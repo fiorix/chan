@@ -43,7 +43,7 @@ tauri-cli:
 # app-notarized) gate on `sign-prereqs` which already enforces
 # the identity is set.
 chan-bin:
-	cd $(CHAN_REPO)/web && npm run build
+	$(MAKE) -C $(CHAN_REPO) web
 	cd $(CHAN_REPO) && cargo build --release --bin chan
 	mkdir -p src-tauri/binaries
 	cp $(CHAN_REPO)/target/release/chan $(CHAN_BIN)
