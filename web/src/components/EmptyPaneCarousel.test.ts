@@ -37,7 +37,7 @@ describe("EmptyPaneCarousel", () => {
     expect(target.querySelector(".placeholder-mark")).toBeNull();
     expect(target.querySelector(".dashboard-stats")).toBeNull();
     expect(target.querySelector(".spawn-row")).toBeNull();
-  }, 15000);
+  });
 
   test("clicking a dot navigates to that slide", async () => {
     const target = await renderCarousel();
@@ -57,7 +57,7 @@ describe("EmptyPaneCarousel", () => {
     dots[0]?.click();
     await tick();
     expect(target.querySelector(".slide-shortcuts")).not.toBeNull();
-  }, 15000);
+  });
 
   test("forwards right-click to the parent contextmenu handler", async () => {
     let received: MouseEvent | null = null;
@@ -79,7 +79,7 @@ describe("EmptyPaneCarousel", () => {
     await tick();
 
     expect(received).not.toBeNull();
-  }, 15000);
+  });
 
   test("right and left arrow keys nudge the active slide", async () => {
     const target = await renderCarousel();
@@ -98,7 +98,7 @@ describe("EmptyPaneCarousel", () => {
     );
     await tick();
     expect(target.querySelector(".slide-shortcuts")).not.toBeNull();
-  }, 15000);
+  });
 
   // `fullstack-85`: the carousel's own `:focus-visible` inset ring
   // was painting on top of `.pane.focused`'s inset ring, making the
@@ -110,5 +110,5 @@ describe("EmptyPaneCarousel", () => {
     expect(raw).not.toMatch(
       /\.carousel:focus-visible\s*\{[\s\S]*?inset 0 0 0 2px/,
     );
-  }, 15000);
+  });
 });

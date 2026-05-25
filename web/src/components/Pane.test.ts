@@ -102,7 +102,7 @@ describe("Pane terminal tab activity marker", () => {
     expect(
       tabs[0]?.querySelector<HTMLButtonElement>(".close")?.getAttribute("aria-label"),
     ).toBe("close Active");
-  }, 15000);
+  });
 
   test("renders output-since-focus marker for inactive terminal tabs", async () => {
     const active = terminalTab({ id: "term-active", title: "Active" });
@@ -123,7 +123,7 @@ describe("Pane terminal tab activity marker", () => {
     expect(
       target.querySelector('[aria-label="terminal output since last focus"]'),
     ).not.toBeNull();
-  }, 15000);
+  });
 });
 
 describe("Pane right-click menus", () => {
@@ -167,7 +167,7 @@ describe("Pane right-click menus", () => {
     await tick();
 
     expect(target.querySelector(".pane")?.getAttribute("data-focus-color")).toBe("orange");
-  }, 15000);
+  });
 
   test("pane hamburger keeps roadmap actions without the old close-pane row", async () => {
     const pane: LeafNode = {
@@ -190,7 +190,7 @@ describe("Pane right-click menus", () => {
     expect(labels).toContain("Kill pane");
     expect(labels).not.toContain("Flip Hybrid");
     expect(labels).not.toContain("Close pane");
-  }, 15000);
+  });
 
   test("pane hamburger pins roadmap chord labels to existing helpers", () => {
     expect(paneSource).toMatch(
@@ -249,7 +249,7 @@ describe("Pane right-click menus", () => {
       "Infographics",
       "Settings",
     ]);
-  }, 15000);
+  });
 
   test("empty pane left-click leaves the welcome menu closed", async () => {
     const pane: LeafNode = {
@@ -277,7 +277,7 @@ describe("Pane right-click menus", () => {
     // button without opening a popover, so any `.hamburger-menu`
     // node in the DOM means the welcome popover actually opened.
     expect(document.body.querySelector(".hamburger-menu")).toBeNull();
-  }, 15000);
+  });
 
   test("loaded pane right-click keeps reload and inspector menu", async () => {
     const pane: LeafNode = {
@@ -299,7 +299,7 @@ describe("Pane right-click menus", () => {
     await tick();
 
     expect(menuLabels()).toEqual(["Reload", "Open Inspector"]);
-  }, 15000);
+  });
 
   // `fullstack-a-43` removed the `.back-attention` indicator. The
   // two phase-C pins that asserted its presence + absence don't
@@ -347,7 +347,7 @@ describe("Pane back-side configuration view (fullstack-a-43)", () => {
     expect(tabs).not.toBeNull();
     expect(tabs!.classList.contains("flipped")).toBe(true);
     expect(target.querySelector(".hybrid-title")).toBeNull();
-  }, 15000);
+  });
 
   test("renders HybridEditorConfig when active front tab is a file", async () => {
     const front = {
@@ -385,7 +385,7 @@ describe("Pane back-side configuration view (fullstack-a-43)", () => {
     expect(
       target.querySelector('[aria-label="Hybrid Editor configuration"]'),
     ).not.toBeNull();
-  }, 15000);
+  });
 
   test("renders Hybrid placeholder when no front tab is active", async () => {
     const pane: LeafNode = {
@@ -404,7 +404,7 @@ describe("Pane back-side configuration view (fullstack-a-43)", () => {
     expect(
       target.querySelector('[aria-label="hybrid back side"]'),
     ).not.toBeNull();
-  }, 15000);
+  });
 
   test("front-tab content does not render while showingBack=true (fullstack-a-43 + -a-54)", async () => {
     const front = terminalTab({ id: "front-term" });
@@ -425,7 +425,7 @@ describe("Pane back-side configuration view (fullstack-a-43)", () => {
     expect(tabs).not.toBeNull();
     expect(tabs!.classList.contains("flipped")).toBe(true);
     expect(target.querySelector(".back-side")).not.toBeNull();
-  }, 15000);
+  });
 });
 
 describe("Pane flip UX redesign (fullstack-a-54 + fullstack-a-55)", () => {
@@ -468,7 +468,7 @@ describe("Pane flip UX redesign (fullstack-a-54 + fullstack-a-55)", () => {
     expect(
       target.querySelector('[aria-label="Hybrid Editor configuration"]'),
     ).not.toBeNull();
-  }, 15000);
+  });
 
   test("front-state pane does not carry the .flipped class", async () => {
     const front = terminalTab({ id: "front-term" });
@@ -483,7 +483,7 @@ describe("Pane flip UX redesign (fullstack-a-54 + fullstack-a-55)", () => {
     expect(tabs).not.toBeNull();
     expect(tabs!.classList.contains("flipped")).toBe(false);
     expect(target.querySelector(".hybrid-title")).toBeNull();
-  }, 15000);
+  });
 
   test("Pane source carries the -a-55 flip CSS (per-child scaleX + row-reverse)", () => {
     // `-a-54` applied the transform to the whole `.tab`, which
@@ -535,7 +535,7 @@ describe("Pane flip UX redesign (fullstack-a-54 + fullstack-a-55)", () => {
 
     // Active-tab swap visible via the live pane state.
     expect(pane.activeTabId).toBe(t2.id);
-  }, 15000);
+  });
 });
 
 describe("Pane Hybrid NAV transaction mode (fullstack-a-44)", () => {
@@ -557,7 +557,7 @@ describe("Pane Hybrid NAV transaction mode (fullstack-a-44)", () => {
     // the empty stretch the user perceives as "the pane top bar".
     expect(tabs?.contains(deadZone!)).toBe(true);
     expect(tabs?.contains(actions!)).toBe(true);
-  }, 15000);
+  });
 
   test("double-click on the dead zone enters transaction mode with no grab (Entry B)", async () => {
     const pane: LeafNode = {
@@ -576,7 +576,7 @@ describe("Pane Hybrid NAV transaction mode (fullstack-a-44)", () => {
     expect(paneMode.active).toBe(true);
     expect(paneMode.transactionMode).toBe(true);
     expect(paneMode.grabPaneId).toBeNull();
-  }, 15000);
+  });
 
   test("pane root flips transaction-grab / transaction-drop-target classes from paneMode state", async () => {
     const leftTab = terminalTab({ id: "term-left", title: "Left" });
@@ -622,7 +622,7 @@ describe("Pane Hybrid NAV transaction mode (fullstack-a-44)", () => {
     await tick();
     expect(paneEl!.classList.contains("transaction-grab")).toBe(false);
     expect(paneEl!.classList.contains("transaction-drop-target")).toBe(true);
-  }, 15000);
+  });
 
   test("dead-zone uses manual mousedown + threshold tracking, not HTML5 dragstart", () => {
     // The per-tab DnD on each `.tab` already owns HTML5 drag for

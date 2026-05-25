@@ -163,7 +163,6 @@ describe("TerminalTab activity frames", () => {
       expect(socket.sent).toContain(JSON.stringify({ type: "focus", focused: false }));
       expect(terminalFocuses).toHaveLength(0);
     },
-    15000,
   );
 
   test(
@@ -178,7 +177,6 @@ describe("TerminalTab activity frames", () => {
       expect(socket.sent).toContain(JSON.stringify({ type: "focus", focused: true }));
       expect(terminalFocuses.length).toBeGreaterThan(0);
     },
-    15000,
   );
 });
 
@@ -213,6 +211,5 @@ describe("TerminalTab menu", () => {
       // moves it up next to MCP env.
       expect(labels).toContain("Restart");
     },
-    15000,
   );
 });
