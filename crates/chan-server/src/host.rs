@@ -54,7 +54,7 @@ impl HostedDriveRuntime {
 
     fn shutdown(&self) {
         let _ = self.artifacts.shutdown_tx.send(true);
-        cancel_indexer(&self.artifacts.drive_cell);
+        clear_drive_cell(&self.artifacts.drive_cell);
     }
 }
 
@@ -233,12 +233,25 @@ fn display_prefix(prefix: &str) -> &str {
     }
 }
 
-fn cancel_indexer(drive_cell: &Arc<RwLock<Option<DriveCell>>>) {
-    if let Ok(cell) = drive_cell.read() {
-        if let Some(cell) = cell.as_ref() {
-            cell.indexer.cancel();
-        }
-    }
+fn clear_drive_cell(drive_cell: &Arc<RwLock<Option<DriveCell>>>) {
+    let cell = match drive_cell.write() {
+        Ok(mut cell) => cell.take(),
+        Err(_) => return,
+    };
+    let Some(cell) = cell else {
+        return;
+    };
+    let DriveCell {
+        drive,
+        watch_handle,
+        indexer,
+    } = cell;
+    // Clear the shared cell before socket accept loops finish aborting;
+    // otherwise their stale Arc can keep the drive marked open.
+    indexer.cancel();
+    drop(watch_handle);
+    drop(indexer);
+    drop(drive);
 }
 
 #[cfg(test)]
@@ -340,6 +353,24 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn host_close_drive_releases_handle_for_immediate_reopen() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("drive");
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        lib.register_drive(root.path()).expect("register");
+        let host = Arc::new(DriveHost::new(lib.clone()));
+
+        host.open_registered_drive(root.path(), serve_config("/first"))
+            .await
+            .expect("open first");
+        assert!(host.close_drive("/first").expect("close first"));
+
+        host.open_registered_drive(root.path(), serve_config("/second"))
+            .await
+            .expect("reopen after close");
     }
 
     #[test]

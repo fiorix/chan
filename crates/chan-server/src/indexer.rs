@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chan_drive::{
@@ -168,8 +168,9 @@ impl Indexer {
         // leave the index stale.
         let cancel = Arc::new(AtomicBool::new(false));
         let (rebuild_tx, rebuild_rx) = mpsc::unbounded_channel::<()>();
+        let drive_weak = Arc::downgrade(&drive);
         let coordinator_task = spawn_coordinator(
-            drive.clone(),
+            drive_weak.clone(),
             status.clone(),
             telemetry.clone(),
             rebuild_rx,
@@ -209,8 +210,11 @@ impl Indexer {
             // many drafts the user keeps around. Runs on the
             // blocking pool so a slow drafts subtree doesn't
             // stall the rest of `Indexer::spawn`.
-            let drive_for_drafts = drive.clone();
+            let drive_for_drafts = drive_weak.clone();
             tokio::task::spawn_blocking(move || {
+                let Some(drive_for_drafts) = drive_for_drafts.upgrade() else {
+                    return;
+                };
                 if let Err(e) = drive_for_drafts.index_drafts_subtree() {
                     tracing::warn!(
                         error = %e,
@@ -221,7 +225,7 @@ impl Indexer {
         }
 
         let watcher_task = spawn_watcher_loop(
-            drive,
+            drive_weak,
             IndexerShared {
                 status: status.clone(),
                 telemetry: telemetry.clone(),
@@ -280,7 +284,7 @@ impl Indexer {
 /// `/api/index/status` at a coarse cadence; with it we get every
 /// per-file event.
 fn spawn_coordinator(
-    drive: Arc<Drive>,
+    drive: Weak<Drive>,
     status: Arc<Mutex<IndexStatus>>,
     telemetry: Arc<Mutex<IndexerTelemetry>>,
     mut rx: mpsc::UnboundedReceiver<()>,
@@ -296,7 +300,9 @@ fn spawn_coordinator(
             if cancel.load(Ordering::Relaxed) {
                 continue;
             }
-            let drive_w = drive.clone();
+            let Some(drive_w) = drive.upgrade() else {
+                break;
+            };
             let status_w = status.clone();
             let cancel_w = cancel.clone();
             let progress_w = progress_sink.clone();
@@ -315,7 +321,11 @@ fn spawn_coordinator(
             })
             .await;
             match result {
-                Ok(Ok(_summary)) => set_idle(&drive, &status, &telemetry),
+                Ok(Ok(_summary)) => {
+                    if let Some(drive) = drive.upgrade() {
+                        set_idle(&drive, &status, &telemetry);
+                    }
+                }
                 Ok(Err(chan_drive::ChanError::Cancelled)) => {
                     // Shutdown path: don't surface a user-visible
                     // error; the next boot will pick up the empty
@@ -341,7 +351,7 @@ fn spawn_coordinator(
 /// Multiple events for the same path inside the window collapse
 /// into one re-index.
 fn spawn_watcher_loop(
-    drive: Arc<Drive>,
+    drive: Weak<Drive>,
     shared: IndexerShared,
     mut rx: broadcast::Receiver<WatchEvent>,
     rebuild_tx: mpsc::UnboundedSender<()>,
@@ -359,9 +369,9 @@ fn spawn_watcher_loop(
         let cancel_w = cancel.clone();
 
         // Worker: every 200 ms, drain paths whose last event is at
-        // least the configured debounce in the past and apply them. We don't bound the
-        // worker to the lifetime of the listener task: dropping the
-        // Indexer aborts both join handles via tokio's task drop.
+        // least the configured debounce in the past and apply them.
+        // If the listener task is aborted, this worker exits on the
+        // shared cancel flag and only holds a weak drive reference.
         let worker = tokio::spawn(async move {
             let debounce = search_aggression.debounce();
             loop {
@@ -375,7 +385,9 @@ fn spawn_watcher_loop(
                     *status_w.lock().unwrap() = IndexStatus::Reindexing {
                         file: change.path.clone(),
                     };
-                    let drive2 = drive_w.clone();
+                    let Some(drive2) = drive_w.upgrade() else {
+                        return;
+                    };
                     let p = change.path.clone();
                     let deleted = change.deleted;
                     let result = tokio::task::spawn_blocking(move || {
@@ -384,10 +396,18 @@ fn spawn_watcher_loop(
                     .await;
                     match result {
                         Ok(Ok(ApplyOutcome::Indexed)) => {
-                            set_idle(&drive_w, &status_w, &telemetry_w)
+                            if let Some(drive) = drive_w.upgrade() {
+                                set_idle(&drive, &status_w, &telemetry_w)
+                            } else {
+                                return;
+                            }
                         }
                         Ok(Ok(ApplyOutcome::Forgotten)) => {
-                            set_idle(&drive_w, &status_w, &telemetry_w)
+                            if let Some(drive) = drive_w.upgrade() {
+                                set_idle(&drive, &status_w, &telemetry_w)
+                            } else {
+                                return;
+                            }
                         }
                         Ok(Ok(ApplyOutcome::SkippedSpecial))
                         | Ok(Ok(ApplyOutcome::SkippedMissing)) => {
@@ -397,7 +417,11 @@ fn spawn_watcher_loop(
                             // back to Idle so the dashboard does
                             // not flash "search is broken" on a
                             // legitimate watcher event.
-                            set_idle(&drive_w, &status_w, &telemetry_w);
+                            if let Some(drive) = drive_w.upgrade() {
+                                set_idle(&drive, &status_w, &telemetry_w);
+                            } else {
+                                return;
+                            }
                         }
                         Ok(Err(e)) => {
                             tracing::warn!(
@@ -1021,7 +1045,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn dropping_indexer_releases_drive_handle() {
+    async fn idle_indexer_does_not_keep_drive_handle_alive() {
         let (_cfg, _dir, drive) = setup_drive();
         let (_events_tx, events_rx) = tokio::sync::broadcast::channel(1);
         let indexer = super::Indexer::spawn(
@@ -1031,16 +1055,9 @@ mod tests {
             chan_drive::SearchAggression::Conservative,
             Arc::new(chan_drive::NoProgress),
         );
-        assert!(Arc::strong_count(&drive) > 1);
+        assert_eq!(Arc::strong_count(&drive), 1);
 
         drop(indexer);
-        for _ in 0..20 {
-            if Arc::strong_count(&drive) == 1 {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-
         assert_eq!(Arc::strong_count(&drive), 1);
     }
 
