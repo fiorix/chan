@@ -87,6 +87,7 @@ fn url_prefix_from_local_url(url: &str) -> Result<String, String> {
         .parse::<url::Url>()
         .map_err(|e| format!("parsing embedded drive URL: {e}"))?;
     let path = parsed.path().trim_end_matches('/');
+    let path = path.strip_suffix("/index.html").unwrap_or(path);
     if path.is_empty() {
         Ok(String::new())
     } else {
@@ -1200,6 +1201,14 @@ mod tests {
     fn embedded_url_prefix_parser_strips_query_and_trailing_slash() {
         let prefix =
             url_prefix_from_local_url("http://127.0.0.1:1234/drive-abcd/?t=token").expect("prefix");
+        assert_eq!(prefix, "/drive-abcd");
+    }
+
+    #[test]
+    fn embedded_url_prefix_parser_strips_index_html() {
+        let prefix =
+            url_prefix_from_local_url("http://127.0.0.1:1234/drive-abcd/index.html?t=token")
+                .expect("prefix");
         assert_eq!(prefix, "/drive-abcd");
     }
 
