@@ -61,8 +61,8 @@ identity. Existing member env values for these keys are treated as legacy
 routing identity and rewritten to canonical values on the next save or
 bootstrap.
 
-`chan __mcp-proxy` will emit a private prelude before MCP traffic only when
-both identity values are present and locally valid:
+The advertised MCP proxy command will emit a private prelude before MCP traffic
+only when both identity values are present and locally valid:
 
 ```text
 CHAN-MCP-PROXY 1 {"team":"alpha","agent":"@@FullStackA"}
@@ -189,8 +189,8 @@ remains in scope but is not used for inbox poke delivery.
 2. Implement `chan-server` inbox state, retention, config updates, and terminal
    registry poke dispatch.
 3. Add the `chan-llm` MCP tools and optional provider interface.
-4. Update `mcp_bridge` and `chan __mcp-proxy` for Team Work identity prelude
-   handling and workspace-tools-only fallback.
+4. Update `mcp_bridge` and every advertised MCP proxy command for Team Work
+   identity prelude handling and workspace-tools-only fallback.
 5. Update Team Work frontend config handling, bootstrap env injection, prompts,
    and remove stale browser echo delivery paths.
 6. Update docs and tests.

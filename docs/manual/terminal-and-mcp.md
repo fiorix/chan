@@ -19,10 +19,11 @@ CHAN_MCP_SERVER_JSON=...
 External agent CLIs launched from that terminal can translate the `CHAN_`
 descriptor into their own MCP configuration shape.
 
-`chan __mcp-proxy <socket>` is the stdio bridge used by those descriptors. In
-a Team Work terminal, the proxy also reads `CHAN_TEAM_NAME` and
-`CHAN_TAB_NAME`. When both are present and valid, it sends a private first line
-to the server before normal MCP traffic:
+The advertised MCP proxy command is the stdio bridge used by those descriptors.
+Depending on the host, that command may be provided by the CLI or by the
+packaged desktop binary. In a Team Work terminal, the proxy also reads
+`CHAN_TEAM_NAME` and `CHAN_TAB_NAME`. When both are present and valid, it sends
+a private first line to the server before normal MCP traffic:
 
 ```text
 CHAN-MCP-PROXY 1 {"team":"alpha","agent":"@@FullStackA"}

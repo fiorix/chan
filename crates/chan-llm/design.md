@@ -13,6 +13,8 @@ In scope:
   - Direct tool dispatch through `tools::execute`.
   - MCP stdio / async-I/O hosting behind the optional `mcp` feature.
   - Media reads for MCP clients, capped by server policy.
+  - Team Work identity validation and MCP proxy prelude
+    parsing/formatting shared by MCP hosts and proxy commands.
   - Typed error passthroughs for chan-workspace write conflicts,
     write-size limits, listing limits, and refused paths.
 

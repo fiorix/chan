@@ -14,7 +14,8 @@ does not depend on browser WebSocket echo or frontend state.
 - Add `list_agent_tasks(since_id?)` for the connected Team Work agent to read
   its own retained tasks with cursor metadata.
 - Add Team Work routing identity through `CHAN_TEAM_NAME`, `CHAN_TAB_NAME`, and
-  a private `chan __mcp-proxy` prelude consumed by `mcp_bridge`.
+  a private prelude from the advertised MCP proxy command consumed by
+  `mcp_bridge`.
 - Add validation for agent handles, team names, context paths, prelude shape,
   inbox parameters, and clear MCP errors without host path disclosure.
 - Add `server.team_work.inbox_depth`, defaulting to `10` and sanitized to
@@ -43,8 +44,9 @@ does not depend on browser WebSocket echo or frontend state.
   terminal poke dispatch, config plumbing, and MCP bridge identity handling.
 - `crates/chan-llm`: add MCP tool schemas and provider interface while keeping
   standalone workspace tools available.
-- `crates/chan`: update `__mcp-proxy` to emit the private identity prelude
-  only when local Team Work identity is present and valid.
+- `crates/chan` and `desktop/src-tauri`: update `__mcp-proxy` to emit the
+  private identity prelude only when local Team Work identity is present and
+  valid.
 - `web/`: update Team Work bootstrap, env handling, prompts, and remove stale
   browser echo delivery state.
 - `docs/`: update configuration and terminal/MCP documentation.

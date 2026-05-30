@@ -26,8 +26,9 @@ External agent CLIs launched from that terminal can translate the
 
 ## Descriptor shape
 
-The command descriptor points at the chan binary itself running a small
-bridge subcommand:
+The command descriptor points at the current Chan host binary running a small
+bridge subcommand. In CLI-hosted sessions that is usually `chan`; in packaged
+desktop sessions it may be `chan-desktop`:
 
 ```
 chan __mcp-proxy <unix-socket-path>

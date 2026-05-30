@@ -85,10 +85,10 @@ Team Work identity.
 ### Requirement: MCP Proxy Prelude
 
 The MCP proxy MUST carry valid Team Work identity with a private prelude.
-The `chan __mcp-proxy` command emits the prelude before MCP traffic only when
-both `CHAN_TEAM_NAME` and `CHAN_TAB_NAME` are present and locally valid. The
-prelude line MUST have version `1` and the exact JSON schema with string fields
-`team` and `agent` and no extra fields:
+Every advertised MCP proxy command MUST emit the prelude before MCP traffic
+only when both `CHAN_TEAM_NAME` and `CHAN_TAB_NAME` are present and locally
+valid. The prelude line MUST have version `1` and the exact JSON schema with
+string fields `team` and `agent` and no extra fields:
 
 ```text
 CHAN-MCP-PROXY 1 {"team":"alpha","agent":"@@FullStackA"}
@@ -109,14 +109,15 @@ and MUST NOT wait indefinitely for identity before normal MCP handling.
 
 #### Scenario: Valid prelude supplies identity
 
-- **WHEN** `chan __mcp-proxy` starts with valid Team Work identity env vars
+- **WHEN** the advertised MCP proxy command starts with valid Team Work identity
+  env vars
 - **THEN** it emits a version `1` prelude and `mcp_bridge` passes the canonical
   team and agent identity to `chan-llm`
 
 #### Scenario: Invalid proxy identity omits prelude
 
-- **WHEN** `chan __mcp-proxy` starts with missing or invalid Team Work identity
-  env vars
+- **WHEN** the advertised MCP proxy command starts with missing or invalid Team
+  Work identity env vars
 - **THEN** it emits no prelude and preserves normal MCP piping without stderr
   warnings
 

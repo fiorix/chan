@@ -1536,11 +1536,41 @@ async fn run_mcp_proxy(socket: PathBuf) -> Result<(), String> {
     let stream = tokio::net::UnixStream::connect(&socket)
         .await
         .map_err(|e| format!("connecting to MCP socket {}: {e}", socket.display()))?;
-    let (mut read_sock, mut write_sock) = stream.into_split();
-    let mut stdin = stdin();
-    let mut stdout = stdout();
-    let to_socket = tokio::io::copy(&mut stdin, &mut write_sock);
-    let from_socket = tokio::io::copy(&mut read_sock, &mut stdout);
+    let (read_sock, write_sock) = stream.into_split();
+    run_mcp_proxy_streams(
+        stdin(),
+        stdout(),
+        read_sock,
+        write_sock,
+        mcp_proxy_prelude_from_env(),
+    )
+    .await
+}
+
+#[cfg(unix)]
+async fn run_mcp_proxy_streams<I, O, R, W>(
+    mut input: I,
+    mut output: O,
+    mut read_sock: R,
+    mut write_sock: W,
+    prelude: Option<String>,
+) -> Result<(), String>
+where
+    I: tokio::io::AsyncRead + Unpin,
+    O: tokio::io::AsyncWrite + Unpin,
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+
+    if let Some(prelude) = prelude {
+        write_sock
+            .write_all(prelude.as_bytes())
+            .await
+            .map_err(|e| format!("writing MCP proxy prelude: {e}"))?;
+    }
+    let to_socket = tokio::io::copy(&mut input, &mut write_sock);
+    let from_socket = tokio::io::copy(&mut read_sock, &mut output);
     tokio::select! {
         r = to_socket => {
             r.map_err(|e| format!("piping stdin to MCP socket: {e}"))?;
@@ -1550,6 +1580,21 @@ async fn run_mcp_proxy(socket: PathBuf) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn mcp_proxy_prelude_from_env() -> Option<String> {
+    mcp_proxy_prelude_from_lookup(|key| std::env::var(key).ok())
+}
+
+#[cfg(unix)]
+fn mcp_proxy_prelude_from_lookup<F>(lookup: F) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let team = lookup("CHAN_TEAM_NAME")?;
+    let agent = lookup("CHAN_TAB_NAME")?;
+    chan_llm::team_work::proxy_prelude_line(&team, &agent).ok()
 }
 
 fn main() {
@@ -2009,6 +2054,39 @@ mod tests {
         assert!(MAIN_RS.contains("\"__mcp-proxy\""));
         assert!(MAIN_RS.contains("run_hidden_mcp_proxy_if_requested"));
         assert!(MAIN_RS.contains("run_mcp_proxy(socket)"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mcp_proxy_stream_writes_team_work_prelude_before_forwarded_bytes() {
+        use tokio::io::AsyncReadExt;
+
+        let forwarded = b"{\"jsonrpc\":\"2.0\",\"id\":1}\n".to_vec();
+        let expected_prelude =
+            b"CHAN-MCP-PROXY 1 {\"team\":\"alpha\",\"agent\":\"@@FullStackA\"}\n";
+        let (proxy_end, mut server_end) = tokio::io::duplex(1024);
+        let (read_sock, write_sock) = tokio::io::split(proxy_end);
+
+        let prelude = mcp_proxy_prelude_from_lookup(|key| match key {
+            "CHAN_TEAM_NAME" => Some("alpha".to_string()),
+            "CHAN_TAB_NAME" => Some("@@FullStackA".to_string()),
+            _ => None,
+        });
+        let proxy = tokio::spawn(run_mcp_proxy_streams(
+            std::io::Cursor::new(forwarded.clone()),
+            tokio::io::sink(),
+            read_sock,
+            write_sock,
+            prelude,
+        ));
+
+        let mut observed = Vec::new();
+        server_end.read_to_end(&mut observed).await.unwrap();
+        proxy.await.unwrap().unwrap();
+
+        let mut expected = expected_prelude.to_vec();
+        expected.extend_from_slice(&forwarded);
+        assert_eq!(observed, expected);
     }
 
     #[test]

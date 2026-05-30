@@ -48,14 +48,17 @@
 - [x] 5.1 Update Team Work bootstrap to persist and spawn `CHAN_TEAM_NAME` and
   canonical `CHAN_TAB_NAME`, rewrite legacy identity env values, and keep these
   values when `mcp_env=false`
-- [x] 5.2 Update `chan __mcp-proxy` to emit the version `1` private prelude
-  only when both Team Work identity env vars are present and valid
+- [x] 5.2 Update every advertised MCP proxy command to emit the version `1`
+  private prelude only when both Team Work identity env vars are present and
+  valid
 - [x] 5.3 Implement bounded `mcp_bridge` prelude detection that strips valid
   prelude lines, replays non-prelude bytes, and consumes malformed reserved
   prelude attempts as workspace-tools-only connections
-- [x] 5.4 Add Rust tests for proxy prelude emission, silent omission, strict
-  schema validation, bounded detection, byte replay, and malformed reserved
-  prelude consumption
+- [x] 5.4 Add Rust tests for proxy prelude emission from every advertised MCP
+  proxy command, silent omission, strict schema validation, bounded detection,
+  byte replay, and malformed reserved prelude consumption. Desktop coverage must
+  assert the proxy writes the prelude bytes before forwarded MCP/stdin bytes,
+  not only that the hidden command exists.
 
 ## 6. Team Work Frontend And Prompting
 
