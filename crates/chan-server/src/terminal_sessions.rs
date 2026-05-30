@@ -17,6 +17,8 @@ use serde::Serialize;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 
+use chan_llm::team_work::TeamWorkIdentity;
+
 use crate::config::TerminalConfig;
 use crate::signal::now_unix_secs;
 
@@ -325,6 +327,30 @@ impl Registry {
         }
     }
 
+    pub fn poke_team_work_agent(&self, team: &str, agent: &str) -> usize {
+        let Ok(target) = TeamWorkIdentity::validated(team, agent) else {
+            return 0;
+        };
+        let sessions: Vec<Arc<Session>> = self
+            .sessions
+            .lock()
+            .expect("terminal registry poisoned")
+            .values()
+            .cloned()
+            .collect();
+        let mut count = 0;
+        for session in sessions {
+            if session.closed.load(Ordering::Relaxed) {
+                continue;
+            }
+            if session.team_work_identity.as_ref() == Some(&target) {
+                session.send_input(b"poke\n");
+                count += 1;
+            }
+        }
+        count
+    }
+
     pub fn prune_idle(&self) -> usize {
         self.prune_idle_at(now_unix_secs() as i64)
     }
@@ -465,10 +491,12 @@ struct Session {
     in_alt_screen: AtomicBool,
     alt_screen_tail: Mutex<Vec<u8>>,
     closed: AtomicBool,
+    team_work_identity: Option<TeamWorkIdentity>,
 }
 
 impl Session {
     fn spawn(id: String, config: RegistryConfig, opts: CreateOptions) -> anyhow::Result<Arc<Self>> {
+        let team_work_identity = team_work_identity_from_options(&opts);
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(opts.size)?;
         let mut cmd = command_builder(opts.command.as_deref());
@@ -563,6 +591,7 @@ impl Session {
             in_alt_screen: AtomicBool::new(false),
             alt_screen_tail: Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
+            team_work_identity,
         });
 
         {
@@ -794,6 +823,15 @@ impl Session {
             tail.extend_from_slice(&scan[scan.len() - keep..]);
         }
     }
+}
+
+fn team_work_identity_from_options(opts: &CreateOptions) -> Option<TeamWorkIdentity> {
+    let team = opts.env.get("CHAN_TEAM_NAME")?;
+    let agent = opts
+        .tab_name
+        .as_deref()
+        .or_else(|| opts.env.get("CHAN_TAB_NAME").map(String::as_str))?;
+    TeamWorkIdentity::validated(team, agent).ok()
 }
 
 fn path_inside_root(path: &Path, root: &Path) -> bool {
@@ -1110,7 +1148,109 @@ mod tests {
             in_alt_screen: AtomicBool::new(false),
             alt_screen_tail: Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
+            team_work_identity: None,
         })
+    }
+
+    fn test_session_with_team_identity(
+        id: &str,
+        team: Option<&str>,
+        agent: Option<&str>,
+    ) -> (Arc<Session>, std::sync::mpsc::Receiver<PtyCommand>) {
+        let (command_tx, command_rx) = std::sync::mpsc::channel();
+        let (output_tx, _) = broadcast::channel(BROADCAST_CAP);
+        let identity = match (team, agent) {
+            (Some(team), Some(agent)) => Some(TeamWorkIdentity::validated(team, agent).unwrap()),
+            _ => None,
+        };
+        (
+            Arc::new(Session {
+                id: id.to_string(),
+                tab_name: agent.map(str::to_string),
+                window_id: None,
+                workspace_root: PathBuf::from("/"),
+                spawn_opts: CreateOptions {
+                    size: test_size(),
+                    tab_name: agent.map(str::to_string),
+                    window_id: None,
+                    mcp_env: true,
+                    cwd: None,
+                    command: None,
+                    env: Default::default(),
+                },
+                child_pid: None,
+                command_tx,
+                output_tx,
+                ring: Mutex::new(RingBuffer::new(1024)),
+                seq: AtomicU64::new(0),
+                last_activity: AtomicI64::new(now_unix_secs() as i64),
+                attach_count: AtomicUsize::new(0),
+                winsize: Mutex::new(test_size()),
+                focused: AtomicBool::new(false),
+                bytes_since_focus: AtomicU64::new(0),
+                in_alt_screen: AtomicBool::new(false),
+                alt_screen_tail: Mutex::new(Vec::new()),
+                closed: AtomicBool::new(false),
+                team_work_identity: identity,
+            }),
+            command_rx,
+        )
+    }
+
+    fn insert_session(registry: &Registry, session: Arc<Session>) {
+        registry
+            .sessions
+            .lock()
+            .expect("terminal registry")
+            .insert(session.id.clone(), session);
+    }
+
+    fn recv_input(rx: &std::sync::mpsc::Receiver<PtyCommand>) -> Vec<u8> {
+        match rx.try_recv().expect("input command") {
+            PtyCommand::Input(data) => data,
+            _ => panic!("expected input command"),
+        }
+    }
+
+    #[test]
+    fn poke_team_work_agent_writes_exact_poke_to_all_matching_sessions() {
+        let registry = Registry::new(test_config(1024, 8, 10));
+        let (first, first_rx) =
+            test_session_with_team_identity("first", Some("alpha"), Some("@@FullStackA"));
+        let (second, second_rx) =
+            test_session_with_team_identity("second", Some("alpha"), Some("@@FullStackA"));
+        let (other_team, other_team_rx) =
+            test_session_with_team_identity("other-team", Some("beta"), Some("@@FullStackA"));
+        let (other_agent, other_agent_rx) =
+            test_session_with_team_identity("other-agent", Some("alpha"), Some("@@Reviewer"));
+        let (plain, plain_rx) = test_session_with_team_identity("plain", None, None);
+        insert_session(&registry, first);
+        insert_session(&registry, second);
+        insert_session(&registry, other_team);
+        insert_session(&registry, other_agent);
+        insert_session(&registry, plain);
+
+        let count = registry.poke_team_work_agent("alpha", "@@FullStackA");
+
+        assert_eq!(count, 2);
+        assert_eq!(recv_input(&first_rx), b"poke\n");
+        assert_eq!(recv_input(&second_rx), b"poke\n");
+        assert!(other_team_rx.try_recv().is_err());
+        assert!(other_agent_rx.try_recv().is_err());
+        assert!(plain_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn poke_team_work_agent_ignores_closed_and_offline_sessions() {
+        let registry = Registry::new(test_config(1024, 8, 10));
+        let (closed, closed_rx) =
+            test_session_with_team_identity("closed", Some("alpha"), Some("@@FullStackA"));
+        closed.closed.store(true, Ordering::Relaxed);
+        insert_session(&registry, closed);
+
+        assert_eq!(registry.poke_team_work_agent("alpha", "@@FullStackA"), 0);
+        assert!(closed_rx.try_recv().is_err());
+        assert_eq!(registry.poke_team_work_agent("alpha", "@@Missing"), 0);
     }
 
     async fn collect_until(session: &mut AttachHandle, needle: &str, timeout: Duration) -> String {

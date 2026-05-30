@@ -262,7 +262,6 @@ export type TerminalTab = {
   terminalSessionId?: string;
   controlledTerminal?: boolean;
   lastSeq?: number;
-  lastAgentEchoSeq?: number;
   terminalActivity?: boolean;
   /// Refines terminalActivity. True while output is actively ARRIVING at
   /// this unfocused terminal (the unseen-output dot PULSES); flips false
@@ -856,7 +855,6 @@ function tabForReopen(src: Tab): Tab {
     tab.terminalSessionId = undefined;
     tab.controlledTerminal = undefined;
     tab.lastSeq = undefined;
-    tab.lastAgentEchoSeq = undefined;
     tab.sessionMcpEnv = undefined;
     tab.terminalEnvTabName = undefined;
     tab.terminalEnvNamePromptDismissed = undefined;
@@ -1283,7 +1281,6 @@ export function setTerminalSession(
   tab.terminalSessionId = sessionId;
   tab.lastSeq = Math.max(0, Math.floor(lastSeq));
   if (wasFresh) {
-    tab.lastAgentEchoSeq = undefined;
     tab.sessionMcpEnv = sessionMcpEnv ?? terminalMcpEnvEnabled(tab);
     tab.terminalEnvTabName = terminalTabName(tab);
     tab.terminalEnvNamePromptDismissed = false;
@@ -1311,7 +1308,6 @@ export function setTerminalActivityPulsing(tab: TerminalTab, pulsing: boolean): 
 export function clearTerminalSession(tab: TerminalTab): void {
   tab.terminalSessionId = undefined;
   tab.lastSeq = undefined;
-  tab.lastAgentEchoSeq = undefined;
   tab.terminalActivity = undefined;
   tab.terminalActivityPulsing = undefined;
   tab.sessionMcpEnv = undefined;
@@ -2163,7 +2159,6 @@ function cloneTab(src: Tab): Tab {
       terminalSessionId: src.terminalSessionId,
       controlledTerminal: src.controlledTerminal,
       lastSeq: src.lastSeq,
-      lastAgentEchoSeq: src.lastAgentEchoSeq,
       cwd: src.cwd,
       seedInput: src.seedInput,
       teamWork: src.teamWork ? { ...src.teamWork } : undefined,
@@ -3363,9 +3358,6 @@ type SerTab = {
   /// Legacy byte-sequence offset. Ignored on restore so a reload
   /// replays the full server ring into a fresh xterm buffer.
   tseq?: number;
-  /// Last injected agent-event echo sequence the browser handled.
-  /// Used only for replaying missed Team Work watcher dispatches.
-  tae?: number;
   /// Desired MCP env injection for fresh terminal sessions. Default on.
   me?: 0;
   /// MCP env mode used by the persisted PTY session. Default on.
@@ -3543,11 +3535,6 @@ function serializeTab(
             tsid: t.terminalSessionId,
             ...(t.sessionMcpEnv === false ? { sme: 0 as const } : {}),
             ...(t.controlledTerminal ? { tc: 1 as const } : {}),
-            ...(typeof t.lastAgentEchoSeq === "number" &&
-            Number.isFinite(t.lastAgentEchoSeq) &&
-            t.lastAgentEchoSeq > 0
-              ? { tae: Math.floor(t.lastAgentEchoSeq) }
-              : {}),
           }
         : {}),
       ...(opts.terminalSessions && t.teamWork
@@ -3833,12 +3820,6 @@ export async function restoreLayout(
             terminalSessionId,
             controlledTerminal: sertab.tc === 1 || savedTerm?.tc === 1,
             lastSeq: undefined,
-            lastAgentEchoSeq:
-              terminalSessionId &&
-              typeof (sertab.tae ?? savedTerm?.tae) === "number" &&
-              Number.isFinite(sertab.tae ?? savedTerm?.tae)
-                ? Math.max(0, Math.floor((sertab.tae ?? savedTerm?.tae)!))
-                : undefined,
             teamWork,
           };
           p.tabs.push(tab);
@@ -4072,10 +4053,6 @@ export function hydrateTerminalSessionsFromLayout(sessionLayout: SerNode | null)
         liveTerms[j]!.mcpEnv = savedTerm.me === 0 ? false : true;
         liveTerms[j]!.sessionMcpEnv = savedTerm.sme === 0 ? false : true;
         liveTerms[j]!.lastSeq = undefined;
-        liveTerms[j]!.lastAgentEchoSeq =
-          typeof savedTerm.tae === "number" && Number.isFinite(savedTerm.tae)
-            ? Math.max(0, Math.floor(savedTerm.tae))
-            : undefined;
       }
       const teamWork = teamWorkFromSer(savedTerm);
       if (teamWork) liveTerms[j]!.teamWork = teamWork;

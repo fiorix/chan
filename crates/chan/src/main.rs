@@ -1834,11 +1834,17 @@ async fn send_control_request(_socket: &Path, _request: ControlRequest) -> Resul
 /// either direction closes, which is the normal end of a session.
 #[cfg(unix)]
 async fn cmd_mcp_proxy(socket: PathBuf) -> Result<()> {
-    use tokio::io::{stdin, stdout};
+    use tokio::io::{stdin, stdout, AsyncWriteExt};
     let stream = connect_mcp_socket(&socket)
         .await
         .with_context(|| format!("connecting to mcp socket {}", socket.display()))?;
     let (mut read_sock, mut write_sock) = stream.into_split();
+    if let Some(prelude) = mcp_proxy_prelude_from_env() {
+        write_sock
+            .write_all(prelude.as_bytes())
+            .await
+            .context("writing mcp proxy prelude")?;
+    }
     let mut stdin = stdin();
     let mut stdout = stdout();
     // Two simultaneous copies; the first to finish ends the session.
@@ -1851,6 +1857,20 @@ async fn cmd_mcp_proxy(socket: PathBuf) -> Result<()> {
         r = from_socket => { r.context("piping mcp socket to stdout")?; }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn mcp_proxy_prelude_from_env() -> Option<String> {
+    mcp_proxy_prelude_from_lookup(|key| std::env::var(key).ok())
+}
+
+fn mcp_proxy_prelude_from_lookup<F>(lookup: F) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let team = lookup("CHAN_TEAM_NAME")?;
+    let agent = lookup("CHAN_TAB_NAME")?;
+    chan_llm::team_work::proxy_prelude_line(&team, &agent).ok()
 }
 
 #[cfg(unix)]
@@ -2509,6 +2529,7 @@ fn read_config_key(
         }
         "server.terminal.session_cap" => Ok(serde_json::json!(server.terminal.session_cap)),
         "server.terminal.ring_bytes" => Ok(serde_json::json!(server.terminal.ring_bytes)),
+        "server.team_work.inbox_depth" => Ok(serde_json::json!(server.team_work.inbox_depth)),
         _ => Err(anyhow::anyhow!(
             "unknown key `{key}`; try `chan config get` to list current values"
         )),
@@ -2573,6 +2594,9 @@ fn write_server_config_key(cfg: &mut ServerConfig, key: &str, value: &str) -> Re
         "server.terminal.ring_bytes" => {
             cfg.terminal.ring_bytes = parse_nonzero_usize(key, value)?;
         }
+        "server.team_work.inbox_depth" => {
+            cfg.team_work.inbox_depth = parse_usize(key, value)?.clamp(1, 100);
+        }
         _ => {
             anyhow::bail!("unknown key `{key}`; try `chan config get` to list current values");
         }
@@ -2615,6 +2639,12 @@ fn parse_line_spacing(value: &str) -> Result<LineSpacing> {
 fn parse_u32(key: &str, value: &str) -> Result<u32> {
     value
         .parse::<u32>()
+        .with_context(|| format!("{key}: expected non-negative integer, got `{value}`"))
+}
+
+fn parse_usize(key: &str, value: &str) -> Result<usize> {
+    value
+        .parse::<usize>()
         .with_context(|| format!("{key}: expected non-negative integer, got `{value}`"))
 }
 
@@ -3137,6 +3167,51 @@ mod tests {
         assert!(err
             .to_string()
             .contains("expected conservative|balanced|aggressive"));
+    }
+
+    #[test]
+    fn config_team_work_inbox_depth_round_trips_and_clamps() {
+        let editor = EditorPrefs::default();
+        let mut server = ServerConfig::default();
+
+        write_server_config_key(&mut server, "server.team_work.inbox_depth", "25").unwrap();
+        assert_eq!(server.team_work.inbox_depth, 25);
+        assert_eq!(
+            read_config_key(&editor, &server, "server.team_work.inbox_depth").unwrap(),
+            serde_json::json!(25)
+        );
+
+        write_server_config_key(&mut server, "server.team_work.inbox_depth", "0").unwrap();
+        assert_eq!(server.team_work.inbox_depth, 1);
+
+        write_server_config_key(&mut server, "server.team_work.inbox_depth", "250").unwrap();
+        assert_eq!(server.team_work.inbox_depth, 100);
+    }
+
+    #[test]
+    fn mcp_proxy_prelude_requires_valid_team_work_identity() {
+        let valid = mcp_proxy_prelude_from_lookup(|key| match key {
+            "CHAN_TEAM_NAME" => Some("alpha".to_string()),
+            "CHAN_TAB_NAME" => Some("@@FullStackA".to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            valid.as_deref(),
+            Some("CHAN-MCP-PROXY 1 {\"team\":\"alpha\",\"agent\":\"@@FullStackA\"}\n")
+        );
+
+        let missing = mcp_proxy_prelude_from_lookup(|key| match key {
+            "CHAN_TEAM_NAME" => Some("alpha".to_string()),
+            _ => None,
+        });
+        assert!(missing.is_none());
+
+        let invalid = mcp_proxy_prelude_from_lookup(|key| match key {
+            "CHAN_TEAM_NAME" => Some("bad team".to_string()),
+            "CHAN_TAB_NAME" => Some("@@FullStackA".to_string()),
+            _ => None,
+        });
+        assert!(invalid.is_none());
     }
 
     #[test]

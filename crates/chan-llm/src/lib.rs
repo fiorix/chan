@@ -10,6 +10,7 @@ pub mod error;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod prompts;
+pub mod team_work;
 pub mod tools;
 
 pub use error::LlmError;

@@ -5,7 +5,6 @@ export type TerminalWsPathOpts = {
   windowId?: string | null;
   sessionId?: string | null;
   lastSeq?: number | null;
-  agentEchoSince?: number | null;
   mcpEnv?: boolean | null;
   cwd?: string | null;
 };
@@ -22,10 +21,6 @@ export function terminalWsPath(opts: TerminalWsPathOpts): string {
   if (sessionId) {
     params.set("session", sessionId);
     params.set("since", String(Math.max(0, Math.floor(opts.lastSeq ?? 0))));
-    params.set(
-      "agent_echo_since",
-      String(Math.max(0, Math.floor(opts.agentEchoSince ?? 0))),
-    );
   } else {
     const cwd = opts.cwd?.trim();
     if (cwd) params.set("cwd", cwd);

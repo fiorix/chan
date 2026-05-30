@@ -1031,6 +1031,17 @@ mod tests {
         }
     }
 
+    fn probe_body<'a>(out: &'a str, begin: &str, end: &str) -> &'a str {
+        let Some(begin_idx) = out.rfind(begin) else {
+            return out;
+        };
+        let after_begin = &out[begin_idx + begin.len()..];
+        match after_begin.find(end) {
+            Some(end_idx) => &after_begin[..end_idx],
+            None => after_begin,
+        }
+    }
+
     async fn run_shell_probe(command: &str, end: &str) -> String {
         let tmp = tempfile::tempdir().expect("temp workspace");
         let mut terminal = TestTerminal::spawn(
@@ -1202,33 +1213,45 @@ mod tests {
                 Duration::from_millis(100),
             )
             .await;
-            terminal.handle.send_input(
-                b"printf '\\n__CWD_HOME_BEGIN__\\n'; pwd; printf '<HOME=%s>\\n' \"$HOME\"; printf '<CHAN_TAB_NAME=%s>\\n' \"$CHAN_TAB_NAME\"; printf '<CHAN_WINDOW_ID=%s>\\n' \"$CHAN_WINDOW_ID\"; printf '<CHAN_CONTROL_SOCKET=%s>\\n' \"$CHAN_CONTROL_SOCKET\"; printf '<CHAN_WORKSPACE_NAME=%s>\\n' \"$CHAN_WORKSPACE_NAME\"; printf '<CHAN_WORKSPACE_PATH=%s>\\n' \"$CHAN_WORKSPACE_PATH\"; env | grep -E '^(CHAN|CLAUDE|CODEX|GEMINI)_MCP_' | sort; printf '\\n__CWD_HOME_END__\\n'\r",
-            );
-            let out = collect_until(&mut terminal.handle, "__CWD_HOME_END__", PROBE_BUDGET).await;
+            for command in [
+                "printf '\\n__CWD_HOME_BEGIN__\\n'\r",
+                "pwd\r",
+                "printf '<HOME=%s>\\n' \"$HOME\"\r",
+                "printf '<CHAN_TAB_NAME=%s>\\n' \"$CHAN_TAB_NAME\"\r",
+                "printf '<CHAN_WINDOW_ID=%s>\\n' \"$CHAN_WINDOW_ID\"\r",
+                "printf '<CHAN_CONTROL_SOCKET=%s>\\n' \"$CHAN_CONTROL_SOCKET\"\r",
+                "printf '<CHAN_WORKSPACE_NAME=%s>\\n' \"$CHAN_WORKSPACE_NAME\"\r",
+                "printf '<CHAN_WORKSPACE_PATH=%s>\\n' \"$CHAN_WORKSPACE_PATH\"\r",
+                "env | grep -E '^(CHAN|CLAUDE|CODEX|GEMINI)_MCP_' | sort\r",
+                "printf '\\n__CWD_HOME_END__\\n'\r",
+            ] {
+                terminal.handle.send_input(command.as_bytes());
+            }
+            let raw = collect_until(&mut terminal.handle, "__CWD_HOME_END__", PROBE_BUDGET).await;
+            let out = probe_body(&raw, "__CWD_HOME_BEGIN__", "__CWD_HOME_END__");
             assert!(
                 out.contains(&cwd.display().to_string()),
-                "terminal should start at workspace root cwd, got {out:?}"
+                "terminal should start at workspace root cwd, got {raw:?}"
             );
             assert!(
                 !out.contains(&format!("<HOME={}>", cwd.display())),
-                "terminal HOME should not be rewritten to workspace root, got {out:?}"
+                "terminal HOME should not be rewritten to workspace root, got {raw:?}"
             );
             assert!(
                 out.contains("<CHAN_TAB_NAME=build>"),
-                "terminal should expose the tab name env var, got {out:?}"
+                "terminal should expose the tab name env var, got {raw:?}"
             );
             assert!(
                 out.contains("<CHAN_WINDOW_ID=window-test>"),
-                "terminal should expose the window id env var, got {out:?}"
+                "terminal should expose the window id env var, got {raw:?}"
             );
             assert!(
                 out.contains("<CHAN_CONTROL_SOCKET=/tmp/chan-control-test.sock>"),
-                "terminal should expose the control socket env var, got {out:?}"
+                "terminal should expose the control socket env var, got {raw:?}"
             );
             assert!(
                 out.contains(&format!("<CHAN_WORKSPACE_PATH={}>", cwd.display())),
-                "terminal should expose the workspace path env var, got {out:?}"
+                "terminal should expose the workspace path env var, got {raw:?}"
             );
             let ws_name = cwd
                 .file_name()
@@ -1236,27 +1259,27 @@ mod tests {
                 .to_string_lossy();
             assert!(
                 out.contains(&format!("<CHAN_WORKSPACE_NAME={ws_name}>")),
-                "terminal should expose the workspace name env var, got {out:?}"
+                "terminal should expose the workspace name env var, got {raw:?}"
             );
             assert!(
                 out.contains("CHAN_MCP_SOCKET=/tmp/chan-test.sock"),
-                "terminal should expose the MCP socket env var, got {out:?}"
+                "terminal should expose the MCP socket env var, got {raw:?}"
             );
             assert!(
                 out.contains("CHAN_MCP_SERVER_NAME=chan"),
-                "terminal should expose the MCP server name env var, got {out:?}"
+                "terminal should expose the MCP server name env var, got {raw:?}"
             );
             assert!(
                 out.contains("CHAN_MCP_SERVER_JSON=")
                     && out.contains("CHAN_MCP_COMMAND=")
                     && out.contains("CHAN_MCP_COMMAND_JSON="),
-                "terminal should expose only chan MCP discovery env vars, got {out:?}"
+                "terminal should expose only chan MCP discovery env vars, got {raw:?}"
             );
             assert!(
                 !out.contains("CLAUDE_MCP_SERVER_JSON=")
                     && !out.contains("CODEX_MCP_SERVER_JSON=")
                     && !out.contains("GEMINI_MCP_SERVER_JSON="),
-                "terminal should not expose third-party MCP aliases, got {out:?}"
+                "terminal should not expose third-party MCP aliases, got {raw:?}"
             );
             passed += 1;
         }
@@ -1351,22 +1374,30 @@ mod tests {
             Duration::from_millis(100),
         )
         .await;
-        terminal.handle.send_input(
-            b"printf '\\n__MCP_ENV_OFF_BEGIN__\\n'; env | grep '^CHAN_MCP_' || true; printf '<CHAN_TAB_NAME=%s>\\n' \"$CHAN_TAB_NAME\"; printf '<CHAN_WINDOW_ID=%s>\\n' \"$CHAN_WINDOW_ID\"; printf '<CHAN_CONTROL_SOCKET=%s>\\n' \"$CHAN_CONTROL_SOCKET\"; printf '\\n__MCP_ENV_OFF_END__\\n'\r",
-        );
-        let out = collect_until(&mut terminal.handle, "__MCP_ENV_OFF_END__", PROBE_BUDGET).await;
+        for command in [
+            "printf '\\n__MCP_ENV_OFF_BEGIN__\\n'\r",
+            "env | grep '^CHAN_MCP_' || true\r",
+            "printf '<CHAN_TAB_NAME=%s>\\n' \"$CHAN_TAB_NAME\"\r",
+            "printf '<CHAN_WINDOW_ID=%s>\\n' \"$CHAN_WINDOW_ID\"\r",
+            "printf '<CHAN_CONTROL_SOCKET=%s>\\n' \"$CHAN_CONTROL_SOCKET\"\r",
+            "printf '\\n__MCP_ENV_OFF_END__\\n'\r",
+        ] {
+            terminal.handle.send_input(command.as_bytes());
+        }
+        let raw = collect_until(&mut terminal.handle, "__MCP_ENV_OFF_END__", PROBE_BUDGET).await;
+        let out = probe_body(&raw, "__MCP_ENV_OFF_BEGIN__", "__MCP_ENV_OFF_END__");
         assert!(
-            !out.contains("CHAN_MCP_"),
-            "mcp_env=false should omit CHAN_MCP_* env vars, got {out:?}"
+            !out.lines().any(|line| line.starts_with("CHAN_MCP_")),
+            "mcp_env=false should omit CHAN_MCP_* env vars, got {raw:?}"
         );
         assert!(
             out.contains("<CHAN_TAB_NAME=plain>"),
-            "mcp_env=false should not affect CHAN_TAB_NAME, got {out:?}"
+            "mcp_env=false should not affect CHAN_TAB_NAME, got {raw:?}"
         );
         assert!(
             out.contains("<CHAN_WINDOW_ID=window-test>")
                 && out.contains("<CHAN_CONTROL_SOCKET=/tmp/chan-control-test.sock>"),
-            "mcp_env=false should not affect chan control env vars, got {out:?}"
+            "mcp_env=false should not affect chan control env vars, got {raw:?}"
         );
     }
 }

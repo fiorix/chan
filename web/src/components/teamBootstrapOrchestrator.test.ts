@@ -59,15 +59,15 @@ function tabFromLayout(id: string): TerminalTab {
 
 function tabsConfig(): TeamDialogConfig {
   return {
-    hostName: "Neo",
+    hostName: "@@Neo",
     configMode: "new",
     configPath: "/tmp/new-team-1/chan-team.toml",
     size: 3,
-    autoPrefix: true,
+    autoPrefix: false,
     members: [
-      { name: "Lead", command: "claude", env: "", isLead: true },
-      { name: "Worker1", command: "claude --resume", env: "", isLead: false },
-      { name: "Worker2", command: "codex", env: "", isLead: false },
+      { name: "@@Lead", command: "claude", env: "", isLead: true },
+      { name: "@@Worker1", command: "claude --resume", env: "", isLead: false },
+      { name: "@@Worker2", command: "codex", env: "", isLead: false },
     ],
     realEstate: { kind: "tabs" },
   };
@@ -158,6 +158,8 @@ describe("runTeamBootstrap: lead-first flow", () => {
     expect(lead.teamWork?.buffer).toContain("We are a team of 3");
     expect(lead.teamWork?.buffer).toContain("Our host is @@Neo");
     expect(lead.teamWork?.buffer).toContain("the team lead is @@Lead");
+    expect(lead.teamWork?.buffer).toContain("send_agent_task");
+    expect(lead.teamWork?.buffer).toContain("list_agent_tasks");
     expect(lead.teamWork?.buffer).toContain("- @@Worker1");
     expect(lead.teamWork?.buffer).toContain("- @@Worker2");
   });

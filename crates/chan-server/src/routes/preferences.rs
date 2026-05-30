@@ -102,6 +102,8 @@ pub struct PatchServerConfigBody {
     search: Option<crate::config::SearchConfig>,
     #[serde(default)]
     terminal: Option<TerminalConfig>,
+    #[serde(default)]
+    team_work: Option<crate::TeamWorkConfig>,
 }
 
 pub async fn api_patch_server_config(
@@ -137,6 +139,14 @@ fn patch_server_config(
     }
     if let Some(terminal) = body.terminal {
         cfg.terminal = sanitize_terminal_config(terminal);
+    }
+    if let Some(team_work) = body.team_work {
+        cfg.team_work = team_work;
+        cfg.sanitize();
+        state
+            .agent_inbox
+            .set_depth(cfg.team_work.inbox_depth)
+            .map_err(|e| Error::Config(e.to_string()))?;
     }
     cfg.save()?;
     Ok(cfg.clone())
@@ -335,6 +345,23 @@ mod tests {
         let json = to_json(&view);
         assert_eq!(json["default_workspace_root"], serde_json::Value::Null);
         assert_eq!(json["workspaces"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn patch_server_config_updates_active_agent_inbox_depth() {
+        let state = make_test_state(false, false);
+        let inbox = state.agent_inbox.clone();
+        let body = PatchServerConfigBody {
+            attachments_dir: None,
+            search: None,
+            terminal: None,
+            team_work: Some(crate::TeamWorkConfig { inbox_depth: 250 }),
+        };
+
+        let cfg = patch_server_config(&state, body).expect("patch server config");
+
+        assert_eq!(cfg.team_work.inbox_depth, 100);
+        assert_eq!(inbox.depth().unwrap(), 100);
     }
 
     #[test]

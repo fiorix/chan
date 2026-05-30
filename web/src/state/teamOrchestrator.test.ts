@@ -47,22 +47,16 @@ describe("parseEnvLines", () => {
 });
 
 describe("memberHandle", () => {
-  test("auto-prefixes with @@ when autoPrefix is on", () => {
-    expect(
-      memberHandle({ name: "Lead", command: "claude", env: "", isLead: true }, true),
-    ).toBe("@@Lead");
-  });
-
-  test("returns raw name when autoPrefix is off", () => {
-    expect(
-      memberHandle({ name: "Lead", command: "claude", env: "", isLead: true }, false),
-    ).toBe("Lead");
-  });
-
-  test("skips double-prefix when name already starts with @@", () => {
+  test("returns canonical handles unchanged", () => {
     expect(
       memberHandle({ name: "@@Lead", command: "claude", env: "", isLead: true }, true),
     ).toBe("@@Lead");
+  });
+
+  test("does not auto-prefix non-canonical names", () => {
+    expect(
+      memberHandle({ name: "Lead", command: "claude", env: "", isLead: true }, false),
+    ).toBe("Lead");
   });
 });
 
@@ -76,21 +70,21 @@ describe("teamNameFromPath", () => {
     // team name is the file base. The default flow always nests
     // under a team dir (e.g. /tmp/new-team-1/...), so this is an
     // edge case rather than the common path.
-    expect(teamNameFromPath("/chan-team.toml")).toBe("chan-team.toml");
+    expect(teamNameFromPath("/chan-team.toml")).toBe("team");
   });
 });
 
 describe("translateConfig", () => {
   function sample(overrides: Partial<TeamDialogConfig> = {}): TeamDialogConfig {
     return {
-      hostName: "Alice",
+      hostName: "@@Alice",
       configMode: "new",
       configPath: "/tmp/demo/chan-team.toml",
       size: 2,
-      autoPrefix: true,
+      autoPrefix: false,
       members: [
-        { name: "Lead", command: "claude", env: "", isLead: true },
-        { name: "Worker1", command: "claude", env: "", isLead: false },
+        { name: "@@Lead", command: "claude", env: "", isLead: true },
+        { name: "@@Worker1", command: "claude", env: "", isLead: false },
       ],
       realEstate: { kind: "tabs" },
       ...overrides,
@@ -101,9 +95,9 @@ describe("translateConfig", () => {
     const out = translateConfig(sample());
     // team_name comes from the config path's directory.
     expect(out.team_name).toBe("demo");
-    expect(out.host_name).toBe("Alice");
+    expect(out.host_name).toBe("@@Alice");
     expect(out.host_handle).toBe("@@Alice");
-    expect(out.auto_prefix_at).toBe(true);
+    expect(out.auto_prefix_at).toBe(false);
     expect(typeof out.created_at).toBe("string");
     expect(out.members.length).toBe(2);
   });
@@ -122,22 +116,43 @@ describe("translateConfig", () => {
     });
   });
 
-  test("auto-injects CHAN_TAB_NAME=<handle> when env doesn't carry it", () => {
+  test("injects system-owned Team Work identity env", () => {
     const out = translateConfig(sample());
+    expect(out.members[0].env.CHAN_TEAM_NAME).toBe("demo");
+    expect(out.members[1].env.CHAN_TEAM_NAME).toBe("demo");
     expect(out.members[0].env.CHAN_TAB_NAME).toBe("@@Lead");
     expect(out.members[1].env.CHAN_TAB_NAME).toBe("@@Worker1");
   });
 
-  test("preserves user-supplied CHAN_TAB_NAME override", () => {
+  test("rewrites legacy user-supplied Team Work identity env", () => {
     const out = translateConfig(
       sample({
         members: [
-          { name: "Lead", command: "claude", env: "CHAN_TAB_NAME=Custom", isLead: true },
-          { name: "Worker1", command: "claude", env: "", isLead: false },
+          {
+            name: "@@Lead",
+            command: "claude",
+            env: "CHAN_TEAM_NAME=old\nCHAN_TAB_NAME=Custom",
+            isLead: true,
+          },
+          { name: "@@Worker1", command: "claude", env: "", isLead: false },
         ],
       }),
     );
-    expect(out.members[0].env.CHAN_TAB_NAME).toBe("Custom");
+    expect(out.members[0].env.CHAN_TEAM_NAME).toBe("demo");
+    expect(out.members[0].env.CHAN_TAB_NAME).toBe("@@Lead");
+  });
+
+  test("rejects non-canonical handles instead of repairing them", () => {
+    expect(() =>
+      translateConfig(
+        sample({
+          members: [
+            { name: "Lead", command: "claude", env: "", isLead: true },
+            { name: "@@Worker1", command: "claude", env: "", isLead: false },
+          ],
+        }),
+      ),
+    ).toThrow(/canonical/);
   });
 
   test("tabs mode persists no member position", () => {
@@ -166,21 +181,21 @@ describe("wireToDialog", () => {
   function wire(overrides: Partial<TeamConfigWire> = {}): TeamConfigWire {
     return {
       team_name: "demo",
-      host_name: "Alice",
+      host_name: "@@Alice",
       host_handle: "@@Alice",
-      auto_prefix_at: true,
+      auto_prefix_at: false,
       created_at: "2026-05-29T08:00:00.000Z",
       members: [
         {
           handle: "@@Lead",
           command: "claude",
-          env: { CHAN_TAB_NAME: "@@Lead", FOO: "bar" },
+          env: { CHAN_TEAM_NAME: "demo", CHAN_TAB_NAME: "@@Lead", FOO: "bar" },
           is_lead: true,
         },
         {
           handle: "@@Worker1",
           command: "claude",
-          env: { CHAN_TAB_NAME: "@@Worker1" },
+          env: { CHAN_TEAM_NAME: "demo", CHAN_TAB_NAME: "@@Worker1" },
           is_lead: false,
         },
       ],
@@ -190,10 +205,10 @@ describe("wireToDialog", () => {
 
   test("inverse of translateConfig: snake_case -> camelCase round-trip", () => {
     const dialog = wireToDialog(wire(), "/tmp/demo/chan-team.toml");
-    expect(dialog.hostName).toBe("Alice");
+    expect(dialog.hostName).toBe("@@Alice");
     expect(dialog.configMode).toBe("load");
     expect(dialog.configPath).toBe("/tmp/demo/chan-team.toml");
-    expect(dialog.autoPrefix).toBe(true);
+    expect(dialog.autoPrefix).toBe(false);
     expect(dialog.size).toBe(2);
     expect(dialog.members).toEqual([
       { name: "@@Lead", command: "claude", env: "FOO=bar", isLead: true },
@@ -201,9 +216,11 @@ describe("wireToDialog", () => {
     ]);
   });
 
-  test("strips CHAN_TAB_NAME from the visible env field", () => {
+  test("strips system-owned identity from the visible env field", () => {
     const dialog = wireToDialog(wire(), "/tmp/demo/chan-team.toml");
+    expect(dialog.members[0].env).not.toContain("CHAN_TEAM_NAME");
     expect(dialog.members[0].env).not.toContain("CHAN_TAB_NAME");
+    expect(dialog.members[1].env).not.toContain("CHAN_TEAM_NAME");
     expect(dialog.members[1].env).not.toContain("CHAN_TAB_NAME");
   });
 
@@ -241,9 +258,9 @@ describe("wireToDialog", () => {
     }
   });
 
-  test("preserves auto_prefix_at when false", () => {
+  test("keeps legacy auto_prefix_at disabled on load", () => {
     const dialog = wireToDialog(
-      wire({ auto_prefix_at: false }),
+      wire({ auto_prefix_at: true }),
       "/tmp/demo/chan-team.toml",
     );
     expect(dialog.autoPrefix).toBe(false);
@@ -253,15 +270,15 @@ describe("wireToDialog", () => {
 describe("translateConfig <-> wireToDialog round-trips real estate", () => {
   test("split layout survives a full save -> load -> save round-trip", () => {
     const original: TeamDialogConfig = {
-      hostName: "Neo",
+      hostName: "@@Neo",
       configMode: "new",
       configPath: "/tmp/round/chan-team.toml",
       size: 3,
-      autoPrefix: true,
+      autoPrefix: false,
       members: [
-        { name: "Lead", command: "claude", env: "", isLead: true },
-        { name: "Worker1", command: "claude", env: "", isLead: false },
-        { name: "Worker2", command: "claude", env: "", isLead: false },
+        { name: "@@Lead", command: "claude", env: "", isLead: true },
+        { name: "@@Worker1", command: "claude", env: "", isLead: false },
+        { name: "@@Worker2", command: "claude", env: "", isLead: false },
       ],
       realEstate: {
         kind: "split",
@@ -284,16 +301,15 @@ describe("translateConfig <-> wireToDialog round-trips real estate", () => {
 });
 
 describe("identityPrompt", () => {
-  test("renders the # Team work prompt with size / host / lead + worker bullets", () => {
+  test("names MCP inbox tools, task files, cursors, and poke", () => {
     const out = identityPrompt(3, "@@Neo", "@@Lead", ["@@Worker1", "@@Worker2"]);
-    expect(out).toBe(
-      "# Team work\n" +
-        "We are a team of 3. Our host is @@Neo and the team lead is @@Lead.\n" +
-        "You are $CHAN_TAB_NAME. Identify yourself and get ready to work with\n" +
-        "the rest of the team:\n" +
-        "- @@Worker1\n" +
-        "- @@Worker2",
-    );
+    expect(out).toContain("send_agent_task");
+    expect(out).toContain("list_agent_tasks");
+    expect(out).toContain("context_path");
+    expect(out).toContain("latest_id");
+    expect(out).toContain("poke");
+    expect(out).toContain("- @@Worker1");
+    expect(out).toContain("- @@Worker2");
   });
 
   test("does NOT escape $CHAN_TAB_NAME (agents read it as a live env-var)", () => {
@@ -305,5 +321,10 @@ describe("identityPrompt", () => {
   test("solo lead (no workers) renders a placeholder bullet", () => {
     const out = identityPrompt(1, "@@Neo", "@@Lead", []);
     expect(out).toContain("- (no other agents)");
+  });
+
+  test("duplicate teammate handles are listed once", () => {
+    const out = identityPrompt(3, "@@Neo", "@@Lead", ["@@Worker1", "@@Worker1"]);
+    expect(out.match(/@@Worker1/g) ?? []).toHaveLength(1);
   });
 });

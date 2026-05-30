@@ -22,15 +22,16 @@ import {
 // grid helpers.
 
 describe("defaultTeamConfig", () => {
-  test("default config: Neo host, New mode, one lead agent", () => {
+  test("default config: canonical host, New mode, one lead agent", () => {
     const cfg = defaultTeamConfig();
     expect(cfg.size).toBe(TEAM_MIN_SIZE);
-    expect(cfg.hostName).toBe("Neo");
+    expect(cfg.hostName).toBe("@@Neo");
     expect(cfg.configMode).toBe("new");
     expect(cfg.members).toHaveLength(1);
+    expect(cfg.members[0].name).toBe("@@Lead");
     expect(cfg.members.filter((m) => m.isLead)).toHaveLength(1);
     expect(cfg.members[0].isLead).toBe(true);
-    expect(cfg.autoPrefix).toBe(true);
+    expect(cfg.autoPrefix).toBe(false);
     expect(cfg.realEstate).toEqual({ kind: "tabs" });
   });
 });
@@ -81,6 +82,21 @@ describe("validateTeamConfig", () => {
     expect(validateTeamConfig(cfg)).toBe("every member needs a name");
   });
 
+  test("rejects non-canonical host and member handles", () => {
+    expect(validateTeamConfig({ ...defaultTeamConfig(), hostName: "Neo" })).toBe(
+      "Your handle must be canonical @@Name",
+    );
+    const cfg = defaultTeamConfig();
+    cfg.members[0].name = "Lead";
+    expect(validateTeamConfig(cfg)).toBe("member handles must be canonical @@Name");
+  });
+
+  test("allows duplicate member handles", () => {
+    const cfg = resizeTeamMembers({ ...defaultTeamConfig(), size: 2 });
+    cfg.members[1].name = cfg.members[0].name;
+    expect(validateTeamConfig(cfg)).toBeNull();
+  });
+
   test("returns null for valid config", () => {
     expect(validateTeamConfig(defaultTeamConfig())).toBeNull();
   });
@@ -90,8 +106,8 @@ describe("resizeTeamMembers", () => {
   test("grow: appends fresh Worker-N entries", () => {
     const out = resizeTeamMembers({ ...defaultTeamConfig(), size: 4 });
     expect(out.members).toHaveLength(4);
-    expect(out.members[2].name).toBe("Worker2");
-    expect(out.members[3].name).toBe("Worker3");
+    expect(out.members[2].name).toBe("@@Worker2");
+    expect(out.members[3].name).toBe("@@Worker3");
     expect(out.members.filter((m) => m.isLead)).toHaveLength(1);
   });
 

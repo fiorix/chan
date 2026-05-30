@@ -21,7 +21,7 @@ pub struct TeamConfig {
 }
 
 fn default_auto_prefix_at() -> bool {
-    true
+    false
 }
 
 /// One member entry inside `TeamConfig.members`. `position` is

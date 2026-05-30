@@ -20,14 +20,21 @@
 //! the socket file is unlinked even when the runtime is torn down
 //! abruptly.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
+use chan_llm::mcp::AgentInboxProvider;
+use chan_llm::team_work::{self, TeamWorkIdentity};
 use rand::RngCore;
+use tokio::io::{AsyncRead, AsyncReadExt};
 #[cfg(unix)]
 use tokio::net::UnixListener;
 #[cfg(unix)]
 use tokio::task::JoinHandle;
+
+const PRELUDE_DETECTION_TIMEOUT: Duration = Duration::from_millis(25);
+const PRELUDE_MAX_LINE_BYTES: usize = 4096;
 
 /// Pick a unique socket path under the system tmp dir. macOS caps
 /// `sun_path` at 104 bytes, so the suffix is short and the directory
@@ -62,12 +69,6 @@ pub struct BridgeHandle {
     socket_path: PathBuf,
 }
 
-impl BridgeHandle {
-    pub fn socket_path(&self) -> &Path {
-        &self.socket_path
-    }
-}
-
 #[cfg(unix)]
 impl Drop for BridgeHandle {
     fn drop(&mut self) {
@@ -82,7 +83,11 @@ impl Drop for BridgeHandle {
 /// gets a fresh `chan_llm::mcp::Server` constructed against the
 /// current workspace Arc.
 #[cfg(unix)]
-pub fn start<DF>(socket_path: PathBuf, workspace_for: DF) -> std::io::Result<BridgeHandle>
+pub fn start<DF>(
+    socket_path: PathBuf,
+    workspace_for: DF,
+    agent_inbox_provider: Option<Arc<dyn AgentInboxProvider>>,
+) -> std::io::Result<BridgeHandle>
 where
     DF: Fn() -> Option<Arc<chan_workspace::Workspace>> + Send + Sync + 'static,
 {
@@ -91,6 +96,7 @@ where
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path)?;
     let workspace_for = Arc::new(workspace_for);
+    let agent_inbox_provider = agent_inbox_provider;
 
     let accept_loop = tokio::spawn(async move {
         loop {
@@ -108,9 +114,15 @@ where
                 tracing::warn!("mcp bridge session refused: workspace state unavailable");
                 continue;
             };
+            let agent_inbox_provider = agent_inbox_provider.clone();
             tokio::spawn(async move {
                 let (read, write) = stream.into_split();
-                let server = chan_llm::mcp::Server::new(workspace);
+                let (identity, read) = detect_proxy_prelude(read).await;
+                let mut server =
+                    chan_llm::mcp::Server::new(workspace).with_team_work_identity(identity);
+                if let Some(provider) = agent_inbox_provider {
+                    server = server.with_agent_inbox_provider_dyn(provider);
+                }
                 if let Err(e) = server.serve_io(read, write).await {
                     tracing::debug!("mcp bridge session: {e}");
                 }
@@ -124,8 +136,79 @@ where
     })
 }
 
+async fn detect_proxy_prelude<R>(
+    mut reader: R,
+) -> (
+    TeamWorkIdentity,
+    tokio::io::Chain<std::io::Cursor<Vec<u8>>, R>,
+)
+where
+    R: AsyncRead + Unpin,
+{
+    let prefix = team_work::MCP_PROXY_PRELUDE_PREFIX.as_bytes();
+    let mut buffered = Vec::new();
+    let Some(first) = read_byte_bounded(&mut reader).await else {
+        return (
+            TeamWorkIdentity::default(),
+            std::io::Cursor::new(buffered).chain(reader),
+        );
+    };
+    buffered.push(first);
+
+    while buffered.len() < prefix.len() {
+        if !prefix.starts_with(&buffered) {
+            return (
+                TeamWorkIdentity::default(),
+                std::io::Cursor::new(buffered).chain(reader),
+            );
+        }
+        let Some(byte) = read_byte_bounded(&mut reader).await else {
+            return (
+                TeamWorkIdentity::default(),
+                std::io::Cursor::new(buffered).chain(reader),
+            );
+        };
+        buffered.push(byte);
+    }
+
+    if buffered != prefix {
+        return (
+            TeamWorkIdentity::default(),
+            std::io::Cursor::new(buffered).chain(reader),
+        );
+    }
+
+    while buffered.len() < PRELUDE_MAX_LINE_BYTES && !buffered.ends_with(b"\n") {
+        let Some(byte) = read_byte_bounded(&mut reader).await else {
+            return (
+                TeamWorkIdentity::default(),
+                std::io::Cursor::new(Vec::new()).chain(reader),
+            );
+        };
+        buffered.push(byte);
+    }
+
+    let line = String::from_utf8_lossy(&buffered);
+    let identity = team_work::parse_proxy_prelude(&line).unwrap_or_default();
+    (identity, std::io::Cursor::new(Vec::new()).chain(reader))
+}
+
+async fn read_byte_bounded<R>(reader: &mut R) -> Option<u8>
+where
+    R: AsyncRead + Unpin,
+{
+    match tokio::time::timeout(PRELUDE_DETECTION_TIMEOUT, reader.read_u8()).await {
+        Ok(Ok(byte)) => Some(byte),
+        Ok(Err(_)) | Err(_) => None,
+    }
+}
+
 #[cfg(not(unix))]
-pub fn start<DF>(_socket_path: PathBuf, _workspace_for: DF) -> std::io::Result<BridgeHandle>
+pub fn start<DF>(
+    _socket_path: PathBuf,
+    _workspace_for: DF,
+    _agent_inbox_provider: Option<Arc<dyn AgentInboxProvider>>,
+) -> std::io::Result<BridgeHandle>
 where
     DF: Fn() -> Option<Arc<chan_workspace::Workspace>> + Send + Sync + 'static,
 {
@@ -133,4 +216,53 @@ where
         std::io::ErrorKind::Unsupported,
         "mcp bridge requires unix-domain sockets",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn valid_proxy_prelude_is_stripped_and_supplies_identity() {
+        let input = b"CHAN-MCP-PROXY 1 {\"team\":\"alpha\",\"agent\":\"@@FullStackA\"}\nContent-Length: 2\r\n\r\n{}";
+        let (identity, mut reader) = detect_proxy_prelude(std::io::Cursor::new(input)).await;
+        let mut rest = String::new();
+        reader.read_to_string(&mut rest).await.unwrap();
+
+        assert_eq!(identity.team.as_deref(), Some("alpha"));
+        assert_eq!(identity.agent.as_deref(), Some("@@FullStackA"));
+        assert_eq!(rest, "Content-Length: 2\r\n\r\n{}");
+    }
+
+    #[tokio::test]
+    async fn non_prelude_bytes_are_replayed() {
+        let input = b"Content-Length: 2\r\n\r\n{}";
+        let (identity, mut reader) = detect_proxy_prelude(std::io::Cursor::new(input)).await;
+        let mut rest = String::new();
+        reader.read_to_string(&mut rest).await.unwrap();
+
+        assert_eq!(identity, TeamWorkIdentity::default());
+        assert_eq!(rest, "Content-Length: 2\r\n\r\n{}");
+    }
+
+    #[tokio::test]
+    async fn malformed_reserved_prelude_is_consumed() {
+        let input = b"CHAN-MCP-PROXY 2 {\"team\":\"alpha\",\"agent\":\"@@FullStackA\"}\nContent-Length: 2\r\n\r\n{}";
+        let (identity, mut reader) = detect_proxy_prelude(std::io::Cursor::new(input)).await;
+        let mut rest = String::new();
+        reader.read_to_string(&mut rest).await.unwrap();
+
+        assert_eq!(identity, TeamWorkIdentity::default());
+        assert_eq!(rest, "Content-Length: 2\r\n\r\n{}");
+    }
+
+    #[tokio::test]
+    async fn prelude_detection_does_not_wait_indefinitely() {
+        let (_client, server) = tokio::io::duplex(64);
+        let result =
+            tokio::time::timeout(Duration::from_secs(1), detect_proxy_prelude(server)).await;
+
+        assert!(result.is_ok());
+    }
 }

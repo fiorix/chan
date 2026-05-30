@@ -16,6 +16,7 @@
 import { api, type TeamConfigWire, type TeamMemberWire } from "../api/client";
 import { notify } from "./notify.svelte";
 import { teamConfigDir } from "./teamConfigPath";
+import { isCanonicalAgentHandle } from "./teamDialog.svelte";
 import {
   allTerminalTabs,
   buildSplitGrid,
@@ -63,11 +64,14 @@ export function parseEnvLines(text: string): Record<string, string> {
 }
 
 /// Compute the handle the way the dialog's `handleOf` helper does:
-/// `@@<name>` when `autoPrefix` is on AND the name doesn't already
-/// start with `@@`; raw otherwise.
+/// the legacy autoPrefix flag no longer repairs non-canonical names.
 export function memberHandle(member: TeamMemberDraft, autoPrefix: boolean): string {
-  if (!autoPrefix) return member.name;
-  return member.name.startsWith("@@") ? member.name : `@@${member.name}`;
+  void autoPrefix;
+  return member.name;
+}
+
+export function isValidTeamName(value: string): boolean {
+  return /^[A-Za-z0-9_-]+$/.test(value);
 }
 
 /// Translate the SPA's camelCase `TeamDialogConfig` into the
@@ -84,17 +88,26 @@ export function memberHandle(member: TeamMemberDraft, autoPrefix: boolean): stri
 /// dialog's `realEstate` from these positions, so Load restores the
 /// same layout the user saw on save.
 export function translateConfig(config: TeamDialogConfig): TeamConfigWire {
+  const teamName = teamNameFromPath(config.configPath);
   const hostHandle = memberHandle(
     { name: config.hostName, command: "", env: "", isLead: false },
     config.autoPrefix,
   );
+  if (!isValidTeamName(teamName)) {
+    throw new Error("team_name must match [A-Za-z0-9_-]+");
+  }
+  if (!isCanonicalAgentHandle(hostHandle)) {
+    throw new Error("host handle must be canonical @@Name");
+  }
   const positions = memberPositions(config);
   const members: TeamMemberWire[] = config.members.map((m, idx) => {
     const env = parseEnvLines(m.env);
     const handle = memberHandle(m, config.autoPrefix);
-    if (!Object.prototype.hasOwnProperty.call(env, "CHAN_TAB_NAME")) {
-      env.CHAN_TAB_NAME = handle;
+    if (!isCanonicalAgentHandle(handle)) {
+      throw new Error("member handles must be canonical @@Name");
     }
+    env.CHAN_TEAM_NAME = teamName;
+    env.CHAN_TAB_NAME = handle;
     const member: TeamMemberWire = {
       handle,
       command: m.command,
@@ -106,10 +119,10 @@ export function translateConfig(config: TeamDialogConfig): TeamConfigWire {
     return member;
   });
   return {
-    team_name: teamNameFromPath(config.configPath),
+    team_name: teamName,
     host_name: config.hostName,
     host_handle: hostHandle,
-    auto_prefix_at: config.autoPrefix,
+    auto_prefix_at: false,
     created_at: new Date().toISOString(),
     members,
   };
@@ -146,7 +159,8 @@ export function teamNameFromPath(path: string): string {
   const dir = teamConfigDir(path);
   const lastSlash = dir.lastIndexOf("/");
   const base = lastSlash >= 0 ? dir.slice(lastSlash + 1) : dir;
-  return base.trim() || "team";
+  const candidate = base.trim();
+  return isValidTeamName(candidate) ? candidate : "team";
 }
 
 /// Inverse of `translateConfig`: map the snake_case wire shape back
@@ -163,9 +177,18 @@ export function wireToDialog(
   wire: TeamConfigWire,
   configPath: string,
 ): TeamDialogConfig {
+  if (!isValidTeamName(wire.team_name)) {
+    throw new Error("team_name must match [A-Za-z0-9_-]+");
+  }
+  if (!isCanonicalAgentHandle(wire.host_handle)) {
+    throw new Error("host_handle must be canonical @@Name");
+  }
   const members: TeamMemberDraft[] = wire.members.map((m) => {
+    if (!isCanonicalAgentHandle(m.handle)) {
+      throw new Error("member handles must be canonical @@Name");
+    }
     const envText = Object.entries(m.env)
-      .filter(([k]) => k !== "CHAN_TAB_NAME")
+      .filter(([k]) => k !== "CHAN_TEAM_NAME" && k !== "CHAN_TAB_NAME")
       .map(([k, v]) => `${k}=${v}`)
       .join("\n");
     return {
@@ -177,11 +200,11 @@ export function wireToDialog(
   });
   const size = Math.max(members.length, 1);
   return {
-    hostName: wire.host_name,
+    hostName: wire.host_handle,
     configMode: "load",
     configPath,
     size,
-    autoPrefix: wire.auto_prefix_at,
+    autoPrefix: false,
     members,
     realEstate: realEstateFromWire(wire, size),
   };
@@ -231,16 +254,24 @@ export function identityPrompt(
   leadHandle: string,
   workerHandles: string[],
 ): string {
+  const uniqueWorkers = [...new Set(workerHandles)];
   const bullets =
-    workerHandles.length > 0
-      ? workerHandles.map((h) => `- ${h}`).join("\n")
+    uniqueWorkers.length > 0
+      ? uniqueWorkers.map((h) => `- ${h}`).join("\n")
       : "- (no other agents)";
   return (
     `# Team work\n` +
     `We are a team of ${size}. Our host is ${hostHandle} and the team lead ` +
     `is ${leadHandle}.\n` +
-    `You are $CHAN_TAB_NAME. Identify yourself and get ready to work with\n` +
-    `the rest of the team:\n` +
+    `You are $CHAN_TAB_NAME. Identify yourself and call list_agent_tasks ` +
+    `once on startup to catch retained work. Store latest_id as your next ` +
+    `cursor if your host supports persistent memory.\n\n` +
+    `Before handing work to another agent, create or update a workspace task ` +
+    `file, then call send_agent_task(to, context_path). The inbox stores only ` +
+    `the context_path; receivers read that file with workspace MCP tools.\n\n` +
+    `If the terminal receives a standalone line "poke", call list_agent_tasks ` +
+    `over MCP and read each returned context_path.\n\n` +
+    `Teammates:\n` +
     bullets
   );
 }
@@ -316,13 +347,15 @@ export async function runTeamBootstrap(
 ): Promise<void> {
   const wire = translateConfig(config);
 
+  const leadEntries = wire.members.filter((m) => m.is_lead);
+  if (leadEntries.length !== 1) throw new Error("config must have exactly one lead member");
+
   // 1. Save/update the chan-team.toml at the user's config path.
   //    This is app-level orchestration config written outside the
   //    workspace sandbox (see api.writeTeamConfigFile).
   await api.writeTeamConfigFile(config.configPath, wire);
 
-  const leadEntry = wire.members.find((m) => m.is_lead);
-  if (!leadEntry) throw new Error("config has no lead member");
+  const leadEntry = leadEntries[0];
   const workerEntries = wire.members.filter((m) => !m.is_lead);
 
   // 2a. Launch the LEAD FIRST into the existing lead tab.

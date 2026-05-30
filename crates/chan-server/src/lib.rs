@@ -15,6 +15,7 @@
 
 #![forbid(unsafe_code)]
 
+mod agent_inbox;
 mod auth;
 mod bus;
 mod config;
@@ -40,7 +41,7 @@ mod terminal_sessions;
 mod tunnel_guard;
 mod util;
 
-pub use config::ServerConfig;
+pub use config::{ServerConfig, TeamWorkConfig};
 pub use error::Error;
 pub use host::{HostedWorkspace, WorkspaceHost};
 pub use preferences::{
@@ -379,38 +380,15 @@ async fn build_app(
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let shutdown_tx = Arc::new(shutdown_tx);
 
-    // Try to bring up the MCP socket bridge before building
-    // AppState, so the resolved socket path (or `None` on failure)
-    // is part of the immutable state every handler observes.
-    let socket_path = mcp_bridge::pick_socket_path();
     let state_for_bridge: Arc<RwLock<Option<WorkspaceCell>>> =
         Arc::new(RwLock::new(Some(WorkspaceCell {
             workspace,
             watch_handle: Some(watch_handle),
             indexer,
         })));
-    let bridge_workspace_cell = state_for_bridge.clone();
-    let bridge = mcp_bridge::start(socket_path.clone(), move || {
-        let cell = match bridge_workspace_cell.read() {
-            Ok(cell) => cell,
-            Err(_) => {
-                tracing::warn!("mcp bridge cannot snapshot workspace: workspace_cell poisoned");
-                return None;
-            }
-        };
-        let Some(cell) = cell.as_ref() else {
-            tracing::warn!("mcp bridge cannot snapshot workspace: workspace_cell missing");
-            return None;
-        };
-        Some(cell.workspace.clone())
-    });
-    let (mcp_socket_path, mcp_bridge) = match bridge {
-        Ok(handle) => (Some(handle.socket_path().to_path_buf()), Some(handle)),
-        Err(e) => {
-            tracing::warn!("mcp bridge bind failed at {}: {e}", socket_path.display());
-            (None, None)
-        }
-    };
+    let agent_inbox = Arc::new(agent_inbox::AgentInbox::new(
+        server_config.team_work.inbox_depth,
+    ));
     let control_socket_path = control_socket::pick_socket_path();
     let control = control_socket::start(
         control_socket_path.clone(),
@@ -428,12 +406,72 @@ async fn build_app(
             (None, None)
         }
     };
-    let terminal_sessions = Arc::new(TerminalRegistry::new(TerminalRegistryConfig {
+
+    // Try to bring up the MCP socket bridge before building
+    // AppState, so the resolved socket path (or `None` on failure)
+    // is part of the immutable state every handler observes.
+    let socket_path = mcp_bridge::pick_socket_path();
+    let terminal_sessions_with_mcp = Arc::new(TerminalRegistry::new(TerminalRegistryConfig {
         workspace_root: workspace_root.clone(),
-        mcp_socket_path: mcp_socket_path.clone(),
+        mcp_socket_path: Some(socket_path.clone()),
         control_socket_path: control_socket_path.clone(),
         terminal: server_config.terminal.clone(),
     }));
+    let provider_workspace_cell = state_for_bridge.clone();
+    let agent_inbox_provider = Arc::new(agent_inbox::ServerAgentInboxProvider::new(
+        agent_inbox.clone(),
+        terminal_sessions_with_mcp.clone(),
+        move || {
+            let cell = match provider_workspace_cell.read() {
+                Ok(cell) => cell,
+                Err(_) => {
+                    tracing::warn!(
+                        "agent inbox cannot snapshot workspace: workspace_cell poisoned"
+                    );
+                    return None;
+                }
+            };
+            let Some(cell) = cell.as_ref() else {
+                tracing::warn!("agent inbox cannot snapshot workspace: workspace_cell missing");
+                return None;
+            };
+            Some(cell.workspace.clone())
+        },
+    ));
+    let bridge_workspace_cell = state_for_bridge.clone();
+    let bridge = mcp_bridge::start(
+        socket_path.clone(),
+        move || {
+            let cell = match bridge_workspace_cell.read() {
+                Ok(cell) => cell,
+                Err(_) => {
+                    tracing::warn!("mcp bridge cannot snapshot workspace: workspace_cell poisoned");
+                    return None;
+                }
+            };
+            let Some(cell) = cell.as_ref() else {
+                tracing::warn!("mcp bridge cannot snapshot workspace: workspace_cell missing");
+                return None;
+            };
+            Some(cell.workspace.clone())
+        },
+        Some(agent_inbox_provider),
+    );
+    let (mcp_bridge, terminal_sessions) = match bridge {
+        Ok(handle) => (Some(handle), terminal_sessions_with_mcp),
+        Err(e) => {
+            tracing::warn!("mcp bridge bind failed at {}: {e}", socket_path.display());
+            (
+                None,
+                Arc::new(TerminalRegistry::new(TerminalRegistryConfig {
+                    workspace_root: workspace_root.clone(),
+                    mcp_socket_path: None,
+                    control_socket_path: control_socket_path.clone(),
+                    terminal: server_config.terminal.clone(),
+                })),
+            )
+        }
+    };
     let terminal_pruner = terminal_sessions.clone().spawn_pruner(shutdown_rx.clone());
 
     let state = Arc::new(AppState {
@@ -451,6 +489,7 @@ async fn build_app(
         self_writes,
         last_activity: last_activity.clone(),
         terminal_sessions,
+        agent_inbox,
         shutdown_rx,
         scope_registry,
     });

@@ -21,6 +21,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+async-trait = { workspace = true }
 
 # `mcp` feature deps. rmcp's defaults already pull macros + server +
 # transport-async-rw + schemars, which is everything we need for a

@@ -22,7 +22,7 @@ describe("terminalWsPath", () => {
         lastSeq: 42,
       }),
     ).toBe(
-      "/api/terminal/ws?cols=80&rows=24&tab_name=build+log&session=term_abc&since=42&agent_echo_since=0",
+      "/api/terminal/ws?cols=80&rows=24&tab_name=build+log&session=term_abc&since=42",
     );
   });
 
@@ -55,21 +55,7 @@ describe("terminalWsPath", () => {
         tabName: "shell",
         sessionId: "term_abc",
       }),
-    ).toContain("&agent_echo_since=0");
-  });
-
-  test("adds agent event echo replay cursor when reattaching", () => {
-    expect(
-      terminalWsPath({
-        cols: 80,
-        rows: 24,
-        tabName: "shell",
-        sessionId: "term_abc",
-        agentEchoSince: 7,
-      }),
-    ).toBe(
-      "/api/terminal/ws?cols=80&rows=24&tab_name=shell&session=term_abc&since=0&agent_echo_since=7",
-    );
+    ).not.toContain("agent_echo_since");
   });
 
   test("adds mcp_env off only for fresh opt-out sessions", () => {

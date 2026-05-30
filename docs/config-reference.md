@@ -27,6 +27,7 @@ Source: `crates/chan-server/src/config.rs`.
 | `terminal.ring_bytes` | `usize` | `1 << 20` (1 MB) | `PATCH /api/server/config` | terminal ring buffer alloc |
 | `terminal.scrollback_mb` | `u32` | `50` (clamped `10..=500`) | `PATCH /api/server/config` | SPA xterm.js scrollback line cap |
 | `terminal.default_term` | `String` | `"xterm-256color"` | `PATCH /api/server/config` | PTY spawn `TERM` env |
+| `team_work.inbox_depth` | `usize` | `10` (clamped `1..=100`) | `PATCH /api/server/config` + `chan config get/set` | retained Agent tasks per `(team, recipient)` inbox |
 
 Legacy `[reports] enabled = ...` blocks in `server.toml` are ignored
 on load and omitted on the next save. Per-workspace
@@ -92,11 +93,14 @@ Source: `crates/chan-workspace/src/teams.rs` (post-`systacean-30`).
 | `team_name` | `String` | required | `chan-server /api/teams/{name}/load + .../unload + GET .../loaded` (`systacean-31`) | team identification |
 | `host_name` | `String` | required | (set at create time) | UI rendering |
 | `host_handle` | `String` | required | (set at create time) | @@-prefix policy |
-| `auto_prefix_at` | `bool` | `true` | (set at create time; future Settings) | bubble overlay @@-auto-prefix |
+| `auto_prefix_at` | `bool` | `false` | legacy field; new saves force `false` | ignored for routing; canonical `@@Name` handles are required |
 | `created_at` | `String` (ISO 8601) | required | (set at create time) | sort + display |
 | `members[]` | `Vec<Member>` | empty | (future Settings) | team roster + position grid |
 
 `Member`: `handle: String`, `command: String`, `env: BTreeMap<String, String>`, `is_lead: bool`, `position: Option<Position>`.
+For Team Work bootstrap, `env` is rewritten with system-owned
+`CHAN_TEAM_NAME` and canonical `CHAN_TAB_NAME`; these keys are not exposed as
+custom member environment values in the dialog.
 
 `Position`: `row: u32`, `col: u32` (airplane-grid coordinate).
 

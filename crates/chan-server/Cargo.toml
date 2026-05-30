@@ -51,6 +51,7 @@ chan-llm = { workspace = true, features = ["mcp"] }
 chan-tunnel-client = { workspace = true }
 chan-tunnel-proto = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 axum = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }

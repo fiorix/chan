@@ -8,19 +8,19 @@ import {
 } from "../state/teamDialog.svelte";
 
 // Team Work dialog. Pins the New/Load path-config control, the 1-9
-// dropdown (no slider), the "drag-me" chip label, the removed
-// copy/paste buttons, and the default-state contract (host "Neo", New mode).
+// dropdown, the "drag-me" chip label, the removed copy/paste buttons,
+// and the default-state contract with canonical host handles.
 
 describe("default config contract", () => {
-  test("host name defaults to Neo, New mode, one lead agent", () => {
+  test("host name defaults to @@Neo, New mode, one lead agent", () => {
     const cfg = defaultTeamConfig();
-    expect(cfg.hostName).toBe("Neo");
+    expect(cfg.hostName).toBe("@@Neo");
     expect(cfg.configMode).toBe("new");
     expect(cfg.configPath).toBe("/tmp/new-team-1/chan-team.toml");
     expect(cfg.size).toBe(TEAM_MIN_SIZE);
     expect(cfg.members).toHaveLength(1);
     expect(cfg.members[0].isLead).toBe(true);
-    expect(cfg.autoPrefix).toBe(true);
+    expect(cfg.autoPrefix).toBe(false);
   });
 
   test("validate requires an absolute config path (no team name)", () => {
@@ -38,13 +38,14 @@ describe("TeamDialog component shell", () => {
     expect(dialog).toMatch(/class="team-dialog-cancel"[\s\S]*?onclick=\{onCancel\}/);
   });
 
-  test("host name input defaults placeholder to Neo", () => {
+  test("host name input defaults placeholder to @@Neo", () => {
     expect(dialog).toMatch(/bind:value=\{config\.hostName\}/);
-    expect(dialog).toMatch(/placeholder="Neo"/);
+    expect(dialog).toMatch(/placeholder="@@Neo"/);
   });
 
-  test("auto-prefix checkbox is kept", () => {
-    expect(dialog).toMatch(/bind:checked=\{config\.autoPrefix\}/);
+  test("auto-prefix checkbox is removed", () => {
+    expect(dialog).not.toMatch(/bind:checked=\{config\.autoPrefix\}/);
+    expect(dialog).not.toMatch(/Auto-prefix names/);
   });
 
   test("Team configuration New/Load toggle replaces the Team name field", () => {

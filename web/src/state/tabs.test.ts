@@ -1976,7 +1976,6 @@ describe("terminal session serialization", () => {
     const tab = terminalTab({
       terminalSessionId: "term_123",
       lastSeq: 99,
-      lastAgentEchoSeq: 7,
       terminalActivity: true,
     });
 
@@ -1984,7 +1983,6 @@ describe("terminal session serialization", () => {
 
     expect(tab.terminalSessionId).toBeUndefined();
     expect(tab.lastSeq).toBeUndefined();
-    expect(tab.lastAgentEchoSeq).toBeUndefined();
     expect(tab.terminalActivity).toBeUndefined();
   });
 
@@ -2024,29 +2022,6 @@ describe("terminal session serialization", () => {
     expect(tab.sessionMcpEnv).toBe(true);
     expect(tab.terminalSessionId).toBe("term_123");
     expect(tab.lastSeq).toBeUndefined();
-  });
-
-  test("round-trips terminal agent echo replay cursor only in session layouts", async () => {
-    resetLayout([
-      terminalTab({
-        title: "build",
-        terminalSessionId: "term_123",
-        lastAgentEchoSeq: 12,
-      }),
-    ]);
-
-    const hashSnapshot = serializeLayout();
-    const sessionSnapshot = serializeLayout({ terminalSessions: true });
-
-    expect(JSON.stringify(hashSnapshot)).not.toContain("\"tae\"");
-    expect(JSON.stringify(sessionSnapshot)).toContain("\"tae\":12");
-
-    await restoreLayout(sessionSnapshot!);
-
-    const [tab] = activePane().tabs;
-    expect(tab?.kind).toBe("terminal");
-    if (tab?.kind !== "terminal") return;
-    expect(tab.lastAgentEchoSeq).toBe(12);
   });
 
   test("ignores legacy terminal sequence cursors on reload", async () => {
@@ -2317,7 +2292,6 @@ describe("terminal session serialization", () => {
     expect(tab.title).toBe("build");
     expect(tab.terminalSessionId).toBe("term_abc");
     expect(tab.lastSeq).toBeUndefined();
-    expect(tab.lastAgentEchoSeq).toBeUndefined();
   });
 
   test("hydrates terminal session ids during restore before mount-time reads", async () => {

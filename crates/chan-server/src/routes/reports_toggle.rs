@@ -148,6 +148,9 @@ mod tests {
                 control_socket_path: None,
                 terminal: ServerConfig::default().terminal,
             })),
+            agent_inbox: Arc::new(crate::agent_inbox::AgentInbox::new(
+                ServerConfig::default().team_work.inbox_depth,
+            )),
             shutdown_rx,
             scope_registry: std::sync::Arc::new(crate::bus::ScopeRegistry::new()),
         });

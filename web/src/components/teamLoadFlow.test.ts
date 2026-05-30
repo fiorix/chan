@@ -71,16 +71,21 @@ function setLayout(lead: TerminalTab): void {
 function loadedWire(): TeamConfigWire {
   return {
     team_name: "saved-team",
-    host_name: "Trinity",
+    host_name: "@@Trinity",
     host_handle: "@@Trinity",
     auto_prefix_at: true,
     created_at: "2026-05-29T00:00:00.000Z",
     members: [
-      { handle: "@@Lead", command: "claude", env: { CHAN_TAB_NAME: "@@Lead" }, is_lead: true },
+      {
+        handle: "@@Lead",
+        command: "claude",
+        env: { CHAN_TEAM_NAME: "saved-team", CHAN_TAB_NAME: "@@Lead" },
+        is_lead: true,
+      },
       {
         handle: "@@Worker1",
         command: "codex",
-        env: { CHAN_TAB_NAME: "@@Worker1" },
+        env: { CHAN_TEAM_NAME: "saved-team", CHAN_TAB_NAME: "@@Worker1" },
         is_lead: false,
       },
     ],
@@ -96,7 +101,7 @@ describe("Load -> edit -> Bootstrap re-saves the config", () => {
   test("a loaded config round-trips into an editable dialog config", () => {
     const cfg = resizeTeamMembers(wireToDialog(loadedWire(), "/tmp/x/chan-team.toml"));
     expect(cfg.configMode).toBe("load");
-    expect(cfg.hostName).toBe("Trinity");
+    expect(cfg.hostName).toBe("@@Trinity");
     expect(cfg.members.map((m) => m.name)).toEqual(["@@Lead", "@@Worker1"]);
     // The config is a plain editable object; translating it back
     // yields the same members (the round-trip the dialog uses on
@@ -119,7 +124,7 @@ describe("Load -> edit -> Bootstrap re-saves the config", () => {
 
     expect(write).toHaveBeenCalledTimes(1);
     expect(write.mock.calls[0][0]).toBe("/tmp/x/chan-team.toml");
-    // The persisted wire carries the loaded host name.
-    expect(write.mock.calls[0][1]).toMatchObject({ host_name: "Trinity" });
+    // The persisted wire carries the loaded host handle.
+    expect(write.mock.calls[0][1]).toMatchObject({ host_name: "@@Trinity" });
   });
 });

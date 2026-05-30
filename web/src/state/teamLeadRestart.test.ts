@@ -50,12 +50,14 @@ function leadFromLayout(): TerminalTab {
 
 function config(): TeamDialogConfig {
   return {
-    hostName: "Neo",
+    hostName: "@@Neo",
     configMode: "new",
     configPath: "/tmp/solo/chan-team.toml",
     size: 1,
-    autoPrefix: true,
-    members: [{ name: "Lead", command: "claude --resume", env: "DEBUG=1", isLead: true }],
+    autoPrefix: false,
+    members: [
+      { name: "@@Lead", command: "claude --resume", env: "DEBUG=1", isLead: true },
+    ],
     realEstate: { kind: "tabs" },
   };
 }
@@ -93,8 +95,8 @@ describe("lead launch (in-place, lead-first)", () => {
       name: "@@Lead",
       command: "claude --resume",
     });
-    // CHAN_TAB_NAME is auto-injected; the user's env entry rides
-    // along.
+    // Team Work identity is system-owned; the user's env entry rides along.
+    expect(opts?.env?.CHAN_TEAM_NAME).toBe("solo");
     expect(opts?.env?.CHAN_TAB_NAME).toBe("@@Lead");
     expect(opts?.env?.DEBUG).toBe("1");
   });

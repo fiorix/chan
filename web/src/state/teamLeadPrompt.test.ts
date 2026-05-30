@@ -49,15 +49,15 @@ function setLayout(lead: TerminalTab): void {
 
 function config(): TeamDialogConfig {
   return {
-    hostName: "Neo",
+    hostName: "@@Neo",
     configMode: "new",
     configPath: "/tmp/new-team-1/chan-team.toml",
     size: 3,
-    autoPrefix: true,
+    autoPrefix: false,
     members: [
-      { name: "Lead", command: "claude", env: "", isLead: true },
-      { name: "Worker1", command: "claude", env: "", isLead: false },
-      { name: "Worker2", command: "claude", env: "", isLead: false },
+      { name: "@@Lead", command: "claude", env: "", isLead: true },
+      { name: "@@Worker1", command: "claude", env: "", isLead: false },
+      { name: "@@Worker2", command: "claude", env: "", isLead: false },
     ],
     realEstate: { kind: "tabs" },
   };
@@ -101,6 +101,9 @@ describe("identity prompt placement", () => {
     const buffer = leadFromLayout().teamWork?.buffer ?? "";
     expect(buffer).toContain("We are a team of 3");
     expect(buffer).toContain("Our host is @@Neo and the team lead is @@Lead");
+    expect(buffer).toContain("send_agent_task");
+    expect(buffer).toContain("list_agent_tasks");
+    expect(buffer).toContain("poke");
     expect(buffer).toContain("- @@Worker1");
     expect(buffer).toContain("- @@Worker2");
   });

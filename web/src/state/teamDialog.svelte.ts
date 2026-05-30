@@ -19,9 +19,7 @@ import { TEAM_CONFIG_DEFAULT_PATH } from "./teamConfigPath";
 /// `TeamDialogConfig.members` is stable (positional id used by the
 /// airplane-grid for drag&drop slot assignment).
 export interface TeamMemberDraft {
-  /// Display name without the `@@` prefix. If
-  /// `TeamDialogConfig.autoPrefix` is true the rendered handle is
-  /// `@@<name>`; otherwise raw.
+  /// Canonical Team Work handle, e.g. `@@FullStackA`.
   name: string;
   /// Spawn command + flags (e.g. `claude` / `claude --resume`).
   /// Free-form so users can pick whatever agent runtime.
@@ -119,7 +117,7 @@ export interface TeamDialogConfig {
   configPath: string;
   /// Total agents (lead + workers). 1-9.
   size: number;
-  /// When true, all member names render with `@@` prefix.
+  /// Legacy field retained for wire compatibility. New saves keep it false.
   autoPrefix: boolean;
   /// Length must equal `size`. Exactly one member has `isLead: true`.
   members: TeamMemberDraft[];
@@ -157,14 +155,18 @@ export const TEAM_MAX_SIZE = 9;
 /// member, auto-prefix on, New mode, real estate defaults to tabs.
 export function defaultTeamConfig(): TeamDialogConfig {
   return {
-    hostName: "Neo",
+    hostName: "@@Neo",
     configMode: "new",
     configPath: TEAM_CONFIG_DEFAULT_PATH,
     size: TEAM_MIN_SIZE,
-    autoPrefix: true,
-    members: [{ name: "Lead", command: "claude", env: "", isLead: true }],
+    autoPrefix: false,
+    members: [{ name: "@@Lead", command: "claude", env: "", isLead: true }],
     realEstate: { kind: "tabs" },
   };
+}
+
+export function isCanonicalAgentHandle(value: string): boolean {
+  return /^@@[A-Za-z0-9_-]+$/.test(value);
 }
 
 /// Returns the first validation issue with the supplied config, or
@@ -174,6 +176,9 @@ export function validateTeamConfig(cfg: TeamDialogConfig): string | null {
   // Copy uses the dialog-visible labels so the user knows which
   // input to fix.
   if (!cfg.hostName.trim()) return "Your name required";
+  if (!isCanonicalAgentHandle(cfg.hostName.trim())) {
+    return "Your handle must be canonical @@Name";
+  }
   if (!cfg.configPath.trim()) return "Path to configuration required";
   if (!cfg.configPath.trim().startsWith("/")) {
     return "Path to configuration must be absolute";
@@ -192,6 +197,9 @@ export function validateTeamConfig(cfg: TeamDialogConfig): string | null {
   if (leadCount > 1) return "exactly one member can be marked as lead";
   if (cfg.members.some((m) => !m.name.trim())) {
     return "every member needs a name";
+  }
+  if (cfg.members.some((m) => !isCanonicalAgentHandle(m.name.trim()))) {
+    return "member handles must be canonical @@Name";
   }
   return null;
 }
@@ -266,14 +274,14 @@ export function unassignMember(
 }
 
 /// Resize `cfg.members` to match `cfg.size`. Truncates from the end
-/// when shrinking; appends fresh `WorkerN` entries when growing.
+/// when shrinking; appends fresh `@@WorkerN` entries when growing.
 /// Preserves the lead designation across the resize.
 export function resizeTeamMembers(cfg: TeamDialogConfig): TeamDialogConfig {
   let out = { ...cfg, members: [...cfg.members] };
   while (out.members.length < out.size) {
     const n = out.members.length;
     out.members.push({
-      name: `Worker${n}`,
+      name: `@@Worker${n}`,
       command: "claude",
       env: "",
       isLead: false,

@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use chan_workspace::{Library, WatchEvent, WatchHandle, Workspace};
 use tokio::sync::{broadcast, watch};
 
+use crate::agent_inbox::AgentInbox;
 use crate::indexer;
 use crate::self_writes::SelfWrites;
 use crate::terminal_sessions::Registry as TerminalRegistry;
@@ -96,6 +97,7 @@ pub struct AppState {
     /// browser reload until explicit close, workspace close, shutdown,
     /// cap eviction, or idle prune.
     pub terminal_sessions: Arc<TerminalRegistry>,
+    pub agent_inbox: Arc<AgentInbox>,
     /// Process-wide shutdown signal. Fires once SIGINT/SIGTERM or
     /// the idle-timeout watcher trip. Long-lived handlers (e.g.
     /// `/ws`) observe this to close their sockets promptly so axum's
@@ -195,6 +197,7 @@ pub(crate) mod test_support {
     use tokio::sync::{broadcast, watch};
 
     use super::AppState;
+    use crate::agent_inbox::AgentInbox;
     use crate::self_writes::SelfWrites;
     use crate::terminal_sessions::{Registry as TerminalRegistry, RegistryConfig};
     use crate::{EditorPrefs, ServerConfig};
@@ -245,6 +248,9 @@ pub(crate) mod test_support {
                 control_socket_path: None,
                 terminal: ServerConfig::default().terminal,
             })),
+            agent_inbox: Arc::new(AgentInbox::new(
+                ServerConfig::default().team_work.inbox_depth,
+            )),
             shutdown_rx,
             scope_registry: Arc::new(crate::bus::ScopeRegistry::new()),
         })

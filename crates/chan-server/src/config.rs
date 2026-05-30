@@ -34,6 +34,8 @@ pub struct ServerConfig {
     pub search: SearchConfig,
     #[serde(default)]
     pub terminal: TerminalConfig,
+    #[serde(default)]
+    pub team_work: TeamWorkConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,10 +44,24 @@ pub struct SearchConfig {
     pub aggression: SearchAggression,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamWorkConfig {
+    #[serde(default = "default_team_work_inbox_depth")]
+    pub inbox_depth: usize,
+}
+
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
             aggression: SearchAggression::Balanced,
+        }
+    }
+}
+
+impl Default for TeamWorkConfig {
+    fn default() -> Self {
+        Self {
+            inbox_depth: default_team_work_inbox_depth(),
         }
     }
 }
@@ -130,6 +146,13 @@ fn default_terminal_default_term() -> String {
     "xterm-256color".into()
 }
 
+fn default_team_work_inbox_depth() -> usize {
+    10
+}
+
+pub const TEAM_WORK_INBOX_DEPTH_MIN: usize = 1;
+pub const TEAM_WORK_INBOX_DEPTH_MAX: usize = 100;
+
 /// Inclusive bounds the Settings UI exposes for the scrollback slider.
 /// Mirrored in `web/src/state/terminalPrefs.ts`; keep in lockstep.
 pub const TERMINAL_SCROLLBACK_MB_MIN: u32 = 10;
@@ -141,6 +164,7 @@ impl Default for ServerConfig {
             attachments_dir: default_attachments_dir(),
             search: SearchConfig::default(),
             terminal: TerminalConfig::default(),
+            team_work: TeamWorkConfig::default(),
         }
     }
 }
@@ -155,7 +179,9 @@ impl ServerConfig {
     }
 
     pub fn load_from(path: &Path) -> Result<Self, Error> {
-        crate::store::load_toml(path)
+        let mut cfg: Self = crate::store::load_toml(path)?;
+        cfg.sanitize();
+        Ok(cfg)
     }
 
     pub fn save(&self) -> Result<(), Error> {
@@ -172,6 +198,14 @@ impl ServerConfig {
     ) -> SearchAggression {
         override_value.unwrap_or(self.search.aggression)
     }
+
+    pub fn sanitize(&mut self) {
+        self.team_work.inbox_depth = sanitize_team_work_inbox_depth(self.team_work.inbox_depth);
+    }
+}
+
+pub fn sanitize_team_work_inbox_depth(depth: usize) -> usize {
+    depth.clamp(TEAM_WORK_INBOX_DEPTH_MIN, TEAM_WORK_INBOX_DEPTH_MAX)
 }
 
 /// Default server config path: `~/.chan/server.toml` on desktop.
@@ -196,6 +230,20 @@ mod tests {
         let loaded = ServerConfig::load_from(&p).unwrap();
         assert_eq!(cfg, loaded);
         assert_eq!(loaded.attachments_dir, "attachments");
+        assert_eq!(loaded.team_work.inbox_depth, 10);
+    }
+
+    #[test]
+    fn team_work_inbox_depth_loads_and_clamps() {
+        let tmp = TempDir::new().unwrap();
+        let p = tmp.path().join("server.toml");
+        std::fs::write(&p, "[team_work]\ninbox_depth = 0\n").unwrap();
+        let cfg = ServerConfig::load_from(&p).unwrap();
+        assert_eq!(cfg.team_work.inbox_depth, 1);
+
+        std::fs::write(&p, "[team_work]\ninbox_depth = 250\n").unwrap();
+        let cfg = ServerConfig::load_from(&p).unwrap();
+        assert_eq!(cfg.team_work.inbox_depth, 100);
     }
 
     #[test]
@@ -215,6 +263,7 @@ mod tests {
                 default_term: "tmux-256color".into(),
                 font: TerminalFontChoice::SourceCodePro,
             },
+            team_work: TeamWorkConfig { inbox_depth: 25 },
         };
         cfg.save_to(&p).unwrap();
         let loaded = ServerConfig::load_from(&p).unwrap();
@@ -237,6 +286,7 @@ mod tests {
         assert_eq!(cfg.attachments_dir, "attachments"); // default applied
         assert_eq!(cfg.search.aggression, SearchAggression::Balanced);
         assert_eq!(cfg.terminal, TerminalConfig::default());
+        assert_eq!(cfg.team_work, TeamWorkConfig::default());
     }
 
     #[test]

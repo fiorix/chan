@@ -31,10 +31,11 @@ use rmcp::{
     transport::stdio,
     ServerHandler, ServiceExt,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::LlmError;
+use crate::team_work::{canonical_agent_handle, TeamWorkIdentity};
 use crate::tools::{self, ToolContext};
 
 const MCP_FRAME_HEADER_LIMIT: usize = 8192;
@@ -116,6 +117,8 @@ pub struct Server {
     /// chan-workspace invariant: the same `Workspace` can host a server with
     /// a different cap.
     max_media_bytes: u64,
+    agent_inbox_provider: Option<Arc<dyn AgentInboxProvider>>,
+    team_work_identity: TeamWorkIdentity,
 }
 
 impl Server {
@@ -123,6 +126,8 @@ impl Server {
         Self {
             ctx: ToolContext::new(workspace),
             max_media_bytes: DEFAULT_MCP_MEDIA_MAX_BYTES,
+            agent_inbox_provider: None,
+            team_work_identity: TeamWorkIdentity::default(),
         }
     }
 
@@ -132,6 +137,24 @@ impl Server {
     /// own configuration surfaces.
     pub fn with_max_media_bytes(mut self, n: u64) -> Self {
         self.max_media_bytes = n;
+        self
+    }
+
+    pub fn with_agent_inbox_provider<P>(mut self, provider: Arc<P>) -> Self
+    where
+        P: AgentInboxProvider + 'static,
+    {
+        self.agent_inbox_provider = Some(provider);
+        self
+    }
+
+    pub fn with_agent_inbox_provider_dyn(mut self, provider: Arc<dyn AgentInboxProvider>) -> Self {
+        self.agent_inbox_provider = Some(provider);
+        self
+    }
+
+    pub fn with_team_work_identity(mut self, identity: TeamWorkIdentity) -> Self {
+        self.team_work_identity = identity;
         self
     }
 
@@ -165,6 +188,53 @@ impl Server {
         drop(framed_tasks);
         Ok(())
     }
+}
+
+#[async_trait::async_trait]
+pub trait AgentInboxProvider: Send + Sync {
+    async fn send_agent_task(
+        &self,
+        identity: TeamWorkIdentity,
+        to: String,
+        context_path: String,
+    ) -> std::result::Result<SendAgentTaskResult, AgentInboxProviderError>;
+
+    async fn list_agent_tasks(
+        &self,
+        identity: TeamWorkIdentity,
+        since_id: Option<u64>,
+    ) -> std::result::Result<ListAgentTasksResult, AgentInboxProviderError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SendAgentTaskResult {
+    pub id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgentTask {
+    pub id: u64,
+    pub from: String,
+    pub to: String,
+    pub context_path: String,
+    pub created_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ListAgentTasksResult {
+    pub team: String,
+    pub agent: String,
+    pub oldest_retained_id: Option<u64>,
+    pub latest_id: Option<u64>,
+    pub tasks: Vec<AgentTask>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AgentInboxProviderError {
+    #[error("{0}")]
+    InvalidParams(String),
+    #[error("{0}")]
+    Internal(String),
 }
 
 struct FramedTasks {
@@ -393,6 +463,21 @@ pub struct ReadMediaParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SendAgentTaskParams {
+    /// Canonical Team Work agent handle, for example @@FullStackA.
+    pub to: String,
+    /// POSIX-style path to an existing readable workspace text file.
+    pub context_path: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListAgentTasksParams {
+    /// Optional numeric cursor. Returns retained tasks with id greater than this value.
+    #[serde(default)]
+    pub since_id: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GraphNeighborsParams {
     /// POSIX-style relative path of the file whose graph adjacency
     /// you want.
@@ -558,6 +643,51 @@ config).")]
     }
 
     #[tool(description = "\
+Store a Team Work Agent task for one recipient. Requires a hosted \
+Team Work MCP identity. `to` must be a canonical `@@Name` handle and \
+`context_path` must point at an existing readable workspace text file. \
+The sender is the connected agent identity; callers do not pass \
+`from`. Returns only { id }.")]
+    async fn send_agent_task(
+        &self,
+        Parameters(p): Parameters<SendAgentTaskParams>,
+    ) -> std::result::Result<String, ErrorData> {
+        let (provider, identity) = self.require_agent_inbox()?;
+        let to = canonical_agent_handle(&p.to)
+            .map_err(|e| ErrorData::invalid_params(format!("invalid to: {e}"), None))?;
+        if p.context_path.is_empty() {
+            return Err(ErrorData::invalid_params(
+                "invalid context_path: must be non-empty".to_string(),
+                None,
+            ));
+        }
+        let result = provider
+            .send_agent_task(identity, to, p.context_path)
+            .await
+            .map_err(inbox_provider_error)?;
+        serde_json::to_string(&result)
+            .map_err(|e| ErrorData::internal_error(format!("serialize result: {e}"), None))
+    }
+
+    #[tool(description = "\
+List retained Team Work Agent tasks for the connected agent identity. \
+No recipient parameter is accepted. With `since_id`, returns retained \
+tasks whose id is greater than the cursor; without it, returns the \
+current retained inbox plus oldest/latest retained id metadata.")]
+    async fn list_agent_tasks(
+        &self,
+        Parameters(p): Parameters<ListAgentTasksParams>,
+    ) -> std::result::Result<String, ErrorData> {
+        let (provider, identity) = self.require_agent_inbox()?;
+        let result = provider
+            .list_agent_tasks(identity, p.since_id)
+            .await
+            .map_err(inbox_provider_error)?;
+        serde_json::to_string(&result)
+            .map_err(|e| ErrorData::internal_error(format!("serialize result: {e}"), None))
+    }
+
+    #[tool(description = "\
 Read the workspace's link graph for a single file. Returns `out` (this \
 file's outbound edges: wiki/markdown `[[links]]`, `#tags`, and \
 `@@mentions`) and `in` (backlinks: every other file that points at \
@@ -639,6 +769,42 @@ need to drill in. The per-file array is capped at 200 entries; if \
             args["include_files"] = serde_json::Value::Bool(b);
         }
         run_tool("repo_report", args, self.ctx.clone()).await
+    }
+}
+
+impl Server {
+    fn require_agent_inbox(
+        &self,
+    ) -> std::result::Result<(Arc<dyn AgentInboxProvider>, TeamWorkIdentity), ErrorData> {
+        let provider = self.agent_inbox_provider.clone().ok_or_else(|| {
+            ErrorData::internal_error("agent inbox unavailable".to_string(), None)
+        })?;
+        let Some(team) = self.team_work_identity.team.clone() else {
+            return Err(ErrorData::internal_error(
+                "team identity unavailable".to_string(),
+                None,
+            ));
+        };
+        let Some(agent) = self.team_work_identity.agent.clone() else {
+            return Err(ErrorData::internal_error(
+                "agent identity unavailable".to_string(),
+                None,
+            ));
+        };
+        Ok((
+            provider,
+            TeamWorkIdentity {
+                team: Some(team),
+                agent: Some(agent),
+            },
+        ))
+    }
+}
+
+fn inbox_provider_error(err: AgentInboxProviderError) -> ErrorData {
+    match err {
+        AgentInboxProviderError::InvalidParams(message) => ErrorData::invalid_params(message, None),
+        AgentInboxProviderError::Internal(message) => ErrorData::internal_error(message, None),
     }
 }
 
@@ -778,8 +944,51 @@ fn mcp_safe_message(err: &LlmError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::team_work::TeamWorkIdentity;
     use chan_workspace::Library;
+    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
+
+    #[derive(Default)]
+    struct TestInboxProvider {
+        sends: Mutex<Vec<(TeamWorkIdentity, String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentInboxProvider for TestInboxProvider {
+        async fn send_agent_task(
+            &self,
+            identity: TeamWorkIdentity,
+            to: String,
+            context_path: String,
+        ) -> Result<SendAgentTaskResult, AgentInboxProviderError> {
+            self.sends
+                .lock()
+                .unwrap()
+                .push((identity, to, context_path));
+            Ok(SendAgentTaskResult { id: 7 })
+        }
+
+        async fn list_agent_tasks(
+            &self,
+            identity: TeamWorkIdentity,
+            since_id: Option<u64>,
+        ) -> Result<ListAgentTasksResult, AgentInboxProviderError> {
+            Ok(ListAgentTasksResult {
+                team: identity.team.unwrap(),
+                agent: identity.agent.unwrap(),
+                oldest_retained_id: Some(4),
+                latest_id: Some(9),
+                tasks: vec![AgentTask {
+                    id: since_id.unwrap_or(0) + 1,
+                    from: "@@Architect".into(),
+                    to: "@@FullStackA".into(),
+                    context_path: "tasks/one.md".into(),
+                    created_at_unix_ms: 123,
+                }],
+            })
+        }
+    }
 
     /// Pin the inlined `#[tool(description = ...)]` literals to the
     /// canonical `prompts::*_DESC` constants. rmcp-macros 1.6 won't
@@ -848,6 +1057,114 @@ mod tests {
         let workspace = lib.open_workspace(workspace_dir.path()).unwrap();
         let server = Server::new(workspace);
         (cfg, workspace_dir, server)
+    }
+
+    fn test_provider() -> Arc<TestInboxProvider> {
+        Arc::new(TestInboxProvider::default())
+    }
+
+    #[tokio::test]
+    async fn inbox_tool_checks_provider_before_identity() {
+        let (_cfg, _root, server) = fixture();
+
+        let err = server
+            .send_agent_task(Parameters(SendAgentTaskParams {
+                to: "@@FullStackA".into(),
+                context_path: "tasks/one.md".into(),
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.message, "agent inbox unavailable");
+    }
+
+    #[tokio::test]
+    async fn inbox_tool_checks_team_before_agent_identity() {
+        let (_cfg, _root, server) = fixture();
+        let provider = test_provider();
+        let server = server.with_agent_inbox_provider(provider.clone());
+
+        let err = server
+            .list_agent_tasks(Parameters(ListAgentTasksParams { since_id: None }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.message, "team identity unavailable");
+
+        let server =
+            server.with_team_work_identity(TeamWorkIdentity::new(Some("alpha".into()), None));
+        let err = server
+            .list_agent_tasks(Parameters(ListAgentTasksParams { since_id: None }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.message, "agent identity unavailable");
+    }
+
+    #[tokio::test]
+    async fn send_agent_task_calls_provider_and_returns_only_id() {
+        let (_cfg, _root, server) = fixture();
+        let provider = test_provider();
+        let server = server
+            .with_agent_inbox_provider(provider.clone())
+            .with_team_work_identity(TeamWorkIdentity::validated("alpha", "@@Architect").unwrap());
+
+        let out = server
+            .send_agent_task(Parameters(SendAgentTaskParams {
+                to: "@@FullStackA".into(),
+                context_path: "tasks/one.md".into(),
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&out).unwrap(),
+            serde_json::json!({"id": 7})
+        );
+        let sends = provider.sends.lock().unwrap();
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].0.agent.as_deref(), Some("@@Architect"));
+        assert_eq!(sends[0].1, "@@FullStackA");
+        assert_eq!(sends[0].2, "tasks/one.md");
+    }
+
+    #[tokio::test]
+    async fn list_agent_tasks_returns_provider_shape() {
+        let (_cfg, _root, server) = fixture();
+        let server = server
+            .with_agent_inbox_provider(test_provider())
+            .with_team_work_identity(TeamWorkIdentity::validated("alpha", "@@FullStackA").unwrap());
+
+        let out = server
+            .list_agent_tasks(Parameters(ListAgentTasksParams { since_id: Some(8) }))
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+        assert_eq!(value["team"], "alpha");
+        assert_eq!(value["agent"], "@@FullStackA");
+        assert_eq!(value["oldest_retained_id"], 4);
+        assert_eq!(value["latest_id"], 9);
+        assert_eq!(value["tasks"][0]["id"], 9);
+        assert_eq!(value["tasks"][0]["context_path"], "tasks/one.md");
+    }
+
+    #[tokio::test]
+    async fn send_agent_task_rejects_invalid_recipient_before_provider_call() {
+        let (_cfg, _root, server) = fixture();
+        let provider = test_provider();
+        let server = server
+            .with_agent_inbox_provider(provider.clone())
+            .with_team_work_identity(TeamWorkIdentity::validated("alpha", "@@Architect").unwrap());
+
+        let err = server
+            .send_agent_task(Parameters(SendAgentTaskParams {
+                to: "FullStackA".into(),
+                context_path: "tasks/one.md".into(),
+            }))
+            .await
+            .unwrap_err();
+
+        assert!(err.message.contains("invalid to"), "msg={}", err.message);
+        assert!(provider.sends.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

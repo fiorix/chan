@@ -165,8 +165,7 @@
   /// Render a member's handle as it'll appear in chan + the
   /// downstream agent's `CHAN_TAB_NAME`.
   function handleOf(member: TeamMemberDraft): string {
-    if (!config.autoPrefix) return member.name;
-    return member.name.startsWith("@@") ? member.name : `@@${member.name}`;
+    return member.name;
   }
 
   async function onBootstrap(): Promise<void> {
@@ -239,18 +238,13 @@
           bind:this={nameInputEl}
           bind:value={config.hostName}
           type="text"
-          placeholder="Neo"
+          placeholder="@@Neo"
           autocomplete="off"
         />
         <span class="team-field-hint">
           Renders as <code>{handleOf({ name: config.hostName || "(name)", command: "", env: "", isLead: false })}</code>
           when joining the team.
         </span>
-      </label>
-
-      <label class="team-checkbox-row">
-        <input type="checkbox" bind:checked={config.autoPrefix} />
-        <span>Auto-prefix names with <code>@@</code></span>
       </label>
 
       <fieldset class="team-realestate">
@@ -563,12 +557,6 @@
   }
   .team-load-error {
     color: var(--danger-text);
-  }
-  .team-checkbox-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 0.875rem;
   }
   .team-members {
     border: 1px solid var(--border);
