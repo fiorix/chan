@@ -83,7 +83,9 @@ describe("Mod-Enter with a ring-selected image", () => {
     view.dispatch({ selection: { anchor: ATOM_END } });
     await tick();
     await Promise.resolve();
-    return content.closest(".cm-editor")?.querySelector(".cm-md-image-wrap[data-selected]") ?? null;
+    return content
+      .closest(".cm-editor")
+      ?.querySelector<HTMLElement>(".cm-md-image-wrap[data-selected]") ?? null;
   }
 
   test("chat host: submit does NOT open the image zoom", async () => {
