@@ -65,6 +65,7 @@ export const DEMO_PREFERENCES: Preferences = {
     default_term: "xterm-256color",
     font: "os-default",
     mcp_env: false,
+    mouse_capture: true,
   },
   bubble_overlay_mode: "stack",
   empty_pane_carousel_cycling: true,

@@ -26,11 +26,13 @@ describe("HybridTerminalConfig back card", () => {
 });
 
 describe("Settings owns terminal controls", () => {
-  test("Terminal section owns scrollback, TERM, MCP discovery, and font", () => {
+  test("Terminal section owns scrollback, TERM, MCP discovery, mouse capture, and font", () => {
     expect(terminalSource).toMatch(/label="Scrollback"/);
     expect(terminalSource).toMatch(/scrollback_mb: mb/);
     expect(terminalSource).toMatch(/default_term: value/);
     expect(terminalSource).toMatch(/mcp_env: on/);
+    expect(terminalSource).toMatch(/mouse_capture: on/);
+    expect(terminalSource).toMatch(/mouse_capture \?\? true/);
     expect(terminalSource).toMatch(/aria-label="Terminal font"/);
   });
 

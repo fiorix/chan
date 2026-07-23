@@ -136,6 +136,7 @@ mod tests {
                 default_term: "tmux-256color".into(),
                 font: chan_library::TerminalFontChoice::SourceCodePro,
                 mcp_env: true,
+                mouse_capture: false,
             },
         };
         cfg.save_to(&p).unwrap();
@@ -197,6 +198,7 @@ mod tests {
         let cfg = TerminalConfig::default();
         assert_eq!(cfg.scrollback_mb, 50);
         assert_eq!(cfg.default_term, "xterm-256color");
+        assert!(cfg.mouse_capture);
     }
 
     #[test]
@@ -217,6 +219,7 @@ mod tests {
         assert_eq!(cfg.terminal.ring_bytes, 4096);
         assert_eq!(cfg.terminal.scrollback_mb, 50);
         assert_eq!(cfg.terminal.default_term, "xterm-256color");
+        assert!(cfg.terminal.mouse_capture);
     }
 
     #[test]

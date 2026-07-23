@@ -132,6 +132,18 @@
 </SettingField>
 
 <SettingField
+  label="Mouse capture"
+  hint="Let full-screen terminal apps capture the mouse. Turn off to keep click-drag text selection over them. New terminals only."
+>
+  <PillToggle
+    label="Allow in new terminals"
+    checked={prefs.terminal.mouse_capture ?? true}
+    ontoggle={(on) =>
+      commit((p) => ({ ...p, terminal: { ...p.terminal, mouse_capture: on } }))}
+  />
+</SettingField>
+
+<SettingField
   label="Terminal font"
   hint="Font for new terminals. Source Code Pro downloads ~80 KB into your config dir on first enable; existing terminals keep their font until they restart."
 >

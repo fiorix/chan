@@ -36,6 +36,7 @@ function basePrefs(): Record<string, unknown> {
       default_term: "xterm-256color",
       font: "os-default",
       mcp_env: false,
+      mouse_capture: true,
     },
     bubble_overlay_mode: "stack",
     empty_pane_carousel_cycling: true,
@@ -254,5 +255,36 @@ describe("settings surface render", () => {
     expect((last.preferences.terminal as { mcp_env: boolean }).mcp_env).toBe(
       false,
     );
+  });
+
+  test("toggling mouse capture PATCHes terminal.mouse_capture and keeps siblings", async () => {
+    const target = openSurface();
+    await flush();
+    const terminalTab = [...target.querySelectorAll(".section-tab")].find(
+      (e) => e.textContent?.trim() === "Terminal",
+    ) as HTMLElement;
+    terminalTab.click();
+    await flush();
+    const pill = [...target.querySelectorAll("label.pill")].find((e) =>
+      e.textContent?.includes("Allow in new terminals"),
+    ) as HTMLLabelElement;
+    expect(pill).not.toBeNull();
+    const checkbox = pill.querySelector(
+      'input[type="checkbox"]',
+    ) as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
+    checkbox.click();
+    await flush();
+    const last = patches[patches.length - 1]!;
+    expect(
+      (last.preferences.terminal as { mouse_capture: boolean }).mouse_capture,
+    ).toBe(false);
+    // Sibling terminal fields survive the spread.
+    expect((last.preferences.terminal as { mcp_env: boolean }).mcp_env).toBe(
+      false,
+    );
+    expect(
+      (last.preferences.terminal as { default_term: string }).default_term,
+    ).toBe("xterm-256color");
   });
 });
