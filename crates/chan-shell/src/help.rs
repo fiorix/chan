@@ -154,7 +154,7 @@ SEE ALSO:
 "#;
 
 /// `cs export` long help (manpage head).
-pub(crate) const CS_EXPORT: &str = r"Render a workspace file through a live renderer window and write the
+pub(crate) const CS_EXPORT: &str = r#"Render a workspace file through a live renderer window and write the
 result back into the workspace.
 
 `cs export doc.md` reads doc.md from the workspace, renders it in an
@@ -179,10 +179,10 @@ shows them.
 Authoring conventions the exporter honors:
   - a code fence tagged `mermaid` renders as a diagram; tag it
     `mermaid-to-excalidraw` for the hand-drawn style
-  - `@pagebreak` alone on a line is a page break (in a deck, the
-    start of the next slide)
+  - `<hr class="chan-page-break">` alone on a line is a page break
+    (in a deck, the start of the next slide)
   - `chan.kind: slides` frontmatter turns the file into a deck
-";
+"#;
 
 /// `cs export` examples, side effects, and caveats.
 pub(crate) const CS_EXPORT_AFTER: &str = r#"EXAMPLES:
@@ -214,16 +214,19 @@ works):
 
   content
 
-  @pagebreak
+  <hr class="chan-page-break">
 
   # Slide 2
 
-Page breaks: `@pagebreak` alone on a line splits a deck into slides
-and forces a document page cut. In the editor, typing @pagebreak or
-@break followed by Space or Enter rewrites the line to the page-break
-atom (an <hr class="chan-page-break">), which the exporter treats the
-same way. `@break` is only that typing macro: left literally in the
-source (written there by an agent, say) it does NOT split.
+Page breaks: `<hr class="chan-page-break">` alone on a line, blank
+line after it, splits a deck into slides and forces a document page
+cut. In the live editor, typing @pagebreak or @break followed by
+Space or Enter rewrites the line to that hr; the rewrite happens at
+typing time only, so a file written with the markers keeps them as
+plain text. One asymmetry: a literal @pagebreak line still splits
+decks and PDF export, but the editor shows it as raw text, so the hr
+form is the canonical one to write. `@break` left literally in the
+source does nothing anywhere.
 
 Diagrams: put the graph in a code fence tagged `mermaid`, or
 `mermaid-to-excalidraw` for the hand-drawn style. Rendering is
@@ -233,14 +236,30 @@ client-side, in the window that runs the export:
   flowchart LR
     spec --> draft --> review
 
-Editor conveniences worth knowing while authoring:
+Editor conveniences worth knowing while typing in the live editor:
 
   [[         file picker; commits [[target]]
   [[file#    heading picker inside that file
   @@name     contact picker; commits an @@name mention pill
-  @today     inserts today's date
+  @today     typing macro: expands to today's date
   @date      same, plus the calendar / format popover
   ![         image picker; commits ![](path)
+
+The @ triggers are live-editor typing macros, expanded on Space or
+Enter as you type and never expanded in a file written with them. An
+agent writing markdown writes the materialized forms instead: the hr
+line above for a page break, and a concrete date for @today/@date.
+
+Dates: a concrete date in any of these shapes gets the editor's date
+pill wherever it appears; ISO is the preferred one to write:
+
+  2026-07-23          YYYY-MM-DD (ISO)
+  02 Jan 2029         DD Mon YYYY
+  13 April 2024       D Month YYYY
+  13th April 2024     Dth Month YYYY
+  April 13, 2024      Month D, YYYY
+  13/04/2024          DD/MM/YYYY
+  04/13/2024          MM/DD/YYYY
 
 SIDE EFFECTS:
 Writes the output file into the workspace through the upload route,
