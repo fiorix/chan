@@ -59,6 +59,7 @@ import { isDraftPath } from "./workspace.svelte";
 import { isEditableText, isExcalidraw } from "./fileTypes";
 import {
   markTabFileMissing,
+  registerDocFallbackSavedHook,
   registerDocReleaseHook,
   registerDocSaveDelegate,
   registerDocSavePausedQuery,
@@ -94,10 +95,24 @@ export const DOC_RECONNECT_GRACE_MS = 3000;
 /// with autosave suppressed indefinitely.
 export const DOC_ATTACH_TIMEOUT_MS = 5000;
 
-/// Ceiling on a save-funnel flush await. Covers the authority's ~800ms
-/// flush debounce plus the write with margin; past it the save degrades
-/// to the classic path.
+/// Quiet-window ceiling on a save-funnel flush await: this long with NO
+/// frame on the session degrades the save to the classic path. Any
+/// progress frame (snapshot, updates, push-ok/-stale, flush) restarts
+/// the window, so the deadline is RTT-agnostic: a slow-but-live channel
+/// whose frames keep flowing never degrades mid-save, while a silent
+/// one still covers the authority's ~800ms flush debounce with margin.
 export const DOC_FLUSH_TIMEOUT_MS = 4000;
+
+/// Absolute ceiling on a save-funnel flush await. A session that keeps
+/// producing frames without ever confirming clean (peer edit storm,
+/// wedged authority) must still fall through to the classic path.
+export const DOC_FLUSH_CAP_MS = 30_000;
+
+/// Bound on the degraded-fallback wait for an in-flight push to settle
+/// before the classic PUT fires. Keeps the two writers serialized: the
+/// push already on the wire lands (and its push-ok/flush frames restamp
+/// the CAS token) before the PUT reads that token.
+export const DOC_FALLBACK_SETTLE_MS = 2000;
 
 /// Outbound cursor cadence: trailing-edge throttle on selection moves.
 /// The presence field's freshness fade assumes roughly this rate.
@@ -222,6 +237,15 @@ export type PeerCursor = {
   version: number;
 };
 
+/// Save-funnel waiter: `quietTimer` is the restartable no-frame window,
+/// `capTimer` the absolute ceiling. Either firing resolves false.
+type FlushWaiter = {
+  resolve: (ok: boolean) => void;
+  quietMs: number;
+  quietTimer: ReturnType<typeof setTimeout>;
+  capTimer: ReturnType<typeof setTimeout>;
+};
+
 // ---- session ---------------------------------------------------------------
 
 const registry = new Map<string, DocSession>();
@@ -242,6 +266,10 @@ export class DocSession {
   private status: DocSyncStatus = "connecting";
   private ws: WebSocket | null = null;
   private sawFrameOnSocket = false;
+  /// The attach timer closed this socket itself (no frame in time).
+  /// Read once by onSocketClosed: a self-inflicted timeout close says
+  /// nothing about server capability, unlike a server-initiated close.
+  private attachDialTimedOut = false;
   private closedByUs = false;
   private retryStopped = false;
   private backoffMs = WS_RECONNECT_BACKOFF_MIN_MS;
@@ -276,8 +304,12 @@ export class DocSession {
   private cursors = new Map<number, PeerCursor>();
   private cursorTimer: ReturnType<typeof setTimeout> | null = null;
 
-  private flushWaiters: {
-    resolve: (ok: boolean) => void;
+  private flushWaiters: FlushWaiter[] = [];
+
+  /// Fallback-settle waiters: resolved the moment no push is in flight
+  /// (or on their own bound). See awaitPushSettled.
+  private pushSettleWaiters: {
+    resolve: () => void;
     timer: ReturnType<typeof setTimeout>;
   }[] = [];
 
@@ -367,32 +399,104 @@ export class DocSession {
   }
 
   /// Save-funnel entry: ensure every local edit is confirmed by the
-  /// authority and the authority has flushed to disk. Resolves false on
-  /// timeout or flush error; the caller degrades the session and falls
-  /// back to the classic PUT.
-  flush(timeoutMs: number = DOC_FLUSH_TIMEOUT_MS): Promise<boolean> {
+  /// authority and the authority has flushed to disk. Resolves false
+  /// when the channel goes quiet for `quietMs` (or DOC_FLUSH_CAP_MS in
+  /// total) or on a flush error; the caller degrades the session and
+  /// falls back to the classic PUT.
+  flush(quietMs: number = DOC_FLUSH_TIMEOUT_MS): Promise<boolean> {
     if (!this.ownsSaves()) return Promise.resolve(false);
     this.maybePush();
     return new Promise<boolean>((resolve) => {
-      const waiter = {
+      const waiter: FlushWaiter = {
         resolve,
-        timer: setTimeout(() => {
-          this.flushWaiters = this.flushWaiters.filter((w) => w !== waiter);
-          resolve(false);
-        }, timeoutMs),
+        quietMs,
+        quietTimer: setTimeout(() => this.expireFlushWaiter(waiter), quietMs),
+        capTimer: setTimeout(
+          () => this.expireFlushWaiter(waiter),
+          DOC_FLUSH_CAP_MS,
+        ),
       };
       this.flushWaiters.push(waiter);
       this.checkFlushWaiters();
     });
   }
 
+  /// A waiter's quiet window or absolute cap ran out: resolve false so
+  /// the save degrades to the classic path.
+  private expireFlushWaiter(w: FlushWaiter): void {
+    const i = this.flushWaiters.indexOf(w);
+    if (i === -1) return;
+    this.flushWaiters.splice(i, 1);
+    clearTimeout(w.quietTimer);
+    clearTimeout(w.capTimer);
+    w.resolve(false);
+  }
+
+  /// A progress frame arrived: restart every waiter's quiet window.
+  /// This is what makes the funnel deadline RTT-agnostic (see
+  /// DOC_FLUSH_TIMEOUT_MS).
+  private noteFlushProgress(): void {
+    for (const w of this.flushWaiters) {
+      clearTimeout(w.quietTimer);
+      w.quietTimer = setTimeout(() => this.expireFlushWaiter(w), w.quietMs);
+    }
+  }
+
+  /// Resolve and clear every pending funnel waiter.
+  private settleFlushWaiters(ok: boolean): void {
+    for (const w of this.flushWaiters.splice(0)) {
+      clearTimeout(w.quietTimer);
+      clearTimeout(w.capTimer);
+      w.resolve(ok);
+    }
+  }
+
   /// Drop to the classic autosave + CAS path. The last `flush` frame's
   /// mtime token is already stamped on the tab, so the next PUT's CAS
-  /// check is correct. Background reconnects continue; success returns
-  /// the session to `attached` via a hard resync.
+  /// check is correct, and the pump stops pushing (maybePush gates on
+  /// this status) so the classic writer is the only writer. Recovery: a
+  /// socket-down degrade heals through the background reconnects; a
+  /// socket-open degrade heals through healAfterFallbackSave once a
+  /// classic save lands.
   degrade(): void {
     if (this.status === "degraded" || this.status === "off") return;
     this.setStatus("degraded");
+  }
+
+  /// Fallback settle: resolves once no push is in flight, bounded by
+  /// `timeoutMs`. The degrade gate in maybePush stops NEW pushes; this
+  /// waits out the one already on the wire so the classic fallback PUT
+  /// never interleaves with it, and so the push's own push-ok/flush
+  /// frames get their chance to restamp the tab's CAS token before the
+  /// PUT reads it.
+  awaitPushSettled(timeoutMs: number = DOC_FALLBACK_SETTLE_MS): Promise<void> {
+    if (!this.pushInFlight) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const waiter = {
+        resolve,
+        timer: setTimeout(() => {
+          this.pushSettleWaiters = this.pushSettleWaiters.filter(
+            (w) => w !== waiter,
+          );
+          resolve();
+        }, timeoutMs),
+      };
+      this.pushSettleWaiters.push(waiter);
+    });
+  }
+
+  /// A classic fallback save for this tab landed while the session sat
+  /// degraded with the channel still up. Resync now: the fresh snapshot
+  /// re-adopts the authority (the PUT divert just updated it) and the
+  /// attach path promotes back to `attached`, restoring single-writer
+  /// ownership instead of leaving the tab degraded-classic for the rest
+  /// of its life. Socket-down degrades keep their background retry
+  /// loop; permanent stops stay stopped.
+  healAfterFallbackSave(): void {
+    if (this.retryStopped || this.closedByUs) return;
+    if (this.status !== "degraded") return;
+    if (this.ws === null || this.ws.readyState !== WebSocket.OPEN) return;
+    this.hardResync();
   }
 
   /// Tear the session down. `linger` keeps the socket + shadow alive for
@@ -584,6 +688,12 @@ export class DocSession {
 
   private maybePush(): void {
     if (!this.view || !this.collabInstalled) return;
+    // Single-writer discipline: a degraded tab's saves belong to the
+    // classic PUT path, so the pump must not keep pushing on a
+    // still-open socket (the same edit traveling both channels is the
+    // duplicated-text / stale-token-409 recipe). Healing back to
+    // `attached` re-opens the pump.
+    if (this.status === "degraded" || this.status === "off") return;
     if (this.pushInFlight || this.staleLatch !== null) return;
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     if (this.isReadOnlyAttach()) return;
@@ -598,6 +708,16 @@ export class DocSession {
         changes: u.changes.toJSON(),
       })),
     });
+  }
+
+  /// The in-flight push settled (answered, superseded, or its socket
+  /// died): release any fallback-settle waiters with it.
+  private clearPushInFlight(): void {
+    this.pushInFlight = false;
+    for (const w of this.pushSettleWaiters.splice(0)) {
+      clearTimeout(w.timer);
+      w.resolve();
+    }
   }
 
   private send(frame: unknown): void {
@@ -625,8 +745,15 @@ export class DocSession {
     }
     this.ws = ws;
     this.attachTimer = setTimeout(() => {
-      // No frame within the window: count the dial as failed.
-      if (!this.sawFrameOnSocket) this.closeSocket(), this.onSocketClosed();
+      // No frame within the window: count the dial as failed. Flag the
+      // close as self-inflicted first so the capability probe in
+      // onSocketClosed does not read a slow dial (high RTT, stalled
+      // proxy hop) as a server without doc sync.
+      if (!this.sawFrameOnSocket) {
+        this.attachDialTimedOut = true;
+        this.closeSocket();
+        this.onSocketClosed();
+      }
     }, DOC_ATTACH_TIMEOUT_MS);
     ws.onopen = () => {
       // A resumed socket (collab installed, incremental catch-up) is
@@ -668,13 +795,18 @@ export class DocSession {
 
   private onSocketClosed(): void {
     this.clearAttachTimer();
+    const dialTimedOut = this.attachDialTimedOut;
+    this.attachDialTimedOut = false;
     this.ws = null;
-    this.pushInFlight = false;
+    this.clearPushInFlight();
     this.staleLatch = null;
     if (this.closedByUs || this.retryStopped) return;
-    // Capability probe: the first doc-ws connect that closes before any
-    // frame means an old server; latch module-wide and go quiet.
-    if (serverSupportsDocSync === null && !this.sawFrameOnSocket) {
+    // Capability probe: the first doc-ws connect the SERVER closes
+    // before any frame means an old server; latch module-wide and go
+    // quiet. A close this client inflicted on itself (the attach
+    // timeout above) proves nothing about capability and must retry
+    // instead of latching doc sync off for the whole page load.
+    if (serverSupportsDocSync === null && !this.sawFrameOnSocket && !dialTimedOut) {
       serverSupportsDocSync = false;
     }
     if (serverSupportsDocSync === false) {
@@ -727,6 +859,19 @@ export class DocSession {
   // ---- frames ------------------------------------------------------------
 
   private onFrame(f: ServerFrame): void {
+    // Sync-progress frames restart the save funnel's quiet window;
+    // presence traffic (cursor frames) deliberately does not, so a
+    // session that only relays peer cursors cannot pin a save open past
+    // the quiet window.
+    if (
+      f.type === "snapshot" ||
+      f.type === "updates" ||
+      f.type === "push-ok" ||
+      f.type === "push-stale" ||
+      f.type === "flush"
+    ) {
+      this.noteFlushProgress();
+    }
     switch (f.type) {
       case "snapshot":
         this.onSnapshot(f);
@@ -735,12 +880,12 @@ export class DocSession {
         this.onUpdates(f);
         return;
       case "push-ok":
-        this.pushInFlight = false;
+        this.clearPushInFlight();
         this.maybePush();
         this.checkFlushWaiters();
         return;
       case "push-stale":
-        this.pushInFlight = false;
+        this.clearPushInFlight();
         if (this.shadowVersion >= f.version) {
           this.maybePush();
         } else {
@@ -853,7 +998,7 @@ export class DocSession {
     // to the pre-resync world and will never be answered on this epoch
     // (a reconnect already dropped it; a same-socket resync superseded
     // it). Clearing here lets the re-attach push immediately.
-    this.pushInFlight = false;
+    this.clearPushInFlight();
     this.staleLatch = null;
     this.serverDirty = f.dirty;
     this.stampMtime(f.mtime_ns ?? null);
@@ -936,10 +1081,7 @@ export class DocSession {
       // (data safe in memory and on every client). Surface it and let
       // any pending save fall back through the degrade path.
       this.tab.error = `save failed: ${f.error}`;
-      for (const w of this.flushWaiters.splice(0)) {
-        clearTimeout(w.timer);
-        w.resolve(false);
-      }
+      this.settleFlushWaiters(false);
       return;
     }
     this.serverDirty = f.dirty;
@@ -991,10 +1133,7 @@ export class DocSession {
     if (!this.ownsSaves()) {
       // Degraded/off mid-wait: resolve false so the save falls back to
       // the classic path instead of timing out.
-      for (const w of this.flushWaiters.splice(0)) {
-        clearTimeout(w.timer);
-        w.resolve(false);
-      }
+      this.settleFlushWaiters(false);
       return;
     }
     if (this.status !== "attached") return;
@@ -1002,10 +1141,7 @@ export class DocSession {
       this.maybePush();
       return;
     }
-    for (const w of this.flushWaiters.splice(0)) {
-      clearTimeout(w.timer);
-      w.resolve(true);
-    }
+    this.settleFlushWaiters(true);
   }
 
   // ---- teardown --------------------------------------------------------
@@ -1025,10 +1161,8 @@ export class DocSession {
     this.clearReconnectTimer();
     this.clearAttachTimer();
     this.clearCursorTimer();
-    for (const w of this.flushWaiters.splice(0)) {
-      clearTimeout(w.timer);
-      w.resolve(false);
-    }
+    this.settleFlushWaiters(false);
+    this.clearPushInFlight();
     this.closeSocket();
     this.view = null;
     this.slot = null;
@@ -1112,11 +1246,20 @@ registerDocSaveDelegate(async (t: FileTab) => {
   if (!session || !session.ownsSaves()) return "classic";
   if (await session.flush()) return "saved";
   session.degrade();
+  // Single-writer handoff: the degrade gated the pump; wait out any
+  // push already on the wire before the classic PUT fires so the two
+  // writers never interleave and the freshest flush token is on the
+  // tab when the PUT stamps its CAS check.
+  await session.awaitPushSettled();
   return "degraded";
 });
 
 registerDocReleaseHook((tabId: string, immediate: boolean) => {
   releaseDocSession(tabId, { immediate });
+});
+
+registerDocFallbackSavedHook((tabId: string) => {
+  registry.get(tabId)?.healAfterFallbackSave();
 });
 
 registerDocSavePausedQuery((tabId: string) => {

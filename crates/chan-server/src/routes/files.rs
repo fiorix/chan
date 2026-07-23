@@ -947,7 +947,10 @@ pub async fn api_write_file(
 /// session token, apply as a `$http` update, force and await a flush,
 /// answer with the post-flush token. Status shapes (200 WriteResponse,
 /// 409 WriteConflictBody) match the disk path exactly; a failed forced
-/// flush answers 503 with the content retained in the session.
+/// flush answers 503 with the content retained in the session. One
+/// deliberate divergence from the disk path: a stale token whose body
+/// is byte-identical to the authority text answers 200 (token-adopt)
+/// instead of 409, because equal bytes cannot lose an update.
 async fn write_via_session(
     state: &Arc<AppState>,
     workspace: &Arc<chan_workspace::Workspace>,
@@ -956,7 +959,9 @@ async fn write_via_session(
     expected_mtime_ns: Option<i64>,
     content: &str,
 ) -> Response {
-    let pre_token = session.token();
+    // Text and token read under one lock: the equal-body escape below
+    // must compare against the same authority state the token belongs to.
+    let (authority_text, pre_token) = session.authority_view();
     // The CAS matrix mirrors write_file_sync: the ns token is
     // preferred, the legacy form compares at second resolution, no
     // token is last-write-wins.
@@ -968,6 +973,24 @@ async fn write_via_session(
         false
     };
     if conflict {
+        // Token-adopt escape: a stale token with a byte-identical body
+        // is not a lost update. The client-side funnel fallback PUTs
+        // the exact text the authority already holds while the
+        // authority's freshest flush token is still in flight to that
+        // client, so a bare token compare would answer a spurious 409
+        // and the editor would raise its conflict modal for a file
+        // nobody else touched. Equal bytes mean accepting can lose
+        // nothing: adopt the caller onto the session token and skip
+        // the no-op replace; any pending flush proceeds on its own
+        // clock (the token rotation reaches attached clients through
+        // the flush frame, exactly as for a confirmed edit).
+        if pre_token.is_some() && content == authority_text {
+            return Json(WriteResponse {
+                mtime: pre_token.map(|ns| ns / 1_000_000_000),
+                mtime_ns: pre_token.map(|ns| ns.to_string()),
+            })
+            .into_response();
+        }
         return (
             StatusCode::CONFLICT,
             Json(WriteConflictBody {
@@ -2617,6 +2640,94 @@ mod doc_divert_tests {
             std::fs::read_to_string(root.path().join("n.md")).unwrap(),
             "four\n"
         );
+    }
+
+    #[tokio::test]
+    async fn put_divert_stale_token_equal_body_token_adopts() {
+        let (_cfg, root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        workspace.write_text("n.md", "one\n").unwrap();
+        let mut handle = state
+            .doc_sessions
+            .attach(&workspace, "n.md", "win-1", None)
+            .await
+            .unwrap();
+        let mut frames = handle.take_frames();
+        let session = handle.session().clone();
+        let token0 = session.token().expect("seeded token");
+
+        // Stale token + byte-identical body: the funnel-fallback shape
+        // (the client re-sends the text the authority already holds
+        // while the freshest flush token is still in flight to it).
+        // Token-adopt: 200 carrying the session token, no $http fan.
+        let resp = api_write_file(
+            State(state.clone()),
+            AxumPath("n.md".into()),
+            Json(WriteBody {
+                content: "one\n".into(),
+                expected_mtime: None,
+                expected_mtime_ns: Some((token0 + 1).to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["mtime_ns"], token0.to_string());
+        while let Ok(raw) = frames.try_recv() {
+            let f: Value = serde_json::from_str(&raw).unwrap();
+            assert_ne!(
+                f["updates"][0]["clientID"], "$http",
+                "an equal-body adopt must not fan a replace"
+            );
+        }
+
+        // Live unflushed edit: authority text moves ahead of disk while
+        // the token stays put. An equal-to-AUTHORITY body still adopts,
+        // and the pending flush is left on its own clock (disk keeps
+        // the old bytes: no forced flush rides the adopt).
+        handle
+            .push(
+                0,
+                vec![UpdateJson {
+                    client_id: "c-1".into(),
+                    changes: replace_diff("one\n", "live v2\n"),
+                }],
+            )
+            .unwrap();
+        let resp = api_write_file(
+            State(state.clone()),
+            AxumPath("n.md".into()),
+            Json(WriteBody {
+                content: "live v2\n".into(),
+                expected_mtime: None,
+                expected_mtime_ns: Some((token0 + 1).to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["mtime_ns"], token0.to_string());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("n.md")).unwrap(),
+            "one\n"
+        );
+
+        // Stale token + DIFFERENT body: a real potential lost update,
+        // still 409 with the session token, nothing applied.
+        let resp = api_write_file(
+            State(state.clone()),
+            AxumPath("n.md".into()),
+            Json(WriteBody {
+                content: "three\n".into(),
+                expected_mtime: None,
+                expected_mtime_ns: Some((token0 + 1).to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let v = body_json(resp).await;
+        assert_eq!(v["current_mtime_ns"], token0.to_string());
+        assert_eq!(session.authority_view().0, "live v2\n");
     }
 
     #[cfg(unix)]
