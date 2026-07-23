@@ -48,6 +48,45 @@ describe("expandPageBreakMacro", () => {
     expect(view.state.doc.toString()).toBe(`${PAGE_BREAK_MARKER}\n\n`);
   });
 
+  test("reuses an existing blank separator below an own-line trigger", () => {
+    const doc = "@pagebreak\n\n# Next\n\nbody";
+    mount(doc, "@pagebreak".length);
+
+    expect(expandPageBreakMacro(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(
+      `${PAGE_BREAK_MARKER}\n\n# Next\n\nbody`,
+    );
+    expect(view.state.selection.main.head).toBe(
+      `${PAGE_BREAK_MARKER}\n`.length,
+    );
+  });
+
+  test("adds only the blank separator when the trigger ends a line", () => {
+    const doc = "before @pagebreak\nnext";
+    mount(doc, "before @pagebreak".length);
+
+    expect(expandPageBreakMacro(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(
+      `before\n\n${PAGE_BREAK_MARKER}\n\nnext`,
+    );
+    expect(view.state.selection.main.head).toBe(
+      `before\n\n${PAGE_BREAK_MARKER}\n`.length,
+    );
+  });
+
+  test("adds nothing when the line break and blank separator exist", () => {
+    const doc = "before @pagebreak\n\n# Next";
+    mount(doc, "before @pagebreak".length);
+
+    expect(expandPageBreakMacro(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(
+      `before\n\n${PAGE_BREAK_MARKER}\n\n# Next`,
+    );
+    expect(view.state.selection.main.head).toBe(
+      `before\n\n${PAGE_BREAK_MARKER}\n`.length,
+    );
+  });
+
   test("normalizes a mid-paragraph trigger into a block marker", () => {
     const doc = "before @pagebreak after";
     mount(doc, "before @pagebreak".length);

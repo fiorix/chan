@@ -356,6 +356,45 @@ after gap
     expect(pageText()).toContain("after gap");
   });
 
+  test("a slide after a page break starts at its heading with no spacer band", () => {
+    // Two blank lines follow the break; they are separator whitespace,
+    // not authored top padding, so the slide must open on its H1.
+    const source = `---
+chan:
+  kind: slides
+  slides:
+    aspect_ratio: "16:9"
+---
+
+# Slide 1
+
+one
+
+<hr class="chan-page-break">
+
+
+# Next
+
+body
+`;
+
+    openSlidePreview({
+      source,
+      currentLine: 0,
+      initialIndex: 1,
+      fromPath: "slides-test.md",
+      theme: "light",
+    });
+
+    const content = slideContent();
+    expect(
+      content?.querySelectorAll(".chan-slide-blank-line"),
+    ).toHaveLength(0);
+    expect(content?.firstElementChild?.tagName).toBe("H1");
+    expect(pageText()).toContain("Next");
+    expect(pageText()).toContain("body");
+  });
+
   test("applies image alignment in slide previews", () => {
     const source = `---
 chan:

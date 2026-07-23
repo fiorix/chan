@@ -129,11 +129,16 @@ function preserveExtraBlankLines(markdown: string): string {
   let inFence = false;
   let fenceMarker: "`" | "~" | null = null;
 
-  function flushBlankRun(): void {
+  // Blank runs at the slide boundaries are page-separator whitespace
+  // left behind by the deck split, not authored in-slide spacing, so
+  // they collapse to a plain blank line instead of emitting spacers.
+  function flushBlankRun(atBoundary: boolean): void {
     if (blankRun === 0) return;
     out.push("");
-    for (let i = 1; i < blankRun; i++) out.push(BLANK_LINE_SPACER);
-    if (blankRun > 1) out.push("");
+    if (!atBoundary) {
+      for (let i = 1; i < blankRun; i++) out.push(BLANK_LINE_SPACER);
+      if (blankRun > 1) out.push("");
+    }
     blankRun = 0;
   }
 
@@ -144,7 +149,9 @@ function preserveExtraBlankLines(markdown: string): string {
       continue;
     }
 
-    flushBlankRun();
+    // An empty `out` means no content line was emitted yet, so the
+    // pending run is the leading boundary.
+    flushBlankRun(out.length === 0);
     out.push(line);
 
     if (!fence) continue;
@@ -158,7 +165,7 @@ function preserveExtraBlankLines(markdown: string): string {
     }
   }
 
-  flushBlankRun();
+  flushBlankRun(true);
   return out.join("\n");
 }
 

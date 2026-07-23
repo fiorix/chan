@@ -40,6 +40,31 @@ function consumeLineBreak(state: EditorViewType["state"], to: number): number {
   return to < state.doc.length ? to + 1 : to;
 }
 
+/// Newlines to append after the marker so exactly one blank line
+/// separates it from the following content. A fixed "\n\n" on top of a
+/// line break or blank line the document already provides leaves a
+/// 2-blank run after the marker, which slide rendering used to show as
+/// a spacer band above the next slide's heading.
+function separatorAfter(state: EditorViewType["state"], to: number): string {
+  const doc = state.doc;
+  if (to >= doc.length) return "\n\n";
+  const line = doc.lineAt(to);
+  // `to` at a line start: the replacement consumed the trigger line's
+  // newline, so the following line's text starts here. A blank line
+  // there already is the separator.
+  if (to === line.from) return line.text.trim() === "" ? "\n" : "\n\n";
+  // `to` at a line end: the document's own newline terminates the
+  // marker line; add the blank separator only when the next line does
+  // not supply one.
+  if (to === line.to) {
+    const next = doc.lineAt(to + 1);
+    return next.text.trim() === "" ? "" : "\n";
+  }
+  // `to` mid-line: the rest of the line becomes the content below the
+  // marker and needs both the marker's line end and the blank separator.
+  return "\n\n";
+}
+
 function trimInlineSpaceAroundTrigger(
   view: EditorViewType,
   from: number,
@@ -76,17 +101,24 @@ export function expandPageBreakMacro(view: EditorViewType): boolean {
     to = after.trim() === ""
       ? consumeLineBreak(view.state, line.to)
       : trimInlineSpaceAroundTrigger(view, hit.from, hit.to).to;
-    insert = `${PAGE_BREAK_MARKER}\n\n`;
+    insert = PAGE_BREAK_MARKER;
   } else {
     const trimmed = trimInlineSpaceAroundTrigger(view, hit.from, hit.to);
     from = trimmed.from;
     to = after.trim() === "" ? line.to : trimmed.to;
-    insert = `\n\n${PAGE_BREAK_MARKER}\n\n`;
+    insert = `\n\n${PAGE_BREAK_MARKER}`;
   }
+  insert += separatorAfter(view.state, to);
+
+  // When the document supplies the marker's line end (empty separator
+  // suffix), hop over it so the caret still lands below the marker.
+  const caret = insert.endsWith("\n")
+    ? from + insert.length
+    : from + insert.length + 1;
 
   view.dispatch({
     changes: { from, to, insert },
-    selection: { anchor: from + insert.length },
+    selection: { anchor: caret },
   });
   return true;
 }

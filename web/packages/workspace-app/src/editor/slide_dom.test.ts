@@ -63,6 +63,23 @@ describe("renderSlideMarkdown", () => {
     expect(root.textContent).toContain("after gap");
   });
 
+  test("collapses a leading blank run without spacers", () => {
+    // Blank lines above the first content line are page-separator
+    // whitespace retained by the deck split, not authored spacing.
+    const html = renderSlideMarkdown("\n\n# T\n\nbody\n");
+    const root = mount(html);
+    expect(root.querySelectorAll(".chan-slide-blank-line")).toHaveLength(0);
+    expect(root.firstElementChild?.tagName).toBe("H1");
+    expect(root.textContent).toContain("body");
+  });
+
+  test("collapses a trailing blank run without spacers", () => {
+    const html = renderSlideMarkdown("# T\n\nbody\n\n\n");
+    const root = mount(html);
+    expect(root.querySelectorAll(".chan-slide-blank-line")).toHaveLength(0);
+    expect(root.textContent).toContain("body");
+  });
+
   test("keeps blank lines inside fences literal", () => {
     const html = renderSlideMarkdown("```\na\n\n\nb\n```\n");
     const root = mount(html);
