@@ -1844,8 +1844,7 @@ fn fmt_spawn_failures(failed: &[(String, String)]) -> String {
 /// survey id, push the `open_survey` overlay to each window, park a oneshot,
 /// and AWAIT the SPA's reply (delivered by C's `POST /api/survey/reply` ->
 /// `SurveyBus::complete_survey`). The returned message is what the CLI prints
-/// to stdout: the chosen option label, or the followup-file path the UI
-/// created on `[F]`.
+/// to stdout: the chosen option label, or the follow-up / dismiss line.
 ///
 /// Surveys addressed to the same target run ONE at a time: the SPA holds a
 /// single overlay slot per tab (and one window-wide slot), so a concurrent
@@ -2041,22 +2040,12 @@ fn send_survey_close_commands(
 
 /// The stdout line the CLI prints for a completed survey. Each variant prints
 /// a distinct line so the asking agent can tell an answer from a deferral from
-/// a dismissal: the chosen option label; the `new follow up file created: ...`
-/// path on `[F]` with team context (or a bare-deferral line without); or the
-/// dismissed line (Part C).
+/// a dismissal: the chosen option label; the "host will follow up later"
+/// signal on `[F]`; or the dismissed line (Part C).
 fn format_survey_reply(reply: &SurveyReply) -> String {
     match reply {
         SurveyReply::Option { option_label, .. } => option_label.clone(),
-        SurveyReply::Followup {
-            followup_path: Some(path),
-            ..
-        } => {
-            format!("new follow up file created: {path}")
-        }
-        SurveyReply::Followup {
-            followup_path: None,
-            ..
-        } => "host deferred; no follow up file created".to_string(),
+        SurveyReply::Followup { .. } => "host will follow up later".to_string(),
         SurveyReply::Dismissed { .. } => "survey dismissed; no answer".to_string(),
     }
 }
@@ -5613,7 +5602,6 @@ is_lead = false
             title: None,
             body_markdown: "pick one".into(),
             options: vec!["a".into(), "b".into()],
-            followup: None,
         };
         // `--tab-name=X` -> the frame carries `tabName`.
         let with_tab = serde_json::to_value(WindowCommand::OpenSurvey {
@@ -5699,7 +5687,6 @@ is_lead = false
                 title: None,
                 body_markdown: "pick one".into(),
                 options: vec!["a".into()],
-                followup: None,
             },
             None,
             Some("alpha"),
@@ -5793,7 +5780,6 @@ is_lead = false
                     title: None,
                     body_markdown: "pick one".into(),
                     options: vec!["a".into()],
-                    followup: None,
                 },
                 None,
                 Some("alpha"),
@@ -5858,7 +5844,6 @@ is_lead = false
             title: None,
             body_markdown: body.into(),
             options: vec!["ok".into()],
-            followup: None,
         }
     }
 

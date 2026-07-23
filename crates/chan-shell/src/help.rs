@@ -977,10 +977,9 @@ with [F], dismisses it, or the timeout elapses. At least one selector
 and a markdown body (positional words, or --stdin for multi-line).
 
 The reply goes to STDOUT so it captures cleanly in $(...): the chosen
-option label, "new follow up file created: <path>" on [F] with
---followup-dir, "host deferred; no follow up file created" on [F]
-without it, or "survey dismissed; no answer". A timeout prints to stderr
-and exits 124, leaving stdout empty.
+option label, "host will follow up later" on [F], or "survey dismissed;
+no answer". A timeout prints to stderr and exits 124, leaving stdout
+empty.
 
 This is how an agent reaches a human here: a window overlay, not a TUI
 prompt. Works in a workspace window and in a standalone terminal alike
@@ -992,17 +991,10 @@ pub(crate) const CS_TERMINAL_SURVEY_AFTER: &str = r#"EXAMPLES:
 Each case shows the invocation and the JSON survey the SPA receives.
 `surveyId` is empty from the CLI; the server mints it before the SPA sees
 it. Every overlay shows the options PLUS [F] (follow up) and Dismiss, so
-the blocking call prints one of: the chosen option label; the new
-followup file path on [F] when `--followup-dir` context was passed (else
-a bare "host deferred" line); or "survey dismissed" when the host drops
-it.
-
-IMPORTANT: an [F] followup file is created EMPTY (the original question
-plus an empty comments section). It means "deferred, not ready" -- NOT an
-actionable answer. The host must WRITE their decision into the file's
-comments section before an agent acts on it. An agent that gets a
-followup path should re-read the file later and act ONLY once the host
-has populated it.
+the blocking call prints one of: the chosen option label; "host will
+follow up later" on [F] (the host will answer later in a separate
+prompt -- treat it as "more is coming", NOT an answer and NOT a drop);
+or "survey dismissed; no answer" when the host drops it.
 
 Single question, two options:
   cs terminal survey --tab-name @@Alice \
@@ -1013,8 +1005,7 @@ Single question, two options:
     "surveyId": "",
     "title": "Merge order",
     "bodyMarkdown": "Which patch lands first?",
-    "options": ["A first", "B first"],
-    "followup": null
+    "options": ["A first", "B first"]
   }
 
 Four options, no title, multi-line body from stdin:
@@ -1026,34 +1017,14 @@ Four options, no title, multi-line body from stdin:
     "surveyId": "",
     "title": null,
     "bodyMarkdown": "Pick a slot:\n\n- morning\n- evening",
-    "options": ["Mon", "Tue", "Wed", "Thu"],
-    "followup": null
-  }
-
-With an [F] follow-up paper-trail file (from <- $CHAN_TAB_NAME, to <- the
-survey target); passing --followup-dir is what makes [F] write the file:
-  cs terminal survey --tab-name @@Host \
-    --option "Ship it" --option "Hold" \
-    --followup-dir teams/alpha \
-    "Ready to cut v0.23.0?"
-
-  {
-    "surveyId": "",
-    "title": null,
-    "bodyMarkdown": "Ready to cut v0.23.0?",
-    "options": ["Ship it", "Hold"],
-    "followup": { "dir": "teams/alpha", "from": "@@Alice", "to": "@@Host" }
+    "options": ["Mon", "Tue", "Wed", "Thu"]
   }
 
 SIDE EFFECTS:
   - Opens an overlay in every window owning a matching tab; the first
     reply wins and the stale overlays in the other windows are closed.
-  - With --followup-dir, [F] makes the server create
-    {dir}/followups/followup-{from}-{to}-{n}.md (question + an EMPTY
-    comments section) inside the workspace, named with the bare
-    handles (no @@).
-  - The answer / followup path / dismissal line goes to stdout; the
-    timeout notice goes to stderr.
+  - The answer / follow-up / dismissal line goes to stdout; the timeout
+    notice goes to stderr.
 
 CAUTIONS:
   - BLOCKS. Default --timeout is 600 seconds; on elapse it prints
@@ -1069,19 +1040,14 @@ CAUTIONS:
 CAVEATS:
   - --tab-name must match a live tab of the window you want the overlay
     in; a selector matching no live session is an error. When the host
-    has no tab of their own, target the lead's tab (or the team's group)
-    and pass --to=@@Host so an [F] follow-up is addressed to the host
-    rather than to the proxy tab: --to overrides --tab-name for the
-    follow-up's `to`.
-  - --from / --to only matter with --followup-dir. `from` is
-    $CHAN_TAB_NAME, with --from used only when that is unset or empty;
-    `to` is --to, else --tab-name, else --tab-group.
-  - An empty followup file is a DEFERRAL, not an answer. Do not act on
-    it until the host has written into it.
+    has no tab of their own, target the lead's tab (or the team's
+    group).
+  - [F] is a deferral signal, not an answer: do not act on the surveyed
+    question until the host's follow-up prompt arrives.
 
 SEE ALSO:
-  cs terminal write (queued poke), cs terminal team (the team the followup
-  dir belongs to).
+  cs terminal write (queued poke), cs terminal team (spawn the team whose
+  host you survey).
 "#;
 
 /// `cs terminal team` long help (manpage head).

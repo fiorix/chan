@@ -358,10 +358,10 @@ pub enum ControlRequest {
     // answers. The server resolves the selector to those windows, mints
     // `spec.survey_id`, pushes the overlay, parks a oneshot keyed by that
     // id, and holds this connection open until the SPA's reply route
-    // completes it. The CLI prints the chosen option (or the new followup
-    // path) to stdout. Unlike `TermWrite`, the reply round-trip is the
-    // whole point, so this is the one control request that does not return
-    // immediately.
+    // completes it. The CLI prints the chosen option (or the follow-up /
+    // dismiss line) to stdout. Unlike `TermWrite`, the reply round-trip is
+    // the whole point, so this is the one control request that does not
+    // return immediately.
     TermSurvey {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tab_name: Option<String>,
@@ -542,9 +542,9 @@ pub enum SplitDir {
 ///
 /// serde camelCase: this is the exact JSON the SPA reads; the SPA's
 /// TypeScript types mirror this struct field for field.
-/// Nullable fields (`title`, `followup`) serialize as `null` rather than
-/// being skipped, so the SPA-facing frame matches the contract's
-/// `string | null` / `{...} | null` shape exactly.
+/// The nullable field (`title`) serializes as `null` rather than being
+/// skipped, so the SPA-facing frame matches the contract's `string | null`
+/// shape exactly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SurveySpec {
@@ -559,28 +559,6 @@ pub struct SurveySpec {
     pub body_markdown: String,
     /// 1..=4 option labels; the SPA numbers them `[1]`..`[4]`.
     pub options: Vec<String>,
-    /// Team context for the `[F]` path, so C's reply route can land the
-    /// followup at `{dir}/followups/followup-{from}-{to}-{n}.md` without
-    /// re-deriving the team-dir (a workspace may hold several teams). The
-    /// CLI populates it ONLY when `--followup` is set; `null` otherwise.
-    #[serde(default)]
-    pub followup: Option<SurveyFollowup>,
-}
-
-/// The team context a `[F]` follow-up needs, carried on [`SurveySpec`] from
-/// the surveying agent (who read `bootstrap.md` and knows its own tab name)
-/// through to C's reply route. serde camelCase to match the contract.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SurveyFollowup {
-    /// The team directory (workspace-relative) under which
-    /// `followups/followup-{from}-{to}-{n}.md` is created.
-    pub dir: String,
-    /// The surveying agent (the followup's author): `$CHAN_TAB_NAME`.
-    pub from: String,
-    /// The survey target (the tab name, or the group name for a group
-    /// survey).
-    pub to: String,
 }
 
 /// The reply the SPA sends back through the reply route to the blocked CLI.
@@ -597,21 +575,14 @@ pub enum SurveyReply {
         option_index: u32,
         option_label: String,
     },
-    /// The user hit `[F]` (follow up). When the survey carried followup context,
-    /// C created `{dir}/followups/followup-{from}-{to}-{n}.md` and
-    /// `followup_path` is that workspace-relative path. Part C made `[F]`
-    /// standard on every survey, so a survey raised WITHOUT followup context
-    /// still offers it: that is a plain deferral and `followup_path` is `None`
-    /// (no file).
+    /// The user hit `[F]` (follow up later): a bare signal, shaped like
+    /// `Dismissed`, telling the asking agent the host will follow up in a
+    /// separate prompt. No option, no payload.
     #[serde(rename = "followup", rename_all = "camelCase")]
-    Followup {
-        survey_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        followup_path: Option<String>,
-    },
-    /// The user hit Dismiss (Part C). A distinct reply with no option index
-    /// and no file, so the asking agent can tell the host dropped the survey
-    /// rather than answering it or deferring with `[F]`.
+    Followup { survey_id: String },
+    /// The user hit Dismiss (Part C). A distinct reply with no option index,
+    /// so the asking agent can tell the host dropped the survey rather than
+    /// answering it or deferring with `[F]`.
     #[serde(rename = "dismissed", rename_all = "camelCase")]
     Dismissed { survey_id: String },
 }
@@ -622,7 +593,7 @@ impl SurveyReply {
     pub fn survey_id(&self) -> &str {
         match self {
             SurveyReply::Option { survey_id, .. } => survey_id,
-            SurveyReply::Followup { survey_id, .. } => survey_id,
+            SurveyReply::Followup { survey_id } => survey_id,
             SurveyReply::Dismissed { survey_id } => survey_id,
         }
     }
@@ -696,11 +667,6 @@ mod survey_wire_tests {
             title: None,
             body_markdown: "pick one".into(),
             options: vec!["A".into(), "B".into()],
-            followup: Some(SurveyFollowup {
-                dir: "team".into(),
-                from: "@@Alice".into(),
-                to: "@@Bob".into(),
-            }),
         };
         let v: serde_json::Value = serde_json::to_value(&spec).unwrap();
         assert_eq!(v["surveyId"], "survey-3");
@@ -708,23 +674,18 @@ mod survey_wire_tests {
         assert!(v.get("title").is_some_and(|t| t.is_null()));
         assert_eq!(v["bodyMarkdown"], "pick one");
         assert_eq!(v["options"], serde_json::json!(["A", "B"]));
-        assert_eq!(v["followup"]["dir"], "team");
-        assert_eq!(v["followup"]["from"], "@@Alice");
-        assert_eq!(v["followup"]["to"], "@@Bob");
     }
 
     #[test]
-    fn survey_spec_emits_null_followup_when_absent() {
+    fn survey_spec_serializes_present_title() {
         let spec = SurveySpec {
             survey_id: String::new(),
             title: Some("Heads up".into()),
             body_markdown: "x".into(),
             options: vec!["ok".into()],
-            followup: None,
         };
         let v: serde_json::Value = serde_json::to_value(&spec).unwrap();
         assert_eq!(v["title"], "Heads up");
-        assert!(v.get("followup").is_some_and(|f| f.is_null()));
     }
 
     #[test]
@@ -753,28 +714,20 @@ mod survey_wire_tests {
 
     #[test]
     fn survey_reply_followup_tag_and_fields() {
+        // [F] is a bare "host will follow up later" signal, shaped exactly
+        // like a dismiss but under its own tag: survey id only, no payload.
         let reply = SurveyReply::Followup {
             survey_id: "survey-9".into(),
-            followup_path: Some("team/followups/followup-a-b-1.md".into()),
         };
         let v: serde_json::Value = serde_json::to_value(&reply).unwrap();
         assert_eq!(v["kind"], "followup");
         assert_eq!(v["surveyId"], "survey-9");
-        assert_eq!(v["followupPath"], "team/followups/followup-a-b-1.md");
-    }
-
-    #[test]
-    fn survey_reply_followup_without_path_is_a_bare_deferral() {
-        // [F] is standard on every survey. A survey raised without
-        // followup context defers with no file, so `followupPath` is omitted.
-        let reply = SurveyReply::Followup {
-            survey_id: "survey-9".into(),
-            followup_path: None,
-        };
-        let v: serde_json::Value = serde_json::to_value(&reply).unwrap();
-        assert_eq!(v["kind"], "followup");
-        assert_eq!(v["surveyId"], "survey-9");
-        assert!(v.get("followupPath").is_none());
+        assert_eq!(reply.survey_id(), "survey-9");
+        assert_eq!(
+            v.as_object().map(|o| o.len()),
+            Some(2),
+            "kind + surveyId only"
+        );
     }
 
     #[test]
@@ -800,7 +753,6 @@ mod survey_wire_tests {
                 title: None,
                 body_markdown: "q".into(),
                 options: vec!["yes".into()],
-                followup: None,
             },
             timeout_secs: 42,
         };
@@ -831,7 +783,7 @@ mod survey_wire_tests {
         let raw = serde_json::json!({
             "type": "term_survey",
             "tab_name": "@@Alice",
-            "spec": { "surveyId": "", "title": null, "bodyMarkdown": "q", "options": ["yes"], "followup": null },
+            "spec": { "surveyId": "", "title": null, "bodyMarkdown": "q", "options": ["yes"] },
         })
         .to_string();
         let back: ControlRequest = serde_json::from_str(&raw).unwrap();
