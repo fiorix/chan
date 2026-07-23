@@ -24,7 +24,7 @@ current.
   `~/.cache/puppeteer/chrome/linux-*/chrome-linux64/chrome`).
 - `SMOKE_SKIP_BUILD=1`: skip the web + cargo builds.
 - `SMOKE_ONLY=50,101`: run only the checks whose filenames start with
-  one of the comma-separated prefixes.
+  one of the comma-separated prefixes (lexical filename-prefix match).
 - `TMPDIR`: the throwaway workspace is created under the OS tmpdir; a
   stray `.git` in `/tmp` makes chan's vcs-parent check refuse it, so
   point `TMPDIR` at a clean directory when that happens.
@@ -35,7 +35,10 @@ not yet landed) do not fail the run but are reported in
 
 ## Checks
 
-Files under `checks/` run in sorted filename order. Each default-
+Files under `checks/` run in sorted filename order. The sort is
+LEXICAL, not numeric: `100-*` and `110-*` run right after `10-*`, and
+the true tail slots are `96`/`97`/`98` (after `95-*`). Pick a number
+with the lexical order in mind. Each default-
 exports `{ name, run(ctx) }`; `run` throws (or returns) and may record
 intermediate evidence:
 

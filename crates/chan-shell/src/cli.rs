@@ -25,8 +25,8 @@ use crate::help;
 use crate::control::{absolutize, control_socket_env, open_env, send_control_request};
 use crate::submit::SubmitAgent;
 use crate::wire::{
-    ControlRequest, PaneOp, PastePrefer, SplitDir, SurveyFollowup, SurveySpec, TeamOp,
-    TermWriteSubmit, GRAPH_LINK_PREFIX, MAX_CLIPBOARD_BYTES,
+    ControlRequest, PaneOp, PastePrefer, SplitDir, SurveySpec, TeamOp, TermWriteSubmit,
+    GRAPH_LINK_PREFIX, MAX_CLIPBOARD_BYTES,
 };
 
 /// What `cs` is and what it needs to work. Consts rather than doc
@@ -804,26 +804,6 @@ pub enum TerminalAction {
         /// --option B`. The UI numbers them `[1]`..`[4]`.
         #[arg(long = "option", value_name = "LABEL", verbatim_doc_comment)]
         option: Vec<String>,
-        /// Team directory (workspace-relative) for the `[F]` follow-up
-        /// paper-trail file, created at
-        /// `{dir}/followups/followup-{from}-{to}-{n}.md`. `[F]` is shown on
-        /// every survey regardless; PASSING this dir is what makes `[F]` write
-        /// the file (and return its path) instead of a plain no-file deferral.
-        /// The file is created EMPTY (question + empty comments): "deferred,
-        /// not ready", NOT an answer -- the host must populate it before an
-        /// agent acts on it.
-        #[arg(long = "followup-dir", value_name = "TEAM_DIR", verbatim_doc_comment)]
-        followup_dir: Option<String>,
-        /// Override the follow-up author (`from`). Defaults to
-        /// `$CHAN_TAB_NAME` (the surveying agent's tab). Only used with
-        /// `--followup-dir`.
-        #[arg(long, verbatim_doc_comment)]
-        from: Option<String>,
-        /// Override the follow-up target (`to`). Defaults to the survey
-        /// target (`--tab-name`, or `--tab-group` for a group). Only used
-        /// with `--followup-dir`.
-        #[arg(long, verbatim_doc_comment)]
-        to: Option<String>,
         /// Seconds to wait for the host's reply before giving up. On elapse the
         /// survey returns no answer, prints `no reply within <secs>s` to
         /// stderr, and exits 124 (the GNU `timeout` convention), so a caller
@@ -1878,9 +1858,6 @@ async fn cmd_shell_terminal(action: TerminalAction) -> Result<()> {
             tab_group,
             title,
             option,
-            followup_dir,
-            from,
-            to,
             timeout,
             stdin,
             body,
@@ -1890,9 +1867,6 @@ async fn cmd_shell_terminal(action: TerminalAction) -> Result<()> {
                 tab_group,
                 title,
                 option,
-                followup_dir,
-                from,
-                to,
                 timeout_secs: timeout,
                 stdin,
                 body,
@@ -2121,15 +2095,12 @@ fn path_to_posix(path: &Path) -> String {
 }
 
 /// The parsed `cs terminal survey` arguments, grouped so the dispatch does
-/// not pass ten positional parameters around.
+/// not pass a long positional parameter list around.
 struct SurveyArgs {
     tab_name: Option<String>,
     tab_group: Option<String>,
     title: Option<String>,
     option: Vec<String>,
-    followup_dir: Option<String>,
-    from: Option<String>,
-    to: Option<String>,
     timeout_secs: u64,
     stdin: bool,
     body: Vec<String>,
@@ -2138,7 +2109,7 @@ struct SurveyArgs {
 /// `cs terminal survey`: build a [`SurveySpec`] and round-trip a BLOCKING
 /// [`ControlRequest::TermSurvey`]. The server holds the connection open
 /// until the user answers, so this call blocks; the reply (the chosen
-/// option label, or the followup-file path on `[F]`) goes to stdout so it
+/// option label, or the follow-up / dismiss line) goes to stdout so it
 /// pipes cleanly, matching the "the tool returns that option" contract.
 async fn cmd_shell_survey(args: SurveyArgs) -> Result<()> {
     let SurveyArgs {
@@ -2146,9 +2117,6 @@ async fn cmd_shell_survey(args: SurveyArgs) -> Result<()> {
         tab_group,
         title,
         option,
-        followup_dir,
-        from,
-        to,
         timeout_secs,
         stdin,
         body,
@@ -2178,27 +2146,12 @@ async fn cmd_shell_survey(args: SurveyArgs) -> Result<()> {
     if body_markdown.trim().is_empty() {
         anyhow::bail!("cs terminal survey needs a markdown body (positional words or --stdin)");
     }
-    // Part C: [F] is standard on every survey. PASSING --followup-dir is what
-    // attaches the team context so [F] writes a paper-trail file; without it
-    // the survey carries `followup: null` and [F] is a plain no-file deferral.
-    let followup_ctx = if followup_dir.is_some() {
-        Some(build_followup(
-            followup_dir,
-            from,
-            to,
-            &tab_name,
-            &tab_group,
-        )?)
-    } else {
-        None
-    };
     let spec = SurveySpec {
         // Server-minted; left empty here (see SurveySpec docs).
         survey_id: String::new(),
         title,
         body_markdown,
         options: option,
-        followup: followup_ctx,
     };
     let socket = control_socket_env()?;
     let result = send_control_request(
@@ -2255,69 +2208,6 @@ fn classify_control_result(result: Result<String>) -> Result<ControlOutcome> {
             Err(other) => Err(other),
         },
     }
-}
-
-/// Resolve the `[F]` followup team context, reading `$CHAN_TAB_NAME` from the
-/// process env and delegating the pure precedence to [`resolve_followup`] (so
-/// the derivation is unit-testable without touching the environment, the same
-/// split as `open_env` / `open_env_from`).
-fn build_followup(
-    followup_dir: Option<String>,
-    from: Option<String>,
-    to: Option<String>,
-    tab_name: &Option<String>,
-    tab_group: &Option<String>,
-) -> Result<SurveyFollowup> {
-    resolve_followup(
-        followup_dir,
-        std::env::var("CHAN_TAB_NAME").ok(),
-        from,
-        to,
-        tab_name.clone(),
-        tab_group.clone(),
-    )
-}
-
-/// The pure followup-context precedence:
-/// `from` <- `$CHAN_TAB_NAME` (fallback `--from`); `to` <- the survey target
-/// (`--tab-name`, then `--tab-group`; fallback `--to`). `dir` comes straight
-/// from `--followup-dir` (only called when that was passed). Bails with a clear
-/// message if `dir`/`from`/`to` cannot be resolved, so a followup is always
-/// well-named and team-scoped.
-fn resolve_followup(
-    followup_dir: Option<String>,
-    env_tab_name: Option<String>,
-    from: Option<String>,
-    to: Option<String>,
-    tab_name: Option<String>,
-    tab_group: Option<String>,
-) -> Result<SurveyFollowup> {
-    let trimmed = |s: String| {
-        let s = s.trim().to_string();
-        (!s.is_empty()).then_some(s)
-    };
-    let dir = followup_dir
-        .and_then(trimmed)
-        .ok_or_else(|| anyhow::anyhow!("--followup-dir is required to write a follow-up file"))?;
-    // from: the surveying agent's own tab, overridable with --from.
-    let from = env_tab_name
-        .and_then(trimmed)
-        .or_else(|| from.and_then(trimmed))
-        .ok_or_else(|| {
-            anyhow::anyhow!("--followup-dir needs a `from`: set $CHAN_TAB_NAME or pass --from")
-        })?;
-    // to: --to is the explicit OVERRIDE (the common case: surveying via the
-    // lead's tab on behalf of a host who has no live tab of their own, so the
-    // followup is addressed to the host, not the lead's tab). Falls back to the
-    // survey target (tab name / group), which is always present per the caller.
-    let to = to
-        .and_then(trimmed)
-        .or_else(|| tab_name.and_then(trimmed))
-        .or_else(|| tab_group.and_then(trimmed))
-        .ok_or_else(|| {
-            anyhow::anyhow!("--followup-dir needs a `to` target (--to / --tab-name / --tab-group)")
-        })?;
-    Ok(SurveyFollowup { dir, from, to })
 }
 
 /// Render the `cs terminal list` registry JSON
@@ -3241,87 +3131,5 @@ mod tests {
         // paths read a file / stdin, exercised end-to-end by the handler.)
         assert!(read_team_config_input(Some("a.toml".into()), true).is_err());
         assert!(read_team_config_input(None, false).is_err());
-    }
-
-    #[test]
-    fn resolve_followup_to_flag_overrides_tab_name() {
-        // from <- $CHAN_TAB_NAME (over --from). to <- --to OVERRIDE (over
-        // --tab-name/--tab-group): the common case of surveying via the lead's
-        // tab on behalf of a host with no live tab, so the followup is
-        // addressed to the host, not the lead's tab.
-        let f = resolve_followup(
-            Some("team-a".into()),
-            Some("Alice".into()),        // env_tab_name -> from
-            Some("ignored-from".into()), // --from (ignored; env wins)
-            Some("@@Host".into()),       // --to -> to (overrides --tab-name)
-            Some("Bob".into()),          // --tab-name (overridden by --to)
-            Some("group-x".into()),
-        )
-        .expect("resolve");
-        assert_eq!(f.dir, "team-a");
-        assert_eq!(f.from, "Alice");
-        assert_eq!(f.to, "@@Host");
-    }
-
-    #[test]
-    fn resolve_followup_falls_back_to_from_flag_and_group_then_to_flag() {
-        // No env tab name -> --from. No tab name -> --tab-group for `to`.
-        let f = resolve_followup(
-            Some("team-a".into()),
-            None,
-            Some("flag-from".into()),
-            None,
-            None,
-            Some("group-x".into()),
-        )
-        .expect("resolve");
-        assert_eq!(f.from, "flag-from");
-        assert_eq!(f.to, "group-x");
-
-        // No tab name and no group -> --to fallback.
-        let f = resolve_followup(
-            Some("team-a".into()),
-            Some("Alice".into()),
-            None,
-            Some("flag-to".into()),
-            None,
-            None,
-        )
-        .expect("resolve");
-        assert_eq!(f.to, "flag-to");
-    }
-
-    #[test]
-    fn resolve_followup_requires_dir_from_and_to() {
-        // Missing / blank dir.
-        assert!(resolve_followup(
-            Some("  ".into()),
-            Some("Alice".into()),
-            None,
-            None,
-            Some("Bob".into()),
-            None,
-        )
-        .is_err());
-        // No from anywhere.
-        assert!(resolve_followup(
-            Some("team-a".into()),
-            None,
-            None,
-            None,
-            Some("Bob".into()),
-            None,
-        )
-        .is_err());
-        // No to anywhere.
-        assert!(resolve_followup(
-            Some("team-a".into()),
-            Some("Alice".into()),
-            None,
-            None,
-            None,
-            None,
-        )
-        .is_err());
     }
 }

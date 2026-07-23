@@ -122,6 +122,10 @@ try {
     outDir,
     downloadDir,
     chanBin,
+    // The server's sandboxed CHAN_HOME (throwaway ~/.chan replacement);
+    // checks that exercise settings writes assert against the toml files
+    // in here, never the host's real global config.
+    chanHome: server.chanHome,
     repoRoot: REPO,
     serverPid: server.child.pid,
     get controlSocket() {
@@ -176,6 +180,8 @@ try {
 
   // SMOKE_ONLY=50,55 runs just the checks whose filenames start with one
   // of the comma-separated prefixes; everything else still runs in order.
+  // Prefix matching (and the run order) is LEXICAL, not numeric: see
+  // README.md.
   const only = process.env.SMOKE_ONLY?.split(",").map((s) => s.trim()).filter(Boolean);
   const checkFiles = readdirSync(join(HERE, "checks"))
     .filter((f) => f.endsWith(".mjs"))
@@ -220,7 +226,9 @@ try {
   console.error(`[smoke] fatal: ${e.message}`);
 } finally {
   if (browser) await browser.close().catch(() => {});
-  await teardownServer(chanBin, server.child, workspaceDir, (l) => console.log(l));
+  await teardownServer(chanBin, server.child, workspaceDir, server.chanHome, (l) =>
+    console.log(l),
+  );
 }
 
 results.finishedAt = new Date().toISOString();

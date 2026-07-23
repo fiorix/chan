@@ -818,7 +818,6 @@ describe("window commands", () => {
         title: null,
         bodyMarkdown: "Pick one",
         options: ["A"],
-        followup: null,
       },
     });
     await Promise.resolve();
@@ -852,7 +851,6 @@ describe("window commands", () => {
         title: null,
         bodyMarkdown: "Group pick",
         options: ["A"],
-        followup: null,
       },
     });
     onWatchEvent({
@@ -865,7 +863,6 @@ describe("window commands", () => {
         title: null,
         bodyMarkdown: "Tab pick",
         options: ["B"],
-        followup: null,
       },
     });
     await Promise.resolve();
@@ -903,7 +900,6 @@ describe("window commands", () => {
         title: null,
         bodyMarkdown: "Group pick",
         options: ["A"],
-        followup: null,
       },
     });
     await Promise.resolve();

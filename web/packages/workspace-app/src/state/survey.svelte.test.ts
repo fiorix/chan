@@ -22,7 +22,6 @@ function spec(over: Partial<SurveySpec> = {}): SurveySpec {
     title: "T",
     bodyMarkdown: "the question",
     options: ["Yes", "No"],
-    followup: null,
     ...over,
   };
 }
@@ -74,39 +73,17 @@ describe("survey store", () => {
     expect(surveyFor(null)).not.toBeNull();
   });
 
-  test("requestFollowup posts the followup reply with the echoed context", async () => {
+  test("requestFollowup posts the bare dismiss-shaped followup signal", async () => {
     const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined as never);
-    showSurvey(
-      spec({
-        followup: { dir: "teams/alpha", from: "@@Alice", to: "@@Host" },
-      }),
-      "t1",
-    );
+    showSurvey(spec(), "t1");
     await requestFollowup("t1");
+    expect(reply).toHaveBeenCalledTimes(1);
     expect(reply).toHaveBeenCalledWith({
       surveyId: "survey-7",
       kind: "followup",
-      followup: { dir: "teams/alpha", from: "@@Alice", to: "@@Host" },
-      title: "T",
-      bodyMarkdown: "the question",
       windowId: expect.any(String),
     });
     expect(surveyFor("t1")).toBeNull();
-  });
-
-  test("requestFollowup without a context posts followup: null (F is standard)", async () => {
-    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined as never);
-    showSurvey(spec({ followup: null }), null);
-    await requestFollowup(null);
-    expect(reply).toHaveBeenCalledWith({
-      surveyId: "survey-7",
-      kind: "followup",
-      followup: null,
-      title: "T",
-      bodyMarkdown: "the question",
-      windowId: expect.any(String),
-    });
-    expect(surveyFor(null)).toBeNull();
   });
 
   test("dismissSurvey posts the dismissed reply and clears ONLY that slot", async () => {

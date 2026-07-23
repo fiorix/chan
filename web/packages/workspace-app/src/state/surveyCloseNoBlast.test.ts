@@ -59,7 +59,6 @@ describe("S-B: group close_survey does not blast independent composers", () => {
         title: null,
         bodyMarkdown: "Group pick",
         options: ["A"],
-        followup: null,
       },
     } as never);
     await Promise.resolve();

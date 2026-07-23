@@ -1,5 +1,4 @@
-//! Survey reply route + the `[F]` followup-file generator (the SPA-reply
-//! side of `cs terminal survey`).
+//! Survey reply route (the SPA-reply side of `cs terminal survey`).
 //!
 //! A `cs terminal survey` call blocks in the control socket on a oneshot
 //! parked in the [`crate::survey::SurveyBus`] keyed by a
@@ -8,11 +7,6 @@
 //! [`chan_shell::SurveyReply`] and calls [`SurveyBus::complete_survey`], which
 //! fires the oneshot and unblocks the CLI. Two halves of one stable
 //! `complete_survey` API keep the bus and the reply route decoupled.
-//!
-//! On `[F]` the SPA cannot know the minted followup path, so it echoes back
-//! the `followup { dir, from, to }` context the survey carried; THIS route
-//! creates `{dir}/followups/followup-{from}-{to}-{n}.md` through the Workspace
-//! sandbox and replies that path to the bus.
 
 use std::sync::Arc;
 
@@ -21,17 +15,13 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chan_shell::SurveyReply;
-use chan_workspace::Workspace;
 use serde::Deserialize;
 
 use crate::error::err;
 use crate::state::AppState;
 
 /// Body of `POST /api/survey/reply`. Internally tagged on `kind`, camelCase
-/// to match the SPA (`web/packages/workspace-app/src/api/client.ts` `SurveyReplyRequest`). Distinct
-/// from [`chan_shell::SurveyReply`]: for a followup the SPA sends the echoed
-/// context (it cannot know the minted path), and this route synthesizes the
-/// path before completing the bus oneshot.
+/// to match the SPA (`web/packages/workspace-app/src/api/client.ts` `SurveyReplyRequest`).
 ///
 /// `windowId` is the answering window's id (the same id the SPA matches
 /// `window_command` frames against). The server excludes that window from the
@@ -49,23 +39,17 @@ pub enum SurveyReplyRequest {
         #[serde(default)]
         window_id: Option<String>,
     },
-    /// The user hit [F]. `followup` carries the team context when the survey
-    /// had it (the route creates the file); Part C made [F] standard on every
-    /// survey, so a survey without context sends `followup: null` and the
-    /// route treats it as a plain deferral (no file).
+    /// The user hit [F] (follow up later): a bare signal, shaped like
+    /// `Dismissed`, telling the asking agent the host will follow up in a
+    /// separate prompt. No option, no payload.
     #[serde(rename = "followup", rename_all = "camelCase")]
     Followup {
         survey_id: String,
         #[serde(default)]
-        followup: Option<FollowupContext>,
-        #[serde(default)]
-        title: Option<String>,
-        body_markdown: String,
-        #[serde(default)]
         window_id: Option<String>,
     },
-    /// The user hit Dismiss (Part C): carries only the survey id (no option,
-    /// no file), so the asking agent can tell a dismiss from an answer.
+    /// The user hit Dismiss (Part C): carries only the survey id (no option),
+    /// so the asking agent can tell a dismiss from an answer.
     #[serde(rename = "dismissed", rename_all = "camelCase")]
     Dismissed {
         survey_id: String,
@@ -85,19 +69,9 @@ impl SurveyReplyRequest {
     }
 }
 
-/// Team context for a `[F]` followup, originating with the surveying agent
-/// (it knows its team-dir + `$CHAN_TAB_NAME`), carried command -> SurveySpec
-/// -> SPA -> echoed here. camelCase single words match 1:1.
-#[derive(Deserialize)]
-pub struct FollowupContext {
-    pub dir: String,
-    pub from: String,
-    pub to: String,
-}
-
 /// `POST /api/survey/reply` - complete a parked `cs terminal survey`. On
-/// "option" the chosen label round-trips straight to the blocked CLI; on
-/// "followup" this creates the followup file first, then replies its path.
+/// "option" the chosen label round-trips straight to the blocked CLI;
+/// "followup" and "dismissed" are bare signals carrying only the survey id.
 /// 404 when no survey with that id is parked (already answered / stale id).
 pub async fn api_survey_reply(
     State(state): State<Arc<AppState>>,
@@ -117,46 +91,7 @@ pub async fn api_survey_reply(
             option_index,
             option_label,
         },
-        SurveyReplyRequest::Followup {
-            survey_id,
-            followup: Some(followup),
-            title,
-            body_markdown,
-            ..
-        } => {
-            // Workspace I/O is blocking; create the file off the async runtime.
-            let workspace = state.workspace();
-            let result = tokio::task::spawn_blocking(move || {
-                create_followup_file(
-                    &workspace,
-                    FollowupSpec {
-                        dir: &followup.dir,
-                        from: &followup.from,
-                        to: &followup.to,
-                        title: title.as_deref(),
-                        body: &body_markdown,
-                    },
-                )
-            })
-            .await;
-            match result {
-                Ok(Ok(path)) => SurveyReply::Followup {
-                    survey_id,
-                    followup_path: Some(path),
-                },
-                Ok(Err(msg)) => return err(StatusCode::BAD_REQUEST, msg),
-                Err(join) => return err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
-            }
-        }
-        // [F] without team context is a plain deferral, no file.
-        SurveyReplyRequest::Followup {
-            survey_id,
-            followup: None,
-            ..
-        } => SurveyReply::Followup {
-            survey_id,
-            followup_path: None,
-        },
+        SurveyReplyRequest::Followup { survey_id, .. } => SurveyReply::Followup { survey_id },
         SurveyReplyRequest::Dismissed { survey_id, .. } => SurveyReply::Dismissed { survey_id },
     };
 
@@ -174,263 +109,9 @@ pub async fn api_survey_reply(
     }
 }
 
-/// One follow-up request: the team dir it lands in plus the message
-/// half (`from`/`to` handles as given, optional title, the original
-/// prompt as `body`).
-pub struct FollowupSpec<'a> {
-    pub dir: &'a str,
-    pub from: &'a str,
-    pub to: &'a str,
-    pub title: Option<&'a str>,
-    pub body: &'a str,
-}
-
-/// Create `{dir}/followups/followup-{from}-{to}-{n}.md` through the Workspace
-/// sandbox, pre-populated per the plan, and return the workspace-relative
-/// path. `n` is the next free index for that from/to pair; from/to are bare
-/// (the `@@` prefix + non-filename chars are stripped) so the filename stays
-/// clean, while the file body keeps the handles as given.
-pub fn create_followup_file(
-    workspace: &Workspace,
-    spec: FollowupSpec<'_>,
-) -> Result<String, String> {
-    let FollowupSpec {
-        dir,
-        from,
-        to,
-        title,
-        body,
-    } = spec;
-    let dir = dir.trim().trim_end_matches('/');
-    if dir.is_empty() {
-        return Err("followup dir is required".into());
-    }
-    if dir.starts_with('/') {
-        return Err(format!("followup dir must be workspace-relative: {dir}"));
-    }
-    let followups_dir = format!("{dir}/followups");
-    workspace
-        .create_dir(&followups_dir)
-        .map_err(|e| format!("cannot create {followups_dir}: {e}"))?;
-
-    let bare_from = sanitize_handle(from);
-    let bare_to = sanitize_handle(to);
-    let n = next_followup_index(workspace, &followups_dir, &bare_from, &bare_to);
-    let rel = format!("{followups_dir}/followup-{bare_from}-{bare_to}-{n}.md");
-
-    let content = render_followup(title, from, to, body);
-    workspace
-        .write_text(&rel, &content)
-        .map_err(|e| format!("cannot write {rel}: {e}"))?;
-    Ok(rel)
-}
-
-/// Strip a leading `@@` and replace any char that is not ASCII alphanumeric,
-/// `-`, or `_` with `-`, so a handle is a safe filename segment. Falls back
-/// to "x" when nothing usable remains.
-fn sanitize_handle(handle: &str) -> String {
-    let trimmed = handle.trim().trim_start_matches("@@");
-    let mut out = String::with_capacity(trimmed.len());
-    for ch in trimmed.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-            out.push(ch);
-        } else {
-            out.push('-');
-        }
-    }
-    let trimmed = out.trim_matches('-').to_string();
-    if trimmed.is_empty() {
-        "x".to_string()
-    } else {
-        trimmed
-    }
-}
-
-/// Next free `n` for `followup-{from}-{to}-{n}.md` in `followups_dir`: one
-/// past the highest existing index, or 1 when none exist. A missing dir or a
-/// listing error reads as empty (the create_dir above just made it).
-fn next_followup_index(
-    workspace: &Workspace,
-    followups_dir: &str,
-    bare_from: &str,
-    bare_to: &str,
-) -> u32 {
-    let prefix = format!("followup-{bare_from}-{bare_to}-");
-    let entries = match workspace.list(followups_dir) {
-        Ok(entries) => entries,
-        Err(_) => return 1,
-    };
-    let max = entries
-        .iter()
-        .filter(|e| !e.is_dir)
-        .filter_map(|e| {
-            let stem = e.name.strip_suffix(".md")?;
-            let num = stem.strip_prefix(&prefix)?;
-            num.parse::<u32>().ok()
-        })
-        .max()
-        .unwrap_or(0);
-    max + 1
-}
-
-/// The pre-populated followup body: title heading, created/from/to header,
-/// the "not ready, check later" line agents key off, the original survey
-/// prompt, and a comment placeholder for `to` (the host) to fill in the
-/// decision. ASCII only, no em dashes.
-fn render_followup(title: Option<&str>, from: &str, to: &str, body: &str) -> String {
-    let heading = title
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .unwrap_or("survey");
-    let created = chrono::Utc::now().to_rfc3339();
-    let mut out = String::new();
-    out.push_str(&format!("# Follow up: {heading}\n\n"));
-    out.push_str(&format!("Created: {created}\n"));
-    out.push_str(&format!("From: {from}\n"));
-    out.push_str(&format!("To: {to}\n\n"));
-    out.push_str("Agents: this is a follow up, not ready; check again later.\n\n");
-    out.push_str("## Original prompt\n\n");
-    out.push_str(body.trim_end());
-    out.push_str("\n\n");
-    out.push_str(&format!("## {to} comments\n\n"));
-    out.push_str(&format!(
-        "<!-- {to}: leave your decision here; the agent re-reads this file. -->\n"
-    ));
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn test_workspace() -> (
-        tempfile::TempDir,
-        tempfile::TempDir,
-        Arc<chan_workspace::Workspace>,
-    ) {
-        let cfg = tempfile::TempDir::new().unwrap();
-        let root = tempfile::TempDir::new().unwrap();
-        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
-        lib.register_workspace(root.path()).unwrap();
-        let workspace = lib.open_workspace(root.path()).unwrap();
-        (cfg, root, workspace)
-    }
-
-    #[test]
-    fn sanitize_strips_at_prefix_and_unsafe_chars() {
-        assert_eq!(sanitize_handle("@@Alice"), "Alice");
-        assert_eq!(sanitize_handle("@@Host"), "Host");
-        assert_eq!(sanitize_handle("a b/c"), "a-b-c");
-        assert_eq!(sanitize_handle("@@"), "x");
-    }
-
-    #[test]
-    fn create_followup_writes_inside_team_dir_and_increments() {
-        let (_cfg, _root, workspace) = test_workspace();
-
-        let p1 = create_followup_file(
-            &workspace,
-            FollowupSpec {
-                dir: "new-team-1",
-                from: "@@Alice",
-                to: "@@Host",
-                title: Some("Pick a search backend"),
-                body: "Should search use BM25 or semantic?",
-            },
-        )
-        .unwrap();
-        assert_eq!(p1, "new-team-1/followups/followup-Alice-Host-1.md");
-        assert!(workspace.exists(&p1));
-
-        // Same from/to pair increments n; the dir already exists.
-        let p2 = create_followup_file(
-            &workspace,
-            FollowupSpec {
-                dir: "new-team-1",
-                from: "@@Alice",
-                to: "@@Host",
-                title: None,
-                body: "Second question",
-            },
-        )
-        .unwrap();
-        assert_eq!(p2, "new-team-1/followups/followup-Alice-Host-2.md");
-
-        // A different from/to pair restarts at 1.
-        let p3 = create_followup_file(
-            &workspace,
-            FollowupSpec {
-                dir: "new-team-1",
-                from: "@@Bob",
-                to: "@@Host",
-                title: None,
-                body: "x",
-            },
-        )
-        .unwrap();
-        assert_eq!(p3, "new-team-1/followups/followup-Bob-Host-1.md");
-    }
-
-    #[test]
-    fn followup_body_carries_prompt_and_placeholders() {
-        let (_cfg, _root, workspace) = test_workspace();
-        let path = create_followup_file(
-            &workspace,
-            FollowupSpec {
-                dir: "team",
-                from: "@@Alice",
-                to: "@@Host",
-                title: Some("Backend choice"),
-                body: "BM25 or semantic?",
-            },
-        )
-        .unwrap();
-        let text = workspace.read_text(&path).unwrap();
-
-        assert!(text.contains("# Follow up: Backend choice"));
-        assert!(text.contains("From: @@Alice"));
-        assert!(text.contains("To: @@Host"));
-        assert!(text.contains("Agents: this is a follow up, not ready; check again later."));
-        assert!(text.contains("## Original prompt"));
-        assert!(text.contains("BM25 or semantic?"));
-        assert!(text.contains("## @@Host comments"));
-        assert!(text.contains("Created: "), "an ISO timestamp line");
-        assert!(!text.contains('\u{2014}'), "no em dashes");
-    }
-
-    #[test]
-    fn missing_title_falls_back_to_survey_heading() {
-        let (_cfg, _root, workspace) = test_workspace();
-        let path = create_followup_file(
-            &workspace,
-            FollowupSpec {
-                dir: "team",
-                from: "@@A",
-                to: "@@B",
-                title: None,
-                body: "body",
-            },
-        )
-        .unwrap();
-        let text = workspace.read_text(&path).unwrap();
-        assert!(text.contains("# Follow up: survey"));
-    }
-
-    #[test]
-    fn empty_dir_is_rejected() {
-        let (_cfg, _root, workspace) = test_workspace();
-        assert!(create_followup_file(
-            &workspace,
-            FollowupSpec {
-                dir: "  ",
-                from: "@@A",
-                to: "@@B",
-                title: None,
-                body: "x",
-            },
-        )
-        .is_err());
-    }
 
     #[test]
     fn option_reply_request_deserializes_camel_case() {
@@ -465,23 +146,18 @@ mod tests {
     }
 
     #[test]
-    fn followup_reply_request_deserializes_with_null_context() {
-        // [F] is standard on every survey; a survey raised without
-        // followup context sends `followup: null` and the route treats it as a
-        // plain deferral (no file).
-        let json = r#"{"surveyId":"survey-9","kind":"followup",
-            "followup":null,"bodyMarkdown":"the question"}"#;
+    fn followup_reply_request_deserializes() {
+        // [F] is a bare "host will follow up later" signal: survey id only,
+        // shaped exactly like a dismiss but under its own kind.
+        let json = r#"{"surveyId":"survey-9","kind":"followup"}"#;
         let req: SurveyReplyRequest = serde_json::from_str(json).unwrap();
         match req {
             SurveyReplyRequest::Followup {
                 survey_id,
-                followup,
-                body_markdown,
-                ..
+                window_id,
             } => {
                 assert_eq!(survey_id, "survey-9");
-                assert!(followup.is_none());
-                assert_eq!(body_markdown, "the question");
+                assert!(window_id.is_none());
             }
             _ => panic!("expected followup variant"),
         }
@@ -489,38 +165,12 @@ mod tests {
 
     #[test]
     fn dismissed_reply_request_deserializes() {
-        // A dismiss carries only the survey id (no option, no file).
+        // A dismiss carries only the survey id (no option).
         let json = r#"{"surveyId":"survey-4","kind":"dismissed"}"#;
         let req: SurveyReplyRequest = serde_json::from_str(json).unwrap();
         match req {
             SurveyReplyRequest::Dismissed { survey_id, .. } => assert_eq!(survey_id, "survey-4"),
             _ => panic!("expected dismissed variant"),
-        }
-    }
-
-    #[test]
-    fn followup_reply_request_deserializes_with_context() {
-        let json = r#"{"surveyId":"survey-9","kind":"followup",
-            "followup":{"dir":"new-team-1","from":"@@Alice","to":"@@Host"},
-            "title":"T","bodyMarkdown":"the question"}"#;
-        let req: SurveyReplyRequest = serde_json::from_str(json).unwrap();
-        match req {
-            SurveyReplyRequest::Followup {
-                survey_id,
-                followup,
-                title,
-                body_markdown,
-                ..
-            } => {
-                assert_eq!(survey_id, "survey-9");
-                let followup = followup.expect("context present");
-                assert_eq!(followup.dir, "new-team-1");
-                assert_eq!(followup.from, "@@Alice");
-                assert_eq!(followup.to, "@@Host");
-                assert_eq!(title.as_deref(), Some("T"));
-                assert_eq!(body_markdown, "the question");
-            }
-            _ => panic!("expected followup variant"),
         }
     }
 }

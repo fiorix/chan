@@ -104,6 +104,7 @@
     installKeyboardProtocolHandlers,
   } from "../terminal/keymap";
   import { installTerminalReportGuards } from "../terminal/xtermReports";
+  import { MouseModeFilter } from "../terminal/mouseModeFilter";
   import { installShiftSelectionBypass } from "../terminal/selectionBypass";
   import {
     refreshTerminalRows as refreshTerminalRowsImpl,
@@ -259,6 +260,11 @@
   let webglRendererActive = false;
   let webglContextLossRetries = 0;
   const ptyWrites = new PtyWriteTracker();
+  // Mouse-capture refusal (Settings: terminal.mouse_capture, default on).
+  // Non-null ONLY when the setting was off at start(); with the setting on
+  // the filter does not exist on the write path at all, keeping the default
+  // byte-for-byte identical to an unfiltered terminal.
+  let mouseFilter: MouseModeFilter | null = null;
   let hostResumeTimers: ReturnType<typeof setTimeout>[] = [];
   let hostResumeListenerCleanup: (() => void) | null = null;
   // Wall-clock-gap sleep/wake detector (shared `installWakeGapDetector`). See
@@ -685,6 +691,13 @@
     scrollbackLines = scrollbackLinesFromMb(
       clampScrollbackMb(workspace.info?.preferences?.terminal?.scrollback_mb),
     );
+    // Mouse capture honors the Settings toggle under the same spawn-time
+    // contract: read once here, so flipping the setting later affects only
+    // newly opened terminals (the hint copy says so). Absent field (older
+    // server) means true, today's behavior.
+    mouseFilter = (workspace.info?.preferences?.terminal?.mouse_capture ?? true)
+      ? null
+      : new MouseModeFilter();
     // lineHeight is 1.2 (not xterm.js's 1.0 default) so multi-row
     // ASCII glyphs (e.g. the Claude Code splash cube, figlet output,
     // nethack tiles) render with the row separation a user gets from
@@ -1013,7 +1026,17 @@
           frame.generation === pendingSnapshot.generation &&
           (frame.missed_bytes ?? 0) === 0
         ) {
-          term?.write(pendingSnapshot.ansi);
+          if (mouseFilter) {
+            // A SerializeAddon snapshot captured in mouse mode carries the
+            // mouse-enable DECSETs; route it through the same filter as
+            // live output so a restore can't re-enter capture.
+            const filtered = mouseFilter.push(
+              new TextEncoder().encode(pendingSnapshot.ansi),
+            );
+            if (filtered.length) term?.write(filtered);
+          } else {
+            term?.write(pendingSnapshot.ansi);
+          }
         }
         pendingSnapshot = null;
         setTerminalSession(tab, frame.id);
@@ -1356,6 +1379,13 @@
 
   function writePtyOutput(bytes: Uint8Array, origin: PtyWriteOrigin = "live"): void {
     if (!term) return;
+    // The mouse-capture refusal filters HERE, not at the ws.onmessage
+    // callsite: receivedSeq must keep counting ORIGINAL frame bytes so the
+    // server ring cursor / missed_bytes math never sees filtered lengths.
+    if (mouseFilter) {
+      bytes = mouseFilter.push(bytes);
+      if (bytes.length === 0) return;
+    }
     ptyWrites.write(term, bytes, origin);
   }
 
@@ -1470,6 +1500,7 @@
     term?.dispose();
     term = null;
     ptyWrites.reset();
+    mouseFilter = null;
     webglRendererActive = false;
     fit = null;
     search = null;

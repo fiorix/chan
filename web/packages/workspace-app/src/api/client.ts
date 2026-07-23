@@ -1315,11 +1315,7 @@ export const api = {
 
   /// Reply to a survey raised by `cs terminal survey`. The blocked CLI is
   /// awaiting on the server's survey bus keyed by `surveyId`; this POST
-  /// completes that oneshot so the CLI prints the result and exits. The
-  /// route owns followup-file creation server-side (see
-  /// crates/chan-server/src/routes/survey.rs); for a followup the SPA sends
-  /// the echoed-back context and the route returns nothing (the CLI gets the
-  /// minted path through the bus).
+  /// completes that oneshot so the CLI prints the result and exits.
   surveyReply: (reply: SurveyReplyRequest) =>
     req<void>("POST", "/api/survey/reply", reply),
 
@@ -1407,29 +1403,16 @@ export interface SurveySpec {
   title?: string | null;
   bodyMarkdown: string;
   options: string[];
-  /// Followup context (team-dir + from/to) for the `[F]` affordance. Present
-  /// only when the survey was raised with `--followup`; the reply route uses
-  /// it to create `{dir}/followups/followup-{from}-{to}-{n}.md`.
-  followup?: SurveyFollowupContext | null;
 }
 
-export interface SurveyFollowupContext {
-  dir: string;
-  from: string;
-  to: string;
-}
-
-/// The reply body the SPA POSTs to `/api/survey/reply`. Distinct from
-/// `chan_shell::wire::SurveyReply`: for a followup the SPA cannot know the
-/// minted path, so it sends the echoed-back context and the route creates the
-/// file + synthesizes the path before completing the bus oneshot.
+/// The reply body the SPA POSTs to `/api/survey/reply`.
 ///
 /// Every survey overlay offers options PLUS an [F] follow-up AND a
 /// Dismiss, so the reply has three kinds. `dismissed` carries only the
 /// `surveyId` (no option index), so the asking agent can tell a dismiss apart
-/// from an answer. `followup` now allows a null context: F is standard on every
-/// survey, so when a survey carried no followup context the SPA sends
-/// `followup: null` and the route treats it as a plain deferral (no file).
+/// from an answer. `followup` is dismiss-shaped: a bare "host will follow up
+/// later" signal telling the asking agent an answer is coming in a separate
+/// prompt.
 /// `windowId` (the answering window's own session id) lets the server exclude
 /// this window from the `close_survey` fan-out, so the window that just replied
 /// does not race a `answered_elsewhere` close against its own local clear.
@@ -1441,14 +1424,7 @@ export type SurveyReplyRequest =
       optionLabel: string;
       windowId?: string;
     }
-  | {
-      surveyId: string;
-      kind: "followup";
-      followup: SurveyFollowupContext | null;
-      title?: string | null;
-      bodyMarkdown: string;
-      windowId?: string;
-    }
+  | { surveyId: string; kind: "followup"; windowId?: string }
   | { surveyId: string; kind: "dismissed"; windowId?: string };
 
 /// Body of `POST /api/window/reply` (the `cs pane` reply). camelCase to match

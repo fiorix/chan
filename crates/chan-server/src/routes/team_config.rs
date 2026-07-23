@@ -370,27 +370,21 @@ pub(crate) fn generate_bootstrap_md(
         "`--tab-name` must match a live tab the host's WINDOW owns. When\n\
          {host_handle} has no member tab of their own, target the lead's tab\n\
          (`--tab-name={lead_handle}`) or the team's tab group instead; the overlay\n\
-         surfaces in the owning window either way. In that PROXY case also pass\n\
-         `--to={host_handle}` so an [F] follow-up is a task addressed to\n\
-         {host_handle} (the team manager), NOT the proxy tab -- `--to` overrides\n\
-         `--tab-name` for the follow-up's `to`.\n\n"
+         surfaces in the owning window either way.\n\n"
     ));
     out.push_str(&format!(
         "The overlay is keyboard-first for the host: {host_handle} picks an option\n\
-         with 1..N (or a click), presses F to follow up (defers with a paper-trail\n\
-         under {team_dir}/followups/), or X to dismiss (Escape or the Dismiss\n\
+         with 1..N (or a click), presses F to follow up (a promise to answer\n\
+         later in a separate prompt), or X to dismiss (Escape or the Dismiss\n\
          button do the same). The reply routed back to {lead_handle} says which:\n\
          an answer, a follow-up, or a dismissal (see `cs terminal survey --help`\n\
          for the current flags).\n\n"
     ));
     out.push_str(&format!(
-        "IMPORTANT: an [F] follow-up creates an EMPTY file at\n\
-         {team_dir}/followups/followup-{{from}}-{{to}}-{{n}}.md (the original\n\
-         question + an empty comments section). It means \"deferred, not ready\",\n\
-         NOT an answer. {host_handle} must WRITE the decision into the file's\n\
-         comments before {lead_handle} (or any agent) acts on it; an unpopulated\n\
-         follow-up is not actionable -- re-read it later and act ONLY once\n\
-         {host_handle} has filled it in.\n\n"
+        "IMPORTANT: an [F] follow-up means {host_handle} will follow up later in\n\
+         a separate prompt. It is \"more is coming\", NOT an answer and NOT a\n\
+         dismissal: do not act on the surveyed question until that follow-up\n\
+         arrives.\n\n"
     ));
 
     out.push_str("## The poke 1-liner\n\n");

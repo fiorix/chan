@@ -49,6 +49,14 @@ pub struct TerminalConfig {
     /// team config's own `mcp_env` toggle instead.
     #[serde(default)]
     pub mcp_env: bool,
+    /// Whether full-screen TUIs may capture the mouse. Consumed by the
+    /// SPA at terminal start time; the server only persists the value.
+    /// On by default (today's behavior: mouse-reporting programs own
+    /// the pointer). When off the SPA strips the mouse-enable escape
+    /// sequences so click-drag keeps selecting text over such programs.
+    /// Applies to newly opened terminals.
+    #[serde(default = "default_terminal_mouse_capture")]
+    pub mouse_capture: bool,
 }
 
 /// Terminal-font preference. Wire shape kept narrow (string enum)
@@ -76,6 +84,7 @@ impl Default for TerminalConfig {
             default_term: default_terminal_default_term(),
             font: TerminalFontChoice::default(),
             mcp_env: false,
+            mouse_capture: default_terminal_mouse_capture(),
         }
     }
 }
@@ -98,6 +107,10 @@ fn default_terminal_scrollback_mb() -> u32 {
 
 fn default_terminal_default_term() -> String {
     "xterm-256color".into()
+}
+
+fn default_terminal_mouse_capture() -> bool {
+    true
 }
 
 /// Inclusive bounds the Settings UI exposes for the scrollback slider.

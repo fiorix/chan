@@ -148,6 +148,13 @@ export type TerminalPreferences = {
   /// agents). Spawn-time only; the per-request `?mcp_env=on|off`
   /// query still overrides it for CLI / team spawns.
   mcp_env?: boolean;
+  /// Whether full-screen TUIs may capture the mouse. On by default;
+  /// when off the SPA strips the mouse-enable escape sequences so
+  /// click-drag keeps selecting text over such programs. Optional on
+  /// the wire so older servers (no field) deserialize cleanly; the
+  /// SPA treats `undefined` as true. Applies to newly opened
+  /// terminals.
+  mouse_capture?: boolean;
 };
 
 export type TerminalFontChoice = "os-default" | "source-code-pro";

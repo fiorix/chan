@@ -22,7 +22,6 @@ function spec(over: Partial<SurveySpec> = {}): SurveySpec {
     title: null,
     bodyMarkdown: "Pick a backend",
     options: ["BM25", "Semantic"],
-    followup: null,
     ...over,
   };
 }
@@ -83,10 +82,8 @@ describe("survey overlay", () => {
     expect(other.querySelector(".survey-overlay")).toBeNull();
   });
 
-  // F (follow up) + Dismiss are STANDARD on every survey, not an opt-in
-  // and not gated on a followup context. The default spec() has followup:null,
-  // so this is the bare case.
-  test("[F] follow-up + Dismiss render on every survey (no context needed)", async () => {
+  // F (follow up) + Dismiss are STANDARD on every survey, not an opt-in.
+  test("[F] follow-up + Dismiss render on every survey", async () => {
     surveyState.windowWide = { spec: spec(), busy: false };
     const target = document.createElement("div");
     document.body.append(target);
