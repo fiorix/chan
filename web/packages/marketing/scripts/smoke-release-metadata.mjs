@@ -32,10 +32,10 @@ async function main() {
 
     assert(releases.latest === "0.15.4", "releases.json latest version");
     assert(releases.latest_tag === "v0.15.4", "releases.json latest tag");
-    assert(releases.releases?.[0]?.downloads?.length === 18, "release download count");
+    assert(releases.releases?.[0]?.downloads?.length === 14, "release download count");
     const downloadIds = new Set(releases.releases[0].downloads.map((download) => download.id));
     assert(downloadIds.has("cli-linux-x64"), "CLI tarball download id present");
-    assert(downloadIds.has("desktop-linux-rpm-amd64"), "desktop rpm download id present");
+    assert(!downloadIds.has("desktop-linux-rpm-amd64"), "dropped desktop rpm download id absent");
     assert(downloadIds.has("gateway-profile-deb-amd64"), "gateway download id present");
     assert(cliLatest.version === "0.15.4", "CLI latest version");
     assert(JSON.stringify(cliLatest) === JSON.stringify(cliVersion), "CLI latest equals version file");
@@ -78,7 +78,7 @@ async function main() {
       winOut,
     ]);
     const winDownloads = (await readJson(path.join(winOut, "releases.json"))).releases[0].downloads;
-    assert(winDownloads.length === 20, "windows present adds two downloads");
+    assert(winDownloads.length === 16, "windows present adds two downloads");
     const winById = new Map(winDownloads.map((download) => [download.id, download]));
     assert(winById.has("desktop-windows-nsis"), "windows installer download present");
     assert(winById.has("cli-windows-x64"), "windows cli download present");
@@ -116,8 +116,8 @@ async function main() {
       "prerelease gateway asset mapped",
     );
     assert(
-      prereleaseDownloads.some((download) => download.asset === "Chan-0.56.0-rc1-1.x86_64.rpm"),
-      "prerelease desktop rpm mapped",
+      prereleaseDownloads.some((download) => download.asset === "Chan_0.56.0-rc1_amd64.AppImage"),
+      "prerelease desktop asset mapped",
     );
 
     // History mode: an array of synthetic manifests (newest first) emits only

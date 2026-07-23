@@ -22,16 +22,14 @@ export function cliAssets() {
   ];
 }
 
-// chan-desktop bundles: the macOS dmg and the tauri-built Linux packages.
+// chan-desktop bundles: the macOS dmg and the tauri-built AppImages. Tauri
+// also emits a .deb and .rpm, but those ship through COPR/PPA/AUR, not as
+// GitHub Release assets.
 export function desktopAssets(version) {
   return [
     `Chan_${version}.dmg`,
     `Chan_${version}_amd64.AppImage`,
     `Chan_${version}_aarch64.AppImage`,
-    `Chan_${version}_amd64.deb`,
-    `Chan_${version}_arm64.deb`,
-    `Chan-${version}-1.x86_64.rpm`,
-    `Chan-${version}-1.aarch64.rpm`,
   ];
 }
 

@@ -278,14 +278,15 @@ jobs:
   linux-desktop-artifacts:
     name: linux desktop packages (${{ matrix.package_arch }})
     # GitHub-hosted runners are ubuntu-only, so CI ships the UNIVERSAL
-    # AppImage plus the debian-family .deb and the fedora-family .rpm that
-    # Tauri targets:"all" already emits, on amd64 AND arm64 (matching the
-    # CLI + gateway matrix jobs). The per-distro sdme rootfs templates under
+    # AppImage that Tauri targets:"all" already emits, on amd64 AND arm64
+    # (matching the CLI + gateway matrix jobs). Tauri also emits a .deb and
+    # .rpm alongside it, but those ship through COPR/PPA/AUR instead of as
+    # GitHub Release artifacts. The per-distro sdme rootfs templates under
     # packaging/sdme/chan-desktop-{ubuntu,fedora,arch}.sdme own the LOCAL
     # multi-distro dev/QA build path (build from macOS via lima); they are
-    # not consumable by GH Actions, so CI leans on the universal AppImage +
-    # the .rpm rather than literal fedora/arch container jobs (which would
-    # re-list distro deps = the single-source drift that killed v0.19.0).
+    # not consumable by GH Actions, so CI leans on the universal AppImage
+    # rather than literal fedora/arch container jobs (which would re-list
+    # distro deps = the single-source drift that killed v0.19.0).
     needs:
       - context
       - linux-validate
@@ -345,14 +346,16 @@ jobs:
         run: |
           set -e
           mkdir -p release-artifacts
-          # Tauri targets:"all" emits one AppImage + one .deb + one .rpm per
-          # arch under these dirs; glob each format dir so the arch-specific
-          # filename skew (AppImage amd64/aarch64 vs deb amd64/arm64 vs rpm
-          # x86_64/aarch64) needs no per-arch bookkeeping.
+          # Tauri targets:"all" also emits a .deb and .rpm per arch, but CI
+          # stages only the AppImage as a GitHub Release artifact; the
+          # deb/rpm channel is COPR/PPA/AUR instead. Glob the format dir so
+          # the arch-specific filename skew (AppImage amd64/aarch64) needs
+          # no per-arch bookkeeping. Kept as a loop over one entry (not
+          # inlined) so a future format re-add is a one-line change and the
+          # missing-artifact error path stays shared.
+          # shellcheck disable=SC2066  # single-item on purpose, see above
           for dir_glob in \
-            "target/release/bundle/appimage/*.AppImage" \
-            "target/release/bundle/deb/*.deb" \
-            "target/release/bundle/rpm/*.rpm"; do
+            "target/release/bundle/appimage/*.AppImage"; do
             file=$(find "$(dirname "$dir_glob")" -name "$(basename "$dir_glob")" -type f | head -1)
             if [ -z "$file" ]; then
               echo "::error::missing desktop artifact: $dir_glob"
