@@ -152,6 +152,42 @@ function renderErrorFace(
   diagram.append(reason);
 }
 
+/// Land the caret ON the failing source line of an errored diagram. CM6
+/// maps any click on a block widget to the nearest block EDGE (top half ->
+/// the opener fence line, bottom half -> the closer), so the error line the
+/// face echoes is otherwise unreachable by mouse. The block position is
+/// resolved at event time via posAtDOM (the widget may have moved since
+/// toDOM); the blamed line is clamped inside the fence because mermaid EOF
+/// errors can blame a line past the source, and errorCol (1-indexed)
+/// refines the column when the parser reported one. The selection lands
+/// inside the block, so the next scan() de-renders it and the caret sits
+/// visibly on the failing line.
+function placeCaretOnErrorLine(
+  view: EditorView,
+  wrap: HTMLElement,
+  source: string,
+  res: DiagramResult,
+): void {
+  const doc = view.state.doc;
+  const openLine = doc.lineAt(view.posAtDOM(wrap)).number;
+  // Source line N sits at doc line openLine + N; the fence interior spans
+  // openLine + 1 through openLine + <source line count>.
+  const lastSourceLine = Math.min(openLine + source.split("\n").length, doc.lines);
+  const docLine = Math.min(
+    Math.max(openLine + (res.errorLine ?? 1), openLine + 1),
+    lastSourceLine,
+  );
+  const line = doc.line(docLine);
+  const col = res.errorCol
+    ? Math.min(Math.max(res.errorCol - 1, 0), line.length)
+    : 0;
+  view.dispatch({
+    selection: EditorSelection.cursor(line.from + col),
+    scrollIntoView: true,
+  });
+  view.focus();
+}
+
 function prefersReducedMotion(): boolean {
   try {
     return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
@@ -254,7 +290,7 @@ class DiagramWidget extends WidgetType {
     return this.source === other.source && this.dark === other.dark;
   }
 
-  toDOM(): HTMLElement {
+  toDOM(view: EditorView): HTMLElement {
     const wrap = document.createElement("div");
     wrap.className = "cm-md-diagram-rendered";
     wrap.contentEditable = "false";
@@ -335,6 +371,17 @@ class DiagramWidget extends WidgetType {
         // Cursor-out always renders, even on a bad diagram: show the
         // renderer's error on the diagram face, never crash / fall back.
         renderErrorFace(diagram, this.source, res, this.spec.label);
+        // The face invites clicking the echoed failing line, but a widget
+        // click otherwise maps to the nearest block edge (the fence lines).
+        // Swallow the press (the View button's discipline) and land the
+        // caret on the blamed source line instead. Success faces keep the
+        // edge mapping - any entry point is equivalent there.
+        diagram.addEventListener("mousedown", (e) => {
+          if (e.button !== 0) return;
+          e.preventDefault();
+          e.stopPropagation();
+          placeCaretOnErrorLine(view, wrap, this.source, res);
+        });
         // Remember the failing line so the source view can accent it
         // when the cursor steps in.
         cacheError(

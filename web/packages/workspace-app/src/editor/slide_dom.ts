@@ -129,11 +129,16 @@ function preserveExtraBlankLines(markdown: string): string {
   let inFence = false;
   let fenceMarker: "`" | "~" | null = null;
 
-  function flushBlankRun(): void {
+  // Blank runs at the slide boundaries are page-separator whitespace
+  // left behind by the deck split, not authored in-slide spacing, so
+  // they collapse to a plain blank line instead of emitting spacers.
+  function flushBlankRun(atBoundary: boolean): void {
     if (blankRun === 0) return;
     out.push("");
-    for (let i = 1; i < blankRun; i++) out.push(BLANK_LINE_SPACER);
-    if (blankRun > 1) out.push("");
+    if (!atBoundary) {
+      for (let i = 1; i < blankRun; i++) out.push(BLANK_LINE_SPACER);
+      if (blankRun > 1) out.push("");
+    }
     blankRun = 0;
   }
 
@@ -144,7 +149,9 @@ function preserveExtraBlankLines(markdown: string): string {
       continue;
     }
 
-    flushBlankRun();
+    // An empty `out` means no content line was emitted yet, so the
+    // pending run is the leading boundary.
+    flushBlankRun(out.length === 0);
     out.push(line);
 
     if (!fence) continue;
@@ -158,7 +165,7 @@ function preserveExtraBlankLines(markdown: string): string {
     }
   }
 
-  flushBlankRun();
+  flushBlankRun(true);
   return out.join("\n");
 }
 
@@ -462,14 +469,17 @@ export type SlidePageBox = { widthPx: number; heightPx: number };
 /// Inline style for a slide page at an explicit pixel box (the PDF
 /// raster path). Mirrors the preview page surface - same editor tokens,
 /// fonts, and padding rule - with the viewport-relative pieces resolved
-/// against the box width instead of the viewport.
+/// against the box width instead of the viewport. A caller that lays
+/// out at a known reference viewport passes `paddingPx` with the
+/// preview's clamp resolved against that viewport instead.
 export function slidePageBoxStyle(
   box: SlidePageBox,
   styleSource: Element | null | undefined,
   theme: SlideDomTheme,
+  paddingPx?: number,
 ): string {
   const tokens = editorTokens(styleSource, theme);
-  const padding = Math.max(22, Math.min(54, 0.04 * box.widthPx));
+  const padding = paddingPx ?? Math.max(22, Math.min(54, 0.04 * box.widthPx));
   return [
     tokens.vars,
     "box-sizing:border-box",

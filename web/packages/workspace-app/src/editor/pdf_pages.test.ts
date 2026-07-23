@@ -2,15 +2,22 @@
 
 import { describe, expect, test } from "vitest";
 import {
+  DECK_LAYOUT_PADDING_PX,
+  DECK_LAYOUT_VIEWPORT_PX,
   DECK_PAGE_BOX_PX,
   DOC_CONTENT_WIDTH_PX,
   buildDocPageElements,
+  buildSlidePageDom,
+  deckPageLayout,
+  deckSlideLayoutBox,
   docPageGeometry,
   normalizeDocPageBreaks,
   paginateDocBlocks,
   slideBoxFit,
   type DocBlockRect,
 } from "./pdf_pages";
+import { RASTER_SCALE } from "./pdf_snapshot";
+import { type SlideAspectRatio } from "./slides";
 
 function block(
   top: number,
@@ -166,6 +173,134 @@ describe("slideBoxFit", () => {
       (DECK_PAGE_BOX_PX.widthPx - fit.widthPx) / 2,
       4,
     );
+  });
+});
+
+describe("deckSlideLayoutBox", () => {
+  // The other side of the mirror: slidePreview.ts pageStyle sizes a
+  // preview slide as width:min(86vw, <86*ratio>vh) with the height
+  // fixed by the aspect ratio and padding clamp(22px, 4vw, 54px). The
+  // preview must keep that CSS viewport-responsive, so the export
+  // mirrors it as numbers at the reference viewport; this test spells
+  // the preview formula out so drift on either side fails here.
+  const vw = 1920;
+  const vh = 1080;
+
+  test.each([
+    ["16:9", 16 / 9],
+    ["4:3", 4 / 3],
+  ] as [SlideAspectRatio, number][])(
+    "%s mirrors the preview page box at the reference viewport",
+    (aspect, ratio) => {
+      expect(DECK_LAYOUT_VIEWPORT_PX).toEqual({ widthPx: vw, heightPx: vh });
+      const box = deckSlideLayoutBox(aspect);
+      const previewWidth = Math.min((86 / 100) * vw, (86 / 100) * vh * ratio);
+      expect(box.widthPx).toBeCloseTo(previewWidth, 6);
+      expect(box.heightPx).toBeCloseTo(previewWidth / ratio, 6);
+    },
+  );
+
+  test("pins the concrete reference boxes", () => {
+    const wide = deckSlideLayoutBox("16:9");
+    expect(wide.widthPx).toBeCloseTo(1651.2, 4);
+    expect(wide.heightPx).toBeCloseTo(928.8, 4);
+    const narrow = deckSlideLayoutBox("4:3");
+    expect(narrow.widthPx).toBeCloseTo(1238.4, 4);
+    expect(narrow.heightPx).toBeCloseTo(928.8, 4);
+  });
+
+  test("the padding constant is the preview clamp at the reference viewport", () => {
+    expect(DECK_LAYOUT_PADDING_PX).toBe(Math.max(22, Math.min(54, 0.04 * vw)));
+  });
+});
+
+describe("deckPageLayout", () => {
+  const ASPECTS: SlideAspectRatio[] = ["16:9", "4:3"];
+
+  test.each(ASPECTS)(
+    "%s: the slide surface is the layout box at the scaled A4 fit position",
+    (aspect) => {
+      const layout = deckPageLayout(aspect);
+      const fit = slideBoxFit(aspect, DECK_PAGE_BOX_PX);
+      const box = deckSlideLayoutBox(aspect);
+      const upscale = box.widthPx / fit.widthPx;
+      expect(layout.slide.widthPx).toBeCloseTo(box.widthPx, 6);
+      expect(layout.slide.heightPx).toBeCloseTo(box.heightPx, 6);
+      expect(layout.slide.leftPx).toBeCloseTo(fit.leftPx * upscale, 6);
+      expect(layout.slide.topPx).toBeCloseTo(fit.topPx * upscale, 6);
+      expect(layout.pageBox.widthPx).toBeCloseTo(
+        DECK_PAGE_BOX_PX.widthPx * upscale,
+        6,
+      );
+      expect(layout.pageBox.heightPx).toBeCloseTo(
+        DECK_PAGE_BOX_PX.heightPx * upscale,
+        6,
+      );
+    },
+  );
+
+  test.each(ASPECTS)(
+    "%s: the raster scale maps the layout box onto the unchanged bitmap",
+    (aspect) => {
+      const layout = deckPageLayout(aspect);
+      const fit = slideBoxFit(aspect, DECK_PAGE_BOX_PX);
+      const box = deckSlideLayoutBox(aspect);
+      expect(layout.rasterScale).toBeCloseTo(
+        (fit.widthPx * RASTER_SCALE) / box.widthPx,
+        10,
+      );
+      // Output device px stay what the DECK_PAGE_BOX_PX layout
+      // produced before, so PDF size/quality is unchanged.
+      expect(Math.ceil(layout.pageBox.widthPx * layout.rasterScale)).toBe(
+        Math.ceil(DECK_PAGE_BOX_PX.widthPx * RASTER_SCALE),
+      );
+      expect(Math.ceil(layout.pageBox.heightPx * layout.rasterScale)).toBe(
+        Math.ceil(DECK_PAGE_BOX_PX.heightPx * RASTER_SCALE),
+      );
+      // The slide surface still spans its old A4-fit raster region.
+      expect(layout.slide.widthPx * layout.rasterScale).toBeCloseTo(
+        fit.widthPx * RASTER_SCALE,
+        6,
+      );
+    },
+  );
+});
+
+describe("buildSlidePageDom", () => {
+  test("lays the page out at the layout box with the reference padding", async () => {
+    const dom = buildSlidePageDom({
+      markdown: "# Title\n\nbody\n",
+      fromPath: null,
+      spec: { aspectRatio: "16:9", zoomFactor: 2 },
+      theme: "light",
+    });
+    await dom.completion;
+
+    const layout = deckPageLayout("16:9");
+    expect(dom.box).toEqual(layout.pageBox);
+    expect(dom.rasterScale).toBe(layout.rasterScale);
+    expect(parseFloat(dom.root.style.width)).toBeCloseTo(
+      layout.pageBox.widthPx,
+      2,
+    );
+    expect(parseFloat(dom.root.style.height)).toBeCloseTo(
+      layout.pageBox.heightPx,
+      2,
+    );
+
+    const slide = dom.root.querySelector<HTMLElement>(".md-slide-preview-page")!;
+    expect(parseFloat(slide.style.width)).toBeCloseTo(layout.slide.widthPx, 2);
+    expect(parseFloat(slide.style.height)).toBeCloseTo(
+      layout.slide.heightPx,
+      2,
+    );
+    expect(slide.style.padding).toBe(`${DECK_LAYOUT_PADDING_PX}px`);
+
+    // The content wrapper and its zoom are unchanged (contentStyle is
+    // pinned in slide_dom.test.ts); only the box it fills grew.
+    expect(
+      slide.querySelector<HTMLElement>(".md-slide-preview-content"),
+    ).not.toBeNull();
   });
 });
 

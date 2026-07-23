@@ -80,4 +80,40 @@ describe("tableDecorations", () => {
       /\.cm-md-table\)[\s\S]{1,500}width: max-content;[\s\S]{1,200}min-width: 100%;/,
     );
   });
+
+  test("block-widget roots carry no vertical margins", () => {
+    // CM6's height map measures block widgets via getBoundingClientRect,
+    // which excludes margins. A vertical margin on a block-widget root
+    // shifts every later block's height-map band off its visual rect, so
+    // clicks below the widget resolve to the wrong line (worst right after
+    // a table, where the next line is usually a heading). Vertical spacing
+    // on these roots must be padding.
+    const source = readFileSync("src/editor/Wysiwyg.svelte", "utf8");
+    const roots = [
+      ".cm-md-table-wrap",
+      ".cm-md-diagram-rendered",
+      '.cm-md-image-wrap[data-editing="true"]',
+      ".cm-md-page-break",
+    ];
+
+    for (const root of roots) {
+      const escaped = root.replace(/[.[\]"]/g, (ch) => `\\${ch}`);
+      const rule = new RegExp(`${escaped}\\)\\s*\\{([^}]*)\\}`).exec(source);
+      expect(rule, `rule for ${root}`).toBeTruthy();
+      const body = rule![1].replace(/\/\*[\s\S]*?\*\//g, "");
+      expect(body, `${root} must not set margin-top`).not.toMatch(
+        /margin-top\s*:/,
+      );
+      expect(body, `${root} must not set margin-bottom`).not.toMatch(
+        /margin-bottom\s*:/,
+      );
+      // Shorthand margin is only safe when the vertical component is 0.
+      const shorthand = /margin\s*:\s*([^;]+);/.exec(body);
+      if (shorthand) {
+        expect(shorthand[1].trim(), `${root} margin shorthand`).toMatch(
+          /^0(px)?( |$)/,
+        );
+      }
+    }
+  });
 });

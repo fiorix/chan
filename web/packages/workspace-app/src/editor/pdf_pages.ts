@@ -6,7 +6,9 @@
 // out at a fixed printable width in CSS px, so pagination measures
 // final geometry. Decks render one slide per page, A4 landscape, the
 // slide box aspect-fit and centered on a page painted in the slide
-// theme background.
+// theme background; the deck page DOM lays out at a preview-reference
+// pixel box and rasterizes at a compensating scale so px-sized media
+// keeps its on-screen fraction of the slide (see deckPageLayout).
 
 import {
   contentStyle,
@@ -20,7 +22,7 @@ import {
 } from "./slide_dom";
 import { buildDocDom, type DocDom } from "./doc_dom";
 import { PAGE_BREAK_RE, type SlideAspectRatio, type SlidesSpec } from "./slides";
-import { type PageBoxPx } from "./pdf_snapshot";
+import { RASTER_SCALE, type PageBoxPx } from "./pdf_snapshot";
 
 /// A4 in PDF points.
 export const A4_PORTRAIT_PT = { widthPt: 595.28, heightPt: 841.89 };
@@ -197,31 +199,102 @@ export function slideBoxFit(
   };
 }
 
+/// Reference viewport for the deck layout box: the common 1920x1080
+/// desktop screen the fullscreen preview is typically seen on.
+export const DECK_LAYOUT_VIEWPORT_PX = { widthPx: 1920, heightPx: 1080 };
+
+/// The preview page padding at the reference viewport: the overlay's
+/// clamp(22px, 4vw, 54px) resolves to 54px there (4vw = 76.8px).
+export const DECK_LAYOUT_PADDING_PX = 54;
+
+/// The preview overlay's page box evaluated at the reference viewport:
+/// slidePreview.ts pageStyle sizes a preview slide as
+/// width:min(86vw, <86*ratio>vh) with the height fixed by the aspect
+/// ratio. That CSS must stay viewport-responsive, so the formula is
+/// mirrored here as numbers; pdf_pages.test.ts pins both sides of the
+/// mirror so drift in either place fails the test.
+export function deckSlideLayoutBox(aspectRatio: SlideAspectRatio): PageBoxPx {
+  const [w, h] = aspectRatio.split(":").map(Number);
+  const ratio = w! / h!;
+  const widthPx = Math.min(
+    0.86 * DECK_LAYOUT_VIEWPORT_PX.widthPx,
+    0.86 * DECK_LAYOUT_VIEWPORT_PX.heightPx * ratio,
+  );
+  return { widthPx, heightPx: widthPx / ratio };
+}
+
+export type DeckPageLayout = {
+  /// CSS-px box the deck page DOM lays out at: DECK_PAGE_BOX_PX scaled
+  /// up so the aspect-fit slide surface lands on the layout box.
+  pageBox: PageBoxPx;
+  /// The slide surface inside pageBox: deckSlideLayoutBox, placed at
+  /// the A4 fit's position scaled by the same factor.
+  slide: { widthPx: number; heightPx: number; leftPx: number; topPx: number };
+  /// Device px per CSS px for the raster. Cancels the layout upscale,
+  /// so the output bitmap stays DECK_PAGE_BOX_PX * RASTER_SCALE and
+  /// maps onto the A4 page exactly as before.
+  rasterScale: number;
+};
+
+/// Deck page layout: diagrams and #w= images size at min(native px,
+/// container px), so a slide laid out directly in the A4-px box shows
+/// them at a different fraction of the slide than the on-screen
+/// preview. Deck pages therefore LAY OUT at the preview-reference box
+/// and rasterize at the compensating scale; the PDF page geometry and
+/// the raster pixel size are unchanged.
+export function deckPageLayout(aspectRatio: SlideAspectRatio): DeckPageLayout {
+  const fit = slideBoxFit(aspectRatio, DECK_PAGE_BOX_PX);
+  const layout = deckSlideLayoutBox(aspectRatio);
+  // Widths are equivalent to heights here: the fit and the layout box
+  // share the aspect ratio by construction, so one factor maps both
+  // axes exactly.
+  const upscale = layout.widthPx / fit.widthPx;
+  return {
+    pageBox: {
+      widthPx: DECK_PAGE_BOX_PX.widthPx * upscale,
+      heightPx: DECK_PAGE_BOX_PX.heightPx * upscale,
+    },
+    slide: {
+      widthPx: layout.widthPx,
+      heightPx: layout.heightPx,
+      leftPx: fit.leftPx * upscale,
+      topPx: fit.topPx * upscale,
+    },
+    rasterScale: (fit.widthPx * RASTER_SCALE) / layout.widthPx,
+  };
+}
+
 export type SlidePageDom = {
   root: HTMLElement;
+  /// The CSS-px box `root` lays out at; pass it to the rasterizer.
+  box: PageBoxPx;
+  /// Raster scale mapping `box` onto the standard deck page bitmap.
+  rasterScale: number;
   /// Resolves when the slide's diagram and image renders settled.
   completion: Promise<void>;
 };
 
 /// Build a deck page: the page box painted in the slide theme
 /// background with the slide surface aspect-fit and centered, reusing
-/// the preview's page classes so slides render identically.
+/// the preview's page classes so slides render identically. The page
+/// lays out at deckPageLayout's preview-reference box (NOT the A4 box)
+/// with the preview's reference padding, so media keeps its preview
+/// fraction; the caller rasterizes at the returned scale to land on
+/// the unchanged A4 bitmap.
 export function buildSlidePageDom(opts: {
   markdown: string;
   fromPath: string | null;
   spec: SlidesSpec;
   theme: SlideDomTheme;
   styleSource?: Element | null;
-  pageBox?: PageBoxPx;
 }): SlidePageDom {
-  const pageBox = opts.pageBox ?? DECK_PAGE_BOX_PX;
+  const layout = deckPageLayout(opts.spec.aspectRatio);
   const tokens = editorTokens(opts.styleSource, opts.theme);
-  const fit = slideBoxFit(opts.spec.aspectRatio, pageBox);
 
   const root = document.createElement("div");
   root.style.cssText = [
-    `width:${pageBox.widthPx}px`,
-    `height:${pageBox.heightPx}px`,
+    `width:${layout.pageBox.widthPx}px`,
+    `height:${layout.pageBox.heightPx}px`,
     `background:${tokens.bg}`,
     "position:relative",
     "overflow:hidden",
@@ -235,11 +308,12 @@ export function buildSlidePageDom(opts: {
   slide.className = "md-slide-preview-page";
   slide.style.cssText =
     slidePageBoxStyle(
-      { widthPx: fit.widthPx, heightPx: fit.heightPx },
+      { widthPx: layout.slide.widthPx, heightPx: layout.slide.heightPx },
       opts.styleSource,
       opts.theme,
+      DECK_LAYOUT_PADDING_PX,
     ) +
-    `;position:absolute;left:${fit.leftPx}px;top:${fit.topPx}px`;
+    `;position:absolute;left:${layout.slide.leftPx}px;top:${layout.slide.topPx}px`;
   root.appendChild(slide);
 
   const content = document.createElement("div");
@@ -253,7 +327,12 @@ export function buildSlidePageDom(opts: {
     renderSlideDiagrams(content, opts.markdown, opts.theme, () => true),
   ]).then(() => undefined);
 
-  return { root, completion };
+  return {
+    root,
+    box: layout.pageBox,
+    rasterScale: layout.rasterScale,
+    completion,
+  };
 }
 
 export { buildDocDom };

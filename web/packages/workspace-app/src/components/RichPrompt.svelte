@@ -113,7 +113,12 @@
       }),
       Prec.high(
         keymap.of([
-          { key: "Mod-Enter", run: submitFromView },
+          // stopPropagation: a pasted image leaves its atom ring-selected,
+          // and the image widget's document-level keydown listener treats a
+          // bubbling Mod-Enter as the View chord (fullscreen zoom). The
+          // composer's submit must consume the chord entirely or one press
+          // both submits and opens the overlay.
+          { key: "Mod-Enter", run: submitFromView, stopPropagation: true },
           { key: "ArrowUp", run: recallFromView },
           { key: "Escape", run: dropOrAbandonFromView },
           // Tab indents (list item, else plain indent) and NEVER escapes to

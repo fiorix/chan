@@ -225,6 +225,76 @@ describe("diagram copy affordance", () => {
   });
 });
 
+describe("errored diagram face click-through", () => {
+  // MERMAID_DOC fence: opener ```mermaid at doc line 3, source at doc
+  // lines 4-6, closer ``` at line 7. CM6 maps a widget click to the
+  // nearest block EDGE (opener / closer line), so the face's own mousedown
+  // handler is what lands the caret on the blamed line.
+  function erroring(errorLine: number, errorCol?: number) {
+    return diagramDecorations({
+      lang: "mermaid",
+      label: "Mermaid",
+      render: async () => ({
+        ok: false,
+        error: `Parse error on line ${errorLine}`,
+        errorLine,
+        errorCol,
+      }),
+      isDark: () => false,
+    });
+  }
+
+  async function mountErrored(deco: ReturnType<typeof diagramDecorations>) {
+    const mounted = mount(deco, MERMAID_DOC, 0);
+    await vi.waitFor(() => {
+      expect(mounted.parent.querySelector(".cm-md-diagram-error")).toBeTruthy();
+    });
+    return mounted;
+  }
+
+  test("mousedown on the echoed line lands the caret ON the failing line", async () => {
+    const { parent, view } = await mountErrored(erroring(2));
+    parent
+      .querySelector(".cm-md-diagram-error-src")!
+      .dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    // Source line 2 sits at doc line openLine + 2 = 5.
+    expect(view.state.doc.lineAt(view.state.selection.main.head).number).toBe(5);
+    // The selection is now inside the block, so the widget de-rendered and
+    // the caret sits visibly on the source.
+    expect(parent.querySelector(".cm-md-diagram-rendered")).toBeNull();
+    view.destroy();
+    parent.remove();
+  });
+
+  test("errorCol refines the caret to the blamed column", async () => {
+    const { parent, view } = await mountErrored(erroring(2, 4));
+    parent
+      .querySelector(".cm-md-diagram-error-src")!
+      .dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    const head = view.state.selection.main.head;
+    const line = view.state.doc.lineAt(head);
+    expect(line.number).toBe(5);
+    expect(head - line.from).toBe(3); // 1-indexed column 4
+    view.destroy();
+    parent.remove();
+  });
+
+  test("a blamed line past the source clamps to the last fence line", async () => {
+    // Mermaid EOF errors blame a line beyond the source. No echoed row
+    // renders for it, and the WHOLE face (head + reason rows) is
+    // click-through, so a press anywhere still reaches the source.
+    const { parent, view } = await mountErrored(erroring(99));
+    expect(parent.querySelector(".cm-md-diagram-error-src")).toBeNull();
+    parent
+      .querySelector(".cm-md-diagram-error")!
+      .dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    // Clamped to the last source line, doc line 6 (closer fence minus 1).
+    expect(view.state.doc.lineAt(view.state.selection.main.head).number).toBe(6);
+    view.destroy();
+    parent.remove();
+  });
+});
+
 describe("diagram wiring", () => {
   test("mermaid is dynamic-imported (never in the initial bundle)", () => {
     expect(mermaidRenderSrc).toMatch(/import\("mermaid"\)/);
@@ -310,6 +380,20 @@ describe("diagram wiring", () => {
     expect(diagramSrc).toMatch(/\$\{label\} error - line \$\{res\.errorLine\}/);
     // Error cleared on a successful re-render so a fixed line stops accenting.
     expect(diagramSrc).toMatch(/cacheError\(this\.spec, this\.source, null\)/);
+  });
+
+  test("errored face click-through resolves the block at event time", () => {
+    // The jsdom tests above cover the caret landings; this pins the
+    // mechanism: the ERROR branch swallows mousedown and places the caret
+    // itself via posAtDOM on the wrap (the block may have moved since
+    // toDOM), while the success face keeps CM6's edge mapping.
+    expect(diagramSrc).toMatch(/function placeCaretOnErrorLine/);
+    expect(diagramSrc).toMatch(/view\.posAtDOM\(wrap\)/);
+    expect(diagramSrc).toMatch(
+      /placeCaretOnErrorLine\(view, wrap, this\.source, res\)/,
+    );
+    // Exactly one attach site: the error branch, never the success face.
+    expect(diagramSrc.match(/placeCaretOnErrorLine\(/g)).toHaveLength(2);
   });
 
   test("Wysiwyg wires BOTH renderers and the diagram-zoom opener", () => {

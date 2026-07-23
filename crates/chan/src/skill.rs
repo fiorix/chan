@@ -875,6 +875,25 @@ mod tests {
         );
     }
 
+    /// Agents write files, so the authoring section must teach the
+    /// materialized forms the renderers actually recognize: the
+    /// page-break hr line and a concrete formatted date. The @-macros
+    /// (@pagebreak, @break, @today, @date) expand only while typing in
+    /// the live editor; a help edit that drops the materialized forms
+    /// would send agents back to writing inert markers.
+    #[test]
+    fn authoring_topic_teaches_materialized_forms() {
+        let text = render_topic("cs-export").expect("cs-export renders");
+        assert!(
+            text.contains("<hr class=\"chan-page-break\">"),
+            "cs-export help must show the materialized page-break form"
+        );
+        assert!(
+            text.contains("2026-07-23"),
+            "cs-export help must show a concrete ISO date example"
+        );
+    }
+
     #[test]
     fn list_names_every_topic() {
         let list = render_list();

@@ -35,6 +35,7 @@ if (!existsSync(join(HERE, "node_modules"))) {
 
 const { default: puppeteer } = await import("puppeteer-core");
 const { assertNoDuplicateBands, assertPdf } = await import("./lib/pdf.mjs");
+const { startDelayProxy } = await import("./lib/delay-proxy.mjs");
 const {
   defaultChrome,
   findControlSocket,
@@ -158,10 +159,27 @@ try {
     assertNoDuplicateBands,
     exec: (bin, args, opts = {}) =>
       execFileP(bin, args, { timeout: 120_000, ...opts }),
+    // A per-check latency shim: returns a rewritten server URL whose TCP
+    // path (HTTP and WebSocket alike) crosses a delay proxy. The check
+    // owns the handle and must close() it.
+    async latencyProxy(latencyMs) {
+      const target = new URL(serverUrl);
+      const proxy = await startDelayProxy({
+        targetPort: Number(target.port),
+        latencyMs,
+      });
+      const url = new URL(serverUrl);
+      url.port = String(proxy.port);
+      return { url: url.toString(), setLatency: proxy.setLatency, close: proxy.close };
+    },
   };
 
+  // SMOKE_ONLY=50,55 runs just the checks whose filenames start with one
+  // of the comma-separated prefixes; everything else still runs in order.
+  const only = process.env.SMOKE_ONLY?.split(",").map((s) => s.trim()).filter(Boolean);
   const checkFiles = readdirSync(join(HERE, "checks"))
     .filter((f) => f.endsWith(".mjs"))
+    .filter((f) => !only || only.some((p) => f.startsWith(p)))
     .sort();
   for (const file of checkFiles) {
     const mod = (await import(pathToFileURL(join(HERE, "checks", file)).href)).default;

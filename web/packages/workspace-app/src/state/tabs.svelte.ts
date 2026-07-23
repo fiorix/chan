@@ -4534,6 +4534,16 @@ export function registerDocSavePausedQuery(fn: (tabId: string) => boolean): void
   docSavePausedQueries.push(fn);
 }
 
+/// Hook: a classic PUT for `tabId` just landed on disk. A session
+/// degraded with its channel still up uses this to resync and take
+/// ownership of saves back (single writer) instead of staying
+/// degraded-classic forever; session modules ignore ids they do not
+/// hold.
+const docFallbackSavedHooks: ((tabId: string) => void)[] = [];
+export function registerDocFallbackSavedHook(fn: (tabId: string) => void): void {
+  docFallbackSavedHooks.push(fn);
+}
+
 /// Release a tab's live session, if any. Every registered hook runs (a
 /// session module ignores tab ids it does not own). `immediate` skips the
 /// remount linger: tab close, rename rekey, and file discard must detach
@@ -4616,9 +4626,11 @@ async function performSaveOnce(t: FileTab): Promise<void> {
   // on the authority, so "save" means "flush to disk", never a PUT
   // (the ConflictModal is unreachable while attached). Delegates run in
   // registration order; "classic" means "not my session, ask the next
-  // one". A flush failure degrades the owning session and falls through
-  // to the classic path below with the last flush frame's CAS token
-  // already stamped.
+  // one". A flush failure degrades the owning session, stops its pump,
+  // waits out any in-flight push, and falls through to the classic path
+  // below with the freshest flush token stamped; a successful classic
+  // save then heals the session back to attached via the fallback-saved
+  // hook.
   if (isDocAttached(t)) {
     for (const delegate of docSaveDelegates) {
       const r = await delegate(t);
@@ -4667,6 +4679,7 @@ async function performSaveOnce(t: FileTab): Promise<void> {
     t.error = null;
     t.fileMissing = null;
     mirrorToSiblings(path, content, t.id);
+    for (const hook of docFallbackSavedHooks) hook(t.id);
   } catch (e) {
     if (e instanceof ApiError && e.status === 409) {
       const data = e.data as {

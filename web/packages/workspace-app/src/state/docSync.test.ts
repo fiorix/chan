@@ -18,6 +18,9 @@ import { peersIn } from "../editor/collab/remoteCursors";
 import {
   acquireDocSession,
   docSessionFor,
+  DOC_ATTACH_TIMEOUT_MS,
+  DOC_FALLBACK_SETTLE_MS,
+  DOC_FLUSH_CAP_MS,
   DOC_FLUSH_TIMEOUT_MS,
   DOC_RELEASE_LINGER_MS,
   isDocSyncEligible,
@@ -590,6 +593,29 @@ describe("degradation", () => {
     expect(acquireDocSession(fileTab())).toBeNull();
   });
 
+  test("an attach TIMEOUT close does not latch capability off; the dial retries", async () => {
+    vi.useFakeTimers();
+    const tab = fileTab();
+    acquireDocSession(tab);
+    const first = lastSocket();
+    // The dial hangs: no frame at all. The client closes the socket
+    // itself when the attach window runs out.
+    await vi.advanceTimersByTimeAsync(DOC_ATTACH_TIMEOUT_MS + 50);
+    expect(first.closedByClient).toBe(true);
+    // A self-inflicted timeout close proves nothing about the server:
+    // the module latch must stay unknown and the session must redial.
+    expect(tab.doc?.state).not.toBe("off");
+    await vi.advanceTimersByTimeAsync(600);
+    expect(sockets.length).toBe(2);
+    const retry = lastSocket();
+    retry.open();
+    retry.frame(snap("hello", 0));
+    await flushMicro();
+    expect(tab.doc?.state).toBe("attached");
+    // Other tabs still get sessions: nothing was latched module-wide.
+    expect(acquireDocSession(fileTab())).not.toBeNull();
+  });
+
   test("a degraded session with no bound view heals to attached on the retry snapshot", async () => {
     vi.useFakeTimers();
     const tab = fileTab();
@@ -737,7 +763,7 @@ describe("connection-outage suppression", () => {
     cleanup();
   });
 
-  test("a REACHABLE degrade (flush timeout, socket open) still PUTs classically", async () => {
+  test("a REACHABLE degrade holds the PUT for the in-flight push and stamps the freshest token", async () => {
     vi.useFakeTimers();
     const tab = fileTab();
     resetLayout([tab]);
@@ -745,18 +771,35 @@ describe("connection-outage suppression", () => {
     const writeSpy = vi
       .spyOn(api, "write")
       .mockResolvedValue({ mtime: 2, mtime_ns: "999" });
-    const { view, cleanup } = await attached(t, "hello");
+    const { sock, view, cleanup } = await attached(t, "hello");
     type(view, "!");
     await flushMicro();
-    // Flush never confirms; the save funnel degrades the session, but the
-    // socket stays OPEN (reachable server), so a classic PUT is correct.
+    expect(sock.frames("push")).toHaveLength(1);
+    // Total silence through the quiet window: the funnel degrades, but
+    // the push is still on the wire, so the fallback holds the PUT
+    // (single writer) instead of racing it with a stale token.
     const save = saveTab(t);
     await vi.advanceTimersByTimeAsync(DOC_FLUSH_TIMEOUT_MS + 50);
-    await save;
     expect(t.doc?.state).toBe("degraded");
     expect(isDocSavePaused(t)).toBe(false); // reachable -> not suppressed
+    expect(writeSpy).not.toHaveBeenCalled();
+    // The late burst lands inside the settle bound: broadcast + a fresh
+    // flush token, then the push-ok releases the fallback. The PUT must
+    // carry the burst's token, not the attach-time one.
+    const pushes = sock.frames("push");
+    sock.frame({ type: "updates", version: 0, updates: pushes[0]!.updates });
+    sock.frame({ type: "flush", dirty: false, mtime_ns: "7777" });
+    sock.frame({ type: "push-ok", version: 1 });
+    await save;
     expect(writeSpy).toHaveBeenCalledTimes(1);
-    expect(writeSpy.mock.calls[0]![2]).toBe(MTIME);
+    expect(writeSpy.mock.calls[0]![2]).toBe("7777");
+    // Degraded single-writer: the pump stays quiet while the classic
+    // path owns saves (no push for further typing on ANY socket).
+    const healDial = lastSocket();
+    type(view, "x");
+    await flushMicro();
+    expect(sock.frames("push")).toHaveLength(1);
+    expect(healDial.frames("push")).toHaveLength(0);
     cleanup();
   });
 
@@ -821,17 +864,103 @@ describe("save funnel", () => {
     const { view, cleanup } = await attached(t, "hello");
     type(view, "!");
     await flushMicro();
-    // Push never acked; the flush cannot confirm.
+    // Push never acked; the flush cannot confirm. The channel stays
+    // silent through the quiet window AND the fallback settle bound, so
+    // the PUT finally fires with the last token that ever arrived.
     const save = saveTab(t);
     await vi.advanceTimersByTimeAsync(DOC_FLUSH_TIMEOUT_MS + 50);
+    await vi.advanceTimersByTimeAsync(DOC_FALLBACK_SETTLE_MS + 50);
     await save;
     expect(t.doc?.state).toBe("degraded");
     expect(writeSpy).toHaveBeenCalledTimes(1);
-    // CAS token is the authority's last stamped mtime, so the PUT is
-    // CAS-correct against whatever the authority flushed.
     expect(writeSpy.mock.calls[0]![2]).toBe(MTIME);
     expect(t.saved).toBe("hello!");
     expect(t.savedMtimeNs).toBe("999");
+    cleanup();
+  });
+
+  test("a slow-but-flowing funnel never degrades: frames past the quiet window keep it alive", async () => {
+    vi.useFakeTimers();
+    const tab = fileTab();
+    resetLayout([tab]);
+    const t = readTab(tab.id)!;
+    const writeSpy = vi.spyOn(api, "write");
+    const { sock, view, cleanup } = await attached(t, "hello");
+    type(view, "!");
+    await flushMicro();
+    const save = saveTab(t);
+    // High-RTT channel: the push confirm lands only at 3.5s, restarting
+    // the quiet window...
+    await vi.advanceTimersByTimeAsync(3500);
+    await ackLastPush(sock, 0);
+    // ...so 7s total is not a timeout; the authority's flush completes
+    // the save with no degrade and no PUT.
+    await vi.advanceTimersByTimeAsync(3500);
+    sock.frame({ type: "flush", dirty: false, mtime_ns: "4242" });
+    await save;
+    expect(t.doc?.state).toBe("attached");
+    expect(writeSpy).not.toHaveBeenCalled();
+    expect(conflictDialog.open).toBe(false);
+    expect(t.saved).toBe("hello!");
+    expect(t.savedMtimeNs).toBe("4242");
+    cleanup();
+  });
+
+  test("the absolute cap degrades a session that streams frames without confirming", async () => {
+    vi.useFakeTimers();
+    const tab = fileTab();
+    resetLayout([tab]);
+    const t = readTab(tab.id)!;
+    const writeSpy = vi
+      .spyOn(api, "write")
+      .mockResolvedValue({ mtime: 2, mtime_ns: "999" });
+    const { sock, view, cleanup } = await attached(t, "hello");
+    type(view, "!");
+    await flushMicro();
+    await ackLastPush(sock, 0);
+    const save = saveTab(t);
+    // The authority keeps reporting dirty (its own disk flush never
+    // lands clean): constant progress restarts the quiet window every
+    // time, but the absolute cap still ends the wait.
+    for (let elapsed = 0; elapsed < DOC_FLUSH_CAP_MS; elapsed += 2000) {
+      sock.frame({ type: "flush", dirty: true, mtime_ns: MTIME });
+      await vi.advanceTimersByTimeAsync(2000);
+    }
+    await vi.advanceTimersByTimeAsync(DOC_FALLBACK_SETTLE_MS + 50);
+    await save;
+    expect(t.doc?.state).toBe("degraded");
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    cleanup();
+  });
+
+  test("a successful fallback save heals the session back to attached", async () => {
+    vi.useFakeTimers();
+    const tab = fileTab();
+    resetLayout([tab]);
+    const t = readTab(tab.id)!;
+    vi.spyOn(api, "write").mockResolvedValue({ mtime: 9, mtime_ns: "9000000000" });
+    const { sock, view, cleanup } = await attached(t, "hello");
+    type(view, "!");
+    await flushMicro();
+    // Silence degrades the funnel and the settle bound expires
+    // unanswered; the classic PUT lands.
+    const save = saveTab(t);
+    await vi.advanceTimersByTimeAsync(DOC_FLUSH_TIMEOUT_MS + 50);
+    await vi.advanceTimersByTimeAsync(DOC_FALLBACK_SETTLE_MS + 50);
+    await save;
+    expect(t.doc?.state).toBe("degraded");
+    // The successful fallback save triggered a heal: a fresh snapshot
+    // dial that re-adopts the authority and promotes back to attached,
+    // restoring funnel ownership of saves (single writer).
+    const healed = lastSocket();
+    expect(healed).not.toBe(sock);
+    expect(sock.closedByClient).toBe(true);
+    healed.open();
+    healed.frame(snap("hello!", 3, { mtime_ns: "9000000000" }));
+    await flushMicro();
+    expect(t.doc?.state).toBe("attached");
+    expect(isDocSavePaused(t)).toBe(true);
+    expect(t.saved).toBe("hello!");
     cleanup();
   });
 

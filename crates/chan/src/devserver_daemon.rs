@@ -405,7 +405,9 @@ async fn ready_record(
     }
     let client = reqwest::Client::new();
     let url = format!("http://{addr}/api/health");
-    if crate::health_ok(&client, &url).await {
+    // Startup polls loop at 100ms under their own deadline; the short cap
+    // keeps one hung probe from eating the whole readiness budget.
+    if crate::health_ok(&client, &url, Duration::from_secs(2)).await {
         Ok(Some(record))
     } else {
         Ok(None)
@@ -491,13 +493,15 @@ async fn watchdog(record: DaemonRecord) -> Result<()> {
          Ctrl-C to detach.",
         record.pid, record.addr
     );
+    // The subject deliberately omits the pid: the watchdog re-pins to a
+    // restarted daemon's pid, so a pid baked in here would go stale.
     crate::run_health_watchdog(
         &record.addr,
         crate::DaemonLiveness::Chan {
             record_path: daemon_record_path(),
             pid: record.pid,
         },
-        &format!("self-managed daemon (pid {})", record.pid),
+        "self-managed daemon",
     )
     .await
 }

@@ -11,7 +11,6 @@ import {
   buildDocDom,
   buildDocPageElements,
   buildSlidePageDom,
-  DECK_PAGE_BOX_PX,
   DOC_CONTENT_WIDTH_PX,
   DOC_MARGIN_PT,
   docPageGeometry,
@@ -41,9 +40,16 @@ export type ExportMarkdownOptions = {
   styleSource?: Element | null;
 };
 
-/// Test seam: the orchestrator's page rasterizer.
+/// Test seam: the orchestrator's page rasterizer. `box` is the CSS-px
+/// box `root` lays out at; deck pages also pass a per-page scale that
+/// maps their preview-reference layout box onto the fixed A4 bitmap
+/// (documents omit it and raster at the default RASTER_SCALE).
 export type ExportSeams = {
-  rasterize?: (root: HTMLElement, box: PageBoxPx) => Promise<PageSnapshot>;
+  rasterize?: (
+    root: HTMLElement,
+    box: PageBoxPx,
+    opts?: { scale?: number },
+  ) => Promise<PageSnapshot>;
 };
 
 function withPageTimeout<T>(work: Promise<T>, what: string): Promise<T> {
@@ -225,7 +231,7 @@ export async function exportMarkdownToPdf(
   seams: ExportSeams = {},
 ): Promise<Uint8Array> {
   const rasterize =
-    seams.rasterize ?? ((root, box) => snapshotPage(root, box));
+    seams.rasterize ?? ((root, box, opts) => snapshotPage(root, box, opts));
   const { PDFDocument } = await import("pdf-lib");
   const pdf = await PDFDocument.create();
 
@@ -240,7 +246,9 @@ export async function exportMarkdownToPdf(
         styleSource: opts.styleSource,
       });
       const snap = await withPageTimeout(
-        slide.completion.then(() => rasterize(slide.root, DECK_PAGE_BOX_PX)),
+        slide.completion.then(() =>
+          rasterize(slide.root, slide.box, { scale: slide.rasterScale }),
+        ),
         `slide ${page.number} render`,
       );
       const png = await pdf.embedPng(snap.png);

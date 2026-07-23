@@ -63,6 +63,23 @@ describe("renderSlideMarkdown", () => {
     expect(root.textContent).toContain("after gap");
   });
 
+  test("collapses a leading blank run without spacers", () => {
+    // Blank lines above the first content line are page-separator
+    // whitespace retained by the deck split, not authored spacing.
+    const html = renderSlideMarkdown("\n\n# T\n\nbody\n");
+    const root = mount(html);
+    expect(root.querySelectorAll(".chan-slide-blank-line")).toHaveLength(0);
+    expect(root.firstElementChild?.tagName).toBe("H1");
+    expect(root.textContent).toContain("body");
+  });
+
+  test("collapses a trailing blank run without spacers", () => {
+    const html = renderSlideMarkdown("# T\n\nbody\n\n\n");
+    const root = mount(html);
+    expect(root.querySelectorAll(".chan-slide-blank-line")).toHaveLength(0);
+    expect(root.textContent).toContain("body");
+  });
+
   test("keeps blank lines inside fences literal", () => {
     const html = renderSlideMarkdown("```\na\n\n\nb\n```\n");
     const root = mount(html);
@@ -189,6 +206,14 @@ describe("slidePageBoxStyle", () => {
     ).toContain("padding:22px");
     expect(
       slidePageBoxStyle({ widthPx: 2000, heightPx: 1500 }, null, "light"),
+    ).toContain("padding:54px");
+  });
+
+  test("an explicit padding overrides the box-derived clamp", () => {
+    // The deck export resolves the preview's viewport clamp itself and
+    // passes the result, so the box width no longer implies the padding.
+    expect(
+      slidePageBoxStyle({ widthPx: 1238.4, heightPx: 928.8 }, null, "light", 54),
     ).toContain("padding:54px");
   });
 });
