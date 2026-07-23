@@ -1572,6 +1572,9 @@
     font-family: ui-monospace, monospace;
     font-size: 12px;
     white-space: pre-wrap;
+    /* The whole errored face is click-through to the failing source line
+       (diagram.ts placeCaretOnErrorLine); advertise the press. */
+    cursor: pointer;
   }
   /* Actionable error face: the line number leads, the offending
      source line is echoed verbatim, then the renderer's reason follows. */
