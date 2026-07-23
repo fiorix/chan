@@ -23,6 +23,11 @@ current.
 - `CHROME_BIN`: Chrome executable (default: newest
   `~/.cache/puppeteer/chrome/linux-*/chrome-linux64/chrome`).
 - `SMOKE_SKIP_BUILD=1`: skip the web + cargo builds.
+- `SMOKE_ONLY=50,101`: run only the checks whose filenames start with
+  one of the comma-separated prefixes.
+- `TMPDIR`: the throwaway workspace is created under the OS tmpdir; a
+  stray `.git` in `/tmp` makes chan's vcs-parent check refuse it, so
+  point `TMPDIR` at a clean directory when that happens.
 
 Exit code is nonzero when any check fails; skipped checks (a surface
 not yet landed) do not fail the run but are reported in
@@ -47,6 +52,10 @@ intermediate evidence:
 - `ctx.assertNoDuplicateBands(bytes)`: fails when the head band of a
   page also appears on the previous page (pagination duplication).
   Only meaningful for documents whose content does not repeat itself.
+- `ctx.latencyProxy(latencyMs)`: a TCP delay proxy in front of the
+  server (WebSockets included; CDP network emulation cannot delay
+  them). Returns `{ url, setLatency, close }`; the check drives its
+  own page against `url` and must `close()` the handle.
 
 Add a new check by dropping a numbered file into `checks/`; nothing
 else needs editing.
