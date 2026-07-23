@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Terminal mouse-capture toggle.** New `terminal.mouse_capture`
+  server setting (default on) with a checkbox in Settings, Terminal
+  section. Turned off, a full-screen TUI that enables mouse reporting
+  no longer captures the pointer: newly opened terminals strip the
+  DECSET mouse-enable sequences from program output, so click-drag
+  text selection works over the TUI while wheel scrolling, links, and
+  the context menu keep working. Default on is byte-for-byte the
+  previous behavior.
+
 ### Changed
 
 - **Survey `[F]` is a pure "will follow up later" signal.** The
