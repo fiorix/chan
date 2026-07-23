@@ -164,8 +164,12 @@ try {
       execFileP(bin, args, { timeout: 120_000, ...opts }),
   };
 
+  // SMOKE_ONLY=NN runs only the checks whose filename starts with the
+  // given lexical prefix (e.g. SMOKE_ONLY=96). Sort order is LEXICAL,
+  // not numeric: see README.md.
   const checkFiles = readdirSync(join(HERE, "checks"))
     .filter((f) => f.endsWith(".mjs"))
+    .filter((f) => !process.env.SMOKE_ONLY || f.startsWith(process.env.SMOKE_ONLY))
     .sort();
   for (const file of checkFiles) {
     const mod = (await import(pathToFileURL(join(HERE, "checks", file)).href)).default;

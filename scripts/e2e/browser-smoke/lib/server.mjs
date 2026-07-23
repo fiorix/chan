@@ -39,7 +39,10 @@ export function launchServer(chanBin, workspaceDir, log) {
   // workspace registry); the control socket routes through
   // $XDG_RUNTIME_DIR and stays discoverable by pid glob.
   const chanHome = mkdtempSync(join(tmpdir(), "chan-smoke-home-"));
-  const child = spawn(chanBin, ["open", workspaceDir], {
+  // --port 0 binds an ephemeral port (the tokenized URL below carries
+  // it), so a busy default 8787 -- another chan on the box -- never
+  // fails the run.
+  const child = spawn(chanBin, ["open", "--port", "0", workspaceDir], {
     env: {
       ...process.env,
       CHAN_NO_DEVSERVER_HANDOFF: "1",

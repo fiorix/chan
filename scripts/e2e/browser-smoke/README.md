@@ -23,6 +23,8 @@ current.
 - `CHROME_BIN`: Chrome executable (default: newest
   `~/.cache/puppeteer/chrome/linux-*/chrome-linux64/chrome`).
 - `SMOKE_SKIP_BUILD=1`: skip the web + cargo builds.
+- `SMOKE_ONLY=NN`: run only the checks whose filename starts with the
+  given prefix (a lexical filename-prefix match, e.g. `SMOKE_ONLY=96`).
 
 Exit code is nonzero when any check fails; skipped checks (a surface
 not yet landed) do not fail the run but are reported in
@@ -30,7 +32,10 @@ not yet landed) do not fail the run but are reported in
 
 ## Checks
 
-Files under `checks/` run in sorted filename order. Each default-
+Files under `checks/` run in sorted filename order. The sort is
+LEXICAL, not numeric: `100-*` and `110-*` run right after `10-*`, and
+the true tail slots are `96`/`97`/`98` (after `95-*`). Pick a number
+with the lexical order in mind. Each default-
 exports `{ name, run(ctx) }`; `run` throws (or returns) and may record
 intermediate evidence:
 
