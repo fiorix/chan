@@ -57,12 +57,23 @@ pub async fn api_open(
     if window_id.is_empty() {
         return err(StatusCode::BAD_REQUEST, "window_id is required".into());
     }
+    if let Err(error) =
+        crate::control_socket::require_connected_window(&state.session_registry, &window_id)
+    {
+        return err(StatusCode::BAD_REQUEST, error);
+    }
     let target = req.target.trim().to_string();
     if target.is_empty() {
         return err(StatusCode::BAD_REQUEST, "target is required".into());
     }
     if target.starts_with(GRAPH_LINK_PREFIX) {
-        return match crate::control_socket::open_graph_link(&window_id, &target, &state.events_tx) {
+        return match crate::control_socket::open_graph_link(
+            &window_id,
+            &target,
+            None,
+            &state.session_registry,
+            &state.events_tx,
+        ) {
             Ok(message) => ok_message(message),
             Err(error) => err(StatusCode::BAD_REQUEST, error),
         };
@@ -83,6 +94,7 @@ pub async fn api_open(
     // open_path stats, canonicalizes, and may create the file: blocking fs
     // work, so run it off the async worker like the files routes do.
     let self_writes = Arc::clone(&state.self_writes);
+    let session_registry = Arc::clone(&state.session_registry);
     let events_tx = state.events_tx.clone();
     let result = tokio::task::spawn_blocking(move || {
         crate::control_socket::open_path(
@@ -90,6 +102,8 @@ pub async fn api_open(
             &self_writes,
             &window_id,
             &requested,
+            None,
+            &session_registry,
             &events_tx,
         )
     })
@@ -128,7 +142,13 @@ mod tests {
     /// subscription (window commands refuse to queue with zero subscribers)
     /// and the root for seeding files. Mirrors `routes::window`'s
     /// test_router.
-    fn test_router() -> (TempDir, TempDir, broadcast::Receiver<String>, axum::Router) {
+    fn test_router() -> (
+        TempDir,
+        TempDir,
+        broadcast::Receiver<String>,
+        axum::Router,
+        crate::session_presence::SessionGuard,
+    ) {
         let cfg = TempDir::new().unwrap();
         let root = TempDir::new().unwrap();
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -145,6 +165,8 @@ mod tests {
         ));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         std::mem::forget(shutdown_tx);
+        let session_registry = Arc::new(crate::session_presence::SessionRegistry::new());
+        let session_guard = session_registry.join("w-1", true, None).guard;
         let state = Arc::new(AppState {
             library: lib,
             workspace_root: root.path().to_path_buf(),
@@ -178,16 +200,24 @@ mod tests {
             ephemeral_sessions: Mutex::new(HashMap::new()),
             terminal_session_dir: None,
             window_presence: Arc::new(crate::window_presence::WindowPresence::new()),
-            session_registry: Arc::new(crate::session_presence::SessionRegistry::new()),
+            session_registry,
             window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
             window_titles: Arc::new(crate::window_titles::WindowTitles::new()),
             instance_id: "test-instance".to_string(),
         });
-        (cfg, root, events_rx, crate::router(state))
+        (cfg, root, events_rx, crate::router(state), session_guard)
     }
 
     async fn post_open(router: axum::Router, target: &str) -> (StatusCode, serde_json::Value) {
-        let body = serde_json::json!({ "window_id": "w-1", "target": target });
+        post_open_for_window(router, "w-1", target).await
+    }
+
+    async fn post_open_for_window(
+        router: axum::Router,
+        window_id: &str,
+        target: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let body = serde_json::json!({ "window_id": window_id, "target": target });
         let resp = router
             .oneshot(
                 Request::builder()
@@ -211,7 +241,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_directory_queues_open_browser_for_the_posted_window() {
-        let (_cfg, root, mut rx, router) = test_router();
+        let (_cfg, root, mut rx, router, _guard) = test_router();
         std::fs::create_dir(root.path().join("docs")).unwrap();
         let (status, body) = post_open(router, "docs").await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -224,7 +254,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_text_file_queues_open_file() {
-        let (_cfg, root, mut rx, router) = test_router();
+        let (_cfg, root, mut rx, router, _guard) = test_router();
         std::fs::write(root.path().join("notes.md"), "hello\n").unwrap();
         let (status, body) = post_open(router, "notes.md").await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -238,7 +268,7 @@ mod tests {
         // No extension fast-path: the 8 KiB content sniff (the editor's own
         // gate) must decide, so `cs open` parity holds for Makefile-style
         // names.
-        let (_cfg, root, mut rx, router) = test_router();
+        let (_cfg, root, mut rx, router, _guard) = test_router();
         std::fs::write(root.path().join("NOTES"), "plain words\n").unwrap();
         let (status, body) = post_open(router, "NOTES").await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -249,7 +279,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_binary_file_refuses_with_400() {
-        let (_cfg, root, mut rx, router) = test_router();
+        let (_cfg, root, mut rx, router, _guard) = test_router();
         std::fs::write(root.path().join("img.png"), b"\x89PNG\r\n\x1a\n\x00\x00").unwrap();
         let (status, body) = post_open(router, "img.png").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -261,7 +291,7 @@ mod tests {
     async fn open_missing_path_creates_empty_and_opens() {
         // Ruling 6: full `cs open` parity, create + open (the dialog's status
         // row discloses "creates and opens" before submit).
-        let (_cfg, root, mut rx, router) = test_router();
+        let (_cfg, root, mut rx, router, _guard) = test_router();
         let (status, body) = post_open(router, "fresh.md").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let frame = next_frame(&mut rx);
@@ -274,7 +304,7 @@ mod tests {
 
     #[tokio::test]
     async fn relative_target_resolves_against_the_workspace_root() {
-        let (_cfg, root, mut rx, router) = test_router();
+        let (_cfg, root, mut rx, router, _guard) = test_router();
         std::fs::create_dir(root.path().join("sub")).unwrap();
         std::fs::write(root.path().join("sub/x.md"), "x\n").unwrap();
         let (status, body) = post_open(router, "sub/x.md").await;
@@ -284,7 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn absolute_target_inside_the_root_passes_verbatim() {
-        let (_cfg, root, mut rx, router) = test_router();
+        let (_cfg, root, mut rx, router, _guard) = test_router();
         std::fs::write(root.path().join("abs.md"), "x\n").unwrap();
         let abs = root.path().join("abs.md");
         let (status, body) = post_open(router, abs.to_str().unwrap()).await;
@@ -296,7 +326,7 @@ mod tests {
     async fn escaping_targets_refuse_with_400() {
         // A relative `..` walk-out and an absolute path outside the root both
         // die on open_path's canonicalized escape check.
-        let (_cfg, _root, mut rx, router) = test_router();
+        let (_cfg, _root, mut rx, router, _guard) = test_router();
         let (status, body) = post_open(router.clone(), "../outside.md").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "path escapes workspace root");
@@ -308,7 +338,7 @@ mod tests {
 
     #[tokio::test]
     async fn graph_link_forwards_verbatim_as_open_graph_link() {
-        let (_cfg, _root, mut rx, router) = test_router();
+        let (_cfg, _root, mut rx, router, _guard) = test_router();
         let link = "chan://graph?scope=fs&select=notes.md";
         let (status, body) = post_open(router, link).await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -321,7 +351,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_fields_refuse_with_400() {
-        let (_cfg, _root, _rx, router) = test_router();
+        let (_cfg, _root, _rx, router, _guard) = test_router();
         let (status, body) = post_open(router.clone(), "   ").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "target is required");
@@ -338,5 +368,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn offline_target_refuses_while_another_window_is_live() {
+        let (_cfg, root, mut rx, router, _guard) = test_router();
+
+        let (status, body) = post_open_for_window(router, "w-offline", "notes.md").await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"].as_str().is_some_and(
+                |message| message.contains("w-offline") && message.contains("not connected")
+            ),
+            "{body}"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the live w-1 receiver must not make w-offline deliverable"
+        );
+        assert!(
+            !root.path().join("notes.md").exists(),
+            "target validation must happen before missing-file creation"
+        );
     }
 }

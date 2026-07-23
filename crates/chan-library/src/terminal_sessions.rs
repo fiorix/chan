@@ -25,7 +25,7 @@ use serde::Serialize;
 use tokio::sync::{broadcast, watch, Notify};
 use tokio::task::JoinHandle;
 
-use chan_shell::{plan_submitted_input, PtyInputPlan, ResolvedSubmit, SubmitAgent};
+use chan_shell::{plan_submitted_input, PaneSide, PtyInputPlan, ResolvedSubmit, SubmitAgent};
 
 use crate::config::TerminalConfig;
 use crate::time::{now_unix_millis, now_unix_secs};
@@ -286,6 +286,16 @@ pub struct CreateOptions {
     pub env: BTreeMap<String, String>,
 }
 
+/// Best-effort SPA layout coordinates supplied by a terminal WebSocket
+/// attachment. Grouping them keeps the session creation API from growing one
+/// positional argument per layout axis.
+#[derive(Debug, Default)]
+pub struct TerminalPlacement {
+    pub pane_id: Option<String>,
+    pub side: Option<PaneSide>,
+    pub tab_id: Option<String>,
+}
+
 /// Optional per-call overrides for [`Registry::restart`], applied onto the
 /// session's own `restart_options()`. `default()` (every field `None`)
 /// restarts the session exactly as it was spawned.
@@ -321,6 +331,7 @@ pub struct TerminalSessionSummary {
     /// window->pane->tab for `cs term list`. Best-effort: `None` until a browser
     /// attaches, and re-bound on split/move.
     pub pane_id: Option<String>,
+    pub side: Option<PaneSide>,
     pub tab_id: Option<String>,
     pub cwd: Option<PathBuf>,
     /// Logical messages still waiting in this session's write queue. The same
@@ -377,6 +388,8 @@ pub struct FdStoreSessionMeta {
     pub tab_group: Option<String>,
     pub window_id: Option<String>,
     pub pane_id: Option<String>,
+    #[serde(default)]
+    pub side: Option<PaneSide>,
     pub tab_id: Option<String>,
     pub cwd: Option<PathBuf>,
     pub command: Option<String>,
@@ -1118,7 +1131,7 @@ impl Registry {
         since: Option<u64>,
         opts: CreateOptions,
     ) -> Result<AttachHandle, CreateError> {
-        self.get_or_create_for_ws(id, since, opts, None, None, None)
+        self.get_or_create_for_ws(id, since, opts, TerminalPlacement::default(), None)
     }
 
     pub fn get_or_create_for_ws(
@@ -1126,10 +1139,14 @@ impl Registry {
         id: Option<&str>,
         since: Option<u64>,
         opts: CreateOptions,
-        pane_id: Option<String>,
-        tab_id: Option<String>,
+        placement: TerminalPlacement,
         client_generation: Option<u64>,
     ) -> Result<AttachHandle, CreateError> {
+        let TerminalPlacement {
+            pane_id,
+            side,
+            tab_id,
+        } = placement;
         if let Some(id) = id {
             // Honor the client's `since` cursor for a SNAPSHOT RESUME only when
             // its cached generation still matches the live session: a restart
@@ -1152,12 +1169,12 @@ impl Registry {
                 // `close_for_window(source)` reaps only sessions still bound to
                 // the source -- not the one that just moved away.
                 self.rebind_session_window(id, opts.window_id.clone());
-                self.bind_session_pane_tab(id, pane_id, tab_id);
+                self.bind_session_layout(id, pane_id, side, tab_id);
                 return Ok(handle);
             }
         }
         let handle = self.create(opts)?;
-        self.bind_session_pane_tab(handle.id(), pane_id, tab_id);
+        self.bind_session_layout(handle.id(), pane_id, side, tab_id);
         Ok(handle)
     }
 
@@ -1183,8 +1200,14 @@ impl Registry {
     /// `None` on either axis leaves the prior value (a server-spawned session
     /// that never attached has neither). Best-effort -- the ids re-bind on
     /// split/move, so the list shows the last attach's coordinates.
-    fn bind_session_pane_tab(&self, id: &str, pane_id: Option<String>, tab_id: Option<String>) {
-        if pane_id.is_none() && tab_id.is_none() {
+    fn bind_session_layout(
+        &self,
+        id: &str,
+        pane_id: Option<String>,
+        side: Option<PaneSide>,
+        tab_id: Option<String>,
+    ) {
+        if pane_id.is_none() && side.is_none() && tab_id.is_none() {
             return;
         }
         if let Some(session) = self
@@ -1194,8 +1217,34 @@ impl Registry {
             .get(id)
         {
             session.set_pane_id(pane_id);
+            session.set_side(side);
             session.set_tab_id(tab_id);
         }
+    }
+
+    /// Refresh browser-reported layout coordinates without reconnecting the
+    /// terminal WebSocket. Moving a tab between Hybrid sides keeps the mounted
+    /// terminal alive, so its socket sends a placement frame instead.
+    pub fn update_session_layout(
+        &self,
+        id: &str,
+        pane_id: Option<String>,
+        side: Option<PaneSide>,
+        tab_id: Option<String>,
+    ) -> bool {
+        let session = self
+            .sessions
+            .lock()
+            .expect("terminal registry poisoned")
+            .get(id)
+            .cloned();
+        let Some(session) = session else {
+            return false;
+        };
+        session.set_pane_id(pane_id);
+        session.set_side(side);
+        session.set_tab_id(tab_id);
+        true
     }
 
     #[cfg(target_os = "linux")]
@@ -1362,6 +1411,7 @@ impl Registry {
                     .unwrap_or_else(|| DEFAULT_TERMINAL_GROUP.to_string()),
                 window_id: session.window_id(),
                 pane_id: session.pane_id(),
+                side: session.side(),
                 tab_id: session.tab_id(),
                 cwd: session.cwd(),
                 queue_depth: session.queue_depth(),
@@ -2278,12 +2328,14 @@ struct Session {
     /// `close_for_window(source)` reaps only sessions STILL bound to the source
     /// Read via [`Session::window_id`].
     window_id: Mutex<Option<String>>,
-    /// The SPA layout coordinates -- pane id + tab id -- this session was last
+    /// The SPA layout coordinates -- pane id + side + tab id -- this session was last
     /// attached under, reported by the browser on each (re)attach. Interior
     /// mutable and best-effort: they re-bind on split/move and stay `None` for
     /// a session that never attached from a browser (e.g. `cs terminal new`).
-    /// Read via [`Session::pane_id`] / [`Session::tab_id`] for `cs term list`.
+    /// Read via [`Session::pane_id`] / [`Session::side`] / [`Session::tab_id`]
+    /// for `cs term list`.
     pane_id: Mutex<Option<String>>,
+    side: Mutex<Option<PaneSide>>,
     tab_id: Mutex<Option<String>>,
     /// Per-PTY-life epoch stamped at spawn (see [`Registry::generation_counter`]).
     /// A restart mints a new session under the same id with this bumped and the
@@ -2493,6 +2545,7 @@ impl Session {
             tab_group,
             window_id: Mutex::new(window_id),
             pane_id: Mutex::new(None),
+            side: Mutex::new(None),
             tab_id: Mutex::new(None),
             generation,
             workspace_root: config.workspace_root.clone(),
@@ -2686,6 +2739,7 @@ impl Session {
             tab_group: self.tab_group.clone(),
             window_id: self.window_id(),
             pane_id: self.pane_id(),
+            side: self.side(),
             tab_id: self.tab_id(),
             cwd: self.cwd().or_else(|| self.spawn_opts.cwd.clone()),
             command: self.spawn_opts.command.clone(),
@@ -2734,6 +2788,7 @@ impl Session {
             tab_group: meta.tab_group.clone(),
             window_id: Mutex::new(meta.window_id.clone()),
             pane_id: Mutex::new(meta.pane_id.clone()),
+            side: Mutex::new(meta.side),
             tab_id: Mutex::new(meta.tab_id.clone()),
             generation: meta.generation,
             workspace_root: config.workspace_root.clone(),
@@ -3292,6 +3347,11 @@ impl Session {
             .clone()
     }
 
+    /// The Hybrid side this session was last attached under.
+    fn side(&self) -> Option<PaneSide> {
+        *self.side.lock().expect("terminal side poisoned")
+    }
+
     /// The SPA tab id this session was last attached under (`cs term list`).
     fn tab_id(&self) -> Option<String> {
         self.tab_id
@@ -3307,6 +3367,14 @@ impl Session {
             return;
         }
         *self.pane_id.lock().expect("terminal pane_id poisoned") = pane_id;
+    }
+
+    /// Rebind the Hybrid side on attach or a live placement update.
+    fn set_side(&self, side: Option<PaneSide>) {
+        if side.is_none() {
+            return;
+        }
+        *self.side.lock().expect("terminal side poisoned") = side;
     }
 
     /// Rebind the tab id on reattach. A `None` does NOT clear the binding.
@@ -3732,6 +3800,7 @@ mod tests {
             tab_group: tab_group.map(str::to_string),
             window_id: Mutex::new(None),
             pane_id: Mutex::new(None),
+            side: Mutex::new(None),
             tab_id: Mutex::new(None),
             generation: 0,
             workspace_root: PathBuf::from("/"),
@@ -5231,6 +5300,7 @@ mod tests {
             tab_group: None,
             window_id: Some("win-1".to_string()),
             pane_id: None,
+            side: None,
             tab_id: None,
             cwd: None,
             command: None,
@@ -5512,17 +5582,20 @@ mod tests {
     }
 
     #[test]
-    fn session_summaries_carry_the_attached_pane_and_tab() {
-        // cs term list traces window -> pane -> tab; the pane/tab ids ride the
-        // WS attach query and are recorded best-effort on the live session.
+    fn session_summaries_carry_the_attached_pane_side_and_tab() {
+        // cs term list traces window -> pane -> side -> tab; the coordinates
+        // ride the WS attach query and are recorded best-effort.
         let registry = Registry::new(test_config(4096, 4, 60));
         let handle = registry
             .get_or_create_for_ws(
                 None,
                 None,
                 opts_with_window("win-pt"),
-                Some("pane-7".to_string()),
-                Some("tab-3".to_string()),
+                TerminalPlacement {
+                    pane_id: Some("pane-7".to_string()),
+                    side: Some(PaneSide::B),
+                    tab_id: Some("tab-3".to_string()),
+                },
                 None,
             )
             .unwrap();
@@ -5530,6 +5603,7 @@ mod tests {
         let summaries = registry.session_summaries();
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].pane_id.as_deref(), Some("pane-7"));
+        assert_eq!(summaries[0].side, Some(PaneSide::B));
         assert_eq!(summaries[0].tab_id.as_deref(), Some("tab-3"));
 
         // A reattach (split/move into another pane) re-binds the pane id; a
@@ -5540,14 +5614,22 @@ mod tests {
                 Some(&id),
                 Some(0),
                 opts_with_window("win-pt"),
-                Some("pane-9".to_string()),
-                None,
+                TerminalPlacement {
+                    pane_id: Some("pane-9".to_string()),
+                    ..TerminalPlacement::default()
+                },
                 None,
             )
             .unwrap();
         let summaries = registry.session_summaries();
         assert_eq!(summaries[0].pane_id.as_deref(), Some("pane-9"));
+        assert_eq!(summaries[0].side, Some(PaneSide::B));
         assert_eq!(summaries[0].tab_id.as_deref(), Some("tab-3"));
+
+        // A side-only move keeps the terminal socket mounted and refreshes
+        // placement through its client frame.
+        assert!(registry.update_session_layout(&id, None, Some(PaneSide::A), None));
+        assert_eq!(registry.session_summaries()[0].side, Some(PaneSide::A));
         registry.close_all(CloseReason::Shutdown);
     }
 
@@ -5657,8 +5739,7 @@ mod tests {
                 Some(&id),
                 Some(end),
                 opts_with_window("win-gate"),
-                None,
-                None,
+                TerminalPlacement::default(),
                 Some(gen),
             )
             .unwrap();
@@ -5670,8 +5751,7 @@ mod tests {
                 Some(&id),
                 Some(end),
                 opts_with_window("win-gate"),
-                None,
-                None,
+                TerminalPlacement::default(),
                 Some(gen + 1),
             )
             .unwrap();
@@ -5699,8 +5779,7 @@ mod tests {
                 Some(&id),
                 Some(0),
                 opts_with_window("win-b"),
-                None,
-                None,
+                TerminalPlacement::default(),
                 None,
             )
             .expect("reattach");

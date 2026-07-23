@@ -60,7 +60,7 @@ describe("item 2: defaultModeForPath open-mode split", () => {
     // straight away, and any other file is peeked (the server's content
     // gate decides) and refused only when it is binary.
     expect(tabs).toMatch(
-      /export async function openInPane\([\s\S]{1,500}if \(!isEditableText\(path\) && \(await probeOpenableAsText\(path\)\) === "binary"\) \{/,
+      /export async function openInPane\([\s\S]{1,900}if \(!isEditableText\(path\) && \(await probeOpenableAsText\(path\)\) === "binary"\) \{/,
     );
     // The peek maps a 415 (the server's binary refusal) to "binary".
     expect(tabs).toMatch(/probeOpenableAsText[\s\S]{1,1400}status === 415\) return "binary"/);

@@ -72,6 +72,7 @@
     terminalTabGroup,
     terminalTabName,
     setTerminalGroup,
+    type PaneSide,
     type TerminalTab as TerminalTabState,
   } from "../state/tabs.svelte";
   import {
@@ -139,11 +140,13 @@
   let {
     tab,
     paneId,
+    side = "a",
     active,
     focused,
   }: {
     tab: TerminalTabState;
     paneId: string;
+    side?: PaneSide;
     active: boolean;
     focused: boolean;
   } = $props();
@@ -934,6 +937,7 @@
         tabGroup: terminalTabGroup(tab),
         windowId: sessionWindowId(),
         paneId,
+        side,
         tabId: tab.id,
         sessionId: tab.terminalSessionId,
         since: resumeSince,
@@ -1271,6 +1275,22 @@
     const on = tab.broadcastEnabled;
     if (status === "connected") {
       send({ type: "set-broadcast", on });
+    }
+  });
+
+  // A side move keeps this component and PTY socket mounted. Update the
+  // server's best-effort layout attachment without forcing a reconnect.
+  $effect(() => {
+    const currentPaneId = paneId;
+    const currentSide = side;
+    const currentTabId = tab.id;
+    if (status === "connected") {
+      send({
+        type: "placement",
+        pane_id: currentPaneId,
+        side: currentSide,
+        tab_id: currentTabId,
+      });
     }
   });
 

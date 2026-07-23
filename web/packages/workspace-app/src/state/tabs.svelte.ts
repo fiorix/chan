@@ -932,6 +932,14 @@ export async function applyGlobalTerminalName(tab: TerminalTab): Promise<void> {
 /// content the user is currently looking at.
 export type HybridTheme = "dark" | "light";
 export type PaneSide = "a" | "b";
+export type TabDestination = {
+  paneId?: string | null;
+  side?: PaneSide | null;
+};
+export type ResolvedTabDestination = {
+  paneId: string;
+  side: PaneSide;
+};
 
 export type Pane = {
   id: string;
@@ -1058,6 +1066,21 @@ export const layout = $state<{
 
 export type LayoutState = typeof layout;
 
+/// Resolve an optional tab destination against the live layout. An omitted
+/// pane or side uses the current active context. An explicit pane that is not
+/// a live leaf refuses instead of redirecting the tab to the active pane.
+export function resolveTabDestination(
+  destination: TabDestination = {},
+): ResolvedTabDestination | null {
+  const paneId = destination.paneId ?? layout.activePaneId;
+  const node = layout.nodes[paneId];
+  if (!node || node.kind !== "leaf") return null;
+  return {
+    paneId,
+    side: destination.side ?? paneSide(node),
+  };
+}
+
 /// Staged spawn intent for Hybrid Nav spawn keys. The intent queues
 /// here so the pane-mode "Enter commit / Esc discard" contract holds
 /// for every keystroke; `commitPaneMode()` materializes it as part of
@@ -1101,6 +1124,26 @@ export const paneMode = $state<{
   hoverPaneId: null,
   stagedDraftEditors: [],
 });
+
+type PaneModeSettledSink = () => void;
+const paneModeSettledSinks = new Set<PaneModeSettledSink>();
+
+/// Register work that must resume only after Hybrid Nav's draft has either
+/// committed or been discarded. The window-command queue uses this boundary
+/// so a CLI mutation cannot be applied to the live layout and then be erased
+/// by a stale draft commit.
+export function registerPaneModeSettledSink(
+  sink: PaneModeSettledSink,
+): () => void {
+  paneModeSettledSinks.add(sink);
+  return () => {
+    paneModeSettledSinks.delete(sink);
+  };
+}
+
+function notifyPaneModeSettled(): void {
+  for (const sink of paneModeSettledSinks) sink();
+}
 
 /// Single-fire wobble bus. Each pane's entry holds a monotonic
 /// counter; bumping it on a structural event (split / close /
@@ -1625,7 +1668,9 @@ export function reattachTerminalInPane(
 
 export type OpenGraphOptions = Partial<
   Pick<GraphTab, "mode" | "scopeId" | "depth" | "pendingSelectId" | "title" | "filters">
->;
+> & {
+  side?: PaneSide;
+};
 
 const DEFAULT_GRAPH_FILTERS: GraphFilters = {
   link: true,
@@ -1644,7 +1689,7 @@ export function openGraphInActivePane(opts: OpenGraphOptions = {}): GraphTab {
 
 export function openGraphInPane(paneId: string, opts: OpenGraphOptions = {}): GraphTab {
   const p = pane(paneId);
-  const side = paneSide(p);
+  const side = opts.side ?? paneSide(p);
   const tabs = mutablePaneTabs(p, side);
   const mode = opts.mode ?? "semantic";
   const scopeId = opts.scopeId ?? "workspace";
@@ -1679,11 +1724,21 @@ export function openGraphInPane(paneId: string, opts: OpenGraphOptions = {}): Gr
   return tab;
 }
 
-export function openBrowserInActivePane(
-  opts: { select?: string | null } = {},
+export type OpenBrowserOptions = {
+  select?: string | null;
+  side?: PaneSide;
+};
+
+export function openBrowserInActivePane(opts: OpenBrowserOptions = {}): BrowserTab {
+  return openBrowserInPane(layout.activePaneId, opts);
+}
+
+export function openBrowserInPane(
+  paneId: string,
+  opts: OpenBrowserOptions = {},
 ): BrowserTab {
-  const p = activePane();
-  const side = paneSide(p);
+  const p = pane(paneId);
+  const side = opts.side ?? paneSide(p);
   const tabs = mutablePaneTabs(p, side);
   // No dedup. Each press spawns a new browser tab with its own current
   // dir and inspector state.
@@ -2571,6 +2626,8 @@ export async function openInPane(
   path: string,
   opts: OpenFileOptions = {},
 ): Promise<void> {
+  const requestedDestination: TabDestination = { paneId, side: opts.side };
+  if (!resolveTabDestination(requestedDestination)) return;
   // The extension may not be editable, but the file can still be plaintext (an
   // odd suffix, no extension). Peek the content and let the server's gate
   // decide -- matching `cs open`. Editable-by-extension files skip the peek.
@@ -2580,8 +2637,10 @@ export async function openInPane(
     notify(`'${path}' is not a text file`);
     return;
   }
-  const p = pane(paneId);
-  const side = opts.side ?? paneSide(p);
+  const destination = resolveTabDestination(requestedDestination);
+  if (!destination) return;
+  const p = pane(destination.paneId);
+  const side = destination.side;
   const tabs = mutablePaneTabs(p, side);
   const pendingReopen =
     pendingMissingFileReopenTabId === null
@@ -3441,6 +3500,7 @@ export function enterPaneMode(): void {
   paneMode.grabPaneId = null;
   paneMode.hoverPaneId = null;
   paneMode.stagedDraftEditors = [];
+  notifyPaneModeSettled();
 }
 
 /// Mouse-driven Nav entry. `grabPaneId` is the pane the user started
@@ -3497,6 +3557,7 @@ export function commitPaneMode(): void {
   paneMode.grabPaneId = null;
   paneMode.hoverPaneId = null;
   paneMode.stagedDraftEditors = [];
+  notifyPaneModeSettled();
 }
 
 export function cancelPaneMode(): void {
@@ -3508,6 +3569,7 @@ export function cancelPaneMode(): void {
   paneMode.grabPaneId = null;
   paneMode.hoverPaneId = null;
   paneMode.stagedDraftEditors = [];
+  notifyPaneModeSettled();
 }
 
 /// Kill the PTYs of terminals that exist ONLY in the draft. Staged
@@ -3626,10 +3688,18 @@ export function paneModeSwap(direction: Direction): void {
 export function paneModeSwapWith(grabId: string, dropId: string): void {
   const draft = draftLayout();
   if (!draft) return;
-  if (grabId === dropId) return;
-  const a = draft.nodes[grabId];
-  const b = draft.nodes[dropId];
-  if (!a || a.kind !== "leaf" || !b || b.kind !== "leaf") return;
+  swapPaneContentsIn(draft, grabId, dropId);
+}
+
+function swapPaneContentsIn(
+  state: LayoutState,
+  sourcePaneId: string,
+  otherPaneId: string,
+): boolean {
+  if (sourcePaneId === otherPaneId) return false;
+  const a = state.nodes[sourcePaneId];
+  const b = state.nodes[otherPaneId];
+  if (!a || a.kind !== "leaf" || !b || b.kind !== "leaf") return false;
   const aTabs = a.tabs;
   const aActive = a.activeTabId;
   const aBTabs = a.bTabs;
@@ -3648,12 +3718,13 @@ export function paneModeSwapWith(grabId: string, dropId: string): void {
   b.bActiveTabId = aBActive;
   b.side = aSide;
   b.theme = aTheme;
-  draft.activePaneId = b.id;
+  state.activePaneId = b.id;
   // Both panes had their content swapped, so both should
   // wobble so the user's eye tracks where their content
   // landed and which slot now holds whatever was displaced.
   requestPaneWobble(a.id);
   requestPaneWobble(b.id);
+  return true;
 }
 
 function nearestAncestorSplit(
@@ -3693,8 +3764,15 @@ export function paneModeResize(
 export function paneModeEqualize(): void {
   const draft = draftLayout();
   if (!draft) return;
-  const parent = parentOf(draft, draft.activePaneId);
-  if (parent) parent.ratio = 0.5;
+  equalizePaneIn(draft, draft.activePaneId);
+}
+
+function equalizePaneIn(state: LayoutState, paneId: string): boolean {
+  const node = state.nodes[paneId];
+  if (!node || node.kind !== "leaf") return false;
+  const split = parentOf(state, paneId);
+  if (split) split.ratio = 0.5;
+  return true;
 }
 
 /// Insert `newPane` next to `originalId` inside a layout state. Same
@@ -3906,6 +3984,7 @@ export const DASHBOARD_SEARCH_SLIDE = 1;
 export interface OpenDashboardOptions {
   slide?: number;
   autoRotate?: boolean;
+  side?: PaneSide;
 }
 
 /// Spawn a Dashboard tab inside the named pane (live layout). Mirrors
@@ -3917,7 +3996,7 @@ export function openDashboardInPane(
 ): void {
   const node = layout.nodes[paneId];
   if (!node || node.kind !== "leaf") return;
-  const side = paneSide(node);
+  const side = opts?.side ?? paneSide(node);
   const tabs = mutablePaneTabs(node, side);
   const tab: DashboardTab = {
     kind: "dashboard",
@@ -4173,10 +4252,10 @@ export function canSplit(): boolean {
 }
 
 export function splitActive(direction: "row" | "column"): void {
-  splitPane(layout.activePaneId, direction, "after");
+  const paneId = splitPane(layout.activePaneId, direction, "after");
   // Terminal-only windows never have an empty pane: the new split pane (now
   // active) gets its own terminal.
-  if (isTerminalWindow()) openTerminalInActivePane({});
+  if (paneId && isTerminalWindow()) openTerminalInActivePane({});
 }
 
 /// Materialize an R×C grid of panes starting from `startPaneId`.
@@ -4229,9 +4308,10 @@ export function splitPane(
   paneId: string,
   direction: "row" | "column",
   placement: "before" | "after" = "after",
-): void {
-  if (!canSplit()) return;
-  const original = pane(paneId);
+): string | null {
+  if (!canSplit()) return null;
+  const original = layout.nodes[paneId];
+  if (!original || original.kind !== "leaf") return null;
   const newPane: LeafNode = {
     kind: "leaf",
     id: id("pane"),
@@ -4242,6 +4322,7 @@ export function splitPane(
   layout.activePaneId = newPane.id;
   requestPaneWobble(original.id);
   requestPaneWobble(newPane.id);
+  return newPane.id;
 }
 
 function insertSiblingPane(
@@ -4250,28 +4331,7 @@ function insertSiblingPane(
   direction: SplitNode["direction"],
   placement: "before" | "after",
 ): void {
-  const original = pane(originalId);
-  // Find parent of original so we can replace original with a new split.
-  const entries = Object.values(layout.nodes);
-  const parent = entries.find(
-    (n): n is SplitNode => n.kind === "split" && (n.a === original.id || n.b === original.id),
-  );
-  const split: SplitNode = {
-    kind: "split",
-    id: id("split"),
-    direction,
-    a: placement === "before" ? newPane.id : original.id,
-    b: placement === "before" ? original.id : newPane.id,
-    ratio: 0.5,
-  };
-  layout.nodes[newPane.id] = newPane;
-  layout.nodes[split.id] = split;
-  if (parent) {
-    if (parent.a === original.id) parent.a = split.id;
-    else parent.b = split.id;
-  } else {
-    layout.rootId = split.id;
-  }
+  insertSiblingPaneIn(layout, originalId, newPane, direction, placement);
 }
 
 export function setActivePane(paneId: string): void {
@@ -4285,6 +4345,38 @@ export function setActivePane(paneId: string): void {
   const previousActive = current.activePaneId;
   current.activePaneId = paneId;
   if (previousActive !== paneId) requestPaneWobble(paneId);
+}
+
+export function focusPane(paneId: string, side?: PaneSide): boolean {
+  const node = layout.nodes[paneId];
+  if (!node || node.kind !== "leaf") return false;
+  if (side) {
+    node.side = side;
+    const tabs = paneTabs(node, side);
+    if (!paneActiveTabId(node, side) && tabs.length > 0) {
+      setPaneActiveTabId(node, tabs[0]!.id, side);
+    }
+  }
+  setActivePane(paneId);
+  return true;
+}
+
+export function resizePane(paneId: string, delta: number): number | null {
+  const node = layout.nodes[paneId];
+  if (!node || node.kind !== "leaf") return null;
+  const split = parentOf(layout, paneId);
+  if (!split) return 0.5;
+  const grow = split.a === paneId ? delta : -delta;
+  split.ratio = Math.min(0.9, Math.max(0.1, split.ratio + grow));
+  return split.ratio;
+}
+
+export function equalizePane(paneId: string): boolean {
+  return equalizePaneIn(layout, paneId);
+}
+
+export function swapPanes(sourcePaneId: string, otherPaneId: string): boolean {
+  return swapPaneContentsIn(layout, sourcePaneId, otherPaneId);
 }
 
 /// Flip the pane between its A and B tab sides.

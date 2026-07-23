@@ -66,7 +66,7 @@ SEE ALSO:
 "#;
 
 /// `cs dashboard` long help (manpage head).
-pub(crate) const CS_DASHBOARD: &str = r"Open a Dashboard tab in the current window.
+pub(crate) const CS_DASHBOARD: &str = r"Open a Dashboard tab in a window and Hybrid side.
 
 The Dashboard hosts a three-slide carousel: slot 0 Workspace, slot 1
 Search (the live indexing graph), slot 2 About. It auto-advances every
@@ -85,21 +85,25 @@ pub(crate) const CS_DASHBOARD_AFTER: &str = r#"EXAMPLES:
     Opens a Dashboard tab on its default slide, auto-rotating.
   cs dashboard --carousel-index 1 --carousel-off
     Lands on the Search / indexing graph and stays there.
+  cs dashboard --window win-2 --pane pane-4 --side b
+    Queues the Dashboard directly into pane-4 side B of win-2.
 
 SIDE EFFECTS:
-  Queues ONE window command for $CHAN_WINDOW_ID; prints "dashboard
+  Queues ONE command to the exact target window; prints "dashboard
   request queued" on stderr, nothing on stdout. The new tab is
-  appended to the window's active pane, becomes the active tab, and
-  is saved with the session layout.
+  appended at the requested pane and side, or at the active pane and
+  visible side when those coordinates are omitted.
 
 CAUTIONS:
-  Fire-and-forget: it returns as soon as the request is queued, so
-  exit 0 does not prove the tab rendered. Each run appends another
-  Dashboard tab; they stack.
+  The command refuses an offline target instead of claiming it queued.
+  Once accepted it returns before the tab renders. Each run appends
+  another Dashboard tab; they stack.
 
 CAVEATS:
   --carousel-off is per tab: it does not change the workspace-wide
   carousel preference, so other dashboards keep rotating.
+  --window defaults to $CHAN_WINDOW_ID; --pane and --side default to
+  the target window's active pane and visible side at dequeue time.
 
 SEE ALSO:
   cs open, cs pane, cs window list.
@@ -288,7 +292,7 @@ SEE ALSO:
 "#;
 
 /// `cs graph` long help (manpage head).
-pub(crate) const CS_GRAPH: &str = r#"Open the workspace graph in the calling window.
+pub(crate) const CS_GRAPH: &str = r#"Open the workspace graph in a window and Hybrid side.
 
 The graph is the workspace's link structure. Files, contact notes
 included, are the stored nodes; wiki-links, markdown links, #tag and
@@ -302,10 +306,10 @@ Bare `cs graph` opens the graph at workspace scope. With PATH it focuses
 that file or directory; PATH is resolved against the terminal's cwd and
 must be inside the workspace.
 
-The tab is opened in the window named by $CHAN_WINDOW_ID over
-$CHAN_CONTROL_SOCKET. Workspace windows only: a standalone terminal
-refuses with "cs graph is only available in a workspace window; this is
-a standalone terminal."
+The target defaults to $CHAN_WINDOW_ID. `--window`, `--pane`, and
+`--side a|b` address another exact live destination. Workspace windows
+only: a standalone terminal refuses with "cs graph is only available in
+a workspace window; this is a standalone terminal."
 
 Navigating the tab: drag the background to pan, wheel to zoom toward the
 cursor, drag a node to move it. A click selects a node and opens the
@@ -326,6 +330,8 @@ pub(crate) const CS_GRAPH_AFTER: &str = r#"EXAMPLES:
     "graph request queued for notes/design.md"
   cs graph crates/chan-server/src
     focused on a directory
+  cs graph --window win-2 --pane pane-4 --side b
+    workspace graph in pane-4 side B of win-2
   cs open 'chan://graph?s=workspace&m=s'
     reopens a serialized view; the "Copy link to graph" command puts
     such a link on the clipboard
@@ -335,21 +341,21 @@ SIDE EFFECTS:
   workspace. The confirmation line goes to stderr; stdout stays empty.
 
 CAUTIONS:
-  Returns as soon as the window command is dispatched; it does not
-  wait for the tab to render. With no chan window connected it fails
-  with "no chan window is connected to receive this".
+  Refuses unless the exact target window is connected. Once queued it
+  returns without waiting for the tab to render.
 
 CAVEATS:
   Workspace windows only. A PATH outside the workspace root is
   refused; a PATH that does not exist on disk is sent as a file
-  scope.
+  scope. --window defaults to $CHAN_WINDOW_ID; --pane and --side
+  default to the active pane and visible side at dequeue time.
 
 SEE ALSO:
   cs open, cs search.
 "#;
 
 /// `cs open` long help (manpage head).
-pub(crate) const CS_OPEN: &str = r#"Open a path, a directory, or a chan://graph link in this window.
+pub(crate) const CS_OPEN: &str = r#"Open a path, directory, or chan://graph link in a window and side.
 
 A directory -- or no argument at all, which means the terminal's current
 directory -- opens the File Browser there. A text file opens in the
@@ -363,8 +369,10 @@ graph" produces) reopens that graph view instead of touching the
 filesystem.
 
 Workspace windows only, and the path must resolve inside the workspace
-root. The command launcher's "Open" entry runs the same path, so what
-you can type here you can also type there.
+root. The target defaults to $CHAN_WINDOW_ID. `--window`, `--pane`, and
+`--side a|b` select an exact destination. The command launcher's "Open"
+entry runs the same path, so what you can type here you can also type
+there.
 "#;
 
 /// `cs open` examples, side effects, and caveats.
@@ -377,24 +385,27 @@ pub(crate) const CS_OPEN_AFTER: &str = r#"EXAMPLES:
     Opens the File Browser on the terminal's current directory.
   cs open data/rows.csv
     Opens the table view.
+  cs open notes/plan.md --window win-2 --pane pane-4 --side b
+    Opens the note directly in pane-4 side B of win-2.
 
 SIDE EFFECTS:
-  Queues ONE window command for $CHAN_WINDOW_ID and returns; the tab
+  Queues ONE command to the exact target window and returns; the tab
   appears asynchronously. The ack ("open request queued for <rel>")
   goes to stderr; stdout stays empty.
   A path that does not exist is CREATED as an empty file before it is
   opened.
 
 CAUTIONS:
-  Does not wait for the tab: exit 0 means the request was queued, not
-  that the file is on screen. Anything that fails after the queue --
-  a slow window, a closed one -- is invisible here.
+  Refuses an offline target rather than claiming it queued. Exit 0
+  means the connected target accepted the queue, not that the file is
+  on screen. A stale pane id can still fail when the SPA dequeues it.
 
 CAVEATS:
   A file whose bytes are not text is refused with "cannot open binary
   file <rel>". A path outside the workspace root is refused. In a
   standalone terminal the command refuses and points at 'chan open
-  PATH', which loads the path AS a workspace window.
+  PATH', which loads the path AS a workspace window. --pane and --side
+  default to the target's active pane and visible side at dequeue time.
 
 SEE ALSO:
   cs graph, cs search, cs terminal new, chan open; chan dump-skill --topic
@@ -402,61 +413,49 @@ SEE ALSO:
 "#;
 
 /// `cs pane` long help (manpage head).
-pub(crate) const CS_PANE: &str = r"Read or change a window's pane and tab layout from a terminal.
+pub(crate) const CS_PANE: &str = r"Design and inspect a window's pane layout.
 
 DESCRIPTION:
-A window's screen area is a tree of split panes; each pane holds a
-stack of tabs (files, terminals, and the other tab kinds) with one
-active tab, and exactly one pane is active. Bare `cs pane` reports
-that layout: one `## pane <id>` section per pane, the active pane
-flagged, a table of its tabs with `*` on the pane's active tab, and
-a flags column carrying `dirty` (unsaved file) or `live` (running
-terminal). An empty pane prints `(empty)`. `--json [--pretty]`
-emits the raw snapshot instead: an `activePaneId` plus `panes`,
-each with `id`, `active`, `side`, `activeTabId` and its `tabs`.
+A window is a tree of split panes. Every pane is a Hybrid with two
+permanent tab sides, A and B, one visible side, and one active tab per
+side. `cs pane list` reports every pane and both sides, including an
+explicit empty side. Bare `cs pane` is a compatibility alias for list.
+`--json [--pretty]` emits the complete nested snapshot.
 
-The subcommands mutate that layout: focus, split right|bottom,
-resize by a signed ratio delta, close-tab, close-pane, close-all.
-Each is one round-trip to the live window, which applies the op and
-replies with a summary plus any blocked tabs.
+The layout commands are `new right|bottom`, `focus`, `resize`,
+`equalize`, `swap`, and `close`. `new` prints the new pane id, so a
+script can place later tabs there. `focus --side a|b` selects a pane
+and side atomically. `split` and `close-pane` remain compatibility
+aliases; `close-tab` and `close-all` remain available until tab
+lifecycle gets its own command.
 
-The target is the caller's own window ($CHAN_WINDOW_ID) by default,
-or the window owning `--tab-name <name>`, which lets `cs pane` run
-from a context that exports no window id. Workspace windows and
-standalone terminal windows both accept pane commands.
+The target is `--window <id>`, the window owning `--tab-name <name>`,
+or $CHAN_WINDOW_ID in that order. `--window` and `--tab-name`
+conflict. Workspace and standalone terminal windows both accept pane
+commands.
 ";
 
 /// `cs pane` examples, side effects, and caveats.
 pub(crate) const CS_PANE_AFTER: &str = r#"EXAMPLES:
-  cs pane
-    the layout report: one section per pane, `*` on the pane's
-    active tab, `dirty` / `live` in the flags column
+  cs pane list --json --pretty
+    every pane with side A and side B
 
-  cs pane --json --pretty
-    the same snapshot as JSON, for scripting
+  right=$(cs pane new right)
+  cs terminal new --pane "$right" --side a --tab-name @@Runner
+    creates, focuses, and prints the new pane, then queues the
+    terminal directly into side A
 
-  cs pane --tab-name @@Alice
-    the layout of whichever live window owns that tab
+  cs pane focus pane-4 --side b
+    selects pane-4 and its B side in one operation
 
-Build a two-pane layout and put a named terminal in the new pane. A
-scripted split does NOT move focus, and a new terminal always opens
-in the ACTIVE pane, so focus the new pane first:
+  cs pane equalize --pane pane-4
+    sets pane-4's nearest enclosing split to 50/50
 
-  cs pane split right
-    -> "split pane pane-1 right"
-  cs pane --json
-    read the new pane's id out of `panes`
-  cs pane focus pane-4
-    -> "focused pane pane-4"
-  cs terminal new --tab-name @@Runner
-    the terminal lands in pane-4
-  cs pane focus pane-1
-    hand focus back to where you started
+  cs pane swap pane-7 --pane pane-4
+    swaps the complete Hybrid contents of pane-4 and pane-7
 
   cs pane resize 0.1 --pane pane-4
-    grows pane-4 inside its enclosing split; the ratio clamps to
-    0.1..0.9, and a sole pane reports "single pane, nothing to
-    resize"
+    grows pane-4 inside its nearest enclosing split
 
 SIDE EFFECTS:
   A mutation changes the live layout, is visible immediately, and
@@ -466,8 +465,8 @@ SIDE EFFECTS:
   stderr.
 
 CAUTIONS:
-  Every call blocks on the window's reply and gives up after 5s
-  with "no reply from the window (is it open in a browser?)" --
+  Every call blocks on the exact target window's reply and gives up
+  after 5s with "no reply from the window (is it open in a browser?)" --
   which is what a window whose browser tab was closed looks like.
   A close blocked by an unsaved file or a live terminal still
   prints its summary and the blocked tabs, then exits non-zero.
@@ -475,17 +474,16 @@ CAUTIONS:
   confirm dialog is raised on either path.
 
 CAVEATS:
-  With neither $CHAN_WINDOW_ID nor `--tab-name` the command
+  With no --window, $CHAN_WINDOW_ID, or `--tab-name` the command
   refuses: "cs pane needs a target: run inside a chan terminal
   ($CHAN_WINDOW_ID) or pass --tab-name". A `--tab-name` owned by
   more than one live window is refused, not guessed.
   Closing the last pane clears its tabs instead of removing it: a
   window always keeps one pane.
-  Subcommand names infer, but `cs pane c` is ambiguous between
-  close-tab, close-pane and close-all.
+  Pane ids are runtime window-local handles, not durable names.
 
 SEE ALSO:
-  cs terminal new (opens in the active pane), cs window, cs session.
+  cs terminal new (accepts --pane and --side), cs window, cs session.
 "#;
 
 /// `cs paste` long help (manpage head).
@@ -813,7 +811,7 @@ pub(crate) const CS_TERMINAL_LIST: &str = r#"List every live terminal session th
 group.
 
 The markdown table carries one row per session: name, agent,
-session id, window, pane, tab, window kind, window status and
+session id, window, pane, side, tab, window kind, window status and
 cwd. `agent` is the server-derived submit agent (claude / codex /
 gemini / opencode, `-` for a shell session), derived from the
 session's spawn command and CHAN_AGENT spawn env; it is what a
@@ -857,10 +855,11 @@ SEE ALSO:
 "#;
 
 /// `cs terminal new` long help (manpage head).
-pub(crate) const CS_TERMINAL_NEW: &str = r#"Open a new terminal tab in the window running this shell.
+pub(crate) const CS_TERMINAL_NEW: &str = r#"Open a new terminal tab in a window and Hybrid side.
 
-The request is routed to the caller's own window ($CHAN_WINDOW_ID)
-over the /ws event broadcast, and that window opens the tab.
+The target defaults to the caller's own window ($CHAN_WINDOW_ID),
+active pane, and visible side. `--window`, `--pane`, and `--side a|b`
+address another live destination directly.
 --tab-name sets $CHAN_TAB_NAME inside the new terminal and
 --tab-group sets $CHAN_TAB_GROUP ("default" when omitted); those are
 what a later `cs terminal write` / restart / close selects on. The
@@ -878,26 +877,28 @@ pub(crate) const CS_TERMINAL_NEW_AFTER: &str = r#"EXAMPLES:
   cs terminal new notes/ --tab-name @@Alice --tab-group alpha
     a named tab in group alpha, cwd notes/
 
+  cs terminal new --pane pane-4 --side b --tab-name build
+    a named terminal in pane-4 side B
+
   cs terminal new README.md
     a tab whose cwd is README.md's parent directory
 
 SIDE EFFECTS:
-  Opens a tab in the calling window. The one-line ack ("terminal
+  Queues a tab in the target window. The one-line ack ("terminal
   request queued", or "terminal request queued for <path>") goes to
   stderr; stdout stays empty.
 
 CAUTIONS:
-  The ack means the request reached a connected window, not that
-  the tab exists yet: creation is asynchronous. With no window
-  connected at all the command errors instead of claiming it
-  queued.
+  The ack means the request was queued to the exact connected window,
+  not that the tab exists yet: creation is asynchronous. An offline
+  target errors instead of claiming it queued.
 
 CAVEATS:
-  Needs $CHAN_WINDOW_ID as well as $CHAN_CONTROL_SOCKET; without it
-  the command refuses ("this needs $CHAN_WINDOW_ID"). On a
-  standalone terminal a --path is refused with "cs terminal new
-  --path is only available in a workspace window"; drop --path to
-  open a terminal there.
+  Needs --window or $CHAN_WINDOW_ID plus $CHAN_CONTROL_SOCKET; without
+  it the command refuses ("this needs $CHAN_WINDOW_ID"). On a
+  standalone terminal a --path is refused with "cs terminal new --path
+  is only available in a workspace window"; drop --path to open a
+  terminal there.
 
 SEE ALSO:
   cs terminal write (drive the new tab), cs terminal close (tear it down),
@@ -1249,6 +1250,9 @@ picked up as-is while the existing bootstrap.md stays untouched.
 
 With `--script` it writes nothing and spawns nothing: the paste-and-run
 bootstrap script for the saved team goes to stdout.
+
+Without `--script`, `--window`, `--pane`, and `--side a|b` place every
+surfaced member tab at one exact live destination.
 ";
 
 /// `cs terminal team load` examples, side effects, and caveats.
@@ -1258,10 +1262,12 @@ pub(crate) const CS_TERMINAL_TEAM_LOAD_AFTER: &str = r"EXAMPLES:
 
   cs terminal team load teams/alpha --script > boot.sh
     -> emits the bootstrap script for the saved team; spawns nothing
+  cs terminal team load alpha --pane pane-4 --side b
+    -> surfaces every member in pane-4 side B
 
 SIDE EFFECTS:
-  - Spawns one terminal per member bound to the calling window, then
-    pokes each agent member its identity prompt.
+  - Spawns one terminal per member bound to the target window, surfaces
+    it at the requested pane and side, then pokes each agent member.
   - Spawn summary to stderr; `--script` output to stdout.
 
 CAUTIONS:
@@ -1273,6 +1279,8 @@ CAUTIONS:
 
 CAVEATS:
   - Workspace windows only, including `--script`.
+  - Placement flags conflict with `--script`, which does not surface
+    tabs. --window defaults to $CHAN_WINDOW_ID.
   - `load` never regenerates bootstrap.md, so there is no `--brief`
     here. To fold a new brief in, re-run `cs terminal team new` with
     the same dir.
@@ -1298,6 +1306,9 @@ the Roster, which is how a round's operating instructions reach every
 member and survive a later regenerate. `--script` turns the whole thing
 into a preview: the paste-and-run bootstrap script goes to stdout and
 nothing is written or spawned.
+
+Without `--script`, `--window`, `--pane`, and `--side a|b` place every
+surfaced member tab at one exact live destination.
 ";
 
 /// `cs terminal team new` examples, side effects, and caveats.
@@ -1315,12 +1326,16 @@ pub(crate) const CS_TERMINAL_TEAM_NEW_AFTER: &str = r"EXAMPLES:
 
   cat myteam.toml | cs terminal team new alpha --stdin --mcp-env on
     -> config from stdin, team terminals get the chan MCP env vars
+  cs terminal team new alpha --config myteam.toml \
+    --pane pane-4 --side b
+    -> surfaces every member in pane-4 side B
 
 SIDE EFFECTS:
   - Creates/overwrites {dir}/config.toml and {dir}/bootstrap.md and
     creates the tasks/ journals/ followups/ subdirectories.
-  - Spawns one terminal session per member, bound to the calling
-    window, then writes an identity poke to each agent member.
+  - Spawns one terminal session per member, bound to the target
+    window and surfaced at the requested pane and side, then writes an
+    identity poke to each agent member.
   - Spawn summary to stderr; `--script` output to stdout.
 
 CAUTIONS:
@@ -1334,6 +1349,8 @@ CAUTIONS:
 
 CAVEATS:
   - Workspace windows only, including `--script`.
+  - Placement flags conflict with `--script`, which does not surface
+    tabs. --window defaults to $CHAN_WINDOW_ID.
   - The config is rejected before anything is written or spawned unless
     it has 1..=9 members with exactly one `is_lead` and non-empty
     team_name / host_name / host_handle / member handles.

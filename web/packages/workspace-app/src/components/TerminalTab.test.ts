@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 // workers). The vi.mock calls are hoisted above all imports, so this
 // static import still sees the mocked xterm modules.
 import TerminalTab from "./TerminalTab.svelte";
+import TerminalTabTestHarness from "./TerminalTabTestHarness.svelte";
 import terminalSource from "./TerminalTab.svelte?raw";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
@@ -123,12 +124,16 @@ function terminalTab(partial: Partial<TerminalTabState> = {}): TerminalTabState 
   };
 }
 
-async function renderTerminal(tab: TerminalTabState, focused: boolean) {
+async function renderTerminal(
+  tab: TerminalTabState,
+  focused: boolean,
+  side: "a" | "b" = "a",
+) {
   const target = document.createElement("div");
   document.body.append(target);
   const component = mount(TerminalTab, {
     target,
-    props: { tab, paneId: "pane-1", active: true, focused },
+    props: { tab, paneId: "pane-1", side, active: true, focused },
   });
   mounted.push(component);
   await tick();
@@ -144,6 +149,53 @@ function openSocket(): TestWebSocket {
 }
 
 describe("TerminalTab activity frames", () => {
+  test("attaches with side and reports placement on the live socket", async () => {
+    const tab = terminalTab();
+    await renderTerminal(tab, true, "b");
+
+    const socket = openSocket();
+    await tick();
+
+    expect(socket.url).toContain("pane_id=pane-1&side=b&tab_id=term-1");
+    expect(socket.sent).toContain(
+      JSON.stringify({
+        type: "placement",
+        pane_id: "pane-1",
+        side: "b",
+        tab_id: "term-1",
+      }),
+    );
+  });
+
+  test("moves pane and side over the existing PTY socket", async () => {
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(TerminalTabTestHarness, {
+      target,
+      props: { tab: terminalTab() },
+    });
+    mounted.push(component);
+    await tick();
+    await tick();
+    const socket = openSocket();
+    await tick();
+    const connectionCount = sockets.length;
+
+    component.move("pane-2", "b");
+    await tick();
+    await tick();
+
+    expect(sockets).toHaveLength(connectionCount);
+    expect(socket.sent).toContain(
+      JSON.stringify({
+        type: "placement",
+        pane_id: "pane-2",
+        side: "b",
+        tab_id: "term-1",
+      }),
+    );
+  });
+
   test(
     "marks an active tab in an unfocused pane when activity arrives",
     async () => {

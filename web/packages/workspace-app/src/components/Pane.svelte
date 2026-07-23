@@ -123,6 +123,12 @@
     return !paneMode.active && tab.id === visibleActiveTabId && isVisibleTab(tab);
   }
 
+  function sideForTab(tab: Tab): PaneSide {
+    return paneTabs(pane, "b").some((candidate) => candidate.id === tab.id)
+      ? "b"
+      : "a";
+  }
+
   /// Per-row is_dir lookup for the active tree, keyed by path. Workspaces
   /// the File-Browser tab title which needs to render "the parent
   /// dir of the selected file" or "the selected directory" - and
@@ -1548,6 +1554,7 @@
       <TerminalTab
         tab={t}
         paneId={pane.id}
+        side={sideForTab(t)}
         active={isLiveActive(t)}
         focused={isLiveActive(t) && viewLayout.activePaneId === pane.id}
       />
