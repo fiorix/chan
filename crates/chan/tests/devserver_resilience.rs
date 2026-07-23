@@ -1110,6 +1110,126 @@ async fn chan_service_start_status_join_restart_stop() {
     assert!(stdout.contains("not running"), "status output: {stdout}");
 }
 
+/// An attached `--join` must ride out a stalled daemon AND a `--restart`
+/// instead of exiting: the join process IS the desktop connection (the connect
+/// script blocks on it), so a join that dies on a bounce tears down every
+/// workspace window and blocks reconnect until the control terminal is closed
+/// by hand. The watchdog's grace window narrates the outage, re-pins to the
+/// restarted daemon's pid, and a later Ctrl-C still detaches with exit 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chan_service_join_survives_stall_and_restart() {
+    let sandbox = Sandbox::new();
+    let client = http();
+
+    let (port, out) = start_chan_service_on_free_port(&sandbox, None, "start chan service");
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    assert_output_ok(out, "chan service start");
+    wait_devserver_up(&client, addr).await;
+    let first_pid = daemon_pid(&sandbox);
+
+    let mut join_child = sandbox
+        .command()
+        .arg("devserver")
+        .arg("--service=chan")
+        .arg("--join")
+        .args(["--bind", "127.0.0.1"])
+        .args(["--port", &port.to_string()])
+        .spawn()
+        .expect("join chan service");
+    let join_out = Transcript::capture(&mut join_child);
+    let mut join = Server {
+        child: join_child,
+        out: join_out,
+    };
+    join.out
+        .wait_for(
+            "attached to the running self-managed daemon",
+            Duration::from_secs(15),
+        )
+        .await
+        .unwrap_or_else(|| panic!("join never attached:\n{}", join.out.dump()));
+
+    // A stalled daemon (SIGSTOP) stays alive but misses health probes: the
+    // old 3-strike watchdog bailed ~6s in. The grace window narrates the
+    // outage instead, and recovers as soon as SIGCONT lets probes answer.
+    // The stall lasts exactly as long as the narration takes to appear, well
+    // inside the grace.
+    send_signal(first_pid, "STOP");
+    join.out
+        .wait_for(
+            "lost contact with the self-managed daemon",
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap_or_else(|| panic!("join never narrated the stall:\n{}", join.out.dump()));
+    send_signal(first_pid, "CONT");
+    join.out
+        .wait_for("answering again", Duration::from_secs(30))
+        .await
+        .unwrap_or_else(|| panic!("join never narrated recovery:\n{}", join.out.dump()));
+    assert!(
+        join.child.try_wait().expect("try_wait join").is_none(),
+        "join died across the stall:\n{}",
+        join.out.dump()
+    );
+
+    // Restart on the SAME port -- the address the join resolved and probes.
+    // The old pid dies for good, so surviving requires adopting the new one.
+    let out = sandbox
+        .command()
+        .arg("devserver")
+        .arg("--service=chan")
+        .arg("--restart")
+        .args(["--bind", "127.0.0.1"])
+        .args(["--port", &port.to_string()])
+        .output()
+        .expect("restart chan service");
+    assert_output_ok(out, "chan service restart");
+    wait_devserver_up(&client, addr).await;
+    let restarted_pid = daemon_pid(&sandbox);
+    assert_ne!(first_pid, restarted_pid, "restart must spawn a new pid");
+
+    let repin_line = join
+        .out
+        .wait_for("restarted (pid", Duration::from_secs(30))
+        .await
+        .unwrap_or_else(|| panic!("join never adopted the new daemon:\n{}", join.out.dump()));
+    assert!(
+        repin_line.contains(&format!("-> {restarted_pid})")),
+        "re-pin line must adopt the restarted pid {restarted_pid}: {repin_line}"
+    );
+    assert!(
+        join.child.try_wait().expect("try_wait join").is_none(),
+        "join died across the restart:\n{}",
+        join.out.dump()
+    );
+
+    // The re-pinned join still honors the detach contract: Ctrl-C exits 0
+    // and leaves the (new) daemon running.
+    send_signal(join.pid(), "INT");
+    let (status, _elapsed) = wait_exit(&mut join, EXIT_BUDGET)
+        .await
+        .unwrap_or_else(|| panic!("join did not detach:\n{}", join.out.dump()));
+    assert!(
+        status.success(),
+        "join detach exit not clean: {status:?}\n{}",
+        join.out.dump()
+    );
+    assert!(
+        pid_alive(restarted_pid),
+        "daemon pid {restarted_pid} should survive join detach"
+    );
+
+    let out = sandbox
+        .command()
+        .arg("devserver")
+        .arg("--service=chan")
+        .arg("--stop")
+        .output()
+        .expect("stop chan service");
+    assert_output_ok(out, "chan service stop");
+}
+
 /// Re-running start against the same bind returns successfully and leaves the
 /// original daemon in place.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
