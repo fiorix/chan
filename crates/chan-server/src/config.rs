@@ -132,7 +132,7 @@ mod tests {
                 idle_timeout_secs: 60,
                 session_cap: 4,
                 ring_bytes: 4096,
-                scrollback_mb: 100,
+                scrollback_mb: 25,
                 default_term: "tmux-256color".into(),
                 font: chan_library::TerminalFontChoice::SourceCodePro,
                 mcp_env: true,
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn terminal_config_defaults_scrollback_and_term() {
         let cfg = TerminalConfig::default();
-        assert_eq!(cfg.scrollback_mb, 50);
+        assert_eq!(cfg.scrollback_mb, 10);
         assert_eq!(cfg.default_term, "xterm-256color");
     }
 
@@ -215,7 +215,7 @@ mod tests {
         assert_eq!(cfg.terminal.idle_timeout_secs, 600);
         assert_eq!(cfg.terminal.session_cap, 8);
         assert_eq!(cfg.terminal.ring_bytes, 4096);
-        assert_eq!(cfg.terminal.scrollback_mb, 50);
+        assert_eq!(cfg.terminal.scrollback_mb, 10);
         assert_eq!(cfg.terminal.default_term, "xterm-256color");
     }
 
