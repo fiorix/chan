@@ -462,7 +462,7 @@ async fn auth_callback_inner(
             tracing::warn!(error = ?e, user = %user.username, "write_auth_audit (blocked) failed");
         }
         // If the user was bounced here by /desktop/authorize, finish
-        // the flow with a chan:// error redirect so the desktop client
+        // the flow with a loopback error redirect so the desktop client
         // can render its own "blocked" panel.
         if let Some(params) = crate::desktop_authorize::take_pending(&session).await? {
             return Ok(Redirect::to(&crate::desktop_authorize::error_url(
@@ -503,7 +503,7 @@ async fn auth_callback_inner(
             tracing::warn!(error = ?e, user = %user.username, "write_auth_audit (oauth_login deny) failed");
         }
         // Desktop bounce: route the deny back to chan-desktop via the
-        // chan:// fragment so the desktop client can surface it.
+        // loopback callback query so the desktop client can surface it.
         if let Some(params) = crate::desktop_authorize::take_pending(&session).await? {
             return Ok(Redirect::to(&crate::desktop_authorize::error_url(
                 &params,
@@ -1622,7 +1622,7 @@ pub(crate) async fn register_devserver_row(
 }
 
 /// Stable failure-reason tokens for the desktop entry 404 body. A
-/// de-facto desktop API like the `desktop_authorize` `#error=` reasons:
+/// de-facto desktop API like the `desktop_authorize` `?error=` reasons:
 /// the desktop branches on these to narrate the failure, so keep them
 /// short and never repurpose one.
 const ENTRY_REASON_NO_DEVSERVER: &str = "no_devserver";
