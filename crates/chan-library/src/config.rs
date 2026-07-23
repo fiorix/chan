@@ -89,7 +89,7 @@ fn default_terminal_session_cap() -> usize {
 }
 
 fn default_terminal_ring_bytes() -> usize {
-    1 << 20
+    2 << 20
 }
 
 fn default_terminal_scrollback_mb() -> u32 {
