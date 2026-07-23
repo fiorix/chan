@@ -1486,7 +1486,10 @@
      axis -- like the image atom's cursor-in-source / cursor-out-render. A
      hover "View" button opens the pan/zoom overlay. */
   :global(.md-wysiwyg-cm6 .cm-md-diagram-rendered) {
-    margin: 0.4rem 0;
+    /* Vertical spacing is padding, never margin: CM6's height map measures
+       block widgets via getBoundingClientRect (margins excluded), so any
+       vertical margin drifts click-to-caret mapping for everything below. */
+    padding: 0.4rem 0;
     perspective: 1200px;
     /* Mirror the code-block slab's right inset. The CM6 fold gutter eats
        ~18px on the LEFT, so the diagram's left edge already sits flush with
@@ -1723,7 +1726,9 @@
     display: block;
     width: fit-content;
     opacity: 0.55;
-    margin: 0.25em 0;
+    /* padding, not margin: block widgets must not carry vertical margins
+       (CM6 height-map drift breaks click mapping below the widget). */
+    padding: 0.25em 0;
   }
   :global(.md-wysiwyg-cm6 .cm-md-image-wrap[data-editing="true"] img) {
     max-width: 160px !important;
@@ -1835,7 +1840,9 @@
     max-width: 100%;
     min-width: 0;
     overflow-x: auto;
-    margin: 0.5em 0;
+    /* padding, not margin: block widgets must not carry vertical margins
+       (CM6 height-map drift breaks click mapping below the widget). */
+    padding: 0.5em 0;
     contain: inline-size;
   }
   :global(.md-wysiwyg-cm6 .cm-md-table) {
