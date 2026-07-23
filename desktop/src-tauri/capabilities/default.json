@@ -8,7 +8,6 @@
     "core:default",
     "dialog:default",
     "dialog:allow-open",
-    "deep-link:default",
     "opener:default",
     "opener:allow-open-url",
     "updater:default",
