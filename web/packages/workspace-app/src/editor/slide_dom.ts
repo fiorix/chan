@@ -469,14 +469,17 @@ export type SlidePageBox = { widthPx: number; heightPx: number };
 /// Inline style for a slide page at an explicit pixel box (the PDF
 /// raster path). Mirrors the preview page surface - same editor tokens,
 /// fonts, and padding rule - with the viewport-relative pieces resolved
-/// against the box width instead of the viewport.
+/// against the box width instead of the viewport. A caller that lays
+/// out at a known reference viewport passes `paddingPx` with the
+/// preview's clamp resolved against that viewport instead.
 export function slidePageBoxStyle(
   box: SlidePageBox,
   styleSource: Element | null | undefined,
   theme: SlideDomTheme,
+  paddingPx?: number,
 ): string {
   const tokens = editorTokens(styleSource, theme);
-  const padding = Math.max(22, Math.min(54, 0.04 * box.widthPx));
+  const padding = paddingPx ?? Math.max(22, Math.min(54, 0.04 * box.widthPx));
   return [
     tokens.vars,
     "box-sizing:border-box",

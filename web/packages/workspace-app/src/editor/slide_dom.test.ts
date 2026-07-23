@@ -208,6 +208,14 @@ describe("slidePageBoxStyle", () => {
       slidePageBoxStyle({ widthPx: 2000, heightPx: 1500 }, null, "light"),
     ).toContain("padding:54px");
   });
+
+  test("an explicit padding overrides the box-derived clamp", () => {
+    // The deck export resolves the preview's viewport clamp itself and
+    // passes the result, so the box width no longer implies the padding.
+    expect(
+      slidePageBoxStyle({ widthPx: 1238.4, heightPx: 928.8 }, null, "light", 54),
+    ).toContain("padding:54px");
+  });
 });
 
 describe("slide page css", () => {
