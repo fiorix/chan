@@ -435,11 +435,11 @@ mod tests {
         assert_eq!(too_low.scrollback_mb, TERMINAL_SCROLLBACK_MB_MIN);
 
         let in_range = sanitize_terminal_config(TerminalConfig {
-            scrollback_mb: 75,
+            scrollback_mb: 25,
             default_term: "tmux-256color".into(),
             ..TerminalConfig::default()
         });
-        assert_eq!(in_range.scrollback_mb, 75);
+        assert_eq!(in_range.scrollback_mb, 25);
         assert_eq!(in_range.default_term, "tmux-256color");
     }
 

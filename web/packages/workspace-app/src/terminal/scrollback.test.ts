@@ -35,7 +35,7 @@ describe("clampScrollbackMb", () => {
     expect(clampScrollbackMb(SCROLLBACK_MB_MIN)).toBe(SCROLLBACK_MB_MIN);
     expect(clampScrollbackMb(SCROLLBACK_MB_DEFAULT)).toBe(SCROLLBACK_MB_DEFAULT);
     expect(clampScrollbackMb(SCROLLBACK_MB_MAX)).toBe(SCROLLBACK_MB_MAX);
-    expect(clampScrollbackMb(123)).toBe(123);
+    expect(clampScrollbackMb(25)).toBe(25);
   });
 
   it("rounds fractional values to the nearest integer", () => {
@@ -54,10 +54,15 @@ describe("scrollbackLinesFromMb", () => {
     expect(lines).toBe(expected);
   });
 
-  it("default budget gives more lines than the 20k baseline", () => {
-    // Acceptance criterion: users who haven't changed the setting
-    // get strictly better scrollback than the previous hardcoded cap.
-    expect(scrollbackLinesFromMb(SCROLLBACK_MB_DEFAULT)).toBeGreaterThan(20_000);
+  it("default budget converts to ~11k lines at the baseline width", () => {
+    // The 10 MB default is a deliberate budget cut; pin its line
+    // translation so a constant change is a conscious decision here.
+    const expected = Math.floor(
+      (SCROLLBACK_MB_DEFAULT * 1024 * 1024) /
+        (SCROLLBACK_BASELINE_COLS * SCROLLBACK_BYTES_PER_CELL),
+    );
+    expect(scrollbackLinesFromMb(SCROLLBACK_MB_DEFAULT)).toBe(expected);
+    expect(expected).toBeGreaterThan(10_000);
   });
 
   it("scales inversely with column width", () => {

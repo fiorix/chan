@@ -11,13 +11,12 @@
 /// `crates/chan-server/src/config.rs` (`TERMINAL_SCROLLBACK_MB_MIN` /
 /// `TERMINAL_SCROLLBACK_MB_MAX`).
 export const SCROLLBACK_MB_MIN = 10;
-export const SCROLLBACK_MB_MAX = 500;
+export const SCROLLBACK_MB_MAX = 50;
 
 /// Default budget for first-launch users (and for `default_term` clear
-/// fallbacks coming back from the server). Translates to >> 20k lines
-/// at the baseline 80-col width, which strictly improves on the
-/// previous 20k cap.
-export const SCROLLBACK_MB_DEFAULT = 50;
+/// fallbacks coming back from the server). Translates to ~11k lines at
+/// the baseline 80-col width.
+export const SCROLLBACK_MB_DEFAULT = 10;
 
 /// Baseline column width used for the MB -> lines conversion. xterm.js
 /// allocates scrollback per visible row regardless of how wide the

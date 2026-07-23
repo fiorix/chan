@@ -19,7 +19,7 @@ Source: `crates/chan-server/src/config.rs`.
 | `terminal.idle_timeout_secs` | `u64` | `1800` (30 min) | `PATCH /api/server/config` | terminal registry idle prune |
 | `terminal.session_cap` | `usize` | `32` | `PATCH /api/server/config` | terminal registry create-gate |
 | `terminal.ring_bytes` | `usize` | `2 << 20` (2 MB) | `PATCH /api/server/config` | terminal ring buffer alloc |
-| `terminal.scrollback_mb` | `u32` | `50` (clamped `10..=500`) | `PATCH /api/server/config` | SPA xterm.js scrollback line cap |
+| `terminal.scrollback_mb` | `u32` | `10` (clamped `10..=50`) | `PATCH /api/server/config` | SPA xterm.js scrollback line cap |
 | `terminal.default_term` | `String` | `"xterm-256color"` | `PATCH /api/server/config` | PTY spawn `TERM` env |
 | `terminal.font` | `TerminalFontChoice` | `os-default` | `PATCH /api/server/config` + Settings | xterm.js fontFamily chain; `source-code-pro` opts into the bundled font (download flow on non-embed builds) |
 | `terminal.mcp_env` | `bool` | `false` | `PATCH /api/server/config` + Settings | whether new non-team terminals export `CHAN_MCP_*`; per-request `?mcp_env=on` overrides, team spawns use the team config's own `mcp_env` |
