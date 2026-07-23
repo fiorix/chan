@@ -51,7 +51,12 @@ describe("RichPrompt.svelte component", () => {
     expect(richPromptSrc).toMatch(
       /extraExtensions=\{editorExtensions\}/,
     );
-    expect(richPromptSrc).toMatch(/\{ key: "Mod-Enter", run: submitFromView \}/);
+    // stopPropagation: the submit chord must not bubble to the image
+    // widget's document-level View chord (paste image + Mod-Enter used to
+    // submit AND open the fullscreen zoom in one press).
+    expect(richPromptSrc).toMatch(
+      /\{ key: "Mod-Enter", run: submitFromView, stopPropagation: true \}/,
+    );
     expect(richPromptSrc).not.toMatch(/key: "Enter"[\s\S]{1,80}submit/);
   });
 

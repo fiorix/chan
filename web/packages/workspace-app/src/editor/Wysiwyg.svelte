@@ -621,12 +621,18 @@
             // supplies its own higher-precedence submit, so this entry only
             // guards the no-onSubmit file-editor case. The date-pill and fence
             // Mod-Enter entries above are tried first and still win.
+            // stopPropagation only for chat hosts: a submit must not bubble to
+            // the image widget's document-level View chord (a pasted image is
+            // ring-selected, so one press would submit AND open the zoom). The
+            // no-onSubmit file editor keeps bubbling on purpose - the ring +
+            // Mod-Enter View chord is a feature there and relies on it.
             {
               key: "Mod-Enter",
               run: () => {
                 onSubmit?.();
                 return true;
               },
+              stopPropagation: !!onSubmit,
             },
             // `>` and `<` on a block selection (every line fully
             // covered) wrap / unwrap the lines in a `> ` blockquote
@@ -673,6 +679,10 @@
                 onSubmit();
                 return true;
               },
+              // Same containment as Mod-Enter above: a chat send must not
+              // leak to document-level listeners. Inert in file editors
+              // (the run returns false there, and the flag is off).
+              stopPropagation: !!onSubmit,
             },
             // Tab inside a fenced code block inserts a literal tab.
             // Without this the keymap falls through to the browser's

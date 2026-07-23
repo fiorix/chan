@@ -65,3 +65,53 @@ describe("R3: Mod-Enter in a no-onSubmit Wysiwyg host (the file editor)", () => 
     expect(onSubmit).toHaveBeenCalledTimes(1);
   });
 });
+
+// A pasted image leaves its atom ring-selected (caret at the atom edge),
+// and the image widget's document-level keydown listener treats a bubbling
+// Mod-Enter as the View chord (fullscreen zoom). A chat host's submit must
+// consume the chord entirely; the file editor keeps the bubbling on purpose
+// (ring + Mod-Enter View is the feature there).
+describe("Mod-Enter with a ring-selected image", () => {
+  const IMG_DOC = "![](photo.png#w=250)\nhello";
+  const ATOM_END = "![](photo.png#w=250)".length;
+
+  afterEach(() => {
+    for (const el of document.querySelectorAll(".md-image-zoom")) el.remove();
+  });
+
+  async function ringSelect(view: EditorView, content: HTMLElement): Promise<HTMLElement | null> {
+    view.dispatch({ selection: { anchor: ATOM_END } });
+    await tick();
+    await Promise.resolve();
+    return content.closest(".cm-editor")?.querySelector(".cm-md-image-wrap[data-selected]") ?? null;
+  }
+
+  test("chat host: submit does NOT open the image zoom", async () => {
+    const onSubmit = vi.fn();
+    const { content, view } = await mountWysiwyg({
+      value: IMG_DOC,
+      currentPath: "note.md",
+      onSubmit,
+    });
+    await tick();
+    const ring = await ringSelect(view, content);
+    expect(ring, "image atom must be ring-selected before the chord").toBeTruthy();
+    press(content, "Enter", { ctrlKey: true });
+    await tick();
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(document.querySelector(".md-image-zoom")).toBeNull();
+  });
+
+  test("file editor: the ring + Mod-Enter View chord still opens the zoom", async () => {
+    const { content, view } = await mountWysiwyg({
+      value: IMG_DOC,
+      currentPath: "note.md",
+    });
+    await tick();
+    const ring = await ringSelect(view, content);
+    expect(ring, "image atom must be ring-selected before the chord").toBeTruthy();
+    press(content, "Enter", { ctrlKey: true });
+    await tick();
+    expect(document.querySelector(".md-image-zoom")).toBeTruthy();
+  });
+});
