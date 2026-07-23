@@ -1,7 +1,12 @@
 // Test-server lifecycle: seed a throwaway workspace, launch `chan open`
-// on it (devserver handoff disabled), parse the tokenized URL off
-// stderr, and tear everything down (process, registry entry, tempdir)
-// afterwards. Kills are scoped to the exact child pid so concurrent
+// on it (devserver handoff disabled) under a throwaway CHAN_HOME, parse
+// the tokenized URL off stderr, and tear everything down (process,
+// registry entry, tempdirs) afterwards. The sandboxed CHAN_HOME keeps
+// the run hermetic both ways: the host's real ~/.chan preferences
+// cannot leak into check assumptions (a host-side browser_side_panes
+// flip once turned four checks red), and checks that write settings
+// (PATCH /api/config) mutate the throwaway home, never the host's real
+// global config. Kills are scoped to the exact child pid so concurrent
 // agents on one machine never hit each other's servers.
 
 import { spawn, execFile } from "node:child_process";
@@ -30,10 +35,15 @@ export function seedWorkspace() {
 /// child is the server (no daemonize); its pid scopes the teardown and
 /// the control-socket glob.
 export function launchServer(chanBin, workspaceDir, log) {
+  // CHAN_HOME REPLACES ~/.chan wholesale (config, preferences,
+  // workspace registry); the control socket routes through
+  // $XDG_RUNTIME_DIR and stays discoverable by pid glob.
+  const chanHome = mkdtempSync(join(tmpdir(), "chan-smoke-home-"));
   const child = spawn(chanBin, ["open", workspaceDir], {
     env: {
       ...process.env,
       CHAN_NO_DEVSERVER_HANDOFF: "1",
+      CHAN_HOME: chanHome,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -68,7 +78,7 @@ export function launchServer(chanBin, workspaceDir, log) {
     });
   });
 
-  return { child, url, stderrLines };
+  return { child, url, stderrLines, chanHome };
 }
 
 /// The server's pid-scoped control socket: chan-control-<pid>-<rand>.sock
@@ -88,7 +98,7 @@ export function findControlSocket(pid) {
   return null;
 }
 
-export async function teardownServer(chanBin, child, workspaceDir, log) {
+export async function teardownServer(chanBin, child, workspaceDir, chanHome, log) {
   try {
     child.kill("SIGTERM");
     await new Promise((resolve) => {
@@ -105,12 +115,19 @@ export async function teardownServer(chanBin, child, workspaceDir, log) {
     });
   } catch {}
   try {
-    await execFileP(chanBin, ["workspace", "rm", workspaceDir]);
+    // The registry entry lives under the sandboxed CHAN_HOME, so the
+    // removal must run with the same home or it consults the host's.
+    await execFileP(chanBin, ["workspace", "rm", workspaceDir], {
+      env: { ...process.env, CHAN_HOME: chanHome },
+    });
   } catch (e) {
     log?.(`[teardown] workspace rm failed: ${e.message}`);
   }
   try {
     rmSync(workspaceDir, { recursive: true, force: true });
+  } catch {}
+  try {
+    if (chanHome) rmSync(chanHome, { recursive: true, force: true });
   } catch {}
 }
 

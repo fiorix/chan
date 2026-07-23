@@ -48,10 +48,10 @@ async function openDoc(page) {
 
 /// Flip the app theme by setting the same [data-theme] attribute the
 /// store's applyResolvedTheme() maintains, then wait for paint.
-/// Deliberately NOT the settings UI / config PATCH path: the harness
-/// server shares the host's $HOME, so a preferences write would mutate
-/// the host's real global config (and echo back over config_changed,
-/// racing the check). The chan:command bridge no-ops app.theme.* ids
+/// Deliberately NOT the settings UI / config PATCH path: a preferences
+/// write echoes back over config_changed and races the check (the
+/// server's CHAN_HOME is sandboxed, so it would be harmless, just
+/// racy). The chan:command bridge no-ops app.theme.* ids
 /// (catalog-only commands). Every token this check samples (fence slab,
 /// --selection-bg) keys off the attribute directly, so this exercises
 /// the real rendering path without side effects.

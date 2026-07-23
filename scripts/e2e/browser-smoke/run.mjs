@@ -121,6 +121,10 @@ try {
     outDir,
     downloadDir,
     chanBin,
+    // The server's sandboxed CHAN_HOME (throwaway ~/.chan replacement);
+    // checks that exercise settings writes assert against the toml files
+    // in here, never the host's real global config.
+    chanHome: server.chanHome,
     repoRoot: REPO,
     serverPid: server.child.pid,
     get controlSocket() {
@@ -202,7 +206,9 @@ try {
   console.error(`[smoke] fatal: ${e.message}`);
 } finally {
   if (browser) await browser.close().catch(() => {});
-  await teardownServer(chanBin, server.child, workspaceDir, (l) => console.log(l));
+  await teardownServer(chanBin, server.child, workspaceDir, server.chanHome, (l) =>
+    console.log(l),
+  );
 }
 
 results.finishedAt = new Date().toISOString();
