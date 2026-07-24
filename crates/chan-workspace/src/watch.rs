@@ -45,6 +45,7 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
@@ -142,6 +143,35 @@ struct DirRegistration {
 /// Registration requests to the registrar thread. The sender is
 /// cheap to clone; `send` never blocks the notify worker.
 type RegistrationTx = std::sync::mpsc::Sender<DirRegistration>;
+
+/// Minimum spacing between surfaced stream-degradation events.
+/// inotify queue overflow (notify's `EventKind::Other`) can repeat
+/// for the whole storm, and every surfaced ProviderError is a
+/// full-reconcile trigger downstream; one per second is plenty.
+const DEGRADE_MIN_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Throttle state for stream-degradation events, one per WatchHandle.
+/// The first degraded signal always passes; repeats inside
+/// `DEGRADE_MIN_INTERVAL` collapse.
+#[derive(Debug)]
+struct DegradeThrottle(std::sync::Mutex<Option<Instant>>);
+
+impl DegradeThrottle {
+    fn new() -> Self {
+        Self(std::sync::Mutex::new(None))
+    }
+
+    fn allow(&self, now: Instant) -> bool {
+        let mut last = self.0.lock().unwrap();
+        match *last {
+            Some(t) if now.duration_since(t) < DEGRADE_MIN_INTERVAL => false,
+            _ => {
+                *last = Some(now);
+                true
+            }
+        }
+    }
+}
 
 /// Linux: owns the watcher and applies registration requests one at
 /// a time. notify's inotify backend answers `watch()` through the
@@ -410,6 +440,7 @@ impl WatchHandle {
         // silently dropped.
         #[cfg(not(target_os = "linux"))]
         let (reg_tx_for_cb, _reg_rx_unused) = std::sync::mpsc::channel::<DirRegistration>();
+        let throttle_for_cb = Arc::new(DegradeThrottle::new());
         let mut watcher =
             notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
                 Ok(event) => dispatch(
@@ -418,6 +449,7 @@ impl WatchHandle {
                     event,
                     &*cb_clone,
                     &reg_tx_for_cb,
+                    &throttle_for_cb,
                 ),
                 Err(e) => {
                     // notify backend errors (inotify queue overflow,
@@ -508,6 +540,7 @@ fn dispatch(
     event: notify::Event,
     cb: &dyn WatchCallback,
     reg_tx: &RegistrationTx,
+    throttle: &DegradeThrottle,
 ) {
     use notify::EventKind;
     // Computed before the kind match moves `event.kind`: the rename
@@ -519,6 +552,25 @@ fn dispatch(
         EventKind::Modify(notify::event::ModifyKind::Name(_)) => WatchKind::Renamed,
         EventKind::Modify(_) => WatchKind::Modified,
         EventKind::Remove(_) => WatchKind::Removed,
+        // notify 6.1.1 delivers inotify queue overflow as
+        // Ok(EventKind::Other): dropping it here meant the watcher
+        // went silently stale (missed events, no rebuild trigger).
+        // Surface it as ProviderError -- throttled, since overflow
+        // repeats for the whole storm and every ProviderError is a
+        // full-reconcile trigger downstream.
+        EventKind::Other => {
+            if throttle.allow(Instant::now()) {
+                safe_call(
+                    cb,
+                    WatchEvent {
+                        kind: WatchKind::ProviderError,
+                        path: Some("inotify queue overflow / watch stream degraded".to_string()),
+                        to: None,
+                    },
+                );
+            }
+            return;
+        }
         _ => return,
     };
     let mut paths = event.paths.into_iter();
@@ -817,6 +869,7 @@ mod tests {
         let root = PathBuf::from("/workspace");
         let roots = [WatchRoot::workspace(&root)];
         let (reg_tx, _reg_rx) = std::sync::mpsc::channel();
+        let throttle = DegradeThrottle::new();
 
         // A modify under node_modules: dropped, callback never fires.
         dispatch(
@@ -831,6 +884,7 @@ mod tests {
             },
             &cb,
             &reg_tx,
+            &throttle,
         );
         assert!(
             cb.0.lock().unwrap().is_empty(),
@@ -850,10 +904,53 @@ mod tests {
             },
             &cb,
             &reg_tx,
+            &throttle,
         );
         let events = cb.0.lock().unwrap();
         assert_eq!(events.len(), 1, "real note event should be forwarded");
         assert_eq!(events[0].path.as_deref(), Some("notes/today.md"));
+    }
+
+    #[test]
+    fn other_kind_surfaces_throttled_provider_error() {
+        use std::sync::Mutex;
+        struct Collect(Mutex<Vec<WatchEvent>>);
+        impl WatchCallback for Collect {
+            fn on_event(&self, e: WatchEvent) {
+                self.0.lock().unwrap().push(e);
+            }
+        }
+        let cb = Collect(Mutex::new(Vec::new()));
+        let filter = default_filter();
+        let root = PathBuf::from("/workspace");
+        let roots = [WatchRoot::workspace(&root)];
+        let (reg_tx, _reg_rx) = std::sync::mpsc::channel();
+        let throttle = DegradeThrottle::new();
+        let other = || notify::Event {
+            kind: notify::EventKind::Other,
+            paths: vec![],
+            attrs: Default::default(),
+        };
+
+        // First overflow signal: surfaced as ProviderError (the
+        // consumers' full-reconcile trigger).
+        dispatch(&roots, &filter, other(), &cb, &reg_tx, &throttle);
+        // An immediate repeat collapses into the throttle window.
+        dispatch(&roots, &filter, other(), &cb, &reg_tx, &throttle);
+
+        let events = cb.0.lock().unwrap();
+        assert_eq!(events.len(), 1, "repeat overflow must be throttled");
+        assert_eq!(events[0].kind, WatchKind::ProviderError);
+        assert!(events[0].path.as_deref().unwrap_or("").contains("overflow"));
+    }
+
+    #[test]
+    fn degrade_throttle_passes_first_then_collapses_then_passes() {
+        let throttle = DegradeThrottle::new();
+        let t0 = Instant::now();
+        assert!(throttle.allow(t0), "first signal always passes");
+        assert!(!throttle.allow(t0 + DEGRADE_MIN_INTERVAL / 2));
+        assert!(throttle.allow(t0 + DEGRADE_MIN_INTERVAL + Duration::from_millis(1)));
     }
 
     // ---- Linux filtered-registration suite -------------------------
