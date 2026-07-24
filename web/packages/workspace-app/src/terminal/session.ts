@@ -5,8 +5,9 @@ export type TerminalWsPathOpts = {
   tabGroup?: string | null;
   windowId?: string | null;
   /// SPA layout coordinates of the view this terminal is mounted in, sent on
-  /// every (re)attach so `cs terminal list` can trace window -> pane -> tab.
+  /// every (re)attach so `cs terminal list` can trace the complete attachment.
   paneId?: string | null;
+  side?: "a" | "b" | null;
   tabId?: string | null;
   sessionId?: string | null;
   /// Byte cursor to resume a reattach from, when the client primes a cached
@@ -39,6 +40,7 @@ export function terminalWsPath(opts: TerminalWsPathOpts): string {
   // pane+tab); best-effort, so they ride the URL only when known.
   const paneId = opts.paneId?.trim();
   if (paneId) params.set("pane_id", paneId);
+  if (opts.side === "a" || opts.side === "b") params.set("side", opts.side);
   const tabId = opts.tabId?.trim();
   if (tabId) params.set("tab_id", tabId);
   const sessionId = opts.sessionId?.trim();

@@ -289,6 +289,21 @@ impl SessionRegistry {
         &self.reaper_wake
     }
 
+    /// Run a short, non-blocking dispatch while `window_id` has at least one
+    /// live socket. Holding the presence lock across the dispatch closes the
+    /// check-then-send race: the target socket's [`SessionGuard`] cannot drop
+    /// between proving exact presence and enqueueing its frame.
+    pub fn dispatch_if_live<T>(&self, window_id: &str, dispatch: impl FnOnce() -> T) -> Option<T> {
+        let inner = self.lock();
+        let live = inner
+            .participants
+            .get(window_id)
+            .is_some_and(|participant| {
+                participant.sockets > 0 && participant.state == ParticipantState::Live
+            });
+        live.then(dispatch)
+    }
+
     /// Install the library's aggregate change signal so a roster/leader change
     /// wakes the window watch feed. Idempotent set-once; the host calls this
     /// once per tenant right after the builder constructs the registry.
@@ -854,6 +869,25 @@ mod tests {
         // Role is origin-derived: the local reads Leader, the remote Follower.
         assert_eq!(snap.participants[0].role, Role::Leader);
         assert_eq!(snap.participants[1].role, Role::Follower);
+    }
+
+    #[test]
+    fn dispatch_if_live_runs_only_while_the_exact_window_has_a_socket() {
+        let reg = Arc::new(SessionRegistry::new());
+        let other = reg.join("w-other", true, None).guard;
+        let mut calls = 0;
+
+        assert_eq!(reg.dispatch_if_live("w-target", || calls += 1), None);
+        assert_eq!(calls, 0, "another live window is not sufficient");
+
+        let target = reg.join("w-target", true, None).guard;
+        assert_eq!(reg.dispatch_if_live("w-target", || calls += 1), Some(()));
+        assert_eq!(calls, 1);
+
+        drop(target);
+        assert_eq!(reg.dispatch_if_live("w-target", || calls += 1), None);
+        assert_eq!(calls, 1, "a dropped target cannot dispatch during grace");
+        drop(other);
     }
 
     #[test]

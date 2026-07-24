@@ -21,13 +21,13 @@ describe("paneMode state: stagedDraftEditors field", () => {
 
   test("commitPaneMode clears stagedDraftEditors as part of teardown", () => {
     expect(tabs).toMatch(
-      /export function commitPaneMode\(\): void \{[\s\S]{1,1200}paneMode\.stagedDraftEditors = \[\];\s*\n\s*\}/,
+      /export function commitPaneMode\(\): void \{[\s\S]{1,1800}paneMode\.stagedDraftEditors = \[\];\s*notifyPaneModeSettled\(\);\s*\}/,
     );
   });
 
   test("cancelPaneMode clears stagedDraftEditors as part of teardown", () => {
     expect(tabs).toMatch(
-      /export function cancelPaneMode\(\): void \{[\s\S]{1,400}paneMode\.stagedDraftEditors = \[\];\s*\n\s*\}/,
+      /export function cancelPaneMode\(\): void \{[\s\S]{1,600}paneMode\.stagedDraftEditors = \[\];\s*notifyPaneModeSettled\(\);\s*\}/,
     );
   });
 });

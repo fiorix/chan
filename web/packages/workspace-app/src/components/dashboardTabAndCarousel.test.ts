@@ -32,7 +32,7 @@ describe("DashboardTab type + helpers", () => {
 
   test("openDashboardInPane appends a Dashboard tab + activates it", () => {
     expect(tabs).toMatch(
-      /export function openDashboardInPane\(\s*paneId: string,\s*opts\?: OpenDashboardOptions,\s*\): void \{[\s\S]{1,500}const side = paneSide\(node\);[\s\S]{1,160}const tabs = mutablePaneTabs\(node, side\);[\s\S]{1,500}tabs\.push\(tab\);[\s\S]{1,200}setPaneActiveTabId\(node, tab\.id, side\);[\s\S]{1,120}node\.side = side;/,
+      /export function openDashboardInPane\(\s*paneId: string,\s*opts\?: OpenDashboardOptions,\s*\): void \{[\s\S]{1,500}const side = opts\?\.side \?\? paneSide\(node\);[\s\S]{1,160}const tabs = mutablePaneTabs\(node, side\);[\s\S]{1,500}tabs\.push\(tab\);[\s\S]{1,200}setPaneActiveTabId\(node, tab\.id, side\);[\s\S]{1,120}node\.side = side;/,
     );
   });
 

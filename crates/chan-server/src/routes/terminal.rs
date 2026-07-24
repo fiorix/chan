@@ -10,7 +10,7 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Json, Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use chan_shell::{ResolvedSubmit, SubmitAgent};
+use chan_shell::{PaneSide, ResolvedSubmit, SubmitAgent};
 use portable_pty::PtySize;
 use serde::{Deserialize, Serialize};
 
@@ -18,7 +18,7 @@ use crate::signal::now_unix_secs;
 use crate::state::AppState;
 use crate::terminal_sessions::{
     AttachHandle, CloseReason, CreateError, CreateOptions, RestartOverrides, SessionEvent,
-    ALT_SCREEN_ATTACH_PRELUDE,
+    TerminalPlacement, ALT_SCREEN_ATTACH_PRELUDE,
 };
 
 const DEFAULT_COLS: u16 = 80;
@@ -44,6 +44,7 @@ pub struct TerminalQuery {
     /// The SPA layout coordinates of the attaching view, threaded onto the live
     /// session so `cs terminal list` can trace it to its window -> pane -> tab.
     pane_id: Option<String>,
+    side: Option<PaneSide>,
     tab_id: Option<String>,
     /// The session incarnation epoch the client cached its scrollback snapshot
     /// under. The server honors `since` only when it still matches the live
@@ -141,6 +142,17 @@ enum ClientFrame {
     /// the state in the cross-window roster other windows read.
     #[serde(rename = "set-broadcast")]
     SetBroadcast { on: bool },
+    /// Refresh layout coordinates when a mounted terminal tab moves without
+    /// reconnecting its PTY WebSocket.
+    #[serde(rename = "placement")]
+    Placement {
+        #[serde(default)]
+        pane_id: Option<String>,
+        #[serde(default)]
+        side: Option<PaneSide>,
+        #[serde(default)]
+        tab_id: Option<String>,
+    },
     #[serde(rename = "close")]
     Close,
     /// Rich Prompt bubble submit. Unlike `Input` (raw keystrokes
@@ -297,6 +309,7 @@ pub async fn api_terminal_ws(
     let tab_group = query.tab_group.as_deref().and_then(normalize_tab_group);
     let window_id = query.window_id.as_deref().and_then(normalize_window_id);
     let pane_id = query.pane_id.as_deref().and_then(normalize_layout_id);
+    let side = query.side;
     let tab_id = query.tab_id.as_deref().and_then(normalize_layout_id);
     // MCP env is off by default. An explicit `?mcp_env=on|off` query
     // wins (the SPA can force a per-terminal choice); when absent we fall
@@ -344,6 +357,7 @@ pub async fn api_terminal_ws(
         tab_group,
         window_id,
         pane_id,
+        side,
         tab_id,
         generation: query.generation,
         mcp_env,
@@ -548,6 +562,7 @@ struct TerminalWsOptions {
     tab_group: Option<String>,
     window_id: Option<String>,
     pane_id: Option<String>,
+    side: Option<PaneSide>,
     tab_id: Option<String>,
     generation: Option<u64>,
     mcp_env: bool,
@@ -603,8 +618,11 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
         opts.session_id.as_deref(),
         opts.since,
         create_opts,
-        opts.pane_id,
-        opts.tab_id,
+        TerminalPlacement {
+            pane_id: opts.pane_id,
+            side: opts.side,
+            tab_id: opts.tab_id,
+        },
         opts.generation,
     ) {
         Ok(session) => session,
@@ -716,6 +734,18 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                                 // roster broadcaster explicitly.
                                 state.terminal_sessions.notify_roster_change();
                                 state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
+                            }
+                            Ok(ClientFrame::Placement {
+                                pane_id,
+                                side,
+                                tab_id,
+                            }) => {
+                                state.terminal_sessions.update_session_layout(
+                                    session.id(),
+                                    pane_id.and_then(|id| normalize_layout_id(&id)),
+                                    side,
+                                    tab_id.and_then(|id| normalize_layout_id(&id)),
+                                );
                             }
                             Ok(ClientFrame::Close) => {
                                 let id = session.id().to_owned();
@@ -1141,6 +1171,33 @@ mod tests {
             serde_json::from_str::<ClientFrame>(r#"{"type":"ping"}"#),
             Ok(ClientFrame::Ping)
         ));
+    }
+
+    #[test]
+    fn placement_frame_decodes_pane_side_and_tab() {
+        let frame: ClientFrame = serde_json::from_str(
+            r#"{"type":"placement","pane_id":"pane-4","side":"b","tab_id":"tab-7"}"#,
+        )
+        .expect("placement frame");
+        match frame {
+            ClientFrame::Placement {
+                pane_id,
+                side,
+                tab_id,
+            } => {
+                assert_eq!(pane_id.as_deref(), Some("pane-4"));
+                assert_eq!(side, Some(PaneSide::B));
+                assert_eq!(tab_id.as_deref(), Some("tab-7"));
+            }
+            other => panic!("expected placement, got {other:?}"),
+        }
+        assert!(
+            serde_json::from_str::<ClientFrame>(
+                r#"{"type":"placement","pane_id":"pane-4","side":"c"}"#
+            )
+            .is_err(),
+            "unknown Hybrid sides must not be accepted silently"
+        );
     }
 
     // Pins the server -> client `pong` bytes, mirroring ws.rs's

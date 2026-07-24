@@ -2,13 +2,13 @@
 
 ## 1. Problem and scope
 
-chan-shell is the crate behind `cs`, the control client a chan terminal uses to drive the chan-server it is running under. `cs open notes.md`, `cs terminal write`, `cs pane split`, `cs window list`, and `cs terminal survey` all reach the serving process over its control socket and act on the window, the live PTY sessions, or the workspace that process owns. The crate owns BOTH halves of that conversation: the wire contract (the request / response types) AND the client that speaks it. Defining the contract once is the point -- the same `ControlRequest` / `ControlResponse` types are linked by the `cs` client and by chan-server's socket handler, so a tag or field rename moves on both sides in one edit instead of compiling green on one side and breaking every `cs` command at runtime.
+chan-shell is the crate behind `cs`, the control client a chan terminal uses to drive the chan-server it is running under. `cs open notes.md`, `cs terminal write`, `cs pane new right`, `cs window list`, and `cs terminal survey` all reach the serving process over its control socket and act on the window, the live PTY sessions, or the workspace that process owns. The crate owns BOTH halves of that conversation: the wire contract (the request / response types) AND the client that speaks it. Defining the contract once is the point -- the same `ControlRequest` / `ControlResponse` types are linked by the `cs` client and by chan-server's socket handler, so a tag or field rename moves on both sides in one edit instead of compiling green on one side and breaking every `cs` command at runtime.
 
 The second reason the crate exists is packaging: the `chan` binary and chan-desktop both ship `cs`. Lifting the `cs` CLI and transport out of the `chan` binary into chan-shell lets chan-desktop drive the identical `cs` command tree (and the MCP discovery it carries) without a separate `chan` install on PATH.
 
 In scope:
 
-  - The control-socket wire types: `ControlRequest` / `ControlResponse` and the payload types they carry (`PaneOp`, `SurveySpec`, `SurveyReply`, `TeamOp`, `SplitDir`, `Identity`, `ServeKind`, and the shared workspace-search request). serde-only, no transport, no clap, always compiled.
+  - The control-socket wire types: `ControlRequest` / `ControlResponse` and the payload types they carry (`PaneOp`, `PaneSide`, `TabDestination`, `SurveySpec`, `SurveyReply`, `TeamOp`, `SplitDir`, `Identity`, `ServeKind`, and the shared workspace-search request). serde-only, no transport, no clap, always compiled.
   - The `cs` clap surface (`ShellAction` / `TerminalAction` and their subcommand trees) and the `dispatch` that turns each parsed action into one control-socket round-trip.
   - The control-socket transport: connect, write one JSON request line, read one JSON response line, over a per-user Unix-domain socket on unix and a named pipe on windows.
   - The agent submit-chord map: the per-agent PTY byte sequences that make a coding agent submit its compose buffer hands-free, plus the spawn-command -> agent derivation. Compiled even without the client feature, because chan-server's team spawner applies the chord server-side.
@@ -43,8 +43,8 @@ sequenceDiagram
   CS->>U: formatted output + process exit code
 ```
 
-  - The client reads two environment values a chan terminal sets: `$CHAN_CONTROL_SOCKET` (which server to reach) and `$CHAN_WINDOW_ID` (which window to act on). Window-targeting actions (`cs open`, `cs upload`, `cs terminal new`) need both; session-scoped actions (`cs terminal list`, `cs search`, `cs window list`) need only the socket, because the server resolves their target through its own registry.
-  - Most requests return immediately: the server pushes a window command keyed by window id and acks. A few hold the connection open until a reply lands (a SPA layout query, a survey the user must answer, a window-close confirmation dialog). The single-round-trip transport is what makes the dedicated `Timeout` response shape necessary -- a parked request that never gets answered must surface as a typed timeout rather than a dropped connection.
+  - The client reads two environment values a chan terminal sets: `$CHAN_CONTROL_SOCKET` (which server to reach) and `$CHAN_WINDOW_ID` (the default window to act on). Tab openers and `cs pane` can override the default with `--window`; session-scoped actions (`cs terminal list`, `cs search`, `cs window list`) need only the socket, because the server resolves their target through its own registry.
+  - Tab openers return after checking the exact target window is currently connected, then queuing the command; this exact-window check is strictly better than a blind fire-and-forget, but "queued" means queued to a window that was live at the moment of dispatch, not a guaranteed delivery -- a window disconnecting or a lagging receiver at that instant can still miss the frame while another live window keeps the broadcast send returning `Ok`. Pane operations are atomic and blocking: one invocation sends one query or mutation and waits for the SPA result. Surveys and window-close confirmations block in the same way. The single-round-trip transport is what makes the dedicated `Timeout` response shape necessary -- a parked request that never gets answered must surface as a typed timeout rather than a dropped connection.
   - Relative paths are absolutized against the client's cwd before they cross the wire, so `cs open .` and `cs upload sub/` resolve where the user typed them, not where the server runs.
 
 ## 3. The feature split: wire-only vs client
@@ -77,12 +77,12 @@ Rather than enumerate every variant, the requests group into a handful of famili
 ```mermaid
 flowchart TD
   REQ["cs ControlRequest line (tag = type)"] --> MATCH["chan-server handle_request: match the type tag"]
-  MATCH --> F1["window-id keyed push<br/>open / graph / dashboard / terminal new / upload / download"]
+  MATCH --> F1["exact-window queued push<br/>open / graph / dashboard / terminal new"]
   MATCH --> F2["registry-resolved, no window id<br/>terminal write/list/restart/close, search, window list, team, identify"]
   MATCH --> F3["SPA-blocking parked oneshot<br/>pane query/exec, terminal survey"]
   MATCH --> F4["desktop Tauri-bridge lifecycle<br/>window new/open/close/hide"]
   MATCH --> F5["process / tenant teardown<br/>close"]
-  F1 --> T1["require_window_id, then push command<br/>over the window bus to that window id"]
+  F1 --> T1["require exact connected window, then push<br/>optional pane + side destination"]
   F2 --> T2["resolve via terminal / session registry<br/>selected by tab name and group"]
   F3 --> T3["push over window bus, park a oneshot,<br/>hold until the SPA POSTs its reply"]
   F4 --> T4["DesktopBridge dispatch to DesktopWindowOp to Tauri<br/>(standalone chan refuses)"]
@@ -98,9 +98,9 @@ flowchart TD
 
 Each family resolves its target a different way -- window-id push, registry lookup, a parked SPA round-trip, the desktop bridge, or teardown -- and only the SPA-blocking family can answer `Timeout`. The breakdown:
 
-  - Open a UI tab or action in the originating window. Window-id keyed, non-blocking: the server pushes a window command to exactly that window and returns. `cs open` / `cs graph` / `cs dashboard` / `cs terminal new` / `cs upload` / `cs download`.
+  - Open a UI tab in one exact connected window. `cs open`, `cs graph`, `cs dashboard`, `cs terminal new`, and real `cs terminal team new|load` accept the same `--window`, `--pane`, and `--side a|b` coordinates. `TabDestination` omits unspecified pane/side axes so the SPA resolves its active pane and visible side when it dequeues the command. These calls queue one command and return; they do not wait for rendering. Upload and download remain window-id actions without pane placement.
   - Act on or inspect live PTY sessions and tenant state through the server's registry. No window id; selected by tab name and/or group. `cs terminal write` / `list` / `restart` / `close` / `scrollback`, `cs search`, `cs window list`, `cs terminal team`, and `chan ps`'s `Identify`. `cs search` sends `WorkspaceSearch { request }` and renders the typed core result as compact/pretty JSON or sectioned markdown; structured result errors make the command nonzero without changing the JSON payload.
-  - Blocking round-trips to a SPA window's frontend. The layout lives only in the browser, so the server pushes a query / exec over the window bus, parks a oneshot, and holds the connection until the SPA replies. `cs pane` (the read-only layout report and the focus / split / resize / close mutations), and `cs terminal survey` (which blocks until the user answers, defers, or dismisses).
+  - Blocking round-trips to a SPA window's frontend. The layout lives only in the browser, so the server pushes a query / exec over the window bus, parks a oneshot, and holds the connection until the SPA replies. `cs pane list` reports both permanent Hybrid sides, and each canonical command (`new`, `focus`, `resize`, `equalize`, `swap`, `close`, plus `close-tab` and `close-all` for the tab/window-wide closes) is one atomic invocation. The bare query form (no subcommand) stays, and two hidden compatibility aliases remain: `split` (of `new`, kept for parity with `cs window new` and `cs terminal new` rather than preserving any distinct split behavior) and `close-pane` (of `close`). `cs terminal survey` also blocks until the user answers, defers, or dismisses.
   - Desktop window lifecycle through the in-process Tauri bridge the embedded server installs. `cs window new` / `open` / `rm` / `hide`. A standalone `chan open` has no desktop attached and refuses them.
   - Process and tenant teardown. `chan close` sends `Close { path, remove }`; the server decides scope from the path (a standalone serve exits; a multi-tenant host unmounts just that tenant).
 
@@ -115,7 +115,7 @@ Two serde conventions recur because byte-compatibility with the SPA and the serv
 
 ## 5. The control-socket transport
 
-The client transport layer resolves the environment, makes paths absolute, and round-trips one request. `OpenEnv` carries the `($CHAN_WINDOW_ID, $CHAN_CONTROL_SOCKET)` pair a window-targeting action needs; `control_socket_env` resolves just the socket for a session-scoped action. The env lookups are split from the validation (`open_env_from`) so the validation is unit-testable without mutating the process environment.
+The client transport layer resolves the environment, makes paths absolute, and round-trips one request. `OpenEnv` carries the `(window id, $CHAN_CONTROL_SOCKET)` pair a window-targeting action needs; the window id can be explicit `--window` or the `$CHAN_WINDOW_ID` default. `control_socket_env` resolves just the socket for a session-scoped action. The env lookups are split from the validation (`open_env_from`) so the validation is unit-testable without mutating the process environment.
 
 `send_control_request` is platform-neutral over a small `transport` module -- the only `#[cfg]`-split surface. On unix it connects a `UnixStream`; on windows it opens a named-pipe client (retrying `ERROR_PIPE_BUSY` and a momentarily-absent pipe under a bounded deadline so a genuinely-missing server still fails fast). Above that split the protocol is identical: serialize the request, append a newline, write it, half-close the write side, then read one response line. The `\n` frames the request, so the half-close is belt-and-suspenders rather than load-bearing.
 
@@ -153,4 +153,4 @@ The serde wire contract is always compiled and independent of the `client` featu
 
 The submit-chord map is also wire-layer state, not client-only code. chan-server applies the same agent derivation and write splitting that the `cs` client exposes, so server-spawned teams and terminal-side `cs terminal write --submit` stay byte-compatible.
 
-The `client` feature owns the clap surface and transport. Its flag names, `infer_subcommands` behavior, `$CHAN_CONTROL_SOCKET` / `$CHAN_WINDOW_ID` environment contract, path-absolutization before send, and alias detection for `cs` / `chan` are runtime-visible behavior. A control request returning `Timeout` maps to the dedicated survey-timeout exit code; `Ok.message` remains the carrier for formatted text or embedded JSON.
+The `client` feature owns the clap surface and transport. Its flag names, `infer_subcommands` behavior, `$CHAN_CONTROL_SOCKET` / `$CHAN_WINDOW_ID` environment contract, path-absolutization before send, and alias detection for `cs` / `chan` are runtime-visible behavior. All current tab openers share `--window`, `--pane`, and `--side a|b`; team `--script` conflicts with those coordinates because preview mode opens no tabs. `cs pane list` and `cs terminal list` expose side A/B placement, with terminal sessions refreshing their pane/side/tab identity over the live terminal WebSocket when a mounted tab moves. A control request returning `Timeout` maps to the dedicated survey-timeout exit code; `Ok.message` remains the carrier for formatted text or embedded JSON.

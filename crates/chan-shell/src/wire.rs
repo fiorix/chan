@@ -93,15 +93,21 @@ pub enum ControlRequest {
     OpenPath {
         window_id: String,
         path: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<TabDestination>,
     },
     OpenGraphLink {
         window_id: String,
         link: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<TabDestination>,
     },
     OpenGraph {
         window_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<TabDestination>,
     },
     OpenTermNew {
         window_id: String,
@@ -111,6 +117,8 @@ pub enum ControlRequest {
         tab_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tab_group: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<TabDestination>,
     },
     OpenDashboard {
         window_id: String,
@@ -121,6 +129,8 @@ pub enum ControlRequest {
         // future caller omit it without a decode error.
         #[serde(default)]
         carousel_off: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<TabDestination>,
     },
     // Category 1: raise the Inspector upload / download action in the
     // originating window (`cs upload` / `cs download`). `path` is the
@@ -415,6 +425,10 @@ pub enum ControlRequest {
         /// the agents spawn unbound, as before.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         window_id: Option<String>,
+        /// Optional pane-side placement for every surfaced member tab. The
+        /// outer `window_id` remains the window coordinate.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<TabDestination>,
     },
     // Category 5 (process teardown): tear down the server serving `path`,
     // the transport behind `chan close <path>` (and `chan workspace rm`, which
@@ -457,6 +471,26 @@ pub enum PastePrefer {
     Image,
 }
 
+/// One side of a Hybrid pane. Lowercase is the control and terminal wire
+/// vocabulary; the SPA renders uppercase labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "client", derive(clap::ValueEnum))]
+pub enum PaneSide {
+    A,
+    B,
+}
+
+/// Optional coordinates within a target window for a newly surfaced tab.
+/// The outer control request and window-command frame own the window id.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabDestination {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side: Option<PaneSide>,
+}
+
 /// Which `cs terminal team` operation a [`ControlRequest::TerminalTeam`]
 /// carries. A bare snake_case string on the wire, matching the CLI
 /// subcommand names. The explicit `rename_all` pins the wire strings so a
@@ -482,9 +516,13 @@ pub enum TeamOp {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PaneOp {
     /// Make `pane_id` the active (focused) pane.
-    Focus { pane_id: String },
+    Focus {
+        pane_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        side: Option<PaneSide>,
+    },
     /// Split a pane (the active one when `pane_id` is absent), placing the
-    /// new empty pane to the `left` or `bottom`.
+    /// new empty pane to the `right` or `bottom`.
     Split {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pane_id: Option<String>,
@@ -498,6 +536,17 @@ pub enum PaneOp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pane_id: Option<String>,
         delta: f64,
+    },
+    /// Set the pane's nearest enclosing split to an equal 50/50 ratio.
+    Equalize {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane_id: Option<String>,
+    },
+    /// Swap complete Hybrid contents between two pane positions.
+    Swap {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane_id: Option<String>,
+        other_pane_id: String,
     },
     /// Close one tab: `tab_id` in `pane_id` (each defaults to the active
     /// tab / pane). `force` closes past a dirty file / live terminal.
@@ -861,6 +910,7 @@ mod survey_wire_tests {
         let req = ControlRequest::OpenGraphLink {
             window_id: "workspace-aa-0".into(),
             link: "chan://graph?s=dir%3Acrates%2Fchan-tunnel-proto%2Fsrc&m=s".into(),
+            destination: None,
         };
         let v: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(v["type"], "open_graph_link");
@@ -880,6 +930,7 @@ mod survey_wire_tests {
             serde_json::to_value(ControlRequest::OpenGraph {
                 window_id: "workspace-aa-0".into(),
                 path: None,
+                destination: None,
             })
             .unwrap(),
             serde_json::json!({
@@ -891,12 +942,54 @@ mod survey_wire_tests {
             serde_json::to_value(ControlRequest::OpenGraph {
                 window_id: "workspace-aa-0".into(),
                 path: Some("notes/a.md".into()),
+                destination: None,
             })
             .unwrap(),
             serde_json::json!({
                 "type": "open_graph",
                 "window_id": "workspace-aa-0",
                 "path": "notes/a.md"
+            })
+        );
+    }
+
+    #[test]
+    fn tab_destination_omits_absent_axes_and_uses_lowercase_sides() {
+        assert_eq!(
+            serde_json::to_value(TabDestination {
+                pane_id: Some("pane-2".into()),
+                side: None,
+            })
+            .unwrap(),
+            serde_json::json!({"pane_id": "pane-2"})
+        );
+        assert_eq!(
+            serde_json::to_value(TabDestination {
+                pane_id: None,
+                side: Some(PaneSide::A),
+            })
+            .unwrap(),
+            serde_json::json!({"side": "a"})
+        );
+        assert_eq!(
+            serde_json::to_value(ControlRequest::OpenDashboard {
+                window_id: "workspace-aa-0".into(),
+                carousel_index: None,
+                carousel_off: false,
+                destination: Some(TabDestination {
+                    pane_id: Some("pane-2".into()),
+                    side: Some(PaneSide::B),
+                }),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "type": "open_dashboard",
+                "window_id": "workspace-aa-0",
+                "carousel_off": false,
+                "destination": {
+                    "pane_id": "pane-2",
+                    "side": "b"
+                }
             })
         );
     }
@@ -1311,6 +1404,10 @@ mod survey_wire_tests {
             brief_content: Some("# Brief\n\nRepro first.".into()),
             script: true,
             window_id: Some("window-a".into()),
+            destination: Some(TabDestination {
+                pane_id: Some("pane-2".into()),
+                side: Some(PaneSide::B),
+            }),
         };
         let v: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(v["type"], "terminal_team");
@@ -1320,6 +1417,8 @@ mod survey_wire_tests {
         assert_eq!(v["brief_content"], "# Brief\n\nRepro first.");
         assert_eq!(v["script"], true);
         assert_eq!(v["window_id"], "window-a");
+        assert_eq!(v["destination"]["pane_id"], "pane-2");
+        assert_eq!(v["destination"]["side"], "b");
 
         // `load` omits config_toml + brief_content + window_id
         // (skip_serializing_if) and defaults script to false.
@@ -1330,6 +1429,7 @@ mod survey_wire_tests {
             brief_content: None,
             script: false,
             window_id: None,
+            destination: None,
         };
         let v: serde_json::Value = serde_json::to_value(&load).unwrap();
         assert_eq!(v["op"], "load");

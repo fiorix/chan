@@ -34,7 +34,7 @@ describe("explicit-open callers force landAtTop", () => {
 
   test("`cs open` window command", () => {
     expect(store).toMatch(
-      /openInActivePane\(frame\.path, \{ landAtTop: true \}\)/,
+      /openInPane\(destination\.paneId, frame\.path, \{[\s\S]{1,120}landAtTop: true,[\s\S]{1,120}side: destination\.side,/,
     );
   });
 

@@ -43,29 +43,39 @@ import {
   hasGraphTab,
   layout,
   openBrowserInActivePane,
+  openBrowserInPane,
   scheduleMissingFileCheck,
   openGraphInActivePane,
+  openGraphInPane,
   parseGraphLink,
   paneActiveTabId,
   paneSide,
   paneTabs,
   openInActivePane,
+  openInPane,
+  openTerminalInPane,
   openTerminalInActivePane,
-  openDashboardInActivePane,
+  openDashboardInPane,
+  equalizePane,
+  focusPane,
   layoutHasDurableContent,
   layoutHasPersistableStructure,
   layoutHasReattachableTerminal,
   reconcileLayout,
   registerDraftPromotionSink,
+  resizePane,
+  resolveTabDestination,
   restoreLayout,
   serializeLayout,
   selectTabInPane,
-  setActivePane,
   splitPane,
+  swapPanes,
   type BrowserTab,
   type LeafNode,
+  type OpenGraphOptions,
+  type PaneSide,
+  type ResolvedTabDestination,
   type SpawnContext,
-  type SplitNode,
   type Tab,
 } from "./tabs.svelte";
 import { isEditableText } from "./fileTypes";
@@ -879,44 +889,58 @@ export function onWatchEvent(e: unknown): void {
   }
 }
 
+type WindowCommandDestination = {
+  pane_id?: string | null;
+  side?: PaneSide | null;
+};
+
+type DestinationWindowCommand = {
+  destination?: WindowCommandDestination | null;
+};
+
 type WindowCommandFrame =
-  | { type: "window_command"; window_id: string; command: "open_file"; path: string }
-  | {
+  | ({
+      type: "window_command";
+      window_id: string;
+      command: "open_file";
+      path: string;
+    } & DestinationWindowCommand)
+  | ({
       type: "window_command";
       window_id: string;
       command: "open_browser";
       path: string;
       select?: string | null;
       enter?: boolean | null;
-    }
-  | {
+    } & DestinationWindowCommand)
+  | ({
       type: "window_command";
       window_id: string;
       command: "open_graph";
       path?: string | null;
       is_dir?: boolean | null;
-    }
-  | {
+    } & DestinationWindowCommand)
+  | ({
       type: "window_command";
       window_id: string;
       command: "open_graph_link";
       link: string;
-    }
-  | {
+    } & DestinationWindowCommand)
+  | ({
       type: "window_command";
       window_id: string;
       command: "open_term_new";
       cwd?: string | null;
       tab_name?: string | null;
       tab_group?: string | null;
-    }
-  | {
+    } & DestinationWindowCommand)
+  | ({
       type: "window_command";
       window_id: string;
       command: "open_dashboard";
       carousel_index?: number | null;
       carousel_off?: boolean;
-    }
+    } & DestinationWindowCommand)
   | {
       type: "window_command";
       window_id: string;
@@ -966,13 +990,13 @@ type WindowCommandFrame =
       request_id: string;
       op: PaneExecOp;
     }
-  | {
+  | ({
       type: "window_command";
       window_id: string;
       command: "team_spawned";
       group: string;
       members: { tab_name: string; session_id: string }[];
-    }
+    } & DestinationWindowCommand)
   | {
       type: "window_command";
       window_id: string;
@@ -1021,6 +1045,40 @@ type WindowCommandFrame =
   // server targets the affected window's own socket. No payload.
   | { type: "window_command"; window_id: string; command: "window_discarded" }
   | { type: "window_command"; window_id: string; command: "window_hidden" };
+
+function resolveWindowCommandDestination(
+  frame: DestinationWindowCommand,
+): ResolvedTabDestination | null {
+  const raw = (frame as { destination?: unknown }).destination;
+  if (
+    raw !== undefined &&
+    raw !== null &&
+    (typeof raw !== "object" || Array.isArray(raw))
+  ) {
+    setTransientStatus("placement failed: invalid destination");
+    return null;
+  }
+  const destination = raw as WindowCommandDestination | null | undefined;
+  const paneId = destination?.pane_id;
+  if (paneId !== undefined && paneId !== null && (typeof paneId !== "string" || !paneId)) {
+    setTransientStatus("placement failed: invalid pane");
+    return null;
+  }
+  const side = destination?.side;
+  if (side !== undefined && side !== null && side !== "a" && side !== "b") {
+    setTransientStatus("placement failed: side must be a or b");
+    return null;
+  }
+  const resolved = resolveTabDestination({
+    paneId: paneId ?? undefined,
+    side: side ?? undefined,
+  });
+  if (!resolved) {
+    const requestedPane = paneId ?? layout.activePaneId;
+    setTransientStatus(`placement failed: no such pane ${requestedPane}`);
+  }
+  return resolved;
+}
 
 /// A tab's display title for `cs pane`: a file tab's basename, else its
 /// explicit `title`.
@@ -1084,9 +1142,11 @@ function paneByIdOrActive(paneId: string | null | undefined): LeafNode | null {
 /// The `op` payload of a `pane_exec` window_command (internally tagged on
 /// `kind`, mirroring the wire `PaneOp`).
 type PaneExecOp =
-  | { kind: "focus"; pane_id: string }
+  | { kind: "focus"; pane_id: string; side?: PaneSide | null }
   | { kind: "split"; pane_id?: string | null; dir: "right" | "bottom" }
   | { kind: "resize"; pane_id?: string | null; delta: number }
+  | { kind: "equalize"; pane_id?: string | null }
+  | { kind: "swap"; pane_id?: string | null; other_pane_id: string }
   | { kind: "close_tab"; pane_id?: string | null; tab_id?: string | null; force?: boolean }
   | { kind: "close_pane"; pane_id?: string | null; force?: boolean }
   | { kind: "close_all"; force?: boolean };
@@ -1095,6 +1155,8 @@ type PaneExecResult = {
   ok: boolean;
   summary: string;
   blocked: { tab: string; reason: string }[];
+  paneId?: string;
+  activeSide?: PaneSide;
 };
 
 /// Apply a `cs pane` exec op to the live `layout` and return the result the
@@ -1109,41 +1171,75 @@ async function applyPaneExec(op: PaneExecOp): Promise<PaneExecResult> {
     case "focus": {
       const p = paneByIdOrActive(op.pane_id);
       if (!p) return { ok: false, summary: `no such pane ${op.pane_id}`, blocked };
-      setActivePane(p.id);
-      return { ok: true, summary: `focused pane ${p.id}`, blocked };
+      focusPane(p.id, op.side ?? undefined);
+      return {
+        ok: true,
+        summary: `focused pane ${p.id}`,
+        blocked,
+        paneId: p.id,
+        activeSide: paneSide(p),
+      };
     }
     case "split": {
       const p = paneByIdOrActive(op.pane_id);
       if (!p)
         return { ok: false, summary: `no such pane ${op.pane_id ?? layout.activePaneId}`, blocked };
-      const before = paneLeaves().length;
-      // A one-shot `cs pane split` must NOT steal focus to the new empty pane:
-      // splitPane sets activePaneId = newPane (right for the keyboard/UI split,
-      // wrong for a scripted command sent from a terminal). Restore the
-      // sending terminal's pane afterward. `right` puts the new pane to the
-      // right (row/after); `bottom` below (column/after) - matching the wire
-      // SplitDir and the hybrid hamburger.
-      const keepActive = layout.activePaneId;
-      if (op.dir === "right") splitPane(p.id, "row", "after");
-      else splitPane(p.id, "column", "after");
-      layout.activePaneId = keepActive;
-      if (paneLeaves().length > before)
-        return { ok: true, summary: `split pane ${p.id} ${op.dir}`, blocked };
-      return { ok: false, summary: "split limit reached", blocked };
+      const paneId = splitPane(
+        p.id,
+        op.dir === "right" ? "row" : "column",
+        "after",
+      );
+      if (!paneId) return { ok: false, summary: "split limit reached", blocked };
+      if (ui.terminalOnly) openTerminalInPane(paneId);
+      return {
+        ok: true,
+        summary: `split pane ${p.id} ${op.dir}`,
+        blocked,
+        paneId,
+        activeSide: "a",
+      };
     }
     case "resize": {
       const p = paneByIdOrActive(op.pane_id);
       if (!p)
         return { ok: false, summary: `no such pane ${op.pane_id ?? layout.activePaneId}`, blocked };
-      const split = Object.values(layout.nodes).find(
-        (n): n is SplitNode => n.kind === "split" && (n.a === p.id || n.b === p.id),
-      );
-      if (!split) return { ok: true, summary: "single pane, nothing to resize", blocked };
-      // Growing pane `a` raises the ratio; growing pane `b` lowers it. Clamp
-      // so a pane never collapses to nothing.
-      const grow = split.a === p.id ? op.delta : -op.delta;
-      split.ratio = Math.min(0.9, Math.max(0.1, split.ratio + grow));
-      return { ok: true, summary: `resized pane ${p.id} (ratio ${split.ratio.toFixed(2)})`, blocked };
+      const ratio = resizePane(p.id, op.delta);
+      if (ratio === null)
+        return { ok: false, summary: `no such pane ${p.id}`, blocked };
+      if (layout.rootId === p.id)
+        return { ok: true, summary: "single pane, nothing to resize", blocked };
+      return { ok: true, summary: `resized pane ${p.id} (ratio ${ratio.toFixed(2)})`, blocked };
+    }
+    case "equalize": {
+      const p = paneByIdOrActive(op.pane_id);
+      if (!p)
+        return { ok: false, summary: `no such pane ${op.pane_id ?? layout.activePaneId}`, blocked };
+      equalizePane(p.id);
+      return {
+        ok: true,
+        summary: layout.rootId === p.id
+          ? "single pane, nothing to equalize"
+          : `equalized pane ${p.id}`,
+        blocked,
+      };
+    }
+    case "swap": {
+      const source = paneByIdOrActive(op.pane_id);
+      if (!source)
+        return { ok: false, summary: `no such pane ${op.pane_id ?? layout.activePaneId}`, blocked };
+      const other = paneByIdOrActive(op.other_pane_id);
+      if (!other)
+        return { ok: false, summary: `no such pane ${op.other_pane_id}`, blocked };
+      if (!swapPanes(source.id, other.id)) {
+        return { ok: false, summary: "source and destination panes must differ", blocked };
+      }
+      return {
+        ok: true,
+        summary: `swapped panes ${source.id} and ${other.id}`,
+        blocked,
+        paneId: other.id,
+        activeSide: paneSide(other),
+      };
     }
     case "close_tab": {
       const p = paneByIdOrActive(op.pane_id);
@@ -1217,8 +1313,7 @@ async function respondPaneExec(requestId: string, op: PaneExecOp): Promise<void>
       blocked: [],
     };
   }
-  // A layout mutation IS worth persisting (unlike the read-only query).
-  scheduleSessionSave();
+  if (result.ok) scheduleSessionSave();
   try {
     await api.windowReply({ requestId, payload: result });
   } catch {
@@ -1235,17 +1330,32 @@ async function respondPaneExec(requestId: string, op: PaneExecOp): Promise<void>
 async function respondPaneQuery(requestId: string): Promise<void> {
   const panes = Object.values(layout.nodes)
     .filter((n): n is LeafNode => n.kind === "leaf")
-    .map((pane) => ({
-      id: pane.id,
-      active: pane.id === layout.activePaneId,
-      side: paneSide(pane),
-      activeTabId: paneActiveTabId(pane),
-      tabs: paneTabs(pane).map((tab) => paneQueryTab(tab, paneActiveTabId(pane))),
-    }));
+    .map((pane) => {
+      const sideSnapshot = (side: PaneSide) => {
+        const activeTabId = paneActiveTabId(pane, side);
+        return {
+          activeTabId,
+          tabs: paneTabs(pane, side).map((tab) => paneQueryTab(tab, activeTabId)),
+        };
+      };
+      return {
+        id: pane.id,
+        active: pane.id === layout.activePaneId,
+        activeSide: paneSide(pane),
+        sides: {
+          a: sideSnapshot("a"),
+          b: sideSnapshot("b"),
+        },
+      };
+    });
   try {
     await api.windowReply({
       requestId,
-      payload: { activePaneId: layout.activePaneId, panes },
+      payload: {
+        windowId: sessionWindowId(),
+        activePaneId: layout.activePaneId,
+        panes,
+      },
     });
   } catch {
     // Stale/timed-out request id -> the route 404s; nothing to do.
@@ -1413,17 +1523,29 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     return;
   }
   if (frame.command === "open_file" && typeof frame.path === "string") {
+    const destination = resolveWindowCommandDestination(frame);
+    if (!destination) return;
     // `cs open {path}` is an explicit CLI open: land at document top.
-    await openInActivePane(frame.path, { landAtTop: true });
+    await openInPane(destination.paneId, frame.path, {
+      landAtTop: true,
+      side: destination.side,
+    });
     setTransientStatus(`opened ${frame.path}`);
     return;
   }
   if (frame.command === "open_browser" && typeof frame.path === "string") {
+    const destination = resolveWindowCommandDestination(frame);
+    if (!destination) return;
     if (frame.enter === true) {
-      revealPathInBrowser(frame.path, { enter: true, inspectorOpen: true });
+      revealPathInBrowser(frame.path, {
+        enter: true,
+        inspectorOpen: true,
+        destination,
+      });
     } else {
       revealPathInBrowser(typeof frame.select === "string" ? frame.select : frame.path, {
         inspectorOpen: true,
+        destination,
       });
     }
     setTransientStatus(
@@ -1433,19 +1555,23 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     return;
   }
   if (frame.command === "open_graph") {
+    const destination = resolveWindowCommandDestination(frame);
+    if (!destination) return;
     if (typeof frame.path === "string" && frame.path) {
-      if (frame.is_dir) openGraphForDirectory(frame.path);
-      else openGraphForFile(frame.path);
+      if (frame.is_dir) openGraphForDirectory(frame.path, destination);
+      else openGraphForFile(frame.path, destination);
       setTransientStatus(`graph: ${frame.path}`);
     } else {
-      openGraphForWorkspace();
+      openGraphForWorkspace(destination);
       setTransientStatus("opened graph");
     }
     scheduleSessionSave();
     return;
   }
   if (frame.command === "open_graph_link" && typeof frame.link === "string") {
-    if (openGraphFromLink(frame.link)) {
+    const destination = resolveWindowCommandDestination(frame);
+    if (!destination) return;
+    if (openGraphFromLink(frame.link, destination)) {
       setTransientStatus("opened graph link");
     } else {
       setTransientStatus("could not open graph link");
@@ -1453,16 +1579,21 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     return;
   }
   if (frame.command === "open_term_new") {
-    openTerminalInActivePane({
+    const destination = resolveWindowCommandDestination(frame);
+    if (!destination) return;
+    openTerminalInPane(destination.paneId, {
       cwd: typeof frame.cwd === "string" ? frame.cwd : undefined,
       title: typeof frame.tab_name === "string" ? frame.tab_name : undefined,
       group: typeof frame.tab_group === "string" ? frame.tab_group : undefined,
+      side: destination.side,
     });
     setTransientStatus("opened terminal");
     scheduleSessionSave();
     return;
   }
   if (frame.command === "open_dashboard") {
+    const destination = resolveWindowCommandDestination(frame);
+    if (!destination) return;
     // Apply the server's carousel_index and/or carousel_off to the freshly
     // spawned dashboard tab. carouselSlide + autoRotate are stable
     // DashboardTab fields; --carousel-off maps to autoRotate=false.
@@ -1470,9 +1601,10 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
       typeof frame.carousel_index === "number" && frame.carousel_index >= 0
         ? Math.floor(frame.carousel_index)
         : undefined;
-    openDashboardInActivePane({
+    openDashboardInPane(destination.paneId, {
       slide,
       autoRotate: frame.carousel_off === true ? false : undefined,
+      side: destination.side,
     });
     setTransientStatus("opened dashboard");
     scheduleSessionSave();
@@ -1551,7 +1683,13 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     // A CLI `cs terminal team new|load` spawned a team in this window;
     // surface each member by opening a terminal tab attached to its live
     // session.
-    surfaceTeamSpawn(typeof frame.group === "string" ? frame.group : "", frame.members);
+    const destination = resolveWindowCommandDestination(frame);
+    if (!destination) return;
+    surfaceTeamSpawn(
+      typeof frame.group === "string" ? frame.group : "",
+      frame.members,
+      destination,
+    );
     return;
   }
   if (
@@ -1613,14 +1751,16 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
 function surfaceTeamSpawn(
   group: string,
   members: { tab_name: string; session_id: string }[],
+  destination: ResolvedTabDestination,
 ): void {
   let opened = 0;
   for (const m of members) {
     if (!m || typeof m.session_id !== "string" || !m.session_id) continue;
-    openTerminalInActivePane({
+    openTerminalInPane(destination.paneId, {
       sessionId: m.session_id,
       title: typeof m.tab_name === "string" && m.tab_name ? m.tab_name : undefined,
       group: group || undefined,
+      side: destination.side,
     });
     opened += 1;
   }
@@ -3010,6 +3150,17 @@ export const graphReloadSignal = $state<{ nonce: number; paths: string[] }>({
   paths: [],
 });
 
+function openGraphAtDestination(
+  opts: OpenGraphOptions,
+  destination?: ResolvedTabDestination,
+): void {
+  if (destination) {
+    openGraphInPane(destination.paneId, { ...opts, side: destination.side });
+  } else {
+    openGraphInActivePane(opts);
+  }
+}
+
 /** Open the graph overlay, snapping the scope to the active file
  *  when applicable. Idempotent. */
 export function openGraph(): void {
@@ -3047,13 +3198,15 @@ export function openGraphWithContext(ctx: SpawnContext): void {
 
 /** Open the semantic graph for the whole workspace. Workspace scope renders
  *  the full graph, so the depth knob is reset to its neutral value. */
-export function openGraphForWorkspace(): void {
-  const tab = openGraphInActivePane({
+export function openGraphForWorkspace(
+  destination?: ResolvedTabDestination,
+): void {
+  openGraphAtDestination({
     mode: "semantic",
     scopeId: "workspace",
     depth: 1,
     pendingSelectId: null,
-  });
+  }, destination);
   scheduleSessionSave();
 }
 
@@ -3084,13 +3237,16 @@ export function openGraphAtNode(nodeId: string): void {
  *  the entire workspace - matching the user's mental model that
  *  invoking the graph FROM a file means "show me what's around
  *  THIS file". */
-export function openGraphForFile(path: string): void {
-  const tab = openGraphInActivePane({
+export function openGraphForFile(
+  path: string,
+  destination?: ResolvedTabDestination,
+): void {
+  openGraphAtDestination({
     mode: "semantic",
     scopeId: `file:${path}`,
     depth: 1,
     pendingSelectId: path,
-  });
+  }, destination);
   scheduleSessionSave();
 }
 
@@ -3115,13 +3271,16 @@ export function openFsGraphForFile(path: string): void {
  *  GraphPanel resolves the rooted directory straight from the tab's
  *  `dir:<path>` scopeId (synthesizeScope); re-rooting is "graph from
  *  here" / file-browser navigation, not a pane-derived option list. */
-export function openGraphForDirectory(path: string): void {
-  const tab = openGraphInActivePane({
+export function openGraphForDirectory(
+  path: string,
+  destination?: ResolvedTabDestination,
+): void {
+  openGraphAtDestination({
     mode: "semantic",
     scopeId: `dir:${path}`,
     depth: 1,
     pendingSelectId: null,
-  });
+  }, destination);
   scheduleSessionSave();
 }
 
@@ -3225,16 +3384,19 @@ export function openGraphForLanguage(language: string): void {
  *  the editor's link-click handler can fall through to normal handling
  *  on a non-graph href. The serialized selection rides in as
  *  `pendingSelectId` so the re-opened graph lands on the same node. */
-export function openGraphFromLink(link: string): boolean {
+export function openGraphFromLink(
+  link: string,
+  destination?: ResolvedTabDestination,
+): boolean {
   const parsed = parseGraphLink(link);
   if (!parsed) return false;
-  openGraphInActivePane({
+  openGraphAtDestination({
     mode: parsed.mode,
     scopeId: parsed.scopeId,
     depth: parsed.depth,
     filters: parsed.filters,
     pendingSelectId: parsed.selectedNodeId,
-  });
+  }, destination);
   scheduleSessionSave();
   return true;
 }
@@ -3290,7 +3452,11 @@ function focusExistingBrowserTab(): BrowserTab | null {
 /// in File Browser" uses.
 export function revealPathInBrowser(
   path: string,
-  opts: { enter?: boolean; inspectorOpen?: boolean } = {},
+  opts: {
+    enter?: boolean;
+    inspectorOpen?: boolean;
+    destination?: ResolvedTabDestination;
+  } = {},
 ): BrowserTab {
   const parts = path.split("/").filter(Boolean);
   // Directory (`enter`): expand itself + ancestors. File: ancestors only
@@ -3303,7 +3469,13 @@ export function revealPathInBrowser(
     if (acc) expanded.push(acc);
   }
   const isRoot = path === "";
-  const tab = openBrowserInActivePane(isRoot ? {} : { select: path });
+  const browserOpts = {
+    ...(isRoot ? {} : { select: path }),
+    ...(opts.destination ? { side: opts.destination.side } : {}),
+  };
+  const tab = opts.destination
+    ? openBrowserInPane(opts.destination.paneId, browserOpts)
+    : openBrowserInActivePane(browserOpts);
   tab.inspectorOpen = opts.inspectorOpen ?? true;
   tab.showWorkspace = isRoot;
   tab.expanded = expanded.length > 0 ? expanded : undefined;

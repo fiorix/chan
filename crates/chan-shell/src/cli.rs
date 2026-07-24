@@ -22,11 +22,13 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::help;
 
-use crate::control::{absolutize, control_socket_env, open_env, send_control_request};
+use crate::control::{
+    absolutize, control_socket_env, open_env, open_env_from, send_control_request, OpenEnv,
+};
 use crate::submit::SubmitAgent;
 use crate::wire::{
-    ControlRequest, PaneOp, PastePrefer, SplitDir, SurveySpec, TeamOp, TermWriteSubmit,
-    GRAPH_LINK_PREFIX, MAX_CLIPBOARD_BYTES,
+    ControlRequest, PaneOp, PaneSide, PastePrefer, SplitDir, SurveySpec, TabDestination, TeamOp,
+    TermWriteSubmit, GRAPH_LINK_PREFIX, MAX_CLIPBOARD_BYTES,
 };
 
 /// What `cs` is and what it needs to work. Consts rather than doc
@@ -55,8 +57,8 @@ Every chan-spawned terminal carries these. Read them; do not set them.
   CHAN_CONTROL_SOCKET   the serving chan-server's control socket. Every
                         `cs` command needs it.
   CHAN_WINDOW_ID        the window to act on. Window-targeting commands
-                        (open, graph, pane, survey, clipboard, upload,
-                        download) need it too.
+                        use it by default; tab openers and pane commands
+                        can override it with --window.
   CHAN_TAB_NAME         this tab's name, when it has one. A team member
                         finds its own handle here.
   CHAN_TAB_GROUP        this tab's broadcast group. Always set; the
@@ -83,10 +85,10 @@ Find out whether this window has a workspace:
   cs search --limit 1 x >/dev/null 2>&1 \
     && echo workspace || echo "standalone terminal"
 
-Open a file, then split the pane and put a named terminal beside it:
+Open a file, create a pane, and place a named terminal exactly:
   cs open notes/plan.md
-  cs pane split right
-  cs terminal new --tab-name @@Builder
+  right=$(cs pane new right)
+  cs terminal new --pane "$right" --side a --tab-name @@Builder
 
 THE MCP BRIDGE:
 chan exposes an in-process MCP server so an external agent can edit
@@ -137,6 +139,44 @@ pub struct CsCli {
 
     #[command(subcommand)]
     pub action: ShellAction,
+}
+
+/// Optional coordinates for a command that surfaces a tab. The target window
+/// defaults to `$CHAN_WINDOW_ID`; pane and side stay omitted so the SPA resolves
+/// its active pane and visible side at dequeue time.
+#[derive(Args, Debug, Clone, Default)]
+pub struct TabDestinationArgs {
+    /// Target window id (default: $CHAN_WINDOW_ID).
+    #[arg(long, value_name = "WINDOW_ID")]
+    window: Option<String>,
+    /// Target pane id (default: the target window's active pane).
+    #[arg(long, value_name = "PANE_ID")]
+    pane: Option<String>,
+    /// Target Hybrid side (default: the target pane's visible side).
+    #[arg(long, value_name = "SIDE")]
+    side: Option<PaneSide>,
+}
+
+impl TabDestinationArgs {
+    fn target_env(&self) -> Result<OpenEnv> {
+        open_env_from(
+            self.window
+                .clone()
+                .or_else(|| std::env::var("CHAN_WINDOW_ID").ok()),
+            std::env::var("CHAN_CONTROL_SOCKET").ok(),
+        )
+    }
+
+    fn destination(&self) -> Option<TabDestination> {
+        if self.pane.is_none() && self.side.is_none() {
+            None
+        } else {
+            Some(TabDestination {
+                pane_id: self.pane.clone(),
+                side: self.side,
+            })
+        }
+    }
 }
 
 /// Search and traversal flags shared by `cs search` and `chan workspace`.
@@ -311,6 +351,8 @@ pub enum ShellAction {
     Open {
         #[arg(value_hint = clap::ValueHint::AnyPath)]
         path: Option<String>,
+        #[command(flatten)]
+        destination: TabDestinationArgs,
     },
     /// Open the workspace graph, focused on an optional path
     #[command(long_about = help::CS_GRAPH)]
@@ -318,6 +360,8 @@ pub enum ShellAction {
     Graph {
         #[arg(value_hint = clap::ValueHint::AnyPath)]
         path: Option<PathBuf>,
+        #[command(flatten)]
+        destination: TabDestinationArgs,
     },
     /// Open a Dashboard tab in the current window
     #[command(long_about = help::CS_DASHBOARD)]
@@ -332,6 +376,8 @@ pub enum ShellAction {
         /// one-r to match `--carousel-index`.
         #[arg(long = "carousel-off", verbatim_doc_comment)]
         carousel_off: bool,
+        #[command(flatten)]
+        destination: TabDestinationArgs,
     },
     /// Raise this window's upload picker, targeting a directory
     #[command(long_about = help::CS_UPLOAD)]
@@ -435,7 +481,11 @@ pub enum ShellAction {
         /// Target the window owning this tab, instead of the caller's own
         /// window. Lets `cs pane` run without a $CHAN_WINDOW_ID.
         #[arg(long = "tab-name", global = true, verbatim_doc_comment)]
+        #[arg(conflicts_with = "window")]
         tab_name: Option<String>,
+        /// Target a window directly instead of using $CHAN_WINDOW_ID.
+        #[arg(long, global = true, value_name = "WINDOW_ID")]
+        window: Option<String>,
         /// Emit JSON instead of the markdown rendering (layout or exec
         /// result). Compact by default.
         #[arg(long, global = true, verbatim_doc_comment)]
@@ -582,12 +632,26 @@ pub enum SessionAction {
 /// [`ControlRequest::PaneExec`].
 #[derive(Subcommand, Debug)]
 pub enum PaneAction {
+    /// List every pane and both of its Hybrid sides.
+    List,
     /// Focus (activate) a pane by id.
     Focus {
-        /// The pane id to focus (from `cs pane`).
+        /// The pane id to focus (from `cs pane list`).
         pane_id: String,
+        /// Select side A or B while focusing.
+        #[arg(long)]
+        side: Option<PaneSide>,
     },
-    /// Split a pane, placing a new empty pane to the `right` or `bottom`.
+    /// Create a pane to the right or below another pane.
+    New {
+        /// Where the new pane goes: `right` or `bottom`.
+        dir: SplitDirArg,
+        /// The pane to split (default: the active pane).
+        #[arg(long = "pane")]
+        pane: Option<String>,
+    },
+    /// Compatibility alias for `cs pane new`.
+    #[command(hide = true)]
     Split {
         /// Where the new pane goes: `right` or `bottom`.
         dir: SplitDirArg,
@@ -610,6 +674,28 @@ pub enum PaneAction {
         #[arg(long = "pane")]
         pane: Option<String>,
     },
+    /// Equalize a pane's nearest enclosing split.
+    Equalize {
+        /// The pane to equalize (default: the active pane).
+        #[arg(long = "pane")]
+        pane: Option<String>,
+    },
+    /// Swap complete Hybrid contents with another pane.
+    Swap {
+        /// The other pane id.
+        other_pane_id: String,
+        /// The source pane (default: the active pane).
+        #[arg(long = "pane")]
+        pane: Option<String>,
+    },
+    /// Close a pane (the active pane by default).
+    Close {
+        /// The pane id to close (default: the active pane).
+        pane_id: Option<String>,
+        /// Close past dirty files / live terminals.
+        #[arg(long)]
+        force: bool,
+    },
     /// Close one tab (the pane's active tab by default).
     CloseTab {
         /// The pane to close a tab in (default: the active pane).
@@ -623,6 +709,7 @@ pub enum PaneAction {
         force: bool,
     },
     /// Close a whole pane (the active one by default).
+    #[command(hide = true)]
     ClosePane {
         /// The pane id to close (default: the active pane).
         #[arg(long = "pane")]
@@ -639,8 +726,8 @@ pub enum PaneAction {
     },
 }
 
-/// `right` | `bottom` for `cs pane split`, mapped to the wire [`SplitDir`].
-/// Matches the hybrid pane hamburger's split options.
+/// `right` | `bottom` for canonical `cs pane new` and its compatibility
+/// `split` alias, mapped to the wire [`SplitDir`].
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 pub enum SplitDirArg {
     Right,
@@ -676,8 +763,9 @@ impl PaneAction {
     /// Convert the parsed subcommand into the wire [`PaneOp`].
     fn into_op(self) -> PaneOp {
         match self {
-            PaneAction::Focus { pane_id } => PaneOp::Focus { pane_id },
-            PaneAction::Split { dir, pane } => PaneOp::Split {
+            PaneAction::List => unreachable!("pane list is a query, not an exec"),
+            PaneAction::Focus { pane_id, side } => PaneOp::Focus { pane_id, side },
+            PaneAction::New { dir, pane } | PaneAction::Split { dir, pane } => PaneOp::Split {
                 pane_id: pane,
                 dir: dir.into(),
             },
@@ -685,6 +773,15 @@ impl PaneAction {
                 pane_id: pane,
                 delta,
             },
+            PaneAction::Equalize { pane } => PaneOp::Equalize { pane_id: pane },
+            PaneAction::Swap {
+                other_pane_id,
+                pane,
+            } => PaneOp::Swap {
+                pane_id: pane,
+                other_pane_id,
+            },
+            PaneAction::Close { pane_id, force } => PaneOp::ClosePane { pane_id, force },
             PaneAction::CloseTab { pane, tab, force } => PaneOp::CloseTab {
                 pane_id: pane,
                 tab_id: tab,
@@ -716,6 +813,8 @@ pub enum TerminalAction {
         /// Broadcast group ($CHAN_TAB_GROUP). Defaults to "default".
         #[arg(long = "tab-group")]
         tab_group: Option<String>,
+        #[command(flatten)]
+        destination: TabDestinationArgs,
     },
     /// Write bytes to live tabs: queued, idle-gated, no newline added
     #[command(long_about = help::CS_TERMINAL_WRITE)]
@@ -866,7 +965,10 @@ pub enum TeamAction {
         /// Emit the paste-and-run bootstrap shell script to stdout instead
         /// of writing the team. A pure preview: it mutates nothing.
         #[arg(long, verbatim_doc_comment)]
+        #[arg(conflicts_with_all = ["window", "pane", "side"])]
         script: bool,
+        #[command(flatten)]
+        destination: TabDestinationArgs,
     },
     /// Re-read a saved team's config.toml and spawn the team again
     #[command(long_about = help::CS_TERMINAL_TEAM_LOAD)]
@@ -875,8 +977,10 @@ pub enum TeamAction {
         /// Workspace-relative team directory to load.
         dir: String,
         /// Emit the paste-and-run bootstrap shell script to stdout.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["window", "pane", "side"])]
         script: bool,
+        #[command(flatten)]
+        destination: TabDestinationArgs,
     },
 }
 
@@ -884,14 +988,16 @@ pub enum TeamAction {
 /// Was `cmd_shell` in the `chan` binary.
 pub async fn dispatch(action: ShellAction) -> Result<()> {
     match action {
-        ShellAction::Open { path } => {
-            let env = open_env()?;
+        ShellAction::Open { path, destination } => {
+            let env = destination.target_env()?;
+            let placement = destination.destination();
             if let Some(link) = path.as_deref().filter(|p| p.starts_with(GRAPH_LINK_PREFIX)) {
                 let message = send_control_request(
                     &env.control_socket,
                     ControlRequest::OpenGraphLink {
                         window_id: env.window_id,
                         link: link.to_string(),
+                        destination: placement,
                     },
                 )
                 .await?;
@@ -905,20 +1011,22 @@ pub async fn dispatch(action: ShellAction) -> Result<()> {
                 ControlRequest::OpenPath {
                     window_id: env.window_id,
                     path: abs,
+                    destination: placement,
                 },
             )
             .await?;
             eprintln!("{message}");
             Ok(())
         }
-        ShellAction::Graph { path } => {
-            let env = open_env()?;
+        ShellAction::Graph { path, destination } => {
+            let env = destination.target_env()?;
             let abs = path.map(absolutize).transpose()?;
             let message = send_control_request(
                 &env.control_socket,
                 ControlRequest::OpenGraph {
                     window_id: env.window_id,
                     path: abs,
+                    destination: destination.destination(),
                 },
             )
             .await?;
@@ -928,14 +1036,16 @@ pub async fn dispatch(action: ShellAction) -> Result<()> {
         ShellAction::Dashboard {
             carousel_index,
             carousel_off,
+            destination,
         } => {
-            let env = open_env()?;
+            let env = destination.target_env()?;
             let message = send_control_request(
                 &env.control_socket,
                 ControlRequest::OpenDashboard {
                     window_id: env.window_id,
                     carousel_index,
                     carousel_off,
+                    destination: destination.destination(),
                 },
             )
             .await?;
@@ -1026,10 +1136,11 @@ pub async fn dispatch(action: ShellAction) -> Result<()> {
         } => cmd_shell_search(search.to_request()?, json, pretty).await,
         ShellAction::Pane {
             tab_name,
+            window,
             json,
             pretty,
             action,
-        } => cmd_pane(tab_name, json, pretty, action).await,
+        } => cmd_pane(window, tab_name, json, pretty, action).await,
     }
 }
 
@@ -1407,14 +1518,22 @@ fn error_message(error: &WorkspaceSearchError) -> &str {
 /// $CHAN_WINDOW_ID); otherwise the caller's own window from $CHAN_WINDOW_ID.
 /// Sending one or the other (never both) keeps the server's precedence
 /// unambiguous; the server errors when neither resolves.
-fn pane_target(tab_name: Option<String>) -> (Option<String>, Option<String>) {
+fn pane_target(
+    window: Option<String>,
+    tab_name: Option<String>,
+) -> (Option<String>, Option<String>) {
     let trimmed = |s: String| {
         let s = s.trim().to_string();
         (!s.is_empty()).then_some(s)
     };
     match tab_name.and_then(trimmed) {
         Some(tab) => (None, Some(tab)),
-        None => (std::env::var("CHAN_WINDOW_ID").ok().and_then(trimmed), None),
+        None => (
+            window
+                .and_then(trimmed)
+                .or_else(|| std::env::var("CHAN_WINDOW_ID").ok().and_then(trimmed)),
+            None,
+        ),
     }
 }
 
@@ -1425,16 +1544,22 @@ fn pane_target(tab_name: Option<String>) -> (Option<String>, Option<String>) {
 /// `--json [--pretty]` for machine output. A close blocked by a dirty file /
 /// live terminal (without `--force`) exits non-zero.
 async fn cmd_pane(
+    window: Option<String>,
     tab_name: Option<String>,
     json: bool,
     pretty: bool,
     action: Option<PaneAction>,
 ) -> Result<()> {
     let socket = control_socket_env()?;
-    let (window_id, tab_name) = pane_target(tab_name);
-    let is_query = action.is_none();
+    let (window_id, tab_name) = pane_target(window, tab_name);
+    let is_query = action
+        .as_ref()
+        .is_none_or(|action| matches!(action, PaneAction::List));
+    let is_new = action
+        .as_ref()
+        .is_some_and(|action| matches!(action, PaneAction::New { .. } | PaneAction::Split { .. }));
     let request = match action {
-        None => ControlRequest::PaneQuery {
+        None | Some(PaneAction::List) => ControlRequest::PaneQuery {
             window_id,
             tab_name,
         },
@@ -1460,6 +1585,18 @@ async fn cmd_pane(
         }
     } else if is_query {
         print!("{}", render_pane_layout_markdown(&raw)?);
+    } else if is_new {
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).context("parsing pane new reply")?;
+        if !value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            print!("{}", render_pane_exec_markdown(&raw)?);
+            anyhow::bail!("cs pane: the operation was blocked (see output above)");
+        }
+        let pane_id = value
+            .get("paneId")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| anyhow::anyhow!("pane new reply missing `paneId`"))?;
+        println!("{pane_id}");
     } else {
         print!("{}", render_pane_exec_markdown(&raw)?);
     }
@@ -1506,13 +1643,8 @@ fn render_pane_exec_markdown(raw: &str) -> Result<String> {
     Ok(out)
 }
 
-/// Render the `cs pane` layout snapshot JSON as one markdown table per pane.
-/// Shape (the SPA's `handleWindowCommand` pane responder builds it):
-/// `{activePaneId, panes: [{id, active, activeTabId, tabs: [{id, kind,
-/// title, active, dirty?, live?}]}]}`. The active pane is flagged in its
-/// heading; per tab, a `*` marks the pane's active tab and the `flags`
-/// column carries `dirty` (unsaved file) / `live` (running terminal). An
-/// empty layout yields a short line rather than a blank table.
+/// Render the complete two-sided `cs pane list` snapshot as one markdown
+/// table per pane. Each side is explicit, including an empty side.
 fn render_pane_layout_markdown(raw: &str) -> Result<String> {
     let value: serde_json::Value = serde_json::from_str(raw).context("parsing pane layout JSON")?;
     let panes = value
@@ -1536,42 +1668,68 @@ fn render_pane_layout_markdown(raw: &str) -> Result<String> {
             .get("active")
             .and_then(|v| v.as_bool())
             .unwrap_or_else(|| active_pane == Some(id.as_str()));
-        let active_tab = pane.get("activeTabId").and_then(|v| v.as_str());
-        if is_active {
-            out.push_str(&format!("## pane {id} (active)\n\n"));
-        } else {
-            out.push_str(&format!("## pane {id}\n\n"));
+        let active_side = pane
+            .get("activeSide")
+            .and_then(|value| value.as_str())
+            .unwrap_or("a");
+        let side_label = active_side.to_ascii_uppercase();
+        match is_active {
+            true => out.push_str(&format!("## pane {id} (active, side {side_label})\n\n")),
+            false => out.push_str(&format!("## pane {id} (side {side_label})\n\n")),
         }
-        let tabs = pane.get("tabs").and_then(|t| t.as_array());
-        let empty = tabs.map(|t| t.is_empty()).unwrap_or(true);
-        if empty {
-            out.push_str("(empty)\n\n");
-            continue;
-        }
-        out.push_str("| tab | kind | title | flags |\n");
-        out.push_str("| --- | --- | --- | --- |\n");
-        for tab in tabs.into_iter().flatten() {
-            let tab_id = str_field(tab, "id");
-            let kind = str_field(tab, "kind");
-            let title = str_field(tab, "title");
-            // `*` marks the active tab (either the explicit `active` flag or
-            // a match against the pane's activeTabId).
-            let is_active_tab = tab
-                .get("active")
-                .and_then(|v| v.as_bool())
-                .unwrap_or_else(|| active_tab == Some(tab_id.as_str()));
-            let marker = if is_active_tab { "*" } else { "" };
-            let mut flags: Vec<&str> = Vec::new();
-            if tab.get("dirty").and_then(|v| v.as_bool()).unwrap_or(false) {
-                flags.push("dirty");
+        let sides = pane
+            .get("sides")
+            .and_then(|value| value.as_object())
+            .ok_or_else(|| anyhow::anyhow!("pane {id} layout JSON missing `sides`"))?;
+        out.push_str("| side | tab | kind | title | flags |\n");
+        out.push_str("| --- | --- | --- | --- | --- |\n");
+        for side in ["a", "b"] {
+            let side_value = sides
+                .get(side)
+                .ok_or_else(|| anyhow::anyhow!("pane {id} layout JSON missing side `{side}`"))?;
+            let active_tab = side_value
+                .get("activeTabId")
+                .and_then(|value| value.as_str());
+            let tabs = side_value
+                .get("tabs")
+                .and_then(|value| value.as_array())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("pane {id} side {side} layout JSON missing `tabs`")
+                })?;
+            let side_label = side.to_ascii_uppercase();
+            if tabs.is_empty() {
+                out.push_str(&format!("| {side_label} | (empty) | | | |\n"));
+                continue;
             }
-            if tab.get("live").and_then(|v| v.as_bool()).unwrap_or(false) {
-                flags.push("live");
+            for tab in tabs {
+                let tab_id = str_field(tab, "id");
+                let kind = str_field(tab, "kind");
+                let title = str_field(tab, "title");
+                let is_active_tab = tab
+                    .get("active")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or_else(|| active_tab == Some(tab_id.as_str()));
+                let marker = if is_active_tab { "*" } else { "" };
+                let mut flags: Vec<&str> = Vec::new();
+                if tab
+                    .get("dirty")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+                {
+                    flags.push("dirty");
+                }
+                if tab
+                    .get("live")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+                {
+                    flags.push("live");
+                }
+                out.push_str(&format!(
+                    "| {side_label} | {tab_id}{marker} | {kind} | {title} | {} |\n",
+                    flags.join(", ")
+                ));
             }
-            out.push_str(&format!(
-                "| {tab_id}{marker} | {kind} | {title} | {} |\n",
-                flags.join(", ")
-            ));
         }
         out.push('\n');
     }
@@ -1725,8 +1883,9 @@ async fn cmd_shell_terminal(action: TerminalAction) -> Result<()> {
             path,
             tab_name,
             tab_group,
+            destination,
         } => {
-            let env = open_env()?;
+            let env = destination.target_env()?;
             let abs = path.map(absolutize).transpose()?;
             let message = send_control_request(
                 &env.control_socket,
@@ -1735,6 +1894,7 @@ async fn cmd_shell_terminal(action: TerminalAction) -> Result<()> {
                     path: abs,
                     tab_name,
                     tab_group,
+                    destination: destination.destination(),
                 },
             )
             .await?;
@@ -1902,7 +2062,13 @@ async fn cmd_shell_team(action: TeamAction) -> Result<()> {
             brief,
             mcp_env,
             script,
+            destination,
         } => {
+            let target_window = destination.window.clone().or_else(|| window_id.clone());
+            anyhow::ensure!(
+                destination.destination().is_none() || target_window.is_some(),
+                "--pane/--side needs --window or $CHAN_WINDOW_ID"
+            );
             let mut config_toml = read_team_config_input(config, stdin)?;
             // --mcp-env overrides the input config's `mcp_env` (or adds it).
             // Omitted -> leave the config as-is (server's serde default is OFF).
@@ -1920,23 +2086,36 @@ async fn cmd_shell_team(action: TeamAction) -> Result<()> {
                     config_toml: Some(config_toml),
                     brief_content,
                     script,
-                    window_id,
+                    window_id: target_window,
+                    destination: destination.destination(),
                 },
                 script,
             )
         }
-        TeamAction::Load { dir, script } => (
-            ControlRequest::TerminalTeam {
-                dir: resolve_team_dir(&dir)?,
-                op: TeamOp::Load,
-                config_toml: None,
-                // Load never regenerates the bootstrap, so a brief is moot.
-                brief_content: None,
-                script,
-                window_id,
-            },
+        TeamAction::Load {
+            dir,
             script,
-        ),
+            destination,
+        } => {
+            let target_window = destination.window.clone().or(window_id);
+            anyhow::ensure!(
+                destination.destination().is_none() || target_window.is_some(),
+                "--pane/--side needs --window or $CHAN_WINDOW_ID"
+            );
+            (
+                ControlRequest::TerminalTeam {
+                    dir: resolve_team_dir(&dir)?,
+                    op: TeamOp::Load,
+                    config_toml: None,
+                    // Load never regenerates the bootstrap, so a brief is moot.
+                    brief_content: None,
+                    script,
+                    window_id: target_window,
+                    destination: destination.destination(),
+                },
+                script,
+            )
+        }
     };
     let message = send_control_request(&socket, request).await?;
     if script {
@@ -2234,12 +2413,14 @@ fn render_terminal_list_markdown(raw: &str) -> Result<String> {
     let mut out = String::new();
     for (group, sessions) in groups {
         out.push_str(&format!("## {group}\n\n"));
-        out.push_str("| name | agent | session | window | pane | tab | kind | status | cwd |\n");
-        out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+        out.push_str(
+            "| name | agent | session | window | pane | side | tab | kind | status | cwd |\n",
+        );
+        out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
         if let Some(arr) = sessions.as_array() {
             for s in arr {
                 out.push_str(&format!(
-                    "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                    "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
                     str_field(s, "name"),
                     // The server-derived submit agent ("-" for a shell
                     // session), so a poker never has to guess the target.
@@ -2247,6 +2428,7 @@ fn render_terminal_list_markdown(raw: &str) -> Result<String> {
                     str_field(s, "session_id"),
                     str_field(s, "window"),
                     str_field(s, "pane"),
+                    str_field(s, "side"),
                     str_field(s, "tab"),
                     str_field(s, "window_kind"),
                     str_field(s, "window_status"),
@@ -2405,15 +2587,17 @@ mod tests {
 
     #[test]
     fn terminal_list_markdown_renders_window_columns() {
-        let raw = r#"{"groups":{"default":[{"name":"probe","agent":"codex","session_id":"s1","window":"w-abc","pane":"p-1","tab":"t-1","window_kind":"standalone-terminal","window_status":"alive","cwd":"/tmp"}]}}"#;
+        let raw = r#"{"groups":{"default":[{"name":"probe","agent":"codex","session_id":"s1","window":"w-abc","pane":"p-1","side":"b","tab":"t-1","window_kind":"standalone-terminal","window_status":"alive","cwd":"/tmp"}]}}"#;
         let out = render_terminal_list_markdown(raw).expect("render");
         assert!(
-            out.contains("| name | agent | session | window | pane | tab | kind | status | cwd |"),
+            out.contains(
+                "| name | agent | session | window | pane | side | tab | kind | status | cwd |"
+            ),
             "header: {out}"
         );
         assert!(
             out.contains(
-                "| probe | codex | s1 | w-abc | p-1 | t-1 | standalone-terminal | alive | /tmp |"
+                "| probe | codex | s1 | w-abc | p-1 | b | t-1 | standalone-terminal | alive | /tmp |"
             ),
             "row: {out}"
         );
@@ -2427,7 +2611,7 @@ mod tests {
         let raw = r#"{"groups":{"default":[{"name":"probe","session_id":"s1","cwd":"/tmp"}]}}"#;
         let out = render_terminal_list_markdown(raw).expect("render");
         assert!(
-            out.contains("| probe | - | s1 | - | - | - | - | - | /tmp |"),
+            out.contains("| probe | - | s1 | - | - | - | - | - | - | /tmp |"),
             "row: {out}"
         );
     }
@@ -2548,6 +2732,7 @@ mod tests {
                 json,
                 pretty,
                 action,
+                ..
             } => {
                 assert!(json);
                 assert!(pretty);
@@ -2566,7 +2751,7 @@ mod tests {
         match cli.action {
             ShellAction::Pane {
                 tab_name,
-                action: Some(PaneAction::Focus { pane_id }),
+                action: Some(PaneAction::Focus { pane_id, .. }),
                 ..
             } => {
                 assert_eq!(tab_name.as_deref(), Some("@@Alice"));
@@ -2610,6 +2795,118 @@ mod tests {
             } => assert!((delta - (-0.1)).abs() < 1e-9),
             other => panic!("unexpected parse: {other:?}"),
         }
+
+        let cli = CsCli::parse_from(["cs", "pane", "--window", "win-2", "new", "right"]);
+        assert!(matches!(
+            cli.action,
+            ShellAction::Pane {
+                window: Some(ref window),
+                action: Some(PaneAction::New {
+                    dir: SplitDirArg::Right,
+                    ..
+                }),
+                ..
+            } if window == "win-2"
+        ));
+
+        let cli = CsCli::parse_from(["cs", "pane", "equalize", "--pane", "pane-2"]);
+        assert!(matches!(
+            cli.action,
+            ShellAction::Pane {
+                action: Some(PaneAction::Equalize {
+                    pane: Some(ref pane)
+                }),
+                ..
+            } if pane == "pane-2"
+        ));
+
+        let cli = CsCli::parse_from(["cs", "pane", "swap", "pane-7", "--pane", "pane-2"]);
+        assert!(matches!(
+            cli.action,
+            ShellAction::Pane {
+                action: Some(PaneAction::Swap {
+                    ref other_pane_id,
+                    pane: Some(ref pane),
+                }),
+                ..
+            } if other_pane_id == "pane-7" && pane == "pane-2"
+        ));
+
+        let cli = CsCli::parse_from(["cs", "pane", "close", "pane-2", "--force"]);
+        assert!(matches!(
+            cli.action,
+            ShellAction::Pane {
+                action: Some(PaneAction::Close {
+                    pane_id: Some(ref pane),
+                    force: true,
+                }),
+                ..
+            } if pane == "pane-2"
+        ));
+
+        assert!(
+            CsCli::try_parse_from([
+                "cs",
+                "pane",
+                "--window",
+                "win-2",
+                "--tab-name",
+                "@@Alice",
+                "list",
+            ])
+            .is_err(),
+            "direct and tab-derived window targets must conflict"
+        );
+    }
+
+    #[test]
+    fn every_tab_opener_accepts_one_shared_destination_shape() {
+        let assert_destination = |destination: TabDestinationArgs| {
+            assert_eq!(destination.window.as_deref(), Some("win-2"));
+            assert_eq!(destination.pane.as_deref(), Some("pane-4"));
+            assert_eq!(destination.side, Some(PaneSide::B));
+        };
+        let tail = ["--window", "win-2", "--pane", "pane-4", "--side", "b"];
+
+        match CsCli::parse_from(["cs", "open", "notes.md"].into_iter().chain(tail)).action {
+            ShellAction::Open { destination, .. } => assert_destination(destination),
+            other => panic!("unexpected open parse: {other:?}"),
+        }
+        match CsCli::parse_from(["cs", "graph"].into_iter().chain(tail)).action {
+            ShellAction::Graph { destination, .. } => assert_destination(destination),
+            other => panic!("unexpected graph parse: {other:?}"),
+        }
+        match CsCli::parse_from(["cs", "dashboard"].into_iter().chain(tail)).action {
+            ShellAction::Dashboard { destination, .. } => assert_destination(destination),
+            other => panic!("unexpected dashboard parse: {other:?}"),
+        }
+        match CsCli::parse_from(["cs", "terminal", "new"].into_iter().chain(tail)).action {
+            ShellAction::Terminal {
+                action: TerminalAction::New { destination, .. },
+            } => assert_destination(destination),
+            other => panic!("unexpected terminal new parse: {other:?}"),
+        }
+        match CsCli::parse_from(
+            ["cs", "terminal", "team", "load", "alpha"]
+                .into_iter()
+                .chain(tail),
+        )
+        .action
+        {
+            ShellAction::Terminal {
+                action:
+                    TerminalAction::Team {
+                        action: TeamAction::Load { destination, .. },
+                    },
+            } => assert_destination(destination),
+            other => panic!("unexpected team load parse: {other:?}"),
+        }
+
+        assert!(CsCli::try_parse_from(["cs", "open", "--side", "c"]).is_err());
+        assert!(CsCli::try_parse_from([
+            "cs", "terminal", "team", "load", "alpha", "--script", "--pane", "pane-4",
+        ])
+        .is_err());
     }
 
     #[test]
@@ -2800,7 +3097,8 @@ mod tests {
     fn pane_action_into_op_maps_each_variant() {
         assert!(matches!(
             PaneAction::Focus {
-                pane_id: "p".into()
+                pane_id: "p".into(),
+                side: Some(PaneSide::B),
             }
             .into_op(),
             PaneOp::Focus { .. }
@@ -2819,6 +3117,26 @@ mod tests {
             PaneOp::Split { dir, .. } => assert!(matches!(dir, SplitDir::Right)),
             other => panic!("unexpected op: {other:?}"),
         }
+        assert!(matches!(
+            PaneAction::Equalize {
+                pane: Some("p".into())
+            }
+            .into_op(),
+            PaneOp::Equalize {
+                pane_id: Some(ref pane)
+            } if pane == "p"
+        ));
+        assert!(matches!(
+            PaneAction::Swap {
+                other_pane_id: "q".into(),
+                pane: Some("p".into()),
+            }
+            .into_op(),
+            PaneOp::Swap {
+                pane_id: Some(ref pane),
+                ref other_pane_id,
+            } if pane == "p" && other_pane_id == "q"
+        ));
     }
 
     #[test]
@@ -2835,25 +3153,65 @@ mod tests {
         let raw = r#"{
             "activePaneId": "p1",
             "panes": [
-                { "id": "p1", "active": true, "activeTabId": "t3", "tabs": [
-                    { "id": "t3", "kind": "file", "title": "notes.md", "active": true, "dirty": true },
-                    { "id": "t4", "kind": "terminal", "title": "@@Alice", "live": true }
-                ] },
-                { "id": "p2", "active": false, "activeTabId": null, "tabs": [] }
+                {
+                    "id": "p1",
+                    "active": true,
+                    "activeSide": "b",
+                    "sides": {
+                        "a": {
+                            "activeTabId": "t3",
+                            "tabs": [
+                                { "id": "t3", "kind": "file", "title": "notes.md", "dirty": true }
+                            ]
+                        },
+                        "b": {
+                            "activeTabId": "t4",
+                            "tabs": [
+                                { "id": "t4", "kind": "terminal", "title": "@@Alice", "live": true }
+                            ]
+                        }
+                    }
+                },
+                {
+                    "id": "p2",
+                    "active": false,
+                    "activeSide": "a",
+                    "sides": {
+                        "a": { "activeTabId": null, "tabs": [] },
+                        "b": { "activeTabId": null, "tabs": [] }
+                    }
+                }
             ]
         }"#;
         let out = render_pane_layout_markdown(raw).expect("render");
         // Active pane is flagged; the inactive one is not.
-        assert!(out.contains("## pane p1 (active)"), "active heading: {out}");
         assert!(
-            out.contains("## pane p2\n") && !out.contains("## pane p2 (active)"),
+            out.contains("## pane p1 (active, side B)"),
+            "active heading: {out}"
+        );
+        assert!(
+            out.contains("## pane p2 (side A)") && !out.contains("## pane p2 (active"),
             "inactive heading: {out}"
         );
-        // The active tab carries the `*` marker; flags carry dirty + live.
-        assert!(out.contains("| t3* | file | notes.md | dirty |"), "{out}");
-        assert!(out.contains("| t4 | terminal | @@Alice | live |"), "{out}");
-        // An empty pane renders `(empty)`, not a header-only table.
-        assert!(out.contains("(empty)"), "empty pane: {out}");
+        // Each side is explicit; active tabs and state flags survive.
+        assert!(
+            out.contains("| A | t3* | file | notes.md | dirty |"),
+            "{out}"
+        );
+        assert!(
+            out.contains("| B | t4* | terminal | @@Alice | live |"),
+            "{out}"
+        );
+        assert_eq!(
+            out.matches("| A | (empty) | | | |").count(),
+            1,
+            "empty A side: {out}"
+        );
+        assert_eq!(
+            out.matches("| B | (empty) | | | |").count(),
+            1,
+            "empty B side: {out}"
+        );
     }
 
     #[test]
@@ -2941,6 +3299,7 @@ mod tests {
                                 brief,
                                 mcp_env,
                                 script,
+                                ..
                             },
                     },
             } => {
@@ -3060,7 +3419,7 @@ mod tests {
             ShellAction::Terminal {
                 action:
                     TerminalAction::Team {
-                        action: TeamAction::Load { dir, script },
+                        action: TeamAction::Load { dir, script, .. },
                     },
             } => {
                 assert_eq!(dir, "alpha");

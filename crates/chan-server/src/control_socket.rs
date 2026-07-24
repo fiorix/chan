@@ -42,7 +42,7 @@ pub use chan_shell::{ControlRequest, ControlResponse};
 // TeamOp tags the `cs terminal team` op (new | load).
 use chan_shell::{
     submit_writes, Identity, PaneOp, PastePrefer, ServeKind, SubmitAgent, SurveyReply, SurveySpec,
-    TeamOp, MAX_CLIPBOARD_BYTES, MAX_CONTROL_REQUEST_BYTES,
+    TabDestination, TeamOp, MAX_CLIPBOARD_BYTES, MAX_CONTROL_REQUEST_BYTES,
 };
 
 #[derive(Debug, Serialize)]
@@ -55,6 +55,8 @@ use chan_shell::{
 enum WindowCommand {
     OpenFile {
         path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        destination: Option<TabDestination>,
     },
     OpenBrowser {
         path: String,
@@ -62,14 +64,20 @@ enum WindowCommand {
         select: Option<String>,
         #[serde(skip_serializing_if = "is_false")]
         enter: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        destination: Option<TabDestination>,
     },
     OpenGraph {
         #[serde(skip_serializing_if = "Option::is_none")]
         path: Option<String>,
         is_dir: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        destination: Option<TabDestination>,
     },
     OpenGraphLink {
         link: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        destination: Option<TabDestination>,
     },
     OpenTermNew {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -78,12 +86,16 @@ enum WindowCommand {
         tab_name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tab_group: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        destination: Option<TabDestination>,
     },
     OpenDashboard {
         #[serde(skip_serializing_if = "Option::is_none")]
         carousel_index: Option<u32>,
         #[serde(skip_serializing_if = "is_false")]
         carousel_off: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        destination: Option<TabDestination>,
     },
     // `cs upload` / `cs download`: raise the Inspector upload / download UI in
     // the originating window, reusing the SPA's fileOps (not a parallel path).
@@ -135,9 +147,10 @@ enum WindowCommand {
         request_id: String,
     },
     // `cs pane <exec>`: the server asks the window to APPLY a layout mutation
-    // (focus / split / resize / close). The op nests under `op` (it is
-    // internally tagged on `kind`, so the SPA reads `frame.op.kind`); the SPA
-    // applies it and POSTs the result echoing `request_id`.
+    // (new / focus / resize / equalize / swap / close). The op nests under
+    // `op` (it is internally tagged on `kind`, so the SPA reads
+    // `frame.op.kind`); the SPA applies it and POSTs the result echoing
+    // `request_id`.
     PaneExec {
         request_id: String,
         op: PaneOp,
@@ -150,6 +163,8 @@ enum WindowCommand {
     TeamSpawned {
         group: String,
         members: Vec<SpawnedMember>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        destination: Option<TabDestination>,
     },
     // `cs session handover`: a follower asked to take leadership; prompt THIS
     // (leader) window to accept or reject. The SPA shows the handover overlay
@@ -437,6 +452,7 @@ mod tenant_gate_tests {
         ControlRequest::OpenPath {
             window_id: "w".into(),
             path: PathBuf::from(p),
+            destination: None,
         }
     }
     fn term_new(path: Option<&str>) -> ControlRequest {
@@ -445,6 +461,7 @@ mod tenant_gate_tests {
             path: path.map(PathBuf::from),
             tab_name: None,
             tab_group: None,
+            destination: None,
         }
     }
     fn workspace_search() -> ControlRequest {
@@ -494,6 +511,7 @@ mod tenant_gate_tests {
                     brief_content: None,
                     script,
                     window_id: None,
+                    destination: None,
                 });
             }
         }
@@ -509,10 +527,12 @@ mod tenant_gate_tests {
             ControlRequest::OpenGraphLink {
                 window_id: "w".into(),
                 link: "chan://graph?s=workspace".into(),
+                destination: None,
             },
             ControlRequest::OpenGraph {
                 window_id: "w".into(),
                 path: None,
+                destination: None,
             },
             workspace_search(),
             term_new(Some("sub")),
@@ -551,10 +571,12 @@ mod tenant_gate_tests {
             ControlRequest::OpenGraphLink {
                 window_id: "w".into(),
                 link: "chan://graph?s=workspace".into(),
+                destination: None,
             },
             ControlRequest::OpenGraph {
                 window_id: "w".into(),
                 path: None,
+                destination: None,
             },
             workspace_search(),
             term_new(Some("sub")),
@@ -615,6 +637,7 @@ mod tenant_gate_tests {
                 window_id: "w".into(),
                 carousel_index: None,
                 carousel_off: false,
+                destination: None,
             },
             ControlRequest::WindowList,
         ] {
@@ -949,7 +972,11 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
         return ControlResponse::Error { message };
     }
     match req {
-        ControlRequest::OpenPath { window_id, path } => {
+        ControlRequest::OpenPath {
+            window_id,
+            path,
+            destination,
+        } => {
             if let Err(message) = require_window_id(&window_id) {
                 return ControlResponse::Error { message };
             }
@@ -957,24 +984,46 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
                 Ok(workspace) => workspace,
                 Err(message) => return ControlResponse::Error { message },
             };
+            if let Err(message) = require_connected_window(session_registry, &window_id) {
+                return ControlResponse::Error { message };
+            }
             into_response(open_path(
                 &workspace,
                 self_writes,
                 &window_id,
                 &path,
+                destination,
+                session_registry,
                 events_tx,
             ))
         }
-        ControlRequest::OpenGraphLink { window_id, link } => {
+        ControlRequest::OpenGraphLink {
+            window_id,
+            link,
+            destination,
+        } => {
             if let Err(message) = require_window_id(&window_id) {
                 return ControlResponse::Error { message };
             }
             if let Err(message) = workspace_from_cell(workspace_cell).map(|_| ()) {
                 return ControlResponse::Error { message };
             }
-            into_response(open_graph_link(&window_id, &link, events_tx))
+            if let Err(message) = require_connected_window(session_registry, &window_id) {
+                return ControlResponse::Error { message };
+            }
+            into_response(open_graph_link(
+                &window_id,
+                &link,
+                destination,
+                session_registry,
+                events_tx,
+            ))
         }
-        ControlRequest::OpenGraph { window_id, path } => {
+        ControlRequest::OpenGraph {
+            window_id,
+            path,
+            destination,
+        } => {
             if let Err(message) = require_window_id(&window_id) {
                 return ControlResponse::Error { message };
             }
@@ -982,10 +1031,15 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
                 Ok(workspace) => workspace,
                 Err(message) => return ControlResponse::Error { message },
             };
+            if let Err(message) = require_connected_window(session_registry, &window_id) {
+                return ControlResponse::Error { message };
+            }
             into_response(open_graph(
                 &workspace,
                 &window_id,
                 path.as_deref(),
+                destination,
+                session_registry,
                 events_tx,
             ))
         }
@@ -994,8 +1048,12 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
             path,
             tab_name,
             tab_group,
+            destination,
         } => {
             if let Err(message) = require_window_id(&window_id) {
+                return ControlResponse::Error { message };
+            }
+            if let Err(message) = require_connected_window(session_registry, &window_id) {
                 return ControlResponse::Error { message };
             }
             // Opening a terminal is window routing, not a workspace operation:
@@ -1006,7 +1064,14 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
             // This mirrors `WindowList`'s tenant branch.
             match tenant {
                 ControlTenant::TerminalOnly => into_response(open_term_new_standalone(
-                    &window_id, tab_name, tab_group, events_tx,
+                    &window_id,
+                    TerminalOpenSpec {
+                        tab_name,
+                        tab_group,
+                        destination,
+                    },
+                    session_registry,
+                    events_tx,
                 )),
                 ControlTenant::Workspace => {
                     let workspace = match workspace_from_cell(workspace_cell) {
@@ -1017,8 +1082,12 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
                         &workspace,
                         &window_id,
                         path.as_deref(),
-                        tab_name,
-                        tab_group,
+                        TerminalOpenSpec {
+                            tab_name,
+                            tab_group,
+                            destination,
+                        },
+                        session_registry,
                         events_tx,
                     ))
                 }
@@ -1028,14 +1097,20 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
             window_id,
             carousel_index,
             carousel_off,
+            destination,
         } => {
             if let Err(message) = require_window_id(&window_id) {
+                return ControlResponse::Error { message };
+            }
+            if let Err(message) = require_connected_window(session_registry, &window_id) {
                 return ControlResponse::Error { message };
             }
             into_response(open_dashboard(
                 &window_id,
                 carousel_index,
                 carousel_off,
+                destination,
+                session_registry,
                 events_tx,
             ))
         }
@@ -1274,7 +1349,19 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
             brief_content,
             script,
             window_id,
+            destination,
         } => {
+            if !script {
+                if let Some(window_id) = window_id.as_deref() {
+                    if let Err(message) = require_connected_window(session_registry, window_id) {
+                        return ControlResponse::Error { message };
+                    }
+                } else if destination.is_some() {
+                    return ControlResponse::Error {
+                        message: "team placement needs a target window".into(),
+                    };
+                }
+            }
             handle_team(
                 TeamRequest {
                     dir,
@@ -1283,6 +1370,7 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
                     brief_content,
                     script,
                     window_id,
+                    destination,
                 },
                 ctx,
             )
@@ -1298,6 +1386,7 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
                 events_tx,
                 window_bus,
                 terminal_registry,
+                session_registry,
             )
             .await
         }
@@ -1313,6 +1402,7 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
                 events_tx,
                 window_bus,
                 terminal_registry,
+                session_registry,
             )
             .await
         }
@@ -1458,6 +1548,7 @@ struct TeamRequest {
     /// window-targeting `cs` commands work from inside an agent. The same
     /// window receives the `TeamSpawned` surfacing push.
     window_id: Option<String>,
+    destination: Option<TabDestination>,
 }
 
 /// The `cs terminal team new|load` path. `new` parses the supplied
@@ -1487,6 +1578,7 @@ async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlRespons
         brief_content,
         script,
         window_id,
+        destination,
     } = req;
     // The registry is a set-once cell that may be filled after the socket
     // starts; resolve it per request, exactly as handle_request's dispatch
@@ -1558,7 +1650,16 @@ async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlRespons
                     ),
                 };
             };
-            spawn_and_poke_team(registry, dir, &config, window_id.as_deref(), events_tx).await
+            spawn_and_poke_team(
+                registry,
+                dir,
+                &config,
+                window_id.as_deref(),
+                destination,
+                &ctx.session_registry,
+                events_tx,
+            )
+            .await
         }
         TeamOp::Load => {
             let workspace = match workspace_from_cell(workspace_cell) {
@@ -1598,7 +1699,16 @@ async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlRespons
                     ),
                 };
             };
-            spawn_and_poke_team(registry, dir, &config, window_id.as_deref(), events_tx).await
+            spawn_and_poke_team(
+                registry,
+                dir,
+                &config,
+                window_id.as_deref(),
+                destination,
+                &ctx.session_registry,
+                events_tx,
+            )
+            .await
         }
     }
 }
@@ -1756,9 +1866,12 @@ async fn spawn_and_poke_team(
     dir: &str,
     config: &TeamConfig,
     window_id: Option<&str>,
+    destination: Option<TabDestination>,
+    session_registry: &SessionRegistry,
     events_tx: &broadcast::Sender<String>,
 ) -> ControlResponse {
     let spawn = spawn_team(registry, dir, config, window_id);
+    let mut surface_error = None;
 
     // Surface the spawned team in the window that owns it (each agent
     // is bound to `window_id`). The same window opens a terminal tab per
@@ -1769,14 +1882,17 @@ async fn spawn_and_poke_team(
     // PTYs independently of any SPA attach.
     if let Some(window_id) = window_id {
         if !spawn.members.is_empty() {
-            let _ = send_window_command(
+            surface_error = send_window_command_if_live(
+                session_registry,
                 window_id,
                 WindowCommand::TeamSpawned {
                     group: spawn.group.clone(),
                     members: spawn.members.clone(),
+                    destination,
                 },
                 events_tx,
-            );
+            )
+            .err();
         }
     }
 
@@ -1799,7 +1915,16 @@ async fn spawn_and_poke_team(
         }
     }
 
-    team_spawn_summary(&config.team_name, &spawn)
+    if let Some(error) = surface_error {
+        ControlResponse::Error {
+            message: format!(
+                "team {:?} spawned but could not be surfaced: {error}",
+                config.team_name
+            ),
+        }
+    } else {
+        team_spawn_summary(&config.team_name, &spawn)
+    }
 }
 
 /// Render the CLI-facing response for a completed `spawn_team`: an error when
@@ -2104,6 +2229,7 @@ async fn pane_round_trip<F>(
     make_command: F,
     events_tx: &broadcast::Sender<String>,
     window_bus: &Arc<crate::window_bus::WindowBus>,
+    session_registry: &SessionRegistry,
 ) -> ControlResponse
 where
     F: FnOnce(String) -> WindowCommand,
@@ -2111,9 +2237,12 @@ where
     // Park the oneshot BEFORE pushing the command so a fast reply cannot
     // arrive before the request is registered.
     let (request_id, rx) = window_bus.register();
-    if let Err(message) =
-        send_window_command(window_id, make_command(request_id.clone()), events_tx)
-    {
+    if let Err(message) = send_window_command_if_live(
+        session_registry,
+        window_id,
+        make_command(request_id.clone()),
+        events_tx,
+    ) {
         window_bus.cancel(&request_id);
         return ControlResponse::Error { message };
     }
@@ -2150,23 +2279,28 @@ async fn handle_pane_query(
     events_tx: &broadcast::Sender<String>,
     window_bus: &Arc<crate::window_bus::WindowBus>,
     terminal_registry: Option<&Arc<TerminalRegistry>>,
+    session_registry: &SessionRegistry,
 ) -> ControlResponse {
     let target = match resolve_pane_window(window_id, tab_name.as_deref(), terminal_registry) {
         Ok(target) => target,
         Err(message) => return ControlResponse::Error { message },
     };
+    if let Err(message) = require_connected_window(session_registry, &target) {
+        return ControlResponse::Error { message };
+    }
     pane_round_trip(
         &target,
         |request_id| WindowCommand::PaneQuery { request_id },
         events_tx,
         window_bus,
+        session_registry,
     )
     .await
 }
 
-/// `cs pane <exec>` (focus / split / resize / close): resolve the target
-/// window, then round-trip a `pane_exec` carrying the op. The reply payload
-/// is the exec result the CLI formats.
+/// `cs pane <exec>` (new / focus / resize / equalize / swap / close): resolve
+/// the target window, then round-trip a `pane_exec` carrying the op. The reply
+/// payload is the exec result the CLI formats.
 async fn handle_pane_exec(
     window_id: Option<String>,
     tab_name: Option<String>,
@@ -2174,16 +2308,21 @@ async fn handle_pane_exec(
     events_tx: &broadcast::Sender<String>,
     window_bus: &Arc<crate::window_bus::WindowBus>,
     terminal_registry: Option<&Arc<TerminalRegistry>>,
+    session_registry: &SessionRegistry,
 ) -> ControlResponse {
     let target = match resolve_pane_window(window_id, tab_name.as_deref(), terminal_registry) {
         Ok(target) => target,
         Err(message) => return ControlResponse::Error { message },
     };
+    if let Err(message) = require_connected_window(session_registry, &target) {
+        return ControlResponse::Error { message };
+    }
     pane_round_trip(
         &target,
         move |request_id| WindowCommand::PaneExec { request_id, op },
         events_tx,
         window_bus,
+        session_registry,
     )
     .await
 }
@@ -2545,6 +2684,24 @@ fn require_window_id(window_id: &str) -> Result<(), String> {
         Err("window_id is required".into())
     } else {
         Ok(())
+    }
+}
+
+pub(crate) fn require_connected_window(
+    session_registry: &SessionRegistry,
+    window_id: &str,
+) -> Result<(), String> {
+    let connected = session_registry
+        .snapshot(std::time::Instant::now())
+        .participants
+        .into_iter()
+        .any(|participant| {
+            participant.window_id == window_id && participant.status == ParticipantState::Live
+        });
+    if connected {
+        Ok(())
+    } else {
+        Err(format!("window {window_id:?} is not connected"))
     }
 }
 
@@ -2971,6 +3128,40 @@ fn send_window_command(
     Ok(())
 }
 
+// Every fire-and-forget opener (`cs open`, `cs graph`, `cs dashboard`, `cs
+// terminal new`, `cs terminal team new|load`) funnels its exact-window
+// dispatch through here and then returns "... request queued" straight to
+// the CLI without awaiting the SPA. `--pane`/`--side` placement is validated
+// and, on failure, surfaced as a visible transient status in the SPA (see
+// `resolveWindowCommandDestination` in store.svelte.ts), but that failure is
+// NOT reflected back to the CLI's exit code: the opener has already returned
+// "queued" by the time the SPA resolves placement. Making that CLI-visible
+// would mean converting openers to blocking round-trips like `cs pane`
+// (`pane_round_trip`, above), which also calls this same function but awaits
+// a reply afterward instead of returning immediately.
+fn send_window_command_if_live(
+    session_registry: &SessionRegistry,
+    window_id: &str,
+    command: WindowCommand,
+    events_tx: &broadcast::Sender<String>,
+) -> Result<(), String> {
+    let frame = WindowCommandFrame {
+        frame_type: "window_command",
+        window_id: window_id.to_string(),
+        command,
+    };
+    let raw = serde_json::to_string(&frame).map_err(|e| format!("encode window command: {e}"))?;
+    match session_registry.dispatch_if_live(window_id, || events_tx.send(raw)) {
+        None => Err(format!("window {window_id:?} is not connected")),
+        Some(Ok(_)) => Ok(()),
+        Some(Err(_)) => Err(
+            "no chan window is connected to receive this; open the workspace in a window, \
+             or run from inside a chan terminal so $CHAN_WINDOW_ID targets one"
+                .into(),
+        ),
+    }
+}
+
 /// Resolve an optional requested path to a workspace-relative path plus
 /// whether it is a directory. `None` / the workspace root resolve to
 /// `(None, _)`, which the SPA treats as "no specific target".
@@ -2998,6 +3189,8 @@ fn open_graph(
     workspace: &Workspace,
     window_id: &str,
     requested: Option<&Path>,
+    destination: Option<TabDestination>,
+    session_registry: &SessionRegistry,
     events_tx: &broadcast::Sender<String>,
 ) -> Result<String, String> {
     let resolved = resolve_optional_rel(workspace, requested)?;
@@ -3005,11 +3198,13 @@ fn open_graph(
         Some((rel, is_dir)) => (Some(rel.clone()), *is_dir),
         None => (None, false),
     };
-    send_window_command(
+    send_window_command_if_live(
+        session_registry,
         window_id,
         WindowCommand::OpenGraph {
             path: path.clone(),
             is_dir,
+            destination,
         },
         events_tx,
     )?;
@@ -3026,12 +3221,16 @@ fn open_graph(
 pub(crate) fn open_graph_link(
     window_id: &str,
     link: &str,
+    destination: Option<TabDestination>,
+    session_registry: &SessionRegistry,
     events_tx: &broadcast::Sender<String>,
 ) -> Result<String, String> {
-    send_window_command(
+    send_window_command_if_live(
+        session_registry,
         window_id,
         WindowCommand::OpenGraphLink {
             link: link.to_string(),
+            destination,
         },
         events_tx,
     )?;
@@ -3040,14 +3239,25 @@ pub(crate) fn open_graph_link(
 
 /// Category 1: open a new terminal tab in the originating window. A
 /// requested file resolves to its parent directory as the cwd.
+struct TerminalOpenSpec {
+    tab_name: Option<String>,
+    tab_group: Option<String>,
+    destination: Option<TabDestination>,
+}
+
 fn open_term_new(
     workspace: &Workspace,
     window_id: &str,
     requested: Option<&Path>,
-    tab_name: Option<String>,
-    tab_group: Option<String>,
+    spec: TerminalOpenSpec,
+    session_registry: &SessionRegistry,
     events_tx: &broadcast::Sender<String>,
 ) -> Result<String, String> {
+    let TerminalOpenSpec {
+        tab_name,
+        tab_group,
+        destination,
+    } = spec;
     let cwd = match resolve_optional_rel(workspace, requested)? {
         Some((rel, true)) => Some(rel),
         Some((rel, false)) => {
@@ -3056,12 +3266,14 @@ fn open_term_new(
         }
         None => None,
     };
-    send_window_command(
+    send_window_command_if_live(
+        session_registry,
         window_id,
         WindowCommand::OpenTermNew {
             cwd: cwd.clone(),
             tab_name,
             tab_group,
+            destination,
         },
         events_tx,
     )?;
@@ -3077,16 +3289,23 @@ fn open_term_new(
 /// `open_dashboard`. The caller has already rejected any `--path`.
 fn open_term_new_standalone(
     window_id: &str,
-    tab_name: Option<String>,
-    tab_group: Option<String>,
+    spec: TerminalOpenSpec,
+    session_registry: &SessionRegistry,
     events_tx: &broadcast::Sender<String>,
 ) -> Result<String, String> {
-    send_window_command(
+    let TerminalOpenSpec {
+        tab_name,
+        tab_group,
+        destination,
+    } = spec;
+    send_window_command_if_live(
+        session_registry,
         window_id,
         WindowCommand::OpenTermNew {
             cwd: None,
             tab_name,
             tab_group,
+            destination,
         },
         events_tx,
     )?;
@@ -3098,13 +3317,17 @@ fn open_dashboard(
     window_id: &str,
     carousel_index: Option<u32>,
     carousel_off: bool,
+    destination: Option<TabDestination>,
+    session_registry: &SessionRegistry,
     events_tx: &broadcast::Sender<String>,
 ) -> Result<String, String> {
-    send_window_command(
+    send_window_command_if_live(
+        session_registry,
         window_id,
         WindowCommand::OpenDashboard {
             carousel_index,
             carousel_off,
+            destination,
         },
         events_tx,
     )?;
@@ -3418,6 +3641,7 @@ fn term_list(registry: &TerminalRegistry, windows: &[WindowRecord]) -> Result<St
             "window_kind": window_kind,
             "window_status": window_status,
             "pane": summary.pane_id,
+            "side": summary.side,
             "tab": summary.tab_id,
             "cwd": summary.cwd.map(|p| p.to_string_lossy().into_owned()),
             "queue_depth": summary.queue_depth,
@@ -3437,22 +3661,23 @@ pub(crate) fn open_path(
     self_writes: &crate::self_writes::SelfWrites,
     window_id: &str,
     requested: &Path,
+    destination: Option<TabDestination>,
+    session_registry: &SessionRegistry,
     events_tx: &broadcast::Sender<String>,
 ) -> Result<String, String> {
     let rel = abs_to_workspace_rel(workspace.root(), requested)?;
     if rel.is_empty() {
-        let frame = WindowCommandFrame {
-            frame_type: "window_command",
-            window_id: window_id.to_string(),
-            command: WindowCommand::OpenBrowser {
+        send_window_command_if_live(
+            session_registry,
+            window_id,
+            WindowCommand::OpenBrowser {
                 path: String::new(),
                 select: None,
                 enter: true,
+                destination,
             },
-        };
-        let raw =
-            serde_json::to_string(&frame).map_err(|e| format!("encode window command: {e}"))?;
-        let _ = events_tx.send(raw);
+            events_tx,
+        )?;
         return Ok("open request queued for /".into());
     }
     let stat = workspace.stat(&rel).ok();
@@ -3462,6 +3687,7 @@ pub(crate) fn open_path(
                 path: rel.clone(),
                 select: None,
                 enter: true,
+                destination: destination.clone(),
             }
         } else if chan_workspace::fs_ops::is_editable_text(&rel) || workspace.sniff_is_text(&rel) {
             // Content-aware text gate -- the same judgment the editor's read
@@ -3470,7 +3696,10 @@ pub(crate) fn open_path(
             // openable text. An extensionless / odd-suffix text file opens;
             // a binary file (image, archive, ...) is refused below rather than
             // revealed in the browser.
-            WindowCommand::OpenFile { path: rel.clone() }
+            WindowCommand::OpenFile {
+                path: rel.clone(),
+                destination: destination.clone(),
+            }
         } else {
             return Err(format!("cannot open binary file {rel}"));
         }
@@ -3485,16 +3714,13 @@ pub(crate) fn open_path(
         workspace
             .write_text(&rel, "")
             .map_err(|e| format!("create {rel}: {e}"))?;
-        WindowCommand::OpenFile { path: rel.clone() }
+        WindowCommand::OpenFile {
+            path: rel.clone(),
+            destination: destination.clone(),
+        }
     };
 
-    let frame = WindowCommandFrame {
-        frame_type: "window_command",
-        window_id: window_id.to_string(),
-        command,
-    };
-    let raw = serde_json::to_string(&frame).map_err(|e| format!("encode window command: {e}"))?;
-    let _ = events_tx.send(raw);
+    send_window_command_if_live(session_registry, window_id, command, events_tx)?;
     Ok(format!("open request queued for {rel}"))
 }
 
@@ -4243,6 +4469,7 @@ mod tests {
             ControlRequest::OpenPath {
                 window_id: "window-a".to_string(),
                 path: PathBuf::from("/tmp/note.md"),
+                destination: None,
             },
             &ctx,
         )
@@ -4304,6 +4531,7 @@ mod tests {
             ControlRequest::OpenPath {
                 window_id: "terminal-win-0".into(),
                 path: PathBuf::from("/home/u/notes"),
+                destination: None,
             },
             &ctx,
         )
@@ -4330,6 +4558,10 @@ mod tests {
 
         let workspace_cell: Arc<RwLock<Option<WorkspaceCell>>> = Arc::new(RwLock::new(None));
         let ctx = test_ctx(workspace_cell, ControlTenant::TerminalOnly);
+        let _window = ctx
+            .session_registry
+            .join("terminal-win-0", true, None)
+            .guard;
         let mut rx = ctx.events_tx.subscribe();
 
         // Download a file: window is signalled with is_dir=false and the path
@@ -4409,6 +4641,10 @@ mod tests {
         // send_window_command succeeds.
         let workspace_cell: Arc<RwLock<Option<WorkspaceCell>>> = Arc::new(RwLock::new(None));
         let ctx = test_ctx(workspace_cell, ControlTenant::TerminalOnly);
+        let _window = ctx
+            .session_registry
+            .join("terminal-win-0", true, None)
+            .guard;
         let mut rx = ctx.events_tx.subscribe();
 
         let response = handle_request(
@@ -4417,6 +4653,10 @@ mod tests {
                 path: None,
                 tab_name: None,
                 tab_group: None,
+                destination: Some(TabDestination {
+                    pane_id: Some("pane-2".into()),
+                    side: Some(chan_shell::PaneSide::B),
+                }),
             },
             &ctx,
         )
@@ -4430,6 +4670,9 @@ mod tests {
         let frame = rx.try_recv().expect("window command broadcast");
         assert!(frame.contains("open_term_new"), "frame: {frame}");
         assert!(frame.contains("terminal-win-0"), "frame: {frame}");
+        let frame: Value = serde_json::from_str(&frame).expect("window command json");
+        assert_eq!(frame["destination"]["pane_id"], "pane-2");
+        assert_eq!(frame["destination"]["side"], "b");
     }
 
     #[tokio::test]
@@ -4446,6 +4689,7 @@ mod tests {
                 path: Some(std::path::PathBuf::from("notes")),
                 tab_name: None,
                 tab_group: None,
+                destination: None,
             },
             &ctx,
         )
@@ -4467,6 +4711,40 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn queued_opener_requires_the_exact_target_window() {
+        let workspace_cell: Arc<RwLock<Option<WorkspaceCell>>> = Arc::new(RwLock::new(None));
+        let ctx = test_ctx(workspace_cell, ControlTenant::TerminalOnly);
+        let _other = ctx.session_registry.join("window-other", true, None).guard;
+        let mut rx = ctx.events_tx.subscribe();
+
+        let response = handle_request(
+            ControlRequest::OpenDashboard {
+                window_id: "window-offline".into(),
+                carousel_index: None,
+                carousel_off: false,
+                destination: Some(TabDestination {
+                    pane_id: Some("pane-2".into()),
+                    side: Some(chan_shell::PaneSide::B),
+                }),
+            },
+            &ctx,
+        )
+        .await;
+
+        match response {
+            ControlResponse::Error { message } => {
+                assert!(message.contains("window-offline"), "{message}");
+                assert!(message.contains("not connected"), "{message}");
+            }
+            other => panic!("unexpected non-error response: {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "another connected window must not make the target deliverable"
+        );
+    }
+
     #[test]
     fn open_path_creates_markdown_and_broadcasts_window_command() {
         let cfg = tempfile::tempdir().expect("config dir");
@@ -4479,12 +4757,18 @@ mod tests {
         let workspace = lib.open_workspace(root.path()).expect("open workspace");
         let self_writes = crate::self_writes::SelfWrites::new();
         let (tx, mut rx) = broadcast::channel(4);
+        let (session_registry, _guard) = live_window("window-a");
 
         let message = open_path(
             &workspace,
             &self_writes,
             "window-a",
             &root.path().join("notes/new.md"),
+            Some(TabDestination {
+                pane_id: Some("pane-2".into()),
+                side: Some(chan_shell::PaneSide::B),
+            }),
+            &session_registry,
             &tx,
         )
         .expect("open path");
@@ -4497,6 +4781,8 @@ mod tests {
         assert_eq!(frame["window_id"], "window-a");
         assert_eq!(frame["command"], "open_file");
         assert_eq!(frame["path"], "notes/new.md");
+        assert_eq!(frame["destination"]["pane_id"], "pane-2");
+        assert_eq!(frame["destination"]["side"], "b");
     }
 
     #[test]
@@ -4511,12 +4797,15 @@ mod tests {
         let workspace = lib.open_workspace(root.path()).expect("open workspace");
         let self_writes = crate::self_writes::SelfWrites::new();
         let (tx, mut rx) = broadcast::channel(4);
+        let (session_registry, _guard) = live_window("window-a");
 
         let message = open_path(
             &workspace,
             &self_writes,
             "window-a",
             &root.path().join("notes/sub"),
+            None,
+            &session_registry,
             &tx,
         )
         .expect("open path");
@@ -4546,12 +4835,15 @@ mod tests {
         let workspace = lib.open_workspace(root.path()).expect("open workspace");
         let self_writes = crate::self_writes::SelfWrites::new();
         let (tx, mut rx) = broadcast::channel(4);
+        let (session_registry, _guard) = live_window("window-a");
 
         let message = open_path(
             &workspace,
             &self_writes,
             "window-a",
             &root.path().join("notes.txt"),
+            None,
+            &session_registry,
             &tx,
         )
         .expect("open path");
@@ -4577,12 +4869,15 @@ mod tests {
         let workspace = lib.open_workspace(root.path()).expect("open workspace");
         let self_writes = crate::self_writes::SelfWrites::new();
         let (tx, mut rx) = broadcast::channel(4);
+        let (session_registry, _guard) = live_window("window-a");
 
         let message = open_path(
             &workspace,
             &self_writes,
             "window-a",
             &root.path().join("LICENSE"),
+            None,
+            &session_registry,
             &tx,
         )
         .expect("open path");
@@ -4608,12 +4903,15 @@ mod tests {
         let workspace = lib.open_workspace(root.path()).expect("open workspace");
         let self_writes = crate::self_writes::SelfWrites::new();
         let (tx, mut rx) = broadcast::channel(4);
+        let session_registry = SessionRegistry::new();
 
         let err = open_path(
             &workspace,
             &self_writes,
             "window-a",
             &root.path().join("data.bin"),
+            None,
+            &session_registry,
             &tx,
         )
         .expect_err("binary file should be refused");
@@ -4640,12 +4938,15 @@ mod tests {
         let workspace = lib.open_workspace(root.path()).expect("open workspace");
         let self_writes = crate::self_writes::SelfWrites::new();
         let (tx, mut rx) = broadcast::channel(4);
+        let (session_registry, _guard) = live_window("window-a");
 
         let message = open_path(
             &workspace,
             &self_writes,
             "window-a",
             &root.path().join("notes/foo.log"),
+            None,
+            &session_registry,
             &tx,
         )
         .expect("open path");
@@ -4670,6 +4971,14 @@ mod tests {
         (cfg, root, workspace)
     }
 
+    fn live_window(
+        window_id: &str,
+    ) -> (Arc<SessionRegistry>, crate::session_presence::SessionGuard) {
+        let registry = Arc::new(SessionRegistry::new());
+        let guard = registry.join(window_id, true, None).guard;
+        (registry, guard)
+    }
+
     fn empty_registry() -> (tempfile::TempDir, TerminalRegistry) {
         use crate::config::TerminalConfig;
         use crate::terminal_sessions::RegistryConfig;
@@ -4688,11 +4997,14 @@ mod tests {
         let (_cfg, root, workspace) = test_workspace();
         std::fs::create_dir_all(root.path().join("notes/sub")).expect("sub dir");
         let (tx, mut rx) = broadcast::channel(4);
+        let (session_registry, _guard) = live_window("window-a");
 
         let message = open_graph(
             &workspace,
             "window-a",
             Some(&root.path().join("notes/sub")),
+            None,
+            &session_registry,
             &tx,
         )
         .expect("open graph");
@@ -4709,8 +5021,9 @@ mod tests {
     fn open_graph_without_a_path_targets_the_whole_graph() {
         let (_cfg, _root, workspace) = test_workspace();
         let (tx, mut rx) = broadcast::channel(4);
+        let (session_registry, _guard) = live_window("window-a");
 
-        open_graph(&workspace, "window-a", None, &tx).expect("open graph");
+        open_graph(&workspace, "window-a", None, None, &session_registry, &tx).expect("open graph");
 
         let frame: Value = serde_json::from_str(&rx.try_recv().expect("window command"))
             .expect("window command json");
@@ -4722,9 +5035,11 @@ mod tests {
     #[test]
     fn open_graph_link_broadcasts_window_command() {
         let (tx, mut rx) = broadcast::channel(4);
+        let (session_registry, _guard) = live_window("window-a");
         let link = "chan://graph?s=dir%3Acrates%2Fchan-tunnel-proto%2Fsrc&m=s&f=2ltmaifds&n=crates%2Fchan-tunnel-proto%2Fsrc%2Fh2_duplex.rs";
 
-        let message = open_graph_link("window-a", link, &tx).expect("open graph link");
+        let message = open_graph_link("window-a", link, None, &session_registry, &tx)
+            .expect("open graph link");
 
         assert_eq!(message, "graph link request queued");
         let frame: Value = serde_json::from_str(&rx.try_recv().expect("window command"))
@@ -4739,13 +5054,18 @@ mod tests {
         std::fs::create_dir_all(root.path().join("notes")).expect("notes dir");
         std::fs::write(root.path().join("notes/today.md"), "x").expect("write file");
         let (tx, mut rx) = broadcast::channel(4);
+        let (session_registry, _guard) = live_window("window-a");
 
         open_term_new(
             &workspace,
             "window-a",
             Some(&root.path().join("notes/today.md")),
-            Some("build".into()),
-            Some("foobar".into()),
+            TerminalOpenSpec {
+                tab_name: Some("build".into()),
+                tab_group: Some("foobar".into()),
+                destination: None,
+            },
+            &session_registry,
             &tx,
         )
         .expect("open term new");
@@ -4761,8 +5081,10 @@ mod tests {
     #[test]
     fn open_dashboard_carries_the_carousel_index() {
         let (tx, mut rx) = broadcast::channel(4);
+        let (session_registry, _guard) = live_window("window-a");
 
-        open_dashboard("window-a", Some(2), false, &tx).expect("open dashboard");
+        open_dashboard("window-a", Some(2), false, None, &session_registry, &tx)
+            .expect("open dashboard");
 
         let frame: Value = serde_json::from_str(&rx.try_recv().expect("window command"))
             .expect("window command json");
@@ -4775,8 +5097,10 @@ mod tests {
     #[test]
     fn open_dashboard_carries_carousel_off_when_set() {
         let (tx, mut rx) = broadcast::channel(4);
+        let (session_registry, _guard) = live_window("window-a");
 
-        open_dashboard("window-a", None, true, &tx).expect("open dashboard");
+        open_dashboard("window-a", None, true, None, &session_registry, &tx)
+            .expect("open dashboard");
 
         let frame: Value = serde_json::from_str(&rx.try_recv().expect("window command"))
             .expect("window command json");
@@ -4936,6 +5260,41 @@ mod tests {
         let json = term_list(&registry, &[]).expect("term list");
         let value: Value = serde_json::from_str(&json).expect("json");
         assert_eq!(value["groups"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn term_list_reports_live_pane_side_placement() {
+        let (_root, registry) = empty_registry();
+        let handle = registry
+            .create(CreateOptions {
+                size: PtySize {
+                    cols: 80,
+                    rows: 24,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+                tab_name: Some("placed".into()),
+                tab_group: None,
+                window_id: Some("win-2".into()),
+                mcp_env: false,
+                cwd: None,
+                command: None,
+                env: Default::default(),
+            })
+            .expect("spawn session");
+        assert!(registry.update_session_layout(
+            handle.id(),
+            Some("pane-4".into()),
+            Some(chan_shell::PaneSide::B),
+            Some("tab-7".into()),
+        ));
+
+        let json = term_list(&registry, &[]).expect("term list");
+        let value: Value = serde_json::from_str(&json).expect("json");
+        let row = &value["groups"]["default"][0];
+        assert_eq!(row["pane"], "pane-4");
+        assert_eq!(row["side"], "b");
+        assert_eq!(row["tab"], "tab-7");
     }
 
     fn window_record(
@@ -5308,6 +5667,7 @@ agent = "codex"
                 brief_content: None,
                 script: false,
                 window_id: None,
+                destination: None,
             },
             &ctx,
         )
@@ -5326,6 +5686,7 @@ agent = "codex"
                 brief_content: None,
                 script: false,
                 window_id: None,
+                destination: None,
             },
             &ctx,
         )
@@ -5349,6 +5710,7 @@ agent = "codex"
                 brief_content: None,
                 script: false,
                 window_id: None,
+                destination: None,
             },
             &ctx,
         )
@@ -5374,6 +5736,7 @@ agent = "codex"
                 brief_content: None,
                 script: true,
                 window_id: None,
+                destination: None,
             },
             &ctx,
         )
@@ -5399,6 +5762,7 @@ agent = "codex"
                 brief_content: None,
                 script: true,
                 window_id: None,
+                destination: None,
             },
             &ctx,
         )
@@ -5429,6 +5793,7 @@ created_at = "2026-05-29T00:00:00Z"
                 brief_content: None,
                 script: true,
                 window_id: None,
+                destination: None,
             },
             &test_ctx(cell, ControlTenant::Workspace),
         )
@@ -6178,7 +6543,17 @@ is_lead = false
         let (_root, registry) = empty_registry();
         let registry = Arc::new(registry);
         let config: TeamConfig = toml::from_str(SHELL_TEAM_TOML).expect("valid shell team");
-        match spawn_and_poke_team(&registry, "new-team-1", &config, None, &test_events()).await {
+        match spawn_and_poke_team(
+            &registry,
+            "new-team-1",
+            &config,
+            None,
+            None,
+            &SessionRegistry::new(),
+            &test_events(),
+        )
+        .await
+        {
             ControlResponse::Ok { message } => {
                 assert!(message.contains("shellsquad"), "{message}");
                 assert!(message.contains("2 member(s) up"), "{message}");
@@ -6198,7 +6573,20 @@ is_lead = false
         let registry = Arc::new(registry);
         let config: TeamConfig = toml::from_str(SHELL_TEAM_TOML).expect("valid shell team");
         let (events_tx, mut rx) = broadcast::channel::<String>(8);
-        spawn_and_poke_team(&registry, "new-team-1", &config, Some("win-s1"), &events_tx).await;
+        let (session_registry, _guard) = live_window("win-s1");
+        spawn_and_poke_team(
+            &registry,
+            "new-team-1",
+            &config,
+            Some("win-s1"),
+            Some(TabDestination {
+                pane_id: Some("pane-2".into()),
+                side: Some(chan_shell::PaneSide::B),
+            }),
+            &session_registry,
+            &events_tx,
+        )
+        .await;
 
         let frame: serde_json::Value =
             serde_json::from_str(&rx.try_recv().expect("team_spawned frame")).expect("json");
@@ -6206,6 +6594,8 @@ is_lead = false
         assert_eq!(frame["window_id"], "win-s1");
         assert_eq!(frame["command"], "team_spawned");
         assert_eq!(frame["group"], "shellsquad");
+        assert_eq!(frame["destination"]["pane_id"], "pane-2");
+        assert_eq!(frame["destination"]["side"], "b");
         let members = frame["members"].as_array().expect("members array");
         assert_eq!(members.len(), 2);
         assert_eq!(members[0]["tab_name"], "@@Boss");
@@ -6218,6 +6608,37 @@ is_lead = false
     }
 
     #[tokio::test]
+    async fn spawn_and_poke_team_reports_a_surface_enqueue_failure() {
+        let (_root, registry) = empty_registry();
+        let registry = Arc::new(registry);
+        let config: TeamConfig = toml::from_str(SHELL_TEAM_TOML).expect("valid shell team");
+        let (events_tx, rx) = broadcast::channel::<String>(8);
+        drop(rx);
+        let (session_registry, _guard) = live_window("win-s1");
+
+        let response = spawn_and_poke_team(
+            &registry,
+            "new-team-1",
+            &config,
+            Some("win-s1"),
+            None,
+            &session_registry,
+            &events_tx,
+        )
+        .await;
+
+        match response {
+            ControlResponse::Error { message } => {
+                assert!(
+                    message.contains("spawned but could not be surfaced"),
+                    "{message}"
+                );
+            }
+            other => panic!("unexpected non-error response: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn spawn_and_poke_team_windowless_does_not_surface() {
         // No window to surface into -> no `team_spawned` push (the SPA learns
         // the sessions on its next attach, as before).
@@ -6225,7 +6646,16 @@ is_lead = false
         let registry = Arc::new(registry);
         let config: TeamConfig = toml::from_str(SHELL_TEAM_TOML).expect("valid shell team");
         let (events_tx, mut rx) = broadcast::channel::<String>(8);
-        spawn_and_poke_team(&registry, "new-team-1", &config, None, &events_tx).await;
+        spawn_and_poke_team(
+            &registry,
+            "new-team-1",
+            &config,
+            None,
+            None,
+            &SessionRegistry::new(),
+            &events_tx,
+        )
+        .await;
         assert!(
             rx.try_recv().is_err(),
             "a windowless spawn must not surface a team_spawned frame"
@@ -6280,6 +6710,8 @@ is_lead = false
         let (_rroot, registry) = empty_registry();
         let registry = Arc::new(registry);
         let ctx = test_ctx(cell, ControlTenant::Workspace);
+        let _events_rx = ctx.events_tx.subscribe();
+        let _window = ctx.session_registry.join("win-load", true, None).guard;
         assert!(
             ctx.terminal_registry.set(registry.clone()).is_ok(),
             "fresh registry cell"
@@ -6292,6 +6724,7 @@ is_lead = false
                 brief_content: None,
                 script: false,
                 window_id: Some("win-load".to_string()),
+                destination: None,
             },
             &ctx,
         )
@@ -6330,6 +6763,7 @@ is_lead = false
                 brief_content: None,
                 script: false,
                 window_id: None,
+                destination: None,
             },
             &test_ctx(cell, ControlTenant::Workspace),
         )
