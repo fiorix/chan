@@ -671,9 +671,8 @@ mod tests {
         a.drain();
         let session = a.handle.session().clone();
 
-        // Dirty the session, then delete the file out from under it.
-        a.push_to("two\n").unwrap();
-        a.drain();
+        // Delete the file while the session is clean. Dirty deletion
+        // is a conflict and is covered in doc_sessions.
         std::fs::remove_file(root.path().join("a.md")).unwrap();
         registry
             .reconcile_event(
