@@ -463,16 +463,11 @@ pub struct Workspace {
     /// agrees with the in-memory map: every add-or-remove + persist
     /// pair runs while no other index_file/forget_file can interleave.
     pending_writes: std::sync::Mutex<std::collections::HashMap<String, PendingOp>>,
-    /// Serialization point for `index_file` / `forget_file`. The
-    /// per-file mutation path is graph-commit then index-commit
-    /// then journal-clear; holding this lock across the trio
-    /// keeps the journal honest (no two writers racing on the same
-    /// rel could otherwise both add, then one removes while the
-    /// other's writes are still in flight). The lock is only held
-    /// for the duration of a single file's commit pair; bulk
-    /// reindex (`reindex_with`) does not pass through here, so the
-    /// serialization is bounded by the watcher's per-file rate.
-    write_serial: std::sync::Mutex<()>,
+    /// Single derived-state mutation boundary. Per-file index/forget,
+    /// replay, reconcile as a unit, full rebuild, and warm report
+    /// watcher updates all take this lock. Queries and file I/O never do.
+    /// The recovery coordinator is a separate short-lived mutex.
+    write_serial: Arc<std::sync::Mutex<()>>,
     /// Short-lived recovery coordinator state. This mutex is never held
     /// across replay, reconcile, or rebuild work; the W2 derived-state
     /// mutation boundary remains a separate lock.
@@ -643,7 +638,7 @@ impl Workspace {
             graph: std::sync::OnceLock::new(),
             rename_log: std::sync::Mutex::new(rename_log),
             pending_writes: std::sync::Mutex::new(pending_writes),
-            write_serial: std::sync::Mutex::new(()),
+            write_serial: Arc::new(std::sync::Mutex::new(())),
             recovery: std::sync::Mutex::new(recovery),
             report: Arc::new(std::sync::OnceLock::new()),
             walk_filter,
@@ -2539,6 +2534,7 @@ impl Workspace {
         aggression: SearchAggression,
     ) -> Result<BuildSummary> {
         let recovery = self.recovery_execution(RecoveryAction::FullRebuild);
+        let _serial = self.write_serial.lock().unwrap();
 
         // Graph rebuild walks the tree once for headings + edges.
         // The search facade walks again for chunking + embeddings.
@@ -3106,10 +3102,14 @@ impl Workspace {
     /// `needs_replay_writes()` so the consumer can call
     /// `replay_pending_writes()` to converge.
     pub fn index_file(&self, rel: &str) -> Result<()> {
+        let _serial = self.write_serial.lock().unwrap();
+        self.index_file_serial(rel)
+    }
+
+    fn index_file_serial(&self, rel: &str) -> Result<()> {
         if !fs_ops::is_indexable_text(rel) {
             return Ok(());
         }
-        let _serial = self.write_serial.lock().unwrap();
         self.journal_record(rel, PendingOp::Index)?;
         let result = self.index_file_inner(rel);
         if result.is_ok() {
@@ -3273,6 +3273,10 @@ impl Workspace {
     /// state the editor cannot self-heal.
     pub fn forget_file(&self, rel: &str) -> Result<()> {
         let _serial = self.write_serial.lock().unwrap();
+        self.forget_file_serial(rel)
+    }
+
+    fn forget_file_serial(&self, rel: &str) -> Result<()> {
         self.journal_record(rel, PendingOp::Forget)?;
         let result = self.forget_file_inner(rel);
         if result.is_ok() {
@@ -3338,6 +3342,7 @@ impl Workspace {
     /// Returns the number of entries successfully replayed.
     pub fn replay_pending_writes(&self) -> Result<usize> {
         let recovery = self.recovery_execution(RecoveryAction::Replay);
+        let _serial = self.write_serial.lock().unwrap();
         let entries: Vec<(String, PendingOp)> = self
             .pending_writes
             .lock()
@@ -3354,13 +3359,13 @@ impl Workspace {
             match op {
                 PendingOp::Index => {
                     if self.exists(&rel) {
-                        self.index_file(&rel)?;
+                        self.index_file_serial(&rel)?;
                     } else {
-                        self.forget_file(&rel)?;
+                        self.forget_file_serial(&rel)?;
                     }
                 }
                 PendingOp::Forget => {
-                    self.forget_file(&rel)?;
+                    self.forget_file_serial(&rel)?;
                 }
             }
             replayed += 1;
@@ -3414,6 +3419,7 @@ impl Workspace {
     /// stat check.
     pub fn reconcile(&self) -> Result<ReconcileReport> {
         let recovery = self.recovery_execution(RecoveryAction::Reconcile);
+        let _serial = self.write_serial.lock().unwrap();
         // Snapshot the graph's view of the world: per-file
         // (mtime, size) tuples. Graph stores mtime as Unix
         // seconds and size as bytes (None for either component
@@ -3476,7 +3482,7 @@ impl Workspace {
                 }
             };
             if needs_index {
-                self.index_file(rel)?;
+                self.index_file_serial(rel)?;
                 upserted.push(rel.clone());
             } else {
                 unchanged += 1;
@@ -3487,7 +3493,7 @@ impl Workspace {
         // deletions the watcher missed (or a downtime deletion).
         for rel in graph_snapshot.keys() {
             if !disk_files.contains_key(rel) {
-                self.forget_file(rel)?;
+                self.forget_file_serial(rel)?;
                 forgotten.push(rel.clone());
             }
         }
@@ -3594,7 +3600,8 @@ impl Workspace {
     /// dropped, since the scan reflects the on-disk state regardless. Callers
     /// that need a warm report call `report()` / `boot()`.
     pub fn watch(self: &Arc<Self>, cb: Arc<dyn WatchCallback>) -> Result<WatchHandle> {
-        let fan: Arc<dyn WatchCallback> = ReportFanOut::new(cb, Arc::clone(&self.report));
+        let fan: Arc<dyn WatchCallback> =
+            ReportFanOut::new(cb, Arc::clone(&self.report), Arc::clone(&self.write_serial));
         // Single recursive root watcher. Drafts live in-root under
         // `<drafts_dir_name>/...`, so the workspace-root watcher already
         // covers them; no separate drafts watch root is needed.
@@ -4684,6 +4691,153 @@ mod tests {
             )
             .is_err());
         assert_eq!(workspace.recovery_status().active, Some(current));
+    }
+
+    fn assert_waits_for_write_serial(
+        workspace: &Arc<Workspace>,
+        operation: impl FnOnce(Arc<Workspace>) + Send + 'static,
+    ) {
+        let guard = workspace.write_serial.lock().unwrap();
+        let worker_workspace = Arc::clone(workspace);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            operation(worker_workspace);
+            completed_tx.send(()).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(
+            completed_rx
+                .recv_timeout(std::time::Duration::from_millis(250))
+                .is_err(),
+            "derived-state mutation bypassed write_serial"
+        );
+        drop(guard);
+        completed_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("derived-state mutation did not resume after write_serial released");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn serialize_all_derived_mutations_share_write_serial() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.write_text("a.md", "# a\nserial-token\n").unwrap();
+
+        assert_waits_for_write_serial(&workspace, |workspace| {
+            workspace.index_file("a.md").unwrap();
+        });
+        assert_waits_for_write_serial(&workspace, |workspace| {
+            workspace.replay_pending_writes().unwrap();
+        });
+        assert_waits_for_write_serial(&workspace, |workspace| {
+            workspace.reconcile().unwrap();
+        });
+        assert_waits_for_write_serial(&workspace, |workspace| {
+            workspace.reindex(None).unwrap();
+        });
+    }
+
+    struct ChannelWatchCallback(std::sync::Mutex<std::sync::mpsc::Sender<crate::WatchEvent>>);
+
+    impl crate::WatchCallback for ChannelWatchCallback {
+        fn on_event(&self, event: crate::WatchEvent) {
+            let _ = self.0.lock().unwrap().send(event);
+        }
+    }
+
+    #[test]
+    fn serialize_report_mutation_uses_write_serial() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.write_text("report.md", "# before\n").unwrap();
+        workspace.report().unwrap();
+
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let callback: Arc<dyn crate::WatchCallback> =
+            Arc::new(ChannelWatchCallback(std::sync::Mutex::new(event_tx)));
+        let fan = ReportFanOut::new(
+            callback,
+            Arc::clone(&workspace.report),
+            Arc::clone(&workspace.write_serial),
+        );
+
+        let guard = workspace.write_serial.lock().unwrap();
+        workspace.write_text("report.md", "# after\n").unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            fan.on_event(crate::WatchEvent {
+                kind: crate::WatchKind::Modified,
+                path: Some("report.md".to_string()),
+                to: None,
+            });
+        });
+        started_rx.recv().unwrap();
+        assert!(
+            event_rx
+                .recv_timeout(std::time::Duration::from_millis(250))
+                .is_err(),
+            "report mutation bypassed write_serial"
+        );
+        drop(guard);
+        event_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("report mutation did not resume after write_serial released");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn serialize_queries_and_file_streams_remain_lock_free() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace
+            .write_text("query.md", "# query\nlock-free-token\n")
+            .unwrap();
+        workspace.index_file("query.md").unwrap();
+        workspace.report().unwrap();
+
+        let guard = workspace.write_serial.lock().unwrap();
+        let worker_workspace = Arc::clone(&workspace);
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            assert_eq!(
+                worker_workspace.read_text("query.md").unwrap(),
+                "# query\nlock-free-token\n"
+            );
+            let bytes = worker_workspace
+                .read_bytes_bounded("query.md")
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .concat();
+            assert_eq!(bytes, b"# query\nlock-free-token\n");
+            assert!(!worker_workspace
+                .search(
+                    "lock-free-token",
+                    &SearchOpts {
+                        mode: crate::SearchMode::Bm25,
+                        limit: 10,
+                        scope: None,
+                    },
+                )
+                .unwrap()
+                .hits
+                .is_empty());
+            assert!(!worker_workspace
+                .graph()
+                .unwrap()
+                .files()
+                .unwrap()
+                .is_empty());
+            assert!(worker_workspace.report_if_available().unwrap().is_some());
+            completed_tx.send(()).unwrap();
+        });
+        completed_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("query or file stream waited for write_serial");
+        drop(guard);
+        worker.join().unwrap();
     }
 
     #[test]

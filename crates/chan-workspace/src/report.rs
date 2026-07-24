@@ -9,7 +9,7 @@
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -244,18 +244,25 @@ impl Drop for ReportState {
 /// stays fast. The scan runs separately (`Workspace::report()` / `boot()`) and
 /// fills the cell; until then report events are dropped, since the scan itself
 /// captures the current filesystem state. The user callback always sees every
-/// event.
+/// event. Warm report mutations take the workspace's shared derived-state
+/// serialization boundary; the user callback runs after that guard is dropped.
 pub(crate) struct ReportFanOut {
     user_cb: Arc<dyn WatchCallback>,
     report: Arc<OnceLock<Arc<ReportState>>>,
+    write_serial: Arc<Mutex<()>>,
 }
 
 impl ReportFanOut {
     pub(crate) fn new(
         user_cb: Arc<dyn WatchCallback>,
         report: Arc<OnceLock<Arc<ReportState>>>,
+        write_serial: Arc<Mutex<()>>,
     ) -> Arc<Self> {
-        Arc::new(Self { user_cb, report })
+        Arc::new(Self {
+            user_cb,
+            report,
+            write_serial,
+        })
     }
 }
 
@@ -265,6 +272,7 @@ impl WatchCallback for ReportFanOut {
         // the slot is empty and the event is a no-op for the report (the
         // pending scan reflects this file's on-disk state anyway).
         if let Some(report) = self.report.get() {
+            let _serial = self.write_serial.lock().unwrap();
             report.on_event(&event);
         }
         self.user_cb.on_event(event);

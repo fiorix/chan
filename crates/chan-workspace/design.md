@@ -393,6 +393,8 @@ Drafts, session blobs, contact import, trash restore/purge, and bootstrap snapsh
 
 Search, graph, and report state are lazy sidecars owned by `Workspace`. Reindexing is synchronous and caller-scheduled; the built-in watcher/indexer is optional and uses the same walk filter as the cold paths. Graph writes serialize through the graph writer connection; graph reads use the reader pool. Report state is opt-in, watcher-fed before user callbacks run, and persisted through chan-report JSONL. `report_if_available` is the non-scanning read path: it returns a warm snapshot or loads a valid persisted JSONL and otherwise returns `None`; unlike `report()`, it never falls back to a filesystem scan.
 
+One workspace `write_serial` mutex is the derived-state mutation boundary. It covers per-file graph/BM25 index and forget, pending-journal replay, reconcile as one unit, full rebuild, and warm report watcher updates. Nested bulk paths call lock-assuming per-file helpers, so they do not reacquire the non-reentrant mutex. Search, graph, report snapshot reads, filesystem reads, and bounded file streams never take this lock.
+
 Per-workspace settings live with the index config so search mode, report enablement, excluded dirs, and screensaver policy move with the workspace sidecar rather than with an app-specific preference file.
 
 ### Progress and recovery
