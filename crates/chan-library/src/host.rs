@@ -2317,6 +2317,20 @@ impl WorkspaceHost {
         }
     }
 
+    /// Publish `starting` before an owner spawns a mount future.
+    ///
+    /// The devserver uses this pre-spawn edge so persistence and serving status
+    /// cannot observe a desired-on row as stopped during background restore.
+    pub fn mark_workspace_starting(&self, root: &Path) {
+        self.mark_mount_starting(root);
+    }
+
+    /// Publish a terminal mount failure supplied by an external lifecycle
+    /// owner, such as the devserver's bounded-attempt timeout.
+    pub fn mark_workspace_failed(&self, root: &Path, reason: String) {
+        self.mark_mount_error(root, reason);
+    }
+
     /// Mark a workspace root's mount as in flight (`starting`) and fire the
     /// watch feed so the launcher spins the row before the (possibly slow)
     /// tenant build completes. No-op when the root is already mounted (`running`
@@ -3423,7 +3437,7 @@ mod tests {
         assert!(overlay
             .entries()
             .iter()
-            .any(|row| row.path == key && !row.on));
+            .any(|row| row.path == key && !row.desired_on));
     }
 
     #[tokio::test]

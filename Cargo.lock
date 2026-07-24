@@ -969,6 +969,7 @@ dependencies = [
  "chan-llm",
  "chan-server",
  "chan-shell",
+ "chan-systemd",
  "chan-workspace",
  "clap 4.6.1",
  "clap_complete",

@@ -226,7 +226,9 @@ FileDescriptorStoreMax=512
 KillMode=process
 Environment="CHAN_TUNNEL_TOKEN=$TOKEN"
 ExecStart=$EXEC
+TimeoutStartSec=10min
 Restart=on-failure
+WatchdogSec=30
 
 [Install]
 WantedBy=default.target
