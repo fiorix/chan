@@ -1022,27 +1022,35 @@ async fn flush_session_locked(
         let Some(job) = session.begin_flush() else {
             return true;
         };
-        // Note the self-write BEFORE the blocking write runs, exactly
-        // like the files.rs save path: the watcher can deliver the
-        // resulting event the instant the write lands, and noting
-        // afterwards would let our own flush surface as an external
-        // edit.
-        self_writes.note(&session.path);
+        // Reserve suppression before the blocking write so an
+        // immediate watcher event cannot escape. The strict preflight
+        // keeps known-refused writes out of the ring; failures after
+        // reservation cancel it below.
+        let self_write = match self_writes.reserve_if_writable(workspace, &session.path) {
+            Ok(reservation) => reservation,
+            Err(e) => {
+                session.note_flush_failure(e.to_string());
+                return false;
+            }
+        };
         let job_hash = content_hash(&job.text);
         let ws = Arc::clone(workspace);
         let path = session.path.clone();
         let epoch = job.epoch;
         let result = tokio::task::spawn_blocking(move || {
-            ws.write_text_if_unchanged(&path, job.expected_mtime_ns, &job.text)?;
-            ws.stat(&path)
+            match ws.write_text_if_unchanged(&path, job.expected_mtime_ns, &job.text) {
+                Ok(()) => (true, ws.stat(&path)),
+                Err(e) => (false, Err(e)),
+            }
         })
         .await;
         match result {
-            Ok(Ok(stat)) => {
+            Ok((_, Ok(stat))) => {
                 session.finish_flush(epoch, &stat, job_hash);
                 return true;
             }
-            Ok(Err(ChanError::WriteConflict { .. })) if attempt == 0 => {
+            Ok((false, Err(ChanError::WriteConflict { .. }))) if attempt == 0 => {
+                self_writes.cancel(self_write);
                 // Disk changed since our token: fold the external
                 // content in, then retry with the adopted token. If
                 // the merge left nothing dirty the retry no-ops. A
@@ -1054,11 +1062,15 @@ async fn flush_session_locked(
                     return false;
                 }
             }
-            Ok(Err(e)) => {
+            Ok((write_committed, Err(e))) => {
+                if !write_committed {
+                    self_writes.cancel(self_write);
+                }
                 session.note_flush_failure(e.to_string());
                 return false;
             }
             Err(join) => {
+                self_writes.cancel(self_write);
                 session.note_flush_failure(join.to_string());
                 return false;
             }
@@ -1156,10 +1168,23 @@ async fn reconcile_session_locked(session: &Arc<DocSession>, workspace: &Arc<Wor
         if st.disk_echo.contains(hash) {
             // Our own bytes under a re-stamped mtime (async-committing
             // fs) or a stale read serving a recent flush back: adopt
-            // the token so the next CAS write succeeds, keep the
-            // authority text, and leave dirty edits pending.
+            // the token so the next CAS write succeeds and keep the
+            // authority text. Divergent bytes stay scheduled: if they
+            // are still on disk after the ring entry expires, they are
+            // durable external state and must fold normally.
             st.flushed_mtime_ns = disk_stat.mtime_ns;
-            st.pending_fold = None;
+            if disk_text == st.text {
+                st.pending_fold = None;
+            } else if !matches!(
+                &st.pending_fold,
+                Some(p) if p.hash == hash && p.mtime_ns == disk_stat.mtime_ns
+            ) {
+                st.pending_fold = Some(PendingFold {
+                    hash,
+                    mtime_ns: disk_stat.mtime_ns,
+                    seen: Instant::now(),
+                });
+            }
             return;
         }
         if disk_text == st.text {
@@ -2062,6 +2087,10 @@ mod tests {
         let root = fx.root.path();
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o555)).unwrap();
         let ok = flush_session(ha.session(), &fx.workspace, &fx.self_writes).await;
+        assert!(
+            !fx.self_writes.should_suppress("a.md"),
+            "a failed flush must not poison watcher suppression"
+        );
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(!ok, "failed write must report false");
         {
@@ -2290,6 +2319,40 @@ mod tests {
         assert_eq!(token, stale_token, "token adopted from the observation");
         assert_eq!(drain(&mut rxa).len(), 0, "no $disk fan");
         assert!(ha.session().lock_state().dirty_since.is_none());
+    }
+
+    #[tokio::test]
+    async fn external_restore_folds_after_echo_ttl() {
+        let fx = fixture(&[("a.md", "v1")]);
+        let (ha, mut rxa) = attach(&fx, "a.md", "w1", None).await;
+        drain(&mut rxa);
+        ha.session()
+            .test_set_disk_echo_ttl(Duration::from_millis(500));
+        ha.session().lock_state().disk_echo.note(content_hash("v1"));
+
+        std::fs::write(fx.root.path().join("a.md"), "v2").unwrap();
+        reconcile_session(ha.session(), &fx.workspace).await;
+        assert_eq!(ha.session().authority_view().0, "v2");
+        drain(&mut rxa);
+
+        std::fs::write(fx.root.path().join("a.md"), "v1").unwrap();
+        reconcile_session(ha.session(), &fx.workspace).await;
+        assert_eq!(
+            ha.session().authority_view().0,
+            "v2",
+            "a live echo-ring entry still protects authority"
+        );
+        assert!(
+            ha.session().lock_state().pending_fold.is_some(),
+            "the restore observation remains scheduled"
+        );
+
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        fx.registry.reconcile_pending(&fx.workspace).await;
+        assert_eq!(ha.session().authority_view().0, "v1");
+        let frames = drain(&mut rxa);
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(frames[0]["updates"][0]["clientID"], "$disk");
     }
 
     #[tokio::test]

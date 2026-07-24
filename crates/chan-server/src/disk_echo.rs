@@ -12,15 +12,17 @@
 //! Each session keeps a ring of hashes of every content it has itself
 //! put on (or adopted from) disk: the attach seed, every successful
 //! flush, every reconciled merge. A disk read whose hash is in the
-//! ring is our own bytes coming back, no matter what the mtime says;
-//! the reconciler adopts the token and keeps the authority text.
+//! ring is our own bytes coming back, no matter what the mtime says.
+//! The reconciler adopts the token and keeps the authority while the
+//! entry is live. A divergent observation remains scheduled so bytes
+//! that persist past expiry fold as durable external state.
 //!
 //! A RING, not just the last flush: a stale read can serve content
 //! from several writes ago (upload queues), so recent history must
 //! match too. Entries expire so the window in which an external edit
-//! that byte-exactly restores recently-flushed content gets swallowed
-//! stays bounded; that over-suppression trade-off is the same class
-//! as the coarser `SelfWrites` path dedupe.
+//! that byte-exactly restores recently-flushed content is deferred
+//! stays bounded; that temporary over-suppression is the same class as
+//! the coarser `SelfWrites` path dedupe.
 //!
 //! Not thread-safe by design: each ring lives inside its session's
 //! state mutex.

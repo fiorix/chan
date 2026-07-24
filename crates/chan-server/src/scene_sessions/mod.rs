@@ -337,6 +337,14 @@ impl SceneSession {
         self.attach_count.load(Ordering::Relaxed)
     }
 
+    /// Swap the echo ring for one with a short TTL so tests can
+    /// observe expiry without sleeping through the production window.
+    /// Discards existing entries; call before the writes under test.
+    #[cfg(test)]
+    fn test_set_disk_echo_ttl(&self, ttl: Duration) {
+        self.lock_state().disk_echo = DiskEchoRing::with_ttl(ttl);
+    }
+
     /// Age the pending absence past CORROBORATE_AFTER so the next
     /// reconcile confirms the removal; for route-level tests that
     /// exercise the removed flow without sleeping.
@@ -867,27 +875,35 @@ async fn flush_session_locked(
         let Some(job) = session.begin_flush() else {
             return true;
         };
-        // Note the self-write BEFORE the blocking write runs, exactly
-        // like the files.rs save path: the watcher can deliver the
-        // resulting event the instant the write lands, and noting
-        // afterwards would let our own flush surface as an external
-        // edit.
-        self_writes.note(&session.path);
+        // Reserve suppression before the blocking write so an
+        // immediate watcher event cannot escape. The strict preflight
+        // keeps known-refused writes out of the ring; failures after
+        // reservation cancel it below.
+        let self_write = match self_writes.reserve_if_writable(workspace, &session.path) {
+            Ok(reservation) => reservation,
+            Err(e) => {
+                session.note_flush_failure(e.to_string());
+                return false;
+            }
+        };
         let job_hash = content_hash(&job.text);
         let ws = Arc::clone(workspace);
         let path = session.path.clone();
         let epoch = job.epoch;
         let result = tokio::task::spawn_blocking(move || {
-            ws.write_text_if_unchanged(&path, job.expected_mtime_ns, &job.text)?;
-            ws.stat(&path)
+            match ws.write_text_if_unchanged(&path, job.expected_mtime_ns, &job.text) {
+                Ok(()) => (true, ws.stat(&path)),
+                Err(e) => (false, Err(e)),
+            }
         })
         .await;
         match result {
-            Ok(Ok(stat)) => {
+            Ok((_, Ok(stat))) => {
                 session.finish_flush(epoch, &stat, job_hash);
                 return true;
             }
-            Ok(Err(ChanError::WriteConflict { .. })) if attempt == 0 => {
+            Ok((false, Err(ChanError::WriteConflict { .. }))) if attempt == 0 => {
+                self_writes.cancel(self_write);
                 // Disk changed since our token: fold the external
                 // content in, then retry with the adopted token. If
                 // the merge left nothing dirty the retry no-ops. A
@@ -899,11 +915,15 @@ async fn flush_session_locked(
                     return false;
                 }
             }
-            Ok(Err(e)) => {
+            Ok((write_committed, Err(e))) => {
+                if !write_committed {
+                    self_writes.cancel(self_write);
+                }
                 session.note_flush_failure(e.to_string());
                 return false;
             }
             Err(join) => {
+                self_writes.cancel(self_write);
                 session.note_flush_failure(join.to_string());
                 return false;
             }
@@ -991,10 +1011,24 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
         let mut st = session.lock_state();
         if st.disk_echo.contains(hash) {
             // Our own bytes under a re-stamped mtime or a stale read
-            // serving a recent flush back: adopt the token, keep the
-            // authority scene, leave dirty mutations pending.
+            // serving a recent flush back: adopt the token and keep
+            // the authority scene. Divergent bytes stay scheduled: if
+            // they remain after expiry, they are durable external
+            // state and must fold normally.
             st.flushed_mtime_ns = disk_stat.mtime_ns;
-            st.pending_fold = None;
+            let authority_hash = content_hash(&st.scene.serialize_file());
+            if hash == authority_hash {
+                st.pending_fold = None;
+            } else if !matches!(
+                &st.pending_fold,
+                Some(p) if p.hash == hash && p.mtime_ns == disk_stat.mtime_ns
+            ) {
+                st.pending_fold = Some(PendingFold {
+                    hash,
+                    mtime_ns: disk_stat.mtime_ns,
+                    seen: Instant::now(),
+                });
+            }
             return;
         }
         let dirty = st.dirty_since.is_some();
@@ -1960,6 +1994,69 @@ mod tests {
         assert!(text.contains("\"y\""), "flushed mutation survives");
         assert_eq!(token, stale_token, "token adopted from the observation");
         assert_eq!(drain(&mut rxa).len(), 0, "no fan");
+    }
+
+    #[tokio::test]
+    async fn external_restore_folds_after_echo_ttl() {
+        let seed = body(json!([elem("x", 1, 1, "a1")]));
+        let changed = body(json!([elem("x", 1, 1, "a1"), elem("y", 1, 1, "a2")]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (ha, mut rxa) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rxa);
+        ha.session()
+            .test_set_disk_echo_ttl(Duration::from_millis(500));
+        ha.session()
+            .lock_state()
+            .disk_echo
+            .note(content_hash(&seed));
+
+        std::fs::write(fx.root.path().join("b.excalidraw"), &changed).unwrap();
+        reconcile_session(ha.session(), &fx.workspace).await;
+        assert!(ha.session().authority_view().0.contains("\"y\""));
+        drain(&mut rxa);
+
+        std::fs::write(fx.root.path().join("b.excalidraw"), &seed).unwrap();
+        reconcile_session(ha.session(), &fx.workspace).await;
+        assert!(
+            ha.session().authority_view().0.contains("\"y\""),
+            "a live echo-ring entry still protects authority"
+        );
+        assert!(
+            ha.session().lock_state().pending_fold.is_some(),
+            "the restore observation remains scheduled"
+        );
+
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        fx.registry.reconcile_pending(&fx.workspace).await;
+        let (text, _) = ha.session().authority_view();
+        assert!(!text.contains("\"y\""), "the expired restore folds");
+        assert_eq!(types(&drain(&mut rxa)), ["update"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_flush_does_not_poison_watcher_suppression() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fx = fixture(&[("b.excalidraw", &body(json!([])))]);
+        let (ha, mut rxa) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rxa);
+        ha.push(vec![elem("x", 1, 1, "a1")], None, None).unwrap();
+
+        let root = fx.root.path();
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let ok = flush_session(ha.session(), &fx.workspace, &fx.self_writes).await;
+        assert!(
+            !fx.self_writes.should_suppress("b.excalidraw"),
+            "a failed flush must not poison watcher suppression"
+        );
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!ok, "failed write must report false");
+        assert!(
+            ha.session().lock_state().dirty_since.is_some(),
+            "authority remains dirty"
+        );
+        assert!(flush_session(ha.session(), &fx.workspace, &fx.self_writes).await);
     }
 
     #[tokio::test]
