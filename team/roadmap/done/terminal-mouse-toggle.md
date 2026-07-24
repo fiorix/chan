@@ -1,5 +1,7 @@
 # A Terminal Mouse Toggle
 
+> Status: shipped in [v0.75.0](../../release/release-v0.75.0.md): per-terminal terminal.mouse_capture toggle.
+
 Status: accepted scope for v0.75.0, deferred out of v0.74.0 by owner ruling ("needs testing, a setting, and a command-launcher entry, not the time this round"). This is a feature, not a bug: nothing is broken today, there is simply no way to turn the terminal's mouse handling off.
 
 ## Problem

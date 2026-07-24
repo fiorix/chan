@@ -1,5 +1,7 @@
 # v0.75.0 bug fixes
 
+> Status: shipped in [v0.75.0](../../release/release-v0.75.0.md).
+
 Branch `v075/bug-fixes-1`, one commit per fix. Every fix carries unit or route tests plus, where the symptom is user-visible in the browser, a committed browser-smoke check that reproduces the observable. This file records what shipped and the proof behind it; the reports themselves are in [bug-reports.md](bug-reports.md).
 
 ## Editor: unclickable line after a table

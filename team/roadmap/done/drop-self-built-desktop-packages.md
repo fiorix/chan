@@ -1,5 +1,7 @@
 # Stop Publishing The Self-Built Desktop .deb And .rpm
 
+> Status: shipped in [v0.75.0](../../release/release-v0.75.0.md): the unmaintained self-built Tauri .deb/.rpm are gone; COPR/PPA/AUR is the desktop package channel.
+
 Status: accepted scope for v0.74.0, blocked on the loopback redirect item landing first.
 
 ## Problem

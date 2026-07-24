@@ -1,5 +1,7 @@
 # Bug reports
 
+> Status: shipped in [v0.75.0](../../release/release-v0.75.0.md): every report closed by the v0.75.0 bug-fix round (see bug-fixes.md).
+
 - Editor: 
   - On pages with tables, we cannot click the line after the table, especially if what comes after the table is a heading
   - We need to teach agents via `chan dump-skill` that markers like `@pagebreak` and `@today` are only for the live editor. They do not work if the agents write files with these markers. They have to write the materialised version instead, e.g. the `<hr class="chan-page-break">` for `@pagebreak` and the date formats we support for `@today` and `@date`

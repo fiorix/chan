@@ -19,16 +19,35 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-### v0.75.0
+### v0.76.0
 
 | item | state | what needs to happen |
 | --- | --- | --- |
-| [loopback-redirect-desktop-signin](v0.75.0/loopback-redirect-desktop-signin.md) | **NOT READY TO IMPLEMENT**; designed and security-reviewed, and that review found three exploitable gaps in the naive shape | refine the design against the real call graph, settle the verifier-keyed variant, and produce a file-level plan before implementing; the control-plane dependency cleared in v0.74.0 |
-| [drop-self-built-desktop-packages](v0.75.0/drop-self-built-desktop-packages.md) | blocked behind the loopback redirect; the CLI half already shipped in v0.73.0 | once loopback lands, drop the four Tauri desktop `.deb`/`.rpm` and fix every release-asset consumer in the same commit |
-| [windows-deeplink-second-instance](v0.75.0/windows-deeplink-second-instance.md) | inferred from source, never reproduced; very likely subsumed by the loopback redirect | reproduce it on Windows first, then confirm loopback closes it and decide whether to keep `chan://` registered at all |
-| [terminal-mouse-toggle](v0.75.0/terminal-mouse-toggle.md) | accepted feature, deferred out of v0.74.0; no mouse toggle exists and "mouse" is five independent mechanisms | settle the "stop TUIs capturing the mouse" vs "kill all mouse" variant, then add a `terminal.*` config boolean and a `TerminalSection.svelte` checkbox wired like `scrollback_mb` |
+| [devserver-rebuild-storm-and-livelock](v0.76.0/devserver-rebuild-storm-and-livelock.md) | levers 1-4 landed on `main` (exclusions + migration + Linux watch-registration pruning, rebuild storm damping, overflow surfacing, worker cap + systemd watchdog); storm-check script ALL GREEN | ship with v0.76.0; the remainder (lever 5, journal-branch rework, .gitignore honoring) moved to v0.77.0 |
+
+### v0.77.0
+
+| item | state | what needs to happen |
+| --- | --- | --- |
+| [upload-download-budgets](v0.77.0/upload-download-budgets.md) | registered, not root-caused; deferred from v0.76.0 | profile a real large-file download in chan-desktop first (desktop main-thread block vs server whole-file buffering vs progress thrash), then set budgets |
+| [video-preview-and-range-serving](v0.77.0/video-preview-and-range-serving.md) | registered, grounded but not specced; deferred from v0.76.0 | spec first; the real chunk is HTTP range/206 in the file route (mirrors the image path on the frontend) |
+| [workspace-open-reconcile-off-mount-path](v0.77.0/workspace-open-reconcile-off-mount-path.md) | registered (storm lever 5) | move `Workspace::open`'s inline full-stat reconcile off the async mount path; also the chan-desktop big-repo startup gate |
+| [devserver-startup-journal-branch-rework](v0.77.0/devserver-startup-journal-branch-rework.md) | registered; branch a42436ac reviewed (20 findings), unsafe as-is | rework per the item: `starting` rows before spawn, supervised restore task, fdstore apply ahead of serving terminals, no READY with mounts pending |
+| [gitignore-aware-exclusions](v0.77.0/gitignore-aware-exclusions.md) | registered (fuller shape of storm lever 1) | honor `.gitignore` in walk, index, and Linux watch registration, layered under `index_excluded_dirs` overrides |
+| [editor-external-restore-echo-swallow](v0.77.0/editor-external-restore-echo-swallow.md) | root-caused and reproduced (check 57, red by design) | park the echo observation and re-check after the ring TTL instead of clearing it; same in scene_sessions; ungate check 57 green |
 
 ## Completed
+
+### v0.75.0
+
+Shipped 2026-07-24; see [release-v0.75.0](../release/release-v0.75.0.md). Closed items in [`done/`](done/):
+
+- [loopback-redirect-desktop-signin](done/loopback-redirect-desktop-signin.md) - RFC 8252 loopback redirect + PKCE replaced the `chan://` scheme, fixing desktop sign-in on Linux and Windows.
+- [windows-deeplink-second-instance](done/windows-deeplink-second-instance.md) - closed as subsumed: the `chan://` scheme and deep-link plugin were removed outright.
+- [drop-self-built-desktop-packages](done/drop-self-built-desktop-packages.md) - the unmaintained self-built Tauri `.deb`/`.rpm` are gone; COPR/PPA/AUR is the desktop package channel.
+- [terminal-mouse-toggle](done/terminal-mouse-toggle.md) - per-terminal `terminal.mouse_capture` toggle.
+- [bug-reports](done/bug-reports.md) / [bug-fixes](done/bug-fixes.md) - the v0.75.0 editor/slides/devserver/terminal bug-fix round and its report bucket.
+- [cleanups](done/cleanups.md) - survey `[F]` reduced to a pure will-follow-up signal; browser-smoke CHAN_HOME sandboxing.
 
 ### v0.74.0
 

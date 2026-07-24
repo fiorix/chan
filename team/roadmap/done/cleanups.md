@@ -1,5 +1,7 @@
 # v0.75.0 cleanups round
 
+> Status: shipped in [v0.75.0](../../release/release-v0.75.0.md).
+
 Status: complete on branch `v075/cleanups` (base `main` @ 9cd6f97c), not
 pushed. Six commits, each gated and proven individually; the full
 pre-push gate and the complete headless browser-smoke suite are green

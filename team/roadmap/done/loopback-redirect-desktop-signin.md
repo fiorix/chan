@@ -1,5 +1,7 @@
 # Loopback Redirect For Desktop Gateway Sign-In
 
+> Status: shipped in [v0.75.0](../../release/release-v0.75.0.md): the RFC 8252 loopback redirect + PKCE replaced the chan:// scheme outright.
+
 Status: **NOT READY TO IMPLEMENT. Do not start coding from this item.** Accepted as scope for v0.74.0; the design is drafted and has been through a security review, and that review found three exploitable gaps in the naive shape of this change. The mitigations below are specified but have not been validated by an implementer, and the design needs one further refinement pass (a named owner walking the mitigations against the real call graph, settling the verifier-keyed variant, and producing the file-level plan) before any code is written. This item also must land **after** the distributed proxy control plane merges: see Sequencing.
 
 ## Problem

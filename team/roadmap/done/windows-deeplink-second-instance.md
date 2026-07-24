@@ -1,5 +1,7 @@
 # Windows Deep-Link Second-Instance Gap
 
+> Status: closed in [v0.75.0](../../release/release-v0.75.0.md): subsumed as suspected -- the chan:// scheme and deep-link plugin were removed outright.
+
 Status: accepted scope for v0.74.0. Very likely subsumed by the loopback redirect item: if loopback lands first, this item reduces to a Windows confirmation smoke plus a decision on whether to keep the `chan://` registration at all. Inferred from source; nobody has reproduced it on Windows.
 
 ## Problem
