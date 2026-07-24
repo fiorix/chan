@@ -52,8 +52,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::fs_ops::{is_chan_internal, WalkFilter};
-use crate::vcs::is_vcs_control_path;
+use crate::fs_ops::{IndexScopeDecision, IndexScopeExclusion, IndexScopePolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WatchKind {
@@ -161,6 +160,8 @@ struct DirRegistration {
     rel: String,
     prefix: Option<String>,
     plan: DirPlan,
+    generation: crate::WorkspaceGeneration,
+    root_device: Option<u64>,
 }
 
 enum WatchCommand {
@@ -176,6 +177,8 @@ enum WatchCommand {
 /// Commands sent to the watcher supervisor. The sender is cheap to
 /// clone; `send` never blocks the notify worker.
 type RegistrationTx = std::sync::mpsc::Sender<WatchCommand>;
+
+type ScopePolicySource = Arc<std::sync::RwLock<Arc<IndexScopePolicy>>>;
 
 /// Minimum spacing between surfaced stream-degradation events.
 /// inotify queue overflow (notify's `EventKind::Other`) can repeat
@@ -217,12 +220,14 @@ fn watch_supervisor_loop(
     rx: std::sync::mpsc::Receiver<WatchCommand>,
     mut watcher: RecommendedWatcher,
     roots: Arc<Vec<WatchRoot>>,
-    filter: Arc<WalkFilter>,
+    policy_source: ScopePolicySource,
     cb: Arc<dyn WatchCallback>,
     health: Arc<std::sync::Mutex<WatchHealth>>,
     initial: std::sync::mpsc::SyncSender<()>,
 ) {
-    let errors = register_all_roots(&mut watcher, &roots, &filter);
+    let mut policy = Arc::clone(&policy_source.read().unwrap());
+    let mut observed_generation = policy.generation();
+    let errors = register_all_roots(&mut watcher, &roots, &policy);
     let mut retry_at = (!errors.is_empty()).then(|| Instant::now() + WATCH_RETRY_INTERVAL);
     record_registration_result(&health, errors, &*cb, true);
     let _ = initial.send(());
@@ -230,11 +235,15 @@ fn watch_supervisor_loop(
     loop {
         let timeout = retry_at
             .map(|deadline| deadline.saturating_duration_since(Instant::now()))
-            .unwrap_or_else(|| Duration::from_secs(60));
+            .unwrap_or(WATCH_RETRY_INTERVAL);
         let command = rx.recv_timeout(timeout);
         match command {
             Ok(WatchCommand::Register(registration)) => {
-                let errors = register_dynamic_dir(&mut watcher, &registration, &filter, &*cb);
+                policy = Arc::clone(&policy_source.read().unwrap());
+                if registration.generation != policy.generation() {
+                    continue;
+                }
+                let errors = register_dynamic_dir(&mut watcher, &registration, &policy, &*cb);
                 if errors.is_empty() {
                     if retry_at.is_none() {
                         record_registration_result(&health, errors, &*cb, false);
@@ -268,11 +277,21 @@ fn watch_supervisor_loop(
                 let mut current = health.lock().unwrap();
                 current.retry_attempts = current.retry_attempts.saturating_add(1);
                 drop(current);
-                let errors = register_all_roots(&mut watcher, &roots, &filter);
+                policy = Arc::clone(&policy_source.read().unwrap());
+                observed_generation = policy.generation();
+                let errors = register_all_roots(&mut watcher, &roots, &policy);
                 retry_at = (!errors.is_empty()).then(|| Instant::now() + WATCH_RETRY_INTERVAL);
                 record_registration_result(&health, errors, &*cb, false);
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                policy = Arc::clone(&policy_source.read().unwrap());
+                if policy.generation() != observed_generation {
+                    observed_generation = policy.generation();
+                    let errors = register_all_roots(&mut watcher, &roots, &policy);
+                    retry_at = (!errors.is_empty()).then(|| Instant::now() + WATCH_RETRY_INTERVAL);
+                    record_registration_result(&health, errors, &*cb, false);
+                }
+            }
         }
     }
     health.lock().unwrap().state = WatchHealthState::Stopped;
@@ -334,21 +353,17 @@ enum DirPlan {
 /// children of directories already accepted for descent, so ancestor
 /// components are clean by construction; the checks here are about
 /// the directory itself.
-fn plan_dir(rel: &str, name: &str, filter: &WalkFilter) -> DirPlan {
-    if is_chan_internal(rel) {
-        return DirPlan::Skip;
+fn plan_dir(rel: &str, name: &str, policy: &IndexScopePolicy) -> DirPlan {
+    match policy.decision(rel, true) {
+        IndexScopeDecision::Include => DirPlan::WatchAndDescend,
+        IndexScopeDecision::VcsControl => DirPlan::WatchOnly,
+        IndexScopeDecision::Exclude(IndexScopeExclusion::Hard)
+            if matches!(name, ".git" | ".hg") =>
+        {
+            DirPlan::WatchOnly
+        }
+        IndexScopeDecision::Exclude(_) => DirPlan::Skip,
     }
-    // VCS dirs are watched top-level-only so control files stream but
-    // the object store never registers -- unless the user removed the
-    // VCS dir from the exclusion set, in which case treat it like any
-    // other directory (the dispatch filter would forward its events).
-    if matches!(name, ".git" | ".hg" | ".svn") && filter.is_excluded(name) {
-        return DirPlan::WatchOnly;
-    }
-    if filter.is_excluded(name) {
-        return DirPlan::Skip;
-    }
-    DirPlan::WatchAndDescend
 }
 
 #[cfg(test)]
@@ -399,13 +414,40 @@ fn watch_registration(
 fn register_all_roots(
     watcher: &mut RecommendedWatcher,
     roots: &[WatchRoot],
-    filter: &WalkFilter,
+    policy: &IndexScopePolicy,
 ) -> Vec<String> {
     let mut errors = Vec::new();
     for root in roots {
-        register_root(watcher, root, filter, &mut errors);
+        register_root(watcher, root, policy, &mut errors);
     }
     errors
+}
+
+#[cfg(target_os = "linux")]
+fn filesystem_device(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path)
+        .ok()
+        .map(|metadata| metadata.dev())
+}
+
+#[cfg(target_os = "linux")]
+fn same_filesystem(root_device: Option<u64>, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    same_device(
+        root_device,
+        std::fs::symlink_metadata(path)
+            .ok()
+            .map(|metadata| metadata.dev()),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn same_device(root_device: Option<u64>, candidate_device: Option<u64>) -> bool {
+    matches!(
+        (root_device, candidate_device),
+        (Some(root), Some(candidate)) if root == candidate
+    )
 }
 
 /// Linux: register `root` non-recursively, then walk and register
@@ -418,11 +460,12 @@ fn register_all_roots(
 fn register_root(
     watcher: &mut RecommendedWatcher,
     root: &WatchRoot,
-    filter: &WalkFilter,
+    policy: &IndexScopePolicy,
     errors: &mut Vec<String>,
 ) {
     register_one(watcher, &root.abs, "", RecursiveMode::NonRecursive, errors);
-    register_subdirs(watcher, &root.abs, "", filter, errors);
+    let root_device = filesystem_device(&root.abs);
+    register_subdirs(watcher, &root.abs, "", root_device, policy, errors);
 }
 
 #[cfg(target_os = "linux")]
@@ -430,7 +473,8 @@ fn register_subdirs(
     watcher: &mut RecommendedWatcher,
     abs: &Path,
     rel: &str,
-    filter: &WalkFilter,
+    root_device: Option<u64>,
+    policy: &IndexScopePolicy,
     errors: &mut Vec<String>,
 ) {
     let entries = match std::fs::read_dir(abs) {
@@ -454,6 +498,9 @@ fn register_subdirs(
         if !ft.is_dir() {
             continue;
         }
+        if !same_filesystem(root_device, &entry.path()) {
+            continue;
+        }
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             continue;
@@ -463,7 +510,7 @@ fn register_subdirs(
         } else {
             format!("{rel}/{name}")
         };
-        match plan_dir(&child_rel, name, filter) {
+        match plan_dir(&child_rel, name, policy) {
             DirPlan::Skip => {}
             DirPlan::WatchOnly => register_one(
                 watcher,
@@ -480,7 +527,14 @@ fn register_subdirs(
                     RecursiveMode::NonRecursive,
                     errors,
                 );
-                register_subdirs(watcher, &entry.path(), &child_rel, filter, errors);
+                register_subdirs(
+                    watcher,
+                    &entry.path(),
+                    &child_rel,
+                    root_device,
+                    policy,
+                    errors,
+                );
             }
         }
     }
@@ -510,7 +564,7 @@ fn register_one(
 fn register_root(
     watcher: &mut RecommendedWatcher,
     root: &WatchRoot,
-    _filter: &WalkFilter,
+    _policy: &IndexScopePolicy,
     errors: &mut Vec<String>,
 ) {
     register_one(watcher, &root.abs, "", RecursiveMode::Recursive, errors);
@@ -528,7 +582,7 @@ fn register_root(
 #[cfg(target_os = "linux")]
 fn track_new_dirs(
     roots: &[WatchRoot],
-    filter: &WalkFilter,
+    policy: &IndexScopePolicy,
     reg_tx: &RegistrationTx,
     candidate: Option<&Path>,
 ) {
@@ -546,7 +600,10 @@ fn track_new_dirs(
         // The root itself; already watched at start.
         return;
     };
-    let plan = plan_dir(&rel, name, filter);
+    if !same_filesystem(filesystem_device(&root.abs), abs) {
+        return;
+    }
+    let plan = plan_dir(&rel, name, policy);
     if plan == DirPlan::Skip {
         return;
     }
@@ -555,6 +612,8 @@ fn track_new_dirs(
         rel,
         prefix: root.prefix.clone(),
         plan,
+        generation: policy.generation(),
+        root_device: filesystem_device(&root.abs),
     }));
 }
 
@@ -567,7 +626,7 @@ fn track_new_dirs(
 fn register_dynamic_dir(
     watcher: &mut RecommendedWatcher,
     registration: &DirRegistration,
-    filter: &WalkFilter,
+    policy: &IndexScopePolicy,
     cb: &dyn WatchCallback,
 ) -> Vec<String> {
     let mut errors = Vec::new();
@@ -579,15 +638,15 @@ fn register_dynamic_dir(
         &mut errors,
     );
     if registration.plan == DirPlan::WatchAndDescend {
-        catch_up_subtree(
+        let mut catch_up = CatchUp {
             watcher,
-            registration.prefix.as_deref(),
-            &registration.abs,
-            &registration.rel,
-            filter,
+            prefix: registration.prefix.as_deref(),
+            root_device: registration.root_device,
+            policy,
             cb,
-            &mut errors,
-        );
+            errors: &mut errors,
+        };
+        catch_up.run(&registration.abs, &registration.rel);
     }
     errors
 }
@@ -596,72 +655,71 @@ fn register_dynamic_dir(
 fn register_dynamic_dir(
     _watcher: &mut RecommendedWatcher,
     _registration: &DirRegistration,
-    _filter: &WalkFilter,
+    _policy: &IndexScopePolicy,
     _cb: &dyn WatchCallback,
 ) -> Vec<String> {
     Vec::new()
 }
 
 #[cfg(target_os = "linux")]
-fn catch_up_subtree(
-    watcher: &mut RecommendedWatcher,
-    prefix: Option<&str>,
-    abs: &Path,
-    rel: &str,
-    filter: &WalkFilter,
-    cb: &dyn WatchCallback,
-    errors: &mut Vec<String>,
-) {
-    let Ok(entries) = std::fs::read_dir(abs) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let Ok(ft) = entry.file_type() else {
-            continue;
+struct CatchUp<'a> {
+    watcher: &'a mut RecommendedWatcher,
+    prefix: Option<&'a str>,
+    root_device: Option<u64>,
+    policy: &'a IndexScopePolicy,
+    cb: &'a dyn WatchCallback,
+    errors: &'a mut Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+impl CatchUp<'_> {
+    fn run(&mut self, abs: &Path, rel: &str) {
+        let Ok(entries) = std::fs::read_dir(abs) else {
+            return;
         };
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        let child_rel = format!("{rel}/{name}");
-        if ft.is_dir() {
-            match plan_dir(&child_rel, name, filter) {
-                DirPlan::Skip => {}
-                DirPlan::WatchOnly => register_one(
-                    watcher,
-                    &entry.path(),
-                    &child_rel,
-                    RecursiveMode::NonRecursive,
-                    errors,
-                ),
-                DirPlan::WatchAndDescend => {
-                    register_one(
-                        watcher,
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let child_rel = format!("{rel}/{name}");
+            if ft.is_dir() {
+                if !same_filesystem(self.root_device, &entry.path()) {
+                    continue;
+                }
+                match plan_dir(&child_rel, name, self.policy) {
+                    DirPlan::Skip => {}
+                    DirPlan::WatchOnly => register_one(
+                        self.watcher,
                         &entry.path(),
                         &child_rel,
                         RecursiveMode::NonRecursive,
-                        errors,
-                    );
-                    catch_up_subtree(
-                        watcher,
-                        prefix,
-                        &entry.path(),
-                        &child_rel,
-                        filter,
-                        cb,
-                        errors,
-                    );
+                        self.errors,
+                    ),
+                    DirPlan::WatchAndDescend => {
+                        register_one(
+                            self.watcher,
+                            &entry.path(),
+                            &child_rel,
+                            RecursiveMode::NonRecursive,
+                            self.errors,
+                        );
+                        self.run(&entry.path(), &child_rel);
+                    }
                 }
+            } else if ft.is_file() && !is_filtered(&child_rel, false, self.policy) {
+                safe_call(
+                    self.cb,
+                    WatchEvent {
+                        kind: WatchKind::Created,
+                        path: Some(apply_prefix(self.prefix, child_rel)),
+                        to: None,
+                    },
+                );
             }
-        } else if ft.is_file() && !is_filtered(&child_rel, filter) {
-            safe_call(
-                cb,
-                WatchEvent {
-                    kind: WatchKind::Created,
-                    path: Some(apply_prefix(prefix, child_rel)),
-                    to: None,
-                },
-            );
         }
     }
 }
@@ -685,7 +743,7 @@ impl WatchHandle {
     /// the same ignore policy as the walk, not a second list).
     pub(crate) fn start(
         roots: &[WatchRoot],
-        filter: Arc<WalkFilter>,
+        policy_source: ScopePolicySource,
         cb: Arc<dyn WatchCallback>,
     ) -> Result<Self> {
         if roots.is_empty() {
@@ -696,7 +754,7 @@ impl WatchHandle {
         let dispatch_roots: Arc<Vec<WatchRoot>> = Arc::new(roots.to_vec());
         let cb_clone = cb.clone();
         let dispatch_roots_for_cb = Arc::clone(&dispatch_roots);
-        let filter_for_cb = Arc::clone(&filter);
+        let policy_source_for_cb = Arc::clone(&policy_source);
         let (command_tx, command_rx) = std::sync::mpsc::channel::<WatchCommand>();
         let command_tx_for_cb = command_tx.clone();
         let throttle_for_cb = Arc::new(DegradeThrottle::new());
@@ -704,7 +762,7 @@ impl WatchHandle {
             notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
                 Ok(event) => dispatch(
                     &dispatch_roots_for_cb,
-                    &filter_for_cb,
+                    &policy_source_for_cb,
                     event,
                     &*cb_clone,
                     &command_tx_for_cb,
@@ -745,7 +803,7 @@ impl WatchHandle {
                     command_rx,
                     watcher,
                     dispatch_roots,
-                    filter,
+                    policy_source,
                     cb,
                     supervisor_health,
                     initial_tx,
@@ -865,15 +923,32 @@ fn new_dir_candidate(kind: &notify::EventKind, paths: &[PathBuf]) -> Option<Path
     }
 }
 
+fn event_is_dir(event: &notify::Event) -> bool {
+    use notify::event::{CreateKind, RemoveKind};
+    use notify::EventKind;
+    match event.kind {
+        EventKind::Create(CreateKind::Folder) | EventKind::Remove(RemoveKind::Folder) => true,
+        EventKind::Create(CreateKind::File) | EventKind::Remove(RemoveKind::File) => false,
+        _ => event
+            .paths
+            .iter()
+            .rev()
+            .find_map(|path| std::fs::symlink_metadata(path).ok())
+            .is_some_and(|metadata| metadata.is_dir()),
+    }
+}
+
 fn dispatch(
     roots: &[WatchRoot],
-    filter: &WalkFilter,
+    policy_source: &ScopePolicySource,
     event: notify::Event,
     cb: &dyn WatchCallback,
     reg_tx: &RegistrationTx,
     throttle: &DegradeThrottle,
 ) {
     use notify::EventKind;
+    let policy = Arc::clone(&policy_source.read().unwrap());
+    let is_dir = event_is_dir(&event);
     // Computed before the kind match moves `event.kind`: the rename
     // mode decides which path (if any) is the appeared directory.
     #[cfg(target_os = "linux")]
@@ -913,7 +988,7 @@ fn dispatch(
     // filter runs: the registration policy is independent of this one
     // event's fate.
     #[cfg(target_os = "linux")]
-    track_new_dirs(roots, filter, reg_tx, dir_candidate.as_deref());
+    track_new_dirs(roots, &policy, reg_tx, dir_candidate.as_deref());
     #[cfg(not(target_os = "linux"))]
     let _ = reg_tx;
 
@@ -932,14 +1007,14 @@ fn dispatch(
     // the indexer consumes downstream.
     if from_resolved
         .as_ref()
-        .map(|(_, rel)| is_filtered(rel, filter))
+        .map(|(_, rel)| is_filtered(rel, is_dir, &policy))
         .unwrap_or(false)
     {
         return;
     }
     if to_resolved
         .as_ref()
-        .map(|(_, rel)| is_filtered(rel, filter))
+        .map(|(_, rel)| is_filtered(rel, is_dir, &policy))
         .unwrap_or(false)
     {
         return;
@@ -1016,19 +1091,8 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 /// `.git`, `.hg`, `.svn`, ... per `DEFAULT_INDEX_EXCLUDED_DIRS` plus
 /// any user additions). Basename match at any depth matches
 /// `walk_workspace_filtered`'s `filter_entry`.
-fn is_filtered(rel: &str, filter: &WalkFilter) -> bool {
-    if is_vcs_control_path(rel) {
-        return false;
-    }
-    if is_chan_internal(rel) {
-        return true;
-    }
-    // Any path component that is an excluded directory basename prunes
-    // the event, exactly as the walk prunes that directory's subtree.
-    // The final component is included: a top-level `node_modules`
-    // create/remove is itself noise the index does not want.
-    rel.split('/')
-        .any(|component| filter.is_excluded(component))
+fn is_filtered(rel: &str, is_dir: bool, policy: &IndexScopePolicy) -> bool {
+    matches!(policy.decision(rel, is_dir), IndexScopeDecision::Exclude(_))
 }
 
 fn relativize(root: &Path, p: &Path) -> Option<String> {
@@ -1131,59 +1195,102 @@ mod tests {
 
     /// Mirror the registry's DEFAULT_INDEX_EXCLUDED_DIRS so the test
     /// exercises the exact set the walk uses at runtime.
-    fn default_filter() -> WalkFilter {
-        WalkFilter::new(crate::registry::DEFAULT_INDEX_EXCLUDED_DIRS.iter().copied())
+    fn default_policy(root: &Path) -> IndexScopePolicy {
+        IndexScopePolicy::new(
+            root.to_path_buf(),
+            crate::WorkspaceGeneration::INITIAL,
+            crate::WalkFilter::new(crate::registry::DEFAULT_INDEX_EXCLUDED_DIRS.iter().copied()),
+        )
+        .unwrap()
+    }
+
+    fn policy_source(root: &Path) -> ScopePolicySource {
+        Arc::new(std::sync::RwLock::new(Arc::new(default_policy(root))))
+    }
+
+    fn filtered(rel: &str, policy: &IndexScopePolicy) -> bool {
+        is_filtered(rel, true, policy)
     }
 
     #[test]
     fn filter_allows_vcs_control_paths_but_hides_other_vcs_noise() {
-        let f = default_filter();
+        let f = default_policy(Path::new("/workspace"));
         // VCS control files forwarded (checkout-storm detection).
-        assert!(!is_filtered(".git/HEAD", &f));
-        assert!(!is_filtered(".git/index", &f));
-        assert!(!is_filtered(".hg/dirstate", &f));
+        assert!(!filtered(".git/HEAD", &f));
+        assert!(!filtered(".git/index", &f));
+        assert!(!filtered(".hg/dirstate", &f));
         // The rest of the VCS dirs are dropped via the excluded-dir set.
-        assert!(is_filtered(".git/objects/pack/foo", &f));
-        assert!(is_filtered(".hg/store/data/foo", &f));
+        assert!(filtered(".git/objects/pack/foo", &f));
+        assert!(filtered(".hg/store/data/foo", &f));
         // The dir entries themselves are noise too.
-        assert!(is_filtered(".git", &f));
-        assert!(is_filtered(".hg", &f));
+        assert!(filtered(".git", &f));
+        assert!(filtered(".hg", &f));
     }
 
     #[test]
     fn filter_drops_unified_ignore_set_at_any_depth() {
-        let f = default_filter();
+        let f = default_policy(Path::new("/workspace"));
         // node_modules / target / venv at the top level.
-        assert!(is_filtered("node_modules", &f));
-        assert!(is_filtered("node_modules/react/index.js", &f));
-        assert!(is_filtered("target", &f));
-        assert!(is_filtered("target/debug/build/foo.rs", &f));
-        assert!(is_filtered("venv", &f));
-        assert!(is_filtered("venv/lib/python3.11/site-packages/x.py", &f));
-        assert!(is_filtered(".venv/pyvenv.cfg", &f));
+        assert!(filtered("node_modules", &f));
+        assert!(filtered("node_modules/react/index.js", &f));
+        assert!(filtered("target", &f));
+        assert!(filtered("target/debug/build/foo.rs", &f));
+        assert!(filtered("venv", &f));
+        assert!(filtered("venv/lib/python3.11/site-packages/x.py", &f));
+        assert!(filtered(".venv/pyvenv.cfg", &f));
         // Nested deeper than the top level: a node_modules under a
         // subproject must also prune (basename match at any depth).
-        assert!(is_filtered("frontend/node_modules/pkg/dist/a.js", &f));
-        assert!(is_filtered("a/b/target/release/x", &f));
-        assert!(is_filtered("svc/__pycache__/mod.cpython-311.pyc", &f));
+        assert!(filtered("frontend/node_modules/pkg/dist/a.js", &f));
+        assert!(filtered("a/b/target/release/x", &f));
+        assert!(filtered("svc/__pycache__/mod.cpython-311.pyc", &f));
         // .chan is always dropped regardless of the filter set.
-        assert!(is_filtered(".chan/index/meta.json", &f));
+        assert!(filtered(".chan/index/meta.json", &f));
     }
 
     #[test]
     fn filter_keeps_real_notes_and_source() {
-        let f = default_filter();
+        let f = default_policy(Path::new("/workspace"));
         // Real content must pass through untouched.
-        assert!(!is_filtered("README.md", &f));
-        assert!(!is_filtered("docs/design.md", &f));
-        assert!(!is_filtered("src/main.rs", &f));
+        assert!(!filtered("README.md", &f));
+        assert!(!filtered("docs/design.md", &f));
+        assert!(!filtered("src/main.rs", &f));
         // A file merely NAMED like an excluded dir (but a file, not a
         // dir-in-the-path) only prunes when the basename matches; that
         // is intended -- a file literally named `target` is index noise
         // the same way the dir is. A file whose name CONTAINS the token
         // but is not equal (e.g. `targeting.md`) is kept.
-        assert!(!is_filtered("notes/targeting.md", &f));
-        assert!(!is_filtered("node_modules_notes.md", &f));
+        assert!(!filtered("notes/targeting.md", &f));
+        assert!(!filtered("node_modules_notes.md", &f));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn registration_device_boundary_is_fail_closed() {
+        assert!(same_device(Some(7), Some(7)));
+        assert!(!same_device(Some(7), Some(8)));
+        assert!(!same_device(Some(7), None));
+        assert!(!same_device(None, Some(7)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dynamic_registration_rejects_symlinked_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let link = root.path().join("linked");
+        symlink(outside.path(), &link).unwrap();
+        let roots = [WatchRoot::workspace(root.path())];
+        let policy = default_policy(root.path());
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        track_new_dirs(&roots, &policy, &tx, Some(&link));
+
+        assert!(
+            matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+            "symlinked directory must never enter the registration queue"
+        );
     }
 
     #[test]
@@ -1196,8 +1303,8 @@ mod tests {
             }
         }
         let cb = Collect(Mutex::new(Vec::new()));
-        let filter = default_filter();
         let root = PathBuf::from("/workspace");
+        let policy_source = policy_source(&root);
         let roots = [WatchRoot::workspace(&root)];
         let (reg_tx, _reg_rx) = std::sync::mpsc::channel();
         let throttle = DegradeThrottle::new();
@@ -1205,7 +1312,7 @@ mod tests {
         // A modify under node_modules: dropped, callback never fires.
         dispatch(
             &roots,
-            &filter,
+            &policy_source,
             notify::Event {
                 kind: notify::EventKind::Modify(notify::event::ModifyKind::Data(
                     notify::event::DataChange::Content,
@@ -1225,7 +1332,7 @@ mod tests {
         // A modify on a real note: forwarded.
         dispatch(
             &roots,
-            &filter,
+            &policy_source,
             notify::Event {
                 kind: notify::EventKind::Modify(notify::event::ModifyKind::Data(
                     notify::event::DataChange::Content,
@@ -1252,8 +1359,8 @@ mod tests {
             }
         }
         let cb = Collect(Mutex::new(Vec::new()));
-        let filter = default_filter();
         let root = PathBuf::from("/workspace");
+        let policy_source = policy_source(&root);
         let roots = [WatchRoot::workspace(&root)];
         let (reg_tx, _reg_rx) = std::sync::mpsc::channel();
         let throttle = DegradeThrottle::new();
@@ -1265,9 +1372,9 @@ mod tests {
 
         // First overflow signal: surfaced as ProviderError (the
         // consumers' full-reconcile trigger).
-        dispatch(&roots, &filter, other(), &cb, &reg_tx, &throttle);
+        dispatch(&roots, &policy_source, other(), &cb, &reg_tx, &throttle);
         // An immediate repeat collapses into the throttle window.
-        dispatch(&roots, &filter, other(), &cb, &reg_tx, &throttle);
+        dispatch(&roots, &policy_source, other(), &cb, &reg_tx, &throttle);
 
         let events = cb.0.lock().unwrap();
         assert_eq!(events.len(), 1, "repeat overflow must be throttled");
@@ -1304,7 +1411,7 @@ mod tests {
             let (tx, rx) = channel();
             let cb = Channel(std::sync::Mutex::new(tx));
             let roots = [WatchRoot::workspace(root.path())];
-            let handle = WatchHandle::start(&roots, Arc::new(default_filter()), Arc::new(cb))
+            let handle = WatchHandle::start(&roots, policy_source(root.path()), Arc::new(cb))
                 .expect("watcher starts");
             (handle, rx)
         }

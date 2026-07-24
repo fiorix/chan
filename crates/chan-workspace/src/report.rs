@@ -16,7 +16,7 @@ use std::time::Duration;
 use chan_report::{CocomoParams, Index, Report, ReportOptions, Scope, UpdateOutcome};
 
 use crate::error::{ChanError, Result};
-use crate::fs_ops::atomic_write;
+use crate::fs_ops::{atomic_write, IndexScopePolicy};
 use crate::watch::{WatchCallback, WatchEvent, WatchKind};
 
 /// Bursts of filesystem events (`git checkout`, bulk save) hit the
@@ -54,9 +54,9 @@ impl ReportState {
     pub(crate) fn open(
         workspace_root: &Path,
         jsonl_path: &Path,
-        excluded_dirs: &[String],
+        policy: Arc<IndexScopePolicy>,
     ) -> Result<Arc<Self>> {
-        let opts = report_options(workspace_root, excluded_dirs);
+        let opts = report_options(workspace_root, policy);
 
         // Try the persisted form first. Any error (missing file,
         // schema mismatch, parse error, partial write) falls
@@ -177,6 +177,28 @@ impl ReportState {
         idx.snapshot(scope, &self.cocomo)
     }
 
+    /// Replace the cached report with a scan governed by a newer scope.
+    ///
+    /// The caller holds the workspace derived-state serialization lock, so
+    /// watcher mutations cannot land between the scan and swap.
+    pub(crate) fn replace_policy(
+        &self,
+        workspace_root: &Path,
+        policy: Arc<IndexScopePolicy>,
+    ) -> Result<()> {
+        let opts = report_options(workspace_root, policy);
+        let replacement =
+            Index::scan(&opts).map_err(|error| ChanError::Report(error.to_string()))?;
+        match self.index.write() {
+            Ok(mut index) => *index = replacement,
+            Err(poisoned) => *poisoned.into_inner() = replacement,
+        }
+        if let Some(tx) = &self.flush_tx {
+            let _ = tx.send(());
+        }
+        Ok(())
+    }
+
     /// O(1) cached read of the per-directory aggregation. Mirrors
     /// `Index::dir_report` and exposes `None` to the caller when
     /// the directory is untracked so the HTTP layer can serve a
@@ -197,27 +219,23 @@ impl ReportState {
 pub(crate) fn load_snapshot_if_available(
     workspace_root: &Path,
     jsonl_path: &Path,
-    excluded_dirs: &[String],
+    policy: Arc<IndexScopePolicy>,
 ) -> Result<Option<Report>> {
     let file = match std::fs::File::open(jsonl_path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(ChanError::Report(error.to_string())),
     };
-    let opts = report_options(workspace_root, excluded_dirs);
+    let opts = report_options(workspace_root, policy);
     let Ok(index) = Index::load_jsonl(BufReader::new(file), &opts) else {
         return Ok(None);
     };
     Ok(Some(index.snapshot(&Scope::All, &opts.cocomo)))
 }
 
-fn report_options(workspace_root: &Path, excluded_dirs: &[String]) -> ReportOptions {
+fn report_options(workspace_root: &Path, policy: Arc<IndexScopePolicy>) -> ReportOptions {
     let mut opts = ReportOptions::new(workspace_root);
-    // The report and workspace index must prune the same dependency trees.
-    opts.exclude_globs = excluded_dirs
-        .iter()
-        .map(|name| format!("{}/", name.trim_end_matches('/')))
-        .collect();
+    opts.path_policy = Some(policy);
     opts
 }
 
@@ -343,7 +361,15 @@ mod tests {
         let root = tmp.path();
         fs::write(root.join("a.md"), "# A\n\nprose\n").unwrap();
         let jsonl = root.join(".chan/report.jsonl");
-        let state = ReportState::open(root, &jsonl, &[]).unwrap();
+        let policy = Arc::new(
+            IndexScopePolicy::new(
+                root.to_path_buf(),
+                crate::WorkspaceGeneration::INITIAL,
+                crate::WalkFilter::default(),
+            )
+            .unwrap(),
+        );
+        let state = ReportState::open(root, &jsonl, policy).unwrap();
         assert_eq!(lang_of(&state, "a.md").as_deref(), Some("Markdown"));
 
         // `mv a.md b.md`. macOS surfaces this as the destination's lone Name

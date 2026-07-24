@@ -481,12 +481,15 @@ pub struct Workspace {
     /// the fan-out without warming the report, and a later scan fills
     /// this cell for both the query path and the fan-out at once.
     report: Arc<std::sync::OnceLock<Arc<ReportState>>>,
-    /// Directory-name blocklist applied to reindex walks (graph
-    /// rebuild + index facade). Captured at `Workspace::open` time
-    /// from the parent `Library`. Other walks (editor file tree,
-    /// trash, restore) ignore this filter so the user can still
-    /// see / restore files inside a blocked directory on demand.
+    /// Global directory-name baseline captured from the parent `Library`.
+    /// The generated scope unions this with the per-workspace additions;
+    /// raw editor listings deliberately bypass both so blocked paths remain
+    /// available for explicit open-on-demand operations.
     walk_filter: Arc<fs_ops::WalkFilter>,
+    /// Immutable generated scope sampled by every derived-state consumer.
+    /// Replacements swap one Arc under a short lock; in-flight work keeps its
+    /// generation while newer recovery remains pending.
+    scope_policy: Arc<std::sync::RwLock<Arc<fs_ops::IndexScopePolicy>>>,
 }
 
 impl std::fmt::Debug for Workspace {
@@ -625,6 +628,15 @@ impl Workspace {
         } else {
             RecoveryStatus::ready()
         };
+        let index_config = crate::index::config::load(&paths.index)
+            .map_err(|error| ChanError::Search(error.to_string()))?;
+        let mut configured = walk_filter.excluded_dir_names.clone();
+        configured.extend(index_config.excluded_dirs);
+        let scope_policy = Arc::new(fs_ops::IndexScopePolicy::new(
+            entry.root_path.clone(),
+            recovery.generation,
+            fs_ops::WalkFilter::new(configured),
+        )?);
         let workspace = Arc::new(Self {
             entry,
             root_canon,
@@ -642,6 +654,7 @@ impl Workspace {
             recovery: std::sync::Mutex::new(recovery),
             report: Arc::new(std::sync::OnceLock::new()),
             walk_filter,
+            scope_policy: Arc::new(std::sync::RwLock::new(scope_policy)),
         });
 
         // Converge the graph against disk on every open. The watcher
@@ -925,6 +938,11 @@ impl Workspace {
         &self.walk_filter
     }
 
+    /// Immutable generated scope currently shared by derived-state consumers.
+    pub fn scope_policy(&self) -> Arc<fs_ops::IndexScopePolicy> {
+        Arc::clone(&self.scope_policy.read().unwrap())
+    }
+
     /// Structural bootstrap snapshot of the workspace root: the immediate
     /// files + directories, each directory carrying its recursive
     /// (filtered) subtree file count and byte total, plus the
@@ -933,7 +951,8 @@ impl Workspace {
     /// UI renders before the paced index / report jobs run; deeper
     /// levels load lazily on File Browser expand / Graph depth.
     pub fn bootstrap(&self) -> Result<crate::bootstrap::BootstrapTree> {
-        crate::bootstrap::bootstrap_root(self.root(), &self.walk_filter)
+        let policy = self.scope_policy();
+        crate::bootstrap::bootstrap_root_scoped(self.root(), &policy)
     }
 
     /// Bootstrap snapshot for a nested directory at workspace-relative
@@ -942,7 +961,8 @@ impl Workspace {
     /// subtree-stats shape for an expanded directory rather than the
     /// plain per-file listing.
     pub fn bootstrap_dir(&self, rel: &str) -> Result<crate::bootstrap::BootstrapTree> {
-        crate::bootstrap::bootstrap_dir(self.root(), rel, &self.walk_filter)
+        let policy = self.scope_policy();
+        crate::bootstrap::bootstrap_dir_scoped(self.root(), rel, &policy)
     }
 
     // ---- filesystem primitives (path-based, rel-only) ----
@@ -1545,7 +1565,8 @@ impl Workspace {
     /// raw `list_tree_unified` stays unfiltered for the editor's
     /// on-demand open-inside-a-noisy-dir path.
     pub fn list_tree_filtered_unified(&self) -> Result<Vec<TreeEntry>> {
-        fs_ops::list_tree_filtered(self.root(), &self.walk_filter)
+        let policy = self.scope_policy();
+        fs_ops::list_tree_scoped(self.root(), &policy)
     }
 
     /// Filtered counterpart of `list_tree_prefix_unified`. Drafts live
@@ -1554,7 +1575,8 @@ impl Workspace {
     pub fn list_tree_prefix_filtered_unified(&self, prefix: &str) -> Result<Vec<TreeEntry>> {
         let trimmed = prefix.trim_matches('/');
         let resolved = fs_ops::resolve_safe_strict(self.root(), trimmed)?;
-        fs_ops::list_tree_prefix_filtered(self.root(), &resolved, &self.walk_filter)
+        let policy = self.scope_policy();
+        fs_ops::list_tree_prefix_scoped(self.root(), &resolved, &policy)
     }
 
     pub fn create_dir(&self, rel: &str) -> Result<()> {
@@ -1642,7 +1664,8 @@ impl Workspace {
         // Filtered so we don't waste time collecting paths under
         // `node_modules/` etc. that were never indexed in the first
         // place; symmetric with the filtered index/graph build.
-        for entry in fs_ops::walk_workspace_filtered(abs, &self.walk_filter) {
+        let policy = self.scope_policy();
+        for entry in fs_ops::walk_workspace_scoped(abs, &policy) {
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -1739,7 +1762,8 @@ impl Workspace {
         // Filtered so restoring a directory that happens to contain a
         // `node_modules/` / `target/` subtree does not re-index a
         // dependency tree the index deliberately excludes.
-        for entry in fs_ops::walk_workspace_filtered(&abs, &self.walk_filter) {
+        let policy = self.scope_policy();
+        for entry in fs_ops::walk_workspace_scoped(&abs, &policy) {
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -2535,6 +2559,7 @@ impl Workspace {
     ) -> Result<BuildSummary> {
         let recovery = self.recovery_execution(RecoveryAction::FullRebuild);
         let _serial = self.write_serial.lock().unwrap();
+        let policy = self.scope_policy();
 
         // Graph rebuild walks the tree once for headings + edges.
         // The search facade walks again for chunking + embeddings.
@@ -2550,14 +2575,14 @@ impl Workspace {
         // instead of trusting an index that may have skipped its
         // final commit.
         self.write_rebuild_marker()?;
-        self.rebuild_graph(cancel, progress)?;
+        self.rebuild_graph(cancel, progress, &policy)?;
         let index = self.index()?;
         // Push the EFFECTIVE filter (global baseline unioned with this
         // workspace's `excluded_dirs` additions) to the index facade so the
         // walk under `build_all` agrees with the graph rebuild on which
         // subtrees to skip. Re-derived here, so a blocklist edit + reindex
         // re-walks against the new set without mutating the shared snapshot.
-        index.set_walk_filter(self.effective_walk_filter()?);
+        index.set_scope_policy(policy);
         // Snapshot the vector epoch BEFORE reading the opt-in flag. A disable
         // flips the flag then bumps the epoch (clear_vectors), so sampling the
         // epoch first guarantees a build that read a stale `true` still observes
@@ -2651,6 +2676,7 @@ impl Workspace {
         &self,
         cancel: Option<&AtomicBool>,
         progress: &dyn crate::progress::ProgressCallback,
+        policy: &fs_ops::IndexScopePolicy,
     ) -> Result<()> {
         use crate::progress::{eta_secs_from, ProgressEvent, ProgressStage};
         // Staged-and-swap: parse each file straight into sqlite
@@ -2669,8 +2695,7 @@ impl Workspace {
         // Effective filter = global baseline + this workspace's blocklist
         // additions, so the graph rebuild skips the same subtrees the index
         // build does (both re-derive it per reindex).
-        let filter = self.effective_walk_filter()?;
-        let entries = fs_ops::list_tree_filtered(self.root(), &filter)?;
+        let entries = fs_ops::list_tree_scoped(self.root(), policy)?;
         // The graph is Markdown-only: only `.md` files become document
         // nodes (and contribute wikilink / heading / token edges). `.txt`
         // stays editable + BM25-searchable (the search pass in `build_all`
@@ -2949,36 +2974,34 @@ impl Workspace {
     /// union(global baseline, per-workspace additions). What the reindex walk
     /// actually skips.
     pub fn effective_excluded_dirs(&self) -> Result<Vec<String>> {
-        Ok(self.effective_walk_filter()?.excluded_dir_names.clone())
+        Ok(self.scope_policy().configured().excluded_dir_names.clone())
     }
 
-    /// Replace this workspace's blocklist additions. Persists the set; the
-    /// effective walk filter is re-derived on the next reindex, so the caller
-    /// triggers a rebuild to re-walk (the chan-server route does this OFF the
-    /// async executor). Names are stored as given; matching is
+    /// Replace this workspace's blocklist additions. Persists the set, swaps
+    /// one new generated scope, and requests reconciliation; the caller
+    /// triggers the recovery off its async executor. Names are stored as
+    /// given; matching is
     /// case-insensitive basename-at-any-depth, so the caller normalizes
     /// (trim / drop blanks / reject path separators / lower-case + dedupe).
     pub fn set_excluded_dirs(&self, dirs: Vec<String>) -> Result<()> {
-        self.index()?.set_excluded_dirs(dirs)?;
-        Ok(())
-    }
-
-    /// The walk filter actually applied to this workspace's index + graph
-    /// rebuild: the global baseline (`self.walk_filter`) unioned with this
-    /// workspace's `excluded_dirs` additions. Re-derived per reindex so a
-    /// blocklist edit takes effect on the next rebuild WITHOUT mutating the
-    /// shared snapshot. The file tree / fs-graph keep using the global
-    /// `self.walk_filter`, so additions affect INDEXING + the graph, not
-    /// on-demand browsing - matching how the global blocklist already behaves
-    /// (a blocklisted dir stays navigable in the tree).
-    fn effective_walk_filter(&self) -> Result<Arc<fs_ops::WalkFilter>> {
-        let extra = self.index()?.config().excluded_dirs;
-        if extra.is_empty() {
-            return Ok(Arc::clone(&self.walk_filter));
+        let _serial = self.write_serial.lock().unwrap();
+        if self.excluded_dirs()? == dirs {
+            return Ok(());
         }
-        let mut names = self.walk_filter.excluded_dir_names.clone();
-        names.extend(extra);
-        Ok(Arc::new(fs_ops::WalkFilter::new(names)))
+        self.index()?.set_excluded_dirs(dirs)?;
+        let generation = self.request_policy_recovery(RecoveryAction::Reconcile);
+        let mut configured = self.walk_filter.excluded_dir_names.clone();
+        configured.extend(self.index()?.config().excluded_dirs);
+        let policy = Arc::new(fs_ops::IndexScopePolicy::new(
+            self.root().to_path_buf(),
+            generation,
+            fs_ops::WalkFilter::new(configured),
+        )?);
+        *self.scope_policy.write().unwrap() = Arc::clone(&policy);
+        if let Some(report) = self.report.get() {
+            report.replace_policy(self.root(), policy)?;
+        }
+        Ok(())
     }
 
     /// Read the per-workspace screensaver-enabled flag.
@@ -3109,6 +3132,9 @@ impl Workspace {
     fn index_file_serial(&self, rel: &str) -> Result<()> {
         if !fs_ops::is_indexable_text(rel) {
             return Ok(());
+        }
+        if !self.scope_policy().includes(rel, false) {
+            return self.forget_file_serial(rel);
         }
         self.journal_record(rel, PendingOp::Index)?;
         let result = self.index_file_inner(rel);
@@ -3436,10 +3462,10 @@ impl Workspace {
         // Only editable-text files participate; binaries / images
         // are not indexed by either backend and so do not need
         // reconciliation.
-        let filter = Arc::clone(&self.walk_filter);
+        let policy = self.scope_policy();
         let mut disk_files: std::collections::HashMap<String, (Option<i64>, Option<i64>)> =
             std::collections::HashMap::new();
-        for entry in fs_ops::walk_workspace_filtered(self.root(), &filter) {
+        for entry in fs_ops::walk_workspace_scoped(self.root(), &policy) {
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -3609,7 +3635,7 @@ impl Workspace {
         // Same unified ignore set the bootstrap/index walk uses, so a
         // node_modules/target/venv/.git storm never reaches the
         // broadcast bus or the indexer.
-        WatchHandle::start(&roots, Arc::clone(&self.walk_filter), fan)
+        WatchHandle::start(&roots, Arc::clone(&self.scope_policy), fan)
     }
 
     /// Start the built-in graph indexer on this workspace. Returns a
@@ -3646,7 +3672,7 @@ impl Workspace {
         crate::report::load_snapshot_if_available(
             self.root(),
             &self.paths.report,
-            &self.walk_filter.excluded_dir_names,
+            self.scope_policy(),
         )
     }
 
@@ -3705,11 +3731,7 @@ impl Workspace {
         // yields the table to editing + the terminal when fds are
         // tight. Cheap and best-effort: clear headroom returns at once.
         crate::fd_budget::pace_reindex_worker(None);
-        let state = ReportState::open(
-            self.root(),
-            &self.paths.report,
-            &self.walk_filter.excluded_dir_names,
-        )?;
+        let state = ReportState::open(self.root(), &self.paths.report, self.scope_policy())?;
         // OnceLock::set is racy with a concurrent caller; the
         // loser drops its state cleanly, which terminates its
         // writer thread via Drop. The winner's state stays.

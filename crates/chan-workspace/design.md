@@ -234,13 +234,13 @@ Each per-file shard under `embeddings/` carries its own `FORMAT_VERSION` (curren
 
 Embedding runs on CPU by default: the candle Metal backend exhausts GPU memory and stalls on large workspaces, so the GPU path is opt-in via `CHAN_ENABLE_GPU=1`. On macOS the CPU path links Apple's Accelerate framework as candle's BLAS backend -- the target-gated `accelerate` feature, wired alongside `metal` under `cfg(target_os = "macos")` -- routing bge-small's matmuls through Accelerate's `sgemm` for a measured ~1.5–2× cold-reindex speedup over candle's default SIMD-threaded `gemm` (modest because the default is already vectorized, and the forward pass also spends time in non-matmul ops). The feature pulls the Apple-only `accelerate-src`, so the static-musl Linux release binary structurally cannot pull it in.
 
-#### Walk filter
+#### Generated index scope
 
-`WalkFilter` (in `fs_ops`) is a caller-supplied list of directory basenames that the reindex walks should not descend into. The machine-wide baseline lives in `Registry::index_excluded_dirs` and is persisted to `~/.chan/config.toml` so CLI and desktop use the same policy (defaults: `.git`, `.hg`, `.svn`, `node_modules`, `target`, `__pycache__`, `.venv`, `venv`, `.tox`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.cache`, `dist`, `build`). A per-workspace blocklist (`IndexConfig::excluded_dirs`, managed through the workspace settings API) is unioned on top: `Workspace::effective_excluded_dirs` is what the walks actually honor. Matching is exact basename at any depth, ASCII case-insensitive. `.git` and `.chan` stay hardcoded in `walk_workspace`: those are safety invariants, not policy.
+`IndexScopePolicy` (in `fs_ops`) is one immutable scope value per `WorkspaceGeneration`. It encodes explicit `Include`, `Exclude(Hard | Gitignore | Configured)`, and `VcsControl` decisions. `.chan`, `.git`, `.hg`, and `.svn` internals are hard exclusions; watcher dispatch alone forwards `.git/HEAD`, `.git/index`, and `.hg/dirstate`. `.svn` checkout detection is unsupported because there is no stable narrow control file to forward. The machine-wide configured baseline lives in `Registry::index_excluded_dirs` and is persisted to `~/.chan/config.toml`; the per-workspace `IndexConfig::excluded_dirs` additions are unioned into the same policy. Configured matching remains exact directory basename at any depth, ASCII case-insensitive, so registry migration and user settings retain their established meaning.
 
 `Registry::drafts_dir` (default `.Drafts`) is modeled the same way as `index_excluded_dirs`: a global field in `~/.chan/config.toml`, hand-edited, not exposed through any UI. It names the in-tree Drafts directory rather than a skip target, so it is deliberately NOT on the walk filter: drafts are real in-tree content and index and graph like any other file.
 
-The filter is honored by the indexing pipeline, the bootstrap snapshot, the report walk, and the watcher feed (one ignore set, not several). The editor-visible APIs (`Workspace::list_tree`, `Workspace::list`, trash sweeps, restore) stay unfiltered so the user can still see and open files inside a blocked directory on demand; the `*_filtered_unified` tree listings exist for callers (the graph layer, the File Browser spine) that want the filtered default view.
+The same policy Arc is sampled by bootstrap, filtered listing, graph, BM25, reconcile, report, Linux watch registration and dynamic registration, and watcher dispatch. Full walks do not follow symlinks and stay on the workspace root filesystem; Linux registration compares every candidate directory's device identity with its `WatchRoot` before registering or descending. `Workspace::set_excluded_dirs` persists the setting, advances the shared recovery generation, swaps a new immutable policy, and requests reconcile. Watch registration observes replacements and discards queued directory work tagged with an older generation. The editor-visible raw `Workspace::list_tree` and `Workspace::list` APIs remain unfiltered so a user can deliberately open a file inside a noisy directory.
 
 ### Graph
 
@@ -295,10 +295,10 @@ After picking a file, the editor calls `GraphView::headings_of(rel)` to populate
 
 Callback-based on purpose: the Swift / Kotlin shell implements the trait by passing an `Arc<dyn WatchCallback>` (uniffi generates a wrapper around a foreign object). No closures cross the FFI.
 
-The dispatch filter mirrors the walk's pruning so the watcher feed and the walks honor one ignore set, with two watcher-specific deviations:
+The dispatch filter calls the active `IndexScopePolicy`, with two watcher-specific deviations:
 
-  - `.chan/` is always dropped via `is_chan_internal`, regardless of the configurable filter: it is chan's own state, an invariant the user cannot un-exclude.
-  - Paths with a walk-filtered directory component (`node_modules`, `target`, `.git`, ...) are dropped, EXCEPT VCS control files (`.git/HEAD`, `.git/index`, `.hg/dirstate`): those are forwarded because the indexer keys checkout-storm detection off them, while the walks prune `.git` wholesale.
+  - Hard `.chan` and VCS internals are never configurable.
+  - Exact VCS control decisions (`.git/HEAD`, `.git/index`, `.hg/dirstate`) are forwarded because the indexer keys checkout-storm detection off them, while all walks prune their parent metadata directories.
 
 When the report subsystem is active, the same watcher fan-outs each event into the report's incremental index before the user's callback runs (see "Report").
 
@@ -313,7 +313,7 @@ When the report subsystem is active, the same watcher fan-outs each event into t
 
 ```mermaid
 flowchart TD
-  Notify["notify event on watcher thread"] --> Filter{"is_filtered(rel, WalkFilter)"}
+  Notify["notify event on watcher thread"] --> Filter{"IndexScopePolicy::decision(rel)"}
   Filter -->|"VCS control file -- force-forwarded"| Send
   Filter -->|".chan internal -- always dropped"| Drop["event dropped"]
   Filter -->|"excluded dir component -- dropped"| Drop

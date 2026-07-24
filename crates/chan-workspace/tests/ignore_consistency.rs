@@ -14,14 +14,66 @@
 //   - the RAW unfiltered listing still SEES them, so a user can open a
 //     file inside an ignored dir on demand (requirement 3).
 
-use chan_workspace::{Library, SearchOpts};
+use chan_workspace::{
+    Library, RecoveryAction, SearchOpts, WalkFilter, WatchCallback, WatchEvent, WatchKind,
+};
 use std::fs;
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 fn seed_junk(root: &std::path::Path, rel: &str, body: &str) {
     let abs = root.join(rel);
     fs::create_dir_all(abs.parent().unwrap()).unwrap();
     fs::write(abs, body).unwrap();
+}
+
+struct EventChannel(mpsc::Sender<WatchEvent>);
+
+impl WatchCallback for EventChannel {
+    fn on_event(&self, event: WatchEvent) {
+        let _ = self.0.send(event);
+    }
+}
+
+fn collect_until(
+    rx: &mpsc::Receiver<WatchEvent>,
+    timeout: Duration,
+    done: impl Fn(&WatchEvent) -> bool,
+) -> Vec<WatchEvent> {
+    let deadline = Instant::now() + timeout;
+    let mut events = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return events;
+        }
+        match rx.recv_timeout(remaining) {
+            Ok(event) => {
+                let finished = done(&event);
+                events.push(event);
+                if finished {
+                    return events;
+                }
+            }
+            Err(_) => return events,
+        }
+    }
+}
+
+fn collect_for(rx: &mpsc::Receiver<WatchEvent>, timeout: Duration) -> Vec<WatchEvent> {
+    let deadline = Instant::now() + timeout;
+    let mut events = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return events;
+        }
+        match rx.recv_timeout(remaining) {
+            Ok(event) => events.push(event),
+            Err(_) => return events,
+        }
+    }
 }
 
 #[test]
@@ -143,4 +195,153 @@ fn ignored_dirs_absent_from_index_and_graph_by_default() {
     // The real Markdown notes ARE in the report.
     assert!(report_paths.contains(&"intro.md"));
     assert!(report_paths.contains(&"notes/today.md"));
+}
+
+#[test]
+fn per_workspace_exclusion_governs_generation_watch_reconcile_and_report() {
+    let cfg = TempDir::new().unwrap();
+    let workspace_root = TempDir::new().unwrap();
+    let root = workspace_root.path();
+
+    let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+    lib.register_workspace(root).unwrap();
+    let workspace = lib.open_workspace(root).unwrap();
+
+    let before = workspace.generation();
+    workspace
+        .set_excluded_dirs(vec!["generated".to_string()])
+        .unwrap();
+    assert!(
+        workspace.generation() > before,
+        "policy replacement must advance the shared workspace generation"
+    );
+    assert_eq!(
+        workspace.recovery_status().required_action(),
+        Some(RecoveryAction::Reconcile)
+    );
+
+    let (tx, rx) = mpsc::channel();
+    let watcher = workspace.watch(Arc::new(EventChannel(tx))).unwrap();
+    seed_junk(root, "generated/live.md", "# ignored live event\n");
+    seed_junk(root, "kept/live.md", "# kept live event\n");
+
+    let mut events = collect_until(&rx, Duration::from_secs(3), |event| {
+        event.kind == WatchKind::Created && event.path.as_deref() == Some("kept/live.md")
+    });
+    assert!(
+        events
+            .iter()
+            .any(|event| event.path.as_deref() == Some("kept/live.md")),
+        "included file did not reach watcher dispatch"
+    );
+    events.extend(collect_for(&rx, Duration::from_millis(500)));
+    let leaked = events.iter().find(|event| {
+        event
+            .path
+            .as_deref()
+            .is_some_and(|path| path == "generated" || path.starts_with("generated/"))
+    });
+    assert!(
+        leaked.is_none(),
+        "per-workspace exclusion leaked through watcher dispatch: {leaked:?}"
+    );
+    watcher.stop();
+
+    workspace.reindex(None).unwrap();
+    seed_junk(root, "generated/offline.md", "# ignored offline\n");
+    seed_junk(root, "kept/offline.md", "# kept offline\n");
+    let reconciled = workspace.reconcile().unwrap();
+    assert!(reconciled.upserted.contains(&"kept/offline.md".to_string()));
+    assert!(
+        !reconciled
+            .upserted
+            .iter()
+            .any(|path| path.starts_with("generated/")),
+        "per-workspace exclusion leaked through reconcile: {reconciled:?}"
+    );
+
+    let report = workspace.report().unwrap();
+    assert!(
+        !report
+            .files
+            .iter()
+            .any(|file| file.path.starts_with("generated/")),
+        "per-workspace exclusion leaked through report scan"
+    );
+    assert!(report.files.iter().any(|file| file.path == "kept/live.md"));
+}
+
+#[test]
+fn warm_report_reloads_when_scope_generation_changes() {
+    let cfg = TempDir::new().unwrap();
+    let workspace_root = TempDir::new().unwrap();
+    let root = workspace_root.path();
+
+    let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+    lib.register_workspace(root).unwrap();
+    let workspace = lib.open_workspace(root).unwrap();
+
+    seed_junk(root, "generated/before.rs", "fn generated() {}\n");
+    seed_junk(root, "kept.rs", "fn kept() {}\n");
+    let before = workspace.report().unwrap();
+    assert!(
+        before
+            .files
+            .iter()
+            .any(|file| file.path == "generated/before.rs"),
+        "fixture must warm the report with the soon-to-be-excluded path"
+    );
+
+    workspace
+        .set_excluded_dirs(vec!["generated".to_string()])
+        .unwrap();
+    let after = workspace.report().unwrap();
+    assert!(
+        !after
+            .files
+            .iter()
+            .any(|file| file.path.starts_with("generated/")),
+        "warm report retained rows from the previous scope generation"
+    );
+    assert!(after.files.iter().any(|file| file.path == "kept.rs"));
+}
+
+#[test]
+fn vcs_internals_remain_hard_excluded_when_configured_list_is_empty() {
+    let cfg = TempDir::new().unwrap();
+    let workspace_root = TempDir::new().unwrap();
+    let root = workspace_root.path();
+
+    let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+    lib.set_walk_filter(WalkFilter::default());
+    lib.register_workspace(root).unwrap();
+    fs::create_dir_all(root.join(".git/objects")).unwrap();
+    let workspace = lib.open_workspace(root).unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let watcher = workspace.watch(Arc::new(EventChannel(tx))).unwrap();
+    seed_junk(root, ".git/objects/pack-test", "object noise\n");
+    seed_junk(root, ".git/HEAD", "ref: refs/heads/main\n");
+
+    let mut events = collect_until(&rx, Duration::from_secs(3), |event| {
+        event.path.as_deref() == Some(".git/HEAD")
+    });
+    assert!(
+        events
+            .iter()
+            .any(|event| event.path.as_deref() == Some(".git/HEAD")),
+        "narrow VCS control event was not forwarded"
+    );
+    events.extend(collect_for(&rx, Duration::from_millis(500)));
+    let leaked = events.iter().find(|event| {
+        event
+            .path
+            .as_deref()
+            .is_some_and(|path| path.starts_with(".git/objects"))
+    });
+    assert!(
+        leaked.is_none(),
+        "hard VCS internals leaked through watcher dispatch: {leaked:?}"
+    );
+    watcher.stop();
 }

@@ -32,6 +32,8 @@ use serde::{Deserialize, Serialize};
 use walkdir::{DirEntry, WalkDir};
 
 use crate::error::{ChanError, Result};
+use crate::vcs::is_vcs_control_path;
+use crate::workspace::WorkspaceGeneration;
 
 /// Semantic policy applied by `Workspace::write_atomic_stream`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -527,6 +529,117 @@ impl WalkFilter {
     }
 }
 
+/// Why a workspace-relative path is outside the generated index scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexScopeExclusion {
+    Hard,
+    Gitignore,
+    Configured,
+}
+
+/// Result of applying one immutable workspace scope policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexScopeDecision {
+    Include,
+    Exclude(IndexScopeExclusion),
+    /// Narrow VCS state needed by watcher consumers to detect checkouts.
+    VcsControl,
+}
+
+/// Repository ignore rules captured by one policy generation.
+///
+/// W5 establishes the policy boundary with an empty matcher. W6 fills this
+/// private value with the `ignore` crate without changing the public policy.
+#[derive(Debug, Default)]
+struct RepositoryIgnores;
+
+impl RepositoryIgnores {
+    fn decision(&self, _rel: &str, _is_dir: bool) -> Option<IndexScopeDecision> {
+        None
+    }
+}
+
+/// One generated scope shared by index, graph, report, reconcile, and watch.
+#[derive(Debug)]
+pub struct IndexScopePolicy {
+    root: PathBuf,
+    generation: WorkspaceGeneration,
+    configured: WalkFilter,
+    repository_ignores: RepositoryIgnores,
+}
+
+impl IndexScopePolicy {
+    pub fn new(
+        root: PathBuf,
+        generation: WorkspaceGeneration,
+        configured: WalkFilter,
+    ) -> Result<Self> {
+        Ok(Self {
+            root,
+            generation,
+            configured,
+            repository_ignores: RepositoryIgnores,
+        })
+    }
+
+    pub fn generation(&self) -> WorkspaceGeneration {
+        self.generation
+    }
+
+    pub fn configured(&self) -> &WalkFilter {
+        &self.configured
+    }
+
+    pub fn decision(&self, rel: &str, is_dir: bool) -> IndexScopeDecision {
+        let rel = rel.trim_matches('/');
+        if is_vcs_control_path(rel) {
+            return IndexScopeDecision::VcsControl;
+        }
+        let components: Vec<&str> = rel.split('/').filter(|part| !part.is_empty()).collect();
+        if components
+            .iter()
+            .any(|part| matches!(*part, ".chan" | ".git" | ".hg" | ".svn"))
+        {
+            return IndexScopeDecision::Exclude(IndexScopeExclusion::Hard);
+        }
+        if let Some(decision) = self.repository_ignores.decision(rel, is_dir) {
+            return decision;
+        }
+        let directory_components = if is_dir {
+            components.as_slice()
+        } else {
+            components
+                .get(..components.len().saturating_sub(1))
+                .unwrap_or_default()
+        };
+        if directory_components
+            .iter()
+            .any(|part| self.configured.is_excluded(part))
+        {
+            return IndexScopeDecision::Exclude(IndexScopeExclusion::Configured);
+        }
+        IndexScopeDecision::Include
+    }
+
+    pub fn includes(&self, rel: &str, is_dir: bool) -> bool {
+        self.decision(rel, is_dir) == IndexScopeDecision::Include
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl chan_report::ReportPathPolicy for IndexScopePolicy {
+    fn generation(&self) -> u64 {
+        self.generation.get()
+    }
+
+    fn includes(&self, rel: &str, is_dir: bool) -> bool {
+        IndexScopePolicy::includes(self, rel, is_dir)
+    }
+}
+
 /// Recursive walker rooted at `root` that:
 ///   - skips `.git/` and `.chan/` at any depth;
 ///   - never follows symlinks (`walkdir` default; we set it
@@ -550,6 +663,38 @@ pub fn walk_workspace_filtered<'a>(
     filter: &'a WalkFilter,
 ) -> impl Iterator<Item = DirEntry> + 'a {
     walk_workspace_with(root, Some(filter))
+}
+
+/// Recursive workspace walk governed by one generated scope policy.
+pub fn walk_workspace_scoped<'a>(
+    root: &'a Path,
+    policy: &'a IndexScopePolicy,
+) -> impl Iterator<Item = DirEntry> + 'a {
+    WalkDir::new(root)
+        .min_depth(1)
+        .follow_links(false)
+        .same_file_system(true)
+        .into_iter()
+        .filter_entry(move |entry| {
+            if !entry.file_type().is_dir() {
+                return true;
+            }
+            let Ok(rel) = entry.path().strip_prefix(policy.root()) else {
+                return false;
+            };
+            policy.includes(&rel.to_string_lossy().replace('\\', "/"), true)
+        })
+        .filter_map(|result| match result {
+            Ok(entry) => Some(entry),
+            Err(error) => {
+                tracing::warn!("walkdir error: {error}");
+                None
+            }
+        })
+        .filter(|entry| {
+            let file_type = entry.file_type();
+            file_type.is_dir() || file_type.is_file()
+        })
 }
 
 fn walk_workspace_with<'a>(
@@ -1459,6 +1604,11 @@ pub fn list_tree_filtered(root: &Path, filter: &WalkFilter) -> Result<Vec<TreeEn
     list_tree_inner(root, root, 1, Some(filter))
 }
 
+/// `list_tree` variant governed by one generated scope policy.
+pub fn list_tree_scoped(root: &Path, policy: &IndexScopePolicy) -> Result<Vec<TreeEntry>> {
+    list_tree_scoped_inner(root, root, 1, policy)
+}
+
 /// Variant of `list_tree` scoped to the subtree at `subtree_abs`,
 /// which must be `root` or a descendant. Walks only that subtree;
 /// returned `TreeEntry.path` values stay relative to `root` so
@@ -1501,6 +1651,96 @@ pub fn list_tree_prefix_filtered(
         return Ok(Vec::new());
     }
     list_tree_inner(root, subtree_abs, 0, Some(filter))
+}
+
+/// Subtree listing governed by one generated scope policy.
+pub fn list_tree_prefix_scoped(
+    root: &Path,
+    subtree_abs: &Path,
+    policy: &IndexScopePolicy,
+) -> Result<Vec<TreeEntry>> {
+    if !subtree_abs.exists() {
+        return Ok(Vec::new());
+    }
+    list_tree_scoped_inner(root, subtree_abs, 0, policy)
+}
+
+fn list_tree_scoped_inner(
+    root: &Path,
+    walk_from: &Path,
+    min_depth: usize,
+    policy: &IndexScopePolicy,
+) -> Result<Vec<TreeEntry>> {
+    let iter: Box<dyn Iterator<Item = DirEntry> + '_> = if walk_from == root {
+        Box::new(walk_workspace_scoped(root, policy))
+    } else {
+        let walker = WalkDir::new(walk_from)
+            .min_depth(min_depth)
+            .follow_links(false)
+            .same_file_system(true)
+            .into_iter()
+            .filter_entry(move |entry| {
+                if !entry.file_type().is_dir() {
+                    return true;
+                }
+                let Ok(rel) = entry.path().strip_prefix(policy.root()) else {
+                    return false;
+                };
+                policy.includes(&rel.to_string_lossy().replace('\\', "/"), true)
+            })
+            .filter_map(|result| match result {
+                Ok(entry) => Some(entry),
+                Err(error) => {
+                    tracing::warn!("walkdir error: {error}");
+                    None
+                }
+            })
+            .filter(|entry| {
+                let file_type = entry.file_type();
+                file_type.is_dir() || file_type.is_file()
+            });
+        Box::new(walker)
+    };
+    tree_entries(root, iter)
+}
+
+fn tree_entries<'a>(
+    root: &Path,
+    iter: impl Iterator<Item = DirEntry> + 'a,
+) -> Result<Vec<TreeEntry>> {
+    let mut out = Vec::new();
+    for entry in iter {
+        if out.len() >= LIST_TREE_LIMIT {
+            return Err(ChanError::ListingTooLarge {
+                observed: out.len(),
+                limit: LIST_TREE_LIMIT,
+            });
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(root)
+            .map_err(|_| ChanError::PathEscape)?;
+        let path_str = rel.to_string_lossy().replace('\\', "/");
+        let meta = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::warn!(?path_str, ?error, "metadata failed; skipping");
+                continue;
+            }
+        };
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs() as i64);
+        out.push(TreeEntry {
+            path: path_str,
+            is_dir: meta.is_dir(),
+            mtime,
+            size: if meta.is_dir() { 0 } else { meta.len() },
+        });
+    }
+    Ok(out)
 }
 
 fn list_tree_inner(
