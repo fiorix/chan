@@ -14,7 +14,10 @@ mod unsupported;
 #[cfg(target_os = "linux")]
 pub use linux::{
     fdstore, fdstore_remove_many, notify_barrier, notify_ready, notify_watchdog,
-    pty_master_has_live_slave, take_listen_fds, watchdog_interval, NamedFd,
+    pty_master_has_live_slave, scrub_child_supervision_env, take_listen_fds, watchdog_interval,
+    NamedFd,
 };
 #[cfg(not(target_os = "linux"))]
-pub use unsupported::{notify_barrier, notify_ready, notify_watchdog, watchdog_interval};
+pub use unsupported::{
+    notify_barrier, notify_ready, notify_watchdog, scrub_child_supervision_env, watchdog_interval,
+};

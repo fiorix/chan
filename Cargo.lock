@@ -1042,6 +1042,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chan-shell",
+ "chan-systemd",
  "chan-workspace",
  "dirs 5.0.1",
  "filedescriptor",
