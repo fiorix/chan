@@ -45,7 +45,9 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use chan_workspace::{ChanError, FileStat, WatchEvent, WatchKind, Workspace, TEXT_WRITE_LIMIT};
+use chan_workspace::{
+    semantic_write_budget, ChanError, FileStat, WatchEvent, WatchKind, Workspace, TEXT_WRITE_LIMIT,
+};
 use tokio::sync::{broadcast, mpsc, watch, Notify};
 
 use crate::disk_echo::{content_hash, DiskEchoRing};
@@ -155,10 +157,12 @@ fn changeset_cost(cs: &ChangeSetJson) -> usize {
 }
 
 struct DocState {
-    /// Authority text. Invariants: valid UTF-8 (a `String`), at most
-    /// `TEXT_WRITE_LIMIT` bytes (the applier and the replace paths
-    /// enforce it).
+    /// Authority text. Invariants: valid UTF-8 (a `String`) and no
+    /// larger than `write_budget`.
     text: String,
+    /// Semantic cap derived from the last durable file size. Legacy
+    /// oversized text may shrink but cannot grow.
+    write_budget: u64,
     /// Cached UTF-16 length of `text`, kept incrementally.
     len16: u64,
     /// Count of accepted updates since session creation.
@@ -555,6 +559,7 @@ impl DocSession {
             path: path.to_string(),
             state: Mutex::new(DocState {
                 text,
+                write_budget: semantic_write_budget(Some(stat.size)),
                 len16,
                 version: 0,
                 log: VecDeque::new(),
@@ -652,13 +657,13 @@ impl DocSession {
     /// the session dirty; the caller decides when to flush.
     #[cfg(test)]
     pub fn apply_replace(&self, client_id: &str, new_text: &str) -> Result<(), ApplyError> {
-        if new_text.len() as u64 > TEXT_WRITE_LIMIT {
+        let mut st = self.lock_state();
+        if new_text.len() as u64 > st.write_budget {
             return Err(ApplyError::DocTooLarge {
                 bytes: new_text.len() as u64,
-                limit: TEXT_WRITE_LIMIT,
+                limit: st.write_budget,
             });
         }
-        let mut st = self.lock_state();
         self.apply_replace_locked(&mut st, client_id, new_text);
         Ok(())
     }
@@ -676,10 +681,10 @@ impl DocSession {
         if let Some(disk_mtime_ns) = st.session_state.conflict_disk_mtime_ns() {
             return Ok(HttpReplaceOutcome::Conflicted { disk_mtime_ns });
         }
-        if new_text.len() as u64 > TEXT_WRITE_LIMIT {
+        if new_text.len() as u64 > st.write_budget {
             return Err(ApplyError::DocTooLarge {
                 bytes: new_text.len() as u64,
-                limit: TEXT_WRITE_LIMIT,
+                limit: st.write_budget,
             });
         }
         self.apply_replace_locked(&mut st, client_id, new_text);
@@ -744,6 +749,7 @@ impl DocSession {
                     mtime_ns: stat.mtime_ns,
                     authority_version: st.version,
                 };
+                st.write_budget = semantic_write_budget(Some(stat.size));
                 st.session_state = if st.text == st.baseline.content {
                     SessionState::Clean
                 } else {
@@ -812,6 +818,7 @@ impl DocSession {
             mtime_ns: stat.mtime_ns,
             authority_version: st.version,
         };
+        st.write_budget = semantic_write_budget(Some(stat.size));
         st.session_state = SessionState::Clean;
         st.flush_failures = 0;
     }
@@ -832,6 +839,7 @@ impl DocSession {
             return;
         }
         st.flushed_mtime_ns = None;
+        st.write_budget = TEXT_WRITE_LIMIT;
         st.session_state = SessionState::Removed;
         st.flush_now = false;
         st.fan(&serialize(&ServerFrame::Removed));
@@ -877,6 +885,7 @@ impl DocSession {
             mtime_ns: disk_mtime_ns,
             authority_version: st.version,
         };
+        st.write_budget = semantic_write_budget(Some(st.baseline.content.len() as u64));
         st.session_state = SessionState::Clean;
         st.flush_now = false;
         st.flush_failures = 0;
@@ -949,6 +958,7 @@ impl DocSession {
             mtime_ns: stat.mtime_ns,
             authority_version: epoch,
         };
+        st.write_budget = semantic_write_budget(Some(stat.size));
         if st.version == epoch {
             st.session_state.clear_after_flush();
         }
@@ -1032,7 +1042,12 @@ impl DocAttachHandle {
                 Some(a) => (a.text.as_str(), a.len16),
                 None => (st.text.as_str(), st.len16),
             };
-            applied = Some(changes::apply(text, len16, &update.changes)?);
+            applied = Some(changes::apply_with_limit(
+                text,
+                len16,
+                &update.changes,
+                st.write_budget,
+            )?);
         }
 
         if let Some(a) = applied {
@@ -2773,6 +2788,20 @@ mod tests {
             ha.session().apply_replace("$http", &too_big),
             Err(ApplyError::DocTooLarge { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn legacy_oversize_session_can_shrink_within_its_semantic_budget() {
+        let fx = fixture(&[]);
+        let legacy = "x".repeat(3 * 1024 * 1024);
+        std::fs::write(fx.root.path().join("legacy.txt"), &legacy).unwrap();
+        let (ha, mut rx) = attach(&fx, "legacy.txt", "w1", None).await;
+        drain(&mut rx);
+
+        let smaller = "y".repeat(5 * 1024 * 1024 / 2);
+        ha.session().apply_replace("$http", &smaller).unwrap();
+
+        assert_eq!(ha.session().authority_view().0.len(), smaller.len());
     }
 
     #[cfg(unix)]

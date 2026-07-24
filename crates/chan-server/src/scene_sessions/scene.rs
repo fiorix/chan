@@ -31,12 +31,14 @@
 //! scenes approach the byte cap; an asset side-channel is a named
 //! follow-up.
 //!
-//! The growth cap counts compact-JSON bytes against
-//! [`TEXT_WRITE_LIMIT`]. That is a lower bound of the pretty file
-//! form; exactness does not matter (the workspace write path enforces
-//! the on-disk limit independently), the cap only bounds session
-//! memory. Everything here is pure: no I/O, no tokio, no session
-//! state.
+//! The growth cap counts compact-JSON bytes against a caller-supplied
+//! semantic write budget. Standalone model users default to
+//! [`TEXT_WRITE_LIMIT`], while sessions retain the larger size of an
+//! existing legacy file. The compact cost is a lower bound of the
+//! pretty file form; exactness does not matter (the workspace write
+//! path enforces the on-disk limit independently), the cap only bounds
+//! session memory. Everything here is pure: no I/O, no tokio, no
+//! session state.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -292,6 +294,18 @@ impl Scene {
         app_state: Option<Value>,
         files: Option<Value>,
     ) -> Result<Applied, SceneError> {
+        self.apply_push_with_limit(elements, app_state, files, TEXT_WRITE_LIMIT)
+    }
+
+    /// Merge one client push under a caller-supplied semantic write
+    /// budget.
+    pub fn apply_push_with_limit(
+        &mut self,
+        elements: Vec<Value>,
+        app_state: Option<Value>,
+        files: Option<Value>,
+        limit: u64,
+    ) -> Result<Applied, SceneError> {
         let mut staged: HashMap<String, StoredElement> = HashMap::new();
         let mut accepted: Vec<Value> = Vec::new();
         for value in elements {
@@ -318,10 +332,10 @@ impl Scene {
             + elements_delta
             + app_state_cost.map_or(0, |c| c as i64 - self.app_state_cost as i64)
             + files_delta as i64;
-        if prospective > TEXT_WRITE_LIMIT as i64 {
+        if prospective > limit as i64 {
             return Err(SceneError::TooLarge {
                 bytes: prospective.max(0) as u64,
-                limit: TEXT_WRITE_LIMIT,
+                limit,
             });
         }
 
@@ -362,6 +376,17 @@ impl Scene {
         &mut self,
         text: &str,
         fresh_nonce: &mut dyn FnMut() -> u64,
+    ) -> Result<Applied, SceneError> {
+        self.apply_replace_with_limit(text, fresh_nonce, TEXT_WRITE_LIMIT)
+    }
+
+    /// Replace the whole scene under a caller-supplied semantic write
+    /// budget.
+    pub fn apply_replace_with_limit(
+        &mut self,
+        text: &str,
+        fresh_nonce: &mut dyn FnMut() -> u64,
+        limit: u64,
     ) -> Result<Applied, SceneError> {
         let incoming = Self::parse(text)?;
 
@@ -420,10 +445,10 @@ impl Scene {
         };
         let files_delta: usize = new_files.iter().map(|(k, v)| k.len() + value_cost(v)).sum();
         let prospective = elements_cost + app_state_cost + self.files_cost + files_delta;
-        if prospective > TEXT_WRITE_LIMIT as usize {
+        if prospective > limit as usize {
             return Err(SceneError::TooLarge {
                 bytes: prospective as u64,
-                limit: TEXT_WRITE_LIMIT,
+                limit,
             });
         }
 
@@ -537,6 +562,15 @@ pub(super) fn merge_three_way(
     authority: &Scene,
     disk_text: &str,
 ) -> Result<String, MergeConflict> {
+    merge_three_way_with_limit(baseline_text, authority, disk_text, TEXT_WRITE_LIMIT)
+}
+
+pub(super) fn merge_three_way_with_limit(
+    baseline_text: &str,
+    authority: &Scene,
+    disk_text: &str,
+    limit: u64,
+) -> Result<String, MergeConflict> {
     let baseline = parse_merge_input(baseline_text)?;
     let disk = parse_merge_input(disk_text)?;
 
@@ -604,7 +638,7 @@ pub(super) fn merge_three_way(
         files_cost,
     };
     let text = merged.serialize_file();
-    if merged.total_cost() > TEXT_WRITE_LIMIT as usize || text.len() > TEXT_WRITE_LIMIT as usize {
+    if merged.total_cost() > limit as usize || text.len() > limit as usize {
         return Err(MergeConflict);
     }
     Ok(text)

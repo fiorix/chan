@@ -43,7 +43,9 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use chan_workspace::{ChanError, FileStat, WatchEvent, WatchKind, Workspace, TEXT_WRITE_LIMIT};
+use chan_workspace::{
+    semantic_write_budget, ChanError, FileStat, WatchEvent, WatchKind, Workspace, TEXT_WRITE_LIMIT,
+};
 use rand::RngCore;
 use tokio::sync::{broadcast, mpsc, watch, Notify};
 
@@ -129,6 +131,9 @@ struct CursorPos {
 struct SceneState {
     /// Authority scene, tombstones included.
     scene: Scene,
+    /// Semantic cap derived from the last durable file size. Legacy
+    /// oversized scenes may shrink but cannot grow.
+    write_budget: u64,
     /// Count of accepted mutations (pushes, replaces, disk merges that
     /// changed anything) since session creation. Informational on the
     /// wire; there is no rebase protocol.
@@ -498,6 +503,7 @@ impl SceneSession {
             path: path.to_string(),
             state: Mutex::new(SceneState {
                 scene,
+                write_budget: semantic_write_budget(Some(stat.size)),
                 version: 0,
                 attaches: HashMap::new(),
                 cursors: HashMap::new(),
@@ -610,7 +616,9 @@ impl SceneSession {
     }
 
     fn apply_replace_locked(&self, st: &mut SceneState, body: &str) -> Result<(), SceneError> {
-        let applied = st.scene.apply_replace(body, &mut fresh_nonce)?;
+        let applied = st
+            .scene
+            .apply_replace_with_limit(body, &mut fresh_nonce, st.write_budget)?;
         if !applied.is_empty() {
             st.version += 1;
             let frame = update_frame(st.version, applied);
@@ -635,6 +643,7 @@ impl SceneSession {
         outcome: MergeOutcome,
     ) {
         let disk_hash = content_hash(&disk_text);
+        let disk_budget = semantic_write_budget(Some(stat.size));
         match outcome {
             MergeOutcome::Merged(merged_text) => {
                 let disk_baseline = match Scene::parse(&disk_text) {
@@ -649,7 +658,11 @@ impl SceneSession {
                     }
                 };
                 let dirty_since = st.session_state.dirty_since().unwrap_or_else(Instant::now);
-                let applied = match st.scene.apply_replace(&merged_text, &mut fresh_nonce) {
+                let applied = match st.scene.apply_replace_with_limit(
+                    &merged_text,
+                    &mut fresh_nonce,
+                    disk_budget,
+                ) {
                     Ok(applied) => applied,
                     Err(e) => {
                         tracing::warn!(
@@ -674,6 +687,7 @@ impl SceneSession {
                     mtime_ns: stat.mtime_ns,
                     authority_version: st.version,
                 };
+                st.write_budget = disk_budget;
                 st.session_state = if st.scene.serialize_file() == st.baseline.content {
                     SessionState::Clean
                 } else {
@@ -727,9 +741,15 @@ impl SceneSession {
         let disk_matches_authority = Scene::parse(&disk_text)
             .is_ok_and(|scene| scene.serialize_file() == st.scene.serialize_file());
         if st.session_state.is_dirty() && !disk_matches_authority {
-            let outcome = scene::merge_three_way(&st.baseline.content, &st.scene, &disk_text)
-                .map(MergeOutcome::Merged)
-                .unwrap_or(MergeOutcome::Conflict);
+            let disk_budget = semantic_write_budget(Some(stat.size));
+            let outcome = scene::merge_three_way_with_limit(
+                &st.baseline.content,
+                &st.scene,
+                &disk_text,
+                disk_budget,
+            )
+            .map(MergeOutcome::Merged)
+            .unwrap_or(MergeOutcome::Conflict);
             self.apply_merge_outcome_locked(&mut st, disk_text, stat, outcome);
             return;
         }
@@ -737,8 +757,12 @@ impl SceneSession {
         // the parse gate below rejects them, a stale read serving the
         // same bytes again is not a fresh observation.
         let disk_hash = content_hash(&disk_text);
+        let disk_budget = semantic_write_budget(Some(stat.size));
         st.disk_echo.note(disk_hash);
-        match st.scene.apply_replace(&disk_text, &mut fresh_nonce) {
+        match st
+            .scene
+            .apply_replace_with_limit(&disk_text, &mut fresh_nonce, disk_budget)
+        {
             Ok(applied) => {
                 if !applied.is_empty() {
                     st.version += 1;
@@ -753,6 +777,7 @@ impl SceneSession {
                     mtime_ns: stat.mtime_ns,
                     authority_version: st.version,
                 };
+                st.write_budget = disk_budget;
                 st.session_state = SessionState::Clean;
                 st.flush_failures = 0;
             }
@@ -782,6 +807,7 @@ impl SceneSession {
             return;
         }
         st.flushed_mtime_ns = None;
+        st.write_budget = TEXT_WRITE_LIMIT;
         st.session_state = SessionState::Removed;
         st.flush_now = false;
         st.fan(&serialize(&ServerFrame::Removed));
@@ -814,10 +840,15 @@ impl SceneSession {
         if disk_version != disk_hash {
             return false;
         }
-        let applied = match st.scene.apply_replace(&disk_content, &mut fresh_nonce) {
-            Ok(applied) => applied,
-            Err(_) => return false,
-        };
+        let disk_budget = semantic_write_budget(Some(disk_content.len() as u64));
+        let applied =
+            match st
+                .scene
+                .apply_replace_with_limit(&disk_content, &mut fresh_nonce, disk_budget)
+            {
+                Ok(applied) => applied,
+                Err(_) => return false,
+            };
         let changed = !applied.is_empty();
         if changed {
             st.version += 1;
@@ -833,6 +864,7 @@ impl SceneSession {
             mtime_ns: disk_mtime_ns,
             authority_version: st.version,
         };
+        st.write_budget = disk_budget;
         st.session_state = SessionState::Clean;
         st.flush_now = false;
         st.flush_failures = 0;
@@ -905,6 +937,7 @@ impl SceneSession {
             mtime_ns: stat.mtime_ns,
             authority_version: epoch,
         };
+        st.write_budget = semantic_write_budget(Some(stat.size));
         if st.version == epoch {
             st.session_state.clear_after_flush();
         }
@@ -967,7 +1000,10 @@ impl SceneAttachHandle {
         if self.session.closed.load(Ordering::Relaxed) {
             return Err(PushError::Closed);
         }
-        let applied = st.scene.apply_push(elements, app_state, files)?;
+        let write_budget = st.write_budget;
+        let applied = st
+            .scene
+            .apply_push_with_limit(elements, app_state, files, write_budget)?;
         if !applied.is_empty() {
             st.version += 1;
             let frame = update_frame(st.version, applied);
@@ -1104,10 +1140,11 @@ impl SceneRegistry {
                 tokio::task::spawn_blocking(move || ws.read_text_with_stat(&read_path))
                     .await
                     .map_err(|e| AttachError::Task(e.to_string()))??;
-            if text.len() as u64 > TEXT_WRITE_LIMIT {
+            let write_budget = semantic_write_budget(Some(stat.size));
+            if text.len() as u64 > write_budget {
                 return Err(AttachError::Scene(SceneError::TooLarge {
                     bytes: text.len() as u64,
-                    limit: TEXT_WRITE_LIMIT,
+                    limit: write_budget,
                 }));
             }
             let scene = Scene::parse(&text)?;
@@ -2644,6 +2681,34 @@ mod tests {
         let err = ha.session().apply_replace("{nope").unwrap_err();
         assert!(matches!(err, SceneError::Invalid(_)));
         assert_eq!(ha.session().lock_state().version, 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_oversize_scene_can_shrink_within_its_semantic_budget() {
+        let fx = fixture(&[]);
+        let mut legacy_element = elem("x", 1, 1, "a1");
+        legacy_element
+            .as_object_mut()
+            .unwrap()
+            .insert("text".into(), json!("x".repeat(3 * 1024 * 1024)));
+        std::fs::write(
+            fx.root.path().join("legacy.excalidraw"),
+            body(json!([legacy_element])),
+        )
+        .unwrap();
+        let (ha, mut rx) = attach(&fx, "legacy.excalidraw", "w1").await;
+        drain(&mut rx);
+
+        let mut smaller_element = elem("x", 1, 1, "a1");
+        smaller_element
+            .as_object_mut()
+            .unwrap()
+            .insert("text".into(), json!("y".repeat(5 * 1024 * 1024 / 2)));
+        ha.session()
+            .apply_replace(&body(json!([smaller_element])))
+            .unwrap();
+
+        assert!(ha.session().authority_view().0.len() > TEXT_WRITE_LIMIT as usize);
     }
 
     #[tokio::test]
