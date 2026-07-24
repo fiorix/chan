@@ -1364,6 +1364,32 @@ enum BootToken {
     RotatedByAge,
 }
 
+/// Owns either `run_devserver` serving path through its shutdown boundary.
+///
+/// Both variants consume the watchdog owner and wait for its task to terminate
+/// before the arm returns, so listener and tunnel-only shutdown cannot detach a
+/// final notification.
+enum DevserverServeArm {
+    Listener(tokio::task::JoinHandle<std::io::Result<()>>),
+    Wait(tokio::task::JoinHandle<()>),
+}
+
+impl DevserverServeArm {
+    async fn join(self, watchdog: Option<fdstore::WatchdogPings>) -> anyhow::Result<()> {
+        let serve_result = match self {
+            Self::Listener(task) => task
+                .await
+                .context("joining devserver serve task")
+                .and_then(|result| result.context("running devserver")),
+            Self::Wait(task) => task.await.context("joining devserver wait task"),
+        };
+        if let Some(watchdog) = watchdog {
+            watchdog.stop().await;
+        }
+        serve_result
+    }
+}
+
 /// Resolve the boot token in `persisted`, minting or rotating in place.
 /// Pure over (`persisted`, `now`) so the age rule is testable without a
 /// boot: empty mints, an unknown or over-age mint time rotates, and a
@@ -1600,13 +1626,13 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
             let local_addr = local_addr.expect("listening devserver has a bound address");
             let serve_signal = signal_tx.clone();
             let serve_startup = state.startup.clone();
-            let serve_task = tokio::spawn(async move {
+            let serve_arm = DevserverServeArm::Listener(tokio::spawn(async move {
                 let result =
                     crate::signal::graceful_serve(listener, app, serve_signal.clone()).await;
                 serve_startup.stop();
                 let _ = serve_signal.send(true);
                 result
-            });
+            }));
             let restore =
                 WorkspaceRestore::spawn(state.clone(), restore_attempts, signal_tx.subscribe());
             let restore_join = restore.join().await;
@@ -1628,15 +1654,12 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
             }
             let watchdog_pings = (ready && notify_result.is_ok())
                 .then(|| fdstore::spawn_watchdog_pings(signal_tx.subscribe()));
-            let serve_join = serve_task.await;
+            let serve_join = serve_arm.join(watchdog_pings).await;
             let cancel_join = cancel_task.await;
             let tunnel_join = match tunnel_task {
                 Some(task) => Some(task.await),
                 None => None,
             };
-            if let Some(watchdog_pings) = watchdog_pings {
-                watchdog_pings.stop().await;
-            }
             state.startup.stop();
             state.startup.stopped();
             restore_join.context("joining workspace startup restore")?;
@@ -1645,18 +1668,16 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
             if let Some(tunnel_join) = tunnel_join {
                 tunnel_join.context("joining devserver tunnel task")?;
             }
-            serve_join
-                .context("joining devserver serve task")?
-                .context("running devserver")?;
+            serve_join?;
         }
         None => {
             let serve_signal = signal_tx.clone();
             let serve_startup = state.startup.clone();
-            let serve_task = tokio::spawn(async move {
+            let serve_arm = DevserverServeArm::Wait(tokio::spawn(async move {
                 crate::signal::graceful_wait(serve_signal.clone()).await;
                 serve_startup.stop();
                 let _ = serve_signal.send(true);
-            });
+            }));
             let restore =
                 WorkspaceRestore::spawn(state.clone(), restore_attempts, signal_tx.subscribe());
             let restore_join = restore.join().await;
@@ -1685,15 +1706,12 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
             }
             let watchdog_pings = (ready && notify_result.is_ok())
                 .then(|| fdstore::spawn_watchdog_pings(signal_tx.subscribe()));
-            let serve_join = serve_task.await;
+            let serve_join = serve_arm.join(watchdog_pings).await;
             let cancel_join = cancel_task.await;
             let tunnel_join = match tunnel_task {
                 Some(task) => Some(task.await),
                 None => None,
             };
-            if let Some(watchdog_pings) = watchdog_pings {
-                watchdog_pings.stop().await;
-            }
             state.startup.stop();
             state.startup.stopped();
             restore_join.context("joining workspace startup restore")?;
@@ -1702,7 +1720,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
             if let Some(tunnel_join) = tunnel_join {
                 tunnel_join.context("joining devserver tunnel task")?;
             }
-            serve_join.context("joining devserver wait task")?;
+            serve_join?;
         }
     }
     Ok(())
@@ -2347,6 +2365,57 @@ fn canonical_root(root: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use chan_library::workspace_slug;
+    use std::sync::atomic::AtomicBool;
+
+    async fn completed_serve_arm(listener: bool) -> DevserverServeArm {
+        if listener {
+            let task = tokio::spawn(async { Ok(()) });
+            while !task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            DevserverServeArm::Listener(task)
+        } else {
+            let task = tokio::spawn(async {});
+            while !task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            DevserverServeArm::Wait(task)
+        }
+    }
+
+    async fn assert_serve_arm_joins_watchdog(arm: DevserverServeArm) {
+        let completed = Arc::new(AtomicBool::new(false));
+        let task_completed = completed.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let watchdog_task = tokio::spawn(async move {
+            let _ = entered_tx.send(());
+            release_rx
+                .recv()
+                .expect("release synchronous watchdog work");
+            task_completed.store(true, Ordering::SeqCst);
+        });
+        entered_rx.await.expect("watchdog task entered");
+
+        let watchdog = fdstore::WatchdogPings::from_task(watchdog_task);
+        let mut arm_join = std::pin::pin!(arm.join(Some(watchdog)));
+        assert!(
+            futures::poll!(arm_join.as_mut()).is_pending(),
+            "serve arm returned after abort without joining synchronous watchdog work"
+        );
+        release_tx.send(()).expect("release watchdog task");
+        arm_join.await.expect("serve arm completed");
+        assert!(
+            completed.load(Ordering::SeqCst),
+            "serve arm returned before the watchdog task's synchronous side effect"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn both_devserver_serve_arms_join_watchdog_before_return() {
+        assert_serve_arm_joins_watchdog(completed_serve_arm(true).await).await;
+        assert_serve_arm_joins_watchdog(completed_serve_arm(false).await).await;
+    }
 
     fn pending_record(generation: u64) -> WorkspaceRecord {
         WorkspaceRecord::prepared(

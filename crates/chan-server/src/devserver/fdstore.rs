@@ -44,7 +44,7 @@ impl WatchdogPings {
         Self { task: None }
     }
 
-    fn from_task(task: tokio::task::JoinHandle<()>) -> Self {
+    pub(super) fn from_task(task: tokio::task::JoinHandle<()>) -> Self {
         Self { task: Some(task) }
     }
 
