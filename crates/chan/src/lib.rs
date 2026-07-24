@@ -4701,6 +4701,7 @@ fn devserver_systemd_unit(
          {environment}\
          ExecStart={exec}\n\
          Restart=on-failure\n\
+         WatchdogSec=30\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
@@ -8475,6 +8476,39 @@ mod tests {
         assert_eq!(
             launchd_program_arguments(escaped).as_deref(),
             Some("/a&b/chan devserver")
+        );
+    }
+
+    /// The systemd unit template carries WatchdogSec= so a seized-but-
+    /// alive devserver fails systemd's liveness check and restarts
+    /// (with the devserver's WATCHDOG=1 pings keeping a healthy one
+    /// alive). Paired with the packaged unit test below.
+    #[test]
+    fn systemd_unit_template_sets_watchdog() {
+        let addr: SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        let unit = devserver_systemd_unit(Path::new("/usr/bin/chan"), addr, None, None);
+        assert!(
+            unit.contains("WatchdogSec=30\n"),
+            "unit template must pin WatchdogSec=30: {unit}"
+        );
+        assert!(
+            unit.contains("Type=notify"),
+            "watchdog needs notify: {unit}"
+        );
+    }
+
+    /// The distro-packaged unit (packaging/distros/shared) mirrors the
+    /// CLI-written template; both must carry the watchdog line.
+    #[test]
+    fn packaged_systemd_unit_sets_watchdog() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packaging/distros/shared/chan-devserver.service"
+        );
+        let unit = std::fs::read_to_string(path).expect("packaged unit readable");
+        assert!(
+            unit.contains("WatchdogSec=30"),
+            "packaged unit must pin WatchdogSec=30: {unit}"
         );
     }
 

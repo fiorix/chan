@@ -64,6 +64,23 @@ pub fn notify_ready() -> Result<()> {
     notify("READY=1")
 }
 
+pub fn notify_watchdog() -> Result<()> {
+    notify("WATCHDOG=1")
+}
+
+/// The ping cadence for the systemd watchdog: half of `WATCHDOG_USEC`
+/// (systemd sets it only when the unit configures `WatchdogSec=`, and
+/// expects pings well inside the window). None when the process is
+/// not watchdog-supervised -- no pings, no ping task.
+pub fn watchdog_interval() -> Option<Duration> {
+    let raw = std::env::var("WATCHDOG_USEC").ok()?;
+    let usec = raw.parse::<u64>().ok()?;
+    if usec == 0 {
+        return None;
+    }
+    Some(Duration::from_micros(usec) / 2)
+}
+
 pub fn notify_barrier(timeout: Duration) -> Result<()> {
     if notify_socket_addr()?.is_none() {
         return Ok(());
@@ -301,6 +318,27 @@ mod tests {
         let _env_lock = ENV_LOCK.lock().unwrap();
         let _notify_socket = EnvGuard::remove("NOTIFY_SOCKET");
         notify_barrier(Duration::from_millis(1)).unwrap();
+    }
+
+    #[test]
+    fn watchdog_interval_reads_half_of_watchdog_usec() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        {
+            let _guard = EnvGuard::set("WATCHDOG_USEC", "30000000");
+            assert_eq!(watchdog_interval(), Some(Duration::from_secs(15)));
+        }
+        {
+            let _guard = EnvGuard::set("WATCHDOG_USEC", "0");
+            assert_eq!(watchdog_interval(), None, "zero means no watchdog");
+        }
+        {
+            let _guard = EnvGuard::set("WATCHDOG_USEC", "nope");
+            assert_eq!(watchdog_interval(), None, "garbage means no watchdog");
+        }
+        {
+            let _guard = EnvGuard::remove("WATCHDOG_USEC");
+            assert_eq!(watchdog_interval(), None, "unset means no watchdog");
+        }
     }
 
     #[test]

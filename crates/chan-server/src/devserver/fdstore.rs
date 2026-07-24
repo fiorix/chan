@@ -422,6 +422,33 @@ mod linux {
         chan_systemd::notify_ready().context("notifying systemd READY=1")
     }
 
+    /// Systemd watchdog ping loop: when the unit configures
+    /// `WatchdogSec=` (WATCHDOG_USEC is set), ping at half the
+    /// configured interval until shutdown. A seized-but-alive process
+    /// then fails systemd's liveness check and is restarted with a
+    /// journal trail. None (no task) outside watchdog supervision.
+    pub(crate) fn spawn_watchdog_pings(
+        mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let interval = chan_systemd::watchdog_interval()?;
+        Some(tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {
+                        if let Err(e) = chan_systemd::notify_watchdog() {
+                            tracing::warn!(error = %e, "systemd watchdog ping failed");
+                        }
+                    }
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            return;
+                        }
+                    }
+                }
+            }
+        }))
+    }
+
     fn manifest_path() -> PathBuf {
         chan_workspace::paths::config_dir()
             .join("devserver")
@@ -561,7 +588,7 @@ mod linux {
 #[cfg(all(target_os = "linux", test))]
 pub(super) use linux::child_pid_from_name;
 #[cfg(target_os = "linux")]
-pub(super) use linux::{notify_ready, prepare_restart, StartupRestore};
+pub(super) use linux::{notify_ready, prepare_restart, spawn_watchdog_pings, StartupRestore};
 
 #[cfg(not(target_os = "linux"))]
 mod unsupported {
@@ -590,7 +617,14 @@ mod unsupported {
     pub(crate) fn notify_ready() -> anyhow::Result<()> {
         chan_systemd::notify_ready().context("notifying systemd READY=1")
     }
+
+    /// Non-Linux: no systemd watchdog; never a task.
+    pub(crate) fn spawn_watchdog_pings(
+        _shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        None
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(super) use unsupported::{notify_ready, prepare_restart, StartupRestore};
+pub(super) use unsupported::{notify_ready, prepare_restart, spawn_watchdog_pings, StartupRestore};

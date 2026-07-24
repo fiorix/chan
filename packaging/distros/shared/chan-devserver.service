@@ -16,6 +16,7 @@ FileDescriptorStoreMax=512
 KillMode=process
 ExecStart=/usr/bin/chan devserver
 Restart=on-failure
+WatchdogSec=30
 
 [Install]
 WantedBy=default.target
