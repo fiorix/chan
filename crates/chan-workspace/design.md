@@ -8,7 +8,7 @@ Canonical design reference for `chan-workspace`. Update in the same commit as an
 
 In scope:
 
-  - Filesystem primitives (`read` / `write` / `stat` / `list` / `rename` / `copy` / `remove` / `list_tree`) rooted at a workspace.
+  - Filesystem primitives (`read` / `write` / `stat` / `list` / `rename` / `copy` / `remove` / `list_tree`) rooted at a workspace, including bounded byte streams and progressively limited atomic writes.
   - Workspace registry persisted to `~/.chan/config.toml` (or the OS sandbox equivalent on iOS / Android).
   - Per-workspace search index (tantivy 0.24, BM25; optional dense via candle + BGE-small for hybrid).
   - Per-workspace graph database (sqlite, single writer, r2d2 pool for readers).
@@ -93,6 +93,12 @@ Two gates guard the text-class APIs:
   - **Indexer gate** (`fs_ops::is_indexable_text`): true only for `FileClass::EditableText` (markdown-class `.md` / `.txt`). Used by the indexer, graph rebuild, link-rewrite on rename, and reindex-after-restore. A `.py` is editable but **not** indexable so `#include` doesn't read as a `#tag`. Within the indexable set, `fs_ops::is_markdown_file` narrows `#tag` / `@@mention` token extraction to `.md` only: `.txt` indexes for full-text, headings, and links, but incidental prose in a plain note never becomes a graph tag.
 
 Binary I/O (`read` / `write_bytes`) routes around both gates: attachments and the future media browser still need it.
+
+`Workspace::write_atomic_stream` is the canonical progressive write path. The caller feeds chunks through `AtomicWriteSink`; the sink writes directly into a same-directory cap-tempfile, rejects a chunk before writing when it would exceed the effective budget, validates text incrementally without rejecting a UTF-8 code point split across chunks, and exposes no commit operation. The workspace commits only after the feed returns successfully and the UTF-8 validator has no incomplete tail. Every earlier error, cancellation, or panic drops the temp and leaves the target untouched. `write_text`, `write_text_if_unchanged`, and `write_bytes` delegate to this primitive.
+
+`Workspace::ensure_writable` is the single strict write preflight. It validates through the cap-std sandbox, rejects directory, symlink, special, and read-only targets, probes same-directory temp creation, and returns `WritableFile { stat }`, where `stat` is the existing regular file's `FileStat` for mtime-token and budget decisions or `None` for a create. `Workspace::classify_workspace_path` uses the same sandbox and returns missing, regular, directory, or special as values while lexical and symlink escapes remain typed errors.
+
+`Workspace::read_bytes_bounded` opens and fstats one regular file, then owns a producer that sends 64 KiB chunks through a depth-8 synchronous channel. `BoundedFileReader` never allocates a whole-file buffer; dropping it closes the receiver and joins the producer so a disconnected consumer leaves no detached reader.
 
 #### Supported file types
 
@@ -379,7 +385,7 @@ Code is the source of truth for signatures; this section records the contracts c
 
 Every workspace operation takes a workspace-relative POSIX path and goes through the sandbox resolver. Text reads/writes additionally pass the editable-text gate; byte reads/writes bypass that gate but still require regular files under the workspace. CAS writes compare the open-time mtime token, soft delete routes through Trash, and link-rewrite only edits markdown-class bodies. Physical path resolution is metadata-only: it maps a public path to a host path for shell/MCP use without reading content.
 
-`TEXT_WRITE_LIMIT` (2 MiB) caps a single text write for new files; existing files may be rewritten up to their current size. `BYTES_WRITE_LIMIT` (50 MiB) caps `write_bytes`. Callers exceeding them get `ChanError::WriteTooLarge`. Tree listings cap at `LIST_TREE_LIMIT` (500k entries) and per-dir listings at `LIST_DIR_LIMIT` (50k); exceeding callers get `ListingTooLarge`.
+`TEXT_WRITE_LIMIT` (2 MiB) caps a single text write for new files; `semantic_write_budget(existing_size)` raises that budget only to the existing size so a legacy large file remains editable without further growth. `BYTES_WRITE_LIMIT` (50 MiB) follows the same intentional legacy-file rule for byte writes: the effective budget is `max(existing_size, BYTES_WRITE_LIMIT)`. The progressive sink rejects the first chunk that would cross the effective budget with `ChanError::WriteTooLarge`. Tree listings cap at `LIST_TREE_LIMIT` (500k entries) and per-dir listings at `LIST_DIR_LIMIT` (50k); exceeding callers get `ListingTooLarge`.
 
 Drafts, session blobs, contact import, trash restore/purge, and bootstrap snapshots are all layered on the same path, atomic-write, and walk-filter rules rather than bypassing the workspace boundary.
 
@@ -494,7 +500,7 @@ What's NOT closed today:
 
 ### Atomic writes
 
-Anything chan-workspace-managed (registry, sessions, blob storage, graph control records, atomic-write user files) routes through `fs_ops::atomic_write` (or its cap-std equivalent `atomic_write_in` for sandboxed writes): tmpfile in the same directory, fsync the file, rename into place, fsync the directory. Mode + xattrs (Finder tags on macOS, SELinux labels and capabilities on Linux) are captured from the existing target before the rename and restored on the new file. Never `std::fs::write` directly to the target. A crash mid-write must produce zero state for the writer plus an intact previous version.
+Anything chan-workspace-managed (registry, sessions, blob storage, graph control records, atomic-write user files) routes through `fs_ops::atomic_write` or the cap-std streaming core shared by `atomic_write_in` and `Workspace::write_atomic_stream`: tmpfile in the same directory, progressive writes, fsync the file, rename into place, fsync the directory. Mode + xattrs (Finder tags on macOS, SELinux labels and capabilities on Linux) are captured from the existing target before the rename and restored on the new file. Never `std::fs::write` directly to the target. A crash mid-write must produce zero state for the writer plus an intact previous version.
 
 ### Locking model
 

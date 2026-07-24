@@ -98,8 +98,10 @@ pub use vcs::{detect_parent_vcs, detect_workspace_vcs, is_vcs_control_path, VcsK
 pub use watch::{WatchCallback, WatchEvent, WatchHandle, WatchKind};
 pub use workspace::ReconcileReport;
 pub use workspace::{
-    CopyOutcome, DirEntry, FileStat, RenameOutcome, ResolvedLink, SearchOpts, TextReadEvent,
-    TreeEntry, Workspace, BYTES_WRITE_LIMIT, TEXT_READ_CHUNK_SIZE, TEXT_WRITE_LIMIT,
+    semantic_write_budget, AtomicWriteKind, AtomicWriteSink, BoundedFileReader, CopyOutcome,
+    DirEntry, FileStat, RenameOutcome, ResolvedLink, SearchOpts, TextReadEvent, TreeEntry,
+    Workspace, WorkspacePath, WritableFile, BINARY_STREAM_CHUNK_SIZE, BINARY_STREAM_QUEUE_DEPTH,
+    BYTES_WRITE_LIMIT, TEXT_READ_CHUNK_SIZE, TEXT_WRITE_LIMIT,
 };
 pub use workspace_search::{
     EffectiveSearchMode, EffectiveWorkspaceTraversal, WorkspaceContentHit, WorkspaceEntityMatch,

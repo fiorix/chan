@@ -27,6 +27,8 @@ use crate::trash::{self, TrashEntry, TRASH_RETENTION_SECS};
 use crate::watch::{WatchCallback, WatchHandle};
 use crate::{Report, ReportScope};
 
+pub use crate::fs_ops::{AtomicWriteKind, AtomicWriteSink};
+
 /// Hard cap on `write_text` content size. Markdown / txt notes are
 /// human-authored; 2 MiB is roughly 2M characters of dense English,
 /// far past any realistic note. Anything larger is almost certainly
@@ -45,6 +47,12 @@ pub const BYTES_WRITE_LIMIT: u64 = 50 * 1024 * 1024;
 /// Chunk size for streaming editable text reads. Large enough to amortize
 /// syscalls, small enough that the editor can paint early on large files.
 pub const TEXT_READ_CHUNK_SIZE: usize = 64 * 1024;
+
+/// Chunk size for bounded opaque-byte reads.
+pub const BINARY_STREAM_CHUNK_SIZE: usize = 64 * 1024;
+
+/// Maximum number of unread chunks held by a bounded opaque-byte reader.
+pub const BINARY_STREAM_QUEUE_DEPTH: usize = 8;
 
 /// File written to `paths.graph_dir` before `rebuild_graph` starts
 /// and removed after `Index::build_all` commits. Its presence at
@@ -118,7 +126,7 @@ pub struct DirEntry {
     pub is_dir: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileStat {
     pub size: u64,
     /// Last modification time as Unix seconds. Coarse, useful for
@@ -134,6 +142,74 @@ pub struct FileStat {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtime_ns: Option<i64>,
     pub is_dir: bool,
+}
+
+/// Sandboxed classification of a workspace-relative path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkspacePath {
+    Missing,
+    Regular(FileStat),
+    Directory(FileStat),
+    Special(fs_ops::PathKind),
+}
+
+/// Successful strict write preflight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WritableFile {
+    /// Existing target stat, or `None` when the write will create it.
+    pub stat: Option<FileStat>,
+}
+
+/// Bounded opaque-byte reader backed by one owned producer thread.
+pub struct BoundedFileReader {
+    stat: FileStat,
+    receiver: Option<std::sync::mpsc::Receiver<Result<Vec<u8>>>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl BoundedFileReader {
+    /// Metadata from the open file handle that supplies the byte stream.
+    pub fn stat(&self) -> &FileStat {
+        &self.stat
+    }
+}
+
+impl Iterator for BoundedFileReader {
+    type Item = Result<Vec<u8>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.receiver.as_ref()?.recv().ok()
+    }
+}
+
+impl Drop for BoundedFileReader {
+    fn drop(&mut self) {
+        self.receiver.take();
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                tracing::warn!("bounded file reader producer panicked");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+static ACTIVE_BOUNDED_FILE_READERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+struct ActiveBoundedFileReaderGuard;
+
+#[cfg(test)]
+impl Drop for ActiveBoundedFileReaderGuard {
+    fn drop(&mut self) {
+        ACTIVE_BOUNDED_FILE_READERS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn active_bounded_file_readers() -> usize {
+    ACTIVE_BOUNDED_FILE_READERS.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Ordered events produced by `Workspace::read_text_with_stat_chunked`.
@@ -672,10 +748,186 @@ impl Workspace {
     // op cannot escape the workspace root. Reads additionally call
     // `ensure_regular_file_in` (lstat) so we never block on a FIFO,
     // drain a device, or follow a symlink off the workspace. Writes
-    // that target an existing path do the same check via
-    // `ensure_writable_in`; writes to a fresh path skip it because
-    // there's nothing to inspect yet (cap-std guarded the parent
-    // walk on the way in).
+    // that target an existing path use the same classification and
+    // temp-file probe through `ensure_writable`.
+
+    /// Classify a workspace-relative path through the capability sandbox.
+    ///
+    /// A missing leaf is a normal value. Lexical traversal and mid-path
+    /// symlink escapes remain typed errors.
+    pub fn classify_workspace_path(&self, rel: &str) -> Result<WorkspacePath> {
+        let rel_path = self.rel(rel)?;
+        let metadata = match self.dir.symlink_metadata(&rel_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(WorkspacePath::Missing);
+            }
+            Err(error) => return Err(map_cap_err(error, &rel_path)),
+        };
+        let file_type = metadata.file_type();
+        let stat = file_stat_from_cap(&metadata);
+        if file_type.is_file() && !file_type.is_symlink() {
+            return Ok(WorkspacePath::Regular(stat));
+        }
+        if file_type.is_dir() {
+            return Ok(WorkspacePath::Directory(stat));
+        }
+        Ok(WorkspacePath::Special(path_kind_cap(&file_type)))
+    }
+
+    /// Verify that an atomic replacement can create its same-directory temp.
+    ///
+    /// Existing targets must be writable regular files. Missing targets are
+    /// allowed, and their parent directories are created with the same
+    /// semantics as the eventual write.
+    pub fn ensure_writable(&self, rel: &str) -> Result<WritableFile> {
+        let rel_path = self.rel(rel)?;
+        let stat = match self.dir.symlink_metadata(&rel_path) {
+            Ok(metadata) => {
+                let file_type = metadata.file_type();
+                if !file_type.is_file() || file_type.is_symlink() {
+                    return Err(ChanError::SpecialFile {
+                        kind: describe_cap_file_kind(&file_type).to_string(),
+                        path: rel_path,
+                    });
+                }
+                if metadata.permissions().readonly() {
+                    return Err(ChanError::Io(format!(
+                        "path is read-only: {}",
+                        rel_path.display()
+                    )));
+                }
+                Some(file_stat_from_cap(&metadata))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(map_cap_err(error, &rel_path)),
+        };
+
+        if let Some(parent) = rel_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                self.dir
+                    .create_dir_all(parent)
+                    .map_err(|error| map_cap_err(error, &rel_path))?;
+            }
+        }
+        let parent = rel_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty());
+        let parent_dir;
+        let target_dir = match parent {
+            Some(parent) => {
+                parent_dir = self
+                    .dir
+                    .open_dir(parent)
+                    .map_err(|error| map_cap_err(error, &rel_path))?;
+                &parent_dir
+            }
+            None => &self.dir,
+        };
+        let parent_metadata = target_dir
+            .dir_metadata()
+            .map_err(|error| map_cap_err(error, &rel_path))?;
+        if parent_metadata.permissions().readonly() {
+            return Err(ChanError::Io(format!(
+                "destination directory is read-only: {}",
+                parent
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .display()
+            )));
+        }
+        let probe = cap_tempfile::TempFile::new(target_dir)
+            .map_err(|error| map_cap_err(error, &rel_path))?;
+        drop(probe);
+        Ok(WritableFile { stat })
+    }
+
+    /// Atomically replace one workspace file from caller-fed chunks.
+    ///
+    /// The target is untouched unless `feed` returns success and every chunk
+    /// satisfies the selected budget and UTF-8 policy.
+    pub fn write_atomic_stream<F>(
+        &self,
+        rel: &str,
+        kind: AtomicWriteKind,
+        feed: F,
+    ) -> Result<FileStat>
+    where
+        F: FnOnce(&mut dyn AtomicWriteSink) -> Result<()>,
+    {
+        if kind == AtomicWriteKind::Text && !self.editable_text_gate(rel) {
+            return Err(ChanError::NotEditableText(rel.to_string()));
+        }
+        let writable = self.ensure_writable(rel)?;
+        let existing_size = writable.stat.as_ref().map(|stat| stat.size);
+        let limit = match kind {
+            AtomicWriteKind::Text => semantic_write_budget(existing_size),
+            AtomicWriteKind::Bytes => std::cmp::max(existing_size.unwrap_or(0), BYTES_WRITE_LIMIT),
+        };
+        let bytes_target_is_text = kind == AtomicWriteKind::Bytes && fs_ops::is_editable_text(rel);
+        let validate_utf8 = kind == AtomicWriteKind::Text || bytes_target_is_text;
+        let (dir, rel_path) = self.resolve_io(rel)?;
+        if let Err(error) =
+            fs_ops::atomic_write_stream_in(dir, &rel_path, kind, limit, validate_utf8, feed)
+        {
+            if bytes_target_is_text
+                && matches!(
+                    &error,
+                    ChanError::Io(message)
+                        if message == "invalid UTF-8 in streamed text write"
+                )
+            {
+                return Err(ChanError::Io(format!(
+                    "refusing to write non-UTF-8 bytes to editable text file: {rel}"
+                )));
+            }
+            return Err(error);
+        }
+        self.stat(rel)
+    }
+
+    /// Open one regular file and stream it through a fixed-size bounded queue.
+    pub fn read_bytes_bounded(&self, rel: &str) -> Result<BoundedFileReader> {
+        use std::io::Read;
+
+        let (dir, rel_path) = self.resolve_io(rel)?;
+        ensure_regular_file_in(dir, &rel_path)?;
+        let mut file = dir
+            .open(&rel_path)
+            .map_err(|error| map_cap_err(error, &rel_path))?;
+        let stat = file_stat_from_cap(&file.metadata()?);
+        let (sender, receiver) =
+            std::sync::mpsc::sync_channel::<Result<Vec<u8>>>(BINARY_STREAM_QUEUE_DEPTH);
+        let worker = std::thread::Builder::new()
+            .name("chan-byte-reader".to_string())
+            .spawn(move || {
+                #[cfg(test)]
+                ACTIVE_BOUNDED_FILE_READERS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                #[cfg(test)]
+                let _active_guard = ActiveBoundedFileReaderGuard;
+
+                loop {
+                    let mut chunk = vec![0u8; BINARY_STREAM_CHUNK_SIZE];
+                    let count = match file.read(&mut chunk) {
+                        Ok(0) => return,
+                        Ok(count) => count,
+                        Err(error) => {
+                            let _ = sender.send(Err(ChanError::Io(error.to_string())));
+                            return;
+                        }
+                    };
+                    chunk.truncate(count);
+                    if sender.send(Ok(chunk)).is_err() {
+                        return;
+                    }
+                }
+            })
+            .map_err(|error| ChanError::Io(format!("spawn bounded file reader: {error}")))?;
+        Ok(BoundedFileReader {
+            stat,
+            receiver: Some(receiver),
+            worker: Some(worker),
+        })
+    }
 
     /// Read raw bytes from a file relative to the workspace root. No
     /// editable-text gate: callers like image previews need binary
@@ -837,18 +1089,10 @@ impl Workspace {
     /// must remove the existing entry first if they intend to
     /// replace it.
     pub fn write_text(&self, rel: &str, content: &str) -> Result<()> {
-        if !self.editable_text_gate(rel) {
-            return Err(ChanError::NotEditableText(rel.to_string()));
-        }
-        let (dir, rel_path) = self.resolve_io(rel)?;
-        let prev = ensure_writable_in(dir, &rel_path)?;
-        check_size(
-            "text",
-            content.len(),
-            TEXT_WRITE_LIMIT,
-            prev.as_ref().map(|m| m.len()),
-        )?;
-        fs_ops::atomic_write_in(dir, &rel_path, content.as_bytes())
+        self.write_atomic_stream(rel, AtomicWriteKind::Text, |sink| {
+            sink.write_chunk(content.as_bytes())
+        })
+        .map(|_| ())
     }
 
     /// Optimistic-concurrency write: succeeds only when the file's
@@ -891,11 +1135,10 @@ impl Workspace {
         if !self.editable_text_gate(rel) {
             return Err(ChanError::NotEditableText(rel.to_string()));
         }
-        let (dir, rel_path) = self.resolve_io(rel)?;
-        let prev = ensure_writable_in(dir, &rel_path)?;
-        let (current, exists, prev_size) = match prev.as_ref() {
-            Some(meta) => (mtime_ns_cap(meta), true, Some(meta.len())),
-            None => (None, false, None),
+        let writable = self.ensure_writable(rel)?;
+        let (current, exists) = match writable.stat.as_ref() {
+            Some(stat) => (stat.mtime_ns, true),
+            None => (None, false),
         };
         let conflict = match (expected_mtime_ns, exists) {
             (None, false) => false,
@@ -907,8 +1150,10 @@ impl Workspace {
                 current_mtime_ns: current,
             });
         }
-        check_size("text", content.len(), TEXT_WRITE_LIMIT, prev_size)?;
-        fs_ops::atomic_write_in(dir, &rel_path, content.as_bytes())
+        self.write_atomic_stream(rel, AtomicWriteKind::Text, |sink| {
+            sink.write_chunk(content.as_bytes())
+        })
+        .map(|_| ())
     }
 
     /// Atomically write raw bytes. Text-class targets still require
@@ -916,20 +1161,10 @@ impl Workspace {
     /// the editor as markdown or source text. Same special-file
     /// refusal as `write_text`.
     pub fn write_bytes(&self, rel: &str, content: &[u8]) -> Result<()> {
-        if fs_ops::is_editable_text(rel) && std::str::from_utf8(content).is_err() {
-            return Err(ChanError::Io(format!(
-                "refusing to write non-UTF-8 bytes to editable text file: {rel}"
-            )));
-        }
-        let (dir, rel_path) = self.resolve_io(rel)?;
-        let prev = ensure_writable_in(dir, &rel_path)?;
-        check_size(
-            "bytes",
-            content.len(),
-            BYTES_WRITE_LIMIT,
-            prev.as_ref().map(|m| m.len()),
-        )?;
-        fs_ops::atomic_write_in(dir, &rel_path, content)
+        self.write_atomic_stream(rel, AtomicWriteKind::Bytes, |sink| {
+            sink.write_chunk(content)
+        })
+        .map(|_| ())
     }
 
     /// True iff the path resolves under the workspace and refers to a
@@ -1512,7 +1747,7 @@ impl Workspace {
                 path: self.entry.root_path.join(&from_rel),
             });
         }
-        ensure_writable_in(&self.dir, &to_rel)?;
+        self.ensure_writable(to)?;
         if let Some(parent) = to_rel.parent() {
             if !parent.as_os_str().is_empty() {
                 self.dir
@@ -3279,31 +3514,12 @@ impl Workspace {
     }
 }
 
-/// Hard size guard for write_* paths. `kind` is the static label
-/// surfaced in the error so the caller can distinguish text vs
-/// bytes vs (future) blob caps.
+/// Semantic text-write budget for a target with optional existing content.
 ///
-/// The configured `limit` is a fresh-file cap. When the target
-/// already exists and is itself larger than the cap (legacy file,
-/// pre-cap content, a binary attached as `.txt`), the caller is
-/// already past the policy boundary and we let edits up to the
-/// existing size through. The intent is "stop runaway growth", not
-/// "make all your files read-only the moment we ship a cap".
-///
-/// Effective limit = max(prev_size, limit). Refusal carries the
-/// effective limit so the editor can show the user the exact
-/// number it has to stay under.
-fn check_size(kind: &'static str, size: usize, limit: u64, prev_size: Option<u64>) -> Result<()> {
-    let size = size as u64;
-    let effective = std::cmp::max(prev_size.unwrap_or(0), limit);
-    if size > effective {
-        return Err(ChanError::WriteTooLarge {
-            kind,
-            size,
-            limit: effective,
-        });
-    }
-    Ok(())
+/// New files use `TEXT_WRITE_LIMIT`. A legacy file already above that cap may
+/// be rewritten up to its current size but may not grow.
+pub fn semantic_write_budget(existing_file_size: Option<u64>) -> u64 {
+    std::cmp::max(existing_file_size.unwrap_or(0), TEXT_WRITE_LIMIT)
 }
 
 fn emit_valid_utf8_chunks<F>(rel: &str, pending: &mut Vec<u8>, on_event: &mut F) -> Result<bool>
@@ -3420,6 +3636,44 @@ fn mtime_ns_cap(meta: &cap_std::fs::Metadata) -> Option<i64> {
         .and_then(|d| i64::try_from(d.as_nanos()).ok())
 }
 
+fn file_stat_from_cap(meta: &cap_std::fs::Metadata) -> FileStat {
+    FileStat {
+        size: if meta.is_dir() { 0 } else { meta.len() },
+        mtime: mtime_secs_cap(meta),
+        mtime_ns: mtime_ns_cap(meta),
+        is_dir: meta.is_dir(),
+    }
+}
+
+fn path_kind_cap(ft: &cap_std::fs::FileType) -> fs_ops::PathKind {
+    if ft.is_dir() {
+        return fs_ops::PathKind::Directory;
+    }
+    if ft.is_symlink() {
+        return fs_ops::PathKind::Symlink;
+    }
+    if ft.is_file() {
+        return fs_ops::PathKind::RegularFile;
+    }
+    #[cfg(unix)]
+    {
+        use cap_std::fs::FileTypeExt;
+        if ft.is_fifo() {
+            return fs_ops::PathKind::Fifo;
+        }
+        if ft.is_socket() {
+            return fs_ops::PathKind::Socket;
+        }
+        if ft.is_block_device() {
+            return fs_ops::PathKind::BlockDevice;
+        }
+        if ft.is_char_device() {
+            return fs_ops::PathKind::CharDevice;
+        }
+    }
+    fs_ops::PathKind::Other
+}
+
 /// Human-readable name for a cap-std `FileType`. Mirrors
 /// `fs_ops::describe_file_kind`. cap-std exposes the same is_*
 /// predicates plus the unix-only fifo/socket/char/block via
@@ -3466,30 +3720,6 @@ fn ensure_regular_file_in(dir: &cap_std::fs::Dir, rel: &std::path::Path) -> Resu
         kind: describe_cap_file_kind(&ft).to_string(),
         path: rel.to_path_buf(),
     })
-}
-
-/// cap-std equivalent of `ensure_writable`. Returns the existing
-/// file's metadata when the leaf is a regular file, `None` when
-/// missing, error when it's something we refuse to overwrite.
-fn ensure_writable_in(
-    dir: &cap_std::fs::Dir,
-    rel: &std::path::Path,
-) -> Result<Option<cap_std::fs::Metadata>> {
-    match dir.symlink_metadata(rel) {
-        Ok(meta) => {
-            let ft = meta.file_type();
-            if ft.is_file() && !ft.is_symlink() {
-                Ok(Some(meta))
-            } else {
-                Err(ChanError::SpecialFile {
-                    kind: describe_cap_file_kind(&ft).to_string(),
-                    path: rel.to_path_buf(),
-                })
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(map_cap_err(e, rel)),
-    }
 }
 
 /// Parse a file's content into the graph-side structures: the
