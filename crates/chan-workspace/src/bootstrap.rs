@@ -194,13 +194,13 @@ pub(crate) fn bootstrap_dir_scoped(
         .same_file_system(true)
         .into_iter()
         .filter_entry(|e| {
-            if !e.file_type().is_dir() {
-                return true;
-            }
             let Ok(rel) = e.path().strip_prefix(root) else {
                 return false;
             };
-            policy.includes(&rel.to_string_lossy().replace('\\', "/"), true)
+            policy.includes(
+                &rel.to_string_lossy().replace('\\', "/"),
+                e.file_type().is_dir(),
+            )
         })
         .filter_map(|res| match res {
             Ok(e) => Some(e),

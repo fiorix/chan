@@ -25,9 +25,13 @@
 // follower-mode could relax this once we've thought through the
 // editor UX.
 
+use std::collections::HashMap;
 use std::fs::Metadata;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 
+use ignore::gitignore::Gitignore;
+use ignore::Match;
 use serde::{Deserialize, Serialize};
 use walkdir::{DirEntry, WalkDir};
 
@@ -546,16 +550,93 @@ pub enum IndexScopeDecision {
     VcsControl,
 }
 
-/// Repository ignore rules captured by one policy generation.
+/// One directory-local `.gitignore` matcher cached by this policy generation.
+#[derive(Clone, Debug)]
+struct RepositoryIgnoreLayer {
+    matcher: Gitignore,
+    has_whitelists: bool,
+}
+
+/// Repository `.gitignore` rules, discovered lazily along requested paths.
 ///
-/// W5 establishes the policy boundary with an empty matcher. W6 fills this
-/// private value with the `ignore` crate without changing the public policy.
+/// Loading only ancestor files keeps `Workspace::open` metadata-only: a policy
+/// construction never scans the workspace. Each directory-local matcher is
+/// cached after its first use, so all consumers of this policy Arc share the
+/// same interpretation until a `.gitignore` event replaces the generation.
+#[derive(Debug)]
+struct RepositoryIgnores {
+    root: PathBuf,
+    layers: Mutex<HashMap<PathBuf, RepositoryIgnoreLayer>>,
+}
+
 #[derive(Debug, Default)]
-struct RepositoryIgnores;
+struct RepositoryIgnoreDecision {
+    matched: Option<IndexScopeDecision>,
+    may_reinclude_descendant: bool,
+}
 
 impl RepositoryIgnores {
-    fn decision(&self, _rel: &str, _is_dir: bool) -> Option<IndexScopeDecision> {
-        None
+    fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            layers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn decision(&self, rel: &str, is_dir: bool) -> RepositoryIgnoreDecision {
+        let path = self.root.join(rel);
+        let mut result = RepositoryIgnoreDecision::default();
+        for dir in self.ancestor_dirs(rel) {
+            let layer = self.layer(&dir);
+            result.may_reinclude_descendant |= layer.has_whitelists;
+            match layer.matcher.matched_path_or_any_parents(&path, is_dir) {
+                Match::None => {}
+                Match::Ignore(_) => {
+                    result.matched =
+                        Some(IndexScopeDecision::Exclude(IndexScopeExclusion::Gitignore));
+                }
+                Match::Whitelist(_) => {
+                    result.matched = Some(IndexScopeDecision::Include);
+                }
+            }
+        }
+        result
+    }
+
+    /// `.gitignore` files apply to entries below their directory, never the
+    /// directory that contains the file itself.
+    fn ancestor_dirs(&self, rel: &str) -> Vec<PathBuf> {
+        let mut dirs = vec![self.root.clone()];
+        let mut current = self.root.clone();
+        let Some(parent) = Path::new(rel).parent() else {
+            return dirs;
+        };
+        for component in parent.components() {
+            let Component::Normal(component) = component else {
+                continue;
+            };
+            current.push(component);
+            dirs.push(current.clone());
+        }
+        dirs
+    }
+
+    fn layer(&self, dir: &Path) -> RepositoryIgnoreLayer {
+        let mut layers = self.layers.lock().unwrap();
+        if let Some(layer) = layers.get(dir) {
+            return layer.clone();
+        }
+        let path = dir.join(".gitignore");
+        let (matcher, error) = Gitignore::new(&path);
+        if let Some(error) = error {
+            tracing::warn!(%error, path = %path.display(), "failed to load repository gitignore");
+        }
+        let layer = RepositoryIgnoreLayer {
+            has_whitelists: matcher.num_whitelists() > 0,
+            matcher,
+        };
+        layers.insert(dir.to_path_buf(), layer.clone());
+        layer
     }
 }
 
@@ -575,10 +656,10 @@ impl IndexScopePolicy {
         configured: WalkFilter,
     ) -> Result<Self> {
         Ok(Self {
+            repository_ignores: RepositoryIgnores::new(root.clone()),
             root,
             generation,
             configured,
-            repository_ignores: RepositoryIgnores,
         })
     }
 
@@ -602,7 +683,8 @@ impl IndexScopePolicy {
         {
             return IndexScopeDecision::Exclude(IndexScopeExclusion::Hard);
         }
-        if let Some(decision) = self.repository_ignores.decision(rel, is_dir) {
+        let repository = self.repository_ignores.decision(rel, is_dir);
+        if let Some(decision) = repository.matched {
             return decision;
         }
         let directory_components = if is_dir {
@@ -616,6 +698,9 @@ impl IndexScopePolicy {
             .iter()
             .any(|part| self.configured.is_excluded(part))
         {
+            if is_dir && repository.may_reinclude_descendant {
+                return IndexScopeDecision::Include;
+            }
             return IndexScopeDecision::Exclude(IndexScopeExclusion::Configured);
         }
         IndexScopeDecision::Include
@@ -676,13 +761,13 @@ pub fn walk_workspace_scoped<'a>(
         .same_file_system(true)
         .into_iter()
         .filter_entry(move |entry| {
-            if !entry.file_type().is_dir() {
-                return true;
-            }
             let Ok(rel) = entry.path().strip_prefix(policy.root()) else {
                 return false;
             };
-            policy.includes(&rel.to_string_lossy().replace('\\', "/"), true)
+            policy.includes(
+                &rel.to_string_lossy().replace('\\', "/"),
+                entry.file_type().is_dir(),
+            )
         })
         .filter_map(|result| match result {
             Ok(entry) => Some(entry),
@@ -1680,13 +1765,13 @@ fn list_tree_scoped_inner(
             .same_file_system(true)
             .into_iter()
             .filter_entry(move |entry| {
-                if !entry.file_type().is_dir() {
-                    return true;
-                }
                 let Ok(rel) = entry.path().strip_prefix(policy.root()) else {
                     return false;
                 };
-                policy.includes(&rel.to_string_lossy().replace('\\', "/"), true)
+                policy.includes(
+                    &rel.to_string_lossy().replace('\\', "/"),
+                    entry.file_type().is_dir(),
+                )
             })
             .filter_map(|result| match result {
                 Ok(entry) => Some(entry),

@@ -5,6 +5,7 @@
 // tree under ~/.chan/workspaces/<metadata_key>/.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -24,7 +25,7 @@ use crate::paths::{ensure_workspace_metadata_dirs, WorkspacePaths};
 use crate::registry::KnownWorkspace;
 use crate::report::{ReportFanOut, ReportState};
 use crate::trash::{self, TrashEntry, TRASH_RETENTION_SECS};
-use crate::watch::{WatchCallback, WatchHandle};
+use crate::watch::{WatchCallback, WatchEvent, WatchHandle, WatchKind};
 use crate::{Report, ReportScope};
 
 pub use crate::fs_ops::{AtomicWriteKind, AtomicWriteSink};
@@ -490,6 +491,37 @@ pub struct Workspace {
     /// Replacements swap one Arc under a short lock; in-flight work keeps its
     /// generation while newer recovery remains pending.
     scope_policy: Arc<std::sync::RwLock<Arc<fs_ops::IndexScopePolicy>>>,
+}
+
+/// Refresh repository-ignore policy before the report and user callbacks see
+/// the `.gitignore` event that invalidated the current generation.
+struct ScopePolicyFanOut {
+    workspace: std::sync::Weak<Workspace>,
+    downstream: Arc<dyn WatchCallback>,
+}
+
+impl WatchCallback for ScopePolicyFanOut {
+    fn on_event(&self, event: WatchEvent) {
+        if event.kind != WatchKind::ProviderError
+            && [event.path.as_deref(), event.to.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(is_repository_policy_path)
+        {
+            if let Some(workspace) = self.workspace.upgrade() {
+                if let Err(error) = workspace.refresh_repository_scope() {
+                    tracing::warn!(?error, "failed to refresh repository ignore policy");
+                }
+            }
+        }
+        self.downstream.on_event(event);
+    }
+}
+
+fn is_repository_policy_path(rel: &str) -> bool {
+    Path::new(rel)
+        .file_name()
+        .is_some_and(|name| name == ".gitignore")
 }
 
 impl std::fmt::Debug for Workspace {
@@ -2989,18 +3021,34 @@ impl Workspace {
             return Ok(());
         }
         self.index()?.set_excluded_dirs(dirs)?;
-        let generation = self.request_policy_recovery(RecoveryAction::Reconcile);
         let mut configured = self.walk_filter.excluded_dir_names.clone();
         configured.extend(self.index()?.config().excluded_dirs);
-        let policy = Arc::new(fs_ops::IndexScopePolicy::new(
-            self.root().to_path_buf(),
-            generation,
-            fs_ops::WalkFilter::new(configured),
-        )?);
-        *self.scope_policy.write().unwrap() = Arc::clone(&policy);
+        let policy = {
+            let mut current = self.scope_policy.write().unwrap();
+            let generation = self.request_policy_recovery(RecoveryAction::Reconcile);
+            let policy = Arc::new(fs_ops::IndexScopePolicy::new(
+                self.root().to_path_buf(),
+                generation,
+                fs_ops::WalkFilter::new(configured),
+            )?);
+            *current = Arc::clone(&policy);
+            policy
+        };
         if let Some(report) = self.report.get() {
             report.replace_policy(self.root(), policy)?;
         }
+        Ok(())
+    }
+
+    fn refresh_repository_scope(&self) -> Result<()> {
+        let mut current = self.scope_policy.write().unwrap();
+        let configured = current.configured().clone();
+        let generation = self.request_policy_recovery(RecoveryAction::Reconcile);
+        *current = Arc::new(fs_ops::IndexScopePolicy::new(
+            self.root().to_path_buf(),
+            generation,
+            configured,
+        )?);
         Ok(())
     }
 
@@ -3626,8 +3674,12 @@ impl Workspace {
     /// dropped, since the scan reflects the on-disk state regardless. Callers
     /// that need a warm report call `report()` / `boot()`.
     pub fn watch(self: &Arc<Self>, cb: Arc<dyn WatchCallback>) -> Result<WatchHandle> {
-        let fan: Arc<dyn WatchCallback> =
+        let report_fan: Arc<dyn WatchCallback> =
             ReportFanOut::new(cb, Arc::clone(&self.report), Arc::clone(&self.write_serial));
+        let fan: Arc<dyn WatchCallback> = Arc::new(ScopePolicyFanOut {
+            workspace: Arc::downgrade(self),
+            downstream: report_fan,
+        });
         // Single recursive root watcher. Drafts live in-root under
         // `<drafts_dir_name>/...`, so the workspace-root watcher already
         // covers them; no separate drafts watch root is needed.
@@ -3661,10 +3713,12 @@ impl Workspace {
         Ok(self.report_state()?.snapshot(&ReportScope::All))
     }
 
-    /// Return a maintained report snapshot without starting a filesystem scan.
+    /// Return a maintained report snapshot without initializing a cold report.
+    /// A warm report captured under an older scope generation is rescanned
+    /// before it is returned.
     pub fn report_if_available(&self) -> Result<Option<Report>> {
-        if let Some(state) = self.report.get() {
-            return Ok(Some(state.snapshot(&ReportScope::All)));
+        if self.report.get().is_some() {
+            return Ok(Some(self.report_state()?.snapshot(&ReportScope::All)));
         }
         if !self.reports_enabled()? {
             return Ok(None);
@@ -3721,6 +3775,7 @@ impl Workspace {
 
     fn report_state(&self) -> Result<&Arc<ReportState>> {
         if let Some(s) = self.report.get() {
+            self.refresh_report_scope_if_needed(s)?;
             return Ok(s);
         }
         // Bug 7: the report's initial `Index::scan` walks the workspace and
@@ -3736,7 +3791,22 @@ impl Workspace {
         // loser drops its state cleanly, which terminates its
         // writer thread via Drop. The winner's state stays.
         let _ = self.report.set(state);
-        Ok(self.report.get().expect("report state just set"))
+        let state = self.report.get().expect("report state just set");
+        self.refresh_report_scope_if_needed(state)?;
+        Ok(state)
+    }
+
+    fn refresh_report_scope_if_needed(&self, report: &ReportState) -> Result<()> {
+        let policy = self.scope_policy();
+        if report.policy_generation() == Some(policy.generation().get()) {
+            return Ok(());
+        }
+        let _serial = self.write_serial.lock().unwrap();
+        let policy = self.scope_policy();
+        if report.policy_generation() != Some(policy.generation().get()) {
+            report.replace_policy(self.root(), policy)?;
+        }
+        Ok(())
     }
 }
 

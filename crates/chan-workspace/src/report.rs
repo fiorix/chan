@@ -177,6 +177,13 @@ impl ReportState {
         idx.snapshot(scope, &self.cocomo)
     }
 
+    pub(crate) fn policy_generation(&self) -> Option<u64> {
+        match self.index.read() {
+            Ok(index) => index.path_policy_generation(),
+            Err(poisoned) => poisoned.into_inner().path_policy_generation(),
+        }
+    }
+
     /// Replace the cached report with a scan governed by a newer scope.
     ///
     /// The caller holds the workspace derived-state serialization lock, so

@@ -307,6 +307,164 @@ fn warm_report_reloads_when_scope_generation_changes() {
 }
 
 #[test]
+fn gitignore_nested_anchored_and_negated_rules_share_workspace_scope() {
+    let cfg = TempDir::new().unwrap();
+    let workspace_root = TempDir::new().unwrap();
+    let root = workspace_root.path();
+
+    seed_junk(
+        root,
+        ".gitignore",
+        "/root-only.md\n*.tmp\n!.git/objects/leak.md\n",
+    );
+    seed_junk(
+        root,
+        "docs/.gitignore",
+        "/private.md\n*.draft.md\n!important.draft.md\n",
+    );
+    seed_junk(root, "generated/.gitignore", "*\n!keep.md\n");
+    for path in [
+        "root-only.md",
+        "nested/root-only.md",
+        "notes.tmp",
+        "private.md",
+        "docs/private.md",
+        "docs/other.draft.md",
+        "docs/important.draft.md",
+        "generated/drop.md",
+        "generated/keep.md",
+        ".git/objects/leak.md",
+    ] {
+        seed_junk(root, path, &format!("# {path}\n"));
+    }
+
+    let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+    lib.register_workspace(root).unwrap();
+    let workspace = lib.open_workspace(root).unwrap();
+    workspace
+        .set_excluded_dirs(vec!["generated".to_string()])
+        .unwrap();
+
+    let listed: Vec<String> = workspace
+        .list_tree_filtered_unified()
+        .unwrap()
+        .into_iter()
+        .filter(|entry| !entry.is_dir)
+        .map(|entry| entry.path)
+        .collect();
+    for expected in [
+        "nested/root-only.md",
+        "private.md",
+        "docs/important.draft.md",
+        "generated/keep.md",
+    ] {
+        assert!(
+            listed.iter().any(|path| path == expected),
+            "gitignore include missing from shared scope: {expected}; got {listed:?}"
+        );
+    }
+    for excluded in [
+        "root-only.md",
+        "notes.tmp",
+        "docs/private.md",
+        "docs/other.draft.md",
+        "generated/drop.md",
+        ".git/objects/leak.md",
+    ] {
+        assert!(
+            !listed.iter().any(|path| path == excluded),
+            "gitignore exclusion leaked into shared scope: {excluded}; got {listed:?}"
+        );
+    }
+
+    let report_paths: Vec<String> = workspace
+        .report()
+        .unwrap()
+        .files
+        .into_iter()
+        .map(|file| file.path)
+        .collect();
+    for expected in [
+        "nested/root-only.md",
+        "private.md",
+        "docs/important.draft.md",
+        "generated/keep.md",
+    ] {
+        assert!(
+            report_paths.iter().any(|path| path == expected),
+            "gitignore include missing from report scope: {expected}; got {report_paths:?}"
+        );
+    }
+    for excluded in [
+        "root-only.md",
+        "docs/private.md",
+        "docs/other.draft.md",
+        "generated/drop.md",
+        ".git/objects/leak.md",
+    ] {
+        assert!(
+            !report_paths.iter().any(|path| path == excluded),
+            "gitignore exclusion leaked into report scope: {excluded}; got {report_paths:?}"
+        );
+    }
+}
+
+#[test]
+fn gitignore_change_replaces_policy_generation_and_warm_report() {
+    let cfg = TempDir::new().unwrap();
+    let workspace_root = TempDir::new().unwrap();
+    let root = workspace_root.path();
+    seed_junk(root, "ignored/before.md", "# Before\n");
+    seed_junk(root, "kept.md", "# Kept\n");
+
+    let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+    lib.register_workspace(root).unwrap();
+    let workspace = lib.open_workspace(root).unwrap();
+    assert!(
+        workspace
+            .report()
+            .unwrap()
+            .files
+            .iter()
+            .any(|file| file.path == "ignored/before.md"),
+        "fixture must warm the report before repository policy changes"
+    );
+
+    let generation = workspace.generation();
+    let (tx, rx) = mpsc::channel();
+    let watcher = workspace.watch(Arc::new(EventChannel(tx))).unwrap();
+    fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
+    let events = collect_until(&rx, Duration::from_secs(3), |event| {
+        event.path.as_deref() == Some(".gitignore")
+    });
+    assert!(
+        events
+            .iter()
+            .any(|event| event.path.as_deref() == Some(".gitignore")),
+        "repository policy file change did not reach the watcher"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while workspace.generation() == generation && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(
+        workspace.generation() > generation,
+        ".gitignore change did not replace the policy generation"
+    );
+    assert!(
+        !workspace
+            .report()
+            .unwrap()
+            .files
+            .iter()
+            .any(|file| file.path.starts_with("ignored/")),
+        "warm report retained repository-ignored rows after policy replacement"
+    );
+    watcher.stop();
+}
+
+#[test]
 fn vcs_internals_remain_hard_excluded_when_configured_list_is_empty() {
     let cfg = TempDir::new().unwrap();
     let workspace_root = TempDir::new().unwrap();

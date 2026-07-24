@@ -388,6 +388,14 @@ fn inject_registration_failures(path: &Path, count: usize) {
     });
 }
 
+#[cfg(test)]
+fn clear_injected_registration_failure() {
+    *INJECTED_REGISTRATION_FAILURE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap() = None;
+}
+
 fn watch_registration(
     watcher: &mut RecommendedWatcher,
     abs: &Path,
@@ -1408,11 +1416,17 @@ mod tests {
         }
 
         fn start_handle(root: &TempDir) -> (WatchHandle, Receiver<WatchEvent>) {
+            start_handle_with_policy(root, policy_source(root.path()))
+        }
+
+        fn start_handle_with_policy(
+            root: &TempDir,
+            policy: ScopePolicySource,
+        ) -> (WatchHandle, Receiver<WatchEvent>) {
             let (tx, rx) = channel();
             let cb = Channel(std::sync::Mutex::new(tx));
             let roots = [WatchRoot::workspace(root.path())];
-            let handle = WatchHandle::start(&roots, policy_source(root.path()), Arc::new(cb))
-                .expect("watcher starts");
+            let handle = WatchHandle::start(&roots, policy, Arc::new(cb)).expect("watcher starts");
             (handle, rx)
         }
 
@@ -1468,6 +1482,53 @@ mod tests {
                     .iter()
                     .any(|e| e.path.as_deref().unwrap_or("").starts_with("buck-out")),
                 "excluded subtree must stay dark: {strays:?}"
+            );
+        }
+
+        #[test]
+        fn gitignore_only_subtree_is_never_registered_or_dispatched() {
+            let root = TempDir::new().unwrap();
+            let ignored = root.path().join("vendor");
+            std::fs::create_dir_all(&ignored).unwrap();
+            std::fs::write(root.path().join(".gitignore"), "vendor/\n").unwrap();
+            inject_registration_failures(&ignored, 1);
+            let policy = Arc::new(
+                IndexScopePolicy::new(
+                    root.path().to_path_buf(),
+                    crate::WorkspaceGeneration::INITIAL,
+                    crate::WalkFilter::default(),
+                )
+                .unwrap(),
+            );
+            let source = Arc::new(std::sync::RwLock::new(policy));
+
+            let (handle, rx) = start_handle_with_policy(&root, source);
+            let initial_health = handle.health();
+            clear_injected_registration_failure();
+            assert_eq!(
+                initial_health.state,
+                WatchHealthState::Healthy,
+                "gitignored directory reached Linux registration"
+            );
+
+            std::fs::write(ignored.join("dark.md"), "dark").unwrap();
+            std::fs::write(root.path().join("visible.md"), "visible").unwrap();
+            assert!(
+                wait_for(&rx, Duration::from_secs(5), |event| {
+                    event.path.as_deref() == Some("visible.md")
+                })
+                .is_some(),
+                "included control event must arrive"
+            );
+            let strays = drain(&rx, Duration::from_millis(500));
+            assert!(
+                !strays.iter().any(|event| {
+                    event
+                        .path
+                        .as_deref()
+                        .is_some_and(|path| path.starts_with("vendor/"))
+                }),
+                "gitignored subtree leaked through dispatch: {strays:?}"
             );
         }
 
