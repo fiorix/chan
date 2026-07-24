@@ -13,9 +13,10 @@
 //
 // On Linux the dispatch filter is only half the policy: registration
 // is a manual filtered recursion (excluded subtrees never get an
-// inotify watch at all) with a registrar thread that picks up
-// directories created after start and catch-up-scans moved-in trees.
-// Other platforms use the backend's native recursive watch.
+// inotify watch at all). An owned supervisor picks up directories
+// created after start, catch-up-scans moved-in trees, retries partial
+// registration, and joins on stop. Other platforms use the backend's
+// native recursive watch under the same lifecycle supervisor.
 //
 // Consumer expectations:
 //
@@ -113,26 +114,48 @@ impl WatchRoot {
     }
 }
 
-/// Holds the underlying watcher machinery; drop to stop watching.
+/// Coarse state of the owned watcher supervisor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WatchHealthState {
+    Starting,
+    Healthy,
+    Degraded,
+    Stopped,
+}
+
+/// Observable watcher registration and recovery status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchHealth {
+    pub state: WatchHealthState,
+    pub registration_failures: u64,
+    pub provider_errors: u64,
+    pub retry_attempts: u64,
+    pub last_error: Option<String>,
+}
+
+impl WatchHealth {
+    fn starting() -> Self {
+        Self {
+            state: WatchHealthState::Starting,
+            registration_failures: 0,
+            provider_errors: 0,
+            retry_attempts: 0,
+            last_error: None,
+        }
+    }
+}
+
+/// Holds the underlying watcher supervisor; drop stops and joins it.
 pub struct WatchHandle {
-    /// Linux: registration requests flow to the registrar thread,
-    /// which owns the watcher. Dropping the sender closes the
-    /// channel; the thread exits and the watcher drops with it.
-    #[cfg(target_os = "linux")]
-    _reg_tx: RegistrationTx,
-    /// Linux: the registrar thread. Must outlive the dispatch
-    /// closure, which holds a sender clone.
-    #[cfg(target_os = "linux")]
-    _registrar: std::thread::JoinHandle<()>,
-    /// Non-Linux: the watcher itself, kept alive so its worker
-    /// thread doesn't exit.
-    #[cfg(not(target_os = "linux"))]
-    _watcher: RecommendedWatcher,
+    command_tx: std::sync::Mutex<Option<RegistrationTx>>,
+    supervisor: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    health: Arc<std::sync::Mutex<WatchHealth>>,
 }
 
 /// A directory-registration request from the dispatch thread to the
-/// registrar thread. The plan is computed dispatch-side (it has the
-/// filter and the roots); the registrar only executes it.
+/// supervisor thread. The plan is computed dispatch-side (it has the
+/// filter and the roots); the supervisor only executes it.
 struct DirRegistration {
     abs: PathBuf,
     rel: String,
@@ -140,15 +163,27 @@ struct DirRegistration {
     plan: DirPlan,
 }
 
-/// Registration requests to the registrar thread. The sender is
-/// cheap to clone; `send` never blocks the notify worker.
-type RegistrationTx = std::sync::mpsc::Sender<DirRegistration>;
+enum WatchCommand {
+    Register(DirRegistration),
+    ProviderLost {
+        message: String,
+        #[cfg(test)]
+        acknowledged: Option<std::sync::mpsc::SyncSender<()>>,
+    },
+    Stop,
+}
+
+/// Commands sent to the watcher supervisor. The sender is cheap to
+/// clone; `send` never blocks the notify worker.
+type RegistrationTx = std::sync::mpsc::Sender<WatchCommand>;
 
 /// Minimum spacing between surfaced stream-degradation events.
 /// inotify queue overflow (notify's `EventKind::Other`) can repeat
 /// for the whole storm, and every surfaced ProviderError is a
 /// full-reconcile trigger downstream; one per second is plenty.
 const DEGRADE_MIN_INTERVAL: Duration = Duration::from_secs(1);
+
+const WATCH_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Throttle state for stream-degradation events, one per WatchHandle.
 /// The first degraded signal always passes; repeats inside
@@ -173,31 +208,110 @@ impl DegradeThrottle {
     }
 }
 
-/// Linux: owns the watcher and applies registration requests one at
-/// a time. notify's inotify backend answers `watch()` through the
-/// event loop, so calling it from the event-loop callback deadlocks
-/// the worker -- registrations must happen on any OTHER thread.
-/// Queued requests are drained in order; on channel close the thread
-/// returns and the watcher drops, stopping the notify worker.
-#[cfg(target_os = "linux")]
-fn registrar_loop(
-    rx: std::sync::mpsc::Receiver<DirRegistration>,
+/// Own the watcher, registration retries, and provider-loss recovery.
+///
+/// notify's Linux backend answers `watch()` through its event loop, so
+/// registration cannot run inside the event callback. The same supervisor is
+/// used on every platform to provide one stop-and-join lifecycle.
+fn watch_supervisor_loop(
+    rx: std::sync::mpsc::Receiver<WatchCommand>,
     mut watcher: RecommendedWatcher,
+    roots: Arc<Vec<WatchRoot>>,
     filter: Arc<WalkFilter>,
     cb: Arc<dyn WatchCallback>,
+    health: Arc<std::sync::Mutex<WatchHealth>>,
+    initial: std::sync::mpsc::SyncSender<()>,
 ) {
-    while let Ok(reg) = rx.recv() {
-        add_watch_quiet(&mut watcher, &reg.abs, &reg.rel);
-        if reg.plan == DirPlan::WatchAndDescend {
-            catch_up_subtree(
-                &mut watcher,
-                reg.prefix.as_deref(),
-                &reg.abs,
-                &reg.rel,
-                &filter,
-                &*cb,
-            );
+    let errors = register_all_roots(&mut watcher, &roots, &filter);
+    let mut retry_at = (!errors.is_empty()).then(|| Instant::now() + WATCH_RETRY_INTERVAL);
+    record_registration_result(&health, errors, &*cb, true);
+    let _ = initial.send(());
+
+    loop {
+        let timeout = retry_at
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or_else(|| Duration::from_secs(60));
+        let command = rx.recv_timeout(timeout);
+        match command {
+            Ok(WatchCommand::Register(registration)) => {
+                let errors = register_dynamic_dir(&mut watcher, &registration, &filter, &*cb);
+                if errors.is_empty() {
+                    if retry_at.is_none() {
+                        record_registration_result(&health, errors, &*cb, false);
+                    }
+                } else {
+                    retry_at.get_or_insert_with(|| Instant::now() + WATCH_RETRY_INTERVAL);
+                    record_registration_result(&health, errors, &*cb, true);
+                }
+            }
+            Ok(WatchCommand::ProviderLost {
+                message,
+                #[cfg(test)]
+                acknowledged,
+            }) => {
+                {
+                    let mut current = health.lock().unwrap();
+                    current.state = WatchHealthState::Degraded;
+                    current.provider_errors = current.provider_errors.saturating_add(1);
+                    current.last_error = Some(message);
+                }
+                retry_at.get_or_insert_with(|| Instant::now() + WATCH_RETRY_INTERVAL);
+                #[cfg(test)]
+                if let Some(acknowledged) = acknowledged {
+                    let _ = acknowledged.send(());
+                }
+            }
+            Ok(WatchCommand::Stop) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                break;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if retry_at.is_some() => {
+                let mut current = health.lock().unwrap();
+                current.retry_attempts = current.retry_attempts.saturating_add(1);
+                drop(current);
+                let errors = register_all_roots(&mut watcher, &roots, &filter);
+                retry_at = (!errors.is_empty()).then(|| Instant::now() + WATCH_RETRY_INTERVAL);
+                record_registration_result(&health, errors, &*cb, false);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
+    }
+    health.lock().unwrap().state = WatchHealthState::Stopped;
+}
+
+fn record_registration_result(
+    health: &std::sync::Mutex<WatchHealth>,
+    errors: Vec<String>,
+    cb: &dyn WatchCallback,
+    surface_failure: bool,
+) {
+    if errors.is_empty() {
+        let mut current = health.lock().unwrap();
+        current.state = WatchHealthState::Healthy;
+        current.last_error = None;
+        return;
+    }
+
+    let message = errors
+        .last()
+        .cloned()
+        .unwrap_or_else(|| "watch registration failed".to_string());
+    {
+        let mut current = health.lock().unwrap();
+        current.state = WatchHealthState::Degraded;
+        current.registration_failures = current
+            .registration_failures
+            .saturating_add(errors.len() as u64);
+        current.last_error = Some(message.clone());
+    }
+    if surface_failure {
+        safe_call(
+            cb,
+            WatchEvent {
+                kind: WatchKind::ProviderError,
+                path: Some(message),
+                to: None,
+            },
+        );
     }
 }
 
@@ -237,12 +351,61 @@ fn plan_dir(rel: &str, name: &str, filter: &WalkFilter) -> DirPlan {
     DirPlan::WatchAndDescend
 }
 
-fn add_watch_quiet(watcher: &mut RecommendedWatcher, abs: &Path, rel: &str) {
-    if let Err(e) = watcher.watch(abs, RecursiveMode::NonRecursive) {
-        // A vanished directory mid-walk is routine; an exhausted
-        // inotify limit surfaces separately through the overflow path.
-        tracing::warn!(error = %e, path = %rel, "watcher: failed to register directory");
+#[cfg(test)]
+struct InjectedRegistrationFailure {
+    path: PathBuf,
+    remaining: usize,
+}
+
+#[cfg(test)]
+static INJECTED_REGISTRATION_FAILURE: std::sync::OnceLock<
+    std::sync::Mutex<Option<InjectedRegistrationFailure>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn inject_registration_failures(path: &Path, count: usize) {
+    *INJECTED_REGISTRATION_FAILURE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap() = Some(InjectedRegistrationFailure {
+        path: path.to_path_buf(),
+        remaining: count,
+    });
+}
+
+fn watch_registration(
+    watcher: &mut RecommendedWatcher,
+    abs: &Path,
+    mode: RecursiveMode,
+) -> notify::Result<()> {
+    #[cfg(test)]
+    {
+        let mut injected = INJECTED_REGISTRATION_FAILURE
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap();
+        if let Some(failure) = injected.as_mut() {
+            if failure.path == abs && failure.remaining > 0 {
+                failure.remaining -= 1;
+                return Err(notify::Error::generic(
+                    "injected watcher registration failure",
+                ));
+            }
+        }
     }
+    watcher.watch(abs, mode)
+}
+
+fn register_all_roots(
+    watcher: &mut RecommendedWatcher,
+    roots: &[WatchRoot],
+    filter: &WalkFilter,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    for root in roots {
+        register_root(watcher, root, filter, &mut errors);
+    }
+    errors
 }
 
 /// Linux: register `root` non-recursively, then walk and register
@@ -256,15 +419,30 @@ fn register_root(
     watcher: &mut RecommendedWatcher,
     root: &WatchRoot,
     filter: &WalkFilter,
-) -> Result<()> {
-    watcher.watch(&root.abs, RecursiveMode::NonRecursive)?;
-    register_subdirs(watcher, &root.abs, "", filter);
-    Ok(())
+    errors: &mut Vec<String>,
+) {
+    register_one(watcher, &root.abs, "", RecursiveMode::NonRecursive, errors);
+    register_subdirs(watcher, &root.abs, "", filter, errors);
 }
 
-fn register_subdirs(watcher: &mut RecommendedWatcher, abs: &Path, rel: &str, filter: &WalkFilter) {
-    let Ok(entries) = std::fs::read_dir(abs) else {
-        return;
+#[cfg(target_os = "linux")]
+fn register_subdirs(
+    watcher: &mut RecommendedWatcher,
+    abs: &Path,
+    rel: &str,
+    filter: &WalkFilter,
+    errors: &mut Vec<String>,
+) {
+    let entries = match std::fs::read_dir(abs) {
+        Ok(entries) => entries,
+        Err(error) => {
+            errors.push(format!(
+                "watcher: failed to scan directory {}: {error}",
+                abs.display()
+            ));
+            tracing::warn!(%error, path = %rel, "watcher: failed to scan directory");
+            return;
+        }
     };
     for entry in entries.flatten() {
         let Ok(ft) = entry.file_type() else {
@@ -287,12 +465,40 @@ fn register_subdirs(watcher: &mut RecommendedWatcher, abs: &Path, rel: &str, fil
         };
         match plan_dir(&child_rel, name, filter) {
             DirPlan::Skip => {}
-            DirPlan::WatchOnly => add_watch_quiet(watcher, &entry.path(), &child_rel),
+            DirPlan::WatchOnly => register_one(
+                watcher,
+                &entry.path(),
+                &child_rel,
+                RecursiveMode::NonRecursive,
+                errors,
+            ),
             DirPlan::WatchAndDescend => {
-                add_watch_quiet(watcher, &entry.path(), &child_rel);
-                register_subdirs(watcher, &entry.path(), &child_rel, filter);
+                register_one(
+                    watcher,
+                    &entry.path(),
+                    &child_rel,
+                    RecursiveMode::NonRecursive,
+                    errors,
+                );
+                register_subdirs(watcher, &entry.path(), &child_rel, filter, errors);
             }
         }
+    }
+}
+
+fn register_one(
+    watcher: &mut RecommendedWatcher,
+    abs: &Path,
+    rel: &str,
+    mode: RecursiveMode,
+    errors: &mut Vec<String>,
+) {
+    if let Err(error) = watch_registration(watcher, abs, mode) {
+        errors.push(format!(
+            "watcher: failed to register {}: {error}",
+            abs.display()
+        ));
+        tracing::warn!(%error, path = %rel, "watcher: failed to register directory");
     }
 }
 
@@ -305,14 +511,14 @@ fn register_root(
     watcher: &mut RecommendedWatcher,
     root: &WatchRoot,
     _filter: &WalkFilter,
-) -> Result<()> {
-    watcher.watch(&root.abs, RecursiveMode::Recursive)?;
-    Ok(())
+    errors: &mut Vec<String>,
+) {
+    register_one(watcher, &root.abs, "", RecursiveMode::Recursive, errors);
 }
 
 /// Linux: a directory that just appeared under a watched parent must
 /// start streaming its subtree. The registration itself is queued
-/// for the registrar thread (see registrar_loop for why it cannot
+/// for the supervisor thread (see `watch_supervisor_loop` for why it cannot
 /// happen on the notify worker). inotify does not replay pre-existing
 /// contents of a moved-in tree either, so an accepted directory also
 /// gets a catch-up scan there that synthesizes Created events for the
@@ -344,19 +550,58 @@ fn track_new_dirs(
     if plan == DirPlan::Skip {
         return;
     }
-    let _ = reg_tx.send(DirRegistration {
+    let _ = reg_tx.send(WatchCommand::Register(DirRegistration {
         abs: abs.to_path_buf(),
         rel,
         prefix: root.prefix.clone(),
         plan,
-    });
+    }));
 }
 
 /// Register accepted subdirectories of a newly appeared tree and
 /// emit Created events for the regular files within, filtered exactly
-/// like live dispatch. Runs on the registrar thread; synthesized
+/// like live dispatch. Runs on the supervisor thread; synthesized
 /// events may race live ones (a file created in the new tree can
 /// surface twice), the same duplicate class as a notify save burst.
+#[cfg(target_os = "linux")]
+fn register_dynamic_dir(
+    watcher: &mut RecommendedWatcher,
+    registration: &DirRegistration,
+    filter: &WalkFilter,
+    cb: &dyn WatchCallback,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    register_one(
+        watcher,
+        &registration.abs,
+        &registration.rel,
+        RecursiveMode::NonRecursive,
+        &mut errors,
+    );
+    if registration.plan == DirPlan::WatchAndDescend {
+        catch_up_subtree(
+            watcher,
+            registration.prefix.as_deref(),
+            &registration.abs,
+            &registration.rel,
+            filter,
+            cb,
+            &mut errors,
+        );
+    }
+    errors
+}
+
+#[cfg(not(target_os = "linux"))]
+fn register_dynamic_dir(
+    _watcher: &mut RecommendedWatcher,
+    _registration: &DirRegistration,
+    _filter: &WalkFilter,
+    _cb: &dyn WatchCallback,
+) -> Vec<String> {
+    Vec::new()
+}
+
 #[cfg(target_os = "linux")]
 fn catch_up_subtree(
     watcher: &mut RecommendedWatcher,
@@ -365,6 +610,7 @@ fn catch_up_subtree(
     rel: &str,
     filter: &WalkFilter,
     cb: &dyn WatchCallback,
+    errors: &mut Vec<String>,
 ) {
     let Ok(entries) = std::fs::read_dir(abs) else {
         return;
@@ -381,10 +627,30 @@ fn catch_up_subtree(
         if ft.is_dir() {
             match plan_dir(&child_rel, name, filter) {
                 DirPlan::Skip => {}
-                DirPlan::WatchOnly => add_watch_quiet(watcher, &entry.path(), &child_rel),
+                DirPlan::WatchOnly => register_one(
+                    watcher,
+                    &entry.path(),
+                    &child_rel,
+                    RecursiveMode::NonRecursive,
+                    errors,
+                ),
                 DirPlan::WatchAndDescend => {
-                    add_watch_quiet(watcher, &entry.path(), &child_rel);
-                    catch_up_subtree(watcher, prefix, &entry.path(), &child_rel, filter, cb);
+                    register_one(
+                        watcher,
+                        &entry.path(),
+                        &child_rel,
+                        RecursiveMode::NonRecursive,
+                        errors,
+                    );
+                    catch_up_subtree(
+                        watcher,
+                        prefix,
+                        &entry.path(),
+                        &child_rel,
+                        filter,
+                        cb,
+                        errors,
+                    );
                 }
             }
         } else if ft.is_file() && !is_filtered(&child_rel, filter) {
@@ -431,24 +697,17 @@ impl WatchHandle {
         let cb_clone = cb.clone();
         let dispatch_roots_for_cb = Arc::clone(&dispatch_roots);
         let filter_for_cb = Arc::clone(&filter);
-        #[cfg(target_os = "linux")]
-        let (reg_tx, reg_rx) = std::sync::mpsc::channel::<DirRegistration>();
-        #[cfg(target_os = "linux")]
-        let reg_tx_for_cb = reg_tx.clone();
-        // Non-Linux has no registrar thread; the sender end of a dead
-        // channel keeps dispatch's call shape identical and sends are
-        // silently dropped.
-        #[cfg(not(target_os = "linux"))]
-        let (reg_tx_for_cb, _reg_rx_unused) = std::sync::mpsc::channel::<DirRegistration>();
+        let (command_tx, command_rx) = std::sync::mpsc::channel::<WatchCommand>();
+        let command_tx_for_cb = command_tx.clone();
         let throttle_for_cb = Arc::new(DegradeThrottle::new());
-        let mut watcher =
+        let watcher =
             notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
                 Ok(event) => dispatch(
                     &dispatch_roots_for_cb,
                     &filter_for_cb,
                     event,
                     &*cb_clone,
-                    &reg_tx_for_cb,
+                    &command_tx_for_cb,
                     &throttle_for_cb,
                 ),
                 Err(e) => {
@@ -460,31 +719,103 @@ impl WatchHandle {
                     // logging-and-continuing left consumers silently
                     // stale.
                     tracing::warn!("watch error: {e}");
+                    let message = e.to_string();
                     safe_call(
                         &*cb_clone,
                         WatchEvent {
                             kind: WatchKind::ProviderError,
-                            path: Some(e.to_string()),
+                            path: Some(message.clone()),
                             to: None,
                         },
                     );
+                    let _ = command_tx_for_cb.send(WatchCommand::ProviderLost {
+                        message,
+                        #[cfg(test)]
+                        acknowledged: None,
+                    });
                 }
             })?;
-        for root in dispatch_roots.iter() {
-            register_root(&mut watcher, root, &filter)?;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            let registrar = std::thread::spawn(move || {
-                registrar_loop(reg_rx, watcher, filter, cb);
-            });
-            Ok(Self {
-                _reg_tx: reg_tx,
-                _registrar: registrar,
+        let health = Arc::new(std::sync::Mutex::new(WatchHealth::starting()));
+        let supervisor_health = Arc::clone(&health);
+        let (initial_tx, initial_rx) = std::sync::mpsc::sync_channel(1);
+        let supervisor = std::thread::Builder::new()
+            .name("chan-workspace::watch".to_string())
+            .spawn(move || {
+                watch_supervisor_loop(
+                    command_rx,
+                    watcher,
+                    dispatch_roots,
+                    filter,
+                    cb,
+                    supervisor_health,
+                    initial_tx,
+                );
             })
+            .map_err(|error| {
+                crate::error::ChanError::Io(format!("spawn watcher supervisor: {error}"))
+            })?;
+        if initial_rx.recv().is_err() {
+            let _ = supervisor.join();
+            return Err(crate::error::ChanError::Io(
+                "watcher supervisor exited during registration".to_string(),
+            ));
         }
-        #[cfg(not(target_os = "linux"))]
-        Ok(Self { _watcher: watcher })
+        Ok(Self {
+            command_tx: std::sync::Mutex::new(Some(command_tx)),
+            supervisor: std::sync::Mutex::new(Some(supervisor)),
+            health,
+        })
+    }
+
+    /// Return a point-in-time snapshot of watcher health and retry counters.
+    pub fn health(&self) -> WatchHealth {
+        self.health.lock().unwrap().clone()
+    }
+
+    /// Stop and join the watcher supervisor. Idempotent.
+    pub fn stop(&self) {
+        if let Some(command_tx) = self.command_tx.lock().unwrap().take() {
+            let _ = command_tx.send(WatchCommand::Stop);
+        }
+        self.join_supervisor();
+    }
+
+    /// Wait for watcher teardown, requesting stop first when needed.
+    pub fn join(&self) {
+        self.stop();
+    }
+
+    fn join_supervisor(&self) {
+        if let Some(supervisor) = self.supervisor.lock().unwrap().take() {
+            if supervisor.join().is_err() {
+                tracing::warn!("watcher supervisor panicked");
+                self.health.lock().unwrap().state = WatchHealthState::Stopped;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn inject_provider_loss(&self, message: &str) {
+        let command_tx = self.command_tx.lock().unwrap().as_ref().cloned();
+        let Some(command_tx) = command_tx else {
+            return;
+        };
+        let (acknowledged, receiver) = std::sync::mpsc::sync_channel(1);
+        if command_tx
+            .send(WatchCommand::ProviderLost {
+                message: message.to_string(),
+                acknowledged: Some(acknowledged),
+            })
+            .is_ok()
+        {
+            let _ = receiver.recv();
+        }
+    }
+}
+
+impl Drop for WatchHandle {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -1106,6 +1437,62 @@ mod tests {
             assert!(
                 seen.is_some(),
                 ".git top level stays watched so control files stream"
+            );
+        }
+
+        #[test]
+        fn watch_registration_lifecycle_recovers_and_joins() {
+            let root = TempDir::new().unwrap();
+            let retry_dir = root.path().join("retry-me");
+            std::fs::create_dir_all(&retry_dir).unwrap();
+            inject_registration_failures(&retry_dir, 1);
+
+            let (handle, rx) = start_handle(&root);
+            let initial = handle.health();
+            assert_eq!(initial.state, WatchHealthState::Degraded);
+            assert_eq!(initial.registration_failures, 1);
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while handle.health().state != WatchHealthState::Healthy && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            let recovered = handle.health();
+            assert_eq!(recovered.state, WatchHealthState::Healthy);
+            assert!(recovered.retry_attempts >= 1);
+
+            std::fs::write(retry_dir.join("after-retry.md"), "x").unwrap();
+            assert!(
+                wait_for(&rx, Duration::from_secs(5), |event| {
+                    event.path.as_deref() == Some("retry-me/after-retry.md")
+                })
+                .is_some(),
+                "retried directory must become observable"
+            );
+
+            inject_registration_failures(root.path(), 1);
+            handle.inject_provider_loss("injected provider loss");
+            let degraded = handle.health();
+            assert_eq!(degraded.state, WatchHealthState::Degraded);
+            assert_eq!(degraded.provider_errors, 1);
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while handle.health().state != WatchHealthState::Healthy && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            assert_eq!(handle.health().state, WatchHealthState::Healthy);
+
+            let _ = drain(&rx, Duration::from_millis(100));
+            handle.stop();
+            handle.join();
+            assert_eq!(handle.health().state, WatchHealthState::Stopped);
+
+            std::fs::write(root.path().join("after-stop.md"), "x").unwrap();
+            assert!(
+                wait_for(&rx, Duration::from_millis(500), |event| {
+                    event.path.as_deref() == Some("after-stop.md")
+                })
+                .is_none(),
+                "stop plus join must prevent post-stop callbacks"
             );
         }
     }

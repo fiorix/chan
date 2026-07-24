@@ -53,7 +53,7 @@ flowchart TB
 
   - `Library` is a per-machine handle. Apps construct one at startup and keep it alive. It owns the registry and the config-file path.
   - `Workspace` is one registered directory. Holds the writer lock for its lifetime; cheap reads (search query, graph traversal) do not contend. Lazily initializes search, graph, and report state on first use via `OnceLock`.
-  - `WatchHandle` is an opaque return value; drop to stop watching. The underlying `notify::RecommendedWatcher` runs on its own thread and dispatches into the consumer's `WatchCallback`.
+  - `WatchHandle` owns a supervised watcher lifecycle. `health()` exposes starting, healthy, degraded, and stopped state with failure and retry counters; partial registration returns a degraded handle that retries; `stop()`, `join()`, and drop all synchronously reclaim the watcher thread and descriptors.
   - `GraphIndexer` is the built-in consumer of the watcher: a worker thread that debounces per-path events into `index_file` / `forget_file` / `reconcile` calls.
 
 ## 3. Components
@@ -291,7 +291,7 @@ After picking a file, the editor calls `GraphView::headings_of(rel)` to populate
 
 ### Watcher
 
-`Workspace::watch` returns a `WatchHandle`; drop to stop. The underlying `notify::RecommendedWatcher` runs on its own thread and calls into the consumer's `WatchCallback`.
+`Workspace::watch` returns an owned `WatchHandle`. Initial root and recursive registration complete before return; partial registration returns `WatchHealthState::Degraded`, emits `ProviderError`, and retries under the owned supervisor. Backend provider loss also marks the handle degraded and re-registers the roots. Successful retry restores healthy state. `stop()` is idempotent and joins the supervisor before returning, `join()` requests the same synchronous teardown, and drop applies the same rule, so no registrar or notify callback thread is detached.
 
 Callback-based on purpose: the Swift / Kotlin shell implements the trait by passing an `Arc<dyn WatchCallback>` (uniffi generates a wrapper around a foreign object). No closures cross the FFI.
 
