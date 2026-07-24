@@ -55,7 +55,7 @@ section = "net"
 priority = "optional"
 # profile's systemd unit Requires the migration unit and binary shipped by the
 # matching identity package. Keep this exact pin in lockstep with workspace.package.
-depends = "$auto, adduser, chan-gateway-identity (= 0.74.0-1)"
+depends = "$auto, adduser, chan-gateway-identity (= 0.75.0-1)"
 maintainer-scripts = "packaging/"
 assets = [
     ["target/release/profile-service", "/usr/bin/chan-gateway-profile", "755"],

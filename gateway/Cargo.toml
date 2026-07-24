@@ -48,7 +48,7 @@ members = [
 # ships on chan's `vX.Y.Z` release line, and the release CI refuses to
 # build if the tag doesn't equal this value. Whatever bumps the root
 # version must bump this in the same commit.
-version = "0.74.0"
+version = "0.75.0"
 edition = "2021"
 # Mirrors the repo-root rust-toolchain.toml (1.95.0); the gateway has
 # no toolchain file of its own and inherits the monorepo pin.

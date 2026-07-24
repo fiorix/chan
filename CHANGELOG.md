@@ -4,10 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.75.0] - 2026-07-24
+
+v0.75.0 replaces the desktop's `chan://` custom-scheme sign-in with an
+RFC 8252 loopback redirect plus PKCE, which fixes sign-in on Linux and
+Windows and closes the deep-link second-instance gap; adds a consistent
+`cs pane` surface for addressing windows, panes, and Hybrid sides, and a
+per-terminal mouse-capture toggle; stops shipping the unmaintained
+self-built desktop `.deb`/`.rpm`; and lands a round of editor, slides,
+terminal, and devserver bug fixes.
 
 ### Added
 
+- **`cs pane` addressing.** `cs pane` gains canonical `new`, `focus`,
+  `resize`, `equalize`, `swap`, `close`, `close-tab`, `close-all`, and
+  `list` commands, and every tab opener (`cs open`, `cs graph`,
+  `cs dashboard`, `cs terminal new`, `cs terminal team new|load`) takes
+  `--window`, `--pane`, and `--side a|b` to place a tab in an exact
+  window, pane, and Hybrid side. `cs pane list` reports both sides of
+  every pane. The `split` and `close-pane` forms stay as hidden aliases
+  of `new` and `close`.
 - **Terminal mouse-capture toggle.** New `terminal.mouse_capture`
   server setting (default on) with a checkbox in Settings, Terminal
   section. Turned off, a full-screen TUI that enables mouse reporting
@@ -19,6 +35,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Loopback desktop sign-in.** chan-desktop signs in through an RFC
+  8252 loopback redirect (`http://127.0.0.1:<port>/auth/callback`) with
+  PKCE (S256) instead of the `chan://` custom scheme. This fixes sign-in
+  on Linux and Windows, where the OS delivered the `chan://` callback to
+  a second process that could not complete it, and needs no system
+  scheme registration. The gateway consent page no longer asserts the
+  requesting app's identity (a local loopback client cannot be verified)
+  and names the local callback port.
+- **`cs` tab openers target one exact window.** `cs open`, `cs graph`,
+  `cs dashboard`, and `cs terminal new` now queue to the exact target
+  window (`--window` or `$CHAN_WINDOW_ID`) and error if that window has
+  no live connection, where before the command was broadcast and
+  reported success as long as any window was connected.
 - **Survey `[F]` is a pure "will follow up later" signal.** The
   follow-up-file machinery is retired: `cs terminal survey` loses
   `--followup-dir`, `--from`, and `--to`, replying `[F]` never writes a
@@ -27,6 +56,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   option replies (the label verbatim) are unchanged, so agents keep the
   three-way branch between an answer, a dismissal, and a follow-up
   coming in a separate prompt.
+- **Terminal budgets.** Per-terminal scrollback defaults to 10 MB
+  (Settings range 10..50 MB; existing configs above the cap clamp to
+  50 on read), and the reattach replay ring doubles to 2 MB so a busy
+  agent session reattaches without opening mid-stream.
+- **`chan dump-skill` marker guidance.** The skill corpus now tells
+  agents that `@pagebreak`/`@today`/`@date` are live-editor typing
+  macros and to write the materialized forms (`<hr class="chan-page-
+  break">`, a concrete date) when authoring files directly.
+
+### Fixed
+
+- **Editor:** the line after a table is clickable again (block widgets
+  use padding, which CodeMirror's height map includes, instead of
+  margin, which it excludes).
+- **Editor:** an errored mermaid block is click-through to its failing
+  line, and ArrowUp no longer escapes above the diagram.
+- **Editor:** saving over a slow network no longer raises a phantom
+  "external edit" conflict modal (the save funnel uses a sync-progress
+  quiet window, and the server token-adopts a byte-identical stale PUT).
+- **Slides:** no spacer band above a slide's first heading, and PDF
+  export sizes diagrams and images at the preview's layout box.
+- **devserver `--join`:** the watchdog rides out a `--restart` or a
+  stall, adopting the restarted daemon and re-pinning instead of
+  bailing after ~6s, so the desktop no longer needs a manual reconnect.
+- **Rich prompt:** pasting an image then pressing the submit chord no
+  longer also opens the fullscreen image viewer.
+
+### Removed
+
+- **Self-built desktop `.deb`/`.rpm` release artifacts.** GitHub
+  releases ship the AppImage; the `.deb`/`.rpm` channel is the
+  maintained COPR/PPA/AUR packages.
+- **The `chan://` custom scheme and deep-link plugin.** Loopback sign-in
+  replaces them, which also closes the Windows/Linux deep-link
+  second-instance gap.
 
 ## [v0.74.0] - 2026-07-22
 
