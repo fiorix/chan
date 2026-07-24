@@ -25,8 +25,11 @@
 //! second/third event through and re-trigger the bad behavior.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use chan_workspace::{ChanError, Workspace};
 
 /// How long after a self-write the matching watcher event(s) are
 /// suppressed. notify's coalesced delivery is well under 500 ms in
@@ -36,8 +39,21 @@ const SELF_WRITE_WINDOW: Duration = Duration::from_millis(1500);
 
 #[derive(Debug)]
 pub struct SelfWrites {
-    inner: Mutex<VecDeque<(String, Instant)>>,
+    inner: Mutex<VecDeque<SelfWriteEntry>>,
     window: Duration,
+    next_id: AtomicU64,
+}
+
+#[derive(Debug)]
+struct SelfWriteEntry {
+    id: u64,
+    path: String,
+    noted_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SelfWriteReservation {
+    id: u64,
 }
 
 impl Default for SelfWrites {
@@ -58,6 +74,7 @@ impl SelfWrites {
         Self {
             inner: Mutex::new(VecDeque::new()),
             window,
+            next_id: AtomicU64::new(1),
         }
     }
 
@@ -66,10 +83,40 @@ impl SelfWrites {
     /// lives in that same coordinate system since the watcher's
     /// `WatchEvent.path` is also workspace-relative.
     pub fn note(&self, rel: &str) {
+        self.reserve(rel);
+    }
+
+    /// Verify that an atomic replacement can create its temporary
+    /// file, then reserve watcher suppression before the real write.
+    /// The caller cancels the reservation if the write later fails.
+    pub(crate) fn reserve_if_writable(
+        &self,
+        workspace: &Workspace,
+        rel: &str,
+    ) -> chan_workspace::Result<SelfWriteReservation> {
+        let target = workspace.resolve_physical_path(rel)?;
+        let parent = target.parent().ok_or(ChanError::PathEmpty)?;
+        crate::routes::transfer::verify_writable_dir(parent).map_err(ChanError::Io)?;
+        Ok(self.reserve(rel))
+    }
+
+    fn reserve(&self, rel: &str) -> SelfWriteReservation {
         let now = Instant::now();
         let mut q = self.inner.lock().expect("self-writes queue poisoned");
         evict_expired(&mut q, now, self.window);
-        q.push_back((rel.to_string(), now));
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        q.push_back(SelfWriteEntry {
+            id,
+            path: rel.to_string(),
+            noted_at: now,
+        });
+        SelfWriteReservation { id }
+    }
+
+    /// Remove a reservation for a write that did not commit.
+    pub(crate) fn cancel(&self, reservation: SelfWriteReservation) {
+        let mut q = self.inner.lock().expect("self-writes queue poisoned");
+        q.retain(|entry| entry.id != reservation.id);
     }
 
     /// True when `rel` was written by chan-server within the dedupe
@@ -80,13 +127,13 @@ impl SelfWrites {
         let now = Instant::now();
         let mut q = self.inner.lock().expect("self-writes queue poisoned");
         evict_expired(&mut q, now, self.window);
-        q.iter().any(|(p, _)| p == rel)
+        q.iter().any(|entry| entry.path == rel)
     }
 }
 
-fn evict_expired(q: &mut VecDeque<(String, Instant)>, now: Instant, window: Duration) {
-    while let Some(&(_, t)) = q.front() {
-        if now.duration_since(t) > window {
+fn evict_expired(q: &mut VecDeque<SelfWriteEntry>, now: Instant, window: Duration) {
+    while let Some(entry) = q.front() {
+        if now.duration_since(entry.noted_at) > window {
             q.pop_front();
         } else {
             break;
