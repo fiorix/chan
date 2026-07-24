@@ -13,11 +13,9 @@ import { describe, expect, test } from "vitest";
 // Vite resolves `import.meta.glob` statically: it MUST be referenced
 // by its full property path on a literal `import.meta` so the Vite
 // transform can rewrite it to a static set of imports. Indirection
-// through a local variable breaks that. Suppress the missing-prop
-// check on this single line; the type isn't part of the project's
-// standard ImportMeta declarations.
+// through a local variable breaks that. The prop's type comes from
+// vite/client (referenced in src/vite-env.d.ts).
 const sources = (
-  // @ts-expect-error import.meta.glob is a Vite-only static helper.
   import.meta.glob(
     ["./**/*.ts", "./**/*.tsx", "./**/*.js", "./**/*.jsx", "./**/*.svelte"],
     { query: "?raw", import: "default", eager: true },

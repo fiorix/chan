@@ -8,9 +8,10 @@ describe("TerminalTab generated reply routing", () => {
     );
     // The keyboard-protocol state lives on the tab (survives a remount on
     // reattach); start() resets it only on a fresh spawn, then installs
-    // the report guards.
+    // the report guards on the xterm branch (the ghostty backend's WASM
+    // parser owns device reports itself).
     expect(terminal).toMatch(
-      /term = new Terminal\([\s\S]*?\);[\s\S]*?const keyboardProtocol = ensureTerminalKeyboardProtocol\([\s\S]*?\);\s*installTerminalReportGuards\(term\);/,
+      /const keyboardProtocol = ensureTerminalKeyboardProtocol\([\s\S]*?\);[\s\S]*?term = new Terminal\([\s\S]*?\);\s*installTerminalReportGuards\(term\);/,
     );
   });
 
@@ -24,7 +25,7 @@ describe("TerminalTab generated reply routing", () => {
     expect(terminal).toContain("PtyWriteTracker");
     expect(terminal).toContain("const ptyWrites = new PtyWriteTracker();");
     expect(terminal).toMatch(
-      /function writePtyOutput\(bytes: Uint8Array, origin: PtyWriteOrigin = "live"\): void \{[\s\S]*?ptyWrites\.write\(term, bytes, origin\);/,
+      /function writePtyOutput\(bytes: Uint8Array, origin: PtyWriteOrigin = "live"\): void \{[\s\S]*?ptyWrites\.write\(termWriter, bytes, origin\);/,
     );
     expect(terminal).toMatch(/const bytes = await terminalMessageBytes\(event\.data\);[\s\S]*?writePtyOutput\(bytes, attachPtyWriteOrigin\(\)\);/);
   });

@@ -17,7 +17,7 @@ describe("TerminalTab WebGL renderer", () => {
 
   test("constructs a WebglAddon instance and loads it onto the terminal", () => {
     expect(tab).toMatch(/new WebglAddon\(\)/);
-    expect(tab).toMatch(/term\.loadAddon\(webgl\)/);
+    expect(tab).toMatch(/\(term as Terminal\)\.loadAddon\(webgl\)/);
   });
 
   test("registers onContextLoss handler to dispose the addon", () => {

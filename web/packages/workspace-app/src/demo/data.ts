@@ -66,6 +66,7 @@ export const DEMO_PREFERENCES: Preferences = {
     font: "os-default",
     mcp_env: false,
     mouse_capture: true,
+    ghostty: false,
   },
   bubble_overlay_mode: "stack",
   empty_pane_carousel_cycling: true,

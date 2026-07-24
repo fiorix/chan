@@ -144,6 +144,18 @@
 </SettingField>
 
 <SettingField
+  label="Ghostty backend"
+  hint="Experimental: parse and render new terminals with Ghostty's WASM engine instead of xterm.js. Downloads ~420 KB of WASM on first enable. New terminals only."
+>
+  <PillToggle
+    label="Use ghostty-web in new terminals"
+    checked={prefs.terminal.ghostty ?? false}
+    ontoggle={(on) =>
+      commit((p) => ({ ...p, terminal: { ...p.terminal, ghostty: on } }))}
+  />
+</SettingField>
+
+<SettingField
   label="Terminal font"
   hint="Font for new terminals. Source Code Pro downloads ~80 KB into your config dir on first enable; existing terminals keep their font until they restart."
 >
