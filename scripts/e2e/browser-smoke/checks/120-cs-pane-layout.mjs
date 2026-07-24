@@ -53,16 +53,6 @@ function paneContent(snapshot, paneId) {
   };
 }
 
-function paneContentWithoutTitle(snapshot, paneId, title) {
-  const content = paneContent(snapshot, paneId);
-  if (!content) return null;
-  return {
-    ...content,
-    a: content.a.filter((tab) => tab.title !== title),
-    b: content.b.filter((tab) => tab.title !== title),
-  };
-}
-
 // Exact identity is useful within one mounted SPA to prove a refused command
 // made no mutation. It is deliberately NOT the reload persistence oracle:
 // pane/tab ids are runtime coordinates and may be regenerated on restore.
@@ -416,11 +406,9 @@ export default {
 
     const layoutFileA = "cs-layout-a.md";
     const layoutFileLauncher = "cs-layout-launcher.md";
-    const layoutFileHybrid = "cs-layout-hybrid-queued.md";
     const layoutDir = "cs-layout-dir";
     writeFileSync(join(ctx.workspaceDir, layoutFileA), "# CLI side A\n");
     writeFileSync(join(ctx.workspaceDir, layoutFileLauncher), "# Launcher\n");
-    writeFileSync(join(ctx.workspaceDir, layoutFileHybrid), "# Hybrid queue\n");
     mkdirSync(join(ctx.workspaceDir, layoutDir), { recursive: true });
     writeFileSync(join(ctx.workspaceDir, layoutDir, "inner.md"), "inner\n");
 
@@ -1212,9 +1200,6 @@ is_lead = false
       );
       await ctx.shot("launcher-contextual-openers", page);
 
-      const hybridBefore = await paneList(ctx, WINDOW_ID);
-      const hybridLeftBefore = paneContent(hybridBefore, leftId);
-      const hybridRightBefore = paneContent(hybridBefore, rightId);
       await cli(ctx, WINDOW_ID, [
         "pane",
         "focus",
@@ -1250,75 +1235,8 @@ is_lead = false
         Math.abs(hybridEqual.left - hybridEqual.right) < 6,
         "Hybrid Nav 0 did not equalize the split",
       );
-      await page.keyboard.press("KeyD");
-      const queuedOpenAck = await cli(ctx, WINDOW_ID, [
-        "open",
-        layoutFileHybrid,
-        "--window",
-        WINDOW_ID,
-        "--pane",
-        rightId,
-        "--side",
-        "b",
-      ]);
-      check(
-        /queued/i.test(
-          rendered(queuedOpenAck.stdout) + rendered(queuedOpenAck.stderr),
-        ),
-        "opener issued during Hybrid Nav did not acknowledge queueing",
-      );
-      check(
-        !tabOn(
-          await paneList(ctx, WINDOW_ID),
-          rightId,
-          "b",
-          (tab) => tab.title === layoutFileHybrid,
-        ),
-        "opener mutated the live layout before Hybrid Nav committed",
-      );
-      let queuedFocusSettled = false;
-      const queuedFocus = cli(ctx, WINDOW_ID, [
-        "pane",
-        "focus",
-        rightId,
-        "--window",
-        WINDOW_ID,
-        "--side",
-        "b",
-      ]).then((result) => {
-        queuedFocusSettled = true;
-        return result;
-      });
-      await sleep(300);
-      check(
-        !queuedFocusSettled,
-        "blocking pane mutation bypassed the active Hybrid Nav transaction",
-      );
       await page.keyboard.press("Enter");
       await page.waitForSelector(".app.pane-mode", { hidden: true, timeout: 10_000 });
-      await queuedFocus;
-      const hybridAfter = await pollLayout(
-        ctx,
-        WINDOW_ID,
-        (value) =>
-          value.activePaneId === rightId &&
-          pane(value, rightId)?.activeSide === "b" &&
-          !!tabOn(
-            value,
-            rightId,
-            "b",
-            (tab) => tab.title === layoutFileHybrid,
-          ),
-        "Hybrid Nav queued CLI replay",
-      );
-      check(
-        sameJson(paneContent(hybridAfter, leftId), hybridRightBefore) &&
-          sameJson(
-            paneContentWithoutTitle(hybridAfter, rightId, layoutFileHybrid),
-            { ...hybridLeftBefore, activeSide: "b" },
-          ),
-        "Hybrid Nav D or its queued CLI replay lost pane contents",
-      );
       await cli(ctx, WINDOW_ID, [
         "pane",
         "swap",

@@ -1128,10 +1128,9 @@ export const paneMode = $state<{
 type PaneModeSettledSink = () => void;
 const paneModeSettledSinks = new Set<PaneModeSettledSink>();
 
-/// Register work that must resume only after Hybrid Nav's draft has either
-/// committed or been discarded. The window-command queue uses this boundary
-/// so a CLI mutation cannot be applied to the live layout and then be erased
-/// by a stale draft commit.
+/// Register work that must run only after Hybrid Nav's draft has either
+/// committed or been discarded (entered, too: `enterPaneMode` also notifies,
+/// since it replaces any prior draft). Returns the unregister function.
 export function registerPaneModeSettledSink(
   sink: PaneModeSettledSink,
 ): () => void {

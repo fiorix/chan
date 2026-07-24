@@ -10,8 +10,6 @@ import {
 } from "./store.svelte";
 import {
   cancelPaneMode,
-  commitPaneMode,
-  enterPaneMode,
   layout,
   paneActiveTabId,
   paneSide,
@@ -207,51 +205,6 @@ describe("queued window command placement", () => {
       side: "a",
     });
     expect(resolveTabDestination({ paneId: "pane-missing" })).toBeNull();
-  });
-
-  test("queues openers behind Hybrid Nav and replays them after commit", async () => {
-    window.history.replaceState(null, "", "/?w=window-a");
-    setTwoPaneLayout();
-    enterPaneMode();
-
-    dispatch({
-      command: "open_dashboard",
-      destination: { pane_id: "pane-right", side: "b" },
-    });
-
-    expect(paneTabs(leaf("pane-right"), "b")).toHaveLength(0);
-    commitPaneMode();
-
-    await vi.waitFor(() => {
-      expect(paneTabs(leaf("pane-right"), "b").map((tab) => tab.kind)).toEqual([
-        "dashboard",
-      ]);
-    });
-  });
-
-  test("queues pane mutations behind Hybrid Nav and replays them after cancel", async () => {
-    window.history.replaceState(null, "", "/?w=window-a");
-    __testSetBootstrapHydrated(false);
-    setTwoPaneLayout();
-    const reply = vi.spyOn(api, "windowReply").mockResolvedValue(undefined);
-    enterPaneMode();
-
-    dispatch({
-      command: "pane_exec",
-      request_id: "request-after-nav",
-      op: { kind: "split", pane_id: "pane-left", dir: "right" },
-    });
-
-    expect(reply).not.toHaveBeenCalled();
-    expect(Object.values(layout.nodes).filter((node) => node.kind === "leaf")).toHaveLength(2);
-    cancelPaneMode();
-
-    await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(1));
-    expect(reply.mock.calls[0]![0].payload).toMatchObject({
-      ok: true,
-      paneId: expect.any(String),
-    });
-    expect(Object.values(layout.nodes).filter((node) => node.kind === "leaf")).toHaveLength(3);
   });
 });
 

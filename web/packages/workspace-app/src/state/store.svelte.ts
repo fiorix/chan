@@ -49,7 +49,6 @@ import {
   openGraphInPane,
   parseGraphLink,
   paneActiveTabId,
-  paneMode,
   paneSide,
   paneTabs,
   openInActivePane,
@@ -64,7 +63,6 @@ import {
   layoutHasReattachableTerminal,
   reconcileLayout,
   registerDraftPromotionSink,
-  registerPaneModeSettledSink,
   resizePane,
   resolveTabDestination,
   restoreLayout,
@@ -726,86 +724,6 @@ export function watchSystemTheme(): () => void {
 /// without re-opening a second socket.
 let unwatch: WatchSubscription | null = null;
 
-type QueuedLayoutCommand = {
-  frame: unknown;
-  expiry: ReturnType<typeof setTimeout> | null;
-};
-
-const queuedLayoutCommands: QueuedLayoutCommand[] = [];
-let drainingLayoutCommands = false;
-
-function isQueuedLayoutCommand(raw: unknown): boolean {
-  const frame = raw as Partial<WindowCommandFrame> | null;
-  if (!frame || frame.window_id !== sessionWindowId()) return false;
-  return (
-    frame.command === "open_file" ||
-    frame.command === "open_browser" ||
-    frame.command === "open_graph" ||
-    frame.command === "open_graph_link" ||
-    frame.command === "open_term_new" ||
-    frame.command === "open_dashboard" ||
-    frame.command === "team_spawned" ||
-    frame.command === "pane_exec"
-  );
-}
-
-function expireQueuedPaneExec(item: QueuedLayoutCommand): void {
-  const index = queuedLayoutCommands.indexOf(item);
-  if (index < 0) return;
-  queuedLayoutCommands.splice(index, 1);
-  const frame = item.frame as Partial<WindowCommandFrame> | null;
-  if (
-    frame?.command === "pane_exec" &&
-    typeof frame.request_id === "string"
-  ) {
-    void api.windowReply({
-      requestId: frame.request_id,
-      payload: {
-        ok: false,
-        summary: "Hybrid Nav transaction still active",
-        blocked: [],
-      },
-    }).catch(() => {
-      // The server-side request may have timed out first.
-    });
-  }
-}
-
-function enqueueLayoutCommand(frame: unknown): void {
-  const item: QueuedLayoutCommand = { frame, expiry: null };
-  const command = (frame as Partial<WindowCommandFrame> | null)?.command;
-  if (command === "pane_exec") {
-    // The server's pane round trip is bounded at five seconds. Refuse before
-    // that deadline instead of applying a stale queued mutation after its CLI
-    // caller has already timed out.
-    item.expiry = setTimeout(() => expireQueuedPaneExec(item), 4_000);
-  }
-  queuedLayoutCommands.push(item);
-  void drainLayoutCommands();
-}
-
-async function drainLayoutCommands(): Promise<void> {
-  if (drainingLayoutCommands || paneMode.active) return;
-  drainingLayoutCommands = true;
-  try {
-    while (!paneMode.active) {
-      const item = queuedLayoutCommands.shift();
-      if (!item) break;
-      if (item.expiry !== null) clearTimeout(item.expiry);
-      await handleWindowCommand(item.frame);
-    }
-  } finally {
-    drainingLayoutCommands = false;
-    if (!paneMode.active && queuedLayoutCommands.length > 0) {
-      void drainLayoutCommands();
-    }
-  }
-}
-
-registerPaneModeSettledSink(() => {
-  void drainLayoutCommands();
-});
-
 // Push the per-window active-transfer count to the server over the window `/ws`
 // whenever the transfer model's count changes. The sink reads the live
 // `unwatch` each call, so it always targets the current (reconnecting) socket;
@@ -844,8 +762,7 @@ export function onWatchEvent(e: unknown): void {
   // animates live as `Workspace::reindex_with` walks the workspace.
   const frameType = (e as { type?: string } | null)?.type;
   if (frameType === "window_command") {
-    if (isQueuedLayoutCommand(e)) enqueueLayoutCommand(e);
-    else void handleWindowCommand(e);
+    void handleWindowCommand(e);
     return;
   }
   if (frameType === "progress") {

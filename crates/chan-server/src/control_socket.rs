@@ -3128,6 +3128,17 @@ fn send_window_command(
     Ok(())
 }
 
+// Every fire-and-forget opener (`cs open`, `cs graph`, `cs dashboard`, `cs
+// terminal new`, `cs terminal team new|load`) funnels its exact-window
+// dispatch through here and then returns "... request queued" straight to
+// the CLI without awaiting the SPA. `--pane`/`--side` placement is validated
+// and, on failure, surfaced as a visible transient status in the SPA (see
+// `resolveWindowCommandDestination` in store.svelte.ts), but that failure is
+// NOT reflected back to the CLI's exit code: the opener has already returned
+// "queued" by the time the SPA resolves placement. Making that CLI-visible
+// would mean converting openers to blocking round-trips like `cs pane`
+// (`pane_round_trip`, above), which also calls this same function but awaits
+// a reply afterward instead of returning immediately.
 fn send_window_command_if_live(
     session_registry: &SessionRegistry,
     window_id: &str,
