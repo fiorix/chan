@@ -15,6 +15,7 @@ NotifyAccess=main
 FileDescriptorStoreMax=512
 KillMode=process
 ExecStart=/usr/bin/chan devserver
+TimeoutStartSec=10min
 Restart=on-failure
 WatchdogSec=30
 
