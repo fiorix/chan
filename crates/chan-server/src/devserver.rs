@@ -997,12 +997,12 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
             // journal the launcher follows.
             println!("{DEVSERVER_TOKEN_MARKER}{token}");
             fdstore::notify_ready()?;
-            // Owned by the shutdown channel: the ping loop exits with
-            // the server. None when systemd didn't configure a watchdog.
-            let _watchdog_pings = fdstore::spawn_watchdog_pings(signal_tx.subscribe());
-            crate::signal::graceful_serve(listener, app, signal_tx)
-                .await
-                .context("running devserver")?;
+            // The ping loop observes the shutdown channel, and its owner also
+            // aborts and joins it before this serve arm can return.
+            let watchdog_pings = fdstore::spawn_watchdog_pings(signal_tx.subscribe());
+            let serve_result = crate::signal::graceful_serve(listener, app, signal_tx).await;
+            watchdog_pings.stop().await;
+            serve_result.context("running devserver")?;
         }
         None => {
             // Tunnel-only: no local TCP listener. The discovery Unix socket and
@@ -1020,10 +1020,11 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
                 ),
             }
             fdstore::notify_ready()?;
-            let _watchdog_pings = fdstore::spawn_watchdog_pings(signal_tx.subscribe());
+            let watchdog_pings = fdstore::spawn_watchdog_pings(signal_tx.subscribe());
             // No listener to drain: install the signal watcher and await
             // shutdown while the tunnel + reindex-cancel tasks run on `signal_tx`.
             crate::signal::graceful_wait(signal_tx).await;
+            watchdog_pings.stop().await;
         }
     }
     Ok(())

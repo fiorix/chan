@@ -68,11 +68,26 @@ pub fn notify_watchdog() -> Result<()> {
     notify("WATCHDOG=1")
 }
 
-/// The ping cadence for the systemd watchdog: half of `WATCHDOG_USEC`
-/// (systemd sets it only when the unit configures `WatchdogSec=`, and
-/// expects pings well inside the window). None when the process is
-/// not watchdog-supervised -- no pings, no ping task.
+/// Remove systemd notification authority from a child command's environment.
+///
+/// Callers supply the command builder's environment-removal operation so this
+/// crate owns the policy without depending on a particular process API.
+pub fn scrub_child_supervision_env(mut remove_var: impl FnMut(&'static str)) {
+    for key in ["WATCHDOG_PID", "WATCHDOG_USEC", "NOTIFY_SOCKET"] {
+        remove_var(key);
+    }
+}
+
+/// The ping cadence for the systemd watchdog: half of `WATCHDOG_USEC`.
+///
+/// `WATCHDOG_PID`, when present, must name this process. None when the
+/// process is not watchdog-supervised, so no ping task is started.
 pub fn watchdog_interval() -> Option<Duration> {
+    match std::env::var("WATCHDOG_PID") {
+        Ok(raw) if raw.parse::<u32>().ok() == Some(std::process::id()) => {}
+        Ok(_) | Err(std::env::VarError::NotUnicode(_)) => return None,
+        Err(std::env::VarError::NotPresent) => {}
+    }
     let raw = std::env::var("WATCHDOG_USEC").ok()?;
     let usec = raw.parse::<u64>().ok()?;
     if usec == 0 {
@@ -323,6 +338,7 @@ mod tests {
     #[test]
     fn watchdog_interval_reads_half_of_watchdog_usec() {
         let _env_lock = ENV_LOCK.lock().unwrap();
+        let _watchdog_pid = EnvGuard::remove("WATCHDOG_PID");
         {
             let _guard = EnvGuard::set("WATCHDOG_USEC", "30000000");
             assert_eq!(watchdog_interval(), Some(Duration::from_secs(15)));
@@ -339,6 +355,43 @@ mod tests {
             let _guard = EnvGuard::remove("WATCHDOG_USEC");
             assert_eq!(watchdog_interval(), None, "unset means no watchdog");
         }
+    }
+
+    #[test]
+    fn watchdog_interval_rejects_another_process_pid() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let own_pid = std::process::id();
+        let other_pid = if own_pid == u32::MAX {
+            own_pid - 1
+        } else {
+            own_pid + 1
+        };
+        let _watchdog_usec = EnvGuard::set("WATCHDOG_USEC", "30000000");
+        let _watchdog_pid = EnvGuard::set("WATCHDOG_PID", other_pid.to_string());
+
+        assert_eq!(watchdog_interval(), None);
+    }
+
+    #[test]
+    fn watchdog_interval_accepts_only_a_valid_own_pid() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let _watchdog_usec = EnvGuard::set("WATCHDOG_USEC", "30000000");
+        {
+            let _watchdog_pid = EnvGuard::set("WATCHDOG_PID", std::process::id().to_string());
+            assert_eq!(watchdog_interval(), Some(Duration::from_secs(15)));
+        }
+        {
+            let _watchdog_pid = EnvGuard::set("WATCHDOG_PID", "not-a-pid");
+            assert_eq!(watchdog_interval(), None);
+        }
+    }
+
+    #[test]
+    fn child_supervision_scrub_covers_all_notification_authority() {
+        let mut removed = Vec::new();
+        scrub_child_supervision_env(|key| removed.push(key));
+
+        assert_eq!(removed, ["WATCHDOG_PID", "WATCHDOG_USEC", "NOTIFY_SOCKET"]);
     }
 
     #[test]

@@ -26,6 +26,7 @@ chan-workspace = { workspace = true, default-features = false }
 # Control-socket wire types (`ControlRequest`/`ControlResponse`); default-features
 # off drops the clap-backed `cs` client, same as chan-server.
 chan-shell = { workspace = true }
+chan-systemd = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }

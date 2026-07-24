@@ -2523,6 +2523,7 @@ impl Session {
         cmd.env_remove("NO_COLOR");
         cmd.env_remove("CI");
         cmd.env_remove("CODEX_CI");
+        chan_systemd::scrub_child_supervision_env(|key| cmd.env_remove(key));
 
         let mut child = pair.slave.spawn_command(cmd)?;
         let child_pid = child.process_id();
@@ -3684,6 +3685,7 @@ fn random_session_id() -> String {
 mod tests {
     use super::*;
     use chan_shell::{SubmitAgent, SubmitTemplateSource};
+    use std::process::Command;
 
     fn built_in_submit(agent: SubmitAgent) -> ResolvedSubmit {
         let template = match agent {
@@ -5960,6 +5962,60 @@ mod tests {
         assert!(
             out.contains("TERM=<tmux-256color>"),
             "PTY did not echo configured TERM: {out:?}"
+        );
+        registry.close(handle.id(), CloseReason::Explicit);
+    }
+
+    #[test]
+    fn session_spawn_scrubs_systemd_notification_env() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .env("CHAN_SYSTEMD_ENV_SCRUB_CHILD", "1")
+            .env("WATCHDOG_USEC", "30000000")
+            .env("WATCHDOG_PID", std::process::id().to_string())
+            .env("NOTIFY_SOCKET", "/run/chan-test-notify.sock")
+            .arg("terminal_sessions::tests::session_spawn_scrubs_systemd_notification_env_child")
+            .arg("--exact")
+            .arg("--nocapture")
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "spawned terminal inherited systemd notification state\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    #[tokio::test]
+    async fn session_spawn_scrubs_systemd_notification_env_child() {
+        if std::env::var_os("CHAN_SYSTEMD_ENV_SCRUB_CHILD").is_none() {
+            return;
+        }
+
+        let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
+        let mut handle = registry
+            .create(CreateOptions {
+                size: test_size(),
+                tab_name: None,
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: Some(
+                    "sleep 0.1; printf 'WATCHDOG_USEC=<%s> WATCHDOG_PID=<%s> NOTIFY_SOCKET=<%s>\\n' \
+                     \"$WATCHDOG_USEC\" \"$WATCHDOG_PID\" \"$NOTIFY_SOCKET\""
+                        .into(),
+                ),
+                env: Default::default(),
+            })
+            .unwrap();
+
+        let expected = "WATCHDOG_USEC=<> WATCHDOG_PID=<> NOTIFY_SOCKET=<>";
+        let out = collect_until(&mut handle, expected, Duration::from_secs(5)).await;
+        assert!(
+            out.contains(expected),
+            "systemd notification variables reached the terminal: {out:?}"
         );
         registry.close(handle.id(), CloseReason::Explicit);
     }
