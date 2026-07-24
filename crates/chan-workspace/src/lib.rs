@@ -95,11 +95,14 @@ pub use registry::{KnownWorkspace, Registry, DEFAULT_INDEX_EXCLUDED_DIRS};
 pub use teams::{Member, Position, TeamConfig};
 pub use trash::{TrashEntry, TRASH_RETENTION_SECS};
 pub use vcs::{detect_parent_vcs, detect_workspace_vcs, is_vcs_control_path, VcsKind, VcsParent};
-pub use watch::{WatchCallback, WatchEvent, WatchHandle, WatchKind};
+pub use watch::{WatchCallback, WatchEvent, WatchHandle, WatchHealth, WatchHealthState, WatchKind};
 pub use workspace::ReconcileReport;
 pub use workspace::{
-    CopyOutcome, DirEntry, FileStat, RenameOutcome, ResolvedLink, SearchOpts, TextReadEvent,
-    TreeEntry, Workspace, BYTES_WRITE_LIMIT, TEXT_READ_CHUNK_SIZE, TEXT_WRITE_LIMIT,
+    semantic_write_budget, AtomicWriteKind, AtomicWriteSink, BoundedFileReader, CopyOutcome,
+    DirEntry, FileStat, RecoveryAction, RecoveryOutcome, RecoveryPass, RecoveryStatus,
+    RenameOutcome, ResolvedLink, SearchOpts, TextReadEvent, TreeEntry, Workspace,
+    WorkspaceGeneration, WorkspacePath, WritableFile, BINARY_STREAM_CHUNK_SIZE,
+    BINARY_STREAM_QUEUE_DEPTH, BYTES_WRITE_LIMIT, TEXT_READ_CHUNK_SIZE, TEXT_WRITE_LIMIT,
 };
 pub use workspace_search::{
     EffectiveSearchMode, EffectiveWorkspaceTraversal, WorkspaceContentHit, WorkspaceEntityMatch,

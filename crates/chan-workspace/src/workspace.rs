@@ -27,6 +27,8 @@ use crate::trash::{self, TrashEntry, TRASH_RETENTION_SECS};
 use crate::watch::{WatchCallback, WatchHandle};
 use crate::{Report, ReportScope};
 
+pub use crate::fs_ops::{AtomicWriteKind, AtomicWriteSink};
+
 /// Hard cap on `write_text` content size. Markdown / txt notes are
 /// human-authored; 2 MiB is roughly 2M characters of dense English,
 /// far past any realistic note. Anything larger is almost certainly
@@ -45,6 +47,12 @@ pub const BYTES_WRITE_LIMIT: u64 = 50 * 1024 * 1024;
 /// Chunk size for streaming editable text reads. Large enough to amortize
 /// syscalls, small enough that the editor can paint early on large files.
 pub const TEXT_READ_CHUNK_SIZE: usize = 64 * 1024;
+
+/// Chunk size for bounded opaque-byte reads.
+pub const BINARY_STREAM_CHUNK_SIZE: usize = 64 * 1024;
+
+/// Maximum number of unread chunks held by a bounded opaque-byte reader.
+pub const BINARY_STREAM_QUEUE_DEPTH: usize = 8;
 
 /// File written to `paths.graph_dir` before `rebuild_graph` starts
 /// and removed after `Index::build_all` commits. Its presence at
@@ -118,7 +126,7 @@ pub struct DirEntry {
     pub is_dir: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileStat {
     pub size: u64,
     /// Last modification time as Unix seconds. Coarse, useful for
@@ -134,6 +142,74 @@ pub struct FileStat {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtime_ns: Option<i64>,
     pub is_dir: bool,
+}
+
+/// Sandboxed classification of a workspace-relative path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkspacePath {
+    Missing,
+    Regular(FileStat),
+    Directory(FileStat),
+    Special(fs_ops::PathKind),
+}
+
+/// Successful strict write preflight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WritableFile {
+    /// Existing target stat, or `None` when the write will create it.
+    pub stat: Option<FileStat>,
+}
+
+/// Bounded opaque-byte reader backed by one owned producer thread.
+pub struct BoundedFileReader {
+    stat: FileStat,
+    receiver: Option<std::sync::mpsc::Receiver<Result<Vec<u8>>>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl BoundedFileReader {
+    /// Metadata from the open file handle that supplies the byte stream.
+    pub fn stat(&self) -> &FileStat {
+        &self.stat
+    }
+}
+
+impl Iterator for BoundedFileReader {
+    type Item = Result<Vec<u8>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.receiver.as_ref()?.recv().ok()
+    }
+}
+
+impl Drop for BoundedFileReader {
+    fn drop(&mut self) {
+        self.receiver.take();
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                tracing::warn!("bounded file reader producer panicked");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+static ACTIVE_BOUNDED_FILE_READERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+struct ActiveBoundedFileReaderGuard;
+
+#[cfg(test)]
+impl Drop for ActiveBoundedFileReaderGuard {
+    fn drop(&mut self) {
+        ACTIVE_BOUNDED_FILE_READERS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn active_bounded_file_readers() -> usize {
+    ACTIVE_BOUNDED_FILE_READERS.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Ordered events produced by `Workspace::read_text_with_stat_chunked`.
@@ -219,6 +295,111 @@ pub struct ReconcileReport {
     pub unchanged: usize,
 }
 
+/// Monotonic tag for recovery and policy-convergence work.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WorkspaceGeneration(u64);
+
+impl WorkspaceGeneration {
+    pub const INITIAL: Self = Self(0);
+
+    pub fn get(self) -> u64 {
+        self.0
+    }
+
+    fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
+/// Recovery work ordered by dominance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryAction {
+    Replay,
+    Reconcile,
+    FullRebuild,
+}
+
+/// One immutable unit of recovery work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryPass {
+    pub generation: WorkspaceGeneration,
+    pub action: RecoveryAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryOutcome {
+    Complete,
+    Retry,
+}
+
+/// Point-in-time state of the workspace recovery coordinator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryStatus {
+    pub generation: WorkspaceGeneration,
+    pub completed_generation: WorkspaceGeneration,
+    pub active: Option<RecoveryPass>,
+    pub pending: Option<RecoveryPass>,
+}
+
+impl RecoveryStatus {
+    pub fn is_ready(self) -> bool {
+        self.active.is_none()
+            && self.pending.is_none()
+            && self.completed_generation >= self.generation
+    }
+
+    pub fn required_action(self) -> Option<RecoveryAction> {
+        self.pending.or(self.active).map(|pass| pass.action)
+    }
+
+    fn ready() -> Self {
+        Self {
+            generation: WorkspaceGeneration::INITIAL,
+            completed_generation: WorkspaceGeneration::INITIAL,
+            active: None,
+            pending: None,
+        }
+    }
+
+    fn seeded(action: RecoveryAction) -> Self {
+        let generation = WorkspaceGeneration::INITIAL.next();
+        Self {
+            generation,
+            completed_generation: WorkspaceGeneration::INITIAL,
+            active: None,
+            pending: Some(RecoveryPass { generation, action }),
+        }
+    }
+}
+
+struct RecoveryExecutionGuard<'a> {
+    workspace: &'a Workspace,
+    pass: Option<RecoveryPass>,
+}
+
+impl RecoveryExecutionGuard<'_> {
+    fn complete(mut self) -> Result<()> {
+        if let Some(pass) = self.pass {
+            self.workspace
+                .finish_recovery(pass, RecoveryOutcome::Complete)?;
+            self.pass = None;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for RecoveryExecutionGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(pass) = self.pass.take() {
+            if let Err(error) = self.workspace.finish_recovery(pass, RecoveryOutcome::Retry) {
+                tracing::warn!(?error, "failed to requeue interrupted recovery pass");
+            }
+        }
+    }
+}
+
 /// One open workspace. Holds the writer lock for as long as it lives,
 /// so two processes can't both write the same workspace's index/graph.
 /// Cheap reads are unlocked; writes go through the locked handle.
@@ -282,41 +463,15 @@ pub struct Workspace {
     /// agrees with the in-memory map: every add-or-remove + persist
     /// pair runs while no other index_file/forget_file can interleave.
     pending_writes: std::sync::Mutex<std::collections::HashMap<String, PendingOp>>,
-    /// Serialization point for `index_file` / `forget_file`. The
-    /// per-file mutation path is graph-commit then index-commit
-    /// then journal-clear; holding this lock across the trio
-    /// keeps the journal honest (no two writers racing on the same
-    /// rel could otherwise both add, then one removes while the
-    /// other's writes are still in flight). The lock is only held
-    /// for the duration of a single file's commit pair; bulk
-    /// reindex (`reindex_with`) does not pass through here, so the
-    /// serialization is bounded by the watcher's per-file rate.
-    write_serial: std::sync::Mutex<()>,
-    /// Set when `Workspace::open` hydrated a non-empty pending-writes
-    /// journal. Surfaces via `needs_replay_writes()`; cleared by
-    /// `replay_pending_writes()` after the journal drains.
-    needs_replay_writes: std::sync::atomic::AtomicBool,
-    /// Set when `Workspace::open` observed a `rebuild.inprogress` marker
-    /// in `paths.graph_dir`: the last reindex did not get to call
-    /// `bm25.commit()` (process killed / power loss between graph
-    /// rebuild and search-index commit). The graph and the index
-    /// can therefore disagree about freshness, so the consumer
-    /// (chan-server's indexer, the CLI) must trigger a full reindex
-    /// before answering search queries. Cleared by `reindex_with`
-    /// after the marker file is removed on disk.
-    needs_rebuild: std::sync::atomic::AtomicBool,
-    /// Live flag for "a `reindex_with` is currently running in this
-    /// process." Set on entry, cleared on every exit path (including
-    /// cancellation and errors) via a RAII guard. Surfaces through
-    /// `is_reindexing()` so a connecting Web App / WebSocket consumer
-    /// can pull current state instead of waiting for the next push
-    /// from `ProgressCallback`. Cross-process visibility is not the
-    /// goal: the `rebuild.inprogress` marker covers crash recovery
-    /// and `needs_rebuild()` exposes that. This flag answers "is the
-    /// in-memory rebuild going right now?" which the on-disk marker
-    /// can't, because the marker is also set during a successful
-    /// in-flight reindex.
-    reindexing: std::sync::atomic::AtomicBool,
+    /// Single derived-state mutation boundary. Per-file index/forget,
+    /// replay, reconcile as a unit, full rebuild, and warm report
+    /// watcher updates all take this lock. Queries and file I/O never do.
+    /// The recovery coordinator is a separate short-lived mutex.
+    write_serial: Arc<std::sync::Mutex<()>>,
+    /// Short-lived recovery coordinator state. This mutex is never held
+    /// across replay, reconcile, or rebuild work; the W2 derived-state
+    /// mutation boundary remains a separate lock.
+    recovery: std::sync::Mutex<RecoveryStatus>,
     /// Lazily-initialized SLOC / language / COCOMO report. First
     /// touch (`report()` / `boot()`) does a full scan; further access
     /// reads the cached state, and the watcher fanout keeps it current
@@ -463,6 +618,13 @@ impl Workspace {
                 "pending_writes journal non-empty at open; replay required",
             );
         }
+        let recovery = if needs_rebuild {
+            RecoveryStatus::seeded(RecoveryAction::FullRebuild)
+        } else if needs_replay_writes {
+            RecoveryStatus::seeded(RecoveryAction::Replay)
+        } else {
+            RecoveryStatus::ready()
+        };
         let workspace = Arc::new(Self {
             entry,
             root_canon,
@@ -476,10 +638,8 @@ impl Workspace {
             graph: std::sync::OnceLock::new(),
             rename_log: std::sync::Mutex::new(rename_log),
             pending_writes: std::sync::Mutex::new(pending_writes),
-            write_serial: std::sync::Mutex::new(()),
-            needs_replay_writes: std::sync::atomic::AtomicBool::new(needs_replay_writes),
-            needs_rebuild: std::sync::atomic::AtomicBool::new(needs_rebuild),
-            reindexing: std::sync::atomic::AtomicBool::new(false),
+            write_serial: Arc::new(std::sync::Mutex::new(())),
+            recovery: std::sync::Mutex::new(recovery),
             report: Arc::new(std::sync::OnceLock::new()),
             walk_filter,
         });
@@ -508,7 +668,7 @@ impl Workspace {
             .graph()
             .and_then(|g| g.files().map(|fs| !fs.is_empty()))
             .unwrap_or(false);
-        if graph_non_empty && !needs_rebuild {
+        if graph_non_empty && !needs_rebuild && !needs_replay_writes {
             if let Err(e) = workspace.reconcile() {
                 // Best-effort: a reconcile failure must never block the
                 // open. The watcher + the next manual reindex still
@@ -525,6 +685,122 @@ impl Workspace {
         Ok(workspace)
     }
 
+    /// Latest recovery or policy generation known to this workspace.
+    pub fn generation(&self) -> WorkspaceGeneration {
+        self.recovery.lock().unwrap().generation
+    }
+
+    /// Snapshot the recovery coordinator without waiting for recovery work.
+    pub fn recovery_status(&self) -> RecoveryStatus {
+        *self.recovery.lock().unwrap()
+    }
+
+    /// Request convergence for a lossy signal such as provider overflow.
+    ///
+    /// Equivalent requests coalesce into the existing pending generation.
+    pub fn request_recovery(&self, action: RecoveryAction) -> WorkspaceGeneration {
+        let mut status = self.recovery.lock().unwrap();
+        if let Some(mut pending) = status.pending {
+            pending.action = std::cmp::max(pending.action, action);
+            status.pending = Some(pending);
+            return pending.generation;
+        }
+
+        let generation = status.generation.next();
+        status.generation = generation;
+        status.pending = Some(RecoveryPass { generation, action });
+        generation
+    }
+
+    /// Request convergence for an immutable policy replacement.
+    ///
+    /// Every policy replacement advances the generation. Pending work can
+    /// collapse into the newest generation while retaining action dominance.
+    pub fn request_policy_recovery(&self, action: RecoveryAction) -> WorkspaceGeneration {
+        let mut status = self.recovery.lock().unwrap();
+        let generation = status.generation.next();
+        status.generation = generation;
+        let action = status
+            .pending
+            .map(|pending| std::cmp::max(pending.action, action))
+            .unwrap_or(action);
+        status.pending = Some(RecoveryPass { generation, action });
+        generation
+    }
+
+    /// Move pending recovery into the single active slot.
+    pub fn begin_recovery(&self) -> Option<RecoveryPass> {
+        let mut status = self.recovery.lock().unwrap();
+        if status.active.is_some() {
+            return None;
+        }
+        let pass = status.pending.take()?;
+        status.active = Some(pass);
+        Some(pass)
+    }
+
+    /// Complete or requeue one active recovery pass.
+    pub fn finish_recovery(
+        &self,
+        pass: RecoveryPass,
+        outcome: RecoveryOutcome,
+    ) -> Result<RecoveryStatus> {
+        let mut status = self.recovery.lock().unwrap();
+        if status.active != Some(pass) {
+            return Err(ChanError::Io(format!(
+                "recovery pass is not active: generation {}",
+                pass.generation.get()
+            )));
+        }
+        status.active = None;
+        match outcome {
+            RecoveryOutcome::Complete => {
+                status.completed_generation =
+                    std::cmp::max(status.completed_generation, pass.generation);
+            }
+            RecoveryOutcome::Retry => {
+                status.pending = Some(match status.pending {
+                    Some(pending) => RecoveryPass {
+                        generation: pending.generation,
+                        action: std::cmp::max(pending.action, pass.action),
+                    },
+                    None => pass,
+                });
+            }
+        }
+        Ok(*status)
+    }
+
+    fn recovery_execution(&self, action: RecoveryAction) -> RecoveryExecutionGuard<'_> {
+        let mut status = self.recovery.lock().unwrap();
+        let pass = if status.active.is_some()
+            || status
+                .pending
+                .is_some_and(|pending| pending.action > action)
+        {
+            None
+        } else {
+            let pass = match status.pending.take() {
+                Some(mut pending) => {
+                    pending.action = std::cmp::max(pending.action, action);
+                    pending
+                }
+                None => {
+                    let generation = status.generation.next();
+                    status.generation = generation;
+                    RecoveryPass { generation, action }
+                }
+            };
+            status.active = Some(pass);
+            Some(pass)
+        };
+        drop(status);
+        RecoveryExecutionGuard {
+            workspace: self,
+            pass,
+        }
+    }
+
     /// True when the last reindex did not run to completion (either
     /// because the process crashed between graph rebuild and BM25
     /// commit, or because a marker from a prior install still
@@ -533,19 +809,25 @@ impl Workspace {
     /// `reindex` before answering search queries. Cleared once
     /// reindex commits the index and removes the on-disk marker.
     pub fn needs_rebuild(&self) -> bool {
-        self.needs_rebuild
-            .load(std::sync::atomic::Ordering::Acquire)
+        let status = self.recovery_status();
+        status
+            .active
+            .into_iter()
+            .chain(status.pending)
+            .any(|pass| pass.action == RecoveryAction::FullRebuild)
     }
 
-    /// True while a `reindex_with` is in flight in this process. The
+    /// True while a full-rebuild recovery pass is active. The
     /// Web App / WebSocket fan-out uses this on first connect to
     /// render "indexing..." without having to wait for the next
     /// `ProgressEvent` push; combine with `index_stats()` for the
     /// chunk count and `needs_rebuild()` for the "needs catch-up"
-    /// signal. The flag is cleared on every exit path of
-    /// `reindex_with` (success, error, cancellation) via a guard.
+    /// signal. Direct reindex calls own a recovery guard; externally
+    /// coordinated calls use the pass begun by their caller.
     pub fn is_reindexing(&self) -> bool {
-        self.reindexing.load(std::sync::atomic::Ordering::Acquire)
+        self.recovery_status()
+            .active
+            .is_some_and(|pass| pass.action == RecoveryAction::FullRebuild)
     }
 
     /// Validate `rel` for use with the cap-std `Dir`. Returns a
@@ -672,10 +954,186 @@ impl Workspace {
     // op cannot escape the workspace root. Reads additionally call
     // `ensure_regular_file_in` (lstat) so we never block on a FIFO,
     // drain a device, or follow a symlink off the workspace. Writes
-    // that target an existing path do the same check via
-    // `ensure_writable_in`; writes to a fresh path skip it because
-    // there's nothing to inspect yet (cap-std guarded the parent
-    // walk on the way in).
+    // that target an existing path use the same classification and
+    // temp-file probe through `ensure_writable`.
+
+    /// Classify a workspace-relative path through the capability sandbox.
+    ///
+    /// A missing leaf is a normal value. Lexical traversal and mid-path
+    /// symlink escapes remain typed errors.
+    pub fn classify_workspace_path(&self, rel: &str) -> Result<WorkspacePath> {
+        let rel_path = self.rel(rel)?;
+        let metadata = match self.dir.symlink_metadata(&rel_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(WorkspacePath::Missing);
+            }
+            Err(error) => return Err(map_cap_err(error, &rel_path)),
+        };
+        let file_type = metadata.file_type();
+        let stat = file_stat_from_cap(&metadata);
+        if file_type.is_file() && !file_type.is_symlink() {
+            return Ok(WorkspacePath::Regular(stat));
+        }
+        if file_type.is_dir() {
+            return Ok(WorkspacePath::Directory(stat));
+        }
+        Ok(WorkspacePath::Special(path_kind_cap(&file_type)))
+    }
+
+    /// Verify that an atomic replacement can create its same-directory temp.
+    ///
+    /// Existing targets must be writable regular files. Missing targets are
+    /// allowed, and their parent directories are created with the same
+    /// semantics as the eventual write.
+    pub fn ensure_writable(&self, rel: &str) -> Result<WritableFile> {
+        let rel_path = self.rel(rel)?;
+        let stat = match self.dir.symlink_metadata(&rel_path) {
+            Ok(metadata) => {
+                let file_type = metadata.file_type();
+                if !file_type.is_file() || file_type.is_symlink() {
+                    return Err(ChanError::SpecialFile {
+                        kind: describe_cap_file_kind(&file_type).to_string(),
+                        path: rel_path,
+                    });
+                }
+                if metadata.permissions().readonly() {
+                    return Err(ChanError::Io(format!(
+                        "path is read-only: {}",
+                        rel_path.display()
+                    )));
+                }
+                Some(file_stat_from_cap(&metadata))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(map_cap_err(error, &rel_path)),
+        };
+
+        if let Some(parent) = rel_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                self.dir
+                    .create_dir_all(parent)
+                    .map_err(|error| map_cap_err(error, &rel_path))?;
+            }
+        }
+        let parent = rel_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty());
+        let parent_dir;
+        let target_dir = match parent {
+            Some(parent) => {
+                parent_dir = self
+                    .dir
+                    .open_dir(parent)
+                    .map_err(|error| map_cap_err(error, &rel_path))?;
+                &parent_dir
+            }
+            None => &self.dir,
+        };
+        let parent_metadata = target_dir
+            .dir_metadata()
+            .map_err(|error| map_cap_err(error, &rel_path))?;
+        if parent_metadata.permissions().readonly() {
+            return Err(ChanError::Io(format!(
+                "destination directory is read-only: {}",
+                parent
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .display()
+            )));
+        }
+        let probe = cap_tempfile::TempFile::new(target_dir)
+            .map_err(|error| map_cap_err(error, &rel_path))?;
+        drop(probe);
+        Ok(WritableFile { stat })
+    }
+
+    /// Atomically replace one workspace file from caller-fed chunks.
+    ///
+    /// The target is untouched unless `feed` returns success and every chunk
+    /// satisfies the selected budget and UTF-8 policy.
+    pub fn write_atomic_stream<F>(
+        &self,
+        rel: &str,
+        kind: AtomicWriteKind,
+        feed: F,
+    ) -> Result<FileStat>
+    where
+        F: FnOnce(&mut dyn AtomicWriteSink) -> Result<()>,
+    {
+        if kind == AtomicWriteKind::Text && !self.editable_text_gate(rel) {
+            return Err(ChanError::NotEditableText(rel.to_string()));
+        }
+        let writable = self.ensure_writable(rel)?;
+        let existing_size = writable.stat.as_ref().map(|stat| stat.size);
+        let limit = match kind {
+            AtomicWriteKind::Text => semantic_write_budget(existing_size),
+            AtomicWriteKind::Bytes => std::cmp::max(existing_size.unwrap_or(0), BYTES_WRITE_LIMIT),
+        };
+        let bytes_target_is_text = kind == AtomicWriteKind::Bytes && fs_ops::is_editable_text(rel);
+        let validate_utf8 = kind == AtomicWriteKind::Text || bytes_target_is_text;
+        let (dir, rel_path) = self.resolve_io(rel)?;
+        if let Err(error) =
+            fs_ops::atomic_write_stream_in(dir, &rel_path, kind, limit, validate_utf8, feed)
+        {
+            if bytes_target_is_text
+                && matches!(
+                    &error,
+                    ChanError::Io(message)
+                        if message == "invalid UTF-8 in streamed text write"
+                )
+            {
+                return Err(ChanError::Io(format!(
+                    "refusing to write non-UTF-8 bytes to editable text file: {rel}"
+                )));
+            }
+            return Err(error);
+        }
+        self.stat(rel)
+    }
+
+    /// Open one regular file and stream it through a fixed-size bounded queue.
+    pub fn read_bytes_bounded(&self, rel: &str) -> Result<BoundedFileReader> {
+        use std::io::Read;
+
+        let (dir, rel_path) = self.resolve_io(rel)?;
+        ensure_regular_file_in(dir, &rel_path)?;
+        let mut file = dir
+            .open(&rel_path)
+            .map_err(|error| map_cap_err(error, &rel_path))?;
+        let stat = file_stat_from_cap(&file.metadata()?);
+        let (sender, receiver) =
+            std::sync::mpsc::sync_channel::<Result<Vec<u8>>>(BINARY_STREAM_QUEUE_DEPTH);
+        let worker = std::thread::Builder::new()
+            .name("chan-byte-reader".to_string())
+            .spawn(move || {
+                #[cfg(test)]
+                ACTIVE_BOUNDED_FILE_READERS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                #[cfg(test)]
+                let _active_guard = ActiveBoundedFileReaderGuard;
+
+                loop {
+                    let mut chunk = vec![0u8; BINARY_STREAM_CHUNK_SIZE];
+                    let count = match file.read(&mut chunk) {
+                        Ok(0) => return,
+                        Ok(count) => count,
+                        Err(error) => {
+                            let _ = sender.send(Err(ChanError::Io(error.to_string())));
+                            return;
+                        }
+                    };
+                    chunk.truncate(count);
+                    if sender.send(Ok(chunk)).is_err() {
+                        return;
+                    }
+                }
+            })
+            .map_err(|error| ChanError::Io(format!("spawn bounded file reader: {error}")))?;
+        Ok(BoundedFileReader {
+            stat,
+            receiver: Some(receiver),
+            worker: Some(worker),
+        })
+    }
 
     /// Read raw bytes from a file relative to the workspace root. No
     /// editable-text gate: callers like image previews need binary
@@ -837,18 +1295,10 @@ impl Workspace {
     /// must remove the existing entry first if they intend to
     /// replace it.
     pub fn write_text(&self, rel: &str, content: &str) -> Result<()> {
-        if !self.editable_text_gate(rel) {
-            return Err(ChanError::NotEditableText(rel.to_string()));
-        }
-        let (dir, rel_path) = self.resolve_io(rel)?;
-        let prev = ensure_writable_in(dir, &rel_path)?;
-        check_size(
-            "text",
-            content.len(),
-            TEXT_WRITE_LIMIT,
-            prev.as_ref().map(|m| m.len()),
-        )?;
-        fs_ops::atomic_write_in(dir, &rel_path, content.as_bytes())
+        self.write_atomic_stream(rel, AtomicWriteKind::Text, |sink| {
+            sink.write_chunk(content.as_bytes())
+        })
+        .map(|_| ())
     }
 
     /// Optimistic-concurrency write: succeeds only when the file's
@@ -891,11 +1341,10 @@ impl Workspace {
         if !self.editable_text_gate(rel) {
             return Err(ChanError::NotEditableText(rel.to_string()));
         }
-        let (dir, rel_path) = self.resolve_io(rel)?;
-        let prev = ensure_writable_in(dir, &rel_path)?;
-        let (current, exists, prev_size) = match prev.as_ref() {
-            Some(meta) => (mtime_ns_cap(meta), true, Some(meta.len())),
-            None => (None, false, None),
+        let writable = self.ensure_writable(rel)?;
+        let (current, exists) = match writable.stat.as_ref() {
+            Some(stat) => (stat.mtime_ns, true),
+            None => (None, false),
         };
         let conflict = match (expected_mtime_ns, exists) {
             (None, false) => false,
@@ -907,8 +1356,10 @@ impl Workspace {
                 current_mtime_ns: current,
             });
         }
-        check_size("text", content.len(), TEXT_WRITE_LIMIT, prev_size)?;
-        fs_ops::atomic_write_in(dir, &rel_path, content.as_bytes())
+        self.write_atomic_stream(rel, AtomicWriteKind::Text, |sink| {
+            sink.write_chunk(content.as_bytes())
+        })
+        .map(|_| ())
     }
 
     /// Atomically write raw bytes. Text-class targets still require
@@ -916,20 +1367,10 @@ impl Workspace {
     /// the editor as markdown or source text. Same special-file
     /// refusal as `write_text`.
     pub fn write_bytes(&self, rel: &str, content: &[u8]) -> Result<()> {
-        if fs_ops::is_editable_text(rel) && std::str::from_utf8(content).is_err() {
-            return Err(ChanError::Io(format!(
-                "refusing to write non-UTF-8 bytes to editable text file: {rel}"
-            )));
-        }
-        let (dir, rel_path) = self.resolve_io(rel)?;
-        let prev = ensure_writable_in(dir, &rel_path)?;
-        check_size(
-            "bytes",
-            content.len(),
-            BYTES_WRITE_LIMIT,
-            prev.as_ref().map(|m| m.len()),
-        )?;
-        fs_ops::atomic_write_in(dir, &rel_path, content)
+        self.write_atomic_stream(rel, AtomicWriteKind::Bytes, |sink| {
+            sink.write_chunk(content)
+        })
+        .map(|_| ())
     }
 
     /// True iff the path resolves under the workspace and refers to a
@@ -1512,7 +1953,7 @@ impl Workspace {
                 path: self.entry.root_path.join(&from_rel),
             });
         }
-        ensure_writable_in(&self.dir, &to_rel)?;
+        self.ensure_writable(to)?;
         if let Some(parent) = to_rel.parent() {
             if !parent.as_os_str().is_empty() {
                 self.dir
@@ -2092,20 +2533,8 @@ impl Workspace {
         progress: &dyn crate::progress::ProgressCallback,
         aggression: SearchAggression,
     ) -> Result<BuildSummary> {
-        // Guard flips `reindexing` true for the lifetime of this call
-        // and back to false on every exit path (`?` early return,
-        // cancellation, panic). The flag is what `is_reindexing()`
-        // returns and is the pull-side of the progress notification
-        // story for the Web App.
-        struct ReindexGuard<'a>(&'a std::sync::atomic::AtomicBool);
-        impl<'a> Drop for ReindexGuard<'a> {
-            fn drop(&mut self) {
-                self.0.store(false, std::sync::atomic::Ordering::Release);
-            }
-        }
-        self.reindexing
-            .store(true, std::sync::atomic::Ordering::Release);
-        let _guard = ReindexGuard(&self.reindexing);
+        let recovery = self.recovery_execution(RecoveryAction::FullRebuild);
+        let _serial = self.write_serial.lock().unwrap();
 
         // Graph rebuild walks the tree once for headings + edges.
         // The search facade walks again for chunking + embeddings.
@@ -2156,8 +2585,6 @@ impl Workspace {
                 other => other.into(),
             })?;
         self.clear_rebuild_marker();
-        self.needs_rebuild
-            .store(false, std::sync::atomic::Ordering::Release);
         // Drafts live in-root under `<drafts_dir_name>/...`, so the
         // main reindex walk above already covers them; there is no
         // separate drafts subtree to walk.
@@ -2183,6 +2610,7 @@ impl Workspace {
                 }
             }
         }
+        recovery.complete()?;
         Ok(summary)
     }
 
@@ -2674,10 +3102,14 @@ impl Workspace {
     /// `needs_replay_writes()` so the consumer can call
     /// `replay_pending_writes()` to converge.
     pub fn index_file(&self, rel: &str) -> Result<()> {
+        let _serial = self.write_serial.lock().unwrap();
+        self.index_file_serial(rel)
+    }
+
+    fn index_file_serial(&self, rel: &str) -> Result<()> {
         if !fs_ops::is_indexable_text(rel) {
             return Ok(());
         }
-        let _serial = self.write_serial.lock().unwrap();
         self.journal_record(rel, PendingOp::Index)?;
         let result = self.index_file_inner(rel);
         if result.is_ok() {
@@ -2841,6 +3273,10 @@ impl Workspace {
     /// state the editor cannot self-heal.
     pub fn forget_file(&self, rel: &str) -> Result<()> {
         let _serial = self.write_serial.lock().unwrap();
+        self.forget_file_serial(rel)
+    }
+
+    fn forget_file_serial(&self, rel: &str) -> Result<()> {
         self.journal_record(rel, PendingOp::Forget)?;
         let result = self.forget_file_inner(rel);
         if result.is_ok() {
@@ -2860,8 +3296,12 @@ impl Workspace {
     /// serving editor queries; until it does, graph and index may
     /// disagree about the journaled files.
     pub fn needs_replay_writes(&self) -> bool {
-        self.needs_replay_writes
-            .load(std::sync::atomic::Ordering::Acquire)
+        let status = self.recovery_status();
+        status
+            .active
+            .into_iter()
+            .chain(status.pending)
+            .any(|pass| pass.action == RecoveryAction::Replay)
     }
 
     /// Snapshot of the currently-journaled `(rel, op)` pairs.
@@ -2901,6 +3341,8 @@ impl Workspace {
     ///
     /// Returns the number of entries successfully replayed.
     pub fn replay_pending_writes(&self) -> Result<usize> {
+        let recovery = self.recovery_execution(RecoveryAction::Replay);
+        let _serial = self.write_serial.lock().unwrap();
         let entries: Vec<(String, PendingOp)> = self
             .pending_writes
             .lock()
@@ -2917,24 +3359,18 @@ impl Workspace {
             match op {
                 PendingOp::Index => {
                     if self.exists(&rel) {
-                        self.index_file(&rel)?;
+                        self.index_file_serial(&rel)?;
                     } else {
-                        self.forget_file(&rel)?;
+                        self.forget_file_serial(&rel)?;
                     }
                 }
                 PendingOp::Forget => {
-                    self.forget_file(&rel)?;
+                    self.forget_file_serial(&rel)?;
                 }
             }
             replayed += 1;
         }
-        // After a clean drain, the journal should already be
-        // empty (each successful call to index_file/forget_file
-        // clears its own entry). Belt-and-braces clear the flag.
-        if self.pending_writes.lock().unwrap().is_empty() {
-            self.needs_replay_writes
-                .store(false, std::sync::atomic::Ordering::Release);
-        }
+        recovery.complete()?;
         Ok(replayed)
     }
 
@@ -2982,6 +3418,8 @@ impl Workspace {
     /// hashing, which is far more expensive than the (mtime, size)
     /// stat check.
     pub fn reconcile(&self) -> Result<ReconcileReport> {
+        let recovery = self.recovery_execution(RecoveryAction::Reconcile);
+        let _serial = self.write_serial.lock().unwrap();
         // Snapshot the graph's view of the world: per-file
         // (mtime, size) tuples. Graph stores mtime as Unix
         // seconds and size as bytes (None for either component
@@ -3044,7 +3482,7 @@ impl Workspace {
                 }
             };
             if needs_index {
-                self.index_file(rel)?;
+                self.index_file_serial(rel)?;
                 upserted.push(rel.clone());
             } else {
                 unchanged += 1;
@@ -3055,18 +3493,20 @@ impl Workspace {
         // deletions the watcher missed (or a downtime deletion).
         for rel in graph_snapshot.keys() {
             if !disk_files.contains_key(rel) {
-                self.forget_file(rel)?;
+                self.forget_file_serial(rel)?;
                 forgotten.push(rel.clone());
             }
         }
 
         upserted.sort();
         forgotten.sort();
-        Ok(ReconcileReport {
+        let report = ReconcileReport {
             upserted,
             forgotten,
             unchanged,
-        })
+        };
+        recovery.complete()?;
+        Ok(report)
     }
 
     /// Add an entry to the pending-writes journal and persist it.
@@ -3081,12 +3521,10 @@ impl Workspace {
         };
         persist_pending_writes(&self.paths.graph_dir, &snapshot)?;
         // The presence of any journaled entry implies "graph and
-        // index may disagree about this rel until replay." We
-        // do not set needs_replay_writes here: the flag is the
-        // "the previous PROCESS crashed mid-write" signal, not
-        // the "we are mid-write right now" one. A clean
-        // index_file completion removes its own entry before
-        // returning, so the flag stays false across normal use.
+        // index may disagree about this rel until replay." A normal
+        // in-process call does not request recovery because it clears
+        // its own entry before returning. A crash leaves the durable
+        // entry for the next open to seed into the coordinator.
         Ok(())
     }
 
@@ -3162,7 +3600,8 @@ impl Workspace {
     /// dropped, since the scan reflects the on-disk state regardless. Callers
     /// that need a warm report call `report()` / `boot()`.
     pub fn watch(self: &Arc<Self>, cb: Arc<dyn WatchCallback>) -> Result<WatchHandle> {
-        let fan: Arc<dyn WatchCallback> = ReportFanOut::new(cb, Arc::clone(&self.report));
+        let fan: Arc<dyn WatchCallback> =
+            ReportFanOut::new(cb, Arc::clone(&self.report), Arc::clone(&self.write_serial));
         // Single recursive root watcher. Drafts live in-root under
         // `<drafts_dir_name>/...`, so the workspace-root watcher already
         // covers them; no separate drafts watch root is needed.
@@ -3279,31 +3718,12 @@ impl Workspace {
     }
 }
 
-/// Hard size guard for write_* paths. `kind` is the static label
-/// surfaced in the error so the caller can distinguish text vs
-/// bytes vs (future) blob caps.
+/// Semantic text-write budget for a target with optional existing content.
 ///
-/// The configured `limit` is a fresh-file cap. When the target
-/// already exists and is itself larger than the cap (legacy file,
-/// pre-cap content, a binary attached as `.txt`), the caller is
-/// already past the policy boundary and we let edits up to the
-/// existing size through. The intent is "stop runaway growth", not
-/// "make all your files read-only the moment we ship a cap".
-///
-/// Effective limit = max(prev_size, limit). Refusal carries the
-/// effective limit so the editor can show the user the exact
-/// number it has to stay under.
-fn check_size(kind: &'static str, size: usize, limit: u64, prev_size: Option<u64>) -> Result<()> {
-    let size = size as u64;
-    let effective = std::cmp::max(prev_size.unwrap_or(0), limit);
-    if size > effective {
-        return Err(ChanError::WriteTooLarge {
-            kind,
-            size,
-            limit: effective,
-        });
-    }
-    Ok(())
+/// New files use `TEXT_WRITE_LIMIT`. A legacy file already above that cap may
+/// be rewritten up to its current size but may not grow.
+pub fn semantic_write_budget(existing_file_size: Option<u64>) -> u64 {
+    std::cmp::max(existing_file_size.unwrap_or(0), TEXT_WRITE_LIMIT)
 }
 
 fn emit_valid_utf8_chunks<F>(rel: &str, pending: &mut Vec<u8>, on_event: &mut F) -> Result<bool>
@@ -3420,6 +3840,44 @@ fn mtime_ns_cap(meta: &cap_std::fs::Metadata) -> Option<i64> {
         .and_then(|d| i64::try_from(d.as_nanos()).ok())
 }
 
+fn file_stat_from_cap(meta: &cap_std::fs::Metadata) -> FileStat {
+    FileStat {
+        size: if meta.is_dir() { 0 } else { meta.len() },
+        mtime: mtime_secs_cap(meta),
+        mtime_ns: mtime_ns_cap(meta),
+        is_dir: meta.is_dir(),
+    }
+}
+
+fn path_kind_cap(ft: &cap_std::fs::FileType) -> fs_ops::PathKind {
+    if ft.is_dir() {
+        return fs_ops::PathKind::Directory;
+    }
+    if ft.is_symlink() {
+        return fs_ops::PathKind::Symlink;
+    }
+    if ft.is_file() {
+        return fs_ops::PathKind::RegularFile;
+    }
+    #[cfg(unix)]
+    {
+        use cap_std::fs::FileTypeExt;
+        if ft.is_fifo() {
+            return fs_ops::PathKind::Fifo;
+        }
+        if ft.is_socket() {
+            return fs_ops::PathKind::Socket;
+        }
+        if ft.is_block_device() {
+            return fs_ops::PathKind::BlockDevice;
+        }
+        if ft.is_char_device() {
+            return fs_ops::PathKind::CharDevice;
+        }
+    }
+    fs_ops::PathKind::Other
+}
+
 /// Human-readable name for a cap-std `FileType`. Mirrors
 /// `fs_ops::describe_file_kind`. cap-std exposes the same is_*
 /// predicates plus the unix-only fifo/socket/char/block via
@@ -3466,30 +3924,6 @@ fn ensure_regular_file_in(dir: &cap_std::fs::Dir, rel: &std::path::Path) -> Resu
         kind: describe_cap_file_kind(&ft).to_string(),
         path: rel.to_path_buf(),
     })
-}
-
-/// cap-std equivalent of `ensure_writable`. Returns the existing
-/// file's metadata when the leaf is a regular file, `None` when
-/// missing, error when it's something we refuse to overwrite.
-fn ensure_writable_in(
-    dir: &cap_std::fs::Dir,
-    rel: &std::path::Path,
-) -> Result<Option<cap_std::fs::Metadata>> {
-    match dir.symlink_metadata(rel) {
-        Ok(meta) => {
-            let ft = meta.file_type();
-            if ft.is_file() && !ft.is_symlink() {
-                Ok(Some(meta))
-            } else {
-                Err(ChanError::SpecialFile {
-                    kind: describe_cap_file_kind(&ft).to_string(),
-                    path: rel.to_path_buf(),
-                })
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(map_cap_err(e, rel)),
-    }
 }
 
 /// Parse a file's content into the graph-side structures: the
@@ -4161,6 +4595,249 @@ mod tests {
         lib.register_workspace(workspace_dir.path()).unwrap();
         let workspace = lib.open_workspace(workspace_dir.path()).unwrap();
         (cfg, workspace_dir, workspace)
+    }
+
+    #[test]
+    fn recovery_generation_signal_during_active_forces_follow_up() {
+        let (_cfg, _root, workspace) = fixture();
+        assert!(workspace.recovery_status().is_ready());
+
+        let first_generation = workspace.request_policy_recovery(RecoveryAction::Reconcile);
+        let first = workspace.begin_recovery().unwrap();
+        assert_eq!(first.generation, first_generation);
+        assert_eq!(first.action, RecoveryAction::Reconcile);
+
+        let second_generation = workspace.request_policy_recovery(RecoveryAction::FullRebuild);
+        assert!(second_generation > first_generation);
+        let during = workspace.recovery_status();
+        assert_eq!(during.active, Some(first));
+        assert_eq!(
+            during.pending,
+            Some(RecoveryPass {
+                generation: second_generation,
+                action: RecoveryAction::FullRebuild,
+            })
+        );
+        assert!(!during.is_ready());
+
+        let after_first = workspace
+            .finish_recovery(first, RecoveryOutcome::Complete)
+            .unwrap();
+        assert_eq!(after_first.completed_generation, first_generation);
+        assert_eq!(
+            after_first.required_action(),
+            Some(RecoveryAction::FullRebuild)
+        );
+
+        let second = workspace.begin_recovery().unwrap();
+        workspace
+            .finish_recovery(second, RecoveryOutcome::Complete)
+            .unwrap();
+        assert!(workspace.recovery_status().is_ready());
+    }
+
+    #[test]
+    fn recovery_generation_provider_errors_coalesce_one_pending_pass() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.request_recovery(RecoveryAction::Reconcile);
+        let active = workspace.begin_recovery().unwrap();
+
+        let pending_generation = workspace.request_recovery(RecoveryAction::Reconcile);
+        assert_eq!(
+            workspace.request_recovery(RecoveryAction::Reconcile),
+            pending_generation
+        );
+        assert_eq!(
+            workspace.request_recovery(RecoveryAction::FullRebuild),
+            pending_generation
+        );
+
+        let status = workspace.recovery_status();
+        assert_eq!(status.generation, pending_generation);
+        assert_eq!(
+            status.pending,
+            Some(RecoveryPass {
+                generation: pending_generation,
+                action: RecoveryAction::FullRebuild,
+            })
+        );
+
+        workspace
+            .finish_recovery(active, RecoveryOutcome::Complete)
+            .unwrap();
+        let follow_up = workspace.begin_recovery().unwrap();
+        assert_eq!(follow_up.generation, pending_generation);
+        assert_eq!(follow_up.action, RecoveryAction::FullRebuild);
+    }
+
+    #[test]
+    fn recovery_generation_policy_requests_advance_and_discard_stale_tag() {
+        let (_cfg, _root, workspace) = fixture();
+        let stale_generation = workspace.request_policy_recovery(RecoveryAction::Replay);
+        let current_generation = workspace.request_policy_recovery(RecoveryAction::Reconcile);
+
+        assert!(current_generation > stale_generation);
+        assert_eq!(workspace.generation(), current_generation);
+        let current = workspace.begin_recovery().unwrap();
+        assert_eq!(current.generation, current_generation);
+        assert_eq!(current.action, RecoveryAction::Reconcile);
+        assert!(workspace
+            .finish_recovery(
+                RecoveryPass {
+                    generation: stale_generation,
+                    action: RecoveryAction::Replay,
+                },
+                RecoveryOutcome::Complete,
+            )
+            .is_err());
+        assert_eq!(workspace.recovery_status().active, Some(current));
+    }
+
+    fn assert_waits_for_write_serial(
+        workspace: &Arc<Workspace>,
+        operation: impl FnOnce(Arc<Workspace>) + Send + 'static,
+    ) {
+        let guard = workspace.write_serial.lock().unwrap();
+        let worker_workspace = Arc::clone(workspace);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            operation(worker_workspace);
+            completed_tx.send(()).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(
+            completed_rx
+                .recv_timeout(std::time::Duration::from_millis(250))
+                .is_err(),
+            "derived-state mutation bypassed write_serial"
+        );
+        drop(guard);
+        completed_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("derived-state mutation did not resume after write_serial released");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn serialize_all_derived_mutations_share_write_serial() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.write_text("a.md", "# a\nserial-token\n").unwrap();
+
+        assert_waits_for_write_serial(&workspace, |workspace| {
+            workspace.index_file("a.md").unwrap();
+        });
+        assert_waits_for_write_serial(&workspace, |workspace| {
+            workspace.replay_pending_writes().unwrap();
+        });
+        assert_waits_for_write_serial(&workspace, |workspace| {
+            workspace.reconcile().unwrap();
+        });
+        assert_waits_for_write_serial(&workspace, |workspace| {
+            workspace.reindex(None).unwrap();
+        });
+    }
+
+    struct ChannelWatchCallback(std::sync::Mutex<std::sync::mpsc::Sender<crate::WatchEvent>>);
+
+    impl crate::WatchCallback for ChannelWatchCallback {
+        fn on_event(&self, event: crate::WatchEvent) {
+            let _ = self.0.lock().unwrap().send(event);
+        }
+    }
+
+    #[test]
+    fn serialize_report_mutation_uses_write_serial() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.write_text("report.md", "# before\n").unwrap();
+        workspace.report().unwrap();
+
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let callback: Arc<dyn crate::WatchCallback> =
+            Arc::new(ChannelWatchCallback(std::sync::Mutex::new(event_tx)));
+        let fan = ReportFanOut::new(
+            callback,
+            Arc::clone(&workspace.report),
+            Arc::clone(&workspace.write_serial),
+        );
+
+        let guard = workspace.write_serial.lock().unwrap();
+        workspace.write_text("report.md", "# after\n").unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            fan.on_event(crate::WatchEvent {
+                kind: crate::WatchKind::Modified,
+                path: Some("report.md".to_string()),
+                to: None,
+            });
+        });
+        started_rx.recv().unwrap();
+        assert!(
+            event_rx
+                .recv_timeout(std::time::Duration::from_millis(250))
+                .is_err(),
+            "report mutation bypassed write_serial"
+        );
+        drop(guard);
+        event_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("report mutation did not resume after write_serial released");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn serialize_queries_and_file_streams_remain_lock_free() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace
+            .write_text("query.md", "# query\nlock-free-token\n")
+            .unwrap();
+        workspace.index_file("query.md").unwrap();
+        workspace.report().unwrap();
+
+        let guard = workspace.write_serial.lock().unwrap();
+        let worker_workspace = Arc::clone(&workspace);
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            assert_eq!(
+                worker_workspace.read_text("query.md").unwrap(),
+                "# query\nlock-free-token\n"
+            );
+            let bytes = worker_workspace
+                .read_bytes_bounded("query.md")
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .concat();
+            assert_eq!(bytes, b"# query\nlock-free-token\n");
+            assert!(!worker_workspace
+                .search(
+                    "lock-free-token",
+                    &SearchOpts {
+                        mode: crate::SearchMode::Bm25,
+                        limit: 10,
+                        scope: None,
+                    },
+                )
+                .unwrap()
+                .hits
+                .is_empty());
+            assert!(!worker_workspace
+                .graph()
+                .unwrap()
+                .files()
+                .unwrap()
+                .is_empty());
+            assert!(worker_workspace.report_if_available().unwrap().is_some());
+            completed_tx.send(()).unwrap();
+        });
+        completed_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("query or file stream waited for write_serial");
+        drop(guard);
+        worker.join().unwrap();
     }
 
     #[test]
