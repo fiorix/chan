@@ -295,6 +295,111 @@ pub struct ReconcileReport {
     pub unchanged: usize,
 }
 
+/// Monotonic tag for recovery and policy-convergence work.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WorkspaceGeneration(u64);
+
+impl WorkspaceGeneration {
+    pub const INITIAL: Self = Self(0);
+
+    pub fn get(self) -> u64 {
+        self.0
+    }
+
+    fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
+/// Recovery work ordered by dominance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryAction {
+    Replay,
+    Reconcile,
+    FullRebuild,
+}
+
+/// One immutable unit of recovery work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryPass {
+    pub generation: WorkspaceGeneration,
+    pub action: RecoveryAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryOutcome {
+    Complete,
+    Retry,
+}
+
+/// Point-in-time state of the workspace recovery coordinator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryStatus {
+    pub generation: WorkspaceGeneration,
+    pub completed_generation: WorkspaceGeneration,
+    pub active: Option<RecoveryPass>,
+    pub pending: Option<RecoveryPass>,
+}
+
+impl RecoveryStatus {
+    pub fn is_ready(self) -> bool {
+        self.active.is_none()
+            && self.pending.is_none()
+            && self.completed_generation >= self.generation
+    }
+
+    pub fn required_action(self) -> Option<RecoveryAction> {
+        self.pending.or(self.active).map(|pass| pass.action)
+    }
+
+    fn ready() -> Self {
+        Self {
+            generation: WorkspaceGeneration::INITIAL,
+            completed_generation: WorkspaceGeneration::INITIAL,
+            active: None,
+            pending: None,
+        }
+    }
+
+    fn seeded(action: RecoveryAction) -> Self {
+        let generation = WorkspaceGeneration::INITIAL.next();
+        Self {
+            generation,
+            completed_generation: WorkspaceGeneration::INITIAL,
+            active: None,
+            pending: Some(RecoveryPass { generation, action }),
+        }
+    }
+}
+
+struct RecoveryExecutionGuard<'a> {
+    workspace: &'a Workspace,
+    pass: Option<RecoveryPass>,
+}
+
+impl RecoveryExecutionGuard<'_> {
+    fn complete(mut self) -> Result<()> {
+        if let Some(pass) = self.pass {
+            self.workspace
+                .finish_recovery(pass, RecoveryOutcome::Complete)?;
+            self.pass = None;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for RecoveryExecutionGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(pass) = self.pass.take() {
+            if let Err(error) = self.workspace.finish_recovery(pass, RecoveryOutcome::Retry) {
+                tracing::warn!(?error, "failed to requeue interrupted recovery pass");
+            }
+        }
+    }
+}
+
 /// One open workspace. Holds the writer lock for as long as it lives,
 /// so two processes can't both write the same workspace's index/graph.
 /// Cheap reads are unlocked; writes go through the locked handle.
@@ -368,31 +473,10 @@ pub struct Workspace {
     /// reindex (`reindex_with`) does not pass through here, so the
     /// serialization is bounded by the watcher's per-file rate.
     write_serial: std::sync::Mutex<()>,
-    /// Set when `Workspace::open` hydrated a non-empty pending-writes
-    /// journal. Surfaces via `needs_replay_writes()`; cleared by
-    /// `replay_pending_writes()` after the journal drains.
-    needs_replay_writes: std::sync::atomic::AtomicBool,
-    /// Set when `Workspace::open` observed a `rebuild.inprogress` marker
-    /// in `paths.graph_dir`: the last reindex did not get to call
-    /// `bm25.commit()` (process killed / power loss between graph
-    /// rebuild and search-index commit). The graph and the index
-    /// can therefore disagree about freshness, so the consumer
-    /// (chan-server's indexer, the CLI) must trigger a full reindex
-    /// before answering search queries. Cleared by `reindex_with`
-    /// after the marker file is removed on disk.
-    needs_rebuild: std::sync::atomic::AtomicBool,
-    /// Live flag for "a `reindex_with` is currently running in this
-    /// process." Set on entry, cleared on every exit path (including
-    /// cancellation and errors) via a RAII guard. Surfaces through
-    /// `is_reindexing()` so a connecting Web App / WebSocket consumer
-    /// can pull current state instead of waiting for the next push
-    /// from `ProgressCallback`. Cross-process visibility is not the
-    /// goal: the `rebuild.inprogress` marker covers crash recovery
-    /// and `needs_rebuild()` exposes that. This flag answers "is the
-    /// in-memory rebuild going right now?" which the on-disk marker
-    /// can't, because the marker is also set during a successful
-    /// in-flight reindex.
-    reindexing: std::sync::atomic::AtomicBool,
+    /// Short-lived recovery coordinator state. This mutex is never held
+    /// across replay, reconcile, or rebuild work; the W2 derived-state
+    /// mutation boundary remains a separate lock.
+    recovery: std::sync::Mutex<RecoveryStatus>,
     /// Lazily-initialized SLOC / language / COCOMO report. First
     /// touch (`report()` / `boot()`) does a full scan; further access
     /// reads the cached state, and the watcher fanout keeps it current
@@ -539,6 +623,13 @@ impl Workspace {
                 "pending_writes journal non-empty at open; replay required",
             );
         }
+        let recovery = if needs_rebuild {
+            RecoveryStatus::seeded(RecoveryAction::FullRebuild)
+        } else if needs_replay_writes {
+            RecoveryStatus::seeded(RecoveryAction::Replay)
+        } else {
+            RecoveryStatus::ready()
+        };
         let workspace = Arc::new(Self {
             entry,
             root_canon,
@@ -553,9 +644,7 @@ impl Workspace {
             rename_log: std::sync::Mutex::new(rename_log),
             pending_writes: std::sync::Mutex::new(pending_writes),
             write_serial: std::sync::Mutex::new(()),
-            needs_replay_writes: std::sync::atomic::AtomicBool::new(needs_replay_writes),
-            needs_rebuild: std::sync::atomic::AtomicBool::new(needs_rebuild),
-            reindexing: std::sync::atomic::AtomicBool::new(false),
+            recovery: std::sync::Mutex::new(recovery),
             report: Arc::new(std::sync::OnceLock::new()),
             walk_filter,
         });
@@ -584,7 +673,7 @@ impl Workspace {
             .graph()
             .and_then(|g| g.files().map(|fs| !fs.is_empty()))
             .unwrap_or(false);
-        if graph_non_empty && !needs_rebuild {
+        if graph_non_empty && !needs_rebuild && !needs_replay_writes {
             if let Err(e) = workspace.reconcile() {
                 // Best-effort: a reconcile failure must never block the
                 // open. The watcher + the next manual reindex still
@@ -601,6 +690,122 @@ impl Workspace {
         Ok(workspace)
     }
 
+    /// Latest recovery or policy generation known to this workspace.
+    pub fn generation(&self) -> WorkspaceGeneration {
+        self.recovery.lock().unwrap().generation
+    }
+
+    /// Snapshot the recovery coordinator without waiting for recovery work.
+    pub fn recovery_status(&self) -> RecoveryStatus {
+        *self.recovery.lock().unwrap()
+    }
+
+    /// Request convergence for a lossy signal such as provider overflow.
+    ///
+    /// Equivalent requests coalesce into the existing pending generation.
+    pub fn request_recovery(&self, action: RecoveryAction) -> WorkspaceGeneration {
+        let mut status = self.recovery.lock().unwrap();
+        if let Some(mut pending) = status.pending {
+            pending.action = std::cmp::max(pending.action, action);
+            status.pending = Some(pending);
+            return pending.generation;
+        }
+
+        let generation = status.generation.next();
+        status.generation = generation;
+        status.pending = Some(RecoveryPass { generation, action });
+        generation
+    }
+
+    /// Request convergence for an immutable policy replacement.
+    ///
+    /// Every policy replacement advances the generation. Pending work can
+    /// collapse into the newest generation while retaining action dominance.
+    pub fn request_policy_recovery(&self, action: RecoveryAction) -> WorkspaceGeneration {
+        let mut status = self.recovery.lock().unwrap();
+        let generation = status.generation.next();
+        status.generation = generation;
+        let action = status
+            .pending
+            .map(|pending| std::cmp::max(pending.action, action))
+            .unwrap_or(action);
+        status.pending = Some(RecoveryPass { generation, action });
+        generation
+    }
+
+    /// Move pending recovery into the single active slot.
+    pub fn begin_recovery(&self) -> Option<RecoveryPass> {
+        let mut status = self.recovery.lock().unwrap();
+        if status.active.is_some() {
+            return None;
+        }
+        let pass = status.pending.take()?;
+        status.active = Some(pass);
+        Some(pass)
+    }
+
+    /// Complete or requeue one active recovery pass.
+    pub fn finish_recovery(
+        &self,
+        pass: RecoveryPass,
+        outcome: RecoveryOutcome,
+    ) -> Result<RecoveryStatus> {
+        let mut status = self.recovery.lock().unwrap();
+        if status.active != Some(pass) {
+            return Err(ChanError::Io(format!(
+                "recovery pass is not active: generation {}",
+                pass.generation.get()
+            )));
+        }
+        status.active = None;
+        match outcome {
+            RecoveryOutcome::Complete => {
+                status.completed_generation =
+                    std::cmp::max(status.completed_generation, pass.generation);
+            }
+            RecoveryOutcome::Retry => {
+                status.pending = Some(match status.pending {
+                    Some(pending) => RecoveryPass {
+                        generation: pending.generation,
+                        action: std::cmp::max(pending.action, pass.action),
+                    },
+                    None => pass,
+                });
+            }
+        }
+        Ok(*status)
+    }
+
+    fn recovery_execution(&self, action: RecoveryAction) -> RecoveryExecutionGuard<'_> {
+        let mut status = self.recovery.lock().unwrap();
+        let pass = if status.active.is_some()
+            || status
+                .pending
+                .is_some_and(|pending| pending.action > action)
+        {
+            None
+        } else {
+            let pass = match status.pending.take() {
+                Some(mut pending) => {
+                    pending.action = std::cmp::max(pending.action, action);
+                    pending
+                }
+                None => {
+                    let generation = status.generation.next();
+                    status.generation = generation;
+                    RecoveryPass { generation, action }
+                }
+            };
+            status.active = Some(pass);
+            Some(pass)
+        };
+        drop(status);
+        RecoveryExecutionGuard {
+            workspace: self,
+            pass,
+        }
+    }
+
     /// True when the last reindex did not run to completion (either
     /// because the process crashed between graph rebuild and BM25
     /// commit, or because a marker from a prior install still
@@ -609,19 +814,25 @@ impl Workspace {
     /// `reindex` before answering search queries. Cleared once
     /// reindex commits the index and removes the on-disk marker.
     pub fn needs_rebuild(&self) -> bool {
-        self.needs_rebuild
-            .load(std::sync::atomic::Ordering::Acquire)
+        let status = self.recovery_status();
+        status
+            .active
+            .into_iter()
+            .chain(status.pending)
+            .any(|pass| pass.action == RecoveryAction::FullRebuild)
     }
 
-    /// True while a `reindex_with` is in flight in this process. The
+    /// True while a full-rebuild recovery pass is active. The
     /// Web App / WebSocket fan-out uses this on first connect to
     /// render "indexing..." without having to wait for the next
     /// `ProgressEvent` push; combine with `index_stats()` for the
     /// chunk count and `needs_rebuild()` for the "needs catch-up"
-    /// signal. The flag is cleared on every exit path of
-    /// `reindex_with` (success, error, cancellation) via a guard.
+    /// signal. Direct reindex calls own a recovery guard; externally
+    /// coordinated calls use the pass begun by their caller.
     pub fn is_reindexing(&self) -> bool {
-        self.reindexing.load(std::sync::atomic::Ordering::Acquire)
+        self.recovery_status()
+            .active
+            .is_some_and(|pass| pass.action == RecoveryAction::FullRebuild)
     }
 
     /// Validate `rel` for use with the cap-std `Dir`. Returns a
@@ -2327,20 +2538,7 @@ impl Workspace {
         progress: &dyn crate::progress::ProgressCallback,
         aggression: SearchAggression,
     ) -> Result<BuildSummary> {
-        // Guard flips `reindexing` true for the lifetime of this call
-        // and back to false on every exit path (`?` early return,
-        // cancellation, panic). The flag is what `is_reindexing()`
-        // returns and is the pull-side of the progress notification
-        // story for the Web App.
-        struct ReindexGuard<'a>(&'a std::sync::atomic::AtomicBool);
-        impl<'a> Drop for ReindexGuard<'a> {
-            fn drop(&mut self) {
-                self.0.store(false, std::sync::atomic::Ordering::Release);
-            }
-        }
-        self.reindexing
-            .store(true, std::sync::atomic::Ordering::Release);
-        let _guard = ReindexGuard(&self.reindexing);
+        let recovery = self.recovery_execution(RecoveryAction::FullRebuild);
 
         // Graph rebuild walks the tree once for headings + edges.
         // The search facade walks again for chunking + embeddings.
@@ -2391,8 +2589,6 @@ impl Workspace {
                 other => other.into(),
             })?;
         self.clear_rebuild_marker();
-        self.needs_rebuild
-            .store(false, std::sync::atomic::Ordering::Release);
         // Drafts live in-root under `<drafts_dir_name>/...`, so the
         // main reindex walk above already covers them; there is no
         // separate drafts subtree to walk.
@@ -2418,6 +2614,7 @@ impl Workspace {
                 }
             }
         }
+        recovery.complete()?;
         Ok(summary)
     }
 
@@ -3095,8 +3292,12 @@ impl Workspace {
     /// serving editor queries; until it does, graph and index may
     /// disagree about the journaled files.
     pub fn needs_replay_writes(&self) -> bool {
-        self.needs_replay_writes
-            .load(std::sync::atomic::Ordering::Acquire)
+        let status = self.recovery_status();
+        status
+            .active
+            .into_iter()
+            .chain(status.pending)
+            .any(|pass| pass.action == RecoveryAction::Replay)
     }
 
     /// Snapshot of the currently-journaled `(rel, op)` pairs.
@@ -3136,6 +3337,7 @@ impl Workspace {
     ///
     /// Returns the number of entries successfully replayed.
     pub fn replay_pending_writes(&self) -> Result<usize> {
+        let recovery = self.recovery_execution(RecoveryAction::Replay);
         let entries: Vec<(String, PendingOp)> = self
             .pending_writes
             .lock()
@@ -3163,13 +3365,7 @@ impl Workspace {
             }
             replayed += 1;
         }
-        // After a clean drain, the journal should already be
-        // empty (each successful call to index_file/forget_file
-        // clears its own entry). Belt-and-braces clear the flag.
-        if self.pending_writes.lock().unwrap().is_empty() {
-            self.needs_replay_writes
-                .store(false, std::sync::atomic::Ordering::Release);
-        }
+        recovery.complete()?;
         Ok(replayed)
     }
 
@@ -3217,6 +3413,7 @@ impl Workspace {
     /// hashing, which is far more expensive than the (mtime, size)
     /// stat check.
     pub fn reconcile(&self) -> Result<ReconcileReport> {
+        let recovery = self.recovery_execution(RecoveryAction::Reconcile);
         // Snapshot the graph's view of the world: per-file
         // (mtime, size) tuples. Graph stores mtime as Unix
         // seconds and size as bytes (None for either component
@@ -3297,11 +3494,13 @@ impl Workspace {
 
         upserted.sort();
         forgotten.sort();
-        Ok(ReconcileReport {
+        let report = ReconcileReport {
             upserted,
             forgotten,
             unchanged,
-        })
+        };
+        recovery.complete()?;
+        Ok(report)
     }
 
     /// Add an entry to the pending-writes journal and persist it.
@@ -3316,12 +3515,10 @@ impl Workspace {
         };
         persist_pending_writes(&self.paths.graph_dir, &snapshot)?;
         // The presence of any journaled entry implies "graph and
-        // index may disagree about this rel until replay." We
-        // do not set needs_replay_writes here: the flag is the
-        // "the previous PROCESS crashed mid-write" signal, not
-        // the "we are mid-write right now" one. A clean
-        // index_file completion removes its own entry before
-        // returning, so the flag stays false across normal use.
+        // index may disagree about this rel until replay." A normal
+        // in-process call does not request recovery because it clears
+        // its own entry before returning. A crash leaves the durable
+        // entry for the next open to seed into the coordinator.
         Ok(())
     }
 
@@ -4391,6 +4588,102 @@ mod tests {
         lib.register_workspace(workspace_dir.path()).unwrap();
         let workspace = lib.open_workspace(workspace_dir.path()).unwrap();
         (cfg, workspace_dir, workspace)
+    }
+
+    #[test]
+    fn recovery_generation_signal_during_active_forces_follow_up() {
+        let (_cfg, _root, workspace) = fixture();
+        assert!(workspace.recovery_status().is_ready());
+
+        let first_generation = workspace.request_policy_recovery(RecoveryAction::Reconcile);
+        let first = workspace.begin_recovery().unwrap();
+        assert_eq!(first.generation, first_generation);
+        assert_eq!(first.action, RecoveryAction::Reconcile);
+
+        let second_generation = workspace.request_policy_recovery(RecoveryAction::FullRebuild);
+        assert!(second_generation > first_generation);
+        let during = workspace.recovery_status();
+        assert_eq!(during.active, Some(first));
+        assert_eq!(
+            during.pending,
+            Some(RecoveryPass {
+                generation: second_generation,
+                action: RecoveryAction::FullRebuild,
+            })
+        );
+        assert!(!during.is_ready());
+
+        let after_first = workspace
+            .finish_recovery(first, RecoveryOutcome::Complete)
+            .unwrap();
+        assert_eq!(after_first.completed_generation, first_generation);
+        assert_eq!(
+            after_first.required_action(),
+            Some(RecoveryAction::FullRebuild)
+        );
+
+        let second = workspace.begin_recovery().unwrap();
+        workspace
+            .finish_recovery(second, RecoveryOutcome::Complete)
+            .unwrap();
+        assert!(workspace.recovery_status().is_ready());
+    }
+
+    #[test]
+    fn recovery_generation_provider_errors_coalesce_one_pending_pass() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.request_recovery(RecoveryAction::Reconcile);
+        let active = workspace.begin_recovery().unwrap();
+
+        let pending_generation = workspace.request_recovery(RecoveryAction::Reconcile);
+        assert_eq!(
+            workspace.request_recovery(RecoveryAction::Reconcile),
+            pending_generation
+        );
+        assert_eq!(
+            workspace.request_recovery(RecoveryAction::FullRebuild),
+            pending_generation
+        );
+
+        let status = workspace.recovery_status();
+        assert_eq!(status.generation, pending_generation);
+        assert_eq!(
+            status.pending,
+            Some(RecoveryPass {
+                generation: pending_generation,
+                action: RecoveryAction::FullRebuild,
+            })
+        );
+
+        workspace
+            .finish_recovery(active, RecoveryOutcome::Complete)
+            .unwrap();
+        let follow_up = workspace.begin_recovery().unwrap();
+        assert_eq!(follow_up.generation, pending_generation);
+        assert_eq!(follow_up.action, RecoveryAction::FullRebuild);
+    }
+
+    #[test]
+    fn recovery_generation_policy_requests_advance_and_discard_stale_tag() {
+        let (_cfg, _root, workspace) = fixture();
+        let stale_generation = workspace.request_policy_recovery(RecoveryAction::Replay);
+        let current_generation = workspace.request_policy_recovery(RecoveryAction::Reconcile);
+
+        assert!(current_generation > stale_generation);
+        assert_eq!(workspace.generation(), current_generation);
+        let current = workspace.begin_recovery().unwrap();
+        assert_eq!(current.generation, current_generation);
+        assert_eq!(current.action, RecoveryAction::Reconcile);
+        assert!(workspace
+            .finish_recovery(
+                RecoveryPass {
+                    generation: stale_generation,
+                    action: RecoveryAction::Replay,
+                },
+                RecoveryOutcome::Complete,
+            )
+            .is_err());
+        assert_eq!(workspace.recovery_status().active, Some(current));
     }
 
     #[test]

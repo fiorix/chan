@@ -408,47 +408,37 @@ Progress events carry a stage, current count, total count (`0` means indetermina
 Push vs. pull, and how the signals relate:
 
   - `ProgressCallback::on_progress` is the push side: zero or more events per long-running call, fired on the producer's thread. Events are best-effort hints, not a stream contract; a slow consumer may drop ticks. The on-disk state is the authority.
-  - `Workspace::is_reindexing()` is the pull side: true while a `reindex_with` is in flight in this process, cleared on every exit path (success, error, cancellation, panic) via a RAII guard. A Web App / WebSocket client uses this on first connect to render "indexing..." without waiting for the next push.
-  - `Workspace::needs_rebuild()` is orthogonal: set at workspace open when a stale `rebuild.inprogress` marker from a prior crashed reindex is found, cleared after the next successful `reindex_with` commits. Survives across process restarts, which the in-memory `is_reindexing()` cannot.
+  - `Workspace::recovery_status()` is the authoritative pull side. One short-lived mutex owns only the current `WorkspaceGeneration`, the last completed generation, one active `RecoveryPass`, and one pending pass. The mutex is never held across replay, reconcile, or rebuild work. `is_ready()` requires no active or pending pass and `completed_generation >= generation`; `required_action()` reports pending work before active work.
+  - `request_recovery` coalesces repeated lossy signals such as `ProviderError` into one pending generation and upgrades the action by `FullRebuild > Reconcile > Replay`. A signal arriving during an active pass creates exactly one newer pending generation, so it cannot be cleared by completion of stale work. `request_policy_recovery` always advances the generation because each immutable policy replacement needs a distinct tag, while pending work still collapses onto the newest tag.
+  - `begin_recovery` moves pending work into the single active slot and `finish_recovery` either completes that generation or requeues it without inventing a new one. `Workspace::is_reindexing()`, `needs_rebuild()`, and `needs_replay_writes()` remain compatibility projections of the coordinator during this release.
+  - At open, `rebuild.inprogress` and `pending_writes.json` seed one initial pending generation, with `FullRebuild` dominating `Replay`. The durable files remain the cross-process authority; the generation identifies in-process work and makes stale completion detectable.
   - `Workspace::reconcile()` is the diff-based recovery path. Walks the live tree, compares each editable-text file's mtime against the graph row, and emits journal-bracketed `index_file` / `forget_file` calls only for the deltas. Unchanged files are skipped, so reconcile costs O(N) stat + the per-file embed only for changed files. Use cases: cold open after offline edits, watcher-overflow recovery (inotify `IN_Q_OVERFLOW` / FSEvents coalesce-loss), post-`replay_pending_writes` sanity. The diff compares `(mtime, size)` tuples against the graph's stamped row; a same-mtime-different-size rewrite is caught via the size delta. Rows that carry `size = NULL` (stamped before a size was recorded) fall back to mtime-only for that row, and a subsequent `index_file` backfills size.
-  - `Workspace::needs_replay_writes()` is the per-file companion: set at workspace open when a non-empty `pending_writes.json` journal exists under `graph_dir/`. Each entry is a `(rel, op)` pair written by `index_file` / `forget_file` before either backend is touched and removed after both commit. A crash between the graph commit and the search-index commit leaves the entry behind; `Workspace::replay_pending_writes()` re-runs the journaled ops against the current on-disk truth and clears the journal. `Index` entries degrade to `forget` when the file no longer exists; `forget` entries are idempotent against an already-cleaned backend. All per-file mutation paths serialize through an internal `write_serial` mutex so the journal never disagrees with the in-flight backend state.
+  - `pending_writes.json` stores a `(rel, op)` pair written by `index_file` / `forget_file` before either backend is touched and removed after both commit. A crash between graph and search commits leaves the entry behind; `Workspace::replay_pending_writes()` re-runs journaled ops against current on-disk truth. `Index` entries degrade to `forget` when the file no longer exists; `forget` entries are idempotent against an already-cleaned backend.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Open
-    state "Open: read disk markers + journal" as Open
-    state "needs_rebuild (rebuild.inprogress)" as NeedsRebuild
-    state "needs_replay_writes (pending_writes.json)" as NeedsReplay
-    state "Reindexing (is_reindexing RAII guard)" as Reindexing
-    state "Replay (replay_pending_writes)" as Replay
-    state "Reconcile (mtime/size stat diff)" as Reconcile
-    state "Serving queries (graph + index agree)" as Serving
-    state "Per-file write (journal-bracketed)" as PerFile
+    state "Ready: completed >= current" as Ready
+    state "Pending generation N" as Pending
+    state "Active generation N" as Active
+    state "Pending generation N+1" as Newer
 
-    Open --> NeedsRebuild : rebuild.inprogress present
-    Open --> NeedsReplay : pending_writes.json non-empty
-    Open --> Reconcile : edits while process down
-    Open --> Serving : clean, both backends agree
+    Open --> Pending : marker or journal
+    Open --> Ready : no durable recovery state
+    Ready --> Pending : provider or policy signal
+    Pending --> Active : begin_recovery
+    Active --> Newer : signal during active pass
+    Active --> Ready : complete, no newer pending
+    Active --> Pending : retry same generation
+    Newer --> Pending : complete stale active pass
 
-    NeedsRebuild --> Reindexing : reindex full rebuild
-    Reindexing --> Serving : BM25 commit clears marker
-
-    NeedsReplay --> Replay : replay each journaled op
-    Replay --> Reconcile : post-recovery sanity pass
-
-    Reconcile --> Serving : per-file index_file / forget_file
-
-    Serving --> PerFile : live edit, watcher push hint
-    PerFile --> Serving : commit graph+index, clear journal
-    Serving --> Reconcile : watcher overflow / ProviderError
-
-    note right of Reconcile
-      pull side: on-disk mtime/size is authority
-      push side: watcher hints, in-proc is_reindexing
+    note right of Active
+      coordinator mutex released during work
+      stale tags cannot clear newer pending work
     end note
 ```
 
-*Open-time recovery signals and the in-process vs on-disk convergence paths: persisted markers/journal drive pull-side rebuild/replay/reconcile while the watcher pushes incremental hints, with the live filesystem stat as authority.*
+*Durable markers seed recovery, monotonic generations prevent stale completion, and coalescing keeps repeated provider loss bounded to one required follow-up pass.*
 
 Cardinality is per-file for `IndexFile` / `RenameRewrite` / `GraphRebuild` and per-batch for `EmbedBatch`; on a 10k-file workspace a full reindex can push tens of thousands of events. Consumers that fan out over a transport (chan-server WebSocket, native FFI bridge) should coalesce or rate-limit upstream of the socket; the producer side does not throttle.
 
