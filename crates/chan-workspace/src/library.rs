@@ -14,7 +14,10 @@ use crate::error::{ChanError, Result};
 use crate::fs_ops::WalkFilter;
 use crate::lock::WorkspaceLock;
 use crate::paths;
-use crate::registry::{config_declares_index_excluded_dirs, KnownWorkspace, Registry};
+use crate::registry::{
+    config_declares_index_excluded_dirs, current_default_index_excluded_dirs,
+    index_excluded_dirs_is_stock_default, KnownWorkspace, Registry,
+};
 use crate::workspace::Workspace;
 
 /// Selects how aggressive `Library::reset_workspace` is.
@@ -97,8 +100,19 @@ impl Library {
     /// Open a Library against an explicit config path. Used in
     /// tests and by callers that want a non-default location.
     pub fn open_at(config_path: PathBuf) -> Result<Self> {
-        let registry = Registry::load_from(&config_path)?;
-        if config_path.exists() && !config_declares_index_excluded_dirs(&config_path) {
+        let mut registry = Registry::load_from(&config_path)?;
+        // Stock-default upgrade: a config whose declared exclusions
+        // match the pre-v0.76.0 default exactly gets migrated to the
+        // current default (build-system output trees joined the set).
+        // A customized list -- including an empty one, and including
+        // one that already carries buck-out by hand -- is the user's
+        // own and is never touched.
+        let upgraded = index_excluded_dirs_is_stock_default(&registry.index_excluded_dirs);
+        if upgraded {
+            registry.index_excluded_dirs = current_default_index_excluded_dirs();
+        }
+        if upgraded || (config_path.exists() && !config_declares_index_excluded_dirs(&config_path))
+        {
             if let Err(e) = registry.save_to(&config_path) {
                 tracing::warn!(
                     error = %e,
@@ -691,6 +705,61 @@ mod tests {
         assert!(!lib.walk_filter().is_excluded("node_modules"));
         assert!(lib.walk_filter().is_excluded("dist"));
         assert_eq!(lib.drafts_dir(), "Scratch");
+    }
+
+    #[test]
+    fn open_at_upgrades_a_stock_default_exclusion_list() {
+        let cfg = TempDir::new().unwrap();
+        let config_path = cfg.path().join("config.toml");
+        // The exact pre-v0.76.0 default set, as materialized into an
+        // existing config.toml by an older chan.
+        std::fs::write(
+            &config_path,
+            "index_excluded_dirs = [\".git\", \".hg\", \".svn\", \"node_modules\", \"target\", \"__pycache__\", \".venv\", \"venv\", \".tox\", \".pytest_cache\", \".mypy_cache\", \".ruff_cache\", \".cache\", \"dist\", \"build\"]\nworkspaces = []\n",
+        )
+        .unwrap();
+        let lib = Library::open_at(config_path.clone()).unwrap();
+        // The build-system output trees joined the default set...
+        for name in ["buck-out", ".buckos", "distfiles", "prebuilt", "vendor"] {
+            assert!(
+                lib.walk_filter().is_excluded(name),
+                "stock default must pick up {name}"
+            );
+        }
+        // ...and the upgrade is persisted back to the file.
+        let raw = std::fs::read_to_string(&config_path).unwrap();
+        assert!(raw.contains("buck-out"), "upgrade persisted: {raw}");
+    }
+
+    #[test]
+    fn open_at_leaves_a_customized_exclusion_list_alone() {
+        let cfg = TempDir::new().unwrap();
+        let config_path = cfg.path().join("config.toml");
+        // One hand edit (buck-out added per the incident-relief note):
+        // no longer the stock default, so no migration.
+        std::fs::write(
+            &config_path,
+            "index_excluded_dirs = [\".git\", \".hg\", \".svn\", \"node_modules\", \"target\", \"__pycache__\", \".venv\", \"venv\", \".tox\", \".pytest_cache\", \".mypy_cache\", \".ruff_cache\", \".cache\", \"dist\", \"build\", \"buck-out\"]\nworkspaces = []\n",
+        )
+        .unwrap();
+        let lib = Library::open_at(config_path).unwrap();
+        assert!(lib.walk_filter().is_excluded("buck-out"));
+        assert!(
+            !lib.walk_filter().is_excluded("distfiles"),
+            "a customized list is the user's own; no silent union"
+        );
+    }
+
+    #[test]
+    fn open_at_leaves_an_empty_exclusion_list_alone() {
+        let cfg = TempDir::new().unwrap();
+        let config_path = cfg.path().join("config.toml");
+        std::fs::write(&config_path, "index_excluded_dirs = []\nworkspaces = []\n").unwrap();
+        let lib = Library::open_at(config_path).unwrap();
+        assert!(
+            !lib.walk_filter().is_excluded("target"),
+            "explicit empty is a user choice, not a stock default"
+        );
     }
 
     #[test]

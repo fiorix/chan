@@ -93,10 +93,10 @@ Global registry fields (not per-workspace), persisted in the same `~/.chan/confi
 
 | Field | Type | Default | Reachability | Consumers |
 |-------|------|---------|--------------|-----------|
-| `index_excluded_dirs` | `Vec<String>` | dev-junk set | hand-edited TOML only | walk filter for index + graph rebuild |
+| `index_excluded_dirs` | `Vec<String>` | dev-junk + build-output set | hand-edited TOML only | walk filter for index + graph rebuild + (Linux) watch registration |
 | `drafts_dir` | `String` | `".Drafts"` | hand-edited TOML only | in-tree Drafts dir name for Cmd+N |
 
-Both `index_excluded_dirs` and `drafts_dir` are hand-edited in the TOML and have no UI surface. `drafts_dir` names a real hidden directory at the workspace root (default `.Drafts/`) that holds Cmd+N scratch work as `<name>/draft.md` plus companions. It is created lazily on the first Cmd+N, so an untouched workspace has no such directory. Because it lives in-tree it participates in search, graph, and watch through the normal machinery; add `.Drafts/` to a `.gitignore` to keep drafts out of SCM.
+Both `index_excluded_dirs` and `drafts_dir` are hand-edited in the TOML and have no UI surface. The `index_excluded_dirs` default covers VCS dirs, dependency and build-output trees (`node_modules`, `target`, `dist`, `build`, `buck-out`, `.buckos`, `downloads`, `distfiles`, `prebuilt`, `vendor`, `prelude`, ...); names match by basename at any depth, case-insensitive, and on Linux excluded subtrees are not even registered with inotify. A config whose list matches the pre-v0.76.0 default exactly is upgraded to the current default on open; any customized list (including an empty one) is left alone. `drafts_dir` names a real hidden directory at the workspace root (default `.Drafts/`) that holds Cmd+N scratch work as `<name>/draft.md` plus companions. It is created lazily on the first Cmd+N, so an untouched workspace has no such directory. Because it lives in-tree it participates in search, graph, and watch through the normal machinery; add `.Drafts/` to a `.gitignore` to keep drafts out of SCM.
 
 ### `<state_dir>/index/<uuid>/config.toml` -- `IndexConfig`
 

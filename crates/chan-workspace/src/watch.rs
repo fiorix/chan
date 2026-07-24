@@ -11,6 +11,12 @@
 // forwarded so the server indexer can recognize checkout storms and
 // fall back to a full rebuild.
 //
+// On Linux the dispatch filter is only half the policy: registration
+// is a manual filtered recursion (excluded subtrees never get an
+// inotify watch at all) with a registrar thread that picks up
+// directories created after start and catch-up-scans moved-in trees.
+// Other platforms use the backend's native recursive watch.
+//
 // Consumer expectations:
 //
 //   * No debouncing. A single editor save typically produces a
@@ -106,11 +112,262 @@ impl WatchRoot {
     }
 }
 
-/// Holds the underlying watcher; drop to stop watching.
+/// Holds the underlying watcher machinery; drop to stop watching.
 pub struct WatchHandle {
-    /// Kept alive so the watcher thread doesn't exit. Field is
-    /// `_watcher` because we don't access it after construction.
+    /// Linux: registration requests flow to the registrar thread,
+    /// which owns the watcher. Dropping the sender closes the
+    /// channel; the thread exits and the watcher drops with it.
+    #[cfg(target_os = "linux")]
+    _reg_tx: RegistrationTx,
+    /// Linux: the registrar thread. Must outlive the dispatch
+    /// closure, which holds a sender clone.
+    #[cfg(target_os = "linux")]
+    _registrar: std::thread::JoinHandle<()>,
+    /// Non-Linux: the watcher itself, kept alive so its worker
+    /// thread doesn't exit.
+    #[cfg(not(target_os = "linux"))]
     _watcher: RecommendedWatcher,
+}
+
+/// A directory-registration request from the dispatch thread to the
+/// registrar thread. The plan is computed dispatch-side (it has the
+/// filter and the roots); the registrar only executes it.
+struct DirRegistration {
+    abs: PathBuf,
+    rel: String,
+    prefix: Option<String>,
+    plan: DirPlan,
+}
+
+/// Registration requests to the registrar thread. The sender is
+/// cheap to clone; `send` never blocks the notify worker.
+type RegistrationTx = std::sync::mpsc::Sender<DirRegistration>;
+
+/// Linux: owns the watcher and applies registration requests one at
+/// a time. notify's inotify backend answers `watch()` through the
+/// event loop, so calling it from the event-loop callback deadlocks
+/// the worker -- registrations must happen on any OTHER thread.
+/// Queued requests are drained in order; on channel close the thread
+/// returns and the watcher drops, stopping the notify worker.
+#[cfg(target_os = "linux")]
+fn registrar_loop(
+    rx: std::sync::mpsc::Receiver<DirRegistration>,
+    mut watcher: RecommendedWatcher,
+    filter: Arc<WalkFilter>,
+    cb: Arc<dyn WatchCallback>,
+) {
+    while let Ok(reg) = rx.recv() {
+        add_watch_quiet(&mut watcher, &reg.abs, &reg.rel);
+        if reg.plan == DirPlan::WatchAndDescend {
+            catch_up_subtree(
+                &mut watcher,
+                reg.prefix.as_deref(),
+                &reg.abs,
+                &reg.rel,
+                &filter,
+                &*cb,
+            );
+        }
+    }
+}
+
+/// What to do with a directory encountered by the registration walk
+/// or the new-directory tracker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirPlan {
+    /// Never watch, never descend (`.chan`, excluded basenames).
+    Skip,
+    /// Watch the directory itself but never descend: VCS dirs, so
+    /// `.git/HEAD` / `.git/index` / `.hg/dirstate` events keep flowing
+    /// (the indexer keys checkout-storm detection off them) without
+    /// registering the whole object store.
+    WatchOnly,
+    /// Watch and recurse.
+    WatchAndDescend,
+}
+
+/// Registration policy for one directory. Only ever applied to
+/// children of directories already accepted for descent, so ancestor
+/// components are clean by construction; the checks here are about
+/// the directory itself.
+fn plan_dir(rel: &str, name: &str, filter: &WalkFilter) -> DirPlan {
+    if is_chan_internal(rel) {
+        return DirPlan::Skip;
+    }
+    // VCS dirs are watched top-level-only so control files stream but
+    // the object store never registers -- unless the user removed the
+    // VCS dir from the exclusion set, in which case treat it like any
+    // other directory (the dispatch filter would forward its events).
+    if matches!(name, ".git" | ".hg" | ".svn") && filter.is_excluded(name) {
+        return DirPlan::WatchOnly;
+    }
+    if filter.is_excluded(name) {
+        return DirPlan::Skip;
+    }
+    DirPlan::WatchAndDescend
+}
+
+fn add_watch_quiet(watcher: &mut RecommendedWatcher, abs: &Path, rel: &str) {
+    if let Err(e) = watcher.watch(abs, RecursiveMode::NonRecursive) {
+        // A vanished directory mid-walk is routine; an exhausted
+        // inotify limit surfaces separately through the overflow path.
+        tracing::warn!(error = %e, path = %rel, "watcher: failed to register directory");
+    }
+}
+
+/// Linux: register `root` non-recursively, then walk and register
+/// every accepted subdirectory ourselves. notify's blanket
+/// RecursiveMode would register inotify watches on EVERY directory
+/// including `node_modules`/`target`/`buck-out` subtrees the dispatch
+/// filter then mutes -- pure descriptor and memory waste on build-
+/// output trees, and what pushes big repos past the inotify limit.
+#[cfg(target_os = "linux")]
+fn register_root(
+    watcher: &mut RecommendedWatcher,
+    root: &WatchRoot,
+    filter: &WalkFilter,
+) -> Result<()> {
+    watcher.watch(&root.abs, RecursiveMode::NonRecursive)?;
+    register_subdirs(watcher, &root.abs, "", filter);
+    Ok(())
+}
+
+fn register_subdirs(watcher: &mut RecommendedWatcher, abs: &Path, rel: &str, filter: &WalkFilter) {
+    let Ok(entries) = std::fs::read_dir(abs) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        // DirEntry::file_type does not follow symlinks: symlinked
+        // directories are never registered, mirroring the walker's
+        // no-follow rule.
+        if !ft.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let child_rel = if rel.is_empty() {
+            name.to_string()
+        } else {
+            format!("{rel}/{name}")
+        };
+        match plan_dir(&child_rel, name, filter) {
+            DirPlan::Skip => {}
+            DirPlan::WatchOnly => add_watch_quiet(watcher, &entry.path(), &child_rel),
+            DirPlan::WatchAndDescend => {
+                add_watch_quiet(watcher, &entry.path(), &child_rel);
+                register_subdirs(watcher, &entry.path(), &child_rel, filter);
+            }
+        }
+    }
+}
+
+/// Non-Linux: the backends (FSEvents, ReadDirectoryChanges) recurse
+/// natively with no per-directory descriptor cost, so the blanket
+/// recursive watch stays; the dispatch filter mutes excluded subtrees
+/// there exactly as before.
+#[cfg(not(target_os = "linux"))]
+fn register_root(
+    watcher: &mut RecommendedWatcher,
+    root: &WatchRoot,
+    _filter: &WalkFilter,
+) -> Result<()> {
+    watcher.watch(&root.abs, RecursiveMode::Recursive)?;
+    Ok(())
+}
+
+/// Linux: a directory that just appeared under a watched parent must
+/// start streaming its subtree. The registration itself is queued
+/// for the registrar thread (see registrar_loop for why it cannot
+/// happen on the notify worker). inotify does not replay pre-existing
+/// contents of a moved-in tree either, so an accepted directory also
+/// gets a catch-up scan there that synthesizes Created events for the
+/// files already inside -- without it those files are invisible until
+/// the next full reconcile (a gap the blanket recursive watch had
+/// too).
+#[cfg(target_os = "linux")]
+fn track_new_dirs(
+    roots: &[WatchRoot],
+    filter: &WalkFilter,
+    reg_tx: &RegistrationTx,
+    candidate: Option<&Path>,
+) {
+    let Some(abs) = candidate else { return };
+    let Ok(meta) = std::fs::symlink_metadata(abs) else {
+        return;
+    };
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return;
+    }
+    let Some((root, rel)) = locate_root(roots, abs) else {
+        return;
+    };
+    let Some(name) = abs.file_name().and_then(|n| n.to_str()) else {
+        // The root itself; already watched at start.
+        return;
+    };
+    let plan = plan_dir(&rel, name, filter);
+    if plan == DirPlan::Skip {
+        return;
+    }
+    let _ = reg_tx.send(DirRegistration {
+        abs: abs.to_path_buf(),
+        rel,
+        prefix: root.prefix.clone(),
+        plan,
+    });
+}
+
+/// Register accepted subdirectories of a newly appeared tree and
+/// emit Created events for the regular files within, filtered exactly
+/// like live dispatch. Runs on the registrar thread; synthesized
+/// events may race live ones (a file created in the new tree can
+/// surface twice), the same duplicate class as a notify save burst.
+#[cfg(target_os = "linux")]
+fn catch_up_subtree(
+    watcher: &mut RecommendedWatcher,
+    prefix: Option<&str>,
+    abs: &Path,
+    rel: &str,
+    filter: &WalkFilter,
+    cb: &dyn WatchCallback,
+) {
+    let Ok(entries) = std::fs::read_dir(abs) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let child_rel = format!("{rel}/{name}");
+        if ft.is_dir() {
+            match plan_dir(&child_rel, name, filter) {
+                DirPlan::Skip => {}
+                DirPlan::WatchOnly => add_watch_quiet(watcher, &entry.path(), &child_rel),
+                DirPlan::WatchAndDescend => {
+                    add_watch_quiet(watcher, &entry.path(), &child_rel);
+                    catch_up_subtree(watcher, prefix, &entry.path(), &child_rel, filter, cb);
+                }
+            }
+        } else if ft.is_file() && !is_filtered(&child_rel, filter) {
+            safe_call(
+                cb,
+                WatchEvent {
+                    kind: WatchKind::Created,
+                    path: Some(apply_prefix(prefix, child_rel)),
+                    to: None,
+                },
+            );
+        }
+    }
 }
 
 impl WatchHandle {
@@ -144,9 +401,24 @@ impl WatchHandle {
         let cb_clone = cb.clone();
         let dispatch_roots_for_cb = Arc::clone(&dispatch_roots);
         let filter_for_cb = Arc::clone(&filter);
+        #[cfg(target_os = "linux")]
+        let (reg_tx, reg_rx) = std::sync::mpsc::channel::<DirRegistration>();
+        #[cfg(target_os = "linux")]
+        let reg_tx_for_cb = reg_tx.clone();
+        // Non-Linux has no registrar thread; the sender end of a dead
+        // channel keeps dispatch's call shape identical and sends are
+        // silently dropped.
+        #[cfg(not(target_os = "linux"))]
+        let (reg_tx_for_cb, _reg_rx_unused) = std::sync::mpsc::channel::<DirRegistration>();
         let mut watcher =
             notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
-                Ok(event) => dispatch(&dispatch_roots_for_cb, &filter_for_cb, event, &*cb_clone),
+                Ok(event) => dispatch(
+                    &dispatch_roots_for_cb,
+                    &filter_for_cb,
+                    event,
+                    &*cb_clone,
+                    &reg_tx_for_cb,
+                ),
                 Err(e) => {
                     // notify backend errors (inotify queue overflow,
                     // fseventsd disconnect, watch path vanishing)
@@ -167,8 +439,19 @@ impl WatchHandle {
                 }
             })?;
         for root in dispatch_roots.iter() {
-            watcher.watch(&root.abs, RecursiveMode::Recursive)?;
+            register_root(&mut watcher, root, &filter)?;
         }
+        #[cfg(target_os = "linux")]
+        {
+            let registrar = std::thread::spawn(move || {
+                registrar_loop(reg_rx, watcher, filter, cb);
+            });
+            Ok(Self {
+                _reg_tx: reg_tx,
+                _registrar: registrar,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
         Ok(Self { _watcher: watcher })
     }
 }
@@ -199,13 +482,38 @@ fn apply_prefix(prefix: Option<&str>, rel: String) -> String {
     }
 }
 
+/// The directory a live event just made appear under a watched root,
+/// if any. Rename modes matter: a MOVED_TO-only event carries the
+/// destination in `paths[0]` (notify's `RenameMode::To`), a full
+/// rename in `paths[1]`; a MOVED_FROM-only event means the tree left.
+#[cfg(target_os = "linux")]
+fn new_dir_candidate(kind: &notify::EventKind, paths: &[PathBuf]) -> Option<PathBuf> {
+    use notify::event::{ModifyKind, RenameMode};
+    use notify::EventKind;
+    match kind {
+        EventKind::Create(_) => paths.first().cloned(),
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => paths.get(1).cloned(),
+        EventKind::Modify(ModifyKind::Name(RenameMode::To)) => paths.first().cloned(),
+        EventKind::Modify(ModifyKind::Name(RenameMode::From)) => None,
+        EventKind::Modify(ModifyKind::Name(_)) => {
+            paths.get(1).cloned().or_else(|| paths.first().cloned())
+        }
+        _ => None,
+    }
+}
+
 fn dispatch(
     roots: &[WatchRoot],
     filter: &WalkFilter,
     event: notify::Event,
     cb: &dyn WatchCallback,
+    reg_tx: &RegistrationTx,
 ) {
     use notify::EventKind;
+    // Computed before the kind match moves `event.kind`: the rename
+    // mode decides which path (if any) is the appeared directory.
+    #[cfg(target_os = "linux")]
+    let dir_candidate = new_dir_candidate(&event.kind, &event.paths);
     let kind = match event.kind {
         EventKind::Create(_) => WatchKind::Created,
         EventKind::Modify(notify::event::ModifyKind::Name(_)) => WatchKind::Renamed,
@@ -216,6 +524,15 @@ fn dispatch(
     let mut paths = event.paths.into_iter();
     let from = paths.next();
     let to = paths.next();
+
+    // Linux: queue registration (and catch-up scan) for directories
+    // that appeared under a watched parent, before the consumer
+    // filter runs: the registration policy is independent of this one
+    // event's fate.
+    #[cfg(target_os = "linux")]
+    track_new_dirs(roots, filter, reg_tx, dir_candidate.as_deref());
+    #[cfg(not(target_os = "linux"))]
+    let _ = reg_tx;
 
     let from_resolved = from
         .as_deref()
@@ -499,6 +816,7 @@ mod tests {
         let filter = default_filter();
         let root = PathBuf::from("/workspace");
         let roots = [WatchRoot::workspace(&root)];
+        let (reg_tx, _reg_rx) = std::sync::mpsc::channel();
 
         // A modify under node_modules: dropped, callback never fires.
         dispatch(
@@ -512,6 +830,7 @@ mod tests {
                 attrs: Default::default(),
             },
             &cb,
+            &reg_tx,
         );
         assert!(
             cb.0.lock().unwrap().is_empty(),
@@ -530,9 +849,167 @@ mod tests {
                 attrs: Default::default(),
             },
             &cb,
+            &reg_tx,
         );
         let events = cb.0.lock().unwrap();
         assert_eq!(events.len(), 1, "real note event should be forwarded");
         assert_eq!(events[0].path.as_deref(), Some("notes/today.md"));
+    }
+
+    // ---- Linux filtered-registration suite -------------------------
+
+    #[cfg(target_os = "linux")]
+    mod filtered_registration {
+        use super::*;
+        use std::sync::mpsc::{channel, Receiver};
+        use std::time::{Duration, Instant};
+        use tempfile::TempDir;
+
+        struct Channel(std::sync::Mutex<std::sync::mpsc::Sender<WatchEvent>>);
+        impl WatchCallback for Channel {
+            fn on_event(&self, e: WatchEvent) {
+                let _ = self.0.lock().unwrap().send(e);
+            }
+        }
+
+        fn start_handle(root: &TempDir) -> (WatchHandle, Receiver<WatchEvent>) {
+            let (tx, rx) = channel();
+            let cb = Channel(std::sync::Mutex::new(tx));
+            let roots = [WatchRoot::workspace(root.path())];
+            let handle = WatchHandle::start(&roots, Arc::new(default_filter()), Arc::new(cb))
+                .expect("watcher starts");
+            (handle, rx)
+        }
+
+        /// Collect events until `deadline`, returning everything seen.
+        fn drain(rx: &Receiver<WatchEvent>, deadline: Duration) -> Vec<WatchEvent> {
+            let start = Instant::now();
+            let mut out = Vec::new();
+            while start.elapsed() < deadline {
+                if let Ok(e) = rx.recv_timeout(Duration::from_millis(100)) {
+                    out.push(e);
+                }
+            }
+            out
+        }
+
+        /// Wait until an event matching `pred` shows up (or the
+        /// deadline lapses and the collected events are returned for
+        /// a useful assertion message).
+        fn wait_for(
+            rx: &Receiver<WatchEvent>,
+            deadline: Duration,
+            pred: impl Fn(&WatchEvent) -> bool,
+        ) -> Option<WatchEvent> {
+            let start = Instant::now();
+            while start.elapsed() < deadline {
+                match rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(e) if pred(&e) => return Some(e),
+                    Ok(_) => {}
+                    Err(_) => {}
+                }
+            }
+            None
+        }
+
+        #[test]
+        fn excluded_subtree_is_never_watched() {
+            let root = TempDir::new().unwrap();
+            std::fs::create_dir_all(root.path().join("buck-out/gen")).unwrap();
+            std::fs::create_dir_all(root.path().join("src")).unwrap();
+            let (_h, rx) = start_handle(&root);
+            // Registration settled (give the worker a beat), then write.
+            std::thread::sleep(Duration::from_millis(300));
+            std::fs::write(root.path().join("buck-out/gen/out.txt"), "x").unwrap();
+            std::fs::write(root.path().join("src/real.md"), "x").unwrap();
+
+            let seen = wait_for(&rx, Duration::from_secs(5), |e| {
+                e.path.as_deref() == Some("src/real.md")
+            });
+            assert!(seen.is_some(), "event for src/real.md must arrive");
+            let strays = drain(&rx, Duration::from_millis(500));
+            assert!(
+                !strays
+                    .iter()
+                    .any(|e| e.path.as_deref().unwrap_or("").starts_with("buck-out")),
+                "excluded subtree must stay dark: {strays:?}"
+            );
+        }
+
+        #[test]
+        fn new_included_dir_streams_and_new_excluded_dir_stays_dark() {
+            let root = TempDir::new().unwrap();
+            let (_h, rx) = start_handle(&root);
+            std::thread::sleep(Duration::from_millis(300));
+            // A directory created AFTER start must start streaming:
+            // registration tracking picks it up on its Created event.
+            std::fs::create_dir_all(root.path().join("fresh")).unwrap();
+            std::fs::create_dir_all(root.path().join("buck-out")).unwrap();
+            std::thread::sleep(Duration::from_millis(500));
+            std::fs::write(root.path().join("fresh/new.md"), "x").unwrap();
+            std::fs::write(root.path().join("buck-out/gen.txt"), "x").unwrap();
+
+            let seen = wait_for(&rx, Duration::from_secs(5), |e| {
+                e.path.as_deref() == Some("fresh/new.md")
+            });
+            assert!(
+                seen.is_some(),
+                "file inside a post-start directory must stream"
+            );
+            let strays = drain(&rx, Duration::from_millis(500));
+            assert!(
+                !strays
+                    .iter()
+                    .any(|e| e.path.as_deref().unwrap_or("").starts_with("buck-out")),
+                "post-start excluded dir must stay dark: {strays:?}"
+            );
+        }
+
+        #[test]
+        fn moved_in_tree_emits_catch_up_events() {
+            let root = TempDir::new().unwrap();
+            let staging = TempDir::new().unwrap();
+            // Build the tree OUTSIDE the watched root, then rename it
+            // in: inotify cannot replay the pre-existing contents, so
+            // the catch-up scan is the only way these files surface.
+            std::fs::create_dir_all(staging.path().join("tree/node_modules/pkg")).unwrap();
+            std::fs::create_dir_all(staging.path().join("tree/docs")).unwrap();
+            std::fs::write(staging.path().join("tree/docs/a.md"), "a").unwrap();
+            std::fs::write(staging.path().join("tree/node_modules/pkg/b.js"), "b").unwrap();
+            let (_h, rx) = start_handle(&root);
+            std::thread::sleep(Duration::from_millis(300));
+            std::fs::rename(staging.path().join("tree"), root.path().join("tree")).unwrap();
+
+            let seen = wait_for(&rx, Duration::from_secs(5), |e| {
+                e.kind == WatchKind::Created && e.path.as_deref() == Some("tree/docs/a.md")
+            });
+            assert!(
+                seen.is_some(),
+                "catch-up scan must emit Created for moved-in files"
+            );
+            let strays = drain(&rx, Duration::from_millis(500));
+            assert!(
+                !strays
+                    .iter()
+                    .any(|e| e.path.as_deref().unwrap_or("").contains("node_modules")),
+                "catch-up scan honors the exclusion set: {strays:?}"
+            );
+        }
+
+        #[test]
+        fn vcs_control_files_still_flow() {
+            let root = TempDir::new().unwrap();
+            std::fs::create_dir_all(root.path().join(".git")).unwrap();
+            let (_h, rx) = start_handle(&root);
+            std::thread::sleep(Duration::from_millis(300));
+            std::fs::write(root.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+            let seen = wait_for(&rx, Duration::from_secs(5), |e| {
+                e.path.as_deref() == Some(".git/HEAD")
+            });
+            assert!(
+                seen.is_some(),
+                ".git top level stays watched so control files stream"
+            );
+        }
     }
 }

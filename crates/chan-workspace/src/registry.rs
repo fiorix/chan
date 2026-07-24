@@ -36,7 +36,52 @@ pub const DEFAULT_INDEX_EXCLUDED_DIRS: &[&str] = &[
     ".cache",
     "dist",
     "build",
+    // Build-system output trees (Buck2's world among them): walked,
+    // watched, and indexed at enormous cost, never useful in search or
+    // graph. Users can still remove a name via `index_excluded_dirs`.
+    "buck-out",
+    ".buckos",
+    "downloads",
+    "distfiles",
+    "prebuilt",
+    "vendor",
+    "prelude",
 ];
+
+/// The default set as shipped before build-system output trees were
+/// added (v0.76.0). `Library::open_at` upgrades a config whose declared
+/// list matches this set exactly to the current default, so stock
+/// installs pick the new names up; a customized list is always the
+/// user's own.
+pub(crate) const OLD_DEFAULT_INDEX_EXCLUDED_DIRS: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "target",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".tox",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".cache",
+    "dist",
+    "build",
+];
+
+/// True when `declared` matches the pre-v0.76.0 default set exactly
+/// (any order, case-insensitive): the list is the stock one and can be
+/// upgraded to the current default without overruling a user's edit.
+pub(crate) fn index_excluded_dirs_is_stock_default(declared: &[String]) -> bool {
+    declared.len() == OLD_DEFAULT_INDEX_EXCLUDED_DIRS.len()
+        && declared.iter().all(|name| {
+            OLD_DEFAULT_INDEX_EXCLUDED_DIRS
+                .iter()
+                .any(|old| old.eq_ignore_ascii_case(name))
+        })
+}
 
 /// On-disk shape of the chan-workspace config TOML.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +122,12 @@ fn default_index_excluded_dirs() -> Vec<String> {
         .iter()
         .map(|name| (*name).to_owned())
         .collect()
+}
+
+/// Current default list as a Vec, for the open-time stock-default
+/// upgrade in `Library::open_at`.
+pub(crate) fn current_default_index_excluded_dirs() -> Vec<String> {
+    default_index_excluded_dirs()
 }
 
 /// Default in-root drafts directory name. Hidden (`.`-prefixed) so it
