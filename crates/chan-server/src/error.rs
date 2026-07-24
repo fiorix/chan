@@ -64,6 +64,7 @@ pub fn err_from(e: &chan_workspace::ChanError) -> Response {
         }
         C::WorkspaceLocked | C::PathAlreadyExists(_) => (StatusCode::CONFLICT, e.to_string()),
         C::DraftBroken { .. } => (StatusCode::BAD_REQUEST, e.to_string()),
+        C::WriteTooLarge { .. } => (StatusCode::PAYLOAD_TOO_LARGE, e.to_string()),
         C::Io(s) if s.contains("No such file") || s.contains("not found") => {
             (StatusCode::NOT_FOUND, e.to_string())
         }
@@ -134,6 +135,20 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(msg.contains("untitled-1"));
         assert!(msg.contains("missing draft.md"));
+    }
+
+    #[tokio::test]
+    async fn err_from_maps_write_too_large_to_413() {
+        // A user-correctable size refusal is 413, never a 500: the SPA
+        // surfaces honest "write too large" messaging, not a server fault.
+        let (status, msg) = status_and_error(err_from(&chan_workspace::ChanError::WriteTooLarge {
+            kind: "text",
+            size: 6_291_573,
+            limit: 6_291_569,
+        }))
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(msg.contains("too large"));
     }
 
     #[tokio::test]

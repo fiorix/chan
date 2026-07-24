@@ -2333,14 +2333,15 @@ mod doc_divert_tests {
     use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex, RwLock};
 
-    use axum::body::to_bytes;
+    use axum::body::{to_bytes, Body};
     use axum::extract::{Path as AxumPath, Query, State};
-    use axum::http::{header, StatusCode};
+    use axum::http::{header, Request, StatusCode};
     use axum::Json;
     use chan_workspace::{SearchAggression, WatchEvent, WatchKind};
     use serde_json::Value;
     use tempfile::TempDir;
     use tokio::sync::{broadcast, watch};
+    use tower::ServiceExt;
 
     use super::{api_read_file, api_write_file, ReadFileQuery, WriteBody};
     use crate::doc_sessions::changes::{replace_diff, UpdateJson};
@@ -2412,6 +2413,57 @@ mod doc_divert_tests {
     pub(super) async fn body_json(resp: axum::response::Response) -> Value {
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// A legacy-oversize file's save must reach the workspace's own
+    /// size check: axum's 2 MiB default body limit would otherwise
+    /// reject every save of a >2 MiB document before the handler runs,
+    /// defeating the max(prev_size, limit) legacy rule with an opaque
+    /// HTTP-layer error. Mirrors window.rs's reply-body test.
+    #[tokio::test]
+    async fn put_files_accepts_legacy_oversize_bodies() {
+        let (_cfg, root, state) = divert_app();
+        let prev = "y".repeat(3 * 1024 * 1024);
+        std::fs::write(root.path().join("legacy.md"), &prev).unwrap();
+        let token_ns = state
+            .try_workspace()
+            .unwrap()
+            .stat("legacy.md")
+            .unwrap()
+            .mtime_ns
+            .unwrap();
+        let router = crate::router(state);
+
+        // 2.5 MiB body: under prev_size (allowed by the legacy rule),
+        // over axum's 2 MiB default (rejected without the raised
+        // DefaultBodyLimit on the route).
+        let shrunk = "z".repeat(5 * 1024 * 1024 / 2);
+        let body = serde_json::to_string(&serde_json::json!({
+            "content": shrunk,
+            "expected_mtime": null,
+            "expected_mtime_ns": token_ns.to_string(),
+        }))
+        .unwrap();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/files/legacy.md")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the raised DefaultBodyLimit on PUT /api/files was removed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("legacy.md")).unwrap(),
+            shrunk
+        );
     }
 
     #[tokio::test]

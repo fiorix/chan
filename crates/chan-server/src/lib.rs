@@ -149,7 +149,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::DefaultBodyLimit;
 use axum::middleware;
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 use chan_workspace::{
     Library, ProgressCallback, ProgressEvent, ProgressStage, WatchEvent, Workspace,
@@ -1596,9 +1596,20 @@ fn router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/api/files/{*path}",
-            get(api_read_file)
-                .put(api_write_file)
-                .delete(api_delete_file),
+            get(api_read_file).delete(api_delete_file),
+        )
+        // PUT gets the same raised body limit as the other write
+        // routes: the workspace's own caps are the authority (2 MiB for
+        // new text, max(prev_size, 2 MiB) for legacy-oversize files,
+        // BYTES_WRITE_LIMIT for bytes), and a legacy file's save must
+        // REACH that check. Axum's 2 MiB default would reject every
+        // save of a >2 MiB document with an opaque body error instead,
+        // silently turning legacy big files read-only in the editor.
+        .route(
+            "/api/files/{*path}",
+            put(api_write_file).layer(DefaultBodyLimit::max(
+                chan_workspace::BYTES_WRITE_LIMIT as usize,
+            )),
         )
         .route("/api/move", post(api_move))
         .route("/api/fs/transfer", post(api_fs_transfer))
