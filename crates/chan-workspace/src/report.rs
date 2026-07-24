@@ -110,6 +110,9 @@ impl ReportState {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
+            if idx.path_policy_generation() != Some(ev.generation.get()) {
+                return;
+            }
             match ev.kind {
                 WatchKind::Removed => match &ev.path {
                     Some(p) => idx.remove(p),
@@ -383,22 +386,26 @@ mod tests {
         // event (the file now exists at b.md) and the source's lone Name
         // event (a.md is gone), each with `to` = None.
         fs::rename(root.join("a.md"), root.join("b.md")).unwrap();
-        state.on_event(&WatchEvent {
-            kind: WatchKind::Renamed,
-            path: Some("b.md".to_string()),
-            to: None,
-        });
+        state.on_event(&WatchEvent::rename(
+            Some("b.md".to_string()),
+            None,
+            false,
+            None,
+            crate::WorkspaceGeneration::INITIAL,
+        ));
         assert_eq!(
             lang_of(&state, "b.md").as_deref(),
             Some("Markdown"),
             "unpaired-rename destination must be indexed with its language",
         );
 
-        state.on_event(&WatchEvent {
-            kind: WatchKind::Renamed,
-            path: Some("a.md".to_string()),
-            to: None,
-        });
+        state.on_event(&WatchEvent::rename(
+            Some("a.md".to_string()),
+            None,
+            false,
+            None,
+            crate::WorkspaceGeneration::INITIAL,
+        ));
         assert!(
             lang_of(&state, "a.md").is_none(),
             "vanished rename source must be dropped from the report",

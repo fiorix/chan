@@ -4857,14 +4857,15 @@ mod tests {
 
         let guard = workspace.write_serial.lock().unwrap();
         workspace.write_text("report.md", "# after\n").unwrap();
+        let generation = workspace.generation();
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             started_tx.send(()).unwrap();
-            fan.on_event(crate::WatchEvent {
-                kind: crate::WatchKind::Modified,
-                path: Some("report.md".to_string()),
-                to: None,
-            });
+            fan.on_event(crate::WatchEvent::file(
+                crate::WatchKind::Modified,
+                "report.md",
+                generation,
+            ));
         });
         started_rx.recv().unwrap();
         assert!(

@@ -300,6 +300,8 @@ The dispatch filter calls the active `IndexScopePolicy`, with two watcher-specif
   - Hard `.chan` and VCS internals are never configurable.
   - Exact VCS control decisions (`.git/HEAD`, `.git/index`, `.hg/dirstate`) are forwarded because the indexer keys checkout-storm detection off them, while all walks prune their parent metadata directories.
 
+Every event carries the policy `WorkspaceGeneration` sampled at dispatch, and stale generations are rejected by the graph and report consumers. `is_dir` preserves directory identity even for Linux `MOVED_FROM` events whose source has already vanished. Rename events expose the Linux inotify correlation `cookie`; it remains `None` on other backends and synthetic events. A path that cannot be mapped into any watched root is emitted as a pathless `ProviderError` loss event so consumers reconcile instead of silently dropping an unknown mutation.
+
 When the report subsystem is active, the same watcher fan-outs each event into the report's incremental index before the user's callback runs (see "Report").
 
 ### Built-in graph indexer

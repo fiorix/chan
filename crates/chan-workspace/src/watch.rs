@@ -4,9 +4,9 @@
 // FFI client passes a Swift / Kotlin object that implements the
 // callback trait, no closures across the boundary). The native
 // implementation uses `notify` and runs the watcher on its own
-// thread; events are filtered through `is_chan_internal` and
-// `walk_workspace`'s pruning rules so `.chan/` and most `.git/` / `.hg/`
-// activity never reaches the callback. A tiny allowlist of VCS
+// thread; events are filtered through the active `IndexScopePolicy`
+// so `.chan/` and most `.git/` / `.hg/` activity never reaches the
+// callback. A tiny allowlist of VCS
 // control files (`.git/HEAD`, `.git/index`, `.hg/dirstate`) is
 // forwarded so the server indexer can recognize checkout storms and
 // fall back to a full rebuild.
@@ -28,12 +28,10 @@
 //     `event.path`, with a small wall-clock window (50-200 ms is
 //     typical).
 //
-//   * `WatchEvent.path == None` is a hint to drop caches. It only
-//     happens when the backend produced a path the workspace can't
-//     relativize (the file lives outside the watched root, usually
-//     the source side of a rename across mount points). Treat it
-//     as "something moved, scope unknown" and reindex the whole
-//     workspace when feasible.
+//   * `WatchEvent.path == None` on `ProviderError` is a loss event:
+//     the backend produced a path the workspace could not relativize
+//     (usually one side of a rename across mount points). Treat it as
+//     "something moved, scope unknown" and reconcile the workspace.
 //
 //   * `WatchKind::ProviderError` is the watcher's signal that the
 //     event stream is no longer trustworthy: inotify queue
@@ -43,6 +41,7 @@
 //     still alive after this event; further events may resume, or
 //     the consumer can rebuild the watcher entirely.
 
+use std::collections::HashSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -66,11 +65,12 @@ pub enum WatchKind {
     /// view (search index freshness, autocomplete) and trigger a
     /// full reindex. Common triggers: inotify watch limit hit,
     /// fseventsd hiccup, the watched directory being unmounted.
-    /// `path` carries the backend's error message; `to` is unused.
+    /// `path` carries the backend's error message, or is `None` for
+    /// path-loss events; `to` is unused.
     ProviderError,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WatchEvent {
     pub kind: WatchKind,
     /// Path relative to the workspace root, POSIX-style. None when the
@@ -81,6 +81,90 @@ pub struct WatchEvent {
     /// For Renamed events, the destination relative path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
+    /// True when the event target is a directory.
+    #[serde(default)]
+    pub is_dir: bool,
+    /// Linux inotify rename correlation cookie. None for other backends,
+    /// non-rename events, and synthetic events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie: Option<u32>,
+    /// Generated workspace scope sampled when this event was emitted.
+    #[serde(default)]
+    pub generation: crate::WorkspaceGeneration,
+}
+
+impl WatchEvent {
+    pub fn file(
+        kind: WatchKind,
+        path: impl Into<String>,
+        generation: crate::WorkspaceGeneration,
+    ) -> Self {
+        Self {
+            kind,
+            path: Some(path.into()),
+            to: None,
+            is_dir: false,
+            cookie: None,
+            generation,
+        }
+    }
+
+    pub fn dir(
+        kind: WatchKind,
+        path: impl Into<String>,
+        generation: crate::WorkspaceGeneration,
+    ) -> Self {
+        Self {
+            kind,
+            path: Some(path.into()),
+            to: None,
+            is_dir: true,
+            cookie: None,
+            generation,
+        }
+    }
+
+    pub fn rename(
+        from: Option<String>,
+        to: Option<String>,
+        is_dir: bool,
+        cookie: Option<u32>,
+        generation: crate::WorkspaceGeneration,
+    ) -> Self {
+        Self {
+            kind: WatchKind::Renamed,
+            path: from,
+            to,
+            is_dir,
+            cookie,
+            generation,
+        }
+    }
+
+    pub fn loss(generation: crate::WorkspaceGeneration) -> Self {
+        Self {
+            kind: WatchKind::ProviderError,
+            path: None,
+            to: None,
+            is_dir: false,
+            cookie: None,
+            generation,
+        }
+    }
+
+    pub fn provider_error(
+        message: impl Into<String>,
+        generation: crate::WorkspaceGeneration,
+    ) -> Self {
+        Self {
+            kind: WatchKind::ProviderError,
+            path: Some(message.into()),
+            to: None,
+            is_dir: false,
+            cookie: None,
+            generation,
+        }
+    }
 }
 
 /// Implement on the consumer side. `Send + Sync` because events
@@ -179,6 +263,13 @@ enum WatchCommand {
 type RegistrationTx = std::sync::mpsc::Sender<WatchCommand>;
 
 type ScopePolicySource = Arc<std::sync::RwLock<Arc<IndexScopePolicy>>>;
+type RegisteredDirs = Arc<std::sync::RwLock<HashSet<PathBuf>>>;
+
+struct WatchRegistrationScope {
+    roots: Arc<Vec<WatchRoot>>,
+    policy_source: ScopePolicySource,
+    registered_dirs: RegisteredDirs,
+}
 
 /// Minimum spacing between surfaced stream-degradation events.
 /// inotify queue overflow (notify's `EventKind::Other`) can repeat
@@ -219,17 +310,21 @@ impl DegradeThrottle {
 fn watch_supervisor_loop(
     rx: std::sync::mpsc::Receiver<WatchCommand>,
     mut watcher: RecommendedWatcher,
-    roots: Arc<Vec<WatchRoot>>,
-    policy_source: ScopePolicySource,
+    scope: WatchRegistrationScope,
     cb: Arc<dyn WatchCallback>,
     health: Arc<std::sync::Mutex<WatchHealth>>,
     initial: std::sync::mpsc::SyncSender<()>,
 ) {
+    let WatchRegistrationScope {
+        roots,
+        policy_source,
+        registered_dirs,
+    } = scope;
     let mut policy = Arc::clone(&policy_source.read().unwrap());
     let mut observed_generation = policy.generation();
-    let errors = register_all_roots(&mut watcher, &roots, &policy);
+    let errors = register_all_roots(&mut watcher, &roots, &policy, &registered_dirs);
     let mut retry_at = (!errors.is_empty()).then(|| Instant::now() + WATCH_RETRY_INTERVAL);
-    record_registration_result(&health, errors, &*cb, true);
+    record_registration_result(&health, errors, &*cb, policy.generation(), true);
     let _ = initial.send(());
 
     loop {
@@ -243,14 +338,26 @@ fn watch_supervisor_loop(
                 if registration.generation != policy.generation() {
                     continue;
                 }
-                let errors = register_dynamic_dir(&mut watcher, &registration, &policy, &*cb);
+                let errors = register_dynamic_dir(
+                    &mut watcher,
+                    &registration,
+                    &policy,
+                    &registered_dirs,
+                    &*cb,
+                );
                 if errors.is_empty() {
                     if retry_at.is_none() {
-                        record_registration_result(&health, errors, &*cb, false);
+                        record_registration_result(
+                            &health,
+                            errors,
+                            &*cb,
+                            policy.generation(),
+                            false,
+                        );
                     }
                 } else {
                     retry_at.get_or_insert_with(|| Instant::now() + WATCH_RETRY_INTERVAL);
-                    record_registration_result(&health, errors, &*cb, true);
+                    record_registration_result(&health, errors, &*cb, policy.generation(), true);
                 }
             }
             Ok(WatchCommand::ProviderLost {
@@ -264,6 +371,7 @@ fn watch_supervisor_loop(
                     current.provider_errors = current.provider_errors.saturating_add(1);
                     current.last_error = Some(message);
                 }
+                reset_registrations(&mut watcher, &registered_dirs);
                 retry_at.get_or_insert_with(|| Instant::now() + WATCH_RETRY_INTERVAL);
                 #[cfg(test)]
                 if let Some(acknowledged) = acknowledged {
@@ -279,17 +387,19 @@ fn watch_supervisor_loop(
                 drop(current);
                 policy = Arc::clone(&policy_source.read().unwrap());
                 observed_generation = policy.generation();
-                let errors = register_all_roots(&mut watcher, &roots, &policy);
+                let errors = register_all_roots(&mut watcher, &roots, &policy, &registered_dirs);
                 retry_at = (!errors.is_empty()).then(|| Instant::now() + WATCH_RETRY_INTERVAL);
-                record_registration_result(&health, errors, &*cb, false);
+                record_registration_result(&health, errors, &*cb, policy.generation(), false);
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 policy = Arc::clone(&policy_source.read().unwrap());
                 if policy.generation() != observed_generation {
                     observed_generation = policy.generation();
-                    let errors = register_all_roots(&mut watcher, &roots, &policy);
+                    reset_registrations(&mut watcher, &registered_dirs);
+                    let errors =
+                        register_all_roots(&mut watcher, &roots, &policy, &registered_dirs);
                     retry_at = (!errors.is_empty()).then(|| Instant::now() + WATCH_RETRY_INTERVAL);
-                    record_registration_result(&health, errors, &*cb, false);
+                    record_registration_result(&health, errors, &*cb, policy.generation(), false);
                 }
             }
         }
@@ -301,6 +411,7 @@ fn record_registration_result(
     health: &std::sync::Mutex<WatchHealth>,
     errors: Vec<String>,
     cb: &dyn WatchCallback,
+    generation: crate::WorkspaceGeneration,
     surface_failure: bool,
 ) {
     if errors.is_empty() {
@@ -323,14 +434,7 @@ fn record_registration_result(
         current.last_error = Some(message.clone());
     }
     if surface_failure {
-        safe_call(
-            cb,
-            WatchEvent {
-                kind: WatchKind::ProviderError,
-                path: Some(message),
-                to: None,
-            },
-        );
+        safe_call(cb, WatchEvent::provider_error(message, generation));
     }
 }
 
@@ -423,12 +527,23 @@ fn register_all_roots(
     watcher: &mut RecommendedWatcher,
     roots: &[WatchRoot],
     policy: &IndexScopePolicy,
+    registered_dirs: &RegisteredDirs,
 ) -> Vec<String> {
     let mut errors = Vec::new();
     for root in roots {
-        register_root(watcher, root, policy, &mut errors);
+        register_root(watcher, root, policy, registered_dirs, &mut errors);
     }
     errors
+}
+
+fn reset_registrations(watcher: &mut RecommendedWatcher, registered_dirs: &RegisteredDirs) {
+    let mut paths: Vec<PathBuf> = registered_dirs.write().unwrap().drain().collect();
+    paths.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for path in paths {
+        if let Err(error) = watcher.unwatch(&path) {
+            tracing::debug!(%error, path = %path.display(), "watcher: unwatch during reset failed");
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -469,11 +584,27 @@ fn register_root(
     watcher: &mut RecommendedWatcher,
     root: &WatchRoot,
     policy: &IndexScopePolicy,
+    registered_dirs: &RegisteredDirs,
     errors: &mut Vec<String>,
 ) {
-    register_one(watcher, &root.abs, "", RecursiveMode::NonRecursive, errors);
+    register_one(
+        watcher,
+        &root.abs,
+        "",
+        RecursiveMode::NonRecursive,
+        registered_dirs,
+        errors,
+    );
     let root_device = filesystem_device(&root.abs);
-    register_subdirs(watcher, &root.abs, "", root_device, policy, errors);
+    register_subdirs(
+        watcher,
+        &root.abs,
+        "",
+        root_device,
+        policy,
+        registered_dirs,
+        errors,
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -483,6 +614,7 @@ fn register_subdirs(
     rel: &str,
     root_device: Option<u64>,
     policy: &IndexScopePolicy,
+    registered_dirs: &RegisteredDirs,
     errors: &mut Vec<String>,
 ) {
     let entries = match std::fs::read_dir(abs) {
@@ -525,6 +657,7 @@ fn register_subdirs(
                 &entry.path(),
                 &child_rel,
                 RecursiveMode::NonRecursive,
+                registered_dirs,
                 errors,
             ),
             DirPlan::WatchAndDescend => {
@@ -533,6 +666,7 @@ fn register_subdirs(
                     &entry.path(),
                     &child_rel,
                     RecursiveMode::NonRecursive,
+                    registered_dirs,
                     errors,
                 );
                 register_subdirs(
@@ -541,6 +675,7 @@ fn register_subdirs(
                     &child_rel,
                     root_device,
                     policy,
+                    registered_dirs,
                     errors,
                 );
             }
@@ -553,14 +688,20 @@ fn register_one(
     abs: &Path,
     rel: &str,
     mode: RecursiveMode,
+    registered_dirs: &RegisteredDirs,
     errors: &mut Vec<String>,
 ) {
+    if registered_dirs.read().unwrap().contains(abs) {
+        return;
+    }
     if let Err(error) = watch_registration(watcher, abs, mode) {
         errors.push(format!(
             "watcher: failed to register {}: {error}",
             abs.display()
         ));
         tracing::warn!(%error, path = %rel, "watcher: failed to register directory");
+    } else {
+        registered_dirs.write().unwrap().insert(abs.to_path_buf());
     }
 }
 
@@ -573,9 +714,17 @@ fn register_root(
     watcher: &mut RecommendedWatcher,
     root: &WatchRoot,
     _policy: &IndexScopePolicy,
+    registered_dirs: &RegisteredDirs,
     errors: &mut Vec<String>,
 ) {
-    register_one(watcher, &root.abs, "", RecursiveMode::Recursive, errors);
+    register_one(
+        watcher,
+        &root.abs,
+        "",
+        RecursiveMode::Recursive,
+        registered_dirs,
+        errors,
+    );
 }
 
 /// Linux: a directory that just appeared under a watched parent must
@@ -635,6 +784,7 @@ fn register_dynamic_dir(
     watcher: &mut RecommendedWatcher,
     registration: &DirRegistration,
     policy: &IndexScopePolicy,
+    registered_dirs: &RegisteredDirs,
     cb: &dyn WatchCallback,
 ) -> Vec<String> {
     let mut errors = Vec::new();
@@ -643,6 +793,7 @@ fn register_dynamic_dir(
         &registration.abs,
         &registration.rel,
         RecursiveMode::NonRecursive,
+        registered_dirs,
         &mut errors,
     );
     if registration.plan == DirPlan::WatchAndDescend {
@@ -651,6 +802,7 @@ fn register_dynamic_dir(
             prefix: registration.prefix.as_deref(),
             root_device: registration.root_device,
             policy,
+            registered_dirs,
             cb,
             errors: &mut errors,
         };
@@ -664,6 +816,7 @@ fn register_dynamic_dir(
     _watcher: &mut RecommendedWatcher,
     _registration: &DirRegistration,
     _policy: &IndexScopePolicy,
+    _registered_dirs: &RegisteredDirs,
     _cb: &dyn WatchCallback,
 ) -> Vec<String> {
     Vec::new()
@@ -675,6 +828,7 @@ struct CatchUp<'a> {
     prefix: Option<&'a str>,
     root_device: Option<u64>,
     policy: &'a IndexScopePolicy,
+    registered_dirs: &'a RegisteredDirs,
     cb: &'a dyn WatchCallback,
     errors: &'a mut Vec<String>,
 }
@@ -705,6 +859,7 @@ impl CatchUp<'_> {
                         &entry.path(),
                         &child_rel,
                         RecursiveMode::NonRecursive,
+                        self.registered_dirs,
                         self.errors,
                     ),
                     DirPlan::WatchAndDescend => {
@@ -713,6 +868,7 @@ impl CatchUp<'_> {
                             &entry.path(),
                             &child_rel,
                             RecursiveMode::NonRecursive,
+                            self.registered_dirs,
                             self.errors,
                         );
                         self.run(&entry.path(), &child_rel);
@@ -721,11 +877,11 @@ impl CatchUp<'_> {
             } else if ft.is_file() && !is_filtered(&child_rel, false, self.policy) {
                 safe_call(
                     self.cb,
-                    WatchEvent {
-                        kind: WatchKind::Created,
-                        path: Some(apply_prefix(self.prefix, child_rel)),
-                        to: None,
-                    },
+                    WatchEvent::file(
+                        WatchKind::Created,
+                        apply_prefix(self.prefix, child_rel),
+                        self.policy.generation(),
+                    ),
                 );
             }
         }
@@ -740,15 +896,10 @@ impl WatchHandle {
     /// path. The workspace root is watched with no prefix (`<rel>`).
     /// Callers pass `&[WatchRoot::workspace(workspace_root)]`.
     ///
-    /// `filter` is the SAME unified ignore set the bootstrap walk
-    /// uses (`Workspace::walk_filter`): events whose relative path runs
-    /// through an excluded directory (`node_modules`, `target`,
-    /// `venv`, ... and the VCS dirs `.git`/`.hg`/`.svn`) are dropped
-    /// here, in the watcher worker thread, BEFORE the consumer's
-    /// callback runs. Filtering at this boundary keeps a git checkout
-    /// storm under `node_modules`/`target` from ever reaching the
-    /// broadcast bus or the indexer (the earliest possible drop, and
-    /// the same ignore policy as the walk, not a second list).
+    /// `policy_source` is the same generation-aware policy sampled by
+    /// bootstrap and indexing. Excluded events are dropped in the
+    /// watcher worker before the consumer callback runs, and Linux
+    /// registrations are rebuilt when the policy generation changes.
     pub(crate) fn start(
         roots: &[WatchRoot],
         policy_source: ScopePolicySource,
@@ -763,6 +914,8 @@ impl WatchHandle {
         let cb_clone = cb.clone();
         let dispatch_roots_for_cb = Arc::clone(&dispatch_roots);
         let policy_source_for_cb = Arc::clone(&policy_source);
+        let registered_dirs: RegisteredDirs = Arc::new(std::sync::RwLock::new(HashSet::new()));
+        let registered_dirs_for_cb = Arc::clone(&registered_dirs);
         let (command_tx, command_rx) = std::sync::mpsc::channel::<WatchCommand>();
         let command_tx_for_cb = command_tx.clone();
         let throttle_for_cb = Arc::new(DegradeThrottle::new());
@@ -771,6 +924,7 @@ impl WatchHandle {
                 Ok(event) => dispatch(
                     &dispatch_roots_for_cb,
                     &policy_source_for_cb,
+                    &registered_dirs_for_cb,
                     event,
                     &*cb_clone,
                     &command_tx_for_cb,
@@ -786,13 +940,10 @@ impl WatchHandle {
                     // stale.
                     tracing::warn!("watch error: {e}");
                     let message = e.to_string();
+                    let generation = policy_source_for_cb.read().unwrap().generation();
                     safe_call(
                         &*cb_clone,
-                        WatchEvent {
-                            kind: WatchKind::ProviderError,
-                            path: Some(message.clone()),
-                            to: None,
-                        },
+                        WatchEvent::provider_error(message.clone(), generation),
                     );
                     let _ = command_tx_for_cb.send(WatchCommand::ProviderLost {
                         message,
@@ -810,8 +961,11 @@ impl WatchHandle {
                 watch_supervisor_loop(
                     command_rx,
                     watcher,
-                    dispatch_roots,
-                    policy_source,
+                    WatchRegistrationScope {
+                        roots: dispatch_roots,
+                        policy_source,
+                        registered_dirs,
+                    },
                     cb,
                     supervisor_health,
                     initial_tx,
@@ -931,7 +1085,7 @@ fn new_dir_candidate(kind: &notify::EventKind, paths: &[PathBuf]) -> Option<Path
     }
 }
 
-fn event_is_dir(event: &notify::Event) -> bool {
+fn event_is_dir(event: &notify::Event, registered_dirs: &RegisteredDirs) -> bool {
     use notify::event::{CreateKind, RemoveKind};
     use notify::EventKind;
     match event.kind {
@@ -941,14 +1095,27 @@ fn event_is_dir(event: &notify::Event) -> bool {
             .paths
             .iter()
             .rev()
-            .find_map(|path| std::fs::symlink_metadata(path).ok())
-            .is_some_and(|metadata| metadata.is_dir()),
+            .find_map(|path| {
+                std::fs::symlink_metadata(path)
+                    .ok()
+                    .map(|metadata| metadata.is_dir())
+            })
+            .or_else(|| {
+                let registered = registered_dirs.read().unwrap();
+                event
+                    .paths
+                    .iter()
+                    .any(|path| registered.contains(path))
+                    .then_some(true)
+            })
+            .unwrap_or(false),
     }
 }
 
 fn dispatch(
     roots: &[WatchRoot],
     policy_source: &ScopePolicySource,
+    registered_dirs: &RegisteredDirs,
     event: notify::Event,
     cb: &dyn WatchCallback,
     reg_tx: &RegistrationTx,
@@ -956,7 +1123,14 @@ fn dispatch(
 ) {
     use notify::EventKind;
     let policy = Arc::clone(&policy_source.read().unwrap());
-    let is_dir = event_is_dir(&event);
+    let generation = policy.generation();
+    let is_dir = event_is_dir(&event, registered_dirs);
+    #[cfg(target_os = "linux")]
+    let cookie = event
+        .tracker()
+        .and_then(|tracker| u32::try_from(tracker).ok());
+    #[cfg(not(target_os = "linux"))]
+    let cookie = None;
     // Computed before the kind match moves `event.kind`: the rename
     // mode decides which path (if any) is the appeared directory.
     #[cfg(target_os = "linux")]
@@ -976,11 +1150,10 @@ fn dispatch(
             if throttle.allow(Instant::now()) {
                 safe_call(
                     cb,
-                    WatchEvent {
-                        kind: WatchKind::ProviderError,
-                        path: Some("inotify queue overflow / watch stream degraded".to_string()),
-                        to: None,
-                    },
+                    WatchEvent::provider_error(
+                        "inotify queue overflow / watch stream degraded",
+                        generation,
+                    ),
                 );
             }
             return;
@@ -1031,14 +1204,34 @@ fn dispatch(
     let from_rel = from_resolved.map(|(prefix, rel)| apply_prefix(prefix.as_deref(), rel));
     let to_rel = to_resolved.map(|(prefix, rel)| apply_prefix(prefix.as_deref(), rel));
 
-    safe_call(
-        cb,
-        WatchEvent {
-            kind,
-            path: from_rel,
-            to: to_rel,
-        },
-    );
+    let watch_event = if kind == WatchKind::Renamed {
+        if from_rel.is_none() && to_rel.is_none() {
+            WatchEvent::loss(generation)
+        } else {
+            WatchEvent::rename(from_rel, to_rel, is_dir, cookie, generation)
+        }
+    } else if let Some(path) = from_rel {
+        if is_dir {
+            WatchEvent::dir(kind, path, generation)
+        } else {
+            WatchEvent::file(kind, path, generation)
+        }
+    } else {
+        WatchEvent::loss(generation)
+    };
+    safe_call(cb, watch_event);
+    if is_dir && matches!(kind, WatchKind::Removed | WatchKind::Renamed) {
+        if let Some(from) = from.as_deref() {
+            forget_registered_subtree(registered_dirs, from);
+        }
+    }
+}
+
+fn forget_registered_subtree(registered_dirs: &RegisteredDirs, root: &Path) {
+    registered_dirs
+        .write()
+        .unwrap()
+        .retain(|path| path != root && !path.starts_with(root));
 }
 
 /// Invoke the consumer's callback with one event, catching any
@@ -1056,17 +1249,17 @@ fn safe_call(cb: &dyn WatchCallback, event: WatchEvent) {
     // is the one whose state may be left half-mutated by their own
     // panic; surfacing ProviderError gives them the chance to
     // recover via reindex.
+    let generation = event.generation;
     if let Err(payload) = catch_unwind(AssertUnwindSafe(|| cb.on_event(event))) {
         let msg = panic_message(&payload);
         tracing::error!("watch callback panicked: {msg}");
         // Best-effort: if the panic-notification itself panics we
         // log and move on. The notify worker stays alive either way.
         let _ = catch_unwind(AssertUnwindSafe(|| {
-            cb.on_event(WatchEvent {
-                kind: WatchKind::ProviderError,
-                path: Some(format!("callback panicked: {msg}")),
-                to: None,
-            });
+            cb.on_event(WatchEvent::provider_error(
+                format!("callback panicked: {msg}"),
+                generation,
+            ));
         }));
     }
 }
@@ -1093,12 +1286,9 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 ///     of the configurable filter set: it is chan's own state, an
 ///     internal invariant the user cannot un-exclude.
 ///
-/// Everything else routes through the SAME `WalkFilter` the bootstrap
-/// walk uses: a path is dropped when any of its directory components
-/// is an excluded basename (`node_modules`, `target`, `venv`,
-/// `.git`, `.hg`, `.svn`, ... per `DEFAULT_INDEX_EXCLUDED_DIRS` plus
-/// any user additions). Basename match at any depth matches
-/// `walk_workspace_filtered`'s `filter_entry`.
+/// Everything else routes through the SAME `IndexScopePolicy` sampled
+/// by bootstrap, indexing, report, and reconcile. That includes hard,
+/// gitignore, and configured exclusions under one generation.
 fn is_filtered(rel: &str, is_dir: bool, policy: &IndexScopePolicy) -> bool {
     matches!(policy.decision(rel, is_dir), IndexScopeDecision::Exclude(_))
 }
@@ -1160,22 +1350,22 @@ mod tests {
         // second invocation and lands successfully.
         safe_call(
             &cb,
-            WatchEvent {
-                kind: WatchKind::Modified,
-                path: Some("a.md".into()),
-                to: None,
-            },
+            WatchEvent::file(
+                WatchKind::Modified,
+                "a.md",
+                crate::WorkspaceGeneration::INITIAL,
+            ),
         );
         // Third call: a normal event after the panic. Must land,
         // proving the worker (modeled here as the test thread) is
         // alive.
         safe_call(
             &cb,
-            WatchEvent {
-                kind: WatchKind::Modified,
-                path: Some("b.md".into()),
-                to: None,
-            },
+            WatchEvent::file(
+                WatchKind::Modified,
+                "b.md",
+                crate::WorkspaceGeneration::INITIAL,
+            ),
         );
         let events = cb.events.lock().unwrap();
         assert!(
@@ -1214,6 +1404,10 @@ mod tests {
 
     fn policy_source(root: &Path) -> ScopePolicySource {
         Arc::new(std::sync::RwLock::new(Arc::new(default_policy(root))))
+    }
+
+    fn registered_dirs() -> RegisteredDirs {
+        Arc::new(std::sync::RwLock::new(HashSet::new()))
     }
 
     fn filtered(rel: &str, policy: &IndexScopePolicy) -> bool {
@@ -1302,6 +1496,48 @@ mod tests {
     }
 
     #[test]
+    fn watch_event_constructors_and_legacy_defaults_are_stable() {
+        let generation: crate::WorkspaceGeneration = serde_json::from_str("7").unwrap();
+
+        let file = WatchEvent::file(WatchKind::Modified, "note.md", generation);
+        assert_eq!(file.kind, WatchKind::Modified);
+        assert_eq!(file.path.as_deref(), Some("note.md"));
+        assert!(!file.is_dir);
+        assert_eq!(file.cookie, None);
+        assert_eq!(file.generation, generation);
+
+        let dir = WatchEvent::dir(WatchKind::Created, "folder", generation);
+        assert!(dir.is_dir);
+
+        let rename = WatchEvent::rename(
+            Some("before".to_string()),
+            Some("after".to_string()),
+            true,
+            Some(41),
+            generation,
+        );
+        assert_eq!(rename.kind, WatchKind::Renamed);
+        assert_eq!(rename.path.as_deref(), Some("before"));
+        assert_eq!(rename.to.as_deref(), Some("after"));
+        assert!(rename.is_dir);
+        assert_eq!(rename.cookie, Some(41));
+
+        let loss = WatchEvent::loss(generation);
+        assert_eq!(loss.kind, WatchKind::ProviderError);
+        assert_eq!(loss.path, None);
+        assert_eq!(loss.to, None);
+
+        let error = WatchEvent::provider_error("backend failed", generation);
+        assert_eq!(error.path.as_deref(), Some("backend failed"));
+
+        let legacy: WatchEvent =
+            serde_json::from_str(r#"{"kind":"Modified","path":"old.md"}"#).unwrap();
+        assert!(!legacy.is_dir);
+        assert_eq!(legacy.cookie, None);
+        assert_eq!(legacy.generation, crate::WorkspaceGeneration::INITIAL);
+    }
+
+    #[test]
     fn dispatch_drops_excluded_subtree_events() {
         use std::sync::Mutex;
         struct Collect(Mutex<Vec<WatchEvent>>);
@@ -1314,6 +1550,7 @@ mod tests {
         let root = PathBuf::from("/workspace");
         let policy_source = policy_source(&root);
         let roots = [WatchRoot::workspace(&root)];
+        let registered = registered_dirs();
         let (reg_tx, _reg_rx) = std::sync::mpsc::channel();
         let throttle = DegradeThrottle::new();
 
@@ -1321,6 +1558,7 @@ mod tests {
         dispatch(
             &roots,
             &policy_source,
+            &registered,
             notify::Event {
                 kind: notify::EventKind::Modify(notify::event::ModifyKind::Data(
                     notify::event::DataChange::Content,
@@ -1341,6 +1579,7 @@ mod tests {
         dispatch(
             &roots,
             &policy_source,
+            &registered,
             notify::Event {
                 kind: notify::EventKind::Modify(notify::event::ModifyKind::Data(
                     notify::event::DataChange::Content,
@@ -1355,6 +1594,119 @@ mod tests {
         let events = cb.0.lock().unwrap();
         assert_eq!(events.len(), 1, "real note event should be forwarded");
         assert_eq!(events[0].path.as_deref(), Some("notes/today.md"));
+        assert!(!events[0].is_dir);
+        assert_eq!(events[0].cookie, None);
+        assert_eq!(
+            events[0].generation,
+            policy_source.read().unwrap().generation()
+        );
+        drop(events);
+
+        dispatch(
+            &roots,
+            &policy_source,
+            &registered,
+            notify::Event {
+                kind: notify::EventKind::Modify(notify::event::ModifyKind::Data(
+                    notify::event::DataChange::Content,
+                )),
+                paths: vec![PathBuf::from("/outside/workspace.md")],
+                attrs: Default::default(),
+            },
+            &cb,
+            &reg_tx,
+            &throttle,
+        );
+        let events = cb.0.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].kind, WatchKind::ProviderError);
+        assert_eq!(events[1].path, None);
+    }
+
+    #[test]
+    fn dispatch_populates_directory_rename_cookie_and_generation() {
+        use std::sync::Mutex;
+        struct Collect(Mutex<Vec<WatchEvent>>);
+        impl WatchCallback for Collect {
+            fn on_event(&self, event: WatchEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("after")).unwrap();
+        let generation: crate::WorkspaceGeneration = serde_json::from_str("9").unwrap();
+        let policy = Arc::new(
+            IndexScopePolicy::new(
+                root.path().to_path_buf(),
+                generation,
+                crate::WalkFilter::default(),
+            )
+            .unwrap(),
+        );
+        let policy_source = Arc::new(std::sync::RwLock::new(policy));
+        let roots = [WatchRoot::workspace(root.path())];
+        let registered = registered_dirs();
+        let (reg_tx, _reg_rx) = std::sync::mpsc::channel();
+        let throttle = DegradeThrottle::new();
+        let cb = Collect(Mutex::new(Vec::new()));
+        let mut event = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::Both,
+            )),
+            paths: vec![root.path().join("before"), root.path().join("after")],
+            attrs: Default::default(),
+        };
+        event.attrs.set_tracker(41);
+
+        dispatch(
+            &roots,
+            &policy_source,
+            &registered,
+            event,
+            &cb,
+            &reg_tx,
+            &throttle,
+        );
+
+        let events = cb.0.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].is_dir);
+        assert_eq!(events[0].generation, generation);
+        #[cfg(target_os = "linux")]
+        assert_eq!(events[0].cookie, Some(41));
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(events[0].cookie, None);
+        drop(events);
+
+        let vanished = root.path().join("vanished-dir");
+        registered.write().unwrap().insert(vanished.clone());
+        let mut from_only = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::From,
+            )),
+            paths: vec![vanished],
+            attrs: Default::default(),
+        };
+        from_only.attrs.set_tracker(73);
+        dispatch(
+            &roots,
+            &policy_source,
+            &registered,
+            from_only,
+            &cb,
+            &reg_tx,
+            &throttle,
+        );
+
+        let events = cb.0.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(
+            events[1].is_dir,
+            "registered directory identity must survive a From-only rename"
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(events[1].cookie, Some(73));
     }
 
     #[test]
@@ -1370,6 +1722,7 @@ mod tests {
         let root = PathBuf::from("/workspace");
         let policy_source = policy_source(&root);
         let roots = [WatchRoot::workspace(&root)];
+        let registered = registered_dirs();
         let (reg_tx, _reg_rx) = std::sync::mpsc::channel();
         let throttle = DegradeThrottle::new();
         let other = || notify::Event {
@@ -1380,9 +1733,25 @@ mod tests {
 
         // First overflow signal: surfaced as ProviderError (the
         // consumers' full-reconcile trigger).
-        dispatch(&roots, &policy_source, other(), &cb, &reg_tx, &throttle);
+        dispatch(
+            &roots,
+            &policy_source,
+            &registered,
+            other(),
+            &cb,
+            &reg_tx,
+            &throttle,
+        );
         // An immediate repeat collapses into the throttle window.
-        dispatch(&roots, &policy_source, other(), &cb, &reg_tx, &throttle);
+        dispatch(
+            &roots,
+            &policy_source,
+            &registered,
+            other(),
+            &cb,
+            &reg_tx,
+            &throttle,
+        );
 
         let events = cb.0.lock().unwrap();
         assert_eq!(events.len(), 1, "repeat overflow must be throttled");
