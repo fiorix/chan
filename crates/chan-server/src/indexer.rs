@@ -227,6 +227,7 @@ impl Indexer {
             shared.clone(),
             rebuild_rx,
             progress_sink.clone(),
+            REBUILD_COOLDOWN,
         );
         // Trigger a full rebuild when either side of the index is
         // empty. Checking BM25 alone misses the case where a prior
@@ -300,6 +301,17 @@ impl Indexer {
     }
 }
 
+/// Minimum spacing between consecutive full rebuilds. The rebuild
+/// triggers (watcher-channel lag, the VCS-burst threshold, provider
+/// errors, `.git/HEAD` writes) are level-triggered: under a sustained
+/// build storm they keep arriving. Without a cooldown, one trigger
+/// per rebuild-duration keeps full-tree rebuilds running back-to-back
+/// forever (the buckos livelock). 30 s bounds the damage to two full
+/// walks a minute while a storm runs; ordinary one-shot rebuilds
+/// (boot, manual reindex) never notice it. The per-file debounced
+/// path is unaffected.
+const REBUILD_COOLDOWN: Duration = Duration::from_secs(30);
+
 /// Coordinator task: blocks on the rebuild channel and runs one
 /// full reindex per request. Workspaces `Workspace::reindex_with` with a
 /// callback that updates the local status mutex AND forwards each
@@ -312,6 +324,7 @@ fn spawn_coordinator(
     shared: IndexerShared,
     mut rx: mpsc::UnboundedReceiver<()>,
     progress_sink: Arc<dyn ProgressCallback>,
+    cooldown: Duration,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         while rx.recv().await.is_some() {
@@ -385,8 +398,21 @@ fn spawn_coordinator(
                     };
                 }
             }
+            coalesce_and_cooldown(&mut rx, cooldown).await;
         }
     })
+}
+
+/// Storm-damping policy, extracted so tests can drive it without a
+/// real workspace: requests that piled up DURING the rebuild coalesce
+/// into one (the loop's pre-start drain at the top picks up anything
+/// that arrives during the cooldown sleep), and the next rebuild
+/// waits out the cooldown.
+async fn coalesce_and_cooldown(rx: &mut mpsc::UnboundedReceiver<()>, cooldown: Duration) {
+    while rx.try_recv().is_ok() {}
+    if !cooldown.is_zero() {
+        tokio::time::sleep(cooldown).await;
+    }
 }
 
 /// Listen to the watcher and re-index per file with a 1 s debounce.
@@ -1663,5 +1689,33 @@ mod tests {
             after < before,
             "expected indexed_docs to drop after symlink replacement; before={before} after={after}"
         );
+    }
+
+    #[tokio::test]
+    async fn coalesce_and_cooldown_drains_then_waits() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<()>();
+        for _ in 0..5 {
+            tx.send(()).unwrap();
+        }
+        let t0 = Instant::now();
+        coalesce_and_cooldown(&mut rx, Duration::from_millis(50)).await;
+        assert!(
+            t0.elapsed() >= Duration::from_millis(50),
+            "the cooldown is actually awaited between rebuilds"
+        );
+        assert!(rx.try_recv().is_err(), "queued requests coalesce to one");
+        // A trigger that arrives afterwards is NOT swallowed: it
+        // drives the next rebuild once the cooldown lapses.
+        tx.send(()).unwrap();
+        coalesce_and_cooldown(&mut rx, Duration::ZERO).await;
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn coalesce_and_cooldown_zero_is_pass_through() {
+        let (_tx, mut rx) = mpsc::unbounded_channel::<()>();
+        let t0 = Instant::now();
+        coalesce_and_cooldown(&mut rx, Duration::ZERO).await;
+        assert!(t0.elapsed() < Duration::from_millis(50));
     }
 }
