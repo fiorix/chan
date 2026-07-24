@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **The editor tracks OS read-only flips live again.** `chmod` on an open file now drives the locked lamp and the editor's read-only state within a watcher tick: the server stats the live user-write bit onto every `/ws` watch frame and open tabs adopt it. Since v0.67 the doc-session reconciler ignored permission-only changes (no mtime bump) and the banner path skipped attached tabs, so a `chmod 400` never surfaced.
+- **Saves of >2 MiB documents reach the workspace's own size check.** `PUT /api/files/{path}` no longer inherits axum's 2 MiB body limit, which rejected every large save with an opaque body error and silently made legacy big files unwritable; the route now allows bodies up to the 50 MiB bytes cap so the deliberate `max(prev_size, 2 MiB)` rule applies. `WriteTooLarge` also maps to an honest 413 instead of a 500.
+
 ## [v0.75.0] - 2026-07-24
 
 v0.75.0 replaces the desktop's `chan://` custom-scheme sign-in with an

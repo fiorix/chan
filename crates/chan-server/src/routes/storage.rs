@@ -180,6 +180,7 @@ fn perform_reset(
             &state.index_events_tx,
             &state.self_writes,
             &state.scope_registry,
+            state.workspace_root.clone(),
         );
         let watch_handle = workspace_strong.watch(bridge).map_err(ResetError::Core)?;
         let search_aggression = state
@@ -219,6 +220,7 @@ fn perform_reset(
         &state.index_events_tx,
         &state.self_writes,
         &state.scope_registry,
+        state.workspace_root.clone(),
     );
     let watch_handle = workspace.watch(bridge).map_err(ResetError::Core)?;
     let search_aggression = state

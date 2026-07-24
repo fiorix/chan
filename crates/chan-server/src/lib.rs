@@ -490,7 +490,13 @@ async fn build_app(
     // per directory. The report's content scan, the larger cost, stays off this
     // path (it runs lazily on the first report query). Registration runs just
     // below, after the cell exists.
-    let bridge = make_watch_bridge(&events_tx, &index_events_tx, &self_writes, &scope_registry);
+    let bridge = make_watch_bridge(
+        &events_tx,
+        &index_events_tx,
+        &self_writes,
+        &scope_registry,
+        workspace.root().to_path_buf(),
+    );
     let workspace_root = workspace.root().to_path_buf();
     // Background indexer: subscribes to index_events_tx, runs the
     // initial build if the index is empty, debounces incremental

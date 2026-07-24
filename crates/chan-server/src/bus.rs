@@ -31,17 +31,23 @@ use crate::self_writes::SelfWrites;
 ///     Self-write suppression DOES NOT apply here: in-app saves
 ///     must reindex, otherwise search drifts every time the user
 ///     types. The indexer applies its own debounce.
+///
+/// `root` is the workspace root: the bridge stats the event path at
+/// broadcast time to carry the live user-write bit on the frame (see
+/// on_event).
 pub fn make_watch_bridge(
     events_tx: &broadcast::Sender<String>,
     index_tx: &broadcast::Sender<WatchEvent>,
     self_writes: &Arc<SelfWrites>,
     scopes: &Arc<ScopeRegistry>,
+    root: std::path::PathBuf,
 ) -> Arc<dyn WatchCallback> {
     Arc::new(WatchBroadcast {
         tx: events_tx.clone(),
         index_tx: index_tx.clone(),
         self_writes: self_writes.clone(),
         scopes: scopes.clone(),
+        root,
     })
 }
 
@@ -50,6 +56,7 @@ struct WatchBroadcast {
     index_tx: broadcast::Sender<WatchEvent>,
     self_writes: Arc<SelfWrites>,
     scopes: Arc<ScopeRegistry>,
+    root: std::path::PathBuf,
 }
 
 impl WatchCallback for WatchBroadcast {
@@ -62,10 +69,24 @@ impl WatchCallback for WatchBroadcast {
         if event_is_self_echo(&event, &self.self_writes) {
             return;
         }
+        // The live user-write bit rides every frame whose path stats.
+        // chmod-style permission flips reach the frontend ONLY here:
+        // they do not touch mtime, so neither the doc-session
+        // reconciler (mtime-token echo) nor the external-change banner
+        // ever surfaces them, and the locked lamp would go stale.
+        let writable = event
+            .to
+            .as_deref()
+            .or(event.path.as_deref())
+            .and_then(|rel| std::fs::symlink_metadata(self.root.join(rel)).ok())
+            .map(|m| !m.permissions().readonly());
         // Legacy global frame for the editor's open-document
         // external-edit toast (kept alongside the scoped `fs`
         // frame). Fans out to every /ws socket regardless of scope.
-        let frame = serde_json::json!({"type": "watch", "event": event});
+        let mut frame = serde_json::json!({"type": "watch", "event": event});
+        if let Some(writable) = writable {
+            frame["writable"] = serde_json::Value::from(writable);
+        }
         if let Ok(s) = serde_json::to_string(&frame) {
             let _ = self.tx.send(s);
         }
@@ -434,6 +455,53 @@ mod tests {
         assert_eq!(parent_dir("notes/recipes/a.md"), "notes/recipes");
         // A trailing slash on a directory path does not change its parent.
         assert_eq!(parent_dir("notes/recipes/"), "notes");
+    }
+
+    // chmod does not touch mtime, so the session reconciler and the
+    // external-change banner both ignore it: the live user-write bit
+    // must ride the watch frame itself, or the editor's locked lamp
+    // never tracks OS permissions on an open file.
+    #[test]
+    fn watch_frame_carries_live_writable_bit() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.md");
+        std::fs::write(&file, "x").unwrap();
+        let (events_tx, mut events_rx) = broadcast::channel::<String>(8);
+        let (index_tx, _index_rx) = broadcast::channel::<WatchEvent>(8);
+        let sw = Arc::new(SelfWrites::new());
+        let scopes = Arc::new(ScopeRegistry::new());
+        let bridge = make_watch_bridge(
+            &events_tx,
+            &index_tx,
+            &sw,
+            &scopes,
+            dir.path().to_path_buf(),
+        );
+        let modified = || WatchEvent {
+            kind: WatchKind::Modified,
+            path: Some("a.md".to_string()),
+            to: None,
+        };
+
+        bridge.on_event(modified());
+        let frame = recv_json(&mut events_rx);
+        assert_eq!(frame["type"], "watch");
+        assert_eq!(frame["writable"], true);
+
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&file, perms).unwrap();
+        bridge.on_event(modified());
+        let frame = recv_json(&mut events_rx);
+        assert_eq!(frame["writable"], false);
+
+        // Restore writability so the tempdir cleanup works on Windows.
+        #[allow(clippy::permissions_set_readonly_false)]
+        {
+            let mut perms = std::fs::metadata(&file).unwrap().permissions();
+            perms.set_readonly(false);
+            std::fs::set_permissions(&file, perms).unwrap();
+        }
     }
 
     #[test]

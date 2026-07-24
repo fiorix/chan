@@ -701,7 +701,16 @@ export type WatchScopeDir = string;
 /// Server -> client: the legacy global filesystem frame. Fans out to every
 /// connected socket regardless of scope. Kept for the editor external-edit
 /// toast; the tree should prefer the scoped `fs` frame.
-export type WsWatchFrame = { type: "watch"; event: WatchEventWire };
+///
+/// `writable` is the live user-write bit on the event path, stat'ed by the
+/// server at broadcast time. Present only when the path exists (absent on
+/// removals and stat failures). chmod does not touch mtime, so this bit is
+/// the only channel that lets open tabs track OS-level read-only state.
+export type WsWatchFrame = {
+  type: "watch";
+  event: WatchEventWire;
+  writable?: boolean;
+};
 
 /// Server -> client: a scoped filesystem frame, delivered only to sockets
 /// subscribed to `dir`. Carries the originating directory so a client that

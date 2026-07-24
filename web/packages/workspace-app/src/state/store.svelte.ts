@@ -106,6 +106,7 @@ import { setNotifyHandler } from "./notify.svelte";
 import { defaultScopeId } from "./scope.svelte";
 import {
   allTerminalTabs,
+  applyFsWritable,
   applyTerminalRoster,
   clearTabError,
   findTeamWorkPendingLead,
@@ -858,12 +859,18 @@ export function onWatchEvent(e: unknown): void {
   const paths = [inner?.path, inner?.to].filter(
     (p): p is string => typeof p === "string" && p.length > 0,
   );
+  // The server stats the live user-write bit onto every watch frame:
+  // chmod flips no mtime, so the reconciler and the banner path both
+  // ignore it, and this is the only channel that keeps fsWritable (the
+  // locked lamp, the editor's readOnly) in step with OS permissions.
+  const frameWritable = (e as { writable?: unknown } | null)?.writable;
   for (const p of paths) {
     // Skip watcher echoes for paths we're actively renaming: the
     // tab still holds the old path during the move's `await`, and a
     // refresh would read a vanished file and stamp a stale error.
     if (movingPaths.has(p)) continue;
     for (const { tabId } of tabsForPath(p)) {
+      if (typeof frameWritable === "boolean") applyFsWritable(tabId, frameWritable);
       if (
         (inner?.kind === "Removed" || inner?.kind === "Renamed") &&
         p === inner.path

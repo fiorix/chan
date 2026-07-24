@@ -273,6 +273,7 @@ fn build_workspace_cell(
         &state.index_events_tx,
         &state.self_writes,
         &state.scope_registry,
+        workspace.root().to_path_buf(),
     );
     let watch_handle = workspace.watch(bridge).map_err(MetadataImportError::Core)?;
     let search_aggression = state

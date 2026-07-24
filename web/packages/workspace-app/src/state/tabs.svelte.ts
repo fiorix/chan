@@ -6473,6 +6473,15 @@ export function dismissExternalChange(tabId: string): void {
   if (found) found.tab.externalChange = false;
 }
 
+/// Adopt the live user-write bit carried on a watcher frame. chmod
+/// does not touch mtime, so neither the doc-session reconciler nor the
+/// banner path ever surfaces a permission flip: without this the
+/// locked lamp and the editor's readOnly only ever re-sample on load.
+export function applyFsWritable(tabId: string, writable: boolean): void {
+  const found = findFileTabById(tabId);
+  if (found) found.tab.fsWritable = writable;
+}
+
 export async function reloadTabFromDisk(tabId: string): Promise<void> {
   const found = findFileTabById(tabId);
   if (!found) return;

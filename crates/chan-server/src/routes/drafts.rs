@@ -540,7 +540,13 @@ mod tests {
         let (events_tx, mut events_rx) = broadcast::channel::<String>(1024);
         let (index_tx, _index_rx) = broadcast::channel::<WatchEvent>(1024);
         let scopes = Arc::new(ScopeRegistry::new());
-        let bridge = make_watch_bridge(&events_tx, &index_tx, &self_writes, &scopes);
+        let bridge = make_watch_bridge(
+            &events_tx,
+            &index_tx,
+            &self_writes,
+            &scopes,
+            workspace.root().to_path_buf(),
+        );
 
         let echo = |bridge: &Arc<dyn WatchCallback>, kind, path: &str| {
             bridge.on_event(WatchEvent {

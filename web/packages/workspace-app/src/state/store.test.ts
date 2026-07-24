@@ -1090,6 +1090,32 @@ describe("external-change banner", () => {
 
     fetchSpy.mockRestore();
   });
+
+  test("a watch frame's writable bit updates the open tab's fsWritable", () => {
+    // chmod flips no mtime, so nothing else (reconciler, banner)
+    // surfaces a permission change on an open tab: the server-stats
+    // bit on the watch frame is what drives the locked lamp.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof Request ? input.url : String(input);
+      const body = url.includes("/api/workspace")
+        ? { name: "test", root: "/tmp/test", preferences: {} }
+        : [];
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const tab = placeFileTab("notes/a.md", "hello");
+    expect(tab.fsWritable).toBe(true);
+
+    onWatchEvent({ kind: "modified", event: { path: "notes/a.md" }, writable: false });
+    expect(tab.fsWritable).toBe(false);
+
+    onWatchEvent({ kind: "modified", event: { path: "notes/a.md" }, writable: true });
+    expect(tab.fsWritable).toBe(true);
+
+    fetchSpy.mockRestore();
+  });
 });
 
 describe("resolveSpawnContext", () => {
