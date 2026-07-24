@@ -52,7 +52,9 @@ use tokio::sync::{broadcast, mpsc, watch, Notify};
 
 use crate::disk_echo::{content_hash, DiskEchoRing};
 use crate::routes::doc::{PeerCursor, ServerFrame};
-use crate::self_writes::SelfWrites;
+use crate::self_writes::{
+    check_write_preconditions, SelfWrites, WritePreconditionError, WritePreconditions,
+};
 use crate::state::WorkspaceCell;
 use changes::{Applied, ApplyError, ChangeSetJson, Section, UpdateJson};
 
@@ -260,7 +262,24 @@ enum MergeOutcome {
 /// Result of the conflict-aware PUT mutation gate.
 pub(crate) enum HttpReplaceOutcome {
     Applied,
-    Conflicted { disk_mtime_ns: Option<i64> },
+    PreconditionRequired {
+        current_version: u64,
+        disk_mtime_ns: Option<i64>,
+    },
+    Stale {
+        current_version: u64,
+        disk_mtime_ns: Option<i64>,
+    },
+    Conflicted {
+        disk_mtime_ns: Option<i64>,
+    },
+}
+
+pub(crate) struct HttpWriteView {
+    pub disk_mtime_ns: Option<i64>,
+    pub authority_version: u64,
+    pub conflict_mtime_ns: Option<Option<i64>>,
+    pub write_budget: u64,
 }
 
 impl SessionState {
@@ -630,13 +649,14 @@ impl DocSession {
 
     /// Atomic PUT preflight view: authority, session token, and an
     /// outer conflict marker carrying the retained disk token.
-    pub(crate) fn http_write_view(&self) -> (String, Option<i64>, Option<Option<i64>>) {
+    pub(crate) fn http_write_view(&self) -> HttpWriteView {
         let st = self.lock_state();
-        (
-            st.text.clone(),
-            st.flushed_mtime_ns,
-            st.session_state.conflict_disk_mtime_ns(),
-        )
+        HttpWriteView {
+            disk_mtime_ns: st.flushed_mtime_ns,
+            authority_version: st.version,
+            conflict_mtime_ns: st.session_state.conflict_disk_mtime_ns(),
+            write_budget: st.write_budget,
+        }
     }
 
     /// Whether a PUT must stay on the session path. Only an explicitly
@@ -648,6 +668,7 @@ impl DocSession {
     }
 
     /// Session CAS token for the PUT divert's conflict check.
+    #[cfg(test)]
     pub fn token(&self) -> Option<i64> {
         self.lock_state().flushed_mtime_ns
     }
@@ -676,10 +697,31 @@ impl DocSession {
         &self,
         client_id: &str,
         new_text: &str,
+        preconditions: WritePreconditions,
     ) -> Result<HttpReplaceOutcome, ApplyError> {
         let mut st = self.lock_state();
         if let Some(disk_mtime_ns) = st.session_state.conflict_disk_mtime_ns() {
             return Ok(HttpReplaceOutcome::Conflicted { disk_mtime_ns });
+        }
+        match check_write_preconditions(
+            st.flushed_mtime_ns,
+            Some(st.version),
+            new_text == st.text,
+            preconditions,
+        ) {
+            Ok(()) => {}
+            Err(WritePreconditionError::Required) => {
+                return Ok(HttpReplaceOutcome::PreconditionRequired {
+                    current_version: st.version,
+                    disk_mtime_ns: st.flushed_mtime_ns,
+                });
+            }
+            Err(WritePreconditionError::Conflict) => {
+                return Ok(HttpReplaceOutcome::Stale {
+                    current_version: st.version,
+                    disk_mtime_ns: st.flushed_mtime_ns,
+                });
+            }
         }
         if new_text.len() as u64 > st.write_budget {
             return Err(ApplyError::DocTooLarge {

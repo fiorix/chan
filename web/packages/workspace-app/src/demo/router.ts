@@ -127,10 +127,12 @@ export function createDemoFetch(
         return file ? json(file) : notFound(`no such file: ${rel}`);
       }
       if (method === "PUT") {
-        const body = parseBody(init) as { content: string };
-        const written = store.write(rel, body?.content ?? "");
+        const raw = typeof init?.body === "string" ? init.body : "";
+        const parsed = parseBody(init) as { content?: string } | undefined;
+        const content = parsed?.content ?? raw;
+        const written = store.write(rel, content);
         if (store.get(rel)?.kind === "document") {
-          graph.indexFile(rel, body?.content ?? "");
+          graph.indexFile(rel, content);
         }
         return json(written);
       }

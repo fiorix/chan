@@ -322,6 +322,56 @@ describe("file read streaming", () => {
   });
 });
 
+describe("raw file writes", () => {
+  test("sends text directly with disk and authority preconditions in the query", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          mtime: 2,
+          mtime_ns: "200",
+          authority_version: 8,
+          disk_conflicted: false,
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await api.write("notes/a b.md", "raw\ntext", "100", null, 7);
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(String(url)).toContain(
+      "/api/files/notes/a%20b.md?expected_mtime_ns=100&authority_version=7",
+    );
+    expect(init?.method).toBe("PUT");
+    expect(init?.body).toBe("raw\ntext");
+    expect(new Headers(init?.headers).get("content-type")).toBe(
+      "text/plain; charset=utf-8",
+    );
+    expect(result.authority_version).toBe(8);
+  });
+
+  test("preserves structured conflict metadata on ApiError", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          current_mtime_ns: "300",
+          current_authority_version: 9,
+          disk_conflicted: false,
+        }),
+        { status: 409 },
+      ),
+    );
+
+    await expect(api.write("a.md", "changed", "100", null, 7)).rejects.toMatchObject({
+      status: 409,
+      data: {
+        current_mtime_ns: "300",
+        current_authority_version: 9,
+      },
+    });
+  });
+});
+
 describe("relationship streaming", () => {
   test("parses report file stream events", async () => {
     const body = new ReadableStream<Uint8Array>({

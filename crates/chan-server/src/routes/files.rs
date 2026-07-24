@@ -12,6 +12,8 @@ use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use chan_workspace::{AtomicWriteKind, FileStat};
+
 use crate::doc_sessions::{flush_session, DocSession, HttpReplaceOutcome as DocHttpReplaceOutcome};
 use crate::error::{err, err_from, err_state};
 use crate::scene_sessions::scene::SceneError;
@@ -19,6 +21,7 @@ use crate::scene_sessions::{
     flush_session as flush_scene_session, HttpReplaceOutcome as SceneHttpReplaceOutcome,
     SceneSession,
 };
+use crate::self_writes::{check_write_preconditions, WritePreconditionError, WritePreconditions};
 use crate::state::AppState;
 use crate::static_assets::content_type_for;
 
@@ -802,22 +805,27 @@ async fn stream_read_file_response(
     ([(header::CONTENT_TYPE, "application/x-ndjson")], body).into_response()
 }
 
+#[derive(Default, Deserialize)]
+pub struct WriteFileQuery {
+    /// Legacy second-resolution disk CAS token.
+    #[serde(default)]
+    expected_mtime: Option<i64>,
+    /// Preferred nanosecond disk CAS token. It remains a decimal
+    /// string on the wire so browser clients never round it.
+    #[serde(default)]
+    expected_mtime_ns: Option<String>,
+    /// Version of the live document or scene authority observed by
+    /// the caller. Required with a disk token for changed content
+    /// whenever an attached authority exists.
+    #[serde(default)]
+    authority_version: Option<u64>,
+}
+
+#[cfg(test)]
 #[derive(Deserialize)]
 pub struct WriteBody {
     content: String,
-    /// CAS token: the mtime the client thinks the file currently
-    /// has on disk. When present, the server uses
-    /// Workspace::write_text_if_unchanged and rejects with 409 if the
-    /// disk-side mtime differs. When absent, the write is
-    /// last-write-wins (Workspace::write_text), preserving the
-    /// pre-CAS contract for callers that don't care
-    /// (bulk imports, scripts).
-    #[serde(default)]
     expected_mtime: Option<i64>,
-    /// Nanosecond CAS token as a decimal string. Preferred over
-    /// `expected_mtime` when present, because JSON numbers cannot
-    /// represent nanosecond mtimes exactly in browser clients.
-    #[serde(default)]
     expected_mtime_ns: Option<String>,
 }
 
@@ -829,6 +837,9 @@ struct WriteResponse {
     mtime: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mtime_ns: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    authority_version: Option<u64>,
+    disk_conflicted: bool,
 }
 
 #[derive(Serialize)]
@@ -841,27 +852,238 @@ struct WriteConflictBody {
     current_mtime: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     current_mtime_ns: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_authority_version: Option<u64>,
+    disk_conflicted: bool,
 }
 
-fn session_write_conflict_response(current_mtime_ns: Option<i64>) -> Response {
+fn write_precondition_response(
+    status: StatusCode,
+    current_mtime_ns: Option<i64>,
+    current_authority_version: Option<u64>,
+    disk_conflicted: bool,
+) -> Response {
     (
-        StatusCode::CONFLICT,
+        status,
         Json(WriteConflictBody {
             current_mtime: current_mtime_ns.map(|ns| ns / 1_000_000_000),
             current_mtime_ns: current_mtime_ns.map(|ns| ns.to_string()),
+            current_authority_version,
+            disk_conflicted,
         }),
     )
         .into_response()
 }
 
+fn session_write_conflict_response(
+    current_mtime_ns: Option<i64>,
+    current_authority_version: u64,
+    disk_conflicted: bool,
+) -> Response {
+    write_precondition_response(
+        StatusCode::CONFLICT,
+        current_mtime_ns,
+        Some(current_authority_version),
+        disk_conflicted,
+    )
+}
+
+enum RequestBodyMessage {
+    Chunk(Bytes),
+    Complete,
+    Failed(String),
+}
+
+async fn feed_request_body(body: Body, tx: mpsc::Sender<RequestBodyMessage>) {
+    let mut stream = body.into_data_stream();
+    while let Some(next) = stream.next().await {
+        let message = match next {
+            Ok(bytes) => RequestBodyMessage::Chunk(bytes),
+            Err(error) => RequestBodyMessage::Failed(error.to_string()),
+        };
+        let terminal = matches!(message, RequestBodyMessage::Failed(_));
+        if tx.send(message).await.is_err() || terminal {
+            return;
+        }
+    }
+    let _ = tx.send(RequestBodyMessage::Complete).await;
+}
+
+fn consume_request_body(
+    rx: &mut mpsc::Receiver<RequestBodyMessage>,
+    mut write_chunk: impl FnMut(&[u8]) -> chan_workspace::Result<()>,
+) -> chan_workspace::Result<()> {
+    loop {
+        match rx.blocking_recv() {
+            Some(RequestBodyMessage::Chunk(bytes)) => write_chunk(&bytes)?,
+            Some(RequestBodyMessage::Complete) => return Ok(()),
+            Some(RequestBodyMessage::Failed(error)) => {
+                return Err(chan_workspace::ChanError::Io(format!(
+                    "request body read failed: {error}"
+                )));
+            }
+            None => {
+                return Err(chan_workspace::ChanError::Io(
+                    "request body ended before completion".into(),
+                ));
+            }
+        }
+    }
+}
+
+struct TextAccumulator {
+    text: String,
+    utf8_tail: Vec<u8>,
+    written: u64,
+    limit: u64,
+}
+
+impl TextAccumulator {
+    fn new(limit: u64) -> Self {
+        Self {
+            text: String::new(),
+            utf8_tail: Vec::with_capacity(4),
+            written: 0,
+            limit,
+        }
+    }
+
+    fn write_chunk(&mut self, chunk: &[u8]) -> chan_workspace::Result<()> {
+        let attempted = self
+            .written
+            .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+        if attempted > self.limit {
+            return Err(chan_workspace::ChanError::WriteTooLarge {
+                kind: "text",
+                size: attempted,
+                limit: self.limit,
+            });
+        }
+        let mut offset = 0usize;
+        if !self.utf8_tail.is_empty() {
+            let needed = utf8_width(self.utf8_tail[0])
+                .ok_or_else(invalid_request_utf8)?
+                .saturating_sub(self.utf8_tail.len());
+            if chunk.len() < needed {
+                self.utf8_tail.extend_from_slice(chunk);
+                self.written = attempted;
+                return Ok(());
+            }
+            self.utf8_tail.extend_from_slice(&chunk[..needed]);
+            let text = std::str::from_utf8(&self.utf8_tail).map_err(|_| invalid_request_utf8())?;
+            self.text.push_str(text);
+            self.utf8_tail.clear();
+            offset = needed;
+        }
+        match std::str::from_utf8(&chunk[offset..]) {
+            Ok(text) => self.text.push_str(text),
+            Err(error) if error.error_len().is_none() => {
+                let valid = &chunk[offset..offset + error.valid_up_to()];
+                self.text
+                    .push_str(std::str::from_utf8(valid).expect("valid_up_to is valid UTF-8"));
+                self.utf8_tail
+                    .extend_from_slice(&chunk[offset + error.valid_up_to()..]);
+            }
+            Err(_) => return Err(invalid_request_utf8()),
+        }
+        self.written = attempted;
+        Ok(())
+    }
+
+    fn finish(self) -> chan_workspace::Result<String> {
+        if self.utf8_tail.is_empty() {
+            Ok(self.text)
+        } else {
+            Err(invalid_request_utf8())
+        }
+    }
+}
+
+fn utf8_width(first: u8) -> Option<usize> {
+    match first {
+        0x00..=0x7f => Some(1),
+        0xc2..=0xdf => Some(2),
+        0xe0..=0xef => Some(3),
+        0xf0..=0xf4 => Some(4),
+        _ => None,
+    }
+}
+
+fn invalid_request_utf8() -> chan_workspace::ChanError {
+    chan_workspace::ChanError::Io("raw text write body is not valid UTF-8".into())
+}
+
+async fn accumulate_text_body(body: Body, limit: u64) -> chan_workspace::Result<String> {
+    let (tx, mut rx) = mpsc::channel(8);
+    let consumer = tokio::task::spawn_blocking(move || {
+        let mut accumulator = TextAccumulator::new(limit);
+        consume_request_body(&mut rx, |chunk| accumulator.write_chunk(chunk))?;
+        accumulator.finish()
+    });
+    feed_request_body(body, tx).await;
+    consumer
+        .await
+        .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?
+}
+
+async fn write_streamed_text(
+    workspace: Arc<chan_workspace::Workspace>,
+    path: String,
+    preconditions: WritePreconditions,
+    self_writes: Arc<crate::self_writes::SelfWrites>,
+    body: Body,
+) -> chan_workspace::Result<FileStat> {
+    let (tx, mut rx) = mpsc::channel(8);
+    let consumer = tokio::task::spawn_blocking(move || {
+        let writable = workspace.ensure_writable(&path)?;
+        let current_mtime_ns = writable.stat.as_ref().and_then(|stat| stat.mtime_ns);
+        match check_write_preconditions(current_mtime_ns, None, false, preconditions) {
+            Ok(()) => {}
+            Err(WritePreconditionError::Conflict) => {
+                return Err(chan_workspace::ChanError::WriteConflict { current_mtime_ns });
+            }
+            Err(WritePreconditionError::Required) => {
+                return Err(chan_workspace::ChanError::Io(
+                    "disk write unexpectedly required an authority precondition".into(),
+                ));
+            }
+        }
+        let mut reservation = None;
+        let result = workspace.write_atomic_stream(&path, AtomicWriteKind::Text, |sink| {
+            consume_request_body(&mut rx, |chunk| sink.write_chunk(chunk))?;
+            reservation = Some(self_writes.reserve_after_preflight(&path));
+            Ok(())
+        });
+        match result {
+            Ok(stat) => Ok(stat),
+            Err(error) => {
+                if let Some(reservation) = reservation {
+                    self_writes.cancel(reservation);
+                }
+                Err(error)
+            }
+        }
+    });
+    feed_request_body(body, tx).await;
+    consumer
+        .await
+        .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?
+}
+
 pub async fn api_write_file(
     State(state): State<Arc<AppState>>,
     AxumPath(path): AxumPath<String>,
-    Json(body): Json<WriteBody>,
+    Query(query): Query<WriteFileQuery>,
+    body: Body,
 ) -> Response {
-    let expected_mtime_ns = match parse_optional_mtime_ns(body.expected_mtime_ns.as_deref()) {
+    let expected_mtime_ns = match parse_optional_mtime_ns(query.expected_mtime_ns.as_deref()) {
         Ok(mtime_ns) => mtime_ns,
         Err(message) => return err(StatusCode::BAD_REQUEST, message),
+    };
+    let preconditions = WritePreconditions {
+        expected_mtime: query.expected_mtime,
+        expected_mtime_ns,
+        authority_version: query.authority_version,
     };
     let workspace = match state.try_workspace() {
         Ok(workspace) => workspace,
@@ -884,15 +1106,19 @@ pub async fn api_write_file(
     // including a delete conflict whose disk token is None.
     if let Some(session) = state.doc_sessions.get(&path) {
         if session.diverts_http_write() {
-            return write_via_session(
-                &state,
-                &workspace,
-                &session,
-                body.expected_mtime,
-                expected_mtime_ns,
-                &body.content,
-            )
-            .await;
+            let view = session.http_write_view();
+            if view.conflict_mtime_ns.is_some() {
+                return session_write_conflict_response(
+                    view.conflict_mtime_ns.flatten(),
+                    view.authority_version,
+                    true,
+                );
+            }
+            let content = match accumulate_text_body(body, view.write_budget).await {
+                Ok(content) => content,
+                Err(error) => return err_from(&error),
+            };
+            return write_via_session(&state, &workspace, &session, preconditions, &content).await;
         }
     }
     // Same divert for a live scene session: CAS against the session
@@ -901,59 +1127,47 @@ pub async fn api_write_file(
     // fall-through matches the doc divert above.
     if let Some(session) = state.scene_sessions.get(&path) {
         if session.diverts_http_write() {
-            return write_via_scene_session(
-                &state,
-                &workspace,
-                &session,
-                body.expected_mtime,
-                expected_mtime_ns,
-                &body.content,
-            )
-            .await;
+            let view = session.http_write_view();
+            if view.conflict_mtime_ns.is_some() {
+                return session_write_conflict_response(
+                    view.conflict_mtime_ns.flatten(),
+                    view.authority_version,
+                    true,
+                );
+            }
+            let content = match accumulate_text_body(body, view.write_budget).await {
+                Ok(content) => content,
+                Err(error) => return err_from(&error),
+            };
+            return write_via_scene_session(&state, &workspace, &session, preconditions, &content)
+                .await;
         }
     }
-    // Record the self-write BEFORE the blocking write runs. The fs
-    // watcher runs on its own thread and can deliver the resulting
-    // notify event the instant the write lands; noting after the
-    // spawn_blocking await left a window where that event reached
-    // should_suppress() before the path was recorded, so the editor's
-    // own autosave surfaced as a phantom "external edit" mid-typing.
-    // Recording up front closes the window. Noting a path whose write
-    // then fails (CAS conflict / IO error) is harmless and within the
-    // module's documented over-suppression trade-off.
-    state.self_writes.note(&path);
-    let path_for_write = path.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        write_file_sync(
-            &workspace,
-            &path_for_write,
-            body.expected_mtime,
-            expected_mtime_ns,
-            &body.content,
-        )
-    })
+    let result = write_streamed_text(
+        workspace,
+        path,
+        preconditions,
+        Arc::clone(&state.self_writes),
+        body,
+    )
     .await;
-
-    let (mtime, mtime_ns) = match result {
-        Ok(Ok(mtime)) => mtime,
-        Ok(Err(e)) => {
-            if let chan_workspace::ChanError::WriteConflict { current_mtime_ns } = e {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(WriteConflictBody {
-                        current_mtime: current_mtime_ns.map(|ns| ns / 1_000_000_000),
-                        current_mtime_ns: current_mtime_ns.map(|ns| ns.to_string()),
-                    }),
-                )
-                    .into_response();
-            }
-            return err_from(&e);
+    let stat = match result {
+        Ok(stat) => stat,
+        Err(chan_workspace::ChanError::WriteConflict { current_mtime_ns }) => {
+            return write_precondition_response(
+                StatusCode::CONFLICT,
+                current_mtime_ns,
+                None,
+                false,
+            );
         }
-        Err(join) => return err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(error) => return err_from(&error),
     };
     Json(WriteResponse {
-        mtime,
-        mtime_ns: mtime_ns.map(|ns| ns.to_string()),
+        mtime: stat.mtime,
+        mtime_ns: stat.mtime_ns.map(|ns| ns.to_string()),
+        authority_version: None,
+        disk_conflicted: false,
     })
     .into_response()
 }
@@ -972,51 +1186,31 @@ async fn write_via_session(
     state: &Arc<AppState>,
     workspace: &Arc<chan_workspace::Workspace>,
     session: &Arc<DocSession>,
-    expected_mtime: Option<i64>,
-    expected_mtime_ns: Option<i64>,
+    preconditions: WritePreconditions,
     content: &str,
 ) -> Response {
-    // Text and token read under one lock: the equal-body escape below
-    // must compare against the same authority state the token belongs to.
-    let (authority_text, pre_token, disk_conflict_mtime_ns) = session.http_write_view();
-    if let Some(disk_mtime_ns) = disk_conflict_mtime_ns {
-        return session_write_conflict_response(disk_mtime_ns);
-    }
-    // The CAS matrix mirrors write_file_sync: the ns token is
-    // preferred, the legacy form compares at second resolution, no
-    // token is last-write-wins.
-    let conflict = if let Some(expected) = expected_mtime_ns {
-        pre_token != Some(expected)
-    } else if let Some(expected) = expected_mtime {
-        pre_token.map(|ns| ns / 1_000_000_000) != Some(expected)
-    } else {
-        false
-    };
-    if conflict {
-        // Token-adopt escape: a stale token with a byte-identical body
-        // is not a lost update. The client-side funnel fallback PUTs
-        // the exact text the authority already holds while the
-        // authority's freshest flush token is still in flight to that
-        // client, so a bare token compare would answer a spurious 409
-        // and the editor would raise its conflict modal for a file
-        // nobody else touched. Equal bytes mean accepting can lose
-        // nothing: adopt the caller onto the session token and skip
-        // the no-op replace; any pending flush proceeds on its own
-        // clock (the token rotation reaches attached clients through
-        // the flush frame, exactly as for a confirmed edit).
-        if pre_token.is_some() && content == authority_text {
-            return Json(WriteResponse {
-                mtime: pre_token.map(|ns| ns / 1_000_000_000),
-                mtime_ns: pre_token.map(|ns| ns.to_string()),
-            })
-            .into_response();
-        }
-        return session_write_conflict_response(pre_token);
-    }
-    match session.apply_http_replace("$http", content) {
+    match session.apply_http_replace("$http", content, preconditions) {
         Ok(DocHttpReplaceOutcome::Applied) => {}
+        Ok(DocHttpReplaceOutcome::PreconditionRequired {
+            current_version,
+            disk_mtime_ns,
+        }) => {
+            return write_precondition_response(
+                StatusCode::PRECONDITION_REQUIRED,
+                disk_mtime_ns,
+                Some(current_version),
+                false,
+            );
+        }
+        Ok(DocHttpReplaceOutcome::Stale {
+            current_version,
+            disk_mtime_ns,
+        }) => {
+            return session_write_conflict_response(disk_mtime_ns, current_version, false);
+        }
         Ok(DocHttpReplaceOutcome::Conflicted { disk_mtime_ns }) => {
-            return session_write_conflict_response(disk_mtime_ns);
+            let version = session.http_write_view().authority_version;
+            return session_write_conflict_response(disk_mtime_ns, version, true);
         }
         Err(e) => {
             // DocTooLarge is the only reachable variant here:
@@ -1031,18 +1225,21 @@ async fn write_via_session(
     // re-applies idempotently), but a 200 must keep meaning "bytes on
     // disk".
     if !flush_session(session, workspace, &state.self_writes).await {
-        if let (_, _, Some(disk_mtime_ns)) = session.http_write_view() {
-            return session_write_conflict_response(disk_mtime_ns);
+        let view = session.http_write_view();
+        if let Some(disk_mtime_ns) = view.conflict_mtime_ns {
+            return session_write_conflict_response(disk_mtime_ns, view.authority_version, true);
         }
         return err(
             StatusCode::SERVICE_UNAVAILABLE,
             "doc session accepted the write but the disk flush failed; retry".into(),
         );
     }
-    let token = session.token();
+    let view = session.http_write_view();
     Json(WriteResponse {
-        mtime: token.map(|ns| ns / 1_000_000_000),
-        mtime_ns: token.map(|ns| ns.to_string()),
+        mtime: view.disk_mtime_ns.map(|ns| ns / 1_000_000_000),
+        mtime_ns: view.disk_mtime_ns.map(|ns| ns.to_string()),
+        authority_version: Some(view.authority_version),
+        disk_conflicted: false,
     })
     .into_response()
 }
@@ -1058,31 +1255,31 @@ async fn write_via_scene_session(
     state: &Arc<AppState>,
     workspace: &Arc<chan_workspace::Workspace>,
     session: &Arc<SceneSession>,
-    expected_mtime: Option<i64>,
-    expected_mtime_ns: Option<i64>,
+    preconditions: WritePreconditions,
     content: &str,
 ) -> Response {
-    let (pre_token, disk_conflict_mtime_ns) = session.http_write_view();
-    if let Some(disk_mtime_ns) = disk_conflict_mtime_ns {
-        return session_write_conflict_response(disk_mtime_ns);
-    }
-    // The CAS matrix mirrors write_file_sync: the ns token is
-    // preferred, the legacy form compares at second resolution, no
-    // token is last-write-wins.
-    let conflict = if let Some(expected) = expected_mtime_ns {
-        pre_token != Some(expected)
-    } else if let Some(expected) = expected_mtime {
-        pre_token.map(|ns| ns / 1_000_000_000) != Some(expected)
-    } else {
-        false
-    };
-    if conflict {
-        return session_write_conflict_response(pre_token);
-    }
-    match session.apply_http_replace(content) {
+    match session.apply_http_replace(content, preconditions) {
         Ok(SceneHttpReplaceOutcome::Applied) => {}
+        Ok(SceneHttpReplaceOutcome::PreconditionRequired {
+            current_version,
+            disk_mtime_ns,
+        }) => {
+            return write_precondition_response(
+                StatusCode::PRECONDITION_REQUIRED,
+                disk_mtime_ns,
+                Some(current_version),
+                false,
+            );
+        }
+        Ok(SceneHttpReplaceOutcome::Stale {
+            current_version,
+            disk_mtime_ns,
+        }) => {
+            return session_write_conflict_response(disk_mtime_ns, current_version, false);
+        }
         Ok(SceneHttpReplaceOutcome::Conflicted { disk_mtime_ns }) => {
-            return session_write_conflict_response(disk_mtime_ns);
+            let version = session.http_write_view().authority_version;
+            return session_write_conflict_response(disk_mtime_ns, version, true);
         }
         Err(e) => {
             return match e {
@@ -1097,49 +1294,23 @@ async fn write_via_scene_session(
     // re-applies idempotently), but a 200 must keep meaning "bytes on
     // disk".
     if !flush_scene_session(session, workspace, &state.self_writes).await {
-        if let (_, Some(disk_mtime_ns)) = session.http_write_view() {
-            return session_write_conflict_response(disk_mtime_ns);
+        let view = session.http_write_view();
+        if let Some(disk_mtime_ns) = view.conflict_mtime_ns {
+            return session_write_conflict_response(disk_mtime_ns, view.authority_version, true);
         }
         return err(
             StatusCode::SERVICE_UNAVAILABLE,
             "scene session accepted the write but the disk flush failed; retry".into(),
         );
     }
-    let token = session.token();
+    let view = session.http_write_view();
     Json(WriteResponse {
-        mtime: token.map(|ns| ns / 1_000_000_000),
-        mtime_ns: token.map(|ns| ns.to_string()),
+        mtime: view.disk_mtime_ns.map(|ns| ns / 1_000_000_000),
+        mtime_ns: view.disk_mtime_ns.map(|ns| ns.to_string()),
+        authority_version: Some(view.authority_version),
+        disk_conflicted: false,
     })
     .into_response()
-}
-
-fn write_file_sync(
-    workspace: &chan_workspace::Workspace,
-    path: &str,
-    expected_mtime: Option<i64>,
-    expected_mtime_ns: Option<i64>,
-    content: &str,
-) -> chan_workspace::Result<(Option<i64>, Option<i64>)> {
-    if let Some(ns) = expected_mtime_ns {
-        workspace.write_text_if_unchanged(path, Some(ns), content)?;
-    } else if expected_mtime.is_some() {
-        let pre = workspace.stat(path).ok();
-        let cur_secs = pre.as_ref().and_then(|s| s.mtime);
-        let cur_ns = pre.as_ref().and_then(|s| s.mtime_ns);
-        if expected_mtime != cur_secs {
-            return Err(chan_workspace::ChanError::WriteConflict {
-                current_mtime_ns: cur_ns,
-            });
-        }
-        workspace.write_text_if_unchanged(path, cur_ns, content)?;
-    } else {
-        workspace.write_text(path, content)?;
-    }
-    let stat = workspace.stat(path).ok();
-    Ok((
-        stat.as_ref().and_then(|s| s.mtime),
-        stat.as_ref().and_then(|s| s.mtime_ns),
-    ))
 }
 
 fn parse_optional_mtime_ns(value: Option<&str>) -> Result<Option<i64>, String> {
@@ -1154,6 +1325,32 @@ fn parse_optional_mtime_ns(value: Option<&str>) -> Result<Option<i64>, String> {
         .parse::<i64>()
         .map(Some)
         .map_err(|_| "expected_mtime_ns must be a decimal nanosecond timestamp".into())
+}
+
+#[cfg(test)]
+fn write_file_sync(
+    workspace: &chan_workspace::Workspace,
+    path: &str,
+    expected_mtime: Option<i64>,
+    expected_mtime_ns: Option<i64>,
+    content: &str,
+) -> chan_workspace::Result<(Option<i64>, Option<i64>)> {
+    let writable = workspace.ensure_writable(path)?;
+    let current_mtime_ns = writable.stat.as_ref().and_then(|stat| stat.mtime_ns);
+    check_write_preconditions(
+        current_mtime_ns,
+        None,
+        false,
+        WritePreconditions {
+            expected_mtime,
+            expected_mtime_ns,
+            authority_version: None,
+        },
+    )
+    .map_err(|_| chan_workspace::ChanError::WriteConflict { current_mtime_ns })?;
+    workspace.write_text(path, content)?;
+    let stat = workspace.stat(path)?;
+    Ok((stat.mtime, stat.mtime_ns))
 }
 
 #[derive(Deserialize)]
@@ -2363,10 +2560,11 @@ mod tests {
 #[cfg(test)]
 mod doc_divert_tests {
     use std::collections::HashMap;
-    use std::sync::atomic::AtomicU64;
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, RwLock};
 
-    use axum::body::{to_bytes, Body};
+    use axum::body::{to_bytes, Body, Bytes};
     use axum::extract::{Path as AxumPath, Query, State};
     use axum::http::{header, Request, StatusCode};
     use axum::Json;
@@ -2376,7 +2574,10 @@ mod doc_divert_tests {
     use tokio::sync::{broadcast, watch};
     use tower::ServiceExt;
 
-    use super::{api_read_file, api_write_file, ReadFileQuery, WriteBody};
+    use super::{
+        api_read_file, api_write_file as api_write_file_raw, ReadFileQuery, WriteBody,
+        WriteFileQuery,
+    };
     use crate::doc_sessions::changes::{replace_diff, UpdateJson};
     use crate::self_writes::SelfWrites;
     use crate::state::{AppState, WorkspaceCell};
@@ -2448,6 +2649,75 @@ mod doc_divert_tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    pub(super) async fn raw_put(
+        state: State<Arc<AppState>>,
+        path: AxumPath<String>,
+        content: String,
+        expected_mtime: Option<i64>,
+        expected_mtime_ns: Option<String>,
+        authority_version: Option<u64>,
+    ) -> axum::response::Response {
+        raw_put_body(
+            state,
+            path,
+            Body::from(content),
+            expected_mtime,
+            expected_mtime_ns,
+            authority_version,
+        )
+        .await
+    }
+
+    pub(super) async fn raw_put_body(
+        state: State<Arc<AppState>>,
+        path: AxumPath<String>,
+        body: Body,
+        expected_mtime: Option<i64>,
+        expected_mtime_ns: Option<String>,
+        authority_version: Option<u64>,
+    ) -> axum::response::Response {
+        api_write_file_raw(
+            state,
+            path,
+            Query(WriteFileQuery {
+                expected_mtime,
+                expected_mtime_ns,
+                authority_version,
+            }),
+            body,
+        )
+        .await
+    }
+
+    pub(super) async fn api_write_file(
+        state: State<Arc<AppState>>,
+        path: AxumPath<String>,
+        Json(body): Json<WriteBody>,
+    ) -> axum::response::Response {
+        let rel = path.0.clone();
+        let authority_version = state
+            .0
+            .doc_sessions
+            .get(&rel)
+            .map(|session| session.http_write_view().authority_version)
+            .or_else(|| {
+                state
+                    .0
+                    .scene_sessions
+                    .get(&rel)
+                    .map(|session| session.http_write_view().authority_version)
+            });
+        raw_put(
+            state,
+            path,
+            body.content,
+            body.expected_mtime,
+            body.expected_mtime_ns,
+            authority_version,
+        )
+        .await
+    }
+
     /// A legacy-oversize file's save must reach the workspace's own
     /// size check: axum's 2 MiB default body limit would otherwise
     /// reject every save of a >2 MiB document before the handler runs,
@@ -2471,19 +2741,14 @@ mod doc_divert_tests {
         // over axum's 2 MiB default (rejected without the raised
         // DefaultBodyLimit on the route).
         let shrunk = "z".repeat(5 * 1024 * 1024 / 2);
-        let body = serde_json::to_string(&serde_json::json!({
-            "content": shrunk,
-            "expected_mtime": null,
-            "expected_mtime_ns": token_ns.to_string(),
-        }))
-        .unwrap();
+        let uri = format!("/api/files/legacy.md?expected_mtime_ns={}", token_ns);
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri("/api/files/legacy.md")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(body))
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .body(Body::from(shrunk.clone()))
                     .unwrap(),
             )
             .await
@@ -2709,7 +2974,9 @@ mod doc_divert_tests {
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         assert_eq!(session.authority_view().0, "three\n");
 
-        // No token: last-write-wins, same as the disk path's contract.
+        // A changed write under a live authority also requires its
+        // open-time disk token. Disk-only writes retain the historical
+        // no-token last-write-wins behavior.
         let resp = api_write_file(
             State(state.clone()),
             AxumPath("n.md".into()),
@@ -2720,15 +2987,161 @@ mod doc_divert_tests {
             }),
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_REQUIRED);
         assert_eq!(
             std::fs::read_to_string(root.path().join("n.md")).unwrap(),
-            "four\n"
+            "three\n"
         );
     }
 
     #[tokio::test]
-    async fn put_divert_stale_token_equal_body_token_adopts() {
+    async fn put_divert_changed_body_without_authority_version_is_precondition_required() {
+        let (_cfg, _root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        workspace.write_text("n.md", "one\n").unwrap();
+        let handle = state
+            .doc_sessions
+            .attach(&workspace, "n.md", "win-1", None)
+            .await
+            .unwrap();
+        let token = handle.session().token().expect("seeded token");
+
+        let resp = raw_put(
+            State(state),
+            AxumPath("n.md".into()),
+            "two\n".into(),
+            None,
+            Some(token.to_string()),
+            None,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_REQUIRED);
+        assert_eq!(handle.session().authority_view().0, "one\n");
+    }
+
+    #[tokio::test]
+    async fn put_divert_stale_authority_or_missing_disk_token_is_rejected() {
+        let (_cfg, _root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        workspace.write_text("n.md", "one\n").unwrap();
+        let handle = state
+            .doc_sessions
+            .attach(&workspace, "n.md", "win-1", None)
+            .await
+            .unwrap();
+        let token = handle.session().token().expect("seeded token");
+
+        let stale = raw_put(
+            State(state.clone()),
+            AxumPath("n.md".into()),
+            "two\n".into(),
+            None,
+            Some(token.to_string()),
+            Some(1),
+        )
+        .await;
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        let stale_body = body_json(stale).await;
+        assert_eq!(stale_body["current_authority_version"], 0);
+
+        let missing_disk_token = raw_put(
+            State(state),
+            AxumPath("n.md".into()),
+            "two\n".into(),
+            None,
+            None,
+            Some(0),
+        )
+        .await;
+        assert_eq!(
+            missing_disk_token.status(),
+            StatusCode::PRECONDITION_REQUIRED
+        );
+        assert_eq!(handle.session().authority_view().0, "one\n");
+    }
+
+    #[tokio::test]
+    async fn oversized_stream_stops_early_and_leaves_target_unchanged() {
+        let (_cfg, _root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        workspace.write_text("n.md", "original\n").unwrap();
+        let token = workspace.stat("n.md").unwrap().mtime_ns.unwrap();
+        let chunks_seen = Arc::new(AtomicUsize::new(0));
+        let stream = futures::stream::unfold(
+            (0usize, Arc::clone(&chunks_seen)),
+            |(index, chunks_seen)| async move {
+                if index == 100 {
+                    return None;
+                }
+                chunks_seen.fetch_add(1, Ordering::Relaxed);
+                Some((
+                    Ok::<Bytes, Infallible>(Bytes::from(vec![b'x'; 64 * 1024])),
+                    (index + 1, chunks_seen),
+                ))
+            },
+        );
+
+        let resp = raw_put_body(
+            State(state.clone()),
+            AxumPath("n.md".into()),
+            Body::from_stream(stream),
+            None,
+            Some(token.to_string()),
+            None,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(workspace.read_text("n.md").unwrap(), "original\n");
+        assert!(
+            chunks_seen.load(Ordering::Relaxed) < 100,
+            "the producer must stop when the bounded consumer rejects overflow"
+        );
+        assert!(!state.self_writes.should_suppress("n.md"));
+    }
+
+    #[tokio::test]
+    async fn streamed_put_accepts_a_legacy_file_larger_than_fifty_mib() {
+        let (_cfg, root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        let replacement_size = chan_workspace::BYTES_WRITE_LIMIT + 64 * 1024;
+        let legacy = std::fs::File::create(root.path().join("legacy.md")).unwrap();
+        legacy.set_len(replacement_size + 64 * 1024).unwrap();
+        drop(legacy);
+        let token = workspace.stat("legacy.md").unwrap().mtime_ns.unwrap();
+        let stream = futures::stream::unfold(replacement_size, |remaining| async move {
+            if remaining == 0 {
+                return None;
+            }
+            let chunk_len = remaining.min(64 * 1024) as usize;
+            Some((
+                Ok::<Bytes, Infallible>(Bytes::from(vec![b'z'; chunk_len])),
+                remaining - chunk_len as u64,
+            ))
+        });
+
+        let resp = raw_put_body(
+            State(state),
+            AxumPath("legacy.md".into()),
+            Body::from_stream(stream),
+            None,
+            Some(token.to_string()),
+            None,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::metadata(root.path().join("legacy.md"))
+                .unwrap()
+                .len(),
+            replacement_size
+        );
+    }
+
+    #[tokio::test]
+    async fn put_divert_equal_body_forces_durable_flush() {
         let (_cfg, root, state) = divert_app();
         let workspace = state.try_workspace().unwrap();
         workspace.write_text("n.md", "one\n").unwrap();
@@ -2744,7 +3157,8 @@ mod doc_divert_tests {
         // Stale token + byte-identical body: the funnel-fallback shape
         // (the client re-sends the text the authority already holds
         // while the freshest flush token is still in flight to it).
-        // Token-adopt: 200 carrying the session token, no $http fan.
+        // Durable confirmation: 200 carrying the session token, no
+        // synthetic $http update.
         let resp = api_write_file(
             State(state.clone()),
             AxumPath("n.md".into()),
@@ -2757,7 +3171,8 @@ mod doc_divert_tests {
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
-        assert_eq!(v["mtime_ns"], token0.to_string());
+        let durable_token = session.token().expect("forced-flush token");
+        assert_eq!(v["mtime_ns"], durable_token.to_string());
         while let Ok(raw) = frames.try_recv() {
             let f: Value = serde_json::from_str(&raw).unwrap();
             assert_ne!(
@@ -2767,9 +3182,8 @@ mod doc_divert_tests {
         }
 
         // Live unflushed edit: authority text moves ahead of disk while
-        // the token stays put. An equal-to-AUTHORITY body still adopts,
-        // and the pending flush is left on its own clock (disk keeps
-        // the old bytes: no forced flush rides the adopt).
+        // the token stays put. An equal-to-authority body must force or
+        // confirm a durable flush before returning 200.
         handle
             .push(
                 0,
@@ -2791,10 +3205,11 @@ mod doc_divert_tests {
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
-        assert_eq!(v["mtime_ns"], token0.to_string());
+        let forced_token = session.token().expect("forced-flush token");
+        assert_eq!(v["mtime_ns"], forced_token.to_string());
         assert_eq!(
             std::fs::read_to_string(root.path().join("n.md")).unwrap(),
-            "one\n"
+            "live v2\n"
         );
 
         // Stale token + DIFFERENT body: a real potential lost update,
@@ -2811,7 +3226,7 @@ mod doc_divert_tests {
         .await;
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         let v = body_json(resp).await;
-        assert_eq!(v["current_mtime_ns"], token0.to_string());
+        assert_eq!(v["current_mtime_ns"], forced_token.to_string());
         assert_eq!(session.authority_view().0, "live v2\n");
     }
 
@@ -2975,8 +3390,8 @@ mod scene_divert_tests {
     use chan_workspace::{WatchEvent, WatchKind};
     use serde_json::{json, Value};
 
-    use super::doc_divert_tests::{body_json, divert_app};
-    use super::{api_read_file, api_write_file, ReadFileQuery, WriteBody};
+    use super::doc_divert_tests::{api_write_file, body_json, divert_app};
+    use super::{api_read_file, ReadFileQuery, WriteBody};
 
     fn scene_body(elements: Value) -> String {
         json!({

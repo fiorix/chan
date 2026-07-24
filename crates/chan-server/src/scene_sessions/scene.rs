@@ -33,15 +33,16 @@
 //!
 //! The growth cap counts compact-JSON bytes against a caller-supplied
 //! semantic write budget. Standalone model users default to
-//! [`TEXT_WRITE_LIMIT`], while sessions retain the larger size of an
-//! existing legacy file. The compact cost is a lower bound of the
-//! pretty file form; exactness does not matter (the workspace write
-//! path enforces the on-disk limit independently), the cap only bounds
-//! session memory. Everything here is pure: no I/O, no tokio, no
-//! session state.
+//! [`chan_workspace::TEXT_WRITE_LIMIT`], while sessions retain the
+//! larger size of an existing legacy file. The compact cost is a lower
+//! bound of the pretty file form; exactness does not matter (the
+//! workspace write path enforces the on-disk limit independently), the
+//! cap only bounds session memory. Everything here is pure: no I/O, no
+//! tokio, no session state.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+#[cfg(test)]
 use chan_workspace::TEXT_WRITE_LIMIT;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -288,6 +289,7 @@ impl Scene {
     /// a client echoing the authority's own appState back must never
     /// bump the version or re-fan, or two live canvases ping-pong the
     /// object forever.
+    #[cfg(test)]
     pub fn apply_push(
         &mut self,
         elements: Vec<Value>,
@@ -372,6 +374,7 @@ impl Scene {
     /// versions; existing tombstones stay untouched unless the body
     /// resurrects their id. Equal content yields an empty [`Applied`]
     /// (the flush-echo case). All-or-nothing like the push path.
+    #[cfg(test)]
     pub fn apply_replace(
         &mut self,
         text: &str,
@@ -557,6 +560,7 @@ pub(super) struct MergeConflict;
 /// scalar values remain atomic. A delete versus edit, two incompatible
 /// additions under one id, duplicate ids, or a same-field edit is a
 /// conflict.
+#[cfg(test)]
 pub(super) fn merge_three_way(
     baseline_text: &str,
     authority: &Scene,
