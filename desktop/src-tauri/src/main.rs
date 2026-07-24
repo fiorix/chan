@@ -1352,9 +1352,8 @@ fn persist_workspaces(state: &AppState) {
         .list_workspaces()
         .into_iter()
         .filter(|ws| embedded.is_root_mounted(&ws.root_path))
-        .map(|ws| chan_server::PersistedWorkspace {
-            path: ws.root_path.to_string_lossy().into_owned(),
-            on: true,
+        .map(|ws| {
+            chan_server::PersistedWorkspace::new(ws.root_path.to_string_lossy().into_owned(), true)
         })
         .collect();
     tracing::info!(
