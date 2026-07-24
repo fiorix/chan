@@ -71,6 +71,8 @@ const FLUSH_TICK: Duration = Duration::from_millis(200);
 /// echo must hold this long, unchanged, before the state machine
 /// settles it; parity with doc_sessions.
 const CORROBORATE_AFTER: Duration = Duration::from_millis(300);
+const REMOVED_DISK_MARKER: &str = "\0chan:removed";
+const UNREADABLE_DISK_MARKER: &str = "\0chan:unreadable";
 static NEXT_CONFLICT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A fresh versionNonce for server-side bumps, in Excalidraw's
@@ -208,8 +210,8 @@ struct SessionConflict {
     disk_content: String,
 }
 
-/// Seam implemented by E3's element-identity merge. E2 owns only the
-/// transition after a merge result is known.
+/// Identity-aware three-way merge result consumed by the session
+/// state transition.
 enum MergeOutcome {
     #[allow(dead_code)] // constructed by E3's merge engine
     Merged(String),
@@ -563,11 +565,21 @@ impl SceneSession {
         Ok(())
     }
 
-    /// Apply a result supplied by E3's identity-aware merge gate. E2
-    /// deliberately does not decide whether element changes overlap.
+    /// Apply a result supplied by the identity-aware merge gate.
+    #[cfg(test)]
     fn apply_merge_outcome(&self, disk_text: String, stat: &FileStat, outcome: MergeOutcome) {
-        let disk_hash = content_hash(&disk_text);
         let mut st = self.lock_state();
+        self.apply_merge_outcome_locked(&mut st, disk_text, stat, outcome);
+    }
+
+    fn apply_merge_outcome_locked(
+        &self,
+        st: &mut SceneState,
+        disk_text: String,
+        stat: &FileStat,
+        outcome: MergeOutcome,
+    ) {
+        let disk_hash = content_hash(&disk_text);
         match outcome {
             MergeOutcome::Merged(merged_text) => {
                 let disk_baseline = match Scene::parse(&disk_text) {
@@ -616,40 +628,54 @@ impl SceneSession {
                 st.flush_failures = 0;
             }
             MergeOutcome::Conflict => {
-                let baseline_version = st.baseline.content_hash;
-                let id = match &st.session_state {
-                    SessionState::Conflicted(conflict)
-                        if conflict.baseline_version == baseline_version
-                            && conflict.disk_version == disk_hash =>
-                    {
-                        conflict.id.clone()
-                    }
-                    _ => format!("scene-{}", NEXT_CONFLICT_ID.fetch_add(1, Ordering::Relaxed)),
-                };
-                st.session_state = SessionState::Conflicted(SessionConflict {
-                    id,
-                    baseline_version,
-                    disk_version: disk_hash,
-                    authority_version: st.version,
-                    disk_mtime_ns: stat.mtime_ns,
-                    disk_content: disk_text,
-                });
-                st.flush_now = false;
+                Self::enter_conflict_locked(st, disk_hash, stat.mtime_ns, disk_text);
             }
         }
     }
 
-    /// Fold clean external disk content into the session. Dirty
-    /// divergence is conservatively retained as a conflict until E3
-    /// supplies a proven merge result. Content that does not parse is
-    /// ignored for now; E3 promotes that stalemate into conflict.
+    fn enter_conflict_locked(
+        st: &mut SceneState,
+        disk_version: u64,
+        disk_mtime_ns: Option<i64>,
+        disk_content: String,
+    ) {
+        let baseline_version = st.baseline.content_hash;
+        let id = match &st.session_state {
+            SessionState::Conflicted(conflict)
+                if conflict.baseline_version == baseline_version
+                    && conflict.disk_version == disk_version =>
+            {
+                conflict.id.clone()
+            }
+            _ => format!("scene-{}", NEXT_CONFLICT_ID.fetch_add(1, Ordering::Relaxed)),
+        };
+        st.session_state = SessionState::Conflicted(SessionConflict {
+            id,
+            baseline_version,
+            disk_version,
+            authority_version: st.version,
+            disk_mtime_ns,
+            disk_content,
+        });
+        st.flush_now = false;
+    }
+
+    /// Fold external disk content into the session. Divergence runs
+    /// the identity- and field-aware three-way merge from the durable
+    /// baseline; invalid or ambiguous scene input becomes a conflict.
     fn merge_disk(&self, disk_text: String, stat: &FileStat) {
         let mut st = self.lock_state();
+        if scene::validate_merge_input(&disk_text).is_err() {
+            self.apply_merge_outcome_locked(&mut st, disk_text, stat, MergeOutcome::Conflict);
+            return;
+        }
         let disk_matches_authority = Scene::parse(&disk_text)
             .is_ok_and(|scene| scene.serialize_file() == st.scene.serialize_file());
         if st.session_state.is_dirty() && !disk_matches_authority {
-            drop(st);
-            self.apply_merge_outcome(disk_text, stat, MergeOutcome::Conflict);
+            let outcome = scene::merge_three_way(&st.baseline.content, &st.scene, &disk_text)
+                .map(MergeOutcome::Merged)
+                .unwrap_or(MergeOutcome::Conflict);
+            self.apply_merge_outcome_locked(&mut st, disk_text, stat, outcome);
             return;
         }
         // Adopted disk bytes join the echo ring either way: even when
@@ -691,10 +717,106 @@ impl SceneSession {
     /// recreates), and tell every client.
     fn mark_removed(&self) {
         let mut st = self.lock_state();
+        if st.session_state.is_dirty() {
+            Self::enter_conflict_locked(
+                &mut st,
+                content_hash(REMOVED_DISK_MARKER),
+                None,
+                String::new(),
+            );
+            return;
+        }
         st.flushed_mtime_ns = None;
         st.session_state = SessionState::Removed;
         st.flush_now = false;
         st.fan(&serialize(&ServerFrame::Removed));
+    }
+
+    /// Resolve a conflict in favor of the retained disk side. A valid
+    /// scene is adopted through replace semantics; a retained removal
+    /// becomes `Removed`. Invalid or unreadable input leaves the
+    /// conflict intact.
+    #[allow(dead_code)] // wired to the explicit resolution route in E4
+    pub(crate) fn reload_conflict(&self) -> bool {
+        let mut st = self.lock_state();
+        let (disk_version, disk_mtime_ns, disk_content) = match &st.session_state {
+            SessionState::Conflicted(conflict) => (
+                conflict.disk_version,
+                conflict.disk_mtime_ns,
+                conflict.disk_content.clone(),
+            ),
+            _ => return false,
+        };
+        if disk_version == content_hash(REMOVED_DISK_MARKER) {
+            st.flushed_mtime_ns = None;
+            st.session_state = SessionState::Removed;
+            st.flush_now = false;
+            st.flush_failures = 0;
+            st.fan(&serialize(&ServerFrame::Removed));
+            return true;
+        }
+        let disk_hash = content_hash(&disk_content);
+        if disk_version != disk_hash {
+            return false;
+        }
+        let applied = match st.scene.apply_replace(&disk_content, &mut fresh_nonce) {
+            Ok(applied) => applied,
+            Err(_) => return false,
+        };
+        let changed = !applied.is_empty();
+        if changed {
+            st.version += 1;
+            let frame = update_frame(st.version, applied);
+            st.fan(&frame);
+        }
+        st.disk_echo.note(disk_hash);
+        st.flushed_mtime_ns = disk_mtime_ns;
+        let baseline_content = st.scene.serialize_file();
+        st.baseline = DurableBaseline {
+            content_hash: content_hash(&baseline_content),
+            content: baseline_content,
+            mtime_ns: disk_mtime_ns,
+            authority_version: st.version,
+        };
+        st.session_state = SessionState::Clean;
+        st.flush_now = false;
+        st.flush_failures = 0;
+        if !changed {
+            let frame = snapshot_frame(&self.path, &st);
+            st.fan(&frame);
+        }
+        true
+    }
+
+    /// Resolve a conflict in favor of the live authority. The
+    /// retained disk token becomes the CAS expectation, the existing
+    /// flush path writes safely, and a successful commit re-broadcasts
+    /// the current authority.
+    #[allow(dead_code)] // wired to the explicit resolution route in E4
+    pub(crate) async fn overwrite_conflict(
+        self: &Arc<Self>,
+        workspace: &Arc<Workspace>,
+        self_writes: &SelfWrites,
+    ) -> bool {
+        {
+            let mut st = self.lock_state();
+            let disk_mtime_ns = match &st.session_state {
+                SessionState::Conflicted(conflict) => conflict.disk_mtime_ns,
+                _ => return false,
+            };
+            st.flushed_mtime_ns = disk_mtime_ns;
+            st.session_state = SessionState::Dirty {
+                since: Instant::now(),
+            };
+            st.flush_now = true;
+        }
+        if !flush_session(self, workspace, self_writes).await {
+            return false;
+        }
+        let st = self.lock_state();
+        let frame = snapshot_frame(&self.path, &st);
+        st.fan(&frame);
+        true
     }
 
     /// First half of a flush: serialize the file form and capture the
@@ -1203,9 +1325,8 @@ async fn flush_session_locked(
 /// own flush echo (ignore); clean parseable content adopts through the
 /// replace semantics, while dirty divergence enters the E3 merge gate
 /// after corroboration; a vanished file routes into the removed path.
-/// Unreadable or unparseable content is ignored with a warning: a deliberate
-/// stalemate that surfaces through flush errors rather than corrupting
-/// the session.
+/// Unreadable or unparseable content enters a retained conflict
+/// instead of risking authority loss.
 pub(crate) async fn reconcile_session(session: &Arc<SceneSession>, workspace: &Arc<Workspace>) {
     let _io = session.io_lock.lock().await;
     reconcile_session_locked(session, workspace).await
@@ -1272,7 +1393,18 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
                 tracing::warn!(
                     error = %e,
                     path = %session.path,
-                    "scene session reconcile read failed; keeping the authority scene"
+                    "scene session reconcile read failed; entering conflict"
+                );
+                let marker = format!(
+                    "{UNREADABLE_DISK_MARKER}:{}:{:?}:{e}",
+                    stat.size, stat.mtime_ns
+                );
+                let mut st = session.lock_state();
+                SceneSession::enter_conflict_locked(
+                    &mut st,
+                    content_hash(&marker),
+                    stat.mtime_ns,
+                    String::new(),
                 );
                 return;
             }
@@ -1692,6 +1824,179 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn distinct_external_element_merges_flushes_and_broadcasts_once() {
+        let seed = body(json!([elem("x", 1, 1, "a1")]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (ha, mut rx) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rx);
+        ha.push(vec![elem("y", 1, 2, "a2")], None, None).unwrap();
+        drain(&mut rx);
+
+        let disk = body(json!([elem("x", 1, 1, "a1"), elem("z", 1, 3, "a3")]));
+        fx.workspace.write_text("b.excalidraw", &disk).unwrap();
+        ha.session().lock_state().flushed_mtime_ns = None;
+        reconcile_session(ha.session(), &fx.workspace).await;
+        backdate_pending_fold(ha.session());
+        fx.registry.reconcile_pending(&fx.workspace).await;
+
+        let authority = Scene::parse(&ha.session().authority_view().0).unwrap();
+        for id in ["x", "y", "z"] {
+            assert!(authority.element(id).is_some(), "merged element {id}");
+        }
+        let updates = drain(&mut rx);
+        assert_eq!(types(&updates), ["update"], "merged authority fans once");
+
+        fx.registry.flush_pass(&fx.workspace, &fx.self_writes).await;
+        let disk = Scene::parse(&fx.workspace.read_text("b.excalidraw").unwrap()).unwrap();
+        for id in ["x", "y", "z"] {
+            assert!(disk.element(id).is_some(), "flushed element {id}");
+        }
+        let flushed = drain(&mut rx);
+        assert_eq!(types(&flushed), ["flush"], "merged authority flushes once");
+        assert_eq!(flushed[0]["dirty"], false);
+    }
+
+    #[tokio::test]
+    async fn same_element_edit_conflicts_and_reload_adopts_disk() {
+        let mut baseline_element = elem("x", 1, 1, "a1");
+        baseline_element["x"] = json!(10);
+        let seed = body(json!([baseline_element]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (ha, mut rx) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rx);
+
+        let mut local_element = elem("x", 2, 2, "a1");
+        local_element["x"] = json!(20);
+        ha.push(vec![local_element], None, None).unwrap();
+        drain(&mut rx);
+        let mut disk_element = elem("x", 2, 3, "a1");
+        disk_element["x"] = json!(30);
+        let disk = body(json!([disk_element]));
+        fx.workspace.write_text("b.excalidraw", &disk).unwrap();
+        let stat = fx.workspace.stat("b.excalidraw").unwrap();
+        ha.session().merge_disk(disk.clone(), &stat);
+
+        {
+            let st = ha.session().lock_state();
+            let SessionState::Conflicted(conflict) = &st.session_state else {
+                panic!("same-field element edits must conflict");
+            };
+            assert_eq!(st.scene.element("x").unwrap().value["x"], 20);
+            assert_eq!(conflict.baseline_version, st.baseline.content_hash);
+            assert_eq!(conflict.disk_version, content_hash(&disk));
+            assert_eq!(conflict.authority_version, st.version);
+            assert_eq!(conflict.disk_content, disk);
+        }
+        assert!(drain(&mut rx).is_empty(), "conflict has no silent winner");
+
+        assert!(ha.session().reload_conflict());
+        assert_eq!(
+            Scene::parse(&ha.session().authority_view().0)
+                .unwrap()
+                .element("x")
+                .unwrap()
+                .value["x"],
+            30
+        );
+        assert_eq!(types(&drain(&mut rx)), ["update"]);
+    }
+
+    #[tokio::test]
+    async fn overwrite_scene_conflict_flushes_authority_and_rebroadcasts() {
+        let mut baseline_element = elem("x", 1, 1, "a1");
+        baseline_element["x"] = json!(10);
+        let seed = body(json!([baseline_element]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (ha, mut rx) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rx);
+
+        let mut local_element = elem("x", 2, 2, "a1");
+        local_element["x"] = json!(20);
+        ha.push(vec![local_element], None, None).unwrap();
+        drain(&mut rx);
+        let mut disk_element = elem("x", 2, 3, "a1");
+        disk_element["x"] = json!(30);
+        let disk = body(json!([disk_element]));
+        fx.workspace.write_text("b.excalidraw", &disk).unwrap();
+        let stat = fx.workspace.stat("b.excalidraw").unwrap();
+        ha.session().merge_disk(disk, &stat);
+
+        assert!(
+            ha.session()
+                .overwrite_conflict(&fx.workspace, &fx.self_writes)
+                .await
+        );
+        assert_eq!(
+            Scene::parse(&fx.workspace.read_text("b.excalidraw").unwrap())
+                .unwrap()
+                .element("x")
+                .unwrap()
+                .value["x"],
+            20
+        );
+        let frames = drain(&mut rx);
+        assert_eq!(types(&frames), ["flush", "snapshot"]);
+        assert_eq!(frames[1]["elements"][0]["x"], 20);
+    }
+
+    #[tokio::test]
+    async fn delete_while_dirty_enters_conflicted() {
+        let seed = body(json!([elem("x", 1, 1, "a1")]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (ha, mut rx) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rx);
+        ha.push(vec![elem("y", 1, 2, "a2")], None, None).unwrap();
+        drain(&mut rx);
+
+        std::fs::remove_file(fx.root.path().join("b.excalidraw")).unwrap();
+        reconcile_session(ha.session(), &fx.workspace).await;
+        backdate_pending_removal(ha.session());
+        fx.registry.reconcile_pending(&fx.workspace).await;
+
+        let st = ha.session().lock_state();
+        let SessionState::Conflicted(conflict) = &st.session_state else {
+            panic!("delete versus edit must enter Conflicted");
+        };
+        assert!(st.scene.element("y").is_some(), "local authority retained");
+        assert_eq!(
+            st.baseline.content,
+            Scene::parse(&seed).unwrap().serialize_file()
+        );
+        assert_eq!(conflict.baseline_version, st.baseline.content_hash);
+        assert_eq!(conflict.authority_version, st.version);
+        assert_eq!(conflict.disk_mtime_ns, None);
+        assert!(conflict.disk_content.is_empty());
+        drop(st);
+        assert_eq!(drain(&mut rx).len(), 0, "neither side wins");
+    }
+
+    #[tokio::test]
+    async fn invalid_external_replacement_enters_conflicted() {
+        let seed = body(json!([elem("x", 1, 1, "a1")]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (ha, mut rx) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rx);
+        fx.workspace.write_text("b.excalidraw", "{oops").unwrap();
+        ha.session().lock_state().flushed_mtime_ns = None;
+
+        reconcile_session(ha.session(), &fx.workspace).await;
+
+        let st = ha.session().lock_state();
+        let SessionState::Conflicted(conflict) = &st.session_state else {
+            panic!("invalid replacement must conflict");
+        };
+        assert!(st.scene.element("x").is_some());
+        assert_eq!(
+            st.baseline.content,
+            Scene::parse(&seed).unwrap().serialize_file()
+        );
+        assert_eq!(conflict.disk_version, content_hash("{oops"));
+        assert_eq!(conflict.disk_content, "{oops");
+        drop(st);
+        assert!(drain(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
     async fn empty_file_seeds_an_empty_scene() {
         let fx = fixture(&[("b.excalidraw", "")]);
         let (_h, mut rx) = attach(&fx, "b.excalidraw", "win-1").await;
@@ -2050,8 +2355,6 @@ mod tests {
         let fx = fixture(&[("b.excalidraw", &body(json!([elem("x", 1, 1, "a1")])))]);
         let (ha, mut rxa) = attach(&fx, "b.excalidraw", "w1").await;
         drain(&mut rxa);
-        ha.push(vec![elem("y", 1, 1, "a2")], None, None).unwrap();
-        drain(&mut rxa);
 
         std::fs::remove_file(fx.root.path().join("b.excalidraw")).unwrap();
         fx.registry
@@ -2096,7 +2399,7 @@ mod tests {
             .iter()
             .map(|e| e["id"].as_str().unwrap())
             .collect();
-        assert_eq!(ids, ["x", "y", "z"]);
+        assert_eq!(ids, ["x", "z"]);
     }
 
     #[tokio::test]
@@ -2167,16 +2470,17 @@ mod tests {
         let fx = fixture(&[("b.excalidraw", &body(json!([elem("x", 1, 1, "a1")])))]);
         let (ha, mut rxa) = attach(&fx, "b.excalidraw", "w1").await;
         drain(&mut rxa);
-        ha.push(vec![elem("y", 1, 1, "a2")], None, None).unwrap();
+        let mut local = elem("x", 2, 2, "a1");
+        local["x"] = json!(20);
+        ha.push(vec![local], None, None).unwrap();
         drain(&mut rxa);
 
         // Stale the session token: an external write bumps the mtime
-        // and adds an element.
+        // and changes the same element field incompatibly.
+        let mut disk = elem("x", 2, 3, "a1");
+        disk["x"] = json!(30);
         fx.workspace
-            .write_text(
-                "b.excalidraw",
-                &body(json!([elem("x", 1, 1, "a1"), elem("z", 1, 1, "a3")])),
-            )
+            .write_text("b.excalidraw", &body(json!([disk])))
             .unwrap();
         backdate_dirty(ha.session());
         let settled = flush_session(ha.session(), &fx.workspace, &fx.self_writes).await;
@@ -2191,26 +2495,23 @@ mod tests {
             assert_eq!(st.flush_failures, 0, "a deferral is not a failure");
         }
 
-        // The observation holds: E2 keeps both sides and pauses flush.
-        // E3 will replace this conservative conflict gate with an
-        // identity-aware merge result where possible.
+        // The observation holds: the identity-aware merge proves the
+        // same field overlaps, keeps both sides, and pauses flush.
         backdate_pending_fold(ha.session());
         fx.registry.reconcile_pending(&fx.workspace).await;
         let st = ha.session().lock_state();
         let SessionState::Conflicted(conflict) = &st.session_state else {
             panic!("corroborated divergence must enter Conflicted");
         };
-        assert!(conflict.disk_content.contains("\"z\""));
+        assert!(conflict.disk_content.contains("\"x\":30"));
         drop(st);
         let (text, _) = ha.session().authority_view();
         let on_session: Value = serde_json::from_str(&text).unwrap();
-        let ids: Vec<&str> = on_session["elements"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|e| e["id"].as_str().unwrap())
-            .collect();
-        assert_eq!(ids, ["x", "y"], "local authority stays live");
+        assert_eq!(on_session["elements"][0]["id"], "x");
+        assert_eq!(
+            on_session["elements"][0]["x"], 20,
+            "local authority stays live"
+        );
         assert_eq!(drain(&mut rxa).len(), 0, "no actor silently wins");
     }
 
@@ -2504,10 +2805,8 @@ mod tests {
         assert_eq!(drain(&mut rxa).len(), 0, "first observation only parks");
         assert!(ha.session().authority_view().0.contains("\"y\""));
 
-        // The observation holds. E2 must retain the local authority
-        // until the E3 identity-merge gate supplies a proven merge or
-        // an explicit conflict resolution; disk must never silently
-        // tombstone the local element.
+        // The observation holds. Distinct identities merge without
+        // allowing disk to silently tombstone the local element.
         backdate_pending_fold(ha.session());
         fx.registry.reconcile_pending(&fx.workspace).await;
         let (text, _) = ha.session().authority_view();
@@ -2518,8 +2817,8 @@ mod tests {
             .iter()
             .map(|e| e["id"].as_str().unwrap())
             .collect();
-        assert_eq!(ids, ["x", "y"]);
-        assert_eq!(drain(&mut rxa).len(), 0, "no actor silently wins");
+        assert_eq!(ids, ["x", "y", "z"]);
+        assert_eq!(types(&drain(&mut rxa)), ["update"]);
     }
 
     #[tokio::test]
