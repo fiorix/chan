@@ -54,38 +54,6 @@ function desktopDownloads(version) {
       format: "appimage",
       asset: `Chan_${version}_aarch64.AppImage`,
     },
-    {
-      id: "desktop-linux-deb",
-      kind: "desktop",
-      label: "Linux deb (amd64)",
-      platform: "linux-x86_64",
-      format: "deb",
-      asset: `Chan_${version}_amd64.deb`,
-    },
-    {
-      id: "desktop-linux-deb-arm64",
-      kind: "desktop",
-      label: "Linux deb (arm64)",
-      platform: "linux-aarch64",
-      format: "deb",
-      asset: `Chan_${version}_arm64.deb`,
-    },
-    {
-      id: "desktop-linux-rpm-amd64",
-      kind: "desktop",
-      label: "Linux rpm (x86_64)",
-      platform: "linux-x86_64",
-      format: "rpm",
-      asset: `Chan-${version}-1.x86_64.rpm`,
-    },
-    {
-      id: "desktop-linux-rpm-arm64",
-      kind: "desktop",
-      label: "Linux rpm (aarch64)",
-      platform: "linux-aarch64",
-      format: "rpm",
-      asset: `Chan-${version}-1.aarch64.rpm`,
-    },
   ];
 }
 

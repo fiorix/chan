@@ -74,7 +74,7 @@ limactl shell default sudo sdme exec chan-build /bin/sh -c '
 
 ## Desktop: build the chan-desktop AppImage and .deb
 
-`make chan-desktop` runs `cargo tauri build` natively, so on macOS it produces a macOS `.app`, not Linux bundles. To build the Linux chan-desktop bundles (the AppImage and `.deb` that `release.yml`'s `linux-desktop-artifacts` job ships, plus the `.rpm` Tauri's `targets:"all"` emits for free) from a macOS workstation, run `cargo tauri build` inside an sdme container:
+`make chan-desktop` runs `cargo tauri build` natively, so on macOS it produces a macOS `.app`, not Linux bundles. To build the Linux chan-desktop bundles (the AppImage that `release.yml`'s `linux-desktop-artifacts` job ships, plus the `.deb`/`.rpm` Tauri's `targets:"all"` emits for free, which stay local/QA outputs -- COPR/PPA/AUR own the packaged channel) from a macOS workstation, run `cargo tauri build` inside an sdme container:
 
 ```sh
 # one-time: import the ubuntu base (shared with the core gate above)
@@ -122,7 +122,7 @@ Packaged-AppImage dispatch: invoking the AppImage through its `cs` / `chan` wrap
 
 ## CLI: build the static musl `chan` tarball
 
-The standalone `chan` CLI tarball (what `install.sh` and the self-upgrade download) is built fully static against musl, so a too-new build glibc does not gate older Linux machines. The `.deb`/`.rpm` packages and the chan-desktop AppImage stay gnu: the distro provides glibc, and webkit cannot be static.
+The standalone `chan` CLI tarball (what `install.sh` and the self-upgrade download) is built fully static against musl, so a too-new build glibc does not gate older Linux machines. The locally built `.deb`/`.rpm` bundles and the chan-desktop AppImage stay gnu: the distro provides glibc, and webkit cannot be static.
 
 This is a host cross-compile, no container. cargo-zigbuild uses zig as the cross C/C++ compiler so the C/C++ deps (ring, bundled SQLite, tokenizers' esaxx-rs/onig) link static. Prerequisites on the host: zig, cargo-zigbuild, and the musl rust targets.
 
@@ -141,7 +141,7 @@ file /tmp/chan          # -> ... statically linked
 # on Linux: ldd /tmp/chan -> "not a dynamic executable"
 ```
 
-CI builds these in `release.yml`'s `linux-cli-artifacts` job (zig via `mlugg/setup-zig` + cargo-zigbuild); the `.deb`/`.rpm` in that same job stay gnu. The `chan-tarball` Make target uses `cargo zigbuild` for musl targets and plain `cargo build` for gnu.
+CI builds these in `release.yml`'s `linux-cli-artifacts` job (zig via `mlugg/setup-zig` + cargo-zigbuild); the locally built `.deb`/`.rpm` bundles stay gnu. The `chan-tarball` Make target uses `cargo zigbuild` for musl targets and plain `cargo build` for gnu.
 
 ## Devserver: the `--service=systemd` user-service path
 

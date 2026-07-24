@@ -21,7 +21,6 @@ tauri-build = { workspace = true, features = [] }
 
 [dependencies]
 tauri = { workspace = true, features = ["devtools"] }
-tauri-plugin-deep-link = { workspace = true }
 tauri-plugin-dialog = { workspace = true }
 tauri-plugin-opener = { workspace = true }
 tauri-plugin-updater = { workspace = true }
@@ -55,6 +54,12 @@ keyring = { workspace = true }
 getrandom = { workspace = true }
 gethostname = { workspace = true }
 reqwest = { workspace = true }
+# PKCE: base64url-no-pad encode the 32-byte verifier and the
+# SHA256(verifier) challenge; subtle backs the constant-time state
+# compare in the loopback callback, matching the gateway's ct_eq.
+base64 = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
 
 # The launcher's local workspace runtime serves the embedded SPA + API
 # over a loopback axum router (see src/embedded.rs).

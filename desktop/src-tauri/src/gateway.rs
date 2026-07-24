@@ -980,6 +980,15 @@ pub async fn resume_gateway_signin<R: tauri::Runtime>(
 /// failure, cancellation) or a competing sign-in replaces it, a parked
 /// gateway's browser leg can never complete - its spinner and the
 /// cross-gateway busy gate must not outlive the leg.
+///
+/// INVARIANT (correctness, not nicety): this touches gateway RUNTIME
+/// ROWS only and MUST NOT clear the auth slot or drop the loopback
+/// listener. `open_signin` installs the new slot and THEN calls this, so
+/// an abandon that dropped the slot would nuke the just-created sign-in.
+/// The slot/listener lifecycle is owned entirely by `auth`
+/// (`replace_pending` drops the prior, the stamp-guarded timer drops the
+/// abandoned at the slot TTL = `GATEWAY_SIGNIN_TIMEOUT`, the settle path
+/// drops on completion, the open-url-failure arm drops on a failed open).
 pub fn abandon_pending_signins<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &Arc<AppState>,

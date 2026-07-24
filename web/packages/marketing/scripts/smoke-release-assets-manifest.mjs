@@ -28,8 +28,12 @@ const windowsAssetCount = baseAssetCount + windowsAssets(version).length;
 
 const root = mkdtempSync(path.join(tmpdir(), "chan-release-assets-"));
 try {
+  // An archived release still carrying the dropped desktop deb/rpm (the
+  // preserve-release-metadata five-release re-run scenario) must not fail
+  // and must not leak them into the collected manifest.
+  const droppedDesktopNames = [`Chan_${version}_amd64.deb`, `Chan-${version}-1.x86_64.rpm`];
   // No Windows assets: the optional Windows entries are skipped, not an error.
-  const base = runCollect("base", version, []);
+  const base = runCollect("base", version, droppedDesktopNames);
   assertEqual(base.version, version, "version");
   assertEqual(base.tag, tag, "tag");
   assertEqual(base.assets.length, baseAssetCount, "asset count excludes detached sig");
@@ -41,6 +45,12 @@ try {
     !base.assets.some((asset) => asset.name.endsWith("windows-msvc.zip")),
     "windows cli absent when not in the release",
   );
+  for (const name of droppedDesktopNames) {
+    assert(
+      !base.assets.some((asset) => asset.name === name),
+      `dropped desktop asset ${name} not collected`,
+    );
+  }
 
   const cli = base.assets.find((asset) => asset.name === firstCliAsset);
   assert(cli, "missing CLI asset");
@@ -74,8 +84,8 @@ try {
   assertEqual(prerelease.version, prereleaseVersion, "prerelease version");
   assertEqual(prerelease.tag, `v${prereleaseVersion}`, "prerelease tag");
   assert(
-    prerelease.assets.some((asset) => asset.name === "Chan-0.56.0-rc1-1.x86_64.rpm"),
-    "prerelease desktop rpm collected",
+    prerelease.assets.some((asset) => asset.name === "Chan_0.56.0-rc1_amd64.AppImage"),
+    "prerelease desktop AppImage collected",
   );
   assert(
     prerelease.assets.some((asset) => asset.name === "chan-gateway-admin_0.56.0.rc1-1_amd64.deb"),

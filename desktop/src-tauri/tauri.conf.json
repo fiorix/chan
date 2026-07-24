@@ -18,11 +18,6 @@
     }
   },
   "plugins": {
-    "deep-link": {
-      "desktop": {
-        "schemes": ["chan"]
-      }
-    },
     "updater": {
       "endpoints": [
         "https://chan.app/dl/desktop/latest.json"

@@ -2,15 +2,17 @@
 //!
 //! Each test gets its own throwaway Postgres schema (for
 //! tower-sessions + api_tokens) and wiremock mocks for profile + the
-//! GitHub OAuth endpoints. Exercises the full flow:
+//! GitHub OAuth endpoints. Exercises the full loopback + PKCE flow:
 //!
 //!   * unauthenticated bounce → `/`
 //!   * OAuth completion → `/desktop/authorize/consent`
 //!   * consent page render (CSRF nonce, security headers)
-//!   * allow / deny POST → 200 handoff page embedding
-//!     `chan://auth/callback#code=...` (meta refresh + fallback link);
-//!     neither the fragment nor the page ever carries the PAT secret
-//!   * redeem: one-time code → PAT once, replayed / unknown → 410
+//!   * allow / deny POST → 200 handoff page navigating to
+//!     `http://127.0.0.1:<port>/auth/callback?code=...&state=...` (meta
+//!     refresh + fallback link); neither the query nor the page ever
+//!     carries the PAT secret
+//!   * redeem: `{code, code_verifier}` → PAT once; replayed, unknown,
+//!     and wrong-verifier → 410
 //!   * audit rows record `created_via_desktop` + `desktop.redeem`
 
 #[path = "../../../tests-shared/pg_reaper.rs"]
@@ -325,10 +327,11 @@ fn extract_oauth_state(authorize_url: &str) -> String {
         .expect("state param")
 }
 
-/// Parse a `chan://auth/callback#k=v&k2=v2` fragment into a map.
-fn parse_chan_fragment(url: &str) -> std::collections::HashMap<String, String> {
-    let frag = url.split_once('#').map(|(_, f)| f).unwrap_or("");
-    url::form_urlencoded::parse(frag.as_bytes())
+/// Parse a `http://127.0.0.1:<port>/auth/callback?k=v&k2=v2` loopback
+/// callback query into a map.
+fn parse_callback_query(url: &str) -> std::collections::HashMap<String, String> {
+    let query = url.split_once('?').map(|(_, q)| q).unwrap_or("");
+    url::form_urlencoded::parse(query.as_bytes())
         .into_owned()
         .collect()
 }
@@ -342,13 +345,13 @@ fn extract_csrf(html: &str) -> String {
     after[..end].to_string()
 }
 
-/// Pull the `chan://` target out of the handoff page HTML and assert
-/// it appears exactly twice (the meta refresh + the fallback link).
-/// The attribute-escaped URL can only contain `&amp;` entities
+/// Pull the loopback callback target out of the handoff page HTML and
+/// assert it appears exactly twice (the meta refresh + the fallback
+/// link). The attribute-escaped URL can only contain `&amp;` entities
 /// (percent-encoding covers every other breaker), so unescaping is a
 /// single replace.
 fn extract_handoff_url(html: &str) -> String {
-    let needle = r#"href="chan://"#;
+    let needle = r#"href="http://127.0.0.1"#;
     let start = html.find(needle).expect("handoff link present");
     let after = &html[start + r#"href=""#.len()..];
     let end = after.find('"').expect("href value closes");
@@ -466,10 +469,20 @@ fn user_json(user_id: Uuid, email: &str, blocked: bool) -> serde_json::Value {
     body
 }
 
+/// RFC 7636 Appendix B known vector. The matching challenge
+/// `E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM ==
+/// base64url(SHA256(PKCE_VERIFIER))` rides the AUTH_URI query strings;
+/// the gateway recomputes and constant-time compares at redeem.
+const PKCE_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+
+/// A valid loopback callback the desktop listener would bind, plus the
+/// PKCE challenge + S256 method.
 const AUTH_URI: &str = "/desktop/authorize?\
-                        redirect_uri=chan%3A%2F%2Fauth%2Fcallback&\
+                        redirect_uri=http%3A%2F%2F127.0.0.1%3A54321%2Fauth%2Fcallback&\
                         state=desktop-nonce-1&\
                         label=chan-desktop+%40+host&\
+                        code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&\
+                        code_challenge_method=S256&\
                         scopes=tunnel&\
                         expires_in=2592000";
 
@@ -494,7 +507,9 @@ async fn bad_redirect_uri_returns_400() {
     let resp = c
         .get(
             "/desktop/authorize?redirect_uri=https%3A%2F%2Fevil.example%2Fcb&\
-             state=x&label=x&expires_in=10",
+             state=x&label=x&\
+             code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&\
+             code_challenge_method=S256&expires_in=10",
         )
         .await;
     assert_eq!(resp.status, StatusCode::BAD_REQUEST);
@@ -546,7 +561,7 @@ async fn full_flow_mints_pat_with_desktop_audit_action() {
     assert!(csp.contains("img-src 'self'"), "{csp}");
 
     // Authorize: a 200 handoff page, NOT a redirect (a 3xx off this
-    // form POST would put the chan:// hop under form-action).
+    // form POST would put the loopback hop under form-action).
     let resp = c
         .post_form(
             "/desktop/authorize/confirm",
@@ -565,30 +580,35 @@ async fn full_flow_mints_pat_with_desktop_audit_action() {
     assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
     assert!(csp.contains("img-src 'self'"), "{csp}");
     let url = extract_handoff_url(resp.body_str());
-    let frag = parse_chan_fragment(&url);
-    assert!(url.starts_with("chan://auth/callback#"));
+    let query = parse_callback_query(&url);
+    assert!(url.starts_with("http://127.0.0.1:54321/auth/callback?"));
+    assert!(
+        !url.contains('#'),
+        "loopback delivery is a query, not a fragment"
+    );
     assert_eq!(
-        frag.get("state").map(String::as_str),
+        query.get("state").map(String::as_str),
         Some("desktop-nonce-1")
     );
-    assert_eq!(
-        frag.get("label").map(String::as_str),
-        Some("chan-desktop @ host")
-    );
+    // label/expires_at ride the redeem response, never the callback query.
+    assert!(!query.contains_key("label"), "no label in the query: {url}");
 
-    // The fragment carries a one-time code and NEVER the credential;
-    // the handoff page as a whole is grep-clean of the secret.
-    assert!(!frag.contains_key("secret"), "no secret key: {url}");
-    assert!(!frag.contains_key("id"), "no id key: {url}");
-    let code = frag.get("code").expect("code in fragment").clone();
+    // The query carries a one-time code and NEVER the credential; the
+    // handoff page as a whole is grep-clean of the secret.
+    assert!(!query.contains_key("secret"), "no secret key: {url}");
+    assert!(!query.contains_key("id"), "no id key: {url}");
+    let code = query.get("code").expect("code in query").clone();
     assert!(!code.is_empty());
     let html = resp.body_str();
     assert!(!html.contains("chan_pat_"), "PAT leaked into the handoff");
     assert!(!html.contains("secret="), "secret key in the handoff");
 
-    // Redeem the code: 200 exactly once, with the working PAT.
+    // Redeem code + verifier: 200 exactly once, with the working PAT.
     let resp = c
-        .post_json("/desktop/authorize/redeem", &json!({ "code": code }))
+        .post_json(
+            "/desktop/authorize/redeem",
+            &json!({ "code": code, "code_verifier": PKCE_VERIFIER }),
+        )
         .await;
     assert_eq!(resp.status, StatusCode::OK);
     let redeemed: serde_json::Value = serde_json::from_slice(&resp.body).expect("redeem json");
@@ -612,7 +632,10 @@ async fn full_flow_mints_pat_with_desktop_audit_action() {
 
     // A replay of the same code is 410 with an error body.
     let resp = c
-        .post_json("/desktop/authorize/redeem", &json!({ "code": code }))
+        .post_json(
+            "/desktop/authorize/redeem",
+            &json!({ "code": code, "code_verifier": PKCE_VERIFIER }),
+        )
         .await;
     assert_eq!(resp.status, StatusCode::GONE);
     let body: serde_json::Value = serde_json::from_slice(&resp.body).expect("error json");
@@ -641,7 +664,7 @@ async fn redeem_unknown_code_is_410() {
     let resp = c
         .post_json(
             "/desktop/authorize/redeem",
-            &json!({ "code": "no-such-code" }),
+            &json!({ "code": "no-such-code", "code_verifier": PKCE_VERIFIER }),
         )
         .await;
     assert_eq!(resp.status, StatusCode::GONE);
@@ -673,13 +696,13 @@ async fn deny_returns_user_cancelled_and_does_not_mint() {
     assert_eq!(resp.status, StatusCode::OK);
     assert!(resp.body_str().contains("Request cancelled"), "deny copy");
     let url = extract_handoff_url(resp.body_str());
-    let frag = parse_chan_fragment(&url);
+    let query = parse_callback_query(&url);
     assert_eq!(
-        frag.get("error").map(String::as_str),
+        query.get("error").map(String::as_str),
         Some("user_cancelled")
     );
     assert_eq!(
-        frag.get("state").map(String::as_str),
+        query.get("state").map(String::as_str),
         Some("desktop-nonce-1")
     );
     // No PAT rows for this user.
@@ -717,9 +740,9 @@ async fn blocked_on_confirm_renders_error_handoff() {
     assert_eq!(resp.status, StatusCode::OK);
     assert!(resp.body_str().contains("Sign-in failed"), "error copy");
     let url = extract_handoff_url(resp.body_str());
-    let frag = parse_chan_fragment(&url);
+    let query = parse_callback_query(&url);
     assert_eq!(
-        frag.get("error").map(String::as_str),
+        query.get("error").map(String::as_str),
         Some("account_blocked")
     );
     // No PAT was minted for the blocked user.
@@ -828,17 +851,21 @@ async fn happy_login_resume(app: &TestApp, c: &mut Client<'_>, user_id: Uuid, em
 /// AUTH query for the account-mode flow: the sole desktop.account
 /// scope (Contract A).
 const AUTH_URI_ACCOUNT: &str = "/desktop/authorize?\
-                                redirect_uri=chan%3A%2F%2Fauth%2Fcallback&\
+                                redirect_uri=http%3A%2F%2F127.0.0.1%3A54321%2Fauth%2Fcallback&\
                                 state=desktop-nonce-3&\
                                 label=chan-desktop+%40+host&\
+                                code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&\
+                                code_challenge_method=S256&\
                                 scopes=desktop.account&\
                                 expires_in=2592000";
 
 /// AUTH query with the legacy scope pair shipped desktops send.
 const AUTH_URI_CONNECT: &str = "/desktop/authorize?\
-                                redirect_uri=chan%3A%2F%2Fauth%2Fcallback&\
+                                redirect_uri=http%3A%2F%2F127.0.0.1%3A54321%2Fauth%2Fcallback&\
                                 state=desktop-nonce-2&\
                                 label=chan-desktop+%40+host&\
+                                code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&\
+                                code_challenge_method=S256&\
                                 scopes=tunnel%2Cdesktop.connect&\
                                 expires_in=2592000";
 
@@ -866,11 +893,13 @@ async fn account_flow_mints_account_pat_and_no_devserver_row() {
     assert_eq!(resp.status, StatusCode::OK);
     let html = resp.body_str().to_string();
     let csrf = extract_csrf(&html);
-    // The account consent: the copy is present, the picker is gone.
+    // The account consent: the exposure-framed copy is present, the
+    // picker is gone.
     assert!(
         html.contains(
-            "chan-desktop will get access to your account on this \
-             gateway: your devservers and devservers shared with you."
+            "Approving gives this application account-level access to \
+             this gateway for 30 days: it can list your devservers and devservers shared \
+             with you, and mint access to them."
         ),
         "{html}"
     );
@@ -885,14 +914,17 @@ async fn account_flow_mints_account_pat_and_no_devserver_row() {
         .await;
     assert_eq!(resp.status, StatusCode::OK);
     let url = extract_handoff_url(resp.body_str());
-    let frag = parse_chan_fragment(&url);
-    let code = frag.get("code").expect("code in fragment").clone();
-    // The fragment never carries devserver_* keys, not even empty ones.
-    assert!(!frag.keys().any(|k| k.starts_with("devserver_")), "{url}");
+    let query = parse_callback_query(&url);
+    let code = query.get("code").expect("code in query").clone();
+    // The query never carries devserver_* keys, not even empty ones.
+    assert!(!query.keys().any(|k| k.starts_with("devserver_")), "{url}");
 
     // The redeemed PAT carries exactly the account scope.
     let resp = c
-        .post_json("/desktop/authorize/redeem", &json!({ "code": code }))
+        .post_json(
+            "/desktop/authorize/redeem",
+            &json!({ "code": code, "code_verifier": PKCE_VERIFIER }),
+        )
         .await;
     assert_eq!(resp.status, StatusCode::OK);
     let redeemed: serde_json::Value = serde_json::from_slice(&resp.body).expect("redeem json");
@@ -956,9 +988,9 @@ async fn legacy_connect_flow_still_mints_and_registers() {
         .await;
     assert_eq!(resp.status, StatusCode::OK);
     let url = extract_handoff_url(resp.body_str());
-    let frag = parse_chan_fragment(&url);
-    assert!(frag.contains_key("code"), "{url}");
-    assert!(!frag.keys().any(|k| k.starts_with("devserver_")), "{url}");
+    let query = parse_callback_query(&url);
+    assert!(query.contains_key("code"), "{url}");
+    assert!(!query.keys().any(|k| k.starts_with("devserver_")), "{url}");
 
     // The minted PAT carries the legacy scope pair.
     let tokens = app.api_tokens.list(uid).await.expect("list");
@@ -973,10 +1005,104 @@ async fn account_scope_mixed_with_tunnel_is_400_at_the_door() {
     let mut c = Client::new(&app);
     let resp = c
         .get(
-            "/desktop/authorize?redirect_uri=chan%3A%2F%2Fauth%2Fcallback&\
-             state=x&label=x&scopes=desktop.account%2Ctunnel&expires_in=10",
+            "/desktop/authorize?\
+             redirect_uri=http%3A%2F%2F127.0.0.1%3A54321%2Fauth%2Fcallback&\
+             state=x&label=x&\
+             code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&\
+             code_challenge_method=S256&\
+             scopes=desktop.account%2Ctunnel&expires_in=10",
         )
         .await;
     assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn redeem_wrong_verifier_is_410() {
+    // A valid, freshly minted code presented with a verifier whose
+    // S256 hash does not equal the stored challenge is 410 --
+    // indistinguishable from an unknown code (PKCE closes the naive
+    // stolen-code injection).
+    let app = TestApp::new().await;
+    let mut c = Client::new(&app);
+    let uid = Uuid::new_v4();
+    app.insert_user(uid, "octo@example.com").await;
+    happy_login(&app, &mut c, uid, "octo@example.com").await;
+    mock_get_user(&app, uid, "octo@example.com", false).await;
+
+    let resp = c.get(AUTH_URI).await;
+    assert_eq!(resp.status, StatusCode::SEE_OTHER);
+    let resp = c.get("/desktop/authorize/consent").await;
+    let csrf = extract_csrf(resp.body_str());
+    let resp = c
+        .post_form(
+            "/desktop/authorize/confirm",
+            &[("csrf", &csrf), ("action", "allow")],
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let url = extract_handoff_url(resp.body_str());
+    let code = parse_callback_query(&url)
+        .get("code")
+        .expect("code in query")
+        .clone();
+
+    // Wrong verifier -> 410.
+    let resp = c
+        .post_json(
+            "/desktop/authorize/redeem",
+            &json!({ "code": code, "code_verifier": "the-wrong-verifier" }),
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::GONE);
+    // The code was consumed on the miss, so the RIGHT verifier now also
+    // 410s (single-use).
+    let resp = c
+        .post_json(
+            "/desktop/authorize/redeem",
+            &json!({ "code": code, "code_verifier": PKCE_VERIFIER }),
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::GONE);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn state_with_specials_round_trips_through_the_loopback_url() {
+    // A state carrying `&`, `#`, `=`, a space, and a newline survives
+    // as one opaque parameter through the authorize -> handoff ->
+    // callback-query path.
+    let app = TestApp::new().await;
+    let mut c = Client::new(&app);
+    let uid = Uuid::new_v4();
+    app.insert_user(uid, "octo@example.com").await;
+    happy_login(&app, &mut c, uid, "octo@example.com").await;
+    mock_get_user(&app, uid, "octo@example.com", false).await;
+
+    let hostile_state = "a&b#c=d e\nf";
+    let encoded_state: String =
+        url::form_urlencoded::byte_serialize(hostile_state.as_bytes()).collect();
+    let auth_uri = format!(
+        "/desktop/authorize?\
+         redirect_uri=http%3A%2F%2F127.0.0.1%3A54321%2Fauth%2Fcallback&\
+         state={encoded_state}&label=chan-desktop+%40+host&\
+         code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&\
+         code_challenge_method=S256&scopes=tunnel&expires_in=2592000"
+    );
+
+    let resp = c.get(&auth_uri).await;
+    assert_eq!(resp.status, StatusCode::SEE_OTHER);
+    let resp = c.get("/desktop/authorize/consent").await;
+    let csrf = extract_csrf(resp.body_str());
+    let resp = c
+        .post_form(
+            "/desktop/authorize/confirm",
+            &[("csrf", &csrf), ("action", "allow")],
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let url = extract_handoff_url(resp.body_str());
+    let query = parse_callback_query(&url);
+    assert_eq!(query.get("state").map(String::as_str), Some(hostile_state));
     app.cleanup().await;
 }

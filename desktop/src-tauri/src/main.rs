@@ -2374,19 +2374,6 @@ fn narrate_parked_migration<R: tauri::Runtime>(
     true
 }
 
-/// Resume the winner of a completed sign-in. Only gateway connects park a
-/// resume id (`gw-*`); anything else is a stray value from an unexpected
-/// producer and is dropped after settling the parked waits (the consumed
-/// slot means no parked browser leg can complete anymore).
-async fn resume_signed_in(app: tauri::AppHandle, state: Arc<AppState>, id: String) {
-    if id.starts_with("gw-") {
-        gateway::resume_gateway_signin(app, state, id).await;
-    } else {
-        gateway::abandon_pending_signins(&app, &state);
-        tracing::warn!(resume = %id, "sign-in resume id is not a gateway; ignoring");
-    }
-}
-
 /// The runtime-independent head of a rostered-devserver connect: mint the
 /// entry through the gateway with the explicit (owner, devserver id)
 /// target and narrate the failures - a 401 runs the gateway cascade, an
@@ -4693,7 +4680,6 @@ fn main() {
     let state_for_setup = Arc::clone(&state);
 
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -4839,69 +4825,12 @@ fn main() {
                 }
             }
 
-            // Deep-link callbacks from the system browser
-            // (`chan://auth/callback#...`). Cold-start URLs and
-            // runtime URLs both flow through the same handler so the
-            // sign-in completes whether the user clicked "Open with
-            // chan-desktop" before or after the app was running.
-            use tauri_plugin_deep_link::DeepLinkExt;
-            let app_for_links = app.handle().clone();
-            let state_for_links = Arc::clone(&state_for_setup);
-            app.deep_link().on_open_url(move |event| {
-                for url in event.urls() {
-                    match auth::handle_callback(&app_for_links, url.as_str()) {
-                        auth::CallbackOutcome::SignedIn { resume_gateway_id } => {
-                            if let Some(id) = resume_gateway_id {
-                                let app = app_for_links.clone();
-                                let state = Arc::clone(&state_for_links);
-                                tauri::async_runtime::spawn(async move {
-                                    resume_signed_in(app, state, id).await;
-                                });
-                            }
-                        }
-                        auth::CallbackOutcome::Failed {
-                            consumed_pending: true,
-                        } => {
-                            // Denied/cancelled/failed sign-in: the banner
-                            // was emitted by handle_callback; the consumed
-                            // slot means no parked gateway leg can complete
-                            // anymore, so settle every wait.
-                            gateway::abandon_pending_signins(&app_for_links, &state_for_links);
-                        }
-                        auth::CallbackOutcome::Failed {
-                            consumed_pending: false,
-                        } => {}
-                        // Duplicate delivery for an already-settled sign-in
-                        // (e.g. the handoff page's fallback link after the
-                        // meta refresh landed): nothing to clear or resume.
-                        auth::CallbackOutcome::Ignored => {}
-                    }
-                }
-            });
-            if let Ok(Some(urls)) = app.deep_link().get_current() {
-                for url in urls {
-                    match auth::handle_callback(app.handle(), url.as_str()) {
-                        auth::CallbackOutcome::SignedIn { resume_gateway_id } => {
-                            if let Some(id) = resume_gateway_id {
-                                let app_handle = app.handle().clone();
-                                let state = Arc::clone(&state_for_setup);
-                                tauri::async_runtime::spawn(async move {
-                                    resume_signed_in(app_handle, state, id).await;
-                                });
-                            }
-                        }
-                        auth::CallbackOutcome::Failed {
-                            consumed_pending: true,
-                        } => {
-                            gateway::abandon_pending_signins(app.handle(), &state_for_setup);
-                        }
-                        auth::CallbackOutcome::Failed {
-                            consumed_pending: false,
-                        } => {}
-                        auth::CallbackOutcome::Ignored => {}
-                    }
-                }
-            }
+            // The loopback sign-in callback lands in THIS process on the
+            // ephemeral `http://127.0.0.1:<port>/auth/callback` listener
+            // that `auth::open_signin` / `auth::open_gateway_signin` bind
+            // per attempt (see src/auth.rs). There is no OS scheme handler
+            // and no second-instance spawn, so the callback needs no setup
+            // wiring here.
 
             // The launcher window loads the embedded loopback's root `/`, where
             // the same web-launcher SPA is served as on every other surface
@@ -7293,21 +7222,6 @@ mod tests {
             .expect("rostered head precedes the raw inner");
         assert!(connect.contains("GatewayEntryError::Unauthorized"));
         assert!(connect.contains("cascade_disconnect"));
-        // A consumed FAILED callback settles every parked gateway wait on
-        // both delivery paths (the pending-auth slot is single, so no
-        // parked browser leg can complete after it is consumed).
-        let links = MAIN_RS
-            .split("on_open_url(move |event|")
-            .nth(1)
-            .expect("deep-link handler exists")
-            .split("let launcher_url")
-            .next()
-            .expect("deep-link section ends before the launcher window build");
-        assert_eq!(
-            links.matches("abandon_pending_signins").count(),
-            2,
-            "both delivery paths settle parked waits on a consumed failure"
-        );
     }
 
     #[test]
