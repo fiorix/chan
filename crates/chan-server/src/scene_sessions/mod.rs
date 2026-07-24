@@ -218,6 +218,12 @@ enum MergeOutcome {
     Conflict,
 }
 
+/// Result of the conflict-aware PUT mutation gate.
+pub(crate) enum HttpReplaceOutcome {
+    Applied,
+    Conflicted { disk_mtime_ns: Option<i64> },
+}
+
 impl SessionState {
     fn dirty_since(&self) -> Option<Instant> {
         match self {
@@ -333,6 +339,13 @@ impl SessionState {
 
     fn has_observation(&self) -> bool {
         matches!(self, Self::Observing { .. })
+    }
+
+    fn conflict_disk_mtime_ns(&self) -> Option<Option<i64>> {
+        match self {
+            Self::Conflicted(conflict) => Some(conflict.disk_mtime_ns),
+            _ => None,
+        }
     }
 
     fn clear_after_flush(&mut self) {
@@ -536,12 +549,35 @@ impl SceneSession {
             .unwrap();
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_force_conflict(&self, disk_text: String, stat: &FileStat) {
+        self.apply_merge_outcome(disk_text, stat, MergeOutcome::Conflict);
+    }
+
     /// Current authority scene in its file form plus the session CAS
     /// token, for the GET divert: a client reads exactly what a flush
     /// would write, under a token consistent with the session.
     pub fn authority_view(&self) -> (String, Option<i64>) {
         let st = self.lock_state();
         (st.scene.serialize_file(), st.flushed_mtime_ns)
+    }
+
+    /// Atomic PUT preflight view: session token and an outer conflict
+    /// marker carrying the retained disk token.
+    pub(crate) fn http_write_view(&self) -> (Option<i64>, Option<Option<i64>>) {
+        let st = self.lock_state();
+        (
+            st.flushed_mtime_ns,
+            st.session_state.conflict_disk_mtime_ns(),
+        )
+    }
+
+    /// Whether a PUT must stay on the session path. Only an explicitly
+    /// removed session falls through so the classic path can recreate
+    /// the file; a conflict remains session-owned even when the
+    /// conflicting disk token is absent.
+    pub(crate) fn diverts_http_write(&self) -> bool {
+        !matches!(&self.lock_state().session_state, SessionState::Removed)
     }
 
     /// Session CAS token for the PUT divert's conflict check.
@@ -553,8 +589,27 @@ impl SceneSession {
     /// divert). Changed elements fan to every attachment with bumped
     /// versions and the session turns dirty; equal content is a no-op.
     /// The caller decides when to flush.
+    #[cfg(test)]
     pub fn apply_replace(&self, body: &str) -> Result<(), SceneError> {
         let mut st = self.lock_state();
+        self.apply_replace_locked(&mut st, body)?;
+        Ok(())
+    }
+
+    /// Apply an HTTP replacement only while automatic persistence is
+    /// permitted. Collaborative updates remain live during conflicts;
+    /// PUT must instead direct the caller to explicit resolution
+    /// without mutating authority.
+    pub(crate) fn apply_http_replace(&self, body: &str) -> Result<HttpReplaceOutcome, SceneError> {
+        let mut st = self.lock_state();
+        if let Some(disk_mtime_ns) = st.session_state.conflict_disk_mtime_ns() {
+            return Ok(HttpReplaceOutcome::Conflicted { disk_mtime_ns });
+        }
+        self.apply_replace_locked(&mut st, body)?;
+        Ok(HttpReplaceOutcome::Applied)
+    }
+
+    fn apply_replace_locked(&self, st: &mut SceneState, body: &str) -> Result<(), SceneError> {
         let applied = st.scene.apply_replace(body, &mut fresh_nonce)?;
         if !applied.is_empty() {
             st.version += 1;
@@ -1244,7 +1299,8 @@ impl SceneRegistry {
 /// when the CAS-conflict reconcile left authority and disk equal
 /// (including the removed-file path, whose authoritative disk state is
 /// deliberately "no file"). False means the write failed and the
-/// session stays dirty; the PUT divert turns that into an honest 503.
+/// session stays dirty, or an unresolved conflict prevents a flush;
+/// the PUT divert turns those into an honest non-200 response.
 pub(crate) async fn flush_session(
     session: &Arc<SceneSession>,
     workspace: &Arc<Workspace>,
@@ -1261,7 +1317,11 @@ async fn flush_session_locked(
 ) -> bool {
     for attempt in 0..2u32 {
         let Some(job) = session.begin_flush() else {
-            return true;
+            return session
+                .lock_state()
+                .session_state
+                .conflict_disk_mtime_ns()
+                .is_none();
         };
         // Reserve suppression before the blocking write so an
         // immediate watcher event cannot escape. The strict preflight
@@ -1798,6 +1858,10 @@ mod tests {
         assert!(
             ha.session().begin_flush().is_none(),
             "automatic flush pauses in Conflicted"
+        );
+        assert!(
+            !flush_session(ha.session(), &fx.workspace, &fx.self_writes).await,
+            "a forced flush must not report a conflict as durable"
         );
     }
 

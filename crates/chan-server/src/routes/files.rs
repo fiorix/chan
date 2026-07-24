@@ -12,10 +12,13 @@ use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::doc_sessions::{flush_session, DocSession};
+use crate::doc_sessions::{flush_session, DocSession, HttpReplaceOutcome as DocHttpReplaceOutcome};
 use crate::error::{err, err_from, err_state};
 use crate::scene_sessions::scene::SceneError;
-use crate::scene_sessions::{flush_session as flush_scene_session, SceneSession};
+use crate::scene_sessions::{
+    flush_session as flush_scene_session, HttpReplaceOutcome as SceneHttpReplaceOutcome,
+    SceneSession,
+};
 use crate::state::AppState;
 use crate::static_assets::content_type_for;
 
@@ -840,6 +843,17 @@ struct WriteConflictBody {
     current_mtime_ns: Option<String>,
 }
 
+fn session_write_conflict_response(current_mtime_ns: Option<i64>) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(WriteConflictBody {
+            current_mtime: current_mtime_ns.map(|ns| ns / 1_000_000_000),
+            current_mtime_ns: current_mtime_ns.map(|ns| ns.to_string()),
+        }),
+    )
+        .into_response()
+}
+
 pub async fn api_write_file(
     State(state): State<Arc<AppState>>,
     AxumPath(path): AxumPath<String>,
@@ -861,14 +875,15 @@ pub async fn api_write_file(
     // meaning "bytes on disk". flush_session notes the self-write
     // itself, so the early note below stays disk-path-only.
     //
-    // Exception: a session in the removed state (file deleted; token
-    // None) deliberately flushes nothing, so an equal-content PUT
+    // Exception: a session in the removed state (file deleted)
+    // deliberately flushes nothing, so an equal-content PUT
     // would 200 with the file still absent. A PUT there is an explicit
     // re-create intent: take the classic disk path below (which
     // recreates) and let the reconciler fold the new file back into
-    // the session.
+    // the session. Conflicted sessions always stay on the divert,
+    // including a delete conflict whose disk token is None.
     if let Some(session) = state.doc_sessions.get(&path) {
-        if session.token().is_some() {
+        if session.diverts_http_write() {
             return write_via_session(
                 &state,
                 &workspace,
@@ -885,7 +900,7 @@ pub async fn api_write_file(
     // semantics, and the reply awaits a forced flush. The removed-state
     // fall-through matches the doc divert above.
     if let Some(session) = state.scene_sessions.get(&path) {
-        if session.token().is_some() {
+        if session.diverts_http_write() {
             return write_via_scene_session(
                 &state,
                 &workspace,
@@ -950,7 +965,9 @@ pub async fn api_write_file(
 /// flush answers 503 with the content retained in the session. One
 /// deliberate divergence from the disk path: a stale token whose body
 /// is byte-identical to the authority text answers 200 (token-adopt)
-/// instead of 409, because equal bytes cannot lose an update.
+/// instead of 409, because equal bytes cannot lose an update. An
+/// unresolved session conflict takes precedence and always answers 409
+/// with the conflicting disk token.
 async fn write_via_session(
     state: &Arc<AppState>,
     workspace: &Arc<chan_workspace::Workspace>,
@@ -961,7 +978,10 @@ async fn write_via_session(
 ) -> Response {
     // Text and token read under one lock: the equal-body escape below
     // must compare against the same authority state the token belongs to.
-    let (authority_text, pre_token) = session.authority_view();
+    let (authority_text, pre_token, disk_conflict_mtime_ns) = session.http_write_view();
+    if let Some(disk_mtime_ns) = disk_conflict_mtime_ns {
+        return session_write_conflict_response(disk_mtime_ns);
+    }
     // The CAS matrix mirrors write_file_sync: the ns token is
     // preferred, the legacy form compares at second resolution, no
     // token is last-write-wins.
@@ -991,24 +1011,29 @@ async fn write_via_session(
             })
             .into_response();
         }
-        return (
-            StatusCode::CONFLICT,
-            Json(WriteConflictBody {
-                current_mtime: pre_token.map(|ns| ns / 1_000_000_000),
-                current_mtime_ns: pre_token.map(|ns| ns.to_string()),
-            }),
-        )
-            .into_response();
+        return session_write_conflict_response(pre_token);
     }
-    if let Err(e) = session.apply_replace("$http", content) {
-        // DocTooLarge is the only reachable variant here: replace_diff
-        // trims on char boundaries and spans the document exactly.
-        return err(StatusCode::PAYLOAD_TOO_LARGE, e.to_string());
+    match session.apply_http_replace("$http", content) {
+        Ok(DocHttpReplaceOutcome::Applied) => {}
+        Ok(DocHttpReplaceOutcome::Conflicted { disk_mtime_ns }) => {
+            return session_write_conflict_response(disk_mtime_ns);
+        }
+        Err(e) => {
+            // DocTooLarge is the only reachable variant here:
+            // replace_diff trims on char boundaries and spans the
+            // document exactly.
+            return err(StatusCode::PAYLOAD_TOO_LARGE, e.to_string());
+        }
     }
-    // A failed forced flush answers 503: the content is authoritative
-    // in the session and every client (a retried PUT re-applies
-    // idempotently), but a 200 must keep meaning "bytes on disk".
+    // A conflict that arrives between replace and flush is still a
+    // 409. Other failed forced flushes answer 503: the content is
+    // authoritative in the session and every client (a retried PUT
+    // re-applies idempotently), but a 200 must keep meaning "bytes on
+    // disk".
     if !flush_session(session, workspace, &state.self_writes).await {
+        if let (_, _, Some(disk_mtime_ns)) = session.http_write_view() {
+            return session_write_conflict_response(disk_mtime_ns);
+        }
         return err(
             StatusCode::SERVICE_UNAVAILABLE,
             "doc session accepted the write but the disk flush failed; retry".into(),
@@ -1026,8 +1051,9 @@ async fn write_via_session(
 /// session token, adopt the body as the scene authority (bumped
 /// versions and tombstones fan live to every canvas), force and await
 /// a flush, answer with the post-flush token. Status shapes match the
-/// disk path; a body that is not a usable scene is a 400 and never
-/// touches the session.
+/// disk path. An unresolved session conflict takes precedence and
+/// answers 409 with the conflicting disk token; otherwise a body that
+/// is not a usable scene is a 400 and never touches the session.
 async fn write_via_scene_session(
     state: &Arc<AppState>,
     workspace: &Arc<chan_workspace::Workspace>,
@@ -1036,7 +1062,10 @@ async fn write_via_scene_session(
     expected_mtime_ns: Option<i64>,
     content: &str,
 ) -> Response {
-    let pre_token = session.token();
+    let (pre_token, disk_conflict_mtime_ns) = session.http_write_view();
+    if let Some(disk_mtime_ns) = disk_conflict_mtime_ns {
+        return session_write_conflict_response(disk_mtime_ns);
+    }
     // The CAS matrix mirrors write_file_sync: the ns token is
     // preferred, the legacy form compares at second resolution, no
     // token is last-write-wins.
@@ -1048,25 +1077,29 @@ async fn write_via_scene_session(
         false
     };
     if conflict {
-        return (
-            StatusCode::CONFLICT,
-            Json(WriteConflictBody {
-                current_mtime: pre_token.map(|ns| ns / 1_000_000_000),
-                current_mtime_ns: pre_token.map(|ns| ns.to_string()),
-            }),
-        )
-            .into_response();
+        return session_write_conflict_response(pre_token);
     }
-    if let Err(e) = session.apply_replace(content) {
-        return match e {
-            SceneError::Invalid(_) => err(StatusCode::BAD_REQUEST, e.to_string()),
-            SceneError::TooLarge { .. } => err(StatusCode::PAYLOAD_TOO_LARGE, e.to_string()),
-        };
+    match session.apply_http_replace(content) {
+        Ok(SceneHttpReplaceOutcome::Applied) => {}
+        Ok(SceneHttpReplaceOutcome::Conflicted { disk_mtime_ns }) => {
+            return session_write_conflict_response(disk_mtime_ns);
+        }
+        Err(e) => {
+            return match e {
+                SceneError::Invalid(_) => err(StatusCode::BAD_REQUEST, e.to_string()),
+                SceneError::TooLarge { .. } => err(StatusCode::PAYLOAD_TOO_LARGE, e.to_string()),
+            };
+        }
     }
-    // A failed forced flush answers 503: the content is authoritative
-    // in the session and every client (a retried PUT re-applies
-    // idempotently), but a 200 must keep meaning "bytes on disk".
+    // A conflict that arrives between replace and flush is still a
+    // 409. Other failed forced flushes answer 503: the content is
+    // authoritative in the session and every client (a retried PUT
+    // re-applies idempotently), but a 200 must keep meaning "bytes on
+    // disk".
     if !flush_scene_session(session, workspace, &state.self_writes).await {
+        if let (_, Some(disk_mtime_ns)) = session.http_write_view() {
+            return session_write_conflict_response(disk_mtime_ns);
+        }
         return err(
             StatusCode::SERVICE_UNAVAILABLE,
             "scene session accepted the write but the disk flush failed; retry".into(),
@@ -2782,6 +2815,45 @@ mod doc_divert_tests {
         assert_eq!(session.authority_view().0, "live v2\n");
     }
 
+    #[tokio::test]
+    async fn put_divert_refuses_conflicted_doc_without_dropping_body() {
+        let (_cfg, _root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        workspace.write_text("n.md", "base\n").unwrap();
+        let mut handle = state
+            .doc_sessions
+            .attach(&workspace, "n.md", "win-1", None)
+            .await
+            .unwrap();
+        let mut frames = handle.take_frames();
+        let session = handle.session().clone();
+        session.apply_replace("c-1", "local\n").unwrap();
+        while frames.try_recv().is_ok() {}
+
+        workspace.write_text("n.md", "disk\n").unwrap();
+        let stat = workspace.stat("n.md").unwrap();
+        session.test_force_conflict("disk\n".into(), &stat);
+        let conflict_token = stat.mtime_ns.expect("conflicting disk token");
+
+        let resp = api_write_file(
+            State(state.clone()),
+            AxumPath("n.md".into()),
+            Json(WriteBody {
+                content: "local\n".into(),
+                expected_mtime: None,
+                expected_mtime_ns: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = body_json(resp).await;
+        assert_eq!(body["current_mtime_ns"], conflict_token.to_string());
+        assert_eq!(session.authority_view().0, "local\n");
+        assert_eq!(workspace.read_text("n.md").unwrap(), "disk\n");
+        assert!(frames.try_recv().is_err(), "conflicted PUT must not fan");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn put_divert_answers_503_when_the_forced_flush_fails() {
@@ -3061,6 +3133,56 @@ mod scene_divert_tests {
         )
         .unwrap();
         assert_eq!(on_disk["elements"][0]["angle"], 30);
+    }
+
+    #[tokio::test]
+    async fn put_divert_refuses_conflicted_scene_without_dropping_body() {
+        let (_cfg, _root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        let mut baseline = elem("x", 1, 1, "a1");
+        baseline["angle"] = json!(0);
+        workspace
+            .write_text("b.excalidraw", &scene_body(json!([baseline])))
+            .unwrap();
+        let mut handle = state
+            .scene_sessions
+            .attach(&workspace, "b.excalidraw", "win-1")
+            .await
+            .unwrap();
+        let mut frames = handle.take_frames();
+        let session = handle.session().clone();
+
+        let mut local = elem("x", 2, 2, "a1");
+        local["angle"] = json!(20);
+        handle.push(vec![local], None, None).unwrap();
+        while frames.try_recv().is_ok() {}
+
+        let mut disk = elem("x", 2, 3, "a1");
+        disk["angle"] = json!(30);
+        let disk_text = scene_body(json!([disk]));
+        workspace.write_text("b.excalidraw", &disk_text).unwrap();
+        let stat = workspace.stat("b.excalidraw").unwrap();
+        session.test_force_conflict(disk_text.clone(), &stat);
+        let authority = session.authority_view().0;
+        let conflict_token = stat.mtime_ns.expect("conflicting disk token");
+
+        let resp = api_write_file(
+            State(state.clone()),
+            AxumPath("b.excalidraw".into()),
+            Json(WriteBody {
+                content: authority.clone(),
+                expected_mtime: None,
+                expected_mtime_ns: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = body_json(resp).await;
+        assert_eq!(body["current_mtime_ns"], conflict_token.to_string());
+        assert_eq!(session.authority_view().0, authority);
+        assert_eq!(workspace.read_text("b.excalidraw").unwrap(), disk_text);
+        assert!(frames.try_recv().is_err(), "conflicted PUT must not fan");
     }
 
     #[tokio::test]
