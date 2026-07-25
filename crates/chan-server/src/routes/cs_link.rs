@@ -266,6 +266,7 @@ pub async fn api_cs_link_create(State(state): State<Arc<AppState>>) -> Response 
 }
 
 #[cfg(test)]
+#[cfg_attr(not(target_os = "linux"), allow(unused_imports, dead_code))]
 mod tests {
     use super::*;
     use tempfile::TempDir;

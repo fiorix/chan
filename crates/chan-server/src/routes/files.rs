@@ -1824,6 +1824,7 @@ pub(crate) fn upload_leaf_filename(original_name: &str) -> chan_workspace::Resul
 }
 
 #[cfg(test)]
+#[cfg_attr(not(target_os = "linux"), allow(unused_imports, dead_code))]
 mod file_browser_listing_tests {
     use super::{
         append_dir_to_archive, create_target_exists, download_path_sync, list_dir_entries,

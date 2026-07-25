@@ -44,6 +44,8 @@ impl WatchdogPings {
         Self { task: None }
     }
 
+    // Only constructed on Linux, where the fdstore watchdog task is spawned.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(super) fn from_task(task: tokio::task::JoinHandle<()>) -> Self {
         Self { task: Some(task) }
     }

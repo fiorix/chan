@@ -255,7 +255,7 @@ pub fn process_creation_time(pid: u32) -> Option<u64> {
         );
         CloseHandle(handle);
         (ok != 0)
-            .then(|| ((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64))
+            .then_some(((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64))
     }
 }
 

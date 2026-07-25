@@ -168,6 +168,7 @@ pub async fn graceful_wait(signal_tx: Arc<tokio::sync::watch::Sender<bool>>) {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(target_os = "linux"), allow(unused_imports, dead_code))]
 mod tests {
     use super::*;
     use std::sync::Mutex;

@@ -235,6 +235,7 @@ pub struct WatchHandle {
     supervisor: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     health: Arc<std::sync::Mutex<WatchHealth>>,
     #[cfg(test)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     registered_dirs: RegisteredDirs,
 }
 
@@ -493,6 +494,7 @@ static INJECTED_REGISTRATION_FAILURE: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 #[cfg(test)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn inject_registration_failures(path: &Path, count: usize) {
     *INJECTED_REGISTRATION_FAILURE
         .get_or_init(|| std::sync::Mutex::new(None))
@@ -504,6 +506,7 @@ fn inject_registration_failures(path: &Path, count: usize) {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn clear_injected_registration_failure() {
     *INJECTED_REGISTRATION_FAILURE
         .get_or_init(|| std::sync::Mutex::new(None))
@@ -1030,6 +1033,7 @@ impl WatchHandle {
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn inject_provider_loss(&self, message: &str) {
         let command_tx = self.command_tx.lock().unwrap().as_ref().cloned();
         let Some(command_tx) = command_tx else {
@@ -1048,6 +1052,7 @@ impl WatchHandle {
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn is_registered(&self, path: &Path) -> bool {
         self.registered_dirs.read().unwrap().contains(path)
     }
