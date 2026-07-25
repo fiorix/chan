@@ -3911,6 +3911,9 @@ fn devserver_host_label() -> String {
 
 /// The systemd user unit name for the devserver.
 const DEVSERVER_SYSTEMD_UNIT: &str = "chan-devserver.service";
+/// Matches the unit's `TimeoutStartSec=10min`, which outlives the bounded
+/// eight-minute startup restore before the devserver emits `READY=1`.
+const DEVSERVER_SYSTEMD_START_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// Supervise the devserver under a systemd user service: ensure linger,
 /// create + start the unit (or re-attach to a running one), then stream its
@@ -4176,7 +4179,7 @@ async fn start_devserver_under_systemd(
         );
         return Ok(());
     }
-    bootstrap_systemd_unit(addr, false, tunnel).await?;
+    bootstrap_systemd_unit(addr, false, false, tunnel).await?;
     // Report the address the service actually bound: a tunnel unit with no
     // pinned port is on an OS-assigned one, not the requested default.
     eprintln!(
@@ -4207,7 +4210,7 @@ async fn join_devserver_under_systemd(
              {DEVSERVER_SYSTEMD_UNIT}"
         );
     } else {
-        bootstrap_systemd_unit(addr, false, tunnel).await?;
+        bootstrap_systemd_unit(addr, false, false, tunnel).await?;
         eprintln!(
             "chan devserver: started the systemd user service \
              {DEVSERVER_SYSTEMD_UNIT} (bind={})",
@@ -4226,6 +4229,91 @@ async fn join_devserver_under_systemd(
     .await
 }
 
+trait DevserverSystemdControl {
+    async fn command(&mut self, args: &[&str]) -> Result<()>;
+    async fn wait_active(&mut self, timeout: Duration) -> bool;
+}
+
+struct LiveDevserverSystemdControl;
+
+impl DevserverSystemdControl for LiveDevserverSystemdControl {
+    async fn command(&mut self, args: &[&str]) -> Result<()> {
+        systemctl_user(args).await
+    }
+
+    async fn wait_active(&mut self, timeout: Duration) -> bool {
+        wait_until_active(timeout).await
+    }
+}
+
+async fn activate_devserver_unit(
+    update: &DevserverUnitUpdate,
+    restart: bool,
+    restore_active: bool,
+    control: &mut impl DevserverSystemdControl,
+) -> Result<()> {
+    let mut restart_attempted = false;
+    let activation = async {
+        if update.changed {
+            control.command(&["daemon-reload"]).await?;
+        }
+        if restart {
+            // enable (so it survives logout) + restart (bounce a running unit,
+            // start a stopped one); `enable --now` does not bounce an active unit.
+            control.command(&["enable", DEVSERVER_SYSTEMD_UNIT]).await?;
+            restart_attempted = true;
+            control
+                .command(&["restart", DEVSERVER_SYSTEMD_UNIT])
+                .await?;
+        } else {
+            control
+                .command(&["enable", "--now", DEVSERVER_SYSTEMD_UNIT])
+                .await?;
+        }
+        if !control.wait_active(DEVSERVER_SYSTEMD_START_TIMEOUT).await {
+            anyhow::bail!(
+                "the systemd user service {DEVSERVER_SYSTEMD_UNIT} failed to become active"
+            );
+        }
+        Ok(())
+    }
+    .await;
+    let Err(error) = activation else {
+        return Ok(());
+    };
+    if !update.changed {
+        return Err(error);
+    }
+
+    let mut rollback_errors = Vec::new();
+    if let Err(rollback_error) = update.rollback_file() {
+        rollback_errors.push(format!("unit restore failed: {rollback_error:#}"));
+    }
+    if let Err(rollback_error) = control.command(&["daemon-reload"]).await {
+        rollback_errors.push(format!("rollback daemon-reload failed: {rollback_error:#}"));
+    }
+    if restore_active && restart_attempted {
+        if let Err(rollback_error) = control.command(&["restart", DEVSERVER_SYSTEMD_UNIT]).await {
+            rollback_errors.push(format!("previous-unit restart failed: {rollback_error:#}"));
+        }
+    }
+    if rollback_errors.is_empty() {
+        let rollback = if update.previous.is_some() {
+            "restored the previous unit"
+        } else {
+            "removed the newly installed unit"
+        };
+        anyhow::bail!(
+            "systemd unit activation failed: {error:#}; {rollback} at {}",
+            update.path.display()
+        );
+    }
+    anyhow::bail!(
+        "systemd unit activation failed: {error:#}; rollback was incomplete: {}",
+        rollback_errors.join("; ")
+    )
+}
+
 /// Write the unit for `addr` and bring it up: `daemon-reload`, then `enable
 /// --now` for a first start or `enable` + `restart` to bounce/(re)start under
 /// `--restart` (`enable --now` would not bounce an already-running unit). Waits
@@ -4235,25 +4323,18 @@ async fn join_devserver_under_systemd(
 async fn bootstrap_systemd_unit(
     addr: SocketAddr,
     restart: bool,
+    restore_active: bool,
     tunnel: Option<SystemdTunnel>,
 ) -> Result<()> {
-    let unit_path = write_devserver_unit(addr, tunnel)?;
-    eprintln!("chan devserver: wrote {}", unit_path.display());
-    systemctl_user(&["daemon-reload"]).await?;
-    if restart {
-        // enable (so it survives logout) + restart (bounce a running unit, start
-        // a stopped one); `enable --now` is a no-op on an already-active unit.
-        systemctl_user(&["enable", DEVSERVER_SYSTEMD_UNIT]).await?;
-        systemctl_user(&["restart", DEVSERVER_SYSTEMD_UNIT]).await?;
-    } else {
-        systemctl_user(&["enable", "--now", DEVSERVER_SYSTEMD_UNIT]).await?;
+    let update = write_devserver_unit(addr, tunnel)?;
+    if update.changed {
+        eprintln!("chan devserver: wrote {}", update.path.display());
     }
-    if !wait_until_active(Duration::from_secs(10)).await {
-        anyhow::bail!(
-            "chan devserver: the systemd user service {DEVSERVER_SYSTEMD_UNIT} \
-             failed to start:\n{}",
-            recent_unit_journal().await
-        );
+    let mut control = LiveDevserverSystemdControl;
+    if let Err(error) =
+        activate_devserver_unit(&update, restart, restore_active, &mut control).await
+    {
+        anyhow::bail!("{error:#}\n{}", recent_unit_journal().await);
     }
     // The freshly started service prints the token marker to its own stdout,
     // which under the unit lands in the journal -- invisible to this terminal
@@ -4286,7 +4367,7 @@ async fn restart_devserver_under_systemd(
         let dial = running_systemd_devserver_addr().unwrap_or(addr);
         prepare_systemd_fdstore_restart(dial, force).await?;
     }
-    bootstrap_systemd_unit(addr, true, tunnel).await?;
+    bootstrap_systemd_unit(addr, true, was_running, tunnel).await?;
     eprintln!(
         "chan devserver: {} the systemd user service {DEVSERVER_SYSTEMD_UNIT} (bind={})",
         if was_running { "restarted" } else { "started" },
@@ -4596,7 +4677,10 @@ fn resolve_relaunchable_exe() -> PathBuf {
     PathBuf::from("chan")
 }
 
-fn write_devserver_unit(addr: SocketAddr, tunnel: Option<SystemdTunnel>) -> Result<PathBuf> {
+fn write_devserver_unit(
+    addr: SocketAddr,
+    tunnel: Option<SystemdTunnel>,
+) -> Result<DevserverUnitUpdate> {
     let exe = resolve_relaunchable_exe();
     let dir = systemd_user_unit_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -4607,18 +4691,110 @@ fn write_devserver_unit(addr: SocketAddr, tunnel: Option<SystemdTunnel>) -> Resu
         devserver_chan_home().as_deref(),
         tunnel.as_ref(),
     );
-    std::fs::write(&unit_path, unit).with_context(|| format!("writing {}", unit_path.display()))?;
-    // The tunnel unit embeds the PAT via Environment=; keep it owner-only. The
-    // 0644 default is exactly why launchd tunnel mode is still refused.
-    if tunnel.is_some() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&unit_path, std::fs::Permissions::from_mode(0o600))
-                .with_context(|| format!("setting 0600 on {}", unit_path.display()))?;
+    write_rendered_devserver_unit(&unit_path, &unit, tunnel.is_some())
+}
+
+#[derive(Debug)]
+struct DevserverUnitUpdate {
+    path: PathBuf,
+    previous: Option<String>,
+    previous_permissions: Option<std::fs::Permissions>,
+    changed: bool,
+}
+
+impl DevserverUnitUpdate {
+    fn rollback_file(&self) -> Result<()> {
+        match &self.previous {
+            Some(previous) => {
+                std::fs::write(&self.path, previous)
+                    .with_context(|| format!("restoring {}", self.path.display()))?;
+                if let Some(permissions) = &self.previous_permissions {
+                    std::fs::set_permissions(&self.path, permissions.clone()).with_context(
+                        || format!("restoring permissions on {}", self.path.display()),
+                    )?;
+                }
+            }
+            None => match std::fs::remove_file(&self.path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| format!("removing {}", self.path.display()));
+                }
+            },
+        }
+        Ok(())
+    }
+}
+
+fn write_rendered_devserver_unit(
+    unit_path: &Path,
+    unit: &str,
+    contains_secret: bool,
+) -> Result<DevserverUnitUpdate> {
+    let (previous, previous_permissions) = match std::fs::read_to_string(unit_path) {
+        Ok(previous) => {
+            let permissions = std::fs::metadata(unit_path)
+                .with_context(|| format!("reading metadata for {}", unit_path.display()))?
+                .permissions();
+            (Some(previous), Some(permissions))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (None, None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspecting installed unit {}", unit_path.display()));
+        }
+    };
+    if let Some(previous) = &previous {
+        match chan_systemd::DevserverUnit::classify_rendered(unit, previous) {
+            chan_systemd::DevserverUnitClass::Current => {
+                return Ok(DevserverUnitUpdate {
+                    path: unit_path.to_path_buf(),
+                    previous: None,
+                    previous_permissions: None,
+                    changed: false,
+                });
+            }
+            chan_systemd::DevserverUnitClass::Foreign => {
+                anyhow::bail!(
+                    "refusing to overwrite foreign or administrator-edited systemd unit at {}; \
+                     move or remove it, then retry",
+                    unit_path.display()
+                );
+            }
+            chan_systemd::DevserverUnitClass::KnownLegacy => {}
         }
     }
-    Ok(unit_path)
+    let update = DevserverUnitUpdate {
+        path: unit_path.to_path_buf(),
+        previous,
+        previous_permissions,
+        changed: true,
+    };
+    let stage = (|| -> Result<()> {
+        std::fs::write(unit_path, unit)
+            .with_context(|| format!("writing {}", unit_path.display()))?;
+        // The tunnel unit embeds the PAT via Environment=; keep it owner-only.
+        // The 0644 default is exactly why launchd tunnel mode is still refused.
+        if contains_secret {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(unit_path, std::fs::Permissions::from_mode(0o600))
+                    .with_context(|| format!("setting 0600 on {}", unit_path.display()))?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = stage {
+        if let Err(rollback_error) = update.rollback_file() {
+            anyhow::bail!(
+                "{error:#}; restoring the unit after the failed write also failed: \
+                 {rollback_error:#}"
+            );
+        }
+        return Err(error);
+    }
+    Ok(update)
 }
 
 /// The `CHAN_HOME` override to bake into a supervised service's environment, if
@@ -8484,6 +8660,174 @@ mod tests {
         assert!(
             unit.contains("Type=notify"),
             "watchdog needs notify: {unit}"
+        );
+    }
+
+    #[test]
+    fn foreign_devserver_systemd_unit_is_refused_without_overwrite() {
+        let dir = tempfile::tempdir().expect("unit dir");
+        let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
+        let foreign = "[Service]\nExecStart=/usr/bin/custom-devserver\n";
+        std::fs::write(&path, foreign).expect("seed foreign unit");
+        let desired = chan_systemd::DevserverUnit::new(
+            "/usr/bin/chan devserver --bind=127.0.0.1 --port=8787",
+        )
+        .render();
+
+        let error = write_rendered_devserver_unit(&path, &desired, false)
+            .expect_err("foreign unit refused");
+        let message = error.to_string();
+        assert!(message.contains("foreign"), "{message}");
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(
+            message.contains("move") || message.contains("remove"),
+            "{message}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path).expect("foreign unit remains"),
+            foreign
+        );
+    }
+
+    #[derive(Default)]
+    struct FakeDevserverSystemdControl {
+        commands: Vec<Vec<String>>,
+        fail_command: Option<usize>,
+        active: bool,
+        waits: Vec<Duration>,
+    }
+
+    impl DevserverSystemdControl for FakeDevserverSystemdControl {
+        async fn command(&mut self, args: &[&str]) -> Result<()> {
+            self.commands
+                .push(args.iter().map(|arg| (*arg).to_string()).collect());
+            if self.fail_command == Some(self.commands.len()) {
+                anyhow::bail!("injected systemctl failure");
+            }
+            Ok(())
+        }
+
+        async fn wait_active(&mut self, timeout: Duration) -> bool {
+            self.waits.push(timeout);
+            self.active
+        }
+    }
+
+    fn systemd_commands(control: &FakeDevserverSystemdControl) -> Vec<String> {
+        control.commands.iter().map(|args| args.join(" ")).collect()
+    }
+
+    #[tokio::test]
+    async fn known_legacy_devserver_systemd_unit_migrates_idempotently() {
+        let dir = tempfile::tempdir().expect("unit dir");
+        let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
+        let desired = chan_systemd::DevserverUnit::new(
+            "/usr/bin/chan devserver --bind=127.0.0.1 --port=8787",
+        )
+        .render();
+        let legacy = desired.replace("TimeoutStartSec=10min\n", "");
+        std::fs::write(&path, &legacy).expect("seed legacy unit");
+
+        let update =
+            write_rendered_devserver_unit(&path, &desired, false).expect("stage migration");
+        assert!(update.changed);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), desired);
+        let mut control = FakeDevserverSystemdControl {
+            active: true,
+            ..Default::default()
+        };
+        activate_devserver_unit(&update, true, true, &mut control)
+            .await
+            .expect("activate migrated unit");
+        assert_eq!(
+            systemd_commands(&control),
+            [
+                "daemon-reload",
+                "enable chan-devserver.service",
+                "restart chan-devserver.service",
+            ]
+        );
+        assert_eq!(control.waits, [DEVSERVER_SYSTEMD_START_TIMEOUT]);
+
+        let repeat =
+            write_rendered_devserver_unit(&path, &desired, false).expect("classify current unit");
+        assert!(!repeat.changed);
+        let mut repeat_control = FakeDevserverSystemdControl {
+            active: true,
+            ..Default::default()
+        };
+        activate_devserver_unit(&repeat, true, true, &mut repeat_control)
+            .await
+            .expect("repeat activation");
+        assert_eq!(
+            systemd_commands(&repeat_control),
+            [
+                "enable chan-devserver.service",
+                "restart chan-devserver.service",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_devserver_systemd_restart_restores_legacy_unit() {
+        let dir = tempfile::tempdir().expect("unit dir");
+        let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
+        let desired = chan_systemd::DevserverUnit::new(
+            "/usr/bin/chan devserver --bind=127.0.0.1 --port=8787",
+        )
+        .render();
+        let legacy = desired.replace("TimeoutStartSec=10min\n", "");
+        std::fs::write(&path, &legacy).expect("seed legacy unit");
+        let update =
+            write_rendered_devserver_unit(&path, &desired, false).expect("stage migration");
+        let mut control = FakeDevserverSystemdControl {
+            fail_command: Some(3),
+            active: true,
+            ..Default::default()
+        };
+
+        let error = activate_devserver_unit(&update, true, true, &mut control)
+            .await
+            .expect_err("restart failure rolls back");
+        assert!(error.to_string().contains("restored"), "{error:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
+        assert_eq!(
+            systemd_commands(&control),
+            [
+                "daemon-reload",
+                "enable chan-devserver.service",
+                "restart chan-devserver.service",
+                "daemon-reload",
+                "restart chan-devserver.service",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_devserver_systemd_reload_restores_without_bounce() {
+        let dir = tempfile::tempdir().expect("unit dir");
+        let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
+        let desired = chan_systemd::DevserverUnit::new(
+            "/usr/bin/chan devserver --bind=127.0.0.1 --port=8787",
+        )
+        .render();
+        let legacy = desired.replace("TimeoutStartSec=10min\n", "");
+        std::fs::write(&path, &legacy).expect("seed legacy unit");
+        let update =
+            write_rendered_devserver_unit(&path, &desired, false).expect("stage migration");
+        let mut control = FakeDevserverSystemdControl {
+            fail_command: Some(1),
+            active: true,
+            ..Default::default()
+        };
+
+        activate_devserver_unit(&update, true, true, &mut control)
+            .await
+            .expect_err("daemon-reload failure rolls back");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
+        assert_eq!(
+            systemd_commands(&control),
+            ["daemon-reload", "daemon-reload"]
         );
     }
 
