@@ -169,13 +169,12 @@ impl TenantTaskOwner {
         let mut shutdown = TenantTaskShutdownGuard::new(self);
         shutdown.owner.cancel();
         let deadline = tokio::time::Instant::now() + grace;
-        let mut completed = 0;
         let timed_out = {
             let cooperative = async {
-                while completed < shutdown.owner.handles.len() {
-                    let result = (&mut shutdown.owner.handles[completed]).await;
+                while !shutdown.owner.handles.is_empty() {
+                    let result = (&mut shutdown.owner.handles[0]).await;
                     report_join_error(result);
-                    completed += 1;
+                    drop(shutdown.owner.handles.swap_remove(0));
                 }
             };
             tokio::time::timeout_at(deadline, cooperative)
@@ -184,18 +183,17 @@ impl TenantTaskOwner {
         };
 
         if timed_out {
-            for handle in &shutdown.owner.handles[completed..] {
+            for handle in &shutdown.owner.handles {
                 if !handle.is_finished() {
                     handle.abort();
                 }
             }
-            while completed < shutdown.owner.handles.len() {
-                let result = (&mut shutdown.owner.handles[completed]).await;
+            while !shutdown.owner.handles.is_empty() {
+                let result = (&mut shutdown.owner.handles[0]).await;
                 report_join_error(result);
-                completed += 1;
+                drop(shutdown.owner.handles.swap_remove(0));
             }
         }
-        shutdown.owner.handles.clear();
         shutdown.disarm();
     }
 
@@ -413,19 +411,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelling_shutdown_future_aborts_without_detaching_handles() {
+    async fn cancelling_after_one_reap_keeps_only_unreaped_handles_guarded() {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let shutdown_tx = Arc::new(shutdown_tx);
         let dropped = Arc::new(AtomicUsize::new(0));
         let task_dropped = Arc::clone(&dropped);
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-        let handle = tokio::spawn(async move {
+        let fast = tokio::spawn(async {});
+        let stuck = tokio::spawn(async move {
             let _drop = DropCount(task_dropped);
             let _ = entered_tx.send(());
             pending::<()>().await;
         });
         entered_rx.await.expect("task entered");
-        let mut owner = TenantTaskOwner::new(shutdown_tx, vec![handle]);
+        while !fast.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let mut owner = TenantTaskOwner::new(shutdown_tx, vec![fast, stuck]);
         let mut shutdown = Box::pin(owner.shutdown_with_grace(Duration::from_secs(60)));
         tokio::select! {
             biased;
@@ -435,6 +437,11 @@ mod tests {
 
         drop(shutdown);
         shutdown_rx.changed().await.expect("shutdown signal");
+        assert_eq!(
+            owner.handles.len(),
+            1,
+            "completed handles must be removed before the next cancellable await"
+        );
         owner.shutdown_with_grace(Duration::ZERO).await;
 
         assert!(*shutdown_rx.borrow());
