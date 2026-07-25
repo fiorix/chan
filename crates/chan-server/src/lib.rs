@@ -194,19 +194,17 @@ struct AppArtifacts {
     /// alive across storage reset or metadata import swaps.
     workspace_cell: Arc<RwLock<Option<WorkspaceCell>>>,
     /// Background idle-prune/shutdown task for long-lived terminal
-    /// sessions. Held so dropping AppArtifacts aborts it if serve()
-    /// exits without the shutdown channel firing.
+    /// sessions. Its shutdown receiver stops it cooperatively; dropping this
+    /// raw Tokio handle detaches the task rather than aborting it.
     _terminal_pruner: tokio::task::JoinHandle<()>,
     /// The `cs terminal write` queue drainer (see terminal_sessions). Held
-    /// alongside the pruner so dropping AppArtifacts aborts it too.
+    /// alongside the pruner for the same cooperative lifetime.
     _terminal_drainer: tokio::task::JoinHandle<()>,
     /// Republishes the cross-window terminal roster onto `/ws` on every
-    /// change. Held alongside the pruner/drainer so dropping AppArtifacts
-    /// aborts it too.
+    /// change. Its shutdown receiver, not raw-handle drop, stops it.
     _terminal_roster_broadcaster: tokio::task::JoinHandle<()>,
     /// Ages out disconnected session participants and rebroadcasts the
-    /// leader/followers roster. Held alongside the other background tasks so
-    /// dropping AppArtifacts aborts it too.
+    /// leader/followers roster. Held alongside the other cooperative tasks.
     _session_reaper: tokio::task::JoinHandle<()>,
     /// Debounced doc-session disk flusher + detach-grace reaper. Held
     /// like the terminal tasks above; `None` in the terminal-only app
@@ -1267,8 +1265,10 @@ impl chan_library::TenantBuilder for RouteLayer {
 
 /// Reduce a route-layer `AppArtifacts` to the host-facing `TenantArtifacts`:
 /// surface what the host routes / reconciles / tears down with, and stash the
-/// rest (MCP bridge, control socket, background tasks, the AppState the router
-/// owns) in the opaque keep-alive the host owns for the tenant's lifetime.
+/// rest (MCP bridge, control socket, raw background-task handles, and the
+/// AppState the router owns) in the opaque keepalive. The host signals
+/// cooperative shutdown before dropping it; only the custom bridge/socket
+/// guards have abort-on-drop behavior.
 fn into_tenant_artifacts(a: AppArtifacts) -> chan_library::TenantArtifacts {
     let AppArtifacts {
         app,

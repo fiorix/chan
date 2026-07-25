@@ -142,8 +142,8 @@ pub struct TenantArtifacts {
     pub token: Option<String>,
     /// The tenant's PTY registry (window-session checks, scrollback, reap).
     pub terminal_sessions: Arc<TerminalRegistry>,
-    /// Shutdown signal; the host fires it on tenant close so the tenant's
-    /// background tasks exit and the runtime drops cleanly.
+    /// Shutdown signal; the host fires it on tenant close so background tasks
+    /// can exit cooperatively. The current raw task handles are not joined.
     pub shutdown_tx: Arc<watch::Sender<bool>>,
     /// SPA-facing URL prefix (tunnel mode swaps it on Connected). Shared Arc
     /// with the tenant's `AppState`.
@@ -169,8 +169,9 @@ pub struct TenantArtifacts {
     /// without naming the route layer's `WorkspaceCell`.
     pub cell: Arc<dyn WorkspaceCellHandle>,
     /// Route-layer pieces the host only owns for the tenant's lifetime (MCP
-    /// bridge, control socket, background task handles). Opaque: the host never
-    /// calls them; dropping this on teardown unlinks sockets + stops tasks.
+    /// bridge, control socket, raw background-task handles). Opaque: the host
+    /// never calls them. Dropping it unlinks or aborts the custom socket guards;
+    /// raw Tokio handles detach after the cooperative shutdown signal.
     pub keepalive: Box<dyn Any + Send + Sync>,
 }
 
