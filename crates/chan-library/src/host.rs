@@ -55,7 +55,7 @@ pub struct HostedWorkspace {
 /// separately (which carries its own per-tenant token).
 ///
 /// Local rows (the host's own library) carry `devserver_id: None` and route
-/// their on/off/remove by `workspace_id` (the round-1 by-root path). Rows merged
+/// their on/off/remove by `workspace_id` (the by-root path). Rows merged
 /// in from a connected devserver via [`DevserverFeedSource::workspaces`] carry
 /// `devserver_id: Some(..)` + the remote `library_id`, and the SPA groups them by
 /// `devserver_id` and routes their on/off/forget by `prefix`.

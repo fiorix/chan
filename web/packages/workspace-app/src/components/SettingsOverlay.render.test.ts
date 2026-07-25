@@ -204,7 +204,7 @@ describe("settings surface render", () => {
     ) as HTMLElement;
     shortcutsTab.click();
     await flush();
-    // KeymapSettings (the Keymap lane's per-OS assign grid) renders its
+    // KeymapSettings (the per-OS assign grid) renders its
     // own filter toolbar; its presence proves the mount seam works.
     expect(target.querySelector(".keymap")).not.toBeNull();
     expect(

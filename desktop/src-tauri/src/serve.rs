@@ -523,7 +523,7 @@ pub async fn spawn_control_terminal_window(
             // control sub-mode: terminal-only, but with the tab strip / pane
             // chrome hidden and Cmd+T / splits disabled so it never spawns a
             // second tab. It also tags the window kind in `cs window list`,
-            // keeping it distinct from persisted standalone terminals (W10).
+            // keeping it distinct from persisted standalone terminals.
             kind: Some("control"),
         },
     )?;

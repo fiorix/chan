@@ -133,7 +133,7 @@ describe("Hybrid Graph legend grid", () => {
     expect(source).toMatch(/style="background: var\(\{row\.cssVar\}\)"/);
   });
 
-  test("Wave 4 OK button routes through onDone", () => {
+  test("the OK button routes through onDone", () => {
     expect(source).toMatch(/let \{ onDone \}: \{ onDone\?: \(\) => void \} = \$props\(\)/);
     expect(source).toMatch(
       /<HybridSurfaceConfigShell title="Hybrid Graph" \{onDone\}>/,

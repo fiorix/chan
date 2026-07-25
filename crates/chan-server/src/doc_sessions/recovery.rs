@@ -4,7 +4,8 @@
 //! `.chan/editor-sessions/v1/` tree. Records use the workspace's canonical
 //! chunk-fed atomic writer, so a crash exposes either the previous complete
 //! record or the next one, never a partial JSON file. The matching reader is
-//! the bounded W4 reader and refuses records above the binary semantic cap.
+//! the workspace's bounded reader and refuses records above the binary
+//! semantic cap.
 
 use std::io::{self, Write};
 

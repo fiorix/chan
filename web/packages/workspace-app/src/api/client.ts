@@ -1398,9 +1398,9 @@ export const api = {
   /// from. ROOT path (`requestRoot`, NOT prefixed): the local-color route is
   /// mounted ONLY on the root launcher router, but a workspace/terminal/devserver
   /// window loads under a tenant prefix -- `apiPath` would prepend it and the PUT
-  /// would 404 before reaching the route (the C8 cut-blocker). The window's `?t=`
+  /// would 404 before reaching the route. The window's `?t=`
   /// bearer still travels (Authorization header), so the surface authenticates as
-  /// its tenant and `require_surface_bearer` (W9) accepts it. Reaches the window's
+  /// its tenant and `require_surface_bearer` accepts it. Reaches the window's
   /// own serving origin (the desktop for local windows, that devserver for
   /// devserver windows) -- i.e. the library that minted the window. The store
   /// returns 204; surfaces without a writable color store answer 403

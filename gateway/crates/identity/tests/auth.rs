@@ -984,7 +984,7 @@ async fn share_landing_root_unauthed_redirects_to_login() {
 
 #[tokio::test]
 async fn share_landing_root_owner_minted_jwt_redirect() {
-    // Whole-devserver open is OWNER-ONLY this round: the owner opening their
+    // Whole-devserver open is OWNER-ONLY: the owner opening their
     // OWN devserver (caller == owner) mints the entry JWT and redirects to
     // the proxy ROOT, where the launcher is served -- the per-workspace flow
     // minus the tenant path.

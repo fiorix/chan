@@ -18,8 +18,8 @@
 #   -p publish does not bridge zones either.
 #
 # Net: two separate zones for the tunnel would need host iptables/forwarding
-# (root). This round's sudo is sdme-only, so the e2e uses one zone, two
-# containers. The tunnel still crosses between two separate containers.
+# (root). The e2e's sudo is sdme-only, so it uses one zone, two containers.
+# The tunnel still crosses between two separate containers.
 set -uo pipefail
 SDME="sudo -n sdme"; RFS=chan-e2e-run
 say(){ printf '\n\033[1;36m== %s\033[0m\n' "$*"; }

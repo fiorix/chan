@@ -66,7 +66,7 @@ class MockSocket {
 class IdleSocket extends MockSocket {}
 
 // Fake PTY. Streams a short canned session on open and echoes typed input so
-// the terminal feels live. Phase 4 enriches this with the mock content file.
+// the terminal feels live.
 class TerminalSocket extends MockSocket {
   #cols = 80;
   #rows = 24;

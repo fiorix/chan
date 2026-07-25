@@ -3,7 +3,7 @@
 // mounts WorkspaceDemo which installs the mock and renders the app.
 //
 // Served by index.demo.html under `vite dev`. The production marketing embed
-// (Phase 7) loads the same WorkspaceDemo the same way, lazily.
+// loads the same WorkspaceDemo the same way, lazily.
 
 import { mount } from "svelte";
 import WorkspaceDemo from "../WorkspaceDemo.svelte";

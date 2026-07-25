@@ -1335,9 +1335,9 @@ mod tests {
         assert_eq!(json["mode"], "bm25");
     }
 
-    /// The empty-query short-circuit previously hardcoded mode:"hybrid";
-    /// it must now report the same mode a real query would run. With
-    /// semantic disabled that is bm25, and the hit list stays empty.
+    /// The empty-query short-circuit reports the same mode a real query
+    /// would run, never a hardcoded one. With semantic disabled that is
+    /// bm25, and the hit list stays empty.
     #[tokio::test]
     async fn content_search_empty_query_reports_flag_mode() {
         let app = route_test_app();

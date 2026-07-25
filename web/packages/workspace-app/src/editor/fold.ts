@@ -7,7 +7,7 @@
 // raw line text, so a `#` inside a fenced block, a tilde fence, an indented
 // fence, an inline code span, or frontmatter is never mistaken for a heading.
 // Indented ATX headings (up to three leading spaces, CommonMark) fold, matching
-// the tree; Setext headings are out of the fold gutter this round.
+// the tree; Setext headings are out of the fold gutter.
 //
 // Why a custom gutter instead of `foldGutter()`: @codemirror/lang-markdown adds
 // `foldNodeProp` to many block types (paragraphs, blockquotes, tables, fenced

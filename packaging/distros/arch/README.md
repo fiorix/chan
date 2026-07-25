@@ -1,6 +1,6 @@
 # chan on Arch Linux (AUR)
 
-Beginning with v0.72.0, two source-built packages are published to the Arch User Repository:
+Two source-built packages are published to the Arch User Repository:
 
 - [`chan`](https://aur.archlinux.org/packages/chan) installs the standalone CLI and devserver.
 - [`chan-desktop`](https://aur.archlinux.org/packages/chan-desktop) installs the native desktop and provides the same `chan` and `cs` command surface.

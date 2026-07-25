@@ -36,9 +36,9 @@ pub struct IdentityValidator {
     proxy_id: ProxyId,
 }
 
-/// Compatibility wrapper for call sites that previously populated a
-/// mutable username cache. Owner authority now comes exclusively from the
-/// signed registration stored on `TunnelHandle`, so this wrapper delegates
+/// Pass-through wrapper for call sites that take a username-capturing
+/// validator. Owner authority comes exclusively from the signed
+/// registration stored on `TunnelHandle`, so this wrapper delegates
 /// without recording identity state.
 pub struct CapturingValidator<V: Validator> {
     inner: V,

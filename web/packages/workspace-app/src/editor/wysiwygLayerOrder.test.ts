@@ -6,11 +6,10 @@ import wysiwyg from "./Wysiwyg.svelte?raw";
 // invariant, not per-layer taste: the OPAQUE page fill must be the
 // bottom layer, the code-block slab above it, and both strictly below
 // CM6's .cm-selectionLayer at -1 so selections stay visible. Getting
-// this wrong is invisible to every build check - v0.70.3 moved the
-// page fill to -2 to fix the selection and silently buried the -3
-// code slab for four releases. jsdom cannot paint, so this pins the
-// declared values' ORDER rather than pixels; the shade itself is
-// owner-verified in a browser.
+// this wrong is invisible to every build check: moving one layer to
+// fix the selection silently buries another behind the page fill.
+// jsdom cannot paint, so this pins the declared values' ORDER rather
+// than pixels; the shade itself is owner-verified in a browser.
 
 function zIndexAfter(anchor: RegExp): number {
   const at = wysiwyg.match(anchor);

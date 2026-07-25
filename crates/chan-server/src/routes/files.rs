@@ -468,7 +468,7 @@ fn stream_binary_download_inner(
                 break;
             }
         }
-        // Dropping the W4 reader closes its sync queue and joins the
+        // Dropping the bounded reader closes its sync queue and joins the
         // owned producer before the optional test completion fires.
         drop(reader);
         if let Some(completion) = completion {
@@ -2364,7 +2364,7 @@ mod write_tests {
         let source = include_str!("files.rs");
         assert!(
             !source.contains("enum DownloadPayload {\n    File(Vec<u8>)"),
-            "single-file downloads must carry W4's bounded reader, not a whole-file Vec"
+            "single-file downloads must carry the workspace's bounded reader, not a whole-file Vec"
         );
     }
 
@@ -2529,7 +2529,7 @@ mod write_tests {
 
         tokio::time::timeout(std::time::Duration::from_secs(2), completed)
             .await
-            .expect("disconnect must stop the bridge and join the W4 reader")
+            .expect("disconnect must stop the bridge and join the bounded reader")
             .expect("download bridge completion sender dropped");
     }
 

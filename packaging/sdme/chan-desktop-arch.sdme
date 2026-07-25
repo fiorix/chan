@@ -73,11 +73,10 @@ RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal && \
 # required for the same reason fedora needs it.
 RUN echo 'export NO_STRIP=1' >> /root/.cargo/env
 
-# VALIDATION STATUS (phase-15 round-4): the .deb and .rpm bundles build + are
-# validated headless on aarch64. The AppImage step still fails at "failed to
-# run linuxdeploy" even with NO_STRIP=1 (tauri swallows linuxdeploy's stderr,
-# so the underlying cause is undiagnosed - likely an arch-specific
-# linuxdeploy-plugin-gtk or FUSE/extract-and-run gap). Capturing the real
-# error needs running linuxdeploy directly with verbose logging. Tracked as a
-# round-5 backlog item; the AppImage is redundant anyway (ubuntu + fedora both
-# emit the universal aarch64 AppImage).
+# VALIDATION STATUS: the .deb and .rpm bundles build + are validated headless
+# on aarch64. The AppImage step fails at "failed to run linuxdeploy" even with
+# NO_STRIP=1 (tauri swallows linuxdeploy's stderr, so the underlying cause is
+# undiagnosed - likely an arch-specific linuxdeploy-plugin-gtk or
+# FUSE/extract-and-run gap). Capturing the real error needs running linuxdeploy
+# directly with verbose logging. The AppImage is redundant anyway (ubuntu +
+# fedora both emit the universal aarch64 AppImage).

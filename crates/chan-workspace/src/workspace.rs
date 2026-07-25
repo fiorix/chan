@@ -634,7 +634,7 @@ pub struct Workspace {
     /// config operations and must not wait behind an index or report walk.
     dashboard_serial: std::sync::Mutex<()>,
     /// Short-lived recovery coordinator state. This mutex is never held
-    /// across replay, reconcile, or rebuild work; the W2 derived-state
+    /// across replay, reconcile, or rebuild work; the derived-state
     /// mutation boundary remains a separate lock.
     recovery: std::sync::Mutex<RecoveryStatus>,
     /// One owned startup worker. It executes the metadata-derived recovery

@@ -81,7 +81,7 @@ describe("screensaver: timeout constants", () => {
   });
 });
 
-describe("Wave 3: plain screen-lock theme", () => {
+describe("plain screen-lock theme", () => {
   test("ScreensaverTheme accepts plain and matrix only", () => {
     expect(sourceText).toMatch(
       /export type ScreensaverTheme = "plain" \| "matrix";/,

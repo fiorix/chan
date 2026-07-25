@@ -123,11 +123,9 @@ export const api = {
     request<AuditEntry[]>(`/api/tokens/${id}/audit`),
 
   // NOTE: whole-devserver "open" (root) + the /s/{owner} share-link are
-  // intentionally absent. Opening a shared devserver is the next phase
-  // ("opening a devserver = opening a chan-library": a root launcher with
-  // full terminal/workspace/state behavior). This round ships sharing
-  // management only; the per-tenant share link /s/{owner}/{workspace} still
-  // exists server-side for a known workspace.
+  // intentionally absent. This surface covers sharing management only; the
+  // per-tenant share link /s/{owner}/{workspace} exists server-side for a
+  // known workspace.
 
   listDevserverGrants: (devserverId: string) =>
     request<DevserverGrant[]>(`/api/devservers/${encodeURIComponent(devserverId)}/grants`),

@@ -8,8 +8,8 @@
 #
 # It exists alongside packaging/gateway/scripts/build-debs.sh (cargo-zigbuild cross-
 # compile, needs zig + cargo-zigbuild on the host). This path needs only
-# lima + sdme, which is already the round's mechanism for the chan-desktop
-# Linux build, so a contributor set up for one is set up for both.
+# lima + sdme, the same mechanism as the chan-desktop Linux build, so a
+# contributor set up for one is set up for both.
 #
 # Invoked through `make linux-gateway` (root Makefile). Standalone:
 #

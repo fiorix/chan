@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """Regenerate the chan-desktop app icon set from the enso source.
 
-Why this exists: the icon was previously hand-produced and the enso ended up
-too zoomed in (it nearly touched the squircle edge). This bakes a reproducible
-pipeline: take the cream-paper enso source, fit it into the SAME macOS squircle
-shape the current icon uses (reused verbatim from the current icon's alpha, so
-the corner shape / transparent margin never drift), and export every Tauri size.
+Why this exists: hand-producing the icon lets the enso drift too far into the
+squircle edge. This bakes a reproducible pipeline: take the cream-paper enso
+source, fit it into the SAME macOS squircle shape the current icon uses (reused
+verbatim from the current icon's alpha, so the corner shape / transparent
+margin never drift), and export every Tauri size.
 
 ENSO_FILL controls the enso size inside the squircle: 1.0 = the source fills the
 squircle bbox (un-zoomed, the source's own generous margin); < 1.0 shrinks the
 source content and fills the ring with the source's edge cream paper, for even
-more breathing room. Tune this with @@Alex.
+more breathing room.
 
 Usage:
   python3 scripts/gen-app-icon.py --preview        # write /tmp preview only

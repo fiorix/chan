@@ -2144,9 +2144,7 @@ mod tests {
     /// the PTY (there is no reliable way to settle `stty -echo` on a
     /// loaded host before typing), so a literal end marker matches
     /// inside the echo and the harvest returns the echo alone, before
-    /// the script ever ran -- the v0.31.0 tag-run flake in the tty
-    /// probe and this round's flake in the cwd/home and mcp-env-off
-    /// probes. Slicing to the marker window additionally drops the
+    /// the script ever ran. Slicing to the marker window drops the
     /// echoed line, the prompt, and any shell banner, so assertions
     /// (negative ones included) only ever see the script's real
     /// output.

@@ -9,9 +9,9 @@
 //! (`{user}.devserver.chan.app/{slug}-{8hex}/`) unchanged, and the devserver
 //! routes the tenant by it. The hash suffix keys the prefix to the *root*, not
 //! just the basename, so two workspaces with the same basename under different
-//! parents (`foo/hello`, `bar/hello`) get DISTINCT prefixes and both mount  --
-//! closing the same-basename collision that previously rejected the second at
-//! mount time. The window-record assembly on `WorkspaceHost` calls
+//! parents (`foo/hello`, `bar/hello`) get DISTINCT prefixes and both mount:
+//! a same-basename pair never collides at mount time.
+//! The window-record assembly on `WorkspaceHost` calls
 //! [`allocate_workspace_prefix`] for the off-workspace case; the devserver
 //! calls it on mount. Both derive the suffix identically from the canonical
 //! root, so the gateway and devserver agree on the prefix.

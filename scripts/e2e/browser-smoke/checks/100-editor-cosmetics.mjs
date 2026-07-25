@@ -1,9 +1,8 @@
-// v0.71.0 editor-cosmetics regression guard (Kimi-B lane). Covers the
-// two theme-token fixes from team/roadmap/done/cosmetics.md:
+// Editor-cosmetics regression guard. Covers two theme tokens:
 //
 // 1. LIGHT: the fenced code-block slab must visibly separate from the
-//    page background (github theme --chan-editor-code-block-bg was
-//    #f6f8fa on a #ffffff canvas - indistinguishable).
+//    page background (a github-theme --chan-editor-code-block-bg of
+//    #f6f8fa on a #ffffff canvas is indistinguishable).
 // 2. DARK: the editor selection must follow --selection-bg (GitHub's
 //    accent-muted blue), not CM6's hard-coded light greys (#d7d4f0),
 //    and the selected text must stay readable against it.

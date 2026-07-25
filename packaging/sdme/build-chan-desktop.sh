@@ -17,8 +17,7 @@
 #   macOS (lima):  SDME='limactl shell default sudo sdme'   (default)
 #   Linux host:    SDME='sudo sdme'
 #
-# Two non-obvious container facts this script accommodates (both learned the
-# hard way in the round-4 de-risk):
+# Two non-obvious container facts this script accommodates:
 #   - sdme mounts a small (~800M) tmpfs over /tmp; the cold Rust + tauri-cli
 #     compile overflows it, so the in-container build sets TMPDIR=/var/tmp
 #     (the disk-backed overlay).

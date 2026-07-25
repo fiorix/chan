@@ -1,10 +1,9 @@
 //! `GET /api/mentions?q=<prefix>&limit=<int>`.
 //!
 //! Returns prefix-matched mention handles from the per-workspace
-//! graph DB for the editor's mention completion
-//! (the editor previously queried only the contact list; this
-//! exposes the broader corpus of `@@<Name>` references across
-//! all indexed markdown).
+//! graph DB for the editor's mention completion: the full corpus of
+//! `@@<Name>` references across all indexed markdown, not just the
+//! contact list.
 //!
 //! Source: `chan_workspace::GraphView::mentions()` -- runs a single
 //! SQL aggregation over the graph's mention edges (parallel to

@@ -72,7 +72,7 @@ XWIN_CRATES ?= -p chan-server -p chan-shell -p chan-workspace
 
 # cargo-xwin needs the LLVM toolchain ON TOP OF cargo-xwin + the rust target:
 # cc-rs shells out to `llvm-lib` / `clang-cl` to build the C deps (ring), so a
-# host without LLVM dies with `failed to find tool "llvm-lib"` (hit by @@LaneA).
+# host without LLVM dies with `failed to find tool "llvm-lib"`.
 # `check` needs llvm-lib + clang-cl (no linking); a full `xwin build` would also
 # need `lld-link` from the `lld` package.
 #   macOS:  brew install llvm        (keg-only; bin auto-added to PATH below)

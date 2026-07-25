@@ -1,14 +1,14 @@
 // @vitest-environment jsdom
 
-// C8 cut-blocker regression. The per-library pane colour
-// (`/api/library/local-color` PUT + `/watch`) is mounted ONLY on the ROOT
-// launcher router, but a workspace/terminal/devserver window's SPA loads UNDER
-// its tenant prefix (`serve.rs` mints `{prefix}/index.html`). `apiPath` /
-// `withTokenQuery` prepend that prefix, so the colour PUT + watch went to
+// The per-library pane colour (`/api/library/local-color` PUT + `/watch`) is
+// mounted ONLY on the ROOT launcher router, but a workspace/terminal/devserver
+// window's SPA loads UNDER its tenant prefix (`serve.rs` mints
+// `{prefix}/index.html`). `apiPath` / `withTokenQuery` would prepend that
+// prefix and send the colour PUT + watch to
 // `/{prefix}/api/library/local-color` → 404 → swallowed → never persisted →
-// fresh window blue. The fix routes them through the ROOT resolvers
-// (`requestRoot` / `rootTokenQuery`) while still carrying the window's `?t=`
-// bearer. transport.ts reads `chan-prefix` ONCE at module load, so each test
+// fresh window blue. Both go through the ROOT resolvers (`requestRoot` /
+// `rootTokenQuery`) instead, while still carrying the window's `?t=` bearer.
+// transport.ts reads `chan-prefix` ONCE at module load, so each test
 // sets the meta + location and imports a FRESH module copy.
 
 import { afterEach, describe, expect, test, vi } from "vitest";

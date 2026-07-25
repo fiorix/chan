@@ -380,7 +380,7 @@ export function createDemoFetch(
       return empty();
     }
 
-    // --- inert settings surfaces (Phase 6 hardens these) ---
+    // --- inert settings surfaces ---
     if (path === "/api/index/excluded-dirs" && method === "GET") {
       return json({ defaults: [], workspace: [], effective: [] });
     }

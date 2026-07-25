@@ -245,10 +245,10 @@ web: web-launcher ## Build the embedded web bundle.
 .PHONY: web-check
 web-check: web-launcher ## Run frontend check, vitest, and production build.
 	# vitest (npm test == `vitest run`) gates here so the pre-push / ci-linux
-	# path covers the frontend unit tests. The Make gate previously ran only
-	# svelte-check + build, leaving vitest ungated after CI was simplified to
-	# the make ci-* targets. The `web-launcher` prerequisite builds the launcher
-	# bundle so the pre-push / release cargo build embeds a real launcher.
+	# path covers the frontend unit tests: CI runs the make ci-* targets, so
+	# anything absent here is ungated. The `web-launcher` prerequisite builds
+	# the launcher bundle so the pre-push / release cargo build embeds a real
+	# launcher.
 	#
 	# The web-launcher prerequisite only BUILDS the launcher (vite build), which
 	# misses type errors + unit regressions, so gate its svelte-check + vitest

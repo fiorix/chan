@@ -1141,10 +1141,9 @@
   /* The slab itself: a non-interactive layer pinned to the line's
      padding box, sitting at z-index -3: BEHIND the selection layer
      (-1, so selecting text inside a code block stays visible) but
-     ABOVE the opaque page fill (-4, or the slab itself disappears -
-     the v0.70.3..v0.74.0 regression). `inset: 0` resolves against the
-     padding box, which the 18px transparent right border already
-     shortens - so it reproduces the old slab's exact bounds. */
+     ABOVE the opaque page fill (-4, or the slab itself disappears).
+     `inset: 0` resolves against the padding box, which the 18px
+     transparent right border already shortens. */
   :global(.md-wysiwyg-cm6 .cm-editor .cm-line.cm-md-fence-opener::before),
   :global(.md-wysiwyg-cm6 .cm-editor .cm-line.cm-md-fence-closer::before),
   :global(.md-wysiwyg-cm6 .cm-editor .cm-line.cm-md-code-block::before) {

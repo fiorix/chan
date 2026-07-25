@@ -6,8 +6,7 @@
   // inspector on the right; double-click / Enter routes to the
   // editor (or graph, for a tag).
   //
-  // Q&A used to live here as a second tab; that surface has been
-  // removed, so this file is search-only now.
+  // Search-only: the panel has no second tab.
 
   import { onDestroy, tick } from "svelte";
   import { untrack } from "svelte";

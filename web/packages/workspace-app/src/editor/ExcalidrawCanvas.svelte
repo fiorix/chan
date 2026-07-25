@@ -293,7 +293,7 @@
         cleanedAppStateJson = JSON.stringify(cleanedAppState);
       } catch {
         // The buffer mirror below still runs; deltas push without
-        // appState this round.
+        // appState.
       }
       pushDeltas();
     }

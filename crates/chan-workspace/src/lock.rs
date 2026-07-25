@@ -28,9 +28,9 @@ use crate::error::{ChanError, Result};
 /// Identity written into `writer.lock` by the holder immediately after
 /// it wins the advisory lock.
 ///
-/// Cross-lane on-disk shape (frozen in the round's `contracts.md`):
-/// `chan close` parses it to discover the serving process. Keep the
-/// field set and `started_at`'s RFC3339 format stable.
+/// The on-disk shape is a cross-crate contract: `chan close` parses it
+/// to discover the serving process. Keep the field set and
+/// `started_at`'s RFC3339 format stable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockRecord {
     /// OS pid of the holder.

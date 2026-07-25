@@ -1,11 +1,11 @@
-// Item 6, surface (b): `cs export` end to end. The real CLI (cs is a
+// `cs export` end to end. The real CLI (cs is a
 // chan symlink, so `chan shell export` is the same code path) sends
 // the Export control request; the server pushes the export-job
 // window_command to the live browser window; the SPA renders, uploads
 // the PDF into the workspace, and replies. Asserts the workspace file.
 //
-// Skips (does not fail) while the `cs export` subcommand has not
-// landed, so the harness stays green-runnable ahead of that lane.
+// Skips (does not fail) when the `cs export` subcommand is absent, so
+// the harness stays green-runnable against a build without it.
 
 import { join } from "node:path";
 

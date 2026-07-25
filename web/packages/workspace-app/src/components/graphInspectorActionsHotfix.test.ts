@@ -21,9 +21,9 @@ describe("graph reload is anchored on scope/depth/mode, not layout churn", () =>
     // Reading visible + loadKey up front registers exactly those two as
     // dependencies. untrack() around load() prevents load()'s internal
     // reads (currentScope, filters...) from becoming reload triggers.
-    // Round 2 (keep-alive) added lazy-first + dirty gating between the
-    // trigger reads and the load() call, but the contract is unchanged:
-    // those two are the only deps, and load() still runs untracked.
+    // Lazy-first + dirty gating (keep-alive) sits between the trigger
+    // reads and the load() call without widening the contract: those
+    // two are the only deps, and load() runs untracked.
     expect(panel).toMatch(/const show = visible;\s*const key = loadKey;/);
     expect(panel).toMatch(/untrack\(\(\) => void load\(\)\);/);
   });

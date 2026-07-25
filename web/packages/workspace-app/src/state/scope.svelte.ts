@@ -12,9 +12,8 @@
 // `visibleFilePaths` are small path helpers used by the graph open
 // paths.
 //
-// The Search overlay no longer has a scope picker (search is
-// workspace-wide), so the dropdown-options builder that used to live
-// here was removed with it.
+// The Search overlay has no scope picker (search is workspace-wide),
+// so this module carries no dropdown-options builder.
 
 import { layout } from "./tabs.svelte";
 // The `dir` scope reads the file browser's current selection and looks

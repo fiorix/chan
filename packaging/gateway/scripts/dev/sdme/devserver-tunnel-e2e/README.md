@@ -30,7 +30,7 @@ The controller, proxy, and chan binaries (including the tunnel-client/-proto cra
 
 ## Topology: why one zone, two containers
 
-The charter asked for two SEPARATE sdme zones. On this host that is not reachable with the round's privileges, and the e2e documents why (`zone-isolation-probe.sh`). Measured sdme 0.9.0 network behaviour here:
+Two SEPARATE sdme zones are not reachable with sdme-only privileges, and `zone-isolation-probe.sh` documents why. Measured sdme 0.9.0 network behaviour here:
 
 | path                              | result                                   |
 |-----------------------------------|------------------------------------------|
@@ -40,7 +40,7 @@ The charter asked for two SEPARATE sdme zones. On this host that is not reachabl
 | container → container, cross zone | BLOCKED                                  |
 | `-p` published port, cross zone   | BLOCKED                                  |
 
-Each zone bridge (`vz-<zone>`) reuses `169.254.0.0/16`, and the host drops container-initiated TCP to itself and forwards nothing between zone bridges. So a container can only initiate TCP to a **same-zone** peer. The tunnel is `chan devserver → devserver-proxy` (client → server), so the two must share a zone. Bridging two isolated zones would need host `iptables`/forwarding changes (root); this round's sudo is `sdme`-only (`NOPASSWD /usr/local/bin/sdme`).
+Each zone bridge (`vz-<zone>`) reuses `169.254.0.0/16`, and the host drops container-initiated TCP to itself and forwards nothing between zone bridges. So a container can only initiate TCP to a **same-zone** peer. The tunnel is `chan devserver → devserver-proxy` (client → server), so the two must share a zone. Bridging two isolated zones would need host `iptables`/forwarding changes (root); the e2e's sudo is `sdme`-only (`NOPASSWD /usr/local/bin/sdme`).
 
 The containers are still fully separate (own netns, fs, process tree); the tunnel genuinely crosses between two containers. Only the L2 zone is shared. Running the proxy and devserver in two ACTUAL zones is a host-networking follow-up (open the firewall / add inter-zone forwarding as root), tracked for Alex alongside the production `--tunnel-url` e2e.
 
