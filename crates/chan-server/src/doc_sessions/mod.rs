@@ -1187,6 +1187,7 @@ impl DocAttachHandle {
         self.attach_id
     }
 
+    #[cfg(test)]
     pub fn session(&self) -> &Arc<DocSession> {
         &self.session
     }

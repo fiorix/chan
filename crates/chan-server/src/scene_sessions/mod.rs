@@ -1091,6 +1091,7 @@ impl SceneAttachHandle {
         self.attach_id
     }
 
+    #[cfg(test)]
     pub fn session(&self) -> &Arc<SceneSession> {
         &self.session
     }
