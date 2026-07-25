@@ -1,5 +1,7 @@
 # Honor .gitignore in walk and watch exclusions
 
+> Status: shipped in [v0.76.0](../../release/release-v0.76.0.md): .gitignore (nested, anchored, negation) is honored as the base scope layer beneath index_excluded_dirs, unified in one IndexScopePolicy across walk, index, report, and the Linux watch registration.
+
 Status: REGISTERED for v0.76.0. The fuller shape of the rebuild-storm
 lever 1; the defaults + migration half shipped in v0.76.0
 (`index_excluded_dirs` now covers Buck2-class output trees, and Linux

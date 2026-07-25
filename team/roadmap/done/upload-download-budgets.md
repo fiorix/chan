@@ -1,5 +1,7 @@
 # Review upload/download budgets (large-file download hangs chan-desktop)
 
+> Status: shipped in [v0.76.0](../../release/release-v0.76.0.md): bounded server byte stream, backpressured multipart upload, desktop native streaming (temp + atomic rename), and bounded 2-download/1-upload concurrency; HTTP range/206 stays in v0.77.0 (video-preview-and-range-serving).
+
 Status: REGISTERED for v0.76.0, NOT specced, NOT yet root-caused. Symptom
 reported by the owner; the notes below are pointers and hypotheses for the
 next session to investigate, not conclusions.

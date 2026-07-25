@@ -19,24 +19,25 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-### v0.76.0
-
-| item | state | what needs to happen |
-| --- | --- | --- |
-| [devserver-rebuild-storm-and-livelock](v0.76.0/devserver-rebuild-storm-and-livelock.md) | levers 1-4 landed on `main` (exclusions + migration + Linux watch-registration pruning, rebuild storm damping, overflow surfacing, worker cap + systemd watchdog); baseline storm-check green | complete lever 5, the journal-branch rework, and `.gitignore` honoring (the items below); strengthen the storm harness with real git ops, content assertions, and loss injection; not marked shipped until the full acceptance matrix is green |
-| [workspace-open-reconcile-off-mount-path](v0.76.0/workspace-open-reconcile-off-mount-path.md) | storm lever 5 | move `Workspace::open`'s inline full-stat reconcile off the calling/mount thread onto the supervised recovery path |
-| [gitignore-aware-exclusions](v0.76.0/gitignore-aware-exclusions.md) | fuller shape of storm lever 1 | honor `.gitignore` (nested, anchoring, negation) in walk, index, report, and Linux watch registration, unified under one scope policy layered beneath `index_excluded_dirs` |
-| [devserver-startup-journal-branch-rework](v0.76.0/devserver-startup-journal-branch-rework.md) | branch a42436ac reviewed (20 findings), unsafe as-is; reworked greenfield | `starting` rows before spawn, persisted desired-intent + generation, supervised shutdown-aware restore, fdstore apply ahead of serving terminals, no READY with mounts pending |
-| [editor-external-restore-echo-swallow](v0.76.0/editor-external-restore-echo-swallow.md) | root-caused and reproduced (check 57, red by design) | park the echo observation and re-check after the ring TTL instead of clearing it; mirror in scene_sessions; ungate check 57 |
-| [upload-download-budgets](v0.76.0/upload-download-budgets.md) | registered; large-file download hangs the chan-desktop UI | bounded server byte stream, backpressured multipart upload, desktop native streaming (temp + atomic rename), and bounded transfer concurrency; range/206 stays in v0.77.0 |
-
 ### v0.77.0
 
 | item | state | what needs to happen |
 | --- | --- | --- |
 | [video-preview-and-range-serving](v0.77.0/video-preview-and-range-serving.md) | registered, grounded but not specced; deferred from v0.76.0 | spec first; the real chunk is HTTP range/206 in the file route (mirrors the image path on the frontend) |
+| [wave3-review-deferred-lows](v0.77.0/wave3-review-deferred-lows.md) | six LOW findings deferred from the v0.76.0 wave-3 adversarial review (none drop user data) | debounce editor recovery off the ack path; collapse a resolved Conflicted session on rehydrate; derive chan's own systemd unit from the trusted renderer; reap desktop generated-download temps on window teardown; bound the desktop chunk frame before materializing; decode escaped leading gitignore path components |
 
 ## Completed
+
+### v0.76.0
+
+Shipped 2026-07-25; see [release-v0.76.0](../release/release-v0.76.0.md). Closed items in [`done/`](done/):
+
+- [devserver-rebuild-storm-and-livelock](done/devserver-rebuild-storm-and-livelock.md) - the rebuild-storm class closed: one `IndexScopePolicy` across walk/index/watch/report, the rebuild generation coordinator, `.gitignore` honoring, and the storm harness green including overflow injection and post-restart convergence.
+- [workspace-open-reconcile-off-mount-path](done/workspace-open-reconcile-off-mount-path.md) - `Workspace::open`'s reconcile moved onto a supervised, cancellable recovery worker off the mount path.
+- [gitignore-aware-exclusions](done/gitignore-aware-exclusions.md) - `.gitignore` (nested, anchored, negation) honored as the base scope layer beneath `index_excluded_dirs`.
+- [devserver-startup-journal-branch-rework](done/devserver-startup-journal-branch-rework.md) - reworked as the devserver startup state machine: `starting` rows before spawn, persisted intent + generation, supervised restore, fdstore ahead of serving terminals, no premature READY.
+- [editor-external-restore-echo-swallow](done/editor-external-restore-echo-swallow.md) - the echo ring re-checks after its TTL instead of clearing the observation; browser smoke check 57 ungated.
+- [upload-download-budgets](done/upload-download-budgets.md) - bounded streaming transfers (server byte stream, terminal download, desktop native) and bounded 2-download/1-upload concurrency.
 
 ### v0.75.0
 

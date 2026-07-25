@@ -1,5 +1,7 @@
 # Editor serves stale content after an external restore (echo-ring swallow)
 
+> Status: shipped in [v0.76.0](../../release/release-v0.76.0.md): the echo ring parks an unmatched external-restore observation and re-checks after the ring TTL instead of clearing it (mirrored in scene_sessions); browser smoke check 57 is ungated.
+
 Status: REGISTERED for v0.76.0. Root-caused and reproduced; the fix
 is scoped below. Found during the v0.76.0 external-edit reliability
 hunt (guards landed in `scripts/e2e/browser-smoke/checks/55,56`; the

@@ -1,5 +1,7 @@
 # Devserver rebuild storm on build-output trees (buckos livelock)
 
+> Status: shipped in [v0.76.0](../../release/release-v0.76.0.md): the rebuild-storm class is closed -- levers 1-4 on `main` plus this round's IndexScopePolicy unification (walk/index/watch/report), the rebuild generation coordinator, and .gitignore honoring; scripts/e2e/storm-check.sh ALL GREEN including inotify-overflow injection and post-restart editor-authority convergence. Lever 5, the startup journal-branch rework, and the fuller .gitignore shape were completed here, not deferred.
+
 Status: levers 1-4 IMPLEMENTED on `main` for v0.76.0: exclusions with
 migration + Linux watch-registration pruning (`27fcc334`), rebuild
 storm damping (`8fecff5d`), inotify overflow surfacing (`6f6dd9c7`),

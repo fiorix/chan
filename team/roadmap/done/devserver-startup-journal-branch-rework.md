@@ -1,5 +1,7 @@
 # Rework the devserver startup-journal branch (fdstore boot mounts)
 
+> Status: shipped in [v0.76.0](../../release/release-v0.76.0.md): reworked greenfield as the devserver startup state machine -- starting rows before spawn, persisted desired-intent + generation, supervised shutdown-aware restore, fdstore apply ahead of serving terminals, no READY with mounts pending.
+
 Status: REGISTERED for v0.76.0. Branch
 `claude/dev-server-startup-journal-jrl3rw` (a42436ac) was reviewed
 adversarially (20 verified findings): real idea, wrong disease for

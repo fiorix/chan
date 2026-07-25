@@ -1,5 +1,7 @@
 # Move Workspace::open's inline reconcile off the calling thread
 
+> Status: shipped in [v0.76.0](../../release/release-v0.76.0.md): Workspace::open's reconcile/rebuild now runs on a supervised, cancellable owned recovery worker off the mount path (non-blocking open); closing a workspace mid-recovery releases its flock promptly instead of holding it past teardown.
+
 Status: REGISTERED for v0.76.0. Remainder (lever 5) of the devserver
 rebuild-storm plan; levers 1-4 shipped in v0.76.0 (see
 `done/` history once v0.76.0 closes, and
