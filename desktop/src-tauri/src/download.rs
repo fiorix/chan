@@ -656,7 +656,7 @@ mod tests {
                 handle_a.clone(),
                 RegisteredGeneratedSink {
                     window_label: label_a.clone(),
-                    sink: sink_a,
+                    sink: Arc::clone(&sink_a),
                 },
             );
             sinks.insert(
@@ -667,6 +667,17 @@ mod tests {
                 },
             );
         }
+        sink_a
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .file
+            .as_mut()
+            .unwrap()
+            .write_all(b"partial")
+            .await
+            .unwrap();
 
         drop_generated_downloads_for_window(&label_a).await.unwrap();
 
@@ -675,6 +686,22 @@ mod tests {
         assert!(staged_b.exists());
         assert!(generated_sinks().lock().unwrap().contains_key(&handle_b));
         assert!(cancel_generated_download(handle_b).await);
+    }
+
+    #[test]
+    fn window_cleanup_drops_the_whole_generated_sink() {
+        const DOWNLOAD_RS: &str = include_str!("download.rs");
+        let cleanup = DOWNLOAD_RS
+            .split("pub(crate) fn drop_generated_downloads_for_window")
+            .nth(1)
+            .expect("window cleanup exists")
+            .split("fn download_commit_lock")
+            .next()
+            .expect("window cleanup ends before the commit lock");
+        assert!(cleanup.contains("let generated = sink.lock().await.take();"));
+        assert!(cleanup.contains("drop(generated);"));
+        assert!(!cleanup.contains(".target"));
+        assert!(!cleanup.contains("GeneratedSink {"));
     }
 
     #[test]
