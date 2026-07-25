@@ -344,13 +344,18 @@ pub(crate) fn generate_bootstrap_md(
          the queue delivers to you.\n\n",
     );
     out.push_str(
-        "Take real turn breaks whenever a safe checkpoint permits, especially\n\
-         the lead, where every lane's pokes converge. Finish or park any active\n\
-         command, stop issuing tools, and yield/end the turn so queued input can\n\
-         become the next prompt. Do not simulate this with a sleep command. The\n\
-         queue's idle signal is PTY output silence: stdout/stderr postpones the\n\
-         drain, while a silent sleep may let bytes enter the terminal without\n\
-         ending the active model turn that needs to consume them.\n\n",
+        "Take real turn breaks to drain input when it is pending, or immediately\n\
+         after a poke when a burst may still be arriving. This matters especially\n\
+         for the lead, where every lane's pokes converge. At a safe checkpoint,\n\
+         finish or park any active command, stop issuing tools, and yield/end the\n\
+         turn so queued input can become the next prompt.\n\
+         Do not simulate this with a sleep command.\n\
+         The queue's idle signal is PTY output silence: stdout/stderr postpones\n\
+         the drain, while a silent sleep may let bytes enter the terminal without\n\
+         ending the active model turn that needs to consume them.\n\n\
+         When nothing is pending and your brief defines a next step, CONTINUE;\n\
+         waiting on an empty queue is a stall, not discipline. Never end a turn\n\
+         solely to wait for input that may not exist.\n\n",
     );
     out.push_str("BEFORE you start the next task:\n\n");
     out.push_str(
@@ -892,8 +897,8 @@ mod tests {
             "batch reconciliation guidance present"
         );
         assert!(
-            bootstrap.contains("Take real turn breaks whenever a safe checkpoint permits"),
-            "real turn-break guidance present"
+            bootstrap.contains("Take real turn breaks to drain input when it is pending"),
+            "conditional real turn-break guidance present"
         );
         assert!(
             bootstrap.contains("Do not simulate this with a sleep command"),
@@ -906,6 +911,43 @@ mod tests {
         // No em dashes; ASCII only.
         assert!(!bootstrap.contains('\u{2014}'), "no em dashes");
         assert!(bootstrap.is_ascii(), "bootstrap must be pure ASCII");
+    }
+
+    #[test]
+    fn bootstrap_queue_guidance_continues_when_nothing_is_pending() {
+        let bootstrap = generate_bootstrap_md("teams/alpha", &sample_config(), None);
+        let queue_guidance = bootstrap
+            .split_once("## Between tasks - drain your queue")
+            .expect("queue guidance section")
+            .1
+            .split_once("## Reaching the host")
+            .expect("queue guidance terminator")
+            .0;
+        let queue_guidance = queue_guidance
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(
+            queue_guidance.contains("when it is pending")
+                && queue_guidance.contains("immediately after a poke"),
+            "turn breaks must be conditional on pending or newly arriving input"
+        );
+        assert!(
+            !queue_guidance.contains("Take real turn breaks whenever a safe checkpoint permits"),
+            "queue guidance must reject an unconditional turn-break directive"
+        );
+        assert!(
+            queue_guidance.contains("for the lead, where every lane's pokes converge"),
+            "queue guidance must retain the lead's converging traffic"
+        );
+        assert!(
+            queue_guidance.contains("nothing is pending")
+                && queue_guidance.contains("brief defines a next step")
+                && queue_guidance.contains("CONTINUE")
+                && queue_guidance.contains("empty queue is a stall"),
+            "an empty queue must explicitly continue the brief instead of stalling"
+        );
     }
 
     #[test]
