@@ -2038,7 +2038,7 @@ impl WorkspaceHost {
                 let outcome = self.close_workspace(&prefix, force).await?;
                 if record_off && (outcome.completed() || outcome.not_found()) {
                     if let Some(overlay) = self.workspace_overlay() {
-                        overlay.set(&root.to_string_lossy(), false);
+                        overlay.set(&target.to_string_lossy(), false);
                     }
                 }
                 Ok(outcome)
@@ -2053,7 +2053,7 @@ impl WorkspaceHost {
                     .is_some_and(|state| matches!(state, MountState::Starting));
                 if record_off && registered {
                     if let Some(overlay) = self.workspace_overlay() {
-                        overlay.set(&root.to_string_lossy(), false);
+                        overlay.set(&target.to_string_lossy(), false);
                     }
                 }
                 self.clear_workspace_lifecycle(root);
@@ -2081,6 +2081,7 @@ impl WorkspaceHost {
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
         let _registering = self.register_lock.lock().await;
+        let target = canonical_key(root);
         // Unmount first (releases the per-workspace flock before the unregister's
         // reset); a no-op when the workspace is registered-but-off or not held
         // here. Refusal leaves the runtime, registry, overlay, and windows intact.
@@ -2098,7 +2099,7 @@ impl WorkspaceHost {
         let removed = self.library().unregister_workspace(root)?;
         // Forget the on/off state so a devserver restart doesn't re-mount it.
         if let Some(overlay) = self.workspace_overlay() {
-            overlay.forget(&root.to_string_lossy());
+            overlay.forget(&target.to_string_lossy());
         }
         // FORGET is the ONLY path that purges the window records: the workspace is
         // gone for good, so drop its layout too. (OFF, by contrast, just unmounts
@@ -3575,6 +3576,46 @@ mod tests {
             .find(|row| row.path == key)
             .expect("overlay row");
         assert!(!row.desired_on, "close persists the pending row off");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn close_and_remove_use_one_overlay_row_through_a_symlink_alias() {
+        use std::os::unix::fs::symlink;
+
+        let cfg = tempfile::tempdir().expect("config dir");
+        let roots = tempfile::tempdir().expect("workspace parent");
+        let root = roots.path().join("workspace");
+        let alias = roots.path().join("alias");
+        std::fs::create_dir(&root).expect("workspace");
+        symlink(&root, &alias).expect("workspace alias");
+
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        let registered = lib.register_workspace(&alias).expect("register");
+        let key = registered.root_path.to_string_lossy().into_owned();
+        let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
+        let overlay = Arc::new(WorkspaceOverlay::open(cfg.path().join("workspaces.json")));
+        overlay.set(&key, true);
+        host.install_workspace_overlay(Arc::clone(&overlay));
+
+        host.mark_workspace_starting(&registered.root_path);
+        assert!(host
+            .close_workspace_for_root(&alias, false)
+            .await
+            .expect("close through alias")
+            .completed());
+        let rows = overlay.entries();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, key);
+        assert!(!rows[0].desired_on);
+
+        assert!(host
+            .remove_workspace_for_root(&alias, false)
+            .await
+            .expect("remove through alias")
+            .completed());
+        assert!(overlay.entries().is_empty());
+        assert!(host.library().list_workspaces().is_empty());
     }
 
     #[tokio::test]
