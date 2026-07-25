@@ -1,3 +1,193 @@
+use std::time::Instant;
+
+#[derive(Debug)]
+pub(crate) enum SessionState {
+    Clean,
+    Dirty {
+        since: Instant,
+    },
+    Observing {
+        dirty_since: Option<Instant>,
+        observation: DiskObservation,
+    },
+    Conflicted(SessionConflict),
+    Removed,
+}
+
+#[derive(Debug)]
+pub(crate) enum DiskObservation {
+    Content {
+        hash: u64,
+        mtime_ns: Option<i64>,
+        seen: Instant,
+    },
+    Removal {
+        seen: Instant,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) struct DurableBaseline {
+    pub(crate) content: String,
+    pub(crate) content_hash: u64,
+    #[allow(dead_code)] // consumed by E3 conflict persistence/resolution
+    pub(crate) mtime_ns: Option<i64>,
+    #[allow(dead_code)] // consumed by E3 conflict persistence/resolution
+    pub(crate) authority_version: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct SessionConflict {
+    pub(crate) id: String,
+    pub(crate) baseline_version: u64,
+    pub(crate) disk_version: u64,
+    pub(crate) authority_version: u64,
+    #[allow(dead_code)] // consumed by E3 explicit overwrite
+    pub(crate) disk_mtime_ns: Option<i64>,
+    #[allow(dead_code)] // consumed by E3 explicit reload
+    pub(crate) disk_content: String,
+}
+
+/// Three-way merge result consumed by the session state transition.
+pub(crate) enum MergeOutcome {
+    #[allow(dead_code)] // constructed by E3's merge engine
+    Merged(String),
+    Conflict,
+}
+
+impl SessionState {
+    pub(crate) fn dirty_since(&self) -> Option<Instant> {
+        match self {
+            Self::Dirty { since } => Some(*since),
+            Self::Observing { dirty_since, .. } => *dirty_since,
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.dirty_since().is_some() || matches!(self, Self::Conflicted(_))
+    }
+
+    pub(crate) fn mark_dirty(&mut self, authority_version: u64) {
+        match self {
+            Self::Clean | Self::Removed => {
+                *self = Self::Dirty {
+                    since: Instant::now(),
+                };
+            }
+            Self::Dirty { .. } => {}
+            Self::Observing { dirty_since, .. } => {
+                dirty_since.get_or_insert_with(Instant::now);
+            }
+            Self::Conflicted(conflict) => conflict.authority_version = authority_version,
+        }
+    }
+
+    pub(crate) fn observe_content(&mut self, hash: u64, mtime_ns: Option<i64>) {
+        if matches!(self, Self::Conflicted(_)) {
+            return;
+        }
+        let dirty_since = self.dirty_since();
+        *self = Self::Observing {
+            dirty_since,
+            observation: DiskObservation::Content {
+                hash,
+                mtime_ns,
+                seen: Instant::now(),
+            },
+        };
+    }
+
+    pub(crate) fn observe_removal(&mut self) {
+        if matches!(self, Self::Conflicted(_)) {
+            return;
+        }
+        let dirty_since = self.dirty_since();
+        *self = Self::Observing {
+            dirty_since,
+            observation: DiskObservation::Removal {
+                seen: Instant::now(),
+            },
+        };
+    }
+
+    pub(crate) fn clear_observation(&mut self) {
+        let Self::Observing { dirty_since, .. } = self else {
+            return;
+        };
+        *self = match *dirty_since {
+            Some(since) => Self::Dirty { since },
+            None => Self::Clean,
+        };
+    }
+
+    pub(crate) fn content_observation(&self) -> Option<(u64, Option<i64>, Instant)> {
+        match self {
+            Self::Observing {
+                observation:
+                    DiskObservation::Content {
+                        hash,
+                        mtime_ns,
+                        seen,
+                    },
+                ..
+            } => Some((*hash, *mtime_ns, *seen)),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn content_observation_mut(&mut self) -> Option<&mut Instant> {
+        match self {
+            Self::Observing {
+                observation: DiskObservation::Content { seen, .. },
+                ..
+            } => Some(seen),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn removal_observation(&self) -> Option<Instant> {
+        match self {
+            Self::Observing {
+                observation: DiskObservation::Removal { seen },
+                ..
+            } => Some(*seen),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn removal_observation_mut(&mut self) -> Option<&mut Instant> {
+        match self {
+            Self::Observing {
+                observation: DiskObservation::Removal { seen },
+                ..
+            } => Some(seen),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn has_observation(&self) -> bool {
+        matches!(self, Self::Observing { .. })
+    }
+
+    pub(crate) fn conflict_disk_mtime_ns(&self) -> Option<Option<i64>> {
+        match self {
+            Self::Conflicted(conflict) => Some(conflict.disk_mtime_ns),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn clear_after_flush(&mut self) {
+        match self {
+            Self::Dirty { .. } => *self = Self::Clean,
+            Self::Observing { dirty_since, .. } => *dirty_since = None,
+            Self::Clean | Self::Conflicted(_) | Self::Removed => {}
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod characterization {
     #[derive(Debug, PartialEq, Eq)]

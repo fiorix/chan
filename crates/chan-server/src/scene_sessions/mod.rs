@@ -50,6 +50,7 @@ use chan_workspace::{
 use rand::RngCore;
 use tokio::sync::{broadcast, mpsc, watch, Notify};
 
+use crate::collab_sessions::{DurableBaseline, MergeOutcome, SessionConflict, SessionState};
 use crate::disk_echo::{content_hash, DiskEchoRing};
 use crate::doc_sessions::recovery::{
     self, RecoveryAuthority, RecoveryBaseline, RecoveryConflict, RecoveryKind, RecoveryRecord,
@@ -176,62 +177,6 @@ struct SceneState {
     disk_echo: DiskEchoRing,
 }
 
-#[derive(Debug)]
-enum SessionState {
-    Clean,
-    Dirty {
-        since: Instant,
-    },
-    Observing {
-        dirty_since: Option<Instant>,
-        observation: DiskObservation,
-    },
-    Conflicted(SessionConflict),
-    Removed,
-}
-
-#[derive(Debug)]
-enum DiskObservation {
-    Content {
-        hash: u64,
-        mtime_ns: Option<i64>,
-        seen: Instant,
-    },
-    Removal {
-        seen: Instant,
-    },
-}
-
-#[derive(Debug)]
-struct DurableBaseline {
-    content: String,
-    content_hash: u64,
-    #[allow(dead_code)] // consumed by E3 conflict persistence/resolution
-    mtime_ns: Option<i64>,
-    #[allow(dead_code)] // consumed by E3 conflict persistence/resolution
-    authority_version: u64,
-}
-
-#[derive(Debug)]
-struct SessionConflict {
-    id: String,
-    baseline_version: u64,
-    disk_version: u64,
-    authority_version: u64,
-    #[allow(dead_code)] // consumed by E3 explicit overwrite
-    disk_mtime_ns: Option<i64>,
-    #[allow(dead_code)] // consumed by E3 explicit reload
-    disk_content: String,
-}
-
-/// Identity-aware three-way merge result consumed by the session
-/// state transition.
-enum MergeOutcome {
-    #[allow(dead_code)] // constructed by E3's merge engine
-    Merged(String),
-    Conflict,
-}
-
 /// Result of the conflict-aware PUT mutation gate.
 pub(crate) enum HttpReplaceOutcome {
     Applied,
@@ -260,139 +205,6 @@ pub(crate) struct HttpReadView {
     pub disk_mtime_ns: Option<i64>,
     pub authority_version: u64,
     pub disk_conflicted: bool,
-}
-
-impl SessionState {
-    fn dirty_since(&self) -> Option<Instant> {
-        match self {
-            Self::Dirty { since } => Some(*since),
-            Self::Observing { dirty_since, .. } => *dirty_since,
-            _ => None,
-        }
-    }
-
-    fn is_dirty(&self) -> bool {
-        self.dirty_since().is_some() || matches!(self, Self::Conflicted(_))
-    }
-
-    fn mark_dirty(&mut self, authority_version: u64) {
-        match self {
-            Self::Clean | Self::Removed => {
-                *self = Self::Dirty {
-                    since: Instant::now(),
-                };
-            }
-            Self::Dirty { .. } => {}
-            Self::Observing { dirty_since, .. } => {
-                dirty_since.get_or_insert_with(Instant::now);
-            }
-            Self::Conflicted(conflict) => conflict.authority_version = authority_version,
-        }
-    }
-
-    fn observe_content(&mut self, hash: u64, mtime_ns: Option<i64>) {
-        if matches!(self, Self::Conflicted(_)) {
-            return;
-        }
-        let dirty_since = self.dirty_since();
-        *self = Self::Observing {
-            dirty_since,
-            observation: DiskObservation::Content {
-                hash,
-                mtime_ns,
-                seen: Instant::now(),
-            },
-        };
-    }
-
-    fn observe_removal(&mut self) {
-        if matches!(self, Self::Conflicted(_)) {
-            return;
-        }
-        let dirty_since = self.dirty_since();
-        *self = Self::Observing {
-            dirty_since,
-            observation: DiskObservation::Removal {
-                seen: Instant::now(),
-            },
-        };
-    }
-
-    fn clear_observation(&mut self) {
-        let Self::Observing { dirty_since, .. } = self else {
-            return;
-        };
-        *self = match *dirty_since {
-            Some(since) => Self::Dirty { since },
-            None => Self::Clean,
-        };
-    }
-
-    fn content_observation(&self) -> Option<(u64, Option<i64>, Instant)> {
-        match self {
-            Self::Observing {
-                observation:
-                    DiskObservation::Content {
-                        hash,
-                        mtime_ns,
-                        seen,
-                    },
-                ..
-            } => Some((*hash, *mtime_ns, *seen)),
-            _ => None,
-        }
-    }
-
-    #[cfg(test)]
-    fn content_observation_mut(&mut self) -> Option<&mut Instant> {
-        match self {
-            Self::Observing {
-                observation: DiskObservation::Content { seen, .. },
-                ..
-            } => Some(seen),
-            _ => None,
-        }
-    }
-
-    fn removal_observation(&self) -> Option<Instant> {
-        match self {
-            Self::Observing {
-                observation: DiskObservation::Removal { seen },
-                ..
-            } => Some(*seen),
-            _ => None,
-        }
-    }
-
-    #[cfg(test)]
-    fn removal_observation_mut(&mut self) -> Option<&mut Instant> {
-        match self {
-            Self::Observing {
-                observation: DiskObservation::Removal { seen },
-                ..
-            } => Some(seen),
-            _ => None,
-        }
-    }
-
-    fn has_observation(&self) -> bool {
-        matches!(self, Self::Observing { .. })
-    }
-
-    fn conflict_disk_mtime_ns(&self) -> Option<Option<i64>> {
-        match self {
-            Self::Conflicted(conflict) => Some(conflict.disk_mtime_ns),
-            _ => None,
-        }
-    }
-
-    fn clear_after_flush(&mut self) {
-        match self {
-            Self::Dirty { .. } => *self = Self::Clean,
-            Self::Observing { dirty_since, .. } => *dirty_since = None,
-            Self::Clean | Self::Conflicted(_) | Self::Removed => {}
-        }
-    }
 }
 
 /// A registered attachment. Dropping it detaches: the outbox and
