@@ -4668,13 +4668,21 @@ async fn user_linger_enabled(user: &str) -> bool {
 /// runs THIS binary's foreground devserver on `addr`. Returns the unit path.
 /// Resolve a STABLE, relaunchable path to this `chan` binary for a unit / plist
 /// `ExecStart`. `current_exe()` goes stale when the binary is relocated or is an
-/// AppImage (an ephemeral `/tmp/.mount_*` path), so prefer in order: `$APPIMAGE`
-/// (the real image), then `current_exe()`, then `~/.local/bin/chan`, then a bare
-/// `chan` resolved from the unit's PATH.
+/// AppImage (an ephemeral `/tmp/.mount_*` path), so prefer in order: a
+/// chan-named `$APPIMAGE`, then `current_exe()`, then `~/.local/bin/chan`, then
+/// a bare `chan` resolved from the unit's PATH.
 fn resolve_relaunchable_exe() -> PathBuf {
     if let Some(appimage) = std::env::var_os("APPIMAGE") {
-        if !appimage.is_empty() {
-            return PathBuf::from(appimage);
+        let appimage = PathBuf::from(appimage);
+        let is_chan = appimage
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                let name = name.to_ascii_lowercase();
+                name.contains("chan") && name.ends_with(".appimage")
+            });
+        if is_chan {
+            return appimage;
         }
     }
     if let Ok(exe) = std::env::current_exe() {
@@ -9046,24 +9054,27 @@ mod tests {
         );
     }
 
-    /// The unit/plist ExecStart binary path prefers `$APPIMAGE` (the real,
-    /// relaunchable image) over the ephemeral `current_exe()`. Snapshot + restore
-    /// the env so the test is order-independent.
+    /// The unit/plist ExecStart binary path prefers chan's `$APPIMAGE` over the
+    /// ephemeral `current_exe()` and ignores an inherited foreign AppImage.
     #[test]
-    fn relaunchable_exe_prefers_appimage() {
+    fn relaunchable_exe_uses_only_chan_appimage() {
         let prev = std::env::var_os("APPIMAGE");
-        std::env::set_var("APPIMAGE", "/opt/chan.AppImage");
-        assert_eq!(
-            resolve_relaunchable_exe(),
-            PathBuf::from("/opt/chan.AppImage")
-        );
+        std::env::set_var("APPIMAGE", "/opt/Chan_0.77.0_amd64.AppImage");
+        let chan_appimage = resolve_relaunchable_exe();
+        std::env::set_var("APPIMAGE", "/opt/Editor.AppImage");
+        let foreign_appimage = resolve_relaunchable_exe();
         std::env::remove_var("APPIMAGE");
-        // Without $APPIMAGE it falls back to a real path (current_exe in tests).
-        assert!(!resolve_relaunchable_exe().as_os_str().is_empty());
+        let current_exe = resolve_relaunchable_exe();
         match prev {
             Some(v) => std::env::set_var("APPIMAGE", v),
             None => std::env::remove_var("APPIMAGE"),
         }
+
+        assert_eq!(
+            chan_appimage,
+            PathBuf::from("/opt/Chan_0.77.0_amd64.AppImage")
+        );
+        assert_eq!(foreign_appimage, current_exe);
     }
 
     #[test]
