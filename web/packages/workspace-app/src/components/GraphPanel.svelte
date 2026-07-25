@@ -689,16 +689,21 @@
   const languageMode = $derived(graphState.mode === "language");
 
   /// `indexStatus` is the workspace-global indexer state. While the index is
-  /// still building/reindexing, the semantic graph may be INCOMPLETE -
+  /// still building/reindexing, or the workspace is recovering, the semantic
+  /// graph may be INCOMPLETE -
   /// link targets that simply aren't indexed yet surface as dead-end
   /// ("missing") nodes. Surface an "indexing" cue so an in-flight graph
   /// isn't trusted as complete; once the index is idle, any remaining
   /// dead-end is a real broken link. (`hiddenMissingIds` below pulls
   /// those dead-ends back while indexing; a per-parent-dir pulse is a
   /// deferred refinement.)
+  const workspaceRecovering = $derived(
+    indexStatus.value?.state === "recovering",
+  );
   const indexBuilding = $derived(
     indexStatus.value?.state === "building" ||
-      indexStatus.value?.state === "reindexing",
+      indexStatus.value?.state === "reindexing" ||
+      workspaceRecovering,
   );
 
   /// Copy for the canvas empty-state (not loading, no error, zero nodes).
@@ -714,11 +719,13 @@
   const emptyStateMessage = $derived(
     filesystemMode
       ? "no filesystem graph nodes for this scope"
-      : indexBuilding
-        ? "graph temporarily unavailable while indexing the workspace"
-        : languageMode
-          ? "no language graph nodes for this workspace yet"
-          : "data being indexed, hang tight...",
+      : workspaceRecovering
+        ? "graph unavailable while the workspace recovers"
+        : indexBuilding
+          ? "graph temporarily unavailable while indexing the workspace"
+          : languageMode
+            ? "no language graph nodes for this workspace yet"
+            : "data being indexed, hang tight...",
   );
 
   /// Shallow-scope cue: when the scope's
@@ -3016,7 +3023,7 @@
       {visibleNodeIds.size}/{nodes.length} nodes · {visibleEdges.length}/{edges.length} edges
       {#if filesystemMode && fsTruncated} · truncated{/if}
       {#if indexBuilding}
-        · <span class="indexing" title="The index is still building; dead-end nodes may resolve once it completes.">indexing…</span>
+        · <span class="indexing" title="The workspace index is not ready; dead-end nodes may resolve once it completes.">{workspaceRecovering ? "workspace recovering…" : "indexing…"}</span>
       {/if}
     </span>
     <span class="hint">

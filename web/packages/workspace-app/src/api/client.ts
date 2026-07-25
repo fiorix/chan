@@ -26,6 +26,7 @@ import type {
   HealthResponse,
   InspectorPayload,
   IndexStatus,
+  IndexerStatus,
   IndexingStateResponse,
   LanguageGraphResponse,
   LinkTarget,
@@ -47,6 +48,7 @@ import type {
   TerminalSpawnResponse,
   TreeEntry,
   WorkspaceInfo,
+  WorkspaceReadiness,
   BubbleOverlayMode,
 } from "./types";
 import { ApiError } from "./errors";
@@ -210,6 +212,40 @@ function req<T>(
   timeoutMs?: number,
 ): Promise<T> {
   return request<T>(method, path, body, signal, timeoutMs);
+}
+
+type IndexStatusWire = IndexerStatus & {
+  readiness: WorkspaceReadiness;
+};
+
+/// Contract-5 decision boundary. Progress fields are deliberately invisible
+/// here: a response is recovering if and only if its readiness tag says so.
+export function workspaceIsRecovering(
+  readiness: WorkspaceReadiness,
+): readiness is Extract<WorkspaceReadiness, { state: "recovering" }> {
+  return readiness.state === "recovering";
+}
+
+function readIndexStatus(response: IndexStatusWire): IndexStatus {
+  if (workspaceIsRecovering(response.readiness)) {
+    return {
+      state: "recovering",
+      readiness: response.readiness,
+    };
+  }
+  const { readiness: _readiness, ...status } = response;
+  return status;
+}
+
+function readContentSearch(
+  response: ContentSearchResponse,
+): ContentSearchResponse {
+  if (!workspaceIsRecovering(response.readiness)) return response;
+  return {
+    ...response,
+    ready: false,
+    hits: [],
+  };
 }
 
 function directAuthHeaders(): Record<string, string> {
@@ -889,12 +925,14 @@ export const api = {
   /// picks hybrid (or BM25 when built without the `embeddings`
   /// feature); the previous user-facing mode picker was removed in
   /// favour of a single sensible default.
-  searchContent: (q: string, opts: { limit?: number } = {}) => {
+  searchContent: async (q: string, opts: { limit?: number } = {}) => {
     const params = new URLSearchParams({ q });
     if (opts.limit !== undefined) params.set("limit", String(opts.limit));
-    return req<ContentSearchResponse>(
-      "GET",
-      `/api/search/content?${params.toString()}`,
+    return readContentSearch(
+      await req<ContentSearchResponse>(
+        "GET",
+        `/api/search/content?${params.toString()}`,
+      ),
     );
   },
   /// Headings of a single file. The wiki-link bubble fetches this
@@ -1029,7 +1067,8 @@ export const api = {
       /// browser at that folder instead of the text editor.
       is_dir?: boolean;
     }>("GET", `/api/resolve-link?target=${encodeURIComponent(target)}`),
-  indexStatus: () => req<IndexStatus>("GET", "/api/index/status"),
+  indexStatus: async () =>
+    readIndexStatus(await req<IndexStatusWire>("GET", "/api/index/status")),
   indexingState: () => req<IndexingStateResponse>("GET", "/api/indexing/state"),
   health: () => req<HealthResponse>("GET", "/api/health"),
   inspector: (path: string) =>

@@ -135,6 +135,7 @@ export function searchContent(
   hits.sort((a, z) => z.rank - a.rank || a.path.length - z.path.length);
   return {
     ready: true,
+    readiness: { state: "ready", generation: 0 },
     mode: "bm25",
     hits: hits.slice(0, limit).map(({ rank: _rank, ...hit }) => hit),
   };

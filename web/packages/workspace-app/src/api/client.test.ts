@@ -501,3 +501,83 @@ describe("relationship streaming", () => {
     expect(partialNodeCounts).toEqual([1, 1]);
   });
 });
+
+describe("workspace recovery readiness", () => {
+  test("index status projects recovery from the readiness state without progress fields", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          state: "idle",
+          indexed_docs: 42,
+          indexed_vectors: 42,
+          model: "bm25",
+          readiness: { state: "recovering" },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await expect(api.indexStatus()).resolves.toEqual({
+      state: "recovering",
+      readiness: { state: "recovering" },
+    });
+  });
+
+  test("content search refuses fresh-looking hits when readiness says recovering", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          ready: true,
+          mode: "bm25",
+          hits: [
+            {
+              path: "stale.md",
+              chunk_id: "stale.md:1",
+              heading: "",
+              start_line: 1,
+              snippet: "stale",
+              score: 1,
+            },
+          ],
+          readiness: { state: "recovering" },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await expect(api.searchContent("stale")).resolves.toMatchObject({
+      ready: false,
+      hits: [],
+      readiness: { state: "recovering" },
+    });
+  });
+
+  test("legacy search ready=false does not override a ready workspace", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          ready: false,
+          mode: "bm25",
+          hits: [
+            {
+              path: "available.md",
+              chunk_id: "available.md:1",
+              heading: "",
+              start_line: 1,
+              snippet: "available",
+              score: 1,
+            },
+          ],
+          readiness: { state: "ready" },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await expect(api.searchContent("available")).resolves.toMatchObject({
+      ready: false,
+      hits: [{ path: "available.md" }],
+      readiness: { state: "ready" },
+    });
+  });
+});

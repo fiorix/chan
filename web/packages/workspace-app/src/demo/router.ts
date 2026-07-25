@@ -342,6 +342,7 @@ export function createDemoFetch(
         indexed_docs: store.data.metadata.textCount,
         indexed_vectors: 0,
         model: "none",
+        readiness: { state: "ready", generation: 0 },
       });
     }
     if (path === "/api/indexing/state" && method === "GET") {

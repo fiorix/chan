@@ -57,6 +57,14 @@ describe("index progress pill visibility", () => {
     expect(indexVisible(indexStatus.value)).toBe(true);
   });
 
+  test("visible while the workspace is recovering", () => {
+    indexStatus.value = {
+      state: "recovering",
+      readiness: { state: "recovering" },
+    };
+    expect(indexVisible(indexStatus.value)).toBe(true);
+  });
+
   test("CLEARS the moment the indexer reports settled idle (bug 9)", () => {
     indexStatus.value = {
       state: "building",
@@ -108,6 +116,12 @@ describe("AppStatusBar source keeps the idle-hide rule (except embedding)", () =
   test("building branch surfaces the animated counter so the embed phase isn't a frozen pill", () => {
     expect(statusBar).toMatch(/s\.state === "building"/);
     expect(statusBar).toMatch(/\{s\.current\}\/\{s\.total\}/);
+  });
+
+  test("recovery branch says the workspace is recovering", () => {
+    expect(statusBar).toMatch(
+      /\{:else if s\.state === "recovering"\}[\s\S]{1,120}workspace recovering/,
+    );
   });
 
   test("counter hides during the embedding-sentinel sub-phase", () => {
