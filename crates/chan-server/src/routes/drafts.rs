@@ -688,6 +688,8 @@ mod tests {
             index_events_tx,
             server_config: Mutex::new(ServerConfig::default()),
             editor_prefs: Mutex::new(EditorPrefs::default()),
+            config_revision: AtomicU64::new(1),
+            config_write_serial: Mutex::new(()),
             self_writes: Arc::new(SelfWrites::new()),
             terminal_sessions: Arc::new(TerminalRegistry::new(RegistryConfig {
                 workspace_root: root.path().to_path_buf(),

@@ -14,7 +14,11 @@ import { settingsPanel } from "../state/store.svelte";
 import { tabFocusPulse } from "../state/tabs.svelte";
 import { DATE_FORMATS } from "../editor/dateFormats";
 
-type Cfg = { preferences: Record<string, unknown>; workspaces: unknown[] };
+type Cfg = {
+  revision: number;
+  preferences: Record<string, unknown>;
+  workspaces: unknown[];
+};
 
 function basePrefs(): Record<string, unknown> {
   return {
@@ -75,7 +79,7 @@ function openSurface(): HTMLElement {
 }
 
 beforeEach(() => {
-  server = { preferences: basePrefs(), workspaces: [] };
+  server = { revision: 1, preferences: basePrefs(), workspaces: [] };
   patches = [];
   settingsPanel.open = false;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -83,7 +87,15 @@ beforeEach(() => {
     const method = init?.method ?? "GET";
     if (url.includes("/api/config")) {
       if (method === "PATCH") {
-        server = JSON.parse(String(init?.body)) as Cfg;
+        const body = JSON.parse(String(init?.body)) as {
+          expected_revision: number;
+          preferences: Record<string, unknown>;
+        };
+        server = {
+          ...server,
+          revision: server.revision + 1,
+          preferences: { ...server.preferences, ...body.preferences },
+        };
         patches.push(server);
         return jsonResponse(server);
       }

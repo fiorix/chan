@@ -6,6 +6,7 @@
 
 import type {
   BuildInfo,
+  ConfigPatchRequest,
   ContentSearchResponse,
   DraftInspectResponse,
   DraftPromoteResponse,
@@ -52,6 +53,7 @@ import type {
   BubbleOverlayMode,
 } from "./types";
 import { ApiError } from "./errors";
+import { updateGlobalConfigSerial } from "./preferenceWrite";
 import {
   apiPath,
   authToken as transportAuthToken,
@@ -509,35 +511,13 @@ async function readFileStream(
   };
 }
 
-/// Serialize whole-block preferences PATCHes. Every preferences setter
-/// re-reads the config and PATCHes the entire `preferences` block, so two
-/// near-simultaneous flips of different fields would each clobber the
-/// other. Chaining each write off the prior (and re-GETting inside the
-/// chain) makes a later write observe the earlier one; the catch swallows
-/// a failed write so it can't wedge the chain. Mirrors persistThemeChoice.
-let prefsWriteInflight: Promise<void> = Promise.resolve();
-function queuePrefWrite(
-  next: (prefs: GlobalConfig["preferences"]) => GlobalConfig["preferences"] | null,
-): Promise<void> {
-  prefsWriteInflight = prefsWriteInflight.catch(() => {}).then(async () => {
-    const cfg = await req<GlobalConfig>("GET", "/api/config");
-    const updated = next(cfg.preferences);
-    if (!updated) return;
-    await req<GlobalConfig>("PATCH", "/api/config", {
-      ...cfg,
-      preferences: updated,
-    });
-  });
-  return prefsWriteInflight;
-}
-
 export const api = {
   workspace: () => req<WorkspaceInfo>("GET", "/api/workspace"),
   /// Read the global per-user config (registry of known workspaces,
   /// default-workspace path, preferences). Mounted by the Settings UI.
   config: () => req<GlobalConfig>("GET", "/api/config"),
-  /// Replace the global config (whole-block PATCH).
-  updateConfig: (body: GlobalConfig) =>
+  /// Apply one owner-specific partial preferences update.
+  updateConfig: (body: ConfigPatchRequest) =>
     req<GlobalConfig>("PATCH", "/api/config", body),
   /** Upload an image attachment. Multipart POST that the editor's `![`
    *  picker, drag-and-drop, and clipboard paste all funnel through.
@@ -903,17 +883,12 @@ export const api = {
       sources,
       dest_dir: destDir,
     }),
-  /// Filename fuzzy search (the [[ autocomplete in the editor).
-  /// Hits /api/search/files. `prefix` scopes the result set to
-  /// files under that directory: the wiki-link picker passes the
-  /// source file's git_repo root when applicable so suggestions
-  /// stay project-bound.
-  search: (q: string, limit = 10, prefix?: string | null) => {
+  /// Exact-basename lookup for missing-file reopen recovery.
+  search: (q: string, limit = 10) => {
     const params = new URLSearchParams({ q, limit: String(limit) });
-    if (prefix) params.set("prefix", prefix);
     return req<SearchHit[]>("GET", `/api/search/files?${params}`);
   },
-  /// Wiki-link target search. Unlike /api/search/files, this is
+  /// Wiki-link target search. Unlike the recovery-only /api/search/files, this is
   /// backed by the graph and matches file basename, indexed title,
   /// and heading text. Wiki file mode consumes both row kinds:
   /// file rows insert paths; heading rows insert anchored links.
@@ -1253,33 +1228,33 @@ export const api = {
       { on },
     ),
   setBubbleOverlayMode: (mode: BubbleOverlayMode): Promise<void> =>
-    queuePrefWrite((p) =>
-      p.bubble_overlay_mode === mode ? null : { ...p, bubble_overlay_mode: mode },
+    updateGlobalConfigSerial((p) =>
+      p.bubble_overlay_mode === mode ? null : { bubble_overlay_mode: mode },
     ),
   setEmptyPaneCarouselCycling: (cycling: boolean): Promise<void> =>
-    queuePrefWrite((p) =>
+    updateGlobalConfigSerial((p) =>
       p.empty_pane_carousel_cycling === cycling
         ? null
-        : { ...p, empty_pane_carousel_cycling: cycling },
+        : { empty_pane_carousel_cycling: cycling },
     ),
   /// Persist the per-library page-width cap ratio. The SPA applies the
   /// cap optimistically and debounces this write (the width slider
   /// fires on every drag tick); the value is stored verbatim and
-  /// re-clamped on read. Serialized via queuePrefWrite so a concurrent
+  /// re-clamped on read. Serialized through the shared helper so a concurrent
   /// overlay / cs-dismiss flip can't clobber it.
   setPageWidthRatio: (ratio: number): Promise<void> =>
-    queuePrefWrite((p) =>
-      p.page_width_ratio === ratio ? null : { ...p, page_width_ratio: ratio },
+    updateGlobalConfigSerial((p) =>
+      p.page_width_ratio === ratio ? null : { page_width_ratio: ratio },
     ),
   /// Persist the per-library overlay-maximize toggle.
   setOverlayMaximizedPref: (on: boolean): Promise<void> =>
-    queuePrefWrite((p) =>
-      p.overlay_maximized === on ? null : { ...p, overlay_maximized: on },
+    updateGlobalConfigSerial((p) =>
+      p.overlay_maximized === on ? null : { overlay_maximized: on },
     ),
   /// Persist the per-library `cs` terminal-alias offer dismissal.
   setCsDismissed: (on: boolean): Promise<void> =>
-    queuePrefWrite((p) =>
-      p.cs_dismissed === on ? null : { ...p, cs_dismissed: on },
+    updateGlobalConfigSerial((p) =>
+      p.cs_dismissed === on ? null : { cs_dismissed: on },
     ),
   /// Semantic-search endpoints. Open-read for state; settings-
   /// gated for mutations (download / enable / disable). The

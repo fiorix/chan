@@ -96,10 +96,8 @@ export default {
       permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"],
     });
 
-    /// Flip terminal.mouse_capture via the exact settings-UI shape: a
-    /// serialized in-page GET /api/config -> mutate the terminal slice
-    /// preserving siblings -> whole-block PATCH (updateGlobalConfigSerial's
-    /// contract, state/configWrite.ts).
+    /// Flip terminal.mouse_capture through the revisioned partial config
+    /// contract. The terminal composite remains one server-owned field.
     async function setMouseCapture(on) {
       await page.evaluate(
         async ({ on, token }) => {
@@ -109,9 +107,8 @@ export default {
           if (!got.ok) throw new Error(`GET /api/config -> ${got.status}`);
           const cfg = await got.json();
           const body = {
-            ...cfg,
+            expected_revision: cfg.revision,
             preferences: {
-              ...cfg.preferences,
               terminal: {
                 ...(cfg.preferences?.terminal ?? {}),
                 mouse_capture: on,
@@ -133,7 +130,7 @@ export default {
 
     /// Assert the sandboxed server.toml records the expected value --
     /// proves the PATCH persisted into the throwaway CHAN_HOME, never
-    /// the host's real config. apply_preferences saves before the PATCH
+    /// the host's real config. The cloned owner is saved before the PATCH
     /// responds, so a short poll only papers over fs latency.
     async function assertTomlMouseCapture(expected) {
       const tomlPath = join(ctx.chanHome, "server.toml");

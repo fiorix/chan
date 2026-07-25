@@ -1,9 +1,8 @@
 // Search surfaces for the frontend-only demo, over the in-memory snapshot.
 // Serves the three real endpoints with plain-JS scoring instead of the
-// server's tantivy/BM25 index: filename fuzzy search (the [[ autocomplete),
-// wiki link-target search (file + heading rows), and content search (the
-// Search overlay). Good ranking beats faithful ranking here; the wire shapes
-// are the contract.
+// server's tantivy/BM25 index: exact-basename missing-file recovery, wiki
+// link-target search (file + heading rows), and content search (the Search
+// overlay).
 
 import type {
   ContentHit,
@@ -42,16 +41,18 @@ export function searchFiles(
   store: MockWorkspaceStore,
   q: string,
   limit: number,
-  prefix?: string | null,
 ): SearchHit[] {
-  const hits: SearchHit[] = [];
-  for (const e of store.entries()) {
-    if (prefix && !e.path.startsWith(`${prefix}/`) && e.path !== prefix) continue;
-    const score = fileScore(e.path, q);
-    if (score > 0) hits.push({ path: e.path, score });
-  }
-  hits.sort((a, z) => z.score - a.score || a.path.length - z.path.length);
-  return hits.slice(0, limit);
+  return store
+    .entries()
+    .filter((entry) => entry.kind !== "contact" && baseName(entry.path) === q)
+    .map((entry) => ({
+      path: entry.path,
+      is_dir: false,
+      mtime: entry.mtime,
+      size: entry.size,
+    }))
+    .sort((left, right) => left.path.localeCompare(right.path))
+    .slice(0, Math.min(limit, 50));
 }
 
 export function linkTargets(graph: DemoGraph, q: string, limit: number): LinkTarget[] {

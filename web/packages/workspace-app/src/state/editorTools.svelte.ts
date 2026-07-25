@@ -21,6 +21,6 @@ export function persistStripTrailingWhitespaceOnSave(value: boolean): Promise<vo
   return updateGlobalConfigSerial((prefs) =>
     prefs.strip_trailing_whitespace_on_save === value
       ? null
-      : { ...prefs, strip_trailing_whitespace_on_save: value },
+      : { strip_trailing_whitespace_on_save: value },
   );
 }

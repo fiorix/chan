@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { api } from "../api/client";
+import type { SearchHit } from "../api/types";
 import {
   attemptInPlaceReopen,
   cancelMissingFileCheck,
@@ -19,6 +20,10 @@ import {
 /// `resolveMissingFileCheck`.
 async function flushDebounce(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 250));
+}
+
+function recoveryHit(path: string): SearchHit {
+  return { path, is_dir: false, mtime: null, size: 0 };
 }
 
 /// Read a tab fresh from the $state proxy. Svelte 5 proxies
@@ -186,7 +191,7 @@ describe("Find-suggest lookup", () => {
     vi.spyOn(api, "readStream").mockRejectedValue(ENOENT);
     const searchSpy = vi
       .spyOn(api, "search")
-      .mockResolvedValue([{ path: "archive/a.md", score: 0.9 }]);
+      .mockResolvedValue([recoveryHit("archive/a.md")]);
 
     scheduleMissingFileCheck(seed.id, seed.path);
     await flushDebounce();
@@ -200,8 +205,8 @@ describe("Find-suggest lookup", () => {
     resetLayout([seed]);
     vi.spyOn(api, "readStream").mockRejectedValue(ENOENT);
     vi.spyOn(api, "search").mockResolvedValue([
-      { path: "archive/a.md", score: 0.8 },
-      { path: "drafts/a.md", score: 0.7 },
+      recoveryHit("archive/a.md"),
+      recoveryHit("drafts/a.md"),
     ]);
 
     scheduleMissingFileCheck(seed.id, seed.path);
@@ -212,12 +217,12 @@ describe("Find-suggest lookup", () => {
     expect(after?.fileMissing?.suggestedPath ?? null).toBeNull();
   });
 
-  test("ignores search results that share path but differ in basename", async () => {
+  test("ignores the original path if it reappears during recovery", async () => {
     const seed = fileTab({ id: "tab-h", path: "notes/specific.md" });
     resetLayout([seed]);
     vi.spyOn(api, "readStream").mockRejectedValue(ENOENT);
     vi.spyOn(api, "search").mockResolvedValue([
-      { path: "notes/other.md", score: 0.9 },
+      recoveryHit("notes/specific.md"),
     ]);
 
     scheduleMissingFileCheck(seed.id, seed.path);

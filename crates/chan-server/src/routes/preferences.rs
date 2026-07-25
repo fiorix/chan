@@ -6,6 +6,7 @@
 //! runtime, not through global user preferences.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -20,8 +21,8 @@ use crate::error::{err, Error};
 use crate::preferences::BubbleOverlayMode;
 use crate::state::AppState;
 use crate::{
-    BrowserSidePanes, EditorTheme, HybridSurfaceThemes, LineSpacing, PaneWidths, ShortcutOverride,
-    ThemeChoice,
+    BrowserSidePanes, EditorPrefs, EditorTheme, HybridSurfaceThemes, LineSpacing, PaneWidths,
+    ServerConfig, ShortcutOverride, ThemeChoice,
 };
 
 /// Unified preferences shape returned over /api/workspace and /api/config.
@@ -97,13 +98,14 @@ pub(super) fn preferences_view(state: &AppState) -> Result<PreferencesView, Erro
 
 // ----- /api/config (unified GlobalConfig) --------------------------------
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct GlobalConfigView {
+    revision: u64,
     preferences: PreferencesView,
     workspaces: Vec<KnownWorkspaceView>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct KnownWorkspaceView {
     path: String,
     metadata_key: String,
@@ -111,21 +113,168 @@ struct KnownWorkspaceView {
     last_seen_at: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PatchConfigBody {
-    /// Whole-block replacement. Frontend sends the entire GlobalConfig
-    /// on every save.
-    #[serde(default)]
-    preferences: Option<PreferencesView>,
-    /// Read-only on PATCH: workspaces are managed by path through the
-    /// CLI (`chan add` / `remove`). Frontend sends the field for
-    /// round-tripping; we just ignore it.
-    #[serde(default)]
-    #[allow(dead_code)]
-    workspaces: Option<serde_json::Value>,
+    expected_revision: u64,
+    preferences: PreferencesPatch,
 }
 
-fn global_config_view(state: &AppState) -> Result<GlobalConfigView, Error> {
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct PreferencesPatch {
+    // EditorPrefs owner.
+    editor_theme: Option<EditorTheme>,
+    theme: Option<ThemeChoice>,
+    pane_widths: Option<PaneWidths>,
+    browser_side_panes: Option<BrowserSidePanes>,
+    line_spacing: Option<LineSpacing>,
+    date_format: Option<String>,
+    strip_trailing_whitespace_on_save: Option<bool>,
+    bubble_overlay_mode: Option<BubbleOverlayMode>,
+    hybrid_surface_themes: Option<HybridSurfaceThemes>,
+    empty_pane_carousel_cycling: Option<bool>,
+    page_width_ratio: Option<f64>,
+    overlay_maximized: Option<bool>,
+    cs_dismissed: Option<bool>,
+    shortcuts: Option<BTreeMap<String, ShortcutOverride>>,
+
+    // ServerConfig owner.
+    attachments_dir: Option<String>,
+    search_aggression: Option<SearchAggression>,
+    terminal: Option<TerminalConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreferencesOwner {
+    Editor,
+    Server,
+}
+
+impl PreferencesPatch {
+    fn owner(&self) -> Result<PreferencesOwner, Error> {
+        let editor = self.editor_theme.is_some()
+            || self.theme.is_some()
+            || self.pane_widths.is_some()
+            || self.browser_side_panes.is_some()
+            || self.line_spacing.is_some()
+            || self.date_format.is_some()
+            || self.strip_trailing_whitespace_on_save.is_some()
+            || self.bubble_overlay_mode.is_some()
+            || self.hybrid_surface_themes.is_some()
+            || self.empty_pane_carousel_cycling.is_some()
+            || self.page_width_ratio.is_some()
+            || self.overlay_maximized.is_some()
+            || self.cs_dismissed.is_some()
+            || self.shortcuts.is_some();
+        let server = self.attachments_dir.is_some()
+            || self.search_aggression.is_some()
+            || self.terminal.is_some();
+        match (editor, server) {
+            (true, false) => Ok(PreferencesOwner::Editor),
+            (false, true) => Ok(PreferencesOwner::Server),
+            (false, false) => Err(Error::BadRequest(
+                "preferences patch must change at least one field".into(),
+            )),
+            (true, true) => Err(Error::BadRequest(
+                "preferences patch cannot mix editor and server fields".into(),
+            )),
+        }
+    }
+
+    fn apply_editor(self, editor: &mut EditorPrefs) {
+        if let Some(value) = self.editor_theme {
+            editor.editor_theme = value;
+        }
+        if let Some(value) = self.theme {
+            editor.theme = value;
+        }
+        if let Some(value) = self.pane_widths {
+            editor.pane_widths = value;
+        }
+        if let Some(value) = self.browser_side_panes {
+            editor.browser_side_panes = value;
+        }
+        if let Some(value) = self.line_spacing {
+            editor.line_spacing = value;
+        }
+        if let Some(value) = self.date_format {
+            editor.date_format = value;
+        }
+        if let Some(value) = self.strip_trailing_whitespace_on_save {
+            editor.strip_trailing_whitespace_on_save = value;
+        }
+        if let Some(value) = self.bubble_overlay_mode {
+            editor.bubble_overlay_mode = value;
+        }
+        if let Some(value) = self.hybrid_surface_themes {
+            editor.hybrid_surface_themes = value;
+        }
+        if let Some(value) = self.empty_pane_carousel_cycling {
+            editor.empty_pane_carousel_cycling = value;
+        }
+        if let Some(value) = self.page_width_ratio {
+            editor.page_width_ratio = value;
+        }
+        if let Some(value) = self.overlay_maximized {
+            editor.overlay_maximized = value;
+        }
+        if let Some(value) = self.cs_dismissed {
+            editor.cs_dismissed = value;
+        }
+        if let Some(value) = self.shortcuts {
+            editor.shortcuts = value;
+        }
+    }
+
+    fn apply_server(self, server: &mut ServerConfig) -> Result<(), Error> {
+        if let Some(value) = self.attachments_dir {
+            if value.is_empty() {
+                return Err(Error::BadRequest("attachments_dir cannot be empty".into()));
+            }
+            server.attachments_dir = value;
+        }
+        if let Some(value) = self.search_aggression {
+            server.search.aggression = value;
+        }
+        if let Some(value) = self.terminal {
+            server.terminal = sanitize_terminal_config(value);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigConflictBody {
+    error: &'static str,
+    current: GlobalConfigView,
+}
+
+#[derive(Debug)]
+enum PatchConfigError {
+    Error(Error),
+    Conflict(Box<GlobalConfigView>),
+}
+
+impl From<Error> for PatchConfigError {
+    fn from(value: Error) -> Self {
+        Self::Error(value)
+    }
+}
+
+struct ConfigSnapshot {
+    revision: u64,
+    preferences: PreferencesView,
+}
+
+fn config_snapshot_locked(state: &AppState) -> Result<ConfigSnapshot, Error> {
+    Ok(ConfigSnapshot {
+        revision: state.config_revision.load(Ordering::Relaxed),
+        preferences: preferences_view(state)?,
+    })
+}
+
+fn global_config_from_snapshot(state: &AppState, snapshot: ConfigSnapshot) -> GlobalConfigView {
     let workspaces = state
         .library
         .list_workspaces()
@@ -136,10 +285,21 @@ fn global_config_view(state: &AppState) -> Result<GlobalConfigView, Error> {
             last_seen_at: d.last_seen_at.to_rfc3339(),
         })
         .collect();
-    Ok(GlobalConfigView {
-        preferences: preferences_view(state)?,
+    GlobalConfigView {
+        revision: snapshot.revision,
+        preferences: snapshot.preferences,
         workspaces,
-    })
+    }
+}
+
+fn global_config_view(state: &AppState) -> Result<GlobalConfigView, Error> {
+    let serial = state
+        .config_write_serial
+        .lock()
+        .map_err(|_| Error::Config("config write lock poisoned".into()))?;
+    let snapshot = config_snapshot_locked(state)?;
+    drop(serial);
+    Ok(global_config_from_snapshot(state, snapshot))
 }
 
 pub async fn api_get_config(State(state): State<Arc<AppState>>) -> Response {
@@ -155,9 +315,23 @@ pub async fn api_patch_config(
 ) -> Response {
     let result = tokio::task::spawn_blocking(move || patch_config(&state, body)).await;
     match result {
-        Ok(Ok(view)) => Json(view).into_response(),
-        Ok(Err(e)) => err(status_for_error(&e), e.to_string()),
+        Ok(result) => patch_config_response(result),
         Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+    }
+}
+
+fn patch_config_response(result: Result<GlobalConfigView, PatchConfigError>) -> Response {
+    match result {
+        Ok(view) => Json(view).into_response(),
+        Err(PatchConfigError::Conflict(current)) => (
+            StatusCode::CONFLICT,
+            Json(ConfigConflictBody {
+                error: "config_conflict",
+                current: *current,
+            }),
+        )
+            .into_response(),
+        Err(PatchConfigError::Error(error)) => err(status_for_error(&error), error.to_string()),
     }
 }
 
@@ -168,15 +342,61 @@ fn status_for_error(e: &Error) -> StatusCode {
     }
 }
 
-fn patch_config(state: &AppState, body: PatchConfigBody) -> Result<GlobalConfigView, Error> {
-    if let Some(prefs) = body.preferences {
-        apply_preferences(state, prefs)?;
-        // Tell every open window of this tenant a setting changed, so each
-        // re-fetches preferences and reflects it live (theme, fonts, pane
-        // widths, ...) instead of going stale until a reload.
-        broadcast_config_changed(state);
+fn patch_config(
+    state: &AppState,
+    body: PatchConfigBody,
+) -> Result<GlobalConfigView, PatchConfigError> {
+    patch_config_with_saves(state, body, EditorPrefs::save, ServerConfig::save)
+}
+
+fn patch_config_with_saves(
+    state: &AppState,
+    body: PatchConfigBody,
+    save_editor: impl FnOnce(&EditorPrefs) -> Result<(), Error>,
+    save_server: impl FnOnce(&ServerConfig) -> Result<(), Error>,
+) -> Result<GlobalConfigView, PatchConfigError> {
+    let owner = body.preferences.owner()?;
+    let serial = state
+        .config_write_serial
+        .lock()
+        .map_err(|_| Error::Config("config write lock poisoned".into()))?;
+    let current_revision = state.config_revision.load(Ordering::Relaxed);
+    if body.expected_revision != current_revision {
+        let snapshot = config_snapshot_locked(state)?;
+        drop(serial);
+        return Err(PatchConfigError::Conflict(Box::new(
+            global_config_from_snapshot(state, snapshot),
+        )));
     }
-    global_config_view(state)
+
+    match owner {
+        PreferencesOwner::Editor => {
+            let mut current = state
+                .editor_prefs
+                .lock()
+                .map_err(|_| Error::Config("editor prefs lock poisoned".into()))?;
+            let mut next = current.clone();
+            body.preferences.apply_editor(&mut next);
+            save_editor(&next)?;
+            *current = next;
+        }
+        PreferencesOwner::Server => {
+            let mut current = state
+                .server_config
+                .lock()
+                .map_err(|_| Error::Config("server config lock poisoned".into()))?;
+            let mut next = current.clone();
+            body.preferences.apply_server(&mut next)?;
+            save_server(&next)?;
+            *current = next;
+        }
+    }
+
+    state.config_revision.fetch_add(1, Ordering::Relaxed);
+    broadcast_config_changed(state);
+    let snapshot = config_snapshot_locked(state)?;
+    drop(serial);
+    Ok(global_config_from_snapshot(state, snapshot))
 }
 
 /// Broadcast a `config_changed` frame on the per-tenant `/ws` bus so every open
@@ -190,43 +410,6 @@ pub(crate) fn broadcast_config_changed(state: &AppState) {
     let _ = state
         .events_tx
         .send(r#"{"kind":"config_changed"}"#.to_string());
-}
-
-fn apply_preferences(state: &AppState, view: PreferencesView) -> Result<(), Error> {
-    {
-        let mut editor = state
-            .editor_prefs
-            .lock()
-            .map_err(|_| Error::Config("editor prefs lock poisoned".into()))?;
-        editor.editor_theme = view.editor_theme;
-        editor.theme = view.theme;
-        editor.pane_widths = view.pane_widths;
-        editor.browser_side_panes = view.browser_side_panes;
-        editor.line_spacing = view.line_spacing;
-        editor.date_format = view.date_format;
-        editor.strip_trailing_whitespace_on_save = view.strip_trailing_whitespace_on_save;
-        editor.bubble_overlay_mode = view.bubble_overlay_mode;
-        editor.hybrid_surface_themes = view.hybrid_surface_themes;
-        editor.empty_pane_carousel_cycling = view.empty_pane_carousel_cycling;
-        editor.page_width_ratio = view.page_width_ratio;
-        editor.overlay_maximized = view.overlay_maximized;
-        editor.cs_dismissed = view.cs_dismissed;
-        editor.shortcuts = view.shortcuts;
-        editor.save()?;
-    }
-    {
-        let mut server = state
-            .server_config
-            .lock()
-            .map_err(|_| Error::Config("server config lock poisoned".into()))?;
-        if !view.attachments_dir.is_empty() {
-            server.attachments_dir = view.attachments_dir;
-        }
-        server.search.aggression = view.search_aggression;
-        server.terminal = sanitize_terminal_config(view.terminal);
-        server.save()?;
-    }
-    Ok(())
 }
 
 fn sanitize_terminal_config(mut cfg: TerminalConfig) -> TerminalConfig {
@@ -268,9 +451,29 @@ fn sanitize_terminal_config(mut cfg: TerminalConfig) -> TerminalConfig {
 mod tests {
     use super::*;
     use crate::state::test_support::make_test_state;
+    use axum::body::to_bytes;
+    use serde_json::json;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+    use tempfile::TempDir;
 
     fn to_json(view: &GlobalConfigView) -> serde_json::Value {
         serde_json::to_value(view).expect("serialize")
+    }
+
+    fn noop_save_editor(_prefs: &EditorPrefs) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn noop_save_server(_config: &ServerConfig) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn patch_body(expected_revision: u64, preferences: PreferencesPatch) -> PatchConfigBody {
+        PatchConfigBody {
+            expected_revision,
+            preferences,
+        }
     }
 
     #[test]
@@ -381,6 +584,292 @@ mod tests {
         let state = make_test_state(false);
         let view = global_config_view(&state).expect("global config view");
         let json = to_json(&view);
+        assert_eq!(json["revision"], 1);
         assert!(json["workspaces"].is_array());
+    }
+
+    #[tokio::test]
+    async fn disjoint_stale_route_updates_conflict_then_both_survive() {
+        let state = make_test_state(false);
+        let first = patch_config_with_saves(
+            &state,
+            patch_body(
+                1,
+                PreferencesPatch {
+                    theme: Some(ThemeChoice::Dark),
+                    ..Default::default()
+                },
+            ),
+            noop_save_editor,
+            noop_save_server,
+        )
+        .expect("first update");
+        assert_eq!(first.revision, 2);
+
+        let conflict = patch_config_with_saves(
+            &state,
+            patch_body(
+                1,
+                PreferencesPatch {
+                    date_format: Some("us".to_string()),
+                    ..Default::default()
+                },
+            ),
+            noop_save_editor,
+            noop_save_server,
+        )
+        .expect_err("stale update must conflict");
+        let PatchConfigError::Conflict(current) = conflict else {
+            panic!("expected conflict");
+        };
+        assert_eq!(current.revision, 2);
+        assert_eq!(current.preferences.theme, ThemeChoice::Dark);
+
+        let response = patch_config_response(Err(PatchConfigError::Conflict(current.clone())));
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), 8192)
+            .await
+            .expect("read conflict body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("conflict JSON");
+        assert_eq!(json["error"], "config_conflict");
+        assert_eq!(json["current"]["revision"], 2);
+        assert_eq!(json["current"]["preferences"]["theme"], "dark");
+
+        let retried = patch_config_with_saves(
+            &state,
+            patch_body(
+                current.revision,
+                PreferencesPatch {
+                    date_format: Some("us".to_string()),
+                    ..Default::default()
+                },
+            ),
+            noop_save_editor,
+            noop_save_server,
+        )
+        .expect("retry against current revision");
+
+        assert_eq!(retried.revision, 3);
+        assert_eq!(retried.preferences.theme, ThemeChoice::Dark);
+        assert_eq!(retried.preferences.date_format, "us");
+    }
+
+    #[test]
+    fn same_field_stale_update_returns_current_value() {
+        let state = make_test_state(false);
+        patch_config_with_saves(
+            &state,
+            patch_body(
+                1,
+                PreferencesPatch {
+                    theme: Some(ThemeChoice::Dark),
+                    ..Default::default()
+                },
+            ),
+            noop_save_editor,
+            noop_save_server,
+        )
+        .expect("first update");
+
+        let error = patch_config_with_saves(
+            &state,
+            patch_body(
+                1,
+                PreferencesPatch {
+                    theme: Some(ThemeChoice::Light),
+                    ..Default::default()
+                },
+            ),
+            noop_save_editor,
+            noop_save_server,
+        )
+        .expect_err("same-field stale update must conflict");
+        let PatchConfigError::Conflict(current) = error else {
+            panic!("expected conflict");
+        };
+        assert_eq!(current.revision, 2);
+        assert_eq!(current.preferences.theme, ThemeChoice::Dark);
+    }
+
+    #[test]
+    fn empty_mixed_unknown_and_workspaces_patches_are_rejected() {
+        let state = make_test_state(false);
+        for preferences in [
+            PreferencesPatch::default(),
+            PreferencesPatch {
+                theme: Some(ThemeChoice::Dark),
+                attachments_dir: Some("media".to_string()),
+                ..Default::default()
+            },
+        ] {
+            let error = patch_config_with_saves(
+                &state,
+                patch_body(1, preferences),
+                noop_save_editor,
+                noop_save_server,
+            )
+            .expect_err("invalid ownership shape must fail");
+            assert!(matches!(
+                error,
+                PatchConfigError::Error(Error::BadRequest(_))
+            ));
+        }
+
+        for body in [
+            json!({
+                "expected_revision": 1,
+                "preferences": {"unknown": true}
+            }),
+            json!({
+                "expected_revision": 1,
+                "preferences": {"theme": "dark"},
+                "workspaces": []
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<PatchConfigBody>(body).is_err(),
+                "unknown and workspaces input must fail deserialization"
+            );
+        }
+    }
+
+    #[test]
+    fn save_failure_preserves_memory_disk_revision_and_broadcast_count() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("preferences.toml");
+        let state = make_test_state(false);
+        let before = state.editor_prefs.lock().unwrap().clone();
+        before.save_to(&path).expect("seed persisted prefs");
+        let before_disk = std::fs::read(&path).expect("read seeded prefs");
+        let mut rx = state.events_tx.subscribe();
+
+        let error = patch_config_with_saves(
+            &state,
+            patch_body(
+                1,
+                PreferencesPatch {
+                    theme: Some(ThemeChoice::Dark),
+                    ..Default::default()
+                },
+            ),
+            |_prefs| Err(Error::Config("injected save failure".into())),
+            noop_save_server,
+        )
+        .expect_err("save must fail");
+
+        assert!(matches!(error, PatchConfigError::Error(Error::Config(_))));
+        assert_eq!(*state.editor_prefs.lock().unwrap(), before);
+        assert_eq!(
+            std::fs::read(path).expect("read prefs after failure"),
+            before_disk
+        );
+        assert_eq!(state.config_revision.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn successful_change_saves_one_owner_increments_once_and_broadcasts_once() {
+        let state = make_test_state(false);
+        let editor_saves = AtomicUsize::new(0);
+        let server_saves = AtomicUsize::new(0);
+        let mut rx = state.events_tx.subscribe();
+
+        let view = patch_config_with_saves(
+            &state,
+            patch_body(
+                1,
+                PreferencesPatch {
+                    attachments_dir: Some("media".to_string()),
+                    ..Default::default()
+                },
+            ),
+            |_| {
+                editor_saves.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+            |_| {
+                server_saves.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+        )
+        .expect("server config update");
+
+        assert_eq!(view.revision, 2);
+        assert_eq!(view.preferences.attachments_dir, "media");
+        assert_eq!(editor_saves.load(Ordering::Relaxed), 0);
+        assert_eq!(server_saves.load(Ordering::Relaxed), 1);
+        assert!(rx.try_recv().is_ok());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn external_reload_racing_api_write_is_serialized_and_counted() {
+        let dir = TempDir::new().expect("tempdir");
+        let external = EditorPrefs {
+            theme: ThemeChoice::Light,
+            ..Default::default()
+        };
+        external
+            .save_to(&dir.path().join("preferences.toml"))
+            .expect("write external prefs");
+
+        let state = make_test_state(false);
+        let mut events = state.events_tx.subscribe();
+        let (save_entered_tx, save_entered_rx) = mpsc::channel();
+        let (release_save_tx, release_save_rx) = mpsc::channel();
+        let api_state = state.clone();
+        let api_write = std::thread::spawn(move || {
+            patch_config_with_saves(
+                &api_state,
+                patch_body(
+                    1,
+                    PreferencesPatch {
+                        theme: Some(ThemeChoice::Dark),
+                        ..Default::default()
+                    },
+                ),
+                move |_| {
+                    save_entered_tx.send(()).expect("signal save entry");
+                    release_save_rx.recv().expect("release save");
+                    Ok(())
+                },
+                noop_save_server,
+            )
+        });
+
+        save_entered_rx.recv().expect("API reached durable save");
+        assert!(
+            state.config_write_serial.try_lock().is_err(),
+            "API write must hold the config serialization boundary through save"
+        );
+        let reload_state = state.clone();
+        let reload_dir = dir.path().to_path_buf();
+        let reload = std::thread::spawn(move || {
+            crate::config_watch::reload_editor_prefs_for_test(&reload_dir, &reload_state);
+        });
+        release_save_tx.send(()).expect("release API save");
+
+        let api_view = api_write.join().expect("API thread").expect("API update");
+        reload.join().expect("reload thread");
+
+        assert_eq!(api_view.revision, 2);
+        assert_eq!(api_view.preferences.theme, ThemeChoice::Dark);
+        assert_eq!(state.editor_prefs.lock().unwrap().theme, ThemeChoice::Light);
+        assert_eq!(state.config_revision.load(Ordering::Relaxed), 3);
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(1))
+        ));
+        assert!(events.try_recv().is_ok());
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
     }
 }

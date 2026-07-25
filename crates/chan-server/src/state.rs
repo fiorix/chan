@@ -78,6 +78,8 @@ pub struct AppState {
     /// `<config>/chan/preferences.toml`; mutated through the
     /// /api/config PATCH path.
     pub editor_prefs: Mutex<EditorPrefs>,
+    pub config_revision: AtomicU64,
+    pub config_write_serial: Mutex<()>,
     /// Recently-written paths for the watcher dedupe. Every server-
     /// side write notes its target here; WatchBroadcast checks the
     /// queue before forwarding so an editor save doesn't bounce
@@ -310,6 +312,8 @@ pub(crate) mod test_support {
             index_events_tx,
             server_config: Mutex::new(ServerConfig::default()),
             editor_prefs: Mutex::new(EditorPrefs::default()),
+            config_revision: AtomicU64::new(1),
+            config_write_serial: Mutex::new(()),
             self_writes: Arc::new(SelfWrites::new()),
             last_activity: Arc::new(AtomicU64::new(0)),
             terminal_sessions: Arc::new(TerminalRegistry::new(RegistryConfig {
