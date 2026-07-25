@@ -393,6 +393,12 @@ export type FileResponse = {
   content: string;
   mtime: number | null;
   mtime_ns?: string | null;
+  /// Live document/scene authority version. Null when the file is
+  /// served directly from disk without an attached authority.
+  authority_version?: number | null;
+  /// True when the live authority retained divergent disk state and
+  /// requires explicit conflict resolution.
+  disk_conflicted?: boolean;
   path_class?: PathClass;
   /// Path of the enclosing git repo, relative to the workspace root.
   /// Absent when the file is not inside a git repo (or when the
@@ -405,6 +411,13 @@ export type FileResponse = {
   /// Optional for forward-compat with older servers; absent =
   /// treat as writable to match prior behavior.
   writable?: boolean;
+};
+
+export type FileWriteResponse = {
+  mtime: number | null;
+  mtime_ns?: string | null;
+  authority_version?: number | null;
+  disk_conflicted?: boolean;
 };
 
 export type SearchHit = { path: string; score: number };

@@ -969,6 +969,7 @@ dependencies = [
  "chan-llm",
  "chan-server",
  "chan-shell",
+ "chan-systemd",
  "chan-workspace",
  "clap 4.6.1",
  "clap_complete",
@@ -1042,6 +1043,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chan-shell",
+ "chan-systemd",
  "chan-workspace",
  "dirs 5.0.1",
  "filedescriptor",
@@ -1101,6 +1103,7 @@ dependencies = [
  "chan-tunnel-proto",
  "chan-workspace",
  "chrono",
+ "diffy",
  "dirs 5.0.1",
  "futures",
  "notify",
@@ -1849,6 +1852,15 @@ name = "deunicode"
 version = "1.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "abd57806937c9cc163efc8ea3910e00a62e2aeb0b8119f1793a978088f8f6b04"
+
+[[package]]
+name = "diffy"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10aec8f7f9393bd6a4f2762be0ceb012d3cbe2478987258cc9960de148561914"
+dependencies = [
+ "hashbrown 0.17.0",
+]
 
 [[package]]
 name = "digest"
@@ -3250,6 +3262,9 @@ name = "hashbrown"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
+dependencies = [
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "hashlink"

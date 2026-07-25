@@ -96,6 +96,16 @@ pub fn utf16_len(s: &str) -> u64 {
 /// never modified, so a failed apply leaves the caller's text exactly
 /// as it was.
 pub fn apply(doc: &str, doc_len16: u64, cs: &ChangeSetJson) -> Result<Applied, ApplyError> {
+    apply_with_limit(doc, doc_len16, cs, TEXT_WRITE_LIMIT)
+}
+
+/// Apply one change set under a caller-supplied semantic write budget.
+pub fn apply_with_limit(
+    doc: &str,
+    doc_len16: u64,
+    cs: &ChangeSetJson,
+    limit: u64,
+) -> Result<Applied, ApplyError> {
     // Saturating: an overflowing total cannot equal any real document
     // length (len16 <= 2 * byte length < u64::MAX).
     let span = cs
@@ -149,10 +159,10 @@ pub fn apply(doc: &str, doc_len16: u64, cs: &ChangeSetJson) -> Result<Applied, A
             doc: utf16_len(doc),
         });
     }
-    if out.len() as u64 > TEXT_WRITE_LIMIT {
+    if out.len() as u64 > limit {
         return Err(ApplyError::DocTooLarge {
             bytes: out.len() as u64,
-            limit: TEXT_WRITE_LIMIT,
+            limit,
         });
     }
     Ok(Applied {

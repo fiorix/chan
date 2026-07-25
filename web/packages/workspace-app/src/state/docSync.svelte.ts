@@ -880,6 +880,7 @@ export class DocSession {
         this.onUpdates(f);
         return;
       case "push-ok":
+        this.tab.authorityVersion = f.version;
         this.clearPushInFlight();
         this.maybePush();
         this.checkFlushWaiters();
@@ -928,6 +929,7 @@ export class DocSession {
         // the fileMissing flip and the classic recovery UX takes over.
         this.tab.savedMtimeNs = null;
         this.tab.savedMtime = null;
+        this.tab.authorityVersion = null;
         markTabFileMissing(this.tabId);
         return;
       case "error":
@@ -993,6 +995,7 @@ export class DocSession {
     }
     this.shadowText = Text.of(f.doc.split("\n"));
     this.shadowVersion = f.version;
+    this.tab.authorityVersion = f.version;
     this.haveSnapshot = true;
     // A snapshot opens a fresh sync epoch: any in-flight push belongs
     // to the pre-resync world and will never be answered on this epoch
@@ -1054,6 +1057,7 @@ export class DocSession {
     }
     this.shadowText = text;
     this.shadowVersion += parsed.length;
+    this.tab.authorityVersion = this.shadowVersion;
     this.serverDirty = true;
     this.writeSaved();
     if (this.view && this.collabInstalled) {

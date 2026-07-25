@@ -37,6 +37,7 @@ cuda = ["chan-workspace/cuda", "chan-server/cuda"]
 [dependencies]
 chan-workspace = { workspace = true, default-features = false }
 chan-server = { workspace = true, default-features = false }
+chan-systemd = { workspace = true }
 # Pulled in directly (not just transitively through chan-server) so
 # the `__mcp` subcommand can run chan-llm's MCP server in-process.
 # The `mcp` feature pulls rmcp + schemars; that's the cost of paying

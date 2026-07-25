@@ -15,6 +15,7 @@ import { setXhrFactory } from "./transport";
 /// answers every send with a 200 upload response so the promise resolves.
 class FakeXhr {
   headers: Record<string, string> = {};
+  body: Document | XMLHttpRequestBodyInit | null = null;
   status = 0;
   statusText = "";
   responseText = "";
@@ -29,7 +30,8 @@ class FakeXhr {
   setRequestHeader(name: string, value: string): void {
     this.headers[name] = value;
   }
-  send(): void {
+  send(body: Document | XMLHttpRequestBodyInit | null = null): void {
+    this.body = body;
     this.status = 200;
     this.responseText = JSON.stringify({ path: "a.txt", size: 1 });
     queueMicrotask(() => {
@@ -78,6 +80,16 @@ describe("XHR multipart gateway CSRF mirror", () => {
 
     expect(created).toHaveLength(1);
     expect(created[0].headers["x-chan-csrf"]).toBe("csrf-token");
+  });
+
+  test("destination metadata precedes the streaming file part", async () => {
+    const created = installFakeXhr();
+
+    await api.uploadFile(new File(["x"], "a.txt"), "inbox");
+    await api.replaceFile(new File(["x"], "a.txt"), "inbox/a.txt");
+
+    expect(Array.from((created[0].body as FormData).keys())).toEqual(["dir", "file"]);
+    expect(Array.from((created[1].body as FormData).keys())).toEqual(["path", "file"]);
   });
 
   test("uploadFile sends no csrf header without the cookie (loopback)", async () => {

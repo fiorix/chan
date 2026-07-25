@@ -4639,10 +4639,10 @@ fn devserver_systemd_unit(
 ) -> String {
     // A CHAN_HOME-scoped supervisor passes it to the service, else the unit runs
     // against the real ~/.chan. Quoted so a path with spaces survives.
-    let mut environment = match chan_home {
-        Some(home) => format!("Environment=\"CHAN_HOME={home}\"\n"),
-        None => String::new(),
-    };
+    let mut environment = Vec::new();
+    if let Some(home) = chan_home {
+        environment.push(format!("CHAN_HOME={home}"));
+    }
     // Tunnel mode: carry the PAT in the unit (written 0600) and dial the gateway
     // via --tunnel-url. Under systemd the devserver still binds the loopback
     // management API (see resolve_devserver_listen) so `--restart` can drive the
@@ -4653,10 +4653,7 @@ fn devserver_systemd_unit(
     // it as if the user chose it.
     let exec = match tunnel {
         Some(tunnel) => {
-            environment.push_str(&format!(
-                "Environment=\"CHAN_TUNNEL_TOKEN={}\"\n",
-                tunnel.token
-            ));
+            environment.push(format!("CHAN_TUNNEL_TOKEN={}", tunnel.token));
             // Pinned only when the user chose a name (explicit or
             // preserved-explicit); omitted, the service resolves its
             // hostname default at runtime. Quotes and backslashes are
@@ -4666,8 +4663,8 @@ fn devserver_systemd_unit(
             // expansion hands the service the literal name
             // ([`persisted_tunnel_name`] undoes it on read-back).
             if let Some(name) = &tunnel.pinned_name {
-                environment.push_str(&format!(
-                    "Environment=\"CHAN_TUNNEL_DEVSERVER_NAME={}\"\n",
+                environment.push(format!(
+                    "CHAN_TUNNEL_DEVSERVER_NAME={}",
                     name.replace(['"', '\\'], "").replace('%', "%%")
                 ));
             }
@@ -4688,24 +4685,13 @@ fn devserver_systemd_unit(
             port = addr.port(),
         ),
     };
-    format!(
-        "[Unit]\n\
-         Description=chan devserver\n\
-         After=network.target\n\
-         \n\
-         [Service]\n\
-         Type=notify\n\
-         NotifyAccess=main\n\
-         FileDescriptorStoreMax=512\n\
-         KillMode=process\n\
-         {environment}\
-         ExecStart={exec}\n\
-         Restart=on-failure\n\
-         WatchdogSec=30\n\
-         \n\
-         [Install]\n\
-         WantedBy=default.target\n",
-    )
+    environment
+        .into_iter()
+        .fold(
+            chan_systemd::DevserverUnit::new(exec),
+            |unit, assignment| unit.with_environment(assignment),
+        )
+        .render()
 }
 
 /// `$XDG_CONFIG_HOME/systemd/user`, else `$HOME/.config/systemd/user`.
@@ -8492,6 +8478,10 @@ mod tests {
             "unit template must pin WatchdogSec=30: {unit}"
         );
         assert!(
+            unit.contains("TimeoutStartSec=10min\n"),
+            "unit must outlive the bounded startup restore: {unit}"
+        );
+        assert!(
             unit.contains("Type=notify"),
             "watchdog needs notify: {unit}"
         );
@@ -8509,6 +8499,60 @@ mod tests {
         assert!(
             unit.contains("WatchdogSec=30"),
             "packaged unit must pin WatchdogSec=30: {unit}"
+        );
+    }
+
+    fn normalized_devserver_systemd_unit(unit: &str) -> String {
+        unit.lines()
+            .filter(|line| !line.is_empty())
+            .filter(|line| !line.starts_with('#'))
+            .filter(|line| !line.starts_with("Environment="))
+            .map(|line| {
+                if line.starts_with("ExecStart=") {
+                    "ExecStart=<runtime>"
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn sdme_devserver_systemd_unit(script: &str) -> &str {
+        let heredoc = script
+            .split_once("cat > \"$UNIT\" <<EOF\n")
+            .expect("sdme provision script contains the unit heredoc")
+            .1;
+        heredoc
+            .split_once("\nEOF\n")
+            .expect("sdme provision unit heredoc is terminated")
+            .0
+    }
+
+    /// The runtime renderer is the canonical unit contract. Package and sdme
+    /// variants may substitute environment and ExecStart values, but every
+    /// supervision directive and its ordering must stay identical.
+    #[test]
+    fn devserver_systemd_unit_sources_match_normalized() {
+        let runtime = devserver_systemd_unit(
+            Path::new("/usr/bin/chan"),
+            "127.0.0.1:8787".parse().unwrap(),
+            None,
+            None,
+        );
+        let packaged = include_str!("../../../packaging/distros/shared/chan-devserver.service");
+        let provision = include_str!("../../../packaging/sdme/chan-devserver-provision.sh");
+        let expected = normalized_devserver_systemd_unit(&runtime);
+
+        assert_eq!(
+            normalized_devserver_systemd_unit(packaged),
+            expected,
+            "packaged unit diverged from the typed runtime contract"
+        );
+        assert_eq!(
+            normalized_devserver_systemd_unit(sdme_devserver_systemd_unit(provision)),
+            expected,
+            "sdme unit diverged from the typed runtime contract"
         );
     }
 

@@ -23,18 +23,18 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 | item | state | what needs to happen |
 | --- | --- | --- |
-| [devserver-rebuild-storm-and-livelock](v0.76.0/devserver-rebuild-storm-and-livelock.md) | levers 1-4 landed on `main` (exclusions + migration + Linux watch-registration pruning, rebuild storm damping, overflow surfacing, worker cap + systemd watchdog); storm-check script ALL GREEN | ship with v0.76.0; the remainder (lever 5, journal-branch rework, .gitignore honoring) moved to v0.77.0 |
+| [devserver-rebuild-storm-and-livelock](v0.76.0/devserver-rebuild-storm-and-livelock.md) | levers 1-4 landed on `main` (exclusions + migration + Linux watch-registration pruning, rebuild storm damping, overflow surfacing, worker cap + systemd watchdog); baseline storm-check green | complete lever 5, the journal-branch rework, and `.gitignore` honoring (the items below); strengthen the storm harness with real git ops, content assertions, and loss injection; not marked shipped until the full acceptance matrix is green |
+| [workspace-open-reconcile-off-mount-path](v0.76.0/workspace-open-reconcile-off-mount-path.md) | storm lever 5 | move `Workspace::open`'s inline full-stat reconcile off the calling/mount thread onto the supervised recovery path |
+| [gitignore-aware-exclusions](v0.76.0/gitignore-aware-exclusions.md) | fuller shape of storm lever 1 | honor `.gitignore` (nested, anchoring, negation) in walk, index, report, and Linux watch registration, unified under one scope policy layered beneath `index_excluded_dirs` |
+| [devserver-startup-journal-branch-rework](v0.76.0/devserver-startup-journal-branch-rework.md) | branch a42436ac reviewed (20 findings), unsafe as-is; reworked greenfield | `starting` rows before spawn, persisted desired-intent + generation, supervised shutdown-aware restore, fdstore apply ahead of serving terminals, no READY with mounts pending |
+| [editor-external-restore-echo-swallow](v0.76.0/editor-external-restore-echo-swallow.md) | root-caused and reproduced (check 57, red by design) | park the echo observation and re-check after the ring TTL instead of clearing it; mirror in scene_sessions; ungate check 57 |
+| [upload-download-budgets](v0.76.0/upload-download-budgets.md) | registered; large-file download hangs the chan-desktop UI | bounded server byte stream, backpressured multipart upload, desktop native streaming (temp + atomic rename), and bounded transfer concurrency; range/206 stays in v0.77.0 |
 
 ### v0.77.0
 
 | item | state | what needs to happen |
 | --- | --- | --- |
-| [upload-download-budgets](v0.77.0/upload-download-budgets.md) | registered, not root-caused; deferred from v0.76.0 | profile a real large-file download in chan-desktop first (desktop main-thread block vs server whole-file buffering vs progress thrash), then set budgets |
 | [video-preview-and-range-serving](v0.77.0/video-preview-and-range-serving.md) | registered, grounded but not specced; deferred from v0.76.0 | spec first; the real chunk is HTTP range/206 in the file route (mirrors the image path on the frontend) |
-| [workspace-open-reconcile-off-mount-path](v0.77.0/workspace-open-reconcile-off-mount-path.md) | registered (storm lever 5) | move `Workspace::open`'s inline full-stat reconcile off the async mount path; also the chan-desktop big-repo startup gate |
-| [devserver-startup-journal-branch-rework](v0.77.0/devserver-startup-journal-branch-rework.md) | registered; branch a42436ac reviewed (20 findings), unsafe as-is | rework per the item: `starting` rows before spawn, supervised restore task, fdstore apply ahead of serving terminals, no READY with mounts pending |
-| [gitignore-aware-exclusions](v0.77.0/gitignore-aware-exclusions.md) | registered (fuller shape of storm lever 1) | honor `.gitignore` in walk, index, and Linux watch registration, layered under `index_excluded_dirs` overrides |
-| [editor-external-restore-echo-swallow](v0.77.0/editor-external-restore-echo-swallow.md) | root-caused and reproduced (check 57, red by design) | park the echo observation and re-check after the ring TTL instead of clearing it; same in scene_sessions; ungate check 57 green |
 
 ## Completed
 

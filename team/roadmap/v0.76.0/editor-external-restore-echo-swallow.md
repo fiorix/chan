@@ -1,6 +1,6 @@
 # Editor serves stale content after an external restore (echo-ring swallow)
 
-Status: REGISTERED for v0.77.0. Root-caused and reproduced; the fix
+Status: REGISTERED for v0.76.0. Root-caused and reproduced; the fix
 is scoped below. Found during the v0.76.0 external-edit reliability
 hunt (guards landed in `scripts/e2e/browser-smoke/checks/55,56`; the
 repro is `checks/57-external-restore-swallow.mjs`).

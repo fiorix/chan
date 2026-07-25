@@ -283,6 +283,7 @@ describe("attach", () => {
     const { binding } = attached(tab, [elem("x"), dead]);
     expect(tab.doc?.state).toBe("attached");
     expect(tab.savedMtimeNs).toBe(MTIME);
+    expect(tab.authorityVersion).toBe(0);
     expect(binding.snapshots).toHaveLength(1);
     expect(binding.snapshots[0]!.elements.map((e) => e.id)).toEqual(["x", "gone"]);
     expect(binding.collabCalls).toBeGreaterThan(0);
@@ -522,6 +523,7 @@ describe("save funnel", () => {
     await saveTab(tab);
     await flushMicro();
     expect(write).toHaveBeenCalledTimes(1);
+    expect(write.mock.calls[0]![4]).toBe(0);
   });
 });
 
@@ -535,6 +537,7 @@ describe("lifecycle", () => {
     sock.frame({ type: "removed" });
     expect(tab.savedMtimeNs).toBeNull();
     expect(tab.savedMtime).toBeNull();
+    expect(tab.authorityVersion).toBeNull();
   });
 
   test("release lingers for a remount and immediate release detaches now", () => {

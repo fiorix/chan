@@ -29,6 +29,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
@@ -299,19 +300,319 @@ pub fn persisted_devserver_port() -> Option<u16> {
     (port != 0).then_some(port)
 }
 
-/// A registered workspace as the devserver tracks it, the source of truth for
-/// `GET /api/devserver/workspaces`. Keyed by its stable `prefix` in
-/// [`DevserverState`]. Either mounted (`on`, live in the host, carrying a
-/// per-mount `token`) or registered-but-unmounted (`!on`, absent from the
-/// host, empty `token`). Forget drops it entirely.
+/// A single workspace mount attempt may spend at most this long acquiring the
+/// workspace and building its tenant. A timeout remains a visible desired-on
+/// failure; it never wedges systemd READY forever.
+const WORKSPACE_MOUNT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Absolute cold-start restore budget. Remaining desired-on rows become
+/// visible failures when it expires; the systemd unit grants ten minutes.
+const STARTUP_RESTORE_TIMEOUT: Duration = Duration::from_secs(8 * 60);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DesiredMount {
+    On,
+    Off,
+    /// In-memory tombstone retained until an older mount attempt settles.
+    Forgotten,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum MountPhase {
+    Starting,
+    Mounted,
+    Stopped,
+    Failed(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MountCompletion {
+    Adopted,
+    CloseStale,
+    ForgetStale,
+}
+
+/// A registered workspace as the devserver tracks it, keyed by stable prefix.
+///
+/// Desired intent and its generation are authoritative. `phase` is observed
+/// serving progress; only a completion for the current desired-on generation
+/// may publish a mounted token.
+#[derive(Clone)]
 struct WorkspaceRecord {
     root: PathBuf,
     prefix: String,
     label: String,
-    /// Whether the workspace is mounted in the host right now.
-    on: bool,
-    /// Per-mount bearer token while `on`; empty while off.
+    desired: DesiredMount,
+    phase: MountPhase,
+    generation: u64,
     token: String,
+}
+
+impl WorkspaceRecord {
+    fn prepared(root: PathBuf, prefix: String, desired_on: bool, generation: u64) -> Self {
+        let label = workspace_label(&root);
+        Self {
+            root,
+            prefix,
+            label,
+            desired: if desired_on {
+                DesiredMount::On
+            } else {
+                DesiredMount::Off
+            },
+            phase: if desired_on {
+                MountPhase::Starting
+            } else {
+                MountPhase::Stopped
+            },
+            generation,
+            token: String::new(),
+        }
+    }
+
+    fn advance_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Begin a fresh desired-on attempt, or return `None` when the current
+    /// desired-on generation is already starting/running.
+    fn begin_on(&mut self) -> Option<u64> {
+        if self.desired == DesiredMount::On
+            && matches!(self.phase, MountPhase::Starting | MountPhase::Mounted)
+        {
+            return None;
+        }
+        self.advance_generation();
+        self.desired = DesiredMount::On;
+        self.phase = MountPhase::Starting;
+        self.token.clear();
+        Some(self.generation)
+    }
+
+    fn turn_off(&mut self) -> bool {
+        if self.desired == DesiredMount::Off && self.phase == MountPhase::Stopped {
+            return false;
+        }
+        self.advance_generation();
+        self.desired = DesiredMount::Off;
+        self.phase = MountPhase::Stopped;
+        self.token.clear();
+        true
+    }
+
+    fn forget(&mut self) {
+        if self.desired != DesiredMount::Forgotten {
+            self.advance_generation();
+        }
+        self.desired = DesiredMount::Forgotten;
+        self.phase = MountPhase::Stopped;
+        self.token.clear();
+    }
+
+    fn complete_success(&mut self, generation: u64, token: String) -> MountCompletion {
+        if self.generation == generation && self.desired == DesiredMount::On {
+            self.phase = MountPhase::Mounted;
+            self.token = token;
+            MountCompletion::Adopted
+        } else if self.desired == DesiredMount::Forgotten {
+            MountCompletion::ForgetStale
+        } else {
+            MountCompletion::CloseStale
+        }
+    }
+
+    fn complete_failure(&mut self, generation: u64, reason: String) -> bool {
+        if self.generation != generation || self.desired != DesiredMount::On {
+            return false;
+        }
+        self.phase = MountPhase::Failed(reason);
+        self.token.clear();
+        true
+    }
+
+    fn persisted(&self) -> Option<PersistedWorkspace> {
+        if self.desired == DesiredMount::Forgotten {
+            return None;
+        }
+        Some(PersistedWorkspace {
+            path: self.root.to_string_lossy().into_owned(),
+            desired_on: self.desired == DesiredMount::On,
+            generation: self.generation,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct MountAttemptKey {
+    prefix: String,
+    generation: u64,
+}
+
+impl MountAttemptKey {
+    fn new(prefix: impl Into<String>, generation: u64) -> Self {
+        Self {
+            prefix: prefix.into(),
+            generation,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MountAttempt {
+    root: PathBuf,
+    prefix: String,
+    generation: u64,
+}
+
+impl MountAttempt {
+    fn key(&self) -> MountAttemptKey {
+        MountAttemptKey::new(self.prefix.clone(), self.generation)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartupPhase {
+    PreparingRows,
+    Binding,
+    FdstoreApplied,
+    ServingAndRestoring,
+    Ready,
+    Stopping,
+    Stopped,
+}
+
+struct StartupInner {
+    phase: StartupPhase,
+    pending: HashSet<MountAttemptKey>,
+}
+
+/// Serializes startup effects and the READY boundary. Mount intents register
+/// before they spawn; READY atomically closes registration for startup work
+/// only after every registered attempt has settled.
+struct StartupCoordinator {
+    inner: Mutex<StartupInner>,
+    changed: tokio::sync::Notify,
+}
+
+impl StartupCoordinator {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(StartupInner {
+                phase: StartupPhase::PreparingRows,
+                pending: HashSet::new(),
+            }),
+            changed: tokio::sync::Notify::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn phase(&self) -> StartupPhase {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).phase
+    }
+
+    fn advance(&self, next: StartupPhase) -> Result<(), String> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let valid = matches!(
+            (inner.phase, next),
+            (StartupPhase::PreparingRows, StartupPhase::Binding)
+                | (StartupPhase::Binding, StartupPhase::FdstoreApplied)
+                | (
+                    StartupPhase::FdstoreApplied,
+                    StartupPhase::ServingAndRestoring
+                )
+                | (StartupPhase::Stopping, StartupPhase::Stopped)
+        );
+        if !valid {
+            return Err(format!(
+                "invalid devserver startup transition {:?} -> {next:?}",
+                inner.phase
+            ));
+        }
+        inner.phase = next;
+        drop(inner);
+        self.changed.notify_waiters();
+        Ok(())
+    }
+
+    fn track(&self, attempt: MountAttemptKey) -> Result<(), String> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.phase == StartupPhase::Ready {
+            // Post-readiness user mounts are ordinary serving work. They still
+            // carry generations, but cannot retroactively gate READY.
+            return Ok(());
+        }
+        if !matches!(
+            inner.phase,
+            StartupPhase::PreparingRows | StartupPhase::ServingAndRestoring
+        ) {
+            return Err(format!(
+                "cannot start workspace mount while devserver is {:?}",
+                inner.phase
+            ));
+        }
+        inner.pending.insert(attempt);
+        drop(inner);
+        self.changed.notify_waiters();
+        Ok(())
+    }
+
+    fn settle(&self, attempt: &MountAttemptKey) {
+        let removed = self
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            .remove(attempt);
+        if removed {
+            self.changed.notify_waiters();
+        }
+    }
+
+    async fn ready_after_restore(&self) -> bool {
+        loop {
+            let notified = self.changed.notified();
+            {
+                let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                match inner.phase {
+                    StartupPhase::ServingAndRestoring if inner.pending.is_empty() => {
+                        inner.phase = StartupPhase::Ready;
+                        return true;
+                    }
+                    StartupPhase::Stopping | StartupPhase::Stopped => return false,
+                    _ => {}
+                }
+            }
+            notified.await;
+        }
+    }
+
+    fn stop(&self) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.phase != StartupPhase::Stopped {
+            inner.phase = StartupPhase::Stopping;
+        }
+        drop(inner);
+        self.changed.notify_waiters();
+    }
+
+    fn stopped(&self) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.phase = StartupPhase::Stopped;
+        inner.pending.clear();
+        drop(inner);
+        self.changed.notify_waiters();
+    }
+}
+
+#[derive(Debug)]
+struct MountTimedOut;
+
+async fn time_bound_mount<T>(
+    timeout: Duration,
+    future: impl Future<Output = T>,
+) -> Result<T, MountTimedOut> {
+    tokio::time::timeout(timeout, future)
+        .await
+        .map_err(|_| MountTimedOut)
 }
 
 #[derive(Debug)]
@@ -343,6 +644,11 @@ struct DevserverState {
     host_label: String,
     /// Registered workspaces by stable prefix, on and off.
     workspaces: Mutex<HashMap<String, WorkspaceRecord>>,
+    /// Extends the host's mount serialization through generation adoption or
+    /// compensating cleanup, so a newer attempt cannot adopt a tenant that an
+    /// older stale completion is about to close.
+    mount_attempt_lock: tokio::sync::Mutex<()>,
+    startup: Arc<StartupCoordinator>,
     store: DevserverStore,
     /// The actual bound TCP port (`local_addr().port()`); `0` until bound.
     /// Persisted so a local client re-discovers the current port after a restart.
@@ -358,22 +664,27 @@ impl DevserverState {
     async fn register_workspace(&self, root: &Path) -> Result<String, Error> {
         let prefix = allocate_workspace_prefix(root)?;
         let mounted = self.mount_at(root, &prefix).await?;
-        self.persist_state();
         Ok(mounted)
     }
 
-    /// Mount `root` at `prefix` in the host and record it as on. The host
-    /// opens through the shared `Library`, which requires the root to be
-    /// registered first; registering an already-known root is a no-op. Does
-    /// NOT persist -- callers batch the save. Returns the prefix actually
-    /// mounted at (the host's idempotent re-register can return an existing
-    /// prefix; for a fresh mount it is `prefix`).
+    /// Publish desired-on + `starting` before awaiting the bounded mount.
+    /// Returns the prefix actually mounted at (or the current stable prefix
+    /// when an equivalent attempt is already pending).
     ///
     /// Rejects a `prefix` that collides with the reserved `/api/` namespace.
     /// The host's own collision guard rejects a `prefix` already taken by a
     /// DIFFERENT root (two workspaces with the same basename slug), surfacing
     /// the design's "slug uniqueness within a devserver".
     async fn mount_at(&self, root: &Path, prefix: &str) -> Result<String, Error> {
+        let Some(attempt) = self.begin_mount(root, prefix)? else {
+            return Ok(prefix.to_string());
+        };
+        self.persist_state();
+        self.execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+            .await
+    }
+
+    fn begin_mount(&self, root: &Path, prefix: &str) -> Result<Option<MountAttempt>, Error> {
         if prefix == RESERVED_WORKSPACE_PREFIX {
             return Err(Error::Config(format!(
                 "cannot mount a workspace at {prefix}: that path is reserved for the devserver \
@@ -382,37 +693,147 @@ impl DevserverState {
             )));
         }
         self.host.library().register_workspace(root)?;
-        let hosted = self
-            .host
-            .open_or_get_registered_workspace(root, tenant_config(self.addr, prefix))
-            .await?;
-        let record = WorkspaceRecord {
-            root: hosted.root.clone(),
-            prefix: hosted.prefix.clone(),
-            label: workspace_label(&hosted.root),
-            on: true,
-            // Tenants are configured with `no_token: false`, so the handle
-            // always carries a token; default to empty rather than panic.
-            token: hosted.handle.token.clone().unwrap_or_default(),
+        let canonical = canonical_root(root);
+        let attempt = {
+            let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
+            let mut record = match workspaces.get(prefix).cloned() {
+                Some(record) if canonical_root(&record.root) != canonical => {
+                    return Err(Error::Config(format!(
+                        "workspace prefix {prefix} already belongs to {}",
+                        record.root.display()
+                    )));
+                }
+                Some(mut record) => {
+                    if record.phase == MountPhase::Mounted
+                        && !self.host.is_root_mounted(&record.root)
+                    {
+                        record.turn_off();
+                    }
+                    record
+                }
+                None => WorkspaceRecord::prepared(canonical.clone(), prefix.to_string(), false, 0),
+            };
+            let Some(generation) = record.begin_on() else {
+                return Ok(None);
+            };
+            let attempt = MountAttempt {
+                root: canonical,
+                prefix: prefix.to_string(),
+                generation,
+            };
+            self.startup.track(attempt.key()).map_err(Error::Config)?;
+            workspaces.insert(prefix.to_string(), record);
+            attempt
         };
-        let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
-        workspaces.insert(hosted.prefix.clone(), record);
-        Ok(hosted.prefix)
+        self.host.mark_workspace_starting(&attempt.root);
+        Ok(Some(attempt))
     }
 
-    /// Track `root` at `prefix` as registered-but-off (remembered, not
-    /// mounted, no token). Re-surfaces an off row on restart and is the off
-    /// side of a toggle. Does NOT persist -- callers batch the save.
-    fn track_off(&self, root: &Path, prefix: &str) {
-        let record = WorkspaceRecord {
-            root: root.to_path_buf(),
-            prefix: prefix.to_string(),
-            label: workspace_label(root),
-            on: false,
-            token: String::new(),
+    async fn execute_mount_attempt(
+        &self,
+        attempt: MountAttempt,
+        timeout: Duration,
+    ) -> Result<String, Error> {
+        let _attempt_guard = self.mount_attempt_lock.lock().await;
+        let result = time_bound_mount(
+            timeout,
+            self.host.open_or_get_registered_workspace(
+                &attempt.root,
+                tenant_config(self.addr, &attempt.prefix),
+            ),
+        )
+        .await;
+        match result {
+            Ok(Ok(hosted)) => {
+                let token = hosted.handle.token.clone().unwrap_or_default();
+                let completion = {
+                    let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
+                    workspaces
+                        .get_mut(&attempt.prefix)
+                        .map(|record| record.complete_success(attempt.generation, token))
+                        .unwrap_or(MountCompletion::ForgetStale)
+                };
+                match completion {
+                    MountCompletion::Adopted => {}
+                    MountCompletion::CloseStale => {
+                        let _ = self.host.close_workspace(&hosted.prefix, true);
+                        self.restore_current_host_lifecycle(&attempt.prefix);
+                    }
+                    MountCompletion::ForgetStale => {
+                        let _ = self.host.remove_workspace_for_root(&attempt.root, true);
+                        self.remove_finished_tombstone(&attempt.prefix);
+                    }
+                }
+                self.startup.settle(&attempt.key());
+                self.persist_state();
+                Ok(hosted.prefix)
+            }
+            Ok(Err(error)) => {
+                let reason = error.to_string();
+                self.finish_failed_attempt(&attempt, reason);
+                Err(error)
+            }
+            Err(MountTimedOut) => {
+                // The timeout drops the in-flight future. Compensate in case it
+                // inserted a tenant immediately before cancellation.
+                let _ = self.host.close_workspace(&attempt.prefix, true);
+                let reason = format!("mount timed out after {} seconds", timeout.as_secs().max(1));
+                self.finish_failed_attempt(&attempt, reason.clone());
+                Err(Error::Config(reason))
+            }
+        }
+    }
+
+    fn finish_failed_attempt(&self, attempt: &MountAttempt, reason: String) {
+        let adopted_failure = {
+            let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
+            workspaces
+                .get_mut(&attempt.prefix)
+                .is_some_and(|record| record.complete_failure(attempt.generation, reason.clone()))
         };
+        if adopted_failure {
+            self.host.mark_workspace_failed(&attempt.root, reason);
+        } else {
+            self.restore_current_host_lifecycle(&attempt.prefix);
+            self.remove_finished_tombstone(&attempt.prefix);
+        }
+        self.startup.settle(&attempt.key());
+        self.persist_state();
+    }
+
+    fn restore_current_host_lifecycle(&self, prefix: &str) {
+        let current = {
+            let workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
+            workspaces
+                .get(prefix)
+                .map(|record| (record.root.clone(), record.phase.clone()))
+        };
+        match current {
+            Some((root, MountPhase::Starting)) => self.host.mark_workspace_starting(&root),
+            Some((root, MountPhase::Failed(reason))) => {
+                self.host.mark_workspace_failed(&root, reason)
+            }
+            Some((root, MountPhase::Mounted | MountPhase::Stopped)) => {
+                self.host.clear_workspace_lifecycle(&root)
+            }
+            None => {}
+        }
+    }
+
+    fn remove_finished_tombstone(&self, prefix: &str) {
         let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
-        workspaces.insert(prefix.to_string(), record);
+        if workspaces
+            .get(prefix)
+            .is_some_and(|record| record.desired == DesiredMount::Forgotten)
+        {
+            workspaces.remove(prefix);
+        }
+    }
+
+    fn cancel_mount_attempt(&self, attempt: &MountAttempt) {
+        let _ = self.host.close_workspace(&attempt.prefix, true);
+        self.restore_current_host_lifecycle(&attempt.prefix);
+        self.startup.settle(&attempt.key());
     }
 
     /// Set whether the registered workspace at `prefix` is mounted, returning
@@ -427,65 +848,59 @@ impl DevserverState {
         on: bool,
         force: bool,
     ) -> Result<SetWorkspaceOnResult, Error> {
-        // Snapshot under the lock, then release it before the mount/unmount:
-        // `close_workspace` blocks on the bounded flock wait and the remount
-        // awaits, and the list endpoint must stay responsive meanwhile.
         let current = {
             let workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
-            workspaces.get(prefix).map(|record| {
-                let currently_on = self.host.is_root_mounted(&record.root);
-                (currently_on, record.root.clone())
-            })
+            workspaces
+                .get(prefix)
+                .filter(|record| record.desired != DesiredMount::Forgotten)
+                .map(|record| (record.root.clone(), record.phase.clone()))
         };
-        let (currently_on, root) = match current {
+        let (root, phase) = match current {
             Some(current) => current,
-            // Not in the serving map: it may be a host-library workspace the
-            // devserver has not mounted yet. Every library workspace is listable
-            // and toggleable. Resolve the prefix back to its library
-            // root and treat it as currently off; an unknown prefix is a 404.
             None => match self.library_root_for_prefix(prefix) {
-                Some(root) => (false, root),
+                Some(root) => (root, MountPhase::Stopped),
                 None => return Ok(SetWorkspaceOnResult::Updated(None)),
             },
         };
-        if currently_on == on {
-            // Already in the requested state: idempotent no-op, current row.
-            // A library-only off row has no map entry, so synthesize it. If a
-            // host-level close already unmounted this workspace, normalize the
-            // stale in-memory record too; the row derivation below already masks
-            // the token, but clearing it here keeps future persists honest.
-            if !on {
-                let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(record) = workspaces.get_mut(prefix) {
-                    record.on = false;
-                    record.token.clear();
-                }
-            }
-            return Ok(SetWorkspaceOnResult::Updated(
-                self.entry_for(prefix)
-                    .or_else(|| self.library_off_entry(prefix)),
-            ));
-        }
         if on {
-            // Off → on: mount at the SAME (stable) prefix, minting a fresh
-            // token. Works for a registered-off row AND a never-served library
-            // workspace (mount_at registers it in the library + host).
             self.mount_at(&root, prefix).await?;
         } else {
-            // On → off: unmount, release the flock, keep the registration.
-            match self.host.close_workspace(prefix, force)? {
-                WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound => {}
-                WorkspaceLifecycleOutcome::Refused { active_terminals } => {
-                    return Ok(SetWorkspaceOnResult::Refused { active_terminals });
+            // A pending attempt must lose to the newer off intent before its
+            // completion can publish. A mounted row can first run the existing
+            // terminal-refusal guard because no attempt is outstanding.
+            if phase == MountPhase::Mounted {
+                match self.host.close_workspace(prefix, force)? {
+                    WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound => {}
+                    WorkspaceLifecycleOutcome::Refused { active_terminals } => {
+                        return Ok(SetWorkspaceOnResult::Refused { active_terminals });
+                    }
                 }
             }
-            let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(record) = workspaces.get_mut(prefix) {
-                record.on = false;
-                record.token.clear();
+            {
+                let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
+                match workspaces.get_mut(prefix) {
+                    Some(record) => {
+                        record.turn_off();
+                    }
+                    None => {
+                        workspaces.insert(
+                            prefix.to_string(),
+                            WorkspaceRecord::prepared(root.clone(), prefix.to_string(), false, 1),
+                        );
+                    }
+                }
             }
+            if phase != MountPhase::Mounted {
+                match self.host.close_workspace(prefix, force)? {
+                    WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound => {}
+                    WorkspaceLifecycleOutcome::Refused { active_terminals } => {
+                        return Ok(SetWorkspaceOnResult::Refused { active_terminals });
+                    }
+                }
+            }
+            self.host.clear_workspace_lifecycle(&root);
+            self.persist_state();
         }
-        self.persist_state();
         Ok(SetWorkspaceOnResult::Updated(
             self.entry_for(prefix)
                 .or_else(|| self.library_off_entry(prefix)),
@@ -517,23 +932,62 @@ impl DevserverState {
         // the reversible unmount; this is the removal. Resolve the root from the
         // serving record OR, for a library workspace not currently served, the
         // library itself -- every library workspace is forgettable.
-        let root = {
+        let current = {
             let workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
-            workspaces.get(prefix).map(|record| record.root.clone())
+            workspaces
+                .get(prefix)
+                .map(|record| (record.root.clone(), record.phase.clone()))
         }
-        .or_else(|| self.library_root_for_prefix(prefix));
-        let Some(root) = root else {
+        .or_else(|| {
+            self.library_root_for_prefix(prefix)
+                .map(|root| (root, MountPhase::Stopped))
+        });
+        let Some((root, phase)) = current else {
             return Ok(WorkspaceLifecycleOutcome::NotFound);
         };
+        let pending_original = if phase == MountPhase::Starting {
+            let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
+            workspaces.get_mut(prefix).map(|record| {
+                let original = record.clone();
+                record.forget();
+                original
+            })
+        } else {
+            None
+        };
+        if pending_original.is_some() {
+            // Durable absence and the tombstone win before physical cleanup;
+            // no lock is held across the host's potentially blocking teardown.
+            self.persist_state();
+        }
         match self.host.remove_workspace_for_root(&root, force)? {
             WorkspaceLifecycleOutcome::Refused { active_terminals } => {
+                if let Some(original) = pending_original {
+                    self.workspaces
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(prefix.to_string(), original);
+                    self.persist_state();
+                }
                 return Ok(WorkspaceLifecycleOutcome::Refused { active_terminals });
             }
             WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound => {}
         }
-        {
+        if phase != MountPhase::Starting {
             let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
-            workspaces.remove(prefix);
+            if workspaces.get(prefix).is_some() {
+                workspaces.remove(prefix);
+            }
+        } else if pending_original.is_none() {
+            // The serving record disappeared between the initial lookup and
+            // intent update; physical removal above is still authoritative.
+            let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
+            if workspaces
+                .get(prefix)
+                .is_some_and(|record| record.desired != DesiredMount::Forgotten)
+            {
+                workspaces.remove(prefix);
+            }
         }
         self.persist_state();
         Ok(WorkspaceLifecycleOutcome::Completed)
@@ -544,18 +998,14 @@ impl DevserverState {
     /// the devserver config. So a restart comes back serving exactly what was on
     /// and remembering what was off.
     fn persist_state(&self) {
-        // Workspace on/off → the library-owned overlay store. The overlay sorts
-        // by path on save for a stable file.
+        // Durable desired intent → the library-owned overlay store. Starting
+        // and failed rows stay desired-on even though no host prefix is live.
         if let Some(overlay) = self.host.workspace_overlay() {
-            // Reconcile against the HOST before persisting, not the in-memory
-            // map alone: a control-socket `chan close --remove` unregisters a
-            // workspace from the library without touching this map, and a plain
-            // `chan close` unmounts it without updating the map's `on`. Trusting
-            // the stale map would re-grow a removed workspace into the overlay
-            // and persist a closed one as on, so a restart resurrects it. Drop
-            // rows no longer registered in the library, and take `on` from what
-            // is ACTUALLY mounted now. (The map stays the row SOURCE so a
-            // registered-but-off row the devserver tracks still survives.)
+            let durable: HashMap<PathBuf, PersistedWorkspace> = overlay
+                .entries()
+                .into_iter()
+                .map(|row| (canonical_root(Path::new(&row.path)), row))
+                .collect();
             let registered: std::collections::HashSet<PathBuf> = self
                 .host
                 .library()
@@ -570,13 +1020,44 @@ impl DevserverState {
                 .into_iter()
                 .collect();
             let rows: Vec<PersistedWorkspace> = {
-                let map = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
+                let mut map = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
+                // Preserve the prior out-of-band control-socket semantics:
+                // remove means absence; close advances a settled mounted row
+                // to a newer desired-off intent. A Starting row is deliberately
+                // not mistaken for an out-of-band close.
+                map.retain(|_, record| {
+                    registered.contains(&canonical_root(&record.root))
+                        || record.phase == MountPhase::Starting
+                        || record.desired == DesiredMount::Forgotten
+                });
+                for record in map.values_mut() {
+                    if let Some(row) = durable.get(&canonical_root(&record.root)) {
+                        if row.generation > record.generation {
+                            record.generation = row.generation;
+                            record.desired = if row.desired_on {
+                                DesiredMount::On
+                            } else {
+                                DesiredMount::Off
+                            };
+                            if row.desired_on {
+                                record.phase = if mounted.contains(&record.prefix) {
+                                    MountPhase::Mounted
+                                } else {
+                                    MountPhase::Starting
+                                };
+                            } else {
+                                record.phase = MountPhase::Stopped;
+                                record.token.clear();
+                            }
+                        }
+                    }
+                    if record.phase == MountPhase::Mounted && !mounted.contains(&record.prefix) {
+                        record.turn_off();
+                    }
+                }
                 map.values()
                     .filter(|record| registered.contains(&canonical_root(&record.root)))
-                    .map(|record| PersistedWorkspace {
-                        path: record.root.to_string_lossy().into_owned(),
-                        on: mounted.contains(&record.prefix),
-                    })
+                    .filter_map(WorkspaceRecord::persisted)
                     .collect()
             };
             overlay.replace(rows);
@@ -620,6 +1101,7 @@ impl DevserverState {
             let workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
             workspaces
                 .values()
+                .filter(|record| record.desired != DesiredMount::Forgotten)
                 .map(|record| (record.root.clone(), self.entry_from_record(record)))
                 .collect()
         };
@@ -688,8 +1170,15 @@ impl DevserverState {
     /// Build the wire [`WorkspaceEntry`] for a registered workspace record: an
     /// off row reports `on:false` with an empty token; an on row its live token.
     fn entry_from_record(&self, record: &WorkspaceRecord) -> WorkspaceEntry {
-        let (status, error) = self.host.workspace_status(&record.root);
-        let on = status == WorkspaceStatus::Running && self.host.is_root_mounted(&record.root);
+        let mounted = self.host.is_root_mounted(&record.root);
+        let (status, error) = match &record.phase {
+            MountPhase::Starting => (WorkspaceStatus::Starting, None),
+            MountPhase::Failed(reason) => (WorkspaceStatus::Error, Some(reason.clone())),
+            MountPhase::Mounted if mounted => (WorkspaceStatus::Running, None),
+            MountPhase::Mounted | MountPhase::Stopped => self.host.workspace_status(&record.root),
+        };
+        let on =
+            record.desired == DesiredMount::On && record.phase == MountPhase::Mounted && mounted;
         let token = if on {
             record.token.clone()
         } else {
@@ -704,6 +1193,56 @@ impl DevserverState {
             error,
             token,
         }
+    }
+
+    /// Insert every durable row before any desired-on restore future spawns.
+    fn prepare_restore_rows(&self, rows: Vec<PersistedWorkspace>) -> Vec<MountAttempt> {
+        let mut attempts = Vec::new();
+        for row in rows {
+            let root = PathBuf::from(&row.path);
+            let prefix = match allocate_workspace_prefix(&root) {
+                Ok(prefix) => prefix,
+                Err(error) => {
+                    eprintln!(
+                        "chan devserver: NOTE: skipping persisted workspace {} ({error})",
+                        row.path
+                    );
+                    continue;
+                }
+            };
+            if let Err(error) = self.host.library().register_workspace(&root) {
+                eprintln!(
+                    "chan devserver: NOTE: could not register persisted workspace {}: {error}",
+                    row.path
+                );
+                continue;
+            }
+            let root = canonical_root(&root);
+            let record = WorkspaceRecord::prepared(
+                root.clone(),
+                prefix.clone(),
+                row.desired_on,
+                row.generation,
+            );
+            let attempt = row.desired_on.then(|| MountAttempt {
+                root: root.clone(),
+                prefix: prefix.clone(),
+                generation: row.generation,
+            });
+            {
+                let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
+                workspaces.insert(prefix, record);
+            }
+            if let Some(attempt) = attempt {
+                if let Err(reason) = self.startup.track(attempt.key()) {
+                    self.finish_failed_attempt(&attempt, reason);
+                    continue;
+                }
+                self.host.mark_workspace_starting(&root);
+                attempts.push(attempt);
+            }
+        }
+        attempts
     }
 
     /// Mount the per-library SHARED terminal tenant. `open_terminal_session`
@@ -727,6 +1266,91 @@ impl DevserverState {
     }
 }
 
+#[must_use = "the startup restore task must be joined before shutdown completes"]
+struct WorkspaceRestore {
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl WorkspaceRestore {
+    fn spawn(
+        state: Arc<DevserverState>,
+        attempts: Vec<MountAttempt>,
+        shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            task: Some(tokio::spawn(restore_prepared_workspaces(
+                state,
+                attempts,
+                shutdown_rx,
+            ))),
+        }
+    }
+
+    async fn join(mut self) -> Result<(), tokio::task::JoinError> {
+        self.task
+            .take()
+            .expect("restore owner always contains its task")
+            .await
+    }
+
+    #[cfg(test)]
+    fn from_task(task: tokio::task::JoinHandle<()>) -> Self {
+        Self { task: Some(task) }
+    }
+}
+
+async fn restore_prepared_workspaces(
+    state: Arc<DevserverState>,
+    attempts: Vec<MountAttempt>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    let deadline = tokio::time::Instant::now() + STARTUP_RESTORE_TIMEOUT;
+    let mut attempts = attempts.into_iter();
+    while let Some(attempt) = attempts.next() {
+        if *shutdown_rx.borrow() {
+            state.cancel_mount_attempt(&attempt);
+            for pending in attempts {
+                state.cancel_mount_attempt(&pending);
+            }
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            let reason = format!(
+                "startup restore exceeded {} seconds",
+                STARTUP_RESTORE_TIMEOUT.as_secs()
+            );
+            state.finish_failed_attempt(&attempt, reason.clone());
+            for pending in attempts {
+                state.finish_failed_attempt(&pending, reason.clone());
+            }
+            return;
+        }
+        let mut restore = Box::pin(state.execute_mount_attempt(
+            attempt.clone(),
+            std::cmp::min(WORKSPACE_MOUNT_TIMEOUT, remaining),
+        ));
+        tokio::select! {
+            result = &mut restore => {
+                if let Err(error) = result {
+                    eprintln!(
+                        "chan devserver: NOTE: could not re-mount {}: {error}",
+                        attempt.root.display()
+                    );
+                }
+            }
+            _ = shutdown_rx.changed() => {
+                drop(restore);
+                state.cancel_mount_attempt(&attempt);
+                for pending in attempts {
+                    state.cancel_mount_attempt(&pending);
+                }
+                return;
+            }
+        }
+    }
+}
+
 /// What the cold-start token resolution decided, so the boot path can
 /// explain a rotation to the operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -738,6 +1362,32 @@ enum BootToken {
     /// The persisted token outlived [`DEVSERVER_TOKEN_MAX_AGE_SECS`] (or
     /// its mint time was unrecorded): re-minted, old bearer retired.
     RotatedByAge,
+}
+
+/// Owns either `run_devserver` serving path through its shutdown boundary.
+///
+/// Both variants consume the watchdog owner and wait for its task to terminate
+/// before the arm returns, so listener and tunnel-only shutdown cannot detach a
+/// final notification.
+enum DevserverServeArm {
+    Listener(tokio::task::JoinHandle<std::io::Result<()>>),
+    Wait(tokio::task::JoinHandle<()>),
+}
+
+impl DevserverServeArm {
+    async fn join(self, watchdog: Option<fdstore::WatchdogPings>) -> anyhow::Result<()> {
+        let serve_result = match self {
+            Self::Listener(task) => task
+                .await
+                .context("joining devserver serve task")
+                .and_then(|result| result.context("running devserver")),
+            Self::Wait(task) => task.await.context("joining devserver wait task"),
+        };
+        if let Some(watchdog) = watchdog {
+            watchdog.stop().await;
+        }
+        serve_result
+    }
 }
 
 /// Resolve the boot token in `persisted`, minting or rotating in place.
@@ -843,6 +1493,8 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         library_id,
         host_label: config.host_label,
         workspaces: Mutex::new(HashMap::new()),
+        mount_attempt_lock: tokio::sync::Mutex::new(()),
+        startup: Arc::new(StartupCoordinator::new()),
         store,
         bound_port: AtomicU16::new(0),
     });
@@ -868,44 +1520,15 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         .ensure_first_open_terminal()
         .context("provisioning the devserver first-open terminal")?;
 
-    // Restore the registered workspaces from the library-owned overlay. The
-    // mount prefix is re-derived from the path (the stable slug live mounts and
-    // the window feed already use), not persisted. `on` rows re-mount at it;
-    // `off` rows are tracked as registered-but-unmounted so the client still
-    // sees them and can toggle them on. A root that fails to re-mount is
-    // downgraded to off so its row still surfaces; a path that fails to map to a
-    // prefix is skipped with a note.
+    // Prepare every durable row before spawning restore work. Desired-on rows
+    // are already visible as Starting and persist as on throughout the window.
     let restore_rows = state
         .host
         .workspace_overlay()
         .map(|overlay| overlay.entries())
         .unwrap_or_default();
-    for ws in &restore_rows {
-        let path = PathBuf::from(&ws.path);
-        let prefix = match allocate_workspace_prefix(&path) {
-            Ok(prefix) => prefix,
-            Err(e) => {
-                eprintln!(
-                    "chan devserver: NOTE: skipping persisted workspace {} ({e})",
-                    ws.path
-                );
-                continue;
-            }
-        };
-        if ws.on {
-            if let Err(e) = state.mount_at(&path, &prefix).await {
-                eprintln!("chan devserver: NOTE: could not re-mount {}: {e}", ws.path);
-                state.track_off(&path, &prefix);
-            }
-        } else {
-            state.track_off(&path, &prefix);
-        }
-    }
-    // Persist once now so a newly-minted token + the restored set (with any
-    // failed re-mounts downgraded to off) land even before the first call.
+    let restore_attempts = state.prepare_restore_rows(restore_rows);
     state.persist_state();
-
-    fdstore_restore.apply(&state);
 
     let (app, serve_addr_cell) = build_devserver_app(state.clone(), host.clone());
 
@@ -913,6 +1536,10 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     // dial the tunnel), unless the resolved config is tunnel-only. `addr` is
     // still meaningful when unbound -- the discovery socket and the per-tenant
     // window records use it; only the loopback TCP bind is skipped.
+    state
+        .startup
+        .advance(StartupPhase::Binding)
+        .map_err(anyhow::Error::msg)?;
     let listener = if config.listen {
         // Bind intent, printed BEFORE the bind: on failure the journal names
         // the attempted address (port 0 = the OS assigns a free port).
@@ -937,25 +1564,38 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         state.bound_port.store(local_addr.port(), Ordering::Relaxed);
         state.persist_state();
     }
+    // Inherited terminals are adopted exactly once before any local, discovery,
+    // or tunnel route can reconnect to them.
+    fdstore_restore.apply(&state);
+    state
+        .startup
+        .advance(StartupPhase::FdstoreApplied)
+        .map_err(anyhow::Error::msg)?;
+
+    // Shutdown wiring is installed before route exposure. The observer moves
+    // startup to Stopping and cancels reindex work; the owned restore task uses
+    // another receiver and joins before this function returns.
+    let signal_tx = Arc::new(tokio::sync::watch::channel(false).0);
+    let cancel_host = host.clone();
+    let cancel_startup = state.startup.clone();
+    let mut cancel_rx = signal_tx.subscribe();
+    let cancel_task = tokio::spawn(async move {
+        let _ = cancel_rx.changed().await;
+        cancel_startup.stop();
+        cancel_host.cancel_all_reindex();
+    });
+
+    state
+        .startup
+        .advance(StartupPhase::ServingAndRestoring)
+        .map_err(anyhow::Error::msg)?;
+
     // A discovery bind failure is non-fatal: the management API still works,
     // only `chan open` registration is disabled. Tunnel-only instances have no
     // bound TCP address, so their configured port (possibly zero) is their
     // local selector identity.
     let discovery_port = local_addr.unwrap_or(config.addr).port();
     let _discovery = start_discovery_listener(state.clone(), discovery_port);
-
-    // Shutdown wiring mirrors `serve()`: a single watch channel fed by
-    // SIGINT/SIGTERM, plus a side task that cancels every tenant's in-flight
-    // reindex so the per-workspace flocks release promptly. Both the bound and
-    // the tunnel-only paths share it; the tunnel task and the no-listener wait
-    // both subscribe to it.
-    let signal_tx = Arc::new(tokio::sync::watch::channel(false).0);
-    let cancel_host = host.clone();
-    let mut cancel_rx = signal_tx.subscribe();
-    tokio::spawn(async move {
-        let _ = cancel_rx.changed().await;
-        cancel_host.cancel_all_reindex();
-    });
 
     // Tunnel mode: also hand the SAME app to chan-tunnel-client, which registers
     // ONE devserver and forwards inbound substreams into it, publishing every
@@ -964,7 +1604,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     // wildcard, so only tenant content is reachable through the gateway. The
     // run loop reconnects with backoff and is cancelled by the shutdown signal.
     let tunnel_url = config.tunnel.as_ref().map(|t| t.tunnel_url.clone());
-    if let Some(tunnel) = config.tunnel {
+    let tunnel_task = config.tunnel.map(|tunnel| {
         let assertion = TunnelAssertion {
             key: chan_tunnel_proto::gateway_assertion::derive_assertion_key(&tunnel.token),
             devserver_id: chan_tunnel_proto::gateway_assertion::devserver_id_from_token(
@@ -978,52 +1618,109 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
             assertion,
             mark_tunnel_origin,
         ));
-        spawn_devserver_tunnel(tunnel, tunnel_app, &signal_tx);
-    }
+        spawn_devserver_tunnel(tunnel, tunnel_app, &signal_tx)
+    });
 
     match listener {
         Some(listener) => {
-            // Report the bound address, not the requested one, so `--port 0`
-            // prints the OS-assigned port (mirrors `chan open`). Falls back to
-            // the request on the impossible local_addr() error rather than
-            // refusing to serve.
             let local_addr = local_addr.expect("listening devserver has a bound address");
-            println!("chan devserver: listening on http://{local_addr}/?t={token}");
-            // Machine-readable token contract: the desktop control terminal
-            // scrapes this exact marker from the connect-script output on every
-            // connect and reconnect, as the source of truth for the bearer
-            // token. Emitted once the token and bound address are known; the
-            // `--service=systemd` first start surfaces it through the unit
-            // journal the launcher follows.
-            println!("{DEVSERVER_TOKEN_MARKER}{token}");
-            fdstore::notify_ready()?;
-            // Owned by the shutdown channel: the ping loop exits with
-            // the server. None when systemd didn't configure a watchdog.
-            let _watchdog_pings = fdstore::spawn_watchdog_pings(signal_tx.subscribe());
-            crate::signal::graceful_serve(listener, app, signal_tx)
-                .await
-                .context("running devserver")?;
+            let serve_signal = signal_tx.clone();
+            let serve_startup = state.startup.clone();
+            let serve_arm = DevserverServeArm::Listener(tokio::spawn(async move {
+                let result =
+                    crate::signal::graceful_serve(listener, app, serve_signal.clone()).await;
+                serve_startup.stop();
+                let _ = serve_signal.send(true);
+                result
+            }));
+            let restore =
+                WorkspaceRestore::spawn(state.clone(), restore_attempts, signal_tx.subscribe());
+            let restore_join = restore.join().await;
+            if restore_join.is_err() {
+                state.startup.stop();
+                let _ = signal_tx.send(true);
+            }
+            let ready = restore_join.is_ok() && state.startup.ready_after_restore().await;
+            let notify_result = if ready {
+                println!("chan devserver: listening on http://{local_addr}/?t={token}");
+                println!("{DEVSERVER_TOKEN_MARKER}{token}");
+                fdstore::notify_ready()
+            } else {
+                Ok(())
+            };
+            if notify_result.is_err() {
+                state.startup.stop();
+                let _ = signal_tx.send(true);
+            }
+            let watchdog_pings = (ready && notify_result.is_ok())
+                .then(|| fdstore::spawn_watchdog_pings(signal_tx.subscribe()));
+            let serve_join = serve_arm.join(watchdog_pings).await;
+            let cancel_join = cancel_task.await;
+            let tunnel_join = match tunnel_task {
+                Some(task) => Some(task.await),
+                None => None,
+            };
+            state.startup.stop();
+            state.startup.stopped();
+            restore_join.context("joining workspace startup restore")?;
+            notify_result?;
+            cancel_join.context("joining devserver shutdown observer")?;
+            if let Some(tunnel_join) = tunnel_join {
+                tunnel_join.context("joining devserver tunnel task")?;
+            }
+            serve_join?;
         }
         None => {
-            // Tunnel-only: no local TCP listener. The discovery Unix socket and
-            // the tunnel are already up; report the public endpoint instead of a
-            // bound address. The token marker is omitted -- it is scraped only on
-            // a LOCAL connect, so it is moot with no listener (and tunnel mode is
-            // foreground-only, so no supervisor follows a journal for it).
-            match &tunnel_url {
-                Some(url) => println!(
-                    "chan devserver: tunnel-only (no local listener); publishing via {url}"
-                ),
-                None => println!(
-                    "chan devserver: no local listener and no tunnel; only the chan-open \
-                     discovery socket is reachable"
-                ),
+            let serve_signal = signal_tx.clone();
+            let serve_startup = state.startup.clone();
+            let serve_arm = DevserverServeArm::Wait(tokio::spawn(async move {
+                crate::signal::graceful_wait(serve_signal.clone()).await;
+                serve_startup.stop();
+                let _ = serve_signal.send(true);
+            }));
+            let restore =
+                WorkspaceRestore::spawn(state.clone(), restore_attempts, signal_tx.subscribe());
+            let restore_join = restore.join().await;
+            if restore_join.is_err() {
+                state.startup.stop();
+                let _ = signal_tx.send(true);
             }
-            fdstore::notify_ready()?;
-            let _watchdog_pings = fdstore::spawn_watchdog_pings(signal_tx.subscribe());
-            // No listener to drain: install the signal watcher and await
-            // shutdown while the tunnel + reindex-cancel tasks run on `signal_tx`.
-            crate::signal::graceful_wait(signal_tx).await;
+            let ready = restore_join.is_ok() && state.startup.ready_after_restore().await;
+            let notify_result = if ready {
+                match &tunnel_url {
+                    Some(url) => println!(
+                        "chan devserver: tunnel-only (no local listener); publishing via {url}"
+                    ),
+                    None => println!(
+                        "chan devserver: no local listener and no tunnel; only the chan-open \
+                         discovery socket is reachable"
+                    ),
+                }
+                fdstore::notify_ready()
+            } else {
+                Ok(())
+            };
+            if notify_result.is_err() {
+                state.startup.stop();
+                let _ = signal_tx.send(true);
+            }
+            let watchdog_pings = (ready && notify_result.is_ok())
+                .then(|| fdstore::spawn_watchdog_pings(signal_tx.subscribe()));
+            let serve_join = serve_arm.join(watchdog_pings).await;
+            let cancel_join = cancel_task.await;
+            let tunnel_join = match tunnel_task {
+                Some(task) => Some(task.await),
+                None => None,
+            };
+            state.startup.stop();
+            state.startup.stopped();
+            restore_join.context("joining workspace startup restore")?;
+            notify_result?;
+            cancel_join.context("joining devserver shutdown observer")?;
+            if let Some(tunnel_join) = tunnel_join {
+                tunnel_join.context("joining devserver tunnel task")?;
+            }
+            serve_join?;
         }
     }
     Ok(())
@@ -1091,7 +1788,7 @@ fn spawn_devserver_tunnel(
     tunnel: DevserverTunnel,
     app: Router,
     signal_tx: &Arc<tokio::sync::watch::Sender<bool>>,
-) {
+) -> tokio::task::JoinHandle<()> {
     let DevserverTunnel {
         tunnel_url,
         token,
@@ -1108,7 +1805,7 @@ fn spawn_devserver_tunnel(
         };
         let production = is_production_tunnel_url(&tunnel_url);
         let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(8);
-        tokio::spawn(async move {
+        let events_task = tokio::spawn(async move {
             while let Some(ev) = events_rx.recv().await {
                 match ev {
                     chan_tunnel_client::TunnelEvent::Connected(reg) => {
@@ -1162,7 +1859,9 @@ fn spawn_devserver_tunnel(
             }
             _ = shutdown_rx.changed() => {}
         }
-    });
+        events_task.abort();
+        let _ = events_task.await;
+    })
 }
 
 /// Build the merged router: the unauthenticated info probe, the
@@ -1666,6 +2365,232 @@ fn canonical_root(root: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use chan_library::workspace_slug;
+    use std::sync::atomic::AtomicBool;
+
+    async fn completed_serve_arm(listener: bool) -> DevserverServeArm {
+        if listener {
+            let task = tokio::spawn(async { Ok(()) });
+            while !task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            DevserverServeArm::Listener(task)
+        } else {
+            let task = tokio::spawn(async {});
+            while !task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            DevserverServeArm::Wait(task)
+        }
+    }
+
+    async fn assert_serve_arm_joins_watchdog(arm: DevserverServeArm) {
+        let completed = Arc::new(AtomicBool::new(false));
+        let task_completed = completed.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let watchdog_task = tokio::spawn(async move {
+            let _ = entered_tx.send(());
+            release_rx
+                .recv()
+                .expect("release synchronous watchdog work");
+            task_completed.store(true, Ordering::SeqCst);
+        });
+        entered_rx.await.expect("watchdog task entered");
+
+        let watchdog = fdstore::WatchdogPings::from_task(watchdog_task);
+        let mut arm_join = std::pin::pin!(arm.join(Some(watchdog)));
+        assert!(
+            futures::poll!(arm_join.as_mut()).is_pending(),
+            "serve arm returned after abort without joining synchronous watchdog work"
+        );
+        release_tx.send(()).expect("release watchdog task");
+        arm_join.await.expect("serve arm completed");
+        assert!(
+            completed.load(Ordering::SeqCst),
+            "serve arm returned before the watchdog task's synchronous side effect"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn both_devserver_serve_arms_join_watchdog_before_return() {
+        assert_serve_arm_joins_watchdog(completed_serve_arm(true).await).await;
+        assert_serve_arm_joins_watchdog(completed_serve_arm(false).await).await;
+    }
+
+    fn pending_record(generation: u64) -> WorkspaceRecord {
+        WorkspaceRecord::prepared(
+            PathBuf::from("/tmp/notes"),
+            "/notes-test".into(),
+            true,
+            generation,
+        )
+    }
+
+    #[test]
+    fn pending_mount_persists_desired_on_before_completion() {
+        let record = pending_record(9);
+        assert_eq!(record.phase, MountPhase::Starting);
+        let persisted = record.persisted().expect("starting row persists");
+        assert!(persisted.desired_on);
+        assert_eq!(persisted.generation, 9);
+    }
+
+    #[tokio::test]
+    async fn begin_mount_publishes_starting_and_intent_before_spawn() {
+        let home = tempfile::tempdir().expect("home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let prefix = allocate_workspace_prefix(workspace.path()).unwrap();
+
+        let attempt = state
+            .begin_mount(workspace.path(), &prefix)
+            .expect("prepare mount")
+            .expect("fresh attempt");
+        state.persist_state();
+
+        let entry = state.entry_for(&prefix).expect("starting row");
+        assert_eq!(entry.status, WorkspaceStatus::Starting);
+        assert!(!entry.on);
+        let persisted = state
+            .host
+            .workspace_overlay()
+            .expect("overlay")
+            .entries()
+            .pop()
+            .expect("durable intent");
+        assert!(persisted.desired_on);
+        assert_eq!(persisted.generation, attempt.generation);
+
+        state.cancel_mount_attempt(&attempt);
+    }
+
+    #[test]
+    fn stale_mount_completion_cannot_reverse_off_or_forget() {
+        let mut off = pending_record(3);
+        let stale_off = off.generation;
+        assert!(off.turn_off());
+        assert_eq!(
+            off.complete_success(stale_off, "stale-token".into()),
+            MountCompletion::CloseStale
+        );
+        assert_eq!(off.desired, DesiredMount::Off);
+        assert_eq!(off.phase, MountPhase::Stopped);
+        assert!(!off.persisted().unwrap().desired_on);
+
+        let mut toggled_back_on = pending_record(4);
+        let older_on = toggled_back_on.generation;
+        assert!(toggled_back_on.turn_off());
+        let newer_on = toggled_back_on.begin_on().expect("new on intent");
+        assert_ne!(older_on, newer_on);
+        assert_eq!(
+            toggled_back_on.complete_success(older_on, "stale-token".into()),
+            MountCompletion::CloseStale
+        );
+        assert_eq!(toggled_back_on.desired, DesiredMount::On);
+        assert_eq!(toggled_back_on.phase, MountPhase::Starting);
+
+        let mut forgotten = pending_record(7);
+        let stale_forget = forgotten.generation;
+        forgotten.forget();
+        assert_eq!(
+            forgotten.complete_success(stale_forget, "stale-token".into()),
+            MountCompletion::ForgetStale
+        );
+        assert_eq!(forgotten.desired, DesiredMount::Forgotten);
+        assert!(forgotten.persisted().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timed_out_mount_becomes_visible_failed_intent() {
+        let mut record = pending_record(11);
+        let result = time_bound_mount(
+            Duration::from_secs(1),
+            std::future::pending::<Result<(), Error>>(),
+        )
+        .await;
+        assert!(result.is_err(), "hung mount must hit its finite bound");
+        assert!(record.complete_failure(11, "mount timed out after 1s".into()));
+        assert_eq!(
+            record.phase,
+            MountPhase::Failed("mount timed out after 1s".into())
+        );
+        let persisted = record.persisted().expect("failure keeps desired intent");
+        assert!(persisted.desired_on);
+        assert_eq!(persisted.generation, 11);
+    }
+
+    #[tokio::test]
+    async fn ready_waits_for_every_startup_attempt_to_settle() {
+        let startup = Arc::new(StartupCoordinator::new());
+        let attempt = MountAttemptKey::new("/notes-test", 4);
+        startup.track(attempt.clone()).expect("track boot mount");
+        startup
+            .advance(StartupPhase::Binding)
+            .expect("preparing -> binding");
+        startup
+            .advance(StartupPhase::FdstoreApplied)
+            .expect("binding -> fdstore");
+        startup
+            .advance(StartupPhase::ServingAndRestoring)
+            .expect("fdstore -> serving");
+
+        let ready_startup = startup.clone();
+        let ready = tokio::spawn(async move { ready_startup.ready_after_restore().await });
+        tokio::task::yield_now().await;
+        assert!(!ready.is_finished(), "READY fired with a mount pending");
+        startup.settle(&attempt);
+        assert!(ready.await.unwrap());
+        assert_eq!(startup.phase(), StartupPhase::Ready);
+    }
+
+    #[test]
+    fn fdstore_apply_is_single_and_precedes_route_exposure() {
+        let startup = StartupCoordinator::new();
+        startup
+            .advance(StartupPhase::Binding)
+            .expect("preparing -> binding");
+        assert!(
+            startup.advance(StartupPhase::ServingAndRestoring).is_err(),
+            "routes must not serve before fdstore adoption"
+        );
+        startup
+            .advance(StartupPhase::FdstoreApplied)
+            .expect("fdstore applies once");
+        assert!(
+            startup.advance(StartupPhase::FdstoreApplied).is_err(),
+            "fdstore adoption cannot run twice"
+        );
+        startup
+            .advance(StartupPhase::ServingAndRestoring)
+            .expect("routes expose after fdstore");
+    }
+
+    #[tokio::test]
+    async fn restore_owner_joins_shutdown_before_returning() {
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let task_fired = fired.clone();
+        let task_release = release.clone();
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                _ = shutdown_rx.changed() => {}
+                _ = task_release.notified() => {
+                    task_fired.store(true, Ordering::SeqCst);
+                }
+            }
+        });
+        let restore = WorkspaceRestore::from_task(task);
+
+        shutdown_tx.send(true).unwrap();
+        restore.join().await.unwrap();
+        release.notify_waiters();
+        tokio::task::yield_now().await;
+        assert!(
+            !fired.load(Ordering::SeqCst),
+            "restore task mutated state after its owner joined"
+        );
+    }
 
     fn updated_row(result: SetWorkspaceOnResult) -> WorkspaceEntry {
         match result {
@@ -2131,6 +3056,8 @@ mod tests {
             library_id: "lib-test".into(),
             host_label: "test".into(),
             workspaces: Mutex::new(HashMap::new()),
+            mount_attempt_lock: tokio::sync::Mutex::new(()),
+            startup: Arc::new(StartupCoordinator::new()),
             store: DevserverStore::at(home.join("devserver").join("config.json")),
             bound_port: AtomicU16::new(0),
         })
@@ -2544,7 +3471,7 @@ mod tests {
         // canonical path.
         let canonical = ws.path().canonicalize().expect("canonicalize workspace");
         assert_eq!(rows[0].path, canonical.to_string_lossy());
-        assert!(!rows[0].on);
+        assert!(!rows[0].desired_on);
     }
 
     #[tokio::test]
@@ -2644,7 +3571,10 @@ mod tests {
             .iter()
             .find(|r| r.path == canon)
             .expect("A is still registered (off)");
-        assert!(!a.on, "closed A stays off across a later persist_state");
+        assert!(
+            !a.desired_on,
+            "closed A stays off across a later persist_state"
+        );
     }
 
     #[tokio::test]

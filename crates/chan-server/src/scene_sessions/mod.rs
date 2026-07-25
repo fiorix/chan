@@ -20,11 +20,10 @@
 //!
 //! While a session is live the server is the single writer to disk:
 //! the flusher debounces dirty sessions to atomic CAS writes of the
-//! scene file form, and the reconciler folds external writes back in
-//! through the replace semantics (bumped versions and tombstones that
-//! win client-side reconciliation) instead of raising the "changed on
-//! disk" banner. Because a filesystem's mtime and read-after-write
-//! cannot be trusted to identify our own flush echoes (network FUSE
+//! scene file form. The reconciler adopts clean external writes
+//! through the replace semantics and retains dirty divergence for
+//! identity-aware resolution. Because a filesystem's mtime and
+//! read-after-write cannot be trusted to identify our own flush echoes (network FUSE
 //! mounts re-stamp mtime and serve stale/empty reads), the reconciler
 //! also checks raw disk bytes against the session's
 //! [`DiskEchoRing`] and defers suspicious fold-ins until a second
@@ -44,13 +43,17 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use chan_workspace::{ChanError, FileStat, WatchEvent, WatchKind, Workspace, TEXT_WRITE_LIMIT};
+use chan_workspace::{
+    semantic_write_budget, ChanError, FileStat, WatchEvent, WatchKind, Workspace, TEXT_WRITE_LIMIT,
+};
 use rand::RngCore;
 use tokio::sync::{broadcast, mpsc, watch, Notify};
 
 use crate::disk_echo::{content_hash, DiskEchoRing};
 use crate::routes::scene::{PeerSceneCursor, ServerFrame};
-use crate::self_writes::SelfWrites;
+use crate::self_writes::{
+    check_write_preconditions, SelfWrites, WritePreconditionError, WritePreconditions,
+};
 use crate::state::WorkspaceCell;
 use scene::{Applied, Scene, SceneError};
 
@@ -69,9 +72,12 @@ const SCENE_DETACH_GRACE: Duration = Duration::from_secs(30);
 const FLUSH_TICK: Duration = Duration::from_millis(200);
 
 /// A divergent disk observation that cannot be verified as our own
-/// echo must hold this long, unchanged, before it folds into the
-/// session; parity with doc_sessions.
+/// echo must hold this long, unchanged, before the state machine
+/// settles it; parity with doc_sessions.
 const CORROBORATE_AFTER: Duration = Duration::from_millis(300);
+const REMOVED_DISK_MARKER: &str = "\0chan:removed";
+const UNREADABLE_DISK_MARKER: &str = "\0chan:unreadable";
+static NEXT_CONFLICT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A fresh versionNonce for server-side bumps, in Excalidraw's
 /// `randomInteger` range `[0, 2^31)`.
@@ -109,6 +115,8 @@ pub struct SceneSession {
     /// interleave. Acquired before any state lock, held across the
     /// blocking-IO awaits; see the module doc.
     io_lock: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    fail_after_preflight: AtomicBool,
 }
 
 struct AttachSink {
@@ -127,15 +135,22 @@ struct CursorPos {
 struct SceneState {
     /// Authority scene, tombstones included.
     scene: Scene,
+    /// Semantic cap derived from the last durable file size. Legacy
+    /// oversized scenes may shrink but cannot grow.
+    write_budget: u64,
     /// Count of accepted mutations (pushes, replaces, disk merges that
     /// changed anything) since session creation. Informational on the
     /// wire; there is no rebase protocol.
     version: u64,
     attaches: HashMap<u64, AttachSink>,
     cursors: HashMap<u64, CursorPos>,
-    /// When the authority first diverged from the flushed disk state;
-    /// None while clean. The flush debounce is measured from here.
-    dirty_since: Option<Instant>,
+    /// Explicit lifecycle state. Disk observations preserve the
+    /// independent dirty clock; conflicts retain all three inputs and
+    /// pause automatic writes.
+    session_state: SessionState,
+    /// Last canonical scene content known to have reached disk. This
+    /// remains unchanged while observations or conflicts are pending.
+    baseline: DurableBaseline,
     /// Skip the debounce on the next flusher pass (detach, forced
     /// flush).
     flush_now: bool,
@@ -154,22 +169,225 @@ struct SceneState {
     /// from) disk. A reconcile read matching the ring is our own bytes
     /// under a re-stamped mtime, never an external edit.
     disk_echo: DiskEchoRing,
-    /// Divergent disk observation awaiting corroboration; folded in
-    /// only after it holds unchanged past `CORROBORATE_AFTER`. The
-    /// flusher tick re-observes pending sessions.
-    pending_fold: Option<PendingFold>,
-    /// First observation of the file being absent; `mark_removed` only
-    /// fires once absence holds past `CORROBORATE_AFTER`.
-    pending_removal: Option<Instant>,
 }
 
-/// One unverified disk observation: content hash plus the stat token
-/// it arrived under. A later observation corroborates it only when
-/// both match; any change restarts the clock.
-struct PendingFold {
-    hash: u64,
+#[derive(Debug)]
+enum SessionState {
+    Clean,
+    Dirty {
+        since: Instant,
+    },
+    Observing {
+        dirty_since: Option<Instant>,
+        observation: DiskObservation,
+    },
+    Conflicted(SessionConflict),
+    Removed,
+}
+
+#[derive(Debug)]
+enum DiskObservation {
+    Content {
+        hash: u64,
+        mtime_ns: Option<i64>,
+        seen: Instant,
+    },
+    Removal {
+        seen: Instant,
+    },
+}
+
+#[derive(Debug)]
+struct DurableBaseline {
+    content: String,
+    content_hash: u64,
+    #[allow(dead_code)] // consumed by E3 conflict persistence/resolution
     mtime_ns: Option<i64>,
-    seen: Instant,
+    #[allow(dead_code)] // consumed by E3 conflict persistence/resolution
+    authority_version: u64,
+}
+
+#[derive(Debug)]
+struct SessionConflict {
+    id: String,
+    baseline_version: u64,
+    disk_version: u64,
+    authority_version: u64,
+    #[allow(dead_code)] // consumed by E3 explicit overwrite
+    disk_mtime_ns: Option<i64>,
+    #[allow(dead_code)] // consumed by E3 explicit reload
+    disk_content: String,
+}
+
+/// Identity-aware three-way merge result consumed by the session
+/// state transition.
+enum MergeOutcome {
+    #[allow(dead_code)] // constructed by E3's merge engine
+    Merged(String),
+    Conflict,
+}
+
+/// Result of the conflict-aware PUT mutation gate.
+pub(crate) enum HttpReplaceOutcome {
+    Applied,
+    PreconditionRequired {
+        current_version: u64,
+        disk_mtime_ns: Option<i64>,
+    },
+    Stale {
+        current_version: u64,
+        disk_mtime_ns: Option<i64>,
+    },
+    Conflicted {
+        disk_mtime_ns: Option<i64>,
+    },
+}
+
+pub(crate) struct HttpWriteView {
+    pub disk_mtime_ns: Option<i64>,
+    pub authority_version: u64,
+    pub conflict_mtime_ns: Option<Option<i64>>,
+    pub write_budget: u64,
+}
+
+pub(crate) struct HttpReadView {
+    pub content: String,
+    pub disk_mtime_ns: Option<i64>,
+    pub authority_version: u64,
+    pub disk_conflicted: bool,
+}
+
+impl SessionState {
+    fn dirty_since(&self) -> Option<Instant> {
+        match self {
+            Self::Dirty { since } => Some(*since),
+            Self::Observing { dirty_since, .. } => *dirty_since,
+            _ => None,
+        }
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.dirty_since().is_some() || matches!(self, Self::Conflicted(_))
+    }
+
+    fn mark_dirty(&mut self, authority_version: u64) {
+        match self {
+            Self::Clean | Self::Removed => {
+                *self = Self::Dirty {
+                    since: Instant::now(),
+                };
+            }
+            Self::Dirty { .. } => {}
+            Self::Observing { dirty_since, .. } => {
+                dirty_since.get_or_insert_with(Instant::now);
+            }
+            Self::Conflicted(conflict) => conflict.authority_version = authority_version,
+        }
+    }
+
+    fn observe_content(&mut self, hash: u64, mtime_ns: Option<i64>) {
+        if matches!(self, Self::Conflicted(_)) {
+            return;
+        }
+        let dirty_since = self.dirty_since();
+        *self = Self::Observing {
+            dirty_since,
+            observation: DiskObservation::Content {
+                hash,
+                mtime_ns,
+                seen: Instant::now(),
+            },
+        };
+    }
+
+    fn observe_removal(&mut self) {
+        if matches!(self, Self::Conflicted(_)) {
+            return;
+        }
+        let dirty_since = self.dirty_since();
+        *self = Self::Observing {
+            dirty_since,
+            observation: DiskObservation::Removal {
+                seen: Instant::now(),
+            },
+        };
+    }
+
+    fn clear_observation(&mut self) {
+        let Self::Observing { dirty_since, .. } = self else {
+            return;
+        };
+        *self = match *dirty_since {
+            Some(since) => Self::Dirty { since },
+            None => Self::Clean,
+        };
+    }
+
+    fn content_observation(&self) -> Option<(u64, Option<i64>, Instant)> {
+        match self {
+            Self::Observing {
+                observation:
+                    DiskObservation::Content {
+                        hash,
+                        mtime_ns,
+                        seen,
+                    },
+                ..
+            } => Some((*hash, *mtime_ns, *seen)),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn content_observation_mut(&mut self) -> Option<&mut Instant> {
+        match self {
+            Self::Observing {
+                observation: DiskObservation::Content { seen, .. },
+                ..
+            } => Some(seen),
+            _ => None,
+        }
+    }
+
+    fn removal_observation(&self) -> Option<Instant> {
+        match self {
+            Self::Observing {
+                observation: DiskObservation::Removal { seen },
+                ..
+            } => Some(*seen),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn removal_observation_mut(&mut self) -> Option<&mut Instant> {
+        match self {
+            Self::Observing {
+                observation: DiskObservation::Removal { seen },
+                ..
+            } => Some(seen),
+            _ => None,
+        }
+    }
+
+    fn has_observation(&self) -> bool {
+        matches!(self, Self::Observing { .. })
+    }
+
+    fn conflict_disk_mtime_ns(&self) -> Option<Option<i64>> {
+        match self {
+            Self::Conflicted(conflict) => Some(conflict.disk_mtime_ns),
+            _ => None,
+        }
+    }
+
+    fn clear_after_flush(&mut self) {
+        match self {
+            Self::Dirty { .. } => *self = Self::Clean,
+            Self::Observing { dirty_since, .. } => *dirty_since = None,
+            Self::Clean | Self::Conflicted(_) | Self::Removed => {}
+        }
+    }
 }
 
 /// A registered attachment. Dropping it detaches: the outbox and
@@ -252,7 +470,7 @@ fn snapshot_frame(path: &str, st: &SceneState) -> String {
         elements: st.scene.elements_snapshot(),
         app_state: serde_json::Value::Object(st.scene.app_state().clone()),
         files: serde_json::Value::Object(st.scene.files().clone()),
-        dirty: st.dirty_since.is_some(),
+        dirty: st.session_state.is_dirty(),
         mtime_ns: st.flushed_mtime_ns.map(|n| n.to_string()),
         cursors,
     })
@@ -260,7 +478,7 @@ fn snapshot_frame(path: &str, st: &SceneState) -> String {
 
 fn flush_frame(st: &SceneState) -> String {
     serialize(&ServerFrame::Flush {
-        dirty: st.dirty_since.is_some(),
+        dirty: st.session_state.is_dirty(),
         mtime_ns: st.flushed_mtime_ns.map(|n| n.to_string()),
         error: None,
     })
@@ -290,9 +508,7 @@ impl SceneState {
     }
 
     fn mark_dirty(&mut self) {
-        if self.dirty_since.is_none() {
-            self.dirty_since = Some(Instant::now());
-        }
+        self.session_state.mark_dirty(self.version);
     }
 }
 
@@ -304,26 +520,35 @@ impl SceneSession {
         // form, because a stale read returns exactly what was on disk.
         let mut disk_echo = DiskEchoRing::new();
         disk_echo.note(content_hash(seed_text));
+        let baseline_content = scene.serialize_file();
+        let baseline = DurableBaseline {
+            content_hash: content_hash(&baseline_content),
+            content: baseline_content,
+            mtime_ns: stat.mtime_ns,
+            authority_version: 0,
+        };
         Self {
             path: path.to_string(),
             state: Mutex::new(SceneState {
                 scene,
+                write_budget: semantic_write_budget(Some(stat.size)),
                 version: 0,
                 attaches: HashMap::new(),
                 cursors: HashMap::new(),
-                dirty_since: None,
+                session_state: SessionState::Clean,
+                baseline,
                 flush_now: false,
                 flushed_mtime_ns: stat.mtime_ns,
                 flush_epoch_version: 0,
                 flush_failures: 0,
                 disk_echo,
-                pending_fold: None,
-                pending_removal: None,
             }),
             attach_count: AtomicUsize::new(0),
             detached_at: AtomicI64::new(0),
             closed: AtomicBool::new(false),
             io_lock: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            fail_after_preflight: AtomicBool::new(false),
         }
     }
 
@@ -337,6 +562,14 @@ impl SceneSession {
         self.attach_count.load(Ordering::Relaxed)
     }
 
+    /// Swap the echo ring for one with a short TTL so tests can
+    /// observe expiry without sleeping through the production window.
+    /// Discards existing entries; call before the writes under test.
+    #[cfg(test)]
+    fn test_set_disk_echo_ttl(&self, ttl: Duration) {
+        self.lock_state().disk_echo = DiskEchoRing::with_ttl(ttl);
+    }
+
     /// Age the pending absence past CORROBORATE_AFTER so the next
     /// reconcile confirms the removal; for route-level tests that
     /// exercise the removed flow without sleeping.
@@ -344,23 +577,67 @@ impl SceneSession {
     pub(crate) fn test_backdate_pending_removal(&self) {
         let mut st = self.lock_state();
         let pending = st
-            .pending_removal
-            .as_mut()
+            .session_state
+            .removal_observation_mut()
             .expect("a pending removal to age");
         *pending = Instant::now()
             .checked_sub(CORROBORATE_AFTER + Duration::from_millis(50))
             .unwrap();
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_force_conflict(&self, disk_text: String, stat: &FileStat) {
+        self.apply_merge_outcome(disk_text, stat, MergeOutcome::Conflict);
+    }
+
+    #[cfg(test)]
+    fn test_fail_after_preflight(&self) {
+        self.fail_after_preflight.store(true, Ordering::Relaxed);
+    }
+
     /// Current authority scene in its file form plus the session CAS
     /// token, for the GET divert: a client reads exactly what a flush
     /// would write, under a token consistent with the session.
+    #[cfg(test)]
     pub fn authority_view(&self) -> (String, Option<i64>) {
         let st = self.lock_state();
         (st.scene.serialize_file(), st.flushed_mtime_ns)
     }
 
+    /// Atomic GET view: authority bytes and every piece of metadata
+    /// the client must retain for a subsequent CAS write.
+    pub(crate) fn http_read_view(&self) -> HttpReadView {
+        let st = self.lock_state();
+        HttpReadView {
+            content: st.scene.serialize_file(),
+            disk_mtime_ns: st.flushed_mtime_ns,
+            authority_version: st.version,
+            disk_conflicted: st.session_state.conflict_disk_mtime_ns().is_some(),
+        }
+    }
+
+    /// Atomic PUT preflight view: session token and an outer conflict
+    /// marker carrying the retained disk token.
+    pub(crate) fn http_write_view(&self) -> HttpWriteView {
+        let st = self.lock_state();
+        HttpWriteView {
+            disk_mtime_ns: st.flushed_mtime_ns,
+            authority_version: st.version,
+            conflict_mtime_ns: st.session_state.conflict_disk_mtime_ns(),
+            write_budget: st.write_budget,
+        }
+    }
+
+    /// Whether a PUT must stay on the session path. Only an explicitly
+    /// removed session falls through so the classic path can recreate
+    /// the file; a conflict remains session-owned even when the
+    /// conflicting disk token is absent.
+    pub(crate) fn diverts_http_write(&self) -> bool {
+        !matches!(&self.lock_state().session_state, SessionState::Removed)
+    }
+
     /// Session CAS token for the PUT divert's conflict check.
+    #[cfg(test)]
     pub fn token(&self) -> Option<i64> {
         self.lock_state().flushed_mtime_ns
     }
@@ -369,9 +646,55 @@ impl SceneSession {
     /// divert). Changed elements fan to every attachment with bumped
     /// versions and the session turns dirty; equal content is a no-op.
     /// The caller decides when to flush.
+    #[cfg(test)]
     pub fn apply_replace(&self, body: &str) -> Result<(), SceneError> {
         let mut st = self.lock_state();
-        let applied = st.scene.apply_replace(body, &mut fresh_nonce)?;
+        self.apply_replace_locked(&mut st, body)?;
+        Ok(())
+    }
+
+    /// Apply an HTTP replacement only while automatic persistence is
+    /// permitted. Collaborative updates remain live during conflicts;
+    /// PUT must instead direct the caller to explicit resolution
+    /// without mutating authority.
+    pub(crate) fn apply_http_replace(
+        &self,
+        body: &str,
+        preconditions: WritePreconditions,
+    ) -> Result<HttpReplaceOutcome, SceneError> {
+        let mut st = self.lock_state();
+        if let Some(disk_mtime_ns) = st.session_state.conflict_disk_mtime_ns() {
+            return Ok(HttpReplaceOutcome::Conflicted { disk_mtime_ns });
+        }
+        let content_equal = Scene::parse(body)?.serialize_file() == st.scene.serialize_file();
+        match check_write_preconditions(
+            st.flushed_mtime_ns,
+            Some(st.version),
+            content_equal,
+            preconditions,
+        ) {
+            Ok(()) => {}
+            Err(WritePreconditionError::Required) => {
+                return Ok(HttpReplaceOutcome::PreconditionRequired {
+                    current_version: st.version,
+                    disk_mtime_ns: st.flushed_mtime_ns,
+                });
+            }
+            Err(WritePreconditionError::Conflict) => {
+                return Ok(HttpReplaceOutcome::Stale {
+                    current_version: st.version,
+                    disk_mtime_ns: st.flushed_mtime_ns,
+                });
+            }
+        }
+        self.apply_replace_locked(&mut st, body)?;
+        Ok(HttpReplaceOutcome::Applied)
+    }
+
+    fn apply_replace_locked(&self, st: &mut SceneState, body: &str) -> Result<(), SceneError> {
+        let applied = st
+            .scene
+            .apply_replace_with_limit(body, &mut fresh_nonce, st.write_budget)?;
         if !applied.is_empty() {
             st.version += 1;
             let frame = update_frame(st.version, applied);
@@ -381,22 +704,141 @@ impl SceneSession {
         Ok(())
     }
 
-    /// Fold external disk content into the session through the replace
-    /// semantics: clients converge on the disk state, the token is
-    /// adopted, and the session is clean afterwards. Equal content
-    /// adopts the token silently. Content that does not parse as a
-    /// scene is ignored with a warning: a deliberate stalemate that
-    /// surfaces through flush errors rather than corrupting the
-    /// session.
+    /// Apply a result supplied by the identity-aware merge gate.
+    #[cfg(test)]
+    fn apply_merge_outcome(&self, disk_text: String, stat: &FileStat, outcome: MergeOutcome) {
+        let mut st = self.lock_state();
+        self.apply_merge_outcome_locked(&mut st, disk_text, stat, outcome);
+    }
+
+    fn apply_merge_outcome_locked(
+        &self,
+        st: &mut SceneState,
+        disk_text: String,
+        stat: &FileStat,
+        outcome: MergeOutcome,
+    ) {
+        let disk_hash = content_hash(&disk_text);
+        let disk_budget = semantic_write_budget(Some(stat.size));
+        match outcome {
+            MergeOutcome::Merged(merged_text) => {
+                let disk_baseline = match Scene::parse(&disk_text) {
+                    Ok(scene) => scene.serialize_file(),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            path = %self.path,
+                            "scene merge outcome carried unusable disk content"
+                        );
+                        return;
+                    }
+                };
+                let dirty_since = st.session_state.dirty_since().unwrap_or_else(Instant::now);
+                let applied = match st.scene.apply_replace_with_limit(
+                    &merged_text,
+                    &mut fresh_nonce,
+                    disk_budget,
+                ) {
+                    Ok(applied) => applied,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            path = %self.path,
+                            "scene merge outcome was unusable"
+                        );
+                        return;
+                    }
+                };
+                st.disk_echo.note(disk_hash);
+                st.flushed_mtime_ns = stat.mtime_ns;
+                if !applied.is_empty() {
+                    st.version += 1;
+                    let frame = update_frame(st.version, applied);
+                    st.fan(&frame);
+                }
+                let baseline_hash = content_hash(&disk_baseline);
+                st.baseline = DurableBaseline {
+                    content: disk_baseline,
+                    content_hash: baseline_hash,
+                    mtime_ns: stat.mtime_ns,
+                    authority_version: st.version,
+                };
+                st.write_budget = disk_budget;
+                st.session_state = if st.scene.serialize_file() == st.baseline.content {
+                    SessionState::Clean
+                } else {
+                    SessionState::Dirty { since: dirty_since }
+                };
+                st.flush_now = st.session_state.is_dirty();
+                st.flush_failures = 0;
+            }
+            MergeOutcome::Conflict => {
+                Self::enter_conflict_locked(st, disk_hash, stat.mtime_ns, disk_text);
+            }
+        }
+    }
+
+    fn enter_conflict_locked(
+        st: &mut SceneState,
+        disk_version: u64,
+        disk_mtime_ns: Option<i64>,
+        disk_content: String,
+    ) {
+        let baseline_version = st.baseline.content_hash;
+        let id = match &st.session_state {
+            SessionState::Conflicted(conflict)
+                if conflict.baseline_version == baseline_version
+                    && conflict.disk_version == disk_version =>
+            {
+                conflict.id.clone()
+            }
+            _ => format!("scene-{}", NEXT_CONFLICT_ID.fetch_add(1, Ordering::Relaxed)),
+        };
+        st.session_state = SessionState::Conflicted(SessionConflict {
+            id,
+            baseline_version,
+            disk_version,
+            authority_version: st.version,
+            disk_mtime_ns,
+            disk_content,
+        });
+        st.flush_now = false;
+    }
+
+    /// Fold external disk content into the session. Divergence runs
+    /// the identity- and field-aware three-way merge from the durable
+    /// baseline; invalid or ambiguous scene input becomes a conflict.
     fn merge_disk(&self, disk_text: String, stat: &FileStat) {
         let mut st = self.lock_state();
+        if scene::validate_merge_input(&disk_text).is_err() {
+            self.apply_merge_outcome_locked(&mut st, disk_text, stat, MergeOutcome::Conflict);
+            return;
+        }
+        let disk_matches_authority = Scene::parse(&disk_text)
+            .is_ok_and(|scene| scene.serialize_file() == st.scene.serialize_file());
+        if st.session_state.is_dirty() && !disk_matches_authority {
+            let disk_budget = semantic_write_budget(Some(stat.size));
+            let outcome = scene::merge_three_way_with_limit(
+                &st.baseline.content,
+                &st.scene,
+                &disk_text,
+                disk_budget,
+            )
+            .map(MergeOutcome::Merged)
+            .unwrap_or(MergeOutcome::Conflict);
+            self.apply_merge_outcome_locked(&mut st, disk_text, stat, outcome);
+            return;
+        }
         // Adopted disk bytes join the echo ring either way: even when
         // the parse gate below rejects them, a stale read serving the
         // same bytes again is not a fresh observation.
-        st.disk_echo.note(content_hash(&disk_text));
-        st.pending_fold = None;
-        st.pending_removal = None;
-        match st.scene.apply_replace(&disk_text, &mut fresh_nonce) {
+        let disk_hash = content_hash(&disk_text);
+        let disk_budget = semantic_write_budget(Some(stat.size));
+        st.disk_echo.note(disk_hash);
+        match st
+            .scene
+            .apply_replace_with_limit(&disk_text, &mut fresh_nonce, disk_budget)
+        {
             Ok(applied) => {
                 if !applied.is_empty() {
                     st.version += 1;
@@ -404,7 +846,15 @@ impl SceneSession {
                     st.fan(&frame);
                 }
                 st.flushed_mtime_ns = stat.mtime_ns;
-                st.dirty_since = None;
+                let baseline_content = st.scene.serialize_file();
+                st.baseline = DurableBaseline {
+                    content_hash: content_hash(&baseline_content),
+                    content: baseline_content,
+                    mtime_ns: stat.mtime_ns,
+                    authority_version: st.version,
+                };
+                st.write_budget = disk_budget;
+                st.session_state = SessionState::Clean;
                 st.flush_failures = 0;
             }
             Err(e) => {
@@ -423,12 +873,113 @@ impl SceneSession {
     /// recreates), and tell every client.
     fn mark_removed(&self) {
         let mut st = self.lock_state();
+        if st.session_state.is_dirty() {
+            Self::enter_conflict_locked(
+                &mut st,
+                content_hash(REMOVED_DISK_MARKER),
+                None,
+                String::new(),
+            );
+            return;
+        }
         st.flushed_mtime_ns = None;
-        st.dirty_since = None;
+        st.write_budget = TEXT_WRITE_LIMIT;
+        st.session_state = SessionState::Removed;
         st.flush_now = false;
-        st.pending_fold = None;
-        st.pending_removal = None;
         st.fan(&serialize(&ServerFrame::Removed));
+    }
+
+    /// Resolve a conflict in favor of the retained disk side. A valid
+    /// scene is adopted through replace semantics; a retained removal
+    /// becomes `Removed`. Invalid or unreadable input leaves the
+    /// conflict intact.
+    #[allow(dead_code)] // wired to the explicit resolution route in E4
+    pub(crate) fn reload_conflict(&self) -> bool {
+        let mut st = self.lock_state();
+        let (disk_version, disk_mtime_ns, disk_content) = match &st.session_state {
+            SessionState::Conflicted(conflict) => (
+                conflict.disk_version,
+                conflict.disk_mtime_ns,
+                conflict.disk_content.clone(),
+            ),
+            _ => return false,
+        };
+        if disk_version == content_hash(REMOVED_DISK_MARKER) {
+            st.flushed_mtime_ns = None;
+            st.session_state = SessionState::Removed;
+            st.flush_now = false;
+            st.flush_failures = 0;
+            st.fan(&serialize(&ServerFrame::Removed));
+            return true;
+        }
+        let disk_hash = content_hash(&disk_content);
+        if disk_version != disk_hash {
+            return false;
+        }
+        let disk_budget = semantic_write_budget(Some(disk_content.len() as u64));
+        let applied =
+            match st
+                .scene
+                .apply_replace_with_limit(&disk_content, &mut fresh_nonce, disk_budget)
+            {
+                Ok(applied) => applied,
+                Err(_) => return false,
+            };
+        let changed = !applied.is_empty();
+        if changed {
+            st.version += 1;
+            let frame = update_frame(st.version, applied);
+            st.fan(&frame);
+        }
+        st.disk_echo.note(disk_hash);
+        st.flushed_mtime_ns = disk_mtime_ns;
+        let baseline_content = st.scene.serialize_file();
+        st.baseline = DurableBaseline {
+            content_hash: content_hash(&baseline_content),
+            content: baseline_content,
+            mtime_ns: disk_mtime_ns,
+            authority_version: st.version,
+        };
+        st.write_budget = disk_budget;
+        st.session_state = SessionState::Clean;
+        st.flush_now = false;
+        st.flush_failures = 0;
+        if !changed {
+            let frame = snapshot_frame(&self.path, &st);
+            st.fan(&frame);
+        }
+        true
+    }
+
+    /// Resolve a conflict in favor of the live authority. The
+    /// retained disk token becomes the CAS expectation, the existing
+    /// flush path writes safely, and a successful commit re-broadcasts
+    /// the current authority.
+    #[allow(dead_code)] // wired to the explicit resolution route in E4
+    pub(crate) async fn overwrite_conflict(
+        self: &Arc<Self>,
+        workspace: &Arc<Workspace>,
+        self_writes: &SelfWrites,
+    ) -> bool {
+        {
+            let mut st = self.lock_state();
+            let disk_mtime_ns = match &st.session_state {
+                SessionState::Conflicted(conflict) => conflict.disk_mtime_ns,
+                _ => return false,
+            };
+            st.flushed_mtime_ns = disk_mtime_ns;
+            st.session_state = SessionState::Dirty {
+                since: Instant::now(),
+            };
+            st.flush_now = true;
+        }
+        if !flush_session(self, workspace, self_writes).await {
+            return false;
+        }
+        let st = self.lock_state();
+        let frame = snapshot_frame(&self.path, &st);
+        st.fan(&frame);
+        true
     }
 
     /// First half of a flush: serialize the file form and capture the
@@ -437,7 +988,7 @@ impl SceneSession {
     fn begin_flush(&self) -> Option<FlushJob> {
         let mut st = self.lock_state();
         st.flush_now = false;
-        st.dirty_since?;
+        st.session_state.dirty_since()?;
         st.flush_epoch_version = st.version;
         Some(FlushJob {
             text: st.scene.serialize_file(),
@@ -450,13 +1001,21 @@ impl SceneSession {
     /// the flushed file form in the echo ring, clear dirty only if no
     /// mutation landed while the write was in flight, and fan the
     /// flush state.
-    fn finish_flush(&self, epoch: u64, stat: &FileStat, content_hash: u64) {
+    fn finish_flush(&self, epoch: u64, stat: &FileStat, content: &str) {
         let mut st = self.lock_state();
         st.flushed_mtime_ns = stat.mtime_ns;
-        st.disk_echo.note(content_hash);
+        let flushed_hash = content_hash(content);
+        st.disk_echo.note(flushed_hash);
         st.flush_failures = 0;
+        st.baseline = DurableBaseline {
+            content: content.to_string(),
+            content_hash: flushed_hash,
+            mtime_ns: stat.mtime_ns,
+            authority_version: epoch,
+        };
+        st.write_budget = semantic_write_budget(Some(stat.size));
         if st.version == epoch {
-            st.dirty_since = None;
+            st.session_state.clear_after_flush();
         }
         let frame = flush_frame(&st);
         st.fan(&frame);
@@ -517,7 +1076,10 @@ impl SceneAttachHandle {
         if self.session.closed.load(Ordering::Relaxed) {
             return Err(PushError::Closed);
         }
-        let applied = st.scene.apply_push(elements, app_state, files)?;
+        let write_budget = st.write_budget;
+        let applied = st
+            .scene
+            .apply_push_with_limit(elements, app_state, files, write_budget)?;
         if !applied.is_empty() {
             st.version += 1;
             let frame = update_frame(st.version, applied);
@@ -654,10 +1216,11 @@ impl SceneRegistry {
                 tokio::task::spawn_blocking(move || ws.read_text_with_stat(&read_path))
                     .await
                     .map_err(|e| AttachError::Task(e.to_string()))??;
-            if text.len() as u64 > TEXT_WRITE_LIMIT {
+            let write_budget = semantic_write_budget(Some(stat.size));
+            if text.len() as u64 > write_budget {
                 return Err(AttachError::Scene(SceneError::TooLarge {
                     bytes: text.len() as u64,
-                    limit: TEXT_WRITE_LIMIT,
+                    limit: write_budget,
                 }));
             }
             let scene = Scene::parse(&text)?;
@@ -728,7 +1291,8 @@ impl SceneRegistry {
                 let st = session.lock_state();
                 st.flush_now
                     || st
-                        .dirty_since
+                        .session_state
+                        .dirty_since()
                         .is_some_and(|since| since.elapsed() >= SCENE_FLUSH_DEBOUNCE)
             };
             if due {
@@ -748,7 +1312,7 @@ impl SceneRegistry {
             let st = session.lock_state();
             let detached_at = session.detached_at.load(Ordering::Relaxed);
             let reap = st.attaches.is_empty()
-                && st.dirty_since.is_none()
+                && !st.session_state.is_dirty()
                 && detached_at > 0
                 && now.saturating_sub(detached_at) >= SCENE_DETACH_GRACE.as_millis() as i64;
             if reap {
@@ -827,7 +1391,7 @@ impl SceneRegistry {
         for session in self.sessions_snapshot() {
             let pending = {
                 let st = session.lock_state();
-                st.pending_fold.is_some() || st.pending_removal.is_some()
+                st.session_state.has_observation()
             };
             if pending {
                 reconcile_session(&session, workspace).await;
@@ -838,8 +1402,8 @@ impl SceneRegistry {
 
 /// Flush one session to disk: serialize under the lock, CAS-write
 /// outside it, commit the token. A CAS conflict means the disk changed
-/// under us: reconcile (merging the external content through the
-/// replace semantics) and retry once. Other failures keep the session
+/// under us: reconcile and retry once if authority and disk converge.
+/// Other failures keep the session
 /// dirty; the content stays safe in memory and in every client, and
 /// the error fan starts on the second consecutive failure.
 ///
@@ -848,7 +1412,8 @@ impl SceneRegistry {
 /// when the CAS-conflict reconcile left authority and disk equal
 /// (including the removed-file path, whose authoritative disk state is
 /// deliberately "no file"). False means the write failed and the
-/// session stays dirty; the PUT divert turns that into an honest 503.
+/// session stays dirty, or an unresolved conflict prevents a flush;
+/// the PUT divert turns those into an honest non-200 response.
 pub(crate) async fn flush_session(
     session: &Arc<SceneSession>,
     workspace: &Arc<Workspace>,
@@ -865,45 +1430,77 @@ async fn flush_session_locked(
 ) -> bool {
     for attempt in 0..2u32 {
         let Some(job) = session.begin_flush() else {
-            return true;
+            return session
+                .lock_state()
+                .session_state
+                .conflict_disk_mtime_ns()
+                .is_none();
         };
-        // Note the self-write BEFORE the blocking write runs, exactly
-        // like the files.rs save path: the watcher can deliver the
-        // resulting event the instant the write lands, and noting
-        // afterwards would let our own flush surface as an external
-        // edit.
-        self_writes.note(&session.path);
-        let job_hash = content_hash(&job.text);
+        // The canonical strict write preflight performs filesystem
+        // syscalls, so keep the whole probe off the async runtime.
+        // Reserve only after it succeeds; every later failure cancels.
         let ws = Arc::clone(workspace);
-        let path = session.path.clone();
-        let epoch = job.epoch;
-        let result = tokio::task::spawn_blocking(move || {
-            ws.write_text_if_unchanged(&path, job.expected_mtime_ns, &job.text)?;
-            ws.stat(&path)
-        })
-        .await;
-        match result {
-            Ok(Ok(stat)) => {
-                session.finish_flush(epoch, &stat, job_hash);
-                return true;
-            }
-            Ok(Err(ChanError::WriteConflict { .. })) if attempt == 0 => {
-                // Disk changed since our token: fold the external
-                // content in, then retry with the adopted token. If
-                // the merge left nothing dirty the retry no-ops. A
-                // fold-in deferred for corroboration is not a failure:
-                // the pending path owns convergence, so bail without
-                // fanning an error.
-                reconcile_session_locked(session, workspace).await;
-                if session.lock_state().pending_fold.is_some() {
-                    return false;
-                }
-            }
+        let preflight_path = session.path.clone();
+        match tokio::task::spawn_blocking(move || ws.ensure_writable(&preflight_path)).await {
+            Ok(Ok(_)) => {}
             Ok(Err(e)) => {
                 session.note_flush_failure(e.to_string());
                 return false;
             }
             Err(join) => {
+                session.note_flush_failure(join.to_string());
+                return false;
+            }
+        }
+        let self_write = self_writes.reserve_after_preflight(&session.path);
+        let flushed_content = job.text.clone();
+        let ws = Arc::clone(workspace);
+        let path = session.path.clone();
+        let epoch = job.epoch;
+        #[cfg(test)]
+        let test_session = Arc::clone(session);
+        let result = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if test_session
+                .fail_after_preflight
+                .swap(false, Ordering::Relaxed)
+            {
+                let target = ws.root().join(&path);
+                let _ = std::fs::remove_file(&target);
+                let _ = std::fs::create_dir(&target);
+            }
+            match ws.write_text_if_unchanged(&path, job.expected_mtime_ns, &job.text) {
+                Ok(()) => (true, ws.stat(&path)),
+                Err(e) => (false, Err(e)),
+            }
+        })
+        .await;
+        match result {
+            Ok((_, Ok(stat))) => {
+                session.finish_flush(epoch, &stat, &flushed_content);
+                return true;
+            }
+            Ok((false, Err(ChanError::WriteConflict { .. }))) if attempt == 0 => {
+                self_writes.cancel(self_write);
+                // Disk changed since our token: reconcile it, then
+                // retry only if the state machine remains flushable.
+                // A fold-in deferred for corroboration is not a failure:
+                // the pending path owns convergence, so bail without
+                // fanning an error.
+                reconcile_session_locked(session, workspace).await;
+                if session.lock_state().session_state.has_observation() {
+                    return false;
+                }
+            }
+            Ok((write_committed, Err(e))) => {
+                if !write_committed {
+                    self_writes.cancel(self_write);
+                }
+                session.note_flush_failure(e.to_string());
+                return false;
+            }
+            Err(join) => {
+                self_writes.cancel(self_write);
                 session.note_flush_failure(join.to_string());
                 return false;
             }
@@ -915,12 +1512,11 @@ async fn flush_session_locked(
 }
 
 /// Bring one session in line with the disk: an unchanged token is our
-/// own flush echo (ignore); parseable content merges through the
-/// replace semantics (equal content adopts the token silently); a
-/// vanished file routes into the removed path. Unreadable or
-/// unparseable content is ignored with a warning: a deliberate
-/// stalemate that surfaces through flush errors rather than corrupting
-/// the session.
+/// own flush echo (ignore); clean parseable content adopts through the
+/// replace semantics, while dirty divergence enters the E3 merge gate
+/// after corroboration; a vanished file routes into the removed path.
+/// Unreadable or unparseable content enters a retained conflict
+/// instead of risking authority loss.
 pub(crate) async fn reconcile_session(session: &Arc<SceneSession>, workspace: &Arc<Workspace>) {
     let _io = session.io_lock.lock().await;
     reconcile_session_locked(session, workspace).await
@@ -942,17 +1538,19 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
                 .unwrap_or(true);
             let mut st = session.lock_state();
             if exists {
-                st.pending_removal = None;
+                if st.session_state.removal_observation().is_some() {
+                    st.session_state.clear_observation();
+                }
                 return;
             }
             // Absence must corroborate; parity with doc_sessions.
-            match st.pending_removal {
+            match st.session_state.removal_observation() {
                 Some(first) if first.elapsed() >= CORROBORATE_AFTER => {
                     drop(st);
                     session.mark_removed();
                 }
                 Some(_) => {}
-                None => st.pending_removal = Some(Instant::now()),
+                None => st.session_state.observe_removal(),
             }
             return;
         }
@@ -960,13 +1558,18 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
     };
     {
         let mut st = session.lock_state();
-        st.pending_removal = None;
+        if st.session_state.removal_observation().is_some() {
+            st.session_state.clear_observation();
+        }
+        if matches!(st.session_state, SessionState::Conflicted(_)) {
+            return;
+        }
         // A matching token settles the event as our own flush echo,
         // except while an observation is pending; parity with
         // doc_sessions.
         if stat.mtime_ns.is_some()
             && stat.mtime_ns == st.flushed_mtime_ns
-            && st.pending_fold.is_none()
+            && st.session_state.content_observation().is_none()
         {
             return;
         }
@@ -980,7 +1583,18 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
                 tracing::warn!(
                     error = %e,
                     path = %session.path,
-                    "scene session reconcile read failed; keeping the authority scene"
+                    "scene session reconcile read failed; entering conflict"
+                );
+                let marker = format!(
+                    "{UNREADABLE_DISK_MARKER}:{}:{:?}:{e}",
+                    stat.size, stat.mtime_ns
+                );
+                let mut st = session.lock_state();
+                SceneSession::enter_conflict_locked(
+                    &mut st,
+                    content_hash(&marker),
+                    stat.mtime_ns,
+                    String::new(),
                 );
                 return;
             }
@@ -991,13 +1605,32 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
         let mut st = session.lock_state();
         if st.disk_echo.contains(hash) {
             // Our own bytes under a re-stamped mtime or a stale read
-            // serving a recent flush back: adopt the token, keep the
-            // authority scene, leave dirty mutations pending.
+            // serving a recent flush back: adopt the token and keep
+            // the authority scene. Divergent bytes stay scheduled: if
+            // they remain after expiry, they are durable external
+            // state and must fold normally.
             st.flushed_mtime_ns = disk_stat.mtime_ns;
-            st.pending_fold = None;
+            let disk_matches_authority = Scene::parse(&disk_text)
+                .is_ok_and(|scene| scene.serialize_file() == st.scene.serialize_file());
+            if disk_matches_authority {
+                st.session_state.clear_observation();
+            } else if !matches!(
+                st.session_state.content_observation(),
+                Some((pending_hash, pending_mtime, _))
+                    if pending_hash == hash && pending_mtime == disk_stat.mtime_ns
+            ) {
+                st.session_state.observe_content(hash, disk_stat.mtime_ns);
+            }
             return;
         }
-        let dirty = st.dirty_since.is_some();
+        let disk_matches_authority = Scene::parse(&disk_text)
+            .is_ok_and(|scene| scene.serialize_file() == st.scene.serialize_file());
+        if disk_matches_authority {
+            drop(st);
+            session.merge_disk(disk_text, &disk_stat);
+            return;
+        }
+        let dirty = st.session_state.is_dirty();
         if disk_text.is_empty() && (dirty || st.disk_echo.any_recent()) {
             // The in-flight-upload placeholder guard; parity with
             // doc_sessions, and load-bearing here too: an empty body
@@ -1006,18 +1639,15 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
             // token lets the next CAS flush restore the scene file.
             st.flushed_mtime_ns = disk_stat.mtime_ns;
             if !matches!(
-                &st.pending_fold,
-                Some(p) if p.hash == hash && p.mtime_ns == disk_stat.mtime_ns
+                st.session_state.content_observation(),
+                Some((pending_hash, pending_mtime, _))
+                    if pending_hash == hash && pending_mtime == disk_stat.mtime_ns
             ) {
                 tracing::warn!(
                     path = %session.path,
                     "scene session reconcile refused an uncorroborated empty read"
                 );
-                st.pending_fold = Some(PendingFold {
-                    hash,
-                    mtime_ns: disk_stat.mtime_ns,
-                    seen: Instant::now(),
-                });
+                st.session_state.observe_content(hash, disk_stat.mtime_ns);
             }
             return;
         }
@@ -1025,25 +1655,24 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
             // Divergent content into a dirty session (or a stable
             // empty read past the guards above): fold in only after
             // the observation holds unchanged for CORROBORATE_AFTER.
+            let observation = st.session_state.content_observation();
             let corroborated = matches!(
-                &st.pending_fold,
-                Some(p) if p.hash == hash
-                    && p.mtime_ns == disk_stat.mtime_ns
-                    && p.seen.elapsed() >= CORROBORATE_AFTER
+                observation,
+                Some((pending_hash, pending_mtime, seen))
+                    if pending_hash == hash
+                        && pending_mtime == disk_stat.mtime_ns
+                        && seen.elapsed() >= CORROBORATE_AFTER
             );
             let same_observation = matches!(
-                &st.pending_fold,
-                Some(p) if p.hash == hash && p.mtime_ns == disk_stat.mtime_ns
+                observation,
+                Some((pending_hash, pending_mtime, _))
+                    if pending_hash == hash && pending_mtime == disk_stat.mtime_ns
             );
             if corroborated {
                 drop(st);
                 session.merge_disk(disk_text, &disk_stat);
             } else if !same_observation {
-                st.pending_fold = Some(PendingFold {
-                    hash,
-                    mtime_ns: disk_stat.mtime_ns,
-                    seen: Instant::now(),
-                });
+                st.session_state.observe_content(hash, disk_stat.mtime_ns);
             }
             return;
         }
@@ -1211,19 +1840,22 @@ mod tests {
 
     fn backdate_dirty(session: &Arc<SceneSession>) {
         let mut st = session.lock_state();
-        st.dirty_since = Some(
-            Instant::now()
+        st.session_state = SessionState::Dirty {
+            since: Instant::now()
                 .checked_sub(SCENE_FLUSH_DEBOUNCE + Duration::from_millis(50))
                 .unwrap(),
-        );
+        };
     }
 
     /// Age the pending disk observation past CORROBORATE_AFTER so the
     /// next reconcile treats it as corroborated.
     fn backdate_pending_fold(session: &Arc<SceneSession>) {
         let mut st = session.lock_state();
-        let pending = st.pending_fold.as_mut().expect("a pending fold to age");
-        pending.seen = Instant::now()
+        let pending = st
+            .session_state
+            .content_observation_mut()
+            .expect("a pending fold to age");
+        *pending = Instant::now()
             .checked_sub(CORROBORATE_AFTER + Duration::from_millis(50))
             .unwrap();
     }
@@ -1250,6 +1882,314 @@ mod tests {
         assert_eq!(snap["dirty"], false);
         assert!(snap["mtime_ns"].is_string());
         assert_eq!(snap["cursors"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn merged_outcome_preserves_durable_baseline_through_observation() {
+        let seed = body(json!([elem("x", 1, 1, "a1")]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (ha, mut rx) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rx);
+        ha.push(vec![elem("y", 1, 2, "a2")], None, None).unwrap();
+        drain(&mut rx);
+
+        let disk = body(json!([elem("x", 1, 1, "a1"), elem("z", 1, 3, "a3")]));
+        fx.workspace.write_text("b.excalidraw", &disk).unwrap();
+        let stat = fx.workspace.stat("b.excalidraw").unwrap();
+        let merged = body(json!([
+            elem("x", 1, 1, "a1"),
+            elem("y", 1, 2, "a2"),
+            elem("z", 1, 3, "a3")
+        ]));
+        ha.session()
+            .apply_merge_outcome(disk.clone(), &stat, MergeOutcome::Merged(merged));
+
+        let authority = Scene::parse(&ha.session().authority_view().0).unwrap();
+        assert!(authority.element("y").is_some());
+        assert!(authority.element("z").is_some());
+        let expected_baseline = Scene::parse(&disk).unwrap().serialize_file();
+        let mut st = ha.session().lock_state();
+        assert!(matches!(st.session_state, SessionState::Dirty { .. }));
+        assert_eq!(st.baseline.content, expected_baseline);
+        assert_eq!(st.baseline.content_hash, content_hash(&expected_baseline));
+        assert_eq!(st.baseline.mtime_ns, stat.mtime_ns);
+        assert_eq!(st.baseline.authority_version, st.version);
+
+        let baseline = (
+            st.baseline.content.clone(),
+            st.baseline.content_hash,
+            st.baseline.mtime_ns,
+            st.baseline.authority_version,
+        );
+        st.session_state
+            .observe_content(content_hash("next disk"), Some(99));
+        assert!(matches!(
+            st.session_state,
+            SessionState::Observing {
+                dirty_since: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(
+            baseline,
+            (
+                st.baseline.content.clone(),
+                st.baseline.content_hash,
+                st.baseline.mtime_ns,
+                st.baseline.authority_version,
+            ),
+            "an observation cannot mutate the durable baseline"
+        );
+    }
+
+    #[tokio::test]
+    async fn conflict_retains_three_versions_and_pauses_flush() {
+        let seed = body(json!([elem("x", 1, 1, "a1")]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (ha, mut rx) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rx);
+        ha.push(vec![elem("x", 2, 2, "a1")], None, None).unwrap();
+        drain(&mut rx);
+
+        let disk = body(json!([elem("x", 2, 3, "a1")]));
+        fx.workspace.write_text("b.excalidraw", &disk).unwrap();
+        let stat = fx.workspace.stat("b.excalidraw").unwrap();
+        ha.session()
+            .apply_merge_outcome(disk.clone(), &stat, MergeOutcome::Conflict);
+
+        let first_id = {
+            let st = ha.session().lock_state();
+            let SessionState::Conflicted(conflict) = &st.session_state else {
+                panic!("overlap must enter Conflicted");
+            };
+            assert_eq!(conflict.baseline_version, st.baseline.content_hash);
+            assert_eq!(conflict.disk_version, content_hash(&disk));
+            assert_eq!(conflict.authority_version, st.version);
+            assert_eq!(conflict.disk_mtime_ns, stat.mtime_ns);
+            assert_eq!(conflict.disk_content, disk);
+            assert_eq!(
+                st.baseline.content,
+                Scene::parse(&seed).unwrap().serialize_file()
+            );
+            assert_eq!(st.baseline.mtime_ns, st.flushed_mtime_ns);
+            assert_eq!(st.baseline.authority_version, 0);
+            conflict.id.clone()
+        };
+
+        ha.session()
+            .apply_merge_outcome(disk.clone(), &stat, MergeOutcome::Conflict);
+        ha.push(vec![elem("y", 1, 4, "a2")], None, None).unwrap();
+        {
+            let st = ha.session().lock_state();
+            let SessionState::Conflicted(conflict) = &st.session_state else {
+                panic!("collaboration must remain conflicted");
+            };
+            assert_eq!(conflict.id, first_id, "conflict id must stay stable");
+            assert_eq!(conflict.authority_version, st.version);
+        }
+        assert!(
+            ha.session().begin_flush().is_none(),
+            "automatic flush pauses in Conflicted"
+        );
+        assert!(
+            !flush_session(ha.session(), &fx.workspace, &fx.self_writes).await,
+            "a forced flush must not report a conflict as durable"
+        );
+    }
+
+    #[tokio::test]
+    async fn disk_equal_to_dirty_authority_advances_baseline_and_cleans() {
+        let seed = body(json!([]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (ha, mut rx) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rx);
+        ha.push(vec![elem("x", 1, 1, "a1")], None, None).unwrap();
+        drain(&mut rx);
+
+        let authority = ha.session().authority_view().0;
+        fx.workspace.write_text("b.excalidraw", &authority).unwrap();
+        ha.session().lock_state().flushed_mtime_ns = None;
+        reconcile_session(ha.session(), &fx.workspace).await;
+
+        let st = ha.session().lock_state();
+        assert!(matches!(st.session_state, SessionState::Clean));
+        assert_eq!(st.baseline.content, authority);
+        assert_eq!(st.baseline.content_hash, content_hash(&authority));
+        assert_eq!(st.baseline.mtime_ns, st.flushed_mtime_ns);
+        assert_eq!(st.baseline.authority_version, st.version);
+    }
+
+    #[tokio::test]
+    async fn distinct_external_element_merges_flushes_and_broadcasts_once() {
+        let seed = body(json!([elem("x", 1, 1, "a1")]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (ha, mut rx) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rx);
+        ha.push(vec![elem("y", 1, 2, "a2")], None, None).unwrap();
+        drain(&mut rx);
+
+        let disk = body(json!([elem("x", 1, 1, "a1"), elem("z", 1, 3, "a3")]));
+        fx.workspace.write_text("b.excalidraw", &disk).unwrap();
+        ha.session().lock_state().flushed_mtime_ns = None;
+        reconcile_session(ha.session(), &fx.workspace).await;
+        backdate_pending_fold(ha.session());
+        fx.registry.reconcile_pending(&fx.workspace).await;
+
+        let authority = Scene::parse(&ha.session().authority_view().0).unwrap();
+        for id in ["x", "y", "z"] {
+            assert!(authority.element(id).is_some(), "merged element {id}");
+        }
+        let updates = drain(&mut rx);
+        assert_eq!(types(&updates), ["update"], "merged authority fans once");
+
+        fx.registry.flush_pass(&fx.workspace, &fx.self_writes).await;
+        let disk = Scene::parse(&fx.workspace.read_text("b.excalidraw").unwrap()).unwrap();
+        for id in ["x", "y", "z"] {
+            assert!(disk.element(id).is_some(), "flushed element {id}");
+        }
+        let flushed = drain(&mut rx);
+        assert_eq!(types(&flushed), ["flush"], "merged authority flushes once");
+        assert_eq!(flushed[0]["dirty"], false);
+    }
+
+    #[tokio::test]
+    async fn same_element_edit_conflicts_and_reload_adopts_disk() {
+        let mut baseline_element = elem("x", 1, 1, "a1");
+        baseline_element["x"] = json!(10);
+        let seed = body(json!([baseline_element]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (ha, mut rx) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rx);
+
+        let mut local_element = elem("x", 2, 2, "a1");
+        local_element["x"] = json!(20);
+        ha.push(vec![local_element], None, None).unwrap();
+        drain(&mut rx);
+        let mut disk_element = elem("x", 2, 3, "a1");
+        disk_element["x"] = json!(30);
+        let disk = body(json!([disk_element]));
+        fx.workspace.write_text("b.excalidraw", &disk).unwrap();
+        let stat = fx.workspace.stat("b.excalidraw").unwrap();
+        ha.session().merge_disk(disk.clone(), &stat);
+
+        {
+            let st = ha.session().lock_state();
+            let SessionState::Conflicted(conflict) = &st.session_state else {
+                panic!("same-field element edits must conflict");
+            };
+            assert_eq!(st.scene.element("x").unwrap().value["x"], 20);
+            assert_eq!(conflict.baseline_version, st.baseline.content_hash);
+            assert_eq!(conflict.disk_version, content_hash(&disk));
+            assert_eq!(conflict.authority_version, st.version);
+            assert_eq!(conflict.disk_content, disk);
+        }
+        assert!(drain(&mut rx).is_empty(), "conflict has no silent winner");
+
+        assert!(ha.session().reload_conflict());
+        assert_eq!(
+            Scene::parse(&ha.session().authority_view().0)
+                .unwrap()
+                .element("x")
+                .unwrap()
+                .value["x"],
+            30
+        );
+        assert_eq!(types(&drain(&mut rx)), ["update"]);
+    }
+
+    #[tokio::test]
+    async fn overwrite_scene_conflict_flushes_authority_and_rebroadcasts() {
+        let mut baseline_element = elem("x", 1, 1, "a1");
+        baseline_element["x"] = json!(10);
+        let seed = body(json!([baseline_element]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (ha, mut rx) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rx);
+
+        let mut local_element = elem("x", 2, 2, "a1");
+        local_element["x"] = json!(20);
+        ha.push(vec![local_element], None, None).unwrap();
+        drain(&mut rx);
+        let mut disk_element = elem("x", 2, 3, "a1");
+        disk_element["x"] = json!(30);
+        let disk = body(json!([disk_element]));
+        fx.workspace.write_text("b.excalidraw", &disk).unwrap();
+        let stat = fx.workspace.stat("b.excalidraw").unwrap();
+        ha.session().merge_disk(disk, &stat);
+
+        assert!(
+            ha.session()
+                .overwrite_conflict(&fx.workspace, &fx.self_writes)
+                .await
+        );
+        assert_eq!(
+            Scene::parse(&fx.workspace.read_text("b.excalidraw").unwrap())
+                .unwrap()
+                .element("x")
+                .unwrap()
+                .value["x"],
+            20
+        );
+        let frames = drain(&mut rx);
+        assert_eq!(types(&frames), ["flush", "snapshot"]);
+        assert_eq!(frames[1]["elements"][0]["x"], 20);
+    }
+
+    #[tokio::test]
+    async fn delete_while_dirty_enters_conflicted() {
+        let seed = body(json!([elem("x", 1, 1, "a1")]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (ha, mut rx) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rx);
+        ha.push(vec![elem("y", 1, 2, "a2")], None, None).unwrap();
+        drain(&mut rx);
+
+        std::fs::remove_file(fx.root.path().join("b.excalidraw")).unwrap();
+        reconcile_session(ha.session(), &fx.workspace).await;
+        backdate_pending_removal(ha.session());
+        fx.registry.reconcile_pending(&fx.workspace).await;
+
+        let st = ha.session().lock_state();
+        let SessionState::Conflicted(conflict) = &st.session_state else {
+            panic!("delete versus edit must enter Conflicted");
+        };
+        assert!(st.scene.element("y").is_some(), "local authority retained");
+        assert_eq!(
+            st.baseline.content,
+            Scene::parse(&seed).unwrap().serialize_file()
+        );
+        assert_eq!(conflict.baseline_version, st.baseline.content_hash);
+        assert_eq!(conflict.authority_version, st.version);
+        assert_eq!(conflict.disk_mtime_ns, None);
+        assert!(conflict.disk_content.is_empty());
+        drop(st);
+        assert_eq!(drain(&mut rx).len(), 0, "neither side wins");
+    }
+
+    #[tokio::test]
+    async fn invalid_external_replacement_enters_conflicted() {
+        let seed = body(json!([elem("x", 1, 1, "a1")]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (ha, mut rx) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rx);
+        fx.workspace.write_text("b.excalidraw", "{oops").unwrap();
+        ha.session().lock_state().flushed_mtime_ns = None;
+
+        reconcile_session(ha.session(), &fx.workspace).await;
+
+        let st = ha.session().lock_state();
+        let SessionState::Conflicted(conflict) = &st.session_state else {
+            panic!("invalid replacement must conflict");
+        };
+        assert!(st.scene.element("x").is_some());
+        assert_eq!(
+            st.baseline.content,
+            Scene::parse(&seed).unwrap().serialize_file()
+        );
+        assert_eq!(conflict.disk_version, content_hash("{oops"));
+        assert_eq!(conflict.disk_content, "{oops");
+        drop(st);
+        assert!(drain(&mut rx).is_empty());
     }
 
     #[tokio::test]
@@ -1301,7 +2241,7 @@ mod tests {
         assert!(b_frames[0].get("files").is_none());
 
         let st = ha.session().lock_state();
-        assert!(st.dirty_since.is_some());
+        assert!(st.session_state.is_dirty());
         assert_eq!(st.version, 1);
     }
 
@@ -1320,7 +2260,10 @@ mod tests {
         assert_eq!(a_frames[0]["version"], 0, "no version bump");
         assert_eq!(drain(&mut rxb).len(), 0, "nothing fans");
         let st = ha.session().lock_state();
-        assert!(st.dirty_since.is_none(), "discarded push leaves no dirt");
+        assert!(
+            !st.session_state.is_dirty(),
+            "discarded push leaves no dirt"
+        );
     }
 
     #[tokio::test]
@@ -1415,7 +2358,7 @@ mod tests {
         assert_eq!(frames[0]["dirty"], false);
         assert!(frames[0]["mtime_ns"].is_string());
         let st = ha.session().lock_state();
-        assert!(st.dirty_since.is_none());
+        assert!(!st.session_state.is_dirty());
         assert!(st.flushed_mtime_ns.is_some());
     }
 
@@ -1434,12 +2377,11 @@ mod tests {
             .write_text_if_unchanged("b.excalidraw", job.expected_mtime_ns, &job.text)
             .unwrap();
         let stat = fx.workspace.stat("b.excalidraw").unwrap();
-        ha.session()
-            .finish_flush(job.epoch, &stat, content_hash(&job.text));
+        ha.session().finish_flush(job.epoch, &stat, &job.text);
 
         let st = ha.session().lock_state();
         assert!(
-            st.dirty_since.is_some(),
+            st.session_state.is_dirty(),
             "the mid-flight push must survive as dirt"
         );
         assert_eq!(st.flushed_mtime_ns, stat.mtime_ns, "token still adopted");
@@ -1519,6 +2461,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn formatting_only_ring_echo_clears_the_disk_observation() {
+        let compact = body(json!([elem("x", 1, 1, "a1")]));
+        let fx = fixture(&[("b.excalidraw", &compact)]);
+        let (ha, mut rx) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rx);
+        std::fs::write(fx.root.path().join("b.excalidraw"), &compact).unwrap();
+        ha.session().lock_state().flushed_mtime_ns = None;
+
+        reconcile_session(ha.session(), &fx.workspace).await;
+
+        assert!(
+            ha.session()
+                .lock_state()
+                .session_state
+                .content_observation()
+                .is_none(),
+            "semantically equal scene formatting must settle the echo"
+        );
+    }
+
+    #[tokio::test]
     async fn reconcile_merges_hand_edits_with_bumped_versions() {
         let fx = fixture(&[("b.excalidraw", &body(json!([elem("x", 5, 10, "a1")])))]);
         let (ha, mut rxa) = attach(&fx, "b.excalidraw", "w1").await;
@@ -1539,11 +2502,11 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Modified,
-                    path: Some("b.excalidraw".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Modified,
+                    "b.excalidraw",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
 
@@ -1558,7 +2521,7 @@ mod tests {
             );
         }
         let st = ha.session().lock_state();
-        assert!(st.dirty_since.is_none(), "authority equals disk: clean");
+        assert!(!st.session_state.is_dirty(), "authority equals disk: clean");
         assert!(st.flushed_mtime_ns.is_some(), "disk token adopted");
     }
 
@@ -1609,18 +2572,16 @@ mod tests {
         let fx = fixture(&[("b.excalidraw", &body(json!([elem("x", 1, 1, "a1")])))]);
         let (ha, mut rxa) = attach(&fx, "b.excalidraw", "w1").await;
         drain(&mut rxa);
-        ha.push(vec![elem("y", 1, 1, "a2")], None, None).unwrap();
-        drain(&mut rxa);
 
         std::fs::remove_file(fx.root.path().join("b.excalidraw")).unwrap();
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Removed,
-                    path: Some("b.excalidraw".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Removed,
+                    "b.excalidraw",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
         // Absence corroborates across two observations before the
@@ -1634,7 +2595,7 @@ mod tests {
         {
             let st = ha.session().lock_state();
             assert_eq!(st.flushed_mtime_ns, None);
-            assert!(st.dirty_since.is_none(), "flush clock stopped");
+            assert!(!st.session_state.is_dirty(), "flush clock stopped");
         }
         fx.registry.flush_pass(&fx.workspace, &fx.self_writes).await;
         assert!(
@@ -1655,7 +2616,7 @@ mod tests {
             .iter()
             .map(|e| e["id"].as_str().unwrap())
             .collect();
-        assert_eq!(ids, ["x", "y", "z"]);
+        assert_eq!(ids, ["x", "z"]);
     }
 
     #[tokio::test]
@@ -1675,18 +2636,18 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Removed,
-                    path: Some("b.excalidraw".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Removed,
+                    "b.excalidraw",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
 
         assert_eq!(drain(&mut rxa).len(), 0, "no spurious removed frame");
         let st = ha.session().lock_state();
         assert_eq!(st.flushed_mtime_ns, token, "token untouched");
-        assert!(st.dirty_since.is_none(), "session stays clean");
+        assert!(!st.session_state.is_dirty(), "session stays clean");
     }
 
     #[tokio::test]
@@ -1703,11 +2664,13 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Renamed,
-                    path: Some("b.excalidraw".into()),
-                    to: Some("c.excalidraw".into()),
-                },
+                WatchEvent::rename(
+                    Some("b.excalidraw".into()),
+                    Some("c.excalidraw".into()),
+                    false,
+                    None,
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
         // The vacated source parks as a pending absence and fans the
@@ -1722,20 +2685,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flush_cas_conflict_reconciles_and_retries() {
+    async fn flush_cas_conflict_enters_conflicted_after_corroboration() {
         let fx = fixture(&[("b.excalidraw", &body(json!([elem("x", 1, 1, "a1")])))]);
         let (ha, mut rxa) = attach(&fx, "b.excalidraw", "w1").await;
         drain(&mut rxa);
-        ha.push(vec![elem("y", 1, 1, "a2")], None, None).unwrap();
+        let mut local = elem("x", 2, 2, "a1");
+        local["x"] = json!(20);
+        ha.push(vec![local], None, None).unwrap();
         drain(&mut rxa);
 
         // Stale the session token: an external write bumps the mtime
-        // and adds an element.
+        // and changes the same element field incompatibly.
+        let mut disk = elem("x", 2, 3, "a1");
+        disk["x"] = json!(30);
         fx.workspace
-            .write_text(
-                "b.excalidraw",
-                &body(json!([elem("x", 1, 1, "a1"), elem("z", 1, 1, "a3")])),
-            )
+            .write_text("b.excalidraw", &body(json!([disk])))
             .unwrap();
         backdate_dirty(ha.session());
         let settled = flush_session(ha.session(), &fx.workspace, &fx.self_writes).await;
@@ -1743,34 +2707,35 @@ mod tests {
         // The conflict defers to corroboration: nothing merged yet, no
         // failure fanned, the divergent observation parked.
         assert!(!settled, "deferred fold-in is not a settled flush");
+        assert!(
+            !fx.self_writes.should_suppress("b.excalidraw"),
+            "the CAS-conflict arm must cancel its reservation"
+        );
         assert_eq!(drain(&mut rxa).len(), 0, "no fan while parked");
         {
             let st = ha.session().lock_state();
-            assert!(st.pending_fold.is_some());
+            assert!(st.session_state.content_observation().is_some());
             assert_eq!(st.flush_failures, 0, "a deferral is not a failure");
         }
 
-        // The observation holds: the aged re-check merges disk through
-        // the replace semantics. The merge tombstones y (the disk body
-        // is the authority and does not carry it); the accepted
-        // outcome is the disk state, mirroring the doc path's
-        // dirty-discard semantics on corroborated external edits.
+        // The observation holds: the identity-aware merge proves the
+        // same field overlaps, keeps both sides, and pauses flush.
         backdate_pending_fold(ha.session());
         fx.registry.reconcile_pending(&fx.workspace).await;
         let st = ha.session().lock_state();
-        assert!(st.dirty_since.is_none());
+        let SessionState::Conflicted(conflict) = &st.session_state else {
+            panic!("corroborated divergence must enter Conflicted");
+        };
+        assert!(conflict.disk_content.contains("\"x\":30"));
         drop(st);
         let (text, _) = ha.session().authority_view();
         let on_session: Value = serde_json::from_str(&text).unwrap();
-        let ids: Vec<&str> = on_session["elements"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|e| e["id"].as_str().unwrap())
-            .collect();
-        assert_eq!(ids, ["x", "z"], "disk authority wins the conflict window");
-        let frames = drain(&mut rxa);
-        assert_eq!(types(&frames), ["update"], "clients hear the disk merge");
+        assert_eq!(on_session["elements"][0]["id"], "x");
+        assert_eq!(
+            on_session["elements"][0]["x"], 20,
+            "local authority stays live"
+        );
+        assert_eq!(drain(&mut rxa).len(), 0, "no actor silently wins");
     }
 
     #[tokio::test]
@@ -1825,7 +2790,7 @@ mod tests {
         assert_eq!(frames[0]["elements"][0]["version"], 6);
         let st = ha.session().lock_state();
         assert_eq!(st.version, 1);
-        assert!(st.dirty_since.is_some(), "PUT divert flushes explicitly");
+        assert!(st.session_state.is_dirty(), "PUT divert flushes explicitly");
         drop(st);
 
         // Equal content is a no-op.
@@ -1838,6 +2803,34 @@ mod tests {
         let err = ha.session().apply_replace("{nope").unwrap_err();
         assert!(matches!(err, SceneError::Invalid(_)));
         assert_eq!(ha.session().lock_state().version, 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_oversize_scene_can_shrink_within_its_semantic_budget() {
+        let fx = fixture(&[]);
+        let mut legacy_element = elem("x", 1, 1, "a1");
+        legacy_element
+            .as_object_mut()
+            .unwrap()
+            .insert("text".into(), json!("x".repeat(3 * 1024 * 1024)));
+        std::fs::write(
+            fx.root.path().join("legacy.excalidraw"),
+            body(json!([legacy_element])),
+        )
+        .unwrap();
+        let (ha, mut rx) = attach(&fx, "legacy.excalidraw", "w1").await;
+        drain(&mut rx);
+
+        let mut smaller_element = elem("x", 1, 1, "a1");
+        smaller_element
+            .as_object_mut()
+            .unwrap()
+            .insert("text".into(), json!("y".repeat(5 * 1024 * 1024 / 2)));
+        ha.session()
+            .apply_replace(&body(json!([smaller_element])))
+            .unwrap();
+
+        assert!(ha.session().authority_view().0.len() > TEXT_WRITE_LIMIT as usize);
     }
 
     #[tokio::test]
@@ -1890,11 +2883,11 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Modified,
-                    path: Some("b.excalidraw".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Modified,
+                    "b.excalidraw",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
 
@@ -1910,8 +2903,11 @@ mod tests {
         assert_eq!(ids, ["x", "y", "z"], "no element lost to the empty read");
         {
             let st = ha.session().lock_state();
-            assert!(st.dirty_since.is_some(), "dirty mutation survives");
-            assert!(st.pending_fold.is_some(), "observation parked");
+            assert!(st.session_state.is_dirty(), "dirty mutation survives");
+            assert!(
+                st.session_state.content_observation().is_some(),
+                "observation parked"
+            );
         }
         assert_eq!(drain(&mut rxa).len(), 0, "no fan for the refusal");
 
@@ -1947,11 +2943,11 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Modified,
-                    path: Some("b.excalidraw".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Modified,
+                    "b.excalidraw",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
 
@@ -1963,13 +2959,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn external_edit_into_dirty_session_folds_after_corroboration() {
+    async fn external_restore_folds_after_echo_ttl() {
+        let seed = body(json!([elem("x", 1, 1, "a1")]));
+        let changed = body(json!([elem("x", 1, 1, "a1"), elem("y", 1, 1, "a2")]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (ha, mut rxa) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rxa);
+        ha.session()
+            .test_set_disk_echo_ttl(Duration::from_millis(500));
+        ha.session()
+            .lock_state()
+            .disk_echo
+            .note(content_hash(&seed));
+
+        std::fs::write(fx.root.path().join("b.excalidraw"), &changed).unwrap();
+        reconcile_session(ha.session(), &fx.workspace).await;
+        assert!(ha.session().authority_view().0.contains("\"y\""));
+        drain(&mut rxa);
+
+        std::fs::write(fx.root.path().join("b.excalidraw"), &seed).unwrap();
+        reconcile_session(ha.session(), &fx.workspace).await;
+        assert!(
+            ha.session().authority_view().0.contains("\"y\""),
+            "a live echo-ring entry still protects authority"
+        );
+        assert!(
+            ha.session()
+                .lock_state()
+                .session_state
+                .content_observation()
+                .is_some(),
+            "the restore observation remains scheduled"
+        );
+
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        fx.registry.reconcile_pending(&fx.workspace).await;
+        let (text, _) = ha.session().authority_view();
+        assert!(!text.contains("\"y\""), "the expired restore folds");
+        assert_eq!(types(&drain(&mut rxa)), ["update"]);
+    }
+
+    #[tokio::test]
+    async fn post_preflight_write_failure_cancels_suppression() {
+        let fx = fixture(&[("b.excalidraw", &body(json!([])))]);
+        let (ha, mut rxa) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rxa);
+        ha.push(vec![elem("x", 1, 1, "a1")], None, None).unwrap();
+
+        // The strict preflight succeeds, then the hook replaces the
+        // target with a directory inside the blocking write task.
+        ha.session().test_fail_after_preflight();
+        let ok = flush_session(ha.session(), &fx.workspace, &fx.self_writes).await;
+        assert!(
+            !fx.self_writes.should_suppress("b.excalidraw"),
+            "a post-preflight failure must cancel watcher suppression"
+        );
+        assert!(!ok, "failed write must report false");
+        assert!(
+            ha.session().lock_state().session_state.is_dirty(),
+            "authority remains dirty"
+        );
+        assert!(fx.root.path().join("b.excalidraw").is_dir());
+
+        std::fs::remove_dir(fx.root.path().join("b.excalidraw")).unwrap();
+        fx.workspace
+            .write_text("b.excalidraw", &body(json!([])))
+            .unwrap();
+        ha.session().lock_state().flushed_mtime_ns =
+            fx.workspace.stat("b.excalidraw").unwrap().mtime_ns;
+        assert!(flush_session(ha.session(), &fx.workspace, &fx.self_writes).await);
+    }
+
+    #[tokio::test]
+    async fn external_edit_into_dirty_session_does_not_discard_authority() {
         let fx = fixture(&[("b.excalidraw", &body(json!([elem("x", 1, 1, "a1")])))]);
         let (ha, mut rxa) = attach(&fx, "b.excalidraw", "w1").await;
         drain(&mut rxa);
         ha.push(vec![elem("y", 1, 1, "a2")], None, None).unwrap();
         drain(&mut rxa);
-        assert!(ha.session().lock_state().dirty_since.is_some());
+        assert!(ha.session().lock_state().session_state.is_dirty());
 
         // A genuine external edit lands while the session is dirty:
         // not our bytes, so it must corroborate before folding in.
@@ -1979,21 +3047,22 @@ mod tests {
                 &body(json!([elem("x", 1, 1, "a1"), elem("z", 1, 1, "a3")])),
             )
             .unwrap();
+        ha.session().lock_state().flushed_mtime_ns = None;
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Modified,
-                    path: Some("b.excalidraw".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Modified,
+                    "b.excalidraw",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
         assert_eq!(drain(&mut rxa).len(), 0, "first observation only parks");
         assert!(ha.session().authority_view().0.contains("\"y\""));
 
-        // The observation holds: one aged re-check merges it (the disk
-        // body is the authority; y tombstones, the accepted semantics).
+        // The observation holds. Distinct identities merge without
+        // allowing disk to silently tombstone the local element.
         backdate_pending_fold(ha.session());
         fx.registry.reconcile_pending(&fx.workspace).await;
         let (text, _) = ha.session().authority_view();
@@ -2004,9 +3073,8 @@ mod tests {
             .iter()
             .map(|e| e["id"].as_str().unwrap())
             .collect();
-        assert_eq!(ids, ["x", "z"]);
-        let frames = drain(&mut rxa);
-        assert_eq!(types(&frames), ["update"], "clients hear the merge");
+        assert_eq!(ids, ["x", "y", "z"]);
+        assert_eq!(types(&drain(&mut rxa)), ["update"]);
     }
 
     #[tokio::test]
@@ -2021,11 +3089,21 @@ mod tests {
         std::fs::remove_file(fx.root.path().join("b.excalidraw")).unwrap();
         reconcile_session(ha.session(), &fx.workspace).await;
         assert_eq!(drain(&mut rxa).len(), 0, "absence only parks");
-        assert!(ha.session().lock_state().pending_removal.is_some());
+        assert!(ha
+            .session()
+            .lock_state()
+            .session_state
+            .removal_observation()
+            .is_some());
 
         std::fs::write(fx.root.path().join("b.excalidraw"), &seed).unwrap();
         reconcile_session(ha.session(), &fx.workspace).await;
-        assert!(ha.session().lock_state().pending_removal.is_none());
+        assert!(ha
+            .session()
+            .lock_state()
+            .session_state
+            .removal_observation()
+            .is_none());
         for f in drain(&mut rxa) {
             assert_ne!(f["type"], "removed");
         }

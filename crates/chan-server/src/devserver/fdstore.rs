@@ -34,6 +34,35 @@ impl PrepareError {
     }
 }
 
+#[must_use = "the watchdog task must be stopped and joined before shutdown completes"]
+pub(super) struct WatchdogPings {
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl WatchdogPings {
+    fn none() -> Self {
+        Self { task: None }
+    }
+
+    pub(super) fn from_task(task: tokio::task::JoinHandle<()>) -> Self {
+        Self { task: Some(task) }
+    }
+
+    pub(super) async fn stop(self) {
+        let Some(task) = self.task else {
+            return;
+        };
+        task.abort();
+        match task.await {
+            Ok(()) => {}
+            Err(error) if error.is_cancelled() => {}
+            Err(error) => {
+                tracing::error!(error = %error, "systemd watchdog ping task failed");
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use std::collections::{HashMap, HashSet};
@@ -50,7 +79,7 @@ mod linux {
     use rand::RngCore;
     use serde::{Deserialize, Serialize};
 
-    use super::{DevserverState, PrepareError, PrepareResponse};
+    use super::{DevserverState, PrepareError, PrepareResponse, WatchdogPings};
     use crate::WorkspaceHost;
 
     const MANIFEST_VERSION: u32 = 1;
@@ -426,12 +455,15 @@ mod linux {
     /// `WatchdogSec=` (WATCHDOG_USEC is set), ping at half the
     /// configured interval until shutdown. A seized-but-alive process
     /// then fails systemd's liveness check and is restarted with a
-    /// journal trail. None (no task) outside watchdog supervision.
+    /// journal trail. The returned owner is empty outside watchdog
+    /// supervision.
     pub(crate) fn spawn_watchdog_pings(
         mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        let interval = chan_systemd::watchdog_interval()?;
-        Some(tokio::spawn(async move {
+    ) -> WatchdogPings {
+        let Some(interval) = chan_systemd::watchdog_interval() else {
+            return WatchdogPings::none();
+        };
+        WatchdogPings::from_task(tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(interval) => {
@@ -594,7 +626,7 @@ pub(super) use linux::{notify_ready, prepare_restart, spawn_watchdog_pings, Star
 mod unsupported {
     use anyhow::Context;
 
-    use super::{DevserverState, PrepareError, PrepareResponse};
+    use super::{DevserverState, PrepareError, PrepareResponse, WatchdogPings};
 
     pub(crate) struct StartupRestore;
 
@@ -621,10 +653,46 @@ mod unsupported {
     /// Non-Linux: no systemd watchdog; never a task.
     pub(crate) fn spawn_watchdog_pings(
         _shutdown_rx: tokio::sync::watch::Receiver<bool>,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        None
+    ) -> WatchdogPings {
+        WatchdogPings::none()
     }
 }
 
 #[cfg(not(target_os = "linux"))]
 pub(super) use unsupported::{notify_ready, prepare_restart, spawn_watchdog_pings, StartupRestore};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn watchdog_owner_aborts_and_joins_before_stop_returns() {
+        let fired = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (signal_tx, mut signal_rx) = tokio::sync::watch::channel(false);
+        let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
+        let task_fired = fired.clone();
+        let task_release = release.clone();
+        let task = tokio::spawn(async move {
+            signal_rx.changed().await.unwrap();
+            assert!(*signal_rx.borrow());
+            let _ = observed_tx.send(());
+            task_release.notified().await;
+            task_fired.store(true, Ordering::SeqCst);
+        });
+        signal_tx.send(true).unwrap();
+        observed_rx.await.unwrap();
+
+        WatchdogPings::from_task(task).stop().await;
+        release.notify_waiters();
+        tokio::task::yield_now().await;
+
+        assert!(
+            !fired.load(Ordering::SeqCst),
+            "watchdog task acted after stop returned"
+        );
+    }
+}

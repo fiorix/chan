@@ -3,14 +3,14 @@
 //!
 //! A chan-library's existence source is its registry (`chan workspace ls` /
 //! `Library::list_workspaces`) -- the set of workspaces it owns. What the
-//! registry does NOT record is which of those a given deployment had MOUNTED
-//! (`on`) versus registered-but-unmounted (`off`) at its last save. That on/off
-//! state is this overlay: a [`PersistedWorkspace`] row keyed by path, owned by
-//! the library and persisted in a [`WorkspaceOverlay`] store co-located with the
-//! window registry (local `~/.chan/workspaces.json`, devserver
-//! `~/.chan/devserver/workspaces.json`) so a restart comes back serving exactly
-//! what was on. Both the desktop-local boot and the headless `run_devserver`
-//! restore route through the same store -- one implementation in the library.
+//! registry does NOT record is whether a given deployment intends each
+//! workspace to be mounted (`on`) or registered-but-unmounted (`off`). That
+//! durable intent is this overlay: a [`PersistedWorkspace`] row keyed by path,
+//! owned by the library and persisted in a [`WorkspaceOverlay`] store
+//! co-located with the window registry (local `~/.chan/workspaces.json`,
+//! devserver `~/.chan/devserver/workspaces.json`). Both the desktop-local boot
+//! and the headless `run_devserver` restore route through the same store -- one
+//! implementation in the library.
 //!
 //! The route `prefix` a workspace mounts at is deliberately NOT persisted: it is
 //! a pure function of the root path, derived per library by that library's own
@@ -25,17 +25,32 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-/// One workspace's persisted on/off state: the `path` that identifies it (the
-/// registry key) and whether it was mounted (`on`) at the last save. The
-/// registry is the existence source; this is the on/off overlay over it. A row
-/// absent from the overlay defaults to off -- the registry still surfaces it.
-/// The mount prefix is re-derived per library at restore, not stored here.
+/// One workspace's persisted mount intent plus its ordering generation.
+///
+/// The registry is the existence source; this overlay records whether the
+/// deployment desires the row on. A row absent from the overlay defaults to
+/// off. The mount prefix is re-derived per library at restore, not stored here.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistedWorkspace {
     /// Filesystem path identifying the workspace (the registry key).
     pub path: String,
-    /// Whether the workspace was mounted (`on`) at the last save.
-    pub on: bool,
+    /// Durable desired mount state. Serialized as the established `on` key.
+    #[serde(rename = "on")]
+    pub desired_on: bool,
+    /// Per-row intent ordering generation; old overlay files start at zero.
+    #[serde(default)]
+    pub generation: u64,
+}
+
+impl PersistedWorkspace {
+    /// Construct a new row before its first accepted intent is allocated.
+    pub fn new(path: impl Into<String>, desired_on: bool) -> Self {
+        Self {
+            path: path.into(),
+            desired_on,
+            generation: 0,
+        }
+    }
 }
 
 /// The library's workspace on/off overlay store: the durable set of
@@ -65,21 +80,27 @@ impl WorkspaceOverlay {
         }
     }
 
-    /// Upsert a workspace's on/off by path and persist. The toggle hook: turning
-    /// a workspace off writes an `on:false` row (remembered-off), turning it on
-    /// writes `on:true`.
-    pub fn set(&self, path: &str, on: bool) {
-        {
+    /// Upsert a workspace's desired on/off state, advance its generation, and
+    /// persist. Returns the accepted generation.
+    pub fn set(&self, path: &str, desired_on: bool) -> u64 {
+        let generation = {
             let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
             match rows.iter_mut().find(|r| r.path == path) {
-                Some(row) => row.on = on,
-                None => rows.push(PersistedWorkspace {
-                    path: path.to_string(),
-                    on,
-                }),
+                Some(row) => {
+                    row.desired_on = desired_on;
+                    row.generation = row.generation.wrapping_add(1);
+                    row.generation
+                }
+                None => {
+                    let mut row = PersistedWorkspace::new(path, desired_on);
+                    row.generation = 1;
+                    rows.push(row);
+                    1
+                }
             }
-        }
+        };
         self.persist();
+        generation
     }
 
     /// Forget a workspace entirely (it left the library) and persist.
@@ -93,10 +114,28 @@ impl WorkspaceOverlay {
 
     /// Replace the whole overlay with `new_rows` and persist. The bulk-snapshot
     /// hook (the desktop snapshots its live serve set; the devserver snapshots
-    /// its registered-workspace map).
-    pub fn replace(&self, new_rows: Vec<PersistedWorkspace>) {
+    /// its registered-workspace map). For a retained path, a newer concurrently
+    /// accepted generation wins over an older snapshot.
+    pub fn replace(&self, mut new_rows: Vec<PersistedWorkspace>) {
         {
             let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+            for replacement in &mut new_rows {
+                let current = rows.iter().find(|row| row.path == replacement.path);
+                match current {
+                    Some(current) if replacement.generation == 0 => {
+                        replacement.generation = if replacement.desired_on == current.desired_on {
+                            current.generation
+                        } else {
+                            current.generation.wrapping_add(1)
+                        };
+                    }
+                    None if replacement.generation == 0 => replacement.generation = 1,
+                    Some(current) if current.generation > replacement.generation => {
+                        *replacement = current.clone();
+                    }
+                    _ => {}
+                }
+            }
             *rows = new_rows;
         }
         self.persist();
@@ -108,7 +147,7 @@ impl WorkspaceOverlay {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .filter(|r| r.on)
+            .filter(|r| r.desired_on)
             .map(|r| r.path.clone())
             .collect()
     }
@@ -238,7 +277,7 @@ mod tests {
         assert!(ov.on_paths().is_empty());
         let entries = ov.entries();
         assert_eq!(entries.len(), 1);
-        assert!(!entries[0].on);
+        assert!(!entries[0].desired_on);
     }
 
     #[test]
@@ -262,37 +301,72 @@ mod tests {
         let entries = reopened.entries();
         // Sorted by path on save.
         assert_eq!(entries[0].path, "/a");
-        assert!(!entries[0].on);
+        assert!(!entries[0].desired_on);
         assert_eq!(entries[1].path, "/b");
-        assert!(entries[1].on);
+        assert!(entries[1].desired_on);
     }
 
     #[test]
     fn replace_overwrites_the_whole_set() {
         let (ov, _dir) = overlay();
         ov.set("/old", true);
-        ov.replace(vec![PersistedWorkspace {
-            path: "/new".into(),
-            on: true,
-        }]);
+        ov.replace(vec![PersistedWorkspace::new("/new", true)]);
         assert_eq!(ov.on_paths(), vec!["/new".to_string()]);
         assert_eq!(ov.entries().len(), 1);
+    }
+
+    #[test]
+    fn replace_cannot_overwrite_a_newer_concurrent_intent() {
+        let (ov, _dir) = overlay();
+        ov.set("/notes", true);
+        let stale = ov.entries().pop().unwrap();
+        ov.set("/notes", false);
+
+        ov.replace(vec![stale]);
+
+        let current = ov.entries().pop().unwrap();
+        assert!(!current.desired_on);
+        assert_eq!(current.generation, 2);
     }
 
     #[test]
     fn persisted_workspace_pins_field_names() {
         // The on-disk record field names are part of the persisted contract;
         // pin them so a rename is a visible, deliberate change.
-        let ws = PersistedWorkspace {
-            path: "/home/u/notes".into(),
-            on: true,
-        };
+        let mut ws = PersistedWorkspace::new("/home/u/notes", true);
+        ws.generation = 7;
         let v = serde_json::to_value(&ws).unwrap();
         assert_eq!(
             v,
-            serde_json::json!({ "path": "/home/u/notes", "on": true })
+            serde_json::json!({
+                "path": "/home/u/notes",
+                "on": true,
+                "generation": 7
+            })
         );
         assert_eq!(ws, serde_json::from_value(v).unwrap());
+    }
+
+    #[test]
+    fn desired_intent_generation_survives_crash_and_old_rows_start_at_zero() {
+        let old: PersistedWorkspace =
+            serde_json::from_value(serde_json::json!({ "path": "/old", "on": true })).unwrap();
+        assert!(old.desired_on);
+        assert_eq!(old.generation, 0);
+
+        let (ov, dir) = overlay();
+        ov.set("/notes", true);
+        let first = ov.entries().pop().expect("first intent");
+        assert!(first.desired_on);
+        assert_eq!(first.generation, 1);
+        ov.set("/notes", false);
+        let second = ov.entries().pop().expect("second intent");
+        assert!(!second.desired_on);
+        assert_eq!(second.generation, 2);
+
+        drop(ov);
+        let restored = WorkspaceOverlay::open(dir.path().join("workspaces.json"));
+        assert_eq!(restored.entries(), vec![second]);
     }
 
     #[test]

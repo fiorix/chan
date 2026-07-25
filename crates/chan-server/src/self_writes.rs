@@ -25,6 +25,7 @@
 //! second/third event through and re-trigger the bad behavior.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -36,8 +37,77 @@ const SELF_WRITE_WINDOW: Duration = Duration::from_millis(1500);
 
 #[derive(Debug)]
 pub struct SelfWrites {
-    inner: Mutex<VecDeque<(String, Instant)>>,
+    inner: Mutex<VecDeque<SelfWriteEntry>>,
     window: Duration,
+    next_id: AtomicU64,
+}
+
+#[derive(Debug)]
+struct SelfWriteEntry {
+    id: u64,
+    path: String,
+    noted_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SelfWriteReservation {
+    id: u64,
+}
+
+/// Open-time concurrency metadata carried by a raw text write.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WritePreconditions {
+    pub expected_mtime: Option<i64>,
+    pub expected_mtime_ns: Option<i64>,
+    pub authority_version: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WritePreconditionError {
+    Required,
+    Conflict,
+}
+
+/// Apply the one raw-text CAS matrix used by disk, document-session,
+/// and scene-session writes.
+///
+/// Equal authority content is always safe to retry: callers still
+/// force or confirm durability before returning success. Changed
+/// content under a live authority requires both its version and an
+/// open-time disk token. A disk-only write preserves the historical
+/// no-token last-write-wins behavior.
+pub(crate) fn check_write_preconditions(
+    current_mtime_ns: Option<i64>,
+    current_authority_version: Option<u64>,
+    content_equal: bool,
+    requested: WritePreconditions,
+) -> Result<(), WritePreconditionError> {
+    if content_equal {
+        return Ok(());
+    }
+    if let Some(current_version) = current_authority_version {
+        let Some(expected_version) = requested.authority_version else {
+            return Err(WritePreconditionError::Required);
+        };
+        if expected_version != current_version {
+            return Err(WritePreconditionError::Conflict);
+        }
+        if requested.expected_mtime_ns.is_none() && requested.expected_mtime.is_none() {
+            return Err(WritePreconditionError::Required);
+        }
+    }
+    let conflict = if let Some(expected) = requested.expected_mtime_ns {
+        current_mtime_ns != Some(expected)
+    } else if let Some(expected) = requested.expected_mtime {
+        current_mtime_ns.map(|ns| ns / 1_000_000_000) != Some(expected)
+    } else {
+        false
+    };
+    if conflict {
+        Err(WritePreconditionError::Conflict)
+    } else {
+        Ok(())
+    }
 }
 
 impl Default for SelfWrites {
@@ -58,6 +128,7 @@ impl SelfWrites {
         Self {
             inner: Mutex::new(VecDeque::new()),
             window,
+            next_id: AtomicU64::new(1),
         }
     }
 
@@ -66,10 +137,34 @@ impl SelfWrites {
     /// lives in that same coordinate system since the watcher's
     /// `WatchEvent.path` is also workspace-relative.
     pub fn note(&self, rel: &str) {
+        self.reserve(rel);
+    }
+
+    /// Reserve after the caller has completed the canonical strict
+    /// writability preflight. Streaming writers call this at the end
+    /// of the body feed, immediately before fsync + rename, so the
+    /// suppression window starts near the actual watcher event.
+    pub(crate) fn reserve_after_preflight(&self, rel: &str) -> SelfWriteReservation {
+        self.reserve(rel)
+    }
+
+    fn reserve(&self, rel: &str) -> SelfWriteReservation {
         let now = Instant::now();
         let mut q = self.inner.lock().expect("self-writes queue poisoned");
         evict_expired(&mut q, now, self.window);
-        q.push_back((rel.to_string(), now));
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        q.push_back(SelfWriteEntry {
+            id,
+            path: rel.to_string(),
+            noted_at: now,
+        });
+        SelfWriteReservation { id }
+    }
+
+    /// Remove a reservation for a write that did not commit.
+    pub(crate) fn cancel(&self, reservation: SelfWriteReservation) {
+        let mut q = self.inner.lock().expect("self-writes queue poisoned");
+        q.retain(|entry| entry.id != reservation.id);
     }
 
     /// True when `rel` was written by chan-server within the dedupe
@@ -80,13 +175,13 @@ impl SelfWrites {
         let now = Instant::now();
         let mut q = self.inner.lock().expect("self-writes queue poisoned");
         evict_expired(&mut q, now, self.window);
-        q.iter().any(|(p, _)| p == rel)
+        q.iter().any(|entry| entry.path == rel)
     }
 }
 
-fn evict_expired(q: &mut VecDeque<(String, Instant)>, now: Instant, window: Duration) {
-    while let Some(&(_, t)) = q.front() {
-        if now.duration_since(t) > window {
+fn evict_expired(q: &mut VecDeque<SelfWriteEntry>, now: Instant, window: Duration) {
+    while let Some(entry) = q.front() {
+        if now.duration_since(entry.noted_at) > window {
             q.pop_front();
         } else {
             break;
@@ -137,5 +232,51 @@ mod tests {
         sleep(Duration::from_millis(40));
         sw.note("notes/foo.md");
         assert!(sw.should_suppress("notes/foo.md"));
+    }
+
+    #[test]
+    fn live_changed_write_requires_version_and_disk_token() {
+        let current = WritePreconditions {
+            expected_mtime_ns: Some(10),
+            authority_version: Some(3),
+            ..WritePreconditions::default()
+        };
+        assert_eq!(
+            check_write_preconditions(10.into(), 3.into(), false, WritePreconditions::default()),
+            Err(WritePreconditionError::Required)
+        );
+        assert_eq!(
+            check_write_preconditions(
+                10.into(),
+                3.into(),
+                false,
+                WritePreconditions {
+                    authority_version: Some(3),
+                    ..WritePreconditions::default()
+                },
+            ),
+            Err(WritePreconditionError::Required)
+        );
+        assert_eq!(
+            check_write_preconditions(10.into(), 3.into(), false, current),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn stale_tokens_conflict_but_equal_content_is_retry_safe() {
+        let stale = WritePreconditions {
+            expected_mtime_ns: Some(9),
+            authority_version: Some(2),
+            ..WritePreconditions::default()
+        };
+        assert_eq!(
+            check_write_preconditions(10.into(), 3.into(), false, stale),
+            Err(WritePreconditionError::Conflict)
+        );
+        assert_eq!(
+            check_write_preconditions(10.into(), 3.into(), true, stale),
+            Ok(())
+        );
     }
 }

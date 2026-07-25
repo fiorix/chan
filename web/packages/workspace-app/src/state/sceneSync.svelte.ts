@@ -582,6 +582,7 @@ export class SceneSession {
         this.onUpdate(f);
         return;
       case "push-ok":
+        this.tab.authorityVersion = f.version;
         this.pushInFlight = false;
         this.drainQueued();
         if (!this.pushInFlight && !(this.binding?.hasPendingLocal() ?? false)) {
@@ -615,6 +616,7 @@ export class SceneSession {
         // the fileMissing flip and the classic recovery UX takes over.
         this.tab.savedMtimeNs = null;
         this.tab.savedMtime = null;
+        this.tab.authorityVersion = null;
         markTabFileMissing(this.tabId);
         return;
       case "error":
@@ -642,6 +644,7 @@ export class SceneSession {
     this.shadowAppState = f.appState;
     this.shadowFiles = f.files;
     this.haveSnapshot = true;
+    this.tab.authorityVersion = f.version;
     // A snapshot opens a fresh sync epoch: an in-flight push belongs to
     // the pre-resync world and will never be acked on this epoch.
     this.pushInFlight = false;
@@ -665,6 +668,7 @@ export class SceneSession {
   }
 
   private onUpdate(f: Extract<ServerFrame, { type: "update" }>): void {
+    this.tab.authorityVersion = f.version;
     for (const el of f.elements) this.foldIntoShadow(el);
     if (f.appState !== undefined) this.shadowAppState = f.appState;
     if (f.files !== undefined) this.shadowFiles = { ...this.shadowFiles, ...f.files };
