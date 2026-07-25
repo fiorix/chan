@@ -22,9 +22,9 @@ async function openFileBrowser(page) {
 
 async function selectTreeFile(page, filename) {
   const clicked = await page.evaluate((name) => {
-    const row = [...document.querySelectorAll('[role="treeitem"] button.name')].find(
-      (b) => b.textContent?.trim() === name,
-    );
+    const row = [
+      ...document.querySelectorAll('[role="treeitem"] button.name'),
+    ].find((b) => b.textContent?.trim() === name);
     if (!row) return false;
     row.click();
     return true;
@@ -60,7 +60,9 @@ async function fetchScene(page) {
     const t =
       sessionStorage.getItem("chan.token") ??
       new URLSearchParams(location.search).get("t");
-    const res = await fetch(`/api/files/${path}?t=${encodeURIComponent(t ?? "")}`);
+    const res = await fetch(
+      `/api/files/${path}?t=${encodeURIComponent(t ?? "")}`,
+    );
     if (!res.ok) throw new Error(`GET ${path}: ${res.status}`);
     const body = await res.json();
     return { content: body.content, mtimeNs: body.mtime_ns ?? null };
@@ -216,15 +218,22 @@ export default {
           if (!rect) throw new Error("seed rectangle missing from authority");
           const versionBefore = rect.version;
           rect.strokeColor = "#2f9e44";
-          const put = await fetch(url, {
+          const putUrl = new URL(url, location.origin);
+          if (body.mtime_ns != null) {
+            putUrl.searchParams.set("expected_mtime_ns", body.mtime_ns);
+          }
+          if (body.authority_version != null) {
+            putUrl.searchParams.set(
+              "authority_version",
+              String(body.authority_version),
+            );
+          }
+          const put = await fetch(putUrl, {
             method: "PUT",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              content: JSON.stringify(scene, null, 2),
-              expected_mtime_ns: body.mtime_ns,
-            }),
+            headers: { "content-type": "text/plain; charset=utf-8" },
+            body: JSON.stringify(scene, null, 2),
           });
-          if (put.status === 409) continue;
+          if (put.status === 409 || put.status === 428) continue;
           if (!put.ok) {
             throw new Error(`PUT ${path}: ${put.status} ${await put.text()}`);
           }
@@ -236,7 +245,9 @@ export default {
       const afterPut = JSON.parse((await fetchScene(page)).content);
       const rect = afterPut.elements.find((e) => e.id === "smoke-rect-1");
       if (rect.strokeColor !== "#2f9e44") {
-        throw new Error(`PUT edit not adopted: strokeColor ${rect.strokeColor}`);
+        throw new Error(
+          `PUT edit not adopted: strokeColor ${rect.strokeColor}`,
+        );
       }
       if (!(rect.version > putResult.versionBefore)) {
         throw new Error(
