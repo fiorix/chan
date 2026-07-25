@@ -55,6 +55,36 @@ pub(crate) enum MergeOutcome {
     Conflict,
 }
 
+/// Result of the conflict-aware PUT mutation gate.
+pub(crate) enum HttpReplaceOutcome {
+    Applied,
+    PreconditionRequired {
+        current_version: u64,
+        disk_mtime_ns: Option<i64>,
+    },
+    Stale {
+        current_version: u64,
+        disk_mtime_ns: Option<i64>,
+    },
+    Conflicted {
+        disk_mtime_ns: Option<i64>,
+    },
+}
+
+pub(crate) struct HttpWriteView {
+    pub(crate) disk_mtime_ns: Option<i64>,
+    pub(crate) authority_version: u64,
+    pub(crate) conflict_mtime_ns: Option<Option<i64>>,
+    pub(crate) write_budget: u64,
+}
+
+pub(crate) struct HttpReadView {
+    pub(crate) content: String,
+    pub(crate) disk_mtime_ns: Option<i64>,
+    pub(crate) authority_version: u64,
+    pub(crate) disk_conflicted: bool,
+}
+
 impl SessionState {
     pub(crate) fn dirty_since(&self) -> Option<Instant> {
         match self {

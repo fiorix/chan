@@ -52,7 +52,10 @@ use chan_workspace::{
 };
 use tokio::sync::{broadcast, mpsc, watch, Notify};
 
-use crate::collab_sessions::{DurableBaseline, MergeOutcome, SessionConflict, SessionState};
+pub(crate) use crate::collab_sessions::HttpReplaceOutcome;
+use crate::collab_sessions::{
+    DurableBaseline, HttpReadView, HttpWriteView, MergeOutcome, SessionConflict, SessionState,
+};
 use crate::disk_echo::{content_hash, DiskEchoRing};
 use crate::doc_sessions::recovery::{
     RecoveryAuthority, RecoveryBaseline, RecoveryConflict, RecoveryKind, RecoveryRecord,
@@ -210,36 +213,6 @@ struct DocState {
     /// disk. A reconcile read matching the ring is our own bytes under
     /// a re-stamped mtime, never an external edit.
     disk_echo: DiskEchoRing,
-}
-
-/// Result of the conflict-aware PUT mutation gate.
-pub(crate) enum HttpReplaceOutcome {
-    Applied,
-    PreconditionRequired {
-        current_version: u64,
-        disk_mtime_ns: Option<i64>,
-    },
-    Stale {
-        current_version: u64,
-        disk_mtime_ns: Option<i64>,
-    },
-    Conflicted {
-        disk_mtime_ns: Option<i64>,
-    },
-}
-
-pub(crate) struct HttpWriteView {
-    pub disk_mtime_ns: Option<i64>,
-    pub authority_version: u64,
-    pub conflict_mtime_ns: Option<Option<i64>>,
-    pub write_budget: u64,
-}
-
-pub(crate) struct HttpReadView {
-    pub content: String,
-    pub disk_mtime_ns: Option<i64>,
-    pub authority_version: u64,
-    pub disk_conflicted: bool,
 }
 
 /// A registered attachment. Dropping it detaches: the outbox and
