@@ -2265,14 +2265,15 @@ mod write_tests {
     #[test]
     fn route_table_delegates_streaming_limits_to_semantic_sinks() {
         let route_table = include_str!("../lib.rs");
-        assert!(route_table
-            .contains("post(api_upload_file).layer(DefaultBodyLimit::disable())"));
+        assert_eq!(
+            route_table.matches("DefaultBodyLimit::disable()").count(),
+            3
+        );
+        assert!(route_table.contains("post(api_upload_file).layer(DefaultBodyLimit::disable())"));
         assert!(route_table.contains(
             "post(crate::routes::transfer::api_terminal_upload_file)\n                .layer(DefaultBodyLimit::disable())"
         ));
-        assert!(
-            route_table.contains("put(api_write_file).layer(DefaultBodyLimit::disable())")
-        );
+        assert!(route_table.contains("put(api_write_file).layer(DefaultBodyLimit::disable())"));
     }
 
     #[tokio::test]

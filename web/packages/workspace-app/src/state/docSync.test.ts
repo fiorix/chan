@@ -308,6 +308,7 @@ describe("attach", () => {
     expect(tab.doc?.state).toBe("attached");
     expect(tab.saved).toBe("hello");
     expect(tab.savedMtimeNs).toBe(MTIME);
+    expect(tab.authorityVersion).toBe(0);
     expect(view.state.doc.toString()).toBe("hello");
     expect(sock.frames("push")).toHaveLength(0);
     cleanup();
@@ -874,6 +875,7 @@ describe("save funnel", () => {
     expect(t.doc?.state).toBe("degraded");
     expect(writeSpy).toHaveBeenCalledTimes(1);
     expect(writeSpy.mock.calls[0]![2]).toBe(MTIME);
+    expect(writeSpy.mock.calls[0]![4]).toBe(0);
     expect(t.saved).toBe("hello!");
     expect(t.savedMtimeNs).toBe("999");
     cleanup();
