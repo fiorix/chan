@@ -1046,6 +1046,7 @@ impl DevserverState {
         });
     }
 
+    #[cfg(test)]
     fn persist_state_with_mounted_snapshot(
         &self,
         mounted_snapshot: impl FnOnce() -> HashSet<String>,
