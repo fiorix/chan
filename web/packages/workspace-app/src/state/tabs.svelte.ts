@@ -6266,8 +6266,7 @@ function serializedLeaves(node: SerNode | null, out: SerLeaf[] = []): SerLeaf[] 
 /// saved `tsid` only respawns a fresh shell, so a window whose tabs are ALL
 /// terminals (or has none) is not worth persisting as a saved window. Used
 /// by `serializeSession()` so a terminal-only window deletes its blob
-/// instead of saving it; mirrors the backend `session_blob_is_empty`
-/// all-terminal rule (chan-workspace) that prunes existing such phantoms.
+/// instead of saving it.
 export function layoutHasDurableContent(layout: SerNode | null): boolean {
   for (const leaf of serializedLeaves(layout)) {
     // Side A plus side B tabs.
