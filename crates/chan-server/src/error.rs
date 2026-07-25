@@ -6,7 +6,8 @@
 //! of building responses by hand so the wire shape stays consistent across
 //! handlers.
 
-use axum::http::StatusCode;
+use axum::http::header::RETRY_AFTER;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
@@ -39,13 +40,18 @@ pub fn err_settings_locked() -> Response {
 
 pub fn err_state(e: &StateAccessError) -> Response {
     match e {
-        StateAccessError::WorkspaceCellMissing => err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "workspace busy: workspace state is temporarily unavailable; retry in a moment".into(),
-        ),
-        StateAccessError::WorkspaceCellPoisoned => {
-            err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        StateAccessError::Busy | StateAccessError::Missing => {
+            let mut response = err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "workspace busy: workspace state is temporarily unavailable; retry in a moment"
+                    .into(),
+            );
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static("1"));
+            response
         }
+        StateAccessError::Poisoned => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -153,8 +159,19 @@ mod tests {
 
     #[tokio::test]
     async fn err_state_maps_missing_workspace_to_retryable_busy() {
-        let (status, msg) =
-            status_and_error(err_state(&StateAccessError::WorkspaceCellMissing)).await;
+        let response = err_state(&StateAccessError::Missing);
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "1");
+        let (status, msg) = status_and_error(response).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(msg.contains("workspace busy"));
+    }
+
+    #[tokio::test]
+    async fn err_state_maps_contended_workspace_to_retryable_busy() {
+        let response = err_state(&StateAccessError::Busy);
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "1");
+        let (status, msg) = status_and_error(response).await;
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(msg.contains("workspace busy"));

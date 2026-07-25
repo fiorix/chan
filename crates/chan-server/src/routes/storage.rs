@@ -11,14 +11,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::header::RETRY_AFTER;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chan_workspace::ResetMode;
 use serde::{Deserialize, Serialize};
 
 use crate::bus::{make_progress_broadcast, make_watch_bridge};
-use crate::error::{err, err_from};
+use crate::error::{err, err_from, err_state};
 use crate::indexer::Indexer;
 use crate::state::{AppState, WorkspaceCell};
 use crate::terminal_sessions::CloseReason;
@@ -59,7 +60,10 @@ struct ResetResponse {
 /// detached tokio tasks) to drop before giving up. Editor-side I/O
 /// is fast (markdown reads / writes); 5 s is comfortable headroom
 /// without making a misclick feel like a hang.
+#[cfg(not(test))]
 const RESET_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const RESET_DRAIN_DEADLINE: Duration = Duration::from_millis(500);
 
 pub async fn api_storage_reset(
     State(state): State<Arc<AppState>>,
@@ -74,15 +78,19 @@ pub async fn api_storage_reset(
     // stale authority text survives into the next workspace
     // generation. Doc sessions hold no workspace Arc, so this also
     // keeps them out of the reset drain count.
-    let doc_workspace = state.try_workspace().ok();
+    let doc_workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(e) => return err_state(&e),
+    };
     state
         .doc_sessions
-        .close_all("reset", doc_workspace.as_ref(), &state.self_writes)
+        .close_all("reset", Some(&doc_workspace), &state.self_writes)
         .await;
     state
         .scene_sessions
-        .close_all("reset", doc_workspace.as_ref(), &state.self_writes)
+        .close_all("reset", Some(&doc_workspace), &state.self_writes)
         .await;
+    drop(doc_workspace);
     // Run the reset on a blocking-thread: the drain spin-wait sleeps
     // and the chan-workspace wipe walks the filesystem; neither belongs
     // on the async runtime's worker thread.
@@ -110,12 +118,18 @@ enum ResetError {
 
 fn err_from_reset(e: &ResetError) -> Response {
     match e {
-        ResetError::Busy => err(
-            StatusCode::CONFLICT,
-            "workspace busy: in-flight requests still hold the writer lock; \
-             retry in a moment"
-                .into(),
-        ),
+        ResetError::Busy => {
+            let mut response = err(
+                StatusCode::CONFLICT,
+                "workspace busy: in-flight requests still hold the workspace; \
+                 retry in a moment"
+                    .into(),
+            );
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static("1"));
+            response
+        }
         ResetError::Core(c) => err_from(c),
         ResetError::Poisoned(what) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -125,8 +139,8 @@ fn err_from_reset(e: &ResetError) -> Response {
 }
 
 /// Replace `state.workspace_cell` end-to-end. Holds the write lock the
-/// entire time so handlers waiting on the read lock see exactly one
-/// transition (old workspace -> new workspace); they never observe the
+/// entire time so handlers receive a nonblocking busy result throughout
+/// the old-workspace to new-workspace transition; they never observe the
 /// `None` middle state.
 ///
 /// Drain protocol: we keep one strong `Arc<Workspace>` aside (`workspace_strong`)
@@ -250,6 +264,90 @@ fn perform_reset(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::{Mutex, RwLock};
+
+    use chan_workspace::SearchAggression;
+    use tempfile::TempDir;
+    use tokio::sync::{broadcast, watch};
+
+    use crate::self_writes::SelfWrites;
+    use crate::terminal_sessions::{Registry as TerminalRegistry, RegistryConfig};
+    use crate::{EditorPrefs, ServerConfig};
+
+    struct ResetTestState {
+        _config: TempDir,
+        _root: TempDir,
+        state: Arc<AppState>,
+    }
+
+    fn reset_test_state() -> ResetTestState {
+        let config = TempDir::new().expect("config tempdir");
+        let root = TempDir::new().expect("workspace tempdir");
+        let library =
+            chan_workspace::Library::open_at(config.path().join("config.toml")).expect("library");
+        library
+            .register_workspace(root.path())
+            .expect("register workspace");
+        let workspace = library.open_workspace(root.path()).expect("workspace");
+        let (events_tx, _) = broadcast::channel::<String>(1);
+        let (index_events_tx, _) = broadcast::channel::<chan_workspace::WatchEvent>(1);
+        let indexer = Arc::new(Indexer::spawn(
+            workspace.clone(),
+            index_events_tx.subscribe(),
+            false,
+            SearchAggression::Conservative,
+            Arc::new(chan_workspace::NoProgress),
+        ));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        std::mem::forget(shutdown_tx);
+
+        let state = Arc::new(AppState {
+            library,
+            workspace_root: root.path().to_path_buf(),
+            workspace_cell: Arc::new(RwLock::new(Some(WorkspaceCell {
+                workspace,
+                watch_handle: None,
+                indexer,
+            }))),
+            token: None,
+            prefix: Arc::new(RwLock::new(String::new())),
+            settings_disabled: false,
+            last_activity: Arc::new(AtomicU64::new(0)),
+            events_tx,
+            index_events_tx,
+            server_config: Mutex::new(ServerConfig::default()),
+            editor_prefs: Mutex::new(EditorPrefs::default()),
+            self_writes: Arc::new(SelfWrites::new()),
+            terminal_sessions: Arc::new(TerminalRegistry::new(RegistryConfig {
+                workspace_root: root.path().to_path_buf(),
+                mcp_socket_path: None,
+                control_socket_path: None,
+                terminal: ServerConfig::default().terminal,
+            })),
+            doc_sessions: Arc::new(crate::doc_sessions::DocRegistry::new()),
+            scene_sessions: Arc::new(crate::scene_sessions::SceneRegistry::new()),
+            shutdown_rx,
+            scope_registry: Arc::new(crate::bus::ScopeRegistry::new()),
+            survey_bus: Arc::new(crate::survey::SurveyBus::new()),
+            window_bus: Arc::new(crate::window_bus::WindowBus::new()),
+            handover_bus: Arc::new(crate::handover_bus::HandoverBus::new()),
+            ephemeral_sessions: Mutex::new(HashMap::new()),
+            terminal_session_dir: None,
+            window_presence: Arc::new(crate::window_presence::WindowPresence::new()),
+            session_registry: Arc::new(crate::session_presence::SessionRegistry::new()),
+            window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
+            window_titles: Arc::new(crate::window_titles::WindowTitles::new()),
+            instance_id: "reset-test".to_string(),
+        });
+
+        ResetTestState {
+            _config: config,
+            _root: root,
+            state,
+        }
+    }
 
     #[test]
     fn err_from_reset_maps_poisoned_locks_to_500() {
@@ -257,5 +355,58 @@ mod tests {
         let status = response.into_response().into_parts().0.status;
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handler_reset_completes_without_an_external_workspace_holder() {
+        let test = reset_test_state();
+
+        let response = api_storage_reset(
+            State(test.state),
+            Json(ResetBody {
+                mode: ResetModeView::Workspace,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handler_reset_restores_busy_cell_and_succeeds_after_holder_drops() {
+        let test = reset_test_state();
+        let state = test.state.clone();
+        let external = state.try_workspace().expect("external workspace holder");
+        let old_workspace = Arc::downgrade(&external);
+
+        let busy = api_storage_reset(
+            State(state.clone()),
+            Json(ResetBody {
+                mode: ResetModeView::Workspace,
+            }),
+        )
+        .await;
+
+        assert_eq!(busy.status(), StatusCode::CONFLICT);
+        assert_eq!(busy.headers().get(RETRY_AFTER).unwrap(), "1");
+        let restored = state.try_workspace().expect("restored workspace");
+        assert!(Arc::ptr_eq(&external, &restored));
+        drop(restored);
+        drop(external);
+
+        let success = api_storage_reset(
+            State(state.clone()),
+            Json(ResetBody {
+                mode: ResetModeView::Workspace,
+            }),
+        )
+        .await;
+
+        assert_eq!(success.status(), StatusCode::OK);
+        assert!(
+            old_workspace.upgrade().is_none(),
+            "the successful retry must replace the old workspace generation"
+        );
+        state.try_workspace().expect("new workspace generation");
     }
 }

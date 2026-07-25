@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, TryLockError};
 
 use chan_workspace::{Library, WatchEvent, WatchHandle, Workspace};
 use tokio::sync::{broadcast, watch};
@@ -28,8 +28,8 @@ pub struct AppState {
     /// Live workspace + its watcher, behind an RwLock so /api/storage/
     /// reset can drop and reopen them without restarting the
     /// process. Always `Some` outside the brief swap window inside
-    /// reset itself; handlers reach the inner Arc<Workspace> via
-    /// `state.workspace()` which clones it under a read lock.
+    /// reset itself; handlers take a fallible nonblocking snapshot
+    /// so reset contention never parks an async worker.
     pub workspace_cell: Arc<RwLock<Option<WorkspaceCell>>>,
     pub token: Option<String>,
     /// Canonical URL prefix the SPA prepends to fetch and WebSocket
@@ -199,26 +199,34 @@ pub struct WorkspaceCell {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateAccessError {
+    #[error("workspace cell busy")]
+    Busy,
     #[error("workspace cell lock poisoned")]
-    WorkspaceCellPoisoned,
+    Poisoned,
     #[error("workspace cell missing outside reset window")]
-    WorkspaceCellMissing,
+    Missing,
 }
 
 impl AppState {
-    /// Snapshot the current workspace Arc. Acquires the RwLock read
-    /// guard for the duration of the clone (microseconds). The
+    fn try_workspace_cell(
+        &self,
+    ) -> Result<RwLockReadGuard<'_, Option<WorkspaceCell>>, StateAccessError> {
+        match self.workspace_cell.try_read() {
+            Ok(cell) => Ok(cell),
+            Err(TryLockError::WouldBlock) => Err(StateAccessError::Busy),
+            Err(TryLockError::Poisoned(_)) => Err(StateAccessError::Poisoned),
+        }
+    }
+
+    /// Snapshot the current workspace Arc without waiting for a reset
+    /// writer. The read guard lives only for the duration of the clone. The
     /// returned Arc keeps the workspace alive even if a reset swaps
     /// the cell out a moment later, so callers don't need to hold
     /// the lock through their I/O.
-    ///
     pub fn try_workspace(&self) -> Result<Arc<Workspace>, StateAccessError> {
-        let cell = self
-            .workspace_cell
-            .read()
-            .map_err(|_| StateAccessError::WorkspaceCellPoisoned)?;
+        let cell = self.try_workspace_cell()?;
         let Some(cell) = cell.as_ref() else {
-            return Err(StateAccessError::WorkspaceCellMissing);
+            return Err(StateAccessError::Missing);
         };
         Ok(cell.workspace.clone())
     }
@@ -230,15 +238,11 @@ impl AppState {
         self.try_workspace().expect("workspace state unavailable")
     }
 
-    /// Snapshot the live indexer Arc. Same RwLock pattern as
-    /// `workspace()`: held only for the duration of the clone.
+    /// Snapshot the live indexer Arc without waiting for a reset writer.
     pub fn try_indexer(&self) -> Result<Arc<indexer::Indexer>, StateAccessError> {
-        let cell = self
-            .workspace_cell
-            .read()
-            .map_err(|_| StateAccessError::WorkspaceCellPoisoned)?;
+        let cell = self.try_workspace_cell()?;
         let Some(cell) = cell.as_ref() else {
-            return Err(StateAccessError::WorkspaceCellMissing);
+            return Err(StateAccessError::Missing);
         };
         Ok(cell.indexer.clone())
     }
@@ -260,7 +264,8 @@ pub(crate) mod test_support {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::atomic::AtomicU64;
-    use std::sync::{Arc, Mutex, RwLock};
+    use std::sync::{mpsc, Arc, Barrier, Mutex, RwLock};
+    use std::time::Duration;
 
     use chan_workspace::Library;
     use tokio::sync::{broadcast, watch};
@@ -338,7 +343,7 @@ pub(crate) mod test_support {
 
         assert!(matches!(
             state.try_workspace(),
-            Err(super::StateAccessError::WorkspaceCellMissing)
+            Err(super::StateAccessError::Missing)
         ));
     }
 
@@ -354,7 +359,43 @@ pub(crate) mod test_support {
 
         assert!(matches!(
             state.try_indexer(),
-            Err(super::StateAccessError::WorkspaceCellPoisoned)
+            Err(super::StateAccessError::Poisoned)
+        ));
+    }
+
+    #[test]
+    fn try_workspace_does_not_wait_for_a_writer() {
+        let state = make_test_state(false);
+        let reader_state = state.clone();
+        let writer = state.workspace_cell.write().expect("workspace cell writer");
+        let ready = Arc::new(Barrier::new(2));
+        let reader_ready = ready.clone();
+        let (tx, rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            reader_ready.wait();
+            tx.send(reader_state.try_workspace())
+                .expect("send snapshot result");
+        });
+
+        ready.wait();
+        let result = rx.recv_timeout(Duration::from_millis(100));
+        drop(writer);
+        reader.join().expect("reader thread");
+
+        assert!(
+            matches!(result, Ok(Err(super::StateAccessError::Busy))),
+            "workspace snapshot waited for the writer instead of returning a state access error"
+        );
+    }
+
+    #[test]
+    fn try_indexer_reports_busy_cell() {
+        let state = make_test_state(false);
+        let _writer = state.workspace_cell.write().expect("workspace cell writer");
+
+        assert!(matches!(
+            state.try_indexer(),
+            Err(super::StateAccessError::Busy)
         ));
     }
 }
