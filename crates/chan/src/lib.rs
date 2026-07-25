@@ -4253,6 +4253,7 @@ async fn activate_devserver_unit(
     control: &mut impl DevserverSystemdControl,
 ) -> Result<()> {
     let mut restart_attempted = false;
+    let mut restart_completed = false;
     let activation = async {
         if update.changed {
             control.command(&["daemon-reload"]).await?;
@@ -4265,6 +4266,7 @@ async fn activate_devserver_unit(
             control
                 .command(&["restart", DEVSERVER_SYSTEMD_UNIT])
                 .await?;
+            restart_completed = true;
         } else {
             control
                 .command(&["enable", "--now", DEVSERVER_SYSTEMD_UNIT])
@@ -4297,6 +4299,15 @@ async fn activate_devserver_unit(
             rollback_errors.push(format!("previous-unit restart failed: {rollback_error:#}"));
         }
     }
+    let terminal_impact = if restore_active && restart_completed {
+        "; rollback required a second restart without another fdstore handoff; \
+         live terminal PTYs were dropped"
+    } else if restore_active && restart_attempted {
+        "; systemd may have begun the migration restart before reporting failure, and rollback \
+         cannot repeat the fdstore handoff; live terminal PTYs may have been dropped"
+    } else {
+        ""
+    };
     if rollback_errors.is_empty() {
         let rollback = if update.previous.is_some() {
             "restored the previous unit"
@@ -4304,13 +4315,13 @@ async fn activate_devserver_unit(
             "removed the newly installed unit"
         };
         anyhow::bail!(
-            "systemd unit activation failed: {error:#}; {rollback} at {}",
-            update.path.display()
+            "systemd unit activation failed: {error:#}; {rollback} at {}{terminal_impact}",
+            update.path.display(),
         );
     }
     anyhow::bail!(
-        "systemd unit activation failed: {error:#}; rollback was incomplete: {}",
-        rollback_errors.join("; ")
+        "systemd unit activation failed: {error:#}; rollback was incomplete: {}{terminal_impact}",
+        rollback_errors.join("; "),
     )
 }
 
@@ -8857,6 +8868,50 @@ mod tests {
             .await
             .expect_err("restart failure rolls back");
         assert!(error.to_string().contains("restored"), "{error:#}");
+        assert!(
+            error
+                .to_string()
+                .contains("live terminal PTYs may have been dropped"),
+            "{error:#}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
+        assert_eq!(
+            systemd_commands(&control),
+            [
+                "daemon-reload",
+                "enable chan-devserver.service",
+                "restart chan-devserver.service",
+                "daemon-reload",
+                "restart chan-devserver.service",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_devserver_systemd_migration_after_restart_reports_dropped_terminals() {
+        let dir = tempfile::tempdir().expect("unit dir");
+        let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
+        let desired = chan_systemd::DevserverUnit::new(
+            "/usr/bin/chan devserver --bind=127.0.0.1 --port=8787",
+        )
+        .render();
+        let legacy = desired.replace("TimeoutStartSec=10min\n", "");
+        std::fs::write(&path, &legacy).expect("seed legacy unit");
+        let update =
+            write_rendered_devserver_unit(&path, &desired, false).expect("stage migration");
+        let mut control = FakeDevserverSystemdControl {
+            active: false,
+            ..Default::default()
+        };
+
+        let error = activate_devserver_unit(&update, true, true, &mut control)
+            .await
+            .expect_err("readiness failure rolls back");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("live terminal PTYs were dropped"),
+            "{message}"
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
         assert_eq!(
             systemd_commands(&control),
