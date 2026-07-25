@@ -4,7 +4,7 @@
   // disappears when none do.
   //
   // Sections (left -> right):
-  //   - index    : indexer state (building / reindexing / error).
+  //   - index    : indexer state (building / reindexing / recovering / error).
   //                Idle is completely hidden so the bar stays quiet
   //                when nothing's happening.
   //   - import   : long-running import progress (contacts today;
@@ -140,6 +140,8 @@
               {#if s.file}<span class="muted">({s.file})</span>{/if}
             {:else if s.state === "reindexing"}
               reindexing <span class="muted">{s.file}</span>
+            {:else if s.state === "recovering"}
+              workspace recovering
             {:else if s.state === "error"}
               index error: <span class="muted">{s.message}</span>
             {:else if s.state === "idle" && s.embedding}

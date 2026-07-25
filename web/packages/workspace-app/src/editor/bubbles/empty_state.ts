@@ -13,7 +13,11 @@ export function indexedDocumentCount(status: IndexStatus | null): number {
 }
 
 export function indexInProgress(status: IndexStatus | null): boolean {
-  return status?.state === "building" || status?.state === "reindexing";
+  return (
+    status?.state === "building" ||
+    status?.state === "reindexing" ||
+    status?.state === "recovering"
+  );
 }
 
 export function completionEmptyState(
@@ -24,6 +28,13 @@ export function completionEmptyState(
     return { kind: "empty", primary: "Empty search, type something" };
   }
   const docs = indexedDocumentCount(indexStatus);
+  if (indexStatus?.state === "recovering") {
+    return {
+      kind: "indexing",
+      primary: "Workspace recovering...",
+      secondary: "search is not ready yet",
+    };
+  }
   if (indexInProgress(indexStatus)) {
     return {
       kind: "indexing",

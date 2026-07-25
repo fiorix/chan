@@ -30,6 +30,19 @@ describe("bubble empty states", () => {
     });
   });
 
+  test("recovering status never reports a fresh-looking empty index", () => {
+    const status: IndexStatus = {
+      state: "recovering",
+      readiness: { state: "recovering" },
+    };
+    expect(indexInProgress(status)).toBe(true);
+    expect(completionEmptyState("note", status)).toEqual({
+      kind: "indexing",
+      primary: "Workspace recovering...",
+      secondary: "search is not ready yet",
+    });
+  });
+
   test("idle status reports no matches against indexed document count", () => {
     const status: IndexStatus = {
       state: "idle",

@@ -12,14 +12,16 @@ describe("graph loading-state: indexing cue", () => {
     expect(graph).toMatch(/import \{[\s\S]*?\bindexStatus\b[\s\S]*?\} from "\.\.\/state\/store\.svelte"/);
   });
 
-  test("indexBuilding derives from the building / reindexing index states", () => {
+  test("indexBuilding includes workspace recovery as an incomplete state", () => {
     expect(graph).toMatch(
-      /const indexBuilding = \$derived\(\s*indexStatus\.value\?\.state === "building" \|\|\s*indexStatus\.value\?\.state === "reindexing",?\s*\)/,
+      /const indexBuilding = \$derived\(\s*indexStatus\.value\?\.state === "building" \|\|\s*indexStatus\.value\?\.state === "reindexing" \|\|\s*workspaceRecovering,?\s*\)/,
     );
   });
 
-  test("the status bar renders the indexing cue gated on indexBuilding", () => {
-    expect(graph).toMatch(/\{#if indexBuilding\}[\s\S]*?class="indexing"[\s\S]*?indexing.../);
+  test("the status bar distinguishes recovery from ordinary indexing", () => {
+    expect(graph).toMatch(
+      /\{#if indexBuilding\}[\s\S]*?class="indexing"[\s\S]*?\{workspaceRecovering \? "workspace recovering…" : "indexing…"\}/,
+    );
   });
 
   test("the indexing cue pulses (and respects reduced-motion)", () => {
@@ -35,7 +37,7 @@ describe("graph loading-state: indexing cue", () => {
 describe("graph empty-state: indexing vs genuinely-empty copy", () => {
   test("emptyStateMessage gates the index-derived modes on indexBuilding", () => {
     expect(graph).toMatch(
-      /const emptyStateMessage = \$derived\(\s*filesystemMode\s*\?\s*"no filesystem graph nodes for this scope"\s*:\s*indexBuilding\s*\?\s*"graph temporarily unavailable while indexing the workspace"\s*:\s*languageMode\s*\?\s*"no language graph nodes for this workspace yet"\s*:\s*"data being indexed, hang tight\.\.\.",?\s*\)/,
+      /const emptyStateMessage = \$derived\(\s*filesystemMode\s*\?\s*"no filesystem graph nodes for this scope"\s*:\s*workspaceRecovering\s*\?\s*"graph unavailable while the workspace recovers"\s*:\s*indexBuilding\s*\?\s*"graph temporarily unavailable while indexing the workspace"/,
     );
   });
 
@@ -49,7 +51,7 @@ describe("graph empty-state: indexing vs genuinely-empty copy", () => {
     // filesystemMode resolves before the indexBuilding branch, so a
     // filesystem graph never shows the indexing copy.
     expect(graph).toMatch(
-      /filesystemMode\s*\?\s*"no filesystem graph nodes for this scope"\s*:\s*indexBuilding/,
+      /filesystemMode\s*\?\s*"no filesystem graph nodes for this scope"\s*:\s*workspaceRecovering/,
     );
   });
 });

@@ -810,9 +810,26 @@ export type HeadingRow = {
   ord: number;
 };
 
-/// Snapshot returned by GET /api/index/status. Field set matches
-/// chan-server::indexer::IndexStatus.
-export type IndexStatus =
+/// Workspace recovery projection carried by readiness-aware API responses.
+/// Only `state` decides ready versus recovering. Generation/action fields are
+/// optional progress detail and must never gate the UI.
+export type WorkspaceReadiness =
+  | {
+      state: "ready";
+      generation?: number;
+    }
+  | {
+      state: "recovering";
+      generation?: number;
+      completed_generation?: number;
+      required_action?: "replay" | "reconcile" | "full_rebuild" | null;
+      active_generation?: number | null;
+      pending_generation?: number | null;
+    };
+
+/// Indexer portion of GET /api/index/status. The server keeps this union
+/// flattened and carries workspace recovery in a sibling `readiness` field.
+export type IndexerStatus =
   | {
       state: "idle";
       indexed_docs: number;
@@ -832,6 +849,17 @@ export type IndexStatus =
   | { state: "building"; current: number; total: number; file: string }
   | { state: "reindexing"; file: string }
   | { state: "error"; message: string };
+
+/// Client-facing index status. During workspace recovery the client projects
+/// the nested readiness tag into an explicit state so every existing SPA
+/// consumer sees transient recovery rather than a settled empty index.
+export type IndexStatus =
+  | IndexerStatus
+  | {
+      state: "recovering";
+      readiness: Extract<WorkspaceReadiness, { state: "recovering" }>;
+      embedding?: null;
+    };
 
 export type IndexingDirectoryState = "indexed" | "indexing" | "pending";
 
@@ -874,6 +902,7 @@ export type ContentHit = {
 
 export type ContentSearchResponse = {
   ready: boolean;
+  readiness: WorkspaceReadiness;
   mode: "hybrid" | "bm25" | "semantic";
   hits: ContentHit[];
 };

@@ -23,7 +23,12 @@
     overlayMaximized,
     setOverlayMaximized,
   } from "../state/pageWidth.svelte";
-  import { ApiError, api, withTokenQuery } from "../api/client";
+  import {
+    ApiError,
+    api,
+    withTokenQuery,
+    workspaceIsRecovering,
+  } from "../api/client";
   import type { ContentHit, ReportFileStats } from "../api/types";
   import { collapseContentHitsByFile } from "../search/results";
   import { isEditableText, isImage } from "../state/fileTypes";
@@ -103,6 +108,7 @@
   let loading = $state(false);
   let active = $state(0);
   let error = $state<string | null>(null);
+  let searchRecovering = $state(false);
 
   // While the index is still building (cold boot on a large workspace) an
   // empty result set means "not indexed yet", not "nothing here". Surface that
@@ -112,6 +118,9 @@
   const indexBuilding = $derived(
     indexStatus.value?.state === "building" ||
       indexStatus.value?.state === "reindexing",
+  );
+  const searchNotReady = $derived(
+    searchRecovering || indexStatus.value?.state === "recovering",
   );
 
   /// Debounce token. Bumped on every input change; any in-flight
@@ -154,6 +163,7 @@
       languageHits = [];
       active = 0;
       error = null;
+      searchRecovering = false;
       // Make sure the graph is loaded so tag hits work on the
       // first query of the session.
       void ensureGraphLoaded();
@@ -207,6 +217,7 @@
       languageHits = [];
       pathHits = [];
       loading = false;
+      searchRecovering = false;
       return;
     }
     const limit = 25;
@@ -227,6 +238,7 @@
           languageHits = hits;
           active = 0;
           error = null;
+          searchRecovering = false;
           return;
         }
         const res = await api.searchContent(q, { limit });
@@ -235,11 +247,13 @@
         languageHits = [];
         active = 0;
         error = null;
+        searchRecovering = workspaceIsRecovering(res.readiness);
       } catch (e) {
         if (myToken !== queryToken) return;
         error = (e as Error).message;
         chunkHits = [];
         languageHits = [];
+        searchRecovering = false;
       } finally {
         if (myToken === queryToken) loading = false;
       }
@@ -911,6 +925,8 @@
           <span>searching...</span>
         {:else if error}
           <span class="err">{error}</span>
+        {:else if searchNotReady}
+          <span class="muted">workspace recovering - content search not ready</span>
         {:else if searchPanel.query.trim() && rows.length === 0}
           {#if indexBuilding}
             <span class="muted">still indexing - results will fill in</span>

@@ -105,6 +105,7 @@
       return "indexing...";
     }
     if (s.state === "reindexing") return "reindexing...";
+    if (s.state === "recovering") return "workspace recovering...";
     if (s.state === "error") return "index error";
     return null;
   });
