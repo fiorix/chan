@@ -13,6 +13,14 @@ The serving layer: turns a workspace (or a terminal) into a web app, hosts the M
   typed request and returns the core result unchanged. The legacy
   `/api/search/content` route is a projection over the same effective-mode
   policy. Control-socket `workspace_search` uses the same contract for `cs`.
+- **Live editor authority**: document and Excalidraw WebSockets share one
+  server-side authority per path. Clean external edits fold into that
+  authority; overlapping dirty edits retain a three-way conflict until an
+  explicit reload or overwrite. Each authority writes a bounded recovery
+  record under `.chan/editor-sessions/v1/` through the workspace atomic stream
+  writer. On restart, dirty/conflicted authority, durable baseline, versions,
+  and the current disk side rehydrate before any flush can run, so stale
+  authority cannot silently replace a newer disk file.
 - **Devserver builder**: `build_devserver_app` composes the `WorkspaceHost` + per-tenant apps into one merged router for `run_devserver`; `chan devserver` and the desktop loopback run the same app.
 
 ```mermaid
