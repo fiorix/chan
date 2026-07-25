@@ -3563,8 +3563,8 @@ fn supervised_tunnel_spec(
 
 /// The `--bind`/`--port` pins a persisted TUNNEL unit carries in its
 /// ExecStart, each field independently. A tunnel unit persists these flags
-/// only when the user chose them (see `devserver_systemd_unit`), so presence
-/// IS the explicitness record; a defaulted field is simply absent. A
+/// only when the user chose them (see `devserver_systemd_unit_spec`), so
+/// presence IS the explicitness record; a defaulted field is simply absent. A
 /// non-tunnel unit (no `--tunnel-url=`) yields no pins: it always persists
 /// its address, so carrying that over into a tunnel unit would fossilize a
 /// default as if the user picked it.
@@ -3584,7 +3584,7 @@ fn persisted_tunnel_pins(unit: &str) -> (Option<IpAddr>, Option<u16>) {
 /// the variable only when the user chose a name, and a non-tunnel unit
 /// (no `--tunnel-url=`) yields nothing. The value is read up to the
 /// closing quote, so names with spaces survive the round trip
-/// ([`devserver_systemd_unit`] strips quotes/backslashes on write),
+/// ([`devserver_systemd_unit_spec`] strips quotes/backslashes on write),
 /// and the `%%` specifier escaping the write site applies is undone
 /// here so a `%`-containing name round-trips literally.
 fn persisted_tunnel_name(unit: &str) -> Option<String> {
@@ -4697,7 +4697,7 @@ fn write_devserver_unit(
     let dir = systemd_user_unit_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let unit_path = dir.join(DEVSERVER_SYSTEMD_UNIT);
-    let unit = devserver_systemd_unit(
+    let unit = devserver_systemd_unit_spec(
         &exe,
         addr,
         devserver_chan_home().as_deref(),
@@ -4740,7 +4740,7 @@ impl DevserverUnitUpdate {
 
 fn write_rendered_devserver_unit(
     unit_path: &Path,
-    unit: &str,
+    unit: &chan_systemd::DevserverUnit,
     contains_secret: bool,
 ) -> Result<DevserverUnitUpdate> {
     let (previous, previous_permissions) = match std::fs::read_to_string(unit_path) {
@@ -4757,7 +4757,7 @@ fn write_rendered_devserver_unit(
         }
     };
     if let Some(previous) = &previous {
-        match chan_systemd::DevserverUnit::classify_rendered(unit, previous) {
+        match unit.classify_installed(previous) {
             chan_systemd::DevserverUnitClass::Current => {
                 return Ok(DevserverUnitUpdate {
                     path: unit_path.to_path_buf(),
@@ -4782,8 +4782,9 @@ fn write_rendered_devserver_unit(
         previous_permissions,
         changed: true,
     };
+    let rendered = unit.render();
     let stage = (|| -> Result<()> {
-        std::fs::write(unit_path, unit)
+        std::fs::write(unit_path, &rendered)
             .with_context(|| format!("writing {}", unit_path.display()))?;
         // The tunnel unit embeds the PAT via Environment=; keep it owner-only.
         // The 0644 default is exactly why launchd tunnel mode is still refused.
@@ -4819,12 +4820,22 @@ fn devserver_chan_home() -> Option<String> {
     std::env::var("CHAN_HOME").ok().filter(|v| !v.is_empty())
 }
 
+#[cfg(test)]
 fn devserver_systemd_unit(
     exe: &Path,
     addr: SocketAddr,
     chan_home: Option<&str>,
     tunnel: Option<&SystemdTunnel>,
 ) -> String {
+    devserver_systemd_unit_spec(exe, addr, chan_home, tunnel).render()
+}
+
+fn devserver_systemd_unit_spec(
+    exe: &Path,
+    addr: SocketAddr,
+    chan_home: Option<&str>,
+    tunnel: Option<&SystemdTunnel>,
+) -> chan_systemd::DevserverUnit {
     // A CHAN_HOME-scoped supervisor passes it to the service, else the unit runs
     // against the real ~/.chan. Quoted so a path with spaces survives.
     let mut environment = Vec::new();
@@ -4873,13 +4884,10 @@ fn devserver_systemd_unit(
             port = addr.port(),
         ),
     };
-    environment
-        .into_iter()
-        .fold(
-            chan_systemd::DevserverUnit::new(exec),
-            |unit, assignment| unit.with_environment(assignment),
-        )
-        .render()
+    environment.into_iter().fold(
+        chan_systemd::DevserverUnit::new(exec),
+        |unit, assignment| unit.with_environment(assignment),
+    )
 }
 
 /// `$XDG_CONFIG_HOME/systemd/user`, else `$HOME/.config/systemd/user`.
@@ -8755,8 +8763,7 @@ mod tests {
         std::fs::write(&path, foreign).expect("seed foreign unit");
         let desired = chan_systemd::DevserverUnit::new(
             "/usr/bin/chan devserver --bind=127.0.0.1 --port=8787",
-        )
-        .render();
+        );
 
         let error = write_rendered_devserver_unit(&path, &desired, false)
             .expect_err("foreign unit refused");
@@ -8771,6 +8778,20 @@ mod tests {
             std::fs::read_to_string(path).expect("foreign unit remains"),
             foreign
         );
+    }
+
+    #[test]
+    fn chan_own_unit_is_not_refused_when_the_exe_name_is_unrecognized() {
+        let dir = tempfile::tempdir().expect("unit dir");
+        let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
+        let addr: SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        let desired =
+            devserver_systemd_unit_spec(Path::new("/opt/Editor.AppImage"), addr, None, None);
+        std::fs::write(&path, desired.render()).expect("seed the unit chan itself wrote");
+
+        let update = write_rendered_devserver_unit(&path, &desired, false)
+            .expect("chan must recognize the unit it just wrote");
+        assert!(!update.changed, "identical unit must be a no-op");
     }
 
     #[derive(Default)]
@@ -8807,15 +8828,15 @@ mod tests {
         let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
         let desired = chan_systemd::DevserverUnit::new(
             "/usr/bin/chan devserver --bind=127.0.0.1 --port=8787",
-        )
-        .render();
-        let legacy = desired.replace("TimeoutStartSec=10min\n", "");
+        );
+        let rendered = desired.render();
+        let legacy = rendered.replace("TimeoutStartSec=10min\n", "");
         std::fs::write(&path, &legacy).expect("seed legacy unit");
 
         let update =
             write_rendered_devserver_unit(&path, &desired, false).expect("stage migration");
         assert!(update.changed);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), desired);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), rendered);
         let mut control = FakeDevserverSystemdControl {
             active: true,
             ..Default::default()
@@ -8858,9 +8879,8 @@ mod tests {
         let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
         let desired = chan_systemd::DevserverUnit::new(
             "/usr/bin/chan devserver --bind=127.0.0.1 --port=8787",
-        )
-        .render();
-        let legacy = desired.replace("TimeoutStartSec=10min\n", "");
+        );
+        let legacy = desired.render().replace("TimeoutStartSec=10min\n", "");
         std::fs::write(&path, &legacy).expect("seed legacy unit");
         let update =
             write_rendered_devserver_unit(&path, &desired, false).expect("stage migration");
@@ -8899,9 +8919,8 @@ mod tests {
         let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
         let desired = chan_systemd::DevserverUnit::new(
             "/usr/bin/chan devserver --bind=127.0.0.1 --port=8787",
-        )
-        .render();
-        let legacy = desired.replace("TimeoutStartSec=10min\n", "");
+        );
+        let legacy = desired.render().replace("TimeoutStartSec=10min\n", "");
         std::fs::write(&path, &legacy).expect("seed legacy unit");
         let update =
             write_rendered_devserver_unit(&path, &desired, false).expect("stage migration");
@@ -8937,9 +8956,8 @@ mod tests {
         let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
         let desired = chan_systemd::DevserverUnit::new(
             "/usr/bin/chan devserver --bind=127.0.0.1 --port=8787",
-        )
-        .render();
-        let legacy = desired.replace("TimeoutStartSec=10min\n", "");
+        );
+        let legacy = desired.render().replace("TimeoutStartSec=10min\n", "");
         std::fs::write(&path, &legacy).expect("seed legacy unit");
         let update =
             write_rendered_devserver_unit(&path, &desired, false).expect("stage migration");

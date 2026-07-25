@@ -56,22 +56,12 @@ impl DevserverUnit {
     /// environment keys must be chan-owned, and every supervision directive
     /// must match one of the known renderer profiles.
     pub fn classify_installed(&self, installed: &str) -> DevserverUnitClass {
-        Self::classify_rendered(&self.render(), installed)
-    }
-
-    /// Classify `installed` against a current unit that was already rendered.
-    pub fn classify_rendered(current: &str, installed: &str) -> DevserverUnitClass {
-        let current_render = canonical_unit(current);
-        let Some(current) = DevserverUnit::from_installed_dynamic(current) else {
-            return DevserverUnitClass::Foreign;
-        };
-        if canonical_unit(&current.render()) != current_render {
-            return DevserverUnitClass::Foreign;
-        }
+        let current_render = canonical_unit(&self.render());
         if canonical_unit(installed) == current_render {
             return DevserverUnitClass::Current;
         }
-        let Some(candidate) = DevserverUnit::from_installed_dynamic(installed) else {
+        let Some(candidate) = DevserverUnit::from_installed_dynamic(installed, &self.exec_start)
+        else {
             return DevserverUnitClass::Foreign;
         };
         let installed = canonical_unit(installed);
@@ -89,13 +79,15 @@ impl DevserverUnit {
         }
     }
 
-    fn from_installed_dynamic(installed: &str) -> Option<Self> {
+    fn from_installed_dynamic(installed: &str, expected_exec_start: &str) -> Option<Self> {
         let mut exec_start = None;
         let mut environment = Vec::new();
         let mut environment_keys = Vec::new();
         for line in installed.lines().map(str::trim) {
             if let Some(value) = line.strip_prefix("ExecStart=") {
-                if exec_start.is_some() || !is_chan_devserver_exec(value) {
+                if exec_start.is_some()
+                    || (value != expected_exec_start && !is_chan_devserver_exec(value))
+                {
                     return None;
                 }
                 exec_start = Some(value.to_string());
@@ -273,6 +265,30 @@ mod unit_tests {
         let foreign_exec = current.replace("/usr/bin/chan devserver", "/usr/bin/logger devserver");
         assert_eq!(
             desired.classify_installed(&foreign_exec),
+            DevserverUnitClass::Foreign
+        );
+    }
+
+    #[test]
+    fn devserver_unit_classifies_its_own_render_regardless_of_exec_name() {
+        let desired =
+            DevserverUnit::new("/opt/Editor.AppImage devserver --bind=127.0.0.1 --port=8787")
+                .with_environment("CHAN_HOME=/tmp/chan");
+        let current = desired.render();
+        assert_eq!(
+            desired.classify_installed(&current),
+            DevserverUnitClass::Current
+        );
+
+        let legacy = current.replace("TimeoutStartSec=10min\n", "");
+        assert_eq!(
+            desired.classify_installed(&legacy),
+            DevserverUnitClass::KnownLegacy
+        );
+
+        let unrelated_exec = legacy.replace("Editor.AppImage", "OtherEditor.AppImage");
+        assert_eq!(
+            desired.classify_installed(&unrelated_exec),
             DevserverUnitClass::Foreign
         );
     }
