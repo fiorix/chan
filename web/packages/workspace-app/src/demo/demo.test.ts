@@ -133,11 +133,20 @@ describe("createDemoFetch router", () => {
 
   test("GET /api/config then PATCH round-trips a preference", async () => {
     const f = demoFetch(store());
-    const cfg = (await (await f("/api/config")).json()) as { preferences: { theme: string } };
-    const next = { ...cfg, preferences: { ...cfg.preferences, theme: "light" } };
+    const cfg = (await (await f("/api/config")).json()) as {
+      revision: number;
+      preferences: { theme: string };
+    };
     const patched = (await (
-      await f("/api/config", { method: "PATCH", body: JSON.stringify(next) })
-    ).json()) as { preferences: { theme: string } };
+      await f("/api/config", {
+        method: "PATCH",
+        body: JSON.stringify({
+          expected_revision: cfg.revision,
+          preferences: { theme: "light" },
+        }),
+      })
+    ).json()) as { revision: number; preferences: { theme: string } };
+    expect(patched.revision).toBe(cfg.revision + 1);
     expect(patched.preferences.theme).toBe("light");
   });
 
@@ -346,12 +355,12 @@ describe("search endpoints", () => {
     return createDemoFetch(st, new DemoGraph(st), new MockReports([]));
   };
 
-  test("search/files ranks basename matches first", async () => {
+  test("search/files matches the complete basename", async () => {
     const f = setup();
-    const hits = (await (await f("/api/search/files?q=read&limit=5")).json()) as Array<{
+    const hits = (await (await f("/api/search/files?q=README.md&limit=5")).json()) as Array<{
       path: string;
     }>;
-    expect(hits[0].path).toBe("README.md");
+    expect(hits.map((hit) => hit.path)).toEqual(["README.md"]);
   });
 
   test("link-targets returns File and Heading rows", async () => {

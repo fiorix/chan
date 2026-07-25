@@ -71,11 +71,24 @@ export type MetadataManifest = {
 /// on the server side and applies to every workspace (no per-
 /// workspace override anymore; settings are always device-global).
 export type GlobalConfig = {
+  revision: number;
   preferences: Preferences;
   /// Known workspaces the user has opened on this machine. Updated
   /// by the server on every spawn (touch existing or append).
   /// Sorted most-recent first.
   workspaces?: KnownWorkspace[];
+};
+
+export type PreferencesPatch = Partial<Preferences>;
+
+export type ConfigPatchRequest = {
+  expected_revision: number;
+  preferences: PreferencesPatch;
+};
+
+export type ConfigConflict = {
+  error: "config_conflict";
+  current: GlobalConfig;
 };
 
 export type KnownWorkspace = {
@@ -217,9 +230,8 @@ export type TerminalRestartRequest = {
 export type Preferences = {
   editor_theme: EditorTheme;
   /// Where image uploads land (relative to workspace root). Default
-  /// `attachments/`. Not exposed in the Settings UI; round-tripped
-  /// here so save() doesn't accidentally reset the value when the
-  /// user has overridden it via the global config.
+  /// `attachments/`. Included in the aggregate read and updated only
+  /// when a partial patch names this server-owned field.
   attachments_dir: string;
   /// Editor theme. Lives server-side so changes propagate to every
   /// open window over the WS config_changed event.
@@ -242,11 +254,11 @@ export type Preferences = {
   /// text buffers to disk.
   strip_trailing_whitespace_on_save: boolean;
   /// Search indexer resource profile. Not surfaced in Settings yet,
-  /// but round-tripped by /api/config so CLI/server config changes
-  /// remain visible to clients.
+  /// but included in /api/config so CLI/server config changes remain
+  /// visible to clients.
   search_aggression: SearchAggression;
   /// Terminal PTY session retention settings. Not surfaced in
-  /// Settings yet; round-tripped for config preservation.
+  /// Settings yet; replaced as one server-owned composite when patched.
   terminal: TerminalPreferences;
   /// Watcher bubbles display mode: show all inline, or collapse
   /// to a count tray until expanded.
@@ -420,7 +432,7 @@ export type FileWriteResponse = {
   disk_conflicted?: boolean;
 };
 
-export type SearchHit = { path: string; score: number };
+export type SearchHit = TreeEntry;
 
 export type LinkTarget = {
   /// "File" = matched by basename / title; "Heading" = a heading inside

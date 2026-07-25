@@ -6461,10 +6461,9 @@ async function resolveMissingFileCheck(
 }
 
 /// Best-effort "did the file just move?" lookup. Runs after a
-/// genuine missing-file detection. Searches the workspace by
-/// basename + filters to exact basename matches at a path
-/// different from the original; only surfaces a suggestion
-/// when there's a unique candidate. Ambiguous results leave
+/// genuine missing-file detection. Requests exact-basename
+/// candidates and drops the original path; only surfaces a
+/// suggestion when there's a unique candidate. Ambiguous results leave
 /// `suggestedPath` null so the user is steered to Find.
 async function runSuggestReopenLookup(
   tabId: string,
@@ -6477,7 +6476,7 @@ async function runSuggestReopenLookup(
     const hits = await api.search(basename, 5);
     candidates = hits
       .map((h) => h.path)
-      .filter((p) => p !== path && p.split("/").pop() === basename);
+      .filter((candidate) => candidate !== path);
   } catch {
     // Search failure is non-blocking; missing-file UX is still
     // usable without the suggestion.

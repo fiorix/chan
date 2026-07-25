@@ -15,6 +15,7 @@
 //! notify's habit of emitting several events per logical write.
 
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use notify::{RecursiveMode, Watcher};
@@ -71,6 +72,13 @@ fn event_touches(event: &notify::Event, name: &str) -> bool {
 }
 
 fn reload_server_config(dir: &Path, state: &AppState) {
+    let _serial = match state.config_write_serial.lock() {
+        Ok(serial) => serial,
+        Err(_) => {
+            tracing::warn!("config write lock poisoned; skipping server config reload");
+            return;
+        }
+    };
     let fresh = match ServerConfig::load_from(&dir.join(SERVER_TOML)) {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -94,11 +102,19 @@ fn reload_server_config(dir: &Path, state: &AppState) {
         }
     };
     if changed {
+        state.config_revision.fetch_add(1, Ordering::Relaxed);
         broadcast_config_changed(state);
     }
 }
 
 fn reload_editor_prefs(dir: &Path, state: &AppState) {
+    let _serial = match state.config_write_serial.lock() {
+        Ok(serial) => serial,
+        Err(_) => {
+            tracing::warn!("config write lock poisoned; skipping editor prefs reload");
+            return;
+        }
+    };
     let fresh = match EditorPrefs::load_from(&dir.join(PREFERENCES_TOML)) {
         Ok(prefs) => prefs,
         Err(e) => {
@@ -122,8 +138,14 @@ fn reload_editor_prefs(dir: &Path, state: &AppState) {
         }
     };
     if changed {
+        state.config_revision.fetch_add(1, Ordering::Relaxed);
         broadcast_config_changed(state);
     }
+}
+
+#[cfg(test)]
+pub(crate) fn reload_editor_prefs_for_test(dir: &Path, state: &AppState) {
+    reload_editor_prefs(dir, state);
 }
 
 #[cfg(test)]
@@ -161,6 +183,7 @@ mod tests {
         let frame = rx.try_recv().expect("a config_changed frame");
         let json: serde_json::Value = serde_json::from_str(&frame).unwrap();
         assert_eq!(json["kind"], "config_changed");
+        assert_eq!(state.config_revision.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -186,6 +209,7 @@ mod tests {
             no_frame_pending(&mut rx),
             "an identical reload must not broadcast"
         );
+        assert_eq!(state.config_revision.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -203,6 +227,7 @@ mod tests {
             "external edit is reloaded into the in-memory prefs"
         );
         assert!(rx.try_recv().is_ok(), "a config_changed frame is broadcast");
+        assert_eq!(state.config_revision.load(Ordering::Relaxed), 2);
     }
 
     #[test]

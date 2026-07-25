@@ -512,7 +512,7 @@ enum Command {
         search_aggression: Option<SearchAggression>,
         /// Lock down the Settings panel: the SPA greys the cog and
         /// the server refuses every settings-write route with 403
-        /// (PATCH /api/workspace, /api/config, /api/server/config,
+        /// (PATCH /api/workspace, /api/config,
         /// POST /api/storage/reset, POST /api/index/rebuild). For
         /// kiosk-style deployments (shared workstation, demo box) where
         /// the workspace owner is not the operator at the keyboard.

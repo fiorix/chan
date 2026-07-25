@@ -1,49 +1,80 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import clientSource from "../api/client.ts?raw";
+import preferenceWriteSource from "../api/preferenceWrite.ts?raw";
 import storeSource from "./store.svelte.ts?raw";
 import configWriteSource from "./configWrite.ts?raw";
 import editorToolsSource from "./editorTools.svelte.ts?raw";
-import { api } from "../api/client";
 import { updateGlobalConfigSerial } from "./store.svelte";
 
-// PATCH /api/config is a whole-block replacement. Independent read-modify-write
-// chains (the old per-persister inflight model) can interleave: a terminal-config
-// autosave reads the config before a just-fired hybrid_surface_themes override
-// PATCH lands, then writes the block back without the override -- so the override
-// resets on reload. updateGlobalConfigSerial funnels every write through one
-// chain so this can't happen.
-
 type Cfg = {
+  revision: number;
   preferences: Record<string, unknown>;
   workspaces: unknown[];
 };
 
 let server: Cfg;
+let forcedConflicts: number;
+let patchBodies: Array<{
+  expected_revision: number;
+  preferences: Record<string, unknown>;
+}>;
 
-function jsonResponse(body: unknown): Response {
+function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
-    status: 200,
+    status,
     headers: { "content-type": "application/json" },
   });
 }
 
 beforeEach(() => {
   server = {
-    preferences: { theme: "dark", terminal: { default_term: "xterm-256color" } },
+    revision: 1,
+    preferences: {
+      theme: "dark",
+      date_format: "iso",
+      terminal: { default_term: "xterm-256color" },
+    },
     workspaces: [],
   };
+  forcedConflicts = 0;
+  patchBodies = [];
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = typeof input === "string" ? input : input.toString();
     const method = init?.method ?? "GET";
-    if (url.includes("/api/config")) {
-      if (method === "PATCH") {
-        server = JSON.parse(String(init?.body)) as Cfg;
-        return jsonResponse(server);
-      }
-      return jsonResponse(server);
+    if (!url.includes("/api/config")) return new Response(null, { status: 404 });
+    if (method !== "PATCH") return jsonResponse(server);
+
+    const body = JSON.parse(String(init?.body)) as {
+      expected_revision: number;
+      preferences: Record<string, unknown>;
+    };
+    patchBodies.push(body);
+    if (forcedConflicts > 0) {
+      forcedConflicts--;
+      server = {
+        ...server,
+        revision: server.revision + 1,
+        preferences: { ...server.preferences, theme: "light" },
+      };
+      return jsonResponse(
+        { error: "config_conflict", current: server },
+        409,
+      );
     }
-    return new Response(null, { status: 404 });
+    if (body.expected_revision !== server.revision) {
+      return jsonResponse(
+        { error: "config_conflict", current: server },
+        409,
+      );
+    }
+    server = {
+      ...server,
+      revision: server.revision + 1,
+      preferences: { ...server.preferences, ...body.preferences },
+    };
+    return jsonResponse(server);
   });
 });
 
@@ -51,108 +82,84 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("config write race (the latent hybrid-theme reset bug)", () => {
-  test("independent stale read-modify-write clobbers a field the other writer owns", async () => {
-    // Two writers both read the current config (no override, default
-    // terminal), then both whole-block PATCH. The terminal write, built
-    // from the stale read, drops the override the theme write saved.
-    const themeRead = await api.config();
-    const terminalRead = await api.config();
-    await api.updateConfig({
-      ...themeRead,
-      preferences: {
-        ...themeRead.preferences,
-        hybrid_surface_themes: { terminal: "light" },
-      },
-    });
-    await api.updateConfig({
-      ...terminalRead,
-      preferences: {
-        ...terminalRead.preferences,
-        terminal: {
-          ...terminalRead.preferences.terminal,
-          default_term: "tmux-256color",
-        },
-      },
-    });
-    // The override is gone -- this is the reset users see on reload.
-    expect(server.preferences.hybrid_surface_themes).toBeUndefined();
-  });
-});
-
-describe("updateGlobalConfigSerial (the fix)", () => {
-  test("concurrent writes to different fields both survive", async () => {
+describe("revisioned partial config writes", () => {
+  test("concurrent writes send narrow patches and both survive", async () => {
     await Promise.all([
+      updateGlobalConfigSerial((prefs) =>
+        prefs.theme === "light" ? null : { theme: "light" },
+      ),
       updateGlobalConfigSerial((prefs) => ({
-        ...prefs,
-        hybrid_surface_themes: { terminal: "light" },
-      })),
-      updateGlobalConfigSerial((prefs) => ({
-        ...prefs,
         terminal: { ...prefs.terminal, default_term: "tmux-256color" },
       })),
     ]);
-    expect(server.preferences.hybrid_surface_themes).toEqual({
-      terminal: "light",
-    });
+
+    expect(server.preferences.theme).toBe("light");
     expect(
       (server.preferences.terminal as { default_term: string }).default_term,
     ).toBe("tmux-256color");
+    expect(patchBodies.map((body) => Object.keys(body.preferences))).toEqual([
+      ["theme"],
+      ["terminal"],
+    ]);
+  });
+
+  test("a conflict reapplies the original mutation to current preferences", async () => {
+    forcedConflicts = 1;
+    await updateGlobalConfigSerial((prefs) =>
+      prefs.date_format === "us" ? null : { date_format: "us" },
+    );
+
+    expect(patchBodies).toHaveLength(2);
+    expect(patchBodies[0]?.expected_revision).toBe(1);
+    expect(patchBodies[1]?.expected_revision).toBe(2);
+    expect(server.preferences.theme).toBe("light");
+    expect(server.preferences.date_format).toBe("us");
+  });
+
+  test("the fourth conflict is surfaced after three retries", async () => {
+    forcedConflicts = 4;
+    await expect(
+      updateGlobalConfigSerial(() => ({ date_format: "us" })),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(patchBodies).toHaveLength(4);
   });
 
   test("a mutation returning null skips the PATCH", async () => {
-    const patches = () =>
-      (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.filter(
-        ([, init]) => (init as RequestInit | undefined)?.method === "PATCH",
-      ).length;
-    const before = patches();
     await updateGlobalConfigSerial(() => null);
-    expect(patches()).toBe(before);
+    expect(patchBodies).toHaveLength(0);
   });
 });
 
-describe("config writers route through the shared serial chain (source pins)", () => {
-  test("persistHybridSurfaceThemes uses updateGlobalConfigSerial", () => {
-    expect(storeSource).toMatch(
-      /function persistHybridSurfaceThemes\(\): Promise<void> \{[\s\S]*?return updateGlobalConfigSerial\(\(prefs\) => \(\{[\s\S]*?hybrid_surface_themes: next,/,
-    );
-  });
-
-  test("persistThemeChoice + persistPaneWidths route through updateGlobalConfigSerial", () => {
-    expect(storeSource).toMatch(
-      /function persistThemeChoice\([\s\S]*?return updateGlobalConfigSerial\(/,
-    );
-    expect(storeSource).toMatch(
-      /persistPaneWidths\(\): void \{[\s\S]*?updateGlobalConfigSerial\(\(prefs\) => \{/,
-    );
-  });
-
-  test("no per-persister inflight chains remain for the config writers", () => {
-    expect(storeSource).not.toMatch(/hybridSurfaceThemePersistInflight/);
-    expect(storeSource).not.toMatch(/themePersistInflight/);
-    expect(storeSource).not.toMatch(/widthsPersistInflight/);
-    expect(editorToolsSource).not.toMatch(/stripWhitespacePersistInflight/);
-  });
-
-  test("the serializer is a leaf module re-exported by store (no import cycle)", () => {
-    // store imports editorTools, so the shared chain must live in a module
-    // that neither imports back. configWrite depends only on the api client.
+describe("all config writers share one helper", () => {
+  test("the state import point re-exports the API helper", () => {
     expect(configWriteSource).toMatch(
+      /export \{ updateGlobalConfigSerial \} from "\.\.\/api\/preferenceWrite";/,
+    );
+    expect(preferenceWriteSource).toMatch(
       /export function updateGlobalConfigSerial\(/,
     );
-    expect(configWriteSource).not.toMatch(/from "\.\/store\.svelte"/);
-    expect(storeSource).toMatch(
-      /import \{ updateGlobalConfigSerial \} from "\.\/configWrite";/,
-    );
-    expect(storeSource).toMatch(/export \{ updateGlobalConfigSerial \};/);
+    expect(clientSource).not.toMatch(/queuePrefWrite|prefsWriteInflight/);
   });
 
-  test("editorTools persists through the shared chain, imported from configWrite", () => {
+  test("store writers return partial field patches", () => {
+    expect(storeSource).toMatch(
+      /persistHybridSurfaceThemes\(\)[\s\S]*?\(\) => \(\{ hybrid_surface_themes: next \}\)/,
+    );
+    expect(storeSource).toMatch(
+      /persistThemeChoice\([\s\S]*?\{ theme: choice \}/,
+    );
+    expect(storeSource).toMatch(/return \{ pane_widths: snapshot \};/);
+    expect(storeSource).not.toMatch(
+      /dateFormatPersistInflight|sidePanesPersistInflight/,
+    );
+  });
+
+  test("editorTools uses the shared partial writer", () => {
     expect(editorToolsSource).toMatch(
       /import \{ updateGlobalConfigSerial \} from "\.\/configWrite";/,
     );
     expect(editorToolsSource).toMatch(
-      /persistStripTrailingWhitespaceOnSave\(value: boolean\): Promise<void> \{[\s\S]*?return updateGlobalConfigSerial\(/,
+      /\{ strip_trailing_whitespace_on_save: value \}/,
     );
   });
 });

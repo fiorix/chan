@@ -1,14 +1,14 @@
 //! Filename + content search and indexer status/rebuild.
 //!
-//! `/api/search/files` is a server-side substring scan of `list_tree`
-//! (chan-workspace has no built-in filename index; the cost is linear and
-//! the workspace size budget is small). `/api/search/content` defers to
+//! `/api/search/files` scans `list_tree` for exact-basename missing-file
+//! recovery candidates. `/api/search/content` defers to
 //! `Workspace::search`: BM25, or hybrid (BM25 + dense, RRF-fused) when
 //! the workspace opted in via `semantic_enabled` and the embedding model
 //! is on disk. `/api/index/status` and `/api/index/rebuild` surface the
 //! background indexer's state machine.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::extract::rejection::JsonRejection;
@@ -17,8 +17,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chan_workspace::{
-    classify, fs_ops, EffectiveSearchMode, FileClass, NodeKind, SearchMode, SearchOpts, TreeEntry,
-    WorkspaceReadiness, WorkspaceSearchRequest,
+    fs_ops, EffectiveSearchMode, SearchMode, SearchOpts, TreeEntry, WorkspaceReadiness,
+    WorkspaceSearchRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,9 +40,9 @@ async fn blocking_response(
     }
 }
 
-/// Filename search params. Empty `q` returns the first `limit`
-/// files in the tree, mirroring the [[ picker's empty state.
+/// Missing-file recovery params. `q` is the complete basename.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileSearchParams {
     #[serde(default)]
     q: String,
@@ -54,72 +54,56 @@ fn default_search_limit() -> usize {
     50
 }
 
-/// Server-side filename match: walk the tree, keep regular files
-/// whose basename contains `q` (case-insensitive). chan-workspace has
-/// no built-in filename index since the cost (scan list_tree) is
-/// linear and the workspace size budget is small. Revisit if profiles
-/// show this hot.
+const MAX_FILE_SEARCH_LIMIT: usize = 50;
+
+fn filename_recovery(
+    workspace: &chan_workspace::Workspace,
+    basename: &str,
+    limit: usize,
+) -> chan_workspace::Result<Vec<TreeEntry>> {
+    filename_recovery_with_contact_paths(workspace, basename, limit, || {
+        Ok(workspace
+            .contacts()?
+            .into_iter()
+            .map(|contact| contact.rel_path)
+            .collect())
+    })
+}
+
+fn filename_recovery_with_contact_paths(
+    workspace: &chan_workspace::Workspace,
+    basename: &str,
+    limit: usize,
+    load_contact_paths: impl FnOnce() -> chan_workspace::Result<BTreeSet<String>>,
+) -> chan_workspace::Result<Vec<TreeEntry>> {
+    let tree = workspace.list_tree()?;
+    let contact_paths = load_contact_paths()?;
+    let mut hits: Vec<TreeEntry> = tree
+        .into_iter()
+        .filter(|entry| {
+            !entry.is_dir
+                && Path::new(&entry.path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    == Some(basename)
+                && !contact_paths.contains(&entry.path)
+        })
+        .collect();
+    hits.sort_by(|left, right| left.path.cmp(&right.path));
+    hits.truncate(limit.min(MAX_FILE_SEARCH_LIMIT));
+    Ok(hits)
+}
+
+/// Exact-basename lookup for missing-file reopen suggestions.
 pub async fn api_search_files(
     State(state): State<Arc<AppState>>,
     Query(p): Query<FileSearchParams>,
 ) -> Response {
     let workspace = state.workspace();
     blocking_response(
-        move || {
-            let tree = match workspace.list_tree() {
-                Ok(t) => t,
-                Err(e) => return err_from(&e),
-            };
-            // Contact-kind notes have their own picker (`@<query>`), so skip
-            // them from the `[[` autocomplete. `graph()` may be unavailable
-            // very early in the lifecycle (index not yet open); in that case
-            // we fall back to returning all matches rather than blocking the
-            // search.
-            let graph = workspace.graph().ok();
-            let needle = p.q.to_lowercase();
-            let mut hits = Vec::new();
-            // Two-pass collection so editable-text notes (.md / .txt) sort
-            // ahead of binary assets. Linking a `[](image.png)` is legal
-            // markdown and we allow it, but the [[ picker's primary use is
-            // navigating between notes; surfacing those first keeps the
-            // picker feeling note-shaped without hiding any file.
-            let mut notes = Vec::new();
-            let mut others = Vec::new();
-            for entry in tree {
-                if entry.is_dir {
-                    continue;
-                }
-                // Match against the full path (lowercased) so directory names
-                // count as a prefix the user can type. Typing "reci" finds
-                // every file under "Recipes/" even when the basename doesn't
-                // contain "reci".
-                let full = entry.path.to_lowercase();
-                if !needle.is_empty() && !full.contains(&needle) {
-                    continue;
-                }
-                if let Some(g) = &graph {
-                    if let Ok(Some(NodeKind::Contact)) = g.node_kind(&entry.path) {
-                        continue;
-                    }
-                }
-                if matches!(classify(&entry.path), FileClass::EditableText) {
-                    notes.push(entry);
-                } else if others.len() < p.limit {
-                    // Once we have `limit` non-note candidates buffered there
-                    // is no way more of them survive the final truncate, so
-                    // skip buffering further to bound memory.
-                    others.push(entry);
-                }
-                if notes.len() >= p.limit {
-                    // Enough notes to fill the response on their own; no need
-                    // to keep scanning for fallback candidates.
-                    break;
-                }
-            }
-            hits.extend(notes);
-            hits.extend(others);
-            hits.truncate(p.limit);
-            Json(hits).into_response()
+        move || match filename_recovery(&workspace, &p.q, p.limit) {
+            Ok(hits) => Json(hits).into_response(),
+            Err(error) => err_from(&error),
         },
         "file search",
     )
@@ -182,44 +166,48 @@ pub async fn api_search_content(
     Query(p): Query<ContentSearchParams>,
 ) -> Response {
     let workspace = state.workspace();
-    // Hybrid (BM25 + dense, RRF-fused) only when the workspace opted in
-    // via `semantic_enabled` and the model is on disk; otherwise BM25.
-    // Resolve it once so the empty-query short-circuit and a real query
-    // report the same mode.
-    let mode = match workspace.effective_search_mode() {
-        Ok(mode) => legacy_search_mode(mode),
-        Err(error) => return err_from(&error),
-    };
-    let readiness = workspace.readiness();
-    if !readiness.is_ready() {
-        return Json(ContentSearchResponse {
-            ready: false,
-            readiness,
-            mode: mode.label(),
-            hits: Vec::new(),
-        })
-        .into_response();
-    }
-    if p.q.trim().is_empty() {
-        let readiness = workspace.readiness();
-        return Json(ContentSearchResponse {
-            ready: readiness.is_ready(),
-            readiness,
-            mode: mode.label(),
-            hits: Vec::new(),
-        })
-        .into_response();
-    }
+    search_content_with_mode_resolver(workspace, p, |workspace| {
+        Ok((
+            legacy_search_mode(workspace.effective_search_mode()?),
+            workspace.readiness(),
+        ))
+    })
+    .await
+}
+
+async fn search_content_with_mode_resolver(
+    workspace: Arc<chan_workspace::Workspace>,
+    p: ContentSearchParams,
+    resolve_mode: impl FnOnce(
+            &chan_workspace::Workspace,
+        ) -> chan_workspace::Result<(SearchMode, WorkspaceReadiness)>
+        + Send
+        + 'static,
+) -> Response {
     let response_limit = normalized_content_limit(p.limit);
-    let opts = SearchOpts {
-        mode,
-        limit: expanded_content_candidate_limit(response_limit),
-        scope: p.scope.clone(),
-    };
-    let query = p.q;
     blocking_response(
         move || {
-            let results = match workspace.search(&query, &opts) {
+            // Effective mode reads disk-backed configuration. Resolve it with
+            // readiness and search in this one blocking operation.
+            let (mode, readiness) = match resolve_mode(&workspace) {
+                Ok(snapshot) => snapshot,
+                Err(error) => return err_from(&error),
+            };
+            if !readiness.is_ready() || p.q.trim().is_empty() {
+                return Json(ContentSearchResponse {
+                    ready: readiness.is_ready(),
+                    readiness,
+                    mode: mode.label(),
+                    hits: Vec::new(),
+                })
+                .into_response();
+            }
+            let opts = SearchOpts {
+                mode,
+                limit: expanded_content_candidate_limit(response_limit),
+                scope: p.scope,
+            };
+            let results = match workspace.search(&p.q, &opts) {
                 Ok(r) => r,
                 Err(e) => return err_from(&e),
             };
@@ -989,8 +977,21 @@ mod tests {
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
         lib.register_workspace(root.path()).unwrap();
         let workspace = lib.open_workspace(root.path()).unwrap();
+        workspace
+            .write_text("archive/done.md", "# archived\n")
+            .unwrap();
+        workspace
+            .write_bytes("archive/done.md.bak", b"# backup\n")
+            .unwrap();
+        workspace
+            .write_text(
+                "contacts/done.md",
+                "---\nchan:\n  kind: contact\n---\n# Done\n",
+            )
+            .unwrap();
         workspace.write_text("notes/done.md", "# done\n").unwrap();
         workspace.write_text("notes/todo.md", "# todo\n").unwrap();
+        workspace.index_file("contacts/done.md").unwrap();
         workspace.index_file("notes/done.md").unwrap();
 
         let (events_tx, _) = broadcast::channel::<String>(1);
@@ -1021,6 +1022,8 @@ mod tests {
             index_events_tx,
             server_config: Mutex::new(ServerConfig::default()),
             editor_prefs: Mutex::new(EditorPrefs::default()),
+            config_revision: AtomicU64::new(1),
+            config_write_serial: Mutex::new(()),
             self_writes: Arc::new(SelfWrites::new()),
             terminal_sessions: Arc::new(TerminalRegistry::new(RegistryConfig {
                 workspace_root: root.path().to_path_buf(),
@@ -1049,6 +1052,91 @@ mod tests {
             _root: root,
             state,
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn content_search_mode_resolution_does_not_starve_async_worker() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let app = route_test_app();
+        let workspace = app.state.workspace();
+        let (resolver_started_tx, resolver_started_rx) = mpsc::channel();
+        let (release_resolver_tx, release_resolver_rx) = mpsc::channel();
+        let (timer_fired_tx, timer_fired_rx) = mpsc::channel();
+        let coordinator = std::thread::spawn(move || {
+            resolver_started_rx.recv().expect("resolver started");
+            let starved = timer_fired_rx
+                .recv_timeout(Duration::from_millis(200))
+                .is_err();
+            release_resolver_tx.send(()).expect("release resolver");
+            starved
+        });
+        let timer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = timer_fired_tx.send(());
+        });
+
+        let response = search_content_with_mode_resolver(
+            workspace,
+            ContentSearchParams {
+                q: String::new(),
+                limit: default_content_limit(),
+                scope: None,
+            },
+            move |_| {
+                resolver_started_tx.send(()).expect("signal resolver");
+                release_resolver_rx.recv().expect("resolver release");
+                Ok((SearchMode::Bm25, WorkspaceReadiness::default()))
+            },
+        )
+        .await;
+        timer.await.expect("timer task");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            !coordinator.join().expect("coordinator"),
+            "filesystem-backed mode resolution starved the single async worker"
+        );
+    }
+
+    #[tokio::test]
+    async fn filename_recovery_matches_exact_basename_and_sorts_paths() {
+        let app = route_test_app();
+        let router = crate::router(app.state);
+        let request = Request::builder()
+            .uri("/api/search/files?q=done.md&limit=50")
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let hits: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            hits.iter()
+                .map(|hit| hit["path"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["archive/done.md", "notes/done.md"]
+        );
+    }
+
+    #[tokio::test]
+    async fn filename_recovery_loads_one_contact_path_set() {
+        let app = route_test_app();
+        let workspace = app.state.workspace();
+        let mut contact_set_queries = 0;
+        filename_recovery_with_contact_paths(&workspace, "recovery.md", 50, || {
+            contact_set_queries += 1;
+            Ok(BTreeSet::new())
+        })
+        .expect("instrumented recovery");
+
+        assert_eq!(contact_set_queries, 1);
     }
 
     #[tokio::test]

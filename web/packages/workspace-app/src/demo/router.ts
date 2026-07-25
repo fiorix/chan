@@ -9,7 +9,11 @@
 // visible during the browser smoke.
 
 import type { FetchImpl } from "../api/transport";
-import type { GlobalConfig, Preferences } from "../api/types";
+import type {
+  ConfigPatchRequest,
+  GlobalConfig,
+  Preferences,
+} from "../api/types";
 import { DEMO_PREFERENCES, demoWorkspaceInfo } from "./data";
 import type { DemoGraph } from "./graph";
 import { exportMetadata, importMetadata } from "./metadata";
@@ -73,10 +77,12 @@ export function createDemoFetch(
   // Mutable session state the mock owns: preferences (round-tripped through
   // config), plus monotonic counters for draft and terminal naming.
   let prefs: Preferences = { ...DEMO_PREFERENCES, ...preferenceOverrides };
+  let configRevision = 1;
   let draftSeq = 0;
   let termSeq = 0;
 
   const config = (): GlobalConfig => ({
+    revision: configRevision,
     preferences: prefs,
     workspaces: [
       {
@@ -101,8 +107,15 @@ export function createDemoFetch(
     if (path === "/api/config") {
       if (method === "GET") return json(config());
       if (method === "PATCH") {
-        const body = parseBody(init) as GlobalConfig | undefined;
-        if (body?.preferences) prefs = { ...prefs, ...body.preferences };
+        const body = parseBody(init) as ConfigPatchRequest | undefined;
+        if (!body || body.expected_revision !== configRevision) {
+          return json(
+            { error: "config_conflict", current: config() },
+            409,
+          );
+        }
+        prefs = { ...prefs, ...body.preferences };
+        configRevision++;
         return json(config());
       }
     }
@@ -281,7 +294,7 @@ export function createDemoFetch(
     // --- search ---
     if (path === "/api/search/files" && method === "GET") {
       return json(
-        searchFiles(store, qs.get("q") ?? "", Number(qs.get("limit")) || 10, qs.get("prefix")),
+        searchFiles(store, qs.get("q") ?? "", Number(qs.get("limit")) || 10),
       );
     }
     if (path === "/api/link-targets" && method === "GET") {

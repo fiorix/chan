@@ -35,8 +35,8 @@
 //!
 //! The Preferences view returned over /api/workspace and /api/config is
 //! assembled in lib.rs by joining EditorPrefs with ServerConfig.
-//! PATCH /api/config splits the incoming body the same way: edits land
-//! in whichever store owns the field.
+//! PATCH /api/config accepts a revisioned partial update for exactly
+//! one of those owners.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

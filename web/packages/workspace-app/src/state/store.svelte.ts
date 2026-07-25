@@ -406,18 +406,15 @@ export { updateGlobalConfigSerial };
 
 function persistHybridSurfaceThemes(): Promise<void> {
   const next = hybridSurfaceThemesSnapshot();
-  return updateGlobalConfigSerial((prefs) => ({
-    ...prefs,
-    hybrid_surface_themes: next,
-  }));
+  return updateGlobalConfigSerial(() => ({ hybrid_surface_themes: next }));
 }
 
-// Route the keymap override layer's writes through the same serialized
-// config chain: every shortcut assign/clear PATCHes the whole override
-// table into `preferences.shortcuts`. The server broadcasts config_changed,
+// Route the keymap override layer's writes through the shared config helper:
+// every shortcut assign/clear replaces the composite override table at
+// `preferences.shortcuts`. The server broadcasts config_changed,
 // so applyServerPreferences re-hydrates every other window.
 registerOverridePersist((shortcuts) => {
-  void updateGlobalConfigSerial((prefs) => ({ ...prefs, shortcuts }));
+  void updateGlobalConfigSerial(() => ({ shortcuts }));
 });
 
 const TRANSIENT_STATUS_DEFAULT_MS = 3000;
@@ -663,7 +660,7 @@ function persistThemeChoice(choice: ThemeChoice): Promise<void> {
   // theme flip can't clobber, or be clobbered by, a parallel config write.
   // Skips the PATCH when the value already matches.
   return updateGlobalConfigSerial((prefs) =>
-    prefs.theme === choice ? null : { ...prefs, theme: choice },
+    prefs.theme === choice ? null : { theme: choice },
   );
 }
 
@@ -3865,7 +3862,7 @@ export function persistPaneWidths(): void {
       ) {
         return null;
       }
-      return { ...prefs, pane_widths: snapshot };
+      return { pane_widths: snapshot };
     });
   }, PANE_WIDTHS_DEBOUNCE_MS);
 }
@@ -3877,35 +3874,24 @@ function clamp(n: number): number {
 
 /// Persist the chosen date format so the next `@today` / `@date`
 /// expansion uses it as the default. Called by the date popover's
-/// format-change callback (commit path). Idempotent - skips the PATCH
-/// when the server already has the same value.
-let dateFormatPersistInflight: Promise<unknown> = Promise.resolve();
+/// format-change callback (commit path).
 export function persistDateFormat(formatId: string): void {
-  dateFormatPersistInflight = dateFormatPersistInflight
-    .catch(() => {})
-    .then(async () => {
-      const cfg = await api.config();
-      if (cfg.preferences.date_format === formatId) return;
-      const next = await api.updateConfig({
-        ...cfg,
-        preferences: { ...cfg.preferences, date_format: formatId },
-      });
-      // Mirror the response into workspace.info so the next macro
-      // expansion reads the new default without a fresh /api/workspace
-      // round-trip.
-      if (workspace.info) {
-        workspace.info = {
-          ...workspace.info,
-          preferences: {
-            ...workspace.info.preferences,
-            date_format: next.preferences.date_format,
-          },
-        };
-      }
-    });
+  void updateGlobalConfigSerial((prefs) =>
+    prefs.date_format === formatId ? null : { date_format: formatId },
+  ).then(() => {
+    // Mirror the accepted value into workspace.info so the next macro
+    // expansion does not need a fresh /api/workspace round-trip.
+    if (workspace.info) {
+      workspace.info = {
+        ...workspace.info,
+        preferences: {
+          ...workspace.info.preferences,
+          date_format: formatId,
+        },
+      };
+    }
+  });
 }
-
-let sidePanesPersistInflight: Promise<void> = Promise.resolve();
 
 export function setBrowserSidePane(side: "left" | "right", open: boolean): void {
   if (browserSidePanes[side] === open) return;
@@ -3922,16 +3908,12 @@ function persistBrowserSidePanes(): void {
     left: browserSidePanes.left,
     right: browserSidePanes.right,
   };
-  sidePanesPersistInflight = sidePanesPersistInflight.catch(() => {}).then(async () => {
-    const cfg = await api.config();
-    const cur = cfg.preferences.browser_side_panes;
+  void updateGlobalConfigSerial((prefs) => {
+    const cur = prefs.browser_side_panes;
     if (cur && cur.left === snapshot.left && cur.right === snapshot.right) {
-      return;
+      return null;
     }
-    await api.updateConfig({
-      ...cfg,
-      preferences: { ...cfg.preferences, browser_side_panes: snapshot },
-    });
+    return { browser_side_panes: snapshot };
   });
 }
 

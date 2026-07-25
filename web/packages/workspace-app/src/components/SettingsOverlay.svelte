@@ -2,8 +2,8 @@
   // The configuration surface: a launcher-reachable web form over the
   // split-store PreferencesView. It reads the current config, presents
   // editable fields grouped by topic, and writes each change back as a
-  // single-field slice through the shared serial config-write chain, so
-  // a save here never clobbers a concurrent config write. The
+  // narrow revisioned patch through the shared config-write helper. A
+  // stale write replays its mutation against the returned current state. The
   // form re-reads on the config_changed WS event (a sibling window's
   // change refreshes workspace.info.preferences), so every open window
   // stays in sync.
@@ -20,7 +20,7 @@
     X,
   } from "lucide-svelte";
   import { tick } from "svelte";
-  import type { Preferences } from "../api/types";
+  import type { Preferences, PreferencesPatch } from "../api/types";
   import { api } from "../api/client";
   import {
     closeSettings,
@@ -76,6 +76,20 @@
       p.date_format = DATE_FORMATS[0]!.id;
     }
     return p;
+  }
+
+  function mutationPatch(
+    current: Preferences,
+    mutate: (preferences: Preferences) => Preferences,
+  ): PreferencesPatch | null {
+    const next = mutate(clone(current));
+    const changed = Object.entries(next).filter(
+      ([key, value]) =>
+        JSON.stringify(current[key as keyof Preferences]) !== JSON.stringify(value),
+    );
+    return changed.length > 0
+      ? (Object.fromEntries(changed) as PreferencesPatch)
+      : null;
   }
 
   async function reload(): Promise<void> {
@@ -145,9 +159,8 @@
 
   /// Apply a single-field mutation. The optimistic local apply gives the
   /// control instant feedback; the persist runs through the shared
-  /// serial config-write chain by default (re-reads the latest config
-  /// and overlays only this slice, so a concurrent config write is never
-  /// clobbered). A caller passes its own persist for a field with
+  /// revision/conflict-replay helper by default. A caller passes its own
+  /// persist for a field with
   /// a dedicated store/api setter (theme). The write's config_changed
   /// then reconciles the buffer through the cross-window effect below,
   /// reflecting any server-side sanitization; the inflight counter holds
@@ -159,7 +172,7 @@
     inflight++;
     const run = persist
       ? persist()
-      : updateGlobalConfigSerial((prefs) => mutate(prefs));
+      : updateGlobalConfigSerial((prefs) => mutationPatch(prefs, mutate));
     void Promise.resolve(run).finally(() => {
       inflight--;
     });
