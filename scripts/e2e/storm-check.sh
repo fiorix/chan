@@ -7,8 +7,8 @@
 #
 #   CHAN_STORM_ACCEPTANCE=1 scripts/e2e/storm-check.sh
 #
-# Editor session-restart durability lands on a separate branch. Integration
-# enables its additional re-attach assertion after merging that branch:
+# Editor session-restart durability adds a re-attach assertion on top of the
+# core convergence run. It costs a server restart, so it is opt-in:
 #
 #   CHAN_STORM_ASSERT_SESSION_RESTART=1 scripts/e2e/storm-check.sh
 #
