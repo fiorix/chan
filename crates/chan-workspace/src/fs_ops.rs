@@ -654,8 +654,9 @@ fn paths_overlap(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 
-/// Return the fixed path prefix of each negation. A pattern with no literal
-/// prefix applies anywhere below its `.gitignore` directory.
+/// Return the fixed path prefix of each negation. Extraction stops at the first
+/// component with an unescaped wildcard or unterminated escape. A pattern with
+/// no literal prefix applies anywhere below its `.gitignore` directory.
 fn gitignore_whitelist_prefixes(path: &Path) -> Vec<PathBuf> {
     let Some(base) = path.parent() else {
         return Vec::new();
@@ -689,6 +690,7 @@ fn gitignore_whitelist_prefix(base: &Path, line: &str) -> Option<PathBuf> {
         }
         let mut literal = String::new();
         let mut escaped = false;
+        let mut wildcard = false;
         for ch in component.chars() {
             if escaped {
                 literal.push(ch);
@@ -696,12 +698,13 @@ fn gitignore_whitelist_prefix(base: &Path, line: &str) -> Option<PathBuf> {
             } else if ch == '\\' {
                 escaped = true;
             } else if matches!(ch, '*' | '?' | '[') {
+                wildcard = true;
                 break;
             } else {
                 literal.push(ch);
             }
         }
-        if literal.is_empty() || literal.len() != component.len() {
+        if wildcard || escaped || literal.is_empty() {
             break;
         }
         if matches!(literal.as_str(), "." | "..") {
@@ -2574,6 +2577,44 @@ mod tests {
     }
 
     #[test]
+    fn scoped_walk_prunes_when_the_negation_prefix_is_escaped() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "!/vendor\\ libs/keep.md\n").unwrap();
+        for path in [
+            "vendor libs/keep.md",
+            "target/deep/noise.md",
+            "notes/visible.md",
+        ] {
+            let path = tmp.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"x").unwrap();
+        }
+        let policy = IndexScopePolicy::new(
+            tmp.path().to_path_buf(),
+            crate::WorkspaceGeneration::INITIAL,
+            WalkFilter::new(["target", "vendor libs"]),
+        )
+        .unwrap();
+
+        let paths: Vec<String> = walk_workspace_scoped(tmp.path(), &policy)
+            .map(|entry| {
+                entry
+                    .path()
+                    .strip_prefix(tmp.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+
+        assert!(paths.iter().any(|path| path == "vendor libs/keep.md"));
+        assert!(
+            !paths.iter().any(|path| path.starts_with("target/")),
+            "escaped negation prefix widened unrelated configured target/: {paths:?}"
+        );
+    }
+
+    #[test]
     fn scoped_walk_descends_for_basename_negation_that_applies_anywhere() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join(".gitignore"), "!keep.md\n").unwrap();
@@ -2640,6 +2681,23 @@ mod tests {
         assert_eq!(
             gitignore_whitelist_prefix(base, "!/keep/"),
             Some(base.join("keep"))
+        );
+    }
+
+    #[test]
+    fn escaped_literal_component_still_extends_prefix() {
+        let base = Path::new("workspace");
+        assert_eq!(
+            gitignore_whitelist_prefix(base, r"!/vendor\ libs/keep.md"),
+            Some(base.join("vendor libs").join("keep.md"))
+        );
+        assert_eq!(
+            gitignore_whitelist_prefix(base, r"!/vendor\"),
+            Some(base.to_path_buf())
+        );
+        assert_eq!(
+            gitignore_whitelist_prefix(base, "!/ven*dor/keep.md"),
+            Some(base.to_path_buf())
         );
     }
 
