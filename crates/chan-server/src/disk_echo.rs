@@ -28,7 +28,6 @@
 //! state mutex.
 
 use std::collections::VecDeque;
-use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
 /// How long a self-written content hash keeps matching. Flushes are
@@ -42,14 +41,17 @@ const DISK_ECHO_TTL: Duration = Duration::from_secs(60);
 /// echo bursts while keeping the ring trivially small.
 const DISK_ECHO_CAP: usize = 16;
 
-/// Hash of session/file content for echo comparison. Collision
-/// resistance is not a security requirement here (a collision only
-/// suppresses one external-edit fold-in); the std hasher is enough
-/// and adds no dependency.
+/// Version-stable FNV-1a hash of session/file content. The durable recovery
+/// record persists baseline hashes across processes and toolchain upgrades, so
+/// the algorithm cannot depend on `DefaultHasher`. Collision resistance is not
+/// a security requirement here: a collision only defers one external fold-in.
 pub(crate) fn content_hash(text: &str) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut h);
-    h.finish()
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 #[derive(Debug)]
@@ -126,6 +128,12 @@ mod tests {
         let mut ring = DiskEchoRing::new();
         assert!(!ring.contains(content_hash("x")));
         assert!(!ring.any_recent());
+    }
+
+    #[test]
+    fn content_hash_is_stable_across_toolchains_and_restarts() {
+        assert_eq!(content_hash(""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(content_hash("hello"), 0xa430_d846_80aa_bd0b);
     }
 
     #[test]

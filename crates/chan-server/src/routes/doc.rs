@@ -238,12 +238,7 @@ async fn doc_ws(
                                     .await;
                                 break;
                             }
-                            if let Err(e) =
-                                handle.session().persist_recovery(&workspace).await
-                            {
-                                error_close(&mut socket, &e, "recovery-write").await;
-                                break;
-                            }
+                            handle.session().persist_recovery(&workspace).await;
                         }
                         Ok(ClientFrame::Pull { version }) => handle.pull(version),
                         Ok(ClientFrame::Cursor { anchor, head }) => {
@@ -973,5 +968,16 @@ mod tests {
         // gets a socket.
         assert!(serde_json::from_str::<DocQuery>(r#"{"path":"a"}"#).is_err());
         assert!(serde_json::from_str::<DocQuery>(r#"{"w":"win-1"}"#).is_err());
+    }
+
+    #[test]
+    fn recovery_persistence_failure_never_rejects_a_completed_mutation() {
+        let doc = include_str!("doc.rs");
+        let scene = include_str!("scene.rs");
+        let files = include_str!("files.rs");
+        assert!(!doc.contains("\"recovery-write\""));
+        assert!(!scene.contains("\"recovery-write\""));
+        assert!(!files.contains("persist document conflict resolution"));
+        assert!(!files.contains("persist scene conflict resolution"));
     }
 }

@@ -722,7 +722,6 @@ impl SceneSession {
                     disk_version: conflict.disk_version,
                     authority_version: conflict.authority_version,
                     disk_mtime_ns: conflict.disk_mtime_ns,
-                    disk_content: conflict.disk_content.clone(),
                 },
             },
             SessionState::Removed => RecoveryState::Removed,
@@ -755,12 +754,15 @@ impl SceneSession {
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) async fn persist_recovery(
-        self: &Arc<Self>,
-        workspace: &Arc<Workspace>,
-    ) -> Result<(), String> {
+    pub(crate) async fn persist_recovery(self: &Arc<Self>, workspace: &Arc<Workspace>) {
         let _io = self.io_lock.lock().await;
-        self.persist_recovery_locked(workspace).await
+        if let Err(error) = self.persist_recovery_locked(workspace).await {
+            tracing::warn!(
+                path = self.path,
+                %error,
+                "scene recovery persistence degraded"
+            );
+        }
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, SceneState> {
@@ -1428,7 +1430,22 @@ impl SceneRegistry {
             let ws = Arc::clone(workspace);
             let read_path = path.to_string();
             let (disk, unreadable_disk, recovery) = tokio::task::spawn_blocking(move || {
-                let recovery = recovery::load(&ws, RecoveryKind::Scene, &read_path)?;
+                let recovery =
+                    recovery::load(&ws, RecoveryKind::Scene, &read_path)?.and_then(|record| {
+                        let validation = Scene::parse(&record.authority.content)
+                            .and_then(|_| Scene::parse(&record.baseline.content));
+                        match validation {
+                            Ok(_) => Some(record),
+                            Err(error) => {
+                                tracing::warn!(
+                                    path = read_path,
+                                    %error,
+                                    "ignoring incompatible scene recovery record"
+                                );
+                                None
+                            }
+                        }
+                    });
                 let (disk, unreadable_disk) = match ws.classify_workspace_path(&read_path)? {
                     WorkspacePath::Missing => (None, None),
                     WorkspacePath::Regular(stat) | WorkspacePath::Directory(stat) => {
@@ -2050,6 +2067,41 @@ mod tests {
             registry: Arc::new(SceneRegistry::new()),
             self_writes: SelfWrites::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn incompatible_recovered_scene_falls_back_to_fresh_disk_open() {
+        let disk = body(json!([]));
+        let fx = fixture(&[("b.excalidraw", &disk)]);
+        let invalid = "{not a scene}";
+        let record = RecoveryRecord::new(
+            RecoveryKind::Scene,
+            "b.excalidraw".into(),
+            RecoveryAuthority {
+                content: invalid.into(),
+                version: 2,
+                write_budget: 1024,
+                flushed_mtime_ns: None,
+            },
+            RecoveryBaseline {
+                content: invalid.into(),
+                content_hash: content_hash(invalid),
+                mtime_ns: None,
+                authority_version: 1,
+            },
+            RecoveryState::Dirty,
+        );
+        recovery::store(&fx.workspace, &record).unwrap();
+
+        let handle = fx
+            .registry
+            .attach(&fx.workspace, "b.excalidraw", "w1")
+            .await
+            .expect("invalid recovery is absent when fresh disk is usable");
+        assert_eq!(
+            handle.session().authority_view().0,
+            Scene::parse(&disk).unwrap().serialize_file()
+        );
     }
 
     fn elem(id: &str, version: u64, nonce: u64, index: &str) -> Value {

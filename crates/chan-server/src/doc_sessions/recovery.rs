@@ -46,7 +46,6 @@ pub(crate) struct RecoveryConflict {
     pub disk_version: u64,
     pub authority_version: u64,
     pub disk_mtime_ns: Option<i64>,
-    pub disk_content: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +76,21 @@ pub(crate) struct RecoveryAuthority {
     pub version: u64,
     pub write_budget: u64,
     pub flushed_mtime_ns: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SkippedRecovery {
+    format: u8,
+    kind: RecoveryKind,
+    path: String,
+    skipped: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum StoredRecovery {
+    Record(RecoveryRecord),
+    Skipped(SkippedRecovery),
 }
 
 impl RecoveryRecord {
@@ -114,6 +128,46 @@ impl RecoveryRecord {
                 "editor-session recovery authority exceeds its write budget".into(),
             ));
         }
+        if crate::disk_echo::content_hash(&self.baseline.content) != self.baseline.content_hash {
+            return Err(ChanError::Io(
+                "editor-session recovery baseline hash mismatch".into(),
+            ));
+        }
+        if self.baseline.authority_version > self.authority.version {
+            return Err(ChanError::Io(
+                "editor-session recovery baseline version is ahead of authority".into(),
+            ));
+        }
+        if let RecoveryState::Conflicted { conflict } = &self.lifecycle {
+            if conflict.baseline_version != self.baseline.content_hash
+                || conflict.authority_version != self.authority.version
+            {
+                return Err(ChanError::Io(
+                    "editor-session recovery conflict version mismatch".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl SkippedRecovery {
+    fn new(record: &RecoveryRecord) -> Self {
+        Self {
+            format: RECOVERY_FORMAT,
+            kind: record.kind,
+            path: record.path.clone(),
+            skipped: true,
+        }
+    }
+
+    fn validate_identity(&self, kind: RecoveryKind, path: &str) -> Result<(), ChanError> {
+        if self.format != RECOVERY_FORMAT || self.kind != kind || self.path != path || !self.skipped
+        {
+            return Err(ChanError::Io(
+                "invalid editor-session skipped-recovery marker".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -133,7 +187,27 @@ pub(crate) fn load(
     path: &str,
 ) -> Result<Option<RecoveryRecord>, ChanError> {
     let recovery_path = recovery_path(kind, path)?;
-    match workspace.classify_workspace_path(&recovery_path)? {
+    match load_inner(workspace, kind, path, &recovery_path) {
+        Ok(record) => Ok(record),
+        Err(error) => {
+            tracing::warn!(
+                path,
+                ?kind,
+                %error,
+                "ignoring unusable editor-session recovery record"
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn load_inner(
+    workspace: &Workspace,
+    kind: RecoveryKind,
+    path: &str,
+    recovery_path: &str,
+) -> Result<Option<RecoveryRecord>, ChanError> {
+    match workspace.classify_workspace_path(recovery_path)? {
         WorkspacePath::Missing => return Ok(None),
         WorkspacePath::Regular(stat) if stat.size <= BYTES_WRITE_LIMIT => {}
         WorkspacePath::Regular(_) => {
@@ -148,7 +222,7 @@ pub(crate) fn load(
         }
     }
 
-    let mut reader = workspace.read_bytes_bounded(&recovery_path)?;
+    let mut reader = workspace.read_bytes_bounded(recovery_path)?;
     let capacity = usize::try_from(reader.stat().size)
         .unwrap_or(usize::MAX)
         .min(BYTES_WRITE_LIMIT as usize);
@@ -166,23 +240,77 @@ pub(crate) fn load(
         }
         bytes.extend_from_slice(&chunk);
     }
-    let record: RecoveryRecord = serde_json::from_slice(&bytes)
+    let stored: StoredRecovery = serde_json::from_slice(&bytes)
         .map_err(|error| ChanError::Io(format!("parse editor-session recovery: {error}")))?;
-    record.validate_identity(kind, path)?;
-    Ok(Some(record))
+    match stored {
+        StoredRecovery::Record(record) => {
+            record.validate_identity(kind, path)?;
+            Ok(Some(record))
+        }
+        StoredRecovery::Skipped(marker) => {
+            marker.validate_identity(kind, path)?;
+            Ok(None)
+        }
+    }
 }
 
 pub(crate) fn store(workspace: &Workspace, record: &RecoveryRecord) -> Result<(), ChanError> {
     record.validate_identity(record.kind, &record.path)?;
     let recovery_path = recovery_path(record.kind, &record.path)?;
+    let encoded_size = serialized_size(record)?;
+    let record_budget = record.authority.write_budget.min(BYTES_WRITE_LIMIT);
+    if encoded_size > record_budget {
+        tracing::warn!(
+            path = record.path,
+            ?record.kind,
+            encoded_size,
+            record_budget,
+            "skipping editor-session recovery record that exceeds the file budget"
+        );
+        return write_json(workspace, &recovery_path, &SkippedRecovery::new(record));
+    }
+    write_json(workspace, &recovery_path, record)
+}
+
+fn serialized_size(value: &impl Serialize) -> Result<u64, ChanError> {
+    let mut counter = SizeCounter::default();
+    serde_json::to_writer(&mut counter, value)
+        .map_err(|error| ChanError::Io(format!("size editor-session recovery: {error}")))?;
+    Ok(counter.bytes)
+}
+
+fn write_json(
+    workspace: &Workspace,
+    recovery_path: &str,
+    value: &impl Serialize,
+) -> Result<(), ChanError> {
     workspace
-        .write_atomic_stream(&recovery_path, AtomicWriteKind::Bytes, |sink| {
+        .write_atomic_stream(recovery_path, AtomicWriteKind::Bytes, |sink| {
             let mut writer = SinkWriter { sink };
-            serde_json::to_writer(&mut writer, record).map_err(|error| {
+            serde_json::to_writer(&mut writer, value).map_err(|error| {
                 ChanError::Io(format!("serialize editor-session recovery: {error}"))
             })
         })
         .map(|_| ())
+}
+
+#[derive(Default)]
+struct SizeCounter {
+    bytes: u64,
+}
+
+impl Write for SizeCounter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| io::Error::other("editor-session recovery size overflow"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 struct SinkWriter<'a> {
@@ -199,5 +327,125 @@ impl Write for SinkWriter<'_> {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        std::sync::Arc<Workspace>,
+    ) {
+        let config = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let workspace = library.open_workspace(root.path()).unwrap();
+        (config, root, workspace)
+    }
+
+    fn record(
+        authority: String,
+        baseline: String,
+        write_budget: u64,
+        lifecycle: RecoveryState,
+    ) -> RecoveryRecord {
+        RecoveryRecord::new(
+            RecoveryKind::Document,
+            "a.md".into(),
+            RecoveryAuthority {
+                content: authority,
+                version: 2,
+                write_budget,
+                flushed_mtime_ns: None,
+            },
+            RecoveryBaseline {
+                content_hash: crate::disk_echo::content_hash(&baseline),
+                content: baseline,
+                mtime_ns: None,
+                authority_version: 1,
+            },
+            lifecycle,
+        )
+    }
+
+    fn write_raw(workspace: &Workspace, bytes: &[u8]) {
+        let path = recovery_path(RecoveryKind::Document, "a.md").unwrap();
+        workspace
+            .write_atomic_stream(&path, AtomicWriteKind::Bytes, |sink| {
+                sink.write_chunk(bytes)
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn corrupt_or_incompatible_record_is_treated_as_absent() {
+        let (_config, _root, workspace) = fixture();
+
+        write_raw(&workspace, b"{not json");
+        assert!(load(&workspace, RecoveryKind::Document, "a.md")
+            .unwrap()
+            .is_none());
+
+        let mut incompatible = record(
+            "authority".into(),
+            "baseline".into(),
+            1024,
+            RecoveryState::Dirty,
+        );
+        incompatible.format = RECOVERY_FORMAT + 1;
+        write_raw(&workspace, &serde_json::to_vec(&incompatible).unwrap());
+        assert!(load(&workspace, RecoveryKind::Document, "a.md")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn record_larger_than_file_budget_replaces_stale_recovery_with_absent_marker() {
+        let (_config, _root, workspace) = fixture();
+        let small = record("local".into(), "disk".into(), 1024, RecoveryState::Dirty);
+        store(&workspace, &small).unwrap();
+        assert!(load(&workspace, RecoveryKind::Document, "a.md")
+            .unwrap()
+            .is_some());
+
+        let large = record(
+            "a".repeat(1_100_000),
+            "b".repeat(1_100_000),
+            chan_workspace::TEXT_WRITE_LIMIT,
+            RecoveryState::Dirty,
+        );
+        store(&workspace, &large).unwrap();
+        assert!(
+            load(&workspace, RecoveryKind::Document, "a.md")
+                .unwrap()
+                .is_none(),
+            "an oversized record must not leave stale recovery authority behind"
+        );
+    }
+
+    #[test]
+    fn conflicted_record_does_not_serialize_a_third_full_content_copy() {
+        let conflict = RecoveryConflict {
+            id: "doc-1".into(),
+            baseline_version: 1,
+            disk_version: 2,
+            authority_version: 2,
+            disk_mtime_ns: None,
+        };
+        let value = serde_json::to_value(record(
+            "authority".into(),
+            "baseline".into(),
+            1024,
+            RecoveryState::Conflicted { conflict },
+        ))
+        .unwrap();
+        assert!(
+            value["lifecycle"]["conflict"].get("disk_content").is_none(),
+            "live disk content is reconstructed from disk and must not be persisted"
+        );
     }
 }
