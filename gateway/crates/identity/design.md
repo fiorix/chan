@@ -245,8 +245,7 @@ Additional username guards:
 - Cookie name `__Host-id_session` (`id_session_insecure_dev` when `COOKIE_SECURE=false`: browsers reject `__Host-` names without Secure). **Host-only on `id.chan.app`.** No `Domain` attribute.
 - `HttpOnly`, `SameSite=Lax`, 30-day inactivity expiry.
 - `Secure` follows the `COOKIE_SECURE` env var.
-- devserver-proxy does **not** read this cookie. Cross-service auth uses a
-  short-lived Ed25519 entry credential, not cookie sharing.
+- devserver-proxy does **not** read this cookie. Cross-service auth uses a short-lived Ed25519 entry credential, not cookie sharing.
 
 ### Session id rotates on login
 
@@ -260,12 +259,7 @@ Additional username guards:
 
 ### Devserver-gate mint, not session sharing
 
-Identity alone holds `DEVSERVER_ENTRY_SIGNING_KEY`; proxy nodes receive only the
-matching `DEVSERVER_ENTRY_VERIFYING_KEYS` public-key ring. Identity signs a
-30-second, single-use entry credential after verifying the controller's
-admission lease and profile authorization. The browser submits it only in the
-body of `POST /_chan/entry`. The proxy consumes its `jti` and replaces it with
-an opaque, proxy-local session cookie capped at one hour.
+Identity alone holds `DEVSERVER_ENTRY_SIGNING_KEY`; proxy nodes receive only the matching `DEVSERVER_ENTRY_VERIFYING_KEYS` public-key ring. Identity signs a 30-second, single-use entry credential after verifying the controller's admission lease and profile authorization. The browser submits it only in the body of `POST /_chan/entry`. The proxy consumes its `jti` and replaces it with an opaque, proxy-local session cookie capped at one hour.
 
 ### IDENTITY_INTERNAL_TOKEN is required and distinct
 

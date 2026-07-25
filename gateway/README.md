@@ -62,10 +62,7 @@ Save the client id and secret.
 
 ### Run
 
-Use the checked-in local-stack scripts from the repository root. They generate
-distinct scoped bearers and Ed25519 admission/entry keypairs, run identity once
-with `CHAN_GATEWAY_MIGRATIONS=only`, then start identity and profile with
-`CHAN_GATEWAY_MIGRATIONS=external`:
+Use the checked-in local-stack scripts from the repository root. They generate distinct scoped bearers and Ed25519 admission/entry keypairs, run identity once with `CHAN_GATEWAY_MIGRATIONS=only`, then start identity and profile with `CHAN_GATEWAY_MIGRATIONS=external`:
 
 ```sh
 cp packaging/gateway/scripts/dev/env.example packaging/gateway/scripts/dev/.env
@@ -74,13 +71,7 @@ packaging/gateway/scripts/dev/setup.sh
 packaging/gateway/scripts/dev/run.sh
 ```
 
-Identity serves browser routes on `https://id.localtest.me:17000` through the
-generated local TLS edge and exposes its
-separate internal proxy/operator listener on `127.0.0.1:17004`. Proxies use
-the internal listener for validation. Import
-`packaging/gateway/scripts/dev/secrets/tls/ca.crt` into the development browser.
-The setup script is idempotent; pass `--force` only when every generated
-credential and the local CA should rotate.
+Identity serves browser routes on `https://id.localtest.me:17000` through the generated local TLS edge and exposes its separate internal proxy/operator listener on `127.0.0.1:17004`. Proxies use the internal listener for validation. Import `packaging/gateway/scripts/dev/secrets/tls/ca.crt` into the development browser. The setup script is idempotent; pass `--force` only when every generated credential and the local CA should rotate.
 
 devserver-proxy holds no database and reads no identity session, and admits no tunnel until its control session to devserver-control reaches `FleetReady`. Opening a workspace submits a separate, short-lived Ed25519 entry credential to the fixed `/_chan/entry` endpoint in a bounded form POST from identity's exact origin. The credential never appears in a URL and succeeds once; the proxy exchanges it for opaque `__Host-devserver_gate` plus `__Host-devserver_csrf` host-only cookies. For the full local stack use `../packaging/gateway/scripts/dev/setup.sh` + `../packaging/gateway/scripts/dev/run.sh`.
 
@@ -125,10 +116,7 @@ sudo apt install ./chan-gateway-profile_*.deb \
                  ./chan-gateway-devserver-proxy_*.deb
 ```
 
-Each package has a distinct system user and a service-only env file under
-`/etc/chan-gateway/`. Use the repository configurator to create scoped
-credentials and the owner-only migration environment, then run the migration
-unit before starting the runtime services:
+Each package has a distinct system user and a service-only env file under `/etc/chan-gateway/`. Use the repository configurator to create scoped credentials and the owner-only migration environment, then run the migration unit before starting the runtime services:
 
 ```sh
 sudo packaging/gateway/scripts/configure.sh
@@ -139,10 +127,7 @@ sudo systemctl enable --now chan-gateway-devserver-control
 sudo systemctl enable --now chan-gateway-devserver-proxy
 ```
 
-The binaries listen on loopback by default: identity public `7000`, identity
-internal proxy/operator `7004`, profile `7001`, control `7003`/`7101`, and proxy
-`7002`/`7100`. Front only identity `7000` and proxy `7002`/`7100` with TLS.
-Never publish identity `7004` or either control listener.
+The binaries listen on loopback by default: identity public `7000`, identity internal proxy/operator `7004`, profile `7001`, control `7003`/`7101`, and proxy `7002`/`7100`. Front only identity `7000` and proxy `7002`/`7100` with TLS. Never publish identity `7004` or either control listener.
 
 ## Admin
 
@@ -156,8 +141,7 @@ Each admin destination has its own credential; rotate them independently:
 - identity-service:  `IDENTITY_ADMIN_TOKEN=<random>`
 - devserver-control: `DEVSERVER_OPERATOR_ADMIN_TOKENS=<random>`
 
-Do not reuse one bearer across services. `chan-gateway-admin` reads the matching
-scoped variable for each destination:
+Do not reuse one bearer across services. `chan-gateway-admin` reads the matching scoped variable for each destination:
 
 ```sh
 export CHAN_ADMIN_PROFILE_TOKEN=<PROFILE_ADMIN_TOKEN>

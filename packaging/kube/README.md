@@ -25,12 +25,7 @@ The service env-var contract is `gateway/crates/*/packaging/*.env` and `gateway/
 
 `secret.example.yaml` defines one Secret per workload plus a root/operator-only CLI Secret. Shared values are duplicated only across their intended endpoints: identity and profile share `PROFILE_AUTH_TOKEN`; identity and proxy share only `IDENTITY_INTERNAL_TOKEN`; identity holds private admission and entry signing keys while consumers receive only the matching public-key rings; control's three admin verifier rings are scope-specific and each caller receives only its singular current bearer; control's `DEVSERVER_PROXY_CREDENTIALS` contains the allowlisted token for each proxy id while each proxy receives only its own `DEVSERVER_PROXY_TOKEN`. Browser sessions are proxy-local opaque identifiers, so no session-signing secret crosses services. No admin token may be reused across control scopes. The duplicated endpoint values MUST match or startup, handoff, or control authentication fails. identity refuses to start with no OAuth provider, so its Secret carries placeholder GitHub creds for boot.
 
-Admission signing-key rotation is overlap-first: set control's
-`DEVSERVER_ADMISSION_VERIFYING_KEYS` to `old;new`, switch identity's signer and
-local verifier to `new`, wait at least 330 seconds (the maximum lease TTL plus
-clock skew) and confirm old leases have drained, then set control to `new` only.
-The ring accepts at most two distinct keys; never switch the signer before the
-new verifier is live.
+Admission signing-key rotation is overlap-first: set control's `DEVSERVER_ADMISSION_VERIFYING_KEYS` to `old;new`, switch identity's signer and local verifier to `new`, wait at least 330 seconds (the maximum lease TTL plus clock skew) and confirm old leases have drained, then set control to `new` only. The ring accepts at most two distinct keys; never switch the signer before the new verifier is live.
 
 The database owner URL exists only in `chan-gateway-migrate`. The prepare Job creates or rotates the `chan_gateway_identity` and `chan_gateway_profile` login roles, removes role membership and administrative attributes, revokes runtime access, and invalidates the rollout marker. The pinned identity migration Job then runs all DDL as the owner. Finally, the reconcile Job requires the exact successful sqlx migration and known table/sequence inventory, installs an explicit per-object ACL matrix with no positive default grants, keeps `_sqlx_migrations` owner-only, and publishes the app-readable migration/policy marker. The app Deployments receive only their own role URL, set `CHAN_GATEWAY_MIGRATIONS=external`, and wait for that exact marker.
 

@@ -83,12 +83,7 @@ Text tools are defined as `StandardTool` and dispatched by name:
 
 Writes are full-file replacements. `write_file` accepts `expected_mtime_ns` for compare-and-swap semantics and maps chan-workspace conflicts into `LlmError::WriteConflict`. `resolve_path` is metadata-only: it maps a chan public path to the physical host path (for shell tools that need a cwd) without reading or writing content.
 
-`workspace_search` is the one active-workspace retrieval surface. It accepts
-typed selector objects and mechanically converts `WorkspaceSearchParams` into
-the core request; it does not select or fan out across tenants. The same
-`JsonSchema` type generates the standard tool schema and rmcp input schema, and
-the parity test compares them exactly. Results are serialized from the core
-result unchanged.
+`workspace_search` is the one active-workspace retrieval surface. It accepts typed selector objects and mechanically converts `WorkspaceSearchParams` into the core request; it does not select or fan out across tenants. The same `JsonSchema` type generates the standard tool schema and rmcp input schema, and the parity test compares them exactly. Results are serialized from the core result unchanged.
 
 Responses are capped so a runaway call cannot bloat a model turn: `read_file` truncates past 256 KiB (with a `truncated` marker), `list_files` caps at 2,000 entries, workspace search applies the core content/node/edge caps, `repo_report` returns at most 200 per-file rows, and `write_file` rejects content above the 2 MiB chan-workspace text-write limit before crossing the dispatch boundary.
 

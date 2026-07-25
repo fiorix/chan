@@ -103,15 +103,7 @@ flowchart TB
 - **`bearer`** gates `/api/library/*`. `Some(token)` requires `Authorization: Bearer` (the watch WebSocket also accepts `?t=`), constant-time compared; `None` is tunnel-trust. The static SPA shell is always public so it loads before it holds the token.
 - **`serve_addr`** (`Option<Arc<OnceLock<SocketAddr>>>`) is both the read-only/full discriminator and the mount enabler. `Some(cell)` is the loopback: workspace mutation is served, and the mount path reads the listen address from the cell, which the embedder fills *after* it binds, so it is read at request time rather than install time. `None` is the tunnel-trust surface: workspaces are read-only -- the mutation handlers answer `403`, and the shell is served with `<meta name="chan-launcher-surface" content="readonly">` so the SPA hides those controls (the New-workspace button, the row checkboxes and bulk bar, and the on/off toggle, which becomes a static state badge) and shows a "manage from the desktop app or the CLI" hint instead of buttons that fail.
 
-Mutation is loopback-only because on the gateway surface the proxy strips
-browser `Cookie` and `Authorization` credentials and is the sole gate, so
-`bearer=None` cannot distinguish a grantee from the owner. Query parameters are
-ordinary tenant application data; proxy entry credentials are accepted only at
-the fixed body-only exchange endpoint. A collaborator holding a
-`__Host-devserver_gate` cookie must not unmount or remove the owner's workspaces.
-Window mint/discard stay on both surfaces (per-view state, low-risk). Owners
-manage a headless devserver's workspaces over the bearer-gated
-`/api/devserver/*` management API and `cs`/CLI.
+Mutation is loopback-only because on the gateway surface the proxy strips browser `Cookie` and `Authorization` credentials and is the sole gate, so `bearer=None` cannot distinguish a grantee from the owner. Query parameters are ordinary tenant application data; proxy entry credentials are accepted only at the fixed body-only exchange endpoint. A collaborator holding a `__Host-devserver_gate` cookie must not unmount or remove the owner's workspaces. Window mint/discard stay on both surfaces (per-view state, low-risk). Owners manage a headless devserver's workspaces over the bearer-gated `/api/devserver/*` management API and `cs`/CLI.
 
 Off is a plain unmount: the launcher's `setWorkspaceOn` sends no `force`, so the devserver's confirm-before-off (a `409` carrying the live-terminal count) stays a `/api/devserver/*` and UI concern rather than a wire status on this surface.
 

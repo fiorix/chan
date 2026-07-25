@@ -10,8 +10,7 @@ The tunnel is per-DEVSERVER and always authenticated:
 
 ## Cross-crate context
 
-chan-tunnel has three boundaries: shared wire contracts, a dial-side client
-driven by `chan devserver`, and this terminator embedded by the gateway.
+chan-tunnel has three boundaries: shared wire contracts, a dial-side client driven by `chan devserver`, and this terminator embedded by the gateway.
 
 This document covers terminator-side design. The wire format is in chan-tunnel-proto's design.md.
 
@@ -129,8 +128,7 @@ sequenceDiagram
 2. `h2::server::handshake(tcp)` under `H2_HANDSHAKE_TIMEOUT` (10s).
 3. First `conn.accept()` under `FIRST_STREAM_TIMEOUT` (10s).
 4. Reject `(method != POST) || (path != TUNNEL_PATH)` with 404.
-5. Parse `Authorization: Bearer ...` (case-insensitive scheme, SP/HTAB separator, trimmed token); reject missing / empty with
-   401.
+5. Parse `Authorization: Bearer ...` (case-insensitive scheme, SP/HTAB separator, trimmed token); reject missing / empty with 401.
 6. Spawn an h2 frame driver task BEFORE awaiting the validator: the validator may be a network round-trip and h2 only progresses while polled. The task rejects any subsequent stream on the same connection with 409 (clients must only ever open one) and `abrupt_shutdown(ENHANCE_YOUR_CALM)` after `MAX_DRAINER_REJECTIONS` (16) rejections.
 7. Call `validator.validate(token).await` under `VALIDATE_TIMEOUT` (10s, independent of any timeout the `Validator` impl enforces internally). On timeout, reply 504. On error: 401 (`InvalidToken`), 502 (`Identity`), or 500. Bare 401 / 403 responses arrive at the client as distinct errors; the validator runs before the 200 precisely so auth failures are not collapsed into generic transport failures.
 8. Verify the validated token's `scopes` contains `"tunnel"`; 403 otherwise.

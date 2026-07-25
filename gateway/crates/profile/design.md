@@ -97,13 +97,7 @@ The router splits into three sub-routers:
 
 All bearer comparisons run through `subtle::ConstantTimeEq` via the shared `bearer_eq` helper. Both checks always run on the service API so a wrong token cannot oracle which leg matched first.
 
-profile-service requires a `DevserverControlClient` configured with
-`DEVSERVER_ADMIN_URL` and the profile-scoped
-`DEVSERVER_PROFILE_ADMIN_TOKEN`. Denial mutations write their primary state,
-audit record, and a durable revocation-outbox generation in one transaction.
-The worker then cuts tunnels and browser sessions across the fleet, confirms a
-post-commit first cut, waits the full entry-credential quiet window, and makes a
-second cut before settling the job. Retries survive profile restarts.
+profile-service requires a `DevserverControlClient` configured with `DEVSERVER_ADMIN_URL` and the profile-scoped `DEVSERVER_PROFILE_ADMIN_TOKEN`. Denial mutations write their primary state, audit record, and a durable revocation-outbox generation in one transaction. The worker then cuts tunnels and browser sessions across the fleet, confirms a post-commit first cut, waits the full entry-credential quiet window, and makes a second cut before settling the job. Retries survive profile restarts.
 
 ## Key decisions
 
