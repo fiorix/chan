@@ -88,9 +88,13 @@ import {
   restoreTransfers,
   setTransferProgress,
   setTransferSignalSink,
-  uploadInFlight,
+  waitForTransferSlot,
 } from "./transfers.svelte";
-import { isTauriDesktop, pickUploadFiles, runDesktopDownload } from "../api/desktop";
+import {
+  isTauriDesktop,
+  runDesktopDownload,
+  runDesktopUpload,
+} from "../api/desktop";
 import {
   base64ToBytes,
   hintClipboardError,
@@ -1421,11 +1425,9 @@ function isSurveyCloseReason(value: unknown): value is SurveyCloseReason {
 /// cancel; an empty selection is a no-op.
 ///
 /// On chan-desktop the synthesized input is useless: WKWebView silently drops a
-/// programmatic file-input `.click()` made outside a user gesture (a `cs upload`
-/// arrives via a window-command, not a click), so no picker ever shows. There we
-/// open a NATIVE picker instead (`pickUploadFiles`) and wrap the returned bytes
-/// in `File` objects for the SAME `uploadFilesTo`. Mirrors how
-/// `downloadPathWithProgress` branches on `isTauriDesktop()`.
+/// programmatic file-input `.click()` made outside a user gesture. Rust opens
+/// the native picker and streams the chosen paths directly to the upload API;
+/// paths and bytes never cross webview IPC.
 export function raiseUploadPicker(destDir: string): void {
   if (isTauriDesktop()) {
     void raiseDesktopUploadPicker(destDir);
@@ -1473,40 +1475,43 @@ export function raiseReplacePicker(targetPath: string): void {
   input.click();
 }
 
-/// chan-desktop upload path: open the native picker, wrap the chosen bytes in
-/// `File` objects, and hand them to the same `fileOps.uploadFilesTo` pipeline as
-/// the browser path. An empty result is a cancel (no-op); an ACL refusal /
-/// IPC failure surfaces as a status (an explicit `cs upload` should not fail
-/// silently -- that silent no-op is the bug this fixes).
 async function raiseDesktopUploadPicker(destDir: string): Promise<void> {
-  let picked: Awaited<ReturnType<typeof pickUploadFiles>>;
   try {
-    picked = await pickUploadFiles();
+    const uploaded = await runDesktopUpload(
+      { dir: destDir, multiple: true },
+      destDir ? `Upload to ${destDir}` : "Upload files",
+    );
+    if (uploaded.length === 0) return;
+    for (const file of uploaded) await refreshTreeForPath(file.path);
+    revealAndSelect(uploaded[uploaded.length - 1]!.path);
+    setTransientStatus(
+      uploaded.length === 1
+        ? `Uploaded '${uploaded[0]!.path}'`
+        : `Uploaded ${uploaded.length} files`,
+    );
   } catch (err) {
     ui.status = `upload failed: ${err instanceof Error ? err.message : String(err)}`;
     ui.statusKind = "persistent";
-    return;
   }
-  if (picked.length === 0) return;
-  const files = picked.map((f) => new File([new Uint8Array(f.bytes)], f.name));
-  await fileOps.uploadFilesTo(destDir, files);
 }
 
 async function raiseDesktopReplacePicker(targetPath: string): Promise<void> {
-  let picked: Awaited<ReturnType<typeof pickUploadFiles>>;
   try {
-    picked = await pickUploadFiles();
+    const uploaded = await runDesktopUpload(
+      { path: targetPath, multiple: false },
+      targetPath.split("/").pop() || targetPath,
+    );
+    if (uploaded.length === 0) return;
+    await refreshTreeForPath(targetPath);
+    for (const tab of tabsForPath(targetPath)) {
+      await refreshTabFromDisk(tab.tabId);
+    }
+    revealAndSelect(targetPath);
+    setTransientStatus(`Replaced '${targetPath}'`);
   } catch (err) {
     ui.status = `upload failed: ${err instanceof Error ? err.message : String(err)}`;
     ui.statusKind = "persistent";
-    return;
   }
-  const first = picked[0];
-  if (!first) return;
-  await fileOps.replaceFileAt(
-    targetPath,
-    new File([new Uint8Array(first.bytes)], first.name),
-  );
 }
 
 async function handleWindowCommand(raw: unknown): Promise<void> {
@@ -4817,9 +4822,9 @@ export const fileOps = {
   /// manager handles progress + the Downloads folder + reveal, so we
   /// keep the `<a download>` path. chan-desktop's webview has no such
   /// manager, so on desktop we route through `runDesktopDownload`
-  /// (api/desktop.ts): it fetches over the loopback connection with
-  /// XHR progress and saves through a Tauri command, driving the
-  /// transfer bubble (the single download surface).
+  /// (api/desktop.ts): Rust streams the authenticated response to the
+  /// Downloads folder while the SPA polls bounded native progress,
+  /// driving the transfer bubble (the single download surface).
   /// Fire-and-forget: the transfer model carries progress / error /
   /// savedPath so callers don't await.
   downloadPathWithProgress(path: string, isDir: boolean): void {
@@ -4831,17 +4836,15 @@ export const fileOps = {
       ).toString();
       // Pass the source so an interrupted download (window reload) can offer
       // Retry from the transfer bubble.
-      void runDesktopDownload(url, downloadFilename(path, isDir), { path, isDir });
+      void runDesktopDownload(url, downloadFilename(path, isDir), {
+        path,
+        isDir,
+      }).catch(() => {});
       return;
     }
     this.downloadPath(path, isDir);
   },
   async replaceFileAt(targetPath: string, picked: File): Promise<void> {
-    if (uploadInFlight()) {
-      ui.status = "upload already in progress";
-      ui.statusKind = "persistent";
-      return;
-    }
     const draftsReason = fileBrowserDraftsPathReason(targetPath);
     if (draftsReason) {
       ui.status = `upload failed: ${draftsReason}`;
@@ -4859,6 +4862,7 @@ export const fileOps = {
       cancel,
     });
     try {
+      if (!(await waitForTransferSlot(xferId))) return;
       await api.replaceFile(picked, targetPath, {
         signal: activeAbort.signal,
         onProgress: (progress) => {
@@ -4885,11 +4889,6 @@ export const fileOps = {
     }
   },
   async uploadFilesTo(destDir: string, dropped: FileList | File[]): Promise<void> {
-    if (uploadInFlight()) {
-      ui.status = "upload already in progress";
-      ui.statusKind = "persistent";
-      return;
-    }
     const files = Array.from(dropped);
     if (files.length === 0) return;
     const seen = new Set<string>();
@@ -4936,6 +4935,7 @@ export const fileOps = {
 
     const uploaded: string[] = [];
     try {
+      if (!(await waitForTransferSlot(xferId))) return;
       for (let i = 0; i < files.length; i++) {
         if (cancelRequested) throw uploadCancelledError();
         const file = files[i]!;

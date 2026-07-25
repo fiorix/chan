@@ -11,7 +11,9 @@ import {
   failTransfer,
   finishTransfer,
   setTransferProgress,
+  waitForTransferSlot,
 } from "../state/transfers.svelte";
+import { withTokenQuery } from "./client";
 
 type TauriWindow = Window &
   typeof globalThis & {
@@ -149,26 +151,6 @@ export async function readDroppedPaths(): Promise<string[]> {
   }
 }
 
-/// One file chosen in the native upload picker: base name + raw bytes (the
-/// `Vec<u8>` crosses the IPC bridge as a JSON number array).
-export interface PickedUploadFile {
-  name: string;
-  bytes: number[];
-}
-
-/// Raise chan-desktop's NATIVE multi-file open picker (the `pick_upload_files`
-/// IPC) and return the chosen files' bytes. `cs upload` cannot raise the SPA's
-/// programmatic `<input type=file>` click on WKWebView (no user gesture, so the
-/// click is silently dropped -- the same wall as the clipboard-paste quirk), so
-/// on desktop we open a native panel in Rust instead; the caller wraps the
-/// results in `File` objects and feeds the same upload pipeline the Inspector
-/// pill uses. `[]` = the user cancelled. THROWS on ACL refusal (remote-served
-/// `outbound-*` windows don't get it) or IPC failure -- an explicit `cs upload`
-/// deserves a visible error, not a silent no-op (which is the bug we're fixing).
-export async function pickUploadFiles(): Promise<PickedUploadFile[]> {
-  return tauriInvoke<PickedUploadFile[]>("pick_upload_files");
-}
-
 /// Reload the chan window. On chan-desktop calls the
 /// `reload_window` IPC which fires `WebviewWindow::reload()`.
 /// Falls back to `window.location.reload()` on web or on IPC
@@ -297,12 +279,56 @@ export async function openWebInspector(): Promise<boolean> {
   }
 }
 
-/// Desktop-native download for the inspector's Download button.
-/// The browser hands `<a download>` to its own download manager;
-/// the desktop webview has none, so this fetches the file over
-/// the loopback connection with XHR progress (shown in the transfer
-/// bubble) and writes it to the user's Downloads folder via the
-/// `save_file_to_downloads` Tauri command.
+interface NativeTransferStatus {
+  loaded: number;
+  total: number | null;
+}
+
+function nativeTransferId(): string {
+  const random = globalThis.crypto?.randomUUID?.();
+  return random ? `native-${random}` : `native-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function pollNativeProgress(nativeId: string, transferId: string): () => void {
+  let stopped = false;
+  let polling = false;
+  const poll = async (): Promise<void> => {
+    if (stopped || polling) return;
+    polling = true;
+    try {
+      const status = await tauriInvoke<NativeTransferStatus | null>(
+        "native_transfer_status",
+        { transferId: nativeId },
+      );
+      if (status) {
+        const fraction =
+          status.total !== null && status.total > 0
+            ? Math.min(1, status.loaded / status.total)
+            : null;
+        setTransferProgress(transferId, fraction);
+      }
+    } catch {
+      // The main invoke owns the error surface. A missed progress poll is
+      // harmless and must not fail an otherwise healthy transfer.
+    } finally {
+      polling = false;
+    }
+  };
+  void poll();
+  const timer = window.setInterval(() => void poll(), 100);
+  return () => {
+    stopped = true;
+    window.clearInterval(timer);
+  };
+}
+
+/// Desktop-native download for the inspector's Download button. Rust performs
+/// the authenticated same-origin request and streams it to a temp file; the
+/// webview sees only bounded progress snapshots and the final saved path.
 ///
 /// `url` is the absolute tokenized download URL (the caller computes it
 /// from `api.downloadUrl(path)` resolved against `window.location`).
@@ -318,63 +344,94 @@ export async function runDesktopDownload(
   if (!isTauriDesktop()) {
     throw new Error("runDesktopDownload called outside chan-desktop");
   }
-  const xhr = new XMLHttpRequest();
-  // The transfer bubble is the single download surface. `source` lets an
-  // interrupted download offer Retry after a window reload.
+  const nativeId = nativeTransferId();
+  const cancel = (): void => {
+    void tauriInvoke<boolean>("cancel_native_transfer", { transferId: nativeId });
+  };
   const xferId = beginTransfer({
     kind: "download",
     filename,
-    cancel: () => xhr.abort(),
+    cancel,
     source,
   });
+  let stopProgress: (() => void) | null = null;
   try {
-    const bytes = await new Promise<Uint8Array>((resolve, reject) => {
-      xhr.open("GET", url);
-      xhr.responseType = "arraybuffer";
-      xhr.onprogress = (event) => {
-        // Content-Length present -> a real ratio; otherwise leave the
-        // indicator indeterminate (null) rather than faking a number.
-        const frac =
-          event.lengthComputable && event.total > 0 ? event.loaded / event.total : null;
-        setTransferProgress(xferId, frac);
-      };
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(new Uint8Array(xhr.response as ArrayBuffer));
-        } else {
-          reject(new Error(`download failed: HTTP ${xhr.status}`));
-        }
-      };
-      xhr.onerror = () => reject(new Error("download failed: network error"));
-      xhr.onabort = () => reject(new Error("download cancelled"));
-      xhr.send();
+    if (!(await waitForTransferSlot(xferId))) {
+      throw new Error("download cancelled");
+    }
+    stopProgress = pollNativeProgress(nativeId, xferId);
+    const saved = await tauriInvoke<{ path: string }>("download_file_native", {
+      transferId: nativeId,
+      url,
+      filename,
     });
-    // Past this point cancelling no longer applies (the bytes are in
-    // hand); the store clears its cancel on finish/fail.
-    const saved = await tauriInvoke<{ path: string }>(
-      "save_file_to_downloads",
-      // Tauri serializes a Uint8Array to a number[] for a Vec<u8> arg.
-      { filename, bytes: Array.from(bytes) },
-    );
     finishTransfer(xferId, saved.path);
     return saved.path;
   } catch (err) {
-    const message = (err as Error)?.message ?? String(err);
-    // A user abort is a cancel, not a failure (the bubble shows "Cancelled").
-    if (message === "download cancelled") cancelTransfer(xferId);
-    else failTransfer(xferId, message);
+    const message = errorMessage(err);
+    if (message.includes("download cancelled")) cancelTransfer(xferId);
+    else {
+      const retry = source
+        ? () => {
+            void runDesktopDownload(url, filename, source).catch(() => {});
+          }
+        : null;
+      failTransfer(xferId, message, retry);
+    }
     throw err instanceof Error ? err : new Error(message);
+  } finally {
+    stopProgress?.();
   }
 }
 
-/// Save bytes the SPA already holds in memory to the Downloads folder
-/// through the same `save_file_to_downloads` command + progress
-/// indicator that `runDesktopDownload` uses. Unlike that path there is
-/// no network fetch (the bytes are produced locally, e.g. by the PDF
-/// export engine), so the transfer goes straight from begin -> finish.
-///
-/// Resolves to the saved absolute path; rejects on error. Reuses the
-/// existing capability, so no new Tauri permission is required.
+export interface NativeUploadedFile {
+  path: string;
+  size: number;
+}
+
+export async function runDesktopUpload(
+  target: { dir?: string; path?: string; multiple: boolean },
+  label: string,
+): Promise<NativeUploadedFile[]> {
+  if (!isTauriDesktop()) {
+    throw new Error("runDesktopUpload called outside chan-desktop");
+  }
+  const nativeId = nativeTransferId();
+  const cancel = (): void => {
+    void tauriInvoke<boolean>("cancel_native_transfer", { transferId: nativeId });
+  };
+  const xferId = beginTransfer({ kind: "upload", filename: label, cancel });
+  let stopProgress: (() => void) | null = null;
+  try {
+    if (!(await waitForTransferSlot(xferId))) return [];
+    stopProgress = pollNativeProgress(nativeId, xferId);
+    const url = new URL(
+      withTokenQuery("/api/files/upload"),
+      window.location.href,
+    ).toString();
+    const uploaded = await tauriInvoke<NativeUploadedFile[]>("upload_files_native", {
+      transferId: nativeId,
+      url,
+      target,
+    });
+    if (uploaded.length === 0) {
+      cancelTransfer(xferId);
+      return [];
+    }
+    finishTransfer(xferId);
+    return uploaded;
+  } catch (err) {
+    const message = errorMessage(err);
+    if (message.includes("upload cancelled")) cancelTransfer(xferId);
+    else failTransfer(xferId, message);
+    throw err instanceof Error ? err : new Error(message);
+  } finally {
+    stopProgress?.();
+  }
+}
+
+/// Save SPA-generated bytes (for example, a rendered PDF) through a bounded
+/// 64 KiB IPC chunk sink. The full byte array never becomes one IPC payload.
 export async function saveBytesToDownloads(
   bytes: Uint8Array,
   filename: string,
@@ -382,20 +439,42 @@ export async function saveBytesToDownloads(
   if (!isTauriDesktop()) {
     throw new Error("saveBytesToDownloads called outside chan-desktop");
   }
-  // The bytes already exist, so cancelling has nothing to abort; pass a null
-  // cancel and let the bubble show an indeterminate-then-done transfer.
-  const xferId = beginTransfer({ kind: "download", filename, cancel: null });
+  let handle: string | null = null;
+  let cancelled = false;
+  const cancel = (): void => {
+    cancelled = true;
+    if (handle) void tauriInvoke<boolean>("cancel_generated_download", { handle });
+  };
+  const xferId = beginTransfer({ kind: "download", filename, cancel });
   try {
-    const saved = await tauriInvoke<{ path: string }>("save_file_to_downloads", {
-      // Tauri serializes a Uint8Array to a number[] for a Vec<u8> arg.
+    if (!(await waitForTransferSlot(xferId))) {
+      throw new Error("download cancelled");
+    }
+    const begun = await tauriInvoke<{ handle: string }>("begin_generated_download", {
       filename,
-      bytes: Array.from(bytes),
     });
+    handle = begun.handle;
+    for (let offset = 0; offset < bytes.length; offset += 64 * 1024) {
+      if (cancelled) throw new Error("download cancelled");
+      const chunk = bytes.subarray(offset, Math.min(bytes.length, offset + 64 * 1024));
+      await tauriInvoke<void>("append_generated_download", {
+        handle,
+        bytes: [...chunk],
+      });
+      setTransferProgress(xferId, bytes.length > 0 ? (offset + chunk.length) / bytes.length : 1);
+    }
+    if (cancelled) throw new Error("download cancelled");
+    const saved = await tauriInvoke<{ path: string }>("finish_generated_download", {
+      handle,
+    });
+    handle = null;
     finishTransfer(xferId, saved.path);
     return saved.path;
   } catch (err) {
-    const message = (err as Error)?.message ?? String(err);
-    failTransfer(xferId, message);
+    if (handle) await tauriInvoke<boolean>("cancel_generated_download", { handle }).catch(() => {});
+    const message = errorMessage(err);
+    if (message.includes("download cancelled")) cancelTransfer(xferId);
+    else failTransfer(xferId, message);
     throw err instanceof Error ? err : new Error(message);
   }
 }

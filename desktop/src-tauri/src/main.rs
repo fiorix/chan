@@ -10,6 +10,7 @@ mod embedded;
 mod gateway;
 mod linux_gui_stack;
 mod native_dialog;
+mod native_transfer;
 mod registry;
 mod runtime_capability;
 mod serve;
@@ -5117,19 +5118,21 @@ fn main() {
             abandon_devserver_for_window,
             reconnect_devserver_for_window,
             restart_desktop_after_update,
-            download::save_file_to_downloads,
+            download::download_file_native,
+            download::begin_generated_download,
+            download::append_generated_download,
+            download::finish_generated_download,
+            download::cancel_generated_download,
+            native_transfer::native_transfer_status,
+            native_transfer::cancel_native_transfer,
             // Registered on every platform; returns [] off macOS so the
             // SPA's terminal drop handler needs no platform branching.
             // ACL-scoped to locally-served windows (capabilities/
             // local-drop.json) -- the drag pasteboard is system-wide.
             dropped_paths::read_dropped_paths,
-            // Native upload picker for `cs upload` (WKWebView blocks the SPA's
-            // gesture-less file-input click). ACL-scoped to locally-served and
-            // the user's own devserver/tunnel windows (capabilities/
-            // local-upload.json); excludes outbound-* (ad-hoc remote URL) so an
-            // untrusted remote-served webview can't pop a native picker over
-            // the user's disk.
-            upload::pick_upload_files,
+            // Native upload picker + HTTP stream. Paths and bytes stay in Rust;
+            // the capability excludes outbound-* remote URL attachments.
+            upload::upload_files_native,
             zoom_in,
             zoom_out,
             zoom_reset,

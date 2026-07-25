@@ -162,7 +162,7 @@ Every window is a Tauri webview with a label prefix that encodes its kind, and T
 
 All embedded-SPA windows (workspace / outbound / terminal) load the SPA with `?w=<label>` so per-window session state (`session.json` panes/tabs) is keyed by the window, and get a " Window N" title suffix where N is the lowest free number among live windows sharing a base title, so the OS window switcher disambiguates.
 
-Capability grants are origin-aware as well as label-globbed: a capability reaches remotely-served content only when its `remote.urls` covers the loading origin, and every chan window is remotely served (the embedded server is loopback HTTP). Broad capabilities are loopback-scoped. The loopback-served launcher (`main`, `main-*`) gets the event-listen and update-restart grants (launcher-events.json, launcher-update.json). Gateway-backed `lib-*` windows have no static or wildcard capability. After an authenticated entry response passes the full identity, exact-child namespace, scheme/port, same-origin entry URL, and refresh-origin checks, the desktop mints one runtime capability for that canonical exact origin. The grant carries the workspace-window command set plus upload picker, fullscreen, webview zoom, and opener. Official and custom gateways use this same entry-derived path. `read_dropped_paths` is the standing exception on every origin: the macOS drag pasteboard is system-wide, so local-drop.json grants it only to locally-supervised window kinds, never to `lib-*` or `outbound-*`. `outbound-*` webviews (arbitrary remote URLs) match no remote pattern and get no IPC at all on their remote content. Runtime Tauri grants are additive: revocation closes managed windows and blocks reconnect immediately, while purging an already-minted origin from the process authority requires quitting and restarting Chan Desktop. serve.rs's origin-aware ACL tests pin the SPA invoke vocabulary and prove that no static or runtime grant contains a gateway wildcard.
+Capability grants are origin-aware as well as label-globbed: a capability reaches remotely-served content only when its `remote.urls` covers the loading origin, and every chan window is remotely served (the embedded server is loopback HTTP). Broad capabilities are loopback-scoped. The loopback-served launcher (`main`, `main-*`) gets the event-listen and update-restart grants (launcher-events.json, launcher-update.json). Gateway-backed `lib-*` windows have no static or wildcard capability. After an authenticated entry response passes the full identity, exact-child namespace, scheme/port, same-origin entry URL, and refresh-origin checks, the desktop mints one runtime capability for that canonical exact origin. The grant carries the workspace-window command set plus the native transfer commands, fullscreen, webview zoom, and opener. Official and custom gateways use this same entry-derived path. Each transfer command has its own permission entry, and the static local-transfer capability is limited to locally served workspace and terminal window classes. `read_dropped_paths` is the standing exception on every origin: the macOS drag pasteboard is system-wide, so local-drop.json grants it only to locally-supervised window kinds, never to `lib-*` or `outbound-*`. `outbound-*` webviews (arbitrary remote URLs) match no remote pattern and get no IPC at all on their remote content. Runtime Tauri grants are additive: revocation closes managed windows and blocks reconnect immediately, while purging an already-minted origin from the process authority requires quitting and restarting Chan Desktop. serve.rs's origin-aware ACL tests pin the SPA invoke vocabulary and prove that no static or runtime grant contains a gateway wildcard.
 
 ### 6.2 Menus and the chord bridge
 
@@ -300,5 +300,22 @@ The user copies the printed URL, including the bearer token, into the [New] moda
 
 ## 12. Native file integrations
 
-- **Download**: the SPA's Download action fetches the bytes over its existing loopback connection (XHR, so the in-app indicator gets progress) and hands them to a Tauri command that writes into the OS Downloads folder and returns the saved path -- WKWebView/WebView2 have no download-manager UI, so `<a download>` would silently do nothing.
+- **Download**: the SPA gives a same-origin, tokenized file URL to a narrowly
+  granted native command. Rust revalidates the invoking origin and workspace
+  prefix, forwards the webview's authentication cookies, refuses redirects,
+  and streams the response into a same-directory temporary file in Downloads
+  before an atomic rename. Network bytes never cross webview IPC. The SPA polls
+  only a bounded progress record at 10 Hz and cancellation removes the
+  temporary file.
+- **Upload / replace**: the native file picker and selected paths remain in
+  Rust. Each regular, non-symlink file is streamed as a multipart body in
+  64 KiB chunks after the workspace-relative destination, invoking origin,
+  cookies, and CSRF mirror are revalidated. The webview receives only final
+  relative paths and progress snapshots, never file paths or file bytes.
+- **Generated downloads**: bytes already produced by the SPA, such as a
+  rendered PDF, cross IPC through an explicit 64 KiB chunk sink and use the
+  same temp-file/atomic-rename commit discipline.
+- **Scheduling**: each window runs at most two downloads and one upload. Extra
+  transfers remain visible in a FIFO queue; queued and active operations are
+  cancellable, and page teardown cancels both.
 - **Export to PDF** (macOS): `window.print()` is a no-op in WKWebView, so the desktop drives the real macOS print pipeline (`printOperationWithPrintInfo:`) silently to a file, which honours `@page`, auto-pagination, and explicit page breaks exactly like the browser's print-to-PDF path. The frontend gates the call to macOS desktop.

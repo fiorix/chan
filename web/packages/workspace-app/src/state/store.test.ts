@@ -732,20 +732,17 @@ describe("window commands", () => {
     uploadSpy.mockRestore();
   });
 
-  test("upload (desktop) opens the native picker and uploads the picked bytes", async () => {
+  test("upload (desktop) streams through Rust without returning picked bytes", async () => {
     window.history.replaceState(null, "", "/?w=window-a");
-    // Stub the Tauri global so isTauriDesktop() is true and pick_upload_files
-    // returns one file; raiseUploadPicker must take the native-picker branch
-    // (a programmatic <input> click is the no-op WKWebView bug we're fixing).
+    const invokeSpy = vi.fn(async (cmd: string) => {
+      if (cmd === "native_transfer_status") return null;
+      if (cmd === "upload_files_native") return [];
+      throw new Error(`unexpected ${cmd}`);
+    });
     const tauriWindow = window as unknown as {
-      __TAURI__?: { core: { invoke: (cmd: string) => Promise<unknown> } };
+      __TAURI__?: { core: { invoke: typeof invokeSpy } };
     };
-    tauriWindow.__TAURI__ = {
-      core: {
-        invoke: async (cmd: string) =>
-          cmd === "pick_upload_files" ? [{ name: "a.md", bytes: [104, 105] }] : undefined,
-      },
-    };
+    tauriWindow.__TAURI__ = { core: { invoke: invokeSpy } };
     const clickSpy = vi
       .spyOn(HTMLInputElement.prototype, "click")
       .mockImplementation(() => {});
@@ -757,16 +754,16 @@ describe("window commands", () => {
         command: "upload",
         path: "notes",
       });
-      await vi.waitFor(() => expect(uploadSpy).toHaveBeenCalledTimes(1));
-      // Native branch only -- never the gesture-less <input> click.
+      await vi.waitFor(() =>
+        expect(invokeSpy).toHaveBeenCalledWith(
+          "upload_files_native",
+          expect.objectContaining({
+            target: { dir: "notes", multiple: true },
+          }),
+        ),
+      );
       expect(clickSpy).not.toHaveBeenCalled();
-      const [destDir, dropped] = uploadSpy.mock.calls[0]!;
-      expect(destDir).toBe("notes");
-      const files = Array.from(dropped as FileList | File[]);
-      expect(files).toHaveLength(1);
-      expect(files[0]).toBeInstanceOf(File);
-      expect(files[0]!.name).toBe("a.md");
-      expect(files[0]!.size).toBe(2);
+      expect(uploadSpy).not.toHaveBeenCalled();
     } finally {
       delete tauriWindow.__TAURI__;
       clickSpy.mockRestore();

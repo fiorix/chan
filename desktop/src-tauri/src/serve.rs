@@ -1584,9 +1584,10 @@ pub(crate) fn restore_key_for_label(state: &Arc<AppState>, label: &str) -> Strin
 ///   bury.
 /// - "Cancel transfer & close" buries the watcher view (so the reconcile won't
 ///   reopen it) + keeps it in the Window menu, then DESTROYS the webview now.
-///   That teardown aborts the in-flight XHR (server upload cleanup is already
-///   safe -- no orphan/partial); the workspace's terminal PTYs survive
-///   server-side, so a later reopen reconnects them with no transfer.
+///   That teardown triggers the SPA's pagehide cancellation for native and
+///   browser transfers (server upload cleanup is already safe -- no
+///   orphan/partial); the workspace's terminal PTYs survive server-side, so a
+///   later reopen reconnects them with no transfer.
 ///
 /// The result callback runs on the main thread (where the view/menu/destroy
 /// mutations are safe); on macOS `native_dialog::confirm` defers the modal to a
@@ -1614,8 +1615,9 @@ fn prompt_transfer_close(app: &AppHandle, state: &Arc<AppState>, label: &str) {
                 return;
             }
             // Cancel: bury the view so the watcher reconcile won't reopen it,
-            // keep it in the reopen menu, then destroy the webview now to abort
-            // the in-flight XHR (the PTYs survive server-side for a later reopen).
+            // keep it in the reopen menu, then destroy the webview now to
+            // cancel its transfers (the PTYs survive server-side for a later
+            // reopen).
             if let Some(view) = state_cb.local_watcher_view() {
                 view.bury(&label_cb);
             }
@@ -3081,7 +3083,6 @@ mod tests {
         for expected in [
             "allow-reload-window",
             "allow-open-devtools",
-            "allow-save-file-to-downloads",
             "allow-zoom-in",
             "allow-zoom-out",
             "allow-zoom-reset",
@@ -3108,7 +3109,8 @@ mod tests {
         // Complete coverage: every command in generate_handler! must be
         // grantable somewhere the SPA can reach it. App-command grants come
         // from the two sets plus the window-scoped local capabilities --
-        // local-drop (read_dropped_paths) and local-upload (pick_upload_files),
+        // local-drop (read_dropped_paths) and local-upload (the native transfer
+        // command family),
         // both scoped to locally-served windows. Catches a command the
         // workspace SPA invokes (e.g. platform_os, read_clipboard_text) that no
         // set grants.
@@ -3119,7 +3121,18 @@ mod tests {
                 .chain(app_permission_set_commands("workspace-window"))
                 .collect();
         granted.insert("read_dropped_paths".to_string());
-        granted.insert("pick_upload_files".to_string());
+        for command in [
+            "download_file_native",
+            "upload_files_native",
+            "native_transfer_status",
+            "cancel_native_transfer",
+            "begin_generated_download",
+            "append_generated_download",
+            "finish_generated_download",
+            "cancel_generated_download",
+        ] {
+            granted.insert(command.to_string());
+        }
         for command in invoke_handler_commands(MAIN_RS) {
             assert!(
                 granted.contains(&command),
@@ -3760,12 +3773,13 @@ mod tests {
         vocabulary.extend(key_bridge_invoke_commands(SERVE_RS));
 
         // Parser honesty: the hard forms must have parsed (the generic and
-        // multi-line save_file_to_downloads call, both plugin channels, a
+        // multi-line native transfer calls, both plugin channels, a
         // KEY_BRIDGE chord). If any is missing the subset assertion below
         // is hollow, so fail here first.
         for expected in [
-            "save_file_to_downloads",
-            "pick_upload_files",
+            "download_file_native",
+            "upload_files_native",
+            "native_transfer_status",
             "read_clipboard_text",
             "read_dropped_paths",
             "plugin:window|set_fullscreen",

@@ -1,7 +1,7 @@
 // The unified per-window file-transfer model: one source for the transfer
 // bubble that `cs upload` / `cs download` surface. It replaces the split
 // upload-status + desktop-download stores so a single bubble shows both kinds,
-// bound to the live XHR progress + cancel the API client already exposes.
+// bound to browser XHR or desktop-native progress and cancellation.
 //
 // Per-window + reload survival: the records (minus the live cancel/retry
 // handles) plus the bubble's shown/hidden flag persist to sessionStorage keyed
@@ -15,9 +15,11 @@ import { sessionWindowId } from "../api/client";
 
 export type TransferKind = "upload" | "download";
 
+/// queued: waiting for this window's kind-specific concurrency slot.
 /// active: in flight. done/cancelled/failed: terminal, this session.
 /// interrupted: was in flight when the window reloaded -- the XHR is gone.
 export type TransferState =
+  | "queued"
   | "active"
   | "done"
   | "cancelled"
@@ -54,6 +56,9 @@ interface TransfersState {
 export const transfers = $state<TransfersState>({ items: [], shown: false });
 
 const STORE_KEY = "chan.transfers";
+const MAX_ACTIVE_DOWNLOADS = 2;
+const MAX_ACTIVE_UPLOADS = 1;
+const PROGRESS_INTERVAL_MS = 100;
 
 function storeKey(): string {
   return `${STORE_KEY}:${sessionWindowId()}`;
@@ -104,19 +109,24 @@ function find(id: string): Transfer | undefined {
   return transfers.items.find((t) => t.id === id);
 }
 
+function occupiesWindow(t: Transfer): boolean {
+  return t.state === "queued" || t.state === "active";
+}
+
+function activeOfKind(kind: TransferKind): number {
+  return transfers.items.filter((t) => t.kind === kind && t.state === "active").length;
+}
+
+function hasSlot(kind: TransferKind): boolean {
+  const limit = kind === "download" ? MAX_ACTIVE_DOWNLOADS : MAX_ACTIVE_UPLOADS;
+  return activeOfKind(kind) < limit;
+}
+
 /// The count of in-flight transfers in THIS window -- the per-window
 /// active-transfer signal the desktop close guard queries (over /ws). A window
 /// with a non-zero count must not close silently.
 export function activeTransferCount(): number {
-  return transfers.items.filter((t) => t.state === "active").length;
-}
-
-/// True while an upload is mid-flight. Both upload entry points (a new
-/// upload and a file replace) drive the transfer bubble now, so the
-/// single-upload-at-a-time guard reads the bubble's own records instead
-/// of a dedicated status-bar slot.
-export function uploadInFlight(): boolean {
-  return transfers.items.some((t) => t.kind === "upload" && t.state === "active");
+  return transfers.items.filter(occupiesWindow).length;
 }
 
 /// The sink that pushes the active-transfer count to the server over the window
@@ -133,8 +143,9 @@ function emitSignal(): void {
   signalSink?.(activeTransferCount());
 }
 
-/// Start tracking a new active transfer; returns its id. `cancel` aborts the
-/// in-flight XHR. `source` is set for downloads so a later interrupt can retry.
+/// Start tracking a transfer; returns its id. It starts active when its
+/// kind-specific window has capacity, otherwise remains visibly queued until
+/// an older peer settles. `source` lets an interrupted download retry.
 export function beginTransfer(opts: {
   kind: TransferKind;
   filename: string;
@@ -142,16 +153,21 @@ export function beginTransfer(opts: {
   source?: { path: string; isDir: boolean } | null;
 }): string {
   const id = transferId();
+  const state: TransferState = hasSlot(opts.kind) ? "active" : "queued";
+  const cancel = (): void => {
+    opts.cancel?.();
+    cancelTransfer(id);
+  };
   transfers.items.push({
     id,
     kind: opts.kind,
     filename: opts.filename,
     progress: null,
-    state: "active",
+    state,
     error: null,
     savedPath: null,
     source: opts.source ?? null,
-    cancel: opts.cancel,
+    cancel,
     retry: null,
   });
   persist();
@@ -159,16 +175,104 @@ export function beginTransfer(opts: {
   return id;
 }
 
+const slotWaiters = new Map<string, (started: boolean) => void>();
+
+function resolveSlotWaiter(id: string, started: boolean): void {
+  const resolve = slotWaiters.get(id);
+  slotWaiters.delete(id);
+  resolve?.(started);
+}
+
+export function waitForTransferSlot(id: string): Promise<boolean> {
+  const transfer = find(id);
+  if (!transfer) return Promise.resolve(false);
+  if (transfer.state === "active") return Promise.resolve(true);
+  if (transfer.state !== "queued") return Promise.resolve(false);
+  return new Promise<boolean>((resolve) => slotWaiters.set(id, resolve)).then(
+    (started) => started && find(id)?.state === "active",
+  );
+}
+
+function drainQueue(kind: TransferKind): void {
+  let changed = false;
+  while (hasSlot(kind)) {
+    const next = transfers.items.find(
+      (transfer) => transfer.kind === kind && transfer.state === "queued",
+    );
+    if (!next) break;
+    next.state = "active";
+    resolveSlotWaiter(next.id, true);
+    changed = true;
+  }
+  if (changed) {
+    persist();
+    emitSignal();
+  }
+}
+
+type PendingProgress = {
+  value: number | null;
+  timer: ReturnType<typeof setTimeout>;
+};
+const pendingProgress = new Map<string, PendingProgress>();
+const lastProgressAt = new Map<string, number>();
+let progressPersistTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleProgressPersist(): void {
+  if (progressPersistTimer !== null) return;
+  progressPersistTimer = setTimeout(() => {
+    progressPersistTimer = null;
+    persist();
+  }, PROGRESS_INTERVAL_MS);
+}
+
+function applyProgress(id: string, progress: number | null): void {
+  const transfer = find(id);
+  if (!transfer || transfer.state !== "active") return;
+  transfer.progress = progress;
+  lastProgressAt.set(id, Date.now());
+  scheduleProgressPersist();
+}
+
 export function setTransferProgress(id: string, progress: number | null): void {
-  const t = find(id);
-  if (!t || t.state !== "active") return;
-  t.progress = progress;
-  persist();
+  const transfer = find(id);
+  if (!transfer || transfer.state !== "active") return;
+  const normalized =
+    progress === null ? null : Math.min(1, Math.max(0, progress));
+  const last = lastProgressAt.get(id);
+  const elapsed = last === undefined ? PROGRESS_INTERVAL_MS : Date.now() - last;
+  if (elapsed >= PROGRESS_INTERVAL_MS) {
+    const pending = pendingProgress.get(id);
+    if (pending) clearTimeout(pending.timer);
+    pendingProgress.delete(id);
+    applyProgress(id, normalized);
+    return;
+  }
+  const existing = pendingProgress.get(id);
+  if (existing) {
+    existing.value = normalized;
+    return;
+  }
+  const timer = setTimeout(() => {
+    const pending = pendingProgress.get(id);
+    pendingProgress.delete(id);
+    if (pending) applyProgress(id, pending.value);
+  }, PROGRESS_INTERVAL_MS - elapsed);
+  pendingProgress.set(id, { value: normalized, timer });
+}
+
+function clearProgressScheduling(id: string): void {
+  const pending = pendingProgress.get(id);
+  if (pending) clearTimeout(pending.timer);
+  pendingProgress.delete(id);
+  lastProgressAt.delete(id);
 }
 
 export function finishTransfer(id: string, savedPath: string | null = null): void {
   const t = find(id);
   if (!t) return;
+  const kind = t.kind;
+  clearProgressScheduling(id);
   t.state = "done";
   t.progress = 1;
   t.cancel = null;
@@ -176,34 +280,53 @@ export function finishTransfer(id: string, savedPath: string | null = null): voi
   t.savedPath = savedPath;
   persist();
   emitSignal();
+  drainQueue(kind);
 }
 
 export function cancelTransfer(id: string): void {
   const t = find(id);
   if (!t) return;
+  const kind = t.kind;
+  clearProgressScheduling(id);
+  resolveSlotWaiter(id, false);
   t.state = "cancelled";
   t.cancel = null;
   persist();
   emitSignal();
+  drainQueue(kind);
 }
 
-export function failTransfer(id: string, error: string): void {
+export function failTransfer(
+  id: string,
+  error: string,
+  retry: (() => void) | null = null,
+): void {
   const t = find(id);
   if (!t) return;
+  const kind = t.kind;
+  clearProgressScheduling(id);
+  resolveSlotWaiter(id, false);
   t.state = "failed";
   t.cancel = null;
   t.error = error;
+  t.retry = retry;
   persist();
   emitSignal();
+  drainQueue(kind);
 }
 
 /// Remove a terminal transfer row (the bubble's per-row dismiss).
 export function dismissTransfer(id: string): void {
   const i = transfers.items.findIndex((t) => t.id === id);
   if (i < 0) return;
+  const [removed] = transfers.items.slice(i, i + 1);
+  if (!removed) return;
+  clearProgressScheduling(id);
+  resolveSlotWaiter(id, false);
   transfers.items.splice(i, 1);
   persist();
   emitSignal();
+  drainQueue(removed.kind);
 }
 
 export function showTransfers(): void {
@@ -244,10 +367,10 @@ export function restoreTransfers(
   }
   const items = Array.isArray(parsed.items) ? parsed.items : [];
   transfers.items = items.map((p): Transfer => {
-    const interrupted = p.state === "active";
+    const interrupted = p.state === "active" || p.state === "queued";
     const state: TransferState = interrupted ? "interrupted" : p.state;
     const retry =
-      interrupted && p.kind === "download" && p.source
+      (interrupted || p.state === "failed") && p.kind === "download" && p.source
         ? reconstructDownloadRetry(p.source)
         : null;
     return {
@@ -269,4 +392,14 @@ export function restoreTransfers(
   // After a reload every record is terminal/interrupted (count 0), but emit so
   // the server's per-socket count is correct from the first announce.
   emitSignal();
+}
+
+export function cancelAllTransfers(): void {
+  for (const transfer of [...transfers.items]) {
+    if (occupiesWindow(transfer)) transfer.cancel?.();
+  }
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", cancelAllTransfers);
 }
