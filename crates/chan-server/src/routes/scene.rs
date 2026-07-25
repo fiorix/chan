@@ -241,7 +241,6 @@ async fn scene_ws(
                                     .await;
                                 break;
                             }
-                            handle.session().persist_recovery(&workspace).await;
                         }
                         Ok(ClientFrame::Cursor { x, y, tool, selected }) => {
                             state.last_activity.store(now_unix_secs(), Ordering::Relaxed);

@@ -238,7 +238,6 @@ async fn doc_ws(
                                     .await;
                                 break;
                             }
-                            handle.session().persist_recovery(&workspace).await;
                         }
                         Ok(ClientFrame::Pull { version }) => handle.pull(version),
                         Ok(ClientFrame::Cursor { anchor, head }) => {
@@ -971,12 +970,15 @@ mod tests {
     }
 
     #[test]
-    fn recovery_persistence_failure_never_rejects_a_completed_mutation() {
+    fn recovery_persistence_stays_off_ack_path_and_never_rejects_mutation() {
         let doc = include_str!("doc.rs");
         let scene = include_str!("scene.rs");
         let files = include_str!("files.rs");
+        let ack_path_write = ["persist", "recovery"].join("_");
         assert!(!doc.contains("\"recovery-write\""));
         assert!(!scene.contains("\"recovery-write\""));
+        assert!(!doc.contains(&ack_path_write));
+        assert!(!scene.contains(&ack_path_write));
         assert!(!files.contains("persist document conflict resolution"));
         assert!(!files.contains("persist scene conflict resolution"));
     }
