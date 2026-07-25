@@ -18,7 +18,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chan_workspace::{
     classify, fs_ops, EffectiveSearchMode, FileClass, NodeKind, SearchMode, SearchOpts, TreeEntry,
-    WorkspaceSearchRequest,
+    WorkspaceReadiness, WorkspaceSearchRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -147,11 +147,10 @@ fn default_content_limit() -> u32 {
 /// carrying the best-ranked heading/snippet for that path.
 #[derive(Serialize)]
 struct ContentSearchResponse {
-    /// True when the index is ready to serve queries. chan-workspace
-    /// opens the index lazily and is always ready once a workspace is
-    /// open; kept as an explicit field so a future "rebuilding"
-    /// state can land without a contract break.
+    /// Compatibility projection of `readiness`: false during workspace
+    /// recovery, and also false if the selected search mode degraded.
     ready: bool,
+    readiness: WorkspaceReadiness,
     /// Mode actually used: "bm25" (tantivy) or "hybrid" (BM25 + dense,
     /// RRF-fused). Hybrid is selected when the workspace opted in via
     /// `semantic_enabled` and the embedding model is on disk; otherwise
@@ -191,9 +190,21 @@ pub async fn api_search_content(
         Ok(mode) => legacy_search_mode(mode),
         Err(error) => return err_from(&error),
     };
-    if p.q.trim().is_empty() {
+    let readiness = workspace.readiness();
+    if !readiness.is_ready() {
         return Json(ContentSearchResponse {
-            ready: true,
+            ready: false,
+            readiness,
+            mode: mode.label(),
+            hits: Vec::new(),
+        })
+        .into_response();
+    }
+    if p.q.trim().is_empty() {
+        let readiness = workspace.readiness();
+        return Json(ContentSearchResponse {
+            ready: readiness.is_ready(),
+            readiness,
             mode: mode.label(),
             hits: Vec::new(),
         })
@@ -216,8 +227,19 @@ pub async fn api_search_content(
                 results.hits.into_iter().map(ContentHit::from),
                 response_limit,
             );
+            let readiness = workspace.readiness();
+            if !readiness.is_ready() {
+                return Json(ContentSearchResponse {
+                    ready: false,
+                    readiness,
+                    mode: results.mode,
+                    hits: Vec::new(),
+                })
+                .into_response();
+            }
             Json(ContentSearchResponse {
                 ready: results.ready,
+                readiness,
                 mode: results.mode,
                 hits,
             })
@@ -304,16 +326,32 @@ where
 /// flight and to Idle (with chunk + vector counts plus the
 /// embedding model id) when it settles.
 pub async fn api_index_status(State(state): State<Arc<AppState>>) -> Response {
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     match state.try_indexer() {
-        Ok(indexer) => Json(indexer.snapshot()).into_response(),
-        Err(e) => err_state(&e),
+        Ok(indexer) => Json(IndexStatusResponse {
+            status: indexer.snapshot(),
+            readiness: workspace.readiness(),
+        })
+        .into_response(),
+        Err(error) => err_state(&error),
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct IndexStatusResponse {
+    #[serde(flatten)]
+    status: IndexStatus,
+    readiness: WorkspaceReadiness,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct IndexingStateResponse {
     root: String,
     nodes: Vec<IndexingStateNode>,
+    readiness: WorkspaceReadiness,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -358,6 +396,7 @@ pub async fn api_indexing_state(State(state): State<Arc<AppState>>) -> Response 
     // separately from `current_file`.
     let embed_sweep = is_embedding_sweep(&status);
     let current_file = current_index_file(status);
+    let readiness = workspace.readiness();
     blocking_response(
         move || {
             let entries =
@@ -377,6 +416,7 @@ pub async fn api_indexing_state(State(state): State<Arc<AppState>>) -> Response 
                 &indexed_paths,
                 current_file.as_deref(),
                 embed_sweep,
+                readiness,
             ))
             .into_response()
         },
@@ -421,6 +461,7 @@ fn build_indexing_state(
     indexed_paths: &BTreeSet<String>,
     current_file: Option<&str>,
     embedding_sweep: bool,
+    readiness: WorkspaceReadiness,
 ) -> IndexingStateResponse {
     let mut dirs = BTreeMap::<String, DirectoryStateAccum>::new();
     dirs.insert(String::new(), DirectoryStateAccum::default());
@@ -494,6 +535,7 @@ fn build_indexing_state(
     IndexingStateResponse {
         root: String::new(),
         nodes,
+        readiness,
     }
 }
 
@@ -625,8 +667,13 @@ mod tests {
             "indexing/live.md".to_string(),
         ]);
 
-        let response =
-            build_indexing_state(&entries, &indexed_paths, Some("indexing/live.md"), false);
+        let response = build_indexing_state(
+            &entries,
+            &indexed_paths,
+            Some("indexing/live.md"),
+            false,
+            WorkspaceReadiness::default(),
+        );
 
         assert_eq!(response.root, "");
         assert!(response
@@ -708,7 +755,13 @@ mod tests {
 
         // No per-file label during the embed sweep; the embedding flag
         // carries the signal instead.
-        let response = build_indexing_state(&entries, &indexed_paths, None, true);
+        let response = build_indexing_state(
+            &entries,
+            &indexed_paths,
+            None,
+            true,
+            WorkspaceReadiness::default(),
+        );
 
         // Every dir with indexable text flips to Indexing during the
         // embedding sweep, even if BM25 already finished. The
@@ -769,8 +822,13 @@ mod tests {
             BTreeSet::from(["notes/embedding.md".to_string(), "docs/done.md".to_string()]);
 
         // Embed sweep AND a live per-file label for the file being drained.
-        let response =
-            build_indexing_state(&entries, &indexed_paths, Some("notes/embedding.md"), true);
+        let response = build_indexing_state(
+            &entries,
+            &indexed_paths,
+            Some("notes/embedding.md"),
+            true,
+            WorkspaceReadiness::default(),
+        );
 
         // Only the dir holding the file being embedded pulses Indexing.
         assert_eq!(
@@ -810,7 +868,13 @@ mod tests {
         ];
         let indexed_paths = BTreeSet::new();
 
-        let response = build_indexing_state(&entries, &indexed_paths, Some(""), false);
+        let response = build_indexing_state(
+            &entries,
+            &indexed_paths,
+            Some(""),
+            false,
+            WorkspaceReadiness::default(),
+        );
 
         // Empty current_file is the initial Building state; treat
         // as a broad sweep.
@@ -845,8 +909,13 @@ mod tests {
         ];
         let indexed_paths = BTreeSet::from(["docs/done.md".to_string()]);
 
-        let response =
-            build_indexing_state(&entries, &indexed_paths, Some("notes/current.md"), false);
+        let response = build_indexing_state(
+            &entries,
+            &indexed_paths,
+            Some("notes/current.md"),
+            false,
+            WorkspaceReadiness::default(),
+        );
 
         // The ancestor chain of the in-flight file is Indexing.
         assert_eq!(
@@ -1014,6 +1083,7 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["root"], "");
+        assert_eq!(json["readiness"]["state"], "ready");
         let nodes = json["nodes"].as_array().unwrap();
         assert!(nodes.iter().any(|node| node["path"] == ""));
         assert!(nodes.iter().any(|node| node["path"] == "notes"));
@@ -1024,6 +1094,57 @@ mod tests {
             )
         }));
         assert!(nodes.iter().all(|node| node["children_count"].is_u64()));
+    }
+
+    #[tokio::test]
+    async fn index_status_preserves_its_tag_and_adds_recovery_readiness() {
+        let app = route_test_app();
+        app.state
+            .workspace()
+            .request_recovery(chan_workspace::RecoveryAction::FullRebuild);
+        let router = crate::router(app.state);
+        let request = Request::builder()
+            .uri("/api/index/status")
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["state"].is_string());
+        assert!(json.get("status").is_none(), "status must stay flattened");
+        assert_eq!(json["readiness"]["state"], "recovering");
+        assert_eq!(json["readiness"]["required_action"], "full_rebuild");
+    }
+
+    #[tokio::test]
+    async fn content_query_during_recovery_is_not_a_fresh_empty_result() {
+        let app = route_test_app();
+        app.state
+            .workspace()
+            .request_recovery(chan_workspace::RecoveryAction::Reconcile);
+        let router = crate::router(app.state);
+        let request = Request::builder()
+            .uri("/api/search/content?q=done")
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["ready"], false);
+        assert_eq!(json["readiness"]["state"], "recovering");
+        assert_eq!(json["hits"], serde_json::json!([]));
     }
 
     #[test]

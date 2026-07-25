@@ -102,7 +102,7 @@ pub use workspace::{
     semantic_write_budget, AtomicWriteKind, AtomicWriteSink, BoundedFileReader, CopyOutcome,
     DirEntry, FileStat, RecoveryAction, RecoveryOutcome, RecoveryPass, RecoveryStatus,
     RenameOutcome, ResolvedLink, SearchOpts, TextReadEvent, TreeEntry, Workspace,
-    WorkspaceGeneration, WorkspacePath, WritableFile, BINARY_STREAM_CHUNK_SIZE,
+    WorkspaceGeneration, WorkspacePath, WorkspaceReadiness, WritableFile, BINARY_STREAM_CHUNK_SIZE,
     BINARY_STREAM_QUEUE_DEPTH, BYTES_WRITE_LIMIT, TEXT_READ_CHUNK_SIZE, TEXT_WRITE_LIMIT,
 };
 pub use workspace_search::{

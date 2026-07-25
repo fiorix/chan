@@ -374,6 +374,57 @@ impl RecoveryStatus {
     }
 }
 
+/// Consumer-facing readiness projection for server, desktop, and CLI.
+///
+/// This is copied from one recovery-coordinator snapshot and carries no
+/// synchronization primitive or worker handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum WorkspaceReadiness {
+    Ready {
+        generation: WorkspaceGeneration,
+    },
+    Recovering {
+        generation: WorkspaceGeneration,
+        completed_generation: WorkspaceGeneration,
+        required_action: Option<RecoveryAction>,
+        active_generation: Option<WorkspaceGeneration>,
+        pending_generation: Option<WorkspaceGeneration>,
+    },
+}
+
+impl WorkspaceReadiness {
+    pub fn is_ready(self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
+}
+
+impl Default for WorkspaceReadiness {
+    fn default() -> Self {
+        Self::Ready {
+            generation: WorkspaceGeneration::INITIAL,
+        }
+    }
+}
+
+impl From<RecoveryStatus> for WorkspaceReadiness {
+    fn from(status: RecoveryStatus) -> Self {
+        if status.is_ready() {
+            Self::Ready {
+                generation: status.generation,
+            }
+        } else {
+            Self::Recovering {
+                generation: status.generation,
+                completed_generation: status.completed_generation,
+                required_action: status.required_action(),
+                active_generation: status.active.map(|pass| pass.generation),
+                pending_generation: status.pending.map(|pass| pass.generation),
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PersistedStateReadiness {
     Cold,
@@ -941,6 +992,11 @@ impl Workspace {
     /// Snapshot the recovery coordinator without waiting for recovery work.
     pub fn recovery_status(&self) -> RecoveryStatus {
         *self.recovery.lock().unwrap()
+    }
+
+    /// Consumer-facing readiness without exposing the coordinator lock.
+    pub fn readiness(&self) -> WorkspaceReadiness {
+        self.recovery_status().into()
     }
 
     /// Request convergence for a lossy signal such as provider overflow.
@@ -5017,6 +5073,31 @@ mod tests {
             .finish_recovery(second, RecoveryOutcome::Complete)
             .unwrap();
         assert!(workspace.recovery_status().is_ready());
+    }
+
+    #[test]
+    fn readiness_projection_exposes_active_and_follow_up_generations() {
+        let (_cfg, _root, workspace) = fixture();
+        let first_generation = workspace.request_policy_recovery(RecoveryAction::Reconcile);
+        let first = workspace.begin_recovery().unwrap();
+        let required_generation = workspace.request_policy_recovery(RecoveryAction::FullRebuild);
+
+        let readiness = workspace.readiness();
+        assert_eq!(
+            serde_json::to_value(readiness).unwrap(),
+            serde_json::json!({
+                "state": "recovering",
+                "generation": required_generation.get(),
+                "completed_generation": 0,
+                "required_action": "full_rebuild",
+                "active_generation": first_generation.get(),
+                "pending_generation": required_generation.get(),
+            })
+        );
+
+        workspace
+            .finish_recovery(first, RecoveryOutcome::Complete)
+            .unwrap();
     }
 
     #[test]
