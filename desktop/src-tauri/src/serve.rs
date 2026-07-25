@@ -1332,6 +1332,8 @@ fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), S
                             .lock()
                             .unwrap()
                             .remove(&label_for_close);
+                        let _cleanup =
+                            crate::download::drop_generated_downloads_for_window(&label_for_close);
                         // A watcher-buried window destroyed here was buried by its
                         // reconcile (the user hid it); KEEP it in the reopen menu.
                         // Check the LOCAL view for `local::` windows and the owning
@@ -3035,6 +3037,19 @@ mod tests {
         // reconnect block instead of stranding it on a destroyed window.
         assert!(arm.contains("control_terminal_dead"));
         assert!(arm.contains("close_devserver_control_terminal"));
+    }
+
+    #[test]
+    fn destroyed_window_drops_its_generated_downloads() {
+        const SERVE_RS: &str = include_str!("serve.rs");
+        let arm = SERVE_RS
+            .split("WindowEvent::Destroyed")
+            .nth(1)
+            .expect("Destroyed arm exists")
+            .split("_ => {}")
+            .next()
+            .expect("Destroyed arm ends before the fallback branch");
+        assert!(arm.contains("drop_generated_downloads_for_window("));
     }
 
     #[test]

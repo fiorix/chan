@@ -4680,6 +4680,23 @@ fn main() {
         .setup(move |app| {
             install_app_menu(app.handle())?;
 
+            tauri::async_runtime::spawn_blocking(|| {
+                let Some(dir) = download::downloads_dir() else {
+                    tracing::warn!("could not resolve Downloads directory for orphan reaping");
+                    return;
+                };
+                let reaped = download::reap_orphaned_download_temps(
+                    &dir,
+                    std::time::SystemTime::now(),
+                    std::time::Duration::from_secs(60 * 60),
+                );
+                tracing::debug!(
+                    directory = %dir.display(),
+                    reaped,
+                    "reaped orphaned generated download temps"
+                );
+            });
+
             // Fix the restricted launchd `$PATH` of a macOS GUI launch BEFORE
             // the embedded server starts, so its in-process `cs` detection (and
             // the terminals it spawns) scan the user's real interactive PATH.
@@ -6976,6 +6993,21 @@ mod tests {
         assert!(MAIN_RS.contains("run_hidden_mcp_proxy_if_requested"));
         assert!(MAIN_RS.contains("run_mcp_proxy(socket)"));
         assert!(MAIN_RS.contains("chan_server::run_mcp_stdio_proxy"));
+    }
+
+    #[test]
+    fn desktop_setup_reaps_old_generated_download_temps() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let setup = MAIN_RS
+            .split(".setup(move |app| {")
+            .nth(1)
+            .expect("Tauri setup closure exists")
+            .split(".invoke_handler")
+            .next()
+            .expect("setup ends before the invoke handler");
+        assert!(setup.contains("tauri::async_runtime::spawn_blocking"));
+        assert!(setup.contains("download::reap_orphaned_download_temps("));
+        assert!(setup.contains("std::time::Duration::from_secs(60 * 60)"));
     }
 
     #[test]
