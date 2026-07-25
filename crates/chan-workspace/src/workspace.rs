@@ -3548,6 +3548,25 @@ impl Workspace {
         self.forget_file_serial(rel)
     }
 
+    /// Drop every graph and search entry at or below a directory path.
+    ///
+    /// Each file remains journal-bracketed so a crash between the graph and
+    /// search commits is replayable on the next open.
+    pub fn forget_subtree(&self, rel: &str) -> Result<usize> {
+        let _serial = self.write_serial.lock().unwrap();
+        let child_prefix = format!("{}/", rel.trim_end_matches('/'));
+        let rel = rel.trim_end_matches('/');
+        let mut paths = self.graph()?.files()?;
+        paths.extend(self.index()?.known_paths()?);
+        paths.retain(|path| path == rel || path.starts_with(&child_prefix));
+        paths.sort();
+        paths.dedup();
+        for path in &paths {
+            self.forget_file_serial(path)?;
+        }
+        Ok(paths.len())
+    }
+
     fn forget_file_serial(&self, rel: &str) -> Result<()> {
         self.journal_record(rel, PendingOp::Forget)?;
         let result = self.forget_file_inner(rel);

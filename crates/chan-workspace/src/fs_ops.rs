@@ -554,7 +554,7 @@ pub enum IndexScopeDecision {
 #[derive(Clone, Debug)]
 struct RepositoryIgnoreLayer {
     matcher: Gitignore,
-    has_whitelists: bool,
+    whitelist_prefixes: Vec<PathBuf>,
 }
 
 /// Repository `.gitignore` rules, discovered lazily along requested paths.
@@ -588,7 +588,10 @@ impl RepositoryIgnores {
         let mut result = RepositoryIgnoreDecision::default();
         for dir in self.ancestor_dirs(rel) {
             let layer = self.layer(&dir);
-            result.may_reinclude_descendant |= layer.has_whitelists;
+            result.may_reinclude_descendant |= layer
+                .whitelist_prefixes
+                .iter()
+                .any(|prefix| paths_overlap(prefix, &path));
             match layer.matcher.matched_path_or_any_parents(&path, is_dir) {
                 Match::None => {}
                 Match::Ignore(_) => {
@@ -599,6 +602,13 @@ impl RepositoryIgnores {
                     result.matched = Some(IndexScopeDecision::Include);
                 }
             }
+        }
+        if is_dir {
+            let layer = self.layer(&path);
+            result.may_reinclude_descendant |= layer
+                .whitelist_prefixes
+                .iter()
+                .any(|prefix| paths_overlap(prefix, &path));
         }
         result
     }
@@ -632,12 +642,71 @@ impl RepositoryIgnores {
             tracing::warn!(%error, path = %path.display(), "failed to load repository gitignore");
         }
         let layer = RepositoryIgnoreLayer {
-            has_whitelists: matcher.num_whitelists() > 0,
+            whitelist_prefixes: gitignore_whitelist_prefixes(&path),
             matcher,
         };
         layers.insert(dir.to_path_buf(), layer.clone());
         layer
     }
+}
+
+fn paths_overlap(a: &Path, b: &Path) -> bool {
+    a.starts_with(b) || b.starts_with(a)
+}
+
+/// Return the fixed path prefix of each negation. A pattern with no literal
+/// prefix applies anywhere below its `.gitignore` directory.
+fn gitignore_whitelist_prefixes(path: &Path) -> Vec<PathBuf> {
+    let Some(base) = path.parent() else {
+        return Vec::new();
+    };
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    contents
+        .lines()
+        .filter_map(|line| gitignore_whitelist_prefix(base, line))
+        .collect()
+}
+
+fn gitignore_whitelist_prefix(base: &Path, line: &str) -> Option<PathBuf> {
+    let line = line.trim_end();
+    let pattern = line.strip_prefix('!')?;
+    if pattern.is_empty() {
+        return None;
+    }
+    let pattern = pattern.strip_prefix('/').unwrap_or(pattern);
+    if !pattern.contains('/') {
+        return Some(base.to_path_buf());
+    }
+    let mut prefix = base.to_path_buf();
+    for component in pattern.trim_end_matches('/').split('/') {
+        if component.is_empty() {
+            continue;
+        }
+        let mut literal = String::new();
+        let mut escaped = false;
+        for ch in component.chars() {
+            if escaped {
+                literal.push(ch);
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if matches!(ch, '*' | '?' | '[') {
+                break;
+            } else {
+                literal.push(ch);
+            }
+        }
+        if literal.is_empty() || literal.len() != component.len() {
+            break;
+        }
+        if matches!(literal.as_str(), "." | "..") {
+            break;
+        }
+        prefix.push(literal);
+    }
+    Some(prefix)
 }
 
 /// One generated scope shared by index, graph, report, reconcile, and watch.
@@ -2460,6 +2529,72 @@ mod tests {
         assert!(names.iter().any(|n| n == "notes/a.md"));
         assert!(!names.iter().any(|n| n.contains("node_modules")));
         assert!(!names.iter().any(|n| n.contains(".git")));
+    }
+
+    #[test]
+    fn scoped_walk_only_descends_configured_dir_targeted_by_negation() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "!/vendor/keep.md\n").unwrap();
+        for path in [
+            "vendor/keep.md",
+            "vendor/drop.md",
+            "target/deep/noise.md",
+            "notes/visible.md",
+        ] {
+            let path = tmp.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"x").unwrap();
+        }
+        let policy = IndexScopePolicy::new(
+            tmp.path().to_path_buf(),
+            crate::WorkspaceGeneration::INITIAL,
+            WalkFilter::new(["target", "vendor"]),
+        )
+        .unwrap();
+
+        let paths: Vec<String> = walk_workspace_scoped(tmp.path(), &policy)
+            .map(|entry| {
+                entry
+                    .path()
+                    .strip_prefix(tmp.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+
+        assert!(paths.iter().any(|path| path == "vendor/keep.md"));
+        assert!(
+            !paths.iter().any(|path| path.starts_with("target/")),
+            "vendor-specific negation widened unrelated configured target/: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn scoped_walk_descends_for_basename_negation_that_applies_anywhere() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "!keep.md\n").unwrap();
+        std::fs::create_dir_all(tmp.path().join("vendor")).unwrap();
+        std::fs::write(tmp.path().join("vendor/keep.md"), b"x").unwrap();
+        let policy = IndexScopePolicy::new(
+            tmp.path().to_path_buf(),
+            crate::WorkspaceGeneration::INITIAL,
+            WalkFilter::new(["vendor"]),
+        )
+        .unwrap();
+
+        let paths: Vec<String> = walk_workspace_scoped(tmp.path(), &policy)
+            .map(|entry| {
+                entry
+                    .path()
+                    .strip_prefix(tmp.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+
+        assert!(paths.iter().any(|path| path == "vendor/keep.md"));
     }
 
     #[test]
