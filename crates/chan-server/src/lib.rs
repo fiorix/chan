@@ -1357,6 +1357,7 @@ impl chan_library::WorkspaceCellHandle for CellHandle {
         // Clear the shared cell before socket accept loops finish aborting;
         // otherwise their stale Arc can keep the workspace marked open.
         indexer.cancel();
+        workspace.stop_open_recovery();
         drop(watch_handle);
         drop(indexer);
         // Capture the lock dir before dropping the workspace: the flock-free

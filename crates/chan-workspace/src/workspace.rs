@@ -684,7 +684,7 @@ fn run_open_recovery(workspace: std::sync::Weak<Workspace>, plan: RecoveryPlan, 
         let mut result = match pass.action {
             RecoveryAction::Replay => workspace.replay_pending_writes().map(|_| ()),
             RecoveryAction::Reconcile => workspace.reconcile().map(|_| ()),
-            RecoveryAction::FullRebuild => workspace.reindex(None).map(|_| ()),
+            RecoveryAction::FullRebuild => workspace.reindex(Some(stop)).map(|_| ()),
         };
         if result.is_ok() && plan.refresh_report && !stop.load(Ordering::Acquire) {
             result = workspace.rescan_persisted_report();
@@ -977,6 +977,15 @@ impl Workspace {
 
     pub(crate) fn start_open_recovery(self: &Arc<Self>, plan: RecoveryPlan) -> Result<()> {
         self.recovery_worker.start(Arc::downgrade(self), plan)
+    }
+
+    /// Cancel and synchronously join the owned startup recovery worker.
+    ///
+    /// Hosts call this before dropping their last workspace handle so a
+    /// crash-recovery full rebuild cannot retain the workspace flock across
+    /// close and block an immediate reopen.
+    pub fn stop_open_recovery(&self) {
+        self.recovery_worker.stop_and_join();
     }
 
     #[cfg(test)]
@@ -2985,6 +2994,8 @@ impl Workspace {
         policy: &fs_ops::IndexScopePolicy,
     ) -> Result<()> {
         use crate::progress::{eta_secs_from, ProgressEvent, ProgressStage};
+        #[cfg(test)]
+        open_rebuild_probe(self, cancel);
         // Staged-and-swap: parse each file straight into sqlite
         // staging tables, then atomically swap them into the live
         // tables at the end. The staging rows are committed
@@ -4202,6 +4213,63 @@ fn arm_open_recovery_probe(
 ) {
     let slot = OPEN_RECOVERY_PROBE.get_or_init(|| std::sync::Mutex::new(None));
     *slot.lock().unwrap() = Some(OpenRecoveryProbe { root, tx });
+}
+
+#[cfg(test)]
+struct OpenRebuildProbe {
+    root: std::path::PathBuf,
+    started: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+static OPEN_REBUILD_PROBE: std::sync::OnceLock<std::sync::Mutex<Option<OpenRebuildProbe>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn open_rebuild_probe(workspace: &Workspace, cancel: Option<&AtomicBool>) {
+    let slot = OPEN_REBUILD_PROBE.get_or_init(|| std::sync::Mutex::new(None));
+    let probe = {
+        let mut probe = slot.lock().unwrap();
+        if probe
+            .as_ref()
+            .is_some_and(|probe| probe.root == workspace.root())
+        {
+            probe.take()
+        } else {
+            None
+        }
+    };
+    let Some(probe) = probe else {
+        return;
+    };
+    let _ = probe.started.send(());
+    loop {
+        if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+            return;
+        }
+        match probe
+            .release
+            .recv_timeout(std::time::Duration::from_millis(2))
+        {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
+#[cfg(test)]
+fn arm_open_rebuild_probe(
+    root: std::path::PathBuf,
+    started: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+) {
+    let slot = OPEN_REBUILD_PROBE.get_or_init(|| std::sync::Mutex::new(None));
+    *slot.lock().unwrap() = Some(OpenRebuildProbe {
+        root,
+        started,
+        release,
+    });
 }
 
 // Test-only hook fired by `index_file_inner` between the `stat`
@@ -5438,6 +5506,67 @@ mod tests {
         lib.register_workspace(workspace2_dir.path()).unwrap();
         let workspace2 = lib.open_workspace(workspace2_dir.path()).unwrap();
         assert!(!workspace2.needs_rebuild());
+    }
+
+    #[test]
+    fn stopping_seeded_full_rebuild_releases_workspace_for_reopen() {
+        use std::sync::mpsc::RecvTimeoutError;
+        use std::time::Duration;
+
+        let cfg = TempDir::new().unwrap();
+        let workspace_dir = TempDir::new().unwrap();
+        let root = workspace_dir.path();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root).unwrap();
+        std::fs::write(root.join("a.md"), "# A\nbody\n").unwrap();
+        let paths = lib.workspace_paths_for(root).unwrap();
+        std::fs::create_dir_all(&paths.graph_dir).unwrap();
+        std::fs::write(
+            paths.graph_dir.join(REBUILD_MARKER),
+            b"started_at = simulated\n",
+        )
+        .unwrap();
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        arm_open_rebuild_probe(root.to_path_buf(), started_tx, release_rx);
+        let workspace = lib.open_workspace(root).unwrap();
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("seeded full rebuild did not begin");
+
+        let (stopped_tx, stopped_rx) = std::sync::mpsc::channel();
+        let workspace_for_stop = Arc::clone(&workspace);
+        let stopper = std::thread::spawn(move || {
+            workspace_for_stop.stop_open_recovery();
+            let _ = stopped_tx.send(());
+        });
+        let stopped = stopped_rx.recv_timeout(Duration::from_millis(500));
+        if stopped == Err(RecvTimeoutError::Timeout) {
+            let _ = release_tx.send(());
+        }
+        stopper.join().unwrap();
+        assert!(
+            stopped.is_ok(),
+            "startup full rebuild ignored the recovery worker stop signal"
+        );
+
+        let weak = Arc::downgrade(&workspace);
+        drop(workspace);
+        assert_eq!(
+            weak.strong_count(),
+            0,
+            "stopped recovery worker retained the workspace"
+        );
+        assert!(
+            crate::lock::is_free(&paths.lock),
+            "stopped recovery worker retained the workspace flock"
+        );
+
+        let reopened = lib
+            .open_workspace(root)
+            .expect("workspace should reopen immediately after recovery teardown");
+        reopened.stop_open_recovery();
     }
 
     /// Snapshot of the queryable end state of a workspace. Two workspaces

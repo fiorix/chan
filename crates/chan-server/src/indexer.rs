@@ -327,6 +327,32 @@ impl RebuildRequester {
 /// path is unaffected.
 const REBUILD_COOLDOWN: Duration = Duration::from_secs(30);
 
+#[cfg(test)]
+static COORDINATOR_RETRY_FAILURE: std::sync::OnceLock<Mutex<Option<std::path::PathBuf>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn arm_coordinator_retry_failure(root: std::path::PathBuf) {
+    *COORDINATOR_RETRY_FAILURE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap() = Some(root);
+}
+
+#[cfg(test)]
+fn take_coordinator_retry_failure(root: &std::path::Path) -> bool {
+    let mut failure = COORDINATOR_RETRY_FAILURE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap();
+    if failure.as_deref() == Some(root) {
+        failure.take();
+        true
+    } else {
+        false
+    }
+}
+
 /// Coordinator task: drains rebuild requests to the newest required
 /// workspace generation and keeps running claimed full-rebuild passes
 /// until that generation is complete. Its progress callback updates the
@@ -409,6 +435,12 @@ fn spawn_coordinator(
                         embed: Mutex::new(EmbedPhaseState::default()),
                         bg_embed: bg_embed_w,
                     };
+                    #[cfg(test)]
+                    if take_coordinator_retry_failure(workspace_for_pass.root()) {
+                        return Err(chan_workspace::ChanError::Io(
+                            "injected coordinator retry".to_string(),
+                        ));
+                    }
                     workspace_for_pass.run_full_rebuild_pass(
                         pass,
                         Some(&cancel_w),
@@ -471,7 +503,15 @@ fn spawn_coordinator(
                         };
                     }
                 }
+                if matches!(&result, Ok(Err(chan_workspace::ChanError::Cancelled)))
+                    || shared.cancel.load(Ordering::Relaxed)
+                {
+                    break;
+                }
                 if !matches!(&result, Ok(Ok(_))) {
+                    if recovery.pending.is_some() {
+                        continue;
+                    }
                     break;
                 }
                 if recovery.completed_generation >= required_generation
@@ -1409,6 +1449,78 @@ mod tests {
                 let _ = self.release_first.lock().unwrap().recv();
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_with_pending_runs_without_a_new_channel_signal() {
+        let (_cfg, dir, workspace) = setup_workspace();
+        fs::write(dir.path().join("a.md"), "# A\nbody\n").unwrap();
+        arm_coordinator_retry_failure(workspace.root().to_path_buf());
+
+        let shared = IndexerShared {
+            status: Arc::new(Mutex::new(IndexStatus::Idle {
+                indexed_docs: 0,
+                indexed_vectors: 0,
+                model: "bm25".to_string(),
+                embedding: None,
+            })),
+            telemetry: Arc::new(Mutex::new(IndexerTelemetry {
+                queue_depth: 0,
+                last_event_at: None,
+                last_settled_at: None,
+                coalesced_rebuild: false,
+            })),
+            bg_embed: Arc::new(Mutex::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            search_aggression: SearchAggression::Conservative,
+        };
+        let status = shared.status.clone();
+        let (tx, rx) = mpsc::unbounded_channel::<WorkspaceGeneration>();
+        let coordinator = spawn_coordinator(
+            Arc::downgrade(&workspace),
+            shared,
+            rx,
+            Arc::new(chan_workspace::NoProgress),
+            Duration::from_millis(200),
+        );
+
+        let required_generation = workspace.request_recovery(RecoveryAction::FullRebuild);
+        tx.send(required_generation).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(*status.lock().unwrap(), IndexStatus::Error { .. }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("first rebuild did not reach the injected retry");
+        let recovery = workspace.recovery_status();
+        assert!(
+            recovery.pending.is_some() || recovery.active.is_some(),
+            "failed rebuild should remain queued or already be reclaimed: {recovery:?}"
+        );
+
+        let convergence = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let recovery = workspace.recovery_status();
+                if recovery.is_ready() && recovery.completed_generation >= required_generation {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            convergence.is_ok(),
+            "pending retry did not converge without a new channel signal; recovery={:?}, status={:?}",
+            workspace.recovery_status(),
+            status.lock().unwrap()
+        );
+
+        drop(tx);
+        coordinator.await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

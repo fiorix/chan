@@ -675,12 +675,15 @@ fn gitignore_whitelist_prefix(base: &Path, line: &str) -> Option<PathBuf> {
     if pattern.is_empty() {
         return None;
     }
-    let pattern = pattern.strip_prefix('/').unwrap_or(pattern);
-    if !pattern.contains('/') {
+    let (anchored, pattern) = pattern
+        .strip_prefix('/')
+        .map_or((false, pattern), |pattern| (true, pattern));
+    let pattern = pattern.trim_end_matches('/');
+    if !anchored && !pattern.contains('/') {
         return Some(base.to_path_buf());
     }
     let mut prefix = base.to_path_buf();
-    for component in pattern.trim_end_matches('/').split('/') {
+    for component in pattern.split('/') {
         if component.is_empty() {
             continue;
         }
@@ -2595,6 +2598,49 @@ mod tests {
             .collect();
 
         assert!(paths.iter().any(|path| path == "vendor/keep.md"));
+    }
+
+    #[test]
+    fn scoped_walk_descends_for_unanchored_directory_negation() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "!keep/\n").unwrap();
+        std::fs::create_dir_all(tmp.path().join("vendor/keep")).unwrap();
+        std::fs::write(tmp.path().join("vendor/keep/file.md"), b"x").unwrap();
+        let policy = IndexScopePolicy::new(
+            tmp.path().to_path_buf(),
+            crate::WorkspaceGeneration::INITIAL,
+            WalkFilter::new(["vendor"]),
+        )
+        .unwrap();
+
+        let paths: Vec<String> = walk_workspace_scoped(tmp.path(), &policy)
+            .map(|entry| {
+                entry
+                    .path()
+                    .strip_prefix(tmp.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+
+        assert!(
+            paths.iter().any(|path| path == "vendor/keep/file.md"),
+            "unanchored directory negation should widen configured pruning: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn directory_negation_prefix_distinguishes_leading_anchor() {
+        let base = Path::new("workspace");
+        assert_eq!(
+            gitignore_whitelist_prefix(base, "!keep/"),
+            Some(base.to_path_buf())
+        );
+        assert_eq!(
+            gitignore_whitelist_prefix(base, "!/keep/"),
+            Some(base.join("keep"))
+        );
     }
 
     #[test]
