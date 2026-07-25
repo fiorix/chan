@@ -23,8 +23,13 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 | item | state | what needs to happen |
 | --- | --- | --- |
-| [video-preview-and-range-serving](v0.77.0/video-preview-and-range-serving.md) | registered, grounded but not specced; deferred from v0.76.0 | spec first; the real chunk is HTTP range/206 in the file route (mirrors the image path on the frontend) |
-| [wave3-review-deferred-lows](v0.77.0/wave3-review-deferred-lows.md) | six LOW findings deferred from the v0.76.0 wave-3 adversarial review (none drop user data) | debounce editor recovery off the ack path; collapse a resolved Conflicted session on rehydrate; derive chan's own systemd unit from the trusted renderer; reap desktop generated-download temps on window teardown; bound the desktop chunk frame before materializing; decode escaped leading gitignore path components |
+| [wave3-review-deferred-lows](v0.77.0/wave3-review-deferred-lows.md) | six LOW findings from the v0.76.0 wave-3 adversarial review (none drop user data); all six re-verified against the live tree and still reachable | debounce editor recovery off the ack path; collapse a resolved Conflicted session on rehydrate; derive chan's own systemd unit from the trusted renderer; reap desktop generated-download temps on window teardown; bound the desktop chunk frame before materializing; decode escaped leading gitignore path components |
+
+### v0.78.0
+
+| item | state | what needs to happen |
+| --- | --- | --- |
+| [video-preview-and-range-serving](v0.78.0/video-preview-and-range-serving.md) | registered, grounded but not specced | spec first; the real chunk is HTTP range/206 in the file route (mirrors the image path on the frontend) |
 
 ## Completed
 
