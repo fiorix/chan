@@ -192,8 +192,8 @@ struct DocState {
     /// pause automatic writes.
     session_state: SessionState,
     /// Last content known to have reached disk. This remains unchanged
-    /// while observations or conflicts are pending, so E3 can reason
-    /// from a real three-way baseline.
+    /// while observations or conflicts are pending, preserving the
+    /// common ancestor for three-way merges.
     baseline: DurableBaseline,
     /// Skip the debounce on the next flusher pass (detach, forced
     /// flush).
@@ -606,7 +606,7 @@ impl DocSession {
     }
 
     // Test-surface accessor; production code reads the atomic directly.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn attach_count(&self) -> usize {
         self.attach_count.load(Ordering::Relaxed)
     }
@@ -1045,14 +1045,11 @@ struct FlushJob {
 }
 
 impl DocAttachHandle {
-    // Exercised by the doc_sessions and route tests; the ws pump itself
-    // only takes frames, pushes, pulls, and moves cursors.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn attach_id(&self) -> u64 {
         self.attach_id
     }
 
-    #[allow(dead_code)]
     pub fn session(&self) -> &Arc<DocSession> {
         &self.session
     }
@@ -1645,8 +1642,8 @@ async fn flush_session_locked(
 /// read matching the session's own recent disk content is our flush
 /// echo (adopt the token, keep the authority); equal content adopts
 /// the token silently; clean divergent content becomes a `$disk`
-/// update, while dirty divergence enters the E3 merge gate only once
-/// corroborated (a lying read must never destroy live state); a
+/// update, while dirty divergence enters the three-way merge gate only
+/// once corroborated (a lying read must never destroy live state); a
 /// vanished file routes into the removed path after absence
 /// corroborates. Unreadable content (non-UTF-8, oversized) enters a
 /// retained conflict instead of risking authority loss.
