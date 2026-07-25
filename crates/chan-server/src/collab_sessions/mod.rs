@@ -30,9 +30,7 @@ pub(crate) enum DiskObservation {
 pub(crate) struct DurableBaseline {
     pub(crate) content: String,
     pub(crate) content_hash: u64,
-    #[allow(dead_code)] // consumed by E3 conflict persistence/resolution
     pub(crate) mtime_ns: Option<i64>,
-    #[allow(dead_code)] // consumed by E3 conflict persistence/resolution
     pub(crate) authority_version: u64,
 }
 
@@ -42,15 +40,12 @@ pub(crate) struct SessionConflict {
     pub(crate) baseline_version: u64,
     pub(crate) disk_version: u64,
     pub(crate) authority_version: u64,
-    #[allow(dead_code)] // consumed by E3 explicit overwrite
     pub(crate) disk_mtime_ns: Option<i64>,
-    #[allow(dead_code)] // consumed by E3 explicit reload
     pub(crate) disk_content: String,
 }
 
 /// Three-way merge result consumed by the session state transition.
 pub(crate) enum MergeOutcome {
-    #[allow(dead_code)] // constructed by E3's merge engine
     Merged(String),
     Conflict,
 }
@@ -220,6 +215,8 @@ impl SessionState {
 
 #[cfg(test)]
 pub(crate) mod characterization {
+    use super::{SessionConflict, SessionState};
+
     #[derive(Debug, PartialEq, Eq)]
     pub(crate) struct ConflictTrace {
         pub id_retained: bool,
@@ -241,6 +238,72 @@ pub(crate) mod characterization {
         pub conflict_is_dirty: bool,
         pub conflict: ConflictTrace,
         pub removed_survives_flush_clear: bool,
+    }
+
+    pub(crate) fn lifecycle_trace() -> LifecycleTrace {
+        let mut state = SessionState::Clean;
+        state.mark_dirty(1);
+        let first_dirty = state.dirty_since().expect("clean state becomes dirty");
+        state.mark_dirty(2);
+        let first_dirty_instant_preserved = state.dirty_since() == Some(first_dirty);
+
+        state.observe_content(7, Some(8));
+        let observation_preserves_dirty_instant = state.dirty_since() == Some(first_dirty);
+        let same_observation_matches = matches!(
+            state.content_observation(),
+            Some((hash, mtime_ns, _)) if hash == 7 && mtime_ns == Some(8)
+        );
+        let changed_hash_does_not_match = !matches!(
+            state.content_observation(),
+            Some((hash, mtime_ns, _)) if hash == 9 && mtime_ns == Some(8)
+        );
+        let changed_mtime_does_not_match = !matches!(
+            state.content_observation(),
+            Some((hash, mtime_ns, _)) if hash == 7 && mtime_ns == Some(10)
+        );
+        state.clear_observation();
+        let clear_observation_restores_dirty = matches!(
+            state,
+            SessionState::Dirty { since } if since == first_dirty
+        );
+
+        let mut state = SessionState::Conflicted(SessionConflict {
+            id: "conflict".into(),
+            baseline_version: 11,
+            disk_version: 22,
+            authority_version: 33,
+            disk_mtime_ns: Some(55),
+            disk_content: "disk".into(),
+        });
+        state.mark_dirty(44);
+        let conflict_is_dirty = state.is_dirty();
+        state.clear_after_flush();
+        let SessionState::Conflicted(conflict) = state else {
+            panic!("flush clearing must retain a conflict");
+        };
+        let conflict = ConflictTrace {
+            id_retained: conflict.id == "conflict",
+            baseline_version: conflict.baseline_version,
+            disk_version: conflict.disk_version,
+            authority_version: conflict.authority_version,
+            disk_mtime_ns: conflict.disk_mtime_ns,
+            disk_content: conflict.disk_content,
+        };
+
+        let mut removed = SessionState::Removed;
+        removed.clear_after_flush();
+
+        LifecycleTrace {
+            first_dirty_instant_preserved,
+            observation_preserves_dirty_instant,
+            clear_observation_restores_dirty,
+            same_observation_matches,
+            changed_hash_does_not_match,
+            changed_mtime_does_not_match,
+            conflict_is_dirty,
+            conflict,
+            removed_survives_flush_clear: matches!(removed, SessionState::Removed),
+        }
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -286,13 +349,11 @@ mod tests {
     };
 
     #[test]
-    fn document_and_scene_lifecycle_transitions_match() {
-        let document = crate::doc_sessions::characterization_lifecycle_trace();
-        let scene = crate::scene_sessions::characterization_lifecycle_trace();
+    fn shared_lifecycle_transitions_preserve_characterized_behavior() {
+        let trace = super::characterization::lifecycle_trace();
 
-        assert_eq!(document, scene);
         assert_eq!(
-            document,
+            trace,
             LifecycleTrace {
                 first_dirty_instant_preserved: true,
                 observation_preserves_dirty_instant: true,
