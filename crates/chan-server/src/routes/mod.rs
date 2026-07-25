@@ -89,9 +89,7 @@ pub use mentions::api_get_mentions;
 pub use metadata::{api_metadata_export, api_metadata_import};
 pub use open::api_open;
 pub(crate) use preferences::broadcast_config_changed;
-pub use preferences::{
-    api_get_config, api_get_server_config, api_patch_config, api_patch_server_config,
-};
+pub use preferences::{api_get_config, api_patch_config};
 pub use preflight::{api_preflight, api_preflight_decision};
 pub use report::{api_report_dir, api_report_file, api_report_prefix};
 pub use reports_toggle::{api_reports_disable, api_reports_enable, api_reports_state};

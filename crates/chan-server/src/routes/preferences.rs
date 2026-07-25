@@ -1,5 +1,4 @@
-//! Server preferences: per-server config (`/api/server/config`) and
-//! the unified GlobalConfig view (`/api/config`).
+//! Unified server and editor preferences through `/api/config`.
 //!
 //! The unified surface joins EditorPrefs, ServerConfig, and the
 //! chan-workspace registry. Agent/assistant preferences were removed with
@@ -21,8 +20,8 @@ use crate::error::{err, Error};
 use crate::preferences::BubbleOverlayMode;
 use crate::state::AppState;
 use crate::{
-    BrowserSidePanes, EditorTheme, HybridSurfaceThemes, LineSpacing, PaneWidths, ServerConfig,
-    ShortcutOverride, ThemeChoice,
+    BrowserSidePanes, EditorTheme, HybridSurfaceThemes, LineSpacing, PaneWidths, ShortcutOverride,
+    ThemeChoice,
 };
 
 /// Unified preferences shape returned over /api/workspace and /api/config.
@@ -94,72 +93,6 @@ pub(super) fn preferences_view(state: &AppState) -> Result<PreferencesView, Erro
         cs_dismissed: editor.cs_dismissed,
         shortcuts: editor.shortcuts.clone(),
     })
-}
-
-// ----- /api/server/config ------------------------------------------------
-
-pub async fn api_get_server_config(State(state): State<Arc<AppState>>) -> Response {
-    let cfg = match state.server_config.lock() {
-        Ok(cfg) => cfg.clone(),
-        Err(_) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server config lock poisoned".into(),
-            );
-        }
-    };
-    Json(cfg).into_response()
-}
-
-#[derive(Deserialize)]
-pub struct PatchServerConfigBody {
-    /// Workspace-relative POSIX path. Empty string is rejected because the
-    /// path is used as a prefix; an empty prefix would land attachments
-    /// in the workspace root, surprising the user.
-    #[serde(default)]
-    attachments_dir: Option<String>,
-    #[serde(default)]
-    search: Option<crate::config::SearchConfig>,
-    #[serde(default)]
-    terminal: Option<TerminalConfig>,
-}
-
-pub async fn api_patch_server_config(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<PatchServerConfigBody>,
-) -> Response {
-    let result = tokio::task::spawn_blocking(move || patch_server_config(&state, body)).await;
-    match result {
-        Ok(Ok(cfg)) => Json(cfg).into_response(),
-        Ok(Err(e)) => err(status_for_error(&e), e.to_string()),
-        Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
-    }
-}
-
-fn patch_server_config(
-    state: &AppState,
-    body: PatchServerConfigBody,
-) -> Result<ServerConfig, Error> {
-    let mut cfg = match state.server_config.lock() {
-        Ok(cfg) => cfg,
-        Err(_) => return Err(Error::Config("server config lock poisoned".into())),
-    };
-    if let Some(p) = body.attachments_dir {
-        if p.is_empty() {
-            return Err(Error::BadRequest(
-                "attachments_dir must be non-empty".into(),
-            ));
-        }
-        cfg.attachments_dir = p;
-    }
-    if let Some(search) = body.search {
-        cfg.search = search;
-    }
-    if let Some(terminal) = body.terminal {
-        cfg.terminal = sanitize_terminal_config(terminal);
-    }
-    cfg.save()?;
-    Ok(cfg.clone())
 }
 
 // ----- /api/config (unified GlobalConfig) --------------------------------
