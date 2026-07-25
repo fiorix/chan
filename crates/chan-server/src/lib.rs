@@ -109,17 +109,17 @@ use routes::{
     api_graph, api_headings, api_health, api_index_rebuild, api_index_status, api_indexing_state,
     api_inspect_draft, api_inspector, api_language_graph, api_link_targets, api_links,
     api_list_files, api_list_sessions, api_list_windows, api_metadata_export, api_metadata_import,
-    api_move, api_open, api_patch_config, api_patch_workspace, api_post_attachment,
-    api_post_contacts_import, api_preflight, api_preflight_decision, api_promote_draft,
-    api_put_session, api_read_file, api_report_dir, api_report_file, api_report_prefix,
-    api_reports_disable, api_reports_enable, api_reports_state, api_resolve_link,
-    api_resolve_session_conflict, api_restart_terminal, api_scene_ws, api_screensaver_clear_pin,
-    api_screensaver_patch, api_screensaver_set_pin, api_screensaver_state, api_screensaver_verify,
-    api_search_content, api_search_files, api_search_workspace, api_session_handover_reply,
-    api_set_terminal_broadcast, api_storage_reset, api_survey_reply, api_team_config_read,
-    api_team_config_write, api_terminal_next_name, api_terminal_ws, api_terminals_roster,
-    api_upload_file, api_window_reply, api_workspace_bootstrap, api_write_file,
-    spawn_roster_broadcaster, ws_upgrade,
+    api_move, api_open, api_patch_config, api_post_attachment, api_post_contacts_import,
+    api_preflight, api_preflight_decision, api_promote_draft, api_put_session, api_read_file,
+    api_report_dir, api_report_file, api_report_prefix, api_reports_disable, api_reports_enable,
+    api_reports_state, api_resolve_link, api_resolve_session_conflict, api_restart_terminal,
+    api_scene_ws, api_screensaver_clear_pin, api_screensaver_patch, api_screensaver_set_pin,
+    api_screensaver_state, api_screensaver_verify, api_search_content, api_search_files,
+    api_search_workspace, api_session_handover_reply, api_set_terminal_broadcast,
+    api_storage_reset, api_survey_reply, api_team_config_read, api_team_config_write,
+    api_terminal_next_name, api_terminal_ws, api_terminals_roster, api_upload_file,
+    api_window_reply, api_workspace_bootstrap, api_write_file, spawn_roster_broadcaster,
+    ws_upgrade,
 };
 #[cfg(feature = "embeddings")]
 use routes::{
@@ -1498,7 +1498,6 @@ fn router(state: Arc<AppState>) -> Router {
     // on this sub-router so it fires before the JSON / query extractors
     // and a malformed body cannot leak the request schema via 422.
     let settings_writes = Router::new()
-        .route("/api/workspace", patch(api_patch_workspace))
         .route("/api/config", patch(api_patch_config))
         .route("/api/storage/reset", post(api_storage_reset))
         .route("/api/index/rebuild", post(api_index_rebuild));

@@ -113,7 +113,5 @@ pub use terminal::{
 };
 pub use window::api_window_reply;
 pub use windows::api_list_windows;
-pub use workspace::{
-    api_cloud_workspaces, api_get_workspace, api_patch_workspace, api_workspace_bootstrap,
-};
+pub use workspace::{api_cloud_workspaces, api_get_workspace, api_workspace_bootstrap};
 pub use ws::ws_upgrade;
