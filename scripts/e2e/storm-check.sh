@@ -239,6 +239,7 @@ capture_expected_tree() {
     cd "$WORK/ws"
     find . \
       -path './.git' -prune -o \
+      -path './.chan' -prune -o \
       -path './buck-out' -prune -o \
       -type f -print |
       sed 's#^\./##' |
