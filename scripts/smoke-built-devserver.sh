@@ -35,6 +35,8 @@ TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/chan-built-devserver.XXXXXX")"
 LOG="$TMP_ROOT/devserver.log"
 PID=
 
+# ShellCheck does not trace function calls through trap handlers.
+# shellcheck disable=SC2329
 cleanup() {
     local status=$?
     if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
