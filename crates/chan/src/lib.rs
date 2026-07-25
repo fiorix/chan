@@ -58,7 +58,7 @@ use chan_server::{EditorPrefs, EditorTheme, LineSpacing, ServeConfig, ServerConf
 use chan_shell::ShellAction;
 use chan_workspace::{
     KnownWorkspace, Library, MetadataExportOptions, MetadataImportOptions, SearchAggression,
-    WorkspaceSearchRequest, WorkspaceSearchResult,
+    Workspace, WorkspaceReadiness, WorkspaceSearchRequest, WorkspaceSearchResult,
 };
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
@@ -6444,9 +6444,13 @@ impl From<&KnownWorkspace> for WorkspaceListEntry {
 struct StatusOutput {
     root: String,
     metadata_key: Option<String>,
-    index: StatusIndex,
-    graph: StatusGraph,
-    report: StatusReport,
+    readiness: WorkspaceReadiness,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    index: Option<StatusIndex>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    graph: Option<StatusGraph>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    report: Option<StatusReport>,
 }
 
 #[derive(Serialize)]
@@ -6494,10 +6498,87 @@ fn cmd_status(path: Option<PathBuf>, json: bool) -> Result<()> {
     let root = path.ok_or_else(|| missing_workspace_path("status", "chan workspace status ."))?;
     ensure_workspace_registered(&lib, &root)?;
     let workspace = lib.open_workspace(&root)?;
-    let known = lib
+    let metadata_key = lib
         .list_workspaces()
         .into_iter()
-        .find(|d| same_path(&d.root_path, workspace.root()));
+        .find(|d| same_path(&d.root_path, workspace.root()))
+        .map(|d| d.metadata_key);
+    let out = workspace_status_output(&workspace, metadata_key)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+    println!("workspace: {}", out.root);
+    if let Some(metadata_key) = &out.metadata_key {
+        println!("metadata: {metadata_key}");
+    }
+    let readiness = match out.readiness {
+        WorkspaceReadiness::Ready { .. } => "ready",
+        WorkspaceReadiness::Recovering { .. } => "recovering",
+    };
+    println!("readiness: {readiness}");
+    if matches!(out.readiness, WorkspaceReadiness::Recovering { .. }) {
+        println!("derived state: unavailable while workspace recovery is in progress");
+        return Ok(());
+    }
+    let index = out
+        .index
+        .as_ref()
+        .context("ready workspace status missing index snapshot")?;
+    let graph = out
+        .graph
+        .as_ref()
+        .context("ready workspace status missing graph snapshot")?;
+    let report = out
+        .report
+        .as_ref()
+        .context("ready workspace status missing report snapshot")?;
+    println!(
+        "index: ready={} docs={} vectors={} model={}",
+        index.ready, index.indexed_docs, index.indexed_vectors, index.model
+    );
+    println!(
+        "graph: files={} edges={} tags={}",
+        graph.files, graph.edges, graph.tags
+    );
+    println!(
+        "report: files={} code={} comments={} blanks={} complexity={} cocomo={} cost=${:.2}",
+        report.files,
+        report.code,
+        report.comments,
+        report.blanks,
+        report.complexity,
+        report.cocomo_model,
+        report.estimated_cost_usd
+    );
+    if !report.by_language.is_empty() {
+        println!("languages:");
+        for lang in &report.by_language {
+            println!(
+                "  {:<18} files={:<5} code={}",
+                lang.name, lang.files, lang.code
+            );
+        }
+    }
+    Ok(())
+}
+
+fn workspace_status_output(
+    workspace: &Workspace,
+    metadata_key: Option<String>,
+) -> Result<StatusOutput> {
+    let readiness = workspace.readiness();
+    if matches!(readiness, WorkspaceReadiness::Recovering { .. }) {
+        return Ok(StatusOutput {
+            root: workspace.root().display().to_string(),
+            metadata_key,
+            readiness,
+            index: None,
+            graph: None,
+            report: None,
+        });
+    }
+
     let index = workspace.index_stats().context("reading index stats")?;
     let graph = workspace.graph().context("opening graph")?;
     let graph_files = graph.files().context("reading graph files")?;
@@ -6522,19 +6603,20 @@ fn cmd_status(path: Option<PathBuf>, json: bool) -> Result<()> {
         .collect();
     let out = StatusOutput {
         root: workspace.root().display().to_string(),
-        metadata_key: known.map(|d| d.metadata_key),
-        index: StatusIndex {
+        metadata_key,
+        readiness,
+        index: Some(StatusIndex {
             ready: index.ready,
             indexed_docs: index.indexed_docs,
             indexed_vectors: index.indexed_vectors,
             model: index.model,
-        },
-        graph: StatusGraph {
+        }),
+        graph: Some(StatusGraph {
             files: graph_files.len(),
             edges: graph_edges,
             tags,
-        },
-        report: StatusReport {
+        }),
+        report: Some(StatusReport {
             files: report.totals.files,
             code: report.totals.code,
             comments: report.totals.comments,
@@ -6543,44 +6625,9 @@ fn cmd_status(path: Option<PathBuf>, json: bool) -> Result<()> {
             by_language,
             cocomo_model: report.cocomo.model,
             estimated_cost_usd: report.cocomo.estimated_cost_usd,
-        },
+        }),
     };
-    if json {
-        println!("{}", serde_json::to_string_pretty(&out)?);
-        return Ok(());
-    }
-    println!("workspace: {}", out.root);
-    if let Some(metadata_key) = &out.metadata_key {
-        println!("metadata: {metadata_key}");
-    }
-    println!(
-        "index: ready={} docs={} vectors={} model={}",
-        out.index.ready, out.index.indexed_docs, out.index.indexed_vectors, out.index.model
-    );
-    println!(
-        "graph: files={} edges={} tags={}",
-        out.graph.files, out.graph.edges, out.graph.tags
-    );
-    println!(
-        "report: files={} code={} comments={} blanks={} complexity={} cocomo={} cost=${:.2}",
-        out.report.files,
-        out.report.code,
-        out.report.comments,
-        out.report.blanks,
-        out.report.complexity,
-        out.report.cocomo_model,
-        out.report.estimated_cost_usd
-    );
-    if !out.report.by_language.is_empty() {
-        println!("languages:");
-        for lang in &out.report.by_language {
-            println!(
-                "  {:<18} files={:<5} code={}",
-                lang.name, lang.files, lang.code
-            );
-        }
-    }
-    Ok(())
+    Ok(out)
 }
 
 fn cmd_config(action: ConfigAction) -> Result<()> {
@@ -7855,6 +7902,7 @@ mod tests {
                     .to_string_lossy()
                     .into_owned(),
             },
+            readiness: chan_workspace::WorkspaceReadiness::default(),
             search: chan_workspace::WorkspaceSearchStatus {
                 requested: false,
                 ready: true,
@@ -7875,6 +7923,25 @@ mod tests {
             warnings: Vec::new(),
             errors: Vec::new(),
         }
+    }
+
+    #[test]
+    fn workspace_status_skips_derived_snapshots_during_recovery() {
+        let config = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace root");
+        let lib = Library::open_at(config.path().join("config.toml")).expect("library");
+        let known = lib.register_workspace(root.path()).expect("register");
+        let workspace = lib.open_workspace(root.path()).expect("open");
+        workspace.request_recovery(chan_workspace::RecoveryAction::FullRebuild);
+
+        let output =
+            workspace_status_output(&workspace, Some(known.metadata_key)).expect("status output");
+        let json = serde_json::to_value(&output).expect("status JSON");
+
+        assert_eq!(json["readiness"]["state"], "recovering");
+        assert!(json.get("index").is_none(), "{json}");
+        assert!(json.get("graph").is_none(), "{json}");
+        assert!(json.get("report").is_none(), "{json}");
     }
 
     #[cfg(unix)]

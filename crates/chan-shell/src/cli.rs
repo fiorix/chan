@@ -14,9 +14,9 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use chan_workspace::{
-    WorkspaceRelationshipKind, WorkspaceSearchDomain, WorkspaceSearchError, WorkspaceSearchRequest,
-    WorkspaceSearchResult, WorkspaceSearchWarning, WorkspaceSelector, WorkspaceSelectorKind,
-    WorkspaceTraversalDirection,
+    WorkspaceReadiness, WorkspaceRelationshipKind, WorkspaceSearchDomain, WorkspaceSearchError,
+    WorkspaceSearchRequest, WorkspaceSearchResult, WorkspaceSearchWarning, WorkspaceSelector,
+    WorkspaceSelectorKind, WorkspaceTraversalDirection,
 };
 use clap::{Args, Parser, Subcommand};
 
@@ -1386,6 +1386,9 @@ async fn cmd_shell_search(request: WorkspaceSearchRequest, json: bool, pretty: b
 
 pub fn render_workspace_search_markdown(result: &WorkspaceSearchResult) -> String {
     let mut out = String::new();
+    if matches!(result.readiness, WorkspaceReadiness::Recovering { .. }) {
+        out.push_str("Workspace recovery is in progress; derived results are not ready.\n\n");
+    }
     if !result.content_hits.is_empty() {
         out.push_str("## Content\n\n");
         for hit in &result.content_hits {
@@ -2545,6 +2548,7 @@ mod tests {
                 metadata_key: "work-00112233".into(),
                 display_name: "work".into(),
             },
+            readiness: chan_workspace::WorkspaceReadiness::default(),
             search: chan_workspace::WorkspaceSearchStatus {
                 requested: true,
                 ready: true,
@@ -2577,6 +2581,54 @@ mod tests {
         // <b>...</b> highlight -> markdown **bold**.
         assert!(out.contains("the **fox** ran"), "bold: {out}");
         assert!(!out.contains("<b>"), "no raw html: {out}");
+    }
+
+    #[test]
+    fn search_markdown_reports_recovery_from_state_only() {
+        let recovering = chan_workspace::WorkspaceReadiness::Recovering {
+            generation: chan_workspace::WorkspaceGeneration::INITIAL,
+            completed_generation: chan_workspace::WorkspaceGeneration::INITIAL,
+            required_action: None,
+            active_generation: None,
+            pending_generation: None,
+        };
+        let result = WorkspaceSearchResult {
+            workspace: chan_workspace::WorkspaceSearchIdentity {
+                root: "/tmp/work".into(),
+                metadata_key: "work-00112233".into(),
+                display_name: "work".into(),
+            },
+            readiness: recovering,
+            search: chan_workspace::WorkspaceSearchStatus {
+                requested: true,
+                ready: true,
+                mode: chan_workspace::EffectiveSearchMode::NotRun,
+            },
+            content_hits: Vec::new(),
+            entity_matches: Vec::new(),
+            nodes: Vec::new(),
+            relationships: Vec::new(),
+            traversal: chan_workspace::EffectiveWorkspaceTraversal {
+                depth: 0,
+                direction: WorkspaceTraversalDirection::Auto,
+                relationship_kinds: Vec::new(),
+                spine_forced: false,
+                profiles: Vec::new(),
+            },
+            truncation: chan_workspace::WorkspaceSearchTruncation::default(),
+            warnings: Vec::new(),
+            errors: vec![chan_workspace::WorkspaceSearchError::IndexNotReady {
+                message: "workspace recovery is in progress".into(),
+            }],
+        };
+
+        let out = render_workspace_search_markdown(&result);
+
+        assert!(
+            out.starts_with("Workspace recovery is in progress; derived results are not ready.\n"),
+            "{out}"
+        );
+        assert!(out.contains("## Errors"), "{out}");
     }
 
     #[test]
