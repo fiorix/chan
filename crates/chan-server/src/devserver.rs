@@ -179,40 +179,29 @@ impl DevserverStore {
     }
 
     fn save(&self, cfg: &PersistedConfig) -> std::io::Result<()> {
-        let dir = match self.path.parent() {
-            Some(dir) => {
-                std::fs::create_dir_all(dir)?;
-                dir
-            }
-            None => Path::new("."),
-        };
-        let bytes = serde_json::to_vec_pretty(cfg)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let tmp = self.path.with_extension("json.tmp");
-        // Write + fsync the tmp so its bytes are durable BEFORE the rename:
-        // renaming un-synced data is exactly the partial-config risk on a
-        // crash or power loss.
-        {
-            use std::io::Write;
-            let mut f = std::fs::File::create(&tmp)?;
-            f.write_all(&bytes)?;
-            f.sync_all()?;
-        }
-        // 0600 on the tmp, before the rename, so the token file is never
-        // visible at its final path with looser permissions.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-        }
-        std::fs::rename(&tmp, &self.path)?;
-        // fsync the parent directory so the new dirent survives a crash too;
-        // POSIX permits the rename to be lost otherwise. Matches the
-        // gold-standard `atomic_write`. Best-effort: durability hardening, not
-        // a reason to fail a save the rename already committed.
-        let _ = chan_workspace::fs_ops::sync_dir(dir);
-        Ok(())
+        let bytes = serialize_persisted_config(cfg)?;
+        crate::atomic_file::write(&self.path, &bytes, Some(0o600))
     }
+
+    #[cfg(test)]
+    fn save_with_pre_persist_hook(
+        &self,
+        cfg: &PersistedConfig,
+        pre_persist: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        let bytes = serialize_persisted_config(cfg)?;
+        crate::atomic_file::write_with_pre_persist_hook(
+            &self.path,
+            &bytes,
+            Some(0o600),
+            pre_persist,
+        )
+    }
+}
+
+fn serialize_persisted_config(cfg: &PersistedConfig) -> std::io::Result<Vec<u8>> {
+    serde_json::to_vec_pretty(cfg)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
 /// The session store for the shared standalone-terminal tenant:
@@ -650,6 +639,8 @@ struct DevserverState {
     mount_attempt_lock: tokio::sync::Mutex<()>,
     startup: Arc<StartupCoordinator>,
     store: DevserverStore,
+    /// Orders persisted snapshot capture and publication across both stores.
+    persist_serial: Mutex<()>,
     /// The actual bound TCP port (`local_addr().port()`); `0` until bound.
     /// Persisted so a local client re-discovers the current port after a restart.
     bound_port: AtomicU16,
@@ -1038,7 +1029,15 @@ impl DevserverState {
     /// the devserver config. So a restart comes back serving exactly what was on
     /// and remembering what was off.
     fn persist_state(&self) {
-        self.persist_state_with_mounted_snapshot(|| {
+        let _persist = self
+            .persist_serial
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.persist_state_locked();
+    }
+
+    fn persist_state_locked(&self) {
+        self.persist_state_with_mounted_snapshot_locked(|| {
             self.host
                 .mounted_prefixes()
                 .unwrap_or_default()
@@ -1048,6 +1047,17 @@ impl DevserverState {
     }
 
     fn persist_state_with_mounted_snapshot(
+        &self,
+        mounted_snapshot: impl FnOnce() -> HashSet<String>,
+    ) {
+        let _persist = self
+            .persist_serial
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.persist_state_with_mounted_snapshot_locked(mounted_snapshot);
+    }
+
+    fn persist_state_with_mounted_snapshot_locked(
         &self,
         mounted_snapshot: impl FnOnce() -> HashSet<String>,
     ) {
@@ -1130,11 +1140,23 @@ impl DevserverState {
     /// the mint time, and persist through the 0600 store. The old bearer
     /// stops authorizing on the next request.
     fn rotate_token(&self) -> String {
-        let token = random_token();
+        self.rotate_token_with_pre_mint_hook(random_token(), unix_now_secs(), || {})
+    }
+
+    fn rotate_token_with_pre_mint_hook(
+        &self,
+        token: String,
+        minted_at: u64,
+        pre_mint: impl FnOnce(),
+    ) -> String {
+        let _persist = self
+            .persist_serial
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         *self.token.write().unwrap_or_else(|e| e.into_inner()) = token.clone();
-        self.token_minted_at
-            .store(unix_now_secs(), Ordering::Relaxed);
-        self.persist_state();
+        pre_mint();
+        self.token_minted_at.store(minted_at, Ordering::Relaxed);
+        self.persist_state_locked();
         token
     }
 
@@ -1547,6 +1569,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         mount_attempt_lock: tokio::sync::Mutex::new(()),
         startup: Arc::new(StartupCoordinator::new()),
         store,
+        persist_serial: Mutex::new(()),
         bound_port: AtomicU16::new(0),
     });
 
@@ -3124,24 +3147,129 @@ mod tests {
             library_id: "lib-xyz".into(),
             port: 9605,
         };
-        store.save(&cfg).unwrap();
+        store
+            .save_with_pre_persist_hook(&cfg, |tmp| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+
+                    let mode = std::fs::metadata(tmp)?.permissions().mode() & 0o777;
+                    assert_eq!(mode, 0o600, "temporary config must be 0600");
+                }
+                Ok(())
+            })
+            .unwrap();
         let loaded = store.load();
         assert_eq!(loaded.devserver_token, "abc");
         assert_eq!(loaded.library_id, "lib-xyz");
         assert_eq!(loaded.port, 9605);
-        // The atomic tmp+rename leaves no tmpfile behind after a save.
-        let tmp = dir.path().join("nested").join("config.json.tmp");
-        assert!(!tmp.exists(), "leftover tmpfile: {}", tmp.display());
+        let path = dir.path().join("nested").join("config.json");
+        let bytes = std::fs::read(&path).expect("published config");
+        serde_json::from_slice::<PersistedConfig>(&bytes).expect("published JSON parses");
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1,
+            "save must leave only the published config"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(dir.path().join("nested").join("config.json"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777;
+            let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "config must be 0600");
         }
+    }
+
+    #[test]
+    fn simultaneous_store_saves_do_not_collide() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DevserverStore::at(dir.path().join("config.json"));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let configs = [
+            PersistedConfig {
+                devserver_token: "token-a".into(),
+                token_minted_at: 11,
+                library_id: "lib-test".into(),
+                port: 9605,
+            },
+            PersistedConfig {
+                devserver_token: "token-b".into(),
+                token_minted_at: 22,
+                library_id: "lib-test".into(),
+                port: 9605,
+            },
+        ];
+
+        let results = std::thread::scope(|scope| {
+            let first = {
+                let barrier = barrier.clone();
+                let store = &store;
+                let cfg = &configs[0];
+                scope.spawn(move || {
+                    store.save_with_pre_persist_hook(cfg, |_| {
+                        barrier.wait();
+                        Ok(())
+                    })
+                })
+            };
+            let second = {
+                let barrier = barrier.clone();
+                let store = &store;
+                let cfg = &configs[1];
+                scope.spawn(move || {
+                    store.save_with_pre_persist_hook(cfg, |_| {
+                        barrier.wait();
+                        Ok(())
+                    })
+                })
+            };
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+
+        assert!(
+            results.iter().all(Result::is_ok),
+            "both saves must publish successfully: {results:?}"
+        );
+        let published = store.load();
+        assert!(
+            configs.iter().any(|cfg| {
+                cfg.devserver_token == published.devserver_token
+                    && cfg.token_minted_at == published.token_minted_at
+            }),
+            "published config must be one complete submitted snapshot: {published:?}"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn store_failure_preserves_prior_config_and_removes_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DevserverStore::at(dir.path().join("config.json"));
+        let prior = PersistedConfig {
+            devserver_token: "prior-token".into(),
+            token_minted_at: 11,
+            library_id: "lib-test".into(),
+            port: 9605,
+        };
+        store.save(&prior).unwrap();
+        let replacement = PersistedConfig {
+            devserver_token: "replacement-token".into(),
+            token_minted_at: 22,
+            library_id: "lib-test".into(),
+            port: 9606,
+        };
+
+        let error = store
+            .save_with_pre_persist_hook(&replacement, |_| {
+                Err(std::io::Error::other("injected pre-persist failure"))
+            })
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        let published = store.load();
+        assert_eq!(published.devserver_token, prior.devserver_token);
+        assert_eq!(published.token_minted_at, prior.token_minted_at);
+        assert_eq!(published.port, prior.port);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     /// Build a `DevserverState` over a sandbox dir for the on/off
@@ -3166,6 +3294,7 @@ mod tests {
             mount_attempt_lock: tokio::sync::Mutex::new(()),
             startup: Arc::new(StartupCoordinator::new()),
             store: DevserverStore::at(home.join("devserver").join("config.json")),
+            persist_serial: Mutex::new(()),
             bound_port: AtomicU16::new(0),
         })
     }
@@ -3588,11 +3717,101 @@ mod tests {
 
         state.persist_state_with_mounted_snapshot(|| {
             assert!(
+                state.persist_serial.try_lock().is_err(),
+                "persist serialization must precede snapshot capture"
+            );
+            assert!(
                 state.workspaces.try_lock().is_err(),
                 "mounted-prefix sampling ran without the serving map locked"
             );
             HashSet::new()
         });
+    }
+
+    #[test]
+    fn ordered_token_rotations_persist_the_newest_complete_pair() {
+        let home = tempfile::tempdir().expect("home");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let (second_started_tx, second_started_rx) = std::sync::mpsc::sync_channel(0);
+
+        std::thread::scope(|scope| {
+            let first_state = state.clone();
+            let first = scope.spawn(move || {
+                first_state.rotate_token_with_pre_mint_hook("older-token".into(), 11, || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                })
+            });
+            entered_rx.recv().unwrap();
+
+            let second_state = state.clone();
+            let second = scope.spawn(move || {
+                second_started_tx.send(()).unwrap();
+                second_state.rotate_token_with_pre_mint_hook("newest-token".into(), 22, || {})
+            });
+            second_started_rx.recv().unwrap();
+            release_tx.send(()).unwrap();
+
+            assert_eq!(first.join().unwrap(), "older-token");
+            assert_eq!(second.join().unwrap(), "newest-token");
+        });
+
+        let published = state.store.load();
+        assert_eq!(published.devserver_token, "newest-token");
+        assert_eq!(published.token_minted_at, 22);
+    }
+
+    #[test]
+    fn unrelated_persist_cannot_publish_token_before_matching_mint_time() {
+        let home = tempfile::tempdir().expect("home");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        state.token_minted_at.store(7, Ordering::Relaxed);
+        state.persist_state();
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let (persist_started_tx, persist_started_rx) = std::sync::mpsc::sync_channel(0);
+        let (persist_done_tx, persist_done_rx) = std::sync::mpsc::channel();
+
+        std::thread::scope(|scope| {
+            let rotate_state = state.clone();
+            let rotate = scope.spawn(move || {
+                rotate_state.rotate_token_with_pre_mint_hook("rotated-token".into(), 99, || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                })
+            });
+            entered_rx.recv().unwrap();
+
+            let persist_state = state.clone();
+            let persist = scope.spawn(move || {
+                persist_started_tx.send(()).unwrap();
+                persist_state.persist_state();
+                persist_done_tx.send(()).unwrap();
+            });
+            persist_started_rx.recv().unwrap();
+            assert!(
+                matches!(
+                    persist_done_rx.recv_timeout(Duration::from_millis(100)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ),
+                "unrelated persistence completed inside a token rotation"
+            );
+            let before_release = state.store.load();
+            assert_eq!(before_release.devserver_token, "test-token");
+            assert_eq!(before_release.token_minted_at, 7);
+
+            release_tx.send(()).unwrap();
+            assert_eq!(rotate.join().unwrap(), "rotated-token");
+            persist.join().unwrap();
+            persist_done_rx.recv().unwrap();
+        });
+
+        let published = state.store.load();
+        assert_eq!(published.devserver_token, "rotated-token");
+        assert_eq!(published.token_minted_at, 99);
     }
 
     #[tokio::test]
