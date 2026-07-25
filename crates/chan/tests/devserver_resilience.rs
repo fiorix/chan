@@ -1379,6 +1379,16 @@ async fn devserver_sigkill_releases_flock_and_survives_config() {
     let port = addr.port();
     let token1 = devserver_token(&first);
     let client = http();
+    let initial_windows = list_library_windows(&client, addr, &token1).await;
+    assert_eq!(
+        initial_windows.len(),
+        1,
+        "fresh devserver has one initial terminal: {initial_windows:?}"
+    );
+    let initial_window_id = initial_windows[0]["window_id"]
+        .as_str()
+        .expect("initial terminal window id")
+        .to_string();
     let prefix = mount_workspace(&client, addr, &token1, &root).await;
 
     // Hard kill: no chance to run cleanup, so this proves the kernel-released
@@ -1407,6 +1417,17 @@ async fn devserver_sigkill_releases_flock_and_survives_config() {
     assert!(
         entries.iter().any(|e| e["prefix"] == prefix),
         "workspace did not re-mount from persisted config: {entries:?}"
+    );
+    let restored_windows = list_library_windows(&client, addr2, &token2).await;
+    assert_eq!(
+        restored_windows.len(),
+        1,
+        "restart must not duplicate the initial terminal: {restored_windows:?}"
+    );
+    assert_eq!(
+        restored_windows[0]["window_id"].as_str(),
+        Some(initial_window_id.as_str()),
+        "restart preserves the existing terminal record"
     );
 }
 

@@ -655,6 +655,42 @@ struct DevserverState {
     bound_port: AtomicU16,
 }
 
+/// Makes startup tracking cancellation-safe for request-owned mount futures.
+///
+/// Dropping an in-flight handler future must publish a terminal failure and
+/// settle its READY key. Explicit success, error, and timeout paths disarm the
+/// guard after performing their more specific completion.
+struct MountAttemptSettlement<'a> {
+    state: &'a DevserverState,
+    attempt: &'a MountAttempt,
+    armed: bool,
+}
+
+impl<'a> MountAttemptSettlement<'a> {
+    fn new(state: &'a DevserverState, attempt: &'a MountAttempt) -> Self {
+        Self {
+            state,
+            attempt,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for MountAttemptSettlement<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.state.finish_failed_attempt(
+                self.attempt,
+                "mount cancelled before completion".to_string(),
+            );
+        }
+    }
+}
+
 impl DevserverState {
     /// Register the workspace at `root` and mount it (on). Allocates the
     /// stable prefix, mounts via [`mount_at`](Self::mount_at), persists, and
@@ -734,6 +770,7 @@ impl DevserverState {
         attempt: MountAttempt,
         timeout: Duration,
     ) -> Result<String, Error> {
+        let mut settlement = MountAttemptSettlement::new(self, &attempt);
         let _attempt_guard = self.mount_attempt_lock.lock().await;
         let result = time_bound_mount(
             timeout,
@@ -766,11 +803,13 @@ impl DevserverState {
                 }
                 self.startup.settle(&attempt.key());
                 self.persist_state();
+                settlement.disarm();
                 Ok(hosted.prefix)
             }
             Ok(Err(error)) => {
                 let reason = error.to_string();
                 self.finish_failed_attempt(&attempt, reason);
+                settlement.disarm();
                 Err(error)
             }
             Err(MountTimedOut) => {
@@ -779,6 +818,7 @@ impl DevserverState {
                 let _ = self.host.close_workspace(&attempt.prefix, true);
                 let reason = format!("mount timed out after {} seconds", timeout.as_secs().max(1));
                 self.finish_failed_attempt(&attempt, reason.clone());
+                settlement.disarm();
                 Err(Error::Config(reason))
             }
         }
@@ -998,6 +1038,19 @@ impl DevserverState {
     /// the devserver config. So a restart comes back serving exactly what was on
     /// and remembering what was off.
     fn persist_state(&self) {
+        self.persist_state_with_mounted_snapshot(|| {
+            self.host
+                .mounted_prefixes()
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+        });
+    }
+
+    fn persist_state_with_mounted_snapshot(
+        &self,
+        mounted_snapshot: impl FnOnce() -> HashSet<String>,
+    ) {
         // Durable desired intent → the library-owned overlay store. Starting
         // and failed rows stay desired-on even though no host prefix is live.
         if let Some(overlay) = self.host.workspace_overlay() {
@@ -1013,14 +1066,12 @@ impl DevserverState {
                 .into_iter()
                 .map(|w| canonical_root(&w.root_path))
                 .collect();
-            let mounted: std::collections::HashSet<String> = self
-                .host
-                .mounted_prefixes()
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
             let rows: Vec<PersistedWorkspace> = {
                 let mut map = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
+                // Keep the serving record and host mount snapshot in one lock
+                // window. Otherwise a mount may publish between the two reads
+                // and be mistaken for an out-of-band close.
+                let mounted = mounted_snapshot();
                 // Preserve the prior out-of-band control-socket semantics:
                 // remove means absence; close advances a settled mounted row
                 // to a newer desired-off intent. A Starting row is deliberately
@@ -2543,6 +2594,62 @@ mod tests {
         assert_eq!(startup.phase(), StartupPhase::Ready);
     }
 
+    #[tokio::test]
+    async fn cancelled_client_mount_settles_startup_and_surfaces_failure() {
+        let home = tempfile::tempdir().expect("home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let prefix = allocate_workspace_prefix(workspace.path()).unwrap();
+        let attempt = state
+            .begin_mount(workspace.path(), &prefix)
+            .expect("prepare mount")
+            .expect("fresh attempt");
+        state
+            .startup
+            .advance(StartupPhase::Binding)
+            .expect("preparing -> binding");
+        state
+            .startup
+            .advance(StartupPhase::FdstoreApplied)
+            .expect("binding -> fdstore");
+        state
+            .startup
+            .advance(StartupPhase::ServingAndRestoring)
+            .expect("fdstore -> serving");
+
+        let serialization = state.mount_attempt_lock.lock().await;
+        let mount_state = state.clone();
+        let mount = tokio::spawn(async move {
+            mount_state
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!mount.is_finished(), "mount must wait on serialization");
+        mount.abort();
+        assert!(mount.await.unwrap_err().is_cancelled());
+        drop(serialization);
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                state.startup.ready_after_restore()
+            )
+            .await
+            .expect("cancelled attempt must not wedge READY"),
+            "startup stopped instead of becoming ready"
+        );
+        let row = state.entry_for(&prefix).expect("cancelled mount row");
+        assert_eq!(row.status, WorkspaceStatus::Error);
+        assert!(
+            row.error
+                .as_deref()
+                .is_some_and(|reason| reason.contains("cancelled")),
+            "cancellation must stay operator-visible: {:?}",
+            row.error
+        );
+    }
+
     #[test]
     fn fdstore_apply_is_single_and_precedes_route_exposure() {
         let startup = StartupCoordinator::new();
@@ -3472,6 +3579,20 @@ mod tests {
         let canonical = ws.path().canonicalize().expect("canonicalize workspace");
         assert_eq!(rows[0].path, canonical.to_string_lossy());
         assert!(!rows[0].desired_on);
+    }
+
+    #[test]
+    fn persist_state_samples_mounted_prefixes_under_workspace_lock() {
+        let home = tempfile::tempdir().expect("home");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+
+        state.persist_state_with_mounted_snapshot(|| {
+            assert!(
+                state.workspaces.try_lock().is_err(),
+                "mounted-prefix sampling ran without the serving map locked"
+            );
+            HashSet::new()
+        });
     }
 
     #[tokio::test]
