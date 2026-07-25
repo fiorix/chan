@@ -555,7 +555,7 @@ impl SceneSession {
     }
 
     // Test-surface accessor; production code reads the atomic directly.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn attach_count(&self) -> usize {
         self.attach_count.load(Ordering::Relaxed)
     }
@@ -1044,14 +1044,11 @@ struct FlushJob {
 }
 
 impl SceneAttachHandle {
-    // Exercised by the scene_sessions and route tests; the ws pump
-    // itself only takes frames, pushes, and moves cursors.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn attach_id(&self) -> u64 {
         self.attach_id
     }
 
-    #[allow(dead_code)]
     pub fn session(&self) -> &Arc<SceneSession> {
         &self.session
     }
@@ -1577,8 +1574,9 @@ async fn flush_session_locked(
 
 /// Bring one session in line with the disk: an unchanged token is our
 /// own flush echo (ignore); clean parseable content adopts through the
-/// replace semantics, while dirty divergence enters the E3 merge gate
-/// after corroboration; a vanished file routes into the removed path.
+/// replace semantics, while dirty divergence enters the three-way
+/// merge gate after corroboration; a vanished file routes into the
+/// removed path.
 /// Unreadable or unparseable content enters a retained conflict
 /// instead of risking authority loss.
 pub(crate) async fn reconcile_session(session: &Arc<SceneSession>, workspace: &Arc<Workspace>) {
