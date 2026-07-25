@@ -1992,6 +1992,23 @@ impl WorkspaceHost {
         force: bool,
         record_off: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
+        let _registering = self.register_lock.lock().await;
+        self.close_workspace_for_root_locked(root, force, record_off)
+            .await
+    }
+
+    /// Close-by-root body while [`register_lock`](Self::register_lock) is held.
+    ///
+    /// Serializing registration with teardown prevents a close from observing
+    /// the gap after a mount starts but before its runtime enters `workspaces`.
+    /// `remove_workspace_for_root` also calls this body under the same guard so
+    /// unregister cannot race a workspace open.
+    async fn close_workspace_for_root_locked(
+        &self,
+        root: &Path,
+        force: bool,
+        record_off: bool,
+    ) -> Result<WorkspaceLifecycleOutcome, Error> {
         let target = canonical_key(root);
         let prefix = {
             let workspaces = self
@@ -2014,13 +2031,24 @@ impl WorkspaceHost {
                 Ok(outcome)
             }
             None => {
-                if record_off && self.library.workspace_paths_for(root).is_some() {
+                let registered = self.library.workspace_paths_for(root).is_some();
+                let starting = self
+                    .mount_state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&target)
+                    .is_some_and(|state| matches!(state, MountState::Starting));
+                if record_off && registered {
                     if let Some(overlay) = self.workspace_overlay() {
                         overlay.set(&root.to_string_lossy(), false);
                     }
                 }
                 self.clear_workspace_lifecycle(root);
-                Ok(WorkspaceLifecycleOutcome::NotFound)
+                if registered && starting {
+                    Ok(WorkspaceLifecycleOutcome::Completed)
+                } else {
+                    Ok(WorkspaceLifecycleOutcome::NotFound)
+                }
             }
         }
     }
@@ -2039,10 +2067,14 @@ impl WorkspaceHost {
         root: &Path,
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
+        let _registering = self.register_lock.lock().await;
         // Unmount first (releases the per-workspace flock before the unregister's
         // reset); a no-op when the workspace is registered-but-off or not held
         // here. Refusal leaves the runtime, registry, overlay, and windows intact.
-        match self.close_workspace_for_root(root, force).await? {
+        match self
+            .close_workspace_for_root_locked(root, force, true)
+            .await?
+        {
             WorkspaceLifecycleOutcome::Refused { active_terminals } => {
                 return Ok(WorkspaceLifecycleOutcome::Refused { active_terminals });
             }
@@ -2704,6 +2736,11 @@ mod tests {
     /// tested in isolation.
     struct FakeBuilder;
 
+    struct GatedWorkspaceBuilder {
+        entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+
     fn fake_builder() -> Arc<dyn TenantBuilder> {
         Arc::new(FakeBuilder)
     }
@@ -2878,6 +2915,61 @@ mod tests {
             let artifacts = fake_artifacts(nest(&config.prefix, inner), Arc::new(FakeTerminalCell));
             artifacts.terminal_sessions.set_default_command(command);
             Ok(artifacts)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TenantBuilder for GatedWorkspaceBuilder {
+        async fn build_workspace(
+            &self,
+            library: Library,
+            workspace: Arc<Workspace>,
+            config: &ServeConfig,
+            desktop: DesktopBridge,
+            unserve: UnserveMode,
+            control_identity: Option<String>,
+        ) -> Result<TenantArtifacts, Error> {
+            if let Some(entered) = self.entered.lock().expect("entered lock").take() {
+                let _ = entered.send(());
+            }
+            let _permit = self
+                .release
+                .acquire()
+                .await
+                .expect("mount release semaphore");
+            FakeBuilder
+                .build_workspace(
+                    library,
+                    workspace,
+                    config,
+                    desktop,
+                    unserve,
+                    control_identity,
+                )
+                .await
+        }
+
+        async fn build_terminal(
+            &self,
+            library: Library,
+            config: &ServeConfig,
+            desktop: DesktopBridge,
+            unserve: UnserveMode,
+            command: Option<String>,
+            session_dir: Option<PathBuf>,
+            control_identity: Option<String>,
+        ) -> Result<TenantArtifacts, Error> {
+            FakeBuilder
+                .build_terminal(
+                    library,
+                    config,
+                    desktop,
+                    unserve,
+                    command,
+                    session_dir,
+                    control_identity,
+                )
+                .await
         }
     }
 
@@ -3430,6 +3522,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn close_for_root_accepts_registered_starting_before_runtime_lands() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace");
+        let key = root.path().to_string_lossy().into_owned();
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        lib.register_workspace(root.path()).expect("register");
+        let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
+        let overlay = Arc::new(WorkspaceOverlay::open(cfg.path().join("workspaces.json")));
+        overlay.set(&key, true);
+        host.install_workspace_overlay(Arc::clone(&overlay));
+
+        // DevserverState publishes this edge before spawning its mount future.
+        // `chan close` must accept the registered intent even though no runtime
+        // has landed in the host map yet.
+        host.mark_workspace_starting(root.path());
+        assert_eq!(
+            host.workspace_status(root.path()).0,
+            WorkspaceStatus::Starting
+        );
+        assert!(host
+            .close_workspace_for_root(root.path(), false)
+            .await
+            .expect("close starting root")
+            .completed());
+
+        assert_eq!(
+            host.workspace_status(root.path()).0,
+            WorkspaceStatus::Stopped
+        );
+        assert!(host.mounted_prefixes().expect("prefixes").is_empty());
+        assert!(
+            host.library().workspace_paths_for(root.path()).is_some(),
+            "plain close keeps the registry row"
+        );
+        let row = overlay
+            .entries()
+            .into_iter()
+            .find(|row| row.path == key)
+            .expect("overlay row");
+        assert!(!row.desired_on, "close persists the pending row off");
+    }
+
+    #[tokio::test]
     async fn shutdown_close_preserves_the_overlay_on_state() {
         // The desktop Exit handler snapshots the on-set (persist_workspaces) and
         // THEN tears every mounted workspace down. Teardown must not touch the
@@ -3738,6 +3873,61 @@ mod tests {
             vec!["/race".to_string()],
             "exactly one tenant mounted despite the race"
         );
+    }
+
+    #[tokio::test]
+    async fn close_for_root_waits_for_inflight_registration_then_unmounts() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace");
+        let key = root.path().to_string_lossy().into_owned();
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        lib.register_workspace(root.path()).expect("register");
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let host = Arc::new(WorkspaceHost::new(
+            lib,
+            Arc::new(GatedWorkspaceBuilder {
+                entered: std::sync::Mutex::new(Some(entered_tx)),
+                release: Arc::clone(&release),
+            }),
+        ));
+        let overlay = Arc::new(WorkspaceOverlay::open(cfg.path().join("workspaces.json")));
+        overlay.set(&key, true);
+        host.install_workspace_overlay(Arc::clone(&overlay));
+
+        let mount_host = Arc::clone(&host);
+        let mount_root = root.path().to_path_buf();
+        let mount = tokio::spawn(async move {
+            mount_host
+                .open_or_get_registered_workspace(mount_root, serve_config("/inflight"))
+                .await
+        });
+        entered_rx.await.expect("tenant build entered");
+
+        let mut close = std::pin::pin!(host.close_workspace_for_root(root.path(), false));
+        let close_was_pending = std::future::poll_fn(|cx| {
+            let pending = std::future::Future::poll(close.as_mut(), cx).is_pending();
+            std::task::Poll::Ready(pending)
+        })
+        .await;
+        assert!(
+            close_was_pending,
+            "close bypassed the in-flight registration boundary"
+        );
+
+        release.add_permits(1);
+        mount
+            .await
+            .expect("mount task")
+            .expect("in-flight mount completes");
+        assert!(close.await.expect("close after mount").completed());
+        assert!(host.mounted_prefixes().expect("prefixes").is_empty());
+        let row = overlay
+            .entries()
+            .into_iter()
+            .find(|row| row.path == key)
+            .expect("overlay row");
+        assert!(!row.desired_on, "the serialized close persists off");
     }
 
     #[tokio::test]

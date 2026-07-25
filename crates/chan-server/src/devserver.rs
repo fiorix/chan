@@ -418,6 +418,28 @@ impl WorkspaceRecord {
         true
     }
 
+    fn reconcile_persisted(&mut self, persisted: &PersistedWorkspace, mounted: bool) {
+        if persisted.generation <= self.generation {
+            return;
+        }
+        self.generation = persisted.generation;
+        self.desired = if persisted.desired_on {
+            DesiredMount::On
+        } else {
+            DesiredMount::Off
+        };
+        self.phase = if persisted.desired_on {
+            if mounted {
+                MountPhase::Mounted
+            } else {
+                MountPhase::Starting
+            }
+        } else {
+            self.token.clear();
+            MountPhase::Stopped
+        };
+    }
+
     fn persisted(&self) -> Option<PersistedWorkspace> {
         if self.desired == DesiredMount::Forgotten {
             return None;
@@ -763,6 +785,14 @@ impl DevserverState {
     ) -> Result<String, Error> {
         let mut settlement = MountAttemptSettlement::new(self, &attempt);
         let _attempt_guard = self.mount_attempt_lock.lock().await;
+        if !self.reconcile_attempt_intent(&attempt, false) {
+            self.restore_current_host_lifecycle(&attempt.prefix);
+            self.remove_finished_tombstone(&attempt.prefix);
+            self.startup.settle(&attempt.key());
+            self.persist_state();
+            settlement.disarm();
+            return Ok(attempt.prefix.clone());
+        }
         let result = time_bound_mount(
             timeout,
             self.host.open_or_get_registered_workspace(
@@ -774,6 +804,7 @@ impl DevserverState {
         match result {
             Ok(Ok(hosted)) => {
                 let token = hosted.handle.token.clone().unwrap_or_default();
+                self.reconcile_attempt_intent(&attempt, true);
                 let completion = {
                     let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
                     workspaces
@@ -816,6 +847,37 @@ impl DevserverState {
                 Err(Error::Config(reason))
             }
         }
+    }
+
+    /// Fold host-level `chan close` / `chan close --remove` intent into the
+    /// devserver's pending record before it opens or publishes a tenant.
+    ///
+    /// Those commands reach [`WorkspaceHost`] directly through the control
+    /// socket. The shared overlay generation is therefore the ordering edge:
+    /// a newer off row supersedes this attempt, while an absent registry row
+    /// means a concurrent remove won.
+    fn reconcile_attempt_intent(&self, attempt: &MountAttempt, mounted: bool) -> bool {
+        let registered = self
+            .host
+            .library()
+            .workspace_paths_for(&attempt.root)
+            .is_some();
+        let persisted = self.host.workspace_overlay().and_then(|overlay| {
+            overlay
+                .entries()
+                .into_iter()
+                .find(|row| canonical_root(Path::new(&row.path)) == canonical_root(&attempt.root))
+        });
+        let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(record) = workspaces.get_mut(&attempt.prefix) else {
+            return false;
+        };
+        if !registered {
+            record.forget();
+        } else if let Some(persisted) = persisted {
+            record.reconcile_persisted(&persisted, mounted);
+        }
+        record.generation == attempt.generation && record.desired == DesiredMount::On
     }
 
     fn finish_failed_attempt(&self, attempt: &MountAttempt, reason: String) {
@@ -1097,24 +1159,7 @@ impl DevserverState {
                 });
                 for record in map.values_mut() {
                     if let Some(row) = durable.get(&canonical_root(&record.root)) {
-                        if row.generation > record.generation {
-                            record.generation = row.generation;
-                            record.desired = if row.desired_on {
-                                DesiredMount::On
-                            } else {
-                                DesiredMount::Off
-                            };
-                            if row.desired_on {
-                                record.phase = if mounted.contains(&record.prefix) {
-                                    MountPhase::Mounted
-                                } else {
-                                    MountPhase::Starting
-                                };
-                            } else {
-                                record.phase = MountPhase::Stopped;
-                                record.token.clear();
-                            }
-                        }
+                        record.reconcile_persisted(row, mounted.contains(&record.prefix));
                     }
                     if record.phase == MountPhase::Mounted && !mounted.contains(&record.prefix) {
                         record.turn_off();
@@ -2790,6 +2835,275 @@ mod tests {
                 .is_some_and(|reason| reason.contains("cancelled")),
             "cancellation must stay operator-visible: {:?}",
             row.error
+        );
+    }
+
+    #[tokio::test]
+    async fn chan_close_during_startup_stays_off_preserves_metadata_and_reopens() {
+        let home = tempfile::tempdir().expect("home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let prefix = allocate_workspace_prefix(workspace.path()).expect("workspace prefix");
+        let attempt = state
+            .begin_mount(workspace.path(), &prefix)
+            .expect("prepare mount")
+            .expect("fresh attempt");
+        state.persist_state();
+
+        let metadata = state
+            .host
+            .library()
+            .workspace_paths_for(workspace.path())
+            .expect("registered workspace metadata");
+        let layout_sentinel = metadata.sessions.join("startup-layout.json");
+        std::fs::write(&layout_sentinel, b"preserve this layout").expect("seed layout");
+
+        // Hold the real mount serialization boundary: the command observes a
+        // Starting row, while the original attempt cannot acquire the writer
+        // lock or complete until the test explicitly releases it.
+        let serialization = state.mount_attempt_lock.lock().await;
+        let mount_state = state.clone();
+        let mount = tokio::spawn(async move {
+            mount_state
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!mount.is_finished(), "mount escaped the startup barrier");
+        assert_eq!(
+            state.entry_for(&prefix).expect("starting row").status,
+            WorkspaceStatus::Starting
+        );
+
+        let closed = tokio::time::timeout(
+            Duration::from_secs(2),
+            state.host.close_workspace_for_root(workspace.path(), false),
+        )
+        .await
+        .expect("chan close must be bounded")
+        .expect("chan close");
+        assert!(
+            closed.completed(),
+            "a registered starting workspace must count as closed: {closed:?}"
+        );
+        let durable = state
+            .host
+            .workspace_overlay()
+            .expect("workspace overlay")
+            .entries()
+            .into_iter()
+            .find(|row| canonical_root(Path::new(&row.path)) == canonical_root(workspace.path()))
+            .expect("durable workspace intent");
+        assert!(!durable.desired_on, "chan close did not persist off");
+        assert!(
+            !mount.is_finished(),
+            "close released the held mount attempt"
+        );
+        assert!(!state.host.is_root_mounted(workspace.path()));
+        assert!(
+            state
+                .host
+                .library()
+                .workspace_paths_for(workspace.path())
+                .is_some(),
+            "plain close removed the registration"
+        );
+        assert_eq!(
+            std::fs::read(&layout_sentinel).expect("layout survives close"),
+            b"preserve this layout"
+        );
+
+        drop(serialization);
+        let stale_result = tokio::time::timeout(Duration::from_secs(10), mount)
+            .await
+            .expect("stale mount compensation must be bounded")
+            .expect("stale mount task");
+        assert_eq!(
+            stale_result.expect("superseded closed mount settles cleanly"),
+            prefix
+        );
+        let stopped = state
+            .workspace_entries()
+            .into_iter()
+            .find(|row| row.prefix == prefix)
+            .expect("registered stopped row");
+        assert!(!stopped.on);
+        assert_eq!(stopped.status, WorkspaceStatus::Stopped);
+        assert_eq!(stopped.token, "");
+        assert!(
+            !state.host.is_root_mounted(workspace.path()),
+            "stale startup resurrected the tenant"
+        );
+        assert_eq!(
+            std::fs::read(&layout_sentinel).expect("layout survives stale completion"),
+            b"preserve this layout"
+        );
+
+        let reopened = tokio::time::timeout(
+            Duration::from_secs(10),
+            state.set_workspace_on(&prefix, true, false),
+        )
+        .await
+        .expect("reopen must be bounded")
+        .expect("reopen");
+        let SetWorkspaceOnResult::Updated(Some(reopened)) = reopened else {
+            panic!("reopen did not return the running workspace row: {reopened:?}");
+        };
+        assert!(reopened.on);
+        assert_eq!(reopened.status, WorkspaceStatus::Running);
+        assert!(
+            state.host.is_root_mounted(workspace.path()),
+            "reopen did not reacquire the released writer lock"
+        );
+        assert_eq!(
+            std::fs::read(&layout_sentinel).expect("layout survives reopen"),
+            b"preserve this layout"
+        );
+
+        assert!(
+            state
+                .forget_workspace(&prefix, true)
+                .await
+                .expect("cleanup")
+                .completed(),
+            "cleanup did not remove the reopened workspace"
+        );
+    }
+
+    #[tokio::test]
+    async fn chan_close_remove_during_startup_forgets_metadata_preserves_source_and_reopens_fresh()
+    {
+        let home = tempfile::tempdir().expect("home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let source_sentinel = workspace.path().join("source-sentinel.md");
+        std::fs::write(&source_sentinel, b"# source survives\n").expect("seed source");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let prefix = allocate_workspace_prefix(workspace.path()).expect("workspace prefix");
+        let attempt = state
+            .begin_mount(workspace.path(), &prefix)
+            .expect("prepare mount")
+            .expect("fresh attempt");
+        state.persist_state();
+
+        let metadata = state
+            .host
+            .library()
+            .workspace_paths_for(workspace.path())
+            .expect("registered workspace metadata");
+        let layout_sentinel = metadata.sessions.join("removed-layout.json");
+        std::fs::write(&layout_sentinel, b"remove this layout").expect("seed layout");
+
+        let serialization = state.mount_attempt_lock.lock().await;
+        let mount_state = state.clone();
+        let mount = tokio::spawn(async move {
+            mount_state
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!mount.is_finished(), "mount escaped the startup barrier");
+        assert_eq!(
+            state.entry_for(&prefix).expect("starting row").status,
+            WorkspaceStatus::Starting
+        );
+
+        let removed = tokio::time::timeout(
+            Duration::from_secs(2),
+            state
+                .host
+                .remove_workspace_for_root(workspace.path(), false),
+        )
+        .await
+        .expect("chan close --remove must be bounded")
+        .expect("chan close --remove");
+        assert!(removed.completed());
+        assert!(
+            !mount.is_finished(),
+            "remove released the held mount attempt"
+        );
+        assert!(!state.host.is_root_mounted(workspace.path()));
+        assert!(
+            state.workspace_entries().is_empty(),
+            "removed workspace stayed visible"
+        );
+        assert!(
+            state.host.library().list_workspaces().is_empty(),
+            "removed workspace stayed registered"
+        );
+        assert!(
+            state
+                .host
+                .library()
+                .workspace_paths_for(workspace.path())
+                .is_none(),
+            "removed workspace retained a metadata identity"
+        );
+        assert!(
+            !layout_sentinel.exists(),
+            "remove retained the saved layout"
+        );
+        assert_eq!(
+            std::fs::read(&source_sentinel).expect("source survives remove"),
+            b"# source survives\n"
+        );
+
+        drop(serialization);
+        let stale_result = tokio::time::timeout(Duration::from_secs(10), mount)
+            .await
+            .expect("stale removed mount must settle")
+            .expect("stale mount task");
+        assert_eq!(
+            stale_result.expect("superseded removed mount settles cleanly"),
+            prefix
+        );
+        assert!(
+            state.entry_for(&prefix).is_none(),
+            "stale completion retained its internal tombstone"
+        );
+        assert!(
+            state.workspace_entries().is_empty(),
+            "stale completion resurrected the removed workspace"
+        );
+        assert!(!state.host.is_root_mounted(workspace.path()));
+        assert!(
+            !metadata.sessions.exists(),
+            "stale completion recreated removed session metadata"
+        );
+        assert_eq!(
+            std::fs::read(&source_sentinel).expect("source survives stale completion"),
+            b"# source survives\n"
+        );
+
+        let fresh_prefix = tokio::time::timeout(
+            Duration::from_secs(10),
+            state.register_workspace(workspace.path()),
+        )
+        .await
+        .expect("fresh reopen must be bounded")
+        .expect("fresh reopen");
+        assert_eq!(fresh_prefix, prefix);
+        assert!(state.host.is_root_mounted(workspace.path()));
+        let fresh_metadata = state
+            .host
+            .library()
+            .workspace_paths_for(workspace.path())
+            .expect("fresh metadata identity");
+        assert!(
+            !fresh_metadata.sessions.join("removed-layout.json").exists(),
+            "fresh reopen recovered removed layout state"
+        );
+        assert_eq!(
+            std::fs::read(&source_sentinel).expect("source survives fresh reopen"),
+            b"# source survives\n"
+        );
+
+        assert!(
+            state
+                .forget_workspace(&prefix, true)
+                .await
+                .expect("cleanup")
+                .completed(),
+            "cleanup did not remove the freshly reopened workspace"
         );
     }
 
