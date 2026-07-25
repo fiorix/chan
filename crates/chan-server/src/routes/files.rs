@@ -291,20 +291,10 @@ fn path_class_for_wire(
     }
 }
 
-/// Check the user-write bit on a workspace-relative path. Returns true when
-/// the path can't be safely resolved (matches read_text's own behavior
-/// of failing later) so we don't surface a misleading "locked" lamp on a
-/// path that's actually broken; callers get the real error from
-/// `read_text` instead.
-fn fs_writable(workspace: &chan_workspace::Workspace, rel: &str) -> bool {
-    let abs = match chan_workspace::fs_ops::resolve_safe_strict(workspace.root(), rel) {
-        Ok(p) => p,
-        Err(_) => return true,
-    };
-    match std::fs::symlink_metadata(&abs) {
-        Ok(m) => !m.permissions().readonly(),
-        Err(_) => true,
-    }
+/// Project the canonical strict write preflight onto read metadata.
+/// Every caller already runs on a blocking worker.
+fn workspace_path_writable(workspace: &chan_workspace::Workspace, rel: &str) -> bool {
+    workspace.ensure_writable(rel).is_ok()
 }
 
 fn read_file_sync(
@@ -336,7 +326,7 @@ fn read_file_sync(
             content,
             mtime: stat.mtime,
             mtime_ns: stat.mtime_ns,
-            writable: fs_writable(workspace, path),
+            writable: workspace_path_writable(workspace, path),
             path_class: path_class_for_wire(workspace, path),
         }),
         Err(chan_workspace::ChanError::NotEditableText(_)) => {
@@ -381,7 +371,7 @@ where
                     mtime: stat.mtime,
                     mtime_ns: stat.mtime_ns.map(|ns| ns.to_string()),
                     path_class: path_class_for_wire(workspace, path),
-                    writable: fs_writable(workspace, path),
+                    writable: workspace_path_writable(workspace, path),
                 },
                 chan_workspace::TextReadEvent::Chunk(content) => FileStreamEvent::Chunk {
                     content,
@@ -720,7 +710,10 @@ async fn read_via_session(
     let ws = workspace.clone();
     let rel = path.to_string();
     let meta = tokio::task::spawn_blocking(move || {
-        (path_class_for_wire(&ws, &rel), fs_writable(&ws, &rel))
+        (
+            path_class_for_wire(&ws, &rel),
+            workspace_path_writable(&ws, &rel),
+        )
     })
     .await;
     let (path_class, writable) = match meta {
@@ -1502,11 +1495,7 @@ fn replace_file_sync(
             "not a file: {trimmed}"
         )));
     }
-    // Pre-flight: the parent directory is writable before overwriting, so a
-    // failed replace writes nothing.
-    let abs = workspace.root().join(trimmed);
-    let parent = abs.parent().unwrap_or_else(|| workspace.root());
-    crate::routes::transfer::verify_writable_dir(parent).map_err(chan_workspace::ChanError::Io)?;
+    workspace.ensure_writable(trimmed)?;
     workspace.write_bytes(trimmed, bytes)?;
     Ok(UploadFileResponse {
         path: trimmed.to_string(),
@@ -1529,20 +1518,12 @@ fn upload_file_sync(
             )));
         }
     }
-    // Pre-flight: the destination directory is writable before any write, so a
-    // failed upload writes nothing (fail fast, no partial file).
-    let abs_dir = if dir.is_empty() {
-        workspace.root().to_path_buf()
-    } else {
-        workspace.root().join(&dir)
-    };
-    crate::routes::transfer::verify_writable_dir(&abs_dir)
-        .map_err(chan_workspace::ChanError::Io)?;
     let filename = upload_leaf_filename(original_name)?;
     let rel = join_rel(&dir, &filename);
     if create_target_exists(workspace, &rel) {
         return Err(chan_workspace::ChanError::PathAlreadyExists(rel));
     }
+    workspace.ensure_writable(&rel)?;
     workspace.write_bytes(&rel, bytes)?;
     Ok(UploadFileResponse {
         path: rel,
@@ -1572,7 +1553,7 @@ mod file_browser_listing_tests {
     use super::{
         append_dir_to_archive, create_target_exists, download_path_sync, list_dir_entries,
         list_files_sync, replace_file_sync, upload_file_sync, upload_leaf_filename,
-        DownloadPayload, ListFilesQuery,
+        workspace_path_writable, DownloadPayload, ListFilesQuery,
     };
 
     #[test]
@@ -1727,7 +1708,7 @@ mod file_browser_listing_tests {
 
     #[cfg(unix)]
     #[test]
-    fn upload_file_sync_preflights_an_unwritable_destination() {
+    fn canonical_preflight_rejects_an_unwritable_upload_destination() {
         use std::os::unix::fs::PermissionsExt;
         let cfg = tempfile::TempDir::new().unwrap();
         let root = tempfile::TempDir::new().unwrap();
@@ -1737,20 +1718,37 @@ mod file_browser_listing_tests {
         workspace.create_dir("locked").unwrap();
         let locked = root.path().join("locked");
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
-        // Root bypasses directory write bits; skip the assertion then (and
-        // restore perms so the TempDir can clean up).
-        if tempfile::Builder::new().tempfile_in(&locked).is_ok() {
-            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
-            return;
-        }
         let err = upload_file_sync(&workspace, "locked", "x.txt", b"data").unwrap_err();
         let message = err.to_string();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(message.contains("not writable"), "{message}");
+        assert!(message.contains("read-only"), "{message}");
         assert!(
             !root.path().join("locked/x.txt").exists(),
             "a rejected upload writes nothing"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_metadata_projects_the_canonical_preflight() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        workspace.write_text("note.md", "old").unwrap();
+        workspace.create_dir("notes").unwrap();
+
+        assert!(workspace_path_writable(&workspace, "note.md"));
+        assert!(!workspace_path_writable(&workspace, "notes"));
+
+        let note = root.path().join("note.md");
+        std::fs::set_permissions(&note, std::fs::Permissions::from_mode(0o444)).unwrap();
+        assert!(!workspace_path_writable(&workspace, "note.md"));
+
+        std::fs::set_permissions(&note, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
 
     #[test]

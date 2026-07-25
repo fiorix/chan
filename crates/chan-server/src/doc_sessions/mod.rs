@@ -125,6 +125,8 @@ pub struct DocSession {
     /// interleave. Acquired before any state lock, held across the
     /// blocking-IO awaits; see the module doc.
     io_lock: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    fail_after_preflight: AtomicBool,
 }
 
 struct AttachSink {
@@ -598,6 +600,8 @@ impl DocSession {
             detached_at: AtomicI64::new(0),
             closed: AtomicBool::new(false),
             io_lock: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            fail_after_preflight: AtomicBool::new(false),
         }
     }
 
@@ -637,6 +641,11 @@ impl DocSession {
     #[cfg(test)]
     pub(crate) fn test_force_conflict(&self, disk_text: String, stat: &FileStat) {
         self.apply_merge_outcome(disk_text, stat, MergeOutcome::Conflict);
+    }
+
+    #[cfg(test)]
+    fn test_fail_after_preflight(&self) {
+        self.fail_after_preflight.store(true, Ordering::Relaxed);
     }
 
     /// Current authority text plus the session CAS token, for the GET
@@ -1506,22 +1515,39 @@ async fn flush_session_locked(
                 .conflict_disk_mtime_ns()
                 .is_none();
         };
-        // Reserve suppression before the blocking write so an
-        // immediate watcher event cannot escape. The strict preflight
-        // keeps known-refused writes out of the ring; failures after
-        // reservation cancel it below.
-        let self_write = match self_writes.reserve_if_writable(workspace, &session.path) {
-            Ok(reservation) => reservation,
-            Err(e) => {
+        // The canonical strict write preflight performs filesystem
+        // syscalls, so keep the whole probe off the async runtime.
+        // Reserve only after it succeeds; every later failure cancels.
+        let ws = Arc::clone(workspace);
+        let preflight_path = session.path.clone();
+        match tokio::task::spawn_blocking(move || ws.ensure_writable(&preflight_path)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
                 session.note_flush_failure(e.to_string());
                 return false;
             }
-        };
+            Err(join) => {
+                session.note_flush_failure(join.to_string());
+                return false;
+            }
+        }
+        let self_write = self_writes.reserve_after_preflight(&session.path);
         let flushed_content = job.text.clone();
         let ws = Arc::clone(workspace);
         let path = session.path.clone();
         let epoch = job.epoch;
+        #[cfg(test)]
+        let test_session = Arc::clone(session);
         let result = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if test_session
+                .fail_after_preflight
+                .swap(false, Ordering::Relaxed)
+            {
+                let target = ws.root().join(&path);
+                let _ = std::fs::remove_file(&target);
+                let _ = std::fs::create_dir(&target);
+            }
             match ws.write_text_if_unchanged(&path, job.expected_mtime_ns, &job.text) {
                 Ok(()) => (true, ws.stat(&path)),
                 Err(e) => (false, Err(e)),
@@ -2747,6 +2773,10 @@ mod tests {
         // The conflict defers to corroboration: nothing merged yet, no
         // failure fanned, the divergent observation parked.
         assert!(!settled, "deferred fold-in is not a settled flush");
+        assert!(
+            !fx.self_writes.should_suppress("a.md"),
+            "the CAS-conflict arm must cancel its reservation"
+        );
         assert_eq!(ha.session().authority_view().0, "base typed");
         assert_eq!(drain(&mut rxa).len(), 0, "no fan while parked");
         {
@@ -2846,39 +2876,36 @@ mod tests {
         assert_eq!(ha.session().authority_view().0.len(), smaller.len());
     }
 
-    #[cfg(unix)]
     #[tokio::test]
-    async fn flush_session_reports_failure_and_success() {
-        use std::os::unix::fs::PermissionsExt;
-
+    async fn post_preflight_write_failure_cancels_suppression() {
         let fx = fixture(&[("a.md", "x")]);
         let (ha, mut rxa) = attach(&fx, "a.md", "w1", None).await;
         drain(&mut rxa);
         ha.push(0, vec![update("c1", json!([1, [0, "y"]]))])
             .unwrap();
 
-        // A read-only workspace root makes the atomic write's tempfile
-        // creation fail: a non-CAS flush error.
-        let root = fx.root.path();
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // The strict preflight succeeds, then the hook replaces the
+        // target with a directory inside the blocking write task.
+        ha.session().test_fail_after_preflight();
         let ok = flush_session(ha.session(), &fx.workspace, &fx.self_writes).await;
         assert!(
             !fx.self_writes.should_suppress("a.md"),
-            "a failed flush must not poison watcher suppression"
+            "a post-preflight failure must cancel watcher suppression"
         );
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(!ok, "failed write must report false");
         {
             let st = ha.session().lock_state();
             assert!(st.session_state.is_dirty(), "content stays dirty in memory");
         }
-        assert_eq!(fx.workspace.read_text("a.md").unwrap(), "x");
+        assert!(fx.root.path().join("a.md").is_dir());
 
-        // Writable again: the same call commits and reports true; a
-        // clean session is also true (already durable).
+        // Restore the disk side and its CAS token; the retained
+        // authority then commits normally.
+        std::fs::remove_dir(fx.root.path().join("a.md")).unwrap();
+        fx.workspace.write_text("a.md", "x").unwrap();
+        ha.session().lock_state().flushed_mtime_ns = fx.workspace.stat("a.md").unwrap().mtime_ns;
         assert!(flush_session(ha.session(), &fx.workspace, &fx.self_writes).await);
         assert_eq!(fx.workspace.read_text("a.md").unwrap(), "xy");
-        assert!(flush_session(ha.session(), &fx.workspace, &fx.self_writes).await);
     }
 
     #[tokio::test]

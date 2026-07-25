@@ -11,11 +11,10 @@
 //! handlers -- mounted only on the terminal tenant -- re-root that path at `/` and
 //! read or write it directly, so no SPA change is needed.
 //!
-//! Both directions pre-flight access before doing any work (fail fast, no
-//! partial artifact): download verifies the source tree is readable before
-//! building the tarball; upload verifies the destination directory is writable
-//! before writing. [`verify_writable_dir`] also backs the workspace upload path
-//! in `files.rs`.
+//! Downloads pre-flight readability before building the tarball.
+//! Terminal uploads rely on their atomic writer as the authoritative
+//! writability check; workspace uploads use
+//! `Workspace::ensure_writable`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -71,24 +70,6 @@ pub(crate) fn verify_readable_fs(abs: &Path) -> Result<(), String> {
             .map(|_| ())
             .map_err(|e| format!("cannot read {}: {e}", abs.display()))
     }
-}
-
-/// Pre-flight for upload: `dir` exists, is a directory, and accepts a new
-/// entry. The writability check probes with a temp file it removes immediately
-/// -- the only check that also catches read-only mounts and ACLs a mode-bit test
-/// misses, and the same operation `atomic_write` performs on every real write.
-/// On failure nothing is written, so the caller can bail before transferring.
-pub(crate) fn verify_writable_dir(dir: &Path) -> Result<(), String> {
-    let meta = std::fs::metadata(dir)
-        .map_err(|e| format!("cannot access destination {}: {e}", dir.display()))?;
-    if !meta.is_dir() {
-        return Err(format!("destination is not a directory: {}", dir.display()));
-    }
-    tempfile::Builder::new()
-        .prefix(".chan-upload-check-")
-        .tempfile_in(dir)
-        .map(|_| ())
-        .map_err(|e| format!("destination is not writable: {} ({e})", dir.display()))
 }
 
 /// A `std::io::Write` that forwards each tar chunk to a streaming HTTP body
@@ -298,9 +279,6 @@ fn terminal_upload_sync(
     original_name: &str,
     bytes: &[u8],
 ) -> Result<TerminalUploadResponse, String> {
-    // Pre-flight: bail before consuming-to-disk if the destination is not a
-    // writable directory (write nothing on failure).
-    verify_writable_dir(abs_dir)?;
     let leaf = upload_leaf_filename(original_name).map_err(|e| e.to_string())?;
     let target = abs_dir.join(&leaf);
     if target.exists() {
@@ -349,20 +327,6 @@ mod tests {
     }
 
     #[test]
-    fn verify_writable_dir_rejects_a_nondirectory_and_missing_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("f");
-        std::fs::write(&file, b"x").unwrap();
-        assert!(verify_writable_dir(dir.path()).is_ok());
-
-        let not_dir = verify_writable_dir(&file).unwrap_err();
-        assert!(not_dir.contains("not a directory"), "{not_dir}");
-
-        let missing = verify_writable_dir(&dir.path().join("gone")).unwrap_err();
-        assert!(missing.contains("cannot access destination"), "{missing}");
-    }
-
-    #[test]
     fn terminal_upload_writes_into_dir_and_refuses_existing_target() {
         let dir = tempfile::tempdir().unwrap();
         let resp = terminal_upload_sync(dir.path(), "note.txt", b"hello").unwrap();
@@ -389,10 +353,12 @@ mod tests {
         std::fs::write(&as_file, b"x").unwrap();
         let under_file = as_file.join("sub");
         let e = terminal_upload_sync(&under_file, "x.txt", b"data").unwrap_err();
+        let lower = e.to_ascii_lowercase();
         assert!(
-            e.contains("cannot access destination") || e.contains("not a directory"),
+            lower.contains("cannot access destination") || lower.contains("not a directory"),
             "{e}"
         );
+        assert_eq!(std::fs::read(&as_file).unwrap(), b"x");
     }
 
     #[cfg(unix)]

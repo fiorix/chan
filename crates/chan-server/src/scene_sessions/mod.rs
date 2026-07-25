@@ -115,6 +115,8 @@ pub struct SceneSession {
     /// interleave. Acquired before any state lock, held across the
     /// blocking-IO awaits; see the module doc.
     io_lock: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    fail_after_preflight: AtomicBool,
 }
 
 struct AttachSink {
@@ -538,6 +540,8 @@ impl SceneSession {
             detached_at: AtomicI64::new(0),
             closed: AtomicBool::new(false),
             io_lock: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            fail_after_preflight: AtomicBool::new(false),
         }
     }
 
@@ -577,6 +581,11 @@ impl SceneSession {
     #[cfg(test)]
     pub(crate) fn test_force_conflict(&self, disk_text: String, stat: &FileStat) {
         self.apply_merge_outcome(disk_text, stat, MergeOutcome::Conflict);
+    }
+
+    #[cfg(test)]
+    fn test_fail_after_preflight(&self) {
+        self.fail_after_preflight.store(true, Ordering::Relaxed);
     }
 
     /// Current authority scene in its file form plus the session CAS
@@ -1407,22 +1416,39 @@ async fn flush_session_locked(
                 .conflict_disk_mtime_ns()
                 .is_none();
         };
-        // Reserve suppression before the blocking write so an
-        // immediate watcher event cannot escape. The strict preflight
-        // keeps known-refused writes out of the ring; failures after
-        // reservation cancel it below.
-        let self_write = match self_writes.reserve_if_writable(workspace, &session.path) {
-            Ok(reservation) => reservation,
-            Err(e) => {
+        // The canonical strict write preflight performs filesystem
+        // syscalls, so keep the whole probe off the async runtime.
+        // Reserve only after it succeeds; every later failure cancels.
+        let ws = Arc::clone(workspace);
+        let preflight_path = session.path.clone();
+        match tokio::task::spawn_blocking(move || ws.ensure_writable(&preflight_path)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
                 session.note_flush_failure(e.to_string());
                 return false;
             }
-        };
+            Err(join) => {
+                session.note_flush_failure(join.to_string());
+                return false;
+            }
+        }
+        let self_write = self_writes.reserve_after_preflight(&session.path);
         let flushed_content = job.text.clone();
         let ws = Arc::clone(workspace);
         let path = session.path.clone();
         let epoch = job.epoch;
+        #[cfg(test)]
+        let test_session = Arc::clone(session);
         let result = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if test_session
+                .fail_after_preflight
+                .swap(false, Ordering::Relaxed)
+            {
+                let target = ws.root().join(&path);
+                let _ = std::fs::remove_file(&target);
+                let _ = std::fs::create_dir(&target);
+            }
             match ws.write_text_if_unchanged(&path, job.expected_mtime_ns, &job.text) {
                 Ok(()) => (true, ws.stat(&path)),
                 Err(e) => (false, Err(e)),
@@ -1564,8 +1590,9 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
             // they remain after expiry, they are durable external
             // state and must fold normally.
             st.flushed_mtime_ns = disk_stat.mtime_ns;
-            let authority_hash = content_hash(&st.scene.serialize_file());
-            if hash == authority_hash {
+            let disk_matches_authority = Scene::parse(&disk_text)
+                .is_ok_and(|scene| scene.serialize_file() == st.scene.serialize_file());
+            if disk_matches_authority {
                 st.session_state.clear_observation();
             } else if !matches!(
                 st.session_state.content_observation(),
@@ -2413,6 +2440,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn formatting_only_ring_echo_clears_the_disk_observation() {
+        let compact = body(json!([elem("x", 1, 1, "a1")]));
+        let fx = fixture(&[("b.excalidraw", &compact)]);
+        let (ha, mut rx) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rx);
+        std::fs::write(fx.root.path().join("b.excalidraw"), &compact).unwrap();
+        ha.session().lock_state().flushed_mtime_ns = None;
+
+        reconcile_session(ha.session(), &fx.workspace).await;
+
+        assert!(
+            ha.session()
+                .lock_state()
+                .session_state
+                .content_observation()
+                .is_none(),
+            "semantically equal scene formatting must settle the echo"
+        );
+    }
+
+    #[tokio::test]
     async fn reconcile_merges_hand_edits_with_bumped_versions() {
         let fx = fixture(&[("b.excalidraw", &body(json!([elem("x", 5, 10, "a1")])))]);
         let (ha, mut rxa) = attach(&fx, "b.excalidraw", "w1").await;
@@ -2636,6 +2684,10 @@ mod tests {
         // The conflict defers to corroboration: nothing merged yet, no
         // failure fanned, the divergent observation parked.
         assert!(!settled, "deferred fold-in is not a settled flush");
+        assert!(
+            !fx.self_writes.should_suppress("b.excalidraw"),
+            "the CAS-conflict arm must cancel its reservation"
+        );
         assert_eq!(drain(&mut rxa).len(), 0, "no fan while parked");
         {
             let st = ha.session().lock_state();
@@ -2924,29 +2976,34 @@ mod tests {
         assert_eq!(types(&drain(&mut rxa)), ["update"]);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
-    async fn failed_flush_does_not_poison_watcher_suppression() {
-        use std::os::unix::fs::PermissionsExt;
-
+    async fn post_preflight_write_failure_cancels_suppression() {
         let fx = fixture(&[("b.excalidraw", &body(json!([])))]);
         let (ha, mut rxa) = attach(&fx, "b.excalidraw", "w1").await;
         drain(&mut rxa);
         ha.push(vec![elem("x", 1, 1, "a1")], None, None).unwrap();
 
-        let root = fx.root.path();
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // The strict preflight succeeds, then the hook replaces the
+        // target with a directory inside the blocking write task.
+        ha.session().test_fail_after_preflight();
         let ok = flush_session(ha.session(), &fx.workspace, &fx.self_writes).await;
         assert!(
             !fx.self_writes.should_suppress("b.excalidraw"),
-            "a failed flush must not poison watcher suppression"
+            "a post-preflight failure must cancel watcher suppression"
         );
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(!ok, "failed write must report false");
         assert!(
             ha.session().lock_state().session_state.is_dirty(),
             "authority remains dirty"
         );
+        assert!(fx.root.path().join("b.excalidraw").is_dir());
+
+        std::fs::remove_dir(fx.root.path().join("b.excalidraw")).unwrap();
+        fx.workspace
+            .write_text("b.excalidraw", &body(json!([])))
+            .unwrap();
+        ha.session().lock_state().flushed_mtime_ns =
+            fx.workspace.stat("b.excalidraw").unwrap().mtime_ns;
         assert!(flush_session(ha.session(), &fx.workspace, &fx.self_writes).await);
     }
 

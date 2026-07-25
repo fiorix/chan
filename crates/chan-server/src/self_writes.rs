@@ -29,8 +29,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use chan_workspace::{ChanError, Workspace};
-
 /// How long after a self-write the matching watcher event(s) are
 /// suppressed. notify's coalesced delivery is well under 500 ms in
 /// practice; 1500 ms is comfortable headroom for slow IO + a busy
@@ -140,20 +138,6 @@ impl SelfWrites {
     /// `WatchEvent.path` is also workspace-relative.
     pub fn note(&self, rel: &str) {
         self.reserve(rel);
-    }
-
-    /// Verify that an atomic replacement can create its temporary
-    /// file, then reserve watcher suppression before the real write.
-    /// The caller cancels the reservation if the write later fails.
-    pub(crate) fn reserve_if_writable(
-        &self,
-        workspace: &Workspace,
-        rel: &str,
-    ) -> chan_workspace::Result<SelfWriteReservation> {
-        let target = workspace.resolve_physical_path(rel)?;
-        let parent = target.parent().ok_or(ChanError::PathEmpty)?;
-        crate::routes::transfer::verify_writable_dir(parent).map_err(ChanError::Io)?;
-        Ok(self.reserve(rel))
     }
 
     /// Reserve after the caller has completed the canonical strict
