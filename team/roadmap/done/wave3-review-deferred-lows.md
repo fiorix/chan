@@ -1,5 +1,7 @@
 # Wave-3 review: deferred LOW findings from v0.76.0
 
+> Status: shipped in [v0.77.0](../../release/release-v0.77.0.md): (1) recovery sidecars coalesce on the flusher tick off push acknowledgements; (2) conflicted document and scene recovery collapses when disk matches authority or baseline; (3) desired systemd units stay typed while inherited AppImage trust accepts only chan-named AppImages; (4) generated desktop sinks are window-owned and canonical stale foreign temporaries are reaped at startup; (5) the 64 KiB generated-download chunk size is documented and pinned as a client-cooperative contract, while raw-frame pre-materialization enforcement did not ship; and (6) escaped literal gitignore components extend the fixed pruning prefix.
+
 Six LOW-severity findings from the v0.76.0 wave-3 adversarial review (each confirmed by skeptic-verify, none of which drops user data) were deferred rather than fixed in that round. They are accepted v0.77.0 scope. The v0.76.0 release report records the triage; the full finding text is in that round's `dev/v0.76.0/team/review-wave3-findings.md`.
 
 ## Items

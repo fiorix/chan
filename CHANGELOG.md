@@ -17,13 +17,19 @@ v0.77.0 makes workspace lifecycle, persistence, and collaboration failures expli
 
 - **Collaborative session state has one private lifecycle core.** Document and scene sessions share only their identical state and HTTP views; their merge engines, wire protocols, recovery payloads, and domain authority remain separate.
 - **Workspace session blobs are opaque.** Workspace open no longer parses or prunes host-owned session JSON, and compatibility-only configuration, route, environment, launcher, and watcher paths are removed.
-- **Team terminals yield to queued work.** Generated team bootstrap guidance requires real quiet turn breaks so queued terminal notifications can drain without polling or sleeps.
+- **Editor recovery sidecars are coalesced off push acknowledgements.** Accepted document and scene pushes mark recovery pending for the existing flusher tick instead of awaiting recovery serialization and fsyncs before the acknowledgement can drain.
+- **Generated desktop chunks have a cooperative 64 KiB contract.** The Rust command limit is pinned to both SPA chunk producers, while the documentation states plainly that Tauri materializes each JSON frame before Rust can reject an oversized chunk.
+- **Team terminals yield only for actual queued work.** Generated team bootstraps require a real turn break when input is pending or a just-received burst may still be arriving, but direct an agent with an empty queue and a defined next step to continue instead of stalling.
 
 ### Fixed
 
 - **Reset and configuration races are bounded.** Workspace reset returns retryable contention instead of blocking Tokio workers, terminal and devserver persistence use unique durable temporary files, dashboard updates serialize, and revisioned partial preference writes cannot silently lose another window's fields.
 - **Hosted shutdown owns its tasks.** Normal shutdown cooperatively joins document, scene, terminal, and reconciliation work to one deadline, then aborts and awaits stragglers before clearing the workspace generation.
 - **Independent edits on one line merge.** Bounded Unicode-scalar conflict retries merge non-overlapping inline edits while retaining genuine overlaps for explicit resolution.
+- **Resolved collaboration conflicts stay resolved after restart.** Recovered document and scene conflicts collapse to clean when disk matches authority or dirty when disk matches the durable baseline, avoiding a false repeat prompt while preserving the authority's CAS-guarded flush path.
+- **Supervisor executable trust stays scoped to chan.** Desired systemd units remain typed instead of passing through installed-text executable-name heuristics, exact desired legacy commands can still migrate, foreign or administrator-edited units remain refused, and an inherited `APPIMAGE` is accepted only for chan-named AppImage basenames.
+- **Generated desktop downloads are window-owned and reaped.** Append and finish operations reject handles owned by another window, window destruction drops matching whole sinks, and startup removes only canonical foreign generated-download temporaries older than one hour without recursion.
+- **Escaped gitignore negations retain their literal fixed prefix.** Fully consumed escaped path components now narrow traversal through configured exclusions, while wildcards and dangling escapes still stop at the last proven literal prefix.
 - **Workspace close wins during startup.** `chan close` and `chan close --remove` cannot be undone by a stale startup completion, and immediate reopen preserves the intended registration semantics.
 - **A removed workspace root fails closed.** Existing views converge to an unavailable state, dirty editor buffers remain in memory, and new files, drafts, terminals, graphs, and file browsers fail without recreating the root.
 

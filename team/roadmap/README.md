@@ -19,12 +19,6 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-### v0.77.0
-
-| item | state | what needs to happen |
-| --- | --- | --- |
-| [wave3-review-deferred-lows](v0.77.0/wave3-review-deferred-lows.md) | six LOW findings from the v0.76.0 wave-3 adversarial review (none drop user data); all six re-verified against the live tree and still reachable | debounce editor recovery off the ack path; collapse a resolved Conflicted session on rehydrate; derive chan's own systemd unit from the trusted renderer; reap desktop generated-download temps on window teardown; bound the desktop chunk frame before materializing; decode escaped leading gitignore path components |
-
 ### v0.78.0
 
 | item | state | what needs to happen |
@@ -32,6 +26,12 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [video-preview-and-range-serving](v0.78.0/video-preview-and-range-serving.md) | registered, grounded but not specced | spec first; the real chunk is HTTP range/206 in the file route (mirrors the image path on the frontend) |
 
 ## Completed
+
+### v0.77.0
+
+Shipped 2026-07-25; see [release-v0.77.0](../release/release-v0.77.0.md). Closed items in [`done/`](done/):
+
+- [wave3-review-deferred-lows](done/wave3-review-deferred-lows.md) - six LOW findings closed: recovery sidecars off push acknowledgements, resolved recovery collapse, typed systemd desired units plus inherited-AppImage trust, window-owned generated-download cleanup and stale reaping, the documented and pinned client-cooperative 64 KiB chunk contract, and escaped-literal gitignore pruning.
 
 ### v0.76.0
 
