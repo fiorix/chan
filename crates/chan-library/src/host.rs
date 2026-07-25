@@ -3539,9 +3539,13 @@ mod tests {
     async fn close_for_root_accepts_registered_starting_before_runtime_lands() {
         let cfg = tempfile::tempdir().expect("config dir");
         let root = tempfile::tempdir().expect("workspace");
-        let key = root.path().to_string_lossy().into_owned();
         let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
-        lib.register_workspace(root.path()).expect("register");
+        let key = lib
+            .register_workspace(root.path())
+            .expect("register")
+            .root_path
+            .to_string_lossy()
+            .into_owned();
         let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
         let overlay = Arc::new(WorkspaceOverlay::open(cfg.path().join("workspaces.json")));
         overlay.set(&key, true);
@@ -3628,12 +3632,14 @@ mod tests {
         let cfg = tempfile::tempdir().expect("config dir");
         let root = tempfile::tempdir().expect("workspace");
         let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
-        lib.register_workspace(root.path()).expect("register");
+        let key = lib
+            .register_workspace(root.path())
+            .expect("register")
+            .root_path
+            .to_string_lossy()
+            .into_owned();
         let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
 
-        // The overlay key is the as-passed root string (not canonicalized), so
-        // set and assert against the same string the close receives.
-        let key = root.path().to_string_lossy().into_owned();
         let overlay = Arc::new(WorkspaceOverlay::open(cfg.path().join("workspaces.json")));
         overlay.set(&key, true);
         host.install_workspace_overlay(Arc::clone(&overlay));
@@ -3657,7 +3663,7 @@ mod tests {
     async fn host_wide_shutdown_drains_all_tenant_kinds_concurrently_and_preserves_overlay() {
         let cfg = tempfile::tempdir().expect("config dir");
         let root = tempfile::tempdir().expect("workspace");
-        let key = root.path().to_string_lossy().into_owned();
+        let key = canonical_key(root.path()).to_string_lossy().into_owned();
         let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
         let host = WorkspaceHost::new(library, fake_builder());
         let overlay = Arc::new(WorkspaceOverlay::open(cfg.path().join("workspaces.json")));
@@ -3717,10 +3723,14 @@ mod tests {
         let cfg = tempfile::tempdir().expect("config dir");
         let root = tempfile::tempdir().expect("workspace");
         let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
-        lib.register_workspace(root.path()).expect("register");
+        let key = lib
+            .register_workspace(root.path())
+            .expect("register")
+            .root_path
+            .to_string_lossy()
+            .into_owned();
         let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
 
-        let key = root.path().to_string_lossy().into_owned();
         let overlay = Arc::new(WorkspaceOverlay::open(cfg.path().join("workspaces.json")));
         overlay.set(&key, true);
         host.install_workspace_overlay(Arc::clone(&overlay));
@@ -3933,9 +3943,13 @@ mod tests {
     async fn close_for_root_waits_for_inflight_registration_then_unmounts() {
         let cfg = tempfile::tempdir().expect("config dir");
         let root = tempfile::tempdir().expect("workspace");
-        let key = root.path().to_string_lossy().into_owned();
         let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
-        lib.register_workspace(root.path()).expect("register");
+        let key = lib
+            .register_workspace(root.path())
+            .expect("register")
+            .root_path
+            .to_string_lossy()
+            .into_owned();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let release = Arc::new(tokio::sync::Semaphore::new(0));
         let host = Arc::new(WorkspaceHost::new(
@@ -3992,7 +4006,7 @@ mod tests {
         std::fs::create_dir(&root).expect("workspace");
         std::fs::write(root.join("note.md"), "# still booting\n").expect("seed workspace");
         let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
-        lib.register_workspace(&root).expect("register");
+        let registered_root = lib.register_workspace(&root).expect("register").root_path;
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let release = Arc::new(tokio::sync::Semaphore::new(0));
         let host = Arc::new(WorkspaceHost::new(
@@ -4027,7 +4041,8 @@ mod tests {
         assert!(
             matches!(
                 error,
-                Error::Core(ChanError::WorkspaceRootMissing(ref missing)) if missing == &root
+                Error::Core(ChanError::WorkspaceRootMissing(ref missing))
+                    if missing == &registered_root
             ),
             "unexpected mount error: {error}"
         );

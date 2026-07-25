@@ -8152,9 +8152,11 @@ mod tests {
         std::fs::create_dir_all(&alpha).unwrap();
         std::fs::create_dir_all(&beta).unwrap();
         let lib = Library::open_at(config.path().join("config.toml")).unwrap();
-        lib.register_workspace_with_name(&alpha, Some("Shared".into()))
+        let alpha_known = lib
+            .register_workspace_with_name(&alpha, Some("Shared".into()))
             .unwrap();
-        lib.register_workspace_with_name(&beta, Some("shared".into()))
+        let beta_known = lib
+            .register_workspace_with_name(&beta, Some("shared".into()))
             .unwrap();
         let targets = WorkspaceTargets {
             workspaces: vec!["SHARED".into()],
@@ -8166,8 +8168,12 @@ mod tests {
         assert!(selected.is_empty());
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].code, "ambiguous_workspace");
-        assert!(errors[0].message.contains(&alpha.display().to_string()));
-        assert!(errors[0].message.contains(&beta.display().to_string()));
+        assert!(errors[0]
+            .message
+            .contains(&alpha_known.root_path.display().to_string()));
+        assert!(errors[0]
+            .message
+            .contains(&beta_known.root_path.display().to_string()));
     }
 
     #[test]

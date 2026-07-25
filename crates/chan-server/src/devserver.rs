@@ -2851,6 +2851,7 @@ mod tests {
             .begin_mount(&workspace, &prefix)
             .expect("prepare mount")
             .expect("fresh attempt");
+        let registered_root = attempt.root.clone();
         state.persist_state();
 
         let serialization = state.mount_attempt_lock.lock().await;
@@ -2883,7 +2884,7 @@ mod tests {
             matches!(
                 error,
                 Error::Core(chan_workspace::ChanError::WorkspaceRootMissing(ref missing))
-                    if missing == &workspace
+                    if missing == &registered_root
             ),
             "unexpected mount error: {error}"
         );
@@ -2898,12 +2899,17 @@ mod tests {
             "root-missing reason was not operator-visible: {:?}",
             failed.error
         );
-        assert!(!state.host.is_root_mounted(&workspace));
+        // Host and registry lookups resolve the caller path against the
+        // registered root, and a deleted root can no longer canonicalize -- so
+        // these must ask with the registered root. Asking with the raw path
+        // would answer "not mounted" and "not registered" for a workspace that
+        // is both, turning the mount assertion into a tautology.
+        assert!(!state.host.is_root_mounted(&registered_root));
         assert!(
             state
                 .host
                 .library()
-                .workspace_paths_for(&workspace)
+                .workspace_paths_for(&registered_root)
                 .is_some(),
             "failed startup unexpectedly unregistered the workspace"
         );

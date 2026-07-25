@@ -1877,10 +1877,10 @@ mod file_browser_listing_tests {
     fn list_files_sync_distinguishes_missing_root_from_empty_workspace() {
         let cfg = tempfile::TempDir::new().unwrap();
         let root = tempfile::TempDir::new().unwrap();
-        let root_path = root.path().to_path_buf();
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
-        lib.register_workspace(&root_path).unwrap();
-        let workspace = lib.open_workspace(&root_path).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        let root_path = workspace.root().to_path_buf();
         std::fs::remove_dir_all(&root_path).expect("remove harness-owned workspace");
 
         let error = match list_files_sync(

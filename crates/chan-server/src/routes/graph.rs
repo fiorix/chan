@@ -2494,8 +2494,8 @@ mod tests {
 
     #[test]
     fn graph_refuses_missing_workspace_root_instead_of_serving_stale_index() {
-        let (_cfg, root, workspace) = open_workspace();
-        let root_path = root.path().to_path_buf();
+        let (_cfg, _root, workspace) = open_workspace();
+        let root_path = workspace.root().to_path_buf();
         workspace.write_text("notes/a.md", "# A\n").unwrap();
         workspace.index_file("notes/a.md").unwrap();
         std::fs::remove_dir_all(&root_path).expect("remove harness-owned workspace");

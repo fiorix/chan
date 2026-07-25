@@ -1781,7 +1781,7 @@ mod tests {
         assert_eq!(outside_abs.as_deref(), Some(outside_wire.as_str()));
         assert_eq!(outside_rel, None);
 
-        let missing = root.path().join("removed-cwd");
+        let missing = workspace.root().join("removed-cwd");
         assert!(!missing.exists());
         let (missing_abs, missing_rel) =
             terminal_cwd_payload(Some(&workspace), Some(missing.clone()));

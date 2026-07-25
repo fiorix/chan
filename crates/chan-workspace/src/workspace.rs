@@ -5610,7 +5610,7 @@ mod tests {
         let workspace_dir = TempDir::new().unwrap();
         let root = workspace_dir.path();
         let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
-        lib.register_workspace(root).unwrap();
+        let registered_root = lib.register_workspace(root).unwrap().root_path;
         std::fs::write(root.join("a.md"), "# A\nbody\n").unwrap();
         let paths = lib.workspace_paths_for(root).unwrap();
         std::fs::create_dir_all(&paths.graph_dir).unwrap();
@@ -5622,7 +5622,7 @@ mod tests {
 
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        arm_open_rebuild_probe(root.to_path_buf(), started_tx, release_rx);
+        arm_open_rebuild_probe(registered_root, started_tx, release_rx);
         let workspace = lib.open_workspace(root).unwrap();
         started_rx
             .recv_timeout(Duration::from_secs(30))
@@ -6319,7 +6319,7 @@ mod tests {
         let workspace_dir = TempDir::new().unwrap();
         let root = workspace_dir.path();
         let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
-        lib.register_workspace(root).unwrap();
+        let registered_root = lib.register_workspace(root).unwrap().root_path;
 
         let workspace = lib.open_workspace(root).unwrap();
         for index in 0..128 {
@@ -6371,7 +6371,7 @@ mod tests {
         fs::remove_file(root.join("removed.md")).unwrap();
 
         let (probe_tx, probe_rx) = std::sync::mpsc::channel();
-        arm_open_recovery_probe(root.to_path_buf(), probe_tx);
+        arm_open_recovery_probe(registered_root, probe_tx);
         let caller = std::thread::current().id();
         let reopened = lib.open_workspace(root).unwrap();
         let recovery_thread = probe_rx
@@ -7622,8 +7622,8 @@ mod tests {
 
     #[test]
     fn draft_creation_refuses_missing_workspace_root_without_recreating_it() {
-        let (_cfg, root, workspace) = fixture();
-        let root_path = root.path().to_path_buf();
+        let (_cfg, _root, workspace) = fixture();
+        let root_path = workspace.root().to_path_buf();
         std::fs::remove_dir_all(&root_path).expect("remove harness-owned workspace");
         assert!(!root_path.exists(), "workspace root survived deletion");
 
@@ -7645,8 +7645,8 @@ mod tests {
 
     #[test]
     fn text_write_refuses_missing_workspace_root_without_recreating_it() {
-        let (_cfg, root, workspace) = fixture();
-        let root_path = root.path().to_path_buf();
+        let (_cfg, _root, workspace) = fixture();
+        let root_path = workspace.root().to_path_buf();
         std::fs::remove_dir_all(&root_path).expect("remove harness-owned workspace");
 
         let error = workspace
@@ -7668,8 +7668,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn open_handle_refuses_a_replacement_at_the_same_root_path() {
-        let (_cfg, root, workspace) = fixture();
-        let root_path = root.path().to_path_buf();
+        let (_cfg, _root, workspace) = fixture();
+        let root_path = workspace.root().to_path_buf();
         std::fs::remove_dir_all(&root_path).expect("remove original workspace root");
         std::fs::create_dir(&root_path).expect("create replacement workspace root");
 
@@ -7692,8 +7692,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn atomic_text_write_reports_root_removed_during_stream() {
-        let (_cfg, root, workspace) = fixture();
-        let root_path = root.path().to_path_buf();
+        let (_cfg, _root, workspace) = fixture();
+        let root_path = workspace.root().to_path_buf();
         workspace.write_text("note.md", "before").unwrap();
 
         let error = workspace
