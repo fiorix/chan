@@ -323,6 +323,34 @@ describe("file read streaming", () => {
 });
 
 describe("raw file writes", () => {
+  test("posts explicit live-session conflict resolution choices", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          path: "notes/a.md",
+          content: "disk\n",
+          mtime: 2,
+          mtime_ns: "200",
+          authority_version: 8,
+          disk_conflicted: false,
+          writable: true,
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await api.resolveSessionConflict("notes/a.md", "reload");
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(String(url)).toContain("/api/session-conflicts/resolve");
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      path: "notes/a.md",
+      action: "reload",
+    });
+    expect(result.content).toBe("disk\n");
+  });
+
   test("sends text directly with disk and authority preconditions in the query", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(

@@ -920,7 +920,6 @@ impl DocSession {
     /// text becomes a synthetic `$disk` update; a retained removal
     /// becomes `Removed`. Unreadable disk state cannot be reloaded and
     /// leaves the conflict intact.
-    #[allow(dead_code)] // wired to the explicit resolution route in E4
     pub(crate) fn reload_conflict(&self) -> bool {
         let mut st = self.lock_state();
         let (disk_version, disk_mtime_ns, disk_content) = match &st.session_state {
@@ -971,7 +970,6 @@ impl DocSession {
     /// retained disk token becomes the CAS expectation, the existing
     /// flush path writes safely, and a successful commit re-broadcasts
     /// the current authority.
-    #[allow(dead_code)] // wired to the explicit resolution route in E4
     pub(crate) async fn overwrite_conflict(
         self: &Arc<Self>,
         workspace: &Arc<Workspace>,

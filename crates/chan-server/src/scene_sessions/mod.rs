@@ -666,7 +666,7 @@ impl SceneSession {
         if let Some(disk_mtime_ns) = st.session_state.conflict_disk_mtime_ns() {
             return Ok(HttpReplaceOutcome::Conflicted { disk_mtime_ns });
         }
-        let content_equal = Scene::parse(body)?.serialize_file() == st.scene.serialize_file();
+        let content_equal = Scene::parse(body)?.file_content_eq(&st.scene);
         match check_write_preconditions(
             st.flushed_mtime_ns,
             Some(st.version),
@@ -764,7 +764,9 @@ impl SceneSession {
                     authority_version: st.version,
                 };
                 st.write_budget = disk_budget;
-                st.session_state = if st.scene.serialize_file() == st.baseline.content {
+                st.session_state = if Scene::parse(&st.baseline.content)
+                    .is_ok_and(|baseline| baseline.file_content_eq(&st.scene))
+                {
                     SessionState::Clean
                 } else {
                     SessionState::Dirty { since: dirty_since }
@@ -814,8 +816,8 @@ impl SceneSession {
             self.apply_merge_outcome_locked(&mut st, disk_text, stat, MergeOutcome::Conflict);
             return;
         }
-        let disk_matches_authority = Scene::parse(&disk_text)
-            .is_ok_and(|scene| scene.serialize_file() == st.scene.serialize_file());
+        let disk_scene = Scene::parse(&disk_text).expect("validated scene parses");
+        let disk_matches_authority = disk_scene.file_content_eq(&st.scene);
         if st.session_state.is_dirty() && !disk_matches_authority {
             let disk_budget = semantic_write_budget(Some(stat.size));
             let outcome = scene::merge_three_way_with_limit(
@@ -846,7 +848,7 @@ impl SceneSession {
                     st.fan(&frame);
                 }
                 st.flushed_mtime_ns = stat.mtime_ns;
-                let baseline_content = st.scene.serialize_file();
+                let baseline_content = disk_scene.serialize_file();
                 st.baseline = DurableBaseline {
                     content_hash: content_hash(&baseline_content),
                     content: baseline_content,
@@ -893,7 +895,6 @@ impl SceneSession {
     /// scene is adopted through replace semantics; a retained removal
     /// becomes `Removed`. Invalid or unreadable input leaves the
     /// conflict intact.
-    #[allow(dead_code)] // wired to the explicit resolution route in E4
     pub(crate) fn reload_conflict(&self) -> bool {
         let mut st = self.lock_state();
         let (disk_version, disk_mtime_ns, disk_content) = match &st.session_state {
@@ -917,6 +918,10 @@ impl SceneSession {
             return false;
         }
         let disk_budget = semantic_write_budget(Some(disk_content.len() as u64));
+        let disk_scene = match Scene::parse(&disk_content) {
+            Ok(scene) => scene,
+            Err(_) => return false,
+        };
         let applied =
             match st
                 .scene
@@ -933,7 +938,7 @@ impl SceneSession {
         }
         st.disk_echo.note(disk_hash);
         st.flushed_mtime_ns = disk_mtime_ns;
-        let baseline_content = st.scene.serialize_file();
+        let baseline_content = disk_scene.serialize_file();
         st.baseline = DurableBaseline {
             content_hash: content_hash(&baseline_content),
             content: baseline_content,
@@ -955,7 +960,6 @@ impl SceneSession {
     /// retained disk token becomes the CAS expectation, the existing
     /// flush path writes safely, and a successful commit re-broadcasts
     /// the current authority.
-    #[allow(dead_code)] // wired to the explicit resolution route in E4
     pub(crate) async fn overwrite_conflict(
         self: &Arc<Self>,
         workspace: &Arc<Workspace>,
@@ -1610,8 +1614,8 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
             // they remain after expiry, they are durable external
             // state and must fold normally.
             st.flushed_mtime_ns = disk_stat.mtime_ns;
-            let disk_matches_authority = Scene::parse(&disk_text)
-                .is_ok_and(|scene| scene.serialize_file() == st.scene.serialize_file());
+            let disk_matches_authority =
+                Scene::parse(&disk_text).is_ok_and(|scene| scene.file_content_eq(&st.scene));
             if disk_matches_authority {
                 st.session_state.clear_observation();
             } else if !matches!(
@@ -1623,8 +1627,8 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
             }
             return;
         }
-        let disk_matches_authority = Scene::parse(&disk_text)
-            .is_ok_and(|scene| scene.serialize_file() == st.scene.serialize_file());
+        let disk_matches_authority =
+            Scene::parse(&disk_text).is_ok_and(|scene| scene.file_content_eq(&st.scene));
         if disk_matches_authority {
             drop(st);
             session.merge_disk(disk_text, &disk_stat);
@@ -2478,6 +2482,47 @@ mod tests {
                 .content_observation()
                 .is_none(),
             "semantically equal scene formatting must settle the echo"
+        );
+    }
+
+    #[tokio::test]
+    async fn restamped_disk_adopt_keeps_durable_bytes_and_settles_its_echo() {
+        let seed = body(json!([elem("x", 5, 10, "a1")]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (ha, mut rx) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rx);
+        let mut edited = elem("x", 5, 10, "a1");
+        edited
+            .as_object_mut()
+            .unwrap()
+            .insert("strokeColor".into(), "#ff0000".into());
+        let disk_text = body(json!([edited]));
+        let disk_canonical = Scene::parse(&disk_text).unwrap().serialize_file();
+        fx.workspace.write_text("b.excalidraw", &disk_text).unwrap();
+
+        reconcile_session(ha.session(), &fx.workspace).await;
+
+        {
+            let mut st = ha.session().lock_state();
+            assert_ne!(
+                st.scene.serialize_file(),
+                disk_canonical,
+                "the server restamps adopted merge metadata"
+            );
+            assert_eq!(
+                st.baseline.content, disk_canonical,
+                "the durable baseline must retain the bytes represented on disk"
+            );
+            st.flushed_mtime_ns = None;
+        }
+        reconcile_session(ha.session(), &fx.workspace).await;
+        assert!(
+            ha.session()
+                .lock_state()
+                .session_state
+                .content_observation()
+                .is_none(),
+            "nonce-only authority divergence must settle a live echo-ring entry"
         );
     }
 

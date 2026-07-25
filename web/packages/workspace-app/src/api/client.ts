@@ -660,6 +660,14 @@ export const api = {
   },
   read: (path: string) => req<FileResponse>("GET", `/api/files/${encPath(path)}`),
   readStream: readFileStream,
+  resolveSessionConflict: (
+    path: string,
+    action: "reload" | "overwrite",
+  ) =>
+    req<FileResponse>("POST", "/api/session-conflicts/resolve", {
+      path,
+      action,
+    }),
   /// Persist raw UTF-8 text progressively. A changed write under a
   /// live authority requires both its open-time mtime and authority
   /// version; stale values reject with structured retry metadata.

@@ -26,12 +26,14 @@ import {
   ensureTerminalKeyboardProtocol,
   closeTab,
   closeTabsInPane,
+  conflictDialog,
   consumeLastCloseWasMoveOut,
   isTerminalMoving,
   markTerminalMovingOut,
   cancelPaneMode,
   commitPaneMode,
   detachTabToPaneEdge,
+  dismissConflict,
   dismissTerminalEnvNamePrompt,
   draftCloseState,
   enterPaneMode,
@@ -51,6 +53,7 @@ import {
   openLinkTarget,
   openFind,
   openTerminalInPane,
+  overwriteConflictedTab,
   paneActiveTabId,
   paneMode,
   paneModeEqualize,
@@ -81,6 +84,7 @@ import {
   uniqueTerminalName,
   reopenClosedTab,
   reorderTab,
+  reloadConflictedTab,
   restoreLayout,
   layoutHasPersistableStructure,
   saveDraftTabToWorkspace,
@@ -188,6 +192,7 @@ afterEach(() => {
   resetLayout([]);
   cancelPaneMode();
   clearRecentlyClosedTabsForTest();
+  dismissConflict();
   editorToolsPrefs.stripTrailingWhitespaceOnSave = false;
 });
 
@@ -3250,6 +3255,92 @@ describe("terminal tab naming", () => {
 });
 
 describe("autosave", () => {
+  test("opens the conflict dialog with retry metadata when PUT requires preconditions", async () => {
+    const tab = fileTab({
+      content: "changed",
+      saved: "saved",
+      savedMtime: null,
+      savedMtimeNs: null,
+      authorityVersion: null,
+    });
+    resetLayout([tab]);
+    vi.spyOn(api, "write").mockRejectedValue(
+      new ApiError(428, "write precondition required", {
+        current_mtime: 12,
+        current_mtime_ns: "12000000034",
+        current_authority_version: 9,
+        disk_conflicted: true,
+      }),
+    );
+
+    await saveTab(tab);
+
+    expect(conflictDialog.open).toBe(true);
+    expect(conflictDialog.tabId).toBe(tab.id);
+    expect(conflictDialog.currentMtime).toBe(12);
+    expect(conflictDialog.currentMtimeNs).toBe("12000000034");
+    expect(conflictDialog.currentAuthorityVersion).toBe(9);
+    expect(conflictDialog.diskConflicted).toBe(true);
+  });
+
+  test("reload resolves a live-session disk conflict before adopting its response", async () => {
+    const tab = fileTab({ content: "local\n", saved: "base\n" });
+    resetLayout([tab]);
+    conflictDialog.open = true;
+    conflictDialog.tabId = tab.id;
+    conflictDialog.path = tab.path;
+    conflictDialog.diskConflicted = true;
+    const resolve = vi.spyOn(api, "resolveSessionConflict").mockResolvedValue({
+      path: tab.path,
+      content: "disk\n",
+      mtime: 2,
+      mtime_ns: "200",
+      authority_version: 8,
+      disk_conflicted: false,
+      writable: true,
+    });
+    const read = vi.spyOn(api, "readStream");
+
+    await reloadConflictedTab();
+
+    expect(resolve).toHaveBeenCalledWith(tab.path, "reload");
+    expect(read).not.toHaveBeenCalled();
+    const resolved = activePane().tabs[0] as FileTab;
+    expect(resolved.content).toBe("disk\n");
+    expect(resolved.saved).toBe("disk\n");
+    expect(resolved.savedMtimeNs).toBe("200");
+    expect(resolved.authorityVersion).toBe(8);
+    expect(resolved.diskConflicted).toBe(false);
+  });
+
+  test("overwrite resolves a live-session conflict without retrying ordinary PUT", async () => {
+    const tab = fileTab({ content: "authority\n", saved: "base\n" });
+    resetLayout([tab]);
+    conflictDialog.open = true;
+    conflictDialog.tabId = tab.id;
+    conflictDialog.path = tab.path;
+    conflictDialog.diskConflicted = true;
+    const resolve = vi.spyOn(api, "resolveSessionConflict").mockResolvedValue({
+      path: tab.path,
+      content: "authority\n",
+      mtime: 3,
+      mtime_ns: "300",
+      authority_version: 9,
+      disk_conflicted: false,
+      writable: true,
+    });
+    const write = vi.spyOn(api, "write");
+
+    await overwriteConflictedTab();
+
+    expect(resolve).toHaveBeenCalledWith(tab.path, "overwrite");
+    expect(write).not.toHaveBeenCalled();
+    const resolved = activePane().tabs[0] as FileTab;
+    expect(resolved.saved).toBe("authority\n");
+    expect(resolved.savedMtimeNs).toBe("300");
+    expect(resolved.authorityVersion).toBe(9);
+  });
+
   test("does not save partial content while a stream is loading", async () => {
     vi.useFakeTimers();
     const tab = fileTab({

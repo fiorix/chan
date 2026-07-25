@@ -505,6 +505,50 @@ impl Scene {
         &self.files
     }
 
+    /// Compare the durable file meaning of two scenes. Excalidraw's
+    /// `version` and `versionNonce` fields are merge clocks, not user
+    /// content: replacing a scene re-stamps them, so exact serialized
+    /// equality would mistake our own durable bytes for an external
+    /// edit. Tombstones and unreferenced files are likewise absent
+    /// from the file form.
+    pub(super) fn file_content_eq(&self, other: &Self) -> bool {
+        if self.app_state != other.app_state {
+            return false;
+        }
+
+        let self_live: BTreeMap<&str, Value> = self
+            .elements
+            .iter()
+            .filter(|(_, element)| !element.is_deleted)
+            .map(|(id, element)| (id.as_str(), element_content(element)))
+            .collect();
+        let other_live: BTreeMap<&str, Value> = other
+            .elements
+            .iter()
+            .filter(|(_, element)| !element.is_deleted)
+            .map(|(id, element)| (id.as_str(), element_content(element)))
+            .collect();
+        if self_live != other_live {
+            return false;
+        }
+
+        let referenced_files = |scene: &Self| {
+            scene
+                .elements
+                .values()
+                .filter(|element| !element.is_deleted)
+                .filter_map(|element| element.value.get("fileId").and_then(Value::as_str))
+                .filter_map(|file_id| {
+                    scene
+                        .files
+                        .get(file_id)
+                        .map(|file| (file_id.to_owned(), file.clone()))
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        referenced_files(self) == referenced_files(other)
+    }
+
     /// The on-disk `.excalidraw` form: non-deleted elements ordered,
     /// the files map filtered to entries a live element references
     /// (the dist's `filterOutDeletedFiles`), pretty-printed like the

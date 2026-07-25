@@ -722,6 +722,93 @@ pub async fn api_read_file(
     }
 }
 
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ConflictResolutionAction {
+    Reload,
+    Overwrite,
+}
+
+#[derive(Deserialize)]
+pub struct ConflictResolutionBody {
+    path: String,
+    action: ConflictResolutionAction,
+}
+
+/// Resolve retained disk divergence explicitly. Ordinary PUT remains
+/// non-destructive while a session is conflicted; this route is the
+/// only HTTP surface that may choose either retained side.
+pub async fn api_resolve_session_conflict(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ConflictResolutionBody>,
+) -> Response {
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(e) => return err_state(&e),
+    };
+
+    if let Some(session) = state.doc_sessions.get(&body.path) {
+        let resolved = match body.action {
+            ConflictResolutionAction::Reload => session.reload_conflict(),
+            ConflictResolutionAction::Overwrite => {
+                session
+                    .overwrite_conflict(&workspace, &state.self_writes)
+                    .await
+            }
+        };
+        if !resolved {
+            return err(
+                StatusCode::CONFLICT,
+                "document session conflict could not be resolved".into(),
+            );
+        }
+        let view = session.http_read_view();
+        return read_via_session(
+            &workspace,
+            view.content,
+            view.disk_mtime_ns,
+            view.authority_version,
+            view.disk_conflicted,
+            &body.path,
+            &ReadFileQuery::default(),
+        )
+        .await;
+    }
+
+    if let Some(session) = state.scene_sessions.get(&body.path) {
+        let resolved = match body.action {
+            ConflictResolutionAction::Reload => session.reload_conflict(),
+            ConflictResolutionAction::Overwrite => {
+                session
+                    .overwrite_conflict(&workspace, &state.self_writes)
+                    .await
+            }
+        };
+        if !resolved {
+            return err(
+                StatusCode::CONFLICT,
+                "scene session conflict could not be resolved".into(),
+            );
+        }
+        let view = session.http_read_view();
+        return read_via_session(
+            &workspace,
+            view.content,
+            view.disk_mtime_ns,
+            view.authority_version,
+            view.disk_conflicted,
+            &body.path,
+            &ReadFileQuery::default(),
+        )
+        .await;
+    }
+
+    err(
+        StatusCode::CONFLICT,
+        "path has no live conflicted document or scene session".into(),
+    )
+}
+
 fn binary_file_response(path: &str, bytes: Vec<u8>) -> Response {
     let mut response = ([(header::CONTENT_TYPE, content_type_for(path))], bytes).into_response();
     if is_active_content_path(path) {
@@ -3787,6 +3874,63 @@ mod doc_divert_tests {
         assert!(frames.try_recv().is_err(), "conflicted PUT must not fan");
     }
 
+    #[tokio::test]
+    async fn conflict_resolution_route_reloads_disk_and_overwrites_from_doc_authority() {
+        let (_cfg, _root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        workspace.write_text("resolve.md", "baseline\n").unwrap();
+        let handle = state
+            .doc_sessions
+            .attach(&workspace, "resolve.md", "win-1", None)
+            .await
+            .unwrap();
+        let session = handle.session().clone();
+
+        session.apply_replace("local", "local\n").unwrap();
+        workspace.write_text("resolve.md", "disk\n").unwrap();
+        let stat = workspace.stat("resolve.md").unwrap();
+        session.test_force_conflict("disk\n".into(), &stat);
+
+        let response = crate::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/session-conflicts/resolve")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"path":"resolve.md","action":"reload"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert_eq!(body["content"], "disk\n");
+        assert_eq!(body["disk_conflicted"], false);
+        assert_eq!(session.authority_view().0, "disk\n");
+
+        session.apply_replace("local", "authority\n").unwrap();
+        workspace.write_text("resolve.md", "disk again\n").unwrap();
+        let stat = workspace.stat("resolve.md").unwrap();
+        session.test_force_conflict("disk again\n".into(), &stat);
+
+        let response = crate::router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/session-conflicts/resolve")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"path":"resolve.md","action":"overwrite"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert_eq!(body["content"], "authority\n");
+        assert_eq!(body["disk_conflicted"], false);
+        assert_eq!(workspace.read_text("resolve.md").unwrap(), "authority\n");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn put_divert_answers_503_when_the_forced_flush_fails() {
@@ -3902,11 +4046,13 @@ mod doc_divert_tests {
 
 #[cfg(test)]
 mod scene_divert_tests {
+    use axum::body::Body;
     use axum::extract::{Path as AxumPath, Query, State};
-    use axum::http::StatusCode;
+    use axum::http::{header, Request, StatusCode};
     use axum::Json;
     use chan_workspace::{WatchEvent, WatchKind};
     use serde_json::{json, Value};
+    use tower::ServiceExt;
 
     use super::doc_divert_tests::{api_write_file, body_json, divert_app};
     use super::{api_read_file, ReadFileQuery, WriteBody};
@@ -4119,6 +4265,87 @@ mod scene_divert_tests {
         assert_eq!(session.authority_view().0, authority);
         assert_eq!(workspace.read_text("b.excalidraw").unwrap(), disk_text);
         assert!(frames.try_recv().is_err(), "conflicted PUT must not fan");
+    }
+
+    #[tokio::test]
+    async fn conflict_resolution_route_reloads_and_overwrites_scene_authority() {
+        let (_cfg, _root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        let mut baseline = elem("x", 1, 1, "a1");
+        baseline["angle"] = json!(0);
+        workspace
+            .write_text("resolve.excalidraw", &scene_body(json!([baseline])))
+            .unwrap();
+        let handle = state
+            .scene_sessions
+            .attach(&workspace, "resolve.excalidraw", "win-1")
+            .await
+            .unwrap();
+        let session = handle.session().clone();
+
+        let mut local = elem("x", 2, 2, "a1");
+        local["angle"] = json!(20);
+        handle.push(vec![local], None, None).unwrap();
+        let mut disk = elem("x", 2, 3, "a1");
+        disk["angle"] = json!(30);
+        let disk_text = scene_body(json!([disk]));
+        workspace
+            .write_text("resolve.excalidraw", &disk_text)
+            .unwrap();
+        let stat = workspace.stat("resolve.excalidraw").unwrap();
+        session.test_force_conflict(disk_text, &stat);
+
+        let response = crate::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/session-conflicts/resolve")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"path":"resolve.excalidraw","action":"reload"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        let reloaded: Value = serde_json::from_str(body["content"].as_str().unwrap()).unwrap();
+        assert_eq!(reloaded["elements"][0]["angle"], 30);
+        assert_eq!(body["disk_conflicted"], false);
+
+        let mut authority = elem("x", 4, 4, "a1");
+        authority["angle"] = json!(40);
+        handle.push(vec![authority], None, None).unwrap();
+        let mut disk = elem("x", 4, 5, "a1");
+        disk["angle"] = json!(50);
+        let disk_text = scene_body(json!([disk]));
+        workspace
+            .write_text("resolve.excalidraw", &disk_text)
+            .unwrap();
+        let stat = workspace.stat("resolve.excalidraw").unwrap();
+        session.test_force_conflict(disk_text, &stat);
+
+        let response = crate::router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/session-conflicts/resolve")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"path":"resolve.excalidraw","action":"overwrite"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        let resolved: Value = serde_json::from_str(body["content"].as_str().unwrap()).unwrap();
+        assert_eq!(resolved["elements"][0]["angle"], 40);
+        let persisted: Value =
+            serde_json::from_str(&workspace.read_text("resolve.excalidraw").unwrap()).unwrap();
+        assert_eq!(persisted["elements"][0]["angle"], 40);
     }
 
     #[tokio::test]
