@@ -266,7 +266,7 @@ pub(crate) mod test_support {
     use std::time::Duration;
 
     use chan_workspace::Library;
-    use tokio::sync::{broadcast, watch};
+    use tokio::sync::{broadcast, oneshot, watch};
 
     use super::AppState;
     use crate::self_writes::SelfWrites;
@@ -384,6 +384,43 @@ pub(crate) mod test_support {
             matches!(result, Ok(Err(super::StateAccessError::Busy))),
             "workspace snapshot waited for the writer instead of returning a state access error"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reset_contention_does_not_starve_single_worker_runtime() {
+        let state = make_test_state(false);
+        let workspace_cell = state.workspace_cell.clone();
+        let (writer_ready_tx, writer_ready_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let _guard = workspace_cell.write().expect("workspace cell writer");
+            writer_ready_tx.send(()).expect("signal held write lock");
+            let _ = release_rx.recv_timeout(Duration::from_millis(500));
+        });
+        writer_ready_rx.recv().expect("writer holds workspace cell");
+
+        // Schedule the access task first. A blocking read here parks the only
+        // runtime worker, so the independent timer cannot fire before its
+        // deadline. The nonblocking accessor returns Busy and leaves the
+        // worker free to make unrelated async progress.
+        let access_state = state.clone();
+        let access = tokio::spawn(async move { access_state.try_workspace() });
+        let (progress_tx, progress_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = progress_tx.send(());
+        });
+
+        let progress = tokio::time::timeout(Duration::from_millis(100), progress_rx).await;
+        let access = tokio::time::timeout(Duration::from_millis(100), access).await;
+        let _ = release_tx.send(());
+        writer.join().expect("workspace cell writer");
+
+        assert!(
+            matches!(progress, Ok(Ok(()))),
+            "workspace contention starved unrelated async progress"
+        );
+        assert!(matches!(access, Ok(Ok(Err(super::StateAccessError::Busy)))));
     }
 
     #[test]
