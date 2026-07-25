@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.77.0] - 2026-07-25
+
+v0.77.0 makes workspace lifecycle, persistence, and collaboration failures explicit and bounded: reset contention no longer blocks async workers, configuration and state writes serialize durably, hosted tenant shutdown awaits owned tasks, independent same-line edits merge, and a removed workspace root fails closed across the server and UI. The release also puts native desktop, distro, and container builds into the ordinary CI contract.
+
+### Added
+
+- **Workspace-lifecycle end-to-end coverage.** The owner-run scenario pack and browser smoke cover close and `close --remove` during startup, root removal during startup, and destructive root loss while the file browser, graph, and a dirty large editor are active.
+- **Cross-platform build gates.** Ordinary CI now builds native Linux, macOS, and Windows desktop packages, direct Linux packages, COPR/PPA sources, both AUR packages, the chan image, and all four gateway images. Pre-push boot-smokes the release devserver and native Linux or macOS desktop package.
+
+### Changed
+
+- **Collaborative session state has one private lifecycle core.** Document and scene sessions share only their identical state and HTTP views; their merge engines, wire protocols, recovery payloads, and domain authority remain separate.
+- **Workspace session blobs are opaque.** Workspace open no longer parses or prunes host-owned session JSON, and compatibility-only configuration, route, environment, launcher, and watcher paths are removed.
+- **Team terminals yield to queued work.** Generated team bootstrap guidance requires real quiet turn breaks so queued terminal notifications can drain without polling or sleeps.
+
+### Fixed
+
+- **Reset and configuration races are bounded.** Workspace reset returns retryable contention instead of blocking Tokio workers, terminal and devserver persistence use unique durable temporary files, dashboard updates serialize, and revisioned partial preference writes cannot silently lose another window's fields.
+- **Hosted shutdown owns its tasks.** Normal shutdown cooperatively joins document, scene, terminal, and reconciliation work to one deadline, then aborts and awaits stragglers before clearing the workspace generation.
+- **Independent edits on one line merge.** Bounded Unicode-scalar conflict retries merge non-overlapping inline edits while retaining genuine overlaps for explicit resolution.
+- **Workspace close wins during startup.** `chan close` and `chan close --remove` cannot be undone by a stale startup completion, and immediate reopen preserves the intended registration semantics.
+- **A removed workspace root fails closed.** Existing views converge to an unavailable state, dirty editor buffers remain in memory, and new files, drafts, terminals, graphs, and file browsers fail without recreating the root.
+
 ## [v0.76.1] - 2026-07-25
 
 Patch: fix the macOS and Windows release build. No functional change from v0.76.0; the v0.76.0 tag failed to build on those platforms.
