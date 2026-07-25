@@ -263,6 +263,101 @@ fn normalize_lf(text: String) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
+/// Merge an external snapshot with the live authority from their last
+/// durable ancestor. The line-oriented pass is cheap and produces the
+/// least surprising result for ordinary prose. If both sides touched
+/// different positions on the same line, retry with one Unicode scalar
+/// per synthetic line so independent in-line edits still commute.
+///
+/// The scalar pass is deliberately still a diff3: edits to the same
+/// scalar range remain a retained conflict instead of picking a winner.
+fn merge_text_snapshots(ancestor: &str, authority: &str, disk: &str) -> Option<String> {
+    const SCALAR_MERGE_MAX_CHANGED_SCALARS: usize = 256 * 1024;
+
+    if authority == disk {
+        return Some(authority.to_string());
+    }
+    if ancestor == authority {
+        return Some(disk.to_string());
+    }
+    if ancestor == disk {
+        return Some(authority.to_string());
+    }
+    if let Ok(merged) = diffy::merge(ancestor, authority, disk) {
+        return Some(merged);
+    }
+
+    // Strip context shared by all three snapshots before scalar expansion.
+    // This keeps a localized same-line edit cheap even in a large document,
+    // while a truly huge divergent span stays a retained conflict instead of
+    // allocating millions of synthetic lines on the reconciler.
+    let prefix_len = ancestor
+        .chars()
+        .zip(authority.chars())
+        .zip(disk.chars())
+        .take_while(|((ancestor, authority), disk)| ancestor == authority && ancestor == disk)
+        .map(|((scalar, _), _)| scalar.len_utf8())
+        .sum::<usize>();
+    let ancestor_tail = &ancestor[prefix_len..];
+    let authority_tail = &authority[prefix_len..];
+    let disk_tail = &disk[prefix_len..];
+    let suffix_len = ancestor_tail
+        .chars()
+        .rev()
+        .zip(authority_tail.chars().rev())
+        .zip(disk_tail.chars().rev())
+        .take_while(|((ancestor, authority), disk)| ancestor == authority && ancestor == disk)
+        .map(|((scalar, _), _)| scalar.len_utf8())
+        .sum::<usize>();
+    let ancestor_core = &ancestor_tail[..ancestor_tail.len() - suffix_len];
+    let authority_core = &authority_tail[..authority_tail.len() - suffix_len];
+    let disk_core = &disk_tail[..disk_tail.len() - suffix_len];
+    let changed_scalars = ancestor_core
+        .chars()
+        .count()
+        .checked_add(authority_core.chars().count())?
+        .checked_add(disk_core.chars().count())?;
+    if changed_scalars > SCALAR_MERGE_MAX_CHANGED_SCALARS {
+        return None;
+    }
+
+    let encoded_ancestor = encode_scalar_lines(ancestor_core);
+    let encoded_authority = encode_scalar_lines(authority_core);
+    let encoded_disk = encode_scalar_lines(disk_core);
+    let encoded_merged = diffy::merge(&encoded_ancestor, &encoded_authority, &encoded_disk).ok()?;
+    let merged_core = decode_scalar_lines(&encoded_merged)?;
+    let mut merged = String::with_capacity(prefix_len + merged_core.len() + suffix_len);
+    merged.push_str(&ancestor[..prefix_len]);
+    merged.push_str(&merged_core);
+    merged.push_str(&ancestor_tail[ancestor_tail.len() - suffix_len..]);
+    Some(merged)
+}
+
+fn encode_scalar_lines(text: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(text.chars().count().saturating_mul(7));
+    for scalar in text.chars() {
+        writeln!(&mut encoded, "{:06x}", scalar as u32)
+            .expect("writing a Unicode scalar into a String cannot fail");
+    }
+    encoded
+}
+
+fn decode_scalar_lines(encoded: &str) -> Option<String> {
+    if !encoded.is_empty() && !encoded.ends_with('\n') {
+        return None;
+    }
+    let mut decoded = String::with_capacity(encoded.len() / 7);
+    for token in encoded.lines() {
+        if token.len() != 6 {
+            return None;
+        }
+        decoded.push(char::from_u32(u32::from_str_radix(token, 16).ok()?)?);
+    }
+    Some(decoded)
+}
+
 fn now_unix_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -852,13 +947,13 @@ impl DocSession {
     }
 
     /// Fold clean external disk content into the session. Dirty
-    /// divergence runs a deterministic line-oriented three-way merge
-    /// from the durable baseline.
+    /// divergence runs a deterministic three-way merge from the
+    /// durable baseline.
     fn merge_disk(&self, disk_text: String, stat: &FileStat) {
         let disk_text = normalize_lf(disk_text);
         let mut st = self.lock_state();
         if st.session_state.is_dirty() && disk_text != st.text {
-            let outcome = diffy::merge(&st.baseline.content, &st.text, &disk_text)
+            let outcome = merge_text_snapshots(&st.baseline.content, &st.text, &disk_text)
                 .map(MergeOutcome::Merged)
                 .unwrap_or(MergeOutcome::Conflict);
             self.apply_merge_outcome_locked(&mut st, disk_text, stat, outcome);
@@ -2288,6 +2383,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_line_nonoverlapping_external_edit_merges_without_conflict() {
+        let baseline = "MAT-C-V1-123\n";
+        let local = "MAT-C-TYPED-123 MAT-C-V1-123\n";
+        let disk = "MAT-C-V2-123\n";
+        let fx = fixture(&[("a.md", baseline)]);
+        let (ha, mut rx) = attach(&fx, "a.md", "w1", None).await;
+        drain(&mut rx);
+        ha.session().apply_replace("c1", local).unwrap();
+        drain(&mut rx);
+
+        fx.workspace.write_text("a.md", disk).unwrap();
+        let stat = fx.workspace.stat("a.md").unwrap();
+        ha.session().merge_disk(disk.to_string(), &stat);
+
+        assert_eq!(
+            ha.session().authority_view().0,
+            "MAT-C-TYPED-123 MAT-C-V2-123\n"
+        );
+        let updates = drain(&mut rx);
+        assert_eq!(updates.len(), 1, "the merged disk edit broadcasts once");
+        assert_eq!(updates[0]["type"], "updates");
+        assert_eq!(updates[0]["updates"][0]["clientID"], "$disk");
+        assert!(matches!(
+            ha.session().lock_state().session_state,
+            SessionState::Dirty { .. }
+        ));
+    }
+
+    #[test]
+    fn scalar_merge_preserves_unicode_and_rejects_true_overlap() {
+        assert_eq!(
+            merge_text_snapshots("🙂 café\n", "note 🙂 café\n", "🙂 cafe\u{301}\n"),
+            Some("note 🙂 cafe\u{301}\n".into())
+        );
+        assert_eq!(
+            merge_text_snapshots("same value\n", "same local\n", "same disk\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn scalar_merge_bounds_only_the_changed_span() {
+        let shared = "x".repeat(300_000);
+        let ancestor = format!("{shared}abc\n");
+        let authority = format!("{shared}aXbc\n");
+        let disk = format!("{shared}abYc\n");
+        assert_eq!(
+            merge_text_snapshots(&ancestor, &authority, &disk),
+            Some(format!("{shared}aXbYc\n"))
+        );
+
+        let ancestor = "a".repeat(90_000);
+        let authority = "b".repeat(90_000);
+        let disk = "c".repeat(90_000);
+        assert_eq!(
+            merge_text_snapshots(&ancestor, &authority, &disk),
+            None,
+            "a huge divergent scalar span must stay a bounded conflict"
+        );
+    }
+
+    #[tokio::test]
     async fn overlapping_external_edit_conflicts_and_reload_adopts_disk() {
         let baseline = "alpha\nbeta\n";
         let local = "alpha local\nbeta\n";
@@ -3052,7 +3209,7 @@ mod tests {
             assert_eq!(st.flush_failures, 0, "a deferral is not a failure");
         }
 
-        // The observation holds: the line merge proves the edits
+        // The observation holds: the three-way merge proves the edits
         // overlap, keeps both sides, and pauses flush.
         backdate_pending_fold(ha.session());
         fx.registry.reconcile_pending(&fx.workspace).await;
