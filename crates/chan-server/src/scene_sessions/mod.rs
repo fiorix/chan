@@ -426,14 +426,35 @@ impl SceneSession {
                 {
                     return Err("scene recovery conflict version mismatch".into());
                 }
-                SessionState::Conflicted(SessionConflict {
-                    id: conflict.id,
-                    baseline_version: baseline_hash,
-                    disk_version: disk_hash,
-                    authority_version: version,
-                    disk_mtime_ns,
-                    disk_content: disk_text.clone(),
-                })
+                let collapsed = if disk_matches_authority {
+                    Some(("clean", SessionState::Clean))
+                } else if disk_matches_baseline {
+                    Some((
+                        "dirty",
+                        SessionState::Dirty {
+                            since: Instant::now(),
+                        },
+                    ))
+                } else {
+                    None
+                };
+                if let Some((collapsed_to, state)) = collapsed {
+                    tracing::info!(
+                        path = %path,
+                        collapsed_to,
+                        "scene recovery conflict matches live disk"
+                    );
+                    state
+                } else {
+                    SessionState::Conflicted(SessionConflict {
+                        id: conflict.id,
+                        baseline_version: baseline_hash,
+                        disk_version: disk_hash,
+                        authority_version: version,
+                        disk_mtime_ns,
+                        disk_content: disk_text.clone(),
+                    })
+                }
             }
             RecoveryState::Removed if disk_present && disk_scene.is_some() => {
                 return Ok(Self::new(
@@ -2440,6 +2461,121 @@ mod tests {
                 .unwrap()
                 .file_content_eq(&Scene::parse(&disk).unwrap()),
             "restart must not flush stale scene authority over retained disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicted_scene_rehydration_collapses_when_disk_matches_authority() {
+        let mut baseline_element = elem("x", 1, 1, "a1");
+        baseline_element["x"] = json!(10);
+        let seed = body(json!([baseline_element]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (handle, mut frames) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut frames);
+
+        let mut local_element = elem("x", 2, 2, "a1");
+        local_element["x"] = json!(20);
+        handle
+            .push(vec![local_element], None, None)
+            .expect("local edit");
+        drain(&mut frames);
+        let authority = handle.session().authority_view().0;
+
+        let mut disk_element = elem("x", 2, 3, "a1");
+        disk_element["x"] = json!(30);
+        let disk = body(json!([disk_element]));
+        fx.workspace.write_text("b.excalidraw", &disk).unwrap();
+        handle.session().lock_state().flushed_mtime_ns = None;
+        reconcile_session(handle.session(), &fx.workspace).await;
+        backdate_pending_fold(handle.session());
+        fx.registry.reconcile_pending(&fx.workspace).await;
+        assert!(handle.session().http_read_view().disk_conflicted);
+        drop(handle);
+
+        fx.workspace.write_text("b.excalidraw", &authority).unwrap();
+        let restarted = Arc::new(SceneRegistry::new());
+        let reopened = restarted
+            .attach(&fx.workspace, "b.excalidraw", "w2")
+            .await
+            .expect("restart attach");
+        assert!(
+            !reopened.session().http_read_view().disk_conflicted,
+            "a resolved scene conflict must not re-prompt"
+        );
+        {
+            let state = reopened.session().lock_state();
+            assert!(matches!(state.session_state, SessionState::Clean));
+            assert!(state
+                .scene
+                .file_content_eq(&Scene::parse(&authority).unwrap()));
+            assert!(Scene::parse(&state.baseline.content)
+                .unwrap()
+                .file_content_eq(&Scene::parse(&authority).unwrap()));
+        }
+
+        restarted.flush_pass(&fx.workspace, &fx.self_writes).await;
+        assert!(
+            Scene::parse(&fx.workspace.read_text("b.excalidraw").unwrap())
+                .unwrap()
+                .file_content_eq(&Scene::parse(&authority).unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicted_scene_rehydration_collapses_when_disk_matches_baseline() {
+        let mut baseline_element = elem("x", 1, 1, "a1");
+        baseline_element["x"] = json!(10);
+        let seed = body(json!([baseline_element]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (handle, mut frames) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut frames);
+
+        let mut local_element = elem("x", 2, 2, "a1");
+        local_element["x"] = json!(20);
+        handle
+            .push(vec![local_element], None, None)
+            .expect("local edit");
+        drain(&mut frames);
+        let authority = handle.session().authority_view().0;
+
+        let mut disk_element = elem("x", 2, 3, "a1");
+        disk_element["x"] = json!(30);
+        let disk = body(json!([disk_element]));
+        fx.workspace.write_text("b.excalidraw", &disk).unwrap();
+        handle.session().lock_state().flushed_mtime_ns = None;
+        reconcile_session(handle.session(), &fx.workspace).await;
+        backdate_pending_fold(handle.session());
+        fx.registry.reconcile_pending(&fx.workspace).await;
+        assert!(handle.session().http_read_view().disk_conflicted);
+        drop(handle);
+
+        fx.workspace.write_text("b.excalidraw", &seed).unwrap();
+        let restarted = Arc::new(SceneRegistry::new());
+        let reopened = restarted
+            .attach(&fx.workspace, "b.excalidraw", "w2")
+            .await
+            .expect("restart attach");
+        assert!(
+            !reopened.session().http_read_view().disk_conflicted,
+            "a baseline-restored scene conflict must not re-prompt"
+        );
+        {
+            let state = reopened.session().lock_state();
+            assert!(matches!(state.session_state, SessionState::Dirty { .. }));
+            assert!(state
+                .scene
+                .file_content_eq(&Scene::parse(&authority).unwrap()));
+            assert!(Scene::parse(&state.baseline.content)
+                .unwrap()
+                .file_content_eq(&Scene::parse(&seed).unwrap()));
+        }
+
+        backdate_dirty(reopened.session());
+        restarted.flush_pass(&fx.workspace, &fx.self_writes).await;
+        assert!(
+            Scene::parse(&fx.workspace.read_text("b.excalidraw").unwrap())
+                .unwrap()
+                .file_content_eq(&Scene::parse(&authority).unwrap())
         );
     }
 

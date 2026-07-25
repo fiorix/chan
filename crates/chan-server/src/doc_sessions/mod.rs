@@ -571,14 +571,35 @@ impl DocSession {
                 {
                     return Err("document recovery conflict version mismatch".into());
                 }
-                SessionState::Conflicted(SessionConflict {
-                    id: conflict.id,
-                    baseline_version: baseline_hash,
-                    disk_version: disk_hash,
-                    authority_version: version,
-                    disk_mtime_ns,
-                    disk_content: disk_text.clone(),
-                })
+                let collapsed = if disk_present && disk_text == authority {
+                    Some(("clean", SessionState::Clean))
+                } else if disk_present && disk_text == baseline.content {
+                    Some((
+                        "dirty",
+                        SessionState::Dirty {
+                            since: Instant::now(),
+                        },
+                    ))
+                } else {
+                    None
+                };
+                if let Some((collapsed_to, state)) = collapsed {
+                    tracing::info!(
+                        path = %path,
+                        collapsed_to,
+                        "document recovery conflict matches live disk"
+                    );
+                    state
+                } else {
+                    SessionState::Conflicted(SessionConflict {
+                        id: conflict.id,
+                        baseline_version: baseline_hash,
+                        disk_version: disk_hash,
+                        authority_version: version,
+                        disk_mtime_ns,
+                        disk_content: disk_text.clone(),
+                    })
+                }
             }
             RecoveryState::Removed if disk_present => {
                 return Ok(Self::new(
@@ -2558,6 +2579,93 @@ mod tests {
             disk,
             "restart must not flush stale authority over retained disk"
         );
+    }
+
+    #[tokio::test]
+    async fn conflicted_rehydration_collapses_when_disk_already_matches_authority() {
+        let baseline = "alpha\nbeta\n";
+        let authority = "alpha local\nbeta\n";
+        let disk = "alpha disk\nbeta\n";
+        let fx = fixture(&[("a.md", baseline)]);
+        let (handle, mut frames) = attach(&fx, "a.md", "w1", None).await;
+        drain(&mut frames);
+        handle
+            .session()
+            .apply_replace("c1", authority)
+            .expect("local edit");
+        drain(&mut frames);
+
+        fx.workspace.write_text("a.md", disk).unwrap();
+        handle.session().lock_state().flushed_mtime_ns = None;
+        reconcile_session(handle.session(), &fx.workspace).await;
+        backdate_pending_fold(handle.session());
+        fx.registry.reconcile_pending(&fx.workspace).await;
+        assert!(handle.session().http_read_view().disk_conflicted);
+        drop(handle);
+
+        fx.workspace.write_text("a.md", authority).unwrap();
+        let restarted = Arc::new(DocRegistry::new());
+        let reopened = restarted
+            .attach(&fx.workspace, "a.md", "w2", None)
+            .await
+            .expect("restart attach");
+        assert!(
+            !reopened.session().http_read_view().disk_conflicted,
+            "a resolved conflict must not re-prompt"
+        );
+        {
+            let state = reopened.session().lock_state();
+            assert!(matches!(state.session_state, SessionState::Clean));
+            assert_eq!(state.text, authority);
+            assert_eq!(state.baseline.content, authority);
+        }
+
+        restarted.flush_pass(&fx.workspace, &fx.self_writes).await;
+        assert_eq!(fx.workspace.read_text("a.md").unwrap(), authority);
+    }
+
+    #[tokio::test]
+    async fn conflicted_rehydration_collapses_to_dirty_when_disk_matches_baseline() {
+        let baseline = "alpha\nbeta\n";
+        let authority = "alpha local\nbeta\n";
+        let disk = "alpha disk\nbeta\n";
+        let fx = fixture(&[("a.md", baseline)]);
+        let (handle, mut frames) = attach(&fx, "a.md", "w1", None).await;
+        drain(&mut frames);
+        handle
+            .session()
+            .apply_replace("c1", authority)
+            .expect("local edit");
+        drain(&mut frames);
+
+        fx.workspace.write_text("a.md", disk).unwrap();
+        handle.session().lock_state().flushed_mtime_ns = None;
+        reconcile_session(handle.session(), &fx.workspace).await;
+        backdate_pending_fold(handle.session());
+        fx.registry.reconcile_pending(&fx.workspace).await;
+        assert!(handle.session().http_read_view().disk_conflicted);
+        drop(handle);
+
+        fx.workspace.write_text("a.md", baseline).unwrap();
+        let restarted = Arc::new(DocRegistry::new());
+        let reopened = restarted
+            .attach(&fx.workspace, "a.md", "w2", None)
+            .await
+            .expect("restart attach");
+        assert!(
+            !reopened.session().http_read_view().disk_conflicted,
+            "a baseline-restored conflict must not re-prompt"
+        );
+        {
+            let state = reopened.session().lock_state();
+            assert!(matches!(state.session_state, SessionState::Dirty { .. }));
+            assert_eq!(state.text, authority);
+            assert_eq!(state.baseline.content, baseline);
+        }
+
+        backdate_dirty(reopened.session());
+        restarted.flush_pass(&fx.workspace, &fx.self_writes).await;
+        assert_eq!(fx.workspace.read_text("a.md").unwrap(), authority);
     }
 
     #[tokio::test]
