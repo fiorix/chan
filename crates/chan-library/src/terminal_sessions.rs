@@ -764,13 +764,19 @@ impl AttachHandle {
         self.session.cwd()
     }
 
+    /// Return an owned PTY cwd probe for composition with other blocking
+    /// filesystem work in one blocking-pool operation.
+    pub fn blocking_cwd_probe(&self) -> impl FnOnce() -> Option<PathBuf> + Send + 'static {
+        let session = Arc::clone(&self.session);
+        move || session.cwd()
+    }
+
     /// Like [`cwd`](Self::cwd) but runs the probe (which shells `lsof` on
     /// macOS) on the blocking pool, so an async caller never stalls the
     /// runtime on the PTY's cwd lookup. `None` if the blocking task is
     /// cancelled or the cwd can't be read.
     pub async fn cwd_blocking(&self) -> Option<PathBuf> {
-        let session = Arc::clone(&self.session);
-        tokio::task::spawn_blocking(move || session.cwd())
+        tokio::task::spawn_blocking(self.blocking_cwd_probe())
             .await
             .ok()
             .flatten()

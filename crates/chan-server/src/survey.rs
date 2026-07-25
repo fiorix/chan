@@ -221,8 +221,8 @@ impl SurveyBus {
             .remove(survey_id);
         match sender {
             // `send` fails only if the receiver was dropped (the CLI
-            // disconnected); the survey is gone either way, so report it
-            // delivered to keep the route idempotent from C's side.
+            // disconnected); report that failure so the reply route maps
+            // the stale response to a 404.
             Some(tx) => tx.send((reply, answered_by)).is_ok(),
             None => false,
         }
@@ -263,6 +263,20 @@ mod tests {
             "survey-nope",
             SurveyReply::Followup {
                 survey_id: "survey-nope".into(),
+            },
+            None,
+        ));
+    }
+
+    #[test]
+    fn complete_after_receiver_drop_is_false() {
+        let bus = SurveyBus::new();
+        let (id, rx) = bus.register();
+        drop(rx);
+        assert!(!bus.complete_survey(
+            &id,
+            SurveyReply::Followup {
+                survey_id: id.clone(),
             },
             None,
         ));
