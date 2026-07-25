@@ -9,8 +9,10 @@
 //! the check rejects contract violations but does not cap IPC allocation.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
 
 use futures::StreamExt;
 use serde::Serialize;
@@ -198,9 +200,81 @@ struct GeneratedSink {
 
 type SharedGeneratedSink = Arc<tokio::sync::Mutex<Option<GeneratedSink>>>;
 
-fn generated_sinks() -> &'static Mutex<HashMap<String, SharedGeneratedSink>> {
-    static SINKS: OnceLock<Mutex<HashMap<String, SharedGeneratedSink>>> = OnceLock::new();
+struct RegisteredGeneratedSink {
+    window_label: String,
+    sink: SharedGeneratedSink,
+}
+
+fn generated_sinks() -> &'static Mutex<HashMap<String, RegisteredGeneratedSink>> {
+    static SINKS: OnceLock<Mutex<HashMap<String, RegisteredGeneratedSink>>> = OnceLock::new();
     SINKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn generated_sink_for_window(
+    handle: &str,
+    window_label: &str,
+) -> Result<SharedGeneratedSink, String> {
+    let sinks = generated_sinks()
+        .lock()
+        .map_err(|_| "generated download registry poisoned".to_string())?;
+    let registered = sinks
+        .get(handle)
+        .ok_or_else(|| "generated download handle is not active".to_string())?;
+    if registered.window_label != window_label {
+        return Err("generated download handle belongs to another window".to_string());
+    }
+    Ok(Arc::clone(&registered.sink))
+}
+
+fn take_generated_sink_for_window(
+    handle: &str,
+    window_label: &str,
+) -> Result<SharedGeneratedSink, String> {
+    let mut sinks = generated_sinks()
+        .lock()
+        .map_err(|_| "generated download registry poisoned".to_string())?;
+    let registered = sinks
+        .get(handle)
+        .ok_or_else(|| "generated download handle is not active".to_string())?;
+    if registered.window_label != window_label {
+        return Err("generated download handle belongs to another window".to_string());
+    }
+    sinks
+        .remove(handle)
+        .map(|registered| registered.sink)
+        .ok_or_else(|| "generated download handle is not active".to_string())
+}
+
+pub(crate) fn drop_generated_downloads_for_window(
+    window_label: &str,
+) -> tauri::async_runtime::JoinHandle<()> {
+    let removed = match generated_sinks().lock() {
+        Ok(mut sinks) => {
+            let mut removed = Vec::new();
+            sinks.retain(|_, registered| {
+                if registered.window_label == window_label {
+                    removed.push(Arc::clone(&registered.sink));
+                    false
+                } else {
+                    true
+                }
+            });
+            removed
+        }
+        Err(_) => {
+            tracing::warn!(
+                window_label,
+                "generated download registry poisoned during window cleanup"
+            );
+            Vec::new()
+        }
+    };
+    tauri::async_runtime::spawn(async move {
+        for sink in removed {
+            let generated = sink.lock().await.take();
+            drop(generated);
+        }
+    })
 }
 
 fn download_commit_lock() -> &'static Mutex<()> {
@@ -214,7 +288,10 @@ pub struct GeneratedDownloadHandle {
 }
 
 #[tauri::command]
-pub async fn begin_generated_download(filename: String) -> Result<GeneratedDownloadHandle, String> {
+pub async fn begin_generated_download(
+    window: WebviewWindow,
+    filename: String,
+) -> Result<GeneratedDownloadHandle, String> {
     let handle = uuid::Uuid::new_v4().simple().to_string();
     let (target, file) = DownloadTarget::create(&filename).await?;
     generated_sinks()
@@ -222,27 +299,29 @@ pub async fn begin_generated_download(filename: String) -> Result<GeneratedDownl
         .map_err(|_| "generated download registry poisoned".to_string())?
         .insert(
             handle.clone(),
-            Arc::new(tokio::sync::Mutex::new(Some(GeneratedSink {
-                file: Some(file),
-                target,
-            }))),
+            RegisteredGeneratedSink {
+                window_label: window.label().to_string(),
+                sink: Arc::new(tokio::sync::Mutex::new(Some(GeneratedSink {
+                    file: Some(file),
+                    target,
+                }))),
+            },
         );
     Ok(GeneratedDownloadHandle { handle })
 }
 
 #[tauri::command]
-pub async fn append_generated_download(handle: String, bytes: Vec<u8>) -> Result<(), String> {
+pub async fn append_generated_download(
+    window: WebviewWindow,
+    handle: String,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
     if bytes.len() > GENERATED_CHUNK_LIMIT {
         return Err(format!(
             "generated download chunk exceeds {GENERATED_CHUNK_LIMIT} bytes"
         ));
     }
-    let sink = generated_sinks()
-        .lock()
-        .map_err(|_| "generated download registry poisoned".to_string())?
-        .get(&handle)
-        .cloned()
-        .ok_or_else(|| "generated download handle is not active".to_string())?;
+    let sink = generated_sink_for_window(&handle, window.label())?;
     let mut sink = sink.lock().await;
     let sink = sink
         .as_mut()
@@ -256,12 +335,11 @@ pub async fn append_generated_download(handle: String, bytes: Vec<u8>) -> Result
 }
 
 #[tauri::command]
-pub async fn finish_generated_download(handle: String) -> Result<SavedDownload, String> {
-    let sink = generated_sinks()
-        .lock()
-        .map_err(|_| "generated download registry poisoned".to_string())?
-        .remove(&handle)
-        .ok_or_else(|| "generated download handle is not active".to_string())?;
+pub async fn finish_generated_download(
+    window: WebviewWindow,
+    handle: String,
+) -> Result<SavedDownload, String> {
+    let sink = take_generated_sink_for_window(&handle, window.label())?;
     let mut sink = sink.lock().await;
     let mut sink = sink
         .take()
@@ -275,7 +353,8 @@ pub async fn cancel_generated_download(handle: String) -> bool {
     let sink = generated_sinks()
         .lock()
         .ok()
-        .and_then(|mut sinks| sinks.remove(&handle));
+        .and_then(|mut sinks| sinks.remove(&handle))
+        .map(|registered| registered.sink);
     let Some(sink) = sink else {
         return false;
     };
@@ -283,8 +362,105 @@ pub async fn cancel_generated_download(handle: String) -> bool {
     true
 }
 
-fn downloads_dir() -> Option<PathBuf> {
+pub(crate) fn downloads_dir() -> Option<PathBuf> {
     dirs::download_dir().or_else(dirs::home_dir)
+}
+
+fn generated_download_temp_pid(name: &OsStr) -> Option<u32> {
+    let name = name.to_str()?;
+    let body = name.strip_prefix(".chan-download-")?.strip_suffix(".tmp")?;
+    let (pid_text, uuid_text) = body.split_once('-')?;
+    if pid_text.is_empty() || !pid_text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let pid = pid_text.parse::<u32>().ok()?;
+    if pid.to_string() != pid_text {
+        return None;
+    }
+    let id = uuid::Uuid::parse_str(uuid_text).ok()?;
+    if id.hyphenated().to_string() != uuid_text {
+        return None;
+    }
+    Some(pid)
+}
+
+pub(crate) fn reap_orphaned_download_temps(
+    dir: &Path,
+    now: SystemTime,
+    max_age: Duration,
+) -> usize {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(
+                directory = %dir.display(),
+                error = %error,
+                "reading Downloads directory for orphaned generated downloads failed"
+            );
+            return 0;
+        }
+    };
+    let mut reaped = 0;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(
+                    directory = %dir.display(),
+                    error = %error,
+                    "reading a Downloads directory entry failed"
+                );
+                continue;
+            }
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                tracing::warn!(
+                    path = %entry.path().display(),
+                    error = %error,
+                    "reading a generated download temp file type failed"
+                );
+                continue;
+            }
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let Some(pid) = generated_download_temp_pid(&entry.file_name()) else {
+            continue;
+        };
+        if pid == std::process::id() {
+            continue;
+        }
+        let modified = match entry.metadata().and_then(|metadata| metadata.modified()) {
+            Ok(modified) => modified,
+            Err(error) => {
+                tracing::warn!(
+                    path = %entry.path().display(),
+                    error = %error,
+                    "reading a generated download temp modification time failed"
+                );
+                continue;
+            }
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age < max_age {
+            continue;
+        }
+        let path = entry.path();
+        match std::fs::remove_file(&path) {
+            Ok(()) => reaped += 1,
+            Err(error) => tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "removing an orphaned generated download temp failed"
+            ),
+        }
+    }
+    reaped
 }
 
 fn sanitize_filename(filename: &str) -> String {
@@ -425,10 +601,13 @@ mod tests {
                 committed: false,
             },
         })));
-        generated_sinks()
-            .lock()
-            .unwrap()
-            .insert(handle.clone(), Arc::clone(&sink));
+        generated_sinks().lock().unwrap().insert(
+            handle.clone(),
+            RegisteredGeneratedSink {
+                window_label: format!("cancel-window-{}", uuid::Uuid::new_v4()),
+                sink: Arc::clone(&sink),
+            },
+        );
 
         let chunk_guard = sink.lock().await;
         let cancel = tokio::spawn(cancel_generated_download(handle.clone()));
@@ -442,6 +621,187 @@ mod tests {
         assert!(cancel.await.unwrap());
         assert!(!staged.exists());
         assert!(!generated_sinks().lock().unwrap().contains_key(&handle));
+    }
+
+    #[tokio::test]
+    async fn destroying_a_window_drops_only_that_windows_generated_sinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let staged_a = temp.path().join(".a.tmp");
+        let staged_b = temp.path().join(".b.tmp");
+        let file_a = tokio::fs::File::create(&staged_a).await.unwrap();
+        let file_b = tokio::fs::File::create(&staged_b).await.unwrap();
+        let handle_a = format!("destroy-a-{}", uuid::Uuid::new_v4());
+        let handle_b = format!("destroy-b-{}", uuid::Uuid::new_v4());
+        let label_a = format!("workspace-a-{}", uuid::Uuid::new_v4());
+        let label_b = format!("workspace-b-{}", uuid::Uuid::new_v4());
+        let sink_a = Arc::new(tokio::sync::Mutex::new(Some(GeneratedSink {
+            file: Some(file_a),
+            target: DownloadTarget {
+                temp: staged_a.clone(),
+                target: temp.path().join("a.bin"),
+                committed: false,
+            },
+        })));
+        let sink_b = Arc::new(tokio::sync::Mutex::new(Some(GeneratedSink {
+            file: Some(file_b),
+            target: DownloadTarget {
+                temp: staged_b.clone(),
+                target: temp.path().join("b.bin"),
+                committed: false,
+            },
+        })));
+        {
+            let mut sinks = generated_sinks().lock().unwrap();
+            sinks.insert(
+                handle_a.clone(),
+                RegisteredGeneratedSink {
+                    window_label: label_a.clone(),
+                    sink: sink_a,
+                },
+            );
+            sinks.insert(
+                handle_b.clone(),
+                RegisteredGeneratedSink {
+                    window_label: label_b,
+                    sink: sink_b,
+                },
+            );
+        }
+
+        drop_generated_downloads_for_window(&label_a).await.unwrap();
+
+        assert!(!staged_a.exists());
+        assert!(!generated_sinks().lock().unwrap().contains_key(&handle_a));
+        assert!(staged_b.exists());
+        assert!(generated_sinks().lock().unwrap().contains_key(&handle_b));
+        assert!(cancel_generated_download(handle_b).await);
+    }
+
+    #[test]
+    fn generated_handles_are_scoped_to_their_window() {
+        let handle = format!("owned-{}", uuid::Uuid::new_v4());
+        let label = format!("workspace-{}", uuid::Uuid::new_v4());
+        let sink = Arc::new(tokio::sync::Mutex::new(None));
+        generated_sinks().lock().unwrap().insert(
+            handle.clone(),
+            RegisteredGeneratedSink {
+                window_label: label.clone(),
+                sink: Arc::clone(&sink),
+            },
+        );
+
+        assert!(generated_sink_for_window(&handle, "another-window").is_err());
+        assert!(take_generated_sink_for_window(&handle, "another-window").is_err());
+        assert!(generated_sinks().lock().unwrap().contains_key(&handle));
+        let found = generated_sink_for_window(&handle, &label).unwrap();
+        assert!(Arc::ptr_eq(&found, &sink));
+        let removed = take_generated_sink_for_window(&handle, &label).unwrap();
+        assert!(Arc::ptr_eq(&removed, &sink));
+        assert!(!generated_sinks().lock().unwrap().contains_key(&handle));
+    }
+
+    #[test]
+    fn generated_download_temp_parser_requires_canonical_minted_shape() {
+        let id = uuid::Uuid::new_v4();
+        let canonical = format!(".chan-download-42-{id}.tmp");
+        assert_eq!(
+            generated_download_temp_pid(OsStr::new(&canonical)),
+            Some(42)
+        );
+
+        for decoy in [
+            format!("chan-download-42-{id}.tmp"),
+            format!(".chan-download-042-{id}.tmp"),
+            format!(".chan-download-+42-{id}.tmp"),
+            format!(".chan-download-42-{}.tmp", id.simple()),
+            format!(
+                ".chan-download-42-{}.tmp",
+                id.to_string().to_ascii_uppercase()
+            ),
+            format!(".chan-download-42-{id}.tmp.backup"),
+        ] {
+            assert_eq!(
+                generated_download_temp_pid(OsStr::new(&decoy)),
+                None,
+                "{decoy} is not a minted temp name"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_reap_removes_only_old_foreign_generated_download_temps() {
+        let temp = tempfile::tempdir().unwrap();
+        let current_pid = std::process::id();
+        let foreign_pid = if current_pid == u32::MAX {
+            current_pid - 1
+        } else {
+            current_pid + 1
+        };
+        let foreign = temp.path().join(format!(
+            ".chan-download-{foreign_pid}-{}.tmp",
+            uuid::Uuid::new_v4()
+        ));
+        let ours = temp.path().join(format!(
+            ".chan-download-{current_pid}-{}.tmp",
+            uuid::Uuid::new_v4()
+        ));
+        let bystander = temp.path().join("quarterly notes.md");
+        let invalid_uuid = temp
+            .path()
+            .join(format!(".chan-download-{foreign_pid}-not-a-uuid.tmp"));
+        let extra_suffix = temp.path().join(format!(
+            ".chan-download-{foreign_pid}-{}.tmp.backup",
+            uuid::Uuid::new_v4()
+        ));
+        let nested = temp.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let matching_directory = temp.path().join(format!(
+            ".chan-download-{foreign_pid}-{}.tmp",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&matching_directory).unwrap();
+        let nested_foreign = nested.join(format!(
+            ".chan-download-{foreign_pid}-{}.tmp",
+            uuid::Uuid::new_v4()
+        ));
+        for path in [
+            &foreign,
+            &ours,
+            &bystander,
+            &invalid_uuid,
+            &extra_suffix,
+            &nested_foreign,
+        ] {
+            std::fs::write(path, b"x").unwrap();
+        }
+
+        assert_eq!(
+            reap_orphaned_download_temps(
+                temp.path(),
+                std::time::SystemTime::now(),
+                std::time::Duration::from_secs(60 * 60),
+            ),
+            0
+        );
+        assert_eq!(
+            reap_orphaned_download_temps(
+                temp.path(),
+                std::time::SystemTime::now(),
+                std::time::Duration::ZERO,
+            ),
+            1
+        );
+        assert!(!foreign.exists());
+        for path in [
+            &ours,
+            &bystander,
+            &invalid_uuid,
+            &extra_suffix,
+            &matching_directory,
+            &nested_foreign,
+        ] {
+            assert!(path.exists(), "{} must not be reaped", path.display());
+        }
     }
 
     #[tokio::test]
