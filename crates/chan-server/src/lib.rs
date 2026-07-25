@@ -868,10 +868,10 @@ async fn build_terminal_app(
     // MCP bridge (nothing to expose without a workspace).
     let workspace_root = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
 
-    // Workspace-less cell: handlers reaching `state.workspace()` would
-    // panic, which is why the slim router mounts no workspace-content
-    // route. The serve loop's indexer-cancel side task tolerates a
-    // `None` cell (it no-ops), so the shared shutdown wiring is safe.
+    // Workspace-less cell: `try_workspace` reports `Missing`, and the slim
+    // router mounts no workspace-content route. The serve loop's
+    // indexer-cancel side task tolerates a `None` cell (it no-ops), so the
+    // shared shutdown wiring is safe.
     // Created before the control socket, which shares it (and reports
     // the terminal-only refusal for workspace commands).
     let workspace_cell: Arc<RwLock<Option<WorkspaceCell>>> = Arc::new(RwLock::new(None));
@@ -1042,9 +1042,8 @@ async fn build_terminal_app(
 /// surface (ws + CRUD + restart), the per-window session blob, the
 /// event/pane `/ws` bus, build-info / health, and the SPA shell
 /// fallback. No file / graph / index / drafts / contacts / inspector /
-/// settings route is present (they all reach `state.workspace()` and
-/// would panic on the `None` cell), so a stray workspace-content
-/// request 404s. Auth + serve_static are layered identically to
+/// settings route is present (they all require a live workspace), so a stray
+/// workspace-content request 404s. Auth + serve_static are layered identically to
 /// [`router`] so `/api/*` stays tokened -- a PTY is shell access.
 fn terminal_router(state: Arc<AppState>) -> Router {
     let api = Router::new()

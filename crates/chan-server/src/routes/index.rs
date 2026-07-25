@@ -35,7 +35,7 @@ use chan_workspace::index::embeddings::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::error::{err, err_from};
+use crate::error::{err, err_from, err_state};
 use crate::state::AppState;
 
 /// Snapshot of the per-workspace semantic-search state. Settings UI +
@@ -169,7 +169,10 @@ fn build_state(
 
 /// `GET /api/index/semantic/state`. Read-only snapshot.
 pub async fn api_semantic_state(State(state): State<Arc<AppState>>) -> Response {
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     match tokio::task::spawn_blocking(move || build_state(&workspace)).await {
         Ok(Ok(s)) => Json(s).into_response(),
         Ok(Err(e)) => err_from(&e),
@@ -183,7 +186,10 @@ pub async fn api_semantic_state(State(state): State<Arc<AppState>>) -> Response 
 
 /// `GET /api/index/semantic/models`. Curated picker state.
 pub async fn api_semantic_models(State(state): State<Arc<AppState>>) -> Response {
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     match tokio::task::spawn_blocking(move || {
         let current_model = match workspace.semantic_model() {
             Ok(model) => model,
@@ -222,7 +228,10 @@ pub async fn api_semantic_model_patch(
             format!("unknown embedding model: {model}"),
         );
     }
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     match tokio::task::spawn_blocking(move || {
         if let Err(e) = workspace.set_semantic_model(&model) {
             return err_from(&e);
@@ -259,7 +268,10 @@ struct ModelNotDownloadedBody {
 /// the structured `ModelNotDownloaded` hint pointing the caller at
 /// the `/download` endpoint.
 pub async fn api_semantic_enable(State(state): State<Arc<AppState>>) -> Response {
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     // Enabling opts in, so kick a from-scratch rebuild: the reindex now embeds
     // (semantic_enabled is true) and bypasses the file cap, so the whole tree
     // gets vectors. If the indexer handle is unavailable (a rare reset/shutdown
@@ -321,7 +333,10 @@ pub async fn api_semantic_enable(State(state): State<Arc<AppState>>) -> Response
 /// from scratch. Always succeeds; idempotent (a wipe of an already-off
 /// workspace is a no-op).
 pub async fn api_semantic_disable(State(state): State<Arc<AppState>>) -> Response {
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     match tokio::task::spawn_blocking(move || {
         if let Err(e) = workspace.set_semantic_enabled(false) {
             return err_from(&e);
@@ -353,7 +368,10 @@ pub async fn api_semantic_disable(State(state): State<Arc<AppState>>) -> Respons
 /// runs on a Tokio blocking thread so it doesn't tie up the
 /// async runtime.
 pub async fn api_semantic_download(State(state): State<Arc<AppState>>) -> Response {
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     let result = tokio::task::spawn_blocking(move || {
         let model_name = match workspace.semantic_model() {
             Ok(m) => m,

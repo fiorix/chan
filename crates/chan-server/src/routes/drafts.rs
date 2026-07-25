@@ -21,7 +21,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{err, err_from};
+use crate::error::{err, err_from, err_state};
 use crate::state::AppState;
 
 const NEW_DRAFT_CONTENT: &str = "# Draft\n";
@@ -164,7 +164,10 @@ pub async fn api_create_draft(
         Ok(seed) => seed,
         Err(message) => return err(StatusCode::BAD_REQUEST, message),
     };
-    let workspace = state.workspace().clone();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     // Note the draft path inside the blocking task, before it returns to
     // the await, so the watcher's Created event for our own draft is
     // suppressed without the post-await race (see files.rs::api_write_file).
@@ -191,7 +194,10 @@ pub async fn api_create_draft(
 /// (promotable + discardable) whose primary file is the Excalidraw
 /// scene rather than `draft.md`.
 pub async fn api_create_diagram(State(state): State<Arc<AppState>>) -> Response {
-    let workspace = state.workspace().clone();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     // Note the diagram path inside the blocking task, before it returns
     // to the await, so the watcher's Created event for our own write is
     // suppressed without the post-await race (see files.rs::api_write_file).
@@ -261,7 +267,10 @@ pub async fn api_inspect_draft(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<DraftPathPayload>,
 ) -> Response {
-    let workspace = state.workspace().clone();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     let result =
         tokio::task::spawn_blocking(move || inspect_draft_sync(&workspace, &payload.path)).await;
 
@@ -276,7 +285,10 @@ pub async fn api_discard_draft(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<DraftPathPayload>,
 ) -> Response {
-    let workspace = state.workspace().clone();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     let path = payload.path.clone();
     // Suppress the watcher's Removed event before the blocking discard
     // (see files.rs::api_write_file).
@@ -295,7 +307,10 @@ pub async fn api_promote_draft(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<DraftPromotePayload>,
 ) -> Response {
-    let workspace = state.workspace().clone();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     let source_path = payload.path.clone();
     let target_path = payload.target.clone();
     // Suppress the discard-at-source + create-at-target events before
@@ -762,7 +777,8 @@ mod tests {
         // Seeded with EXACTLY the slides content (frontmatter + heading).
         assert_eq!(
             app.state
-                .workspace()
+                .try_workspace()
+                .expect("slides draft test workspace")
                 .read_text(".Drafts/untitled/draft.md")
                 .unwrap(),
             NEW_SLIDES_CONTENT
@@ -782,7 +798,8 @@ mod tests {
         assert_eq!(body["name"], "untitled");
         assert_eq!(
             app.state
-                .workspace()
+                .try_workspace()
+                .expect("markdown draft test workspace")
                 .read_text(".Drafts/untitled/draft.md")
                 .unwrap(),
             NEW_DRAFT_CONTENT
@@ -805,6 +822,12 @@ mod tests {
             "unexpected error body: {body}"
         );
         // Nothing was created for the refused request.
-        assert!(!app.state.workspace().drafts_dir().join("untitled").exists());
+        assert!(!app
+            .state
+            .try_workspace()
+            .expect("draft test workspace")
+            .drafts_dir()
+            .join("untitled")
+            .exists());
     }
 }

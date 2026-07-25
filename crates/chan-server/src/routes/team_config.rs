@@ -34,7 +34,7 @@ use axum::Json;
 use chan_workspace::{Member, TeamConfig};
 use serde::Deserialize;
 
-use crate::error::err;
+use crate::error::{err, err_state};
 use crate::state::AppState;
 
 /// `POST /api/team-config/read` body. `dir` is workspace-relative.
@@ -156,7 +156,10 @@ pub async fn api_team_config_read(
         Ok(d) => d,
         Err(msg) => return err(StatusCode::BAD_REQUEST, msg),
     };
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     let result = tokio::task::spawn_blocking(move || read_team_config(&workspace, &dir)).await;
     match result {
         Ok(Ok(config)) => Json(config).into_response(),
@@ -179,7 +182,10 @@ pub async fn api_team_config_write(
     };
     let config = payload.config;
     let brief = payload.brief_content;
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     let result = tokio::task::spawn_blocking(move || {
         write_team_config(&workspace, &dir, &config, brief.as_deref())
     })

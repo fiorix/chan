@@ -26,7 +26,7 @@ use axum::Json;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{err, err_from};
+use crate::error::{err, err_from, err_state};
 use crate::state::AppState;
 
 const MIN_TIMEOUT_SECS: u32 = 10;
@@ -64,7 +64,10 @@ pub struct VerifyResult {
 
 /// `GET /api/screensaver/state`.
 pub async fn api_screensaver_state(State(state): State<Arc<AppState>>) -> Response {
-    let workspace = state.workspace().clone();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     screensaver_state_response(workspace).await
 }
 
@@ -110,7 +113,10 @@ pub async fn api_screensaver_patch(
             );
         }
     }
-    let workspace = state.workspace().clone();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     let result = tokio::task::spawn_blocking(
         move || -> Result<ScreensaverState, chan_workspace::ChanError> {
             let config = workspace.update_screensaver(
@@ -142,7 +148,10 @@ pub async fn api_screensaver_set_pin(
     if bytes.is_empty() {
         return err(StatusCode::BAD_REQUEST, "empty hash".to_string());
     }
-    let workspace = state.workspace().clone();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     let result = tokio::task::spawn_blocking(move || {
         workspace.set_screensaver_pin_hash(Some(bytes))?;
         screensaver_state_sync(&workspace)
@@ -157,7 +166,10 @@ pub async fn api_screensaver_set_pin(
 
 /// `DELETE /api/screensaver/pin`. Clear the PIN.
 pub async fn api_screensaver_clear_pin(State(state): State<Arc<AppState>>) -> Response {
-    let workspace = state.workspace().clone();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     let result = tokio::task::spawn_blocking(move || {
         workspace.set_screensaver_pin_hash(None)?;
         screensaver_state_sync(&workspace)
@@ -183,7 +195,10 @@ pub async fn api_screensaver_verify(
         Ok(b) => b,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid base64: {e}")),
     };
-    let workspace = state.workspace().clone();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     let result = tokio::task::spawn_blocking(move || {
         let stored = workspace.screensaver_pin_hash()?;
         let verified = match stored {
@@ -426,7 +441,10 @@ mod tests {
         // The API boundary rejects values outside
         // the UI-supported [10s, 3600s] range.
         let app = route_test_app();
-        let workspace = app.state.workspace();
+        let workspace = app
+            .state
+            .try_workspace()
+            .expect("screensaver test workspace");
         let dashboard_path = chan_workspace::dashboard::config_path(&workspace.paths().root);
         let router = crate::router(app.state);
         for body in [r#"{"timeout_secs":9}"#, r#"{"timeout_secs":3601}"#] {

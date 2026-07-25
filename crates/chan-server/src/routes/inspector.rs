@@ -10,7 +10,7 @@ use axum::Json;
 use chan_workspace::{FileClass, PathClass, ReportFileStats, ReportLanguageStats, ReportTotals};
 use serde::{Deserialize, Serialize};
 
-use crate::error::err_from;
+use crate::error::{err_from, err_state};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -78,7 +78,10 @@ pub async fn api_inspector(
     State(state): State<Arc<AppState>>,
     Query(params): Query<InspectorParams>,
 ) -> Response {
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     match tokio::task::spawn_blocking(move || build_inspector_payload(&workspace, &params.path))
         .await
     {

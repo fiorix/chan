@@ -35,7 +35,7 @@ use axum::Json;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-use crate::error::err;
+use crate::error::{err, err_state};
 use crate::state::AppState;
 
 /// Hard cap on `depth` for scope=directory. Ten matches the frontend's
@@ -295,7 +295,10 @@ pub async fn api_fs_graph(
     State(state): State<Arc<AppState>>,
     Query(p): Query<FsGraphParams>,
 ) -> Response {
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     // A request carrying `limit` or `cursor` is paged: bounded one
     // batch at a time with a continuation token. Otherwise it is the
     // historical whole-scope walk (the depth-cap probe needs that

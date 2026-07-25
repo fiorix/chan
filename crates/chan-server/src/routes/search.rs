@@ -99,7 +99,10 @@ pub async fn api_search_files(
     State(state): State<Arc<AppState>>,
     Query(p): Query<FileSearchParams>,
 ) -> Response {
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     blocking_response(
         move || match filename_recovery(&workspace, &p.q, p.limit) {
             Ok(hits) => Json(hits).into_response(),
@@ -165,7 +168,10 @@ pub async fn api_search_content(
     State(state): State<Arc<AppState>>,
     Query(p): Query<ContentSearchParams>,
 ) -> Response {
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     search_content_with_mode_resolver(workspace, p, |workspace| {
         Ok((
             legacy_search_mode(workspace.effective_search_mode()?),
@@ -251,7 +257,10 @@ pub async fn api_search_workspace(
             return (StatusCode::BAD_REQUEST, rejection.body_text()).into_response();
         }
     };
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     blocking_response(
         move || match workspace.workspace_search(&request) {
             Ok(result) => Json(result).into_response(),
@@ -1060,7 +1069,10 @@ mod tests {
         use std::time::Duration;
 
         let app = route_test_app();
-        let workspace = app.state.workspace();
+        let workspace = app
+            .state
+            .try_workspace()
+            .expect("content search test workspace");
         let (resolver_started_tx, resolver_started_rx) = mpsc::channel();
         let (release_resolver_tx, release_resolver_rx) = mpsc::channel();
         let (timer_fired_tx, timer_fired_rx) = mpsc::channel();
@@ -1128,7 +1140,10 @@ mod tests {
     #[tokio::test]
     async fn filename_recovery_loads_one_contact_path_set() {
         let app = route_test_app();
-        let workspace = app.state.workspace();
+        let workspace = app
+            .state
+            .try_workspace()
+            .expect("filename recovery test workspace");
         let mut contact_set_queries = 0;
         filename_recovery_with_contact_paths(&workspace, "recovery.md", 50, || {
             contact_set_queries += 1;
@@ -1188,7 +1203,8 @@ mod tests {
     async fn index_status_preserves_its_tag_and_adds_recovery_readiness() {
         let app = route_test_app();
         app.state
-            .workspace()
+            .try_workspace()
+            .expect("index status test workspace")
             .request_recovery(chan_workspace::RecoveryAction::FullRebuild);
         let router = crate::router(app.state);
         let request = Request::builder()
@@ -1214,7 +1230,8 @@ mod tests {
     async fn content_query_during_recovery_is_not_a_fresh_empty_result() {
         let app = route_test_app();
         app.state
-            .workspace()
+            .try_workspace()
+            .expect("content recovery test workspace")
             .request_recovery(chan_workspace::RecoveryAction::Reconcile);
         let router = crate::router(app.state);
         let request = Request::builder()

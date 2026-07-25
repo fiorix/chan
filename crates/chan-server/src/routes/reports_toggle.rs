@@ -24,7 +24,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
 
-use crate::error::err_from;
+use crate::error::{err_from, err_state};
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Serialize)]
@@ -35,7 +35,10 @@ pub struct ReportsState {
 /// `GET /api/index/reports/state`. Read-only snapshot of the
 /// per-workspace reports toggle.
 pub async fn api_reports_state(State(state): State<Arc<AppState>>) -> Response {
-    let workspace = state.workspace().clone();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     let result = tokio::task::spawn_blocking(move || workspace.reports_enabled()).await;
     match result {
         Ok(Ok(enabled)) => Json(ReportsState { enabled }).into_response(),
@@ -74,7 +77,10 @@ pub async fn api_reports_disable(State(state): State<Arc<AppState>>) -> Response
 }
 
 async fn set_reports(state: Arc<AppState>, enabled: bool) -> Response {
-    let workspace = state.workspace().clone();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     // set_reports_enabled may do non-trivial work (kicks off
     // indexing); run on the blocking pool to keep the async
     // runtime responsive.

@@ -52,7 +52,7 @@ use chan_workspace::contacts::{
     google::parse_google_csv, ImportOpts, ImportOutcome, ImportSummary, ProviderKind,
 };
 
-use crate::error::{err, err_from};
+use crate::error::{err, err_from, err_state};
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -76,7 +76,10 @@ pub async fn api_get_contacts(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ContactsListQuery>,
 ) -> Response {
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     let needle = q.q;
     match tokio::task::spawn_blocking(move || {
         let needle = needle.as_deref().map(str::trim).filter(|s| !s.is_empty());
@@ -230,7 +233,11 @@ pub async fn api_post_contacts_import(
         );
     }
 
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
+    let import_workspace = workspace.clone();
     let self_writes = Arc::clone(&state.self_writes);
     let summary =
         match tokio::task::spawn_blocking(move || -> Result<ImportSummary, Box<Response>> {
@@ -243,7 +250,7 @@ pub async fn api_post_contacts_import(
                     )))
                 }
             };
-            let summary = workspace
+            let summary = import_workspace
                 .import_contacts(&dest_dir, contacts, ImportOpts { overwrite })
                 .map_err(|e| Box::new(err_from(&e)))?;
             // Note our own writes inside the task, before the await
@@ -280,7 +287,6 @@ pub async fn api_post_contacts_import(
         }
     }
     if !to_index.is_empty() {
-        let workspace = state.workspace();
         let _ = tokio::task::spawn_blocking(move || {
             for p in &to_index {
                 if let Err(e) = workspace.index_file(p) {

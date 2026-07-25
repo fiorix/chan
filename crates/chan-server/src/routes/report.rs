@@ -43,7 +43,7 @@ use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::error::err_from;
+use crate::error::{err_from, err_state};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -173,7 +173,10 @@ pub async fn api_report_file(
     if p.path.trim().is_empty() {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     if query_flag(&p.stream) {
         return stream_report_file_response(workspace, p.path).await;
     }
@@ -241,7 +244,10 @@ pub async fn api_report_prefix(
     State(state): State<Arc<AppState>>,
     Query(p): Query<ReportPathParams>,
 ) -> Response {
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     blocking_response(
         move || {
             let report = match if p.path.is_empty() {
@@ -272,7 +278,10 @@ pub async fn api_report_dir(
     State(state): State<Arc<AppState>>,
     Query(p): Query<ReportPathParams>,
 ) -> Response {
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     blocking_response(
         move || {
             let report = match workspace.report_for_dir(&p.path) {

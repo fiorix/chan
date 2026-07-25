@@ -19,7 +19,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::error::err_from;
+use crate::error::{err_from, err_state};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -51,7 +51,10 @@ pub async fn api_get_mentions(
     State(state): State<Arc<AppState>>,
     Query(params): Query<MentionsQuery>,
 ) -> Response {
-    let workspace = state.workspace().clone();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     let q = params.q.clone();
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT) as usize;
     let result = tokio::task::spawn_blocking(
@@ -91,6 +94,9 @@ pub async fn api_get_mentions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::{header::RETRY_AFTER, StatusCode};
+
+    use crate::state::test_support::make_test_state;
 
     #[test]
     fn limit_clamps_to_bounds() {
@@ -119,5 +125,36 @@ mod tests {
         };
         let clamped_default = q_default.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT) as usize;
         assert_eq!(clamped_default, DEFAULT_LIMIT as usize);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspace_contention_returns_retryable_service_unavailable() {
+        let state = make_test_state(false);
+        let handler_state = state.clone();
+        let workspace_cell = state.workspace_cell.clone();
+        let (writer_ready_tx, writer_ready_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_writer_tx, release_writer_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let _guard = workspace_cell.write().expect("workspace cell writer");
+            writer_ready_tx.send(()).expect("signal workspace writer");
+            release_writer_rx.recv().expect("release workspace writer");
+        });
+        writer_ready_rx.recv().expect("workspace writer ready");
+
+        let response = api_get_mentions(
+            State(handler_state),
+            Query(MentionsQuery {
+                q: String::new(),
+                limit: None,
+            }),
+        )
+        .await;
+        release_writer_tx
+            .send(())
+            .expect("release workspace writer");
+        writer.join().expect("workspace writer");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "1");
     }
 }

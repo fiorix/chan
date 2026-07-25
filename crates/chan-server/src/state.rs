@@ -231,13 +231,6 @@ impl AppState {
         Ok(cell.workspace.clone())
     }
 
-    /// Legacy infallible accessor for call sites that have not yet
-    /// been converted to explicit HTTP errors. New route code should
-    /// prefer `try_workspace`.
-    pub fn workspace(&self) -> Arc<Workspace> {
-        self.try_workspace().expect("workspace state unavailable")
-    }
-
     /// Snapshot the live indexer Arc without waiting for a reset writer.
     pub fn try_indexer(&self) -> Result<Arc<indexer::Indexer>, StateAccessError> {
         let cell = self.try_workspace_cell()?;
@@ -253,9 +246,7 @@ pub(crate) mod test_support {
     //! Minimal `AppState` builder for tests that exercise the
     //! middleware / handlers but don't need a real workspace on disk.
     //! The `workspace_cell` is intentionally left `None`: callers that
-    //! try to reach into it will hit the `workspace_cell missing` panic
-    //! from `AppState::workspace()`, which is the right failure mode
-    //! (the test isn't supposed to touch the workspace).
+    //! try to reach into it receive `StateAccessError::Missing`.
     //!
     //! The `Library` is opened against a tempfile so that
     //! `list_workspaces` returns an empty Vec and registry writes don't
@@ -278,8 +269,7 @@ pub(crate) mod test_support {
     /// Build an `AppState` with the two policy bools set to the
     /// requested values and everything else stubbed to defaults.
     /// The returned `AppState` is safe to wrap in `Arc` and hand to
-    /// axum extractors; reading any workspace-bearing field will panic
-    /// (by design).
+    /// axum extractors; workspace access returns `StateAccessError::Missing`.
     pub fn make_test_state(settings_disabled: bool) -> Arc<AppState> {
         // The TempDir's path is what Library::open_at uses for any
         // later registry writes (register_workspace, ...). Letting it

@@ -9,7 +9,7 @@ use axum::Json;
 use serde::Serialize;
 
 use super::preferences::{preferences_view, PreferencesView};
-use crate::error::err;
+use crate::error::{err, err_state};
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -52,7 +52,11 @@ pub async fn api_get_workspace(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn workspace_info_response(state: Arc<AppState>, label: &'static str) -> Response {
-    let result = tokio::task::spawn_blocking(move || workspace_info(&state)).await;
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
+    let result = tokio::task::spawn_blocking(move || workspace_info(&state, &workspace)).await;
     match result {
         Ok(Ok(info)) => Json(info).into_response(),
         Ok(Err(message)) => err(StatusCode::INTERNAL_SERVER_ERROR, message),
@@ -76,7 +80,7 @@ async fn workspace_info_response(state: Arc<AppState>, label: &'static str) -> R
 pub async fn api_workspace_bootstrap(State(state): State<Arc<AppState>>) -> Response {
     let workspace = match state.try_workspace() {
         Ok(workspace) => workspace,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(error) => return err_state(&error),
     };
     match tokio::task::spawn_blocking(move || workspace.bootstrap()).await {
         Ok(Ok(tree)) => Json(tree).into_response(),
@@ -137,14 +141,11 @@ pub async fn api_cloud_workspaces() -> Response {
 }
 
 /// Build a `WorkspaceInfo` from current registry state.
-fn workspace_info(state: &AppState) -> Result<WorkspaceInfo, String> {
+fn workspace_info(
+    state: &AppState,
+    workspace: &chan_workspace::Workspace,
+) -> Result<WorkspaceInfo, String> {
     let workspaces = state.library.list_workspaces();
-    // Snapshot the live workspace once: each call to `state.workspace()`
-    // takes the `workspace_cell` RwLock and clones the Arc. Two calls
-    // worked fine; one call reads slightly cleaner and survives a
-    // hypothetical reset-in-flight where the cell could swap
-    // between the registry lookup and the path serialization.
-    let workspace = state.workspace();
     let workspace_root = workspace.root();
     let entry = workspaces
         .iter()
@@ -159,7 +160,7 @@ fn workspace_info(state: &AppState) -> Result<WorkspaceInfo, String> {
         metadata_key: entry.map(|e| e.metadata_key.clone()),
         drafts_dir: state.library.drafts_dir(),
         preferences: preferences_view(state).map_err(|e| e.to_string())?,
-        warnings: workspace_warnings(&workspace),
+        warnings: workspace_warnings(workspace),
     })
 }
 

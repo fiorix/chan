@@ -29,7 +29,7 @@ use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::error::err_from;
+use crate::error::{err_from, err_state};
 use crate::routes::fs_graph::{build_fs_graph, FsGraphScope};
 use crate::state::AppState;
 
@@ -129,7 +129,10 @@ pub async fn api_link_targets(
     State(state): State<Arc<AppState>>,
     Query(p): Query<LinkTargetsParams>,
 ) -> Response {
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     blocking_response(move || api_link_targets_sync(workspace, p), "link targets").await
 }
 
@@ -159,7 +162,10 @@ pub async fn api_resolve_link(
     State(state): State<Arc<AppState>>,
     Query(p): Query<ResolveLinkParams>,
 ) -> Response {
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     blocking_response(
         move || match workspace.resolve_link(&p.target) {
             Some(resolved) => Json(resolved).into_response(),
@@ -174,7 +180,10 @@ pub async fn api_headings(
     State(state): State<Arc<AppState>>,
     AxumPath(path): AxumPath<String>,
 ) -> Response {
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     blocking_response(
         move || {
             let graph = match workspace.graph() {
@@ -203,7 +212,10 @@ pub async fn api_headings(
 /// shape is `[Edge]` so the frontend can render the link-only
 /// view without a follow-up request.
 pub async fn api_links(State(state): State<Arc<AppState>>) -> Response {
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     // Empty while the first index builds (the link-edge walk hits the
     // contended graph DB); the SPA re-fetches once indexing completes.
     if workspace.is_reindexing() {
@@ -1278,7 +1290,10 @@ pub async fn api_language_graph(
     State(state): State<Arc<AppState>>,
     Query(p): Query<LanguageGraphParams>,
 ) -> Response {
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     blocking_response(
         move || {
             let report = match workspace.report() {
@@ -1301,7 +1316,10 @@ pub async fn api_graph(
     State(state): State<Arc<AppState>>,
     Query(q): Query<GraphQuery>,
 ) -> Response {
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     let stream = query_flag(&q.stream);
     let params = q.into_params();
     // While the first index builds, the graph DB is saturated by the
@@ -1823,7 +1841,10 @@ pub async fn api_backlinks(
     AxumPath(path): AxumPath<String>,
     Query(query): Query<BacklinksQuery>,
 ) -> Response {
-    let workspace = state.workspace();
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
     let stream = query_flag(&query.stream);
     // During the first index build the graph DB is contended; reading
     // backlinks here would queue behind the reindex writer and freeze
