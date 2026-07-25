@@ -300,22 +300,8 @@ The user copies the printed URL, including the bearer token, into the [New] moda
 
 ## 12. Native file integrations
 
-- **Download**: the SPA gives a same-origin, tokenized file URL to a narrowly
-  granted native command. Rust revalidates the invoking origin and workspace
-  prefix, forwards the webview's authentication cookies, refuses redirects,
-  and streams the response into a same-directory temporary file in Downloads
-  before an atomic rename. Network bytes never cross webview IPC. The SPA polls
-  only a bounded progress record at 10 Hz and cancellation removes the
-  temporary file.
-- **Upload / replace**: the native file picker and selected paths remain in
-  Rust. Each regular, non-symlink file is streamed as a multipart body in
-  64 KiB chunks after the workspace-relative destination, invoking origin,
-  cookies, and CSRF mirror are revalidated. The webview receives only final
-  relative paths and progress snapshots, never file paths or file bytes.
-- **Generated downloads**: bytes already produced by the SPA, such as a
-  rendered PDF, cross IPC through an explicit 64 KiB chunk sink and use the
-  same temp-file/atomic-rename commit discipline.
-- **Scheduling**: each window runs at most two downloads and one upload. Extra
-  transfers remain visible in a FIFO queue; queued and active operations are
-  cancellable, and page teardown cancels both.
+- **Download**: the SPA gives a same-origin, tokenized file URL to a narrowly granted native command. Rust revalidates the invoking origin and workspace prefix, forwards the webview's authentication cookies, refuses redirects, and streams the response into a same-directory temporary file in Downloads before an atomic rename. Network bytes never cross webview IPC. The SPA polls only a bounded progress record at 10 Hz and cancellation removes the temporary file.
+- **Upload / replace**: the native file picker and selected paths remain in Rust. Each regular, non-symlink file is streamed as a multipart body in 64 KiB chunks after the workspace-relative destination, invoking origin, cookies, and CSRF mirror are revalidated. The webview receives only final relative paths and progress snapshots, never file paths or file bytes.
+- **Generated downloads**: bytes already produced by the SPA, such as a rendered PDF, cross IPC through an explicit 64 KiB chunk sink and use the same temp-file/atomic-rename commit discipline.
+- **Scheduling**: each window runs at most two downloads and one upload. Extra transfers remain visible in a FIFO queue; queued and active operations are cancellable, and page teardown cancels both.
 - **Export to PDF** (macOS): `window.print()` is a no-op in WKWebView, so the desktop drives the real macOS print pipeline (`printOperationWithPrintInfo:`) silently to a file, which honours `@page`, auto-pagination, and explicit page breaks exactly like the browser's print-to-PDF path. The frontend gates the call to macOS desktop.

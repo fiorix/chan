@@ -8,8 +8,7 @@ Support video files (.mp4 first, then .webm/.mov) for inline preview and the ful
 
 ## What is already known (grounding, verified 2026-07-24)
 
-The two inspectors share one body, so anything added to it lands in both:
-FileInfoBody.svelte is rendered by both the file browser inspector and the graph inspector (via InspectorBody.svelte; its comment: "the graph 'image-ish file' node both get the same preview").
+The two inspectors share one body, so anything added to it lands in both: FileInfoBody.svelte is rendered by both the file browser inspector and the graph inspector (via InspectorBody.svelte; its comment: "the graph 'image-ish file' node both get the same preview").
 
 Frontend is a near-mirror of the existing image path (small):
 - web/.../state/fileTypes.ts has IMAGE_EXTENSIONS + isImage but NO video set; video currently falls into "Other". Add VIDEO_EXTENSIONS + isVideo.
@@ -18,8 +17,7 @@ Frontend is a near-mirror of the existing image path (small):
 - Directory prev/next: the flat-directory image list at FileInfoBody.svelte 154-159 (filters isImage) extends to media.
 
 The one real task is server-side HTTP RANGE support (this is what makes it "some work" rather than trivial):
-- crates/chan-server/src/routes/files.rs read_file_sync returns ReadFileResult::Data(Bytes), i.e. the WHOLE file is read into memory and returned as a single 200 with no Accept-Ranges / 206. Fine for images and PDFs; wrong for video. Without ranges, a <video> cannot seek/scrub, and a large mp4 buffers entirely in server RAM and re-streams from the start on
-  every seek.
+- crates/chan-server/src/routes/files.rs read_file_sync returns ReadFileResult::Data(Bytes), i.e. the WHOLE file is read into memory and returned as a single 200 with no Accept-Ranges / 206. Fine for images and PDFs; wrong for video. Without ranges, a <video> cannot seek/scrub, and a large mp4 buffers entirely in server RAM and re-streams from the start on every seek.
 - Add Range / 206 Partial Content handling (parse Range, return Content-Range
   + Accept-Ranges: bytes, read only the requested slice), OR serve media through tower-http ServeFile (which does ranges out of the box) on a scoped media path.
 - content_type_for (crate::static_assets) must map .mp4 -> video/mp4 (and .webm/.mov, .mp3 for audio). Confirm current coverage.

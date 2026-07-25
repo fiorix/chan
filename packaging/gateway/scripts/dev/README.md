@@ -88,11 +88,7 @@ cargo run -p chan -- serve <some-workspace-dir> \
   --tunnel-workspace-name=blog
 ```
 
-The client verifies the per-stack CA, then the tunnel TLS edge negotiates only
-h2 and forwards it to proxy p1's loopback h2c listener. Identity and proxy
-public edges negotiate only HTTP/1.1; keeping the ALPN sets disjoint prevents a
-public listener from receiving an h2 preface it does not serve. Once connected,
-clicking Open targets `https://<user>--<disc>.p1.devserver.localtest.me:17002/blog/`.
+The client verifies the per-stack CA, then the tunnel TLS edge negotiates only h2 and forwards it to proxy p1's loopback h2c listener. Identity and proxy public edges negotiate only HTTP/1.1; keeping the ALPN sets disjoint prevents a public listener from receiving an h2 preface it does not serve. Once connected, clicking Open targets `https://<user>--<disc>.p1.devserver.localtest.me:17002/blog/`.
 
 ## Notes
 

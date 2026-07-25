@@ -37,8 +37,7 @@ sudo apt install ./chan-gateway-admin_*.deb
 | `CHAN_ADMIN_IDENTITY_URL` | `http://127.0.0.1:7000`  | identity-service   |
 | `CHAN_ADMIN_WORKSPACE_URL` | `http://127.0.0.1:7003` | devserver-control  |
 
-Each bearer is scoped to one service. `--token` is retained as a compatibility
-alias for `--operator-token`; it is not sent to profile or identity.
+Each bearer is scoped to one service. `--token` is retained as a compatibility alias for `--operator-token`; it is not sent to profile or identity.
 
 ## Commands
 

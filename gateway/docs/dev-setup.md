@@ -1,22 +1,12 @@
 # Gateway setup: local, mirroring production
 
-The gateway can run as a set of `sdme` containers, but a private bridge alone
-is not a trusted transport. This guide describes the production-shaped layout
-for hosts that also provide an authenticated, encrypted service overlay.
+The gateway can run as a set of `sdme` containers, but a private bridge alone is not a trusted transport. This guide describes the production-shaped layout for hosts that also provide an authenticated, encrypted service overlay.
 
 It mirrors the production definitions in the sibling `chan-prod-setup` repo. Per "show the pattern, copy little", it walks ONE worked service container end to end and points at `chan-prod-setup` for the rest, rather than duplicating every prod config here.
 
 > A faster inner loop exists for rapid iteration: `packaging/gateway/scripts/dev/run.sh` runs the services as host `cargo run` binaries over `*.localtest.me` (see [`packaging/gateway/scripts/dev/README.md`](../../packaging/gateway/scripts/dev/README.md)). That is handy while editing code, but it is NOT the prod-like shape. This guide is the all-container stack.
 
-> **Load-bearing transport requirement:** an ordinary sdme `--network-zone`
-> supplies network-namespace/L2 isolation, not authenticated encryption. It is
-> therefore not sufficient grounds for
-> `CHAN_GATEWAY_INTERNAL_TRANSPORT=protected-overlay`; never set that value just
-> to make a cleartext non-loopback bind pass validation. The all-container
-> commands below assume WireGuard, mTLS, or an equivalent authenticated and
-> encrypted overlay is already in place. Without one, use the checked-in local
-> runner: it keeps every cleartext Rust listener on literal loopback and puts
-> verified TLS edges in the same host namespace.
+> **Load-bearing transport requirement:** an ordinary sdme `--network-zone` supplies network-namespace/L2 isolation, not authenticated encryption. It is therefore not sufficient grounds for `CHAN_GATEWAY_INTERNAL_TRANSPORT=protected-overlay`; never set that value just to make a cleartext non-loopback bind pass validation. The all-container commands below assume WireGuard, mTLS, or an equivalent authenticated and encrypted overlay is already in place. Without one, use the checked-in local runner: it keeps every cleartext Rust listener on literal loopback and puts verified TLS edges in the same host namespace.
 
 ## Why the all-container, prod-like stack
 
@@ -93,26 +83,9 @@ Services reach it as `chan-psql:5432` on the zone; the published `:5432` (via Li
 
 ## The service containers
 
-Each gateway service is its own container built from a tiny `.sdme` file that
-installs the matching `.deb` and enables its systemd unit. The prod files live
-in `chan-prod-setup/services/` (`chan-id.sdme`, `chan-profile.sdme`,
-`chan-devserver-control.sdme`, `chan-devserver-proxy.sdme`). Do not copy the
-old cleartext `*.localtest.me` example: public DNS origins are required to use
-TLS, even when they resolve into `127/8`. For a local stack, use the checked-in
-`packaging/gateway/scripts/dev/{setup,run}.sh` runner, which creates a local CA
-and keeps every cleartext Rust listener on a literal loopback address. A
-container topology must instead terminate TLS at the public edge and carry
-service-to-service cleartext only on an authenticated, encrypted overlay.
+Each gateway service is its own container built from a tiny `.sdme` file that installs the matching `.deb` and enables its systemd unit. The prod files live in `chan-prod-setup/services/` (`chan-id.sdme`, `chan-profile.sdme`, `chan-devserver-control.sdme`, `chan-devserver-proxy.sdme`). Do not copy the old cleartext `*.localtest.me` example: public DNS origins are required to use TLS, even when they resolve into `127/8`. For a local stack, use the checked-in `packaging/gateway/scripts/dev/{setup,run}.sh` runner, which creates a local CA and keeps every cleartext Rust listener on a literal loopback address. A container topology must instead terminate TLS at the public edge and carry service-to-service cleartext only on an authenticated, encrypted overlay.
 
-Use the checked-in env templates for the exact service contract:
-control has separate operator/identity/profile admin rings, a per-proxy
-credential map, and `DEVSERVER_ADMISSION_VERIFYING_KEYS`; proxy points
-`IDENTITY_URL` at identity's internal listener (`http://chan-id:7004`) and
-receives only its own controller bearer plus the entry-verifier ring. The
-database owner credential belongs only to the migration unit; identity and
-profile run with distinct app-role URLs and `CHAN_GATEWAY_MIGRATIONS=external`.
-See `chan-prod-setup/services/` for the prod topology, but reconcile its secrets
-against these templates before deployment.
+Use the checked-in env templates for the exact service contract: control has separate operator/identity/profile admin rings, a per-proxy credential map, and `DEVSERVER_ADMISSION_VERIFYING_KEYS`; proxy points `IDENTITY_URL` at identity's internal listener (`http://chan-id:7004`) and receives only its own controller bearer plus the entry-verifier ring. The database owner credential belongs only to the migration unit; identity and profile run with distinct app-role URLs and `CHAN_GATEWAY_MIGRATIONS=external`. See `chan-prod-setup/services/` for the prod topology, but reconcile its secrets against these templates before deployment.
 
 ## nginx container + TLS
 

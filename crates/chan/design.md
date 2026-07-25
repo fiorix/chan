@@ -52,9 +52,7 @@ The standalone binary builds one multi-threaded tokio runtime for the whole proc
 
 ## 3. Frontend boundary
 
-This crate ships no frontend code. `chan open` serves the SPA through
-`chan-server`'s build-time bundle, so the editor / terminal / launcher assets
-reach the user without this crate owning web assets.
+This crate ships no frontend code. `chan open` serves the SPA through `chan-server`'s build-time bundle, so the editor / terminal / launcher assets reach the user without this crate owning web assets.
 
 ## 4. Subcommand dispatch
 

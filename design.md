@@ -4,22 +4,14 @@
 
 ## Component architecture
 
-The dependency direction keeps local-first workspace code independent from app and gateway concerns. `chan-workspace`
-owns filesystem gates, search, graph, and workspace state. `chan-server` wraps one tenant in HTTP, WebSocket,
-frontend serving, terminal, and MCP-bridge concerns. `chan-library` composes tenants into a multi-workspace host
-and launcher surface. `chan` and `chan-desktop` are runtime drivers, while `chan-llm` exposes the same workspace
-boundary to external agent CLIs over MCP.
+The dependency direction keeps local-first workspace code independent from app and gateway concerns. `chan-workspace` owns filesystem gates, search, graph, and workspace state. `chan-server` wraps one tenant in HTTP, WebSocket, frontend serving, terminal, and MCP-bridge concerns. `chan-library` composes tenants into a multi-workspace host and launcher surface. `chan` and `chan-desktop` are runtime drivers, while `chan-llm` exposes the same workspace boundary to external agent CLIs over MCP.
 
 The split is load-bearing:
 
-- `chan-server` links only chan-shell's wire types (`ControlRequest` / `ControlResponse`), not its clap actions
-  or transport.
-- The gateway is a separate Cargo workspace with its own lockfile and dependency stack, so the core single-binary
-  build never pulls in Postgres, OAuth, or proxy-only code. It consumes the in-repo tunnel crates through the
-  tunnel protocol boundary. See [`gateway/README.md`](./gateway/README.md).
+- `chan-server` links only chan-shell's wire types (`ControlRequest` / `ControlResponse`), not its clap actions or transport.
+- The gateway is a separate Cargo workspace with its own lockfile and dependency stack, so the core single-binary build never pulls in Postgres, OAuth, or proxy-only code. It consumes the in-repo tunnel crates through the tunnel protocol boundary. See [`gateway/README.md`](./gateway/README.md).
 - The embedding-model bundler is an explicit release helper, not an implicit `cargo build` step.
-- Naming traps: the launcher is the `web-launcher` package, devserver is a `chan-server` mode, and `chan-llm` is an
-  MCP tool sandbox rather than a provider client.
+- Naming traps: the launcher is the `web-launcher` package, devserver is a `chan-server` mode, and `chan-llm` is an MCP tool sandbox rather than a provider client.
 
 ### System architecture
 
@@ -70,75 +62,35 @@ flowchart LR
   Desktop -.->|"attach remote"| Proxy
 ```
 
-The whole-chan view: your machine (the CLI plus the desktop shell that embeds the host, the
-per-tenant server, the core, and the SPA), a box you own running a dial-out `chan devserver`, and
-the chan.app gateway (identity + Postgres + the devserver-proxy).
+The whole-chan view: your machine (the CLI plus the desktop shell that embeds the host, the per-tenant server, the core, and the SPA), a box you own running a dial-out `chan devserver`, and the chan.app gateway (identity + Postgres + the devserver-proxy).
 
-Bottom-up layering: **chan-report** feeds **chan-workspace** (the core); chan-workspace is wrapped
-per-tenant by **chan-server**, orchestrated multi-tenant by **chan-library**, and exposed to agents by
-**chan-llm**; the **devserver** mode composes server + library + **chan-tunnel-client** (`-proto`
-shared); **chan** (CLI) and **chan-desktop** are the drivers, **chan-shell** their control client. The
-dependency direction is load-bearing for the inversion seams: chan-library holds the launcher's
-`DevserverRegistry` trait + the `WindowTransfers` signal as `Arc<dyn ...>`/owned types, and chan-server
-(which depends on chan-library) re-exports them and implements the routes -- the low-level crate
-exposes the slot, the higher one fills it.
+Bottom-up layering: **chan-report** feeds **chan-workspace** (the core); chan-workspace is wrapped per-tenant by **chan-server**, orchestrated multi-tenant by **chan-library**, and exposed to agents by **chan-llm**; the **devserver** mode composes server + library + **chan-tunnel-client** (`-proto` shared); **chan** (CLI) and **chan-desktop** are the drivers, **chan-shell** their control client. The dependency direction is load-bearing for the inversion seams: chan-library holds the launcher's `DevserverRegistry` trait + the `WindowTransfers` signal as `Arc<dyn ...>`/owned types, and chan-server (which depends on chan-library) re-exports them and implements the routes -- the low-level crate exposes the slot, the higher one fills it.
 
 ### The launcher: one SPA, three surfaces, reflecting the real library
 
-The launcher (`web-launcher`) is served at `/` by the `chan-library` `WorkspaceHost` root fallback and
-reached identically on the desktop loopback, a `chan devserver`, and the gateway-proxied root. Its registry
-CRUD (workspaces **and** devservers) is the **live `/api/library/*` client** -- on the desktop loopback it
-lists + mutates the user's real `~/.chan` workspaces and configured devservers (no mock).
+The launcher (`web-launcher`) is served at `/` by the `chan-library` `WorkspaceHost` root fallback and reached identically on the desktop loopback, a `chan devserver`, and the gateway-proxied root. Its registry CRUD (workspaces **and** devservers) is the **live `/api/library/*` client** -- on the desktop loopback it lists + mutates the user's real `~/.chan` workspaces and configured devservers (no mock).
 
-- **Workspaces** ride `/api/library/workspaces` (list + add/on/off/rm); per-row **Open** mints a new
-  workspace window, **Turn on** mounts an off workspace. Mutation is loopback-only; read-only over the tunnel.
-- **Devservers** ride `/api/library/devservers` (list + add/edit/remove), backed by a **`DevserverRegistry`**
-  bridge: chan-library defines the trait (held by `WorkspaceHost`, mirror of `workspace_overlay`),
-  chan-desktop implements it over its config (URL-shaped entries; the bearer token is write-only --
-  `has_token` reported, never echoed); the headless devserver/gateway surface installs none, so it serves an
-  empty list and 404s mutation. A devserver entry is a single full URL (scheme included), the forward hook
-  for the eventual devserver-proxy dial.
-- **Windows** ride `/api/library/windows` (+ `/watch` WS) -- the authoritative `WindowRecord` feed the
-  desktop, the launcher, and `cs window list` reconcile to; the clickable status dot toggles a window
-  open/hidden, and `cs upload`/`cs download` surface a per-window transfer bubble whose in-flight count is
-  reported over `/ws` (`WindowTransfers`) so closing a window mid-transfer prompts hold/cancel. `cs
-  copy`/`cs paste` bridge the terminal's stdin/stdout to that window's clipboard (text, HTML, or a PNG
-  image) over the same `pane_query`-style window round-trip: the server pushes a `clipboard_write` /
-  `clipboard_read` window_command, parks a `WindowBus` oneshot, and blocks until the SPA replies through
-  `POST /api/window/reply`. The SPA writes/reads via `navigator.clipboard`, or the desktop's native
-  `arboard` IPC where WKWebView's async clipboard is gesture-gated.
+- **Workspaces** ride `/api/library/workspaces` (list + add/on/off/rm); per-row **Open** mints a new workspace window, **Turn on** mounts an off workspace. Mutation is loopback-only; read-only over the tunnel.
+- **Devservers** ride `/api/library/devservers` (list + add/edit/remove), backed by a **`DevserverRegistry`** bridge: chan-library defines the trait (held by `WorkspaceHost`, mirror of `workspace_overlay`), chan-desktop implements it over its config (URL-shaped entries; the bearer token is write-only -- `has_token` reported, never echoed); the headless devserver/gateway surface installs none, so it serves an empty list and 404s mutation. A devserver entry is a single full URL (scheme included), the forward hook for the eventual devserver-proxy dial.
+- **Windows** ride `/api/library/windows` (+ `/watch` WS) -- the authoritative `WindowRecord` feed the desktop, the launcher, and `cs window list` reconcile to; the clickable status dot toggles a window open/hidden, and `cs upload`/`cs download` surface a per-window transfer bubble whose in-flight count is reported over `/ws` (`WindowTransfers`) so closing a window mid-transfer prompts hold/cancel. `cs copy`/`cs paste` bridge the terminal's stdin/stdout to that window's clipboard (text, HTML, or a PNG image) over the same `pane_query`-style window round-trip: the server pushes a `clipboard_write` / `clipboard_read` window_command, parks a `WindowBus` oneshot, and blocks until the SPA replies through `POST /api/window/reply`. The SPA writes/reads via `navigator.clipboard`, or the desktop's native `arboard` IPC where WKWebView's async clipboard is gesture-gated.
 
 ## Crate responsibilities
 
 ### chan (binary)
 
-Owns process-level CLI concerns: argument parsing, tracing initialization, startup/shutdown policy, self-upgrade,
-and dispatch into lower layers. It does not own HTTP routes, LLM tool behavior, or filesystem policy. Workspace
-registry and per-workspace operations go through `chan-workspace`; local and tunnel serving go through
-`chan-server`; shell/window control goes through `chan-shell`.
+Owns process-level CLI concerns: argument parsing, tracing initialization, startup/shutdown policy, self-upgrade, and dispatch into lower layers. It does not own HTTP routes, LLM tool behavior, or filesystem policy. Workspace registry and per-workspace operations go through `chan-workspace`; local and tunnel serving go through `chan-server`; shell/window control goes through `chan-shell`.
 
-`chan open` is the handoff point between a standalone loopback server and an already-running desktop/devserver
-host. An explicit workspace path may auto-register with that host and exit; `--standalone` forces an independent
-bind. Hidden MCP entrypoints are compatibility shims for external agent CLIs: one starts `chan-llm` over stdio for
-a workspace, and one bridges stdio into the in-process MCP socket hosted by `chan-server`. Embedded terminals export
-`CHAN_MCP_*` and control-socket discovery variables, leaving provider-specific env namespaces to the external tools.
+`chan open` is the handoff point between a standalone loopback server and an already-running desktop/devserver host. An explicit workspace path may auto-register with that host and exit; `--standalone` forces an independent bind. Hidden MCP entrypoints are compatibility shims for external agent CLIs: one starts `chan-llm` over stdio for a workspace, and one bridges stdio into the in-process MCP socket hosted by `chan-server`. Embedded terminals export `CHAN_MCP_*` and control-socket discovery variables, leaving provider-specific env namespaces to the external tools.
 
 ### chan-server
 
-Owns the per-tenant HTTP/WS runtime: launch-token auth, SPA fallback and embedded assets, API route composition,
-watcher/indexer subscriptions, terminal PTY lifecycle, model-bundle seeding, and the in-process MCP socket bridge.
-It delegates filesystem, search, graph, report, archive, and write semantics to `chan-workspace`, and MCP tool
-semantics to `chan-llm`. Tunnel transport is composed around the same per-tenant router rather than changing tenant
-request handling.
+Owns the per-tenant HTTP/WS runtime: launch-token auth, SPA fallback and embedded assets, API route composition, watcher/indexer subscriptions, terminal PTY lifecycle, model-bundle seeding, and the in-process MCP socket bridge. It delegates filesystem, search, graph, report, archive, and write semantics to `chan-workspace`, and MCP tool semantics to `chan-llm`. Tunnel transport is composed around the same per-tenant router rather than changing tenant request handling.
 
 Stable contracts:
 
-- Async handlers treat `chan-workspace` as a synchronous filesystem boundary: they snapshot the live workspace,
-  return retryable busy responses during metadata swaps, and move blocking filesystem/index/report/archive/transfer
-  work off the async executor.
+- Async handlers treat `chan-workspace` as a synchronous filesystem boundary: they snapshot the live workspace, return retryable busy responses during metadata swaps, and move blocking filesystem/index/report/archive/transfer work off the async executor.
 - Per-launch auth gates every `/api/*` and `/ws` route. SPA fallback must not mask `/api/*` or `/ws` misses.
-- Streaming reads use NDJSON on established `?stream=1` read/report/graph/backlink endpoints; clients must tolerate
-  incremental records.
+- Streaming reads use NDJSON on established `?stream=1` read/report/graph/backlink endpoints; clients must tolerate incremental records.
 - `/api/devserver/*` is reserved local-only management surface; the gateway tunnel must 404 it publicly.
 - `GET /ws` is the watcher and window-presence side channel; window tags are part of that presence contract.
 - A terminal WebSocket's `session` frame carries optional `submit_agent`, derived from the current PTY incarnation's stored spawn command and `CHAN_AGENT`. Restart and reattach recompute it; shells and unknown commands omit it, so old clients and servers remain wire-compatible.
@@ -149,9 +101,7 @@ Owns: the chan MCP server (`chan_llm::mcp::Server`), tool schemas exposed over M
 
 chan-llm is MCP-only: it has no in-app chat session, no CLI backends, and no tool loop of its own. External agent CLIs (claude, codex, gemini, opencode) connect to the chan MCP server by reading the `CHAN_MCP_*` environment variables the embedded terminal exports and translating them to their own MCP configuration. The crate also ships `chan-llm-mcp`, a standalone stdio MCP server binary any MCP client (Claude Desktop, Cursor, ...) can spawn for chan-workspace-sandboxed access to a workspace.
 
-chan-server hosts the MCP server in-process behind a Unix-domain socket. External subprocesses connect via
-`chan __mcp-proxy <socket>`, which is a stdio<->socket pipe. This sidesteps chan-workspace's per-workspace flock
-that would otherwise reject a child's `Library::open_workspace`.
+chan-server hosts the MCP server in-process behind a Unix-domain socket. External subprocesses connect via `chan __mcp-proxy <socket>`, which is a stdio<->socket pipe. This sidesteps chan-workspace's per-workspace flock that would otherwise reject a child's `Library::open_workspace`.
 
 ## Error model
 
@@ -191,12 +141,7 @@ Both paths install signal watchers (SIGINT / SIGTERM on Unix, Ctrl-C on Windows)
 
 ## Devserver and the multi-workspace host
 
-`WorkspaceHost` is an in-process owner that mounts several workspaces behind one runtime instead of one `chan open`
-child per workspace. It is a thin owner around the existing per-workspace server: each mounted workspace builds its
-own server state, watcher, indexer, MCP bridge, control socket, terminal registry, and route prefix, and the host
-dispatches by URL prefix without sharing route state across tenants. chan-desktop embeds a `WorkspaceHost` for local
-workspaces (see [`desktop/design.md`](desktop/design.md)); `chan devserver` binds one to a real address as a
-headless multi-workspace aggregator for boxes reached over SSH or a LAN.
+`WorkspaceHost` is an in-process owner that mounts several workspaces behind one runtime instead of one `chan open` child per workspace. It is a thin owner around the existing per-workspace server: each mounted workspace builds its own server state, watcher, indexer, MCP bridge, control socket, terminal registry, and route prefix, and the host dispatches by URL prefix without sharing route state across tenants. chan-desktop embeds a `WorkspaceHost` for local workspaces (see [`desktop/design.md`](desktop/design.md)); `chan devserver` binds one to a real address as a headless multi-workspace aggregator for boxes reached over SSH or a LAN.
 
 ```mermaid
 flowchart TB
@@ -229,16 +174,8 @@ Three surfaces ride one `WorkspaceHost`: local management (bearer), the per-user
 
 The devserver wraps the host in two surfaces:
 
-- A management HTTP/JSON API under the reserved `/api/devserver/*` namespace. It lists, mounts, and forgets
-  workspaces and opens standalone terminals. Workspace tenants mount at their public slug, with `api` reserved and
-  colliding workspace slugs rejected inside a devserver. Standalone terminal tenants keep opaque launcher-local
-  prefixes rather than public workspace slugs.
-- A per-user Unix discovery socket. When a devserver is running on a box, a `chan open PATH` there registers its
-  workspace with the running devserver and exits instead of binding a second listener, so the devserver keeps the
-  single-writer flock. Discovery is a well-known per-user endpoint, separate from per-process MCP/control sockets
-  and from the desktop handoff. It is Unix-only; other targets resolve to "no devserver" and the CLI stays
-  standalone. The registration handshake carries a protocol version, and a mismatch falls back to standalone rather
-  than decoding an unknown shape. `chan open --standalone` forces a standalone bind and skips both handoff paths.
+- A management HTTP/JSON API under the reserved `/api/devserver/*` namespace. It lists, mounts, and forgets workspaces and opens standalone terminals. Workspace tenants mount at their public slug, with `api` reserved and colliding workspace slugs rejected inside a devserver. Standalone terminal tenants keep opaque launcher-local prefixes rather than public workspace slugs.
+- A per-user Unix discovery socket. When a devserver is running on a box, a `chan open PATH` there registers its workspace with the running devserver and exits instead of binding a second listener, so the devserver keeps the single-writer flock. Discovery is a well-known per-user endpoint, separate from per-process MCP/control sockets and from the desktop handoff. It is Unix-only; other targets resolve to "no devserver" and the CLI stays standalone. The registration handshake carries a protocol version, and a mismatch falls back to standalone rather than decoding an unknown shape. `chan open --standalone` forces a standalone bind and skips both handoff paths.
 
 Optionally, `chan devserver --tunnel-token <PAT>` also publishes the whole library through the gateway (see "Bind vs tunnel"): the foreground devserver hands the SAME devserver router to `chan_tunnel_client`, registering ONE devserver at `{user}.devserver.chan.app`. The management API rides the same router but the proxy 404s `/api/devserver/*` on the public wildcard, so only tenant content (`/{slug}/...`) is reachable through the gateway; the owner manages the devserver over the direct (host:port / `ssh -L`) connection. Tunnel mode is foreground-only -- combined with `--service=systemd`/`--service=launchd` it is refused, since the supervised backend would have to persist the token in the unit file / launchd plist.
 
@@ -252,8 +189,7 @@ The token-delivery contract is the load-bearing invariant shared by every superv
 
 ## State ownership
 
-`chan-workspace` owns per-workspace state, the workspace registry, sandboxed user-file operations, and its own
-persistence rules. See [`crates/chan-workspace/design.md`](crates/chan-workspace/design.md).
+`chan-workspace` owns per-workspace state, the workspace registry, sandboxed user-file operations, and its own persistence rules. See [`crates/chan-workspace/design.md`](crates/chan-workspace/design.md).
 
 App-level state outside chan-workspace is intentionally narrow:
 
@@ -262,8 +198,7 @@ App-level state outside chan-workspace is intentionally narrow:
 - API key storage is optional; environment variables and OS keychain sources take precedence when available.
 - Devserver supervision state carries the reused bearer token and enabled workspace set needed to re-mount after restart.
 
-Bearer tokens and on-disk secrets are mode 0600 on Unix. App-layer writes use the same atomic-write and parent-dir
-fsync discipline as workspace content, so durability semantics do not vary by storage owner.
+Bearer tokens and on-disk secrets are mode 0600 on Unix. App-layer writes use the same atomic-write and parent-dir fsync discipline as workspace content, so durability semantics do not vary by storage owner.
 
 ## App-level vs chan-workspace
 

@@ -38,11 +38,7 @@ Migrations under `migrations/` run on startup.
 | `DEVSERVER_ADMIN_URL`  | yes      | protected devserver-control admin base |
 | `DEVSERVER_PROFILE_ADMIN_TOKEN` | yes | profile-scoped controller bearer |
 
-A missing `PROFILE_ADMIN_TOKEN` makes every `/v1/admin/*` route return 401; that
-is the safe default for a fresh deploy. Every access-denial mutation writes a
-durable revocation job in the same transaction. The worker uses the
-profile-scoped controller bearer to cut tunnels and browser sessions across the
-fleet and retries across service restarts until settled or exhausted.
+A missing `PROFILE_ADMIN_TOKEN` makes every `/v1/admin/*` route return 401; that is the safe default for a fresh deploy. Every access-denial mutation writes a durable revocation job in the same transaction. The worker uses the profile-scoped controller bearer to cut tunnels and browser sessions across the fleet and retries across service restarts until settled or exhausted.
 
 ## Routes
 

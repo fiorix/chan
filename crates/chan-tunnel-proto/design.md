@@ -2,8 +2,7 @@
 
 ## Cross-crate context
 
-chan-tunnel has three boundaries: shared wire contracts, a dial-side client
-embedded by `chan devserver`, and a terminator embedded by the gateway.
+chan-tunnel has three boundaries: shared wire contracts, a dial-side client embedded by `chan devserver`, and a terminator embedded by the gateway.
 
 End to end, `chan devserver` embeds the client and dials the terminator at `POST {tunnel-host}/v1/tunnel`; after the control handshake the single h2 stream becomes a yamux session, and the terminator opens one substream per public request:
 
@@ -58,8 +57,7 @@ Out of scope here, owned by the I/O crates:
 
 The end-to-end control and data path is the sequence diagram above (Cross-crate context). This section covers the on-wire framing the two control frames share.
 
-Framing for the two control messages is identical in both directions: a
-big-endian `u32` length prefix followed by that many JSON bytes.
+Framing for the two control messages is identical in both directions: a big-endian `u32` length prefix followed by that many JSON bytes.
 
 After `HelloAck` is fully read on the client and fully written on the server, the outer byte stream belongs to yamux. The same bounded frame helper is later reused inside a dedicated one-shot yamux stream for `LeaseRefreshRequest` / `LeaseRefreshResponse`; it is never interleaved with public h1 substreams.
 

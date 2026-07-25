@@ -21,8 +21,7 @@ Both clients use plain `reqwest` with a shared bearer configuration; the CLI set
 
 ### Identity resolution
 
-User-facing identifiers resolve by uuid, email substring, or exact username, in
-that order. Ambiguous and missing matches are distinct operator errors.
+User-facing identifiers resolve by uuid, email substring, or exact username, in that order. Ambiguous and missing matches are distinct operator errors.
 
 ### User block
 
@@ -55,12 +54,7 @@ Default rendering uses `comfy_table` with the `NOTHING` preset (no Unicode lines
 
 ### Per-service bearers
 
-The CLI accepts independent `CHAN_ADMIN_PROFILE_TOKEN`,
-`CHAN_ADMIN_IDENTITY_TOKEN`, and `CHAN_ADMIN_OPERATOR_TOKEN` credentials.
-`--profile-token`, `--identity-token`, and `--operator-token` are bound to one
-destination each; `--token` remains only as a compatibility alias for the
-controller operator token. The CLI never reuses one service's credential
-against another service.
+The CLI accepts independent `CHAN_ADMIN_PROFILE_TOKEN`, `CHAN_ADMIN_IDENTITY_TOKEN`, and `CHAN_ADMIN_OPERATOR_TOKEN` credentials. `--profile-token`, `--identity-token`, and `--operator-token` are bound to one destination each; `--token` remains only as a compatibility alias for the controller operator token. The CLI never reuses one service's credential against another service.
 
 ### Exit codes are part of the contract
 

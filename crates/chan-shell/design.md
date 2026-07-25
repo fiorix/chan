@@ -106,10 +106,7 @@ Each family resolves its target a different way -- window-id push, registry look
 
 The response side is intentionally narrow: `Ok { message }`, `Error { message }`, or `Timeout { message }`. Structured replies (the `Identity` JSON for `chan ps`, the window-list rows, the session roster rows and the `session self` whoami record, the search hits, the pane layout, the pane-exec result, the team bootstrap script) ride as JSON or raw text inside `Ok.message`, and the CLI formats them -- markdown by default, `--json [--pretty]` for machine output. `Timeout` is split out from `Error` so the client maps an elapsed reply window to its own exit code instead of inferring it from a generic failure or a dropped socket.
 
-`Identity` includes optional `workspace_root` and `metadata_key` fields. They are
-present for a mounted workspace tenant and omitted for terminal-only servers;
-old decoders tolerate their absence. The pair is the exact tenant identity used
-by `chan workspace search/graph` when a single process serves several roots.
+`Identity` includes optional `workspace_root` and `metadata_key` fields. They are present for a mounted workspace tenant and omitted for terminal-only servers; old decoders tolerate their absence. The pair is the exact tenant identity used by `chan workspace search/graph` when a single process serves several roots.
 
 Two serde conventions recur because byte-compatibility with the SPA and the server matters. Optional request fields carry both `#[serde(default)]` (the server tolerates an omitted key) and `skip_serializing_if = "Option::is_none"` (the client omits `None`), keeping the emitted JSON minimal while staying loss-tolerant on decode. The SPA-facing payloads (`SurveySpec`, `SurveyReply`) use camelCase. `SurveySpec` is the JSON the SPA renders, and its one nullable field (`title`) carries `#[serde(default)]` with no `skip_serializing_if`, so it serializes as explicit `null` when unset, because the SPA's TypeScript type mirrors the struct field for field and expects a `string | null` shape. `SurveyReply` is camelCase too, with no nullable fields: every variant carries only required keys (`surveyId`, plus the option index and label on an option reply).
 

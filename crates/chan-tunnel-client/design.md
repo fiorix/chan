@@ -2,8 +2,7 @@
 
 ## Cross-crate context
 
-chan-tunnel has three boundaries: shared wire contracts, this dial-side client
-embedded by `chan devserver`, and a terminator embedded by the gateway.
+chan-tunnel has three boundaries: shared wire contracts, this dial-side client embedded by `chan devserver`, and a terminator embedded by the gateway.
 
 End-to-end shape: `chan devserver` calls `chan_tunnel_client::run(cfg, router)`; the terminator accepts the connection in `serve_tunnel_listener` and registers the devserver in its `Registry`. The dial / handshake / yamux flow is the section-2 diagram below, set in the cross-crate system diagram in [`chan-tunnel-proto/design.md`](../chan-tunnel-proto/design.md).
 

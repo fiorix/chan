@@ -59,8 +59,7 @@ Developer ID Application certs expire every 5 years; rotation also applies if th
 1. Generate the new cert per the macOS signing procedure (see the [release signing notes](skills/release/SKILL.md); the detailed Developer ID certificate-generation steps are kept in the team's private dev/ tree).
 2. Update `bundle.macOS.signingIdentity` in `tauri.conf.json` to the new identity string. Single-field swap.
 3. Refresh `APPLE_CERTIFICATE_BASE64` + `APPLE_CERTIFICATE_PASSWORD`
-   + `APPLE_SIGNING_IDENTITY` + `APPLE_TEAM_ID` in GitHub Actions
-   Secrets via the `populate-apple-secrets.sh` helper kept in the team's private dev/ tree (re-run the relevant steps).
+   + `APPLE_SIGNING_IDENTITY` + `APPLE_TEAM_ID` in GitHub Actions Secrets via the `populate-apple-secrets.sh` helper kept in the team's private dev/ tree (re-run the relevant steps).
 4. Refresh the local Keychain: import the new `.p12`; remove the old cert (`security delete-certificate -c "Developer ID Application: <Old Name> ..."`) so the `sign-prereqs` `grep -c "Developer ID Application:"` detection picks the new one unambiguously.
 
 No bridge release is needed for Developer ID cert rotation (unlike the minisign updater key rotation below). Gatekeeper trusts any Developer ID Application cert chained to Apple's root, regardless of which one signed the previous release, so the next signed bundle under the new identity is accepted by clients that had the old one.

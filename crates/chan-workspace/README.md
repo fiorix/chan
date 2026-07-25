@@ -15,20 +15,12 @@ Hybrid (BM25 + dense) search is on by default via the `embeddings` feature. Disa
 
   - `Library`: per-machine handle. Owns the workspace registry at `~/.chan/config.toml` (or the platform sandbox equivalent), resolves OS state and cache paths, opens workspaces.
   - `Workspace`: per-directory handle. Holds a cross-process writer lock for its lifetime.
-    - Filesystem: `read`, `read_text`, `write_text`, `write_bytes`,
-      `read_text_with_stat` + `write_text_if_unchanged` (mtime
-      CAS), `stat`, `list`, `list_tree`, `create_dir`, `rename`,
-      `remove` (soft-delete to trash).
-    - Trash: `trash_list`, `trash_restore`, `trash_purge`,
-      `trash_empty`. 30-day retention, lazy GC.
-    - Search: `search`, `reindex` (sync), `index_file`,
-      `forget_file`, `link_targets`, `resolve_link`.
-    - Graph: `graph()` returns a `GraphView` with `neighbors`,
-      `backlinks`, `tags`, `files_with_tag`, `replace_file`.
-    - Watch: `watch(Arc<dyn WatchCallback>)` returns a
-      `WatchHandle`; drop to stop.
-    - Blob storage: `put_session` and friends for opaque host JSON
-      (window/session state).
+    - Filesystem: `read`, `read_text`, `write_text`, `write_bytes`, `read_text_with_stat` + `write_text_if_unchanged` (mtime CAS), `stat`, `list`, `list_tree`, `create_dir`, `rename`, `remove` (soft-delete to trash).
+    - Trash: `trash_list`, `trash_restore`, `trash_purge`, `trash_empty`. 30-day retention, lazy GC.
+    - Search: `search`, `reindex` (sync), `index_file`, `forget_file`, `link_targets`, `resolve_link`.
+    - Graph: `graph()` returns a `GraphView` with `neighbors`, `backlinks`, `tags`, `files_with_tag`, `replace_file`.
+    - Watch: `watch(Arc<dyn WatchCallback>)` returns a `WatchHandle`; drop to stop.
+    - Blob storage: `put_session` and friends for opaque host JSON (window/session state).
   - `ChanError`: one umbrella enum, primitive payloads, FFI-safe.
 
 All public types are owned (no lifetimes), `Send + Sync`, and shaped for a future uniffi binding to Swift / Kotlin shells. No public `async fn`; async runs internal to the crate where it exists at all.
