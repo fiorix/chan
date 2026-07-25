@@ -45,12 +45,16 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use chan_workspace::{ChanError, FileStat, WatchEvent, WatchKind, Workspace, TEXT_WRITE_LIMIT};
+use chan_workspace::{
+    semantic_write_budget, ChanError, FileStat, WatchEvent, WatchKind, Workspace, TEXT_WRITE_LIMIT,
+};
 use tokio::sync::{broadcast, mpsc, watch, Notify};
 
 use crate::disk_echo::{content_hash, DiskEchoRing};
 use crate::routes::doc::{PeerCursor, ServerFrame};
-use crate::self_writes::SelfWrites;
+use crate::self_writes::{
+    check_write_preconditions, SelfWrites, WritePreconditionError, WritePreconditions,
+};
 use crate::state::WorkspaceCell;
 use changes::{Applied, ApplyError, ChangeSetJson, Section, UpdateJson};
 
@@ -121,6 +125,8 @@ pub struct DocSession {
     /// interleave. Acquired before any state lock, held across the
     /// blocking-IO awaits; see the module doc.
     io_lock: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    fail_after_preflight: AtomicBool,
 }
 
 struct AttachSink {
@@ -155,10 +161,12 @@ fn changeset_cost(cs: &ChangeSetJson) -> usize {
 }
 
 struct DocState {
-    /// Authority text. Invariants: valid UTF-8 (a `String`), at most
-    /// `TEXT_WRITE_LIMIT` bytes (the applier and the replace paths
-    /// enforce it).
+    /// Authority text. Invariants: valid UTF-8 (a `String`) and no
+    /// larger than `write_budget`.
     text: String,
+    /// Semantic cap derived from the last durable file size. Legacy
+    /// oversized text may shrink but cannot grow.
+    write_budget: u64,
     /// Cached UTF-16 length of `text`, kept incrementally.
     len16: u64,
     /// Count of accepted updates since session creation.
@@ -256,7 +264,31 @@ enum MergeOutcome {
 /// Result of the conflict-aware PUT mutation gate.
 pub(crate) enum HttpReplaceOutcome {
     Applied,
-    Conflicted { disk_mtime_ns: Option<i64> },
+    PreconditionRequired {
+        current_version: u64,
+        disk_mtime_ns: Option<i64>,
+    },
+    Stale {
+        current_version: u64,
+        disk_mtime_ns: Option<i64>,
+    },
+    Conflicted {
+        disk_mtime_ns: Option<i64>,
+    },
+}
+
+pub(crate) struct HttpWriteView {
+    pub disk_mtime_ns: Option<i64>,
+    pub authority_version: u64,
+    pub conflict_mtime_ns: Option<Option<i64>>,
+    pub write_budget: u64,
+}
+
+pub(crate) struct HttpReadView {
+    pub content: String,
+    pub disk_mtime_ns: Option<i64>,
+    pub authority_version: u64,
+    pub disk_conflicted: bool,
 }
 
 impl SessionState {
@@ -555,6 +587,7 @@ impl DocSession {
             path: path.to_string(),
             state: Mutex::new(DocState {
                 text,
+                write_budget: semantic_write_budget(Some(stat.size)),
                 len16,
                 version: 0,
                 log: VecDeque::new(),
@@ -574,6 +607,8 @@ impl DocSession {
             detached_at: AtomicI64::new(0),
             closed: AtomicBool::new(false),
             io_lock: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            fail_after_preflight: AtomicBool::new(false),
         }
     }
 
@@ -615,23 +650,42 @@ impl DocSession {
         self.apply_merge_outcome(disk_text, stat, MergeOutcome::Conflict);
     }
 
+    #[cfg(test)]
+    fn test_fail_after_preflight(&self) {
+        self.fail_after_preflight.store(true, Ordering::Relaxed);
+    }
+
     /// Current authority text plus the session CAS token, for the GET
     /// divert: a client about to attach sees exactly the bytes its
     /// snapshot will carry, under a token consistent with the session.
+    #[cfg(test)]
     pub fn authority_view(&self) -> (String, Option<i64>) {
         let st = self.lock_state();
         (st.text.clone(), st.flushed_mtime_ns)
     }
 
+    /// Atomic GET view: authority bytes and every piece of metadata
+    /// the client must retain for a subsequent CAS write.
+    pub(crate) fn http_read_view(&self) -> HttpReadView {
+        let st = self.lock_state();
+        HttpReadView {
+            content: st.text.clone(),
+            disk_mtime_ns: st.flushed_mtime_ns,
+            authority_version: st.version,
+            disk_conflicted: st.session_state.conflict_disk_mtime_ns().is_some(),
+        }
+    }
+
     /// Atomic PUT preflight view: authority, session token, and an
     /// outer conflict marker carrying the retained disk token.
-    pub(crate) fn http_write_view(&self) -> (String, Option<i64>, Option<Option<i64>>) {
+    pub(crate) fn http_write_view(&self) -> HttpWriteView {
         let st = self.lock_state();
-        (
-            st.text.clone(),
-            st.flushed_mtime_ns,
-            st.session_state.conflict_disk_mtime_ns(),
-        )
+        HttpWriteView {
+            disk_mtime_ns: st.flushed_mtime_ns,
+            authority_version: st.version,
+            conflict_mtime_ns: st.session_state.conflict_disk_mtime_ns(),
+            write_budget: st.write_budget,
+        }
     }
 
     /// Whether a PUT must stay on the session path. Only an explicitly
@@ -643,6 +697,7 @@ impl DocSession {
     }
 
     /// Session CAS token for the PUT divert's conflict check.
+    #[cfg(test)]
     pub fn token(&self) -> Option<i64> {
         self.lock_state().flushed_mtime_ns
     }
@@ -652,13 +707,13 @@ impl DocSession {
     /// the session dirty; the caller decides when to flush.
     #[cfg(test)]
     pub fn apply_replace(&self, client_id: &str, new_text: &str) -> Result<(), ApplyError> {
-        if new_text.len() as u64 > TEXT_WRITE_LIMIT {
+        let mut st = self.lock_state();
+        if new_text.len() as u64 > st.write_budget {
             return Err(ApplyError::DocTooLarge {
                 bytes: new_text.len() as u64,
-                limit: TEXT_WRITE_LIMIT,
+                limit: st.write_budget,
             });
         }
-        let mut st = self.lock_state();
         self.apply_replace_locked(&mut st, client_id, new_text);
         Ok(())
     }
@@ -671,15 +726,36 @@ impl DocSession {
         &self,
         client_id: &str,
         new_text: &str,
+        preconditions: WritePreconditions,
     ) -> Result<HttpReplaceOutcome, ApplyError> {
         let mut st = self.lock_state();
         if let Some(disk_mtime_ns) = st.session_state.conflict_disk_mtime_ns() {
             return Ok(HttpReplaceOutcome::Conflicted { disk_mtime_ns });
         }
-        if new_text.len() as u64 > TEXT_WRITE_LIMIT {
+        match check_write_preconditions(
+            st.flushed_mtime_ns,
+            Some(st.version),
+            new_text == st.text,
+            preconditions,
+        ) {
+            Ok(()) => {}
+            Err(WritePreconditionError::Required) => {
+                return Ok(HttpReplaceOutcome::PreconditionRequired {
+                    current_version: st.version,
+                    disk_mtime_ns: st.flushed_mtime_ns,
+                });
+            }
+            Err(WritePreconditionError::Conflict) => {
+                return Ok(HttpReplaceOutcome::Stale {
+                    current_version: st.version,
+                    disk_mtime_ns: st.flushed_mtime_ns,
+                });
+            }
+        }
+        if new_text.len() as u64 > st.write_budget {
             return Err(ApplyError::DocTooLarge {
                 bytes: new_text.len() as u64,
-                limit: TEXT_WRITE_LIMIT,
+                limit: st.write_budget,
             });
         }
         self.apply_replace_locked(&mut st, client_id, new_text);
@@ -744,6 +820,7 @@ impl DocSession {
                     mtime_ns: stat.mtime_ns,
                     authority_version: st.version,
                 };
+                st.write_budget = semantic_write_budget(Some(stat.size));
                 st.session_state = if st.text == st.baseline.content {
                     SessionState::Clean
                 } else {
@@ -812,6 +889,7 @@ impl DocSession {
             mtime_ns: stat.mtime_ns,
             authority_version: st.version,
         };
+        st.write_budget = semantic_write_budget(Some(stat.size));
         st.session_state = SessionState::Clean;
         st.flush_failures = 0;
     }
@@ -832,6 +910,7 @@ impl DocSession {
             return;
         }
         st.flushed_mtime_ns = None;
+        st.write_budget = TEXT_WRITE_LIMIT;
         st.session_state = SessionState::Removed;
         st.flush_now = false;
         st.fan(&serialize(&ServerFrame::Removed));
@@ -877,6 +956,7 @@ impl DocSession {
             mtime_ns: disk_mtime_ns,
             authority_version: st.version,
         };
+        st.write_budget = semantic_write_budget(Some(st.baseline.content.len() as u64));
         st.session_state = SessionState::Clean;
         st.flush_now = false;
         st.flush_failures = 0;
@@ -949,6 +1029,7 @@ impl DocSession {
             mtime_ns: stat.mtime_ns,
             authority_version: epoch,
         };
+        st.write_budget = semantic_write_budget(Some(stat.size));
         if st.version == epoch {
             st.session_state.clear_after_flush();
         }
@@ -1032,7 +1113,12 @@ impl DocAttachHandle {
                 Some(a) => (a.text.as_str(), a.len16),
                 None => (st.text.as_str(), st.len16),
             };
-            applied = Some(changes::apply(text, len16, &update.changes)?);
+            applied = Some(changes::apply_with_limit(
+                text,
+                len16,
+                &update.changes,
+                st.write_budget,
+            )?);
         }
 
         if let Some(a) = applied {
@@ -1449,22 +1535,39 @@ async fn flush_session_locked(
                 .conflict_disk_mtime_ns()
                 .is_none();
         };
-        // Reserve suppression before the blocking write so an
-        // immediate watcher event cannot escape. The strict preflight
-        // keeps known-refused writes out of the ring; failures after
-        // reservation cancel it below.
-        let self_write = match self_writes.reserve_if_writable(workspace, &session.path) {
-            Ok(reservation) => reservation,
-            Err(e) => {
+        // The canonical strict write preflight performs filesystem
+        // syscalls, so keep the whole probe off the async runtime.
+        // Reserve only after it succeeds; every later failure cancels.
+        let ws = Arc::clone(workspace);
+        let preflight_path = session.path.clone();
+        match tokio::task::spawn_blocking(move || ws.ensure_writable(&preflight_path)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
                 session.note_flush_failure(e.to_string());
                 return false;
             }
-        };
+            Err(join) => {
+                session.note_flush_failure(join.to_string());
+                return false;
+            }
+        }
+        let self_write = self_writes.reserve_after_preflight(&session.path);
         let flushed_content = job.text.clone();
         let ws = Arc::clone(workspace);
         let path = session.path.clone();
         let epoch = job.epoch;
+        #[cfg(test)]
+        let test_session = Arc::clone(session);
         let result = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if test_session
+                .fail_after_preflight
+                .swap(false, Ordering::Relaxed)
+            {
+                let target = ws.root().join(&path);
+                let _ = std::fs::remove_file(&target);
+                let _ = std::fs::create_dir(&target);
+            }
             match ws.write_text_if_unchanged(&path, job.expected_mtime_ns, &job.text) {
                 Ok(()) => (true, ws.stat(&path)),
                 Err(e) => (false, Err(e)),
@@ -2690,6 +2793,10 @@ mod tests {
         // The conflict defers to corroboration: nothing merged yet, no
         // failure fanned, the divergent observation parked.
         assert!(!settled, "deferred fold-in is not a settled flush");
+        assert!(
+            !fx.self_writes.should_suppress("a.md"),
+            "the CAS-conflict arm must cancel its reservation"
+        );
         assert_eq!(ha.session().authority_view().0, "base typed");
         assert_eq!(drain(&mut rxa).len(), 0, "no fan while parked");
         {
@@ -2775,39 +2882,50 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
     #[tokio::test]
-    async fn flush_session_reports_failure_and_success() {
-        use std::os::unix::fs::PermissionsExt;
+    async fn legacy_oversize_session_can_shrink_within_its_semantic_budget() {
+        let fx = fixture(&[]);
+        let legacy = "x".repeat(3 * 1024 * 1024);
+        std::fs::write(fx.root.path().join("legacy.txt"), &legacy).unwrap();
+        let (ha, mut rx) = attach(&fx, "legacy.txt", "w1", None).await;
+        drain(&mut rx);
 
+        let smaller = "y".repeat(5 * 1024 * 1024 / 2);
+        ha.session().apply_replace("$http", &smaller).unwrap();
+
+        assert_eq!(ha.session().authority_view().0.len(), smaller.len());
+    }
+
+    #[tokio::test]
+    async fn post_preflight_write_failure_cancels_suppression() {
         let fx = fixture(&[("a.md", "x")]);
         let (ha, mut rxa) = attach(&fx, "a.md", "w1", None).await;
         drain(&mut rxa);
         ha.push(0, vec![update("c1", json!([1, [0, "y"]]))])
             .unwrap();
 
-        // A read-only workspace root makes the atomic write's tempfile
-        // creation fail: a non-CAS flush error.
-        let root = fx.root.path();
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // The strict preflight succeeds, then the hook replaces the
+        // target with a directory inside the blocking write task.
+        ha.session().test_fail_after_preflight();
         let ok = flush_session(ha.session(), &fx.workspace, &fx.self_writes).await;
         assert!(
             !fx.self_writes.should_suppress("a.md"),
-            "a failed flush must not poison watcher suppression"
+            "a post-preflight failure must cancel watcher suppression"
         );
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(!ok, "failed write must report false");
         {
             let st = ha.session().lock_state();
             assert!(st.session_state.is_dirty(), "content stays dirty in memory");
         }
-        assert_eq!(fx.workspace.read_text("a.md").unwrap(), "x");
+        assert!(fx.root.path().join("a.md").is_dir());
 
-        // Writable again: the same call commits and reports true; a
-        // clean session is also true (already durable).
+        // Restore the disk side and its CAS token; the retained
+        // authority then commits normally.
+        std::fs::remove_dir(fx.root.path().join("a.md")).unwrap();
+        fx.workspace.write_text("a.md", "x").unwrap();
+        ha.session().lock_state().flushed_mtime_ns = fx.workspace.stat("a.md").unwrap().mtime_ns;
         assert!(flush_session(ha.session(), &fx.workspace, &fx.self_writes).await);
         assert_eq!(fx.workspace.read_text("a.md").unwrap(), "xy");
-        assert!(flush_session(ha.session(), &fx.workspace, &fx.self_writes).await);
     }
 
     #[tokio::test]
