@@ -1234,6 +1234,7 @@ dependencies = [
  "fs4 0.9.1",
  "gray_matter",
  "hf-hub",
+ "ignore",
  "notify",
  "percent-encoding",
  "pulldown-cmark",

@@ -33,7 +33,8 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use crate::error::Result;
-use crate::fs_ops::{self, FileClass, WalkFilter};
+use crate::fs_ops::{self, FileClass, IndexScopePolicy, WalkFilter};
+use crate::workspace::WorkspaceGeneration;
 
 /// Structural snapshot of one directory level, produced by the
 /// bootstrap walk. Counts and sizes only; no content, no graph edges.
@@ -134,7 +135,12 @@ impl From<FileClass> for FileClassWire {
 /// `walk_workspace_filtered`, so the spine and the index agree on what is
 /// part of the workspace.
 pub fn bootstrap_root(root: &Path, filter: &WalkFilter) -> Result<BootstrapTree> {
-    bootstrap_dir(root, "", filter)
+    let policy = IndexScopePolicy::new(
+        root.to_path_buf(),
+        WorkspaceGeneration::INITIAL,
+        filter.clone(),
+    )?;
+    bootstrap_root_scoped(root, &policy)
 }
 
 /// Build a `BootstrapTree` for the directory at workspace-relative `rel`
@@ -143,6 +149,26 @@ pub fn bootstrap_root(root: &Path, filter: &WalkFilter) -> Result<BootstrapTree>
 /// nested directory (File Browser expand can reuse this rather than
 /// the plain per-file listing when it wants subtree stats).
 pub fn bootstrap_dir(root: &Path, rel: &str, filter: &WalkFilter) -> Result<BootstrapTree> {
+    let policy = IndexScopePolicy::new(
+        root.to_path_buf(),
+        WorkspaceGeneration::INITIAL,
+        filter.clone(),
+    )?;
+    bootstrap_dir_scoped(root, rel, &policy)
+}
+
+pub(crate) fn bootstrap_root_scoped(
+    root: &Path,
+    policy: &IndexScopePolicy,
+) -> Result<BootstrapTree> {
+    bootstrap_dir_scoped(root, "", policy)
+}
+
+pub(crate) fn bootstrap_dir_scoped(
+    root: &Path,
+    rel: &str,
+    policy: &IndexScopePolicy,
+) -> Result<BootstrapTree> {
     let base = if rel.is_empty() {
         root.to_path_buf()
     } else {
@@ -168,14 +194,13 @@ pub fn bootstrap_dir(root: &Path, rel: &str, filter: &WalkFilter) -> Result<Boot
         .same_file_system(true)
         .into_iter()
         .filter_entry(|e| {
-            if !e.file_type().is_dir() {
-                return true;
-            }
-            let n = e.file_name().to_string_lossy();
-            if n == ".git" || n == ".chan" {
+            let Ok(rel) = e.path().strip_prefix(root) else {
                 return false;
-            }
-            !filter.is_excluded(&n)
+            };
+            policy.includes(
+                &rel.to_string_lossy().replace('\\', "/"),
+                e.file_type().is_dir(),
+            )
         })
         .filter_map(|res| match res {
             Ok(e) => Some(e),

@@ -67,7 +67,8 @@ pub use dashboard::{DashboardConfig, ScreensaverTheme};
 pub use drafts::{DraftInspection, DraftPromoteMode, DraftPromoteReport, DraftRef};
 pub use error::{ChanError, Result};
 pub use fs_ops::{
-    classify, classify_path, FileClass, PathClass, PathKind, PathPermission, WalkFilter,
+    classify, classify_path, FileClass, IndexScopeDecision, IndexScopeExclusion, IndexScopePolicy,
+    PathClass, PathKind, PathPermission, WalkFilter,
 };
 pub use graph::{
     ContactNode, Edge, EdgeKind, GraphView, HeadingRow, LinkTarget, LinkTargetKind, Mention,

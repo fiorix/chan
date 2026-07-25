@@ -27,21 +27,46 @@ pub use summary::{
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chrono::Utc;
 
 use crate::walk::Filter;
 
+/// Workspace-owned scope adapter used by both full and incremental reports.
+pub trait ReportPathPolicy: Send + Sync {
+    fn generation(&self) -> u64;
+    fn includes(&self, rel: &str, is_dir: bool) -> bool;
+}
+
 /// Inputs to the initial walk and to the filter applied by
 /// incremental updates.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ReportOptions {
     pub root: PathBuf,
     pub follow_symlinks: bool,
     pub include_hidden: bool,
     pub respect_gitignore: bool,
     pub exclude_globs: Vec<String>,
+    pub path_policy: Option<Arc<dyn ReportPathPolicy>>,
     pub cocomo: CocomoParams,
+}
+
+impl std::fmt::Debug for ReportOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReportOptions")
+            .field("root", &self.root)
+            .field("follow_symlinks", &self.follow_symlinks)
+            .field("include_hidden", &self.include_hidden)
+            .field("respect_gitignore", &self.respect_gitignore)
+            .field("exclude_globs", &self.exclude_globs)
+            .field(
+                "path_policy_generation",
+                &self.path_policy.as_ref().map(|policy| policy.generation()),
+            )
+            .field("cocomo", &self.cocomo)
+            .finish()
+    }
 }
 
 impl ReportOptions {
@@ -55,6 +80,7 @@ impl ReportOptions {
             include_hidden: false,
             respect_gitignore: true,
             exclude_globs: Vec::new(),
+            path_policy: None,
             cocomo: CocomoParams::default(),
         }
     }
@@ -300,18 +326,26 @@ impl Index {
                 found: meta.schema,
             });
         }
+        let filter = Filter::build(opts)?;
         let mut map = HashMap::with_capacity(files.len());
         for f in files {
-            map.insert(f.path.clone(), f);
+            if filter.accepts(&f.path) {
+                map.insert(f.path.clone(), f);
+            }
         }
         let mut idx = Self {
             root: opts.root.clone(),
-            filter: Filter::build(opts)?,
+            filter,
             files: map,
             dirs: HashMap::new(),
         };
         idx.rebuild_dirs();
         Ok(idx)
+    }
+
+    /// Policy generation captured by this report index, when workspace-owned.
+    pub fn path_policy_generation(&self) -> Option<u64> {
+        self.filter.generation()
     }
 
     /// Read-side O(1) lookup of the maintained per-directory

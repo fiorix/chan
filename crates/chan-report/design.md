@@ -52,7 +52,7 @@ Index dataflow: `scan` walks and counts each file into the `Index`; incremental 
 
 ## 3. Data model contracts
 
-`Index` is the mutable state boundary: it owns the per-file rows, the per-directory aggregation cache, and the accept filter captured during the initial scan. Incremental updates must apply that same filter before changing rows so watcher-driven state converges with a full rescan.
+`Index` is the mutable state boundary: it owns the per-file rows, the per-directory aggregation cache, and the accept filter captured during the initial scan. Incremental updates and JSONL loads apply that same filter before changing or admitting rows so watcher-driven and persisted state converge with a full rescan. `Index::path_policy_generation()` exposes the captured generation when a caller supplied a shared path policy.
 
 `Report` is a pure snapshot derived from an `Index`, a scope, and COCOMO parameters. Scopes cover the whole tree, a prefix, or an explicit file set, but all produce the same report shape so consumers can render one model.
 
@@ -88,7 +88,7 @@ The JSONL `file` records alone are sufficient to reconstruct the index; the `lan
 
 `Index::update(rel)`:
 
-  - Applies the cached `Filter` (hidden / gitignore / exclude_globs) to `rel`. If rejected and a row exists, drops the row and returns `Removed`; otherwise `Skipped`.
+  - Applies the cached `Filter` to `rel`. Standalone indexes use hidden / gitignore / exclude-glob options; embedded indexes use the caller's `ReportPathPolicy`. If rejected and a row exists, drops the row and returns `Removed`; otherwise `Skipped`.
   - Calls `count_file` against the stored root. If the file vanished or the counter rejected it, removes any existing row (`Removed`) or returns `Skipped`.
   - Compares the new `FileStats` against the existing row. Returns `Unchanged` when identical; otherwise inserts or updates and returns `Inserted` / `Updated`.
 
@@ -107,11 +107,14 @@ The crate uses the `ignore` crate (same engine as ripgrep) with these settings d
   - `respect_gitignore`: when true, honors `.gitignore`, `.ignore`, `.git/info/exclude`, global git excludes, and parent-directory ignore files. `.gitignore` is additionally registered as a custom ignore filename so it works in trees that are not git repos (chan workspaces often aren't); inside a real repo nested `.gitignore` files keep working as usual. Default true.
   - `include_hidden`: when false, skips dotfiles and dot-directories. Default false.
   - `follow_symlinks`: when false, symlinks are listed but not descended. Default false.
-  - `exclude_globs`: extra gitignore-style patterns applied on top of the gitignore rules, both during the walk and by the cached incremental filter. chan-workspace passes its index-excluded directory basenames here (`node_modules/`, `target/`, ...) so the report never rolls up dependency trees.
+  - `exclude_globs`: extra gitignore-style patterns applied on top of the gitignore rules, both during the walk and by the cached incremental filter.
+  - `path_policy`: an optional `Arc<dyn ReportPathPolicy>` that overrides all four standalone sources above. The full walk and incremental filter call the same object, stay on one filesystem, and do not follow symlinks. chan-workspace uses this seam so report scope is exactly its generated index scope instead of a second matcher.
 
 The walker emits relative POSIX paths to the counter. Anything the counter can't classify (no recognized language) is dropped silently; binary content falls back to tokei's path-based parse and is dropped when that fails. Non-UTF-8 paths fail the walk with `ChanReportError::InvalidUtf8Path`.
 
-One known asymmetry: the cached incremental `Filter` reapplies the ROOT `.gitignore` plus the exclude globs, but not nested ignore files deeper in the tree. Nested ignores take effect during a full `scan`; a watcher-driven `update` on a file only a nested `.gitignore` excludes can therefore insert a row that the next full rescan drops.
+Standalone mode has one known asymmetry: the cached incremental `Filter` reapplies the root `.gitignore` plus exclude globs, but not nested ignore files deeper in the tree. Nested ignores take effect during a full standalone `scan`; a watcher-driven standalone `update` on a file only a nested `.gitignore` excludes can therefore insert a row that the next full rescan drops. A supplied `path_policy` removes that asymmetry because both paths call the same policy object.
+
+For workspace-driven reports, `path_policy` is authoritative and deliberately narrows ignore sources to the repository `.gitignore` layer defined by chan-workspace. `.ignore`, `.git/info/exclude`, Git global excludes, parent-directory rules, and chan-report's hidden-file default are disabled because the graph, BM25, reconcile, and watcher consumers do not honor them; retaining them only for reports would produce a divergent scope. Standalone callers with `path_policy: None` retain the richer behavior above.
 
 ## 7. Complexity score
 

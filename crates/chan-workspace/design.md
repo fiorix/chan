@@ -234,13 +234,13 @@ Each per-file shard under `embeddings/` carries its own `FORMAT_VERSION` (curren
 
 Embedding runs on CPU by default: the candle Metal backend exhausts GPU memory and stalls on large workspaces, so the GPU path is opt-in via `CHAN_ENABLE_GPU=1`. On macOS the CPU path links Apple's Accelerate framework as candle's BLAS backend -- the target-gated `accelerate` feature, wired alongside `metal` under `cfg(target_os = "macos")` -- routing bge-small's matmuls through Accelerate's `sgemm` for a measured ~1.5–2× cold-reindex speedup over candle's default SIMD-threaded `gemm` (modest because the default is already vectorized, and the forward pass also spends time in non-matmul ops). The feature pulls the Apple-only `accelerate-src`, so the static-musl Linux release binary structurally cannot pull it in.
 
-#### Walk filter
+#### Generated index scope
 
-`WalkFilter` (in `fs_ops`) is a caller-supplied list of directory basenames that the reindex walks should not descend into. The machine-wide baseline lives in `Registry::index_excluded_dirs` and is persisted to `~/.chan/config.toml` so CLI and desktop use the same policy (defaults: `.git`, `.hg`, `.svn`, `node_modules`, `target`, `__pycache__`, `.venv`, `venv`, `.tox`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.cache`, `dist`, `build`). A per-workspace blocklist (`IndexConfig::excluded_dirs`, managed through the workspace settings API) is unioned on top: `Workspace::effective_excluded_dirs` is what the walks actually honor. Matching is exact basename at any depth, ASCII case-insensitive. `.git` and `.chan` stay hardcoded in `walk_workspace`: those are safety invariants, not policy.
+`IndexScopePolicy` (in `fs_ops`) is one immutable scope value per `WorkspaceGeneration`. It encodes explicit `Include`, `Exclude(Hard | Gitignore | Configured)`, and `VcsControl` decisions. `.chan`, `.git`, `.hg`, and `.svn` internals are hard exclusions; watcher dispatch alone forwards `.git/HEAD`, `.git/index`, and `.hg/dirstate`. `.svn` checkout detection is unsupported because there is no stable narrow control file to forward. The machine-wide configured baseline lives in `Registry::index_excluded_dirs` and is persisted to `~/.chan/config.toml`; the per-workspace `IndexConfig::excluded_dirs` additions are unioned into the same policy. Configured matching remains exact directory basename at any depth, ASCII case-insensitive, so registry migration and user settings retain their established meaning.
 
 `Registry::drafts_dir` (default `.Drafts`) is modeled the same way as `index_excluded_dirs`: a global field in `~/.chan/config.toml`, hand-edited, not exposed through any UI. It names the in-tree Drafts directory rather than a skip target, so it is deliberately NOT on the walk filter: drafts are real in-tree content and index and graph like any other file.
 
-The filter is honored by the indexing pipeline, the bootstrap snapshot, the report walk, and the watcher feed (one ignore set, not several). The editor-visible APIs (`Workspace::list_tree`, `Workspace::list`, trash sweeps, restore) stay unfiltered so the user can still see and open files inside a blocked directory on demand; the `*_filtered_unified` tree listings exist for callers (the graph layer, the File Browser spine) that want the filtered default view.
+The same policy Arc is sampled by bootstrap, filtered listing, graph, BM25, reconcile, report, Linux watch registration and dynamic registration, and watcher dispatch. Full walks do not follow symlinks and stay on the workspace root filesystem; Linux registration compares every candidate directory's device identity with its `WatchRoot` before registering or descending. `Workspace::set_excluded_dirs` persists the setting, advances the shared recovery generation, swaps a new immutable policy, and requests reconcile. Watch registration observes replacements and discards queued directory work tagged with an older generation. The editor-visible raw `Workspace::list_tree` and `Workspace::list` APIs remain unfiltered so a user can deliberately open a file inside a noisy directory.
 
 ### Graph
 
@@ -295,10 +295,12 @@ After picking a file, the editor calls `GraphView::headings_of(rel)` to populate
 
 Callback-based on purpose: the Swift / Kotlin shell implements the trait by passing an `Arc<dyn WatchCallback>` (uniffi generates a wrapper around a foreign object). No closures cross the FFI.
 
-The dispatch filter mirrors the walk's pruning so the watcher feed and the walks honor one ignore set, with two watcher-specific deviations:
+The dispatch filter calls the active `IndexScopePolicy`, with two watcher-specific deviations:
 
-  - `.chan/` is always dropped via `is_chan_internal`, regardless of the configurable filter: it is chan's own state, an invariant the user cannot un-exclude.
-  - Paths with a walk-filtered directory component (`node_modules`, `target`, `.git`, ...) are dropped, EXCEPT VCS control files (`.git/HEAD`, `.git/index`, `.hg/dirstate`): those are forwarded because the indexer keys checkout-storm detection off them, while the walks prune `.git` wholesale.
+  - Hard `.chan` and VCS internals are never configurable.
+  - Exact VCS control decisions (`.git/HEAD`, `.git/index`, `.hg/dirstate`) are forwarded because the indexer keys checkout-storm detection off them, while all walks prune their parent metadata directories.
+
+Every event carries the policy `WorkspaceGeneration` sampled at dispatch, and stale generations are rejected by the graph and report consumers. `is_dir` preserves directory identity even for Linux `MOVED_FROM` events whose source has already vanished. Rename events expose the Linux inotify correlation `cookie`; it remains `None` on other backends and synthetic events. A path that cannot be mapped into any watched root is emitted as a pathless `ProviderError` loss event so consumers reconcile instead of silently dropping an unknown mutation.
 
 When the report subsystem is active, the same watcher fan-outs each event into the report's incremental index before the user's callback runs (see "Report").
 
@@ -313,7 +315,7 @@ When the report subsystem is active, the same watcher fan-outs each event into t
 
 ```mermaid
 flowchart TD
-  Notify["notify event on watcher thread"] --> Filter{"is_filtered(rel, WalkFilter)"}
+  Notify["notify event on watcher thread"] --> Filter{"IndexScopePolicy::decision(rel)"}
   Filter -->|"VCS control file -- force-forwarded"| Send
   Filter -->|".chan internal -- always dropped"| Drop["event dropped"]
   Filter -->|"excluded dir component -- dropped"| Drop
@@ -391,7 +393,7 @@ Drafts, session blobs, contact import, trash restore/purge, and bootstrap snapsh
 
 ### Search, graph, report, watch
 
-Search, graph, and report state are lazy sidecars owned by `Workspace`. Reindexing is synchronous and caller-scheduled; the built-in watcher/indexer is optional and uses the same walk filter as the cold paths. Graph writes serialize through the graph writer connection; graph reads use the reader pool. Report state is opt-in, watcher-fed before user callbacks run, and persisted through chan-report JSONL. `report_if_available` is the non-scanning read path: it returns a warm snapshot or loads a valid persisted JSONL and otherwise returns `None`; unlike `report()`, it never falls back to a filesystem scan.
+Search and graph sidecars are metadata-opened during workspace construction so readiness can be classified without visiting the workspace tree. Report state remains lazy unless a persisted report needs startup recovery. Explicit reindex calls are synchronous; startup replay, rebuild, reconcile, and persisted-report rescan run on the workspace's owned blocking worker. The built-in watcher/indexer remains optional and uses the same scope policy as the cold paths. Graph writes serialize through the graph writer connection; graph reads use the reader pool. Report state is opt-in, watcher-fed before user callbacks run, and persisted through chan-report JSONL. `report_if_available` is the non-scanning read path: it returns a warm snapshot or loads a valid persisted JSONL and otherwise returns `None`; unlike `report()`, it never falls back to a filesystem scan.
 
 One workspace `write_serial` mutex is the derived-state mutation boundary. It covers per-file graph/BM25 index and forget, pending-journal replay, reconcile as one unit, full rebuild, and warm report watcher updates. Nested bulk paths call lock-assuming per-file helpers, so they do not reacquire the non-reentrant mutex. Search, graph, report snapshot reads, filesystem reads, and bounded file streams never take this lock.
 
@@ -413,7 +415,7 @@ Push vs. pull, and how the signals relate:
   - `Workspace::recovery_status()` is the authoritative pull side. One short-lived mutex owns only the current `WorkspaceGeneration`, the last completed generation, one active `RecoveryPass`, and one pending pass. The mutex is never held across replay, reconcile, or rebuild work. `is_ready()` requires no active or pending pass and `completed_generation >= generation`; `required_action()` reports pending work before active work.
   - `request_recovery` coalesces repeated lossy signals such as `ProviderError` into one pending generation and upgrades the action by `FullRebuild > Reconcile > Replay`. A signal arriving during an active pass creates exactly one newer pending generation, so it cannot be cleared by completion of stale work. `request_policy_recovery` always advances the generation because each immutable policy replacement needs a distinct tag, while pending work still collapses onto the newest tag.
   - `begin_recovery` moves pending work into the single active slot and `finish_recovery` either completes that generation or requeues it without inventing a new one. `Workspace::is_reindexing()`, `needs_rebuild()`, and `needs_replay_writes()` remain compatibility projections of the coordinator during this release.
-  - At open, `rebuild.inprogress` and `pending_writes.json` seed one initial pending generation, with `FullRebuild` dominating `Replay`. The durable files remain the cross-process authority; the generation identifies in-process work and makes stale completion detectable.
+  - `Workspace::open` returns a metadata-only `RecoveryPlan` with the durable marker/journal inputs, graph and search readiness, policy generation, and persisted-report state. `Library::open_workspace` starts the owned recovery worker only after construction returns. A warm populated pair schedules reconcile; a stale rebuild marker or graph-populated/search-empty pair schedules full rebuild; a pending journal schedules replay; an empty cold pair skips the tree. A persisted report is rescanned on that same worker. The durable files remain the cross-process authority, and `RecoveryStatus` stays pending/active until the derived-state pass finishes.
   - `Workspace::reconcile()` is the diff-based recovery path. Walks the live tree, compares each editable-text file's mtime against the graph row, and emits journal-bracketed `index_file` / `forget_file` calls only for the deltas. Unchanged files are skipped, so reconcile costs O(N) stat + the per-file embed only for changed files. Use cases: cold open after offline edits, watcher-overflow recovery (inotify `IN_Q_OVERFLOW` / FSEvents coalesce-loss), post-`replay_pending_writes` sanity. The diff compares `(mtime, size)` tuples against the graph's stamped row; a same-mtime-different-size rewrite is caught via the size delta. Rows that carry `size = NULL` (stamped before a size was recorded) fall back to mtime-only for that row, and a subsequent `index_file` backfills size.
   - `pending_writes.json` stores a `(rel, op)` pair written by `index_file` / `forget_file` before either backend is touched and removed after both commit. A crash between graph and search commits leaves the entry behind; `Workspace::replay_pending_writes()` re-runs journaled ops against current on-disk truth. `Index` entries degrade to `forget` when the file no longer exists; `forget` entries are idempotent against an already-cleaned backend.
 
@@ -425,8 +427,8 @@ stateDiagram-v2
     state "Active generation N" as Active
     state "Pending generation N+1" as Newer
 
-    Open --> Pending : marker or journal
-    Open --> Ready : no durable recovery state
+    Open --> Pending : marker, journal, or warm sidecars
+    Open --> Ready : empty cold sidecars
     Ready --> Pending : provider or policy signal
     Pending --> Active : begin_recovery
     Active --> Newer : signal during active pass

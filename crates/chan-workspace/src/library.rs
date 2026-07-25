@@ -283,9 +283,9 @@ impl Library {
         // WorkspaceAlreadyOpen, so the two agree; the pre-check additionally
         // short-circuits the potentially-slow Workspace::open below.) The lock
         // on `live_workspaces` is held only across the upgrade probe; we drop
-        // it before calling Workspace::open so a slow open (canonicalize on a
-        // cloud root, lazy index init) never blocks unrelated workspaces from
-        // registering / listing.
+        // it before calling Workspace::open so a slow metadata open
+        // (canonicalize on a cloud root, sidecar readiness probes) never
+        // blocks unrelated workspaces from registering / listing.
         {
             let mut map = self.inner.live_workspaces.lock().unwrap();
             gc_dead_entries(&mut map);
@@ -297,12 +297,13 @@ impl Library {
         }
         let filter = Arc::clone(&self.inner.walk_filter.lock().unwrap());
         let drafts_dir = self.drafts_dir();
-        let workspace = Workspace::open(entry, filter, drafts_dir)?;
+        let (workspace, recovery_plan) = Workspace::open(entry, filter, drafts_dir)?;
         self.inner
             .live_workspaces
             .lock()
             .unwrap()
             .insert(key, Arc::downgrade(&workspace));
+        workspace.start_open_recovery(recovery_plan)?;
         Ok(workspace)
     }
 
@@ -1231,6 +1232,12 @@ mod tests {
             let d = lib.open_workspace(workspace.path()).unwrap();
             let entries = d.list_tree().unwrap();
             assert!(entries.iter().any(|e| e.path == "notes/keep.md"));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while !d.recovery_status().is_ready() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(d.recovery_status().is_ready());
+            d.join_open_recovery();
         }
 
         assert!(lib.unregister_workspace(workspace.path()).unwrap());

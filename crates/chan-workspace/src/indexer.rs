@@ -287,6 +287,9 @@ fn apply_event(
     debounce: Duration,
     now: Instant,
 ) {
+    if event.generation != workspace.scope_policy().generation() {
+        return;
+    }
     match event.kind {
         WatchKind::ProviderError => {
             // Stream untrusted: pending entries may be wrong, drop

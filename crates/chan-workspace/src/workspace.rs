@@ -5,6 +5,7 @@
 // tree under ~/.chan/workspaces/<metadata_key>/.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -24,7 +25,7 @@ use crate::paths::{ensure_workspace_metadata_dirs, WorkspacePaths};
 use crate::registry::KnownWorkspace;
 use crate::report::{ReportFanOut, ReportState};
 use crate::trash::{self, TrashEntry, TRASH_RETENTION_SECS};
-use crate::watch::{WatchCallback, WatchHandle};
+use crate::watch::{WatchCallback, WatchEvent, WatchHandle, WatchKind};
 use crate::{Report, ReportScope};
 
 pub use crate::fs_ops::{AtomicWriteKind, AtomicWriteSink};
@@ -59,8 +60,8 @@ pub const BINARY_STREAM_QUEUE_DEPTH: usize = 8;
 /// `Workspace::open` time means a previous reindex did not run to
 /// completion: the graph may have been rebuilt while the search
 /// index never reached `bm25.commit()`, so graph + index can
-/// disagree about freshness. The consumer reads
-/// `Workspace::needs_rebuild()` and reindexes before serving queries.
+/// disagree about freshness. The next open seeds a supervised full
+/// rebuild while `Workspace::needs_rebuild()` keeps readiness truthful.
 const REBUILD_MARKER: &str = "rebuild.inprogress";
 
 /// Persisted form of the in-process rename log, kept under
@@ -83,9 +84,8 @@ const RENAME_LOG_FILE: &str = "rename_log.json";
 /// runs first (sqlite), the index commit runs second (tantivy +
 /// vectors), and a crash between them leaves graph and index
 /// disagreeing about the file. On the next `Workspace::open` any
-/// entries still in the journal flag `needs_replay_writes()`; the
-/// consumer calls `replay_pending_writes()` to workspace both
-/// backends back to the on-disk truth.
+/// entries still in the journal seed supervised replay;
+/// `needs_replay_writes()` remains the compatibility status projection.
 const PENDING_WRITES_FILE: &str = "pending_writes.json";
 
 /// What `replay_pending_writes` should do for a journaled entry.
@@ -374,6 +374,111 @@ impl RecoveryStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PersistedStateReadiness {
+    Cold,
+    Populated,
+    Inconsistent,
+}
+
+/// Metadata-only startup work derived before `Workspace::open` returns.
+///
+/// The plan contains no filesystem walk result. It is built from durable
+/// recovery markers, the pending-write journal, graph state readiness, the
+/// generated scope, and whether a persisted report needs loading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RecoveryPlan {
+    generation: WorkspaceGeneration,
+    replay_pending_writes: bool,
+    action: Option<RecoveryAction>,
+    refresh_report: bool,
+}
+
+impl RecoveryPlan {
+    fn derive(
+        needs_rebuild: bool,
+        replay_pending_writes: bool,
+        readiness: PersistedStateReadiness,
+        refresh_report: bool,
+    ) -> (RecoveryStatus, Self) {
+        let action = if needs_rebuild || readiness == PersistedStateReadiness::Inconsistent {
+            Some(RecoveryAction::FullRebuild)
+        } else if replay_pending_writes {
+            Some(RecoveryAction::Replay)
+        } else if readiness == PersistedStateReadiness::Populated || refresh_report {
+            Some(RecoveryAction::Reconcile)
+        } else {
+            None
+        };
+        let recovery = action
+            .map(RecoveryStatus::seeded)
+            .unwrap_or_else(RecoveryStatus::ready);
+        (
+            recovery,
+            Self {
+                generation: recovery.generation,
+                replay_pending_writes,
+                action,
+                refresh_report,
+            },
+        )
+    }
+
+    fn has_work(self) -> bool {
+        self.replay_pending_writes || self.action.is_some() || self.refresh_report
+    }
+}
+
+struct RecoveryWorker {
+    stop: Arc<AtomicBool>,
+    worker: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl RecoveryWorker {
+    fn new() -> Self {
+        Self {
+            stop: Arc::new(AtomicBool::new(false)),
+            worker: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn start(&self, workspace: std::sync::Weak<Workspace>, plan: RecoveryPlan) -> Result<()> {
+        if !plan.has_work() {
+            return Ok(());
+        }
+        let stop = Arc::clone(&self.stop);
+        let worker = std::thread::Builder::new()
+            .name("chan-workspace-recovery".to_string())
+            .spawn(move || run_open_recovery(workspace, plan, &stop))
+            .map_err(|error| ChanError::Io(format!("spawn workspace recovery worker: {error}")))?;
+        *self.worker.lock().unwrap() = Some(worker);
+        Ok(())
+    }
+
+    fn stop_and_join(&self) {
+        self.stop.store(true, Ordering::Release);
+        self.join();
+    }
+
+    fn join(&self) {
+        let Some(worker) = self.worker.lock().unwrap().take() else {
+            return;
+        };
+        if worker.thread().id() == std::thread::current().id() {
+            return;
+        }
+        if worker.join().is_err() {
+            tracing::warn!("workspace recovery worker panicked");
+        }
+    }
+}
+
+impl Drop for RecoveryWorker {
+    fn drop(&mut self) {
+        self.stop_and_join();
+    }
+}
+
 struct RecoveryExecutionGuard<'a> {
     workspace: &'a Workspace,
     pass: Option<RecoveryPass>,
@@ -439,9 +544,9 @@ pub struct Workspace {
     /// This leaves room for editor reads, writes, PTYs, and watchers
     /// even when tests or callers try to open many workspaces at once.
     _fd_permit: crate::fd_budget::WorkspacePermit,
-    /// Lazily constructed; held in an Option so the field can be
-    /// observed via `index()` / `graph()` accessors that initialize
-    /// on first call.
+    /// Opened from sidecar metadata during startup readiness probing.
+    /// `OnceLock` retains the existing retry-on-access behavior when
+    /// a corrupt sidecar could not be opened during that probe.
     index: std::sync::OnceLock<Index>,
     graph: std::sync::OnceLock<GraphView>,
     /// Cumulative rename log accumulated since the last `reindex`.
@@ -472,6 +577,9 @@ pub struct Workspace {
     /// across replay, reconcile, or rebuild work; the W2 derived-state
     /// mutation boundary remains a separate lock.
     recovery: std::sync::Mutex<RecoveryStatus>,
+    /// One owned startup worker. It executes the metadata-derived recovery
+    /// plan off the open caller and joins on ordinary workspace teardown.
+    recovery_worker: RecoveryWorker,
     /// Lazily-initialized SLOC / language / COCOMO report. First
     /// touch (`report()` / `boot()`) does a full scan; further access
     /// reads the cached state, and the watcher fanout keeps it current
@@ -481,12 +589,110 @@ pub struct Workspace {
     /// the fan-out without warming the report, and a later scan fills
     /// this cell for both the query path and the fan-out at once.
     report: Arc<std::sync::OnceLock<Arc<ReportState>>>,
-    /// Directory-name blocklist applied to reindex walks (graph
-    /// rebuild + index facade). Captured at `Workspace::open` time
-    /// from the parent `Library`. Other walks (editor file tree,
-    /// trash, restore) ignore this filter so the user can still
-    /// see / restore files inside a blocked directory on demand.
+    /// Global directory-name baseline captured from the parent `Library`.
+    /// The generated scope unions this with the per-workspace additions;
+    /// raw editor listings deliberately bypass both so blocked paths remain
+    /// available for explicit open-on-demand operations.
     walk_filter: Arc<fs_ops::WalkFilter>,
+    /// Immutable generated scope sampled by every derived-state consumer.
+    /// Replacements swap one Arc under a short lock; in-flight work keeps its
+    /// generation while newer recovery remains pending.
+    scope_policy: Arc<std::sync::RwLock<Arc<fs_ops::IndexScopePolicy>>>,
+}
+
+fn run_open_recovery(workspace: std::sync::Weak<Workspace>, plan: RecoveryPlan, stop: &AtomicBool) {
+    let Some(workspace) = workspace.upgrade() else {
+        return;
+    };
+    tracing::debug!(
+        generation = plan.generation.get(),
+        action = ?plan.action,
+        replay_pending_writes = plan.replay_pending_writes,
+        refresh_report = plan.refresh_report,
+        "workspace startup recovery worker started",
+    );
+
+    if plan.replay_pending_writes
+        && plan.action != Some(RecoveryAction::Replay)
+        && !stop.load(Ordering::Acquire)
+    {
+        if let Err(error) = workspace.replay_pending_writes() {
+            tracing::warn!(
+                workspace = %workspace.root().display(),
+                ?error,
+                "startup pending-write replay failed; recovery remains pending",
+            );
+            return;
+        }
+    }
+
+    while !stop.load(Ordering::Acquire) {
+        let Some(pass) = workspace.begin_recovery() else {
+            break;
+        };
+        let mut result = match pass.action {
+            RecoveryAction::Replay => workspace.replay_pending_writes().map(|_| ()),
+            RecoveryAction::Reconcile => workspace.reconcile().map(|_| ()),
+            RecoveryAction::FullRebuild => workspace.reindex(None).map(|_| ()),
+        };
+        if result.is_ok() && plan.refresh_report && !stop.load(Ordering::Acquire) {
+            result = workspace.rescan_persisted_report();
+        }
+        let outcome = if result.is_ok() {
+            RecoveryOutcome::Complete
+        } else {
+            RecoveryOutcome::Retry
+        };
+        if let Err(error) = workspace.finish_recovery(pass, outcome) {
+            tracing::warn!(
+                workspace = %workspace.root().display(),
+                ?error,
+                "startup recovery coordinator completion failed",
+            );
+            return;
+        }
+        if let Err(error) = result {
+            tracing::warn!(
+                workspace = %workspace.root().display(),
+                generation = pass.generation.get(),
+                action = ?pass.action,
+                ?error,
+                "startup recovery pass failed; recovery remains pending",
+            );
+            return;
+        }
+    }
+}
+
+/// Refresh repository-ignore policy before the report and user callbacks see
+/// the `.gitignore` event that invalidated the current generation.
+struct ScopePolicyFanOut {
+    workspace: std::sync::Weak<Workspace>,
+    downstream: Arc<dyn WatchCallback>,
+}
+
+impl WatchCallback for ScopePolicyFanOut {
+    fn on_event(&self, event: WatchEvent) {
+        if event.kind != WatchKind::ProviderError
+            && [event.path.as_deref(), event.to.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(is_repository_policy_path)
+        {
+            if let Some(workspace) = self.workspace.upgrade() {
+                if let Err(error) = workspace.refresh_repository_scope() {
+                    tracing::warn!(?error, "failed to refresh repository ignore policy");
+                }
+            }
+        }
+        self.downstream.on_event(event);
+    }
+}
+
+fn is_repository_policy_path(rel: &str) -> bool {
+    Path::new(rel)
+        .file_name()
+        .is_some_and(|name| name == ".gitignore")
 }
 
 impl std::fmt::Debug for Workspace {
@@ -503,7 +709,7 @@ impl Workspace {
         entry: KnownWorkspace,
         walk_filter: Arc<fs_ops::WalkFilter>,
         drafts_dir: String,
-    ) -> Result<Arc<Self>> {
+    ) -> Result<(Arc<Self>, RecoveryPlan)> {
         // Defensive check: the registered path must still resolve to
         // a directory. A user (or another tool) could have replaced
         // the workspace directory with a symlink, file, or socket since
@@ -585,10 +791,8 @@ impl Workspace {
         let drafts_root = entry.root_path.join(&drafts_dir_name);
         // A stale `rebuild.inprogress` marker means the previous
         // reindex did not finish atomically. Promote it to an
-        // in-process flag the consumer can observe via
-        // `Workspace::needs_rebuild()`. We don't auto-reindex here so
-        // `open` stays fast on large workspaces; the consumer schedules
-        // the rebuild on its own thread when it sees the flag set.
+        // pending full-rebuild plan. The plan runs on the owned recovery
+        // worker after open returns.
         let needs_rebuild = paths.graph_dir.join(REBUILD_MARKER).exists();
         if needs_rebuild {
             tracing::warn!(
@@ -605,9 +809,8 @@ impl Workspace {
         let rename_log = load_rename_log(&paths.graph_dir);
         // Rehydrate the pending-writes journal: any entries still
         // present mean a previous index_file / forget_file crashed
-        // between the graph and index commits. The consumer reads
-        // `needs_replay_writes()` and calls `replay_pending_writes()`
-        // to converge both backends. Best-effort against malformed
+        // between the graph and index commits. The startup plan replays
+        // these entries off the open caller. Best-effort against malformed
         // JSON, same rationale as the rename log.
         let pending_writes = load_pending_writes(&paths.graph_dir);
         let needs_replay_writes = !pending_writes.is_empty();
@@ -618,12 +821,84 @@ impl Workspace {
                 "pending_writes journal non-empty at open; replay required",
             );
         }
-        let recovery = if needs_rebuild {
-            RecoveryStatus::seeded(RecoveryAction::FullRebuild)
-        } else if needs_replay_writes {
-            RecoveryStatus::seeded(RecoveryAction::Replay)
-        } else {
-            RecoveryStatus::ready()
+        // Probe persisted graph and search metadata only. No workspace path is
+        // visited. A populated pair needs an offline-change reconcile, an empty
+        // pair stays on the existing cold-boot path, and unreadable or
+        // graph-populated/search-empty state requests a rebuild.
+        let (graph, graph_populated) = match GraphView::open(&paths.graph_db) {
+            Ok(graph) => match graph.files() {
+                Ok(files) => (Some(graph), Some(!files.is_empty())),
+                Err(error) => {
+                    tracing::warn!(
+                        workspace = %entry.root_path.display(),
+                        ?error,
+                        "graph readiness probe failed; full rebuild required",
+                    );
+                    (Some(graph), None)
+                }
+            },
+            Err(error) => {
+                tracing::warn!(
+                    workspace = %entry.root_path.display(),
+                    ?error,
+                    "graph open failed during readiness probe; full rebuild required",
+                );
+                (None, None)
+            }
+        };
+        let index_config = crate::index::config::load(&paths.index)
+            .map_err(|error| ChanError::Search(error.to_string()))?;
+        let (index, index_populated) = match Index::open(&entry.root_path, &paths.index) {
+            Ok(index) => {
+                let populated = index.stats().indexed_docs > 0;
+                (Some(index), Some(populated))
+            }
+            Err(error) => {
+                tracing::warn!(
+                    workspace = %entry.root_path.display(),
+                    ?error,
+                    "search readiness probe failed; full rebuild required",
+                );
+                (None, None)
+            }
+        };
+        let state_readiness = match (graph_populated, index_populated) {
+            (Some(false), Some(false)) => PersistedStateReadiness::Cold,
+            (Some(true), Some(false)) | (None, _) | (_, None) => {
+                PersistedStateReadiness::Inconsistent
+            }
+            (Some(_), Some(true)) => PersistedStateReadiness::Populated,
+        };
+        let refresh_report = paths.report.is_file();
+        let (recovery, recovery_plan) = RecoveryPlan::derive(
+            needs_rebuild,
+            needs_replay_writes,
+            state_readiness,
+            refresh_report,
+        );
+        let mut configured = walk_filter.excluded_dir_names.clone();
+        configured.extend(index_config.excluded_dirs);
+        let scope_policy = Arc::new(fs_ops::IndexScopePolicy::new(
+            entry.root_path.clone(),
+            recovery.generation,
+            fs_ops::WalkFilter::new(configured),
+        )?);
+        if let Some(index) = &index {
+            index.set_scope_policy(Arc::clone(&scope_policy));
+        }
+        let index_cell = {
+            let cell = std::sync::OnceLock::new();
+            if let Some(index) = index {
+                let _ = cell.set(index);
+            }
+            cell
+        };
+        let graph_cell = {
+            let cell = std::sync::OnceLock::new();
+            if let Some(graph) = graph {
+                let _ = cell.set(graph);
+            }
+            cell
         };
         let workspace = Arc::new(Self {
             entry,
@@ -634,55 +909,28 @@ impl Workspace {
             paths,
             _lock: lock,
             _fd_permit: fd_permit,
-            index: std::sync::OnceLock::new(),
-            graph: std::sync::OnceLock::new(),
+            index: index_cell,
+            graph: graph_cell,
             rename_log: std::sync::Mutex::new(rename_log),
             pending_writes: std::sync::Mutex::new(pending_writes),
             write_serial: Arc::new(std::sync::Mutex::new(())),
             recovery: std::sync::Mutex::new(recovery),
+            recovery_worker: RecoveryWorker::new(),
             report: Arc::new(std::sync::OnceLock::new()),
             walk_filter,
+            scope_policy: Arc::new(std::sync::RwLock::new(scope_policy)),
         });
 
-        // Converge the graph against disk on every open. The watcher
-        // only sees events that happen WHILE a server is running, so a
-        // file added/removed/edited while nothing was watching (closed
-        // laptop, `chan open` not running) leaves the graph diverged
-        // from the live tree, and no consumer's startup path catches it:
-        // chan-server only triggers a full reindex when an index side is
-        // wholly EMPTY, and the indexer only reconciles on watcher
-        // ProviderError / path-less events. So a single offline-added
-        // file in a non-empty graph stays invisible across restarts (its
-        // mentions/tags never get edges). reconcile() is a stat-only walk
-        // that indexes just the diff, so the cost is one tree stat plus
-        // re-indexing only the changed files, not a full rebuild.
-        //
-        // Skip the empty-graph case: that is a cold workspace whose
-        // consumer (chan-server's coldboot trigger / the CLI's reindex)
-        // runs the full build in the background, and reconciling an empty
-        // graph here would index every file synchronously inside open(),
-        // defeating the "open stays fast" invariant. needs_rebuild also
-        // short-circuits, since a pending full rebuild supersedes a
-        // reconcile.
-        let graph_non_empty = workspace
-            .graph()
-            .and_then(|g| g.files().map(|fs| !fs.is_empty()))
-            .unwrap_or(false);
-        if graph_non_empty && !needs_rebuild && !needs_replay_writes {
-            if let Err(e) = workspace.reconcile() {
-                // Best-effort: a reconcile failure must never block the
-                // open. The watcher + the next manual reindex still
-                // converge the index; we just lose the offline catch-up
-                // for this session.
-                tracing::warn!(
-                    workspace = %workspace.entry.root_path.display(),
-                    ?e,
-                    "startup reconcile failed; index may lag the live tree until next reindex",
-                );
-            }
-        }
+        Ok((workspace, recovery_plan))
+    }
 
-        Ok(workspace)
+    pub(crate) fn start_open_recovery(self: &Arc<Self>, plan: RecoveryPlan) -> Result<()> {
+        self.recovery_worker.start(Arc::downgrade(self), plan)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn join_open_recovery(&self) {
+        self.recovery_worker.join();
     }
 
     /// Latest recovery or policy generation known to this workspace.
@@ -804,10 +1052,8 @@ impl Workspace {
     /// True when the last reindex did not run to completion (either
     /// because the process crashed between graph rebuild and BM25
     /// commit, or because a marker from a prior install still
-    /// lingers). Consumers (chan-server's indexer trigger, the CLI's
-    /// "index --auto" check) should treat this as a signal to call
-    /// `reindex` before answering search queries. Cleared once
-    /// reindex commits the index and removes the on-disk marker.
+    /// lingers). Startup recovery consumes this automatically; callers
+    /// can use the projection to avoid serving a not-yet-ready index.
     pub fn needs_rebuild(&self) -> bool {
         let status = self.recovery_status();
         status
@@ -925,6 +1171,11 @@ impl Workspace {
         &self.walk_filter
     }
 
+    /// Immutable generated scope currently shared by derived-state consumers.
+    pub fn scope_policy(&self) -> Arc<fs_ops::IndexScopePolicy> {
+        Arc::clone(&self.scope_policy.read().unwrap())
+    }
+
     /// Structural bootstrap snapshot of the workspace root: the immediate
     /// files + directories, each directory carrying its recursive
     /// (filtered) subtree file count and byte total, plus the
@@ -933,7 +1184,8 @@ impl Workspace {
     /// UI renders before the paced index / report jobs run; deeper
     /// levels load lazily on File Browser expand / Graph depth.
     pub fn bootstrap(&self) -> Result<crate::bootstrap::BootstrapTree> {
-        crate::bootstrap::bootstrap_root(self.root(), &self.walk_filter)
+        let policy = self.scope_policy();
+        crate::bootstrap::bootstrap_root_scoped(self.root(), &policy)
     }
 
     /// Bootstrap snapshot for a nested directory at workspace-relative
@@ -942,7 +1194,8 @@ impl Workspace {
     /// subtree-stats shape for an expanded directory rather than the
     /// plain per-file listing.
     pub fn bootstrap_dir(&self, rel: &str) -> Result<crate::bootstrap::BootstrapTree> {
-        crate::bootstrap::bootstrap_dir(self.root(), rel, &self.walk_filter)
+        let policy = self.scope_policy();
+        crate::bootstrap::bootstrap_dir_scoped(self.root(), rel, &policy)
     }
 
     // ---- filesystem primitives (path-based, rel-only) ----
@@ -1545,7 +1798,8 @@ impl Workspace {
     /// raw `list_tree_unified` stays unfiltered for the editor's
     /// on-demand open-inside-a-noisy-dir path.
     pub fn list_tree_filtered_unified(&self) -> Result<Vec<TreeEntry>> {
-        fs_ops::list_tree_filtered(self.root(), &self.walk_filter)
+        let policy = self.scope_policy();
+        fs_ops::list_tree_scoped(self.root(), &policy)
     }
 
     /// Filtered counterpart of `list_tree_prefix_unified`. Drafts live
@@ -1554,7 +1808,8 @@ impl Workspace {
     pub fn list_tree_prefix_filtered_unified(&self, prefix: &str) -> Result<Vec<TreeEntry>> {
         let trimmed = prefix.trim_matches('/');
         let resolved = fs_ops::resolve_safe_strict(self.root(), trimmed)?;
-        fs_ops::list_tree_prefix_filtered(self.root(), &resolved, &self.walk_filter)
+        let policy = self.scope_policy();
+        fs_ops::list_tree_prefix_scoped(self.root(), &resolved, &policy)
     }
 
     pub fn create_dir(&self, rel: &str) -> Result<()> {
@@ -1642,7 +1897,8 @@ impl Workspace {
         // Filtered so we don't waste time collecting paths under
         // `node_modules/` etc. that were never indexed in the first
         // place; symmetric with the filtered index/graph build.
-        for entry in fs_ops::walk_workspace_filtered(abs, &self.walk_filter) {
+        let policy = self.scope_policy();
+        for entry in fs_ops::walk_workspace_scoped(abs, &policy) {
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -1739,7 +1995,8 @@ impl Workspace {
         // Filtered so restoring a directory that happens to contain a
         // `node_modules/` / `target/` subtree does not re-index a
         // dependency tree the index deliberately excludes.
-        for entry in fs_ops::walk_workspace_filtered(&abs, &self.walk_filter) {
+        let policy = self.scope_policy();
+        for entry in fs_ops::walk_workspace_scoped(&abs, &policy) {
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -2535,6 +2792,7 @@ impl Workspace {
     ) -> Result<BuildSummary> {
         let recovery = self.recovery_execution(RecoveryAction::FullRebuild);
         let _serial = self.write_serial.lock().unwrap();
+        let policy = self.scope_policy();
 
         // Graph rebuild walks the tree once for headings + edges.
         // The search facade walks again for chunking + embeddings.
@@ -2545,19 +2803,17 @@ impl Workspace {
         // written before the graph rebuild starts and removed only
         // after the search index commits. A process killed at any
         // point in between leaves the marker on disk, which the
-        // next `Workspace::open` promotes into `needs_rebuild() = true`.
-        // The consumer then knows to retry the whole reindex
-        // instead of trusting an index that may have skipped its
-        // final commit.
+        // next `Workspace::open` promotes into a supervised full rebuild
+        // instead of trusting an index that may have skipped its final commit.
         self.write_rebuild_marker()?;
-        self.rebuild_graph(cancel, progress)?;
+        self.rebuild_graph(cancel, progress, &policy)?;
         let index = self.index()?;
         // Push the EFFECTIVE filter (global baseline unioned with this
         // workspace's `excluded_dirs` additions) to the index facade so the
         // walk under `build_all` agrees with the graph rebuild on which
         // subtrees to skip. Re-derived here, so a blocklist edit + reindex
         // re-walks against the new set without mutating the shared snapshot.
-        index.set_walk_filter(self.effective_walk_filter()?);
+        index.set_scope_policy(policy);
         // Snapshot the vector epoch BEFORE reading the opt-in flag. A disable
         // flips the flag then bumps the epoch (clear_vectors), so sampling the
         // epoch first guarantees a build that read a stale `true` still observes
@@ -2651,6 +2907,7 @@ impl Workspace {
         &self,
         cancel: Option<&AtomicBool>,
         progress: &dyn crate::progress::ProgressCallback,
+        policy: &fs_ops::IndexScopePolicy,
     ) -> Result<()> {
         use crate::progress::{eta_secs_from, ProgressEvent, ProgressStage};
         // Staged-and-swap: parse each file straight into sqlite
@@ -2669,8 +2926,7 @@ impl Workspace {
         // Effective filter = global baseline + this workspace's blocklist
         // additions, so the graph rebuild skips the same subtrees the index
         // build does (both re-derive it per reindex).
-        let filter = self.effective_walk_filter()?;
-        let entries = fs_ops::list_tree_filtered(self.root(), &filter)?;
+        let entries = fs_ops::list_tree_scoped(self.root(), policy)?;
         // The graph is Markdown-only: only `.md` files become document
         // nodes (and contribute wikilink / heading / token edges). `.txt`
         // stays editable + BM25-searchable (the search pass in `build_all`
@@ -2949,36 +3205,50 @@ impl Workspace {
     /// union(global baseline, per-workspace additions). What the reindex walk
     /// actually skips.
     pub fn effective_excluded_dirs(&self) -> Result<Vec<String>> {
-        Ok(self.effective_walk_filter()?.excluded_dir_names.clone())
+        Ok(self.scope_policy().configured().excluded_dir_names.clone())
     }
 
-    /// Replace this workspace's blocklist additions. Persists the set; the
-    /// effective walk filter is re-derived on the next reindex, so the caller
-    /// triggers a rebuild to re-walk (the chan-server route does this OFF the
-    /// async executor). Names are stored as given; matching is
+    /// Replace this workspace's blocklist additions. Persists the set, swaps
+    /// one new generated scope, and requests reconciliation; the caller
+    /// triggers the recovery off its async executor. Names are stored as
+    /// given; matching is
     /// case-insensitive basename-at-any-depth, so the caller normalizes
     /// (trim / drop blanks / reject path separators / lower-case + dedupe).
     pub fn set_excluded_dirs(&self, dirs: Vec<String>) -> Result<()> {
+        let _serial = self.write_serial.lock().unwrap();
+        if self.excluded_dirs()? == dirs {
+            return Ok(());
+        }
         self.index()?.set_excluded_dirs(dirs)?;
+        let mut configured = self.walk_filter.excluded_dir_names.clone();
+        configured.extend(self.index()?.config().excluded_dirs);
+        let policy = {
+            let mut current = self.scope_policy.write().unwrap();
+            let generation = self.request_policy_recovery(RecoveryAction::Reconcile);
+            let policy = Arc::new(fs_ops::IndexScopePolicy::new(
+                self.root().to_path_buf(),
+                generation,
+                fs_ops::WalkFilter::new(configured),
+            )?);
+            *current = Arc::clone(&policy);
+            policy
+        };
+        if let Some(report) = self.report.get() {
+            report.replace_policy(self.root(), policy)?;
+        }
         Ok(())
     }
 
-    /// The walk filter actually applied to this workspace's index + graph
-    /// rebuild: the global baseline (`self.walk_filter`) unioned with this
-    /// workspace's `excluded_dirs` additions. Re-derived per reindex so a
-    /// blocklist edit takes effect on the next rebuild WITHOUT mutating the
-    /// shared snapshot. The file tree / fs-graph keep using the global
-    /// `self.walk_filter`, so additions affect INDEXING + the graph, not
-    /// on-demand browsing - matching how the global blocklist already behaves
-    /// (a blocklisted dir stays navigable in the tree).
-    fn effective_walk_filter(&self) -> Result<Arc<fs_ops::WalkFilter>> {
-        let extra = self.index()?.config().excluded_dirs;
-        if extra.is_empty() {
-            return Ok(Arc::clone(&self.walk_filter));
-        }
-        let mut names = self.walk_filter.excluded_dir_names.clone();
-        names.extend(extra);
-        Ok(Arc::new(fs_ops::WalkFilter::new(names)))
+    fn refresh_repository_scope(&self) -> Result<()> {
+        let mut current = self.scope_policy.write().unwrap();
+        let configured = current.configured().clone();
+        let generation = self.request_policy_recovery(RecoveryAction::Reconcile);
+        *current = Arc::new(fs_ops::IndexScopePolicy::new(
+            self.root().to_path_buf(),
+            generation,
+            configured,
+        )?);
+        Ok(())
     }
 
     /// Read the per-workspace screensaver-enabled flag.
@@ -3098,9 +3368,8 @@ impl Workspace {
     /// Journal-bracketed: the call records a `PendingOp::Index`
     /// entry for `rel` before touching either backend and removes
     /// it after both commit. A crash mid-call leaves the entry on
-    /// disk; the next `Workspace::open` surfaces it via
-    /// `needs_replay_writes()` so the consumer can call
-    /// `replay_pending_writes()` to converge.
+    /// disk; the next `Workspace::open` schedules replay and exposes
+    /// `needs_replay_writes()` while it remains outstanding.
     pub fn index_file(&self, rel: &str) -> Result<()> {
         let _serial = self.write_serial.lock().unwrap();
         self.index_file_serial(rel)
@@ -3109,6 +3378,9 @@ impl Workspace {
     fn index_file_serial(&self, rel: &str) -> Result<()> {
         if !fs_ops::is_indexable_text(rel) {
             return Ok(());
+        }
+        if !self.scope_policy().includes(rel, false) {
+            return self.forget_file_serial(rel);
         }
         self.journal_record(rel, PendingOp::Index)?;
         let result = self.index_file_inner(rel);
@@ -3291,11 +3563,13 @@ impl Workspace {
         Ok(())
     }
 
-    /// True when the pending-writes journal was non-empty at open.
-    /// The consumer should call `replay_pending_writes()` before
-    /// serving editor queries; until it does, graph and index may
-    /// disagree about the journaled files.
+    /// True while the pending-writes journal still needs replay.
+    /// Open schedules replay automatically; callers may also invoke
+    /// `replay_pending_writes()` explicitly.
     pub fn needs_replay_writes(&self) -> bool {
+        if !self.pending_writes.lock().unwrap().is_empty() {
+            return true;
+        }
         let status = self.recovery_status();
         status
             .active
@@ -3420,6 +3694,8 @@ impl Workspace {
     pub fn reconcile(&self) -> Result<ReconcileReport> {
         let recovery = self.recovery_execution(RecoveryAction::Reconcile);
         let _serial = self.write_serial.lock().unwrap();
+        #[cfg(test)]
+        open_recovery_probe(self);
         // Snapshot the graph's view of the world: per-file
         // (mtime, size) tuples. Graph stores mtime as Unix
         // seconds and size as bytes (None for either component
@@ -3436,10 +3712,10 @@ impl Workspace {
         // Only editable-text files participate; binaries / images
         // are not indexed by either backend and so do not need
         // reconciliation.
-        let filter = Arc::clone(&self.walk_filter);
+        let policy = self.scope_policy();
         let mut disk_files: std::collections::HashMap<String, (Option<i64>, Option<i64>)> =
             std::collections::HashMap::new();
-        for entry in fs_ops::walk_workspace_filtered(self.root(), &filter) {
+        for entry in fs_ops::walk_workspace_scoped(self.root(), &policy) {
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -3600,8 +3876,12 @@ impl Workspace {
     /// dropped, since the scan reflects the on-disk state regardless. Callers
     /// that need a warm report call `report()` / `boot()`.
     pub fn watch(self: &Arc<Self>, cb: Arc<dyn WatchCallback>) -> Result<WatchHandle> {
-        let fan: Arc<dyn WatchCallback> =
+        let report_fan: Arc<dyn WatchCallback> =
             ReportFanOut::new(cb, Arc::clone(&self.report), Arc::clone(&self.write_serial));
+        let fan: Arc<dyn WatchCallback> = Arc::new(ScopePolicyFanOut {
+            workspace: Arc::downgrade(self),
+            downstream: report_fan,
+        });
         // Single recursive root watcher. Drafts live in-root under
         // `<drafts_dir_name>/...`, so the workspace-root watcher already
         // covers them; no separate drafts watch root is needed.
@@ -3609,7 +3889,7 @@ impl Workspace {
         // Same unified ignore set the bootstrap/index walk uses, so a
         // node_modules/target/venv/.git storm never reaches the
         // broadcast bus or the indexer.
-        WatchHandle::start(&roots, Arc::clone(&self.walk_filter), fan)
+        WatchHandle::start(&roots, Arc::clone(&self.scope_policy), fan)
     }
 
     /// Start the built-in graph indexer on this workspace. Returns a
@@ -3635,10 +3915,12 @@ impl Workspace {
         Ok(self.report_state()?.snapshot(&ReportScope::All))
     }
 
-    /// Return a maintained report snapshot without starting a filesystem scan.
+    /// Return a maintained report snapshot without initializing a cold report.
+    /// A warm report captured under an older scope generation is rescanned
+    /// before it is returned.
     pub fn report_if_available(&self) -> Result<Option<Report>> {
-        if let Some(state) = self.report.get() {
-            return Ok(Some(state.snapshot(&ReportScope::All)));
+        if self.report.get().is_some() {
+            return Ok(Some(self.report_state()?.snapshot(&ReportScope::All)));
         }
         if !self.reports_enabled()? {
             return Ok(None);
@@ -3646,7 +3928,7 @@ impl Workspace {
         crate::report::load_snapshot_if_available(
             self.root(),
             &self.paths.report,
-            &self.walk_filter.excluded_dir_names,
+            self.scope_policy(),
         )
     }
 
@@ -3695,6 +3977,7 @@ impl Workspace {
 
     fn report_state(&self) -> Result<&Arc<ReportState>> {
         if let Some(s) = self.report.get() {
+            self.refresh_report_scope_if_needed(s)?;
             return Ok(s);
         }
         // Bug 7: the report's initial `Index::scan` walks the workspace and
@@ -3705,16 +3988,33 @@ impl Workspace {
         // yields the table to editing + the terminal when fds are
         // tight. Cheap and best-effort: clear headroom returns at once.
         crate::fd_budget::pace_reindex_worker(None);
-        let state = ReportState::open(
-            self.root(),
-            &self.paths.report,
-            &self.walk_filter.excluded_dir_names,
-        )?;
+        let state = ReportState::open(self.root(), &self.paths.report, self.scope_policy())?;
         // OnceLock::set is racy with a concurrent caller; the
         // loser drops its state cleanly, which terminates its
         // writer thread via Drop. The winner's state stays.
         let _ = self.report.set(state);
-        Ok(self.report.get().expect("report state just set"))
+        let state = self.report.get().expect("report state just set");
+        self.refresh_report_scope_if_needed(state)?;
+        Ok(state)
+    }
+
+    fn refresh_report_scope_if_needed(&self, report: &ReportState) -> Result<()> {
+        let policy = self.scope_policy();
+        if report.policy_generation() == Some(policy.generation().get()) {
+            return Ok(());
+        }
+        let _serial = self.write_serial.lock().unwrap();
+        let policy = self.scope_policy();
+        if report.policy_generation() != Some(policy.generation().get()) {
+            report.replace_policy(self.root(), policy)?;
+        }
+        Ok(())
+    }
+
+    fn rescan_persisted_report(&self) -> Result<()> {
+        let report = self.report_state()?;
+        let _serial = self.write_serial.lock().unwrap();
+        report.replace_policy(self.root(), self.scope_policy())
     }
 }
 
@@ -3775,6 +4075,39 @@ where
 /// usable for the reconcile `(mtime, size)` equality check.
 fn size_to_i64(size: u64) -> i64 {
     i64::try_from(size).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+struct OpenRecoveryProbe {
+    root: std::path::PathBuf,
+    tx: std::sync::mpsc::Sender<std::thread::ThreadId>,
+}
+
+#[cfg(test)]
+static OPEN_RECOVERY_PROBE: std::sync::OnceLock<std::sync::Mutex<Option<OpenRecoveryProbe>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn open_recovery_probe(workspace: &Workspace) {
+    let slot = OPEN_RECOVERY_PROBE.get_or_init(|| std::sync::Mutex::new(None));
+    let mut probe = slot.lock().unwrap();
+    if probe
+        .as_ref()
+        .is_some_and(|probe| probe.root == workspace.root())
+    {
+        if let Some(probe) = probe.take() {
+            let _ = probe.tx.send(std::thread::current().id());
+        }
+    }
+}
+
+#[cfg(test)]
+fn arm_open_recovery_probe(
+    root: std::path::PathBuf,
+    tx: std::sync::mpsc::Sender<std::thread::ThreadId>,
+) {
+    let slot = OPEN_RECOVERY_PROBE.get_or_init(|| std::sync::Mutex::new(None));
+    *slot.lock().unwrap() = Some(OpenRecoveryProbe { root, tx });
 }
 
 // Test-only hook fired by `index_file_inner` between the `stat`
@@ -4597,6 +4930,18 @@ mod tests {
         (cfg, workspace_dir, workspace)
     }
 
+    fn await_recovery_ready(workspace: &Workspace) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !workspace.recovery_status().is_ready() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            workspace.recovery_status().is_ready(),
+            "background startup recovery did not converge: {:?}",
+            workspace.recovery_status()
+        );
+    }
+
     #[test]
     fn recovery_generation_signal_during_active_forces_follow_up() {
         let (_cfg, _root, workspace) = fixture();
@@ -4765,14 +5110,15 @@ mod tests {
 
         let guard = workspace.write_serial.lock().unwrap();
         workspace.write_text("report.md", "# after\n").unwrap();
+        let generation = workspace.generation();
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             started_tx.send(()).unwrap();
-            fan.on_event(crate::WatchEvent {
-                kind: crate::WatchKind::Modified,
-                path: Some("report.md".to_string()),
-                to: None,
-            });
+            fan.on_event(crate::WatchEvent::file(
+                crate::WatchKind::Modified,
+                "report.md",
+                generation,
+            ));
         });
         started_rx.recv().unwrap();
         assert!(
@@ -4938,8 +5284,8 @@ mod tests {
     fn needs_rebuild_flag_tracks_marker() {
         // Pre-stamp the rebuild.inprogress marker as if a prior
         // reindex had been killed between graph rebuild and BM25
-        // commit. Workspace::open must promote it to needs_rebuild()=true
-        // so the consumer reindexes before serving queries.
+        // commit. Workspace::open must schedule a full rebuild without
+        // performing it on the caller.
         let cfg = TempDir::new().unwrap();
         let workspace_dir = TempDir::new().unwrap();
 
@@ -4956,16 +5302,10 @@ mod tests {
         std::fs::write(&marker, b"started_at = 1\n").unwrap();
 
         let workspace = lib.open_workspace(workspace_dir.path()).unwrap();
-        assert!(
-            workspace.needs_rebuild(),
-            "marker on disk should set needs_rebuild()",
-        );
-
-        // A successful reindex removes the marker and clears the flag.
-        workspace.reindex(None).unwrap();
+        await_recovery_ready(&workspace);
         assert!(
             !workspace.needs_rebuild(),
-            "needs_rebuild() should clear after a clean reindex",
+            "startup recovery should clear needs_rebuild()",
         );
         assert!(
             !marker.exists(),
@@ -5058,9 +5398,11 @@ mod tests {
         std::fs::write(&marker, b"started_at = simulated\n").unwrap();
 
         let workspace = lib.open_workspace(workspace_dir.path()).unwrap();
-        assert!(workspace.needs_rebuild(), "marker must promote to flag");
-        workspace.reindex(None).unwrap();
-        assert!(!workspace.needs_rebuild(), "reindex must clear the flag");
+        await_recovery_ready(&workspace);
+        assert!(
+            !workspace.needs_rebuild(),
+            "background reindex must clear the flag"
+        );
         let recovered = capture_recovery_state(&workspace, probe);
         assert_eq!(
             recovered, baseline,
@@ -5102,22 +5444,7 @@ mod tests {
         .unwrap();
 
         let workspace = lib.open_workspace(workspace_dir.path()).unwrap();
-        assert!(workspace.needs_rebuild());
-        // Before the recovery reindex, search should return zero
-        // hits (BM25 store is empty). Confirm that the test setup
-        // actually broke the index, otherwise the recovery
-        // assertion below would pass for the wrong reason.
-        let opts = crate::workspace::SearchOpts {
-            mode: crate::SearchMode::Bm25,
-            limit: 100,
-            scope: None,
-        };
-        assert!(
-            workspace.search(probe, &opts).unwrap().hits.is_empty(),
-            "test precondition: corrupted BM25 should produce zero hits",
-        );
-
-        workspace.reindex(None).unwrap();
+        await_recovery_ready(&workspace);
         let recovered = capture_recovery_state(&workspace, probe);
         assert_eq!(
             recovered, baseline,
@@ -5319,18 +5646,9 @@ mod tests {
             persist_pending_writes(&workspace.paths.graph_dir, &map).unwrap();
         }
 
-        // Reopen: the flag must surface, the in-memory map must
-        // mirror the on-disk journal.
+        // Reopen schedules the durable journal replay off the caller.
         let workspace = lib.open_workspace(workspace_dir.path()).unwrap();
-        assert!(workspace.needs_replay_writes());
-        let pending = workspace.pending_writes();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].0, "a.md");
-        assert_eq!(pending[0].1, "index");
-
-        // Replay must workspace both backends to the on-disk truth.
-        let replayed = workspace.replay_pending_writes().unwrap();
-        assert_eq!(replayed, 1);
+        await_recovery_ready(&workspace);
         assert!(!workspace.needs_replay_writes());
         assert!(workspace.pending_writes().is_empty());
 
@@ -5377,8 +5695,7 @@ mod tests {
         }
 
         let workspace = lib.open_workspace(workspace_dir.path()).unwrap();
-        assert!(workspace.needs_replay_writes());
-        workspace.replay_pending_writes().unwrap();
+        await_recovery_ready(&workspace);
         assert!(!workspace.needs_replay_writes());
 
         // After replay the entry should be gone from both backends.
@@ -5421,8 +5738,7 @@ mod tests {
         }
 
         let workspace = lib.open_workspace(workspace_dir.path()).unwrap();
-        assert!(workspace.needs_replay_writes());
-        workspace.replay_pending_writes().unwrap();
+        await_recovery_ready(&workspace);
 
         let opts = crate::workspace::SearchOpts {
             mode: crate::SearchMode::Bm25,
@@ -5650,6 +5966,152 @@ mod tests {
     }
 
     #[test]
+    fn nonblocking_open_recovery_reconciles_offline_tree_changes() {
+        use std::fs;
+        use std::time::{Duration, Instant};
+
+        let cfg = TempDir::new().unwrap();
+        let workspace_dir = TempDir::new().unwrap();
+        let root = workspace_dir.path();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root).unwrap();
+
+        let workspace = lib.open_workspace(root).unwrap();
+        for index in 0..128 {
+            fs::write(
+                root.join(format!("bulk-{index:03}.md")),
+                format!("# bulk {index}\nfixture-token-{index}\n"),
+            )
+            .unwrap();
+        }
+        fs::write(root.join("modified.md"), "# modified\nbefore-modify\n").unwrap();
+        fs::write(root.join("same-mtime.md"), "# same\nbefore-size\n").unwrap();
+        fs::write(root.join("rename-old.md"), "# rename\nrename-token\n").unwrap();
+        fs::write(root.join("removed.md"), "# remove\nremove-token\n").unwrap();
+        workspace.reindex(None).unwrap();
+        workspace.report().unwrap();
+        let report_path = workspace.paths().report.clone();
+        let report_deadline = Instant::now() + Duration::from_secs(5);
+        while !report_path.exists() && Instant::now() < report_deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(report_path.exists(), "baseline report was not persisted");
+
+        let same_mtime_path = root.join("same-mtime.md");
+        let original_modified = fs::metadata(&same_mtime_path).unwrap().modified().unwrap();
+        drop(workspace);
+
+        fs::write(
+            root.join("created.md"),
+            "# created\ncreated-offline-token\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("modified.md"),
+            "# modified\nmodified-offline-token with a changed length\n",
+        )
+        .unwrap();
+        fs::write(
+            &same_mtime_path,
+            "# same\nsame-mtime-offline-token with a much longer body\n",
+        )
+        .unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&same_mtime_path)
+            .unwrap()
+            .set_modified(original_modified)
+            .unwrap();
+        fs::rename(root.join("rename-old.md"), root.join("rename-new.md")).unwrap();
+        fs::remove_file(root.join("removed.md")).unwrap();
+
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        arm_open_recovery_probe(root.to_path_buf(), probe_tx);
+        let caller = std::thread::current().id();
+        let reopened = lib.open_workspace(root).unwrap();
+        let recovery_thread = probe_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("startup recovery did not begin");
+        assert_ne!(
+            recovery_thread, caller,
+            "Workspace::open walked the populated tree on its caller"
+        );
+
+        await_recovery_ready(&reopened);
+        reopened.join_open_recovery();
+
+        let graph_files = reopened.graph().unwrap().files().unwrap();
+        for expected in [
+            "created.md",
+            "modified.md",
+            "same-mtime.md",
+            "rename-new.md",
+        ] {
+            assert!(
+                graph_files.iter().any(|path| path == expected),
+                "background recovery missed {expected}: {graph_files:?}"
+            );
+        }
+        for stale in ["rename-old.md", "removed.md"] {
+            assert!(
+                !graph_files.iter().any(|path| path == stale),
+                "background recovery retained {stale}: {graph_files:?}"
+            );
+        }
+
+        let opts = SearchOpts {
+            mode: SearchMode::Bm25,
+            limit: 10,
+            scope: None,
+        };
+        for token in [
+            "created-offline-token",
+            "modified-offline-token",
+            "same-mtime-offline-token",
+            "rename-token",
+        ] {
+            assert_eq!(
+                reopened.search(token, &opts).unwrap().hits.len(),
+                1,
+                "background recovery did not index {token}"
+            );
+        }
+        assert!(
+            reopened
+                .search("remove-token", &opts)
+                .unwrap()
+                .hits
+                .is_empty(),
+            "background recovery retained removed content"
+        );
+
+        let report_paths: Vec<String> = reopened
+            .report()
+            .unwrap()
+            .files
+            .into_iter()
+            .map(|file| file.path)
+            .collect();
+        for expected in [
+            "created.md",
+            "modified.md",
+            "same-mtime.md",
+            "rename-new.md",
+        ] {
+            assert!(
+                report_paths.iter().any(|path| path == expected),
+                "background report recovery missed {expected}: {report_paths:?}"
+            );
+        }
+        for stale in ["rename-old.md", "removed.md"] {
+            assert!(
+                !report_paths.iter().any(|path| path == stale),
+                "background report recovery retained {stale}: {report_paths:?}"
+            );
+        }
+    }
+
+    #[test]
     fn index_file_stamps_pre_read_stat_so_concurrent_writes_stay_visible() {
         // TOCTOU between `stat` and `read_text` inside
         // `index_file_inner`. We use a test-only thread-local hook
@@ -5774,7 +6236,7 @@ mod tests {
         // next `open`. This drives the real consumer entry point
         // (`Library::open_workspace` -> `Workspace::open`), NOT a
         // direct `reconcile()` call, because the bug was that the
-        // startup path never reconciled when the graph was non-empty.
+        // startup path never scheduled recovery when the graph was non-empty.
         let cfg = TempDir::new().unwrap();
         let workspace_dir = TempDir::new().unwrap();
         let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -5811,6 +6273,7 @@ mod tests {
 
         // Re-open via the real startup entry point.
         let workspace = lib.open_workspace(workspace_dir.path()).unwrap();
+        await_recovery_ready(&workspace);
         let files = workspace.graph().unwrap().files().unwrap();
         assert!(
             files
@@ -7488,7 +7951,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_opens_lazily() {
+    fn graph_handle_is_stable_after_metadata_open() {
         let (_cfg, _root, workspace) = fixture();
         // Calling graph() twice returns the same handle; this is
         // the contract the editor relies on for incremental
