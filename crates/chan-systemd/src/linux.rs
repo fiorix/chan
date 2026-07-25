@@ -506,6 +506,111 @@ mod tests {
     }
 
     #[test]
+    fn systemd_watchdog_fdstore_e2e() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        if std::env::var_os("CHAN_SYSTEMD_FDSTORE_E2E").is_none() {
+            eprintln!("skipping systemd watchdog e2e; set CHAN_SYSTEMD_FDSTORE_E2E=1");
+            return;
+        }
+        if !command_status(Command::new("systemctl").args(["--user", "show-environment"])) {
+            panic!("CHAN_SYSTEMD_FDSTORE_E2E=1 but systemctl --user is unavailable");
+        }
+        if !command_status(Command::new("systemd-run").arg("--version")) {
+            panic!("CHAN_SYSTEMD_FDSTORE_E2E=1 but systemd-run is unavailable");
+        }
+
+        let unique = format!("{}-{}", std::process::id(), timestamp_nanos());
+        let unit = format!("chan-systemd-watchdog-e2e-{unique}.service");
+        let helper_unit = format!("chan-systemd-watchdog-e2e-helper-{unique}.service");
+        let state = std::env::temp_dir().join(format!("chan-systemd-watchdog-e2e-{unique}.state"));
+        let _state_guard = SocketPathGuard(state.clone());
+        std::fs::write(&state, "store\n").unwrap();
+        let cleanup = SystemdE2eCleanup {
+            main_unit: unit.clone(),
+            helper_unit: helper_unit.clone(),
+            state: state.clone(),
+        };
+
+        let exe = std::env::current_exe().unwrap();
+        let output = Command::new("systemd-run")
+            .arg("--user")
+            .arg("--unit")
+            .arg(&unit)
+            .arg("--property=Type=notify")
+            .arg("--property=NotifyAccess=main")
+            .arg("--property=FileDescriptorStoreMax=4")
+            .arg("--property=KillMode=process")
+            .arg("--property=WatchdogSec=2s")
+            .arg("--property=Restart=on-watchdog")
+            .arg("--property=TimeoutStopSec=1s")
+            .arg("--property=RemainAfterExit=yes")
+            .arg(format!(
+                "--setenv=CHAN_SYSTEMD_FDSTORE_E2E_STATE={}",
+                state.display()
+            ))
+            .arg(format!(
+                "--setenv=CHAN_SYSTEMD_FDSTORE_E2E_HELPER={helper_unit}"
+            ))
+            .arg("--setenv=CHAN_SYSTEMD_FDSTORE_E2E_CHILD=1")
+            .arg("--setenv=CHAN_SYSTEMD_WATCHDOG_E2E=1")
+            .arg(exe.as_os_str())
+            .arg("linux::tests::systemd_fdstore_e2e_child")
+            .arg("--exact")
+            .arg("--nocapture")
+            .output()
+            .unwrap();
+        if !output.status.success() {
+            panic_systemd_e2e(
+                &cleanup,
+                format!(
+                    "systemd-run failed\nstdout:\n{}\nstderr:\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            );
+        }
+        if let Err(err) = wait_for_state(&state, "restore") {
+            panic_systemd_e2e(&cleanup, err);
+        }
+
+        let first_pid = systemd_unit_u32_property(&unit, "MainPID")
+            .filter(|pid| *pid != 0)
+            .unwrap_or_else(|| panic_systemd_e2e(&cleanup, "unit has no main pid after READY"));
+        thread::sleep(Duration::from_secs(5));
+        let healthy_pid = systemd_unit_u32_property(&unit, "MainPID").unwrap_or_default();
+        let early_restarts = systemd_unit_u32_property(&unit, "NRestarts").unwrap_or_default();
+        if healthy_pid != first_pid || early_restarts != 0 || read_state_phase(&state) != "restore"
+        {
+            panic_systemd_e2e(
+                &cleanup,
+                format!(
+                    "healthy watchdog service restarted before SIGSTOP: \
+                     first pid {first_pid}, current pid {healthy_pid}, \
+                     restarts {early_restarts}"
+                ),
+            );
+        }
+
+        let stopped = Command::new("kill")
+            .args(["-STOP", &first_pid.to_string()])
+            .status()
+            .is_ok_and(|status| status.success());
+        if !stopped {
+            panic_systemd_e2e(&cleanup, format!("failed to SIGSTOP pid {first_pid}"));
+        }
+        if let Err(err) = wait_for_state(&state, "done") {
+            panic_systemd_e2e(&cleanup, err);
+        }
+        let journal = unit_journal(&unit);
+        if !journal.contains("Watchdog timeout") {
+            panic_systemd_e2e(
+                &cleanup,
+                "systemd journal did not record a watchdog timeout",
+            );
+        }
+    }
+
+    #[test]
     fn systemd_fdstore_e2e_child() {
         if std::env::var_os("CHAN_SYSTEMD_FDSTORE_E2E_CHILD").is_none() {
             return;
@@ -589,8 +694,17 @@ mod tests {
         write_e2e_state(state, "restore", &helper_unit);
         notify_ready().unwrap();
         let deadline = Instant::now() + Duration::from_secs(30);
+        let watchdog_tick = std::env::var_os("CHAN_SYSTEMD_WATCHDOG_E2E").map(|_| {
+            watchdog_interval()
+                .expect("systemd watchdog e2e child has watchdog supervision")
+                .min(Duration::from_millis(500))
+        });
         while Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(100));
+            let tick = watchdog_tick.unwrap_or(Duration::from_millis(100));
+            thread::sleep(tick);
+            if watchdog_tick.is_some() {
+                notify_watchdog().unwrap();
+            }
         }
         panic!("timed out waiting for systemd to restart e2e unit");
     }
@@ -598,6 +712,11 @@ mod tests {
     fn systemd_fdstore_e2e_restore(state: &Path) {
         let helper_unit = read_state_helper_unit(state).expect("helper_unit in e2e state");
         let mut named = take_listen_fds();
+        assert_eq!(
+            named.iter().filter(|fd| fd.name == "chan.pty.e2e").count(),
+            1,
+            "fdstore restore must contain exactly one PTY: {named:?}"
+        );
         let idx = named
             .iter()
             .position(|fd| fd.name == "chan.pty.e2e")
@@ -741,6 +860,18 @@ mod tests {
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
+    }
+
+    fn systemd_unit_u32_property(unit: &str, property: &str) -> Option<u32> {
+        let output = Command::new("systemctl")
+            .args(["--user", "show", unit, "--property", property, "--value"])
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().parse().ok())
+            .flatten()
     }
 
     fn timestamp_nanos() -> u128 {
@@ -899,18 +1030,24 @@ mod tests {
     fn cleanup_systemd_stop(unit: &str) {
         let _ = Command::new("systemctl")
             .args(["--user", "stop", unit])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
     }
 
     fn cleanup_systemd_clean_fdstore(unit: &str) {
         let _ = Command::new("systemctl")
             .args(["--user", "clean", "--what=fdstore", unit])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
     }
 
     fn cleanup_systemd_reset_failed(unit: &str) {
         let _ = Command::new("systemctl")
             .args(["--user", "reset-failed", unit])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
     }
 
