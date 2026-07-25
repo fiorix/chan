@@ -2262,6 +2262,20 @@ mod write_tests {
         assert!(!terminal_route.contains(collecting_text_pattern));
     }
 
+    #[test]
+    fn route_table_delegates_streaming_limits_to_semantic_sinks() {
+        let route_table = include_str!("../lib.rs");
+        assert_eq!(
+            route_table.matches("DefaultBodyLimit::disable()").count(),
+            3
+        );
+        assert!(route_table.contains("post(api_upload_file).layer(DefaultBodyLimit::disable())"));
+        assert!(route_table.contains(
+            "post(crate::routes::transfer::api_terminal_upload_file)\n                .layer(DefaultBodyLimit::disable())"
+        ));
+        assert!(route_table.contains("put(api_write_file).layer(DefaultBodyLimit::disable())"));
+    }
+
     #[tokio::test]
     async fn workspace_upload_rejects_overflow_progressively_without_a_partial_target() {
         let cfg = tempfile::TempDir::new().unwrap();
