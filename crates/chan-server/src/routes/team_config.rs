@@ -348,11 +348,11 @@ pub(crate) fn generate_bootstrap_md(
          after a poke when a burst may still be arriving. This matters especially\n\
          for the lead, where every lane's pokes converge. At a safe checkpoint,\n\
          finish or park any active command, stop issuing tools, and yield/end the\n\
-         turn so queued input can become the next prompt. Do not simulate this\n\
-         with a sleep command. The queue's idle signal is PTY output silence:\n\
-         stdout/stderr postpones the drain, while a silent sleep may let bytes\n\
-         enter the terminal without ending the active model turn that needs to\n\
-         consume them.\n\n\
+         turn so queued input can become the next prompt.\n\
+         Do not simulate this with a sleep command.\n\
+         The queue's idle signal is PTY output silence: stdout/stderr postpones\n\
+         the drain, while a silent sleep may let bytes enter the terminal without\n\
+         ending the active model turn that needs to consume them.\n\n\
          When nothing is pending and your brief defines a next step, CONTINUE;\n\
          waiting on an empty queue is a stall, not discipline. Never end a turn\n\
          solely to wait for input that may not exist.\n\n",
