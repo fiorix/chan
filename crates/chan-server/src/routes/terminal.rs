@@ -717,10 +717,11 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                                 state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
                             }
                             Ok(ClientFrame::Cwd) => {
-                                let (cwd, cwd_rel) = terminal_cwd_payload(
-                                    state.try_workspace().ok().as_deref(),
-                                    session.cwd_blocking().await,
-                                );
+                                let (cwd, cwd_rel) = terminal_cwd_payload_blocking(
+                                    state.try_workspace().ok(),
+                                    session.blocking_cwd_probe(),
+                                )
+                                .await;
                                 let _ = send_frame(&mut socket, ServerFrame::Cwd { cwd, cwd_rel }).await;
                             }
                             Ok(ClientFrame::Focus { focused }) => {
@@ -952,10 +953,9 @@ async fn send_attach_prelude(
         return Err(());
     }
     session.request_redraw();
-    let (cwd, cwd_rel) = terminal_cwd_payload(
-        state.try_workspace().ok().as_deref(),
-        session.cwd_blocking().await,
-    );
+    let (cwd, cwd_rel) =
+        terminal_cwd_payload_blocking(state.try_workspace().ok(), session.blocking_cwd_probe())
+            .await;
     if send_frame(
         socket,
         ServerFrame::Ready {
@@ -1017,6 +1017,34 @@ fn terminal_cwd_payload(
         }
         None => (None, None),
     }
+}
+
+async fn terminal_cwd_payload_blocking<C>(
+    workspace: Option<Arc<chan_workspace::Workspace>>,
+    cwd_probe: C,
+) -> (Option<String>, Option<String>)
+where
+    C: FnOnce() -> Option<PathBuf> + Send + 'static,
+{
+    terminal_cwd_payload_blocking_with_hook(workspace, cwd_probe, || {}).await
+}
+
+async fn terminal_cwd_payload_blocking_with_hook<C, H>(
+    workspace: Option<Arc<chan_workspace::Workspace>>,
+    cwd_probe: C,
+    before_mapping: H,
+) -> (Option<String>, Option<String>)
+where
+    C: FnOnce() -> Option<PathBuf> + Send + 'static,
+    H: FnOnce() + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let cwd = cwd_probe();
+        before_mapping();
+        terminal_cwd_payload(workspace.as_deref(), cwd)
+    })
+    .await
+    .unwrap_or((None, None))
 }
 
 fn pty_size(cols: Option<u16>, rows: Option<u16>) -> PtySize {
@@ -1730,6 +1758,98 @@ mod tests {
         let (cwd_abs_nw, cwd_rel_nw) = terminal_cwd_payload(None, Some(cwd));
         assert!(cwd_abs_nw.is_some());
         assert_eq!(cwd_rel_nw, None);
+    }
+
+    #[test]
+    fn terminal_cwd_payload_preserves_root_outside_and_missing_cases() {
+        let (_cfg, root, workspace) = terminal_workspace_fixture();
+        let root_canon = root.path().canonicalize().expect("canonical root");
+        let outside = tempfile::TempDir::new().expect("outside directory");
+        let outside_canon = outside.path().canonicalize().expect("canonical outside");
+
+        let (root_abs, root_rel) = terminal_cwd_payload(Some(&workspace), Some(root_canon.clone()));
+        let root_wire = path_to_wire(root_canon);
+        assert_eq!(root_abs.as_deref(), Some(root_wire.as_str()));
+        assert_eq!(root_rel.as_deref(), Some(""));
+
+        let (outside_abs, outside_rel) =
+            terminal_cwd_payload(Some(&workspace), Some(outside_canon.clone()));
+        let outside_wire = path_to_wire(outside_canon);
+        assert_eq!(outside_abs.as_deref(), Some(outside_wire.as_str()));
+        assert_eq!(outside_rel, None);
+
+        let missing = root.path().join("removed-cwd");
+        assert!(!missing.exists());
+        let (missing_abs, missing_rel) =
+            terminal_cwd_payload(Some(&workspace), Some(missing.clone()));
+        let missing_wire = path_to_wire(missing);
+        assert_eq!(missing_abs.as_deref(), Some(missing_wire.as_str()));
+        assert_eq!(missing_rel.as_deref(), Some("removed-cwd"));
+
+        assert_eq!(terminal_cwd_payload(Some(&workspace), None), (None, None));
+    }
+
+    #[test]
+    fn terminal_cwd_frames_preserve_wire_shape() {
+        let ready = ServerFrame::Ready {
+            cols: 80,
+            rows: 24,
+            cwd: Some("/workspace".into()),
+            cwd_rel: Some(String::new()),
+        };
+        assert_eq!(
+            serde_json::to_string(&ready).unwrap(),
+            r#"{"type":"ready","cols":80,"rows":24,"cwd":"/workspace","cwd_rel":""}"#
+        );
+
+        let missing = ServerFrame::Cwd {
+            cwd: None,
+            cwd_rel: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&missing).unwrap(),
+            r#"{"type":"cwd"}"#
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cwd_lookup_and_mapping_do_not_block_the_async_worker() {
+        let (_cfg, root, workspace) = terminal_workspace_fixture();
+        let cwd = root.path().canonicalize().expect("canonical root");
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mapping_entered = Arc::new(tokio::sync::Notify::new());
+        let mapping_entered_for_hook = Arc::clone(&mapping_entered);
+
+        let observer = std::thread::spawn(move || {
+            entered_rx.recv().expect("mapping hook entered");
+            let progressed = progress_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+            release_tx.send(()).expect("release mapping hook");
+            progressed
+        });
+
+        let (payload, ()) = tokio::join!(
+            terminal_cwd_payload_blocking_with_hook(
+                Some(workspace),
+                move || Some(cwd),
+                move || {
+                    entered_tx.send(()).expect("announce mapping hook");
+                    mapping_entered_for_hook.notify_one();
+                    release_rx.recv().expect("mapping hook release");
+                },
+            ),
+            async move {
+                mapping_entered.notified().await;
+                let _ = progress_tx.send(());
+            }
+        );
+
+        assert_eq!(payload.1.as_deref(), Some(""));
+        assert!(
+            observer.join().expect("observer thread"),
+            "the async worker stalled while cwd mapping ran"
+        );
     }
 
     #[test]
