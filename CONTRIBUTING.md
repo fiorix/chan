@@ -40,15 +40,15 @@ To run these gates in a Linux container that mirrors CI (natively on Linux, or v
 
 ## Pre-push gate
 
-Installing the pre-push hook (`./scripts/install-hooks`) wires the same gate that CI enforces: shellcheck + actionlint + fmt + clippy `-D warnings` + cargo test + `cargo build --no-default-features` + `npm run check` + `npm test` + `npm run build` against the pinned Rust toolchain. Run it locally before pushing; CI will fail fast otherwise.
+Installing the pre-push hook (`./scripts/install-hooks`) wires the same gate that CI enforces: shellcheck + actionlint + the cross-platform build-matrix contract + fmt + clippy `-D warnings` + cargo test + `cargo build --no-default-features` + the separate gateway release build + `npm run check` + `npm test` + `npm run build` + a release devserver boot smoke + the native desktop package against the pinned Rust toolchain. Linux produces an AppImage; macOS produces an ad-hoc-signed `.app`. Run it locally before pushing; CI will fail fast otherwise.
 
-The two static linters (`make shell-check`, `make workflow-check`) cover the shell scripts and GitHub workflows that no cargo or npm target reads. `scripts/lint-static.sh` downloads both at a pinned version, verified against a checksum, into `${XDG_CACHE_HOME:-~/.cache}/chan/lint-tools`, so no system package or root is needed. Only a cold cache needs network; the cache deliberately sits outside `target/` so wiping `target/` or adding a worktree does not force a re-download. Set `CHAN_LINT_TOOLS_DIR` to move it. Severity and the exclude list live in [`.shellcheckrc`](.shellcheckrc), each exclude with its reason.
+The two static linters (`make shell-check`, `make workflow-check`) cover the shell scripts and GitHub workflows that no cargo or npm target reads. `make build-matrix-check` then asserts that the native macOS, Windows, and Linux package jobs plus the distro and container jobs still invoke the repository's real build targets. It is deliberately a wiring test: a Linux hook cannot execute AppKit or produce an NSIS installer, so the authoritative compile/package proof stays on native CI runners. `scripts/lint-static.sh` downloads both linters at a pinned version, verified against a checksum, into `${XDG_CACHE_HOME:-~/.cache}/chan/lint-tools`, so no system package or root is needed. Only a cold cache needs network; the cache deliberately sits outside `target/` so wiping `target/` or adding a worktree does not force a re-download. Set `CHAN_LINT_TOOLS_DIR` to move it. Severity and the exclude list live in [`.shellcheckrc`](.shellcheckrc), each exclude with its reason.
 
 Do not bypass with `--no-verify` unless explicitly agreed. Hook failures get fixed in a NEW commit, not amended into the previous one.
 
 ## Gateway (server-side, Postgres)
 
-`gateway/` is a separate nested Cargo workspace (the account / sign-in / reverse-proxy surface for chan.app: profile, identity, devserver-proxy, admin, gateway-common). It is NOT a member of the root workspace, so `cargo build`/`make pre-push` above never touch it, and the core build stays free of Postgres and the sqlx/oauth2 stack. The gateway has its own gate (`.github/workflows/gateway-ci.yml`) and ships only linux amd64/arm64 `.deb` packages, versioned in lockstep with the root (bump `gateway/Cargo.toml` in the same commit as the root version).
+`gateway/` is a separate nested Cargo workspace (the account / sign-in / reverse-proxy surface for chan.app: profile, identity, devserver-proxy, admin, gateway-common). It is NOT a member of the root workspace, so a root `cargo build` never touches it and the core build stays free of Postgres and the sqlx/oauth2 stack. `make pre-push` explicitly crosses that boundary with `make gateway-build`, a Postgres-free release compile of every gateway service. The gateway's own integration gate (`.github/workflows/gateway-ci.yml`) adds Postgres-backed tests and builds all four OCI service images. The gateway ships only linux amd64/arm64 `.deb` packages, versioned in lockstep with the root (bump `gateway/Cargo.toml` in the same commit as the root version).
 
 Unlike the core, the gateway is Postgres-backed. Its integration tests (`profile`, `identity`) create a throwaway schema per test under `TEST_DATABASE_URL`. The supported, reproducible setup runs Postgres in an `sdme` container (the same way CI does) and works on both Linux and macOS; see [`gateway/docs/testing-on-linux-and-macos.md`](gateway/docs/testing-on-linux-and-macos.md). Any Postgres with a `chan_gateway_test` database also works:
 
@@ -62,7 +62,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test                             # profile + identity need the DB
 ```
 
-Because the shared pre-push hook is intentionally Postgres-free, it does not run the gateway gate. Run the block above by hand before pushing gateway changes; gateway-ci.yml runs the same gate (with a Postgres service) on PRs that touch `gateway/**`.
+Because the shared pre-push hook is intentionally Postgres-free, it compiles the gateway but does not run its database-backed integration tests. Run the block above by hand before pushing gateway changes; gateway-ci.yml runs the same gate (with a Postgres service) on PRs that touch `gateway/**`.
 
 ## Workflow
 

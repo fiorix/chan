@@ -24,9 +24,11 @@ packaging/docker/build.sh                 # all five images, tag :dev
 packaging/docker/build.sh -t v0.50.0      # custom tag
 packaging/docker/build.sh --model         # chan image with the embedded search model
 packaging/docker/build.sh --save          # also export OCI archives to packaging/docker/_out/
+packaging/docker/build.sh --chan-only     # only the CLI/devserver image
+packaging/docker/build.sh --gateway-only  # only the four gateway images
 ```
 
-`build.sh` autodetects docker (BuildKit), podman, or buildah. The equivalent raw commands:
+`build.sh` autodetects docker (BuildKit), podman, or buildah. Docker users also need the buildx CLI plugin (`docker-buildx` on Ubuntu); the script checks for it before starting a build. The equivalent raw commands:
 
 ```sh
 DOCKER_BUILDKIT=1 docker build -f packaging/docker/chan.Dockerfile -t chan:dev .

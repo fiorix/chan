@@ -8,6 +8,9 @@ LINUX_TARGET ?= x86_64-unknown-linux-gnu
 DEB_TARGET ?= $(LINUX_TARGET)
 RPM_TARGET ?= $(LINUX_TARGET)
 ARCHPKG_TARGET ?= $(LINUX_TARGET)
+# Compound root targets set this only after building the exact current web
+# sources. Direct package entry points retain their self-contained default.
+WEB_ALREADY_BUILT ?= 0
 
 # chan-desktop Linux build. Distinct from the CLI deb/rpm/archpkg targets
 # above: those cross-compile the `chan` CLI on the host and package the binary,
@@ -67,7 +70,9 @@ deb:
 	@case "$(DEB_TARGET)" in *-unknown-linux-gnu) ;; \
 		*) echo "error: DEB_TARGET must be a gnu Linux target, got $(DEB_TARGET)"; exit 1;; \
 	esac
-	$(MAKE) -C "$(CHAN_REPO)" web
+	@if [ "$(WEB_ALREADY_BUILT)" != 1 ]; then \
+		$(MAKE) -C "$(CHAN_REPO)" web; \
+	fi
 	cd "$(CHAN_REPO)" && $(CARGO) build --release --target "$(DEB_TARGET)" -p chan
 	cd "$(CHAN_REPO)" && $(CARGO) deb --no-build --no-strip --target "$(DEB_TARGET)" -p chan
 	@ls -1 "$(CHAN_REPO)/target/$(DEB_TARGET)/debian/"*.deb
@@ -77,7 +82,9 @@ rpm:
 	@case "$(RPM_TARGET)" in *-unknown-linux-gnu) ;; \
 		*) echo "error: RPM_TARGET must be a gnu Linux target, got $(RPM_TARGET)"; exit 1;; \
 	esac
-	$(MAKE) -C "$(CHAN_REPO)" web
+	@if [ "$(WEB_ALREADY_BUILT)" != 1 ]; then \
+		$(MAKE) -C "$(CHAN_REPO)" web; \
+	fi
 	cd "$(CHAN_REPO)" && $(CARGO) build --release --target "$(RPM_TARGET)" -p chan
 	mkdir -p "$(CHAN_REPO)/target/release"
 	cp "$(CHAN_REPO)/target/$(RPM_TARGET)/release/chan" "$(CHAN_REPO)/target/release/chan"

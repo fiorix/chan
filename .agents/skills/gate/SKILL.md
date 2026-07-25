@@ -2,8 +2,9 @@
 name: gate
 description: >-
   Run the chan pre-push gate (shellcheck, actionlint, fmt, clippy, test,
-  no-default-features build, gateway build, web checks, marketing checks) and
-  the isolated/own-gate model for multi-agent rounds.
+  no-default-features build, gateway build, web checks, release devserver
+  smoke, native desktop package) and the isolated/own-gate model for
+  multi-agent rounds.
 when_to_use: >-
   Before any push, when CI fails, or when you need to validate a
   change against the same checks CI runs.
@@ -19,15 +20,18 @@ The gate runs, in order:
 
 1. `make shell-check` (shellcheck over every tracked shell script)
 2. `make workflow-check` (actionlint over `.github/workflows`, with shellcheck on the `run:` blocks)
-3. `cargo fmt --check`
-4. `cargo clippy --all-targets -- -D warnings` (with `RUSTFLAGS=-D warnings`)
-5. `cargo test --all-targets` (with `RUSTFLAGS=-D warnings`)
-6. `cargo build --no-default-features` (with `RUSTFLAGS=-D warnings`)
-7. `make gateway-build` (the SEPARATE gateway Cargo workspace; builds its SPA then its release crates)
-8. `make web-check` (svelte-check + vitest + production build)
-9. `make web-marketing-check` (marketing site build + smokes)
+3. `make build-matrix-check` (the static contract tying native CI, distro, and container jobs to their real build targets)
+4. `cargo fmt --check`
+5. `cargo clippy --all-targets -- -D warnings` (with `RUSTFLAGS=-D warnings`)
+6. `cargo test --all-targets` (with `RUSTFLAGS=-D warnings`)
+7. `cargo build --no-default-features` (with `RUSTFLAGS=-D warnings`)
+8. `make gateway-build` (the SEPARATE gateway Cargo workspace; builds its SPA then its release crates)
+9. `make web-check` (svelte-check + vitest + production build)
+10. `make web-marketing-check` (marketing site build + smokes)
+11. `make shortcuts-check`
+12. `make host-build-check` (release CLI build plus a foreground-devserver health smoke, followed by a native AppImage on Linux or an ad-hoc-signed `.app` on macOS)
 
-Steps 1 and 2 are the only checks that read `packaging/`, `scripts/`, and the workflows, so a packaging or CI change is otherwise ungated. `scripts/lint-static.sh` fetches both linters at a pinned version, each verified against a checksum, into `${XDG_CACHE_HOME:-~/.cache}/chan/lint-tools` (override with `CHAN_LINT_TOOLS_DIR`). The cache is deliberately outside `target/`, which the gate discipline wipes: a per-worktree cache under `target/` would mean a fresh download for every isolated or GA gate. Only a cold cache needs network. The severity and the exclude list, with the reason for each exclude, live in `.shellcheckrc`.
+Steps 1 and 2 lint `packaging/`, `scripts/`, and the workflows; step 3 additionally proves that every shipped build surface still has an automatic native, distro, or container build edge. `scripts/lint-static.sh` fetches both linters at a pinned version, each verified against a checksum, into `${XDG_CACHE_HOME:-~/.cache}/chan/lint-tools` (override with `CHAN_LINT_TOOLS_DIR`). The cache is deliberately outside `target/`, which the gate discipline wipes: a per-worktree cache under `target/` would mean a fresh download for every isolated or GA gate. Only a cold cache needs network. The severity and the exclude list, with the reason for each exclude, live in `.shellcheckrc`.
 
 The gateway is a separate Cargo workspace and is NOT a member of the root workspace. A `crates/`-scoped check misses it, plus the `chan-desktop` (`desktop/src-tauri`) construction sites. When a change touches a cross-workspace struct, build the whole repo, not just the default workspace.
 

@@ -31,7 +31,7 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-The Rust toolchain is pinned in `rust-toolchain.toml` (1.95.0). `cargo` auto-installs through rustup on first use, so contributor and CI clippy lint sets stay locked together. The pre-push hook (`./scripts/install-hooks` to install) runs the same gate as CI under the pinned compiler with `RUSTFLAGS=-D warnings` plus `cargo build --no-default-features`, and opens with shellcheck over the tracked shell scripts and actionlint over the workflows (`make shell-check`, `make workflow-check`). Bumping Rust = edit `rust-toolchain.toml` and fix any new clippy findings in the same commit. See [skills/gate/SKILL.md](skills/gate/SKILL.md) for the full pre-push gate and the isolated/own-gate model.
+The Rust toolchain is pinned in `rust-toolchain.toml` (1.95.0). `cargo` auto-installs through rustup on first use, so contributor and CI clippy lint sets stay locked together. The pre-push hook (`./scripts/install-hooks` to install) runs the same gate as CI under the pinned compiler with `RUSTFLAGS=-D warnings` plus `cargo build --no-default-features`, opens with shellcheck over the tracked shell scripts and actionlint over the workflows (`make shell-check`, `make workflow-check`), and finishes with a release devserver boot smoke plus the native Linux/macOS desktop package. Its build-matrix contract also fails when an automatic macOS, Windows, Linux, distro, or container lane is disconnected from the real build target. Bumping Rust = edit `rust-toolchain.toml` and fix any new clippy findings in the same commit. See [skills/gate/SKILL.md](skills/gate/SKILL.md) for the full pre-push gate and the isolated/own-gate model.
 
 ## Documentation
 

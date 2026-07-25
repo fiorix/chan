@@ -13,10 +13,26 @@ on:
     branches: [main]
     paths:
       - 'gateway/**'
+      - 'Makefile'
+      - 'rust-toolchain.toml'
+      - 'web/package-lock.json'
+      - 'web/package.json'
+      - 'web/packages/profile/**'
+      - 'packaging/docker/build.sh'
+      - 'packaging/docker/gateway.Dockerfile'
+      - 'packaging/docker/gateway.Dockerfile.dockerignore'
       - '.github/workflows/gateway-ci.yml'
   pull_request:
     paths:
       - 'gateway/**'
+      - 'Makefile'
+      - 'rust-toolchain.toml'
+      - 'web/package-lock.json'
+      - 'web/package.json'
+      - 'web/packages/profile/**'
+      - 'packaging/docker/build.sh'
+      - 'packaging/docker/gateway.Dockerfile'
+      - 'packaging/docker/gateway.Dockerfile.dockerignore'
       - '.github/workflows/gateway-ci.yml'
   workflow_dispatch:
 
@@ -93,3 +109,16 @@ jobs:
       - name: test
         working-directory: chan/gateway
         run: cargo test
+
+  containers:
+    name: gateway containers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: chan
+
+      - uses: docker/setup-buildx-action@v4
+
+      - run: make docker-gateway-build
+        working-directory: chan

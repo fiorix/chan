@@ -1,8 +1,9 @@
 name: CI
 
-# CI calls the same Make targets developers use locally.
-# Linux and macOS gates run in parallel: Linux runs the full gate,
-# macOS stays focused on Rust clippy/tests for OS-specific coverage.
+# CI calls the same Make targets developers use locally. The ordinary
+# push/PR matrix builds real packages on every supported desktop OS, plus
+# the Linux devserver, distro recipes, and chan container. Signing and
+# notarization remain release gates because they require protected secrets.
 
 on:
   push:
@@ -50,7 +51,15 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libsoup-3.0-dev \
-            patchelf
+            patchelf \
+            xdg-utils \
+            desktop-file-utils \
+            file
+
+      - name: Install tauri-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli@2
 
       - run: make ci-linux
         working-directory: chan
@@ -69,5 +78,159 @@ jobs:
         with:
           workspaces: chan
 
+      # Window chrome follows the linked SDK. Match the release workflow so
+      # this build is a useful rehearsal of the shipped macOS desktop.
+      - name: Select newest Xcode
+        run: |
+          sudo xcode-select -s "$(python3 chan/scripts/select-newest-xcode.py)"
+          xcodebuild -version
+          xcrun --show-sdk-version
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: chan/web/package-lock.json
+
+      - name: Install tauri-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli@2
+
       - run: make ci-macos
+        working-directory: chan
+
+  windows:
+    name: make ci-windows
+    runs-on: windows-latest
+    env:
+      PYTHON: python
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: chan
+
+      - run: cp chan/rust-toolchain.toml ./rust-toolchain.toml
+        shell: bash
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: chan
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: chan/web/package-lock.json
+
+      - name: Install tauri-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli@2
+
+      - name: Install GNU make
+        run: choco install make --yes --no-progress
+
+      - run: make ci-windows
+        working-directory: chan
+        shell: bash
+
+  linux-packages:
+    name: Linux deb + rpm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: chan
+
+      - run: cp chan/rust-toolchain.toml ./rust-toolchain.toml
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: chan
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: chan/web/package-lock.json
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+      - name: Install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm --locked
+
+      - run: make ci-linux-packages
+        working-directory: chan
+
+  distro-sources:
+    name: COPR + PPA source packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: chan
+
+      - run: cp chan/rust-toolchain.toml ./rust-toolchain.toml
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: chan/web/package-lock.json
+
+      - name: Install source-package tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            debhelper \
+            devscripts \
+            dpkg-dev \
+            xz-utils
+          cargo install cargo-vendor-filterer --locked
+
+      - run: make ci-distro-sources
+        working-directory: chan
+
+  aur:
+    name: AUR build + smoke (${{ matrix.pkgbase }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pkgbase: [chan, chan-desktop]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: chan
+
+      - name: Archive the commit under test
+        working-directory: chan
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir -p target/aur-ci-source
+          archive="$PWD/target/aur-ci-source/chan-$version.tar.gz"
+          git archive --format=tar.gz --prefix="chan-$version/" HEAD > "$archive"
+          echo "RELEASE_TAG=v$version" >> "$GITHUB_ENV"
+          echo "AUR_LOCAL_SOURCE=$archive" >> "$GITHUB_ENV"
+
+      - name: Build, install, and smoke
+        working-directory: chan
+        env:
+          PKGBASE: ${{ matrix.pkgbase }}
+        run: packaging/distros/arch/build-in-ci.sh docker.io/archlinux/archlinux:base-devel
+
+  docker-chan:
+    name: chan container
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: chan
+
+      - uses: docker/setup-buildx-action@v4
+
+      - run: make docker-chan-build
         working-directory: chan

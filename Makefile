@@ -8,11 +8,16 @@
 PREFIX ?= $(if $(XDG_BIN_HOME),$(XDG_BIN_HOME:/bin=),$(HOME)/.local)
 CARGO ?= cargo
 NPM ?= npm
+PYTHON ?= python3
 # The AUR recipes populate web/node_modules with `npm ci` in prepare() and then
 # build offline, so WEB_SKIP_INSTALL=1 drops the install step from `web` and
 # `web-launcher`. Every other consumer keeps the default install command.
 WEB_SKIP_INSTALL ?= 0
 NPM_INSTALL = $(if $(filter 1,$(WEB_SKIP_INSTALL)),true,$(NPM) install)
+# Internal orchestration knob for compound targets that have just completed
+# `make web` or `make web-check`. Standalone entry points leave this at 0.
+WEB_ALREADY_BUILT ?= 0
+WEB_PREREQ = $(if $(filter 1,$(WEB_ALREADY_BUILT)),,web)
 AUR_ROOTFS ?= archlinux
 AUR_REV ?= HEAD
 LINUX_TARGET ?= x86_64-unknown-linux-gnu
@@ -62,7 +67,7 @@ help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z0-9_.-]+:.*##/ {printf "  %-28s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 .PHONY: chan
-chan: web ## Build the release CLI binary.
+chan: $(WEB_PREREQ) ## Build the release CLI binary.
 	@if [ -n "$(CHAN_TARGET)" ]; then \
 		$(CARGO) build --release --target "$(CHAN_TARGET)" -p chan; \
 	else \
@@ -183,6 +188,10 @@ shell-check: ## Run shellcheck over the tracked shell scripts.
 workflow-check: ## Run actionlint (and shellcheck on run: blocks) over the workflows.
 	scripts/lint-static.sh workflows
 
+.PHONY: build-matrix-check
+build-matrix-check: ## Verify every shipped build surface remains gated.
+	$(PYTHON) scripts/check-build-matrix.py
+
 .PHONY: pre-push
 pre-push: ## Run the local pre-push gate.
 	# The two static linters run first: they are seconds-long, they cover the
@@ -190,6 +199,7 @@ pre-push: ## Run the local pre-push gate.
 	# is not worth a full compile to discover.
 	$(MAKE) shell-check
 	$(MAKE) workflow-check
+	$(MAKE) build-matrix-check
 	$(CARGO) fmt --check
 	RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
 	RUSTFLAGS="-D warnings" $(CARGO) test --all-targets
@@ -198,14 +208,70 @@ pre-push: ## Run the local pre-push gate.
 	$(MAKE) web-check
 	$(MAKE) web-marketing-check
 	$(MAKE) shortcuts-check
+	$(MAKE) host-build-check WEB_ALREADY_BUILT=1
+
+.PHONY: host-devserver-build-check
+host-devserver-build-check: chan ## Build and boot-smoke the host release CLI.
+	scripts/smoke-built-devserver.sh "$(BIN)"
+
+.PHONY: ci-linux-build
+ci-linux-build: host-devserver-build-check ## Build Linux release surfaces.
+	$(MAKE) -C desktop ci-linux WEB_ALREADY_BUILT=1
+
+.PHONY: ci-macos-build
+ci-macos-build: host-devserver-build-check ## Build macOS release surfaces.
+	$(MAKE) -C desktop ci-macos WEB_ALREADY_BUILT=1
+
+.PHONY: host-build-check
+host-build-check: ## Build the native host's release CLI and desktop package.
+ifeq ($(UNAME_S),Linux)
+	$(MAKE) ci-linux-build
+else ifeq ($(UNAME_S),Darwin)
+	$(MAKE) ci-macos-build
+else
+	@echo "error: make pre-push needs a native Linux or macOS host"; exit 1
+endif
 
 .PHONY: ci-linux
 ci-linux: pre-push ## Run the Linux CI validation target.
 
 .PHONY: ci-macos
 ci-macos: ## Run the focused macOS CI validation target.
+	$(MAKE) build-matrix-check
 	RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
 	RUSTFLAGS="-D warnings" $(CARGO) test --all-targets
+	$(MAKE) ci-macos-build
+
+.PHONY: ci-windows
+ci-windows: ## Build and smoke the native Windows CLI and NSIS package.
+	$(MAKE) build-matrix-check
+	$(MAKE) -C desktop ci-windows
+	scripts/smoke-built-devserver.sh target/release/chan-desktop.exe
+
+.PHONY: ci-linux-packages
+ci-linux-packages: ## Build the direct-download Linux deb and rpm packages.
+	$(MAKE) web
+	$(MAKE) linux-deb WEB_ALREADY_BUILT=1
+	$(MAKE) linux-rpm WEB_ALREADY_BUILT=1
+
+.PHONY: ci-distro-sources
+ci-distro-sources: ## Assemble COPR and unsigned noble PPA source packages.
+	# copr-srpm creates the shared vendored tarball that ppa-source consumes,
+	# so running distros-tarball separately would repeat npm + cargo vendor.
+	$(MAKE) copr-srpm
+	PPA_NOSIGN=1 PPA_SERIES=noble $(MAKE) ppa-source
+
+.PHONY: docker-build
+docker-build: ## Build all chan and gateway OCI images.
+	packaging/docker/build.sh
+
+.PHONY: docker-chan-build
+docker-chan-build: ## Build the chan CLI/devserver OCI image.
+	packaging/docker/build.sh --chan-only
+
+.PHONY: docker-gateway-build
+docker-gateway-build: ## Build all four chan-gateway OCI images.
+	packaging/docker/build.sh --gateway-only
 
 .PHONY: ci-release
 ci-release: pre-push ## Run the local release validation target.

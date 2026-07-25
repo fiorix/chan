@@ -1,6 +1,7 @@
 .PHONY: dev build check fmt fmt-check lint test clean web tauri-cli \
         app-signed app-notarized sign-prereqs notarize-prereqs \
-        dmg-layout-proof windows-installer xwin-prereqs xwin-check
+        dmg-layout-proof windows-installer xwin-prereqs xwin-check \
+        ci-linux-prereqs ci-linux ci-macos ci-windows
 
 # Monorepo root. Override via CHAN_REPO=/path on CI.
 CHAN_REPO ?= ..
@@ -17,6 +18,10 @@ TAURI := PATH="$(TAURI_CLI_ROOT)/bin:$$PATH" cargo tauri
 DMGBUILD_SPEC ?= dmgbuild>=1.6,<2
 DMG_VENV ?= $(abspath $(CHAN_REPO))/target/dmg-venv
 BUNDLE_DIR := $(abspath $(CHAN_REPO))/target/release/bundle
+CI_MACOS_CONFIG := tauri.ci.macos.conf.json
+CI_WINDOWS_CONFIG := tauri.ci.windows.conf.json
+WEB_ALREADY_BUILT ?= 0
+CI_WEB_PREREQ = $(if $(filter 1,$(WEB_ALREADY_BUILT)),,web)
 
 # Keep local dev self-contained: CI installs tauri-cli globally, but a
 # fresh workstation usually does not have the cargo subcommand yet.
@@ -48,6 +53,50 @@ build: tauri-cli web
 windows-installer: tauri-cli web
 	cd $(CHAN_REPO) && $(CARGO) build --release -p chan
 	cd src-tauri && $(TAURI) build --bundles nsis --config tauri.windows.conf.json
+
+# Secret-free native package proofs for ordinary CI. Release signing and
+# notarization stay in release.yml; these targets prove that the platform
+# compiler and bundler can create the artifact on every pull request.
+ci-linux-prereqs:
+	@for tool in xdg-open xdg-mime; do \
+	    command -v "$$tool" >/dev/null 2>&1 || { \
+	        echo "error: $$tool is required; install xdg-utils"; exit 1; \
+	    }; \
+	done
+
+ci-linux: ci-linux-prereqs tauri-cli $(CI_WEB_PREREQ)
+	@test "$$(uname -s)" = Linux || { \
+	    echo "error: desktop ci-linux requires a native Linux host"; exit 1; \
+	}
+	cd src-tauri && $(TAURI) build --bundles appimage
+	@appimage="$$(find "$(BUNDLE_DIR)/appimage" -name '*.AppImage' \
+	    -type f -print -quit)"; \
+	    [ -n "$$appimage" ] \
+	        || { echo "error: Tauri emitted no AppImage"; exit 1; }; \
+	    "$(CHAN_REPO)/scripts/smoke-built-devserver.sh" "$$appimage"
+
+ci-macos: tauri-cli $(CI_WEB_PREREQ)
+	@test "$$(uname -s)" = Darwin || { \
+	    echo "error: desktop ci-macos requires a native macOS host"; exit 1; \
+	}
+	cd src-tauri && $(TAURI) build --bundles app --config $(CI_MACOS_CONFIG)
+	@test -x "$(BUNDLE_DIR)/macos/Chan.app/Contents/MacOS/chan-desktop" \
+	    || { echo "error: Tauri emitted no runnable Chan.app"; exit 1; }
+	codesign --verify --deep --strict "$(BUNDLE_DIR)/macos/Chan.app"
+	"$(CHAN_REPO)/scripts/smoke-built-devserver.sh" \
+	    "$(BUNDLE_DIR)/macos/Chan.app/Contents/MacOS/chan-desktop"
+
+ci-windows: tauri-cli $(CI_WEB_PREREQ)
+	@case "$$(uname -s)" in \
+	    MINGW*|MSYS*|CYGWIN*) ;; \
+	    *) echo "error: desktop ci-windows requires a native Windows host"; \
+	       exit 1 ;; \
+	esac
+	cd $(CHAN_REPO) && $(CARGO) build --release -p chan
+	cd src-tauri && $(TAURI) build --bundles nsis \
+	    --config $(CI_WINDOWS_CONFIG)
+	@find "$(BUNDLE_DIR)/nsis" -name '*.exe' -type f -print -quit \
+	    | grep -q . || { echo "error: Tauri emitted no NSIS installer"; exit 1; }
 
 check:
 	cd src-tauri && cargo check

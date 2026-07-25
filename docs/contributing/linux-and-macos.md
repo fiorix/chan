@@ -62,7 +62,8 @@ limactl shell default sudo sdme exec chan-build /bin/sh -c '
   apt-get update -qq
   apt-get install -y build-essential pkg-config curl ca-certificates \
     nodejs npm libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
-    librsvg2-dev libsoup-3.0-dev patchelf
+    librsvg2-dev libsoup-3.0-dev patchelf xdg-utils \
+    desktop-file-utils file
   curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal'
 
 # run the gate (reads rust-toolchain.toml -> 1.95.0)
@@ -70,7 +71,7 @@ limactl shell default sudo sdme exec chan-build /bin/sh -c '
   export HOME=/root; . /root/.cargo/env; cd /root/chan && make ci-linux'
 ```
 
-`git archive HEAD` ships committed files only; re-run it (and re-`cp`) after each commit you want reflected in the container. To iterate without rebuilding the container, `sdme cp` individual files or `sdme join chan-build` for an interactive shell.
+`git archive HEAD` ships committed files only; re-run it (and re-`cp`) after each commit you want reflected in the container. To iterate without rebuilding the container, `sdme cp` individual files or `sdme join chan-build` for an interactive shell. A cold `make ci-linux` also installs Tauri CLI under `target/tauri-cli`, then builds and boots the release devserver and produces an AppImage after the compile/test gates.
 
 ## Desktop: build the chan-desktop AppImage and .deb
 
@@ -288,8 +289,9 @@ for p in 7001 7000 7002; do curl -fsS "http://127.0.0.1:$p/healthz"; echo; done
 
 CI does not run `sdme`. GitHub Actions runs directly on its ubuntu runners with the deps installed natively; the `sdme` flow above is just the local way to reproduce that Linux environment on your machine. The two are deliberately separate setups.
 
-- `.github/workflows/ci.yml` runs `make ci-linux` then `make ci-macos` (the same Make targets the container runs above), with the Tauri build deps apt-installed on the runner.
-- `.github/workflows/gateway-ci.yml` runs the gateway gate directly on the runner against a `postgres:16` **service container** (not `chan-psql`), scoped to `gateway/**`.
+- `.github/workflows/ci.yml` runs native Linux, macOS, and Windows build lanes in parallel. Linux builds and boots the release devserver and emits an AppImage; macOS emits and verifies an ad-hoc-signed `.app`; Windows emits an unsigned NSIS installer and boots the desktop binary as a devserver.
+- The same workflow builds the direct `.deb`/`.rpm`, both AUR packages in clean Arch containers, COPR/PPA source packages, and the chan OCI image.
+- `.github/workflows/gateway-ci.yml` runs the gateway gate directly on the runner against a `postgres:16` **service container** (not `chan-psql`) and separately builds all four gateway OCI images.
 
 Local `sdme` is the fast loop; CI is the canonical lane (and owns x86_64).
 

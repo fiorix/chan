@@ -1,6 +1,6 @@
 # Building and testing chan on Windows (and Linux from a Windows host)
 
-> **Status: design, not yet validated.** Nobody on the team has a Windows host, so the dev loop below is the *proposed* plan a Windows contributor would follow -- the companion to [`linux-and-macos.md`](linux-and-macos.md) for the third platform. The native-Windows **compile** path (`cargo-xwin`) and the **CI** path (the `windows-latest` job) are real and exercised; the WSL2 + `sdme` Linux-on-Windows loop is unverified and may need adjustment when first run on real hardware. Flag corrections back into this doc.
+> **Status: native CI is authoritative; the local dev loop is not yet validated.** Nobody on the team has a Windows workstation, so the WSL2 loop below is the *proposed* companion to [`linux-and-macos.md`](linux-and-macos.md). Ordinary CI builds an unsigned NSIS package and boots its desktop binary as a devserver on `windows-latest`; release CI repeats the package with Authenticode signing. The WSL2 + `sdme` loop may need adjustment when first run on real hardware. Flag corrections back into this doc.
 
 chan supports Windows on two fronts, kept deliberately separate:
 
@@ -18,7 +18,7 @@ The fast local proof that the `cfg(windows)` arms compile is a cross-compile fro
 make -C desktop xwin-check
 ```
 
-This checks the core crates (`chan-server`, `chan-shell`, `chan-workspace`) for `x86_64-pc-windows-msvc`. The chan-desktop crate's full Windows build pulls the whole Tauri + WebView2 toolchain and is **not** part of `xwin-check`; it is built and bundled (NSIS) and headlessly smoked by the **`windows-latest`** job in [`.github/workflows/release-desktop.yml`](../../.github/workflows/release-desktop.yml). That CI job is the authoritative Windows build; the NSIS installer it uploads (`chan-desktop-windows-x86_64`) is what you download with `gh run download` to smoke on a real Windows box.
+This checks the core crates (`chan-server`, `chan-shell`, `chan-workspace`) for `x86_64-pc-windows-msvc`. The chan-desktop crate's full Windows build pulls the whole Tauri + WebView2 toolchain and is **not** part of `xwin-check`; the `windows-latest` job in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) builds the CLI and desktop with native MSVC, emits a secret-free NSIS installer, and boots the desktop binary as a foreground devserver. [`.github/workflows/release-desktop.yml`](../../.github/workflows/release-desktop.yml) remains the signed package rehearsal whose `chan-desktop-windows-x86_64` artifact is suitable for a real Windows smoke.
 
 A clean Win11 needs the **WebView2 evergreen runtime**. It ships with current Windows 10/11 and the `windows-latest` runner has it; for an older or stripped image, install Microsoft's Evergreen Bootstrapper (`MicrosoftEdgeWebview2Setup.exe`) -- the NSIS installer can also bundle the bootstrapper check via Tauri's `webviewInstallMode`.
 
@@ -75,7 +75,7 @@ The core gate itself (`make ci-linux`) runs inside an sdme container exactly as 
 
 CI does not use WSL2 or `sdme`. As on the other platforms, GitHub Actions runs natively:
 
-- `.github/workflows/ci.yml` runs the Linux/macOS gates on their native runners.
-- The `windows-latest` arm of [`release-desktop.yml`](../../.github/workflows/release-desktop.yml) builds and NSIS-bundles chan-desktop and runs the headless boot/`/api/health` smoke.
+- `.github/workflows/ci.yml` runs Linux, macOS, and Windows on native runners. Its `windows-latest` job builds the release CLI, builds an unsigned NSIS package from the same Tauri configuration shape as release, and runs the headless devserver `/api/health` smoke through `chan-desktop.exe`.
+- The `windows-latest` arm of [`release-desktop.yml`](../../.github/workflows/release-desktop.yml) repeats the NSIS build with Authenticode signing and uploads the package for a real-hardware smoke.
 
 The WSL2 + `sdme` flow above is the *local* way to reproduce the Linux environment on a Windows machine; `cargo-xwin` is the *local* way to compile-check the native Windows build. Both are the fast loop -- CI is the canonical lane (and owns the authoritative Windows artifact).
