@@ -62,9 +62,9 @@ struct WatchBroadcast {
 impl WatchCallback for WatchBroadcast {
     fn on_event(&self, event: WatchEvent) {
         // Indexer always sees the event. Send-error means there are
-        // no subscribers (indexer not spawned yet, or shut down);
-        // safe to drop because a no-subscriber channel just keeps
-        // events in the ring until one connects.
+        // no subscribers (the indexer has not subscribed yet, or has
+        // shut down). Tokio drops the event in that case; a receiver
+        // that subscribes later does not replay it.
         let _ = self.index_tx.send(event.clone());
         if event_is_self_echo(&event, &self.self_writes) {
             return;
@@ -372,6 +372,19 @@ impl ProgressCallback for ProgressBroadcast {
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn broadcast_drops_events_sent_without_a_receiver() {
+        let (tx, rx) = broadcast::channel(8);
+        drop(rx);
+        assert!(tx.send("before-subscribe").is_err());
+
+        let mut later = tx.subscribe();
+        assert!(matches!(
+            later.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
 
     fn recv_json(rx: &mut broadcast::Receiver<String>) -> Value {
         let raw = rx.try_recv().expect("broadcast frame");

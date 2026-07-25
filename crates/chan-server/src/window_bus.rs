@@ -77,8 +77,8 @@ impl WindowBus {
             .remove(request_id);
         match sender {
             // `send` fails only if the receiver was dropped (the CLI
-            // disconnected); the request is gone either way, so report it
-            // delivered to keep the reply route idempotent.
+            // disconnected); report that failure so the reply route maps
+            // the stale response to a 404.
             Some(tx) => tx.send(payload).is_ok(),
             None => false,
         }
@@ -102,6 +102,14 @@ mod tests {
     fn complete_unknown_request_is_false() {
         let bus = WindowBus::new();
         assert!(!bus.complete("win-nope", serde_json::json!({})));
+    }
+
+    #[test]
+    fn complete_after_receiver_drop_is_false() {
+        let bus = WindowBus::new();
+        let (id, rx) = bus.register();
+        drop(rx);
+        assert!(!bus.complete(&id, serde_json::json!({})));
     }
 
     #[test]

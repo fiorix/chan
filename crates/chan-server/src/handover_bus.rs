@@ -81,8 +81,8 @@ impl HandoverBus {
             .remove(request_id);
         match sender {
             // `send` fails only if the receiver was dropped (the requester's CLI
-            // disconnected or timed out); the request is gone either way, so
-            // report it delivered to keep the answer path idempotent.
+            // disconnected or timed out); report that failure so the reply
+            // route maps the stale response to a 404.
             Some(tx) => tx.send(reply).is_ok(),
             None => false,
         }
@@ -123,6 +123,14 @@ mod tests {
     fn complete_unknown_request_is_false() {
         let bus = HandoverBus::new();
         assert!(!bus.complete("handover-nope", HandoverReply::Accept));
+    }
+
+    #[test]
+    fn complete_after_receiver_drop_is_false() {
+        let bus = HandoverBus::new();
+        let (id, rx) = bus.register();
+        drop(rx);
+        assert!(!bus.complete(&id, HandoverReply::Accept));
     }
 
     #[test]
