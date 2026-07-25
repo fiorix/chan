@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.76.1] - 2026-07-25
+
+Patch: fix the macOS and Windows release build. No functional change from v0.76.0; the v0.76.0 tag failed to build on those platforms.
+
+### Fixed
+
+- **The macOS and Windows builds compile again.** The Linux-only inotify per-directory watch-registration items (`DirRegistration`, the `WatchCommand::Register` variant, `DirPlan`, `plan_dir`) were flagged as dead code on the macOS and Windows notify backends, which watch recursively and never use them, failing the build under `-D warnings`. They are now gated off non-Linux.
+
 ## [v0.76.0] - 2026-07-25
 
 v0.76.0 hardens the devserver rebuild-storm and recovery paths: one `IndexScopePolicy` across walk, index, watch, and report with `.gitignore` honoring and a rebuild generation coordinator; the editor's never-discard write contract (`428`/`409` plus reachable conflict resolution) and session-restart durability that stops a restart flushing stale authority over disk; bounded streaming file transfers on desktop and the terminal download; a workspace recovery-readiness surface on the status routes, the SPA, and `chan workspace status`; and safe systemd unit classification and migration.
