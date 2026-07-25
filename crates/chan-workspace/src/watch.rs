@@ -241,6 +241,9 @@ pub struct WatchHandle {
 /// A directory-registration request from the dispatch thread to the
 /// supervisor thread. The plan is computed dispatch-side (it has the
 /// filter and the roots); the supervisor only executes it.
+// Registration is a Linux-only path: non-Linux notify backends watch
+// recursively and never build these per-directory records.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct DirRegistration {
     abs: PathBuf,
     rel: String,
@@ -251,6 +254,7 @@ struct DirRegistration {
 }
 
 enum WatchCommand {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Register(DirRegistration),
     ProviderLost {
         message: String,
@@ -446,6 +450,7 @@ fn record_registration_result(
 /// What to do with a directory encountered by the registration walk
 /// or the new-directory tracker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum DirPlan {
     /// Never watch, never descend (`.chan`, excluded basenames).
     Skip,
@@ -462,6 +467,7 @@ enum DirPlan {
 /// children of directories already accepted for descent, so ancestor
 /// components are clean by construction; the checks here are about
 /// the directory itself.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn plan_dir(rel: &str, name: &str, policy: &IndexScopePolicy) -> DirPlan {
     match policy.decision(rel, true) {
         IndexScopeDecision::Include => DirPlan::WatchAndDescend,
