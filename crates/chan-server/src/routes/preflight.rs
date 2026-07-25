@@ -298,11 +298,15 @@ fn detect_scm(root: &std::path::Path) -> Option<String> {
 /// config read never turns an otherwise-ready snapshot into a failure.
 fn workspace_summary(workspace: &chan_workspace::Workspace) -> Summary {
     let indexed_docs = workspace.index_stats().map(|s| s.indexed_docs).unwrap_or(0);
+    let (semantic_enabled, reports_enabled) = workspace
+        .dashboard_snapshot()
+        .map(|config| (config.semantic_enabled, config.reports_enabled))
+        .unwrap_or((false, false));
     Summary {
         indexed_docs,
         scm: detect_scm(workspace.root()),
-        semantic_enabled: workspace.semantic_enabled().unwrap_or(false),
-        reports_enabled: workspace.reports_enabled().unwrap_or(false),
+        semantic_enabled,
+        reports_enabled,
     }
 }
 
