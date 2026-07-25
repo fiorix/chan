@@ -16,7 +16,7 @@
 //! writability check; workspace uploads use
 //! `Workspace::ensure_writable`.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use axum::body::{Body, Bytes};
@@ -159,17 +159,9 @@ pub async fn api_terminal_read_file(
     let plan_abs = abs.clone();
     let plan = tokio::task::spawn_blocking(move || terminal_download_plan(&plan_abs)).await;
     match plan {
-        Ok(Ok(TerminalDownload::File { bytes, name })) => (
-            [
-                (header::CONTENT_TYPE, content_type_for(&name).to_string()),
-                (
-                    header::CONTENT_DISPOSITION,
-                    content_disposition_attachment(&name),
-                ),
-            ],
-            bytes,
-        )
-            .into_response(),
+        Ok(Ok(TerminalDownload::File { reader, name })) => {
+            stream_terminal_file_response(&name, reader)
+        }
         // The tree was pre-flighted readable in the plan; stream the tar on the
         // fly so a cancel is trace-free by construction (no staged temp).
         Ok(Ok(TerminalDownload::Directory { name })) => {
@@ -185,12 +177,84 @@ pub async fn api_terminal_read_file(
     }
 }
 
-/// What a terminal download resolves to: a small file read into memory, or a
+/// One absolute regular-file stream backed by a fixed-size bounded queue and
+/// one owned producer thread. Dropping the consumer closes the queue and joins
+/// the producer, so a disconnected response cannot leave a blocked reader
+/// behind.
+struct AbsoluteFileReader {
+    size: u64,
+    receiver: Option<std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl AbsoluteFileReader {
+    fn open(abs: &Path) -> Result<Self, String> {
+        let mut file =
+            std::fs::File::open(abs).map_err(|e| format!("cannot read {}: {e}", abs.display()))?;
+        let metadata = file
+            .metadata()
+            .map_err(|e| format!("cannot stat {}: {e}", abs.display()))?;
+        if !metadata.is_file() {
+            return Err(format!("not a regular file: {}", abs.display()));
+        }
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<std::io::Result<Vec<u8>>>(
+            chan_workspace::BINARY_STREAM_QUEUE_DEPTH,
+        );
+        let worker = std::thread::Builder::new()
+            .name("chan-terminal-byte-reader".into())
+            .spawn(move || loop {
+                let mut chunk = vec![0u8; chan_workspace::BINARY_STREAM_CHUNK_SIZE];
+                let count = match file.read(&mut chunk) {
+                    Ok(0) => return,
+                    Ok(count) => count,
+                    Err(error) => {
+                        let _ = sender.send(Err(error));
+                        return;
+                    }
+                };
+                chunk.truncate(count);
+                if sender.send(Ok(chunk)).is_err() {
+                    return;
+                }
+            })
+            .map_err(|e| format!("cannot start reader for {}: {e}", abs.display()))?;
+        Ok(Self {
+            size: metadata.len(),
+            receiver: Some(receiver),
+            worker: Some(worker),
+        })
+    }
+}
+
+impl Iterator for AbsoluteFileReader {
+    type Item = std::io::Result<Vec<u8>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.receiver.as_ref()?.recv().ok()
+    }
+}
+
+impl Drop for AbsoluteFileReader {
+    fn drop(&mut self) {
+        self.receiver.take();
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                tracing::warn!("terminal bounded file reader producer panicked");
+            }
+        }
+    }
+}
+
+/// What a terminal download resolves to: a bounded open-file reader, or a
 /// directory whose tree has been pre-flighted readable and is ready to stream.
-#[cfg_attr(test, derive(Debug))]
 enum TerminalDownload {
-    File { bytes: Vec<u8>, name: String },
-    Directory { name: String },
+    File {
+        reader: AbsoluteFileReader,
+        name: String,
+    },
+    Directory {
+        name: String,
+    },
 }
 
 fn terminal_download_plan(abs: &Path) -> Result<TerminalDownload, String> {
@@ -204,12 +268,65 @@ fn terminal_download_plan(abs: &Path) -> Result<TerminalDownload, String> {
         verify_readable_fs(abs)?;
         Ok(TerminalDownload::Directory { name })
     } else {
-        // A single file is read into memory; a permission error surfaces here
-        // with nothing sent (no partial response body).
-        let bytes =
-            std::fs::read(abs).map_err(|e| format!("cannot read {}: {e}", abs.display()))?;
-        Ok(TerminalDownload::File { bytes, name })
+        // Opening happens before headers are sent. The returned reader keeps
+        // the exact file handle and bounded producer alive.
+        let reader = AbsoluteFileReader::open(abs)?;
+        Ok(TerminalDownload::File { reader, name })
     }
+}
+
+fn stream_terminal_file_response(path: &str, reader: AbsoluteFileReader) -> Response {
+    stream_terminal_file_response_inner(path, reader, None)
+}
+
+#[cfg(test)]
+fn stream_terminal_file_response_with_completion(
+    path: &str,
+    reader: AbsoluteFileReader,
+) -> (Response, tokio::sync::oneshot::Receiver<()>) {
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    (
+        stream_terminal_file_response_inner(path, reader, Some(done_tx)),
+        done_rx,
+    )
+}
+
+fn stream_terminal_file_response_inner(
+    path: &str,
+    mut reader: AbsoluteFileReader,
+    completion: Option<tokio::sync::oneshot::Sender<()>>,
+) -> Response {
+    let size = reader.size;
+    let (tx, rx) =
+        mpsc::channel::<std::io::Result<Bytes>>(chan_workspace::BINARY_STREAM_QUEUE_DEPTH);
+    tokio::task::spawn_blocking(move || {
+        for next in reader.by_ref() {
+            let terminal = next.is_err();
+            let message = next.map(Bytes::from);
+            if tx.blocking_send(message).is_err() || terminal {
+                break;
+            }
+        }
+        drop(reader);
+        if let Some(completion) = completion {
+            let _ = completion.send(());
+        }
+    });
+    let body = Body::from_stream(stream::unfold(rx, |mut rx| async {
+        rx.recv().await.map(|message| (message, rx))
+    }));
+    (
+        [
+            (header::CONTENT_TYPE, content_type_for(path).to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                content_disposition_attachment(path),
+            ),
+            (header::CONTENT_LENGTH, size.to_string()),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 #[derive(Serialize)]
@@ -551,13 +668,39 @@ mod tests {
     }
 
     #[test]
-    fn terminal_download_plan_reads_a_file_and_marks_a_directory() {
+    fn terminal_single_file_download_plan_never_owns_a_whole_file_vec() {
+        let source = include_str!("transfer.rs");
+        let owned_file_pattern = concat!("File { bytes: ", "Vec<u8>, name: String }");
+        let collecting_read_pattern = concat!("std::fs::", "read(abs)");
+        assert!(
+            !source.contains(owned_file_pattern),
+            "terminal downloads must carry a bounded reader, not a whole-file Vec"
+        );
+        assert!(
+            !source.contains(collecting_read_pattern),
+            "terminal downloads must never collect the absolute file before responding"
+        );
+    }
+
+    #[test]
+    fn terminal_download_plan_streams_a_file_and_marks_a_directory() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("one.txt"), b"one").unwrap();
+        let content = vec![0x5a; chan_workspace::BINARY_STREAM_CHUNK_SIZE.saturating_mul(2) + 17];
+        std::fs::write(dir.path().join("one.txt"), &content).unwrap();
 
         match terminal_download_plan(&dir.path().join("one.txt")).unwrap() {
-            TerminalDownload::File { bytes, name } => {
-                assert_eq!(bytes, b"one");
+            TerminalDownload::File { mut reader, name } => {
+                let chunks: std::io::Result<Vec<Vec<u8>>> = reader.by_ref().collect();
+                let chunks = chunks.unwrap();
+                assert_eq!(
+                    chunks.iter().map(Vec::len).collect::<Vec<_>>(),
+                    [
+                        chan_workspace::BINARY_STREAM_CHUNK_SIZE,
+                        chan_workspace::BINARY_STREAM_CHUNK_SIZE,
+                        17,
+                    ]
+                );
+                assert_eq!(chunks.concat(), content);
                 assert_eq!(name, "one.txt");
             }
             TerminalDownload::Directory { .. } => panic!("expected a file payload"),
@@ -577,8 +720,33 @@ mod tests {
             }
             TerminalDownload::File { .. } => panic!("expected a directory"),
         }
-        let missing = terminal_download_plan(&dir.path().join("missing")).unwrap_err();
+        let missing = match terminal_download_plan(&dir.path().join("missing")) {
+            Err(error) => error,
+            Ok(_) => panic!("missing download must fail"),
+        };
         assert!(missing.contains("cannot access"), "{missing}");
+    }
+
+    #[tokio::test]
+    async fn dropping_terminal_file_response_joins_the_bounded_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let size = chan_workspace::BINARY_STREAM_CHUNK_SIZE
+            * (chan_workspace::BINARY_STREAM_QUEUE_DEPTH + 16);
+        let path = dir.path().join("disconnect.bin");
+        std::fs::write(&path, vec![0x44; size]).unwrap();
+        let reader = match terminal_download_plan(&path).unwrap() {
+            TerminalDownload::File { reader, .. } => reader,
+            TerminalDownload::Directory { .. } => panic!("expected file"),
+        };
+        let (response, completed) =
+            stream_terminal_file_response_with_completion("disconnect.bin", reader);
+
+        drop(response);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), completed)
+            .await
+            .expect("bounded terminal reader must stop after response drop")
+            .expect("completion sender must fire");
     }
 
     #[test]

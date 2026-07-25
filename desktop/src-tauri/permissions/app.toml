@@ -36,7 +36,6 @@ permissions = [
   "allow-hide-window-from-close-confirm",
   "allow-abandon-devserver-for-window",
   "allow-reconnect-devserver-for-window",
-  "allow-save-file-to-downloads",
   "allow-zoom-in",
   "allow-zoom-out",
   "allow-zoom-reset",
@@ -116,11 +115,6 @@ description = "Enables the reconnect_devserver_for_window command (disconnect ov
 commands.allow = ["reconnect_devserver_for_window"]
 
 [[permission]]
-identifier = "allow-save-file-to-downloads"
-description = "Enables the save_file_to_downloads command."
-commands.allow = ["save_file_to_downloads"]
-
-[[permission]]
 identifier = "allow-zoom-in"
 description = "Enables the zoom_in command."
 commands.allow = ["zoom_in"]
@@ -189,15 +183,49 @@ identifier = "allow-read-dropped-paths"
 description = "Enables the read_dropped_paths command (drag-pasteboard read at drop time)."
 commands.allow = ["read_dropped_paths"]
 
-# Deliberately NOT in the workspace-window set: this command pops a native
-# open panel and reads the chosen files' bytes off the user's local disk, so
-# it is granted per window kind: locally-served windows plus loopback lib-*
-# via capabilities/local-upload.json, and authenticated exact gateway origins
-# through runtime_capability.rs. Never grant it to outbound-* webviews.
+# Deliberately NOT in the workspace-window set: native transfers read or write
+# the user's local filesystem, so every command is granted only to locally
+# served windows plus authenticated exact gateway origins. Never grant these
+# to outbound-* remote URL attachments.
 [[permission]]
-identifier = "allow-pick-upload-files"
-description = "Enables the pick_upload_files command (native file picker for `cs upload`)."
-commands.allow = ["pick_upload_files"]
+identifier = "allow-download-file-native"
+description = "Streams a same-origin authenticated download to the Downloads folder."
+commands.allow = ["download_file_native"]
+
+[[permission]]
+identifier = "allow-upload-files-native"
+description = "Picks local regular files and streams them to the same-origin upload API."
+commands.allow = ["upload_files_native"]
+
+[[permission]]
+identifier = "allow-native-transfer-status"
+description = "Reads bounded native transfer progress."
+commands.allow = ["native_transfer_status"]
+
+[[permission]]
+identifier = "allow-cancel-native-transfer"
+description = "Cancels one opaque native transfer id."
+commands.allow = ["cancel_native_transfer"]
+
+[[permission]]
+identifier = "allow-begin-generated-download"
+description = "Begins a bounded chunk sink for SPA-generated download bytes."
+commands.allow = ["begin_generated_download"]
+
+[[permission]]
+identifier = "allow-append-generated-download"
+description = "Appends one bounded chunk to an SPA-generated download."
+commands.allow = ["append_generated_download"]
+
+[[permission]]
+identifier = "allow-finish-generated-download"
+description = "Atomically commits an SPA-generated download."
+commands.allow = ["finish_generated_download"]
+
+[[permission]]
+identifier = "allow-cancel-generated-download"
+description = "Cancels and cleans an SPA-generated download."
+commands.allow = ["cancel_generated_download"]
 
 [[permission]]
 identifier = "allow-add-outbound-workspace"

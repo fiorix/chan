@@ -238,6 +238,12 @@ async fn doc_ws(
                                     .await;
                                 break;
                             }
+                            if let Err(e) =
+                                handle.session().persist_recovery(&workspace).await
+                            {
+                                error_close(&mut socket, &e, "recovery-write").await;
+                                break;
+                            }
                         }
                         Ok(ClientFrame::Pull { version }) => handle.pull(version),
                         Ok(ClientFrame::Cursor { anchor, head }) => {

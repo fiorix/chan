@@ -13,7 +13,11 @@
 
 import { api, sessionWindowId } from "../api/client";
 import { ApiError } from "../api/errors";
-import type { DraftPromoteResponse, TerminalRosterEntry } from "../api/types";
+import type {
+  DraftPromoteResponse,
+  FileResponse,
+  TerminalRosterEntry,
+} from "../api/types";
 import type { FindRange } from "../editor/find";
 import {
   renderedCaretForSourceCaret,
@@ -4544,8 +4548,9 @@ const savingTabs = new Set<string>();
 const saveAgainAfterCurrent = new Set<string>();
 let pendingMissingFileReopenTabId: string | null = null;
 
-/// Conflict dialog state. Populated when a save returns 409 (an
-/// external edit landed since we last read this tab). Mounted by
+/// Conflict dialog state. Populated when a save returns 409 or 428
+/// (an external edit landed, or a live authority requires explicit
+/// preconditions). Mounted by
 /// ConflictModal.svelte; closed via reloadConflictedTab,
 /// overwriteConflictedTab, or dismissConflict.
 export const conflictDialog = $state<{
@@ -4592,22 +4597,44 @@ function findFileTabById(tabId: string): { paneId: string; tab: FileTab } | null
   return null;
 }
 
+function adoptConflictResolution(tab: FileTab, response: FileResponse): void {
+  tab.content = response.content;
+  tab.saved = response.content;
+  tab.openedEmpty = response.content.trim().length === 0;
+  tab.savedMtime = response.mtime ?? null;
+  tab.savedMtimeNs = response.mtime_ns ?? null;
+  tab.authorityVersion = response.authority_version ?? null;
+  tab.diskConflicted = response.disk_conflicted ?? false;
+  tab.repoRoot = response.repo_root ?? null;
+  tab.fsWritable = response.writable ?? true;
+  tab.error = null;
+  tab.fileMissing = null;
+  tab.externalChange = false;
+  mirrorToSiblings(tab.path, response.content, tab.id);
+  for (const hook of docFallbackSavedHooks) hook(tab.id);
+}
+
 /// Discard the in-memory buffer for the conflicted tab and re-fetch
 /// from disk. The user picked Reload: their unsaved edits go away,
 /// the disk version takes over.
 export async function reloadConflictedTab(): Promise<void> {
   const tabId = conflictDialog.tabId;
+  const diskConflicted = conflictDialog.diskConflicted;
   dismissConflict();
   if (!tabId) return;
   const found = findFileTabById(tabId);
   if (!found) return;
+  if (diskConflicted) {
+    const response = await api.resolveSessionConflict(found.tab.path, "reload");
+    adoptConflictResolution(found.tab, response);
+    return;
+  }
   await loadTabContent(found.paneId, found.tab.id, found.tab.path);
 }
 
-/// Adopt the server-reported on-disk mtime as the new CAS token and
-/// save the in-memory buffer. The CAS check matches, so the write
-/// goes through (unless ANOTHER external edit landed since the 409
-/// was issued, in which case we re-prompt).
+/// Resolve a live-session conflict explicitly, or adopt the
+/// server-reported on-disk mtime as the classic path's next CAS
+/// token. Another external edit still re-prompts.
 export async function overwriteConflictedTab(): Promise<void> {
   const tabId = conflictDialog.tabId;
   const currentMtime = conflictDialog.currentMtime;
@@ -4618,6 +4645,11 @@ export async function overwriteConflictedTab(): Promise<void> {
   if (!tabId) return;
   const found = findFileTabById(tabId);
   if (!found) return;
+  if (diskConflicted) {
+    const response = await api.resolveSessionConflict(found.tab.path, "overwrite");
+    adoptConflictResolution(found.tab, response);
+    return;
+  }
   found.tab.savedMtime = currentMtime;
   found.tab.savedMtimeNs = currentMtimeNs;
   found.tab.authorityVersion = currentAuthorityVersion;
@@ -4816,7 +4848,7 @@ async function performSaveOnce(t: FileTab): Promise<void> {
     mirrorToSiblings(path, content, t.id);
     for (const hook of docFallbackSavedHooks) hook(t.id);
   } catch (e) {
-    if (e instanceof ApiError && e.status === 409) {
+    if (e instanceof ApiError && (e.status === 409 || e.status === 428)) {
       const data = e.data as {
         current_mtime?: number | null;
         current_mtime_ns?: string | null;

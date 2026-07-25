@@ -53,7 +53,7 @@ notify-debouncer-mini = { workspace = true }
 keyring = { workspace = true }
 getrandom = { workspace = true }
 gethostname = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["multipart", "stream"] }
 # PKCE: base64url-no-pad encode the 32-byte verifier and the
 # SHA256(verifier) challenge; subtle backs the constant-time state
 # compare in the loopback callback, matching the gateway's ct_eq.

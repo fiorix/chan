@@ -1,11 +1,20 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "local-upload",
-  "description": "Native multi-file open picker for `cs upload`. Granted to locally-served SPA windows (workspace-*, terminal-*, control-terminal-* connect-script terminals, local::<window_id> watcher-opened workspace windows) and loopback devserver windows (lib-*). Authenticated exact gateway origins receive the equivalent permission through a runtime capability. Excludes outbound-* remote URL attachments because this command opens a native picker and reads the selected local files.",
+  "description": "Native streaming transfers for locally-served SPA windows and loopback devserver windows. Authenticated exact gateway origins receive the same commands through a runtime capability. Excludes outbound-* remote URL attachments because transfers access the user's local filesystem.",
   "remote": {
     "urls": ["http://127.0.0.1:*", "http://localhost:*"]
   },
   "local": true,
   "windows": ["workspace-*", "terminal-*", "control-terminal-*", "local::*", "lib-*"],
-  "permissions": ["allow-pick-upload-files"]
+  "permissions": [
+    "allow-download-file-native",
+    "allow-upload-files-native",
+    "allow-native-transfer-status",
+    "allow-cancel-native-transfer",
+    "allow-begin-generated-download",
+    "allow-append-generated-download",
+    "allow-finish-generated-download",
+    "allow-cancel-generated-download"
+  ]
 }

@@ -31,7 +31,7 @@ describe("File Browser upload via the Upload button", () => {
     expect(store).toContain("setTransferProgress(xferId");
     expect(store).toContain("finishTransfer(xferId)");
     // The single-upload-at-a-time guard reads the bubble's records.
-    expect(store).toContain("uploadInFlight()");
+    expect(store).toContain("waitForTransferSlot(xferId)");
   });
 
   test("replace upload also routes through the transfer bubble", () => {

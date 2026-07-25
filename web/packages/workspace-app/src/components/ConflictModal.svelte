@@ -4,11 +4,13 @@
   // since the last read.
   //
   // Choices:
-  //   Reload    -> discard buffer, refetch the disk version. Local
+  //   Reload    -> explicitly resolve a live-session conflict in
+  //                favor of disk, or refetch the classic disk version. Local
   //                edits are lost; the disk wins. Right answer when
   //                the user's edits are minor or duplicate.
-  //   Overwrite -> push the buffer with the new disk-side mtime as
-  //                the CAS token. The external edit is destroyed but
+  //   Overwrite -> explicitly resolve in favor of live authority, or
+  //                push the classic buffer with the new disk-side mtime.
+  //                The external edit is destroyed but
   //                the user keeps their work. Right answer when the
   //                external edit was an unintended autoreformat or a
   //                stale sibling tab catching up.

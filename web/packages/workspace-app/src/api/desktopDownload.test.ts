@@ -6,19 +6,13 @@ import { describe, expect, test } from "vitest";
 import desktop from "./desktop.ts?raw";
 
 describe("desktop download capability", () => {
-  test("runDesktopDownload fetches with XHR progress and saves via Tauri", () => {
+  test("runDesktopDownload delegates same-origin streaming to Rust", () => {
     expect(desktop).toContain("export async function runDesktopDownload(");
-    // XHR download (not upload) progress workspaces the indicator.
-    expect(desktop).toContain("xhr.responseType = \"arraybuffer\"");
-    expect(desktop).toContain("xhr.onprogress");
-    expect(desktop).toContain("event.loaded / event.total");
-    // A streamed-tar directory download has no Content-Length, so the progress
-    // is guarded to an indeterminate `null` (the bubble renders the moving bar)
-    // rather than dividing by a zero/absent total into a NaN%.
-    expect(desktop).toContain("event.lengthComputable && event.total > 0");
-    // Hands the finished bytes to the Tauri command as a Vec<u8>.
-    expect(desktop).toContain('tauriInvoke<{ path: string }>(\n      "save_file_to_downloads"');
-    expect(desktop).toContain("Array.from(bytes)");
+    expect(desktop).toContain('"download_file_native"');
+    expect(desktop).toContain('"native_transfer_status"');
+    expect(desktop).toContain("status.loaded / status.total");
+    expect(desktop).not.toContain('responseType = "arraybuffer"');
+    expect(desktop).not.toContain("Array.from(bytes)");
   });
 
   test("it gates on isTauriDesktop and drives the unified transfer model", () => {
@@ -28,7 +22,6 @@ describe("desktop download capability", () => {
     expect(desktop).toContain("beginTransfer({");
     expect(desktop).toContain("finishTransfer(xferId, saved.path)");
     expect(desktop).toContain("failTransfer(xferId, message)");
-    // The model-backed cancel aborts the in-flight fetch.
-    expect(desktop).toContain("() => xhr.abort()");
+    expect(desktop).toContain('"cancel_native_transfer"');
   });
 });

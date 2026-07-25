@@ -69,7 +69,7 @@ pub use drafts::{
 pub use excluded_dirs::{api_excluded_dirs_get, api_excluded_dirs_put};
 pub use files::{
     api_create_file, api_delete_file, api_fs_transfer, api_list_files, api_move, api_read_file,
-    api_upload_file, api_write_file,
+    api_resolve_session_conflict, api_upload_file, api_write_file,
 };
 pub use fonts::api_fonts_source_code_pro_download;
 pub use fs_graph::{api_fs_graph, build_fs_graph, FsGraphResponse, FsGraphScope};

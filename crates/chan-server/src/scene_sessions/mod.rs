@@ -44,12 +44,17 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chan_workspace::{
-    semantic_write_budget, ChanError, FileStat, WatchEvent, WatchKind, Workspace, TEXT_WRITE_LIMIT,
+    semantic_write_budget, ChanError, FileStat, WatchEvent, WatchKind, Workspace, WorkspacePath,
+    TEXT_WRITE_LIMIT,
 };
 use rand::RngCore;
 use tokio::sync::{broadcast, mpsc, watch, Notify};
 
 use crate::disk_echo::{content_hash, DiskEchoRing};
+use crate::doc_sessions::recovery::{
+    self, RecoveryAuthority, RecoveryBaseline, RecoveryConflict, RecoveryKind, RecoveryRecord,
+    RecoveryState,
+};
 use crate::routes::scene::{PeerSceneCursor, ServerFrame};
 use crate::self_writes::{
     check_write_preconditions, SelfWrites, WritePreconditionError, WritePreconditions,
@@ -552,6 +557,212 @@ impl SceneSession {
         }
     }
 
+    fn from_recovery(
+        path: &str,
+        disk: Option<(String, FileStat)>,
+        unreadable_disk: Option<(u64, Option<i64>)>,
+        record: RecoveryRecord,
+    ) -> Result<Self, String> {
+        let authority = Scene::parse(&record.authority.content)
+            .map_err(|error| format!("parse recovered scene authority: {error}"))?;
+        let baseline_scene = Scene::parse(&record.baseline.content)
+            .map_err(|error| format!("parse recovered scene baseline: {error}"))?;
+        let (disk_text, disk_scene, disk_stat) = match disk {
+            Some((text, stat)) => {
+                let scene = Scene::parse(&text).ok();
+                (text, scene, Some(stat))
+            }
+            None => (String::new(), None, None),
+        };
+        let disk_mtime_ns = disk_stat
+            .as_ref()
+            .and_then(|stat| stat.mtime_ns)
+            .or_else(|| unreadable_disk.and_then(|(_, mtime_ns)| mtime_ns));
+        let disk_present = disk_stat.is_some();
+        let baseline_hash = content_hash(&record.baseline.content);
+        if baseline_hash != record.baseline.content_hash {
+            return Err("scene recovery baseline hash mismatch".into());
+        }
+        if record.baseline.authority_version > record.authority.version {
+            return Err("scene recovery baseline version is ahead of authority".into());
+        }
+        if record.authority.content.len() as u64 > record.authority.write_budget {
+            return Err("scene recovery authority exceeds its write budget".into());
+        }
+
+        let disk_canonical = disk_scene.as_ref().map(Scene::serialize_file);
+        let disk_hash = if disk_present {
+            content_hash(&disk_text)
+        } else if let Some((version, _)) = unreadable_disk {
+            version
+        } else {
+            content_hash(REMOVED_DISK_MARKER)
+        };
+        let version = record.authority.version;
+        let baseline = DurableBaseline {
+            content: record.baseline.content,
+            content_hash: baseline_hash,
+            mtime_ns: record.baseline.mtime_ns,
+            authority_version: record.baseline.authority_version,
+        };
+        let disk_matches_authority = disk_scene
+            .as_ref()
+            .is_some_and(|scene| scene.file_content_eq(&authority));
+        let disk_matches_baseline = disk_scene
+            .as_ref()
+            .is_some_and(|scene| scene.file_content_eq(&baseline_scene));
+        let session_state = match record.lifecycle {
+            RecoveryState::Clean if disk_present && disk_scene.is_some() => {
+                return Ok(Self::new(
+                    path,
+                    &disk_text,
+                    disk_scene.expect("present disk has scene"),
+                    disk_stat.as_ref().expect("present disk has stat"),
+                ));
+            }
+            RecoveryState::Clean => {
+                return Err("scene recovery is clean but the source file is unusable".into());
+            }
+            RecoveryState::Dirty if disk_matches_authority => SessionState::Clean,
+            RecoveryState::Dirty if disk_matches_baseline => SessionState::Dirty {
+                since: Instant::now(),
+            },
+            RecoveryState::Dirty => SessionState::Conflicted(SessionConflict {
+                id: format!("scene-{}", NEXT_CONFLICT_ID.fetch_add(1, Ordering::Relaxed)),
+                baseline_version: baseline_hash,
+                disk_version: disk_hash,
+                authority_version: version,
+                disk_mtime_ns,
+                disk_content: disk_text.clone(),
+            }),
+            RecoveryState::Conflicted { conflict } => {
+                if conflict.baseline_version != baseline_hash
+                    || conflict.authority_version != version
+                {
+                    return Err("scene recovery conflict version mismatch".into());
+                }
+                SessionState::Conflicted(SessionConflict {
+                    id: conflict.id,
+                    baseline_version: baseline_hash,
+                    disk_version: disk_hash,
+                    authority_version: version,
+                    disk_mtime_ns,
+                    disk_content: disk_text.clone(),
+                })
+            }
+            RecoveryState::Removed if disk_present && disk_scene.is_some() => {
+                return Ok(Self::new(
+                    path,
+                    &disk_text,
+                    disk_scene.expect("present disk has scene"),
+                    disk_stat.as_ref().expect("present disk has stat"),
+                ));
+            }
+            RecoveryState::Removed => {
+                return Err("scene recovery source file is still missing".into());
+            }
+        };
+        let baseline = if matches!(session_state, SessionState::Clean) {
+            DurableBaseline {
+                content_hash: content_hash(
+                    disk_canonical
+                        .as_ref()
+                        .expect("clean recovery has disk content"),
+                ),
+                content: disk_canonical.expect("clean recovery has disk content"),
+                mtime_ns: disk_mtime_ns,
+                authority_version: version,
+            }
+        } else {
+            baseline
+        };
+        let mut disk_echo = DiskEchoRing::new();
+        disk_echo.note(disk_hash);
+        Ok(Self {
+            path: path.to_string(),
+            state: Mutex::new(SceneState {
+                scene: authority,
+                write_budget: record.authority.write_budget,
+                version,
+                attaches: HashMap::new(),
+                cursors: HashMap::new(),
+                session_state,
+                baseline,
+                flush_now: false,
+                flushed_mtime_ns: disk_mtime_ns,
+                flush_epoch_version: version,
+                flush_failures: 0,
+                disk_echo,
+            }),
+            attach_count: AtomicUsize::new(0),
+            detached_at: AtomicI64::new(0),
+            closed: AtomicBool::new(false),
+            io_lock: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            fail_after_preflight: AtomicBool::new(false),
+        })
+    }
+
+    fn recovery_record(&self) -> RecoveryRecord {
+        let st = self.lock_state();
+        let lifecycle = match &st.session_state {
+            SessionState::Clean => RecoveryState::Clean,
+            SessionState::Dirty { .. } => RecoveryState::Dirty,
+            SessionState::Observing { dirty_since, .. } => {
+                if dirty_since.is_some() {
+                    RecoveryState::Dirty
+                } else {
+                    RecoveryState::Clean
+                }
+            }
+            SessionState::Conflicted(conflict) => RecoveryState::Conflicted {
+                conflict: RecoveryConflict {
+                    id: conflict.id.clone(),
+                    baseline_version: conflict.baseline_version,
+                    disk_version: conflict.disk_version,
+                    authority_version: conflict.authority_version,
+                    disk_mtime_ns: conflict.disk_mtime_ns,
+                    disk_content: conflict.disk_content.clone(),
+                },
+            },
+            SessionState::Removed => RecoveryState::Removed,
+        };
+        RecoveryRecord::new(
+            RecoveryKind::Scene,
+            self.path.clone(),
+            RecoveryAuthority {
+                content: st.scene.serialize_file(),
+                version: st.version,
+                write_budget: st.write_budget,
+                flushed_mtime_ns: st.flushed_mtime_ns,
+            },
+            RecoveryBaseline {
+                content: st.baseline.content.clone(),
+                content_hash: st.baseline.content_hash,
+                mtime_ns: st.baseline.mtime_ns,
+                authority_version: st.baseline.authority_version,
+            },
+            lifecycle,
+        )
+    }
+
+    async fn persist_recovery_locked(&self, workspace: &Arc<Workspace>) -> Result<(), String> {
+        let record = self.recovery_record();
+        let workspace = Arc::clone(workspace);
+        tokio::task::spawn_blocking(move || recovery::store(&workspace, &record))
+            .await
+            .map_err(|error| format!("scene recovery write task failed: {error}"))?
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn persist_recovery(
+        self: &Arc<Self>,
+        workspace: &Arc<Workspace>,
+    ) -> Result<(), String> {
+        let _io = self.io_lock.lock().await;
+        self.persist_recovery_locked(workspace).await
+    }
+
     fn lock_state(&self) -> std::sync::MutexGuard<'_, SceneState> {
         self.state.lock().expect("scene session state poisoned")
     }
@@ -666,7 +877,7 @@ impl SceneSession {
         if let Some(disk_mtime_ns) = st.session_state.conflict_disk_mtime_ns() {
             return Ok(HttpReplaceOutcome::Conflicted { disk_mtime_ns });
         }
-        let content_equal = Scene::parse(body)?.serialize_file() == st.scene.serialize_file();
+        let content_equal = Scene::parse(body)?.file_content_eq(&st.scene);
         match check_write_preconditions(
             st.flushed_mtime_ns,
             Some(st.version),
@@ -764,7 +975,9 @@ impl SceneSession {
                     authority_version: st.version,
                 };
                 st.write_budget = disk_budget;
-                st.session_state = if st.scene.serialize_file() == st.baseline.content {
+                st.session_state = if Scene::parse(&st.baseline.content)
+                    .is_ok_and(|baseline| baseline.file_content_eq(&st.scene))
+                {
                     SessionState::Clean
                 } else {
                     SessionState::Dirty { since: dirty_since }
@@ -814,8 +1027,8 @@ impl SceneSession {
             self.apply_merge_outcome_locked(&mut st, disk_text, stat, MergeOutcome::Conflict);
             return;
         }
-        let disk_matches_authority = Scene::parse(&disk_text)
-            .is_ok_and(|scene| scene.serialize_file() == st.scene.serialize_file());
+        let disk_scene = Scene::parse(&disk_text).expect("validated scene parses");
+        let disk_matches_authority = disk_scene.file_content_eq(&st.scene);
         if st.session_state.is_dirty() && !disk_matches_authority {
             let disk_budget = semantic_write_budget(Some(stat.size));
             let outcome = scene::merge_three_way_with_limit(
@@ -846,7 +1059,7 @@ impl SceneSession {
                     st.fan(&frame);
                 }
                 st.flushed_mtime_ns = stat.mtime_ns;
-                let baseline_content = st.scene.serialize_file();
+                let baseline_content = disk_scene.serialize_file();
                 st.baseline = DurableBaseline {
                     content_hash: content_hash(&baseline_content),
                     content: baseline_content,
@@ -893,7 +1106,6 @@ impl SceneSession {
     /// scene is adopted through replace semantics; a retained removal
     /// becomes `Removed`. Invalid or unreadable input leaves the
     /// conflict intact.
-    #[allow(dead_code)] // wired to the explicit resolution route in E4
     pub(crate) fn reload_conflict(&self) -> bool {
         let mut st = self.lock_state();
         let (disk_version, disk_mtime_ns, disk_content) = match &st.session_state {
@@ -917,6 +1129,10 @@ impl SceneSession {
             return false;
         }
         let disk_budget = semantic_write_budget(Some(disk_content.len() as u64));
+        let disk_scene = match Scene::parse(&disk_content) {
+            Ok(scene) => scene,
+            Err(_) => return false,
+        };
         let applied =
             match st
                 .scene
@@ -933,7 +1149,7 @@ impl SceneSession {
         }
         st.disk_echo.note(disk_hash);
         st.flushed_mtime_ns = disk_mtime_ns;
-        let baseline_content = st.scene.serialize_file();
+        let baseline_content = disk_scene.serialize_file();
         st.baseline = DurableBaseline {
             content_hash: content_hash(&baseline_content),
             content: baseline_content,
@@ -955,7 +1171,6 @@ impl SceneSession {
     /// retained disk token becomes the CAS expectation, the existing
     /// flush path writes safely, and a successful commit re-broadcasts
     /// the current authority.
-    #[allow(dead_code)] // wired to the explicit resolution route in E4
     pub(crate) async fn overwrite_conflict(
         self: &Arc<Self>,
         workspace: &Arc<Workspace>,
@@ -1212,18 +1427,51 @@ impl SceneRegistry {
             // scene its flush could not represent).
             let ws = Arc::clone(workspace);
             let read_path = path.to_string();
-            let (text, stat) =
-                tokio::task::spawn_blocking(move || ws.read_text_with_stat(&read_path))
-                    .await
-                    .map_err(|e| AttachError::Task(e.to_string()))??;
-            let write_budget = semantic_write_budget(Some(stat.size));
-            if text.len() as u64 > write_budget {
-                return Err(AttachError::Scene(SceneError::TooLarge {
-                    bytes: text.len() as u64,
-                    limit: write_budget,
-                }));
+            let (disk, unreadable_disk, recovery) = tokio::task::spawn_blocking(move || {
+                let recovery = recovery::load(&ws, RecoveryKind::Scene, &read_path)?;
+                let (disk, unreadable_disk) = match ws.classify_workspace_path(&read_path)? {
+                    WorkspacePath::Missing => (None, None),
+                    WorkspacePath::Regular(stat) | WorkspacePath::Directory(stat) => {
+                        match ws.read_text_with_stat(&read_path) {
+                            Ok(read) => (Some(read), None),
+                            Err(error) if recovery.is_some() => {
+                                let marker = format!(
+                                    "{UNREADABLE_DISK_MARKER}:{}:{:?}:{error}",
+                                    stat.size, stat.mtime_ns
+                                );
+                                (None, Some((content_hash(&marker), stat.mtime_ns)))
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    WorkspacePath::Special(kind) if recovery.is_some() => {
+                        let marker = format!("{UNREADABLE_DISK_MARKER}:special:{kind:?}");
+                        (None, Some((content_hash(&marker), None)))
+                    }
+                    WorkspacePath::Special(_) => {
+                        return Err(ChanError::Io(
+                            "scene session source is not a regular file".into(),
+                        ));
+                    }
+                };
+                Ok::<_, ChanError>((disk, unreadable_disk, recovery))
+            })
+            .await
+            .map_err(|e| AttachError::Task(e.to_string()))??;
+            if disk.is_none() && recovery.is_none() {
+                return Err(AttachError::Workspace(ChanError::Io(format!(
+                    "not found: {path}"
+                ))));
             }
-            let scene = Scene::parse(&text)?;
+            if let Some((text, stat)) = &disk {
+                let write_budget = semantic_write_budget(Some(stat.size));
+                if text.len() as u64 > write_budget {
+                    return Err(AttachError::Scene(SceneError::TooLarge {
+                        bytes: text.len() as u64,
+                        limit: write_budget,
+                    }));
+                }
+            }
 
             // Re-lock and double-check: a concurrent first attach may
             // have won the race; use its session and discard this read
@@ -1238,7 +1486,17 @@ impl SceneRegistry {
                     // Raced a close between the lookups; start over.
                 }
                 _ => {
-                    let session = Arc::new(SceneSession::new(path, &text, scene, &stat));
+                    let session = Arc::new(match (recovery, disk) {
+                        (Some(record), disk) => {
+                            SceneSession::from_recovery(path, disk, unreadable_disk, record)
+                                .map_err(AttachError::Task)?
+                        }
+                        (None, Some((text, stat))) => {
+                            let scene = Scene::parse(&text)?;
+                            SceneSession::new(path, &text, scene, &stat)
+                        }
+                        (None, None) => unreachable!("missing source handled before registry lock"),
+                    });
                     sessions.insert(path.to_string(), session.clone());
                     let handle = self
                         .register_attach(session, window_id)
@@ -1420,7 +1678,11 @@ pub(crate) async fn flush_session(
     self_writes: &SelfWrites,
 ) -> bool {
     let _io = session.io_lock.lock().await;
-    flush_session_locked(session, workspace, self_writes).await
+    let durable = flush_session_locked(session, workspace, self_writes).await;
+    if let Err(error) = session.persist_recovery_locked(workspace).await {
+        tracing::warn!(error = %error, path = %session.path, "persist scene recovery failed");
+    }
+    durable
 }
 
 async fn flush_session_locked(
@@ -1519,7 +1781,10 @@ async fn flush_session_locked(
 /// instead of risking authority loss.
 pub(crate) async fn reconcile_session(session: &Arc<SceneSession>, workspace: &Arc<Workspace>) {
     let _io = session.io_lock.lock().await;
-    reconcile_session_locked(session, workspace).await
+    reconcile_session_locked(session, workspace).await;
+    if let Err(error) = session.persist_recovery_locked(workspace).await {
+        tracing::warn!(error = %error, path = %session.path, "persist scene recovery failed");
+    }
 }
 
 async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<Workspace>) {
@@ -1610,8 +1875,8 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
             // they remain after expiry, they are durable external
             // state and must fold normally.
             st.flushed_mtime_ns = disk_stat.mtime_ns;
-            let disk_matches_authority = Scene::parse(&disk_text)
-                .is_ok_and(|scene| scene.serialize_file() == st.scene.serialize_file());
+            let disk_matches_authority =
+                Scene::parse(&disk_text).is_ok_and(|scene| scene.file_content_eq(&st.scene));
             if disk_matches_authority {
                 st.session_state.clear_observation();
             } else if !matches!(
@@ -1623,8 +1888,8 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
             }
             return;
         }
-        let disk_matches_authority = Scene::parse(&disk_text)
-            .is_ok_and(|scene| scene.serialize_file() == st.scene.serialize_file());
+        let disk_matches_authority =
+            Scene::parse(&disk_text).is_ok_and(|scene| scene.file_content_eq(&st.scene));
         if disk_matches_authority {
             drop(st);
             session.merge_disk(disk_text, &disk_stat);
@@ -2136,6 +2401,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn conflicted_scene_rehydrates_after_server_restart_without_flushing_authority() {
+        let mut baseline_element = elem("x", 1, 1, "a1");
+        baseline_element["x"] = json!(10);
+        let seed = body(json!([baseline_element]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (handle, mut frames) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut frames);
+
+        let mut local_element = elem("x", 2, 2, "a1");
+        local_element["x"] = json!(20);
+        handle
+            .push(vec![local_element], None, None)
+            .expect("local edit");
+        drain(&mut frames);
+        let authority = handle.session().authority_view().0;
+
+        let mut disk_element = elem("x", 2, 3, "a1");
+        disk_element["x"] = json!(30);
+        let disk = body(json!([disk_element]));
+        fx.workspace.write_text("b.excalidraw", &disk).unwrap();
+        handle.session().lock_state().flushed_mtime_ns = None;
+        reconcile_session(handle.session(), &fx.workspace).await;
+        backdate_pending_fold(handle.session());
+        fx.registry.reconcile_pending(&fx.workspace).await;
+        assert!(handle.session().http_read_view().disk_conflicted);
+        drop(handle);
+
+        let restarted = Arc::new(SceneRegistry::new());
+        let reopened = restarted
+            .attach(&fx.workspace, "b.excalidraw", "w2")
+            .await
+            .expect("restart attach");
+        let view = reopened.session().http_read_view();
+        assert!(
+            Scene::parse(&view.content)
+                .unwrap()
+                .file_content_eq(&Scene::parse(&authority).unwrap()),
+            "live scene authority rehydrates"
+        );
+        assert!(view.disk_conflicted, "scene conflict survives restart");
+        {
+            let state = reopened.session().lock_state();
+            let durable = Scene::parse(&state.baseline.content).unwrap();
+            assert!(durable.file_content_eq(&Scene::parse(&seed).unwrap()));
+            let SessionState::Conflicted(conflict) = &state.session_state else {
+                panic!("reopened scene must remain conflicted");
+            };
+            assert_eq!(conflict.baseline_version, state.baseline.content_hash);
+            assert_eq!(conflict.authority_version, state.version);
+        }
+
+        restarted.flush_pass(&fx.workspace, &fx.self_writes).await;
+        assert!(
+            Scene::parse(&fx.workspace.read_text("b.excalidraw").unwrap())
+                .unwrap()
+                .file_content_eq(&Scene::parse(&disk).unwrap()),
+            "restart must not flush stale scene authority over retained disk"
+        );
+    }
+
+    #[tokio::test]
     async fn delete_while_dirty_enters_conflicted() {
         let seed = body(json!([elem("x", 1, 1, "a1")]));
         let fx = fixture(&[("b.excalidraw", &seed)]);
@@ -2143,27 +2469,50 @@ mod tests {
         drain(&mut rx);
         ha.push(vec![elem("y", 1, 2, "a2")], None, None).unwrap();
         drain(&mut rx);
+        let authority = ha.session().authority_view().0;
 
         std::fs::remove_file(fx.root.path().join("b.excalidraw")).unwrap();
         reconcile_session(ha.session(), &fx.workspace).await;
         backdate_pending_removal(ha.session());
         fx.registry.reconcile_pending(&fx.workspace).await;
 
-        let st = ha.session().lock_state();
-        let SessionState::Conflicted(conflict) = &st.session_state else {
-            panic!("delete versus edit must enter Conflicted");
-        };
-        assert!(st.scene.element("y").is_some(), "local authority retained");
-        assert_eq!(
-            st.baseline.content,
-            Scene::parse(&seed).unwrap().serialize_file()
-        );
-        assert_eq!(conflict.baseline_version, st.baseline.content_hash);
-        assert_eq!(conflict.authority_version, st.version);
-        assert_eq!(conflict.disk_mtime_ns, None);
-        assert!(conflict.disk_content.is_empty());
-        drop(st);
+        {
+            let st = ha.session().lock_state();
+            let SessionState::Conflicted(conflict) = &st.session_state else {
+                panic!("delete versus edit must enter Conflicted");
+            };
+            assert!(st.scene.element("y").is_some(), "local authority retained");
+            assert_eq!(
+                st.baseline.content,
+                Scene::parse(&seed).unwrap().serialize_file()
+            );
+            assert_eq!(conflict.baseline_version, st.baseline.content_hash);
+            assert_eq!(conflict.authority_version, st.version);
+            assert_eq!(conflict.disk_mtime_ns, None);
+            assert!(conflict.disk_content.is_empty());
+        }
         assert_eq!(drain(&mut rx).len(), 0, "neither side wins");
+        drop(ha);
+
+        let restarted = Arc::new(SceneRegistry::new());
+        let reopened = restarted
+            .attach(&fx.workspace, "b.excalidraw", "w2")
+            .await
+            .expect("removed-side scene conflict rehydrates");
+        let view = reopened.session().http_read_view();
+        assert!(view.disk_conflicted);
+        assert!(Scene::parse(&view.content)
+            .unwrap()
+            .file_content_eq(&Scene::parse(&authority).unwrap()));
+        {
+            let st = reopened.session().lock_state();
+            let SessionState::Conflicted(conflict) = &st.session_state else {
+                panic!("removed-side scene conflict must survive restart");
+            };
+            assert_eq!(conflict.disk_version, content_hash(REMOVED_DISK_MARKER));
+        }
+        restarted.flush_pass(&fx.workspace, &fx.self_writes).await;
+        assert!(!fx.root.path().join("b.excalidraw").exists());
     }
 
     #[tokio::test]
@@ -2177,19 +2526,34 @@ mod tests {
 
         reconcile_session(ha.session(), &fx.workspace).await;
 
-        let st = ha.session().lock_state();
-        let SessionState::Conflicted(conflict) = &st.session_state else {
-            panic!("invalid replacement must conflict");
-        };
-        assert!(st.scene.element("x").is_some());
-        assert_eq!(
-            st.baseline.content,
-            Scene::parse(&seed).unwrap().serialize_file()
-        );
-        assert_eq!(conflict.disk_version, content_hash("{oops"));
-        assert_eq!(conflict.disk_content, "{oops");
-        drop(st);
+        {
+            let st = ha.session().lock_state();
+            let SessionState::Conflicted(conflict) = &st.session_state else {
+                panic!("invalid replacement must conflict");
+            };
+            assert!(st.scene.element("x").is_some());
+            assert_eq!(
+                st.baseline.content,
+                Scene::parse(&seed).unwrap().serialize_file()
+            );
+            assert_eq!(conflict.disk_version, content_hash("{oops"));
+            assert_eq!(conflict.disk_content, "{oops");
+        }
         assert!(drain(&mut rx).is_empty());
+        drop(ha);
+
+        let restarted = Arc::new(SceneRegistry::new());
+        let reopened = restarted
+            .attach(&fx.workspace, "b.excalidraw", "w2")
+            .await
+            .expect("invalid-side scene conflict rehydrates");
+        let view = reopened.session().http_read_view();
+        assert!(view.disk_conflicted);
+        assert!(Scene::parse(&view.content)
+            .unwrap()
+            .file_content_eq(&Scene::parse(&seed).unwrap()));
+        restarted.flush_pass(&fx.workspace, &fx.self_writes).await;
+        assert_eq!(fx.workspace.read_text("b.excalidraw").unwrap(), "{oops");
     }
 
     #[tokio::test]
@@ -2478,6 +2842,47 @@ mod tests {
                 .content_observation()
                 .is_none(),
             "semantically equal scene formatting must settle the echo"
+        );
+    }
+
+    #[tokio::test]
+    async fn restamped_disk_adopt_keeps_durable_bytes_and_settles_its_echo() {
+        let seed = body(json!([elem("x", 5, 10, "a1")]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (ha, mut rx) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rx);
+        let mut edited = elem("x", 5, 10, "a1");
+        edited
+            .as_object_mut()
+            .unwrap()
+            .insert("strokeColor".into(), "#ff0000".into());
+        let disk_text = body(json!([edited]));
+        let disk_canonical = Scene::parse(&disk_text).unwrap().serialize_file();
+        fx.workspace.write_text("b.excalidraw", &disk_text).unwrap();
+
+        reconcile_session(ha.session(), &fx.workspace).await;
+
+        {
+            let mut st = ha.session().lock_state();
+            assert_ne!(
+                st.scene.serialize_file(),
+                disk_canonical,
+                "the server restamps adopted merge metadata"
+            );
+            assert_eq!(
+                st.baseline.content, disk_canonical,
+                "the durable baseline must retain the bytes represented on disk"
+            );
+            st.flushed_mtime_ns = None;
+        }
+        reconcile_session(ha.session(), &fx.workspace).await;
+        assert!(
+            ha.session()
+                .lock_state()
+                .session_state
+                .content_observation()
+                .is_none(),
+            "nonce-only authority divergence must settle a live echo-ring entry"
         );
     }
 

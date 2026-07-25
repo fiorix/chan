@@ -3,8 +3,8 @@
   // progress, opened from the status-bar transfers entry. One row per transfer
   // with a progress bar + a state-appropriate action -- Cancel while active,
   // Retry for an interrupted/failed download, Dismiss for any finished row.
-  // Bound to the live XHR progress + abort the API client exposes; the bar look
-  // mirrors the SPA's download-progress idiom (adapted, not cross-imported).
+  // Bound to browser XHR or desktop-native progress + cancellation; the bar
+  // look mirrors the SPA's download-progress idiom (adapted, not cross-imported).
   import {
     transfers,
     dismissTransfer,
@@ -19,6 +19,8 @@
   function statusLine(t: Transfer): string {
     const verb = t.kind === "upload" ? "Uploading" : "Downloading";
     switch (t.state) {
+      case "queued":
+        return `Queued ${t.filename}`;
       case "active": {
         const p = pct(t);
         return p === null ? `${verb} ${t.filename}...` : `${verb} ${t.filename} (${p}%)`;
@@ -64,7 +66,7 @@
           </div>
           <div class="tb-line-row">
             <span class="tb-line">{statusLine(t)}</span>
-            {#if t.state === "active" && t.cancel}
+            {#if (t.state === "queued" || t.state === "active") && t.cancel}
               <button class="tb-action" type="button" onclick={() => t.cancel?.()}>Cancel</button>
             {:else if t.retry}
               <button class="tb-action" type="button" onclick={() => t.retry?.()}>Retry</button>

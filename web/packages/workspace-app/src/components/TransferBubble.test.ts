@@ -65,6 +65,21 @@ describe("TransferBubble", () => {
     expect(cancel).toHaveBeenCalledOnce();
   });
 
+  test("queued transfers remain visible and cancellable", () => {
+    beginTransfer({ kind: "upload", filename: "active.md", cancel: vi.fn() });
+    const queuedCancel = vi.fn();
+    beginTransfer({ kind: "upload", filename: "queued.md", cancel: queuedCancel });
+    transfers.shown = true;
+    const el = render();
+    flushSync();
+
+    expect(el.textContent).toContain("Queued queued.md");
+    const actions = [...el.querySelectorAll(".tb-action")] as HTMLButtonElement[];
+    expect(actions.map((button) => button.textContent)).toEqual(["Cancel", "Cancel"]);
+    actions[1]!.click();
+    expect(queuedCancel).toHaveBeenCalledOnce();
+  });
+
   test("progress updates the bar width and percentage", () => {
     const id = beginTransfer({ kind: "download", filename: "data.bin", cancel: vi.fn() });
     transfers.shown = true;

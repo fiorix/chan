@@ -111,13 +111,14 @@ use routes::{
     api_patch_workspace, api_post_attachment, api_post_contacts_import, api_preflight,
     api_preflight_decision, api_promote_draft, api_put_session, api_read_file, api_report_dir,
     api_report_file, api_report_prefix, api_reports_disable, api_reports_enable, api_reports_state,
-    api_resolve_link, api_restart_terminal, api_scene_ws, api_screensaver_clear_pin,
-    api_screensaver_patch, api_screensaver_set_pin, api_screensaver_state, api_screensaver_verify,
-    api_search_content, api_search_files, api_search_workspace, api_session_handover_reply,
-    api_set_terminal_broadcast, api_storage_reset, api_survey_reply, api_team_config_read,
-    api_team_config_write, api_terminal_next_name, api_terminal_ws, api_terminals_roster,
-    api_upload_file, api_window_reply, api_workspace_bootstrap, api_write_file,
-    spawn_roster_broadcaster, ws_upgrade,
+    api_resolve_link, api_resolve_session_conflict, api_restart_terminal, api_scene_ws,
+    api_screensaver_clear_pin, api_screensaver_patch, api_screensaver_set_pin,
+    api_screensaver_state, api_screensaver_verify, api_search_content, api_search_files,
+    api_search_workspace, api_session_handover_reply, api_set_terminal_broadcast,
+    api_storage_reset, api_survey_reply, api_team_config_read, api_team_config_write,
+    api_terminal_next_name, api_terminal_ws, api_terminals_roster, api_upload_file,
+    api_window_reply, api_workspace_bootstrap, api_write_file, spawn_roster_broadcaster,
+    ws_upgrade,
 };
 #[cfg(feature = "embeddings")]
 use routes::{
@@ -1565,6 +1566,10 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/api/drafts/inspect", post(api_inspect_draft))
         .route("/api/drafts/discard", post(api_discard_draft))
         .route("/api/drafts/promote", post(api_promote_draft))
+        .route(
+            "/api/session-conflicts/resolve",
+            post(api_resolve_session_conflict),
+        )
         // Path-based chan-team.toml read/write for the Team Work
         // dialog's New/Load flow.
         // Deliberately outside the workspace sandbox (user path,

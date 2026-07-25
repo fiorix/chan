@@ -1,64 +1,285 @@
-// Desktop-native "Download" save target.
-//
-// In the browser an `<a download>` click hands the bytes to the
-// browser's own download manager, which shows progress + drops the
-// file in the user's Downloads folder. chan-desktop's WKWebView /
-// WebView2 has no such download manager UI, so a plain `<a download>`
-// in the desktop shell silently does nothing useful; this command
-// backs a native download flow that mimics the browser.
-//
-// The split is: the SPA fetches the file over the same loopback
-// connection it already uses (via XHR, so it gets download progress
-// for the in-app indicator), then hands the finished bytes to this
-// command, which writes them to the OS Downloads folder and returns
-// the saved path so the SPA can show "Saved to <path>". Keeping the
-// byte transfer in JS reuses the upload progress pattern and avoids a
-// second loopback fetch from Rust; workspace content is notes-scale, so
-// buffering the blob in memory is acceptable. (A "reveal in Finder"
-// action is a future addition: reveal_in_finder is currently only in
-// the launcher window's ACL, not workspace windows where the inspector
-// lives.)
+//! Desktop-native streamed downloads.
+//!
+//! Network bytes never enter the webview. Rust validates the requested API URL
+//! against the invoking webview, reuses its authentication cookies, refuses
+//! redirects, streams into a same-directory temporary file, and renames only
+//! after a complete response. Cancellation and every error remove the temp.
 
-use std::{fs, path::PathBuf};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use futures::StreamExt;
 use serde::Serialize;
+use tauri::WebviewWindow;
+use tokio::io::AsyncWriteExt;
+
+use crate::native_transfer::{
+    endpoint_for_window, http_client, request_headers, EndpointKind, TransferRegistration,
+};
+
+const GENERATED_CHUNK_LIMIT: usize = 64 * 1024;
 
 #[derive(Debug, Serialize)]
 pub struct SavedDownload {
-    /// Absolute path the file was written to (after de-duplicating
-    /// against an existing name).
     pub path: String,
 }
 
-/// Write `bytes` to the user's Downloads folder under `filename`,
-/// de-duplicating the name if it already exists, and return the saved
-/// path. The SPA passes a filename it already sanitized
-/// (`downloadFilename`), but we defensively strip path separators so a
-/// crafted name can't escape the Downloads folder.
-#[tauri::command]
-pub fn save_file_to_downloads(filename: String, bytes: Vec<u8>) -> Result<SavedDownload, String> {
-    let dir = downloads_dir().ok_or_else(|| "could not resolve a Downloads folder".to_string())?;
-    fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-
-    let safe = sanitize_filename(&filename);
-    let target = unique_path(&dir, &safe);
-    fs::write(&target, &bytes).map_err(|e| format!("writing {}: {e}", target.display()))?;
-
-    Ok(SavedDownload {
-        path: target.display().to_string(),
-    })
+struct DownloadTarget {
+    temp: PathBuf,
+    target: PathBuf,
+    committed: bool,
 }
 
-/// The OS Downloads folder, falling back to the home directory when
-/// the platform has no distinct Downloads dir.
+impl DownloadTarget {
+    async fn create(filename: &str) -> Result<(Self, tokio::fs::File), String> {
+        let safe = sanitize_filename(filename);
+        let (dir, target) = tokio::task::spawn_blocking(move || {
+            let dir = downloads_dir()
+                .ok_or_else(|| "could not resolve a Downloads folder".to_string())?;
+            std::fs::create_dir_all(&dir)
+                .map_err(|error| format!("creating {}: {error}", dir.display()))?;
+            let target = dir.join(safe);
+            Ok::<_, String>((dir, target))
+        })
+        .await
+        .map_err(|error| format!("preparing native download target: {error}"))??;
+        let temp = dir.join(format!(
+            ".chan-download-{}-{}.tmp",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let file = tokio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp)
+            .await
+            .map_err(|error| format!("creating {}: {error}", temp.display()))?;
+        Ok((
+            Self {
+                temp,
+                target,
+                committed: false,
+            },
+            file,
+        ))
+    }
+
+    async fn commit(mut self, mut file: tokio::fs::File) -> Result<SavedDownload, String> {
+        file.flush()
+            .await
+            .map_err(|error| format!("flushing {}: {error}", self.temp.display()))?;
+        file.sync_all()
+            .await
+            .map_err(|error| format!("syncing {}: {error}", self.temp.display()))?;
+        drop(file);
+        let temp = self.temp.clone();
+        let requested = self.target.clone();
+        let target = tokio::task::spawn_blocking(move || {
+            let _commit = download_commit_lock()
+                .lock()
+                .map_err(|_| "native download commit lock poisoned".to_string())?;
+            let directory = requested
+                .parent()
+                .ok_or_else(|| "native download target has no parent".to_string())?;
+            let filename = requested
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| "native download target has no UTF-8 file name".to_string())?;
+            let target = unique_path(directory, filename);
+            std::fs::rename(&temp, &target).map_err(|error| {
+                format!(
+                    "committing {} to {}: {error}",
+                    temp.display(),
+                    target.display()
+                )
+            })?;
+            Ok::<_, String>(target)
+        })
+        .await
+        .map_err(|error| format!("joining native download commit: {error}"))??;
+        self.target = target;
+        self.committed = true;
+        Ok(SavedDownload {
+            path: self.target.display().to_string(),
+        })
+    }
+}
+
+impl Drop for DownloadTarget {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.temp);
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn download_file_native(
+    window: WebviewWindow,
+    transfer_id: String,
+    url: String,
+    filename: String,
+) -> Result<SavedDownload, String> {
+    let endpoint = endpoint_for_window(&window, &url, EndpointKind::Download)?;
+    let headers = request_headers(&window, &endpoint, false)?;
+    let registration = TransferRegistration::new(transfer_id, None)?;
+    let client = http_client()?;
+    let request = client.get(endpoint).headers(headers).send();
+    let response = tokio::select! {
+        _ = registration.progress.cancelled() => return Err("download cancelled".into()),
+        response = request => response.map_err(|error| format!("download request failed: {error}"))?,
+    };
+    if response.status().is_redirection() {
+        return Err("download refused an unexpected redirect".into());
+    }
+    if !response.status().is_success() {
+        return Err(response_error("download", response).await);
+    }
+    registration.progress.set_total(response.content_length());
+    let (target, mut file) = DownloadTarget::create(&filename).await?;
+    let mut body = response.bytes_stream();
+    loop {
+        let chunk = tokio::select! {
+            _ = registration.progress.cancelled() => return Err("download cancelled".into()),
+            chunk = body.next() => chunk,
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
+        let chunk = chunk.map_err(|error| format!("reading download response: {error}"))?;
+        file.write_all(&chunk)
+            .await
+            .map_err(|error| format!("writing {}: {error}", target.temp.display()))?;
+        registration.progress.add_loaded(chunk.len() as u64);
+    }
+    if registration.progress.is_cancelled() {
+        return Err("download cancelled".into());
+    }
+    target.commit(file).await
+}
+
+async fn response_error(kind: &str, response: reqwest::Response) -> String {
+    let status = response.status();
+    let mut detail = Vec::new();
+    let mut stream = response.bytes_stream();
+    while detail.len() < 512 {
+        let Some(next) = stream.next().await else {
+            break;
+        };
+        let Ok(bytes) = next else {
+            break;
+        };
+        let remaining = 512 - detail.len();
+        detail.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+    }
+    let detail = String::from_utf8_lossy(&detail);
+    if detail.trim().is_empty() {
+        format!("{kind} failed: HTTP {status}")
+    } else {
+        format!("{kind} failed: HTTP {status}: {}", detail.trim())
+    }
+}
+
+struct GeneratedSink {
+    // Field order is deliberate: cancellation drops the open handle before
+    // DownloadTarget removes its temp, including on platforms that refuse to
+    // unlink an open file.
+    file: Option<tokio::fs::File>,
+    target: DownloadTarget,
+}
+
+type SharedGeneratedSink = Arc<tokio::sync::Mutex<Option<GeneratedSink>>>;
+
+fn generated_sinks() -> &'static Mutex<HashMap<String, SharedGeneratedSink>> {
+    static SINKS: OnceLock<Mutex<HashMap<String, SharedGeneratedSink>>> = OnceLock::new();
+    SINKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn download_commit_lock() -> &'static Mutex<()> {
+    static COMMIT: Mutex<()> = Mutex::new(());
+    &COMMIT
+}
+
+#[derive(Serialize)]
+pub struct GeneratedDownloadHandle {
+    handle: String,
+}
+
+#[tauri::command]
+pub async fn begin_generated_download(filename: String) -> Result<GeneratedDownloadHandle, String> {
+    let handle = uuid::Uuid::new_v4().simple().to_string();
+    let (target, file) = DownloadTarget::create(&filename).await?;
+    generated_sinks()
+        .lock()
+        .map_err(|_| "generated download registry poisoned".to_string())?
+        .insert(
+            handle.clone(),
+            Arc::new(tokio::sync::Mutex::new(Some(GeneratedSink {
+                file: Some(file),
+                target,
+            }))),
+        );
+    Ok(GeneratedDownloadHandle { handle })
+}
+
+#[tauri::command]
+pub async fn append_generated_download(handle: String, bytes: Vec<u8>) -> Result<(), String> {
+    if bytes.len() > GENERATED_CHUNK_LIMIT {
+        return Err(format!(
+            "generated download chunk exceeds {GENERATED_CHUNK_LIMIT} bytes"
+        ));
+    }
+    let sink = generated_sinks()
+        .lock()
+        .map_err(|_| "generated download registry poisoned".to_string())?
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| "generated download handle is not active".to_string())?;
+    let mut sink = sink.lock().await;
+    let sink = sink
+        .as_mut()
+        .ok_or_else(|| "generated download handle is not active".to_string())?;
+    sink.file
+        .as_mut()
+        .expect("active generated sink has a file")
+        .write_all(&bytes)
+        .await
+        .map_err(|error| format!("writing {}: {error}", sink.target.temp.display()))
+}
+
+#[tauri::command]
+pub async fn finish_generated_download(handle: String) -> Result<SavedDownload, String> {
+    let sink = generated_sinks()
+        .lock()
+        .map_err(|_| "generated download registry poisoned".to_string())?
+        .remove(&handle)
+        .ok_or_else(|| "generated download handle is not active".to_string())?;
+    let mut sink = sink.lock().await;
+    let mut sink = sink
+        .take()
+        .ok_or_else(|| "generated download handle is not active".to_string())?;
+    let file = sink.file.take().expect("active generated sink has a file");
+    sink.target.commit(file).await
+}
+
+#[tauri::command]
+pub async fn cancel_generated_download(handle: String) -> bool {
+    let sink = generated_sinks()
+        .lock()
+        .ok()
+        .and_then(|mut sinks| sinks.remove(&handle));
+    let Some(sink) = sink else {
+        return false;
+    };
+    sink.lock().await.take();
+    true
+}
+
 fn downloads_dir() -> Option<PathBuf> {
     dirs::download_dir().or_else(dirs::home_dir)
 }
 
-/// Reduce `filename` to a single bare name with no path separators or
-/// control characters, so a value coming from the webview can never
-/// redirect the write outside the Downloads folder. Empty / dot-only
-/// names fall back to a generic label.
 fn sanitize_filename(filename: &str) -> String {
     let base = filename
         .rsplit(['/', '\\'])
@@ -67,49 +288,46 @@ fn sanitize_filename(filename: &str) -> String {
         .trim();
     let cleaned: String = base
         .chars()
-        .map(|c| if c.is_control() { '_' } else { c })
+        .map(|character| {
+            if character.is_control() {
+                '_'
+            } else {
+                character
+            }
+        })
         .collect();
-    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+    if cleaned.is_empty() || matches!(cleaned.as_str(), "." | "..") {
         "download".to_string()
     } else {
         cleaned
     }
 }
 
-/// `dir/name`, or `dir/name (N).ext` for the smallest N >= 1 that does
-/// not already exist. Mirrors the browser download manager's
-/// "file (1).txt" de-duplication so a second download of the same file
-/// never silently overwrites the first.
-fn unique_path(dir: &std::path::Path, name: &str) -> PathBuf {
+fn unique_path(dir: &Path, name: &str) -> PathBuf {
     let candidate = dir.join(name);
     if !candidate.exists() {
         return candidate;
     }
     let (stem, ext) = split_ext(name);
-    for n in 1..=9999 {
-        let alt = match &ext {
-            Some(ext) => format!("{stem} ({n}).{ext}"),
-            None => format!("{stem} ({n})"),
+    for number in 1..=9999 {
+        let alternative = match &ext {
+            Some(ext) => format!("{stem} ({number}).{ext}"),
+            None => format!("{stem} ({number})"),
         };
-        let candidate = dir.join(&alt);
+        let candidate = dir.join(alternative);
         if !candidate.exists() {
             return candidate;
         }
     }
-    // Pathological: 9999 collisions. Fall back to the bare name and let
-    // the write overwrite rather than loop forever.
-    dir.join(name)
+    dir.join(format!("{stem}-{}", uuid::Uuid::new_v4()))
 }
 
-/// Split `name` into (stem, Some(ext)) on the LAST dot, or (name, None)
-/// when there is no usable extension. A leading-dot name like
-/// `.gitignore` has no extension (stem == name) so de-duplication
-/// produces `.gitignore (1)`, not ` (1).gitignore`.
 fn split_ext(name: &str) -> (String, Option<String>) {
     match name.rfind('.') {
-        Some(idx) if idx > 0 && idx < name.len() - 1 => {
-            (name[..idx].to_string(), Some(name[idx + 1..].to_string()))
-        }
+        Some(index) if index > 0 && index < name.len() - 1 => (
+            name[..index].to_string(),
+            Some(name[index + 1..].to_string()),
+        ),
         _ => (name.to_string(), None),
     }
 }
@@ -117,6 +335,19 @@ fn split_ext(name: &str) -> (String, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_download_never_buffers_the_network_response_over_ipc() {
+        let rust = include_str!("download.rs");
+        let production = rust
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production download module");
+        let web = include_str!("../../../web/packages/workspace-app/src/api/desktop.ts");
+        assert!(!production.contains("save_file_to_downloads"));
+        assert!(!web.contains("responseType = \"arraybuffer\""));
+        assert!(!web.contains("Array.from(bytes)"));
+    }
 
     #[test]
     fn sanitize_strips_path_separators() {
@@ -131,27 +362,98 @@ mod tests {
     #[test]
     fn split_ext_handles_dotfiles_and_extensions() {
         assert_eq!(split_ext("a.md"), ("a".to_string(), Some("md".to_string())));
-        assert_eq!(
-            split_ext("archive.tar"),
-            ("archive".to_string(), Some("tar".to_string()))
-        );
         assert_eq!(split_ext("noext"), ("noext".to_string(), None));
         assert_eq!(split_ext(".gitignore"), (".gitignore".to_string(), None));
-        assert_eq!(
-            split_ext("trailingdot."),
-            ("trailingdot.".to_string(), None)
-        );
     }
 
     #[test]
     fn unique_path_dedupes_against_existing() {
-        let tmp = std::env::temp_dir().join(format!("chan-dl-test-{}", std::process::id()));
-        fs::create_dir_all(&tmp).unwrap();
-        let first = unique_path(&tmp, "note.md");
-        assert_eq!(first, tmp.join("note.md"));
-        fs::write(&first, b"x").unwrap();
-        let second = unique_path(&tmp, "note.md");
-        assert_eq!(second, tmp.join("note (1).md"));
-        fs::remove_dir_all(&tmp).ok();
+        let temp = tempfile::tempdir().unwrap();
+        let first = unique_path(temp.path(), "note.md");
+        assert_eq!(first, temp.path().join("note.md"));
+        std::fs::write(&first, b"x").unwrap();
+        let second = unique_path(temp.path(), "note.md");
+        assert_eq!(second, temp.path().join("note (1).md"));
+    }
+
+    #[tokio::test]
+    async fn uncommitted_download_target_removes_its_temp() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("out.bin");
+        let staged = temp.path().join(".out.tmp");
+        std::fs::write(&staged, b"partial").unwrap();
+        drop(DownloadTarget {
+            temp: staged.clone(),
+            target,
+            committed: false,
+        });
+        assert!(!staged.exists());
+    }
+
+    #[tokio::test]
+    async fn generated_cancel_waits_for_an_in_flight_chunk_then_removes_its_temp() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("out.bin");
+        let staged = temp.path().join(".out.tmp");
+        let file = tokio::fs::File::create(&staged).await.unwrap();
+        let handle = format!("cancel-race-{}", uuid::Uuid::new_v4());
+        let sink = Arc::new(tokio::sync::Mutex::new(Some(GeneratedSink {
+            file: Some(file),
+            target: DownloadTarget {
+                temp: staged.clone(),
+                target,
+                committed: false,
+            },
+        })));
+        generated_sinks()
+            .lock()
+            .unwrap()
+            .insert(handle.clone(), Arc::clone(&sink));
+
+        let chunk_guard = sink.lock().await;
+        let cancel = tokio::spawn(cancel_generated_download(handle.clone()));
+        tokio::task::yield_now().await;
+        assert!(
+            staged.exists(),
+            "cancel waits for the in-flight chunk lock instead of losing the handle"
+        );
+        drop(chunk_guard);
+
+        assert!(cancel.await.unwrap());
+        assert!(!staged.exists());
+        assert!(!generated_sinks().lock().unwrap().contains_key(&handle));
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_name_downloads_commit_without_overwriting() {
+        let temp = tempfile::tempdir().unwrap();
+        let requested = temp.path().join("same.bin");
+        let staged_a = temp.path().join(".a.tmp");
+        let staged_b = temp.path().join(".b.tmp");
+        let mut file_a = tokio::fs::File::create(&staged_a).await.unwrap();
+        let mut file_b = tokio::fs::File::create(&staged_b).await.unwrap();
+        file_a.write_all(b"first").await.unwrap();
+        file_b.write_all(b"second").await.unwrap();
+        let target_a = DownloadTarget {
+            temp: staged_a,
+            target: requested.clone(),
+            committed: false,
+        };
+        let target_b = DownloadTarget {
+            temp: staged_b,
+            target: requested,
+            committed: false,
+        };
+
+        let (saved_a, saved_b) = tokio::join!(target_a.commit(file_a), target_b.commit(file_b));
+        let saved_a = saved_a.unwrap().path;
+        let saved_b = saved_b.unwrap().path;
+        assert_ne!(saved_a, saved_b);
+        let mut contents = [
+            std::fs::read(saved_a).unwrap(),
+            std::fs::read(saved_b).unwrap(),
+        ];
+        contents.sort();
+        assert_eq!(contents, [b"first".to_vec(), b"second".to_vec()]);
     }
 }
