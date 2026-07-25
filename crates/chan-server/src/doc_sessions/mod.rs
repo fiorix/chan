@@ -2116,6 +2116,190 @@ pub fn spawn_reconciler(
 }
 
 #[cfg(test)]
+pub(crate) fn characterization_lifecycle_trace(
+) -> crate::collab_sessions::characterization::LifecycleTrace {
+    use crate::collab_sessions::characterization::{ConflictTrace, LifecycleTrace};
+
+    let mut state = SessionState::Clean;
+    state.mark_dirty(1);
+    let first_dirty = state.dirty_since().expect("clean state becomes dirty");
+    state.mark_dirty(2);
+    let first_dirty_instant_preserved = state.dirty_since() == Some(first_dirty);
+
+    state.observe_content(7, Some(8));
+    let observation_preserves_dirty_instant = state.dirty_since() == Some(first_dirty);
+    let same_observation_matches = matches!(
+        state.content_observation(),
+        Some((hash, mtime_ns, _)) if hash == 7 && mtime_ns == Some(8)
+    );
+    let changed_hash_does_not_match = !matches!(
+        state.content_observation(),
+        Some((hash, mtime_ns, _)) if hash == 9 && mtime_ns == Some(8)
+    );
+    let changed_mtime_does_not_match = !matches!(
+        state.content_observation(),
+        Some((hash, mtime_ns, _)) if hash == 7 && mtime_ns == Some(10)
+    );
+    state.clear_observation();
+    let clear_observation_restores_dirty = matches!(
+        state,
+        SessionState::Dirty { since } if since == first_dirty
+    );
+
+    let mut state = SessionState::Conflicted(SessionConflict {
+        id: "conflict".into(),
+        baseline_version: 11,
+        disk_version: 22,
+        authority_version: 33,
+        disk_mtime_ns: Some(55),
+        disk_content: "disk".into(),
+    });
+    state.mark_dirty(44);
+    let conflict_is_dirty = state.is_dirty();
+    state.clear_after_flush();
+    let SessionState::Conflicted(conflict) = state else {
+        panic!("flush clearing must retain a conflict");
+    };
+    let conflict = ConflictTrace {
+        id_retained: conflict.id == "conflict",
+        baseline_version: conflict.baseline_version,
+        disk_version: conflict.disk_version,
+        authority_version: conflict.authority_version,
+        disk_mtime_ns: conflict.disk_mtime_ns,
+        disk_content: conflict.disk_content,
+    };
+
+    let mut removed = SessionState::Removed;
+    removed.clear_after_flush();
+
+    LifecycleTrace {
+        first_dirty_instant_preserved,
+        observation_preserves_dirty_instant,
+        clear_observation_restores_dirty,
+        same_observation_matches,
+        changed_hash_does_not_match,
+        changed_mtime_does_not_match,
+        conflict_is_dirty,
+        conflict,
+        removed_survives_flush_clear: matches!(removed, SessionState::Removed),
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn characterization_http_trace(
+) -> crate::collab_sessions::characterization::HttpTrace {
+    use crate::collab_sessions::characterization::{HttpOutcomeTrace, HttpTrace, HttpViewTrace};
+
+    fn outcome(outcome: HttpReplaceOutcome, expected_token: Option<i64>) -> HttpOutcomeTrace {
+        match outcome {
+            HttpReplaceOutcome::Applied => panic!("characterization expected a refusal"),
+            HttpReplaceOutcome::PreconditionRequired {
+                current_version,
+                disk_mtime_ns,
+            } => HttpOutcomeTrace::PreconditionRequired {
+                current_version,
+                token_matches: disk_mtime_ns == expected_token,
+            },
+            HttpReplaceOutcome::Stale {
+                current_version,
+                disk_mtime_ns,
+            } => HttpOutcomeTrace::Stale {
+                current_version,
+                token_matches: disk_mtime_ns == expected_token,
+            },
+            HttpReplaceOutcome::Conflicted { disk_mtime_ns } => HttpOutcomeTrace::Conflicted {
+                token_matches: disk_mtime_ns == expected_token,
+            },
+        }
+    }
+
+    fn view(session: &DocSession, expected_conflict_token: Option<Option<i64>>) -> HttpViewTrace {
+        let read = session.http_read_view();
+        let write = session.http_write_view();
+        HttpViewTrace {
+            authority_version: read.authority_version,
+            read_write_version_match: read.authority_version == write.authority_version,
+            read_write_token_match: read.disk_mtime_ns == write.disk_mtime_ns,
+            disk_conflicted: read.disk_conflicted,
+            conflict_layer_present: write.conflict_mtime_ns.is_some(),
+            conflict_token_matches: write.conflict_mtime_ns == expected_conflict_token,
+        }
+    }
+
+    let config = tempfile::tempdir().expect("config tempdir");
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let library =
+        chan_workspace::Library::open_at(config.path().join("config.toml")).expect("library");
+    library
+        .register_workspace(root.path())
+        .expect("register workspace");
+    let workspace = library.open_workspace(root.path()).expect("workspace");
+    workspace.write_text("a.md", "base").expect("seed");
+    let stat = workspace.stat("a.md").expect("seed stat");
+    let session = Arc::new(DocSession::new("a.md", "base".into(), &stat));
+    let initial_token = session.http_write_view().disk_mtime_ns;
+
+    let precondition_required = outcome(
+        session
+            .apply_http_replace("$http", "local", WritePreconditions::default())
+            .expect("precondition outcome"),
+        initial_token,
+    );
+    let stale = outcome(
+        session
+            .apply_http_replace(
+                "$http",
+                "local",
+                WritePreconditions {
+                    expected_mtime_ns: initial_token,
+                    authority_version: Some(99),
+                    ..WritePreconditions::default()
+                },
+            )
+            .expect("stale outcome"),
+        initial_token,
+    );
+
+    workspace.write_text("a.md", "disk").expect("disk side");
+    let disk_stat = workspace.stat("a.md").expect("disk stat");
+    session.test_force_conflict("disk".into(), &disk_stat);
+    let conflicted = outcome(
+        session
+            .apply_http_replace("$http", "local", WritePreconditions::default())
+            .expect("conflict outcome"),
+        disk_stat.mtime_ns,
+    );
+    let conflicted_view = view(&session, Some(disk_stat.mtime_ns));
+
+    assert!(session.reload_conflict());
+    let reloaded_view = view(&session, None);
+
+    session
+        .apply_replace("$http", "disk local")
+        .expect("local replacement");
+    workspace
+        .write_text("a.md", "disk external")
+        .expect("second disk side");
+    let second_disk_stat = workspace.stat("a.md").expect("second disk stat");
+    session.test_force_conflict("disk external".into(), &second_disk_stat);
+    assert!(
+        session
+            .overwrite_conflict(&workspace, &SelfWrites::new())
+            .await
+    );
+    let overwritten_view = view(&session, None);
+
+    HttpTrace {
+        precondition_required,
+        stale,
+        conflicted,
+        conflicted_view,
+        reloaded_view,
+        overwritten_view,
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::{json, Value};
