@@ -362,10 +362,12 @@ fn spawn_coordinator(
                     break;
                 }
                 if recovery.active.is_some() {
+                    drop(workspace_w);
                     tokio::time::sleep(Duration::from_millis(10)).await;
                     continue;
                 }
                 let Some(pass) = workspace_w.begin_recovery() else {
+                    drop(workspace_w);
                     tokio::time::sleep(Duration::from_millis(10)).await;
                     continue;
                 };
@@ -379,11 +381,15 @@ fn spawn_coordinator(
                     };
                     break;
                 }
+                drop(workspace_w);
                 let delay = next_start_at.saturating_duration_since(Instant::now());
                 if !delay.is_zero() {
                     tokio::time::sleep(delay).await;
                 }
 
+                let Some(workspace_for_pass) = workspace.upgrade() else {
+                    return;
+                };
                 let status_w = shared.status.clone();
                 let cancel_w = shared.cancel.clone();
                 let progress_w = progress_sink.clone();
@@ -394,8 +400,7 @@ fn spawn_coordinator(
                     total: 0,
                     file: String::new(),
                 };
-                let workspace_weak = Arc::downgrade(&workspace_w);
-                let workspace_for_pass = Arc::clone(&workspace_w);
+                let workspace_weak = Arc::downgrade(&workspace_for_pass);
                 let result = tokio::task::spawn_blocking(move || {
                     let progress = StatusUpdater {
                         status: status_w,
@@ -418,6 +423,9 @@ fn spawn_coordinator(
                     RecoveryOutcome::Complete
                 } else {
                     RecoveryOutcome::Retry
+                };
+                let Some(workspace_w) = workspace.upgrade() else {
+                    return;
                 };
                 let recovery = match workspace_w.finish_recovery(pass, outcome) {
                     Ok(recovery) => recovery,
