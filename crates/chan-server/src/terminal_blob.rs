@@ -42,22 +42,23 @@ pub fn put(dir: &Path, key: &str, content: &[u8]) -> std::io::Result<()> {
             "invalid session key",
         ));
     };
-    std::fs::create_dir_all(dir)?;
-    // Leading-dot tmp: a valid key can never start with `.`, so this never
-    // collides with another key's blob (even a key like `foo.bar`), and
-    // `list` skips it (it fails `safe_key`).
-    let tmp = dir.join(format!(".{key}.tmp"));
-    {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(content)?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, &path)?;
-    // Best-effort dirent durability, matching the workspace store + the
-    // devserver config write.
-    let _ = chan_workspace::fs_ops::sync_dir(dir);
-    Ok(())
+    crate::atomic_file::write(&path, content, None)
+}
+
+#[cfg(test)]
+fn put_with_pre_persist_hook(
+    dir: &Path,
+    key: &str,
+    content: &[u8],
+    pre_persist: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let Some(path) = key_path(dir, key) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid session key",
+        ));
+    };
+    crate::atomic_file::write_with_pre_persist_hook(&path, content, None, pre_persist)
 }
 
 /// Read `key`'s blob, or `None` when it is absent or the key is invalid.
@@ -107,7 +108,119 @@ pub fn delete(dir: &Path, key: &str) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+
     use super::*;
+
+    #[test]
+    fn simultaneous_same_key_writes_publish_complete_bodies() {
+        let dir = tempfile::tempdir().unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let bodies: [&[u8]; 2] = [b"layout-from-a", b"layout-from-b"];
+
+        let results = std::thread::scope(|scope| {
+            let first = {
+                let barrier = barrier.clone();
+                let dir = dir.path();
+                let body = bodies[0];
+                scope.spawn(move || {
+                    put_with_pre_persist_hook(dir, "terminal-1", body, |_| {
+                        barrier.wait();
+                        Ok(())
+                    })
+                })
+            };
+            let second = {
+                let barrier = barrier.clone();
+                let dir = dir.path();
+                let body = bodies[1];
+                scope.spawn(move || {
+                    put_with_pre_persist_hook(dir, "terminal-1", body, |_| {
+                        barrier.wait();
+                        Ok(())
+                    })
+                })
+            };
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+
+        assert!(
+            results.iter().all(Result::is_ok),
+            "both writes must publish successfully: {results:?}"
+        );
+        let published = get(dir.path(), "terminal-1").unwrap().unwrap();
+        assert!(
+            bodies.contains(&published.as_slice()),
+            "published bytes must be one complete submitted body"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn simultaneous_different_key_writes_do_not_interfere() {
+        let dir = tempfile::tempdir().unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let results = std::thread::scope(|scope| {
+            let first = {
+                let barrier = barrier.clone();
+                let dir = dir.path();
+                scope.spawn(move || {
+                    put_with_pre_persist_hook(dir, "terminal-1", b"layout-a", |_| {
+                        barrier.wait();
+                        Ok(())
+                    })
+                })
+            };
+            let second = {
+                let barrier = barrier.clone();
+                let dir = dir.path();
+                scope.spawn(move || {
+                    put_with_pre_persist_hook(dir, "terminal-2", b"layout-b", |_| {
+                        barrier.wait();
+                        Ok(())
+                    })
+                })
+            };
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+
+        assert!(
+            results.iter().all(Result::is_ok),
+            "both writes must publish successfully: {results:?}"
+        );
+        assert_eq!(
+            get(dir.path(), "terminal-1").unwrap().as_deref(),
+            Some(&b"layout-a"[..])
+        );
+        assert_eq!(
+            get(dir.path(), "terminal-2").unwrap().as_deref(),
+            Some(&b"layout-b"[..])
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn pre_persist_failure_preserves_target_and_removes_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), "terminal-1", b"prior-layout").unwrap();
+
+        let result = put_with_pre_persist_hook(dir.path(), "terminal-1", b"replacement", |tmp| {
+            assert!(tmp.exists(), "temporary file exists before publication");
+            Err(std::io::Error::other("injected pre-persist failure"))
+        });
+
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::Other,
+            "injected failure is surfaced"
+        );
+        assert_eq!(
+            get(dir.path(), "terminal-1").unwrap().as_deref(),
+            Some(&b"prior-layout"[..])
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn put_get_list_delete_round_trip() {
@@ -126,9 +239,8 @@ mod tests {
             list(d).unwrap(),
             vec!["terminal-1".to_string(), "terminal-2".to_string()]
         );
-        // Atomic write leaves no (leading-dot) tmp behind, and it never shows
-        // up in `list`.
-        assert!(!d.join(".terminal-1.tmp").exists());
+        // Atomic writes leave only the published blobs.
+        assert_eq!(std::fs::read_dir(d).unwrap().count(), 2);
 
         delete(d, "terminal-1").unwrap();
         assert!(get(d, "terminal-1").unwrap().is_none());
@@ -177,5 +289,6 @@ mod tests {
         }
         // Nothing escaped the dir.
         assert!(list(d).unwrap().is_empty());
+        assert_eq!(std::fs::read_dir(d).unwrap().count(), 0);
     }
 }
