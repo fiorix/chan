@@ -1,6 +1,6 @@
 <script lang="ts">
   // chan-reports toggle for the "This workspace" settings tab. Per-workspace:
-  // IndexConfig.reports_enabled is the source of truth, written immediately
+  // DashboardConfig.reports_enabled is the source of truth, written immediately
   // through the reports endpoints.
 
   import { onMount } from "svelte";

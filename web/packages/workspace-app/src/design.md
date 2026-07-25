@@ -7,7 +7,7 @@ Design reference for the chan web frontend: first the two web SPAs and how each 
 chan ships **two** Svelte 5 + Vite web SPAs, both embedded into chan-server as bundles and both built on the color system below:
 
 - **The main SPA** is served as the workspace tenant fallback. The server stamps boot metadata for the URL mount prefix and whether Settings is disabled, so a reverse-proxied instance builds correct `/api` URLs and can grey restricted controls.
-- **The launcher SPA** is served at the host/library root `/` through the `WorkspaceHost` root fallback. It reads `<meta chan-launcher-readonly>` to hide mutation controls on read-only surfaces. The launcher is reached on **all three surfaces** -- devserver/tunnel, gateway-proxied (`{owner}.devserver.chan.app/`), and desktop loopback -- the same bundle per-surface installed, with per-surface auth (None tunnel-trust / Some loopback window token) and a read-only-gateway vs full-loopback workspace-mutation split. Its serving and auth contract is documented in the launcher design doc.
+- **The launcher SPA** is served at the host/library root `/` through the `WorkspaceHost` root fallback. It reads `<meta name="chan-launcher-surface">` to derive registry-mutation, desktop-bridge, and self-managed-window capabilities. The launcher is reached on **all three surfaces** -- devserver/tunnel, gateway-proxied (`{owner}.devserver.chan.app/`), and desktop loopback -- the same bundle per-surface installed, with per-surface auth (None tunnel-trust / Some loopback window token) and a read-only-gateway vs full-loopback workspace-mutation split. Its serving and auth contract is documented in the launcher design doc.
 
 The two are complementary: the launcher is the cross-workspace registry (pick / add / toggle a workspace, mint a window), and opening a workspace window lands the user in the main SPA. Both honor the theme axes + canonical palette below, so a launcher served over a tunnel and the workspace UI on loopback read identically.
 
@@ -17,7 +17,7 @@ flowchart TB
         WAPP["workspace app · editor · file browser · graph · terminals · dashboard<br/>over /api/* (files · drafts · index · contacts · config · fs/transfer · /ws)<br/>reads &lt;meta chan-prefix&gt; + &lt;meta chan-settings-disabled&gt;"]
     end
     subgraph launcher["launcher SPA (the registry)"]
-        LAPP["TopBar · WorkspaceList · WindowFeed · NewWorkspaceDialog<br/>pure /api/library/* client (workspaces · windows · devservers)<br/>reads &lt;meta chan-launcher-readonly&gt; → hides mutation controls"]
+        LAPP["TopBar · WorkspaceList · WindowFeed · NewWorkspaceDialog<br/>pure /api/library/* client (workspaces · windows · devservers)<br/>reads &lt;meta chan-launcher-surface&gt; → gates capabilities"]
     end
     subgraph cs["chan-server -- two embedded bundles"]
         WEBA["workspace bundle<br/>static fallback + injected boot metadata (workspace tenant)"]

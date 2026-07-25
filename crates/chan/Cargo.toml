@@ -30,8 +30,7 @@ embed-model = ["embeddings", "chan-server/embed-model"]
 # runtime host (libnvrtc, libcublas, libcurand, libcudart): candle's
 # cudarc dep uses dynamic-linking, not dlopen-style fallback, so
 # DT_NEEDED entries land in the ELF and the binary won't launch
-# without those .so files in the loader path. CHAN_DISABLE_GPU=1
-# still forces CPU at runtime once the binary is loaded.
+# without those .so files in the loader path.
 cuda = ["chan-workspace/cuda", "chan-server/cuda"]
 
 [dependencies]

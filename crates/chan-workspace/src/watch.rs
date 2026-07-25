@@ -1323,14 +1323,6 @@ fn relativize(root: &Path, p: &Path) -> Option<String> {
     Some(rel.to_string_lossy().replace('\\', "/"))
 }
 
-/// Re-exported for callers who want the absolute path that was
-/// touched. Not currently surfaced through `WatchEvent`; add when
-/// a consumer needs it.
-#[allow(dead_code)]
-pub(crate) fn _abs(root: &Path, rel: &str) -> PathBuf {
-    root.join(rel)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -159,20 +159,14 @@ impl LauncherSurface {
             LauncherSurface::ReadOnly => "readonly",
         }
     }
-
-    /// Whether workspace mutation is gated out (the tunnel-trust surface).
-    fn read_only(self) -> bool {
-        matches!(self, LauncherSurface::ReadOnly)
-    }
 }
 
 /// Single-page-app fallback for the launcher bundle, mirroring
 /// [`serve_static`] but for [`LauncherAssets`]. Stateless: the launcher
 /// always mounts at the devserver/library root `/`, so there is no
 /// per-workspace prefix to inject. The index gets a
-/// `<meta name="chan-launcher-surface">` hint (plus the legacy
-/// `chan-launcher-readonly` on the read-only surface) so the SPA splits its
-/// capabilities without a probe round-trip. `/api`/`/ws` misses still 404
+/// `<meta name="chan-launcher-surface">` hint so the SPA splits its capabilities
+/// without a probe round-trip. `/api`/`/ws` misses still 404
 /// rather than returning the SPA shell, so the launcher's `/api/library/*`
 /// calls and the reserved namespace get JSON-style 404s.
 pub async fn serve_launcher(uri: axum::http::Uri, surface: LauncherSurface) -> Response {
@@ -295,9 +289,6 @@ pub fn inject_chan_meta(html: &[u8], prefix: &str, settings_disabled: bool) -> V
 ///   - `<link rel="manifest" href="/manifest.webmanifest">` always, so an
 ///     installable surface (devserver loopback, https gateway) can be added to
 ///     the home screen / dock as a PWA.
-///   - `<meta name="chan-launcher-readonly" content="1">` additionally on the
-///     read-only surface, so a client that has not yet split on the descriptor
-///     still hides its mutation controls instead of showing buttons that 403.
 ///
 /// No-op when `<head>` is absent (returns the original bytes).
 fn inject_launcher_meta(html: &[u8], surface: LauncherSurface) -> Vec<u8> {
@@ -316,9 +307,6 @@ fn inject_launcher_meta(html: &[u8], surface: LauncherSurface) -> Vec<u8> {
     // ephemeral-port desktop loopback simply won't install coherently, which is
     // harmless). Root-absolute href: the launcher is always at the origin root.
     insert.push_str("<link rel=\"manifest\" href=\"/manifest.webmanifest\">");
-    if surface.read_only() {
-        insert.push_str("<meta name=\"chan-launcher-readonly\" content=\"1\">");
-    }
     let after_head = pos + needle.len();
     let mut out = Vec::with_capacity(html.len() + insert.len());
     out.extend_from_slice(&html[..after_head]);
@@ -480,26 +468,19 @@ mod tests {
     #[test]
     fn inject_launcher_meta_advertises_the_surface_descriptor() {
         let html = b"<head><title>x</title></head>";
-        // Desktop and devserver surfaces carry the descriptor but NOT the legacy
-        // read-only meta.
         let desktop =
             String::from_utf8(inject_launcher_meta(html, LauncherSurface::Desktop)).unwrap();
         assert!(desktop.contains("<meta name=\"chan-launcher-surface\" content=\"desktop\">"));
-        assert!(!desktop.contains("chan-launcher-readonly"));
         // The host-os meta is always present.
         assert!(desktop.contains("chan-launcher-host-os"));
 
         let devserver =
             String::from_utf8(inject_launcher_meta(html, LauncherSurface::Devserver)).unwrap();
         assert!(devserver.contains("<meta name=\"chan-launcher-surface\" content=\"devserver\">"));
-        assert!(!devserver.contains("chan-launcher-readonly"));
 
-        // The read-only surface carries the descriptor AND keeps emitting the
-        // legacy meta for a client that has not split on the descriptor yet.
         let readonly =
             String::from_utf8(inject_launcher_meta(html, LauncherSurface::ReadOnly)).unwrap();
         assert!(readonly.contains("<meta name=\"chan-launcher-surface\" content=\"readonly\">"));
-        assert!(readonly.contains("<meta name=\"chan-launcher-readonly\" content=\"1\">"));
 
         // Every surface links the PWA manifest.
         assert!(desktop.contains(r#"<link rel="manifest" href="/manifest.webmanifest">"#));

@@ -163,7 +163,7 @@ Deliberately not included:
 
 `tantivy` 0.24 backs the per-workspace index in sidecar state. BM25 runs over `path`, `filename`, `headings`, and `body`. Schema version lives in the `schema_version` field of the `IndexConfig` struct (alongside the embedding model id and the chunking strategy). Mismatched versions trigger a wipe and full rebuild on next open; user data is unaffected.
 
-The index config doubles as the per-workspace settings store. Beyond the index fields it persists `semantic_enabled` (hybrid-search opt-in, default false), `reports_enabled` (chan-report opt-in, default on for newly created workspaces), `excluded_dirs` (per-workspace walk-filter additions), and the screensaver settings (`screensaver_enabled`, timeout, theme, and a base64-encoded PIN hash that is stored without interpretation and never echoed back over the wire). `Workspace` exposes typed accessors for all of these; writes go through the same atomic-write path as the rest of the config.
+The index config also persists `excluded_dirs`, the per-workspace additions to the walk filter. Presentation and feature toggles live separately in `dashboard.toml`: `semantic_enabled` (hybrid-search opt-in, default false), `reports_enabled` (chan-report opt-in, default true), and the screensaver settings (`screensaver_enabled`, timeout, theme, and a base64-encoded PIN hash that is stored without interpretation and never echoed back over the wire). `Workspace` exposes typed accessors for these settings; dashboard writes serialize through one mutex and use the same atomic-write primitive as the index config.
 
 Two additional config fields, `vectors_model` and `vectors_dim`, describe the model that produced the vectors currently on disk. They are stamped at the end of every successful embed pass. On `Index::open`, if `vectors_model` is set and differs from `model` (the user-configured target), the embeddings dir is wiped and the tracking fields cleared; BM25 segments are preserved because BM25 is model-independent. This closes the silent-corruption window where a hand-edited or upgraded `model` field would otherwise mix vectors from two different models in the same store. A schema-version bump still wipes everything and clears both tracking fields.
 
@@ -397,7 +397,7 @@ Search and graph sidecars are metadata-opened during workspace construction so r
 
 One workspace `write_serial` mutex is the derived-state mutation boundary. It covers per-file graph/BM25 index and forget, pending-journal replay, reconcile as one unit, full rebuild, and warm report watcher updates. Nested bulk paths call lock-assuming per-file helpers, so they do not reacquire the non-reentrant mutex. Search, graph, report snapshot reads, filesystem reads, and bounded file streams never take this lock.
 
-Per-workspace settings live with the index config so search mode, report enablement, excluded dirs, and screensaver policy move with the workspace sidecar rather than with an app-specific preference file.
+Per-workspace settings live in the workspace sidecar rather than an app-specific preference file. Search mode, report enablement, and screensaver policy use `dashboard.toml`; per-workspace excluded dirs remain in the index config.
 
 ### Progress and recovery
 

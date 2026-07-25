@@ -18,8 +18,7 @@
 // `[_MTLCommandBuffer waitUntilCompleted]` on at least one machine;
 // see `select_device`; the GPU-embed investigation is in git history.
 // `CHAN_ENABLE_GPU=1` opts back into the accelerator at runtime
-// without rebuilding. `CHAN_DISABLE_GPU` is still accepted (now a
-// no-op, since CPU is already the default) for back-compat.
+// without rebuilding.
 //
 // Models we accept are listed in `MODELS`. Unknown ids are rejected
 // at open time so the user gets a clear error instead of a panic
@@ -428,35 +427,19 @@ fn l2_normalize(t: &Tensor) -> Result<Tensor, EmbedError> {
 /// intact behind the opt-in so machines with a working Metal/CUDA
 /// stack can still use it for benchmarking.
 ///
-/// `CHAN_DISABLE_GPU` is accepted for back-compat. CPU is already the
-/// default, so it is now a no-op, but honoring it means existing
-/// scripts and docs that set it keep working without surprises.
 /// Pure policy: should the accelerator (Metal/CUDA) be attempted?
 /// Split out from `select_device` so the env-var contract is unit
 /// testable without touching real device init or process-global env.
-///
-/// `disable_gpu` is the presence of `CHAN_DISABLE_GPU` (back-compat,
-/// now redundant since CPU is the default). `enable_gpu` is the
-/// presence of the `CHAN_ENABLE_GPU` opt-in. GPU is attempted only
-/// when the opt-in is set and the (now redundant) disable flag is
-/// not, so `CHAN_DISABLE_GPU` still wins if someone sets both.
-fn want_gpu(disable_gpu: bool, enable_gpu: bool) -> bool {
-    !disable_gpu && enable_gpu
+fn want_gpu(enable_gpu: bool) -> bool {
+    enable_gpu
 }
 
 fn select_device() -> Device {
-    let disable_gpu = std::env::var_os("CHAN_DISABLE_GPU").is_some();
     let enable_gpu = std::env::var_os("CHAN_ENABLE_GPU").is_some();
-    if !want_gpu(disable_gpu, enable_gpu) {
-        if disable_gpu {
-            // Back-compat: CPU is the default now, so this is a no-op,
-            // but we still recognize the variable so it is not unhandled.
-            tracing::info!("embedder: CHAN_DISABLE_GPU set (no-op; CPU is the default), using CPU");
-        } else {
-            tracing::info!(
-                "embedder: using CPU (GPU is opt-in; set CHAN_ENABLE_GPU=1 to enable Metal/CUDA)"
-            );
-        }
+    if !want_gpu(enable_gpu) {
+        tracing::info!(
+            "embedder: using CPU (GPU is opt-in; set CHAN_ENABLE_GPU=1 to enable Metal/CUDA)"
+        );
         return Device::Cpu;
     }
     #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -644,16 +627,12 @@ mod tests {
     }
 
     #[test]
-    fn gpu_is_opt_in_and_disable_wins() {
+    fn gpu_is_opt_in() {
         // Default (neither var): CPU, because the Metal path hangs in
         // [_MTLCommandBuffer waitUntilCompleted] out of the box.
-        assert!(!want_gpu(false, false));
-        // Opt-in only: attempt the accelerator.
-        assert!(want_gpu(false, true));
-        // Back-compat disable alone: still CPU (and a no-op anyway).
-        assert!(!want_gpu(true, false));
-        // Both set: the explicit disable wins over the opt-in.
-        assert!(!want_gpu(true, true));
+        assert!(!want_gpu(false));
+        // Opt-in: attempt the accelerator.
+        assert!(want_gpu(true));
     }
 
     #[test]

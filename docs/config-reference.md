@@ -26,8 +26,6 @@ Source: `crates/chan-server/src/config.rs`.
 
 `GET /api/config` returns the editor and server preference aggregate with a revision. `PATCH /api/config` accepts one owner-specific partial preferences object plus `expected_revision`; stale revisions return `409 config_conflict` with the current aggregate.
 
-Legacy `[reports] enabled = ...` blocks in `server.toml` are ignored on load and omitted on the next save. Per-workspace `IndexConfig.reports_enabled` is the only reports toggle source.
-
 ### `~/.chan/submit.toml` -- agent submit templates
 
 Source: `crates/chan-server/src/submit_config.rs` and `crates/chan-shell/src/submit.rs`.
@@ -89,7 +87,7 @@ Per-workspace entry persisted at registration time:
 | `last_seen_at` | `DateTime<Utc>` | refreshed on open | `chan workspace ls --json` | recency sort |
 | `canonical_path` | transient (`#[serde(skip)]`) | n/a | (internal cache) | symlink-stable comparison |
 
-Workspaces have no persisted display name: the UI titles a workspace by its directory basename, and `PATCH /api/workspace` rejects `name` writes.
+Workspaces have no persisted display name: the UI titles a workspace by its directory basename.
 
 Global registry fields (not per-workspace), persisted in the same `~/.chan/config.toml`:
 
@@ -111,9 +109,16 @@ Source: `crates/chan-workspace/src/index/config.rs`.
 | `chunking` | `Chunking` enum | `Headings` | (internal; no user surface yet) | indexer chunking strategy |
 | `vectors_model` | `Option<String>` | `None` | (internal stamp) | mismatch-wipe trigger on `Index::open` |
 | `vectors_dim` | `Option<u32>` | `None` | (internal stamp) | build-time defensive cross-check |
-| `semantic_enabled` | `bool` | `false` | `chan workspace index enable-semantic/disable-semantic --path <workspace>` + Settings | `Workspace::search` Hybrid default mode |
-| `reports_enabled` | `bool` | `true` on new workspaces; a legacy config.toml omitting the field stays `false` | `chan workspace reports enable/disable --path <workspace> [-y]` + `chan workspace add --reports` | `Workspace::report()` lazy init + `Workspace::boot()` |
 | `excluded_dirs` | `Vec<String>` | `[]` | `GET`/`PUT /api/index/excluded-dirs` | per-workspace additions to the global walk blocklist (exact basenames, any depth, case-insensitive) |
+
+### `<state_dir>/workspaces/<metadata_key>/dashboard.toml` -- `DashboardConfig`
+
+Source: `crates/chan-workspace/src/dashboard.rs`.
+
+| Field | Type | Default | Reachability | Consumers |
+|-------|------|---------|--------------|-----------|
+| `semantic_enabled` | `bool` | `false` | `chan workspace index enable-semantic/disable-semantic --path <workspace>` + Settings | `Workspace::search` Hybrid default mode |
+| `reports_enabled` | `bool` | `true` | `chan workspace reports enable/disable --path <workspace> [-y]` + `chan workspace add --reports` | `Workspace::report()` lazy init + `Workspace::boot()` |
 | `screensaver_enabled` | `bool` | `false` | `PATCH /api/screensaver/state` + Settings | SPA screensaver overlay arming |
 | `screensaver_timeout_secs` | `u32` | `300` | `PATCH /api/screensaver/state` | SPA client-side idle threshold |
 | `screensaver_theme` | `ScreensaverTheme` | `plain` | `PATCH /api/screensaver/state` | overlay scene |

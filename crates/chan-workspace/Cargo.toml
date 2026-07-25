@@ -122,8 +122,7 @@ embeddings = [
 # Apple GPU. The chan binary forwards this automatically on macOS
 # targets via target-conditional feature wiring; you almost never
 # need to set it directly. Enabling it on Linux/Windows fails at
-# build time (objc2-metal is Apple-only). `CHAN_DISABLE_GPU=1` at
-# runtime falls back to CPU without rebuilding.
+# build time (objc2-metal is Apple-only).
 metal = [
     "embeddings",
     "candle-core/metal",
@@ -149,7 +148,7 @@ accelerate = [
 # Linux-only opt-in: `--features cuda` wires candle's CUDA backend.
 # Needs libcuda + libcublas at runtime so default Linux builds stay
 # hermetic. Enabling on macOS fails to compile (cudarc requires the
-# CUDA toolkit). `CHAN_DISABLE_GPU=1` at runtime falls back to CPU.
+# CUDA toolkit).
 cuda = [
     "embeddings",
     "candle-core/cuda",

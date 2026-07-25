@@ -163,19 +163,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_reports_block_is_ignored() {
-        let tmp = TempDir::new().unwrap();
-        let p = tmp.path().join("server.toml");
-        std::fs::write(&p, "[reports]\nenabled = false\n").unwrap();
-        let cfg = ServerConfig::load_from(&p).unwrap();
-        assert_eq!(cfg, ServerConfig::default());
-        cfg.save_to(&p).unwrap();
-        let raw = std::fs::read_to_string(&p).unwrap();
-        assert!(!raw.contains("[reports]"));
-        assert!(!raw.contains("enabled"));
-    }
-
-    #[test]
     fn search_aggression_round_trips_as_nested_config() {
         let tmp = TempDir::new().unwrap();
         let p = tmp.path().join("server.toml");
