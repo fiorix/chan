@@ -374,6 +374,57 @@ impl RecoveryStatus {
     }
 }
 
+/// Consumer-facing readiness projection for server, desktop, and CLI.
+///
+/// This is copied from one recovery-coordinator snapshot and carries no
+/// synchronization primitive or worker handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum WorkspaceReadiness {
+    Ready {
+        generation: WorkspaceGeneration,
+    },
+    Recovering {
+        generation: WorkspaceGeneration,
+        completed_generation: WorkspaceGeneration,
+        required_action: Option<RecoveryAction>,
+        active_generation: Option<WorkspaceGeneration>,
+        pending_generation: Option<WorkspaceGeneration>,
+    },
+}
+
+impl WorkspaceReadiness {
+    pub fn is_ready(self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
+}
+
+impl Default for WorkspaceReadiness {
+    fn default() -> Self {
+        Self::Ready {
+            generation: WorkspaceGeneration::INITIAL,
+        }
+    }
+}
+
+impl From<RecoveryStatus> for WorkspaceReadiness {
+    fn from(status: RecoveryStatus) -> Self {
+        if status.is_ready() {
+            Self::Ready {
+                generation: status.generation,
+            }
+        } else {
+            Self::Recovering {
+                generation: status.generation,
+                completed_generation: status.completed_generation,
+                required_action: status.required_action(),
+                active_generation: status.active.map(|pass| pass.generation),
+                pending_generation: status.pending.map(|pass| pass.generation),
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PersistedStateReadiness {
     Cold,
@@ -941,6 +992,11 @@ impl Workspace {
     /// Snapshot the recovery coordinator without waiting for recovery work.
     pub fn recovery_status(&self) -> RecoveryStatus {
         *self.recovery.lock().unwrap()
+    }
+
+    /// Consumer-facing readiness without exposing the coordinator lock.
+    pub fn readiness(&self) -> WorkspaceReadiness {
+        self.recovery_status().into()
     }
 
     /// Request convergence for a lossy signal such as provider overflow.
@@ -2870,6 +2926,25 @@ impl Workspace {
         Ok(summary)
     }
 
+    /// Execute one full-rebuild pass already claimed from the recovery
+    /// coordinator. The caller owns the matching `finish_recovery` call.
+    pub fn run_full_rebuild_pass(
+        &self,
+        pass: RecoveryPass,
+        cancel: Option<&AtomicBool>,
+        progress: &dyn crate::progress::ProgressCallback,
+        aggression: SearchAggression,
+    ) -> Result<BuildSummary> {
+        if pass.action != RecoveryAction::FullRebuild || self.recovery_status().active != Some(pass)
+        {
+            return Err(ChanError::Io(format!(
+                "full rebuild pass is not active: generation {}",
+                pass.generation.get()
+            )));
+        }
+        self.reindex_with_aggression(cancel, progress, aggression)
+    }
+
     /// Stamp `paths.graph_dir/rebuild.inprogress`. Atomic write so a
     /// crash during marker creation never leaves a half-written file
     /// that would confuse the next open. The file body carries the
@@ -3546,6 +3621,25 @@ impl Workspace {
     pub fn forget_file(&self, rel: &str) -> Result<()> {
         let _serial = self.write_serial.lock().unwrap();
         self.forget_file_serial(rel)
+    }
+
+    /// Drop every graph and search entry at or below a directory path.
+    ///
+    /// Each file remains journal-bracketed so a crash between the graph and
+    /// search commits is replayable on the next open.
+    pub fn forget_subtree(&self, rel: &str) -> Result<usize> {
+        let _serial = self.write_serial.lock().unwrap();
+        let child_prefix = format!("{}/", rel.trim_end_matches('/'));
+        let rel = rel.trim_end_matches('/');
+        let mut paths = self.graph()?.files()?;
+        paths.extend(self.index()?.known_paths()?);
+        paths.retain(|path| path == rel || path.starts_with(&child_prefix));
+        paths.sort();
+        paths.dedup();
+        for path in &paths {
+            self.forget_file_serial(path)?;
+        }
+        Ok(paths.len())
     }
 
     fn forget_file_serial(&self, rel: &str) -> Result<()> {
@@ -4979,6 +5073,31 @@ mod tests {
             .finish_recovery(second, RecoveryOutcome::Complete)
             .unwrap();
         assert!(workspace.recovery_status().is_ready());
+    }
+
+    #[test]
+    fn readiness_projection_exposes_active_and_follow_up_generations() {
+        let (_cfg, _root, workspace) = fixture();
+        let first_generation = workspace.request_policy_recovery(RecoveryAction::Reconcile);
+        let first = workspace.begin_recovery().unwrap();
+        let required_generation = workspace.request_policy_recovery(RecoveryAction::FullRebuild);
+
+        let readiness = workspace.readiness();
+        assert_eq!(
+            serde_json::to_value(readiness).unwrap(),
+            serde_json::json!({
+                "state": "recovering",
+                "generation": required_generation.get(),
+                "completed_generation": 0,
+                "required_action": "full_rebuild",
+                "active_generation": first_generation.get(),
+                "pending_generation": required_generation.get(),
+            })
+        );
+
+        workspace
+            .finish_recovery(first, RecoveryOutcome::Complete)
+            .unwrap();
     }
 
     #[test]

@@ -279,6 +279,11 @@ fn collect_matured(pending: &HashMap<String, Instant>, now: Instant) -> Vec<Stri
         .collect()
 }
 
+fn remove_pending_subtree(pending: &mut HashMap<String, Instant>, prefix: &str) {
+    let child_prefix = format!("{prefix}/");
+    pending.retain(|path, _| path != prefix && !path.starts_with(&child_prefix));
+}
+
 fn apply_event(
     event: WatchEvent,
     pending: &mut HashMap<String, Instant>,
@@ -290,6 +295,7 @@ fn apply_event(
     if event.generation != workspace.scope_policy().generation() {
         return;
     }
+    let is_dir = event.is_dir;
     match event.kind {
         WatchKind::ProviderError => {
             // Stream untrusted: pending entries may be wrong, drop
@@ -308,30 +314,52 @@ fn apply_event(
         },
         WatchKind::Removed => {
             if let Some(p) = event.path {
-                pending.remove(&p);
-                match workspace.forget_file(&p) {
-                    Ok(()) => {
-                        state.forgotten_total.fetch_add(1, Ordering::Relaxed);
+                if is_dir {
+                    remove_pending_subtree(pending, &p);
+                } else {
+                    pending.remove(&p);
+                }
+                let result = if is_dir {
+                    workspace.forget_subtree(&p)
+                } else {
+                    workspace.forget_file(&p).map(|()| 1)
+                };
+                match result {
+                    Ok(forgotten) => {
+                        state
+                            .forgotten_total
+                            .fetch_add(forgotten as u64, Ordering::Relaxed);
                     }
                     Err(e) => {
-                        tracing::warn!(path = %p, ?e, "indexer: forget_file failed");
+                        tracing::warn!(path = %p, ?e, "indexer: forget failed");
                     }
                 }
             }
         }
         WatchKind::Renamed => {
             if let Some(from) = event.path {
-                pending.remove(&from);
-                match workspace.forget_file(&from) {
-                    Ok(()) => {
-                        state.forgotten_total.fetch_add(1, Ordering::Relaxed);
+                if is_dir {
+                    remove_pending_subtree(pending, &from);
+                } else {
+                    pending.remove(&from);
+                }
+                let result = if is_dir {
+                    workspace.forget_subtree(&from)
+                } else {
+                    workspace.forget_file(&from).map(|()| 1)
+                };
+                match result {
+                    Ok(forgotten) => {
+                        state
+                            .forgotten_total
+                            .fetch_add(forgotten as u64, Ordering::Relaxed);
                     }
                     Err(e) => {
-                        tracing::warn!(path = %from, ?e, "indexer: forget_file failed on rename src");
+                        tracing::warn!(path = %from, ?e, "indexer: forget failed on rename src");
                     }
                 }
             }
-            if let Some(to) = event.to {
+            if let Some(to) = event.to.filter(|_| !is_dir) {
                 schedule_pending(pending, to, now, debounce);
             }
         }
@@ -411,6 +439,66 @@ mod tests {
         lib.register_workspace(workspace_dir.path()).unwrap();
         let workspace = lib.open_workspace(workspace_dir.path()).unwrap();
         (cfg, workspace_dir, workspace)
+    }
+
+    fn graph_indexer_state() -> GraphIndexerInner {
+        GraphIndexerInner {
+            stop: AtomicBool::new(false),
+            pending: AtomicUsize::new(0),
+            indexed_total: AtomicU64::new(0),
+            forgotten_total: AtomicU64::new(0),
+            reconciles_total: AtomicU64::new(0),
+            thread: Mutex::new(None),
+            watch: Mutex::new(None),
+        }
+    }
+
+    #[test]
+    fn directory_rename_forgets_source_subtree() {
+        let (_cfg, workspace_dir, workspace) = setup_workspace();
+        for (path, body) in [
+            ("old/a.md", "# A\nold-a-token\n"),
+            ("old/nested/b.md", "# B\nold-b-token\n"),
+            ("keep.md", "# Keep\nkeep-token\n"),
+        ] {
+            workspace.write_text(path, body).unwrap();
+        }
+        workspace.reindex(None).unwrap();
+        std::fs::rename(
+            workspace_dir.path().join("old"),
+            workspace_dir.path().join("moved"),
+        )
+        .unwrap();
+
+        let mut pending = HashMap::new();
+        let state = graph_indexer_state();
+        apply_event(
+            WatchEvent::rename(
+                Some("old".to_string()),
+                Some("moved".to_string()),
+                true,
+                Some(7),
+                workspace.scope_policy().generation(),
+            ),
+            &mut pending,
+            &workspace,
+            &state,
+            Duration::from_millis(DEBOUNCE_TEST_MS),
+            Instant::now(),
+        );
+
+        let graph_paths = workspace.graph().unwrap().files().unwrap();
+        let index_paths = workspace.indexed_paths().unwrap();
+        assert!(
+            graph_paths.iter().all(|path| !path.starts_with("old/")),
+            "directory rename left stale graph rows: {graph_paths:?}"
+        );
+        assert!(
+            index_paths.iter().all(|path| !path.starts_with("old/")),
+            "directory rename left stale search rows: {index_paths:?}"
+        );
+        assert!(graph_paths.iter().any(|path| path == "keep.md"));
+        assert!(index_paths.iter().any(|path| path == "keep.md"));
     }
 
     #[test]

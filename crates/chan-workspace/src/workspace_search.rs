@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     classify, normalize_graph_edges, ContactNode, Edge, EdgeKind, FileClass, Hit, Report, Result,
-    SearchMode, SearchOpts, Workspace,
+    SearchMode, SearchOpts, Workspace, WorkspaceReadiness,
 };
 
 const DEFAULT_LIMIT: u32 = 20;
@@ -84,6 +84,8 @@ pub enum WorkspaceRelationshipKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceSearchResult {
     pub workspace: WorkspaceSearchIdentity,
+    #[serde(default)]
+    pub readiness: WorkspaceReadiness,
     pub search: WorkspaceSearchStatus,
     pub content_hits: Vec<WorkspaceContentHit>,
     pub entity_matches: Vec<WorkspaceEntityMatch>,
@@ -369,8 +371,10 @@ impl Workspace {
             display_name: self.display_name(),
         };
         let (normalized, mut warnings, mut errors) = normalize_request(request);
+        let readiness = self.readiness();
         let mut result = WorkspaceSearchResult {
             workspace: identity,
+            readiness,
             search: WorkspaceSearchStatus {
                 requested: false,
                 ready: true,
@@ -391,6 +395,15 @@ impl Workspace {
             warnings: Vec::new(),
             errors: Vec::new(),
         };
+        if !readiness.is_ready() {
+            result.search.ready = false;
+            errors.push(WorkspaceSearchError::IndexNotReady {
+                message: "workspace derived state is recovering".into(),
+            });
+            result.warnings = warnings;
+            result.errors = errors;
+            return Ok(result);
+        }
         if !errors.is_empty() {
             result.warnings = warnings;
             result.errors = errors;
@@ -465,6 +478,23 @@ impl Workspace {
         result.truncation.graph_edges = traversal_truncation.graph_edges;
         result.truncation.graph_edges_observed = traversal_truncation.graph_edges_observed;
         result.truncation.frontier_stopped = traversal_truncation.frontier_stopped;
+        let final_readiness = self.readiness();
+        if !final_readiness.is_ready() {
+            result.readiness = final_readiness;
+            result.search.ready = false;
+            result.content_hits.clear();
+            result.entity_matches.clear();
+            result.nodes.clear();
+            result.relationships.clear();
+            result.traversal.profiles.clear();
+            result.traversal.spine_forced = false;
+            result.truncation = WorkspaceSearchTruncation::default();
+            errors.push(WorkspaceSearchError::IndexNotReady {
+                message: "workspace derived state entered recovery during the query".into(),
+            });
+        } else {
+            result.readiness = final_readiness;
+        }
         result.warnings = warnings;
         result.errors = errors;
         Ok(result)
@@ -2192,6 +2222,35 @@ mod tests {
             errors.as_slice(),
             [WorkspaceSearchError::InvalidRequest { .. }]
         ));
+    }
+
+    #[test]
+    fn workspace_search_during_recovery_is_explicitly_not_ready() {
+        let (_config, _root, workspace) = open_workspace();
+        workspace
+            .write_text("a.md", "# A\nrecovery-search-token\n")
+            .unwrap();
+        workspace.index_file("a.md").unwrap();
+        workspace.request_recovery(crate::RecoveryAction::Reconcile);
+
+        let result = workspace
+            .workspace_search(&WorkspaceSearchRequest {
+                query: Some("recovery-search-token".into()),
+                domains: vec![WorkspaceSearchDomain::Content],
+                ..WorkspaceSearchRequest::default()
+            })
+            .unwrap();
+
+        assert!(!result.search.ready);
+        assert!(result.content_hits.is_empty());
+        assert!(matches!(
+            result.errors.as_slice(),
+            [WorkspaceSearchError::IndexNotReady { .. }]
+        ));
+        assert_eq!(
+            serde_json::to_value(result.readiness).unwrap()["state"],
+            "recovering"
+        );
     }
 
     #[test]

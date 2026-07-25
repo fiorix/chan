@@ -7,14 +7,12 @@
 //! The snapshot is DERIVED from live state on every poll, so there is no
 //! first-boot flag to persist or reset:
 //!
-//!   - `index` step: the background indexer's `IndexStatus`. Indexing is
-//!     NON-BLOCKING: it never locks the boot overlay. A fresh, large
-//!     workspace is usable as soon as the bootstrap spine exists; the
-//!     initial build runs in the background and its progress surfaces
-//!     through `/api/index/status` + the carousel, not here. This step
-//!     reads `done` for every healthy state (cold build, warm rebuild,
-//!     incremental reindex, idle) and flips to `failed` only on a genuine
-//!     index error, the sole index condition that gates the boot.
+//!   - `index` step: the background indexer's `IndexStatus` plus the
+//!     workspace's authoritative `WorkspaceReadiness`. Progress-only
+//!     indexing on a ready generation stays non-blocking, but pending or
+//!     active recovery reports `running` and locks the overlay until its
+//!     required generation converges. A genuine index error reports
+//!     `failed`.
 //!   - `model` step (embeddings builds only): when the workspace has
 //!     semantic search enabled but the embedding model is not on disk,
 //!     the user must choose -- download it or fall back to keyword
@@ -31,6 +29,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use chan_workspace::WorkspaceReadiness;
 use serde::{Deserialize, Serialize};
 
 use super::cs_link::{self, CsLink};
@@ -44,6 +43,7 @@ struct PreflightSnapshot {
     /// True until `phase == ready`. The single signal the OverlayShell
     /// keys its lock on.
     locked: bool,
+    readiness: WorkspaceReadiness,
     steps: Vec<PreflightStep>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<PreflightError>,
@@ -139,14 +139,11 @@ struct PreflightError {
 
 /// Map the indexer's status onto the `index` readiness step.
 ///
-/// Indexing is NON-BLOCKING. A cold initial build, a warm mid-session
-/// rebuild, an incremental watcher reindex, and an idle index all leave the
-/// bootstrap spine usable, so every healthy `IndexStatus` maps to `Done`. The
-/// initial-build PROGRESS is surfaced out of band through the carousel and
-/// `/api/index/status`, never the boot lock. The only index condition that
-/// gates the boot is a genuine `Error`, mapped to `Failed` so the shell can
-/// surface it.
-fn index_step(status: &IndexStatus) -> PreflightStep {
+/// Recovery readiness dominates healthy progress states: pending or active
+/// derived-state recovery maps to `Pending`, while a ready generation keeps
+/// ordinary build/reindex progress non-blocking. A genuine index error maps
+/// to `Failed` so the shell can surface it.
+fn index_step(status: &IndexStatus, readiness: WorkspaceReadiness) -> PreflightStep {
     let base = PreflightStep {
         id: "index",
         label: "Build search index",
@@ -154,14 +151,15 @@ fn index_step(status: &IndexStatus) -> PreflightStep {
         decision: None,
     };
     match status {
+        IndexStatus::Error { .. } => PreflightStep {
+            state: StepState::Failed,
+            ..base
+        },
+        _ if !readiness.is_ready() => base,
         IndexStatus::Building { .. }
         | IndexStatus::Reindexing { .. }
         | IndexStatus::Idle { .. } => PreflightStep {
             state: StepState::Done,
-            ..base
-        },
-        IndexStatus::Error { .. } => PreflightStep {
-            state: StepState::Failed,
             ..base
         },
     }
@@ -231,7 +229,8 @@ fn build_snapshot(
     workspace: &chan_workspace::Workspace,
     status: &IndexStatus,
 ) -> PreflightSnapshot {
-    let mut steps = vec![index_step(status)];
+    let readiness = workspace.readiness();
+    let mut steps = vec![index_step(status, readiness)];
     if let Some(step) = model_step(workspace) {
         steps.push(step);
     }
@@ -240,6 +239,8 @@ fn build_snapshot(
     // then "all done" is ready, otherwise still running.
     let phase = if steps.iter().any(|s| s.state == StepState::Failed) {
         Phase::Failed
+    } else if !readiness.is_ready() {
+        Phase::Running
     } else if steps.iter().any(|s| s.state == StepState::NeedsDecision) {
         Phase::NeedsDecision
     } else if steps.iter().all(|s| s.state == StepState::Done) {
@@ -251,6 +252,7 @@ fn build_snapshot(
     PreflightSnapshot {
         phase,
         locked: phase != Phase::Ready,
+        readiness,
         error: index_error(status),
         steps,
         // Attached by the route handlers; neither gates the boot overlay.
@@ -520,13 +522,33 @@ mod tests {
     }
 
     #[test]
+    fn recovery_is_explicitly_running_and_locks_preflight() {
+        let (_c, _r, ws) = workspace();
+        ws.request_recovery(chan_workspace::RecoveryAction::Reconcile);
+
+        let snap = build_snapshot(&ws, &idle());
+
+        assert_eq!(snap.phase, Phase::Running);
+        assert!(snap.locked);
+        assert_eq!(
+            serde_json::to_value(snap.readiness).unwrap()["state"],
+            "recovering"
+        );
+        let index = snap.steps.iter().find(|step| step.id == "index").unwrap();
+        assert_eq!(index.state, StepState::Pending);
+    }
+
+    #[test]
     fn reindexing_never_locks() {
         // An incremental watcher reindex maps to a ready (unlocked) step: all
         // index activity is non-blocking, so this holds by construction.
         assert_eq!(
-            index_step(&IndexStatus::Reindexing {
-                file: "note-490.md".into(),
-            })
+            index_step(
+                &IndexStatus::Reindexing {
+                    file: "note-490.md".into(),
+                },
+                WorkspaceReadiness::default(),
+            )
             .state,
             StepState::Done
         );
@@ -542,7 +564,10 @@ mod tests {
             total: 10,
             file: "a.md".into(),
         };
-        assert_eq!(index_step(&building()).state, StepState::Done);
+        assert_eq!(
+            index_step(&building(), WorkspaceReadiness::default()).state,
+            StepState::Done
+        );
     }
 
     #[test]

@@ -234,6 +234,8 @@ pub struct WatchHandle {
     command_tx: std::sync::Mutex<Option<RegistrationTx>>,
     supervisor: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     health: Arc<std::sync::Mutex<WatchHealth>>,
+    #[cfg(test)]
+    registered_dirs: RegisteredDirs,
 }
 
 /// A directory-registration request from the dispatch thread to the
@@ -386,6 +388,9 @@ fn watch_supervisor_loop(
                 current.retry_attempts = current.retry_attempts.saturating_add(1);
                 drop(current);
                 policy = Arc::clone(&policy_source.read().unwrap());
+                if policy.generation() != observed_generation {
+                    reset_registrations(&mut watcher, &registered_dirs);
+                }
                 observed_generation = policy.generation();
                 let errors = register_all_roots(&mut watcher, &roots, &policy, &registered_dirs);
                 retry_at = (!errors.is_empty()).then(|| Instant::now() + WATCH_RETRY_INTERVAL);
@@ -915,6 +920,8 @@ impl WatchHandle {
         let dispatch_roots_for_cb = Arc::clone(&dispatch_roots);
         let policy_source_for_cb = Arc::clone(&policy_source);
         let registered_dirs: RegisteredDirs = Arc::new(std::sync::RwLock::new(HashSet::new()));
+        #[cfg(test)]
+        let registered_dirs_for_test = Arc::clone(&registered_dirs);
         let registered_dirs_for_cb = Arc::clone(&registered_dirs);
         let (command_tx, command_rx) = std::sync::mpsc::channel::<WatchCommand>();
         let command_tx_for_cb = command_tx.clone();
@@ -984,6 +991,8 @@ impl WatchHandle {
             command_tx: std::sync::Mutex::new(Some(command_tx)),
             supervisor: std::sync::Mutex::new(Some(supervisor)),
             health,
+            #[cfg(test)]
+            registered_dirs: registered_dirs_for_test,
         })
     }
 
@@ -1030,6 +1039,11 @@ impl WatchHandle {
         {
             let _ = receiver.recv();
         }
+    }
+
+    #[cfg(test)]
+    fn is_registered(&self, path: &Path) -> bool {
+        self.registered_dirs.read().unwrap().contains(path)
     }
 }
 
@@ -1898,6 +1912,71 @@ mod tests {
                         .is_some_and(|path| path.starts_with("vendor/"))
                 }),
                 "gitignored subtree leaked through dispatch: {strays:?}"
+            );
+        }
+
+        #[test]
+        fn unrelated_gitignore_negation_does_not_register_configured_subtree() {
+            let root = TempDir::new().unwrap();
+            let target = root.path().join("target");
+            std::fs::create_dir_all(target.join("deep")).unwrap();
+            std::fs::create_dir_all(root.path().join("docs")).unwrap();
+            std::fs::write(root.path().join(".gitignore"), "!/docs/keep.md\n").unwrap();
+            inject_registration_failures(&target, 1);
+            let policy = Arc::new(
+                IndexScopePolicy::new(
+                    root.path().to_path_buf(),
+                    crate::WorkspaceGeneration::INITIAL,
+                    crate::WalkFilter::new(["target"]),
+                )
+                .unwrap(),
+            );
+            let source = Arc::new(std::sync::RwLock::new(policy));
+
+            let (handle, _rx) = start_handle_with_policy(&root, source);
+            let initial_health = handle.health();
+            clear_injected_registration_failure();
+            assert_eq!(
+                initial_health.state,
+                WatchHealthState::Healthy,
+                "docs-only negation widened registration into configured target/"
+            );
+            assert!(!handle.is_registered(&target));
+        }
+
+        #[test]
+        fn policy_change_during_retry_resets_stale_registrations() {
+            let root = TempDir::new().unwrap();
+            let stale = root.path().join("stale");
+            let retry = root.path().join("retry-me");
+            std::fs::create_dir_all(&stale).unwrap();
+            std::fs::create_dir_all(&retry).unwrap();
+            inject_registration_failures(&retry, 1);
+            let source = policy_source(root.path());
+
+            let (handle, _rx) = start_handle_with_policy(&root, Arc::clone(&source));
+            assert_eq!(handle.health().state, WatchHealthState::Degraded);
+            assert!(handle.is_registered(&stale));
+
+            let next_generation: crate::WorkspaceGeneration = serde_json::from_str("1").unwrap();
+            *source.write().unwrap() = Arc::new(
+                IndexScopePolicy::new(
+                    root.path().to_path_buf(),
+                    next_generation,
+                    crate::WalkFilter::new(["stale"]),
+                )
+                .unwrap(),
+            );
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while handle.health().state != WatchHealthState::Healthy && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            clear_injected_registration_failure();
+            assert_eq!(handle.health().state, WatchHealthState::Healthy);
+            assert!(
+                !handle.is_registered(&stale),
+                "retry consumed the policy generation without resetting stale watches"
             );
         }
 
