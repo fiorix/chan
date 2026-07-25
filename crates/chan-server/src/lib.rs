@@ -15,8 +15,10 @@
 
 #![forbid(unsafe_code)]
 
+mod atomic_file;
 mod auth;
 mod bus;
+mod collab_sessions;
 mod config;
 mod config_watch;
 mod control_socket;
