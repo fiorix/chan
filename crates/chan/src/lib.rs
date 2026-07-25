@@ -24,7 +24,8 @@
 //   chan workspace search <path> <query>
 //                                   query the BM25 index
 //   chan workspace graph <path>     inspect semantic or filesystem graph edges
-//   chan workspace status [path]    report workspace/index/graph health
+//   chan workspace status [path]    report workspace/index/graph health,
+//                                   and recovery readiness (ready/recovering)
 //   chan workspace metadata export PATH ARCHIVE.tar.zst
 //                                   export a workspace's chan metadata
 //   chan workspace contacts import csv FILE --into DIR

@@ -42,7 +42,7 @@ Because the source is the single source of truth, the editor sidesteps a class o
 
 9. **Fold** uses `@codemirror/language` `foldService` with a heading-aware computer. Heading detection has one source of truth: the lezer syntax tree. A line is a heading iff the tree resolves it to a non-empty `ATXHeading1..6` node, so a `#` inside a fenced block, a tilde fence, an indented fence, an inline code span, or frontmatter is never a heading; the gutter marker, the fold service, and the gutter click all read the same `headingLevelAt` / `headingFoldRange` helpers. A heading folds end-of-line -> start of the next `ATXHeading{<=n}` line (or doc end); the forward scan runs to doc end so it forces the parse past the lazy viewport (`ensureSyntaxTree`). Three recorded decisions: indented ATX headings (up to three leading spaces, CommonMark) fold, matching the tree, where the old column-0 regex ignored them; an empty heading (a bare `#` with no text, which lezer still parses as `ATXHeading1`) does not fold, since it has no section under it; and Setext headings (`===` / `---` underlines) are out of the fold gutter this round. The chevron gutter is custom (headings only): `foldGutter()` would chevron every foldable block because lang-markdown marks paragraphs, quotes, and fences foldable too. The same tree-based code-node guard stops the block-formatting chords (`setBlockKind`, `toggleLinePrefix` in `commands/format.ts`) from rewriting a fenced `#` comment.
 
-10. **Autosave** writes `view.state.doc.toString()` on `update.docChanged` to the bindable `value` prop. The echo guard prevents prop write-back from clobbering the caret, and the debounced autosave pipeline owns the server write. No serialize step. The CAS contract on `PUT /api/files` (`expected_mtime_ns`, 409 + `current_mtime_ns` on conflict) is the conflict gate; a watcher event for a non-self write flags a "changed on disk" banner instead of auto-reloading. A debounced localStorage mirror keyed by path is kept for hang-recovery.
+10. **Autosave** writes `view.state.doc.toString()` on `update.docChanged` to the bindable `value` prop. The echo guard prevents prop write-back from clobbering the caret, and the debounced autosave pipeline owns the server write. No serialize step. The write contract on `PUT /api/files/<path>` is server-authority per path: a read of the path returns `authority_version` + `disk_conflicted`, and a changed-content write echoes the `authority_version` it last saw (alongside `expected_mtime_ns`). The server answers `428 PRECONDITION_REQUIRED` when that authority precondition is required but missing, and `409` on a version mismatch, carrying `current_authority_version` + `current_mtime_ns`. A watcher event for a non-self write flags a "changed on disk" banner instead of auto-reloading; once a session goes dirty/conflicted, the divergence is resolved explicitly via `POST /api/session-conflicts/resolve` with `{action: reload | overwrite}`. A debounced localStorage mirror keyed by path is kept for hang-recovery.
 
 ## Decoration pipeline
 
@@ -160,7 +160,7 @@ The editor relies on three server contracts: file reads/writes with optimistic C
 
 ## Autosave and conflicts
 
-A keystroke flows through the echo guard and debounced autosave to a CAS `PUT /api/files`; a stale mtime returns 409 and opens the conflict dialog, while a non-self `/ws` event only raises the changed-on-disk banner.
+A keystroke flows through the echo guard and debounced autosave to `PUT /api/files/<path>`, carrying `expected_mtime_ns` + the last-read `authority_version`; a missing authority precondition returns 428, a version mismatch returns 409 and opens the conflict dialog, and a non-self `/ws` event only raises the changed-on-disk banner. A dirty/conflicted session is resolved explicitly through `POST /api/session-conflicts/resolve` (`reload` | `overwrite`).
 
 ```mermaid
 sequenceDiagram
@@ -170,7 +170,8 @@ sequenceDiagram
     participant Tab as "tab.content (App effect)"
     participant Save as "scheduleAutosave"
     participant LS as "editorBuffer (localStorage)"
-    participant Srv as "PUT /api/files"
+    participant Srv as "PUT /api/files/<path>"
+    participant Res as "POST /api/session-conflicts/resolve"
     participant WS as "/ws watcher"
 
     User->>CM: type (docChanged)
@@ -179,13 +180,18 @@ sequenceDiagram
     Sync->>Tab: value = doc.toString()
     Tab->>Save: scheduleAutosave debounced
     Tab->>LS: queueBufferWrite debounced mirror
-    Save->>Srv: write content + expected_mtime_ns
-    alt mtime matches
-        Srv-->>Save: 200 OK + mtime_ns
+    Save->>Srv: write content + expected_mtime_ns + authority_version
+    alt precondition met
+        Srv-->>Save: 200 OK + mtime_ns + authority_version
         Note over Save: t.saved updated, mirrorToSiblings
-    else mtime stale
-        Srv-->>Save: 409 + current_mtime_ns
+    else authority precondition required
+        Srv-->>Save: 428 PRECONDITION_REQUIRED + current_authority_version
+        Note over Save: resend the write echoing current_authority_version
+    else version mismatch
+        Srv-->>Save: 409 + current_authority_version + current_mtime_ns
         Save->>User: open conflictDialog Reload or Overwrite
+        User->>Res: {path, action: reload | overwrite}
+        Res-->>Tab: resolved read view (authority_version, disk_conflicted)
     end
     WS-->>Tab: non-self write event
     Note over Tab: flagExternalChange raises changed-on-disk banner, no reload

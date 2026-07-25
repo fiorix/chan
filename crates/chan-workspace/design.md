@@ -512,7 +512,7 @@ Reading does not take the cross-process lock. tantivy is multi-reader-safe by de
 
 ### Workspace-internal noise filter
 
-Apart from the drafts directory (deliberate, user-visible, configurable), chan-workspace stores ZERO files inside the user's workspace directory. This makes it safe to drop a workspace inside an existing git repo, an iCloud / Google Drive / Dropbox directory, or anywhere else. A stray `.chan/` left over from an older install or created by a third-party tool is filtered out by `walk_workspace` and the watcher dispatch; chan-workspace never emits events for it or includes it in `list_tree`.
+Apart from the drafts directory (deliberate, user-visible, configurable), chan-workspace stores ZERO files inside the user's workspace directory. This makes it safe to drop a workspace inside an existing git repo, an iCloud / Google Drive / Dropbox directory, or anywhere else. Editor-session recovery is the one in-tree exception, and it is chan-server's write, not chan-workspace's: chan-server records recovery state under `.chan/editor-sessions/v1/` through the workspace atomic stream writer (`write_atomic_stream`), and those records are filtered from walk and index like `.git/`. A stray `.chan/` left over from an older install or created by a third-party tool is filtered out by `walk_workspace` and the watcher dispatch; chan-workspace never emits events for it or includes it in `list_tree`.
 
 ## 6. State placement
 

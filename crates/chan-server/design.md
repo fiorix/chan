@@ -13,10 +13,16 @@ The serving layer: turns a workspace (or a terminal) into a web app, hosts the M
   typed request and returns the core result unchanged. The legacy
   `/api/search/content` route is a projection over the same effective-mode
   policy. Control-socket `workspace_search` uses the same contract for `cs`.
+- **Workspace readiness envelope**: `/api/index/status`,
+  `/api/indexing/state`, `/api/preflight`, and `/api/search/content` each
+  carry a `WorkspaceReadiness` ready/recovering envelope. A content query
+  issued during recovery returns an explicit not-ready/recovering result
+  rather than a fresh-looking empty one.
 - **Live editor authority**: document and Excalidraw WebSockets share one
   server-side authority per path. Clean external edits fold into that
   authority; overlapping dirty edits retain a three-way conflict until an
-  explicit reload or overwrite. Each authority writes a bounded recovery
+  explicit reload or overwrite via `POST /api/session-conflicts/resolve`.
+  Each authority writes a bounded recovery
   record under `.chan/editor-sessions/v1/` through the workspace atomic stream
   writer. On restart, dirty/conflicted authority, durable baseline, versions,
   and the current disk side rehydrate before any flush can run, so stale
