@@ -80,12 +80,18 @@ async fn screensaver_state_response(workspace: Arc<chan_workspace::Workspace>) -
 fn screensaver_state_sync(
     workspace: &chan_workspace::Workspace,
 ) -> chan_workspace::Result<ScreensaverState> {
-    Ok(ScreensaverState {
-        enabled: workspace.screensaver_enabled()?,
-        timeout_secs: workspace.screensaver_timeout_secs()?,
-        theme: workspace.screensaver_theme()?,
-        pin_set: workspace.screensaver_pin_hash()?.is_some(),
-    })
+    Ok(screensaver_state_from_config(
+        workspace.dashboard_snapshot()?,
+    ))
+}
+
+fn screensaver_state_from_config(config: chan_workspace::DashboardConfig) -> ScreensaverState {
+    ScreensaverState {
+        enabled: config.screensaver_enabled,
+        timeout_secs: config.screensaver_timeout_secs,
+        theme: config.screensaver_theme,
+        pin_set: config.screensaver_pin_hash.is_some(),
+    }
 }
 
 /// `PATCH /api/screensaver/state`. Partial update: only the
@@ -107,16 +113,12 @@ pub async fn api_screensaver_patch(
     let workspace = state.workspace().clone();
     let result = tokio::task::spawn_blocking(
         move || -> Result<ScreensaverState, chan_workspace::ChanError> {
-            if let Some(enabled) = payload.enabled {
-                workspace.set_screensaver_enabled(enabled)?;
-            }
-            if let Some(timeout) = payload.timeout_secs {
-                workspace.set_screensaver_timeout_secs(timeout)?;
-            }
-            if let Some(theme) = payload.theme {
-                workspace.set_screensaver_theme(theme)?;
-            }
-            screensaver_state_sync(&workspace)
+            let config = workspace.update_screensaver(
+                payload.enabled,
+                payload.timeout_secs,
+                payload.theme,
+            )?;
+            Ok(screensaver_state_from_config(config))
         },
     )
     .await;
@@ -352,9 +354,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn screensaver_patch_updates_enabled_and_timeout() {
-        // PATCH accepts partial body, applies
-        // present fields, returns post-update state.
+    async fn screensaver_patch_updates_three_fields_atomically() {
+        // PATCH accepts partial body, applies all present fields in one
+        // mutation, and returns the resulting snapshot.
         let app = route_test_app();
         let router = crate::router(app.state);
         let (status, body) = request(
@@ -422,6 +424,8 @@ mod tests {
         // The API boundary rejects values outside
         // the UI-supported [10s, 3600s] range.
         let app = route_test_app();
+        let workspace = app.state.workspace();
+        let dashboard_path = chan_workspace::dashboard::config_path(&workspace.paths().root);
         let router = crate::router(app.state);
         for body in [r#"{"timeout_secs":9}"#, r#"{"timeout_secs":3601}"#] {
             let (status, body) =
@@ -432,6 +436,10 @@ mod tests {
                 "body should mention timeout_secs: {body}"
             );
         }
+        assert!(
+            !dashboard_path.exists(),
+            "invalid timeout must not write dashboard config"
+        );
     }
 
     #[tokio::test]

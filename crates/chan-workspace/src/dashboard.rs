@@ -143,10 +143,70 @@ pub fn load(root: &Path) -> Result<DashboardConfig> {
 /// Persist the dashboard config; `atomic_write` creates the parent directory if
 /// needed.
 pub fn save(root: &Path, cfg: &DashboardConfig) -> Result<()> {
+    #[cfg(test)]
+    record_test_save(root)?;
     let path = config_path(root);
     let body = toml::to_string_pretty(cfg).map_err(|e| ChanError::ConfigEncode(e.to_string()))?;
     crate::fs_ops::atomic_write(&path, body.as_bytes())?;
     Ok(())
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct TestSaveProbe {
+    calls: usize,
+    fail_next: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_SAVE_PROBES: std::cell::RefCell<std::collections::HashMap<PathBuf, TestSaveProbe>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+#[cfg(test)]
+fn record_test_save(root: &Path) -> Result<()> {
+    TEST_SAVE_PROBES.with(|probes| {
+        let mut probes = probes.borrow_mut();
+        let probe = probes.entry(root.to_path_buf()).or_default();
+        probe.calls += 1;
+        if probe.fail_next {
+            probe.fail_next = false;
+            return Err(ChanError::Io("injected dashboard save failure".into()));
+        }
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn reset_test_save_probe(root: &Path) {
+    TEST_SAVE_PROBES.with(|probes| {
+        probes
+            .borrow_mut()
+            .insert(root.to_path_buf(), TestSaveProbe::default());
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn inject_test_save_failure(root: &Path) {
+    TEST_SAVE_PROBES.with(|probes| {
+        probes
+            .borrow_mut()
+            .entry(root.to_path_buf())
+            .or_default()
+            .fail_next = true;
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn test_save_calls(root: &Path) -> usize {
+    TEST_SAVE_PROBES.with(|probes| {
+        probes
+            .borrow()
+            .get(root)
+            .map(|probe| probe.calls)
+            .unwrap_or(0)
+    })
 }
 
 /// The dashboard keys as they used to live in `<index_dir>/config.toml`, read

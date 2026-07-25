@@ -624,6 +624,10 @@ pub struct Workspace {
     /// watcher updates all take this lock. Queries and file I/O never do.
     /// The recovery coordinator is a separate short-lived mutex.
     write_serial: Arc<std::sync::Mutex<()>>,
+    /// Serializes dashboard snapshots and read-modify-write publication.
+    /// This stays separate from `write_serial`: dashboard changes are small
+    /// config operations and must not wait behind an index or report walk.
+    dashboard_serial: std::sync::Mutex<()>,
     /// Short-lived recovery coordinator state. This mutex is never held
     /// across replay, reconcile, or rebuild work; the W2 derived-state
     /// mutation boundary remains a separate lock.
@@ -965,6 +969,7 @@ impl Workspace {
             rename_log: std::sync::Mutex::new(rename_log),
             pending_writes: std::sync::Mutex::new(pending_writes),
             write_serial: Arc::new(std::sync::Mutex::new(())),
+            dashboard_serial: std::sync::Mutex::new(()),
             recovery: std::sync::Mutex::new(recovery),
             recovery_worker: RecoveryWorker::new(),
             report: Arc::new(std::sync::OnceLock::new()),
@@ -3142,26 +3147,35 @@ impl Workspace {
         Ok(self.index()?.known_paths()?)
     }
 
-    /// Load this workspace's dashboard config (screensaver overlay + the
-    /// chan-report / semantic-search opt-ins) from `<root>/dashboard.toml`,
-    /// falling back to defaults when the file is absent. Read per access: the
-    /// dashboard surfaces (preflight + the dedicated toggle endpoints) are not
-    /// hot paths, so the config is not cached on the Workspace.
-    fn dashboard(&self) -> Result<DashboardConfig> {
+    fn dashboard_lock(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
+        self.dashboard_serial
+            .lock()
+            .map_err(|_| ChanError::Io("dashboard config lock poisoned".into()))
+    }
+
+    /// Load one coherent dashboard snapshot. The config remains disk-backed,
+    /// but snapshots share the same boundary as updates so a reader cannot
+    /// observe an update between individual fields.
+    pub fn dashboard_snapshot(&self) -> Result<DashboardConfig> {
+        let _serial = self.dashboard_lock()?;
         dashboard::load(&self.paths.root)
     }
 
     /// Apply `mutate` to the dashboard config and persist it only when the
     /// closure reports a change (so the toggles stay idempotent -- re-setting
-    /// the current value writes nothing). Last-writer-wins across concurrent
-    /// callers; these are single-user UI actions, matching the prior
-    /// `IndexConfig` setter behaviour.
-    fn update_dashboard(&self, mutate: impl FnOnce(&mut DashboardConfig) -> bool) -> Result<()> {
-        let mut cfg = self.dashboard()?;
+    /// the current value writes nothing). The lock covers load through durable
+    /// publication, so concurrent disjoint changes compose instead of replacing
+    /// fields from a stale snapshot.
+    fn update_dashboard(
+        &self,
+        mutate: impl FnOnce(&mut DashboardConfig) -> bool,
+    ) -> Result<DashboardConfig> {
+        let _serial = self.dashboard_lock()?;
+        let mut cfg = dashboard::load(&self.paths.root)?;
         if mutate(&mut cfg) {
             dashboard::save(&self.paths.root, &cfg)?;
         }
-        Ok(())
+        Ok(cfg)
     }
 
     /// Read the per-workspace Hybrid-search preference.
@@ -3170,7 +3184,7 @@ impl Workspace {
     /// Query-path callers consult this when no explicit `Mode` is
     /// passed.
     pub fn semantic_enabled(&self) -> Result<bool> {
-        Ok(self.dashboard()?.semantic_enabled)
+        Ok(self.dashboard_snapshot()?.semantic_enabled)
     }
 
     /// Flip the per-workspace Hybrid-search preference.
@@ -3236,7 +3250,7 @@ impl Workspace {
     /// `Workspace::report()` initialization + the per-workspace
     /// language-graph layer on this flag.
     pub fn reports_enabled(&self) -> Result<bool> {
-        Ok(self.dashboard()?.reports_enabled)
+        Ok(self.dashboard_snapshot()?.reports_enabled)
     }
 
     /// Flip the per-workspace chan-report opt-in.
@@ -3341,7 +3355,7 @@ impl Workspace {
     /// Default-false on workspaces that pre-date the field; SPA arms
     /// the overlay state machine when true.
     pub fn screensaver_enabled(&self) -> Result<bool> {
-        Ok(self.dashboard()?.screensaver_enabled)
+        Ok(self.dashboard_snapshot()?.screensaver_enabled)
     }
 
     /// Flip the per-workspace screensaver-enabled flag.
@@ -3356,12 +3370,13 @@ impl Workspace {
             cfg.screensaver_enabled = enabled;
             true
         })
+        .map(|_| ())
     }
 
     /// Read the idle window (seconds) before the
     /// SPA arms the overlay. Default 300.
     pub fn screensaver_timeout_secs(&self) -> Result<u32> {
-        Ok(self.dashboard()?.screensaver_timeout_secs)
+        Ok(self.dashboard_snapshot()?.screensaver_timeout_secs)
     }
 
     /// Persist the idle window. SPA enforces a
@@ -3375,12 +3390,13 @@ impl Workspace {
             cfg.screensaver_timeout_secs = secs;
             true
         })
+        .map(|_| ())
     }
 
     /// Read the persisted visual theme. Default
     /// plain on workspaces that pre-date the field.
     pub fn screensaver_theme(&self) -> Result<ScreensaverTheme> {
-        Ok(self.dashboard()?.screensaver_theme)
+        Ok(self.dashboard_snapshot()?.screensaver_theme)
     }
 
     /// Persist the visual theme.
@@ -3392,6 +3408,34 @@ impl Workspace {
             cfg.screensaver_theme = theme;
             true
         })
+        .map(|_| ())
+    }
+
+    /// Atomically apply the optional screensaver state fields and return the
+    /// resulting dashboard snapshot. Callers validate values before entering
+    /// this core persistence boundary.
+    pub fn update_screensaver(
+        &self,
+        enabled: Option<bool>,
+        timeout_secs: Option<u32>,
+        theme: Option<ScreensaverTheme>,
+    ) -> Result<DashboardConfig> {
+        self.update_dashboard(|cfg| {
+            let mut changed = false;
+            if let Some(enabled) = enabled {
+                changed |= cfg.screensaver_enabled != enabled;
+                cfg.screensaver_enabled = enabled;
+            }
+            if let Some(timeout_secs) = timeout_secs {
+                changed |= cfg.screensaver_timeout_secs != timeout_secs;
+                cfg.screensaver_timeout_secs = timeout_secs;
+            }
+            if let Some(theme) = theme {
+                changed |= cfg.screensaver_theme != theme;
+                cfg.screensaver_theme = theme;
+            }
+            changed
+        })
     }
 
     /// Read the persisted PIN hash. `None` means no
@@ -3401,7 +3445,7 @@ impl Workspace {
     /// bytes server-side. This getter is for the chan-server route
     /// + tests only.
     pub fn screensaver_pin_hash(&self) -> Result<Option<Vec<u8>>> {
-        Ok(self.dashboard()?.screensaver_pin_hash)
+        Ok(self.dashboard_snapshot()?.screensaver_pin_hash)
     }
 
     /// Persist or clear the PIN hash. `Some(bytes)`
@@ -3415,6 +3459,7 @@ impl Workspace {
             cfg.screensaver_pin_hash = hash;
             true
         })
+        .map(|_| ())
     }
 
     /// BOOT entry-point. Consumers call this after
@@ -3426,7 +3471,11 @@ impl Workspace {
     /// initialized. Errors during one layer don't block the
     /// other.
     pub fn boot(&self) -> Result<()> {
-        if self.reports_enabled().unwrap_or(false) {
+        let reports_enabled = self
+            .dashboard_snapshot()
+            .map(|config| config.reports_enabled)
+            .unwrap_or(false);
+        if reports_enabled {
             // Lazy initialization: `report_state()` constructs
             // `ReportState`, runs the initial scan if no JSONL
             // is persisted, and primes the watcher fanout. A
@@ -7884,6 +7933,144 @@ mod tests {
             .set_screensaver_theme(ScreensaverTheme::Matrix)
             .unwrap();
         workspace.set_screensaver_pin_hash(None).unwrap();
+    }
+
+    mod dashboard_concurrency {
+        use super::*;
+
+        fn run_concurrent_dashboard_updates(
+            first: fn(&mut DashboardConfig),
+            second: fn(&mut DashboardConfig),
+        ) -> DashboardConfig {
+            let (_cfg, _root, workspace) = fixture();
+            let (first_loaded_tx, first_loaded_rx) = std::sync::mpsc::sync_channel(1);
+            let (release_first_tx, release_first_rx) = std::sync::mpsc::sync_channel(1);
+            let first_workspace = Arc::clone(&workspace);
+            let first_thread = std::thread::spawn(move || {
+                first_workspace
+                    .update_dashboard(|config| {
+                        first_loaded_tx.send(()).unwrap();
+                        release_first_rx.recv().unwrap();
+                        first(config);
+                        true
+                    })
+                    .unwrap();
+            });
+            first_loaded_rx.recv().unwrap();
+
+            let (second_loaded_tx, second_loaded_rx) = std::sync::mpsc::sync_channel(1);
+            let second_workspace = Arc::clone(&workspace);
+            let second_thread = std::thread::spawn(move || {
+                second_workspace
+                    .update_dashboard(|config| {
+                        second_loaded_tx.send(()).unwrap();
+                        second(config);
+                        true
+                    })
+                    .unwrap();
+            });
+
+            match second_loaded_rx.recv_timeout(std::time::Duration::from_secs(1)) {
+                Ok(()) => {
+                    second_thread.join().unwrap();
+                    release_first_tx.send(()).unwrap();
+                    first_thread.join().unwrap();
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    release_first_tx.send(()).unwrap();
+                    first_thread.join().unwrap();
+                    second_thread.join().unwrap();
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("second dashboard update disconnected before mutation")
+                }
+            }
+
+            workspace.dashboard_snapshot().unwrap()
+        }
+
+        #[test]
+        fn concurrent_semantic_and_screensaver_updates_both_survive() {
+            let config = run_concurrent_dashboard_updates(
+                |config| config.semantic_enabled = true,
+                |config| config.screensaver_enabled = true,
+            );
+
+            assert!(config.semantic_enabled);
+            assert!(config.screensaver_enabled);
+        }
+
+        #[test]
+        fn concurrent_reports_and_pin_updates_both_survive() {
+            let config = run_concurrent_dashboard_updates(
+                |config| config.reports_enabled = false,
+                |config| config.screensaver_pin_hash = Some(vec![1, 2, 3, 4]),
+            );
+
+            assert!(!config.reports_enabled);
+            assert_eq!(config.screensaver_pin_hash, Some(vec![1, 2, 3, 4]));
+        }
+
+        #[test]
+        fn concurrent_dashboard_same_field_follows_serial_completion_order() {
+            let config = run_concurrent_dashboard_updates(
+                |config| config.screensaver_enabled = true,
+                |config| config.screensaver_enabled = false,
+            );
+
+            assert!(!config.screensaver_enabled);
+        }
+    }
+
+    #[test]
+    fn dashboard_multi_field_screensaver_update_saves_once() {
+        let (_cfg, _root, workspace) = fixture();
+        dashboard::reset_test_save_probe(&workspace.paths.root);
+
+        let config = workspace
+            .update_screensaver(Some(true), Some(60), Some(ScreensaverTheme::Matrix))
+            .unwrap();
+
+        assert!(config.screensaver_enabled);
+        assert_eq!(config.screensaver_timeout_secs, 60);
+        assert_eq!(config.screensaver_theme, ScreensaverTheme::Matrix);
+        assert_eq!(dashboard::test_save_calls(&workspace.paths.root), 1);
+    }
+
+    #[test]
+    fn dashboard_malformed_toml_is_not_overwritten() {
+        let (_cfg, _root, workspace) = fixture();
+        let path = dashboard::config_path(&workspace.paths.root);
+        let malformed = "screensaver_enabled = [\n";
+        std::fs::write(&path, malformed).unwrap();
+
+        let error = workspace
+            .update_screensaver(Some(true), None, None)
+            .unwrap_err();
+
+        assert!(matches!(error, ChanError::ConfigDecode { .. }));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), malformed);
+    }
+
+    #[test]
+    fn dashboard_injected_save_failure_preserves_prior_file() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace
+            .update_screensaver(Some(true), Some(60), None)
+            .unwrap();
+        let before = workspace.dashboard_snapshot().unwrap();
+        dashboard::reset_test_save_probe(&workspace.paths.root);
+        dashboard::inject_test_save_failure(&workspace.paths.root);
+
+        let error = workspace
+            .update_screensaver(None, Some(120), None)
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("injected dashboard save failure"));
+        assert_eq!(workspace.dashboard_snapshot().unwrap(), before);
+        assert_eq!(dashboard::test_save_calls(&workspace.paths.root), 1);
     }
 
     #[test]
