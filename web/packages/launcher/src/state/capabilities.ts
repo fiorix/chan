@@ -37,22 +37,20 @@ export function capabilitiesFor(surface: LauncherSurface): Capabilities {
   };
 }
 
-/** Resolve the surface from the injected metas: the descriptor wins; a bare
- * legacy `chan-launcher-readonly` (pre-split server) reads as readonly; anything
- * else defaults to desktop (today's mutable-loopback default). */
-export function parseSurface(surfaceMeta: string | null, hasLegacyReadonly: boolean): LauncherSurface {
+/** Resolve the injected surface descriptor. Unknown or absent values default
+ * to desktop, today's mutable-loopback default. */
+export function parseSurface(surfaceMeta: string | null): LauncherSurface {
   if (surfaceMeta === "desktop" || surfaceMeta === "devserver" || surfaceMeta === "readonly") {
     return surfaceMeta;
   }
-  return hasLegacyReadonly ? "readonly" : "desktop";
+  return "desktop";
 }
 
 function readSurface(): LauncherSurface {
   if (typeof document === "undefined") return "desktop";
   const meta =
     document.querySelector('meta[name="chan-launcher-surface"]')?.getAttribute("content") ?? null;
-  const legacy = document.querySelector('meta[name="chan-launcher-readonly"]') !== null;
-  return parseSurface(meta, legacy);
+  return parseSurface(meta);
 }
 
 export const surface: LauncherSurface = readSurface();

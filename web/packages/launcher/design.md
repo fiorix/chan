@@ -8,7 +8,7 @@ How the launcher is built and reached. The [`README`](README.md) covers the stac
 flowchart TB
     subgraph spa["web-launcher SPA (one bundle, ~29 KB)"]
         LIB["launcher API client -- pure /api/library/* HTTP<br/>workspaces · windows · devservers (deferred)<br/>bearer via ?t= (Authorization header; ?t= query for the watch WS)"]
-        UI["TopBar · WorkspaceList · WindowFeed · NewWorkspaceDialog<br/>reads &lt;meta chan-launcher-readonly&gt; → hides mutation controls"]
+        UI["TopBar · WorkspaceList · WindowFeed · NewWorkspaceDialog<br/>reads &lt;meta chan-launcher-surface&gt; → gates capabilities"]
     end
 
     subgraph cs["chan-server"]
@@ -76,7 +76,7 @@ flowchart TB
 
     subgraph mutx["serve_addr -- read-only vs full mutation"]
         AFULL["Some(cell): full workspace mutation<br/>addr read from the cell at request time"]
-        ARO["None: read-only<br/>mutation handlers answer 403<br/>&lt;meta chan-launcher-readonly&gt; hides controls"]
+        ARO["None: read-only<br/>mutation handlers answer 403<br/>&lt;meta chan-launcher-surface=readonly&gt; hides controls"]
     end
 
     RTR --> BTOK
@@ -101,7 +101,7 @@ flowchart TB
 `launcher_router(host, bearer, serve_addr)` is auth-agnostic in its handlers; the installer sets the policy per surface:
 
 - **`bearer`** gates `/api/library/*`. `Some(token)` requires `Authorization: Bearer` (the watch WebSocket also accepts `?t=`), constant-time compared; `None` is tunnel-trust. The static SPA shell is always public so it loads before it holds the token.
-- **`serve_addr`** (`Option<Arc<OnceLock<SocketAddr>>>`) is both the read-only/full discriminator and the mount enabler. `Some(cell)` is the loopback: workspace mutation is served, and the mount path reads the listen address from the cell, which the embedder fills *after* it binds, so it is read at request time rather than install time. `None` is the tunnel-trust surface: workspaces are read-only -- the mutation handlers answer `403`, and the shell is served with `<meta name="chan-launcher-readonly">` so the SPA hides those controls (the New-workspace button, the row checkboxes and bulk bar, and the on/off toggle, which becomes a static state badge) and shows a "manage from the desktop app or the CLI" hint instead of buttons that fail.
+- **`serve_addr`** (`Option<Arc<OnceLock<SocketAddr>>>`) is both the read-only/full discriminator and the mount enabler. `Some(cell)` is the loopback: workspace mutation is served, and the mount path reads the listen address from the cell, which the embedder fills *after* it binds, so it is read at request time rather than install time. `None` is the tunnel-trust surface: workspaces are read-only -- the mutation handlers answer `403`, and the shell is served with `<meta name="chan-launcher-surface" content="readonly">` so the SPA hides those controls (the New-workspace button, the row checkboxes and bulk bar, and the on/off toggle, which becomes a static state badge) and shows a "manage from the desktop app or the CLI" hint instead of buttons that fail.
 
 Mutation is loopback-only because on the gateway surface the proxy strips
 browser `Cookie` and `Authorization` credentials and is the sole gate, so

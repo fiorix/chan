@@ -29,21 +29,16 @@ describe("capabilitiesFor", () => {
 
 describe("parseSurface", () => {
   it("takes the descriptor value when valid", () => {
-    expect(parseSurface("desktop", false)).toBe("desktop");
-    expect(parseSurface("devserver", false)).toBe("devserver");
-    expect(parseSurface("readonly", false)).toBe("readonly");
+    expect(parseSurface("desktop")).toBe("desktop");
+    expect(parseSurface("devserver")).toBe("devserver");
+    expect(parseSurface("readonly")).toBe("readonly");
   });
 
-  it("falls back to the legacy readonly meta when the descriptor is absent", () => {
-    expect(parseSurface(null, true)).toBe("readonly");
+  it("defaults to desktop with no descriptor", () => {
+    expect(parseSurface(null)).toBe("desktop");
   });
 
-  it("defaults to desktop with no descriptor and no legacy meta", () => {
-    expect(parseSurface(null, false)).toBe("desktop");
-  });
-
-  it("ignores an unrecognized descriptor value, falling back", () => {
-    expect(parseSurface("bogus", true)).toBe("readonly");
-    expect(parseSurface("bogus", false)).toBe("desktop");
+  it("defaults an unrecognized descriptor value to desktop", () => {
+    expect(parseSurface("bogus")).toBe("desktop");
   });
 });

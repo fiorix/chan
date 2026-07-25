@@ -92,19 +92,6 @@ pub async fn api_workspace_bootstrap(State(state): State<Arc<AppState>>) -> Resp
     }
 }
 
-pub async fn api_patch_workspace(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<serde_json::Value>,
-) -> Response {
-    // Kept as a compatibility endpoint while the frontend drops its
-    // former workspace-name editor. Local workspace names are no longer a
-    // mutable registry field.
-    if body.get("name").is_some() {
-        return (StatusCode::BAD_REQUEST, "workspace names are not supported").into_response();
-    }
-    workspace_info_response(state, "workspace patch").await
-}
-
 #[derive(Serialize)]
 struct CloudDriveJson {
     provider: String,

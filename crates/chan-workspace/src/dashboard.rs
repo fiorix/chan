@@ -35,11 +35,9 @@ pub struct DashboardConfig {
     #[serde(default)]
     pub semantic_enabled: bool,
     /// Per-workspace chan-report opt-in. Default ON (see `Default`): a new
-    /// workspace gets language detection + SLOC roll-up + COCOMO out of the
-    /// box. The `#[serde(default)]` here resolves to `false` so a file that
-    /// omits the key is not silently flipped on; the on-by-default applies only
-    /// to a brand-new workspace with no file yet.
-    #[serde(default)]
+    /// workspace or partial current config gets language detection + SLOC
+    /// roll-up + COCOMO out of the box.
+    #[serde(default = "default_reports_enabled")]
     pub reports_enabled: bool,
     /// Screensaver overlay opt-in. Default-false so a workspace without the
     /// feature configured stays unchanged. The SPA arms the overlay state
@@ -68,16 +66,15 @@ fn default_screensaver_timeout_secs() -> u32 {
     300
 }
 
+fn default_reports_enabled() -> bool {
+    true
+}
+
 impl Default for DashboardConfig {
     fn default() -> Self {
         Self {
             semantic_enabled: false,
-            // Reports default ON for a brand-new workspace (used by `load` only
-            // when no dashboard.toml exists yet). An existing file keeps its
-            // persisted value, and a file that omits the key deserializes to
-            // false via the field's `#[serde(default)]`, so existing workspaces
-            // never silently flip.
-            reports_enabled: true,
+            reports_enabled: default_reports_enabled(),
             screensaver_enabled: false,
             screensaver_timeout_secs: default_screensaver_timeout_secs(),
             screensaver_theme: ScreensaverTheme::Plain,
@@ -209,78 +206,6 @@ pub(crate) fn test_save_calls(root: &Path) -> usize {
     })
 }
 
-/// The dashboard keys as they used to live in `<index_dir>/config.toml`, read
-/// with the OLD `IndexConfig` serde defaults so a migration is byte-faithful to
-/// what the index config would have reported. In particular `reports_enabled`
-/// defaults `false` here (an existing workspace that never set it stays off);
-/// the reports-default-ON only applies to a brand-new workspace, which has no
-/// index config to migrate and so picks up [`DashboardConfig::default`]. The
-/// search keys (model, chunking, vectors_*, excluded_dirs, schema_version) are
-/// ignored.
-#[derive(Deserialize)]
-struct LegacyDashboardKeys {
-    #[serde(default)]
-    semantic_enabled: bool,
-    #[serde(default)]
-    reports_enabled: bool,
-    #[serde(default)]
-    screensaver_enabled: bool,
-    #[serde(default = "default_screensaver_timeout_secs")]
-    screensaver_timeout_secs: u32,
-    #[serde(default)]
-    screensaver_theme: ScreensaverTheme,
-    #[serde(default, with = "screensaver_pin_serde")]
-    screensaver_pin_hash: Option<Vec<u8>>,
-}
-
-impl LegacyDashboardKeys {
-    fn into_config(self) -> DashboardConfig {
-        DashboardConfig {
-            semantic_enabled: self.semantic_enabled,
-            reports_enabled: self.reports_enabled,
-            screensaver_enabled: self.screensaver_enabled,
-            screensaver_timeout_secs: self.screensaver_timeout_secs,
-            screensaver_theme: self.screensaver_theme,
-            screensaver_pin_hash: self.screensaver_pin_hash,
-        }
-    }
-}
-
-/// One-shot migration: these toggles used to squat in the search `IndexConfig`
-/// (`<index_dir>/config.toml`). On first open after the re-home, move any
-/// persisted values into `<root>/dashboard.toml` and strip the old keys from
-/// the index config, so the dashboard config is the single home. Pre-release,
-/// this is a one-shot data move, not an ongoing back-compat path.
-///
-/// A no-op once `dashboard.toml` exists. Gated on the legacy index config
-/// EXISTING (not on which keys it carries): a workspace with an index config is
-/// "existing", so even one omitting every toggle migrates to faithful values
-/// (reports off) rather than picking up the new-workspace default (reports on).
-/// A truly brand-new workspace has no index config, so it is skipped and
-/// [`load`] returns [`DashboardConfig::default`]. A malformed index config is
-/// skipped too (left for `index::config::load` to surface, so open stays as
-/// lenient as before).
-pub fn migrate_from_index_config(root: &Path, index_dir: &Path) -> Result<()> {
-    let dash_path = config_path(root);
-    if dash_path.exists() {
-        return Ok(());
-    }
-    let index_cfg_path = crate::index::config::config_path(index_dir);
-    let Ok(raw) = std::fs::read_to_string(&index_cfg_path) else {
-        return Ok(()); // brand-new workspace: no legacy config → defaults apply
-    };
-    let Ok(legacy) = toml::from_str::<LegacyDashboardKeys>(&raw) else {
-        return Ok(()); // malformed/foreign: leave it for index::config::load
-    };
-    save(root, &legacy.into_config())?;
-    // Strip the moved keys from the index config: load it (the struct no longer
-    // has those fields, so they fall away) and re-save the stripped form.
-    if let Ok(index_cfg) = crate::index::config::load(index_dir) {
-        let _ = crate::index::config::save(index_dir, &index_cfg);
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn save_then_load_round_trips_all_fields() {
+    fn complete_config_round_trips_all_fields() {
         let tmp = TempDir::new().unwrap();
         let cfg = DashboardConfig {
             semantic_enabled: true,
@@ -339,107 +264,28 @@ mod tests {
     }
 
     #[test]
-    fn missing_keys_in_a_partial_file_fall_to_defaults() {
-        // A dashboard.toml that omits keys deserializes them to their defaults
-        // (the serde-default behaviour the migration and existing files rely on).
+    fn partial_current_config_fills_struct_defaults() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(config_path(tmp.path()), "screensaver_enabled = true\n").unwrap();
         let cfg = load(tmp.path()).unwrap();
         assert!(cfg.screensaver_enabled);
         assert!(!cfg.semantic_enabled, "omitted key defaults to false");
-        assert!(
-            !cfg.reports_enabled,
-            "omitted in an EXISTING file stays false"
-        );
+        assert!(cfg.reports_enabled, "omitted key uses the struct default");
         assert_eq!(cfg.screensaver_timeout_secs, 300);
         assert_eq!(cfg.screensaver_theme, ScreensaverTheme::Plain);
+        assert!(cfg.screensaver_pin_hash.is_none());
     }
 
     #[test]
-    fn migrate_moves_legacy_index_keys_then_strips_them() {
+    fn malformed_config_is_rejected_without_rewrite() {
         let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("meta");
-        let index_dir = root.join("index");
-        std::fs::create_dir_all(&index_dir).unwrap();
-        // An old index config.toml with the dashboard toggles squatting in it.
-        std::fs::write(
-            crate::index::config::config_path(&index_dir),
-            concat!(
-                "schema_version = 3\n",
-                "model = \"BAAI/bge-small-en-v1.5\"\n",
-                "semantic_enabled = true\n",
-                "reports_enabled = false\n",
-                "screensaver_enabled = true\n",
-                "screensaver_timeout_secs = 90\n",
-                "screensaver_theme = \"matrix\"\n",
-                "screensaver_pin_hash = \"3q2+7w==\"\n",
-            ),
-        )
-        .unwrap();
-
-        migrate_from_index_config(&root, &index_dir).unwrap();
-
-        // dashboard.toml now carries the migrated values, byte-faithful.
-        let dash = load(&root).unwrap();
-        assert!(dash.semantic_enabled);
-        assert!(!dash.reports_enabled);
-        assert!(dash.screensaver_enabled);
-        assert_eq!(dash.screensaver_timeout_secs, 90);
-        assert_eq!(dash.screensaver_theme, ScreensaverTheme::Matrix);
-        assert_eq!(
-            dash.screensaver_pin_hash,
-            Some(vec![0xde, 0xad, 0xbe, 0xef])
-        );
-
-        // The index config kept its search keys but dropped the dashboard ones.
-        let raw = std::fs::read_to_string(crate::index::config::config_path(&index_dir)).unwrap();
-        assert!(raw.contains("model = \"BAAI/bge-small-en-v1.5\""));
-        assert!(!raw.contains("screensaver"), "old keys stripped: {raw}");
-        assert!(
-            !raw.contains("semantic_enabled"),
-            "old keys stripped: {raw}"
-        );
-        assert!(!raw.contains("reports_enabled"), "old keys stripped: {raw}");
-
-        // Idempotent: a second run is a no-op (dashboard.toml already exists).
-        migrate_from_index_config(&root, &index_dir).unwrap();
-        assert_eq!(load(&root).unwrap(), dash);
-    }
-
-    #[test]
-    fn migrate_is_noop_for_a_brand_new_workspace() {
-        // No index config.toml → nothing to migrate; `load` falls to defaults
-        // (reports ON for a brand-new workspace).
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("meta");
-        let index_dir = root.join("index");
-        migrate_from_index_config(&root, &index_dir).unwrap();
-        assert!(!config_path(&root).exists(), "no dashboard.toml written");
-        assert!(
-            load(&root).unwrap().reports_enabled,
-            "a brand-new workspace defaults reports ON"
-        );
-    }
-
-    #[test]
-    fn migrate_existing_index_without_toggles_keeps_reports_off() {
-        // An existing workspace whose index config omits every toggle is NOT
-        // brand-new: it migrates to faithful values (reports OFF), not the
-        // new-workspace default (reports ON).
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("meta");
-        let index_dir = root.join("index");
-        std::fs::create_dir_all(&index_dir).unwrap();
-        std::fs::write(
-            crate::index::config::config_path(&index_dir),
-            "schema_version = 3\nmodel = \"BAAI/bge-small-en-v1.5\"\n",
-        )
-        .unwrap();
-        migrate_from_index_config(&root, &index_dir).unwrap();
-        assert!(config_path(&root).exists(), "existing workspace migrates");
-        assert!(
-            !load(&root).unwrap().reports_enabled,
-            "existing-without-toggle stays OFF (faithful, not the new-workspace default)"
-        );
+        let path = config_path(tmp.path());
+        let malformed = "reports_enabled = not-a-bool\n";
+        std::fs::write(&path, malformed).unwrap();
+        assert!(matches!(
+            load(tmp.path()),
+            Err(ChanError::ConfigDecode { .. })
+        ));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), malformed);
     }
 }

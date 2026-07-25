@@ -512,8 +512,8 @@ enum Command {
         search_aggression: Option<SearchAggression>,
         /// Lock down the Settings panel: the SPA greys the cog and
         /// the server refuses every settings-write route with 403
-        /// (PATCH /api/workspace, /api/config,
-        /// POST /api/storage/reset, POST /api/index/rebuild). For
+        /// (PATCH /api/config, POST /api/storage/reset,
+        /// POST /api/index/rebuild). For
         /// kiosk-style deployments (shared workstation, demo box) where
         /// the workspace owner is not the operator at the keyboard.
         #[arg(long, verbatim_doc_comment)]
@@ -6002,8 +6002,7 @@ fn cmd_index_status(path: Option<PathBuf>, json: bool) -> Result<()> {
             workspace_paths.index.display()
         )
     })?;
-    // The screensaver + report/semantic toggles re-homed out of IndexConfig
-    // into the dedicated per-workspace dashboard config; read them from there.
+    // Report and semantic toggles live in the per-workspace dashboard config.
     let dashboard = chan_workspace::dashboard::load(&workspace_paths.root).with_context(|| {
         format!(
             "reading dashboard config at {}",
