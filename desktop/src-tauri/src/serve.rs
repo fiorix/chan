@@ -85,16 +85,20 @@ pub async fn start(
     };
     let url = embedded.open_workspace(&key).await?;
     let prefix = url_prefix_from_local_url(&url)?;
-    {
+    let duplicate = {
         let mut serves = state.serves.lock().unwrap();
         if serves.contains_key(&key) {
-            drop(serves);
-            if let Err(e) = embedded.close_prefix(&prefix, true) {
-                tracing::warn!(key = %key, error = %e, "closing duplicate embedded workspace failed");
-            }
-            return Ok(());
+            true
+        } else {
+            serves.insert(key.clone(), ServeHandle::embedded(url.clone()));
+            false
         }
-        serves.insert(key.clone(), ServeHandle::embedded(url.clone()));
+    };
+    if duplicate {
+        if let Err(e) = embedded.close_prefix(&prefix, true).await {
+            tracing::warn!(key = %key, error = %e, "closing duplicate embedded workspace failed");
+        }
+        return Ok(());
     }
     let _ = app.emit(SERVES_CHANGED, ());
     // Mint the FIRST window only on a USER turn-on (`mint_first_window`) when this
@@ -114,9 +118,10 @@ pub async fn start(
     });
     if mint_first_window && !has_window {
         if let Err(e) = embedded.mint_window(WindowKind::Workspace, Some(key.clone())) {
-            if let Some(handle) = state.serves.lock().unwrap().remove(&key) {
+            let removed = { state.serves.lock().unwrap().remove(&key) };
+            if let Some(handle) = removed {
                 drop(handle);
-                let _ = stop_handle(None, &state, &key, true);
+                let _ = stop_handle(None, &state, &key, true).await;
             }
             let _ = app.emit(SERVES_CHANGED, ());
             return Err(e);
@@ -141,7 +146,7 @@ fn url_prefix_from_local_url(url: &str) -> Result<String, String> {
 /// Stop a running serve. No-op if the workspace isn't running. The live map
 /// entry is removed only after the host accepts the close, so a live-terminal
 /// refusal leaves desktop state consistent with the still-running tenant.
-pub fn stop(
+pub async fn stop(
     app: Option<&AppHandle>,
     state: &AppState,
     key: &str,
@@ -150,7 +155,7 @@ pub fn stop(
     if !state.serves.lock().unwrap().contains_key(key) {
         return Ok(WorkspaceLifecycleOutcome::NotFound);
     }
-    let outcome = stop_handle(app, state, key, force)?;
+    let outcome = stop_handle(app, state, key, force).await?;
     if matches!(
         outcome,
         WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound
@@ -160,28 +165,28 @@ pub fn stop(
     Ok(outcome)
 }
 
-/// Stop every running serve on process shutdown. Called from the Tauri Exit hook
-/// (and the panic-unwind `impl Drop for AppState`) so embedded workspace state
-/// shuts down before the desktop exits. Uses the overlay-preserving close: the
-/// on-set is snapshotted by `persist_workspaces` BEFORE this runs, so a slow
-/// per-workspace teardown racing process death must not flip a workspace off for
-/// the next boot. There is no AppHandle work here (the interactive `stop_handle`
-/// path owns the window / `SERVES_CHANGED` reconcile; on shutdown the
-/// indirection carried `app = None` anyway, so nothing is emitted).
-pub fn stop_all(state: &AppState) {
-    let handles: Vec<(String, ServeHandle)> = state.serves.lock().unwrap().drain().collect();
+/// Drain every embedded tenant on normal process shutdown while preserving the
+/// workspace overlay. The host starts all tenant shutdowns together, so shared
+/// terminal and control-terminal tenants are included without multiplying the
+/// grace period by the tenant count.
+pub async fn stop_all(state: &AppState) {
+    let count = {
+        let mut serves = state.serves.lock().unwrap();
+        let count = serves.len();
+        serves.clear();
+        count
+    };
     tracing::info!(
-        "shutdown: unmounting {} workspaces (overlay preserved)",
-        handles.len()
+        "shutdown: draining {count} workspace serves and all embedded tenants (overlay preserved)"
     );
     if let Some(embedded) = state.embedded.get() {
-        for (key, _handle) in handles {
-            let _ = embedded.close_workspace_root_for_shutdown(Path::new(&key), true);
+        if let Err(error) = embedded.shutdown_all().await {
+            tracing::warn!(%error, "embedded tenant shutdown failed");
         }
     }
 }
 
-fn stop_handle(
+async fn stop_handle(
     app: Option<&AppHandle>,
     state: &AppState,
     key: &str,
@@ -189,7 +194,7 @@ fn stop_handle(
 ) -> Result<WorkspaceLifecycleOutcome, String> {
     let mut outcome = WorkspaceLifecycleOutcome::NotFound;
     if let Some(embedded) = state.embedded.get() {
-        outcome = embedded.close_workspace_root(Path::new(key), force)?;
+        outcome = embedded.close_workspace_root(Path::new(key), force).await?;
     }
     if let Some(app) = app {
         if matches!(
@@ -1255,8 +1260,20 @@ fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), S
                             // then let the real close proceed. Without this the
                             // destroy leaves the block set with no terminal left
                             // to close, and connect stays walled off.
-                            if state.control_terminal_dead.lock().unwrap().contains(id) {
-                                crate::close_devserver_control_terminal(&app_for_close, &state, id);
+                            let control_terminal_dead =
+                                state.control_terminal_dead.lock().unwrap().contains(id);
+                            if control_terminal_dead {
+                                let app_for_terminal_close = app_for_close.clone();
+                                let state_for_terminal_close = Arc::clone(&state);
+                                let id_for_terminal_close = id.to_string();
+                                tauri::async_runtime::spawn(async move {
+                                    crate::close_devserver_control_terminal(
+                                        &app_for_terminal_close,
+                                        &state_for_terminal_close,
+                                        &id_for_terminal_close,
+                                    )
+                                    .await;
+                                });
                                 false
                             } else {
                                 // Closed (red button) WHILE STILL CONNECTING: must

@@ -310,47 +310,46 @@ impl EmbeddedServer {
         self.host.is_root_mounted(root)
     }
 
-    pub fn close_prefix(
+    pub async fn close_prefix(
         &self,
         prefix: &str,
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, String> {
         self.host
             .close_workspace(prefix, force)
+            .await
             .map_err(|e| format!("closing embedded route {prefix}: {e}"))
     }
 
-    pub fn close_workspace_root(
+    pub async fn close_workspace_root(
         &self,
         root: &Path,
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, String> {
         self.host
             .close_workspace_for_root(root, force)
+            .await
             .map_err(|e| format!("closing embedded workspace {}: {e}", root.display()))
     }
 
-    /// Shutdown-flavored close: unmount without recording the workspace off in the
-    /// on/off overlay, so the on-set snapshotted before teardown survives to the
-    /// next boot. Used only by `serve::stop_all` on process shutdown.
-    pub fn close_workspace_root_for_shutdown(
-        &self,
-        root: &Path,
-        force: bool,
-    ) -> Result<WorkspaceLifecycleOutcome, String> {
-        self.host
-            .close_workspace_for_root_preserving_overlay(root, force)
-            .map_err(|e| format!("closing embedded workspace {}: {e}", root.display()))
-    }
-
-    pub fn remove_workspace_root(
+    pub async fn remove_workspace_root(
         &self,
         root: &Path,
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, String> {
         self.host
             .remove_workspace_for_root(root, force)
+            .await
             .map_err(|e| format!("removing embedded workspace {}: {e}", root.display()))
+    }
+
+    /// Drain every hosted workspace, shared-terminal, and control-terminal
+    /// tenant concurrently while preserving the persisted workspace overlay.
+    pub async fn shutdown_all(&self) -> Result<(), String> {
+        self.host
+            .shutdown_all()
+            .await
+            .map_err(|e| format!("shutting down embedded tenants: {e}"))
     }
 
     /// Return the tokened launch URL of the single shared `/terminal` tenant
@@ -465,8 +464,8 @@ impl EmbeddedServer {
     /// `reap_control_window` removes the registry row and unmounts the tenant
     /// directly (it does NOT route through the fragile `close_prefix` prune-task
     /// drop race).
-    pub fn reap_control_window(&self, window_id: &str) -> bool {
-        self.host.reap_control_window(window_id)
+    pub async fn reap_control_window(&self, window_id: &str) -> bool {
+        self.host.reap_control_window(window_id).await
     }
 
     /// Set the server-persisted visibility of a window in the LOCAL embedded

@@ -518,8 +518,11 @@ impl ConfigStore {
 /// Set once, after the Tauri `AppHandle` exists (the registry installs before it),
 /// via the shared [`OnceLock`] cell -- the chan-server-side registry can't see
 /// the `AppHandle` directly, so the desktop injects the teardown as a closure.
+/// The returned handle lets async gateway policy paths await teardown before a
+/// reconnect; the synchronous registry-remove path explicitly detaches it.
 /// A no-op when nothing is live (removing a not-connected devserver).
-pub type DevserverRemoveHook = Arc<dyn Fn(&str) + Send + Sync>;
+pub type DevserverRemoveHook =
+    Arc<dyn Fn(&str) -> tauri::async_runtime::JoinHandle<()> + Send + Sync>;
 
 /// chan-desktop's [`DevserverRegistry`] implementation -- the bridge the
 /// launcher's `/api/library/devservers` routes reach through
@@ -934,7 +937,7 @@ impl DevserverRegistry for DevserverConfigRegistry {
         // above first -- the teardown locks the other AppState maps, never the
         // store. A no-op when the devserver wasn't connected.
         if let Some(hook) = self.on_remove.get() {
-            hook(id);
+            std::mem::drop(hook(id));
         }
         Ok(true)
     }
@@ -1981,7 +1984,8 @@ mod tests {
         let fired_for_hook = Arc::clone(&fired);
         hook_cell
             .set(Arc::new(move |id: &str| {
-                fired_for_hook.lock().unwrap().push(id.to_string())
+                fired_for_hook.lock().unwrap().push(id.to_string());
+                tauri::async_runtime::spawn(async {})
             }))
             .ok();
         let reg = DevserverConfigRegistry::new(

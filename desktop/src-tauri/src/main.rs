@@ -229,6 +229,9 @@ pub struct AppState {
     /// `ExitRequested` (from `app.exit(0)` in the dialog callback)
     /// must pass instead of prompting again.
     pub quit_confirmed: std::sync::atomic::AtomicBool,
+    /// One-shot guard for the awaited embedded-tenant drain that precedes a
+    /// normal exit or update restart.
+    pub shutdown_started: std::sync::atomic::AtomicBool,
     /// True while the quit-confirmation dialog is showing, so a
     /// repeated Cmd+Q doesn't stack a second dialog.
     pub quit_prompt_open: std::sync::atomic::AtomicBool,
@@ -270,6 +273,7 @@ impl AppState {
             gateway_backstop_probed: Mutex::new(std::collections::HashSet::new()),
             gateway_migration: Mutex::new(None),
             quit_confirmed: std::sync::atomic::AtomicBool::new(false),
+            shutdown_started: std::sync::atomic::AtomicBool::new(false),
             quit_prompt_open: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -392,18 +396,6 @@ fn most_recent_buried_with_prefix<'a>(buried: &'a [BuriedWindow], prefix: &str) 
         .rev()
         .find(|b| b.label.starts_with(prefix))
         .map(|b| b.label.as_str())
-}
-
-/// Defense-in-depth local runtime teardown: `RunEvent::Exit` is the
-/// primary path, but a panic unwinding through `tauri::App` can
-/// bypass it. Dropping the last `Arc<AppState>` signals every
-/// running local workspace via `serve::stop_all`. Idempotent: stop_all
-/// drains the serves map, so a normal-exit run followed by Drop is a
-/// no-op on the second pass.
-impl Drop for AppState {
-    fn drop(&mut self) {
-        serve::stop_all(self);
-    }
 }
 
 /// Lowest free display number (`>= 1`) for `base` among the live
@@ -1270,21 +1262,14 @@ async fn remove_workspace(
         return Err("embedded local server is unavailable".to_string());
     }
     emit_chan_busy(&app, true, "remove", &key);
-    let key_for_block = key.clone();
-    let state_for_block = Arc::clone(&state);
-    let result = tokio::task::spawn_blocking(move || {
-        let embedded = state_for_block
-            .embedded
-            .get()
-            .ok_or_else(|| "embedded local server is unavailable".to_string())?;
-        embedded.remove_workspace_root(Path::new(&key_for_block), false)
-    })
-    .await;
+    let result = state
+        .embedded
+        .get()
+        .expect("embedded availability checked above")
+        .remove_workspace_root(Path::new(&key), false)
+        .await;
     emit_chan_busy(&app, false, "remove", &key);
-    let outcome = match result {
-        Ok(inner) => inner?,
-        Err(e) => return Err(format!("unregistering workspace panicked: {e}")),
-    };
+    let outcome = result?;
     match outcome {
         chan_server::WorkspaceLifecycleOutcome::Completed
         | chan_server::WorkspaceLifecycleOutcome::NotFound => {
@@ -1311,14 +1296,9 @@ async fn set_workspace_on(
         // has_window=true so it won't double-mint.
         serve::start(app, Arc::clone(&state), key, true).await?;
     } else {
-        // `serve::stop` → `close_workspace` busy-waits up to 5s for the flock
-        // release (host.rs `wait_for_workspace_release`), so run it off the
-        // runtime; this async command must not block the event loop.
-        let state_owned = Arc::clone(&state);
-        let outcome =
-            tokio::task::spawn_blocking(move || serve::stop(Some(&app), &state_owned, &key, false))
-                .await
-                .map_err(|e| format!("stopping workspace {path}: {e}"))??;
+        // The host runs its bounded flock verifier on Tokio's blocking pool,
+        // so the async close can be awaited directly without blocking Tauri.
+        let outcome = serve::stop(Some(&app), &state, &key, false).await?;
         if let chan_server::WorkspaceLifecycleOutcome::Refused { active_terminals } = outcome {
             return Err(format!(
                 "refusing to stop {path}: {active_terminals} live terminal(s)"
@@ -1565,7 +1545,7 @@ fn remove_devserver_workspace_windows(app: &tauri::AppHandle, state: &AppState, 
 /// `reap_control_window` reaps both (idempotent), killing the script PTY. Used
 /// by explicit teardown, by an explicit user close of the control window, and
 /// by the PTY-exit path once the script-backed connection has ended.
-fn reap_devserver_control_terminal(app: &tauri::AppHandle, state: &AppState, id: &str) {
+async fn reap_devserver_control_terminal(app: &tauri::AppHandle, state: &AppState, id: &str) {
     let label = serve::control_terminal_label(id);
     serve::close_window_by_label(app, &label);
     if state.remove_buried(&label) {
@@ -1574,7 +1554,7 @@ fn reap_devserver_control_terminal(app: &tauri::AppHandle, state: &AppState, id:
     state.control_terminal_prefixes.lock().unwrap().remove(id);
     state.control_terminal_runs.lock().unwrap().remove(id);
     if let Some(embedded) = state.embedded.get() {
-        embedded.reap_control_window(&label);
+        embedded.reap_control_window(&label).await;
     }
 }
 
@@ -1706,12 +1686,12 @@ async fn revoke_devserver_native_trust(
         false,
     )?;
     state.bump_native_policy_generation(id);
-    teardown_devserver_connection(app, state, id);
+    teardown_devserver_connection(app, state, id).await;
     signal_devserver_policy_change(app, state);
     Ok(())
 }
 
-fn teardown_devserver_connection(app: &tauri::AppHandle, state: &AppState, id: &str) {
+async fn teardown_devserver_connection(app: &tauri::AppHandle, state: &AppState, id: &str) {
     state.devservers.remove(id);
     // A full teardown reaps the control terminal, so the reconnect block must
     // not outlive it: the block's invariant is that a kept "process exited"
@@ -1721,7 +1701,7 @@ fn teardown_devserver_connection(app: &tauri::AppHandle, state: &AppState, id: &
     state.control_terminal_dead.lock().unwrap().remove(id);
     // Reap the control terminal BEFORE remove_devserver_windows fires the
     // launcher refresh, so the refresh already reflects the reaped control row.
-    reap_devserver_control_terminal(app, state, id);
+    reap_devserver_control_terminal(app, state, id).await;
     remove_devserver_windows(app, state, id);
 }
 
@@ -1781,7 +1761,7 @@ fn mark_devserver_control_exited(app: &tauri::AppHandle, state: &AppState, id: &
 /// The user explicitly closed the control terminal window. This is different
 /// from the connect script exiting inside an otherwise open terminal: the row
 /// should leave the launcher, not linger flashing for attention.
-fn close_devserver_control_terminal(app: &tauri::AppHandle, state: &AppState, id: &str) {
+async fn close_devserver_control_terminal(app: &tauri::AppHandle, state: &AppState, id: &str) {
     let was_connected = state.devservers.is_connected(id);
     if was_connected {
         state.devservers.remove(id);
@@ -1789,7 +1769,7 @@ fn close_devserver_control_terminal(app: &tauri::AppHandle, state: &AppState, id
     // Closing a dead control terminal (the user read the death reason) clears the
     // reconnect block: the devserver is now ready to connect again.
     state.control_terminal_dead.lock().unwrap().remove(id);
-    reap_devserver_control_terminal(app, state, id);
+    reap_devserver_control_terminal(app, state, id).await;
     if was_connected {
         remove_devserver_windows(app, state, id);
     } else if let Some(embedded) = state.embedded() {
@@ -2109,7 +2089,7 @@ fn spawn_control_terminal_exit_watcher(
                         devserver = %id,
                         "control script exited cleanly within the connect grace; reaping the control terminal"
                     );
-                    reap_devserver_control_terminal(&app, &state, &id);
+                    reap_devserver_control_terminal(&app, &state, &id).await;
                     if let Some(embedded) = state.embedded() {
                         embedded.signal_library_change();
                     }
@@ -2120,7 +2100,7 @@ fn spawn_control_terminal_exit_watcher(
                     devserver = %id,
                     "control script exited cleanly past the connect grace; disconnecting the devserver"
                 );
-                teardown_devserver_connection(&app, &state, &id);
+                teardown_devserver_connection(&app, &state, &id).await;
                 return;
             }
             tracing::info!(
@@ -2221,7 +2201,7 @@ async fn connect_devserver_impl(
                     .get_webview_window(&serve::control_terminal_label(&id))
                     .is_some();
                 if control_terminated && !control_window_live {
-                    teardown_devserver_connection(&app, &state, &id);
+                    teardown_devserver_connection(&app, &state, &id).await;
                 } else if state
                     .control_terminal_runs
                     .lock()
@@ -2675,7 +2655,7 @@ async fn connect_devserver_impl_inner(
     let control = if script.trim().is_empty() {
         None
     } else {
-        reap_devserver_control_terminal(&app, &state, &id);
+        reap_devserver_control_terminal(&app, &state, &id).await;
         let ct = serve::spawn_control_terminal_window(
             app.clone(),
             Arc::clone(&state),
@@ -3460,21 +3440,19 @@ async fn close_workspace_from_handoff(
         return Err("embedded local server is unavailable".to_string());
     }
     let key = canonical_key(&path);
-    let state_for_block = Arc::clone(&state);
-    let key_for_block = key.clone();
-    let outcome = tokio::task::spawn_blocking(move || {
-        let embedded = state_for_block
-            .embedded
-            .get()
-            .ok_or_else(|| "embedded local server is unavailable".to_string())?;
-        if remove {
-            embedded.remove_workspace_root(Path::new(&key_for_block), false)
-        } else {
-            embedded.close_workspace_root(Path::new(&key_for_block), false)
-        }
-    })
-    .await
-    .map_err(|e| format!("closing workspace from handoff panicked: {e}"))??;
+    let embedded = state
+        .embedded
+        .get()
+        .expect("embedded availability checked above");
+    let outcome = if remove {
+        embedded
+            .remove_workspace_root(Path::new(&key), false)
+            .await?
+    } else {
+        embedded
+            .close_workspace_root(Path::new(&key), false)
+            .await?
+    };
     match outcome {
         chan_server::WorkspaceLifecycleOutcome::Completed
         | chan_server::WorkspaceLifecycleOutcome::NotFound => {
@@ -3557,7 +3535,7 @@ async fn desktop_handle_upgrade(
                             }
                         }
                         tracing::info!(%version, "chan-desktop update installed; relaunching");
-                        app_bg.restart();
+                        begin_normal_shutdown(app_bg, ShutdownAction::Restart);
                     }
                     Err(e) => {
                         emit_system_notice(
@@ -3677,7 +3655,7 @@ fn notify_desktop_update_ready(app: &tauri::AppHandle, version: &str) {
 #[tauri::command]
 #[cfg(target_os = "macos")]
 fn restart_desktop_after_update(app: tauri::AppHandle) {
-    app.restart();
+    begin_normal_shutdown(app, ShutdownAction::Restart);
 }
 
 #[tauri::command]
@@ -4048,7 +4026,10 @@ fn open_devtools(window: tauri::WebviewWindow) {
 /// keep focus on the frontmost remaining window -- the window the user
 /// just dropped the terminal into.
 #[tauri::command]
-fn request_close_window(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+async fn request_close_window(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
     let closing = window.label();
     // A control terminal WINDOW close is explicit teardown of that row. The
     // script/PTY-exit watcher is the path that keeps the row and emits launcher
@@ -4058,7 +4039,7 @@ fn request_close_window(app: tauri::AppHandle, window: tauri::WebviewWindow) -> 
         let state = app.state::<Arc<AppState>>();
         let id = id.to_string();
         let _ = show_window(&app, "main");
-        close_devserver_control_terminal(&app, &state, &id);
+        close_devserver_control_terminal(&app, &state, &id).await;
         return Ok(());
     }
     let others_remain = app
@@ -4159,9 +4140,9 @@ fn hide_window_from_close_confirm(app: tauri::AppHandle, window: tauri::WebviewW
 /// the launcher refreshes its row. Inert on a local window, or when no
 /// devserver matches the library.
 #[tauri::command]
-fn abandon_devserver_for_window(
+async fn abandon_devserver_for_window(
     app: tauri::AppHandle,
-    state: State<Arc<AppState>>,
+    state: State<'_, Arc<AppState>>,
     window: tauri::WebviewWindow,
 ) -> Result<(), String> {
     let devserver_id = devserver_id_for_window_label(&state.devserver_feed, window.label());
@@ -4171,7 +4152,7 @@ fn abandon_devserver_for_window(
         // not listening for the event. The teardown covers every control-run
         // state: reaping the control terminal kills a still-running connect
         // script, and is a no-op on an exited or absent one.
-        teardown_devserver_connection(&app, &state, &id);
+        teardown_devserver_connection(&app, &state, &id).await;
         let _ = app.emit("devserver-abandon", id);
     }
     Ok(())
@@ -4200,7 +4181,7 @@ async fn reconnect_devserver_for_window(
         if state_arc.devserver_connecting.lock().unwrap().contains(&id) {
             return Ok(());
         }
-        teardown_devserver_connection(&app, &state_arc, &id);
+        teardown_devserver_connection(&app, &state_arc, &id).await;
         connect_devserver_impl(app.clone(), state_arc, id).await?;
     }
     Ok(())
@@ -4740,8 +4721,12 @@ fn main() {
                     let app_for_teardown = app.handle().clone();
                     let _ = state_for_setup.devserver_remove_hook.set(Arc::new(
                         move |id: &str| {
-                            let state = app_for_teardown.state::<Arc<AppState>>();
-                            teardown_devserver_connection(&app_for_teardown, &state, id);
+                            let app = app_for_teardown.clone();
+                            let id = id.to_string();
+                            tauri::async_runtime::spawn(async move {
+                                let state = Arc::clone(&app.state::<Arc<AppState>>());
+                                teardown_devserver_connection(&app, &state, &id).await;
+                            })
                         },
                     ));
                     // The roster poll's node-move handling fires this after
@@ -5172,41 +5157,24 @@ fn main() {
                     .filter(|l| serve::is_workspace_webview_label(l))
                     .count();
                 if open == 0 {
-                    return; // nothing worth guarding; quit as before
+                    api.prevent_exit();
+                    begin_normal_shutdown(_app.clone(), ShutdownAction::Exit(0));
+                    return;
                 }
                 api.prevent_exit();
                 request_quit(_app);
             }
             RunEvent::Exit => {
                 capture_launcher_geometry(_app);
-                // Snapshot the on-set BEFORE teardown. The order is load-bearing:
-                // persist_workspaces reads the LIVE mounted set, so it must run
-                // while the workspaces are still mounted; stop_all then unmounts
-                // them WITHOUT recording them off (the overlay-preserving close),
-                // so the next boot re-serves exactly this on-set (the §3.2 boot
-                // matrix).
-                persist_workspaces(&state_for_exit);
-                // Best-effort: unmount every embedded local workspace
-                // before the desktop runtime exits.
-                serve::stop_all(&state_for_exit);
-                // Explicitly reap any devserver connect-script control terminals:
-                // stop_all only unmounts workspaces, so without this their PTYs
-                // would ride process-death SIGHUP rather than a deterministic kill.
-                // `reap_control_window` drops each control row + unmounts its
-                // `/control-N` tenant (kills the PTY). Mirrors the disconnect/forget
-                // teardown. Best-effort; the ids are collected before the calls so
-                // the lock isn't held across them.
-                if let Some(embedded) = state_for_exit.embedded.get() {
-                    let ids: Vec<String> = state_for_exit
-                        .control_terminal_prefixes
-                        .lock()
-                        .unwrap()
-                        .keys()
-                        .cloned()
-                        .collect();
-                    for id in ids {
-                        embedded.reap_control_window(&serve::control_terminal_label(&id));
-                    }
+                // Normal exit/restart drained asynchronously before requesting
+                // this event. An external/fallback exit cannot await here, but
+                // it still snapshots the live overlay; dropping the host then
+                // applies the cancel+abort-before-cell-clear fallback.
+                if !state_for_exit
+                    .shutdown_started
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    persist_workspaces(&state_for_exit);
                 }
             }
             // macOS: Dock click or `open -a` while the process is
@@ -6728,6 +6696,35 @@ const LAUNCHER_RELOAD_BRIDGE_JS: &str = r#"
 })();
 "#;
 
+enum ShutdownAction {
+    Exit(i32),
+    #[cfg(target_os = "macos")]
+    Restart,
+}
+
+/// Start the one normal-exit drain. Snapshot the mounted overlay before any
+/// tenant is removed, await every embedded tenant, then perform the process
+/// action. Synchronous Tauri hooks call this and return; the async task owns the
+/// remaining state.
+fn begin_normal_shutdown(app: tauri::AppHandle, action: ShutdownAction) {
+    use std::sync::atomic::Ordering;
+
+    let state = Arc::clone(&app.state::<Arc<AppState>>());
+    if state.shutdown_started.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    state.quit_confirmed.store(true, Ordering::SeqCst);
+    persist_workspaces(&state);
+    tauri::async_runtime::spawn(async move {
+        serve::stop_all(&state).await;
+        match action {
+            ShutdownAction::Exit(code) => app.exit(code),
+            #[cfg(target_os = "macos")]
+            ShutdownAction::Restart => app.restart(),
+        }
+    });
+}
+
 /// Quit, asking first while ANY SPA window is alive -- visible or
 /// buried (a buried window is a live hidden webview, so one
 /// `webview_windows()` scan covers both): quitting silently kills
@@ -6749,9 +6746,8 @@ fn request_quit(app: &tauri::AppHandle) {
         .filter(|l| serve::is_workspace_webview_label(l))
         .count();
     if open == 0 {
-        state.quit_confirmed.store(true, Ordering::SeqCst);
         capture_launcher_geometry(app);
-        app.exit(0);
+        begin_normal_shutdown(app.clone(), ShutdownAction::Exit(0));
         return;
     }
     // One dialog at a time: a second Cmd+Q while the ask is up must
@@ -6773,9 +6769,8 @@ fn request_quit(app: &tauri::AppHandle) {
     native_dialog::confirm(app, "Quit Chan?", &message, "Quit", "Cancel", move |quit| {
         state.quit_prompt_open.store(false, Ordering::SeqCst);
         if quit {
-            state.quit_confirmed.store(true, Ordering::SeqCst);
             capture_launcher_geometry(&app_for_reply);
-            app_for_reply.exit(0);
+            begin_normal_shutdown(app_for_reply, ShutdownAction::Exit(0));
         }
     });
 }
@@ -6886,7 +6881,10 @@ fn handle_close_window(app: &tauri::AppHandle) {
 /// handler turns that into a hide.
 fn close_spa_or_native_window(app: &tauri::AppHandle, window: tauri::WebviewWindow) {
     if window.label().starts_with("control-terminal-") {
-        let _ = request_close_window(app.clone(), window);
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = request_close_window(app, window).await;
+        });
         return;
     }
     if serve::is_workspace_webview_label(window.label()) {

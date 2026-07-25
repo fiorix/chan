@@ -401,6 +401,15 @@ pub fn apply_roster_fetch(rt: &mut GatewayRuntime, fetch: RosterFetch) -> FetchE
     effect
 }
 
+async fn await_devserver_teardown(state: &AppState, id: &str) {
+    let Some(teardown) = state.devserver_remove_hook.get() else {
+        return;
+    };
+    if let Err(error) = teardown(id).await {
+        tracing::warn!(devserver = %id, %error, "awaiting devserver teardown failed");
+    }
+}
+
 async fn apply_roster_policy_diff(state: &Arc<AppState>, gateway_id: &str, diff: &RosterDiff) {
     for (owner, devserver_id) in &diff.removed {
         let id = synthesized_row_id(gateway_id, owner, devserver_id);
@@ -412,9 +421,7 @@ async fn apply_roster_policy_diff(state: &Arc<AppState>, gateway_id: &str, diff:
         {
             tracing::warn!(gateway = %gateway_id, devserver = %id, error = %e, "pruning removed devserver native trust failed");
         }
-        if let Some(teardown) = state.devserver_remove_hook.get() {
-            teardown(&id);
-        }
+        await_devserver_teardown(state, &id).await;
     }
 
     // A moved row is a node migration, not a revocation: the exact-origin
@@ -429,9 +436,7 @@ async fn apply_roster_policy_diff(state: &Arc<AppState>, gateway_id: &str, diff:
         let _policy_guard = policy_lock.lock().await;
         state.bump_native_policy_generation(&id);
         let was_connected = state.devservers.is_connected(&id);
-        if let Some(teardown) = state.devserver_remove_hook.get() {
-            teardown(&id);
-        }
+        await_devserver_teardown(state, &id).await;
         if was_connected {
             if let Some(reconnect) = state.devserver_reconnect_hook.get() {
                 reconnect(&id);
@@ -454,9 +459,7 @@ async fn apply_roster_policy_diff(state: &Arc<AppState>, gateway_id: &str, diff:
                 Ok(true) => {}
                 Ok(false) => {
                     state.bump_native_policy_generation(&id);
-                    if let Some(teardown) = state.devserver_remove_hook.get() {
-                        teardown(&id);
-                    }
+                    await_devserver_teardown(state, &id).await;
                 }
                 Err(e) => {
                     tracing::warn!(gateway = %gateway_id, devserver = %id, error = %e, "checking changed devserver native trust failed")
@@ -1171,9 +1174,7 @@ pub async fn cascade_disconnect<R: tauri::Runtime>(
         let policy_lock = state.native_policy_lock(&synth_id);
         let _policy_guard = policy_lock.lock().await;
         state.bump_native_policy_generation(&synth_id);
-        if let Some(teardown) = state.devserver_remove_hook.get() {
-            teardown(&synth_id);
-        }
+        await_devserver_teardown(state, &synth_id).await;
     }
     match reason {
         CascadeReason::UserDisconnect => persist_enabled(state, gateway_id, false),
@@ -1403,14 +1404,31 @@ mod tests {
         let torn_down = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&torn_down);
         let conns = Arc::clone(&state.devservers);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let teardown_started = Arc::new(Mutex::new(Some(started_tx)));
+        let teardown_release = Arc::new(tokio::sync::Notify::new());
         assert!(state
             .devserver_remove_hook
-            .set(Arc::new(move |id| {
-                seen.lock().unwrap().push(id.to_string());
-                // The production hook (teardown_devserver_connection) drops
-                // the conn; the stub mirrors that one effect so the test
-                // observes the pin going away.
-                conns.remove(id);
+            .set(Arc::new({
+                let teardown_release = Arc::clone(&teardown_release);
+                move |id| {
+                    let id = id.to_string();
+                    let seen = Arc::clone(&seen);
+                    let conns = Arc::clone(&conns);
+                    let teardown_started = Arc::clone(&teardown_started);
+                    let teardown_release = Arc::clone(&teardown_release);
+                    tauri::async_runtime::spawn(async move {
+                        if let Some(started) = teardown_started.lock().unwrap().take() {
+                            let _ = started.send(());
+                        }
+                        teardown_release.notified().await;
+                        seen.lock().unwrap().push(id.clone());
+                        // The production hook (teardown_devserver_connection)
+                        // drops the conn; the stub mirrors that effect after an
+                        // explicit async gap.
+                        conns.remove(&id);
+                    })
+                }
             }))
             .is_ok());
         let reconnected = Arc::new(Mutex::new(Vec::new()));
@@ -1427,7 +1445,18 @@ mod tests {
             ..Default::default()
         };
 
-        apply_roster_policy_diff(&state, "gw-feedface", &diff).await;
+        let mut apply = Box::pin(apply_roster_policy_diff(&state, "gw-feedface", &diff));
+        tokio::select! {
+            biased;
+            () = &mut apply => panic!("policy application returned before async teardown completed"),
+            result = started_rx => result.expect("teardown starts"),
+        }
+        assert!(
+            reconnected.lock().unwrap().is_empty(),
+            "reconnect must wait while teardown is held"
+        );
+        teardown_release.notify_one();
+        apply.await;
 
         assert_eq!(
             state.native_policy_generation(&id),
@@ -1498,10 +1527,10 @@ mod tests {
         let seen = Arc::clone(&torn_down);
         assert!(state
             .devserver_remove_hook
-            .set(Arc::new(move |id| seen
-                .lock()
-                .unwrap()
-                .push(id.to_string())))
+            .set(Arc::new(move |id| {
+                seen.lock().unwrap().push(id.to_string());
+                tauri::async_runtime::spawn(async {})
+            }))
             .is_ok());
         let diff = RosterDiff {
             removed: vec![(owner.into(), devserver_id.clone())],
@@ -1544,10 +1573,10 @@ mod tests {
         let seen = Arc::clone(&torn_down);
         assert!(state
             .devserver_remove_hook
-            .set(Arc::new(move |id| seen
-                .lock()
-                .unwrap()
-                .push(id.to_string())))
+            .set(Arc::new(move |id| {
+                seen.lock().unwrap().push(id.to_string());
+                tauri::async_runtime::spawn(async {})
+            }))
             .is_ok());
         let diff = RosterDiff {
             updated: vec![(owner.into(), devserver_id.clone())],

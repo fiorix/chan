@@ -193,32 +193,10 @@ struct AppArtifacts {
     /// indexer on shutdown without keeping stale indexer handles
     /// alive across storage reset or metadata import swaps.
     workspace_cell: Arc<RwLock<Option<WorkspaceCell>>>,
-    /// Background idle-prune/shutdown task for long-lived terminal
-    /// sessions. Its shutdown receiver stops it cooperatively; dropping this
-    /// raw Tokio handle detaches the task rather than aborting it.
-    _terminal_pruner: tokio::task::JoinHandle<()>,
-    /// The `cs terminal write` queue drainer (see terminal_sessions). Held
-    /// alongside the pruner for the same cooperative lifetime.
-    _terminal_drainer: tokio::task::JoinHandle<()>,
-    /// Republishes the cross-window terminal roster onto `/ws` on every
-    /// change. Its shutdown receiver, not raw-handle drop, stops it.
-    _terminal_roster_broadcaster: tokio::task::JoinHandle<()>,
-    /// Ages out disconnected session participants and rebroadcasts the
-    /// leader/followers roster. Held alongside the other cooperative tasks.
-    _session_reaper: tokio::task::JoinHandle<()>,
-    /// Debounced doc-session disk flusher + detach-grace reaper. Held
-    /// like the terminal tasks above; `None` in the terminal-only app
-    /// (no workspace, no doc route, nothing to flush).
-    _doc_flusher: Option<tokio::task::JoinHandle<()>>,
-    /// Folds raw watcher events into live doc sessions. Same
-    /// terminal-only caveat as the flusher.
-    _doc_reconciler: Option<tokio::task::JoinHandle<()>>,
-    /// Debounced scene-session disk flusher + detach-grace reaper.
-    /// Same terminal-only caveat as the doc flusher.
-    _scene_flusher: Option<tokio::task::JoinHandle<()>>,
-    /// Folds raw watcher events into live scene sessions. Same
-    /// terminal-only caveat as the flusher.
-    _scene_reconciler: Option<tokio::task::JoinHandle<()>>,
+    /// Bounded owner for the terminal/session/document/scene background
+    /// tasks. Hosted and standalone teardown both await it before the
+    /// workspace cell and route state can drop.
+    tasks: chan_library::TenantTaskOwner,
     /// Mutable handle to the URL prefix injected into the SPA shell
     /// as `<meta name="chan-prefix">`. Local serve sets it once at
     /// build time from `ServeConfig::prefix`; tunnel mode swaps in
@@ -774,20 +752,26 @@ async fn build_app(
     } else {
         Router::new().nest(&config.prefix, inner)
     };
+    let tasks = chan_library::TenantTaskOwner::new(
+        shutdown_tx.clone(),
+        vec![
+            terminal_pruner,
+            terminal_drainer,
+            terminal_roster_broadcaster,
+            session_reaper,
+            doc_flusher,
+            doc_reconciler,
+            scene_flusher,
+            scene_reconciler,
+        ],
+    );
 
     Ok(AppArtifacts {
         app,
         token,
         last_activity,
         workspace_cell: state_for_bridge.clone(),
-        _terminal_pruner: terminal_pruner,
-        _terminal_drainer: terminal_drainer,
-        _terminal_roster_broadcaster: terminal_roster_broadcaster,
-        _session_reaper: session_reaper,
-        _doc_flusher: Some(doc_flusher),
-        _doc_reconciler: Some(doc_reconciler),
-        _scene_flusher: Some(scene_flusher),
-        _scene_reconciler: Some(scene_reconciler),
+        tasks,
         prefix,
         mcp_bridge,
         control_socket,
@@ -1009,22 +993,22 @@ async fn build_terminal_app(
     } else {
         Router::new().nest(&config.prefix, inner)
     };
+    let tasks = chan_library::TenantTaskOwner::new(
+        shutdown_tx.clone(),
+        vec![
+            terminal_pruner,
+            terminal_drainer,
+            terminal_roster_broadcaster,
+            session_reaper,
+        ],
+    );
 
     Ok(AppArtifacts {
         app,
         token,
         last_activity,
         workspace_cell,
-        _terminal_pruner: terminal_pruner,
-        _terminal_drainer: terminal_drainer,
-        _terminal_roster_broadcaster: terminal_roster_broadcaster,
-        _session_reaper: session_reaper,
-        // No workspace: no doc sessions to flush or reconcile (the slim
-        // router mounts no doc route).
-        _doc_flusher: None,
-        _doc_reconciler: None,
-        _scene_flusher: None,
-        _scene_reconciler: None,
+        tasks,
         prefix,
         // No workspace to MCP-bridge; the control socket above IS the
         // local CLI surface (terminal-scoped).
@@ -1268,30 +1252,22 @@ impl chan_library::TenantBuilder for RouteLayer {
 
 /// Reduce a route-layer `AppArtifacts` to the host-facing `TenantArtifacts`:
 /// surface what the host routes / reconciles / tears down with, and stash the
-/// rest (MCP bridge, control socket, raw background-task handles, and the
-/// AppState the router owns) in the opaque keepalive. The host signals
-/// cooperative shutdown before dropping it; only the custom bridge/socket
-/// guards have abort-on-drop behavior.
+/// rest (MCP bridge, control socket, and the AppState the router owns) in the
+/// opaque keepalive. The task owner remains explicit so the host can join it
+/// before clearing the workspace cell.
 fn into_tenant_artifacts(a: AppArtifacts) -> chan_library::TenantArtifacts {
     let AppArtifacts {
         app,
         token,
         last_activity,
         workspace_cell,
-        _terminal_pruner,
-        _terminal_drainer,
-        _terminal_roster_broadcaster,
-        _session_reaper,
-        _doc_flusher,
-        _doc_reconciler,
-        _scene_flusher,
-        _scene_reconciler,
+        tasks,
         prefix,
         mcp_bridge,
         control_socket,
         terminal_sessions,
         state,
-        shutdown_tx,
+        shutdown_tx: _,
     } = a;
     let window_presence = state.window_presence.clone();
     // The SAME Arc the AppState holds, so the `/ws` route's transfer updates
@@ -1308,27 +1284,14 @@ fn into_tenant_artifacts(a: AppArtifacts) -> chan_library::TenantArtifacts {
         app,
         token,
         terminal_sessions,
-        shutdown_tx,
+        tasks,
         prefix,
         window_presence,
         window_transfers,
         session_registry,
         events_tx,
         cell,
-        keepalive: Box::new((
-            last_activity,
-            _terminal_pruner,
-            _terminal_drainer,
-            _terminal_roster_broadcaster,
-            _session_reaper,
-            _doc_flusher,
-            _doc_reconciler,
-            _scene_flusher,
-            _scene_reconciler,
-            mcp_bridge,
-            control_socket,
-            state,
-        )),
+        keepalive: Box::new((last_activity, mcp_bridge, control_socket, state)),
     }
 }
 
@@ -1399,7 +1362,7 @@ pub async fn serve(
     // bridge and an empty (unwritten) title map. No stable control
     // identity either -- a window-spawned serve's control socket dies
     // with the process by design.
-    let artifacts = build_app(
+    let mut artifacts = build_app(
         library,
         workspace,
         &config,
@@ -1442,15 +1405,9 @@ pub async fn serve(
         }
     }
 
-    let app = artifacts.app;
-    let last_activity = artifacts.last_activity;
+    let app = artifacts.app.clone();
+    let last_activity = artifacts.last_activity.clone();
     let workspace_cell = artifacts.workspace_cell.clone();
-    // Keep the MCP bridge alive for the duration of `serve()`. Dropping
-    // it at the end of this function unlinks the socket and aborts the
-    // accept loop. Bound to a `let _` so clippy doesn't warn on
-    // `let _ = artifacts.mcp_bridge` discarding the guard prematurely.
-    let _mcp_bridge = artifacts.mcp_bridge;
-    let _control_socket = artifacts.control_socket;
 
     // Single shutdown channel fed by both the idle-timeout watcher
     // (when --timeout is set) and SIGINT/SIGTERM. axum's
@@ -1458,7 +1415,7 @@ pub async fn serve(
     // accepting new connections and drains in-flight ones. The
     // channel itself was created inside build_app so AppState (for
     // ws_pump and other long-lived handlers) shares the same signal.
-    let signal_tx = artifacts.shutdown_tx;
+    let signal_tx = artifacts.shutdown_tx.clone();
 
     if let Some(timeout) = config.idle_timeout {
         spawn_idle_watcher(timeout, last_activity.clone(), signal_tx.clone());
@@ -1482,9 +1439,9 @@ pub async fn serve(
     // Shared drain: spawns the SIGINT/SIGTERM watcher, hands axum the
     // graceful-shutdown receiver, and force-exits after the grace window so
     // a lingering WebSocket can't hang the process.
-    graceful_serve(listener, app, signal_tx)
-        .await
-        .map_err(Error::Io)?;
+    let serve_result = graceful_serve(listener, app, signal_tx).await;
+    artifacts.tasks.shutdown().await;
+    serve_result.map_err(Error::Io)?;
     Ok(())
 }
 

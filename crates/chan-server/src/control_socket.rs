@@ -1481,7 +1481,7 @@ async fn handle_unserve(scope: &UnserveScope, path: &Path, remove: bool) -> Cont
             // `DELETE /api/library/workspaces/{id}` equivalent), so the host's
             // own library + persisted overlay reflect it; a plain close just
             // unmounts the tenant and keeps the registration.
-            Some(host) if remove => match host.remove_workspace_for_root(path, false) {
+            Some(host) if remove => match host.remove_workspace_for_root(path, false).await {
                 Ok(chan_library::WorkspaceLifecycleOutcome::Completed) => ControlResponse::Ok {
                     message: format!("removed {}", path.display()),
                 },
@@ -1497,7 +1497,7 @@ async fn handle_unserve(scope: &UnserveScope, path: &Path, remove: bool) -> Cont
                     message: format!("removing {}: {e}", path.display()),
                 },
             },
-            Some(host) => match host.close_workspace_for_root(path, false) {
+            Some(host) => match host.close_workspace_for_root(path, false).await {
                 Ok(chan_library::WorkspaceLifecycleOutcome::Completed) => ControlResponse::Ok {
                     message: format!("unmounted {}", path.display()),
                 },
@@ -5520,15 +5520,16 @@ mod tests {
         discarded: std::sync::atomic::AtomicBool,
     }
 
+    #[async_trait::async_trait]
     impl chan_library::HostControl for FakeHost {
-        fn close_workspace_for_root(
+        async fn close_workspace_for_root(
             &self,
             _root: &std::path::Path,
             _force: bool,
         ) -> Result<chan_library::WorkspaceLifecycleOutcome, chan_library::Error> {
             Ok(chan_library::WorkspaceLifecycleOutcome::NotFound)
         }
-        fn remove_workspace_for_root(
+        async fn remove_workspace_for_root(
             &self,
             _root: &std::path::Path,
             _force: bool,

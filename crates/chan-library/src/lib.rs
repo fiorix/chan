@@ -44,7 +44,8 @@ pub use host::{
 pub use prefix::{allocate_workspace_prefix, workspace_slug};
 pub use serve_config::{sanitize_prefix, ServeConfig, ServeHandle};
 pub use tenant::{
-    HostControl, TenantArtifacts, TenantBuilder, UnserveMode, UnserveScope, WorkspaceCellHandle,
+    HostControl, TenantArtifacts, TenantBuilder, TenantTaskOwner, UnserveMode, UnserveScope,
+    WorkspaceCellHandle,
 };
 /// The single-sourced shell resolver (`$SHELL` → passwd → `/bin/sh`); unix-only.
 /// Re-exported at the crate root so callers say `chan_library::user_shell()`.

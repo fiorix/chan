@@ -1188,7 +1188,7 @@ async fn handle_workspace_off(
     let Some((_allocated, root)) = resolve_workspace(&state.host, &id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    match state.host.close_workspace_for_root(&root, force) {
+    match state.host.close_workspace_for_root(&root, force).await {
         Ok(WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound) => {
             StatusCode::NO_CONTENT.into_response()
         }
@@ -1212,7 +1212,7 @@ async fn handle_remove_workspace(
     let Some((_allocated, root)) = resolve_workspace(&state.host, &id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    match state.host.remove_workspace_for_root(&root, false) {
+    match state.host.remove_workspace_for_root(&root, false).await {
         Ok(WorkspaceLifecycleOutcome::Completed) => StatusCode::NO_CONTENT.into_response(),
         Ok(WorkspaceLifecycleOutcome::NotFound) => StatusCode::NOT_FOUND.into_response(),
         Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => {

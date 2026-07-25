@@ -77,7 +77,7 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
         // desktop bridge. Each reuses the same connection state the connect
         // flow set up; the reply unblocks the route's `dispatch_window_op`.
         DesktopWindowOp::DisconnectDevserver { id, reply } => {
-            crate::teardown_devserver_connection(&app, &state, &id);
+            crate::teardown_devserver_connection(&app, &state, &id).await;
             let _ = reply.send(Ok(()));
         }
         DesktopWindowOp::GrantDevserverNativeTrust { id, reply } => {
