@@ -1069,7 +1069,7 @@ fn terminal_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/files/upload",
             post(crate::routes::transfer::api_terminal_upload_file)
-                .layer(DefaultBodyLimit::max(50 * 1024 * 1024)),
+                .layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/api/files/{*path}",
@@ -1553,7 +1553,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/api/files", get(api_list_files).post(api_create_file))
         .route(
             "/api/files/upload",
-            post(api_upload_file).layer(DefaultBodyLimit::max(50 * 1024 * 1024)),
+            post(api_upload_file).layer(DefaultBodyLimit::disable()),
         )
         // New Draft action. Creates `<drafts_dir>/<next-untitled>/draft.md`
         // in the in-root drafts dir (`.Drafts/` by default) as ordinary
@@ -1607,9 +1607,7 @@ fn router(state: Arc<AppState>) -> Router {
         // silently turning legacy big files read-only in the editor.
         .route(
             "/api/files/{*path}",
-            put(api_write_file).layer(DefaultBodyLimit::max(
-                chan_workspace::BYTES_WRITE_LIMIT as usize,
-            )),
+            put(api_write_file).layer(DefaultBodyLimit::disable()),
         )
         .route("/api/move", post(api_move))
         .route("/api/fs/transfer", post(api_fs_transfer))
