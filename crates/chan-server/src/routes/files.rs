@@ -3868,11 +3868,11 @@ mod doc_divert_tests {
             .doc_sessions
             .reconcile_event(
                 &workspace,
-                WatchEvent {
-                    kind: WatchKind::Removed,
-                    path: Some("n.md".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Removed,
+                    "n.md",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
         // Absence corroborates across two observations.
@@ -4141,11 +4141,11 @@ mod scene_divert_tests {
             .scene_sessions
             .reconcile_event(
                 &workspace,
-                WatchEvent {
-                    kind: WatchKind::Removed,
-                    path: Some("b.excalidraw".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Removed,
+                    "b.excalidraw",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
         // Absence corroborates across two observations.

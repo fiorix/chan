@@ -1979,13 +1979,14 @@ mod tests {
         ha.session()
             .apply_merge_outcome(disk.clone(), &stat, MergeOutcome::Conflict);
         ha.push(vec![elem("y", 1, 4, "a2")], None, None).unwrap();
-        let st = ha.session().lock_state();
-        let SessionState::Conflicted(conflict) = &st.session_state else {
-            panic!("collaboration must remain conflicted");
-        };
-        assert_eq!(conflict.id, first_id, "conflict id must stay stable");
-        assert_eq!(conflict.authority_version, st.version);
-        drop(st);
+        {
+            let st = ha.session().lock_state();
+            let SessionState::Conflicted(conflict) = &st.session_state else {
+                panic!("collaboration must remain conflicted");
+            };
+            assert_eq!(conflict.id, first_id, "conflict id must stay stable");
+            assert_eq!(conflict.authority_version, st.version);
+        }
         assert!(
             ha.session().begin_flush().is_none(),
             "automatic flush pauses in Conflicted"
@@ -2501,11 +2502,11 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Modified,
-                    path: Some("b.excalidraw".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Modified,
+                    "b.excalidraw",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
 
@@ -2576,11 +2577,11 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Removed,
-                    path: Some("b.excalidraw".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Removed,
+                    "b.excalidraw",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
         // Absence corroborates across two observations before the
@@ -2635,11 +2636,11 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Removed,
-                    path: Some("b.excalidraw".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Removed,
+                    "b.excalidraw",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
 
@@ -2663,11 +2664,13 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Renamed,
-                    path: Some("b.excalidraw".into()),
-                    to: Some("c.excalidraw".into()),
-                },
+                WatchEvent::rename(
+                    Some("b.excalidraw".into()),
+                    Some("c.excalidraw".into()),
+                    false,
+                    None,
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
         // The vacated source parks as a pending absence and fans the
@@ -2880,11 +2883,11 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Modified,
-                    path: Some("b.excalidraw".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Modified,
+                    "b.excalidraw",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
 
@@ -2940,11 +2943,11 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Modified,
-                    path: Some("b.excalidraw".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Modified,
+                    "b.excalidraw",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
 
@@ -3048,11 +3051,11 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Modified,
-                    path: Some("b.excalidraw".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Modified,
+                    "b.excalidraw",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
         assert_eq!(drain(&mut rxa).len(), 0, "first observation only parks");

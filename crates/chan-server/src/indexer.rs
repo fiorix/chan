@@ -1029,10 +1029,25 @@ mod tests {
     }
 
     fn ev(kind: WatchKind, path: Option<&str>, to: Option<&str>) -> WatchEvent {
-        WatchEvent {
-            kind,
-            path: path.map(str::to_owned),
-            to: to.map(str::to_owned),
+        let generation = chan_workspace::WorkspaceGeneration::default();
+        match (kind, path, to) {
+            (WatchKind::ProviderError, Some(message), _) => {
+                WatchEvent::provider_error(message, generation)
+            }
+            (WatchKind::ProviderError, None, _) => WatchEvent::loss(generation),
+            (WatchKind::Renamed, from, to) => WatchEvent::rename(
+                from.map(str::to_owned),
+                to.map(str::to_owned),
+                false,
+                None,
+                generation,
+            ),
+            (kind, Some(path), _) => WatchEvent::file(kind, path, generation),
+            (kind, None, _) => {
+                let mut event = WatchEvent::file(kind, "", generation);
+                event.path = None;
+                event
+            }
         }
     }
 

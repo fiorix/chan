@@ -632,11 +632,11 @@ mod tests {
         registry
             .reconcile_event(
                 &workspace,
-                WatchEvent {
-                    kind: WatchKind::Modified,
-                    path: Some("a.md".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Modified,
+                    "a.md",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
         assert!(a.drain().is_empty(), "own flush echo must not fan");
@@ -647,11 +647,11 @@ mod tests {
         registry
             .reconcile_event(
                 &workspace,
-                WatchEvent {
-                    kind: WatchKind::Modified,
-                    path: Some("a.md".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Modified,
+                    "a.md",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
         let frames = a.drain();
@@ -677,11 +677,11 @@ mod tests {
         registry
             .reconcile_event(
                 &workspace,
-                WatchEvent {
-                    kind: WatchKind::Removed,
-                    path: Some("a.md".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Removed,
+                    "a.md",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
         // Absence corroborates across two observations before the

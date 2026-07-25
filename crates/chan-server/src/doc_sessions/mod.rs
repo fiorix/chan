@@ -2059,13 +2059,14 @@ mod tests {
         ha.session()
             .apply_merge_outcome(disk.clone(), &stat, MergeOutcome::Conflict);
         ha.session().apply_replace("c2", "local continued").unwrap();
-        let st = ha.session().lock_state();
-        let SessionState::Conflicted(conflict) = &st.session_state else {
-            panic!("collaboration must remain conflicted");
-        };
-        assert_eq!(conflict.id, first_id, "conflict id must stay stable");
-        assert_eq!(conflict.authority_version, st.version);
-        drop(st);
+        {
+            let st = ha.session().lock_state();
+            let SessionState::Conflicted(conflict) = &st.session_state else {
+                panic!("collaboration must remain conflicted");
+            };
+            assert_eq!(conflict.id, first_id, "conflict id must stay stable");
+            assert_eq!(conflict.authority_version, st.version);
+        }
         assert!(
             ha.session().begin_flush().is_none(),
             "automatic flush pauses in Conflicted"
@@ -2611,11 +2612,11 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Modified,
-                    path: Some("a.md".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Modified,
+                    "a.md",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
 
@@ -2662,11 +2663,11 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Removed,
-                    path: Some("a.md".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Removed,
+                    "a.md",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
         // Absence corroborates across two observations before the
@@ -2716,11 +2717,11 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Removed,
-                    path: Some("a.md".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Removed,
+                    "a.md",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
 
@@ -2740,11 +2741,13 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Renamed,
-                    path: Some("a.md".into()),
-                    to: Some("b.md".into()),
-                },
+                WatchEvent::rename(
+                    Some("a.md".into()),
+                    Some("b.md".into()),
+                    false,
+                    None,
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
         // The vacated source parks as a pending absence and fans the
@@ -2963,11 +2966,11 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Modified,
-                    path: Some("a.md".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Modified,
+                    "a.md",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
 
@@ -3068,11 +3071,11 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Modified,
-                    path: Some("a.md".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Modified,
+                    "a.md",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
 
@@ -3133,11 +3136,11 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Modified,
-                    path: Some("a.md".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Modified,
+                    "a.md",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
 
@@ -3243,11 +3246,11 @@ mod tests {
         fx.registry
             .reconcile_event(
                 &fx.workspace,
-                WatchEvent {
-                    kind: WatchKind::Modified,
-                    path: Some("a.md".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Modified,
+                    "a.md",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
         assert_eq!(ha.session().authority_view().0, "base typed");
