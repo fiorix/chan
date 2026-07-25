@@ -15,10 +15,12 @@
 use std::any::Any;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, Weak};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chan_workspace::{Library, Workspace};
 use tokio::sync::{broadcast, watch};
+use tokio::task::{JoinError, JoinHandle};
 
 use crate::desktop_window_ops::DesktopBridge;
 use crate::session_presence::SessionRegistry;
@@ -51,10 +53,11 @@ pub trait WorkspaceCellHandle: Send + Sync {
 /// back-reference (`WorkspaceHost` registers itself via `install_self`). Held
 /// as `Weak<dyn HostControl>` so the control socket never names the concrete
 /// host type.
+#[async_trait]
 pub trait HostControl: Send + Sync {
     /// Unmount the hosted tenant whose root matches `root` (the `chan close`
     /// over-the-host path).
-    fn close_workspace_for_root(
+    async fn close_workspace_for_root(
         &self,
         root: &Path,
         force: bool,
@@ -68,7 +71,7 @@ pub trait HostControl: Send + Sync {
     /// host's in-memory library + the persisted overlay both reflect it (a
     /// CLI-local `config.toml` edit would leave the host's caches stale and the
     /// workspace lingering in the launcher / surviving a restart).
-    fn remove_workspace_for_root(
+    async fn remove_workspace_for_root(
         &self,
         root: &Path,
         force: bool,
@@ -128,13 +131,137 @@ pub enum UnserveMode {
     Unsupported,
 }
 
+const TENANT_TASK_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// Owns the background tasks whose lifetime is bounded by one tenant.
+///
+/// The route layer supplies only its eight existing terminal/session/document/
+/// scene task handles (four for a terminal-only tenant) plus a clone of their
+/// existing shutdown watch sender. Socket guards, the indexer, router state, and
+/// domain session state retain their existing owners.
+pub struct TenantTaskOwner {
+    shutdown_tx: Arc<watch::Sender<bool>>,
+    handles: Vec<JoinHandle<()>>,
+    cancelled: bool,
+}
+
+impl TenantTaskOwner {
+    /// Bind the existing tenant tasks to their existing cooperative shutdown
+    /// signal.
+    pub fn new(shutdown_tx: Arc<watch::Sender<bool>>, handles: Vec<JoinHandle<()>>) -> Self {
+        Self {
+            shutdown_tx,
+            handles,
+            cancelled: false,
+        }
+    }
+
+    /// Cancel cooperatively, then join every task against one common deadline.
+    ///
+    /// At the deadline every unfinished task is aborted before any of them is
+    /// awaited again. The borrowing guard keeps all not-yet-reaped handles
+    /// abort-on-drop if this future itself is cancelled.
+    pub async fn shutdown(&mut self) {
+        self.shutdown_with_grace(TENANT_TASK_SHUTDOWN_GRACE).await;
+    }
+
+    async fn shutdown_with_grace(&mut self, grace: Duration) {
+        let mut shutdown = TenantTaskShutdownGuard::new(self);
+        shutdown.owner.cancel();
+        let deadline = tokio::time::Instant::now() + grace;
+        let timed_out = {
+            let cooperative = async {
+                while !shutdown.owner.handles.is_empty() {
+                    let result = (&mut shutdown.owner.handles[0]).await;
+                    report_join_error(result);
+                    drop(shutdown.owner.handles.swap_remove(0));
+                }
+            };
+            tokio::time::timeout_at(deadline, cooperative)
+                .await
+                .is_err()
+        };
+
+        if timed_out {
+            for handle in &shutdown.owner.handles {
+                if !handle.is_finished() {
+                    handle.abort();
+                }
+            }
+            while !shutdown.owner.handles.is_empty() {
+                let result = (&mut shutdown.owner.handles[0]).await;
+                report_join_error(result);
+                drop(shutdown.owner.handles.swap_remove(0));
+            }
+        }
+        shutdown.disarm();
+    }
+
+    /// Synchronous fallback for an unwinding or cancelled hosted teardown.
+    ///
+    /// Callers that also clear a workspace cell invoke this first so no
+    /// background task can observe the cleared cell after the fallback begins.
+    pub fn cancel_and_abort(&mut self) {
+        self.cancel();
+        for handle in &self.handles {
+            handle.abort();
+        }
+    }
+
+    fn cancel(&mut self) {
+        if self.cancelled {
+            return;
+        }
+        self.cancelled = true;
+        if !*self.shutdown_tx.borrow() {
+            let _ = self.shutdown_tx.send(true);
+        }
+    }
+}
+
+impl Drop for TenantTaskOwner {
+    fn drop(&mut self) {
+        self.cancel_and_abort();
+    }
+}
+
+struct TenantTaskShutdownGuard<'a> {
+    owner: &'a mut TenantTaskOwner,
+    armed: bool,
+}
+
+impl<'a> TenantTaskShutdownGuard<'a> {
+    fn new(owner: &'a mut TenantTaskOwner) -> Self {
+        Self { owner, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TenantTaskShutdownGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.owner.cancel_and_abort();
+        }
+    }
+}
+
+fn report_join_error(result: Result<(), JoinError>) {
+    if let Err(error) = result {
+        if !error.is_cancelled() {
+            tracing::error!(%error, "tenant background task panicked during shutdown");
+        }
+    }
+}
+
 /// What the route layer hands back per mounted tenant -- everything the host
 /// needs to route to it, reconcile its windows, and tear it down. The
 /// router-construction boundary: the host owns these; the route layer builds them
 /// via [`TenantBuilder`]. This is the ex-`AppArtifacts`, reduced to the
 /// host-facing surface, plus an opaque keep-alive for the route-layer pieces
-/// the host only owns for lifetime (the MCP bridge, the control socket, the
-/// background prune/drain/broadcast tasks).
+/// the host only owns for lifetime (the MCP bridge and control socket).
 pub struct TenantArtifacts {
     /// The tenant's axum app, dispatched under its route prefix.
     pub app: axum::Router,
@@ -142,9 +269,9 @@ pub struct TenantArtifacts {
     pub token: Option<String>,
     /// The tenant's PTY registry (window-session checks, scrollback, reap).
     pub terminal_sessions: Arc<TerminalRegistry>,
-    /// Shutdown signal; the host fires it on tenant close so background tasks
-    /// can exit cooperatively. The current raw task handles are not joined.
-    pub shutdown_tx: Arc<watch::Sender<bool>>,
+    /// The bounded owner of the existing terminal/session/document/scene tasks
+    /// and their existing cooperative shutdown sender.
+    pub tasks: TenantTaskOwner,
     /// SPA-facing URL prefix (tunnel mode swaps it on Connected). Shared Arc
     /// with the tenant's `AppState`.
     pub prefix: Arc<RwLock<String>>,
@@ -169,9 +296,8 @@ pub struct TenantArtifacts {
     /// without naming the route layer's `WorkspaceCell`.
     pub cell: Arc<dyn WorkspaceCellHandle>,
     /// Route-layer pieces the host only owns for the tenant's lifetime (MCP
-    /// bridge, control socket, raw background-task handles). Opaque: the host
-    /// never calls them. Dropping it unlinks or aborts the custom socket guards;
-    /// raw Tokio handles detach after the cooperative shutdown signal.
+    /// bridge, control socket, and app state). Opaque: the host never calls
+    /// them. Dropping it unlinks or aborts the custom socket guards.
     pub keepalive: Box<dyn Any + Send + Sync>,
 }
 
@@ -212,4 +338,143 @@ pub trait TenantBuilder: Send + Sync {
         session_dir: Option<PathBuf>,
         control_identity: Option<String>,
     ) -> Result<TenantArtifacts, Error>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::pending;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct DropCount(Arc<AtomicUsize>);
+
+    impl Drop for DropCount {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_joins_all_eight_cooperative_tasks() {
+        let (shutdown_tx, _) = watch::channel(false);
+        let shutdown_tx = Arc::new(shutdown_tx);
+        let completed = Arc::new(AtomicUsize::new(0));
+        let handles = (0..8)
+            .map(|_| {
+                let mut shutdown_rx = shutdown_tx.subscribe();
+                let completed = Arc::clone(&completed);
+                tokio::spawn(async move {
+                    let _ = shutdown_rx.changed().await;
+                    completed.fetch_add(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        let mut owner = TenantTaskOwner::new(shutdown_tx, handles);
+
+        owner.shutdown().await;
+
+        assert_eq!(completed.load(Ordering::SeqCst), 8);
+        assert!(owner.handles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_deadline_aborts_and_joins_every_stuck_task() {
+        let (shutdown_tx, _) = watch::channel(false);
+        let shutdown_tx = Arc::new(shutdown_tx);
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        let mut cooperative_rx = shutdown_tx.subscribe();
+        handles.push(tokio::spawn(async move {
+            let _ = cooperative_rx.changed().await;
+        }));
+        for _ in 0..4 {
+            let dropped = Arc::clone(&dropped);
+            handles.push(tokio::spawn(async move {
+                let _drop = DropCount(dropped);
+                pending::<()>().await;
+            }));
+        }
+        let mut owner = TenantTaskOwner::new(shutdown_tx, handles);
+        let start = std::time::Instant::now();
+        let grace = Duration::from_millis(100);
+
+        owner.shutdown_with_grace(grace).await;
+
+        let elapsed = start.elapsed();
+        assert!(elapsed >= grace, "deadline fired early: {elapsed:?}");
+        assert!(
+            elapsed < grace * 3,
+            "shutdown multiplied grace by stuck handle count: {elapsed:?}"
+        );
+        assert_eq!(dropped.load(Ordering::SeqCst), 4);
+        assert!(owner.handles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelling_after_one_reap_keeps_only_unreaped_handles_guarded() {
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let shutdown_tx = Arc::new(shutdown_tx);
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let task_dropped = Arc::clone(&dropped);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let fast = tokio::spawn(async {});
+        let stuck = tokio::spawn(async move {
+            let _drop = DropCount(task_dropped);
+            let _ = entered_tx.send(());
+            pending::<()>().await;
+        });
+        entered_rx.await.expect("task entered");
+        while !fast.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let mut owner = TenantTaskOwner::new(shutdown_tx, vec![fast, stuck]);
+        let mut shutdown = Box::pin(owner.shutdown_with_grace(Duration::from_secs(60)));
+        tokio::select! {
+            biased;
+            _ = shutdown.as_mut() => panic!("stuck task completed shutdown"),
+            _ = tokio::task::yield_now() => {}
+        }
+
+        drop(shutdown);
+        shutdown_rx.changed().await.expect("shutdown signal");
+        assert_eq!(
+            owner.handles.len(),
+            1,
+            "completed handles must be removed before the next cancellable await"
+        );
+        owner.shutdown_with_grace(Duration::ZERO).await;
+
+        assert!(*shutdown_rx.borrow());
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert!(owner.handles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn owner_drop_cancels_and_aborts() {
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let shutdown_tx = Arc::new(shutdown_tx);
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let task_dropped = Arc::clone(&dropped);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _drop = DropCount(task_dropped);
+            let _ = entered_tx.send(());
+            pending::<()>().await;
+        });
+        entered_rx.await.expect("task entered");
+        let owner = TenantTaskOwner::new(shutdown_tx, vec![handle]);
+
+        drop(owner);
+        shutdown_rx.changed().await.expect("shutdown signal");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while dropped.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("aborted task dropped");
+
+        assert!(*shutdown_rx.borrow());
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
 }
