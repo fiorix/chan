@@ -343,6 +343,15 @@ pub(crate) fn generate_bootstrap_md(
          separate turns and form queue boundaries. There is no poll command -\n\
          the queue delivers to you.\n\n",
     );
+    out.push_str(
+        "Take real turn breaks whenever a safe checkpoint permits, especially\n\
+         the lead, where every lane's pokes converge. Finish or park any active\n\
+         command, stop issuing tools, and yield/end the turn so queued input can\n\
+         become the next prompt. Do not simulate this with a sleep command. The\n\
+         queue's idle signal is PTY output silence: stdout/stderr postpones the\n\
+         drain, while a silent sleep may let bytes enter the terminal without\n\
+         ending the active model turn that needs to consume them.\n\n",
+    );
     out.push_str("BEFORE you start the next task:\n\n");
     out.push_str(
         "1. Drain your queue - process EVERY pending poke that has arrived\n\
@@ -881,6 +890,18 @@ mod tests {
         assert!(
             bootstrap.contains("Read the entire batch before acting"),
             "batch reconciliation guidance present"
+        );
+        assert!(
+            bootstrap.contains("Take real turn breaks whenever a safe checkpoint permits"),
+            "real turn-break guidance present"
+        );
+        assert!(
+            bootstrap.contains("Do not simulate this with a sleep command"),
+            "sleep is distinguished from yielding the active turn"
+        );
+        assert!(
+            bootstrap.contains("queue's idle signal is PTY output silence"),
+            "the implemented output-quiescence signal is documented"
         );
         // No em dashes; ASCII only.
         assert!(!bootstrap.contains('\u{2014}'), "no em dashes");
