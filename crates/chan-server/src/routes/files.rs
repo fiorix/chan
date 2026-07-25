@@ -4,7 +4,7 @@
 use std::{convert::Infallible, io::Cursor, sync::Arc};
 
 use axum::body::{Body, Bytes};
-use axum::extract::{Multipart, Path as AxumPath, Query, State};
+use axum::extract::{multipart::Field, Multipart, Path as AxumPath, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -12,7 +12,7 @@ use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use chan_workspace::{AtomicWriteKind, FileStat};
+use chan_workspace::{AtomicWriteKind, BoundedFileReader, FileStat};
 
 use crate::doc_sessions::{flush_session, DocSession, HttpReplaceOutcome as DocHttpReplaceOutcome};
 use crate::error::{err, err_from, err_state};
@@ -239,6 +239,8 @@ struct FileResponse {
     mtime: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mtime_ns: Option<String>,
+    authority_version: Option<u64>,
+    disk_conflicted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     path_class: Option<chan_workspace::PathClass>,
     /// Filesystem-level writability. False when the path lacks the
@@ -259,6 +261,8 @@ enum FileStreamEvent<'a> {
         mtime: Option<i64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         mtime_ns: Option<String>,
+        authority_version: Option<u64>,
+        disk_conflicted: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         path_class: Option<chan_workspace::PathClass>,
         writable: bool,
@@ -370,6 +374,8 @@ where
                     size: stat.size,
                     mtime: stat.mtime,
                     mtime_ns: stat.mtime_ns.map(|ns| ns.to_string()),
+                    authority_version: None,
+                    disk_conflicted: false,
                     path_class: path_class_for_wire(workspace, path),
                     writable: workspace_path_writable(workspace, path),
                 },
@@ -398,10 +404,10 @@ where
     }
 }
 
-/// What a workspace download resolves to: a file read into memory, or a
+/// What a workspace download resolves to: a bounded open-file reader, or a
 /// directory whose tree has been pre-flighted readable and is ready to stream.
 enum DownloadPayload {
-    File(Vec<u8>),
+    File(BoundedFileReader),
     Directory,
 }
 
@@ -417,10 +423,69 @@ fn download_path_sync(
         verify_readable_workspace_tree(workspace, path).map_err(chan_workspace::ChanError::Io)?;
         Ok(DownloadPayload::Directory)
     } else {
-        // A single file is read into memory; an unreadable file surfaces the
-        // error here with no bytes sent.
-        workspace.read(path).map(DownloadPayload::File)
+        // Opening happens before headers are sent, while the returned reader
+        // keeps the exact handle/stat pair and bounded producer alive.
+        workspace
+            .read_bytes_bounded(path)
+            .map(DownloadPayload::File)
     }
+}
+
+fn stream_binary_download(path: &str, reader: BoundedFileReader) -> Response {
+    stream_binary_download_inner(path, reader, None)
+}
+
+#[cfg(test)]
+fn stream_binary_download_with_completion(
+    path: &str,
+    reader: BoundedFileReader,
+) -> (Response, tokio::sync::oneshot::Receiver<()>) {
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    (
+        stream_binary_download_inner(path, reader, Some(done_tx)),
+        done_rx,
+    )
+}
+
+fn stream_binary_download_inner(
+    path: &str,
+    mut reader: BoundedFileReader,
+    completion: Option<tokio::sync::oneshot::Sender<()>>,
+) -> Response {
+    let size = reader.stat().size;
+    let (tx, rx) = mpsc::channel::<std::io::Result<Bytes>>(8);
+    tokio::task::spawn_blocking(move || {
+        for next in reader.by_ref() {
+            let message = next
+                .map(Bytes::from)
+                .map_err(|error| std::io::Error::other(error.to_string()));
+            let terminal = message.is_err();
+            if tx.blocking_send(message).is_err() || terminal {
+                break;
+            }
+        }
+        // Dropping the W4 reader closes its sync queue and joins the
+        // owned producer before the optional test completion fires.
+        drop(reader);
+        if let Some(completion) = completion {
+            let _ = completion.send(());
+        }
+    });
+    let body = Body::from_stream(stream::unfold(rx, |mut rx| async {
+        rx.recv().await.map(|message| (message, rx))
+    }));
+    (
+        [
+            (header::CONTENT_TYPE, content_type_for(path).to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                content_disposition_attachment(path),
+            ),
+            (header::CONTENT_LENGTH, size.to_string()),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 /// Pre-flight for a directory download: confirm every file in the tree we will
@@ -573,15 +638,33 @@ pub async fn api_read_file(
     // carry, and an old client's read-modify-PUT loop stays
     // token-consistent with the PUT divert below.
     if let Some(session) = state.doc_sessions.get(&path) {
-        let (content, token) = session.authority_view();
-        return read_via_session(&workspace, content, token, &path, &query).await;
+        let view = session.http_read_view();
+        return read_via_session(
+            &workspace,
+            view.content,
+            view.disk_mtime_ns,
+            view.authority_version,
+            view.disk_conflicted,
+            &path,
+            &query,
+        )
+        .await;
     }
     // Same divert for a live scene session: every read mode serves the
     // scene's file form (exactly what a flush would write) under the
     // session token.
     if let Some(session) = state.scene_sessions.get(&path) {
-        let (content, token) = session.authority_view();
-        return read_via_session(&workspace, content, token, &path, &query).await;
+        let view = session.http_read_view();
+        return read_via_session(
+            &workspace,
+            view.content,
+            view.disk_mtime_ns,
+            view.authority_version,
+            view.disk_conflicted,
+            &path,
+            &query,
+        )
+        .await;
     }
     if query_flag(&query.download) {
         let plan_ws = workspace.clone();
@@ -589,17 +672,7 @@ pub async fn api_read_file(
         let result =
             tokio::task::spawn_blocking(move || download_path_sync(&plan_ws, &plan_path)).await;
         return match result {
-            Ok(Ok(DownloadPayload::File(bytes))) => (
-                [
-                    (header::CONTENT_TYPE, content_type_for(&path).to_string()),
-                    (
-                        header::CONTENT_DISPOSITION,
-                        content_disposition_attachment(&path),
-                    ),
-                ],
-                bytes,
-            )
-                .into_response(),
+            Ok(Ok(DownloadPayload::File(reader))) => stream_binary_download(&path, reader),
             // The tree was pre-flighted readable in the plan; stream the tar on
             // the fly so a cancel is trace-free by construction (no staged temp).
             Ok(Ok(DownloadPayload::Directory)) => {
@@ -638,6 +711,8 @@ pub async fn api_read_file(
             content,
             mtime,
             mtime_ns: mtime_ns.map(|ns| ns.to_string()),
+            authority_version: None,
+            disk_conflicted: false,
             writable,
         })
         .into_response(),
@@ -687,6 +762,8 @@ async fn read_via_session(
     workspace: &Arc<chan_workspace::Workspace>,
     content: String,
     token: Option<i64>,
+    authority_version: u64,
+    disk_conflicted: bool,
     path: &str,
     query: &ReadFileQuery,
 ) -> Response {
@@ -730,6 +807,8 @@ async fn read_via_session(
                 size: content.len() as u64,
                 mtime,
                 mtime_ns: mtime_ns.clone(),
+                authority_version: Some(authority_version),
+                disk_conflicted,
                 path_class,
                 writable,
             }),
@@ -754,6 +833,8 @@ async fn read_via_session(
         content,
         mtime,
         mtime_ns,
+        authority_version: Some(authority_version),
+        disk_conflicted,
         writable,
     })
     .into_response()
@@ -1004,6 +1085,21 @@ fn utf8_width(first: u8) -> Option<usize> {
 
 fn invalid_request_utf8() -> chan_workspace::ChanError {
     chan_workspace::ChanError::Io("raw text write body is not valid UTF-8".into())
+}
+
+pub(crate) async fn read_multipart_text_field(
+    mut field: Field<'_>,
+) -> chan_workspace::Result<String> {
+    const METADATA_LIMIT: u64 = 64 * 1024;
+    let mut accumulator = TextAccumulator::new(METADATA_LIMIT);
+    while let Some(bytes) = field
+        .chunk()
+        .await
+        .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?
+    {
+        accumulator.write_chunk(&bytes)?;
+    }
+    accumulator.finish()
 }
 
 async fn accumulate_text_body(body: Body, limit: u64) -> chan_workspace::Result<String> {
@@ -1403,35 +1499,54 @@ pub async fn api_upload_file(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> Response {
-    let mut chosen: Option<(String, Vec<u8>)> = None;
     let mut dir = String::new();
     let mut replace_path: Option<String> = None;
+    let mut destination_seen = false;
     loop {
         match multipart.next_field().await {
             Ok(Some(field)) => {
                 let name = field.name().unwrap_or("").to_owned();
                 match name.as_str() {
-                    "file" if chosen.is_none() => {
+                    "file" => {
+                        if !destination_seen {
+                            return err(
+                                StatusCode::BAD_REQUEST,
+                                "`dir` or `path` must precede the streaming `file` part".into(),
+                            );
+                        }
                         let filename = field.file_name().unwrap_or("").to_owned();
-                        let bytes = match field.bytes().await {
-                            Ok(b) => b.to_vec(),
-                            Err(e) => {
-                                return err(
-                                    StatusCode::BAD_REQUEST,
-                                    format!("multipart read: {e}"),
-                                );
-                            }
+                        let workspace = match state.try_workspace() {
+                            Ok(workspace) => workspace,
+                            Err(e) => return err_state(&e),
                         };
-                        chosen = Some((filename, bytes));
+                        let result = stream_workspace_upload(
+                            workspace,
+                            Arc::clone(&state.self_writes),
+                            dir,
+                            replace_path,
+                            filename,
+                            field,
+                        )
+                        .await;
+                        return match result {
+                            Ok(upload) => Json(upload).into_response(),
+                            Err(e) => err_from(&e),
+                        };
                     }
-                    "dir" => match field.text().await {
-                        Ok(s) => dir = s,
+                    "dir" => match read_multipart_text_field(field).await {
+                        Ok(s) => {
+                            dir = s;
+                            destination_seen = true;
+                        }
                         Err(e) => {
                             return err(StatusCode::BAD_REQUEST, format!("multipart read: {e}"));
                         }
                     },
-                    "path" => match field.text().await {
-                        Ok(s) => replace_path = Some(s),
+                    "path" => match read_multipart_text_field(field).await {
+                        Ok(s) => {
+                            replace_path = Some(s);
+                            destination_seen = true;
+                        }
                         Err(e) => {
                             return err(StatusCode::BAD_REQUEST, format!("multipart read: {e}"));
                         }
@@ -1444,44 +1559,114 @@ pub async fn api_upload_file(
         }
     }
 
-    let Some((filename, bytes)) = chosen else {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "missing `file` part in multipart body".into(),
-        );
-    };
+    err(
+        StatusCode::BAD_REQUEST,
+        "missing `file` part in multipart body".into(),
+    )
+}
 
-    let workspace = match state.try_workspace() {
-        Ok(workspace) => workspace,
-        Err(e) => return err_state(&e),
-    };
-    // The destination path is computed inside the blocking task (the
-    // collision-avoidance loop picks a free name), so we can't note it
-    // before the spawn. Clone the suppression handle in and record the
-    // self-write inside the task, before it returns to the await, so
-    // the watcher's echo is suppressed without the race that surfaced
-    // server writes as phantom external edits. See api_write_file.
-    let self_writes = Arc::clone(&state.self_writes);
-    let result = tokio::task::spawn_blocking(move || {
-        let upload = if let Some(path) = replace_path {
-            replace_file_sync(&workspace, &path, &bytes)
-        } else {
-            upload_file_sync(&workspace, &dir, &filename, &bytes)
-        }?;
-        self_writes.note(&upload.path);
-        Ok::<_, chan_workspace::ChanError>(upload)
-    })
-    .await;
+async fn stream_workspace_upload(
+    workspace: Arc<chan_workspace::Workspace>,
+    self_writes: Arc<crate::self_writes::SelfWrites>,
+    dir: String,
+    replace_path: Option<String>,
+    filename: String,
+    mut field: Field<'_>,
+) -> chan_workspace::Result<UploadFileResponse> {
+    let (tx, mut rx) = mpsc::channel(8);
+    let consumer = tokio::task::spawn_blocking(move || {
+        workspace_upload_stream_sync(
+            &workspace,
+            &self_writes,
+            &dir,
+            replace_path.as_deref(),
+            &filename,
+            &mut rx,
+        )
+    });
+
+    loop {
+        let message = match field.chunk().await {
+            Ok(Some(bytes)) => RequestBodyMessage::Chunk(bytes),
+            Ok(None) => RequestBodyMessage::Complete,
+            Err(error) => RequestBodyMessage::Failed(error.to_string()),
+        };
+        let terminal = !matches!(message, RequestBodyMessage::Chunk(_));
+        if tx.send(message).await.is_err() || terminal {
+            break;
+        }
+    }
+    drop(tx);
+    consumer
+        .await
+        .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?
+}
+
+fn workspace_upload_stream_sync(
+    workspace: &chan_workspace::Workspace,
+    self_writes: &crate::self_writes::SelfWrites,
+    dir: &str,
+    replace_path: Option<&str>,
+    filename: &str,
+    rx: &mut mpsc::Receiver<RequestBodyMessage>,
+) -> chan_workspace::Result<UploadFileResponse> {
+    let rel = workspace_upload_target(workspace, dir, replace_path, filename)?;
+    let mut reservation = None;
+    let result = workspace.write_atomic_stream(&rel, AtomicWriteKind::Bytes, |sink| {
+        consume_request_body(rx, |chunk| sink.write_chunk(chunk))?;
+        reservation = Some(self_writes.reserve_after_preflight(&rel));
+        Ok(())
+    });
     match result {
-        Ok(Ok(upload)) => Json(upload).into_response(),
-        Ok(Err(e)) => err_from(&e),
-        Err(e) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("file upload task panicked: {e}"),
-        ),
+        Ok(stat) => Ok(UploadFileResponse {
+            path: rel,
+            size: stat.size,
+        }),
+        Err(error) => {
+            if let Some(reservation) = reservation {
+                self_writes.cancel(reservation);
+            }
+            Err(error)
+        }
     }
 }
 
+fn workspace_upload_target(
+    workspace: &chan_workspace::Workspace,
+    dir: &str,
+    replace_path: Option<&str>,
+    original_name: &str,
+) -> chan_workspace::Result<String> {
+    if let Some(path) = replace_path {
+        let trimmed = path.trim_matches('/');
+        chan_workspace::fs_ops::validate_rel(trimmed)?;
+        let stat = workspace.stat(trimmed)?;
+        if stat.is_dir {
+            return Err(chan_workspace::ChanError::Io(format!(
+                "not a file: {trimmed}"
+            )));
+        }
+        return Ok(trimmed.to_string());
+    }
+
+    let dir = normalize_dir_query(dir)?;
+    if !dir.is_empty() {
+        let stat = workspace.stat(&dir)?;
+        if !stat.is_dir {
+            return Err(chan_workspace::ChanError::Io(format!(
+                "not a directory: {dir}"
+            )));
+        }
+    }
+    let filename = upload_leaf_filename(original_name)?;
+    let rel = join_rel(&dir, &filename);
+    if create_target_exists(workspace, &rel) {
+        return Err(chan_workspace::ChanError::PathAlreadyExists(rel));
+    }
+    Ok(rel)
+}
+
+#[cfg(test)]
 fn replace_file_sync(
     workspace: &chan_workspace::Workspace,
     path: &str,
@@ -1503,6 +1688,7 @@ fn replace_file_sync(
     })
 }
 
+#[cfg(test)]
 fn upload_file_sync(
     workspace: &chan_workspace::Workspace,
     dir: &str,
@@ -1969,9 +2155,37 @@ mod write_tests {
         assert_eq!(events[0]["type"], "meta");
         assert_eq!(events[0]["path"], "note.md");
         assert_eq!(events[0]["size"], 5);
+        assert_eq!(events[0]["authority_version"], serde_json::Value::Null);
+        assert_eq!(events[0]["disk_conflicted"], false);
         assert_eq!(events[1]["type"], "chunk");
         assert_eq!(events[1]["content"], "hello");
         assert_eq!(events[2]["type"], "done");
+    }
+
+    #[test]
+    fn stream_read_file_sync_preserves_utf8_across_chunk_boundaries() {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        let content = format!(
+            "{}é-tail",
+            "a".repeat(chan_workspace::TEXT_READ_CHUNK_SIZE - 1)
+        );
+        workspace.write_text("split.md", &content).unwrap();
+        let mut chunks = String::new();
+
+        stream_read_file_sync(&workspace, "split.md", |bytes| {
+            let event: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if event["type"] == "chunk" {
+                chunks.push_str(event["content"].as_str().unwrap());
+            }
+            true
+        })
+        .unwrap();
+
+        assert_eq!(chunks, content);
     }
 
     #[test]
@@ -2013,9 +2227,193 @@ mod write_tests {
         let payload = download_path_sync(&workspace, "notes/readme.md").unwrap();
 
         match payload {
-            DownloadPayload::File(bytes) => assert_eq!(bytes, b"hello\n"),
+            DownloadPayload::File(reader) => {
+                let chunks: chan_workspace::Result<Vec<Vec<u8>>> = reader.collect();
+                assert_eq!(chunks.unwrap().concat(), b"hello\n");
+            }
             DownloadPayload::Directory => panic!("expected file download"),
         }
+    }
+
+    #[test]
+    fn single_file_download_plan_never_owns_a_whole_file_vec() {
+        let source = include_str!("files.rs");
+        assert!(
+            !source.contains("enum DownloadPayload {\n    File(Vec<u8>)"),
+            "single-file downloads must carry W4's bounded reader, not a whole-file Vec"
+        );
+    }
+
+    #[test]
+    fn multipart_upload_handlers_never_collect_file_fields() {
+        let workspace_route = include_str!("files.rs");
+        let terminal_route = include_str!("transfer.rs");
+        let collecting_pattern = concat!("let bytes = match field.", "bytes().await");
+        let collecting_text_pattern = concat!("field.", "text().await");
+        assert!(
+            !workspace_route.contains(collecting_pattern),
+            "workspace multipart files must be consumed chunk by chunk"
+        );
+        assert!(
+            !terminal_route.contains(collecting_pattern),
+            "terminal multipart files must be consumed chunk by chunk"
+        );
+        assert!(!workspace_route.contains(collecting_text_pattern));
+        assert!(!terminal_route.contains(collecting_text_pattern));
+    }
+
+    #[tokio::test]
+    async fn workspace_upload_rejects_overflow_progressively_without_a_partial_target() {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        let self_writes = Arc::new(crate::self_writes::SelfWrites::new());
+        let (tx, mut rx) = mpsc::channel(8);
+        let ws = Arc::clone(&workspace);
+        let writes = Arc::clone(&self_writes);
+        let consumer = tokio::task::spawn_blocking(move || {
+            workspace_upload_stream_sync(&ws, &writes, "", None, "too-large.bin", &mut rx)
+        });
+        let chunk = Bytes::from(vec![0x5a; 1024 * 1024]);
+        let attempts = chan_workspace::BYTES_WRITE_LIMIT / chunk.len() as u64 + 2;
+        for _ in 0..attempts {
+            if tx
+                .send(RequestBodyMessage::Chunk(chunk.clone()))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+        let _ = tx.send(RequestBodyMessage::Complete).await;
+        drop(tx);
+
+        let error = consumer.await.unwrap().unwrap_err();
+
+        assert!(matches!(
+            error,
+            chan_workspace::ChanError::WriteTooLarge { .. }
+        ));
+        assert!(!root.path().join("too-large.bin").exists());
+        assert!(!self_writes.should_suppress("too-large.bin"));
+        assert!(
+            workspace.list("").unwrap().is_empty(),
+            "the rejected atomic upload must remove its temp"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnected_workspace_upload_keeps_replacement_and_removes_temp() {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        workspace.write_bytes("same.bin", b"old").unwrap();
+        let self_writes = Arc::new(crate::self_writes::SelfWrites::new());
+        let (tx, mut rx) = mpsc::channel(8);
+        let ws = Arc::clone(&workspace);
+        let writes = Arc::clone(&self_writes);
+        let consumer = tokio::task::spawn_blocking(move || {
+            workspace_upload_stream_sync(&ws, &writes, "", Some("same.bin"), "ignored.bin", &mut rx)
+        });
+        tx.send(RequestBodyMessage::Chunk(Bytes::from_static(b"new")))
+            .await
+            .unwrap();
+        drop(tx);
+
+        assert!(consumer.await.unwrap().is_err());
+        assert_eq!(workspace.read("same.bin").unwrap(), b"old");
+        assert!(!self_writes.should_suppress("same.bin"));
+        assert_eq!(workspace.list("").unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn binary_download_stream_is_byte_exact_with_attachment_metadata() {
+        use axum::body::to_bytes;
+
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        let expected: Vec<u8> = (0..(chan_workspace::BINARY_STREAM_CHUNK_SIZE * 2 + 17))
+            .map(|index| (index % 251) as u8)
+            .collect();
+        workspace.write_bytes("large.bin", &expected).unwrap();
+        let reader = match download_path_sync(&workspace, "large.bin").unwrap() {
+            DownloadPayload::File(reader) => reader,
+            DownloadPayload::Directory => panic!("expected file download"),
+        };
+
+        let response = stream_binary_download("large.bin", reader);
+
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/octet-stream"
+        );
+        assert_eq!(
+            response.headers()[header::CONTENT_DISPOSITION],
+            "attachment; filename=\"large.bin\""
+        );
+        assert_eq!(
+            response.headers()[header::CONTENT_LENGTH],
+            expected.len().to_string()
+        );
+        let actual = to_bytes(response.into_body(), expected.len() + 1)
+            .await
+            .unwrap();
+        assert_eq!(actual.as_ref(), expected);
+    }
+
+    #[tokio::test]
+    async fn dropping_binary_download_body_joins_the_bounded_reader() {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        let size = chan_workspace::BINARY_STREAM_CHUNK_SIZE
+            * (chan_workspace::BINARY_STREAM_QUEUE_DEPTH + 16);
+        workspace
+            .write_bytes("disconnect.bin", &vec![0x5a; size])
+            .unwrap();
+        let reader = match download_path_sync(&workspace, "disconnect.bin").unwrap() {
+            DownloadPayload::File(reader) => reader,
+            DownloadPayload::Directory => panic!("expected file download"),
+        };
+        let (response, completed) =
+            stream_binary_download_with_completion("disconnect.bin", reader);
+
+        drop(response);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), completed)
+            .await
+            .expect("disconnect must stop the bridge and join the W4 reader")
+            .expect("download bridge completion sender dropped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_file_download_refuses_special_paths_and_keeps_directories_separate() {
+        use std::os::unix::fs::symlink;
+
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        workspace.create_dir("dir").unwrap();
+        workspace.write_bytes("target.bin", b"x").unwrap();
+        symlink("target.bin", root.path().join("link.bin")).unwrap();
+
+        assert!(matches!(
+            download_path_sync(&workspace, "dir").unwrap(),
+            DownloadPayload::Directory
+        ));
+        assert!(download_path_sync(&workspace, "link.bin").is_err());
     }
 
     #[test]
@@ -2465,6 +2863,8 @@ mod tests {
             content: "hello".to_string(),
             mtime: Some(1),
             mtime_ns: Some("1000000000".to_string()),
+            authority_version: None,
+            disk_conflicted: false,
             path_class: Some(chan_workspace::PathClass {
                 kind: chan_workspace::PathKind::RegularFile,
                 permission: chan_workspace::PathPermission::ReadWrite,
@@ -2666,6 +3066,74 @@ mod doc_divert_tests {
         .await
     }
 
+    #[tokio::test]
+    async fn multipart_upload_streams_after_destination_metadata() {
+        let (_cfg, root, state) = divert_app();
+        state.try_workspace().unwrap().create_dir("docs").unwrap();
+        let router = crate::router(state.clone());
+        let boundary = "chan-upload-boundary";
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"dir\"\r\n\r\n\
+             docs\r\n\
+             --{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"note.bin\"\r\n\
+             Content-Type: application/octet-stream\r\n\r\n\
+             streamed-bytes\r\n\
+             --{boundary}--\r\n"
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/files/upload")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body = body_json(response).await;
+        assert_eq!(response_body["path"], "docs/note.bin");
+        assert_eq!(
+            std::fs::read(root.path().join("docs/note.bin")).unwrap(),
+            b"streamed-bytes"
+        );
+
+        let file_first = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"wrong.bin\"\r\n\r\n\
+             no-write\r\n\
+             --{boundary}\r\n\
+             Content-Disposition: form-data; name=\"dir\"\r\n\r\n\
+             docs\r\n\
+             --{boundary}--\r\n"
+        );
+        let response = crate::router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/files/upload")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(file_first))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!root.path().join("wrong.bin").exists());
+        assert!(!root.path().join("docs/wrong.bin").exists());
+    }
+
     pub(super) async fn raw_put_body(
         state: State<Arc<AppState>>,
         path: AxumPath<String>,
@@ -2815,6 +3283,7 @@ mod doc_divert_tests {
             )
             .unwrap();
         let token = handle.session().token().expect("seeded token");
+        let authority_version = handle.session().http_write_view().authority_version;
 
         // Plain JSON: authority text under the session token.
         let resp = api_read_file(
@@ -2830,6 +3299,8 @@ mod doc_divert_tests {
         let v = body_json(resp).await;
         assert_eq!(v["content"], "live v2\n");
         assert_eq!(v["mtime_ns"], token.to_string());
+        assert_eq!(v["authority_version"], authority_version);
+        assert_eq!(v["disk_conflicted"], false);
         assert_eq!(v["writable"], true);
 
         // Stream: Meta + ONE Chunk + Done, same token, same text; the
@@ -2853,6 +3324,8 @@ mod doc_divert_tests {
         assert_eq!(lines.len(), 3, "{lines:?}");
         assert_eq!(lines[0]["type"], "meta");
         assert_eq!(lines[0]["mtime_ns"], token.to_string());
+        assert_eq!(lines[0]["authority_version"], authority_version);
+        assert_eq!(lines[0]["disk_conflicted"], false);
         assert_eq!(lines[0]["size"].as_u64(), Some("live v2\n".len() as u64));
         assert_eq!(lines[1]["type"], "chunk");
         assert_eq!(lines[1]["content"], "live v2\n");
@@ -3247,6 +3720,39 @@ mod doc_divert_tests {
         let stat = workspace.stat("n.md").unwrap();
         session.test_force_conflict("disk\n".into(), &stat);
         let conflict_token = stat.mtime_ns.expect("conflicting disk token");
+        let authority_version = session.http_read_view().authority_version;
+
+        let get = api_read_file(
+            State(state.clone()),
+            AxumPath("n.md".into()),
+            Query(ReadFileQuery::default()),
+        )
+        .await;
+        let get_body = body_json(get).await;
+        assert_eq!(get_body["authority_version"], authority_version);
+        assert_eq!(get_body["disk_conflicted"], true);
+
+        let stream = api_read_file(
+            State(state.clone()),
+            AxumPath("n.md".into()),
+            Query(ReadFileQuery {
+                download: None,
+                stream: Some("1".into()),
+            }),
+        )
+        .await;
+        let stream_bytes = to_bytes(stream.into_body(), usize::MAX).await.unwrap();
+        let first: Value = serde_json::from_str(
+            std::str::from_utf8(&stream_bytes)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(first["type"], "meta");
+        assert_eq!(first["authority_version"], authority_version);
+        assert_eq!(first["disk_conflicted"], true);
 
         let resp = api_write_file(
             State(state.clone()),
@@ -3432,6 +3938,7 @@ mod scene_divert_tests {
             .push(vec![elem("y", 1, 1, "a2")], None, None)
             .unwrap();
         let token = handle.session().token().expect("seeded token");
+        let authority_version = handle.session().http_read_view().authority_version;
 
         let resp = api_read_file(
             State(state.clone()),
@@ -3445,6 +3952,8 @@ mod scene_divert_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
         assert_eq!(v["mtime_ns"], token.to_string());
+        assert_eq!(v["authority_version"], authority_version);
+        assert_eq!(v["disk_conflicted"], false);
         let content: Value = serde_json::from_str(v["content"].as_str().unwrap()).unwrap();
         let ids: Vec<&str> = content["elements"]
             .as_array()

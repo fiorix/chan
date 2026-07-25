@@ -250,6 +250,13 @@ pub(crate) struct HttpWriteView {
     pub write_budget: u64,
 }
 
+pub(crate) struct HttpReadView {
+    pub content: String,
+    pub disk_mtime_ns: Option<i64>,
+    pub authority_version: u64,
+    pub disk_conflicted: bool,
+}
+
 impl SessionState {
     fn dirty_since(&self) -> Option<Instant> {
         match self {
@@ -591,9 +598,22 @@ impl SceneSession {
     /// Current authority scene in its file form plus the session CAS
     /// token, for the GET divert: a client reads exactly what a flush
     /// would write, under a token consistent with the session.
+    #[cfg(test)]
     pub fn authority_view(&self) -> (String, Option<i64>) {
         let st = self.lock_state();
         (st.scene.serialize_file(), st.flushed_mtime_ns)
+    }
+
+    /// Atomic GET view: authority bytes and every piece of metadata
+    /// the client must retain for a subsequent CAS write.
+    pub(crate) fn http_read_view(&self) -> HttpReadView {
+        let st = self.lock_state();
+        HttpReadView {
+            content: st.scene.serialize_file(),
+            disk_mtime_ns: st.flushed_mtime_ns,
+            authority_version: st.version,
+            disk_conflicted: st.session_state.conflict_disk_mtime_ns().is_some(),
+        }
     }
 
     /// Atomic PUT preflight view: session token and an outer conflict

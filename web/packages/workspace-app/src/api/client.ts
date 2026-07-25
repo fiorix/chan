@@ -708,8 +708,8 @@ export const api = {
   ): Promise<{ path: string; size: number }> =>
     new Promise((resolve, reject) => {
       const form = new FormData();
-      form.append("file", file);
       form.append("dir", dir);
+      form.append("file", file);
       const xhr = createXhr();
       xhr.open("POST", apiPath("/api/files/upload"));
       for (const [name, value] of Object.entries(directAuthHeaders())) {
@@ -772,8 +772,8 @@ export const api = {
   ): Promise<{ path: string; size: number }> =>
     new Promise((resolve, reject) => {
       const form = new FormData();
-      form.append("file", file);
       form.append("path", path);
+      form.append("file", file);
       const xhr = createXhr();
       xhr.open("POST", apiPath("/api/files/upload"));
       for (const [name, value] of Object.entries(directAuthHeaders())) {
