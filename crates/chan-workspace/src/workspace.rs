@@ -2870,6 +2870,25 @@ impl Workspace {
         Ok(summary)
     }
 
+    /// Execute one full-rebuild pass already claimed from the recovery
+    /// coordinator. The caller owns the matching `finish_recovery` call.
+    pub fn run_full_rebuild_pass(
+        &self,
+        pass: RecoveryPass,
+        cancel: Option<&AtomicBool>,
+        progress: &dyn crate::progress::ProgressCallback,
+        aggression: SearchAggression,
+    ) -> Result<BuildSummary> {
+        if pass.action != RecoveryAction::FullRebuild || self.recovery_status().active != Some(pass)
+        {
+            return Err(ChanError::Io(format!(
+                "full rebuild pass is not active: generation {}",
+                pass.generation.get()
+            )));
+        }
+        self.reindex_with_aggression(cancel, progress, aggression)
+    }
+
     /// Stamp `paths.graph_dir/rebuild.inprogress`. Atomic write so a
     /// crash during marker creation never leaves a half-written file
     /// that would confuse the next open. The file body carries the

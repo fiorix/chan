@@ -22,8 +22,8 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chan_workspace::{
-    ProgressCallback, ProgressEvent, ProgressStage, SearchAggression, VcsKind, WatchEvent,
-    WatchKind, Workspace,
+    ProgressCallback, ProgressEvent, ProgressStage, RecoveryAction, RecoveryOutcome,
+    SearchAggression, VcsKind, WatchEvent, WatchKind, Workspace, WorkspaceGeneration,
 };
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc};
@@ -134,7 +134,7 @@ struct IndexerShared {
 pub struct Indexer {
     status: Arc<Mutex<IndexStatus>>,
     telemetry: Arc<Mutex<IndexerTelemetry>>,
-    rebuild_tx: mpsc::UnboundedSender<()>,
+    rebuild_requester: RebuildRequester,
     /// Set to true on shutdown so the in-flight `Workspace::reindex`
     /// blocking task bails at its next per-file check. Without this
     /// the runtime drop after `serve()` returns would have to wait
@@ -220,8 +220,12 @@ impl Indexer {
             cancel: cancel.clone(),
             search_aggression,
         };
-        let (rebuild_tx, rebuild_rx) = mpsc::unbounded_channel::<()>();
+        let (rebuild_tx, rebuild_rx) = mpsc::unbounded_channel::<WorkspaceGeneration>();
         let workspace_weak = Arc::downgrade(&workspace);
+        let rebuild_requester = RebuildRequester {
+            workspace: workspace_weak.clone(),
+            tx: rebuild_tx,
+        };
         let coordinator_task = spawn_coordinator(
             workspace_weak.clone(),
             shared.clone(),
@@ -244,10 +248,7 @@ impl Indexer {
                 false
             });
         if initial_build && (stats.indexed_docs == 0 || graph_empty) {
-            // Best-effort: if the channel is full we already
-            // queued a rebuild and the redundant request is fine
-            // to drop.
-            let _ = rebuild_tx.send(());
+            rebuild_requester.request();
         }
         // Drafts are real in-root files under the configured drafts dir
         // now, so the normal `Workspace::reindex` walk and the watcher
@@ -258,14 +259,14 @@ impl Indexer {
             workspace_weak,
             shared,
             watch_events,
-            rebuild_tx.clone(),
+            rebuild_requester.clone(),
             watch_context,
         );
 
         Self {
             status,
             telemetry,
-            rebuild_tx,
+            rebuild_requester,
             cancel,
             _watcher_task: watcher_task,
             _coordinator_task: coordinator_task,
@@ -295,9 +296,23 @@ impl Indexer {
     /// the actual work runs on the blocking pool. The status flips
     /// to `Building` when the worker picks the request up.
     pub fn request_rebuild(&self) {
-        // Channel unbounded; only the receiver-dropped variant
-        // would error and at that point the indexer is gone.
-        let _ = self.rebuild_tx.send(());
+        self.rebuild_requester.request();
+    }
+}
+
+#[derive(Clone)]
+struct RebuildRequester {
+    workspace: Weak<Workspace>,
+    tx: mpsc::UnboundedSender<WorkspaceGeneration>,
+}
+
+impl RebuildRequester {
+    fn request(&self) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let generation = workspace.request_recovery(RecoveryAction::FullRebuild);
+        let _ = self.tx.send(generation);
     }
 }
 
@@ -312,107 +327,163 @@ impl Indexer {
 /// path is unaffected.
 const REBUILD_COOLDOWN: Duration = Duration::from_secs(30);
 
-/// Coordinator task: blocks on the rebuild channel and runs one
-/// full reindex per request. Workspaces `Workspace::reindex_with` with a
-/// callback that updates the local status mutex AND forwards each
-/// tick to the WS fan-out so the frontend's status pill animates
-/// in real time. Without the WS forward we'd be polling
-/// `/api/index/status` at a coarse cadence; with it we get every
-/// per-file event.
+/// Coordinator task: drains rebuild requests to the newest required
+/// workspace generation and keeps running claimed full-rebuild passes
+/// until that generation is complete. Its progress callback updates the
+/// local status mutex AND forwards each tick to the WS fan-out so the
+/// frontend's status pill animates in real time. Without the WS forward
+/// we'd be polling `/api/index/status` at a coarse cadence; with it we
+/// get every per-file event.
 fn spawn_coordinator(
     workspace: Weak<Workspace>,
     shared: IndexerShared,
-    mut rx: mpsc::UnboundedReceiver<()>,
+    mut rx: mpsc::UnboundedReceiver<WorkspaceGeneration>,
     progress_sink: Arc<dyn ProgressCallback>,
     cooldown: Duration,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        while rx.recv().await.is_some() {
-            // Drain any extra requests that piled up so we run one
-            // rebuild for the whole burst.
-            while rx.try_recv().is_ok() {}
-            if shared.cancel.load(Ordering::Relaxed) {
-                continue;
-            }
-            let Some(workspace_w) = workspace.upgrade() else {
-                break;
-            };
-            let status_w = shared.status.clone();
-            let cancel_w = shared.cancel.clone();
-            let progress_w = progress_sink.clone();
-            let bg_embed_w = shared.bg_embed.clone();
-            let aggression = shared.search_aggression;
-            *status_w.lock().unwrap() = IndexStatus::Building {
-                current: 0,
-                total: 0,
-                file: String::new(),
-            };
-            let workspace_weak = Arc::downgrade(&workspace_w);
-            let result = tokio::task::spawn_blocking(move || {
-                let progress = StatusUpdater {
-                    status: status_w,
-                    forward: progress_w,
-                    workspace: workspace_weak,
-                    embed: Mutex::new(EmbedPhaseState::default()),
-                    bg_embed: bg_embed_w,
+        let mut next_start_at = Instant::now();
+        while let Some(mut required_generation) = rx.recv().await {
+            required_generation = drain_required_generation(&mut rx, required_generation);
+            loop {
+                if shared.cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                let Some(workspace_w) = workspace.upgrade() else {
+                    return;
                 };
-                workspace_w.reindex_with_aggression(Some(&cancel_w), &progress, aggression)
-            })
-            .await;
-            // The build has resolved (success, cancel, or error), so the
-            // embed pass is over. Clear the shared signal before reconciling
-            // so the chip drops on the next set_idle; the StatusUpdater that
-            // wrote it lived inside the now-finished blocking task, so there
-            // is no concurrent writer here.
-            *shared.bg_embed.lock().unwrap() = None;
-            // Bug 9: every resolution of a build MUST move the status
-            // out of `Building`, or the status pill is stuck forever
-            // (it hides only on `Idle`). The success and cancel arms
-            // both reconcile to `Idle` against the live index stats:
-            // a cancelled rebuild leaves whatever committed, and the
-            // honest steady-state is "idle showing what's indexed",
-            // not a frozen progress counter. The error arms set
-            // `Error`. The only way to stay `Building` now is an
-            // in-flight build that has genuinely not resolved.
-            match result {
-                Ok(Ok(_summary)) => {
+                required_generation = drain_required_generation(&mut rx, required_generation);
+                let recovery = workspace_w.recovery_status();
+                if recovery.completed_generation >= required_generation
+                    && recovery.active.is_none()
+                    && recovery.pending.is_none()
+                {
                     reconcile_idle(&workspace, &shared);
+                    break;
                 }
-                Ok(Err(chan_workspace::ChanError::Cancelled)) => {
-                    // Shutdown / reset path: don't surface a
-                    // user-visible error; the next boot picks up the
-                    // (possibly empty) index and rebuilds. Still clear
-                    // the pill so a cancel that leaves the process
-                    // running does not park `Building` forever.
-                    tracing::info!("indexer: rebuild cancelled");
-                    reconcile_idle(&workspace, &shared);
+                if recovery.active.is_some() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    continue;
                 }
-                Ok(Err(e)) => {
+                let Some(pass) = workspace_w.begin_recovery() else {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    continue;
+                };
+                if pass.action != RecoveryAction::FullRebuild {
+                    let _ = workspace_w.finish_recovery(pass, RecoveryOutcome::Retry);
                     *shared.status.lock().unwrap() = IndexStatus::Error {
-                        message: e.to_string(),
+                        message: format!(
+                            "server rebuild coordinator claimed non-rebuild generation {}",
+                            pass.generation.get()
+                        ),
                     };
+                    break;
                 }
-                Err(e) => {
-                    *shared.status.lock().unwrap() = IndexStatus::Error {
-                        message: format!("rebuild task: {e}"),
+                let delay = next_start_at.saturating_duration_since(Instant::now());
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+
+                let status_w = shared.status.clone();
+                let cancel_w = shared.cancel.clone();
+                let progress_w = progress_sink.clone();
+                let bg_embed_w = shared.bg_embed.clone();
+                let aggression = shared.search_aggression;
+                *status_w.lock().unwrap() = IndexStatus::Building {
+                    current: 0,
+                    total: 0,
+                    file: String::new(),
+                };
+                let workspace_weak = Arc::downgrade(&workspace_w);
+                let workspace_for_pass = Arc::clone(&workspace_w);
+                let result = tokio::task::spawn_blocking(move || {
+                    let progress = StatusUpdater {
+                        status: status_w,
+                        forward: progress_w,
+                        workspace: workspace_weak,
+                        embed: Mutex::new(EmbedPhaseState::default()),
+                        bg_embed: bg_embed_w,
                     };
+                    workspace_for_pass.run_full_rebuild_pass(
+                        pass,
+                        Some(&cancel_w),
+                        &progress,
+                        aggression,
+                    )
+                })
+                .await;
+
+                *shared.bg_embed.lock().unwrap() = None;
+                let outcome = if matches!(&result, Ok(Ok(_))) {
+                    RecoveryOutcome::Complete
+                } else {
+                    RecoveryOutcome::Retry
+                };
+                let recovery = match workspace_w.finish_recovery(pass, outcome) {
+                    Ok(recovery) => recovery,
+                    Err(error) => {
+                        *shared.status.lock().unwrap() = IndexStatus::Error {
+                            message: error.to_string(),
+                        };
+                        break;
+                    }
+                };
+                next_start_at = Instant::now() + cooldown;
+                required_generation = drain_required_generation(&mut rx, required_generation);
+
+                match &result {
+                    Ok(Ok(_summary)) => {
+                        if recovery.is_ready()
+                            && recovery.completed_generation >= required_generation
+                        {
+                            reconcile_idle(&workspace, &shared);
+                        } else {
+                            mark_coalesced_rebuild(&shared.telemetry);
+                            *shared.status.lock().unwrap() = IndexStatus::Building {
+                                current: 0,
+                                total: 0,
+                                file: String::new(),
+                            };
+                        }
+                    }
+                    Ok(Err(chan_workspace::ChanError::Cancelled)) => {
+                        tracing::info!("indexer: rebuild cancelled");
+                        if recovery.is_ready() {
+                            reconcile_idle(&workspace, &shared);
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        *shared.status.lock().unwrap() = IndexStatus::Error {
+                            message: error.to_string(),
+                        };
+                    }
+                    Err(error) => {
+                        *shared.status.lock().unwrap() = IndexStatus::Error {
+                            message: format!("rebuild task: {error}"),
+                        };
+                    }
+                }
+                if !matches!(&result, Ok(Ok(_))) {
+                    break;
+                }
+                if recovery.completed_generation >= required_generation
+                    && recovery.pending.is_none()
+                {
+                    break;
                 }
             }
-            coalesce_and_cooldown(&mut rx, cooldown).await;
         }
     })
 }
 
-/// Storm-damping policy, extracted so tests can drive it without a
-/// real workspace: requests that piled up DURING the rebuild coalesce
-/// into one (the loop's pre-start drain at the top picks up anything
-/// that arrives during the cooldown sleep), and the next rebuild
-/// waits out the cooldown.
-async fn coalesce_and_cooldown(rx: &mut mpsc::UnboundedReceiver<()>, cooldown: Duration) {
-    while rx.try_recv().is_ok() {}
-    if !cooldown.is_zero() {
-        tokio::time::sleep(cooldown).await;
+fn drain_required_generation(
+    rx: &mut mpsc::UnboundedReceiver<WorkspaceGeneration>,
+    mut required: WorkspaceGeneration,
+) -> WorkspaceGeneration {
+    while let Ok(generation) = rx.try_recv() {
+        required = std::cmp::max(required, generation);
     }
+    required
 }
 
 /// Listen to the watcher and re-index per file with a 1 s debounce.
@@ -422,7 +493,7 @@ fn spawn_watcher_loop(
     workspace: Weak<Workspace>,
     shared: IndexerShared,
     mut rx: broadcast::Receiver<WatchEvent>,
-    rebuild_tx: mpsc::UnboundedSender<()>,
+    rebuild_requester: RebuildRequester,
     watch_context: WatchContext,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -454,8 +525,9 @@ fn spawn_watcher_loop(
                     };
                     let p = change.path.clone();
                     let deleted = change.deleted;
+                    let is_dir = change.is_dir;
                     let result = tokio::task::spawn_blocking(move || {
-                        apply_watch_change(&workspace2, &p, deleted)
+                        apply_watch_change(&workspace2, &p, deleted, is_dir)
                     })
                     .await;
                     match result {
@@ -523,6 +595,7 @@ fn spawn_watcher_loop(
                                 // a create-then-delete burst should end
                                 // as a delete.
                                 entry.deleted = change.deleted;
+                                entry.is_dir = change.is_dir;
                                 entry.last_seen = change.last_seen;
                             }
                             if should_rebuild_for_vcs_burst(watch_context, p.len()) {
@@ -532,7 +605,7 @@ fn spawn_watcher_loop(
                                 threshold = VCS_BURST_REBUILD_THRESHOLD,
                                 "indexer: VCS-aware watcher burst exceeded threshold; requesting rebuild"
                             );
-                                let _ = rebuild_tx.send(());
+                                rebuild_requester.request();
                             }
                             drop(p);
                             update_queue_depth(&pending, &shared.telemetry);
@@ -545,7 +618,7 @@ fn spawn_watcher_loop(
                                 reason,
                                 "indexer: watcher event stream lost scope; requesting rebuild"
                             );
-                            let _ = rebuild_tx.send(());
+                            rebuild_requester.request();
                         }
                         WatchAction::Ignore => {}
                     }
@@ -559,7 +632,7 @@ fn spawn_watcher_loop(
                     tracing::warn!(
                         "indexer: watcher channel lagged ({n} events); requesting rebuild"
                     );
-                    let _ = rebuild_tx.send(());
+                    rebuild_requester.request();
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -572,6 +645,7 @@ fn spawn_watcher_loop(
 struct PendingChange {
     path: String,
     deleted: bool,
+    is_dir: bool,
     last_seen: Instant,
 }
 
@@ -625,9 +699,14 @@ fn apply_watch_change(
     workspace: &Workspace,
     path: &str,
     deleted: bool,
+    is_dir: bool,
 ) -> chan_workspace::Result<ApplyOutcome> {
     if deleted {
-        workspace.forget_file(path)?;
+        if is_dir {
+            workspace.forget_subtree(path)?;
+        } else {
+            workspace.forget_file(path)?;
+        }
         return Ok(ApplyOutcome::Forgotten);
     }
     // Drafts are real in-root files under the configured drafts dir now,
@@ -683,22 +762,37 @@ fn classify_watch_event(event: &WatchEvent, context: WatchContext) -> WatchActio
                 // Team Work workspace activity look broken.
                 return WatchAction::Ignore;
             };
-            if !chan_workspace::fs_ops::is_indexable_text(path) {
+            if event.is_dir && event.kind == WatchKind::Removed {
+                return WatchAction::Changes(vec![PendingChange {
+                    path: path.to_owned(),
+                    deleted: true,
+                    is_dir: true,
+                    last_seen: now,
+                }]);
+            }
+            if event.is_dir || !chan_workspace::fs_ops::is_indexable_text(path) {
                 return WatchAction::Ignore;
             }
             WatchAction::Changes(vec![PendingChange {
                 path: path.to_owned(),
                 deleted: matches!(event.kind, WatchKind::Removed),
+                is_dir: false,
                 last_seen: now,
             }])
         }
         WatchKind::Renamed => {
+            if event.is_dir {
+                return WatchAction::Rebuild {
+                    reason: "directory-rename",
+                };
+            }
             let mut changes = Vec::with_capacity(2);
             if let Some(from) = event.path.as_deref() {
                 if chan_workspace::fs_ops::is_indexable_text(from) {
                     changes.push(PendingChange {
                         path: from.to_owned(),
                         deleted: true,
+                        is_dir: false,
                         last_seen: now,
                     });
                 }
@@ -708,6 +802,7 @@ fn classify_watch_event(event: &WatchEvent, context: WatchContext) -> WatchActio
                     changes.push(PendingChange {
                         path: to.to_owned(),
                         deleted: false,
+                        is_dir: false,
                         last_seen: now,
                     });
                 }
@@ -1015,8 +1110,9 @@ fn set_idle(workspace: &Workspace, shared: &IndexerShared) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chan_workspace::{Library, SearchMode, SearchOpts};
+    use chan_workspace::{Library, RecoveryAction, SearchMode, SearchOpts};
     use std::fs;
+    use std::sync::atomic::AtomicUsize;
     use tempfile::TempDir;
 
     fn setup_workspace() -> (TempDir, TempDir, Arc<Workspace>) {
@@ -1118,6 +1214,21 @@ mod tests {
     }
 
     #[test]
+    fn classify_directory_rename_requires_subtree_recovery() {
+        let event = WatchEvent::rename(
+            Some("old".to_string()),
+            Some("moved".to_string()),
+            true,
+            Some(9),
+            chan_workspace::WorkspaceGeneration::default(),
+        );
+        assert!(
+            !matches!(classify(&event), WatchAction::Ignore),
+            "directory rename must not be treated as a non-indexable file"
+        );
+    }
+
+    #[test]
     fn classify_watch_event_requests_rebuild_on_vcs_control_paths() {
         assert!(matches!(
             classify_vcs(&ev(WatchKind::Modified, Some(".git/HEAD"), None)),
@@ -1165,6 +1276,7 @@ mod tests {
                 PendingChange {
                     path: "new.md".to_string(),
                     deleted: false,
+                    is_dir: false,
                     last_seen: Instant::now() - Duration::from_secs(2),
                 },
             ),
@@ -1173,6 +1285,7 @@ mod tests {
                 PendingChange {
                     path: "old.md".to_string(),
                     deleted: true,
+                    is_dir: false,
                     last_seen: Instant::now() - Duration::from_secs(2),
                 },
             ),
@@ -1240,8 +1353,141 @@ mod tests {
     fn apply_watch_change_indexes_regular_file() {
         let (_cfg, dir, workspace) = setup_workspace();
         fs::write(dir.path().join("a.md"), "# A\n\nbody\n").unwrap();
-        let outcome = apply_watch_change(&workspace, "a.md", false).unwrap();
+        let outcome = apply_watch_change(&workspace, "a.md", false, false).unwrap();
         assert_eq!(outcome, ApplyOutcome::Indexed);
+    }
+
+    #[test]
+    fn apply_watch_change_directory_delete_forgets_subtree() {
+        let (_cfg, dir, workspace) = setup_workspace();
+        for (path, body) in [
+            ("old/a.md", "# A\nold-a-token\n"),
+            ("old/nested/b.md", "# B\nold-b-token\n"),
+            ("keep.md", "# Keep\nkeep-token\n"),
+        ] {
+            workspace.write_text(path, body).unwrap();
+        }
+        workspace.reindex(None).unwrap();
+        fs::rename(dir.path().join("old"), dir.path().join("moved")).unwrap();
+
+        apply_watch_change(&workspace, "old", true, true).unwrap();
+
+        let graph_paths = workspace.graph().unwrap().files().unwrap();
+        let index_paths = workspace.indexed_paths().unwrap();
+        assert!(
+            graph_paths.iter().all(|path| !path.starts_with("old/")),
+            "directory event left stale graph rows: {graph_paths:?}"
+        );
+        assert!(
+            index_paths.iter().all(|path| !path.starts_with("old/")),
+            "directory event left stale search rows: {index_paths:?}"
+        );
+    }
+
+    struct BlockingRebuildProgress {
+        passes: AtomicUsize,
+        started: tokio::sync::mpsc::UnboundedSender<usize>,
+        release_first: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl ProgressCallback for BlockingRebuildProgress {
+        fn on_progress(&self, event: ProgressEvent) {
+            if event.stage != ProgressStage::GraphRebuild || event.current != 0 {
+                return;
+            }
+            let pass = self.passes.fetch_add(1, Ordering::SeqCst) + 1;
+            let _ = self.started.send(pass);
+            if pass == 1 {
+                let _ = self.release_first.lock().unwrap().recv();
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn trigger_during_active_rebuild_forces_one_follow_up_generation() {
+        let cooldown = Duration::from_millis(75);
+        let (_cfg, _dir, workspace) = setup_workspace();
+        workspace.write_text("a.md", "# A\nbody\n").unwrap();
+        let status = Arc::new(Mutex::new(IndexStatus::Idle {
+            indexed_docs: 0,
+            indexed_vectors: 0,
+            model: "bm25".to_string(),
+            embedding: None,
+        }));
+        let telemetry = Arc::new(Mutex::new(IndexerTelemetry {
+            queue_depth: 0,
+            last_event_at: None,
+            last_settled_at: None,
+            coalesced_rebuild: false,
+        }));
+        let shared = IndexerShared {
+            status,
+            telemetry,
+            bg_embed: Arc::new(Mutex::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            search_aggression: SearchAggression::Conservative,
+        };
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let progress = Arc::new(BlockingRebuildProgress {
+            passes: AtomicUsize::new(0),
+            started: started_tx,
+            release_first: Mutex::new(release_rx),
+        });
+        let (tx, rx) = mpsc::unbounded_channel::<WorkspaceGeneration>();
+        let coordinator = spawn_coordinator(
+            Arc::downgrade(&workspace),
+            shared,
+            rx,
+            progress.clone(),
+            cooldown,
+        );
+
+        let first_generation = workspace.request_recovery(RecoveryAction::FullRebuild);
+        tx.send(first_generation).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), started_rx.recv())
+                .await
+                .unwrap(),
+            Some(1)
+        );
+
+        let required_generation = workspace.request_recovery(RecoveryAction::FullRebuild);
+        assert!(required_generation > first_generation);
+        for _ in 0..3 {
+            assert_eq!(
+                workspace.request_recovery(RecoveryAction::FullRebuild),
+                required_generation
+            );
+            tx.send(required_generation).unwrap();
+        }
+        release_tx.send(()).unwrap();
+        let released_at = Instant::now();
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(750), started_rx.recv())
+                .await
+                .expect("mid-rebuild generation was swallowed"),
+            Some(2)
+        );
+        assert!(
+            released_at.elapsed() >= cooldown,
+            "follow-up rebuild started before the cooldown floor"
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let recovery = workspace.recovery_status();
+                if recovery.is_ready() && recovery.completed_generation >= required_generation {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("follow-up generation did not complete");
+        assert_eq!(progress.passes.load(Ordering::SeqCst), 2);
+        drop(tx);
+        coordinator.await.unwrap();
     }
 
     fn progress_event(
@@ -1388,7 +1634,7 @@ mod tests {
     fn reconcile_idle_reads_live_stats_when_workspace_present() {
         let (_cfg, dir, workspace) = setup_workspace();
         fs::write(dir.path().join("a.md"), "# A\n\nbody token\n").unwrap();
-        apply_watch_change(&workspace, "a.md", false).unwrap();
+        apply_watch_change(&workspace, "a.md", false, false).unwrap();
         let status = Arc::new(Mutex::new(IndexStatus::Building {
             current: 0,
             total: 1,
@@ -1429,7 +1675,7 @@ mod tests {
         // embedding: None.
         let (_cfg, dir, workspace) = setup_workspace();
         fs::write(dir.path().join("a.md"), "# A\n\nbody token\n").unwrap();
-        apply_watch_change(&workspace, "a.md", false).unwrap();
+        apply_watch_change(&workspace, "a.md", false, false).unwrap();
         let status = Arc::new(Mutex::new(IndexStatus::Reindexing {
             file: "a.md".to_owned(),
         }));
@@ -1510,7 +1756,8 @@ mod tests {
         )
         .unwrap();
 
-        let outcome = apply_watch_change(&workspace, ".Drafts/untitled-1/draft.md", false).unwrap();
+        let outcome =
+            apply_watch_change(&workspace, ".Drafts/untitled-1/draft.md", false, false).unwrap();
         assert_eq!(outcome, ApplyOutcome::Indexed);
 
         // Verify the side-effect: graph + BM25 now know about the draft
@@ -1560,7 +1807,8 @@ mod tests {
                 other => panic!("expected created change for {path}, got {other:?}"),
             };
             assert_eq!(
-                apply_watch_change(&workspace, &change.path, change.deleted).unwrap(),
+                apply_watch_change(&workspace, &change.path, change.deleted, change.is_dir)
+                    .unwrap(),
                 ApplyOutcome::Indexed
             );
         }
@@ -1593,7 +1841,7 @@ mod tests {
         let path = dir.path().join("rapid.md");
         fs::write(&path, "# Rapid\n\nrapid-token-00\n").unwrap();
         assert_eq!(
-            apply_watch_change(&workspace, "rapid.md", false).unwrap(),
+            apply_watch_change(&workspace, "rapid.md", false, false).unwrap(),
             ApplyOutcome::Indexed
         );
 
@@ -1601,7 +1849,7 @@ mod tests {
             fs::write(&path, format!("# Rapid\n\nrapid-token-{n:02}\n")).unwrap();
         }
         assert_eq!(
-            apply_watch_change(&workspace, "rapid.md", false).unwrap(),
+            apply_watch_change(&workspace, "rapid.md", false, false).unwrap(),
             ApplyOutcome::Indexed
         );
 
@@ -1627,14 +1875,14 @@ mod tests {
     #[test]
     fn apply_watch_change_forgets_on_delete_flag() {
         let (_cfg, _dir, workspace) = setup_workspace();
-        let outcome = apply_watch_change(&workspace, "gone.md", true).unwrap();
+        let outcome = apply_watch_change(&workspace, "gone.md", true, false).unwrap();
         assert_eq!(outcome, ApplyOutcome::Forgotten);
     }
 
     #[test]
     fn apply_watch_change_skips_missing_path() {
         let (_cfg, _dir, workspace) = setup_workspace();
-        let outcome = apply_watch_change(&workspace, "never-existed.md", false).unwrap();
+        let outcome = apply_watch_change(&workspace, "never-existed.md", false, false).unwrap();
         assert_eq!(outcome, ApplyOutcome::SkippedMissing);
     }
 
@@ -1644,7 +1892,7 @@ mod tests {
         let (_cfg, dir, workspace) = setup_workspace();
         fs::write(dir.path().join("real.md"), "# Real\n").unwrap();
         std::os::unix::fs::symlink("real.md", dir.path().join("alias.md")).unwrap();
-        let outcome = apply_watch_change(&workspace, "alias.md", false).unwrap();
+        let outcome = apply_watch_change(&workspace, "alias.md", false, false).unwrap();
         assert_eq!(outcome, ApplyOutcome::SkippedSpecial);
     }
 
@@ -1653,7 +1901,7 @@ mod tests {
     fn apply_watch_change_skips_broken_symlink() {
         let (_cfg, dir, workspace) = setup_workspace();
         std::os::unix::fs::symlink("does-not-exist.md", dir.path().join("broken.md")).unwrap();
-        let outcome = apply_watch_change(&workspace, "broken.md", false).unwrap();
+        let outcome = apply_watch_change(&workspace, "broken.md", false, false).unwrap();
         assert_eq!(outcome, ApplyOutcome::SkippedSpecial);
     }
 
@@ -1674,7 +1922,7 @@ mod tests {
             Ok(s) if s.success() => {}
             _ => return,
         }
-        let outcome = apply_watch_change(&workspace, "attach.fifo", false).unwrap();
+        let outcome = apply_watch_change(&workspace, "attach.fifo", false, false).unwrap();
         assert_eq!(outcome, ApplyOutcome::SkippedSpecial);
     }
 
@@ -1687,7 +1935,7 @@ mod tests {
         let (_cfg, dir, workspace) = setup_workspace();
         fs::write(dir.path().join("a.md"), "# A\n").unwrap();
         assert_eq!(
-            apply_watch_change(&workspace, "a.md", false).unwrap(),
+            apply_watch_change(&workspace, "a.md", false, false).unwrap(),
             ApplyOutcome::Indexed
         );
         let before = workspace.index_stats().unwrap().indexed_docs;
@@ -1695,7 +1943,7 @@ mod tests {
         fs::write(dir.path().join("real.md"), "# Real\n").unwrap();
         std::os::unix::fs::symlink("real.md", dir.path().join("a.md")).unwrap();
         assert_eq!(
-            apply_watch_change(&workspace, "a.md", false).unwrap(),
+            apply_watch_change(&workspace, "a.md", false, false).unwrap(),
             ApplyOutcome::SkippedSpecial
         );
         // Best-effort cleanup ran: the prior `a.md` row is gone.
@@ -1706,31 +1954,19 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn coalesce_and_cooldown_drains_then_waits() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<()>();
-        for _ in 0..5 {
-            tx.send(()).unwrap();
-        }
-        let t0 = Instant::now();
-        coalesce_and_cooldown(&mut rx, Duration::from_millis(50)).await;
-        assert!(
-            t0.elapsed() >= Duration::from_millis(50),
-            "the cooldown is actually awaited between rebuilds"
-        );
-        assert!(rx.try_recv().is_err(), "queued requests coalesce to one");
-        // A trigger that arrives afterwards is NOT swallowed: it
-        // drives the next rebuild once the cooldown lapses.
-        tx.send(()).unwrap();
-        coalesce_and_cooldown(&mut rx, Duration::ZERO).await;
-        assert!(rx.try_recv().is_err());
-    }
+    #[test]
+    fn drain_required_generation_keeps_newest_obligation() {
+        let generation_1: WorkspaceGeneration = serde_json::from_str("1").unwrap();
+        let generation_2: WorkspaceGeneration = serde_json::from_str("2").unwrap();
+        let generation_3: WorkspaceGeneration = serde_json::from_str("3").unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(generation_2).unwrap();
+        tx.send(generation_2).unwrap();
+        tx.send(generation_3).unwrap();
 
-    #[tokio::test]
-    async fn coalesce_and_cooldown_zero_is_pass_through() {
-        let (_tx, mut rx) = mpsc::unbounded_channel::<()>();
-        let t0 = Instant::now();
-        coalesce_and_cooldown(&mut rx, Duration::ZERO).await;
-        assert!(t0.elapsed() < Duration::from_millis(50));
+        assert_eq!(
+            drain_required_generation(&mut rx, generation_1),
+            generation_3
+        );
     }
 }
