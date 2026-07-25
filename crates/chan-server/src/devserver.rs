@@ -784,11 +784,14 @@ impl DevserverState {
                 match completion {
                     MountCompletion::Adopted => {}
                     MountCompletion::CloseStale => {
-                        let _ = self.host.close_workspace(&hosted.prefix, true);
+                        let _ = self.host.close_workspace(&hosted.prefix, true).await;
                         self.restore_current_host_lifecycle(&attempt.prefix);
                     }
                     MountCompletion::ForgetStale => {
-                        let _ = self.host.remove_workspace_for_root(&attempt.root, true);
+                        let _ = self
+                            .host
+                            .remove_workspace_for_root(&attempt.root, true)
+                            .await;
                         self.remove_finished_tombstone(&attempt.prefix);
                     }
                 }
@@ -806,7 +809,7 @@ impl DevserverState {
             Err(MountTimedOut) => {
                 // The timeout drops the in-flight future. Compensate in case it
                 // inserted a tenant immediately before cancellation.
-                let _ = self.host.close_workspace(&attempt.prefix, true);
+                let _ = self.host.close_workspace(&attempt.prefix, true).await;
                 let reason = format!("mount timed out after {} seconds", timeout.as_secs().max(1));
                 self.finish_failed_attempt(&attempt, reason.clone());
                 settlement.disarm();
@@ -861,8 +864,8 @@ impl DevserverState {
         }
     }
 
-    fn cancel_mount_attempt(&self, attempt: &MountAttempt) {
-        let _ = self.host.close_workspace(&attempt.prefix, true);
+    async fn cancel_mount_attempt(&self, attempt: &MountAttempt) {
+        let _ = self.host.close_workspace(&attempt.prefix, true).await;
         self.restore_current_host_lifecycle(&attempt.prefix);
         self.startup.settle(&attempt.key());
     }
@@ -900,7 +903,7 @@ impl DevserverState {
             // completion can publish. A mounted row can first run the existing
             // terminal-refusal guard because no attempt is outstanding.
             if phase == MountPhase::Mounted {
-                match self.host.close_workspace(prefix, force)? {
+                match self.host.close_workspace(prefix, force).await? {
                     WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound => {}
                     WorkspaceLifecycleOutcome::Refused { active_terminals } => {
                         return Ok(SetWorkspaceOnResult::Refused { active_terminals });
@@ -922,7 +925,7 @@ impl DevserverState {
                 }
             }
             if phase != MountPhase::Mounted {
-                match self.host.close_workspace(prefix, force)? {
+                match self.host.close_workspace(prefix, force).await? {
                     WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound => {}
                     WorkspaceLifecycleOutcome::Refused { active_terminals } => {
                         return Ok(SetWorkspaceOnResult::Refused { active_terminals });
@@ -950,7 +953,7 @@ impl DevserverState {
     /// Forget the workspace at `prefix`: unmount it if on, then drop the
     /// registration entirely. Refusal leaves both the live mount and the
     /// registration intact. Distinct from on/off.
-    fn forget_workspace(
+    async fn forget_workspace(
         &self,
         prefix: &str,
         force: bool,
@@ -991,7 +994,7 @@ impl DevserverState {
             // no lock is held across the host's potentially blocking teardown.
             self.persist_state();
         }
-        match self.host.remove_workspace_for_root(&root, force)? {
+        match self.host.remove_workspace_for_root(&root, force).await? {
             WorkspaceLifecycleOutcome::Refused { active_terminals } => {
                 if let Some(original) = pending_original {
                     self.workspaces
@@ -1382,9 +1385,9 @@ async fn restore_prepared_workspaces(
     let mut attempts = attempts.into_iter();
     while let Some(attempt) = attempts.next() {
         if *shutdown_rx.borrow() {
-            state.cancel_mount_attempt(&attempt);
+            state.cancel_mount_attempt(&attempt).await;
             for pending in attempts {
-                state.cancel_mount_attempt(&pending);
+                state.cancel_mount_attempt(&pending).await;
             }
             return;
         }
@@ -1415,9 +1418,9 @@ async fn restore_prepared_workspaces(
             }
             _ = shutdown_rx.changed() => {
                 drop(restore);
-                state.cancel_mount_attempt(&attempt);
+                state.cancel_mount_attempt(&attempt).await;
                 for pending in attempts {
-                    state.cancel_mount_attempt(&pending);
+                    state.cancel_mount_attempt(&pending).await;
                 }
                 return;
             }
@@ -1735,6 +1738,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
                 Some(task) => Some(task.await),
                 None => None,
             };
+            let hosted_shutdown = host.shutdown_all().await;
             state.startup.stop();
             state.startup.stopped();
             restore_join.context("joining workspace startup restore")?;
@@ -1743,6 +1747,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
             if let Some(tunnel_join) = tunnel_join {
                 tunnel_join.context("joining devserver tunnel task")?;
             }
+            hosted_shutdown.context("shutting down hosted tenants")?;
             serve_join?;
         }
         None => {
@@ -1787,6 +1792,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
                 Some(task) => Some(task.await),
                 None => None,
             };
+            let hosted_shutdown = host.shutdown_all().await;
             state.startup.stop();
             state.startup.stopped();
             restore_join.context("joining workspace startup restore")?;
@@ -1795,6 +1801,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
             if let Some(tunnel_join) = tunnel_join {
                 tunnel_join.context("joining devserver tunnel task")?;
             }
+            hosted_shutdown.context("shutting down hosted tenants")?;
             serve_join?;
         }
     }
@@ -2252,7 +2259,7 @@ async fn handle_forget(
     // The wildcard captures the prefix without its leading slash (the
     // client appends the prefix value verbatim to the route base).
     let prefix = format!("/{}", prefix_tail.trim_start_matches('/'));
-    match state.forget_workspace(&prefix, query.force) {
+    match state.forget_workspace(&prefix, query.force).await {
         Ok(WorkspaceLifecycleOutcome::Completed) => StatusCode::NO_CONTENT.into_response(),
         Ok(WorkspaceLifecycleOutcome::NotFound) => StatusCode::NOT_FOUND.into_response(),
         Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => (
@@ -2442,6 +2449,118 @@ mod tests {
     use chan_library::workspace_slug;
     use std::sync::atomic::AtomicBool;
 
+    struct ShutdownProbeBuilder {
+        state_tx: Mutex<Option<tokio::sync::oneshot::Sender<Arc<crate::state::AppState>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl chan_library::TenantBuilder for ShutdownProbeBuilder {
+        async fn build_workspace(
+            &self,
+            library: Library,
+            workspace: Arc<chan_workspace::Workspace>,
+            config: &ServeConfig,
+            desktop: crate::DesktopBridge,
+            unserve: chan_library::UnserveMode,
+            control_identity: Option<String>,
+        ) -> Result<chan_library::TenantArtifacts, Error> {
+            let artifacts = crate::build_app(
+                library,
+                workspace,
+                config,
+                desktop,
+                unserve,
+                control_identity,
+            )
+            .await?;
+            let sent = self
+                .state_tx
+                .lock()
+                .expect("probe builder lock")
+                .take()
+                .expect("workspace built once")
+                .send(artifacts.state.clone());
+            assert!(sent.is_ok(), "probe state receiver");
+            Ok(crate::into_tenant_artifacts(artifacts))
+        }
+
+        async fn build_terminal(
+            &self,
+            _library: Library,
+            _config: &ServeConfig,
+            _desktop: crate::DesktopBridge,
+            _unserve: chan_library::UnserveMode,
+            _command: Option<String>,
+            _session_dir: Option<PathBuf>,
+            _control_identity: Option<String>,
+        ) -> Result<chan_library::TenantArtifacts, Error> {
+            Err(Error::Config(
+                "shutdown probe does not build terminal tenants".into(),
+            ))
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hosted_shutdown_joins_doc_close_all_before_clearing_workspace_cell() {
+        let config = tempfile::tempdir().expect("config");
+        let root = tempfile::tempdir().expect("workspace");
+        std::fs::write(root.path().join("note.md"), "previous bytes").expect("seed note");
+
+        let library = Library::open_at(config.path().join("config.toml")).expect("library");
+        library
+            .register_workspace(root.path())
+            .expect("register workspace");
+        let (state_tx, state_rx) = tokio::sync::oneshot::channel();
+        let host = Arc::new(WorkspaceHost::new(
+            library.clone(),
+            Arc::new(ShutdownProbeBuilder {
+                state_tx: Mutex::new(Some(state_tx)),
+            }),
+        ));
+        host.open_registered_workspace(
+            root.path(),
+            tenant_config("127.0.0.1:0".parse().unwrap(), "/shutdown-probe"),
+        )
+        .await
+        .expect("mount workspace");
+        let state = state_rx.await.expect("built app state");
+        let workspace = state.try_workspace().expect("live workspace");
+        let mut attachment = state
+            .doc_sessions
+            .attach(&workspace, "note.md", "window-1", None)
+            .await
+            .expect("attach document");
+        let mut frames = attachment.take_frames();
+        while frames.try_recv().is_ok() {}
+        attachment
+            .session()
+            .apply_replace("$shutdown-probe", "shutdown-flushed bytes")
+            .expect("dirty document");
+        while frames.try_recv().is_ok() {}
+        drop(workspace);
+
+        let outcome = host
+            .close_workspace("/shutdown-probe", false)
+            .await
+            .expect("close workspace");
+        assert!(outcome.completed());
+        let mut closed = false;
+        while let Ok(frame) = frames.try_recv() {
+            let frame: serde_json::Value = serde_json::from_str(&frame).expect("document frame");
+            closed |= frame["type"] == "closed";
+        }
+        assert!(closed, "host returned before joining document close_all");
+        assert_eq!(
+            std::fs::read(root.path().join("note.md")).expect("read note"),
+            b"shutdown-flushed bytes",
+            "host cleared the workspace cell before close_all could flush"
+        );
+        assert!(
+            state.try_workspace().is_err(),
+            "workspace cell stayed live after joined shutdown"
+        );
+    }
+
     async fn completed_serve_arm(listener: bool) -> DevserverServeArm {
         if listener {
             let task = tokio::spawn(async { Ok(()) });
@@ -2536,7 +2655,7 @@ mod tests {
         assert!(persisted.desired_on);
         assert_eq!(persisted.generation, attempt.generation);
 
-        state.cancel_mount_attempt(&attempt);
+        state.cancel_mount_attempt(&attempt).await;
     }
 
     #[test]
@@ -3657,6 +3776,7 @@ mod tests {
 
         assert!(state
             .forget_workspace(&prefix, false)
+            .await
             .expect("forget")
             .completed());
         assert!(
@@ -3677,6 +3797,7 @@ mod tests {
         // Idempotent: forgetting an unknown / already-removed prefix is false.
         assert!(state
             .forget_workspace(&prefix, false)
+            .await
             .expect("already removed")
             .not_found());
     }
@@ -3840,6 +3961,7 @@ mod tests {
         assert!(state
             .host
             .remove_workspace_for_root(ws_a.path(), false)
+            .await
             .expect("remove a")
             .completed());
 
@@ -3891,6 +4013,7 @@ mod tests {
         assert!(state
             .host
             .close_workspace_for_root(ws_a.path(), false)
+            .await
             .expect("close a")
             .completed());
 
@@ -3941,6 +4064,7 @@ mod tests {
         assert!(state
             .host
             .close_workspace_for_root(ws.path(), false)
+            .await
             .expect("close")
             .completed());
 
@@ -3974,6 +4098,7 @@ mod tests {
         assert!(state
             .host
             .remove_workspace_for_root(ws.path(), false)
+            .await
             .expect("remove")
             .completed());
 
@@ -4004,6 +4129,7 @@ mod tests {
         assert!(state
             .host
             .close_workspace_for_root(ws.path(), false)
+            .await
             .expect("close")
             .completed());
 

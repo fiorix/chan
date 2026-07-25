@@ -23,6 +23,8 @@ use tokio::sync::Notify;
 use tower::ServiceExt;
 
 use crate::desktop_window_ops::DesktopBridge;
+#[cfg(test)]
+use crate::tenant::TenantTaskOwner;
 use crate::tenant::{HostControl, TenantArtifacts, TenantBuilder, UnserveMode};
 use crate::terminal_sessions::{CloseReason, TerminalExit};
 #[cfg(target_os = "linux")]
@@ -405,21 +407,29 @@ impl HostedWorkspaceRuntime {
         self.artifacts.app.clone()
     }
 
-    /// Signal shutdown and tear the workspace cell down. Returns a `Weak`
-    /// to the workspace plus its lock dir so a caller that needs the
-    /// per-workspace flock released before it returns (an in-process close
-    /// then reopen) can wait for the last strong `Arc` to drop AND the flock
-    /// to free. `None` when the cell was already cleared (a second call, e.g.
-    /// Drop after an explicit close, or a terminal tenant with no workspace).
-    fn shutdown(&self) -> Option<(Weak<Workspace>, PathBuf)> {
-        let _ = self.artifacts.shutdown_tx.send(true);
-        self.artifacts.cell.clear()
+    /// Stop and join the tenant tasks before clearing the workspace cell, then
+    /// verify the workspace flock is released before returning.
+    async fn shutdown(mut self) {
+        self.artifacts.tasks.shutdown().await;
+        let released = self.artifacts.cell.clear();
+        if let Some((weak, lock_dir)) = released {
+            let wait = tokio::task::spawn_blocking(move || {
+                wait_for_workspace_release(&weak, &lock_dir);
+            });
+            if let Err(error) = wait.await {
+                tracing::warn!(%error, "workspace flock-release verifier panicked");
+            }
+        }
     }
 }
 
 impl Drop for HostedWorkspaceRuntime {
     fn drop(&mut self) {
-        let _ = self.shutdown();
+        // Cancellation/unwind fallback: no async join is possible here. Abort
+        // the tasks explicitly before clearing the cell so field declaration
+        // order can never expose a cleared cell to a detached flusher.
+        self.artifacts.tasks.cancel_and_abort();
+        let _ = self.artifacts.cell.clear();
     }
 }
 
@@ -1578,7 +1588,7 @@ impl WorkspaceHost {
     /// notify, so the feed drops the row. Returns whether a row existed. Called
     /// on control PTY exit (the server-side reap) and on explicit
     /// disconnect/forget; idempotent.
-    pub fn reap_control_window(&self, window_id: &str) -> bool {
+    pub async fn reap_control_window(&self, window_id: &str) -> bool {
         let prefix = self
             .control_tenants
             .write()
@@ -1590,7 +1600,7 @@ impl WorkspaceHost {
             .unwrap_or(false);
         if let Some(prefix) = prefix {
             // Best-effort: an already-unmounted tenant returns Ok(false).
-            let _ = self.close_terminal_tenant(&prefix);
+            let _ = self.close_terminal_tenant(&prefix).await;
         }
         removed
     }
@@ -1947,12 +1957,12 @@ impl WorkspaceHost {
     /// overlay, so a devserver restart (which re-mounts from the overlay) does
     /// not bring a just-closed workspace back up. The launcher's in-memory view
     /// already reflects the unmount; this persists it.
-    pub fn close_workspace_for_root(
+    pub async fn close_workspace_for_root(
         &self,
         root: &Path,
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
-        self.close_workspace_for_root_impl(root, force, true)
+        self.close_workspace_for_root_impl(root, force, true).await
     }
 
     /// Shutdown-flavored close: unmount the workspace at `root` WITHOUT recording
@@ -1963,12 +1973,12 @@ impl WorkspaceHost {
     /// per-workspace teardown racing process death can never flip a workspace off
     /// for the next boot. Every other close is genuine user intent and records
     /// off through [`close_workspace_for_root`](Self::close_workspace_for_root).
-    pub fn close_workspace_for_root_preserving_overlay(
+    pub async fn close_workspace_for_root_preserving_overlay(
         &self,
         root: &Path,
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
-        self.close_workspace_for_root_impl(root, force, false)
+        self.close_workspace_for_root_impl(root, force, false).await
     }
 
     /// Shared body for the close-by-root variants. `record_off` gates the off
@@ -1976,7 +1986,7 @@ impl WorkspaceHost {
     /// launcher off-toggle, the control-socket close) records off so a devserver
     /// restart does not bring the just-closed workspace back up; a shutdown close
     /// preserves the overlay so the next boot restores the same on-set.
-    fn close_workspace_for_root_impl(
+    async fn close_workspace_for_root_impl(
         &self,
         root: &Path,
         force: bool,
@@ -1995,7 +2005,7 @@ impl WorkspaceHost {
         };
         match prefix {
             Some(prefix) => {
-                let outcome = self.close_workspace(&prefix, force)?;
+                let outcome = self.close_workspace(&prefix, force).await?;
                 if record_off && (outcome.completed() || outcome.not_found()) {
                     if let Some(overlay) = self.workspace_overlay() {
                         overlay.set(&root.to_string_lossy(), false);
@@ -2024,7 +2034,7 @@ impl WorkspaceHost {
     /// the host process so the host's in-memory library + the persisted overlay
     /// stay consistent (a CLI-side `config.toml` edit alone would leave them
     /// stale, so the workspace lingers in the launcher and survives a restart).
-    pub fn remove_workspace_for_root(
+    pub async fn remove_workspace_for_root(
         &self,
         root: &Path,
         force: bool,
@@ -2032,7 +2042,7 @@ impl WorkspaceHost {
         // Unmount first (releases the per-workspace flock before the unregister's
         // reset); a no-op when the workspace is registered-but-off or not held
         // here. Refusal leaves the runtime, registry, overlay, and windows intact.
-        match self.close_workspace_for_root(root, force)? {
+        match self.close_workspace_for_root(root, force).await? {
             WorkspaceLifecycleOutcome::Refused { active_terminals } => {
                 return Ok(WorkspaceLifecycleOutcome::Refused { active_terminals });
             }
@@ -2067,13 +2077,12 @@ impl WorkspaceHost {
     /// signal before dropping the runtime, so active WebSockets and terminal
     /// sessions get a clean exit path.
     ///
-    /// This does NOT synchronously reap the tenant's PTYs: the shutdown
-    /// signal lets the per-tenant prune task close them on its own schedule.
-    /// That is fine for a workspace tenant (the devserver only mounts
-    /// workspaces through this), but a terminal-only tenant whose PTY must
-    /// stop at once -- a control terminal running a connect script -- should be
+    /// This does not call the terminal registry's `close_all` directly: the
+    /// per-tenant prune task closes it during the bounded joined shutdown. A
+    /// terminal-only tenant whose PTY must receive its kill before that joined
+    /// task runs -- a control terminal running a connect script -- should be
     /// closed with [`close_terminal_tenant`](Self::close_terminal_tenant).
-    pub fn close_workspace(
+    pub async fn close_workspace(
         &self,
         prefix: &str,
         force: bool,
@@ -2111,21 +2120,15 @@ impl WorkspaceHost {
         // so turning it back ON restores the same windows/panes/tabs (the PTYs
         // restart). The records are merely filtered out of the LIVE feed while the
         // workspace is off (see `window_in_live_feed`); only FORGET purges them.
-        // Tear down explicitly (rather than leaving it to Drop) so we hold a
-        // `Weak` to the workspace and can wait for the per-workspace flock to
-        // release before returning. Without this an in-process close then
-        // immediate reopen of the same root races teardown and trips
-        // `WorkspaceAlreadyOpen`. Drop re-runs shutdown on the now-cleared
-        // cell, which is a no-op.
-        let released = runtime.shutdown();
+        // Tear down explicitly (rather than leaving it to Drop) so tenant
+        // tasks finish while the workspace cell is live, then the cell clears
+        // and the per-workspace flock is verified released.
+        let runtime_root = runtime.root.clone();
+        runtime.shutdown().await;
         // A running workspace carries no transient lifecycle state, but clear
         // defensively so a leftover `error`/`starting` can never outlive a
         // close. No feed push here -- the `notify_window_change` below covers it.
-        self.clear_mount_state(&runtime.root);
-        drop(runtime);
-        if let Some((weak, lock_dir)) = released {
-            wait_for_workspace_release(&weak, &lock_dir);
-        }
+        self.clear_mount_state(&runtime_root);
         self.notify_window_change();
         Ok(WorkspaceLifecycleOutcome::Completed)
     }
@@ -2148,7 +2151,7 @@ impl WorkspaceHost {
     /// [`close_workspace`](Self::close_workspace) so pointing this at a
     /// workspace tenant by mistake still tears it down race-free; a terminal
     /// tenant has no workspace cell, so that wait is skipped.
-    pub fn close_terminal_tenant(&self, prefix: &str) -> Result<bool, Error> {
+    pub async fn close_terminal_tenant(&self, prefix: &str) -> Result<bool, Error> {
         let prefix = sanitize_prefix(prefix).map_err(Error::Config)?;
         let runtime = {
             let mut workspaces = self
@@ -2169,13 +2172,38 @@ impl WorkspaceHost {
             .artifacts
             .terminal_sessions
             .close_all(CloseReason::Shutdown);
-        let released = runtime.shutdown();
-        drop(runtime);
-        if let Some((weak, lock_dir)) = released {
-            wait_for_workspace_release(&weak, &lock_dir);
-        }
+        runtime.shutdown().await;
         self.notify_window_change();
         Ok(true)
+    }
+
+    /// Drain every mounted tenant for normal process shutdown without changing
+    /// the persisted workspace overlay.
+    ///
+    /// Every runtime starts its bounded shutdown before this method awaits any
+    /// one of them, so a stuck tenant cannot multiply the per-tenant grace by
+    /// the number of workspace, shared-terminal, or control-terminal tenants.
+    pub async fn shutdown_all(&self) -> Result<(), Error> {
+        let runtimes: Vec<HostedWorkspaceRuntime> = {
+            let mut workspaces = self
+                .workspaces
+                .write()
+                .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
+            workspaces.drain().map(|(_, runtime)| runtime).collect()
+        };
+        let mut shutdowns = tokio::task::JoinSet::new();
+        for runtime in runtimes {
+            shutdowns.spawn(runtime.shutdown());
+        }
+        while let Some(result) = shutdowns.join_next().await {
+            if let Err(error) = result {
+                if !error.is_cancelled() {
+                    tracing::error!(%error, "hosted tenant shutdown panicked");
+                }
+            }
+        }
+        self.notify_window_change();
+        Ok(())
     }
 
     /// Cancel any in-flight reindex on every mounted tenant.
@@ -2456,21 +2484,22 @@ impl WorkspaceHost {
 
 /// The control socket reaches the host through `Weak<dyn HostControl>` (the
 /// `install_self` back-reference), so it never names the concrete host type.
+#[async_trait::async_trait]
 impl HostControl for WorkspaceHost {
-    fn close_workspace_for_root(
+    async fn close_workspace_for_root(
         &self,
         root: &Path,
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
-        self.close_workspace_for_root(root, force)
+        self.close_workspace_for_root(root, force).await
     }
 
-    fn remove_workspace_for_root(
+    async fn remove_workspace_for_root(
         &self,
         root: &Path,
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
-        self.remove_workspace_for_root(root, force)
+        self.remove_workspace_for_root(root, force).await
     }
 
     fn assemble_window_records(&self) -> Vec<WindowRecord> {
@@ -2713,11 +2742,12 @@ mod tests {
 
     fn fake_artifacts(app: Router, cell: Arc<dyn WorkspaceCellHandle>) -> TenantArtifacts {
         let (shutdown_tx, _rx) = tokio::sync::watch::channel(false);
+        let shutdown_tx = Arc::new(shutdown_tx);
         TenantArtifacts {
             app,
             token: None,
             terminal_sessions: fake_registry(),
-            shutdown_tx: Arc::new(shutdown_tx),
+            tasks: TenantTaskOwner::new(shutdown_tx, Vec::new()),
             prefix: Arc::new(RwLock::new(String::new())),
             window_presence: Arc::new(crate::window_presence::WindowPresence::new()),
             window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
@@ -2726,6 +2756,24 @@ mod tests {
             cell,
             keepalive: Box::new(()),
         }
+    }
+
+    fn fake_artifacts_with_gated_shutdown(
+        entered_tx: tokio::sync::mpsc::UnboundedSender<()>,
+        release: Arc<tokio::sync::Semaphore>,
+        completed: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> TenantArtifacts {
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let shutdown_tx = Arc::new(shutdown_tx);
+        let task = tokio::spawn(async move {
+            let _ = shutdown_rx.changed().await;
+            let _ = entered_tx.send(());
+            let _permit = release.acquire().await.expect("shutdown release semaphore");
+            completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let mut artifacts = fake_artifacts(Router::new(), Arc::new(FakeTerminalCell));
+        artifacts.tasks = TenantTaskOwner::new(shutdown_tx, vec![task]);
+        artifacts
     }
 
     #[test]
@@ -3003,6 +3051,7 @@ mod tests {
 
         assert!(host
             .close_workspace("/workspace", false)
+            .await
             .expect("close")
             .completed());
         let response = app
@@ -3044,6 +3093,7 @@ mod tests {
 
         assert!(host
             .close_workspace("/workspace", false)
+            .await
             .expect("close")
             .completed());
         assert_eq!(
@@ -3201,6 +3251,7 @@ mod tests {
             .expect("open first");
         assert!(host
             .close_workspace("/first", false)
+            .await
             .expect("close first")
             .completed());
 
@@ -3246,6 +3297,7 @@ mod tests {
         // is unaffected, and the record is STILL persisted in the registry.
         assert!(host
             .close_workspace("/workspace", false)
+            .await
             .expect("close")
             .completed());
         assert!(
@@ -3295,6 +3347,7 @@ mod tests {
 
         assert!(host
             .remove_workspace_for_root(root.path(), false)
+            .await
             .expect("forget")
             .completed());
         assert!(
@@ -3333,6 +3386,7 @@ mod tests {
 
         assert!(host
             .close_workspace("/ws", false)
+            .await
             .expect("close")
             .completed());
         assert!(
@@ -3355,6 +3409,7 @@ mod tests {
         // The `chan close` host path: unmount the matching tenant by root.
         assert!(host
             .close_workspace_for_root(root.path(), false)
+            .await
             .expect("close by root")
             .completed());
         assert!(host.mounted_prefixes().expect("prefixes").is_empty());
@@ -3363,11 +3418,13 @@ mod tests {
         // (no panic, no error) so unserve is idempotent / 404-able.
         assert!(host
             .close_workspace_for_root(root.path(), false)
+            .await
             .expect("absent root")
             .not_found());
         let other = tempfile::tempdir().expect("other");
         assert!(host
             .close_workspace_for_root(other.path(), false)
+            .await
             .expect("unknown root")
             .not_found());
     }
@@ -3398,10 +3455,67 @@ mod tests {
 
         assert!(host
             .close_workspace_for_root_preserving_overlay(root.path(), false)
+            .await
             .expect("shutdown close")
             .completed());
 
         // Unmounted, but the desired-state row is still on for the next boot.
+        assert!(host.mounted_prefixes().expect("prefixes").is_empty());
+        assert_eq!(overlay.on_paths(), vec![key]);
+    }
+
+    #[tokio::test]
+    async fn host_wide_shutdown_drains_all_tenant_kinds_concurrently_and_preserves_overlay() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace");
+        let key = root.path().to_string_lossy().into_owned();
+        let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        let host = WorkspaceHost::new(library, fake_builder());
+        let overlay = Arc::new(WorkspaceOverlay::open(cfg.path().join("workspaces.json")));
+        overlay.set(&key, true);
+        host.install_workspace_overlay(Arc::clone(&overlay));
+
+        let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let prefixes = ["/workspace", "/terminal", "/control-0"];
+        {
+            let mut workspaces = host.workspaces.write().expect("host map");
+            for prefix in prefixes {
+                workspaces.insert(
+                    prefix.to_string(),
+                    HostedWorkspaceRuntime {
+                        root: root.path().to_path_buf(),
+                        handle: ServeHandle {
+                            addr: ([127, 0, 0, 1], 0).into(),
+                            prefix: prefix.to_string(),
+                            token: None,
+                        },
+                        artifacts: fake_artifacts_with_gated_shutdown(
+                            entered_tx.clone(),
+                            Arc::clone(&release),
+                            Arc::clone(&completed),
+                        ),
+                    },
+                );
+            }
+        }
+        drop(entered_tx);
+        let mut shutdown = Box::pin(host.shutdown_all());
+        for _ in prefixes {
+            tokio::select! {
+                biased;
+                entered = entered_rx.recv() => entered.expect("tenant shutdown started"),
+                result = shutdown.as_mut() => panic!("host shutdown serialized tenants: {result:?}"),
+            }
+        }
+        release.add_permits(prefixes.len());
+        shutdown.await.expect("host-wide shutdown");
+
+        assert_eq!(
+            completed.load(std::sync::atomic::Ordering::SeqCst),
+            prefixes.len()
+        );
         assert!(host.mounted_prefixes().expect("prefixes").is_empty());
         assert_eq!(overlay.on_paths(), vec![key]);
     }
@@ -3428,6 +3542,7 @@ mod tests {
 
         assert!(host
             .close_workspace_for_root(root.path(), false)
+            .await
             .expect("close by root")
             .completed());
 
@@ -3467,6 +3582,7 @@ mod tests {
         // After close, the handle is no longer live.
         assert!(host
             .close_workspace("/workspace", false)
+            .await
             .expect("close")
             .completed());
         assert!(host.live_workspace(root.path()).is_none());
@@ -3508,6 +3624,7 @@ mod tests {
         // Closing the REAL prefix unmounts it; by-root resolution then reads off.
         assert!(host
             .close_workspace(mount_prefix, false)
+            .await
             .expect("close")
             .completed());
         assert!(!host.is_root_mounted(root.path()));
@@ -3780,6 +3897,7 @@ mod tests {
         // An explicit Disconnect must stop the script now.
         assert!(host
             .close_terminal_tenant("/control")
+            .await
             .expect("close terminal tenant"));
         assert_eq!(registry.len(), 0, "PTY reaped on tenant close");
 
@@ -3792,6 +3910,7 @@ mod tests {
         // idempotent (a second teardown call doesn't error).
         assert!(!host
             .close_terminal_tenant("/absent")
+            .await
             .expect("absent close is false"));
     }
 
@@ -3878,7 +3997,7 @@ mod tests {
             .expect("spawn PTY");
 
         assert_eq!(
-            host.close_workspace("/ws", false).expect("close"),
+            host.close_workspace("/ws", false).await.expect("close"),
             WorkspaceLifecycleOutcome::Refused {
                 active_terminals: 1
             }
@@ -3891,6 +4010,7 @@ mod tests {
 
         assert!(host
             .close_workspace("/ws", true)
+            .await
             .expect("force close")
             .completed());
         assert!(!host.is_root_mounted(root.path()));
@@ -3936,6 +4056,7 @@ mod tests {
 
         assert_eq!(
             host.remove_workspace_for_root(root.path(), false)
+                .await
                 .expect("remove"),
             WorkspaceLifecycleOutcome::Refused {
                 active_terminals: 1
@@ -3952,6 +4073,7 @@ mod tests {
 
         assert!(host
             .remove_workspace_for_root(root.path(), true)
+            .await
             .expect("force remove")
             .completed());
         assert!(host.library().list_workspaces().is_empty());
@@ -4012,7 +4134,10 @@ mod tests {
             Some(TerminalExit::Code { code: 7 }),
             "the failing script's exit code surfaces"
         );
-        assert!(host.close_terminal_tenant("/ctl").expect("close tenant"));
+        assert!(host
+            .close_terminal_tenant("/ctl")
+            .await
+            .expect("close tenant"));
         assert!(host.terminal_tenant_last_exit("/ctl").is_none());
     }
 
@@ -4046,6 +4171,7 @@ mod tests {
         // empty map.
         assert!(host
             .close_workspace("/a", false)
+            .await
             .expect("close a")
             .completed());
         host.cancel_all_reindex();
@@ -4159,7 +4285,7 @@ mod tests {
 
         // Reap (server-side, on PTY exit): the row leaves the feed AND the control
         // tenant is unmounted (a second close is the idempotent no-op).
-        assert!(host.reap_control_window("control-terminal-ds1"));
+        assert!(host.reap_control_window("control-terminal-ds1").await);
         assert!(
             !host
                 .assemble_window_records()
@@ -4170,6 +4296,7 @@ mod tests {
         assert!(
             !host
                 .close_terminal_tenant("/control-0")
+                .await
                 .expect("close is idempotent"),
             "reap already unmounted the control tenant"
         );
