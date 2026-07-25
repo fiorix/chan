@@ -5,6 +5,7 @@
 
 import type {
   FileResponse,
+  FileWriteResponse,
   InspectorKind,
   InspectorPayload,
   MoveResponse,
@@ -107,11 +108,13 @@ export class MockWorkspaceStore {
       content: e.content ?? "",
       mtime: e.mtime,
       mtime_ns: mtimeNs(e.mtime),
+      authority_version: null,
+      disk_conflicted: false,
       writable: true,
     };
   }
 
-  write(path: string, content: string): { mtime: number | null; mtime_ns: string | null } {
+  write(path: string, content: string): FileWriteResponse {
     const mtime = nowSeconds();
     const existing = this.#files.get(path);
     const entry: MockFileEntry = {
@@ -124,7 +127,12 @@ export class MockWorkspaceStore {
     const isNew = !existing;
     this.#files.set(path, entry);
     if (isNew) this.#reindex();
-    return { mtime, mtime_ns: mtimeNs(mtime) };
+    return {
+      mtime,
+      mtime_ns: mtimeNs(mtime),
+      authority_version: null,
+      disk_conflicted: false,
+    };
   }
 
   /// Write an uploaded file into memory. Unlike `write`, the byte size is

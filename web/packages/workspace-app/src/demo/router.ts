@@ -127,9 +127,7 @@ export function createDemoFetch(
         return file ? json(file) : notFound(`no such file: ${rel}`);
       }
       if (method === "PUT") {
-        const raw = typeof init?.body === "string" ? init.body : "";
-        const parsed = parseBody(init) as { content?: string } | undefined;
-        const content = parsed?.content ?? raw;
+        const content = typeof init?.body === "string" ? init.body : "";
         const written = store.write(rel, content);
         if (store.get(rel)?.kind === "document") {
           graph.indexFile(rel, content);
@@ -471,6 +469,8 @@ function streamFile(store: MockWorkspaceStore, rel: string): Response {
       path: file.path,
       mtime: file.mtime,
       mtime_ns: file.mtime_ns ?? null,
+      authority_version: null,
+      disk_conflicted: false,
       writable: true,
       size: file.content.length,
     },

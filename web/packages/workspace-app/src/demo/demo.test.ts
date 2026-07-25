@@ -160,7 +160,7 @@ describe("createDemoFetch router", () => {
   test("PUT /api/files/<path> writes and DELETE removes", async () => {
     const st = store();
     const f = demoFetch(st);
-    await f("/api/files/README.md", { method: "PUT", body: JSON.stringify({ content: "x" }) });
+    await f("/api/files/README.md", { method: "PUT", body: "x" });
     expect(st.read("README.md")?.content).toBe("x");
     const del = await f("/api/files/README.md", { method: "DELETE" });
     expect(del.status).toBe(204);
@@ -172,6 +172,10 @@ describe("createDemoFetch router", () => {
     const body = await (await f("/api/files/README.md?stream=1")).text();
     const events = body.trim().split("\n").map((l) => JSON.parse(l));
     expect(events.map((e) => e.type)).toEqual(["meta", "chunk", "done"]);
+    expect(events[0]).toMatchObject({
+      authority_version: null,
+      disk_conflicted: false,
+    });
     expect(events[1].content).toBe("hello");
   });
 
@@ -514,7 +518,7 @@ describe("metadata export / import", () => {
   test("export carries archive headers and captures live edits", async () => {
     const st = new MockWorkspaceStore(fixture());
     const f = demoFetch(st);
-    await f("/api/files/README.md", { method: "PUT", body: JSON.stringify({ content: "edited" }) });
+    await f("/api/files/README.md", { method: "PUT", body: "edited" });
     const res = await f("/api/metadata/export", { method: "POST" });
     expect(res.headers.get("content-disposition")).toContain("metadata.json");
     expect(Number(res.headers.get("x-chan-metadata-files"))).toBeGreaterThan(0);
@@ -526,7 +530,7 @@ describe("metadata export / import", () => {
   test("import applies an exported archive into a fresh in-memory store", async () => {
     const src = new MockWorkspaceStore(fixture());
     const fsrc = demoFetch(src);
-    await fsrc("/api/files/README.md", { method: "PUT", body: JSON.stringify({ content: "edited" }) });
+    await fsrc("/api/files/README.md", { method: "PUT", body: "edited" });
     const archive = await (await fsrc("/api/metadata/export", { method: "POST" })).text();
 
     const dst = new MockWorkspaceStore(fixture());
