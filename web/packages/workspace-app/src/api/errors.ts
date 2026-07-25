@@ -18,3 +18,14 @@ export class ApiError extends Error {
     this.data = data ?? null;
   }
 }
+
+/** A workspace tenant can remain alive long enough to report that its source
+ * root was removed externally. Keep this classifier in the transport leaf so
+ * File Browser and Graph error paths agree without importing app state. */
+export function isWorkspaceRootMissingError(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 404 &&
+    error.message.toLowerCase().includes("workspace root does not exist")
+  );
+}

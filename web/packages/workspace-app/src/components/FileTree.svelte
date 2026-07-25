@@ -1175,6 +1175,11 @@
     <li class="empty">
       <div class="empty-title">Loading files...</div>
     </li>
+  {:else if root.children.length === 0 && tree.rootUnavailable}
+    <li class="empty">
+      <div class="empty-title">Workspace root unavailable</div>
+      <div class="empty-detail">{tree.error}</div>
+    </li>
   {:else if root.children.length === 0 && tree.error}
     <li class="empty">
       <div class="empty-title">File listing failed</div>

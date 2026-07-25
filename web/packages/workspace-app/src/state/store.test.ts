@@ -106,6 +106,9 @@ afterEach(() => {
   tree.loadedDirs = {};
   tree.loadingDirs = {};
   tree.dirErrors = {};
+  tree.entries = [];
+  tree.error = null;
+  tree.rootUnavailable = false;
   treeExpanded.map = { "": true };
   fbTreeInstances.byId = {};
   richPrompt.byTab = {};
@@ -559,6 +562,123 @@ describe("graph watcher reload signal", () => {
     vi.clearAllTimers();
     fetchSpy.mockRestore();
     vi.useRealTimers();
+  });
+});
+
+describe("workspace root loss", () => {
+  test("clears the tree and marks open files missing without discarding dirty buffers", async () => {
+    const dirty = "unsaved words stay in memory";
+    const file: FileTab = {
+      kind: "file",
+      fileKind: "document",
+      id: "file-root-loss",
+      path: "notes/large.md",
+      content: dirty,
+      saved: "disk version",
+      savedMtime: 1,
+      savedMtimeNs: "1",
+      mode: "source",
+      loading: false,
+      error: null,
+      fileMissing: null,
+      inspectorOpen: false,
+      outlineOpen: false,
+      repoRoot: null,
+      readMode: false,
+      fsWritable: true,
+      styleToolbarOpen: false,
+      syntaxHighlight: true,
+      highlightTrailingWhitespace: false,
+      codeBlocksCollapsed: false,
+    };
+    const pane: LeafNode = {
+      kind: "leaf",
+      id: "pane-root-loss",
+      tabs: [file],
+      activeTabId: file.id,
+    };
+    layout.rootId = pane.id;
+    layout.activePaneId = pane.id;
+    layout.nodes = { [pane.id]: pane };
+    tree.entries = [
+      { path: "notes", is_dir: true, size: 0, mtime: 1 },
+      {
+        path: "notes/large.md",
+        is_dir: false,
+        size: dirty.length,
+        mtime: 1,
+      },
+    ];
+    tree.loadedDirs = { "": true, notes: true };
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.includes("/api/files")) {
+        return new Response(
+          JSON.stringify({ error: "workspace root does not exist: /tmp/gone" }),
+          { status: 404, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.includes("/api/search")) {
+        return new Response(JSON.stringify({ hits: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ name: "test", root: "/tmp/gone", preferences: {} }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    onWatchEvent({
+      type: "watch",
+      event: { kind: "Removed", path: "", is_dir: true },
+    });
+
+    await vi.waitFor(() => expect(tree.rootUnavailable).toBe(true));
+    const live = (layout.nodes[pane.id] as LeafNode).tabs[0] as FileTab;
+    expect(tree.entries).toEqual([]);
+    expect(live.fileMissing?.path).toBe("notes/large.md");
+    expect(live.content).toBe(dirty);
+    expect(live.saved).toBe("disk version");
+
+    fetchSpy.mockRestore();
+  });
+
+  test("provider loss probes the root without treating its message as a file path", async () => {
+    tree.entries = [
+      { path: "still-here.md", is_dir: false, size: 1, mtime: 1 },
+    ];
+    tree.loadedDirs = { "": true };
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.includes("/api/files")) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ name: "test", root: "/tmp/test", preferences: {} }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    onWatchEvent({
+      type: "watch",
+      event: { kind: "ProviderError", path: "watch backend lost scope", is_dir: false },
+    });
+
+    await vi.waitFor(() => expect(tree.entries).toEqual([]));
+    expect(tree.rootUnavailable).toBe(false);
+    expect(
+      fetchSpy.mock.calls.some(([input]) =>
+        String(input instanceof Request ? input.url : input).includes("watch%20backend"),
+      ),
+    ).toBe(false);
+
+    fetchSpy.mockRestore();
   });
 });
 

@@ -72,6 +72,7 @@
     syncOverlayStack,
     toggleBrowserSidePane,
     topOverlay,
+    tree,
     ui,
     watchSystemTheme,
   } from "./state/store.svelte";
@@ -449,6 +450,12 @@
   /// so all entry points (chord / Hybrid Nav / hamburger / right-click)
   /// behave identically.
   function spawnTerminalFromContext(): void {
+    if (tree.rootUnavailable) {
+      setTransientStatus(
+        `New terminal failed: ${tree.error ?? "workspace root does not exist"}`,
+      );
+      return;
+    }
     const ctx = resolveSpawnContext();
     openTerminalInActivePane({ cwd: ctx.dir });
     scheduleSessionSave();

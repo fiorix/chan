@@ -13,7 +13,7 @@
 //! watcher pick them up like any other in-root path; there is no
 //! special draft routing. This module is the filesystem primitive
 //! layer only (`create_dir`, `list`, `inspect`, `promote`, `discard`,
-//! `preflight`, `ensure_root`), each operating directly on the
+//! `preflight`), each operating directly on the
 //! `<root>/<drafts_dir>` directory the caller passes in.
 
 use std::fs;
@@ -86,11 +86,8 @@ struct DraftEntry {
     is_dir: bool,
 }
 
-/// Ensure the in-root drafts directory exists. Created lazily: the
-/// only caller is `create_draft_dir`, which makes `<drafts_dir>/<name>`
-/// after this. A workspace with no drafts never materializes the
-/// directory, keeping the root clean until the user hits Cmd+N.
-pub(crate) fn ensure_root(drafts_dir: &Path) -> Result<()> {
+#[cfg(test)]
+fn ensure_root(drafts_dir: &Path) -> Result<()> {
     fs::create_dir_all(drafts_dir).map_err(|e| {
         ChanError::Io(format!(
             "failed to create drafts directory {}: {e}",
@@ -637,7 +634,7 @@ fn posix_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn validate_name(name: &str) -> Result<()> {
+pub(crate) fn validate_name(name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(ChanError::Io("draft name cannot be empty".into()));
     }

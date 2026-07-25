@@ -1471,6 +1471,11 @@ fn build_graph_view(
     p: GraphParams,
     emit: &mut Option<&mut dyn FnMut(GraphStreamEvent) -> bool>,
 ) -> Result<GraphViewResponse, GraphBuildError> {
+    // The graph DB intentionally outlives source files, so it can still return
+    // indexed nodes after the workspace root itself has vanished. Root loss is
+    // not an ordinary broken-link view: fail with the shared typed condition
+    // before reading either the persisted graph or the filesystem layer.
+    workspace.ensure_root_available()?;
     let graph = workspace.graph()?;
     let files = graph.files()?;
     let tags = graph.tags()?;
@@ -2485,6 +2490,43 @@ mod tests {
         let response = api_graph_sync(workspace, params);
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn graph_refuses_missing_workspace_root_instead_of_serving_stale_index() {
+        let (_cfg, root, workspace) = open_workspace();
+        let root_path = root.path().to_path_buf();
+        workspace.write_text("notes/a.md", "# A\n").unwrap();
+        workspace.index_file("notes/a.md").unwrap();
+        std::fs::remove_dir_all(&root_path).expect("remove harness-owned workspace");
+
+        let mut emit = None;
+        let result = build_graph_view(
+            workspace,
+            GraphParams {
+                scope: GraphScope::Workspace,
+                path: String::new(),
+                depth: 10,
+            },
+            &mut emit,
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("a missing root must not serve stale graph nodes"),
+        };
+        assert!(
+            matches!(
+                error,
+                GraphBuildError::Workspace(
+                    chan_workspace::ChanError::WorkspaceRootMissing(ref missing)
+                ) if missing == &root_path
+            ),
+            "unexpected graph error: {error}"
+        );
+        assert!(
+            !root_path.exists(),
+            "graph request recreated the workspace root"
+        );
     }
 
     #[test]

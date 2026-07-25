@@ -23,6 +23,7 @@ import {
   type WatchSubscription,
   type WsStatus,
 } from "../api/client";
+import { isWorkspaceRootMissingError } from "../api/errors";
 import {
   closeSurveyFromRemote,
   showSurvey,
@@ -42,6 +43,7 @@ import {
   cancelMissingFileCheck,
   hasGraphTab,
   layout,
+  markTabFileMissing,
   openBrowserInActivePane,
   openBrowserInPane,
   scheduleMissingFileCheck,
@@ -164,6 +166,7 @@ export const tree = $state<{
   entries: TreeEntry[];
   loading: boolean;
   error: string | null;
+  rootUnavailable: boolean;
   loadedDirs: Record<string, true>;
   loadingDirs: Record<string, true>;
   dirErrors: Record<string, string>;
@@ -171,6 +174,7 @@ export const tree = $state<{
   entries: [],
   loading: true,
   error: null,
+  rootUnavailable: false,
   loadedDirs: {},
   loadingDirs: {},
   dirErrors: {},
@@ -753,6 +757,32 @@ export function watchSubscription(): WatchSubscription | null {
 /// watcher handler skip the refresh for paths it would have raced.
 const movingPaths = new Set<string>();
 
+function markOpenFileTabsMissing(): void {
+  for (const node of Object.values(layout.nodes)) {
+    if (node.kind !== "leaf") continue;
+    for (const tab of allPaneTabs(node)) {
+      if (tab.kind === "file" && !tab.fileMissing) {
+        // markTabFileMissing retains both `content` and `saved`; a dirty
+        // editor therefore remains recoverable while its backing path is gone.
+        markTabFileMissing(tab.id);
+      }
+    }
+  }
+}
+
+async function reconcileWorkspaceRootAvailability(): Promise<void> {
+  try {
+    await refreshTree();
+  } catch (error) {
+    if (isWorkspaceRootMissingError(error)) {
+      markOpenFileTabsMissing();
+    }
+    // The File Browser owns the persistent error state. Watch delivery is
+    // best-effort and must not create an unhandled rejection for either a
+    // terminal root loss or a transient provider failure.
+  }
+}
+
 /// Watcher event handler. Extracted so reconnectWatcher() can reuse
 /// the exact same callbacks as bootstrap().
 export function onWatchEvent(e: unknown): void {
@@ -829,9 +859,19 @@ export function onWatchEvent(e: unknown): void {
   // and we touch only the affected dir.
   const innerForScope = (e as { event?: { kind?: string; path?: string; to?: string } } | null)
     ?.event;
-  const watchedPaths = [innerForScope?.path, innerForScope?.to].filter(
-    (p): p is string => typeof p === "string" && p.length > 0,
-  );
+  const providerLost = innerForScope?.kind === "ProviderError";
+  const rootRemoved =
+    innerForScope?.kind === "Removed" &&
+    innerForScope.path === "" &&
+    (innerForScope as { is_dir?: unknown }).is_dir === true;
+  const watchedPaths = providerLost
+    ? []
+    : [innerForScope?.path, innerForScope?.to].filter(
+        (p): p is string => typeof p === "string" && p.length > 0,
+      );
+  if (rootRemoved || providerLost) {
+    void reconcileWorkspaceRootAvailability();
+  }
   const scopes = activeFbScopes();
   const inScope = watchedPaths.some((p) => pathInAnyScope(p, scopes));
   if (inScope) {
@@ -2097,12 +2137,23 @@ export async function refreshTree(): Promise<void> {
   try {
     const entries = await api.list("");
     tree.entries = sortTreeEntries(entries);
+    tree.rootUnavailable = false;
     tree.loadedDirs = { "": true };
     tree.loadingDirs = {};
     tree.dirErrors = {};
     seedTreeExpansionIfFresh();
   } catch (e) {
     tree.error = (e as Error).message;
+    if (isWorkspaceRootMissingError(e)) {
+      // A capability directory can read as empty after its path is unlinked.
+      // The server distinguishes that case; clear every cached row here so a
+      // new File Browser cannot display stale files or "No files".
+      tree.entries = [];
+      tree.rootUnavailable = true;
+      tree.loadedDirs = { "": true };
+      tree.loadingDirs = {};
+      tree.dirErrors = {};
+    }
     throw e;
   } finally {
     tree.loading = false;

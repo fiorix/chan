@@ -341,6 +341,14 @@ fn resolve_scope(
     path: &str,
     requested_depth: usize,
 ) -> Result<ResolvedScope, FsGraphError> {
+    workspace.ensure_root_available().map_err(|error| {
+        let status = match &error {
+            chan_workspace::ChanError::WorkspaceRootMissing(_) => StatusCode::NOT_FOUND,
+            chan_workspace::ChanError::SpecialFile { .. } => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        FsGraphError::new(status, error.to_string())
+    })?;
     let root: PathBuf = workspace.root().to_path_buf();
     let rel = normalize_rel(path);
     let abs = if rel.is_empty() {
@@ -1806,6 +1814,21 @@ mod tests {
         assert!(
             err.message.contains("no such path"),
             "expected missing-path rejection, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn build_fs_graph_refuses_a_missing_workspace_root() {
+        let (_cfg, root, workspace) = open_workspace();
+        fs::remove_dir_all(root.path()).unwrap();
+
+        let err = build_fs_graph(&workspace, FsGraphScope::Directory, "", MAX_DEPTH).unwrap_err();
+
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert!(
+            err.message.contains("workspace root does not exist"),
+            "expected typed root-loss rejection, got: {}",
             err.message
         );
     }

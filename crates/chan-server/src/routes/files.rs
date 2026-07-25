@@ -134,6 +134,10 @@ fn list_files_sync(
     workspace: &chan_workspace::Workspace,
     query: ListFilesQuery,
 ) -> chan_workspace::Result<Vec<TreeEntryView>> {
+    // An open capability handle can outlive an unlinked root and read back as
+    // an empty directory. Distinguish that terminal condition from a genuine
+    // empty workspace so the File Browser renders an unavailable-root error.
+    workspace.ensure_root_available()?;
     let tree = if let Some(dir) = query.dir.as_deref() {
         list_dir_entries(workspace, dir)?
     } else {
@@ -1867,6 +1871,36 @@ mod file_browser_listing_tests {
             .iter()
             .any(|entry| entry.path == ".Drafts" && entry.is_dir));
         assert!(root_dir.iter().any(|entry| entry.path == "note.md"));
+    }
+
+    #[test]
+    fn list_files_sync_distinguishes_missing_root_from_empty_workspace() {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let root_path = root.path().to_path_buf();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(&root_path).unwrap();
+        let workspace = lib.open_workspace(&root_path).unwrap();
+        std::fs::remove_dir_all(&root_path).expect("remove harness-owned workspace");
+
+        let error = match list_files_sync(
+            &workspace,
+            ListFilesQuery {
+                dir: Some(String::new()),
+            },
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("a missing root must not look like an empty file tree"),
+        };
+        assert!(
+            matches!(
+                error,
+                chan_workspace::ChanError::WorkspaceRootMissing(ref missing)
+                    if missing == &root_path
+            ),
+            "unexpected listing error: {error}"
+        );
+        assert!(!root_path.exists(), "listing recreated the workspace root");
     }
 
     #[test]

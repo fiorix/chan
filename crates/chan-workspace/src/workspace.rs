@@ -565,6 +565,11 @@ pub struct Workspace {
     /// Used where we need an absolute path and as the slow-path
     /// baseline for trash::restore.
     root_canon: std::path::PathBuf,
+    /// Device/inode identity of the capability root on Unix. A deleted root
+    /// can be recreated at the same path while this handle still points at the
+    /// unlinked original; path existence alone cannot distinguish them.
+    #[cfg(unix)]
+    root_identity: (u64, u64),
     /// Capability-based handle to the workspace root. All filesystem
     /// ops on user-controllable paths go through this so a mid-path
     /// symlink swap between path-resolution and the actual op
@@ -787,14 +792,40 @@ impl Workspace {
                 path: entry.root_path.clone(),
             });
         }
-        let root_canon = entry
-            .root_path
-            .canonicalize()
-            .map_err(|e| ChanError::Io(format!("canonicalize workspace root: {e}")))?;
+        let root_canon = match entry.root_path.canonicalize() {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ChanError::WorkspaceRootMissing(entry.root_path.clone()));
+            }
+            Err(error) => {
+                return Err(ChanError::Io(format!(
+                    "canonicalize workspace root: {error}"
+                )));
+            }
+        };
         let fd_permit = crate::fd_budget::acquire_workspace_permit();
         let dir =
             cap_std::fs::Dir::open_ambient_dir(&entry.root_path, cap_std::ambient_authority())
-                .map_err(|e| ChanError::Io(format!("open workspace root: {e}")))?;
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        ChanError::WorkspaceRootMissing(entry.root_path.clone())
+                    } else {
+                        ChanError::Io(format!("open workspace root: {error}"))
+                    }
+                })?;
+        #[cfg(unix)]
+        let root_identity = {
+            use cap_std::fs::MetadataExt as _;
+            let opened = dir
+                .dir_metadata()
+                .map_err(|e| ChanError::Io(format!("stat open workspace root: {e}")))?;
+            let identity = (opened.dev(), opened.ino());
+            use std::os::unix::fs::MetadataExt as _;
+            if identity != (meta.dev(), meta.ino()) {
+                return Err(ChanError::WorkspaceRootMissing(entry.root_path.clone()));
+            }
+            identity
+        };
         if entry.metadata_key.is_empty() {
             return Err(ChanError::Io(format!(
                 "registry entry for {:?} has empty metadata key; open the workspace via Library::open_workspace",
@@ -942,6 +973,8 @@ impl Workspace {
         let workspace = Arc::new(Self {
             entry,
             root_canon,
+            #[cfg(unix)]
+            root_identity,
             dir,
             drafts_dir_name,
             drafts_root,
@@ -1190,6 +1223,63 @@ impl Workspace {
         &self.entry.root_path
     }
 
+    /// Verify that the workspace root still resolves to the directory this
+    /// handle was opened for.
+    ///
+    /// The capability directory remains usable as an object after its path is
+    /// recursively removed on Unix. Callers that are about to publish a tenant
+    /// or begin a new root-dependent operation therefore cannot infer path
+    /// availability from the open handle alone. This check deliberately uses
+    /// the live path and the same file-shape contract as [`Workspace::open`]:
+    /// missing roots are typed, and a root replaced by a symlink or non-
+    /// directory is refused.
+    pub fn ensure_root_available(&self) -> Result<()> {
+        let meta = match std::fs::symlink_metadata(&self.entry.root_path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ChanError::WorkspaceRootMissing(
+                    self.entry.root_path.clone(),
+                ));
+            }
+            Err(error) => return Err(ChanError::Io(error.to_string())),
+        };
+        let file_type = meta.file_type();
+        if !file_type.is_dir() || file_type.is_symlink() {
+            return Err(ChanError::SpecialFile {
+                kind: fs_ops::describe_file_kind(&file_type).to_string(),
+                path: self.entry.root_path.clone(),
+            });
+        }
+        let live_canon = match self.entry.root_path.canonicalize() {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ChanError::WorkspaceRootMissing(
+                    self.entry.root_path.clone(),
+                ));
+            }
+            Err(error) => {
+                return Err(ChanError::Io(format!(
+                    "canonicalize workspace root: {error}"
+                )));
+            }
+        };
+        if live_canon != self.root_canon {
+            return Err(ChanError::WorkspaceRootMissing(
+                self.entry.root_path.clone(),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            if (meta.dev(), meta.ino()) != self.root_identity {
+                return Err(ChanError::WorkspaceRootMissing(
+                    self.entry.root_path.clone(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Canonical workspace root captured when the writer handle opened.
     pub fn canonical_root(&self) -> &std::path::Path {
         &self.root_canon
@@ -1294,6 +1384,10 @@ impl Workspace {
     /// allowed, and their parent directories are created with the same
     /// semantics as the eventual write.
     pub fn ensure_writable(&self, rel: &str) -> Result<WritableFile> {
+        // A capability directory can outlive an unlinked workspace path on
+        // Unix. Never preflight or create parents inside that unreachable
+        // directory: callers need a typed root-loss error instead.
+        self.ensure_root_available()?;
         let rel_path = self.rel(rel)?;
         let stat = match self.dir.symlink_metadata(&rel_path) {
             Ok(metadata) => {
@@ -1382,6 +1476,10 @@ impl Workspace {
         if let Err(error) =
             fs_ops::atomic_write_stream_in(dir, &rel_path, kind, limit, validate_utf8, feed)
         {
+            // Prefer the terminal root-loss condition over an incidental
+            // mid-delete I/O failure. This keeps an editor autosave racing
+            // `rm -rf <root>` on the stable typed 404 path.
+            self.ensure_root_available()?;
             if bytes_target_is_text
                 && matches!(
                     &error,
@@ -1395,6 +1493,10 @@ impl Workspace {
             }
             return Err(error);
         }
+        // The write may have begun while the root still existed and completed
+        // through the retained capability after its pathname was removed.
+        // Do not report that unreachable commit as success.
+        self.ensure_root_available()?;
         self.stat(rel)
     }
 
@@ -2108,8 +2210,39 @@ impl Workspace {
     /// first; this is the only place `<root>/<drafts_dir_name>` is
     /// materialized.
     pub fn create_draft_dir(&self, name: &str) -> Result<DraftRef> {
-        drafts::ensure_root(&self.drafts_root)?;
-        drafts::create_dir(&self.drafts_root, name)
+        self.ensure_root_available()?;
+        drafts::validate_name(name)?;
+        let drafts_rel = std::path::Path::new(&self.drafts_dir_name);
+        let rel = drafts_rel.join(name);
+        let abs = self.drafts_root.join(name);
+        // Create relative to the retained capability so a concurrent
+        // `rm -rf <root>` cannot recreate the absolute workspace pathname.
+        // The postcondition turns an otherwise-successful orphaned create into
+        // the shared typed root-loss error.
+        self.dir.create_dir_all(drafts_rel).map_err(|error| {
+            ChanError::Io(format!(
+                "failed to create drafts directory {}: {error}",
+                self.drafts_root.display()
+            ))
+        })?;
+        self.dir.create_dir(&rel).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                ChanError::Io(format!(
+                    "draft `{name}` already exists at {}",
+                    abs.display()
+                ))
+            } else {
+                ChanError::Io(format!(
+                    "failed to create draft directory {}: {error}",
+                    abs.display()
+                ))
+            }
+        })?;
+        self.ensure_root_available()?;
+        Ok(DraftRef {
+            name: name.to_string(),
+            abs,
+        })
     }
 
     /// Enumerate drafts. Sorted by name. Empty when the drafts
@@ -3673,11 +3806,17 @@ impl Workspace {
     /// search commits is replayable on the next open.
     pub fn forget_subtree(&self, rel: &str) -> Result<usize> {
         let _serial = self.write_serial.lock().unwrap();
-        let child_prefix = format!("{}/", rel.trim_end_matches('/'));
         let rel = rel.trim_end_matches('/');
         let mut paths = self.graph()?.files()?;
         paths.extend(self.index()?.known_paths()?);
-        paths.retain(|path| path == rel || path.starts_with(&child_prefix));
+        if !rel.is_empty() {
+            let child_prefix = format!("{rel}/");
+            paths.retain(|path| path == rel || path.starts_with(&child_prefix));
+        }
+        // The empty relative path is the workspace root. Keep every known
+        // path so a watcher `Removed { path: \"\", is_dir: true }` clears the
+        // entire graph + search catalog instead of matching nothing against
+        // the otherwise-invalid child prefix "/".
         paths.sort();
         paths.dedup();
         for path in &paths {
@@ -7479,6 +7618,99 @@ mod tests {
             workspace.drafts_dir().is_dir(),
             "drafts dir should materialize after the first draft"
         );
+    }
+
+    #[test]
+    fn draft_creation_refuses_missing_workspace_root_without_recreating_it() {
+        let (_cfg, root, workspace) = fixture();
+        let root_path = root.path().to_path_buf();
+        std::fs::remove_dir_all(&root_path).expect("remove harness-owned workspace");
+        assert!(!root_path.exists(), "workspace root survived deletion");
+
+        let error = workspace
+            .create_draft_dir("untitled-1")
+            .expect_err("missing workspace root must reject a new draft");
+        assert!(
+            matches!(
+                error,
+                ChanError::WorkspaceRootMissing(ref missing) if missing == &root_path
+            ),
+            "unexpected draft error: {error}"
+        );
+        assert!(
+            !root_path.exists(),
+            "draft creation recreated the deleted workspace root"
+        );
+    }
+
+    #[test]
+    fn text_write_refuses_missing_workspace_root_without_recreating_it() {
+        let (_cfg, root, workspace) = fixture();
+        let root_path = root.path().to_path_buf();
+        std::fs::remove_dir_all(&root_path).expect("remove harness-owned workspace");
+
+        let error = workspace
+            .write_text("new.md", "must not land in an orphaned capability")
+            .expect_err("missing workspace root must reject a text write");
+        assert!(
+            matches!(
+                error,
+                ChanError::WorkspaceRootMissing(ref missing) if missing == &root_path
+            ),
+            "unexpected write error: {error}"
+        );
+        assert!(
+            !root_path.exists(),
+            "text write recreated the deleted workspace root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_handle_refuses_a_replacement_at_the_same_root_path() {
+        let (_cfg, root, workspace) = fixture();
+        let root_path = root.path().to_path_buf();
+        std::fs::remove_dir_all(&root_path).expect("remove original workspace root");
+        std::fs::create_dir(&root_path).expect("create replacement workspace root");
+
+        let error = workspace
+            .write_text("new.md", "must not land in the unlinked original")
+            .expect_err("an open handle must reject a replacement root");
+        assert!(
+            matches!(
+                error,
+                ChanError::WorkspaceRootMissing(ref missing) if missing == &root_path
+            ),
+            "unexpected replacement error: {error}"
+        );
+        assert!(
+            !root_path.join("new.md").exists(),
+            "write crossed from the original capability into its replacement"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_text_write_reports_root_removed_during_stream() {
+        let (_cfg, root, workspace) = fixture();
+        let root_path = root.path().to_path_buf();
+        workspace.write_text("note.md", "before").unwrap();
+
+        let error = workspace
+            .write_atomic_stream("note.md", AtomicWriteKind::Text, |sink| {
+                sink.write_chunk(b"after")?;
+                std::fs::remove_dir_all(&root_path)?;
+                Ok(())
+            })
+            .expect_err("a write racing root deletion must not report success");
+        assert!(
+            matches!(
+                error,
+                ChanError::WorkspaceRootMissing(ref missing) if missing == &root_path
+            ),
+            "unexpected write error: {error}"
+        );
+        assert!(!root_path.exists(), "workspace root survived deletion");
     }
 
     #[test]

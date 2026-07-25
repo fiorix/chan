@@ -1098,6 +1098,9 @@ fn resolve_terminal_cwd(
     workspace: &chan_workspace::Workspace,
     cwd: Option<&str>,
 ) -> Result<Option<PathBuf>, String> {
+    workspace
+        .ensure_root_available()
+        .map_err(|error| format!("invalid terminal cwd: {error}"))?;
     let Some(raw) = cwd else {
         return Ok(None);
     };
@@ -1860,6 +1863,21 @@ mod tests {
 
         assert!(resolve_terminal_cwd(&workspace, Some("../outside")).is_err());
         assert!(resolve_terminal_cwd(&workspace, Some("notes/today.md")).is_err());
+    }
+
+    #[test]
+    fn resolve_terminal_cwd_refuses_a_missing_workspace_root() {
+        let (_cfg, root, workspace) = terminal_workspace_fixture();
+        let root_path = root.path().to_path_buf();
+        fs::remove_dir_all(&root_path).expect("remove harness-owned workspace");
+
+        let error = resolve_terminal_cwd(&workspace, None)
+            .expect_err("a new terminal must not start after root deletion");
+        assert!(
+            error.contains("workspace root does not exist"),
+            "unexpected terminal error: {error}"
+        );
+        assert!(!root_path.exists(), "terminal cwd check recreated the root");
     }
 
     async fn response_json(response: Response) -> serde_json::Value {

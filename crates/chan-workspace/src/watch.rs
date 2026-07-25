@@ -331,6 +331,7 @@ fn watch_supervisor_loop(
     let mut observed_generation = policy.generation();
     let errors = register_all_roots(&mut watcher, &roots, &policy, &registered_dirs);
     let mut retry_at = (!errors.is_empty()).then(|| Instant::now() + WATCH_RETRY_INTERVAL);
+    let mut missing_roots = HashSet::<PathBuf>::new();
     record_registration_result(&health, errors, &*cb, policy.generation(), true);
     let _ = initial.send(());
 
@@ -388,29 +389,77 @@ fn watch_supervisor_loop(
             Ok(WatchCommand::Stop) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 break;
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if retry_at.is_some() => {
-                let mut current = health.lock().unwrap();
-                current.retry_attempts = current.retry_attempts.saturating_add(1);
-                drop(current);
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 policy = Arc::clone(&policy_source.read().unwrap());
-                if policy.generation() != observed_generation {
+
+                // Linux inotify removes the final watched directory without
+                // reliably producing a notify event or backend error. Poll the
+                // small root set at the supervisor cadence so consumers still
+                // receive one terminal subtree removal and can discard their
+                // tree/index caches. Per-entry changes continue through notify;
+                // this probe exists only for the watched roots themselves.
+                let unavailable = roots
+                    .iter()
+                    .filter(|root| {
+                        std::fs::symlink_metadata(&root.abs)
+                            .map(|meta| !meta.is_dir() || meta.file_type().is_symlink())
+                            .unwrap_or(true)
+                    })
+                    .map(|root| root.abs.clone())
+                    .collect::<HashSet<_>>();
+                let newly_missing = unavailable
+                    .difference(&missing_roots)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let roots_recovered = missing_roots.iter().any(|path| !unavailable.contains(path));
+                if !newly_missing.is_empty() {
+                    reset_registrations(&mut watcher, &registered_dirs);
+                    for path in &newly_missing {
+                        if let Some(root) = roots.iter().find(|root| root.abs == *path) {
+                            safe_call(
+                                &*cb,
+                                WatchEvent::dir(
+                                    WatchKind::Removed,
+                                    root.prefix.clone().unwrap_or_default(),
+                                    policy.generation(),
+                                ),
+                            );
+                        }
+                    }
+                    let mut current = health.lock().unwrap();
+                    current.state = WatchHealthState::Degraded;
+                    current.last_error = Some(format!(
+                        "watch root unavailable: {}",
+                        newly_missing[0].display()
+                    ));
+                }
+                missing_roots = unavailable.clone();
+                if !missing_roots.is_empty() {
+                    retry_at = Some(Instant::now() + WATCH_RETRY_INTERVAL);
+                }
+
+                let generation_changed = policy.generation() != observed_generation;
+                let retrying = retry_at.is_some() || roots_recovered;
+                if !generation_changed && !retrying {
+                    continue;
+                }
+                if retrying {
+                    let mut current = health.lock().unwrap();
+                    current.retry_attempts = current.retry_attempts.saturating_add(1);
+                }
+                if generation_changed || roots_recovered {
                     reset_registrations(&mut watcher, &registered_dirs);
                 }
                 observed_generation = policy.generation();
-                let errors = register_all_roots(&mut watcher, &roots, &policy, &registered_dirs);
+                let errors = register_available_roots(
+                    &mut watcher,
+                    &roots,
+                    &unavailable,
+                    &policy,
+                    &registered_dirs,
+                );
                 retry_at = (!errors.is_empty()).then(|| Instant::now() + WATCH_RETRY_INTERVAL);
                 record_registration_result(&health, errors, &*cb, policy.generation(), false);
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                policy = Arc::clone(&policy_source.read().unwrap());
-                if policy.generation() != observed_generation {
-                    observed_generation = policy.generation();
-                    reset_registrations(&mut watcher, &registered_dirs);
-                    let errors =
-                        register_all_roots(&mut watcher, &roots, &policy, &registered_dirs);
-                    retry_at = (!errors.is_empty()).then(|| Instant::now() + WATCH_RETRY_INTERVAL);
-                    record_registration_result(&health, errors, &*cb, policy.generation(), false);
-                }
             }
         }
     }
@@ -546,6 +595,24 @@ fn register_all_roots(
     let mut errors = Vec::new();
     for root in roots {
         register_root(watcher, root, policy, registered_dirs, &mut errors);
+    }
+    errors
+}
+
+fn register_available_roots(
+    watcher: &mut RecommendedWatcher,
+    roots: &[WatchRoot],
+    unavailable: &HashSet<PathBuf>,
+    policy: &IndexScopePolicy,
+    registered_dirs: &RegisteredDirs,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    for root in roots {
+        if unavailable.contains(&root.abs) {
+            errors.push(format!("watch root unavailable: {}", root.abs.display()));
+        } else {
+            register_root(watcher, root, policy, registered_dirs, &mut errors);
+        }
     }
     errors
 }
@@ -1868,6 +1935,25 @@ mod tests {
                     .iter()
                     .any(|e| e.path.as_deref().unwrap_or("").starts_with("buck-out")),
                 "excluded subtree must stay dark: {strays:?}"
+            );
+        }
+
+        #[test]
+        fn deleting_the_watched_root_surfaces_terminal_loss() {
+            let root = TempDir::new().unwrap();
+            std::fs::write(root.path().join("open.md"), "open").unwrap();
+            let (_handle, rx) = start_handle(&root);
+
+            std::fs::remove_dir_all(root.path()).unwrap();
+
+            let event = wait_for(&rx, Duration::from_secs(5), |event| {
+                event.kind == WatchKind::Removed
+                    && event.path.as_deref() == Some("")
+                    && event.is_dir
+            });
+            assert!(
+                event.is_some(),
+                "deleting the watched root must produce a terminal subtree removal"
             );
         }
 

@@ -713,9 +713,10 @@ export type CsLinkResult = {
 /// Distinct from the older, narrower `WatchEvent` type below (lowercase
 /// kinds, no rename destination); new code should use `WatchEventWire`.
 export type WatchEventWire = {
-  kind: "Created" | "Modified" | "Removed" | "Renamed";
-  path: string;
+  kind: "Created" | "Modified" | "Removed" | "Renamed" | "ProviderError";
+  path: string | null;
   to?: string | null;
+  is_dir?: boolean;
 };
 
 /// Workspace-relative POSIX directory path used as a watcher scope key. The

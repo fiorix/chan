@@ -874,7 +874,7 @@ impl WorkspaceHost {
             .builder
             .build_workspace(
                 self.library.clone(),
-                workspace,
+                Arc::clone(&workspace),
                 &config,
                 self.desktop.clone(),
                 self.unserve_mode(),
@@ -913,6 +913,19 @@ impl WorkspaceHost {
             .workspaces
             .write()
             .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
+        // Workspace::open validates the root before the asynchronous tenant
+        // build starts. Validate it again at the publication boundary: on Unix
+        // the capability dir + writer lock stay alive after `rm -rf`, so a
+        // builder that was awaiting could otherwise publish a deleted root as
+        // a healthy running tenant. The host map lock makes this check and
+        // insertion one synchronous publication step.
+        let root_available = workspace.ensure_root_available();
+        drop(workspace);
+        if let Err(error) = root_available {
+            drop(workspaces);
+            runtime.shutdown().await;
+            return Err(error.into());
+        }
         if workspaces.contains_key(&prefix) {
             return Err(Error::Config(format!(
                 "workspace prefix already mounted: {}",
@@ -3928,6 +3941,60 @@ mod tests {
             .find(|row| row.path == key)
             .expect("overlay row");
         assert!(!row.desired_on, "the serialized close persists off");
+    }
+
+    #[tokio::test]
+    async fn mount_rejects_root_removed_while_tenant_builds() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let parent = tempfile::tempdir().expect("workspace parent");
+        let root = parent.path().join("workspace");
+        std::fs::create_dir(&root).expect("workspace");
+        std::fs::write(root.join("note.md"), "# still booting\n").expect("seed workspace");
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        lib.register_workspace(&root).expect("register");
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let host = Arc::new(WorkspaceHost::new(
+            lib,
+            Arc::new(GatedWorkspaceBuilder {
+                entered: std::sync::Mutex::new(Some(entered_tx)),
+                release: Arc::clone(&release),
+            }),
+        ));
+
+        let mount_host = Arc::clone(&host);
+        let mount_root = root.clone();
+        let mount = tokio::spawn(async move {
+            mount_host
+                .open_or_get_registered_workspace(mount_root, serve_config("/vanished"))
+                .await
+        });
+        entered_rx
+            .await
+            .expect("workspace opened and tenant build entered");
+
+        // The root disappears after Workspace::open acquired its capability
+        // handle and writer lock, but before the tenant can be published.
+        std::fs::remove_dir_all(&root).expect("remove harness-owned workspace");
+        assert!(!root.exists(), "test root survived recursive deletion");
+        release.add_permits(1);
+
+        let error = mount
+            .await
+            .expect("mount task")
+            .expect_err("a vanished root must not publish a running tenant");
+        assert!(
+            matches!(
+                error,
+                Error::Core(ChanError::WorkspaceRootMissing(ref missing)) if missing == &root
+            ),
+            "unexpected mount error: {error}"
+        );
+        assert!(
+            host.mounted_prefixes().expect("prefixes").is_empty(),
+            "deleted root was published as a tenant"
+        );
+        assert!(!root.exists(), "failed mount recreated the workspace root");
     }
 
     #[tokio::test]

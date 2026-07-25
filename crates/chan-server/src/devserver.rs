@@ -2839,6 +2839,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_root_removed_during_startup_fails_closed() {
+        let home = tempfile::tempdir().expect("home");
+        let parent = tempfile::tempdir().expect("workspace parent");
+        let workspace = parent.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        std::fs::write(workspace.join("note.md"), "# booting\n").expect("seed workspace");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let prefix = allocate_workspace_prefix(&workspace).expect("workspace prefix");
+        let attempt = state
+            .begin_mount(&workspace, &prefix)
+            .expect("prepare mount")
+            .expect("fresh attempt");
+        state.persist_state();
+
+        let serialization = state.mount_attempt_lock.lock().await;
+        let mount_state = state.clone();
+        let mount = tokio::spawn(async move {
+            mount_state
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!mount.is_finished(), "mount escaped the startup barrier");
+        assert_eq!(
+            state.entry_for(&prefix).expect("starting row").status,
+            WorkspaceStatus::Starting
+        );
+
+        std::fs::remove_dir_all(&workspace).expect("remove harness-owned workspace");
+        assert!(
+            !workspace.exists(),
+            "workspace root survived recursive deletion"
+        );
+        drop(serialization);
+
+        let error = tokio::time::timeout(Duration::from_secs(10), mount)
+            .await
+            .expect("failed mount must settle")
+            .expect("mount task")
+            .expect_err("deleted workspace root must fail startup");
+        assert!(
+            matches!(
+                error,
+                Error::Core(chan_workspace::ChanError::WorkspaceRootMissing(ref missing))
+                    if missing == &workspace
+            ),
+            "unexpected mount error: {error}"
+        );
+        let failed = state.entry_for(&prefix).expect("registered failed row");
+        assert!(!failed.on);
+        assert_eq!(failed.status, WorkspaceStatus::Error);
+        assert!(
+            failed
+                .error
+                .as_deref()
+                .is_some_and(|reason| reason.contains("workspace root does not exist")),
+            "root-missing reason was not operator-visible: {:?}",
+            failed.error
+        );
+        assert!(!state.host.is_root_mounted(&workspace));
+        assert!(
+            state
+                .host
+                .library()
+                .workspace_paths_for(&workspace)
+                .is_some(),
+            "failed startup unexpectedly unregistered the workspace"
+        );
+        assert!(
+            !workspace.exists(),
+            "failed mount recreated the workspace root"
+        );
+        assert!(
+            state
+                .startup
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .pending
+                .is_empty(),
+            "failed startup stayed pending"
+        );
+    }
+
+    #[tokio::test]
     async fn chan_close_during_startup_stays_off_preserves_metadata_and_reopens() {
         let home = tempfile::tempdir().expect("home");
         let workspace = tempfile::tempdir().expect("workspace");

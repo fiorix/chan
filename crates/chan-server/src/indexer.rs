@@ -1432,6 +1432,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn apply_watch_change_workspace_root_delete_forgets_every_indexed_path() {
+        let (_cfg, _dir, workspace) = setup_workspace();
+        for (path, body) in [
+            ("a.md", "# A\nroot-a-token\n"),
+            ("nested/b.md", "# B\nroot-b-token\n"),
+        ] {
+            workspace.write_text(path, body).unwrap();
+        }
+        workspace.reindex(None).unwrap();
+
+        let outcome = apply_watch_change(&workspace, "", true, true).unwrap();
+
+        assert_eq!(outcome, ApplyOutcome::Forgotten);
+        assert!(
+            workspace.graph().unwrap().files().unwrap().is_empty(),
+            "root deletion left stale graph rows"
+        );
+        assert!(
+            workspace.indexed_paths().unwrap().is_empty(),
+            "root deletion left stale search rows"
+        );
+    }
+
     struct BlockingRebuildProgress {
         passes: AtomicUsize,
         started: tokio::sync::mpsc::UnboundedSender<usize>,

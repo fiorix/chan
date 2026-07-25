@@ -15,6 +15,7 @@
   // neighbours. Workspace / global scope leaves all nodes free.
 
   import { api } from "../api/client";
+  import { isWorkspaceRootMissingError } from "../api/errors";
   import type {
     FsGraphEdge,
     FsGraphNode,
@@ -2230,6 +2231,16 @@
       }
     } catch (e) {
       if (seq === graphLoadSeq && (e as DOMException).name !== "AbortError") {
+        if (isWorkspaceRootMissingError(e)) {
+          // Do not leave the persisted/indexed graph dimly visible behind the
+          // error after the source root is gone. The dirty editor owns its
+          // buffer; a graph owns no unsaved state and converges to unavailable.
+          fsNodes = [];
+          fsEdgesRaw = [];
+          nodes = [];
+          edges = [];
+          selectedId = null;
+        }
         error = (e as Error).message;
       }
     } finally {
