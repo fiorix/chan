@@ -773,7 +773,6 @@ impl DocSession {
                     disk_version: conflict.disk_version,
                     authority_version: conflict.authority_version,
                     disk_mtime_ns: conflict.disk_mtime_ns,
-                    disk_content: conflict.disk_content.clone(),
                 },
             },
             SessionState::Removed => RecoveryState::Removed,
@@ -806,12 +805,15 @@ impl DocSession {
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) async fn persist_recovery(
-        self: &Arc<Self>,
-        workspace: &Arc<Workspace>,
-    ) -> Result<(), String> {
+    pub(crate) async fn persist_recovery(self: &Arc<Self>, workspace: &Arc<Workspace>) {
         let _io = self.io_lock.lock().await;
-        self.persist_recovery_locked(workspace).await
+        if let Err(error) = self.persist_recovery_locked(workspace).await {
+            tracing::warn!(
+                path = self.path,
+                %error,
+                "document recovery persistence degraded"
+            );
+        }
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, DocState> {
@@ -2158,6 +2160,20 @@ mod tests {
             .expect("attach");
         let frames = handle.take_frames();
         (handle, frames)
+    }
+
+    #[tokio::test]
+    async fn corrupt_recovery_sidecar_falls_back_to_fresh_disk_open() {
+        let fx = fixture(&[("a.md", "fresh disk")]);
+        let sidecar = fx
+            .root
+            .path()
+            .join(".chan/editor-sessions/v1/documents/a.md.json");
+        std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        std::fs::write(sidecar, b"{not json").unwrap();
+
+        let (handle, _frames) = attach(&fx, "a.md", "w1", None).await;
+        assert_eq!(handle.session().authority_view().0, "fresh disk");
     }
 
     /// Drain everything currently enqueued. All enqueues under test

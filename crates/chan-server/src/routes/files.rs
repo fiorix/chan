@@ -762,12 +762,7 @@ pub async fn api_resolve_session_conflict(
                 "document session conflict could not be resolved".into(),
             );
         }
-        if let Err(error) = session.persist_recovery(&workspace).await {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("persist document conflict resolution: {error}"),
-            );
-        }
+        session.persist_recovery(&workspace).await;
         let view = session.http_read_view();
         return read_via_session(
             &workspace,
@@ -796,12 +791,7 @@ pub async fn api_resolve_session_conflict(
                 "scene session conflict could not be resolved".into(),
             );
         }
-        if let Err(error) = session.persist_recovery(&workspace).await {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("persist scene conflict resolution: {error}"),
-            );
-        }
+        session.persist_recovery(&workspace).await;
         let view = session.http_read_view();
         return read_via_session(
             &workspace,

@@ -182,7 +182,6 @@ pub async fn api_terminal_read_file(
 /// the producer, so a disconnected response cannot leave a blocked reader
 /// behind.
 struct AbsoluteFileReader {
-    size: u64,
     receiver: Option<std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
@@ -219,7 +218,6 @@ impl AbsoluteFileReader {
             })
             .map_err(|e| format!("cannot start reader for {}: {e}", abs.display()))?;
         Ok(Self {
-            size: metadata.len(),
             receiver: Some(receiver),
             worker: Some(worker),
         })
@@ -296,7 +294,6 @@ fn stream_terminal_file_response_inner(
     mut reader: AbsoluteFileReader,
     completion: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> Response {
-    let size = reader.size;
     let (tx, rx) =
         mpsc::channel::<std::io::Result<Bytes>>(chan_workspace::BINARY_STREAM_QUEUE_DEPTH);
     tokio::task::spawn_blocking(move || {
@@ -322,7 +319,6 @@ fn stream_terminal_file_response_inner(
                 header::CONTENT_DISPOSITION,
                 content_disposition_attachment(path),
             ),
-            (header::CONTENT_LENGTH, size.to_string()),
         ],
         body,
     )
@@ -740,6 +736,10 @@ mod tests {
         };
         let (response, completed) =
             stream_terminal_file_response_with_completion("disconnect.bin", reader);
+        assert!(
+            response.headers().get(header::CONTENT_LENGTH).is_none(),
+            "a live file stream must not promise its open-time length"
+        );
 
         drop(response);
 
