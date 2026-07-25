@@ -549,11 +549,11 @@ mod tests {
         );
 
         let echo = |bridge: &Arc<dyn WatchCallback>, kind, path: &str| {
-            bridge.on_event(WatchEvent {
+            bridge.on_event(WatchEvent::file(
                 kind,
-                path: Some(path.to_string()),
-                to: None,
-            });
+                path,
+                chan_workspace::WorkspaceGeneration::default(),
+            ));
         };
 
         // Create the draft the way api_create_draft does: seed draft.md,

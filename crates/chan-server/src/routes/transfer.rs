@@ -11,17 +11,16 @@
 //! handlers -- mounted only on the terminal tenant -- re-root that path at `/` and
 //! read or write it directly, so no SPA change is needed.
 //!
-//! Both directions pre-flight access before doing any work (fail fast, no
-//! partial artifact): download verifies the source tree is readable before
-//! building the tarball; upload verifies the destination directory is writable
-//! before writing. [`verify_writable_dir`] also backs the workspace upload path
-//! in `files.rs`.
+//! Downloads pre-flight readability before building the tarball.
+//! Terminal uploads rely on their atomic writer as the authoritative
+//! writability check; workspace uploads use
+//! `Workspace::ensure_writable`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use axum::body::{Body, Bytes};
-use axum::extract::{Multipart, Path as AxumPath, Query};
+use axum::extract::{multipart::Field, Multipart, Path as AxumPath, Query};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -29,10 +28,10 @@ use futures::stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::error::err;
+use crate::error::{err, err_from};
 use crate::routes::files::{
     content_disposition_archive, content_disposition_attachment, download_filename, query_flag,
-    upload_leaf_filename,
+    read_multipart_text_field, upload_leaf_filename,
 };
 use crate::static_assets::content_type_for;
 
@@ -71,24 +70,6 @@ pub(crate) fn verify_readable_fs(abs: &Path) -> Result<(), String> {
             .map(|_| ())
             .map_err(|e| format!("cannot read {}: {e}", abs.display()))
     }
-}
-
-/// Pre-flight for upload: `dir` exists, is a directory, and accepts a new
-/// entry. The writability check probes with a temp file it removes immediately
-/// -- the only check that also catches read-only mounts and ACLs a mode-bit test
-/// misses, and the same operation `atomic_write` performs on every real write.
-/// On failure nothing is written, so the caller can bail before transferring.
-pub(crate) fn verify_writable_dir(dir: &Path) -> Result<(), String> {
-    let meta = std::fs::metadata(dir)
-        .map_err(|e| format!("cannot access destination {}: {e}", dir.display()))?;
-    if !meta.is_dir() {
-        return Err(format!("destination is not a directory: {}", dir.display()));
-    }
-    tempfile::Builder::new()
-        .prefix(".chan-upload-check-")
-        .tempfile_in(dir)
-        .map(|_| ())
-        .map_err(|e| format!("destination is not writable: {} ({e})", dir.display()))
 }
 
 /// A `std::io::Write` that forwards each tar chunk to a streaming HTTP body
@@ -242,25 +223,32 @@ struct TerminalUploadResponse {
 /// the cwd / uid-scoped `dir`. No replace (`path`) flow -- the slim tenant has no
 /// file browser. Mounted only on the terminal router, so `dir` is absolute.
 pub async fn api_terminal_upload_file(mut multipart: Multipart) -> Response {
-    let mut chosen: Option<(String, Vec<u8>)> = None;
     let mut dir = String::new();
+    let mut dir_seen = false;
     loop {
         match multipart.next_field().await {
             Ok(Some(field)) => {
                 let name = field.name().unwrap_or("").to_owned();
                 match name.as_str() {
-                    "file" if chosen.is_none() => {
+                    "file" => {
+                        if !dir_seen {
+                            return err(
+                                StatusCode::BAD_REQUEST,
+                                "`dir` must precede the streaming `file` part".into(),
+                            );
+                        }
                         let filename = field.file_name().unwrap_or("").to_owned();
-                        let bytes = match field.bytes().await {
-                            Ok(b) => b.to_vec(),
-                            Err(e) => {
-                                return err(StatusCode::BAD_REQUEST, format!("multipart read: {e}"))
-                            }
+                        let abs_dir = abs_from_terminal_path(&dir);
+                        return match stream_terminal_upload(abs_dir, filename, field).await {
+                            Ok(response) => Json(response).into_response(),
+                            Err(error) => err_from(&error),
                         };
-                        chosen = Some((filename, bytes));
                     }
-                    "dir" => match field.text().await {
-                        Ok(s) => dir = s,
+                    "dir" => match read_multipart_text_field(field).await {
+                        Ok(s) => {
+                            dir = s;
+                            dir_seen = true;
+                        }
                         Err(e) => {
                             return err(StatusCode::BAD_REQUEST, format!("multipart read: {e}"))
                         }
@@ -273,34 +261,117 @@ pub async fn api_terminal_upload_file(mut multipart: Multipart) -> Response {
         }
     }
 
-    let Some((filename, bytes)) = chosen else {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "missing `file` part in multipart body".into(),
-        );
-    };
-    let abs_dir = abs_from_terminal_path(&dir);
-    let result =
-        tokio::task::spawn_blocking(move || terminal_upload_sync(&abs_dir, &filename, &bytes))
-            .await;
-    match result {
-        Ok(Ok(response)) => Json(response).into_response(),
-        Ok(Err(message)) => err(StatusCode::BAD_REQUEST, message),
-        Err(join) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("file upload task panicked: {join}"),
-        ),
-    }
+    err(
+        StatusCode::BAD_REQUEST,
+        "missing `file` part in multipart body".into(),
+    )
 }
 
+enum TerminalUploadMessage {
+    Chunk(Bytes),
+    Complete,
+    Failed(String),
+}
+
+async fn stream_terminal_upload(
+    abs_dir: PathBuf,
+    filename: String,
+    mut field: Field<'_>,
+) -> chan_workspace::Result<TerminalUploadResponse> {
+    let (tx, rx) = mpsc::channel(8);
+    let consumer = tokio::task::spawn_blocking(move || {
+        terminal_upload_stream_sync(&abs_dir, &filename, rx, chan_workspace::BYTES_WRITE_LIMIT)
+    });
+    loop {
+        let message = match field.chunk().await {
+            Ok(Some(bytes)) => TerminalUploadMessage::Chunk(bytes),
+            Ok(None) => TerminalUploadMessage::Complete,
+            Err(error) => TerminalUploadMessage::Failed(error.to_string()),
+        };
+        let terminal = !matches!(message, TerminalUploadMessage::Chunk(_));
+        if tx.send(message).await.is_err() || terminal {
+            break;
+        }
+    }
+    drop(tx);
+    consumer
+        .await
+        .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?
+}
+
+fn terminal_upload_stream_sync(
+    abs_dir: &Path,
+    original_name: &str,
+    mut rx: mpsc::Receiver<TerminalUploadMessage>,
+    limit: u64,
+) -> chan_workspace::Result<TerminalUploadResponse> {
+    let metadata = std::fs::metadata(abs_dir)
+        .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?;
+    if !metadata.is_dir() {
+        return Err(chan_workspace::ChanError::Io(format!(
+            "destination is not a directory: {}",
+            abs_dir.display()
+        )));
+    }
+    let leaf = upload_leaf_filename(original_name)?;
+    let target = abs_dir.join(&leaf);
+    if target.exists() {
+        return Err(chan_workspace::ChanError::PathAlreadyExists(
+            target.display().to_string(),
+        ));
+    }
+    let mut temp = tempfile::NamedTempFile::new_in(abs_dir)
+        .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?;
+    let mut written = 0u64;
+    loop {
+        match rx.blocking_recv() {
+            Some(TerminalUploadMessage::Chunk(bytes)) => {
+                let attempted =
+                    written.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                if attempted > limit {
+                    return Err(chan_workspace::ChanError::WriteTooLarge {
+                        kind: "bytes",
+                        size: attempted,
+                        limit,
+                    });
+                }
+                temp.write_all(&bytes)
+                    .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?;
+                written = attempted;
+            }
+            Some(TerminalUploadMessage::Complete) => break,
+            Some(TerminalUploadMessage::Failed(error)) => {
+                return Err(chan_workspace::ChanError::Io(format!(
+                    "multipart read failed: {error}"
+                )));
+            }
+            None => {
+                return Err(chan_workspace::ChanError::Io(
+                    "multipart body ended before completion".into(),
+                ));
+            }
+        }
+    }
+    temp.as_file()
+        .sync_all()
+        .map_err(|error| chan_workspace::ChanError::Io(format!("fsync tmp: {error}")))?;
+    temp.persist_noclobber(&target)
+        .map_err(|error| chan_workspace::ChanError::Io(error.error.to_string()))?;
+    std::fs::File::open(abs_dir)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|error| chan_workspace::ChanError::Io(format!("fsync dir: {error}")))?;
+    Ok(TerminalUploadResponse {
+        path: target.display().to_string(),
+        size: written,
+    })
+}
+
+#[cfg(test)]
 fn terminal_upload_sync(
     abs_dir: &Path,
     original_name: &str,
     bytes: &[u8],
 ) -> Result<TerminalUploadResponse, String> {
-    // Pre-flight: bail before consuming-to-disk if the destination is not a
-    // writable directory (write nothing on failure).
-    verify_writable_dir(abs_dir)?;
     let leaf = upload_leaf_filename(original_name).map_err(|e| e.to_string())?;
     let target = abs_dir.join(&leaf);
     if target.exists() {
@@ -319,6 +390,49 @@ fn terminal_upload_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn terminal_multipart_upload_streams_after_directory_metadata() {
+        use axum::http::Request;
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let boundary = "terminal-upload-boundary";
+        let rooted_dir = dir.path().display().to_string();
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"dir\"\r\n\r\n\
+             {rooted_dir}\r\n\
+             --{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"note.bin\"\r\n\r\n\
+             terminal-stream\r\n\
+             --{boundary}--\r\n"
+        );
+        let app = Router::new().route("/upload", post(api_terminal_upload_file));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/upload")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read(dir.path().join("note.bin")).unwrap(),
+            b"terminal-stream"
+        );
+    }
 
     #[test]
     fn abs_from_terminal_path_reroots_at_filesystem_root() {
@@ -349,20 +463,6 @@ mod tests {
     }
 
     #[test]
-    fn verify_writable_dir_rejects_a_nondirectory_and_missing_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("f");
-        std::fs::write(&file, b"x").unwrap();
-        assert!(verify_writable_dir(dir.path()).is_ok());
-
-        let not_dir = verify_writable_dir(&file).unwrap_err();
-        assert!(not_dir.contains("not a directory"), "{not_dir}");
-
-        let missing = verify_writable_dir(&dir.path().join("gone")).unwrap_err();
-        assert!(missing.contains("cannot access destination"), "{missing}");
-    }
-
-    #[test]
     fn terminal_upload_writes_into_dir_and_refuses_existing_target() {
         let dir = tempfile::tempdir().unwrap();
         let resp = terminal_upload_sync(dir.path(), "note.txt", b"hello").unwrap();
@@ -389,10 +489,48 @@ mod tests {
         std::fs::write(&as_file, b"x").unwrap();
         let under_file = as_file.join("sub");
         let e = terminal_upload_sync(&under_file, "x.txt", b"data").unwrap_err();
+        let lower = e.to_ascii_lowercase();
         assert!(
-            e.contains("cannot access destination") || e.contains("not a directory"),
+            lower.contains("cannot access destination") || lower.contains("not a directory"),
             "{e}"
         );
+        assert_eq!(std::fs::read(&as_file).unwrap(), b"x");
+    }
+
+    #[test]
+    fn terminal_stream_upload_overflow_removes_temp_and_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        tx.blocking_send(TerminalUploadMessage::Chunk(Bytes::from_static(b"12345")))
+            .unwrap();
+        tx.blocking_send(TerminalUploadMessage::Chunk(Bytes::from_static(b"67890")))
+            .unwrap();
+        tx.blocking_send(TerminalUploadMessage::Complete).unwrap();
+        drop(tx);
+
+        let error = terminal_upload_stream_sync(dir.path(), "large.bin", rx, 8).unwrap_err();
+
+        assert!(matches!(
+            error,
+            chan_workspace::ChanError::WriteTooLarge { .. }
+        ));
+        assert!(!dir.path().join("large.bin").exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn terminal_stream_upload_disconnect_removes_temp_and_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        tx.blocking_send(TerminalUploadMessage::Chunk(Bytes::from_static(b"partial")))
+            .unwrap();
+        drop(tx);
+
+        let error = terminal_upload_stream_sync(dir.path(), "cancelled.bin", rx, 1024).unwrap_err();
+
+        assert!(error.to_string().contains("before completion"));
+        assert!(!dir.path().join("cancelled.bin").exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[cfg(unix)]

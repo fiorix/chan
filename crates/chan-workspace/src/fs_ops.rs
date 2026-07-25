@@ -25,13 +25,50 @@
 // follower-mode could relax this once we've thought through the
 // editor UX.
 
+use std::collections::HashMap;
 use std::fs::Metadata;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 
-use serde::Serialize;
+use ignore::gitignore::Gitignore;
+use ignore::Match;
+use serde::{Deserialize, Serialize};
 use walkdir::{DirEntry, WalkDir};
 
 use crate::error::{ChanError, Result};
+use crate::vcs::is_vcs_control_path;
+use crate::workspace::WorkspaceGeneration;
+
+/// Semantic policy applied by `Workspace::write_atomic_stream`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicWriteKind {
+    /// Editable UTF-8 content governed by the semantic text budget.
+    Text,
+    /// Opaque bytes governed by the binary-write budget.
+    Bytes,
+}
+
+impl AtomicWriteKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Bytes => "bytes",
+        }
+    }
+}
+
+/// Chunk sink passed to `Workspace::write_atomic_stream`.
+///
+/// The sink writes directly to a same-directory temporary file. Callers never
+/// receive the temporary path and cannot commit it themselves.
+pub trait AtomicWriteSink {
+    /// Append one chunk, enforcing the semantic budget before it reaches disk.
+    fn write_chunk(&mut self, chunk: &[u8]) -> Result<()>;
+    /// Bytes accepted so far.
+    fn bytes_written(&self) -> u64;
+    /// Maximum bytes this write may commit.
+    fn limit(&self) -> u64;
+}
 
 /// True for paths inside the workspace-internal `.chan/` dir. chan-workspace
 /// never writes there now (per-workspace state lives outside the user's
@@ -147,7 +184,7 @@ pub struct PathClass {
     pub target_escapes_workspace: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PathKind {
     Directory,
@@ -496,6 +533,198 @@ impl WalkFilter {
     }
 }
 
+/// Why a workspace-relative path is outside the generated index scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexScopeExclusion {
+    Hard,
+    Gitignore,
+    Configured,
+}
+
+/// Result of applying one immutable workspace scope policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexScopeDecision {
+    Include,
+    Exclude(IndexScopeExclusion),
+    /// Narrow VCS state needed by watcher consumers to detect checkouts.
+    VcsControl,
+}
+
+/// One directory-local `.gitignore` matcher cached by this policy generation.
+#[derive(Clone, Debug)]
+struct RepositoryIgnoreLayer {
+    matcher: Gitignore,
+    has_whitelists: bool,
+}
+
+/// Repository `.gitignore` rules, discovered lazily along requested paths.
+///
+/// Loading only ancestor files keeps `Workspace::open` metadata-only: a policy
+/// construction never scans the workspace. Each directory-local matcher is
+/// cached after its first use, so all consumers of this policy Arc share the
+/// same interpretation until a `.gitignore` event replaces the generation.
+#[derive(Debug)]
+struct RepositoryIgnores {
+    root: PathBuf,
+    layers: Mutex<HashMap<PathBuf, RepositoryIgnoreLayer>>,
+}
+
+#[derive(Debug, Default)]
+struct RepositoryIgnoreDecision {
+    matched: Option<IndexScopeDecision>,
+    may_reinclude_descendant: bool,
+}
+
+impl RepositoryIgnores {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            layers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn decision(&self, rel: &str, is_dir: bool) -> RepositoryIgnoreDecision {
+        let path = self.root.join(rel);
+        let mut result = RepositoryIgnoreDecision::default();
+        for dir in self.ancestor_dirs(rel) {
+            let layer = self.layer(&dir);
+            result.may_reinclude_descendant |= layer.has_whitelists;
+            match layer.matcher.matched_path_or_any_parents(&path, is_dir) {
+                Match::None => {}
+                Match::Ignore(_) => {
+                    result.matched =
+                        Some(IndexScopeDecision::Exclude(IndexScopeExclusion::Gitignore));
+                }
+                Match::Whitelist(_) => {
+                    result.matched = Some(IndexScopeDecision::Include);
+                }
+            }
+        }
+        result
+    }
+
+    /// `.gitignore` files apply to entries below their directory, never the
+    /// directory that contains the file itself.
+    fn ancestor_dirs(&self, rel: &str) -> Vec<PathBuf> {
+        let mut dirs = vec![self.root.clone()];
+        let mut current = self.root.clone();
+        let Some(parent) = Path::new(rel).parent() else {
+            return dirs;
+        };
+        for component in parent.components() {
+            let Component::Normal(component) = component else {
+                continue;
+            };
+            current.push(component);
+            dirs.push(current.clone());
+        }
+        dirs
+    }
+
+    fn layer(&self, dir: &Path) -> RepositoryIgnoreLayer {
+        let mut layers = self.layers.lock().unwrap();
+        if let Some(layer) = layers.get(dir) {
+            return layer.clone();
+        }
+        let path = dir.join(".gitignore");
+        let (matcher, error) = Gitignore::new(&path);
+        if let Some(error) = error {
+            tracing::warn!(%error, path = %path.display(), "failed to load repository gitignore");
+        }
+        let layer = RepositoryIgnoreLayer {
+            has_whitelists: matcher.num_whitelists() > 0,
+            matcher,
+        };
+        layers.insert(dir.to_path_buf(), layer.clone());
+        layer
+    }
+}
+
+/// One generated scope shared by index, graph, report, reconcile, and watch.
+#[derive(Debug)]
+pub struct IndexScopePolicy {
+    root: PathBuf,
+    generation: WorkspaceGeneration,
+    configured: WalkFilter,
+    repository_ignores: RepositoryIgnores,
+}
+
+impl IndexScopePolicy {
+    pub fn new(
+        root: PathBuf,
+        generation: WorkspaceGeneration,
+        configured: WalkFilter,
+    ) -> Result<Self> {
+        Ok(Self {
+            repository_ignores: RepositoryIgnores::new(root.clone()),
+            root,
+            generation,
+            configured,
+        })
+    }
+
+    pub fn generation(&self) -> WorkspaceGeneration {
+        self.generation
+    }
+
+    pub fn configured(&self) -> &WalkFilter {
+        &self.configured
+    }
+
+    pub fn decision(&self, rel: &str, is_dir: bool) -> IndexScopeDecision {
+        let rel = rel.trim_matches('/');
+        if is_vcs_control_path(rel) {
+            return IndexScopeDecision::VcsControl;
+        }
+        let components: Vec<&str> = rel.split('/').filter(|part| !part.is_empty()).collect();
+        if components
+            .iter()
+            .any(|part| matches!(*part, ".chan" | ".git" | ".hg" | ".svn"))
+        {
+            return IndexScopeDecision::Exclude(IndexScopeExclusion::Hard);
+        }
+        let repository = self.repository_ignores.decision(rel, is_dir);
+        if let Some(decision) = repository.matched {
+            return decision;
+        }
+        let directory_components = if is_dir {
+            components.as_slice()
+        } else {
+            components
+                .get(..components.len().saturating_sub(1))
+                .unwrap_or_default()
+        };
+        if directory_components
+            .iter()
+            .any(|part| self.configured.is_excluded(part))
+        {
+            if is_dir && repository.may_reinclude_descendant {
+                return IndexScopeDecision::Include;
+            }
+            return IndexScopeDecision::Exclude(IndexScopeExclusion::Configured);
+        }
+        IndexScopeDecision::Include
+    }
+
+    pub fn includes(&self, rel: &str, is_dir: bool) -> bool {
+        self.decision(rel, is_dir) == IndexScopeDecision::Include
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl chan_report::ReportPathPolicy for IndexScopePolicy {
+    fn generation(&self) -> u64 {
+        self.generation.get()
+    }
+
+    fn includes(&self, rel: &str, is_dir: bool) -> bool {
+        IndexScopePolicy::includes(self, rel, is_dir)
+    }
+}
+
 /// Recursive walker rooted at `root` that:
 ///   - skips `.git/` and `.chan/` at any depth;
 ///   - never follows symlinks (`walkdir` default; we set it
@@ -519,6 +748,38 @@ pub fn walk_workspace_filtered<'a>(
     filter: &'a WalkFilter,
 ) -> impl Iterator<Item = DirEntry> + 'a {
     walk_workspace_with(root, Some(filter))
+}
+
+/// Recursive workspace walk governed by one generated scope policy.
+pub fn walk_workspace_scoped<'a>(
+    root: &'a Path,
+    policy: &'a IndexScopePolicy,
+) -> impl Iterator<Item = DirEntry> + 'a {
+    WalkDir::new(root)
+        .min_depth(1)
+        .follow_links(false)
+        .same_file_system(true)
+        .into_iter()
+        .filter_entry(move |entry| {
+            let Ok(rel) = entry.path().strip_prefix(policy.root()) else {
+                return false;
+            };
+            policy.includes(
+                &rel.to_string_lossy().replace('\\', "/"),
+                entry.file_type().is_dir(),
+            )
+        })
+        .filter_map(|result| match result {
+            Ok(entry) => Some(entry),
+            Err(error) => {
+                tracing::warn!("walkdir error: {error}");
+                None
+            }
+        })
+        .filter(|entry| {
+            let file_type = entry.file_type();
+            file_type.is_dir() || file_type.is_file()
+        })
 }
 
 fn walk_workspace_with<'a>(
@@ -964,8 +1225,179 @@ pub fn validate_rel(requested: &str) -> Result<PathBuf> {
 /// bad path anyway, but the explicit gate keeps our error mapping
 /// crisp.
 pub fn atomic_write_in(dir: &cap_std::fs::Dir, rel: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
+    atomic_write_stream_in(dir, rel, AtomicWriteKind::Bytes, u64::MAX, false, |sink| {
+        sink.write_chunk(bytes)
+    })
+}
 
+#[derive(Debug, Clone)]
+enum AtomicStreamFailure {
+    TooLarge {
+        kind: &'static str,
+        size: u64,
+        limit: u64,
+    },
+    InvalidUtf8,
+    Io(String),
+}
+
+impl AtomicStreamFailure {
+    fn error(&self) -> ChanError {
+        match self {
+            Self::TooLarge { kind, size, limit } => ChanError::WriteTooLarge {
+                kind,
+                size: *size,
+                limit: *limit,
+            },
+            Self::InvalidUtf8 => ChanError::Io("invalid UTF-8 in streamed text write".to_string()),
+            Self::Io(message) => ChanError::Io(message.clone()),
+        }
+    }
+}
+
+struct AtomicStreamSink<'d> {
+    tmp: Option<cap_tempfile::TempFile<'d>>,
+    kind: AtomicWriteKind,
+    limit: u64,
+    written: u64,
+    validate_utf8: bool,
+    utf8_tail: Vec<u8>,
+    failure: Option<AtomicStreamFailure>,
+}
+
+impl<'d> AtomicStreamSink<'d> {
+    fn new(
+        tmp: cap_tempfile::TempFile<'d>,
+        kind: AtomicWriteKind,
+        limit: u64,
+        validate_utf8: bool,
+    ) -> Self {
+        Self {
+            tmp: Some(tmp),
+            kind,
+            limit,
+            written: 0,
+            validate_utf8,
+            utf8_tail: Vec::new(),
+            failure: None,
+        }
+    }
+
+    fn fail(&mut self, failure: AtomicStreamFailure) -> ChanError {
+        let error = failure.error();
+        self.failure = Some(failure);
+        error
+    }
+
+    fn validate_chunk_utf8(&mut self, chunk: &[u8]) -> Result<()> {
+        let mut offset = 0usize;
+        if !self.utf8_tail.is_empty() {
+            let width = utf8_sequence_width(self.utf8_tail[0])
+                .ok_or_else(|| self.fail(AtomicStreamFailure::InvalidUtf8))?;
+            let needed = width.saturating_sub(self.utf8_tail.len());
+            if chunk.len() < needed {
+                self.utf8_tail.extend_from_slice(chunk);
+                return Ok(());
+            }
+            let mut sequence = [0u8; 4];
+            sequence[..self.utf8_tail.len()].copy_from_slice(&self.utf8_tail);
+            sequence[self.utf8_tail.len()..width].copy_from_slice(&chunk[..needed]);
+            if std::str::from_utf8(&sequence[..width]).is_err() {
+                return Err(self.fail(AtomicStreamFailure::InvalidUtf8));
+            }
+            self.utf8_tail.clear();
+            offset = needed;
+        }
+
+        match std::str::from_utf8(&chunk[offset..]) {
+            Ok(_) => Ok(()),
+            Err(error) if error.error_len().is_none() => {
+                self.utf8_tail
+                    .extend_from_slice(&chunk[offset + error.valid_up_to()..]);
+                Ok(())
+            }
+            Err(_) => Err(self.fail(AtomicStreamFailure::InvalidUtf8)),
+        }
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        if let Some(failure) = &self.failure {
+            return Err(failure.error());
+        }
+        if self.validate_utf8 && !self.utf8_tail.is_empty() {
+            return Err(self.fail(AtomicStreamFailure::InvalidUtf8));
+        }
+        Ok(())
+    }
+
+    fn take_temp(&mut self) -> cap_tempfile::TempFile<'d> {
+        self.tmp
+            .take()
+            .expect("atomic stream temp is present until commit")
+    }
+}
+
+impl AtomicWriteSink for AtomicStreamSink<'_> {
+    fn write_chunk(&mut self, chunk: &[u8]) -> Result<()> {
+        use std::io::Write;
+
+        if let Some(failure) = &self.failure {
+            return Err(failure.error());
+        }
+        let chunk_len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+        let attempted = self.written.saturating_add(chunk_len);
+        if attempted > self.limit {
+            return Err(self.fail(AtomicStreamFailure::TooLarge {
+                kind: self.kind.label(),
+                size: attempted,
+                limit: self.limit,
+            }));
+        }
+        if self.validate_utf8 {
+            self.validate_chunk_utf8(chunk)?;
+        }
+        if let Err(error) = self
+            .tmp
+            .as_mut()
+            .expect("atomic stream temp is present until commit")
+            .write_all(chunk)
+        {
+            return Err(self.fail(AtomicStreamFailure::Io(format!("write: {error}"))));
+        }
+        self.written = attempted;
+        Ok(())
+    }
+
+    fn bytes_written(&self) -> u64 {
+        self.written
+    }
+
+    fn limit(&self) -> u64 {
+        self.limit
+    }
+}
+
+fn utf8_sequence_width(first: u8) -> Option<usize> {
+    match first {
+        0x00..=0x7f => Some(1),
+        0xc2..=0xdf => Some(2),
+        0xe0..=0xef => Some(3),
+        0xf0..=0xf4 => Some(4),
+        _ => None,
+    }
+}
+
+pub(crate) fn atomic_write_stream_in<F>(
+    dir: &cap_std::fs::Dir,
+    rel: &Path,
+    kind: AtomicWriteKind,
+    limit: u64,
+    validate_utf8: bool,
+    feed: F,
+) -> Result<()>
+where
+    F: FnOnce(&mut dyn AtomicWriteSink) -> Result<()>,
+{
     if let Some(parent) = rel.parent() {
         if !parent.as_os_str().is_empty() {
             dir.create_dir_all(parent).map_err(|e| map_cap(e, rel))?;
@@ -985,12 +1417,17 @@ pub fn atomic_write_in(dir: &cap_std::fs::Dir, rel: &Path, bytes: &[u8]) -> Resu
         None => dir,
     };
     let leaf = rel.file_name().ok_or(ChanError::PathEmpty)?;
-    let mut tmp = cap_tempfile::TempFile::new(target_dir).map_err(|e| map_cap(e, rel))?;
-    tmp.write_all(bytes)
-        .map_err(|e| ChanError::Io(format!("write: {e}")))?;
-    tmp.as_file()
+    let tmp = cap_tempfile::TempFile::new(target_dir).map_err(|e| map_cap(e, rel))?;
+    let mut sink = AtomicStreamSink::new(tmp, kind, limit, validate_utf8);
+    feed(&mut sink)?;
+    sink.finish()?;
+    sink.tmp
+        .as_ref()
+        .expect("atomic stream temp is present until commit")
+        .as_file()
         .sync_all()
         .map_err(|e| ChanError::Io(format!("fsync tmp: {e}")))?;
+    let tmp = sink.take_temp();
     tmp.replace(leaf).map_err(|e| map_cap(e, rel))?;
     apply_metadata_in(dir, rel, preserved);
     sync_dir_handle(target_dir)?;
@@ -1252,6 +1689,11 @@ pub fn list_tree_filtered(root: &Path, filter: &WalkFilter) -> Result<Vec<TreeEn
     list_tree_inner(root, root, 1, Some(filter))
 }
 
+/// `list_tree` variant governed by one generated scope policy.
+pub fn list_tree_scoped(root: &Path, policy: &IndexScopePolicy) -> Result<Vec<TreeEntry>> {
+    list_tree_scoped_inner(root, root, 1, policy)
+}
+
 /// Variant of `list_tree` scoped to the subtree at `subtree_abs`,
 /// which must be `root` or a descendant. Walks only that subtree;
 /// returned `TreeEntry.path` values stay relative to `root` so
@@ -1294,6 +1736,96 @@ pub fn list_tree_prefix_filtered(
         return Ok(Vec::new());
     }
     list_tree_inner(root, subtree_abs, 0, Some(filter))
+}
+
+/// Subtree listing governed by one generated scope policy.
+pub fn list_tree_prefix_scoped(
+    root: &Path,
+    subtree_abs: &Path,
+    policy: &IndexScopePolicy,
+) -> Result<Vec<TreeEntry>> {
+    if !subtree_abs.exists() {
+        return Ok(Vec::new());
+    }
+    list_tree_scoped_inner(root, subtree_abs, 0, policy)
+}
+
+fn list_tree_scoped_inner(
+    root: &Path,
+    walk_from: &Path,
+    min_depth: usize,
+    policy: &IndexScopePolicy,
+) -> Result<Vec<TreeEntry>> {
+    let iter: Box<dyn Iterator<Item = DirEntry> + '_> = if walk_from == root {
+        Box::new(walk_workspace_scoped(root, policy))
+    } else {
+        let walker = WalkDir::new(walk_from)
+            .min_depth(min_depth)
+            .follow_links(false)
+            .same_file_system(true)
+            .into_iter()
+            .filter_entry(move |entry| {
+                let Ok(rel) = entry.path().strip_prefix(policy.root()) else {
+                    return false;
+                };
+                policy.includes(
+                    &rel.to_string_lossy().replace('\\', "/"),
+                    entry.file_type().is_dir(),
+                )
+            })
+            .filter_map(|result| match result {
+                Ok(entry) => Some(entry),
+                Err(error) => {
+                    tracing::warn!("walkdir error: {error}");
+                    None
+                }
+            })
+            .filter(|entry| {
+                let file_type = entry.file_type();
+                file_type.is_dir() || file_type.is_file()
+            });
+        Box::new(walker)
+    };
+    tree_entries(root, iter)
+}
+
+fn tree_entries<'a>(
+    root: &Path,
+    iter: impl Iterator<Item = DirEntry> + 'a,
+) -> Result<Vec<TreeEntry>> {
+    let mut out = Vec::new();
+    for entry in iter {
+        if out.len() >= LIST_TREE_LIMIT {
+            return Err(ChanError::ListingTooLarge {
+                observed: out.len(),
+                limit: LIST_TREE_LIMIT,
+            });
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(root)
+            .map_err(|_| ChanError::PathEscape)?;
+        let path_str = rel.to_string_lossy().replace('\\', "/");
+        let meta = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::warn!(?path_str, ?error, "metadata failed; skipping");
+                continue;
+            }
+        };
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs() as i64);
+        out.push(TreeEntry {
+            path: path_str,
+            is_dir: meta.is_dir(),
+            mtime,
+            size: if meta.is_dir() { 0 } else { meta.len() },
+        });
+    }
+    Ok(out)
 }
 
 fn list_tree_inner(
@@ -1388,7 +1920,21 @@ fn list_tree_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::library::Library;
+    use crate::workspace::{
+        active_bounded_file_readers, semantic_write_budget, AtomicWriteKind, WorkspacePath,
+        BINARY_STREAM_CHUNK_SIZE, BINARY_STREAM_QUEUE_DEPTH,
+    };
     use tempfile::TempDir;
+
+    fn workspace_fixture() -> (TempDir, TempDir, std::sync::Arc<crate::Workspace>) {
+        let cfg = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let workspace = library.open_workspace(root.path()).unwrap();
+        (cfg, root, workspace)
+    }
 
     #[test]
     fn classify_path_reports_directory_and_regular_file() {
@@ -1946,5 +2492,144 @@ mod tests {
         assert!(names.contains(&"note.md".to_string()));
         assert!(!names.contains(&"alias.md".to_string()));
         assert!(!names.contains(&"sock".to_string()));
+    }
+
+    #[test]
+    fn semantic_write_budget_keeps_legacy_text_editable_without_growth() {
+        assert_eq!(semantic_write_budget(None), crate::TEXT_WRITE_LIMIT);
+        assert_eq!(
+            semantic_write_budget(Some(crate::TEXT_WRITE_LIMIT - 1)),
+            crate::TEXT_WRITE_LIMIT
+        );
+        assert_eq!(
+            semantic_write_budget(Some(crate::TEXT_WRITE_LIMIT + 1)),
+            crate::TEXT_WRITE_LIMIT + 1
+        );
+    }
+
+    #[test]
+    fn atomic_stream_limit_error_leaves_no_target_or_temp() {
+        let (_cfg, root, workspace) = workspace_fixture();
+        let too_large = vec![b'x'; semantic_write_budget(None) as usize + 1];
+
+        let err = workspace
+            .write_atomic_stream("too-large.md", AtomicWriteKind::Text, |sink| {
+                sink.write_chunk(&too_large)
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, ChanError::WriteTooLarge { kind: "text", .. }));
+        assert!(!root.path().join("too-large.md").exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn atomic_stream_feed_error_leaves_no_target_or_temp() {
+        let (_cfg, root, workspace) = workspace_fixture();
+
+        let err = workspace
+            .write_atomic_stream("cancelled.bin", AtomicWriteKind::Bytes, |sink| {
+                sink.write_chunk(b"partial")?;
+                Err(ChanError::Cancelled)
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, ChanError::Cancelled));
+        assert!(!root.path().join("cancelled.bin").exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn atomic_text_stream_accepts_split_utf8_code_point() {
+        let (_cfg, _root, workspace) = workspace_fixture();
+        let body = "a\u{20ac}z".as_bytes();
+
+        let stat = workspace
+            .write_atomic_stream("split.md", AtomicWriteKind::Text, |sink| {
+                sink.write_chunk(&body[..2])?;
+                sink.write_chunk(&body[2..])?;
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(stat.size, body.len() as u64);
+        assert_eq!(workspace.read_text("split.md").unwrap(), "a\u{20ac}z");
+    }
+
+    #[test]
+    fn bounded_binary_reader_emits_fixed_size_chunks() {
+        let (_cfg, root, workspace) = workspace_fixture();
+        let size = BINARY_STREAM_CHUNK_SIZE * 2 + 17;
+        std::fs::write(root.path().join("large.bin"), vec![0x5a; size]).unwrap();
+
+        let mut reader = workspace.read_bytes_bounded("large.bin").unwrap();
+        assert_eq!(reader.stat().size, size as u64);
+        let chunks: Vec<Vec<u8>> = reader.by_ref().collect::<crate::Result<_>>().unwrap();
+
+        assert_eq!(
+            chunks.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![BINARY_STREAM_CHUNK_SIZE, BINARY_STREAM_CHUNK_SIZE, 17]
+        );
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.len() <= BINARY_STREAM_CHUNK_SIZE));
+    }
+
+    #[test]
+    fn dropping_bounded_reader_joins_blocked_producer() {
+        let (_cfg, root, workspace) = workspace_fixture();
+        let size = BINARY_STREAM_CHUNK_SIZE * (BINARY_STREAM_QUEUE_DEPTH + 16);
+        std::fs::write(root.path().join("disconnect.bin"), vec![0x5a; size]).unwrap();
+
+        let reader = workspace.read_bytes_bounded("disconnect.bin").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while active_bounded_file_readers() == 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(active_bounded_file_readers(), 1);
+
+        drop(reader);
+
+        assert_eq!(
+            active_bounded_file_readers(),
+            0,
+            "BoundedFileReader::drop must close the queue and join its producer"
+        );
+    }
+
+    #[test]
+    fn workspace_path_classification_and_writability_share_one_stat_shape() {
+        let (_cfg, root, workspace) = workspace_fixture();
+        assert!(matches!(
+            workspace.classify_workspace_path("new.md").unwrap(),
+            WorkspacePath::Missing
+        ));
+
+        std::fs::write(root.path().join("note.md"), "hello").unwrap();
+        std::fs::create_dir(root.path().join("notes")).unwrap();
+
+        let regular = workspace.classify_workspace_path("note.md").unwrap();
+        let stat = match regular {
+            WorkspacePath::Regular(stat) => stat,
+            other => panic!("expected regular file, got {other:?}"),
+        };
+        assert_eq!(stat.size, 5);
+        assert_eq!(
+            workspace.ensure_writable("note.md").unwrap().stat,
+            Some(stat)
+        );
+        assert_eq!(workspace.ensure_writable("new.md").unwrap().stat, None);
+        assert!(matches!(
+            workspace.classify_workspace_path("notes").unwrap(),
+            WorkspacePath::Directory(_)
+        ));
+        assert!(matches!(
+            workspace.ensure_writable("notes").unwrap_err(),
+            ChanError::SpecialFile { .. }
+        ));
+        assert!(matches!(
+            workspace.classify_workspace_path("../escape").unwrap_err(),
+            ChanError::PathEscape
+        ));
     }
 }

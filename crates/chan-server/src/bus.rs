@@ -398,19 +398,21 @@ mod tests {
     use chan_workspace::WatchKind;
 
     fn created(path: &str) -> WatchEvent {
-        WatchEvent {
-            kind: WatchKind::Created,
-            path: Some(path.to_string()),
-            to: None,
-        }
+        WatchEvent::file(
+            WatchKind::Created,
+            path,
+            chan_workspace::WorkspaceGeneration::default(),
+        )
     }
 
     fn renamed(from: &str, to: &str) -> WatchEvent {
-        WatchEvent {
-            kind: WatchKind::Renamed,
-            path: Some(from.to_string()),
-            to: Some(to.to_string()),
-        }
+        WatchEvent::rename(
+            Some(from.to_string()),
+            Some(to.to_string()),
+            false,
+            None,
+            chan_workspace::WorkspaceGeneration::default(),
+        )
     }
 
     fn try_recv(rx: &mut mpsc::UnboundedReceiver<String>) -> Option<Value> {
@@ -477,10 +479,12 @@ mod tests {
             &scopes,
             dir.path().to_path_buf(),
         );
-        let modified = || WatchEvent {
-            kind: WatchKind::Modified,
-            path: Some("a.md".to_string()),
-            to: None,
+        let modified = || {
+            WatchEvent::file(
+                WatchKind::Modified,
+                "a.md",
+                chan_workspace::WorkspaceGeneration::default(),
+            )
         };
 
         bridge.on_event(modified());

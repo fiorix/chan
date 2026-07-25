@@ -1,6 +1,6 @@
 # Move Workspace::open's inline reconcile off the calling thread
 
-Status: REGISTERED for v0.77.0. Remainder (lever 5) of the devserver
+Status: REGISTERED for v0.76.0. Remainder (lever 5) of the devserver
 rebuild-storm plan; levers 1-4 shipped in v0.76.0 (see
 `done/` history once v0.76.0 closes, and
 `../v0.76.0/devserver-rebuild-storm-and-livelock.md` for the incident

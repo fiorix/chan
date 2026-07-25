@@ -31,15 +31,18 @@
 //! scenes approach the byte cap; an asset side-channel is a named
 //! follow-up.
 //!
-//! The growth cap counts compact-JSON bytes against
-//! [`TEXT_WRITE_LIMIT`]. That is a lower bound of the pretty file
-//! form; exactness does not matter (the workspace write path enforces
-//! the on-disk limit independently), the cap only bounds session
-//! memory. Everything here is pure: no I/O, no tokio, no session
-//! state.
+//! The growth cap counts compact-JSON bytes against a caller-supplied
+//! semantic write budget. Standalone model users default to
+//! [`chan_workspace::TEXT_WRITE_LIMIT`], while sessions retain the
+//! larger size of an existing legacy file. The compact cost is a lower
+//! bound of the pretty file form; exactness does not matter (the
+//! workspace write path enforces the on-disk limit independently), the
+//! cap only bounds session memory. Everything here is pure: no I/O, no
+//! tokio, no session state.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+#[cfg(test)]
 use chan_workspace::TEXT_WRITE_LIMIT;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -286,11 +289,24 @@ impl Scene {
     /// a client echoing the authority's own appState back must never
     /// bump the version or re-fan, or two live canvases ping-pong the
     /// object forever.
+    #[cfg(test)]
     pub fn apply_push(
         &mut self,
         elements: Vec<Value>,
         app_state: Option<Value>,
         files: Option<Value>,
+    ) -> Result<Applied, SceneError> {
+        self.apply_push_with_limit(elements, app_state, files, TEXT_WRITE_LIMIT)
+    }
+
+    /// Merge one client push under a caller-supplied semantic write
+    /// budget.
+    pub fn apply_push_with_limit(
+        &mut self,
+        elements: Vec<Value>,
+        app_state: Option<Value>,
+        files: Option<Value>,
+        limit: u64,
     ) -> Result<Applied, SceneError> {
         let mut staged: HashMap<String, StoredElement> = HashMap::new();
         let mut accepted: Vec<Value> = Vec::new();
@@ -318,10 +334,10 @@ impl Scene {
             + elements_delta
             + app_state_cost.map_or(0, |c| c as i64 - self.app_state_cost as i64)
             + files_delta as i64;
-        if prospective > TEXT_WRITE_LIMIT as i64 {
+        if prospective > limit as i64 {
             return Err(SceneError::TooLarge {
                 bytes: prospective.max(0) as u64,
-                limit: TEXT_WRITE_LIMIT,
+                limit,
             });
         }
 
@@ -358,10 +374,22 @@ impl Scene {
     /// versions; existing tombstones stay untouched unless the body
     /// resurrects their id. Equal content yields an empty [`Applied`]
     /// (the flush-echo case). All-or-nothing like the push path.
+    #[cfg(test)]
     pub fn apply_replace(
         &mut self,
         text: &str,
         fresh_nonce: &mut dyn FnMut() -> u64,
+    ) -> Result<Applied, SceneError> {
+        self.apply_replace_with_limit(text, fresh_nonce, TEXT_WRITE_LIMIT)
+    }
+
+    /// Replace the whole scene under a caller-supplied semantic write
+    /// budget.
+    pub fn apply_replace_with_limit(
+        &mut self,
+        text: &str,
+        fresh_nonce: &mut dyn FnMut() -> u64,
+        limit: u64,
     ) -> Result<Applied, SceneError> {
         let incoming = Self::parse(text)?;
 
@@ -420,10 +448,10 @@ impl Scene {
         };
         let files_delta: usize = new_files.iter().map(|(k, v)| k.len() + value_cost(v)).sum();
         let prospective = elements_cost + app_state_cost + self.files_cost + files_delta;
-        if prospective > TEXT_WRITE_LIMIT as usize {
+        if prospective > limit as usize {
             return Err(SceneError::TooLarge {
                 bytes: prospective as u64,
-                limit: TEXT_WRITE_LIMIT,
+                limit,
             });
         }
 
@@ -523,6 +551,229 @@ impl Scene {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct MergeConflict;
+
+/// Merge a dirty authority and an external file from their durable
+/// baseline. Element ids are stable identities; within one element,
+/// appState, and files, object keys are independent fields. Arrays and
+/// scalar values remain atomic. A delete versus edit, two incompatible
+/// additions under one id, duplicate ids, or a same-field edit is a
+/// conflict.
+#[cfg(test)]
+pub(super) fn merge_three_way(
+    baseline_text: &str,
+    authority: &Scene,
+    disk_text: &str,
+) -> Result<String, MergeConflict> {
+    merge_three_way_with_limit(baseline_text, authority, disk_text, TEXT_WRITE_LIMIT)
+}
+
+pub(super) fn merge_three_way_with_limit(
+    baseline_text: &str,
+    authority: &Scene,
+    disk_text: &str,
+    limit: u64,
+) -> Result<String, MergeConflict> {
+    let baseline = parse_merge_input(baseline_text)?;
+    let disk = parse_merge_input(disk_text)?;
+
+    let mut ids = BTreeSet::new();
+    ids.extend(baseline.elements.keys().cloned());
+    ids.extend(authority.elements.keys().cloned());
+    ids.extend(disk.elements.keys().cloned());
+
+    let mut elements = HashMap::new();
+    for id in ids {
+        let baseline_element = baseline.elements.get(&id).filter(|el| !el.is_deleted);
+        let authority_element = authority.elements.get(&id).filter(|el| !el.is_deleted);
+        let disk_element = disk.elements.get(&id).filter(|el| !el.is_deleted);
+        let baseline_value = baseline_element.map(element_content);
+        let authority_value = authority_element.map(element_content);
+        let disk_value = disk_element.map(element_content);
+
+        if baseline_element.is_none()
+            && authority_element.is_some()
+            && disk_element.is_some()
+            && authority_value != disk_value
+        {
+            return Err(MergeConflict);
+        }
+
+        let merged_value = merge_value(
+            baseline_value.as_ref(),
+            authority_value.as_ref(),
+            disk_value.as_ref(),
+        )?;
+        let Some(merged_value) = merged_value else {
+            continue;
+        };
+        let merged = if authority_value.as_ref() == Some(&merged_value) {
+            authority_element
+                .expect("authority value came from an element")
+                .clone()
+        } else if disk_value.as_ref() == Some(&merged_value) {
+            disk_element
+                .expect("disk value came from an element")
+                .clone()
+        } else {
+            build_element(
+                &id,
+                merged_value,
+                baseline_element,
+                authority_element,
+                disk_element,
+            )?
+        };
+        elements.insert(id, merged);
+    }
+
+    let app_state = merge_object(&baseline.app_state, &authority.app_state, &disk.app_state)?;
+    let files = merge_object(&baseline.files, &authority.files, &disk.files)?;
+    let elements_cost = elements.values().map(|el| el.cost).sum();
+    let app_state_cost = value_cost(&Value::Object(app_state.clone()));
+    let files_cost = files.iter().map(|(k, v)| k.len() + value_cost(v)).sum();
+    let merged = Scene {
+        elements,
+        app_state,
+        files,
+        elements_cost,
+        app_state_cost,
+        files_cost,
+    };
+    let text = merged.serialize_file();
+    if merged.total_cost() > limit as usize || text.len() > limit as usize {
+        return Err(MergeConflict);
+    }
+    Ok(text)
+}
+
+fn parse_merge_input(text: &str) -> Result<Scene, MergeConflict> {
+    if !text.trim().is_empty() {
+        let root: Value = serde_json::from_str(text).map_err(|_| MergeConflict)?;
+        let raw_elements = root
+            .as_object()
+            .and_then(|root| root.get("elements"))
+            .filter(|elements| !elements.is_null());
+        if let Some(raw_elements) = raw_elements {
+            let raw_elements = raw_elements.as_array().ok_or(MergeConflict)?;
+            let mut ids = HashSet::with_capacity(raw_elements.len());
+            for element in raw_elements {
+                let id = element
+                    .as_object()
+                    .and_then(|element| element.get("id"))
+                    .and_then(Value::as_str)
+                    .ok_or(MergeConflict)?;
+                if !ids.insert(id) {
+                    return Err(MergeConflict);
+                }
+            }
+        }
+    }
+    Scene::parse(text).map_err(|_| MergeConflict)
+}
+
+pub(super) fn validate_merge_input(text: &str) -> Result<(), MergeConflict> {
+    parse_merge_input(text).map(|_| ())
+}
+
+fn element_content(element: &StoredElement) -> Value {
+    let mut value = element.value.clone();
+    let object = value
+        .as_object_mut()
+        .expect("stored element value is an object");
+    for metadata in ["id", "version", "versionNonce", "isDeleted"] {
+        object.remove(metadata);
+    }
+    value
+}
+
+fn build_element(
+    id: &str,
+    content: Value,
+    baseline: Option<&StoredElement>,
+    authority: Option<&StoredElement>,
+    disk: Option<&StoredElement>,
+) -> Result<StoredElement, MergeConflict> {
+    let mut object = content.as_object().cloned().ok_or(MergeConflict)?;
+    let version = [baseline, authority, disk]
+        .into_iter()
+        .flatten()
+        .map(|element| element.version)
+        .max()
+        .unwrap_or_default();
+    let version_nonce = authority
+        .or(disk)
+        .or(baseline)
+        .map_or(0, |element| element.version_nonce);
+    object.insert("id".into(), id.into());
+    object.insert("version".into(), version.into());
+    object.insert("versionNonce".into(), version_nonce.into());
+    object.insert("isDeleted".into(), false.into());
+    StoredElement::from_value(Value::Object(object))
+        .map(|(_, element)| element)
+        .map_err(|_| MergeConflict)
+}
+
+fn merge_object(
+    baseline: &Map<String, Value>,
+    authority: &Map<String, Value>,
+    disk: &Map<String, Value>,
+) -> Result<Map<String, Value>, MergeConflict> {
+    let merged = merge_value(
+        Some(&Value::Object(baseline.clone())),
+        Some(&Value::Object(authority.clone())),
+        Some(&Value::Object(disk.clone())),
+    )?
+    .expect("three present objects produce a present object");
+    merged.as_object().cloned().ok_or(MergeConflict)
+}
+
+fn merge_value(
+    baseline: Option<&Value>,
+    authority: Option<&Value>,
+    disk: Option<&Value>,
+) -> Result<Option<Value>, MergeConflict> {
+    if authority == disk {
+        return Ok(authority.cloned());
+    }
+    if authority == baseline {
+        return Ok(disk.cloned());
+    }
+    if disk == baseline {
+        return Ok(authority.cloned());
+    }
+
+    let (baseline, authority, disk) = match (baseline, authority, disk) {
+        (
+            Some(Value::Object(baseline)),
+            Some(Value::Object(authority)),
+            Some(Value::Object(disk)),
+        ) => (Some(baseline), authority, disk),
+        (None, Some(Value::Object(authority)), Some(Value::Object(disk))) => {
+            (None, authority, disk)
+        }
+        _ => return Err(MergeConflict),
+    };
+    let mut keys = BTreeSet::new();
+    if let Some(baseline) = baseline {
+        keys.extend(baseline.keys().cloned());
+    }
+    keys.extend(authority.keys().cloned());
+    keys.extend(disk.keys().cloned());
+    let mut merged = Map::new();
+    for key in keys {
+        if let Some(value) = merge_value(
+            baseline.and_then(|baseline| baseline.get(&key)),
+            authority.get(&key),
+            disk.get(&key),
+        )? {
+            merged.insert(key, value);
+        }
+    }
+    Ok(Some(Value::Object(merged)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,6 +824,59 @@ mod tests {
         assert_eq!(el.value["versionNonce"].as_u64().unwrap(), el.version_nonce);
         assert_eq!(el.value["isDeleted"].as_bool().unwrap(), el.is_deleted);
         (el.version, el.version_nonce, el.is_deleted)
+    }
+
+    fn file(elements: Vec<Value>) -> String {
+        json!({
+            "elements": elements,
+            "appState": {},
+            "files": {},
+        })
+        .to_string()
+    }
+
+    // ---- three-way disk merge ----
+
+    #[test]
+    fn three_way_merges_distinct_fields_of_one_stable_element() {
+        let baseline_element = el("x", 1, 1, "a1");
+        let baseline = file(vec![baseline_element.clone()]);
+        let mut authority_element = baseline_element.clone();
+        authority_element["version"] = 2.into();
+        authority_element["x"] = 20.into();
+        let authority = Scene::parse(&file(vec![authority_element])).unwrap();
+        let mut disk_element = baseline_element;
+        disk_element["version"] = 2.into();
+        disk_element["strokeColor"] = "#ff0000".into();
+        let disk = file(vec![disk_element]);
+
+        let merged = Scene::parse(&merge_three_way(&baseline, &authority, &disk).unwrap()).unwrap();
+        let merged = &merged.element("x").unwrap().value;
+        assert_eq!(merged["x"], 20);
+        assert_eq!(merged["strokeColor"], "#ff0000");
+    }
+
+    #[test]
+    fn three_way_rejects_same_field_delete_edit_and_duplicate_identity() {
+        let baseline_element = el("x", 1, 1, "a1");
+        let baseline = file(vec![baseline_element.clone()]);
+        let mut authority_element = baseline_element.clone();
+        authority_element["version"] = 2.into();
+        authority_element["x"] = 20.into();
+        let authority = Scene::parse(&file(vec![authority_element])).unwrap();
+        let mut disk_element = baseline_element.clone();
+        disk_element["version"] = 2.into();
+        disk_element["x"] = 30.into();
+        assert!(merge_three_way(&baseline, &authority, &file(vec![disk_element])).is_err());
+
+        let deleted = Scene::parse(&file(vec![])).unwrap();
+        let mut edited = baseline_element.clone();
+        edited["version"] = 2.into();
+        edited["x"] = 30.into();
+        assert!(merge_three_way(&baseline, &deleted, &file(vec![edited])).is_err());
+
+        let duplicate_disk = file(vec![baseline_element.clone(), baseline_element]);
+        assert!(merge_three_way(&baseline, &authority, &duplicate_disk).is_err());
     }
 
     // ---- the LWW rule ----

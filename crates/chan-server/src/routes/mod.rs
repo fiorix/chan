@@ -48,8 +48,7 @@ mod survey;
 pub(crate) mod team_config;
 mod terminal;
 // pub(crate) so the terminal router (`crate::lib`) mounts the standalone
-// transfer handlers and the workspace upload path (`routes::files`) reuses
-// `verify_writable_dir`.
+// transfer handlers.
 pub(crate) mod transfer;
 mod window;
 // pub(crate) so the `cs window list` control-socket handler

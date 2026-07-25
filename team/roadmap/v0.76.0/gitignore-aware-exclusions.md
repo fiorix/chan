@@ -1,6 +1,6 @@
 # Honor .gitignore in walk and watch exclusions
 
-Status: REGISTERED for v0.77.0. The fuller shape of the rebuild-storm
+Status: REGISTERED for v0.76.0. The fuller shape of the rebuild-storm
 lever 1; the defaults + migration half shipped in v0.76.0
 (`index_excluded_dirs` now covers Buck2-class output trees, and Linux
 watch registration prunes excluded subtrees). chan still never reads

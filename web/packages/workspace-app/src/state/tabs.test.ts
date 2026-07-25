@@ -201,7 +201,7 @@ describe("tab close confirmation", () => {
 
     await closeTab(pane.id, tab.id);
 
-    expect(write).toHaveBeenCalledWith("notes/a.md", "unsaved", null, 1);
+    expect(write).toHaveBeenCalledWith("notes/a.md", "unsaved", null, 1, null);
     expect(confirmState.open).toBe(false);
     expect(activePane().tabs).toHaveLength(0);
   });
@@ -3096,6 +3096,8 @@ describe("file tab loading", () => {
         path: "notes/slow.md",
         mtime: 10,
         mtime_ns: "10",
+        authority_version: 7,
+        disk_conflicted: false,
         writable: true,
         size: 9,
       });
@@ -3109,6 +3111,8 @@ describe("file tab loading", () => {
         content: "# partial",
         mtime: 10,
         mtime_ns: "10",
+        authority_version: 7,
+        disk_conflicted: false,
         writable: true,
       };
     });
@@ -3129,6 +3133,8 @@ describe("file tab loading", () => {
     expect(tab.content).toBe("# partial");
     expect(tab.saved).toBe("# partial");
     expect(tab.savedMtimeNs).toBe("10");
+    expect(tab.authorityVersion).toBe(7);
+    expect(tab.diskConflicted).toBe(false);
     expect(tab.loadProgress).toBeUndefined();
   });
 
@@ -3270,18 +3276,31 @@ describe("autosave", () => {
       saved: "",
       savedMtime: 1,
       savedMtimeNs: "1000000001",
+      authorityVersion: 7,
     });
     resetLayout([tab]);
     const write = vi
       .spyOn(api, "write")
-      .mockResolvedValue({ mtime: 2, mtime_ns: "2000000002" });
+      .mockResolvedValue({
+        mtime: 2,
+        mtime_ns: "2000000002",
+        authority_version: 8,
+        disk_conflicted: false,
+      });
 
     await saveTab(tab);
 
-    expect(write).toHaveBeenCalledWith("notes/a.md", "a\n\tb\n", "1000000001", 1);
+    expect(write).toHaveBeenCalledWith(
+      "notes/a.md",
+      "a\n\tb\n",
+      "1000000001",
+      1,
+      7,
+    );
     expect(tab.content).toBe("a\n\tb\n");
     expect(tab.saved).toBe("a\n\tb\n");
     expect(tab.savedMtimeNs).toBe("2000000002");
+    expect(tab.authorityVersion).toBe(8);
   });
 
   test("serializes overlapping saves and keeps edits after an in-flight save dirty", async () => {

@@ -243,6 +243,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
   let blockOriginalText = "";
   let blockMtime: number | null = null;
   let blockMtimeNs: string | null = null;
+  let blockAuthorityVersion: number | null = null;
   let blockHits: ParsedBlock[] = [];
   let selectedIndex = 0;
   let reqSeq = 0;
@@ -524,6 +525,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
     blockOriginalText = "";
     blockMtime = null;
     blockMtimeNs = null;
+    blockAuthorityVersion = null;
     render();
     api
       .read(target)
@@ -534,6 +536,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
         blockOriginalText = res.content;
         blockMtime = res.mtime;
         blockMtimeNs = res.mtime_ns ?? null;
+        blockAuthorityVersion = res.authority_version ?? null;
         blockAll = parseBlocks(res.content);
         filterBlocksLocal();
       })
@@ -706,11 +709,18 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
       const newContent = insertBlockAnchor(blockOriginalText, block, anchorId);
       status.textContent = "Adding anchor...";
       try {
-        const res = await api.write(target, newContent, blockMtimeNs, blockMtime);
+        const res = await api.write(
+          target,
+          newContent,
+          blockMtimeNs,
+          blockMtime,
+          blockAuthorityVersion,
+        );
         if (!alive) return;
         blockOriginalText = newContent;
         blockMtime = res.mtime;
         blockMtimeNs = res.mtime_ns ?? null;
+        blockAuthorityVersion = res.authority_version ?? null;
       } catch (err: unknown) {
         const msg =
           err instanceof Error ? err.message : String(err);

@@ -153,8 +153,10 @@ impl GraphIndexer {
         // Drop the watch first so the channel closes; the worker
         // then exits on RecvTimeoutError::Disconnected. Without this
         // we'd race the stop flag against in-flight events.
-        let watch = self.inner.watch.lock().unwrap().take();
-        drop(watch);
+        if let Some(watch) = self.inner.watch.lock().unwrap().take() {
+            watch.stop();
+            watch.join();
+        }
         if let Some(t) = self.inner.thread.lock().unwrap().take() {
             let _ = t.join();
         }
@@ -285,6 +287,9 @@ fn apply_event(
     debounce: Duration,
     now: Instant,
 ) {
+    if event.generation != workspace.scope_policy().generation() {
+        return;
+    }
     match event.kind {
         WatchKind::ProviderError => {
             // Stream untrusted: pending entries may be wrong, drop

@@ -632,11 +632,11 @@ mod tests {
         registry
             .reconcile_event(
                 &workspace,
-                WatchEvent {
-                    kind: WatchKind::Modified,
-                    path: Some("a.md".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Modified,
+                    "a.md",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
         assert!(a.drain().is_empty(), "own flush echo must not fan");
@@ -647,11 +647,11 @@ mod tests {
         registry
             .reconcile_event(
                 &workspace,
-                WatchEvent {
-                    kind: WatchKind::Modified,
-                    path: Some("a.md".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Modified,
+                    "a.md",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
         let frames = a.drain();
@@ -671,18 +671,17 @@ mod tests {
         a.drain();
         let session = a.handle.session().clone();
 
-        // Dirty the session, then delete the file out from under it.
-        a.push_to("two\n").unwrap();
-        a.drain();
+        // Delete the file while the session is clean. Dirty deletion
+        // is a conflict and is covered in doc_sessions.
         std::fs::remove_file(root.path().join("a.md")).unwrap();
         registry
             .reconcile_event(
                 &workspace,
-                WatchEvent {
-                    kind: WatchKind::Removed,
-                    path: Some("a.md".into()),
-                    to: None,
-                },
+                WatchEvent::file(
+                    WatchKind::Removed,
+                    "a.md",
+                    chan_workspace::WorkspaceGeneration::default(),
+                ),
             )
             .await;
         // Absence corroborates across two observations before the

@@ -1,6 +1,6 @@
 # Rework the devserver startup-journal branch (fdstore boot mounts)
 
-Status: REGISTERED for v0.77.0. Branch
+Status: REGISTERED for v0.76.0. Branch
 `claude/dev-server-startup-journal-jrl3rw` (a42436ac) was reviewed
 adversarially (20 verified findings): real idea, wrong disease for
 the rebuild-storm incident, and unsafe to merge as-is. This item is

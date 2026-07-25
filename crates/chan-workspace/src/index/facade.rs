@@ -26,7 +26,8 @@ use super::fusion;
 use super::vectors;
 use super::vectors::{VectorError, VectorStore};
 use crate::error::ChanError;
-use crate::fs_ops::{self, WalkFilter};
+use crate::fs_ops::{self, IndexScopePolicy, WalkFilter};
+use crate::workspace::WorkspaceGeneration;
 
 /// Emit a one-shot `tracing::warn!` when chan-workspace
 /// falls back to BM25-only because the BGE embedding model isn't
@@ -170,7 +171,7 @@ pub struct Index {
     /// Directory-name blocklist applied by `build_all`'s tree walk.
     /// Workspace forwards the Library filter here before each reindex
     /// so search and graph rebuilds use the same exclusions.
-    walk_filter: Mutex<Arc<WalkFilter>>,
+    scope_policy: Mutex<Arc<IndexScopePolicy>>,
     /// Monotonic vector-store generation, bumped by `clear_vectors` (a model
     /// switch or a semantic opt-out). `build_all` and the per-file `write_file`
     /// snapshot it and treat any vector write / stamp as void if it moved, so a
@@ -252,7 +253,11 @@ impl Index {
             vectors,
             #[cfg(feature = "embeddings")]
             embedder: Mutex::new(None),
-            walk_filter: Mutex::new(Arc::new(WalkFilter::default())),
+            scope_policy: Mutex::new(Arc::new(IndexScopePolicy::new(
+                workspace_root.to_path_buf(),
+                WorkspaceGeneration::INITIAL,
+                WalkFilter::default(),
+            )?)),
             vectors_epoch: AtomicU64::new(0),
         })
     }
@@ -262,8 +267,8 @@ impl Index {
     /// keeps its snapshot (the filter is sampled once at the top of
     /// `build_all`). Workspace calls this from `reindex_with` before
     /// kicking off the build.
-    pub fn set_walk_filter(&self, filter: Arc<WalkFilter>) {
-        *self.walk_filter.lock().unwrap() = filter;
+    pub fn set_scope_policy(&self, policy: Arc<IndexScopePolicy>) {
+        *self.scope_policy.lock().unwrap() = policy;
     }
 
     /// Re-open after wiping `index_dir`. Intended for `--rebuild`.
@@ -473,8 +478,8 @@ impl Index {
         // declaration trips `unused_variables` under `-D warnings`.
         #[cfg(feature = "embeddings")]
         let model_at_start = cfg_at_start.model.clone();
-        let filter = Arc::clone(&self.walk_filter.lock().unwrap());
-        let files = list_indexable(&self.workspace_root, &filter)?;
+        let policy = Arc::clone(&self.scope_policy.lock().unwrap());
+        let files = list_indexable(&self.workspace_root, &policy)?;
         let total = files.len();
         let mut indexed = 0usize;
         let mut chunks_total = 0usize;
@@ -1407,8 +1412,8 @@ fn wipe_vectors_dir(index_dir: &Path) -> Result<(), IndexError> {
 /// Calls `is_indexable_text`, not `is_editable_text`: the wider
 /// editor gate (which also covers `.py`, `.json`, Makefile, ...)
 /// must not pull arbitrary source/config text into the index.
-fn list_indexable(root: &Path, filter: &WalkFilter) -> Result<Vec<String>, IndexError> {
-    let mut out: Vec<String> = fs_ops::walk_workspace_filtered(root, filter)
+fn list_indexable(root: &Path, policy: &IndexScopePolicy) -> Result<Vec<String>, IndexError> {
+    let mut out: Vec<String> = fs_ops::walk_workspace_scoped(root, policy)
         .filter(|e| e.file_type().is_file())
         .filter_map(|e| {
             e.path()
@@ -1488,7 +1493,13 @@ mod tests {
         write("a/b/c/leaf.md");
         write("m.md");
         write("a/deep.md");
-        let files = list_indexable(root, &WalkFilter::default()).unwrap();
+        let policy = IndexScopePolicy::new(
+            root.to_path_buf(),
+            WorkspaceGeneration::INITIAL,
+            WalkFilter::default(),
+        )
+        .unwrap();
+        let files = list_indexable(root, &policy).unwrap();
         // Depth (count of '/') ascending, lexicographic within a depth: the
         // root notes index before the deep leaf.
         assert_eq!(files, vec!["m.md", "z.md", "a/deep.md", "a/b/c/leaf.md"]);

@@ -11,6 +11,7 @@ import type {
   DraftPromoteResponse,
   ExcludedDirsView,
   FileResponse,
+  FileWriteResponse,
   FsGraphResponse,
   PreflightSnapshot,
   PreflightDecisionRequest,
@@ -222,7 +223,24 @@ function responseTextError(res: Response): Promise<never> {
   return res.text()
     .catch(() => res.statusText)
     .then((text) => {
-      throw new ApiError(res.status, text || res.statusText);
+      let data: unknown = null;
+      let message = text || res.statusText;
+      if (text) {
+        try {
+          data = JSON.parse(text);
+          if (
+            data &&
+            typeof data === "object" &&
+            "error" in (data as Record<string, unknown>) &&
+            typeof (data as { error: unknown }).error === "string"
+          ) {
+            message = (data as { error: string }).error;
+          }
+        } catch {
+          // Keep the raw text fallback.
+        }
+      }
+      throw new ApiError(res.status, message, data);
     });
 }
 
@@ -396,6 +414,10 @@ async function readFileStream(
         path: typeof event.path === "string" ? event.path : path,
         mtime: typeof event.mtime === "number" ? event.mtime : null,
         mtime_ns: typeof event.mtime_ns === "string" ? event.mtime_ns : null,
+        authority_version:
+          typeof event.authority_version === "number" ? event.authority_version : null,
+        disk_conflicted:
+          typeof event.disk_conflicted === "boolean" ? event.disk_conflicted : false,
         path_class: event.path_class as FileResponse["path_class"],
         writable: typeof event.writable === "boolean" ? event.writable : true,
         size: typeof event.size === "number" ? event.size : undefined,
@@ -444,6 +466,8 @@ async function readFileStream(
     content,
     mtime: meta.mtime ?? null,
     mtime_ns: meta.mtime_ns ?? null,
+    authority_version: meta.authority_version ?? null,
+    disk_conflicted: meta.disk_conflicted ?? false,
     path_class: meta.path_class,
     writable: meta.writable ?? true,
   };
@@ -636,32 +660,37 @@ export const api = {
   },
   read: (path: string) => req<FileResponse>("GET", `/api/files/${encPath(path)}`),
   readStream: readFileStream,
-  /// Persist `content` at `path`. When `expectedMtimeNs` is provided,
-  /// the server CAS-writes via Workspace::write_text_if_unchanged and
-  /// rejects with 409 + { current_mtime_ns } if the on-disk mtime
-  /// differs (an external edit landed since the client last read).
-  /// Returns the new mtime token so callers store it for the next CAS.
-  write: (
+  /// Persist raw UTF-8 text progressively. A changed write under a
+  /// live authority requires both its open-time mtime and authority
+  /// version; stale values reject with structured retry metadata.
+  write: async (
     path: string,
     content: string,
     expectedMtimeNs?: string | null,
     expectedMtime?: number | null,
-  ) => {
-    const body: {
-      content: string;
-      expected_mtime_ns?: string;
-      expected_mtime?: number | null;
-    } = { content };
+    authorityVersion?: number | null,
+  ): Promise<FileWriteResponse> => {
+    const params = new URLSearchParams();
     if (expectedMtimeNs !== undefined && expectedMtimeNs !== null) {
-      body.expected_mtime_ns = expectedMtimeNs;
-    } else if (expectedMtime !== undefined) {
-      body.expected_mtime = expectedMtime;
+      params.set("expected_mtime_ns", expectedMtimeNs);
+    } else if (expectedMtime !== undefined && expectedMtime !== null) {
+      params.set("expected_mtime", String(expectedMtime));
     }
-    return req<{ mtime: number | null; mtime_ns?: string | null }>(
-      "PUT",
-      `/api/files/${encPath(path)}`,
-      body,
-    );
+    if (authorityVersion !== undefined && authorityVersion !== null) {
+      params.set("authority_version", String(authorityVersion));
+    }
+    const suffix = params.size > 0 ? `?${params.toString()}` : "";
+    const headers = {
+      ...directAuthHeaders(),
+      "content-type": "text/plain; charset=utf-8",
+    };
+    const res = await chanFetch(apiPath(`/api/files/${encPath(path)}${suffix}`), {
+      method: "PUT",
+      headers,
+      body: content,
+    });
+    if (!res.ok) await responseTextError(res);
+    return (await res.json()) as FileWriteResponse;
   },
   create: (path: string, isDir: boolean, content?: string) =>
     req<void>("POST", "/api/files", { path, is_dir: isDir, content }),
@@ -679,8 +708,8 @@ export const api = {
   ): Promise<{ path: string; size: number }> =>
     new Promise((resolve, reject) => {
       const form = new FormData();
-      form.append("file", file);
       form.append("dir", dir);
+      form.append("file", file);
       const xhr = createXhr();
       xhr.open("POST", apiPath("/api/files/upload"));
       for (const [name, value] of Object.entries(directAuthHeaders())) {
@@ -743,8 +772,8 @@ export const api = {
   ): Promise<{ path: string; size: number }> =>
     new Promise((resolve, reject) => {
       const form = new FormData();
-      form.append("file", file);
       form.append("path", path);
+      form.append("file", file);
       const xhr = createXhr();
       xhr.open("POST", apiPath("/api/files/upload"));
       for (const [name, value] of Object.entries(directAuthHeaders())) {

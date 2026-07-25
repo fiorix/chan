@@ -9,14 +9,14 @@
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use chan_report::{CocomoParams, Index, Report, ReportOptions, Scope, UpdateOutcome};
 
 use crate::error::{ChanError, Result};
-use crate::fs_ops::atomic_write;
+use crate::fs_ops::{atomic_write, IndexScopePolicy};
 use crate::watch::{WatchCallback, WatchEvent, WatchKind};
 
 /// Bursts of filesystem events (`git checkout`, bulk save) hit the
@@ -54,9 +54,9 @@ impl ReportState {
     pub(crate) fn open(
         workspace_root: &Path,
         jsonl_path: &Path,
-        excluded_dirs: &[String],
+        policy: Arc<IndexScopePolicy>,
     ) -> Result<Arc<Self>> {
-        let opts = report_options(workspace_root, excluded_dirs);
+        let opts = report_options(workspace_root, policy);
 
         // Try the persisted form first. Any error (missing file,
         // schema mismatch, parse error, partial write) falls
@@ -110,6 +110,9 @@ impl ReportState {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
+            if idx.path_policy_generation() != Some(ev.generation.get()) {
+                return;
+            }
             match ev.kind {
                 WatchKind::Removed => match &ev.path {
                     Some(p) => idx.remove(p),
@@ -177,6 +180,35 @@ impl ReportState {
         idx.snapshot(scope, &self.cocomo)
     }
 
+    pub(crate) fn policy_generation(&self) -> Option<u64> {
+        match self.index.read() {
+            Ok(index) => index.path_policy_generation(),
+            Err(poisoned) => poisoned.into_inner().path_policy_generation(),
+        }
+    }
+
+    /// Replace the cached report with a scan governed by a newer scope.
+    ///
+    /// The caller holds the workspace derived-state serialization lock, so
+    /// watcher mutations cannot land between the scan and swap.
+    pub(crate) fn replace_policy(
+        &self,
+        workspace_root: &Path,
+        policy: Arc<IndexScopePolicy>,
+    ) -> Result<()> {
+        let opts = report_options(workspace_root, policy);
+        let replacement =
+            Index::scan(&opts).map_err(|error| ChanError::Report(error.to_string()))?;
+        match self.index.write() {
+            Ok(mut index) => *index = replacement,
+            Err(poisoned) => *poisoned.into_inner() = replacement,
+        }
+        if let Some(tx) = &self.flush_tx {
+            let _ = tx.send(());
+        }
+        Ok(())
+    }
+
     /// O(1) cached read of the per-directory aggregation. Mirrors
     /// `Index::dir_report` and exposes `None` to the caller when
     /// the directory is untracked so the HTTP layer can serve a
@@ -197,27 +229,23 @@ impl ReportState {
 pub(crate) fn load_snapshot_if_available(
     workspace_root: &Path,
     jsonl_path: &Path,
-    excluded_dirs: &[String],
+    policy: Arc<IndexScopePolicy>,
 ) -> Result<Option<Report>> {
     let file = match std::fs::File::open(jsonl_path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(ChanError::Report(error.to_string())),
     };
-    let opts = report_options(workspace_root, excluded_dirs);
+    let opts = report_options(workspace_root, policy);
     let Ok(index) = Index::load_jsonl(BufReader::new(file), &opts) else {
         return Ok(None);
     };
     Ok(Some(index.snapshot(&Scope::All, &opts.cocomo)))
 }
 
-fn report_options(workspace_root: &Path, excluded_dirs: &[String]) -> ReportOptions {
+fn report_options(workspace_root: &Path, policy: Arc<IndexScopePolicy>) -> ReportOptions {
     let mut opts = ReportOptions::new(workspace_root);
-    // The report and workspace index must prune the same dependency trees.
-    opts.exclude_globs = excluded_dirs
-        .iter()
-        .map(|name| format!("{}/", name.trim_end_matches('/')))
-        .collect();
+    opts.path_policy = Some(policy);
     opts
 }
 
@@ -244,18 +272,25 @@ impl Drop for ReportState {
 /// stays fast. The scan runs separately (`Workspace::report()` / `boot()`) and
 /// fills the cell; until then report events are dropped, since the scan itself
 /// captures the current filesystem state. The user callback always sees every
-/// event.
+/// event. Warm report mutations take the workspace's shared derived-state
+/// serialization boundary; the user callback runs after that guard is dropped.
 pub(crate) struct ReportFanOut {
     user_cb: Arc<dyn WatchCallback>,
     report: Arc<OnceLock<Arc<ReportState>>>,
+    write_serial: Arc<Mutex<()>>,
 }
 
 impl ReportFanOut {
     pub(crate) fn new(
         user_cb: Arc<dyn WatchCallback>,
         report: Arc<OnceLock<Arc<ReportState>>>,
+        write_serial: Arc<Mutex<()>>,
     ) -> Arc<Self> {
-        Arc::new(Self { user_cb, report })
+        Arc::new(Self {
+            user_cb,
+            report,
+            write_serial,
+        })
     }
 }
 
@@ -265,6 +300,7 @@ impl WatchCallback for ReportFanOut {
         // the slot is empty and the event is a no-op for the report (the
         // pending scan reflects this file's on-disk state anyway).
         if let Some(report) = self.report.get() {
+            let _serial = self.write_serial.lock().unwrap();
             report.on_event(&event);
         }
         self.user_cb.on_event(event);
@@ -335,29 +371,41 @@ mod tests {
         let root = tmp.path();
         fs::write(root.join("a.md"), "# A\n\nprose\n").unwrap();
         let jsonl = root.join(".chan/report.jsonl");
-        let state = ReportState::open(root, &jsonl, &[]).unwrap();
+        let policy = Arc::new(
+            IndexScopePolicy::new(
+                root.to_path_buf(),
+                crate::WorkspaceGeneration::INITIAL,
+                crate::WalkFilter::default(),
+            )
+            .unwrap(),
+        );
+        let state = ReportState::open(root, &jsonl, policy).unwrap();
         assert_eq!(lang_of(&state, "a.md").as_deref(), Some("Markdown"));
 
         // `mv a.md b.md`. macOS surfaces this as the destination's lone Name
         // event (the file now exists at b.md) and the source's lone Name
         // event (a.md is gone), each with `to` = None.
         fs::rename(root.join("a.md"), root.join("b.md")).unwrap();
-        state.on_event(&WatchEvent {
-            kind: WatchKind::Renamed,
-            path: Some("b.md".to_string()),
-            to: None,
-        });
+        state.on_event(&WatchEvent::rename(
+            Some("b.md".to_string()),
+            None,
+            false,
+            None,
+            crate::WorkspaceGeneration::INITIAL,
+        ));
         assert_eq!(
             lang_of(&state, "b.md").as_deref(),
             Some("Markdown"),
             "unpaired-rename destination must be indexed with its language",
         );
 
-        state.on_event(&WatchEvent {
-            kind: WatchKind::Renamed,
-            path: Some("a.md".to_string()),
-            to: None,
-        });
+        state.on_event(&WatchEvent::rename(
+            Some("a.md".to_string()),
+            None,
+            false,
+            None,
+            crate::WorkspaceGeneration::INITIAL,
+        ));
         assert!(
             lang_of(&state, "a.md").is_none(),
             "vanished rename source must be dropped from the report",

@@ -22,6 +22,7 @@ dirs = { workspace = true }
 dunce = "1"
 fs4 = { version = "0.9", features = ["sync"] }
 gray_matter = { version = "0.2", default-features = false, features = ["yaml"] }
+ignore = "0.4"
 # Local pin, not `workspace = true`: pins the file-watch backend explicitly
 # (defaults off + macos_fsevent) so a change to the workspace-wide notify
 # default cannot silently swap this crate's backend.

@@ -237,6 +237,13 @@ export type FileTab = {
   /// server treats Some(None) as "expecting a fresh file".
   savedMtime: number | null;
   savedMtimeNs?: string | null;
+  /// Version of the live doc/scene authority observed with the saved
+  /// bytes. Required alongside the disk token for fallback PUTs while
+  /// an attached authority still exists.
+  authorityVersion?: number | null;
+  /// The live authority has retained divergent disk state and requires
+  /// explicit conflict resolution.
+  diskConflicted?: boolean;
   mode: Mode;
   loading: boolean;
   loadProgress?: { loadedBytes: number; totalBytes: number | null };
@@ -2516,6 +2523,8 @@ async function loadTabContent(
       start.saved = "";
       start.savedMtime = null;
       start.savedMtimeNs = null;
+      start.authorityVersion = null;
+      start.diskConflicted = false;
       start.loading = true;
       start.loadProgress = { loadedBytes: 0, totalBytes: null };
       start.error = null;
@@ -2531,6 +2540,8 @@ async function loadTabContent(
         }
         t.savedMtime = meta.mtime ?? null;
         t.savedMtimeNs = meta.mtime_ns ?? null;
+        t.authorityVersion = meta.authority_version ?? null;
+        t.diskConflicted = meta.disk_conflicted ?? false;
         t.repoRoot = meta.repo_root ?? null;
         t.fsWritable = meta.writable ?? true;
         t.loadProgress = {
@@ -2555,6 +2566,8 @@ async function loadTabContent(
       t.openedEmpty = r.content.trim().length === 0;
       t.savedMtime = r.mtime ?? null;
       t.savedMtimeNs = r.mtime_ns ?? null;
+      t.authorityVersion = r.authority_version ?? null;
+      t.diskConflicted = r.disk_conflicted ?? false;
       t.repoRoot = r.repo_root ?? null;
       t.error = null;
       t.fileMissing = null;
@@ -2662,6 +2675,8 @@ export async function openInPane(
     pendingReopen.saved = "";
     pendingReopen.savedMtime = null;
     pendingReopen.savedMtimeNs = null;
+    pendingReopen.authorityVersion = null;
+    pendingReopen.diskConflicted = false;
     pendingReopen.mode = defaultModeForPath(path, pendingReopen.fileKind);
     pendingReopen.loading = true;
     pendingReopen.error = null;
@@ -2718,6 +2733,8 @@ export async function openInPane(
     saved: "",
     savedMtime: null,
     savedMtimeNs: null,
+    authorityVersion: null,
+    diskConflicted: false,
     mode: defaultModeForPath(path, fileKind),
     loading: true,
     error: null,
@@ -3431,6 +3448,8 @@ function cloneTab(src: Tab): Tab {
     saved: src.saved,
     savedMtime: src.savedMtime,
     savedMtimeNs: src.savedMtimeNs ?? null,
+    authorityVersion: src.authorityVersion ?? null,
+    diskConflicted: src.diskConflicted ?? false,
     mode: src.mode,
     loading: src.loading,
     error: src.error,
@@ -4542,7 +4561,17 @@ export const conflictDialog = $state<{
   /// re-prompts if a third edit landed in the meantime).
   currentMtime: number | null;
   currentMtimeNs: string | null;
-}>({ open: false, tabId: null, path: "", currentMtime: null, currentMtimeNs: null });
+  currentAuthorityVersion: number | null;
+  diskConflicted: boolean;
+}>({
+  open: false,
+  tabId: null,
+  path: "",
+  currentMtime: null,
+  currentMtimeNs: null,
+  currentAuthorityVersion: null,
+  diskConflicted: false,
+});
 
 export function dismissConflict(): void {
   conflictDialog.open = false;
@@ -4550,6 +4579,8 @@ export function dismissConflict(): void {
   conflictDialog.path = "";
   conflictDialog.currentMtime = null;
   conflictDialog.currentMtimeNs = null;
+  conflictDialog.currentAuthorityVersion = null;
+  conflictDialog.diskConflicted = false;
 }
 
 function findFileTabById(tabId: string): { paneId: string; tab: FileTab } | null {
@@ -4581,12 +4612,16 @@ export async function overwriteConflictedTab(): Promise<void> {
   const tabId = conflictDialog.tabId;
   const currentMtime = conflictDialog.currentMtime;
   const currentMtimeNs = conflictDialog.currentMtimeNs;
+  const currentAuthorityVersion = conflictDialog.currentAuthorityVersion;
+  const diskConflicted = conflictDialog.diskConflicted;
   dismissConflict();
   if (!tabId) return;
   const found = findFileTabById(tabId);
   if (!found) return;
   found.tab.savedMtime = currentMtime;
   found.tab.savedMtimeNs = currentMtimeNs;
+  found.tab.authorityVersion = currentAuthorityVersion;
+  found.tab.diskConflicted = diskConflicted;
   await performSave(found.tab);
 }
 
@@ -4759,14 +4794,23 @@ async function performSaveOnce(t: FileTab): Promise<void> {
     : sourceContent;
   const expectedMtimeNs = t.savedMtimeNs ?? null;
   const expectedMtime = t.savedMtime;
+  const authorityVersion = t.authorityVersion ?? null;
   try {
-    const r = await api.write(path, content, expectedMtimeNs, expectedMtime);
+    const r = await api.write(
+      path,
+      content,
+      expectedMtimeNs,
+      expectedMtime,
+      authorityVersion,
+    );
     if (stripOnSave && content !== sourceContent && t.content === sourceContent) {
       t.content = content;
     }
     t.saved = content;
     t.savedMtime = r.mtime ?? null;
     t.savedMtimeNs = r.mtime_ns ?? null;
+    t.authorityVersion = r.authority_version ?? null;
+    t.diskConflicted = r.disk_conflicted ?? false;
     t.error = null;
     t.fileMissing = null;
     mirrorToSiblings(path, content, t.id);
@@ -4776,12 +4820,17 @@ async function performSaveOnce(t: FileTab): Promise<void> {
       const data = e.data as {
         current_mtime?: number | null;
         current_mtime_ns?: string | null;
+        current_authority_version?: number | null;
+        disk_conflicted?: boolean;
       } | null;
       conflictDialog.open = true;
       conflictDialog.tabId = t.id;
       conflictDialog.path = t.path;
       conflictDialog.currentMtime = data?.current_mtime ?? null;
       conflictDialog.currentMtimeNs = data?.current_mtime_ns ?? null;
+      conflictDialog.currentAuthorityVersion =
+        data?.current_authority_version ?? null;
+      conflictDialog.diskConflicted = data?.disk_conflicted ?? false;
       return;
     }
     throw e;
@@ -5582,6 +5631,8 @@ function restoreFileTabFromSer(sertab: SerTab): FileTab {
     saved: "",
     savedMtime: null,
     savedMtimeNs: null,
+    authorityVersion: null,
+    diskConflicted: false,
     // Trust the persisted mode when it is a valid pair for
     // this tab's path; otherwise fall back to the default.
     // Guards: a markdown-only "wysiwyg" mode persisted for a
