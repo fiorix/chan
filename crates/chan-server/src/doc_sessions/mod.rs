@@ -198,6 +198,10 @@ struct DocState {
     /// Skip the debounce on the next flusher pass (detach, forced
     /// flush).
     flush_now: bool,
+    /// Authority changed since the last recovery record capture.
+    /// Record capture clears this under the state lock before IO, so
+    /// a push landing during persistence remains pending.
+    recovery_pending: bool,
     /// CAS token of the last flushed (or adopted) disk state. None
     /// when the file is gone or the token is unknown; a CAS write
     /// against None creates the file.
@@ -484,6 +488,7 @@ impl DocSession {
                 session_state: SessionState::Clean,
                 baseline,
                 flush_now: false,
+                recovery_pending: false,
                 flushed_mtime_ns: stat.mtime_ns,
                 flush_epoch_version: 0,
                 flush_failures: 0,
@@ -571,14 +576,35 @@ impl DocSession {
                 {
                     return Err("document recovery conflict version mismatch".into());
                 }
-                SessionState::Conflicted(SessionConflict {
-                    id: conflict.id,
-                    baseline_version: baseline_hash,
-                    disk_version: disk_hash,
-                    authority_version: version,
-                    disk_mtime_ns,
-                    disk_content: disk_text.clone(),
-                })
+                let collapsed = if disk_present && disk_text == authority {
+                    Some(("clean", SessionState::Clean))
+                } else if disk_present && disk_text == baseline.content {
+                    Some((
+                        "dirty",
+                        SessionState::Dirty {
+                            since: Instant::now(),
+                        },
+                    ))
+                } else {
+                    None
+                };
+                if let Some((collapsed_to, state)) = collapsed {
+                    tracing::info!(
+                        path = %path,
+                        collapsed_to,
+                        "document recovery conflict matches live disk"
+                    );
+                    state
+                } else {
+                    SessionState::Conflicted(SessionConflict {
+                        id: conflict.id,
+                        baseline_version: baseline_hash,
+                        disk_version: disk_hash,
+                        authority_version: version,
+                        disk_mtime_ns,
+                        disk_content: disk_text.clone(),
+                    })
+                }
             }
             RecoveryState::Removed if disk_present => {
                 return Ok(Self::new(
@@ -620,6 +646,7 @@ impl DocSession {
                 session_state,
                 baseline,
                 flush_now: false,
+                recovery_pending: false,
                 flushed_mtime_ns: disk_mtime_ns,
                 flush_epoch_version: version,
                 flush_failures: 0,
@@ -635,7 +662,8 @@ impl DocSession {
     }
 
     fn recovery_record(&self) -> RecoveryRecord {
-        let st = self.lock_state();
+        let mut st = self.lock_state();
+        let _ = std::mem::take(&mut st.recovery_pending);
         let lifecycle = match &st.session_state {
             SessionState::Clean => RecoveryState::Clean,
             SessionState::Dirty { .. } => RecoveryState::Dirty,
@@ -683,6 +711,20 @@ impl DocSession {
             .await
             .map_err(|error| format!("document recovery write task failed: {error}"))?
             .map_err(|error| error.to_string())
+    }
+
+    async fn persist_pending_recovery(self: &Arc<Self>, workspace: &Arc<Workspace>) {
+        let _io = self.io_lock.lock().await;
+        if !self.lock_state().recovery_pending {
+            return;
+        }
+        if let Err(error) = self.persist_recovery_locked(workspace).await {
+            tracing::warn!(
+                path = self.path,
+                %error,
+                "document recovery persistence degraded"
+            );
+        }
     }
 
     pub(crate) async fn persist_recovery(self: &Arc<Self>, workspace: &Arc<Workspace>) {
@@ -1145,6 +1187,7 @@ impl DocAttachHandle {
         self.attach_id
     }
 
+    #[cfg(test)]
     pub fn session(&self) -> &Arc<DocSession> {
         &self.session
     }
@@ -1220,6 +1263,7 @@ impl DocAttachHandle {
                 st.append_log(entry);
             }
             st.mark_dirty();
+            st.recovery_pending = true;
             st.fan(&frame);
         }
         let ok = serialize(&ServerFrame::PushOk {
@@ -1501,16 +1545,21 @@ impl DocRegistry {
     /// elapsed or flush requested).
     pub async fn flush_pass(&self, workspace: &Arc<Workspace>, self_writes: &SelfWrites) {
         for session in self.sessions_snapshot() {
-            let due = {
+            let (due, recovery_pending) = {
                 let st = session.lock_state();
-                st.flush_now
-                    || st
-                        .session_state
-                        .dirty_since()
-                        .is_some_and(|since| since.elapsed() >= DOC_FLUSH_DEBOUNCE)
+                (
+                    st.flush_now
+                        || st
+                            .session_state
+                            .dirty_since()
+                            .is_some_and(|since| since.elapsed() >= DOC_FLUSH_DEBOUNCE),
+                    st.recovery_pending,
+                )
             };
             if due {
                 flush_session(&session, workspace, self_writes).await;
+            } else if recovery_pending {
+                session.persist_pending_recovery(workspace).await;
             }
         }
     }
@@ -2561,6 +2610,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn conflicted_rehydration_collapses_when_disk_already_matches_authority() {
+        let baseline = "alpha\nbeta\n";
+        let authority = "alpha local\nbeta\n";
+        let disk = "alpha disk\nbeta\n";
+        let fx = fixture(&[("a.md", baseline)]);
+        let (handle, mut frames) = attach(&fx, "a.md", "w1", None).await;
+        drain(&mut frames);
+        handle
+            .session()
+            .apply_replace("c1", authority)
+            .expect("local edit");
+        drain(&mut frames);
+
+        fx.workspace.write_text("a.md", disk).unwrap();
+        handle.session().lock_state().flushed_mtime_ns = None;
+        reconcile_session(handle.session(), &fx.workspace).await;
+        backdate_pending_fold(handle.session());
+        fx.registry.reconcile_pending(&fx.workspace).await;
+        assert!(handle.session().http_read_view().disk_conflicted);
+        drop(handle);
+
+        fx.workspace.write_text("a.md", authority).unwrap();
+        let restarted = Arc::new(DocRegistry::new());
+        let reopened = restarted
+            .attach(&fx.workspace, "a.md", "w2", None)
+            .await
+            .expect("restart attach");
+        assert!(
+            !reopened.session().http_read_view().disk_conflicted,
+            "a resolved conflict must not re-prompt"
+        );
+        {
+            let state = reopened.session().lock_state();
+            assert!(matches!(state.session_state, SessionState::Clean));
+            assert_eq!(state.text, authority);
+            assert_eq!(state.baseline.content, authority);
+        }
+
+        restarted.flush_pass(&fx.workspace, &fx.self_writes).await;
+        assert_eq!(fx.workspace.read_text("a.md").unwrap(), authority);
+    }
+
+    #[tokio::test]
+    async fn conflicted_rehydration_collapses_to_dirty_when_disk_matches_baseline() {
+        let baseline = "alpha\nbeta\n";
+        let authority = "alpha local\nbeta\n";
+        let disk = "alpha disk\nbeta\n";
+        let fx = fixture(&[("a.md", baseline)]);
+        let (handle, mut frames) = attach(&fx, "a.md", "w1", None).await;
+        drain(&mut frames);
+        handle
+            .session()
+            .apply_replace("c1", authority)
+            .expect("local edit");
+        drain(&mut frames);
+
+        fx.workspace.write_text("a.md", disk).unwrap();
+        handle.session().lock_state().flushed_mtime_ns = None;
+        reconcile_session(handle.session(), &fx.workspace).await;
+        backdate_pending_fold(handle.session());
+        fx.registry.reconcile_pending(&fx.workspace).await;
+        assert!(handle.session().http_read_view().disk_conflicted);
+        drop(handle);
+
+        fx.workspace.write_text("a.md", baseline).unwrap();
+        let restarted = Arc::new(DocRegistry::new());
+        let reopened = restarted
+            .attach(&fx.workspace, "a.md", "w2", None)
+            .await
+            .expect("restart attach");
+        assert!(
+            !reopened.session().http_read_view().disk_conflicted,
+            "a baseline-restored conflict must not re-prompt"
+        );
+        {
+            let state = reopened.session().lock_state();
+            assert!(matches!(state.session_state, SessionState::Dirty { .. }));
+            assert_eq!(state.text, authority);
+            assert_eq!(state.baseline.content, baseline);
+        }
+
+        backdate_dirty(reopened.session());
+        restarted.flush_pass(&fx.workspace, &fx.self_writes).await;
+        assert_eq!(fx.workspace.read_text("a.md").unwrap(), authority);
+    }
+
+    #[tokio::test]
     async fn delete_while_dirty_enters_conflicted() {
         let fx = fixture(&[("a.md", "base")]);
         let (ha, mut rx) = attach(&fx, "a.md", "w1", None).await;
@@ -2687,6 +2823,59 @@ mod tests {
 
         let (text, _) = ha.session().authority_view();
         assert_eq!(text, "aXb");
+    }
+
+    #[tokio::test]
+    async fn push_persists_recovery_on_flusher_tick_not_ack_path() {
+        let fx = fixture(&[("a.md", "base")]);
+        let sidecar = fx
+            .root
+            .path()
+            .join(".chan/editor-sessions/v1/documents/a.md.json");
+        let (handle, _frames) = attach(&fx, "a.md", "w1", None).await;
+
+        handle
+            .push(0, vec![update("c1", json!([4, [0, "x"]]))])
+            .unwrap();
+        assert!(
+            !sidecar.exists(),
+            "the ack path must not write the recovery sidecar"
+        );
+
+        fx.registry.flush_pass(&fx.workspace, &fx.self_writes).await;
+        assert!(
+            sidecar.exists(),
+            "the flusher tick must persist pending recovery"
+        );
+        let record: Value = serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
+        assert_eq!(record["authority"], "basex");
+        assert_eq!(record["authority_version"], 1);
+    }
+
+    #[tokio::test]
+    async fn push_after_recovery_capture_stays_pending_for_next_tick() {
+        let fx = fixture(&[("a.md", "base")]);
+        let sidecar = fx
+            .root
+            .path()
+            .join(".chan/editor-sessions/v1/documents/a.md.json");
+        let (handle, _frames) = attach(&fx, "a.md", "w1", None).await;
+        handle
+            .push(0, vec![update("c1", json!([4, [0, "x"]]))])
+            .unwrap();
+
+        let captured = handle.session().recovery_record();
+        assert!(!handle.session().lock_state().recovery_pending);
+        handle
+            .push(1, vec![update("c1", json!([5, [0, "y"]]))])
+            .unwrap();
+        assert!(handle.session().lock_state().recovery_pending);
+
+        recovery::store(&fx.workspace, &captured).unwrap();
+        fx.registry.flush_pass(&fx.workspace, &fx.self_writes).await;
+        let record: Value = serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
+        assert_eq!(record["authority"], "basexy");
+        assert_eq!(record["authority_version"], 2);
     }
 
     #[tokio::test]
