@@ -934,6 +934,14 @@ mod tests {
             "turn breaks must be conditional on pending or newly arriving input"
         );
         assert!(
+            !queue_guidance.contains("Take real turn breaks whenever a safe checkpoint permits"),
+            "queue guidance must reject an unconditional turn-break directive"
+        );
+        assert!(
+            queue_guidance.contains("for the lead, where every lane's pokes converge"),
+            "queue guidance must retain the lead's converging traffic"
+        );
+        assert!(
             queue_guidance.contains("nothing is pending")
                 && queue_guidance.contains("brief defines a next step")
                 && queue_guidance.contains("CONTINUE")
