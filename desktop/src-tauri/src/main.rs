@@ -4194,6 +4194,36 @@ fn open_devtools(window: tauri::WebviewWindow) {
     window.open_devtools();
 }
 
+/// New Window from a menu-less SPA window's key bridge (Ctrl+Shift+N
+/// off-mac; also a control terminal's Ctrl+Shift+T, whose New-terminal
+/// chord means a standalone terminal). Off macOS only the launcher keeps
+/// a menubar, so these windows route the chord over IPC -- focus-proof
+/// and live on the connecting screen, where the SPA command bus is dead.
+/// The routing mirrors the launcher menu's New Window item but keyed on
+/// the INVOKING window's label instead of focus: a workspace-class
+/// window (workspace / outbound / standalone terminal / watcher-opened)
+/// opens another window of its OWN connection; anything else (a control
+/// terminal) spawns a standalone terminal.
+#[tauri::command]
+fn open_new_window(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+    let label = window.label();
+    if serve::is_workspace_webview_label(label) {
+        open_new_window_for_label(&app, label)
+    } else {
+        spawn_terminal_window(&app);
+        Ok(())
+    }
+}
+
+/// Quit from a menu-less SPA window's key bridge (Ctrl+Q off-mac): the
+/// same confirm-then-quit flow the launcher's Quit menu item runs. The
+/// launcher's own Ctrl+Q stays with its native menu item; macOS is
+/// untouched (Cmd+Q is the menubar's).
+#[tauri::command]
+fn request_app_quit(app: tauri::AppHandle) {
+    request_quit(&app);
+}
+
 /// Close-cascade tail. The SPA
 /// invokes this when the last tab and then the last empty pane of a
 /// workspace window are closed: close the window, and -- only if this
@@ -5057,6 +5087,29 @@ fn main() {
                         };
                         match builder.build() {
                             Ok(main) => {
+                                // Off-mac the launcher is the ONLY window
+                                // with a menubar, attached per-window (no
+                                // app-wide default exists for it to
+                                // inherit): every other window is born
+                                // menu-less and gets its chords from
+                                // KEY_BRIDGE_JS. The bar could not be
+                                // attached in `install_app_menu` -- this
+                                // window did not exist yet. Best-effort: a
+                                // failure leaves the launcher bar-less,
+                                // like every other window.
+                                #[cfg(not(target_os = "macos"))]
+                                {
+                                    match build_launcher_menu(app.handle()) {
+                                        Ok(menu) => {
+                                            if let Err(e) = main.set_menu(menu) {
+                                                tracing::warn!(error = %e, "attaching the launcher menu failed");
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, "building the launcher menu failed")
+                                        }
+                                    }
+                                }
                                 let main_for_event = main.clone();
                                 let app_for_close = app.handle().clone();
                                 main.on_window_event(move |event| {
@@ -5299,6 +5352,8 @@ fn main() {
             reveal_in_finder,
             reload_window,
             open_devtools,
+            open_new_window,
+            request_app_quit,
             request_close_window,
             hide_window_from_close_confirm,
             abandon_devserver_for_window,
@@ -5405,12 +5460,12 @@ fn main() {
 /// macOS starts from Tauri's `Menu::default` (the system menubar already
 /// carries the App menu's About / Quit): ONE global menubar serves every
 /// window, so its items route by the focused window's kind. Off macOS the
-/// menubar renders per window, so menus are per-window-KIND: this installs
-/// the launcher-shape bar (`build_launcher_menu`) as the app-wide default
-/// (shown by the launcher, control terminals, and any window built without
-/// an explicit menu); workspace and standalone-terminal windows get their
-/// own bars at build time (`build_workspace_menu` / `build_launcher_menu`
-/// in `serve::build_workspace_window`).
+/// menubar renders per window and only the LAUNCHER carries one: there is
+/// deliberately no app-wide default, and the launcher bar
+/// (`build_launcher_menu`) is attached per-window with `Window::set_menu`
+/// when the launcher is built later in setup (it cannot be attached here
+/// -- the window does not exist yet). Every other window is born
+/// menu-less; its chords ride KEY_BRIDGE_JS (serve.rs).
 fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     // macOS: inject the window-nav items into the system menubar's Window
     // submenu. The App menu already owns About <app> and Quit, so File ▸
@@ -5556,24 +5611,24 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         menu
     };
 
-    // Linux / Windows: the app-wide default is the launcher-shape bar,
-    // WITH the New-Standalone-Terminal chord claim (the launcher webview
-    // carries no key bridge for it, so only a native accelerator can
-    // serve the chord there).
-    #[cfg(not(target_os = "macos"))]
-    let menu = build_launcher_menu(app, true, None)?;
-
+    // macOS: install the ONE global menubar. Off macOS there is no
+    // app-wide menu at all -- the launcher window gets its bar per-window
+    // when it is built (see the setup hook), and every other window is
+    // born menu-less.
+    #[cfg(target_os = "macos")]
     app.set_menu(menu)?;
+
     app.on_menu_event(handle_menu_event);
     Ok(())
 }
 
-/// Route every menubar item click / accelerator, from every menu shape.
-/// Menu events carry only the item id -- never the source window -- so
-/// per-window rows encode their owning window's label in the id (the
-/// `wscmd:` / `ws-*:` namespaces); routing by `is_focused` is reserved
-/// for items that genuinely mean "the focused window" (and for macOS,
-/// whose single global menubar has no owning window).
+/// Route every menubar item click / accelerator. Menu events carry only
+/// the item id -- never the source window -- so the dynamic Window-menu
+/// rows encode their window's label in the id (the `buried:` / `open:` /
+/// `remote:` namespaces); routing by `is_focused` is reserved for items
+/// that genuinely mean "the focused window" (and for macOS, whose single
+/// global menubar has no owning window). Off macOS only the launcher has
+/// a menubar, so the static items below fire from it alone.
 fn handle_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
     let id = event.id().as_ref();
     // Dynamic Window-menu entries (buried windows) carry their
@@ -5596,44 +5651,6 @@ fn handle_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
         open_remote_window_from_menu(app, label);
         return;
     }
-    // Per-window workspace-menu rows (off-mac). The owning window's label
-    // rides in the id, so routing never consults focus: during a GTK menu
-    // click the toplevel can read unfocused (on Wayland an open menu is a
-    // grabbing popup that takes keyboard focus), which made focus-routed
-    // items misfire on their launcher fallback.
-    #[cfg(not(target_os = "macos"))]
-    {
-        if let Some((command, label)) = parse_workspace_cmd_menu_id(id) {
-            dispatch_to_workspace_window(app, label, command);
-            return;
-        }
-        if let Some(label) = id.strip_prefix(WS_NEW_WINDOW_MENU_ID_PREFIX) {
-            // Parity with the focused route: an SPA window opens another
-            // window of its connection; a control terminal (not
-            // SPA-classified) means a standalone terminal.
-            if serve::is_workspace_webview_label(label) {
-                if let Err(e) = open_new_window_for_label(app, label) {
-                    tracing::warn!(label, error = %e, "open new window from a window menu failed");
-                }
-            } else {
-                spawn_terminal_window(app);
-            }
-            return;
-        }
-        if let Some(label) = id.strip_prefix(WS_OPEN_IN_BROWSER_MENU_ID_PREFIX) {
-            if let Err(e) = open_window_in_browser(app, label) {
-                tracing::warn!(label, error = %e, "open in browser from a workspace menu failed");
-            }
-            return;
-        }
-        if let Some(label) = id.strip_prefix(WS_CLOSE_WINDOW_MENU_ID_PREFIX) {
-            match app.get_webview_window(label) {
-                Some(window) => close_spa_or_native_window(app, window),
-                None => tracing::warn!(label, "close row pointed at a dead window"),
-            }
-            return;
-        }
-    }
     match id {
         "win-main" => {
             let _ = show_window(app, "main");
@@ -5650,11 +5667,9 @@ fn handle_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
         }
         "app-new-terminal" => {
             // macOS's single global menubar routes New Terminal by the
-            // focused window's kind. Off-mac the item appears only on
-            // launcher-shape menubars (launcher, standalone and control
-            // terminals), is labelled New Standalone Terminal, and always
-            // means a standalone window; workspace windows reach their
-            // pane-terminal toggle through their own File menu instead.
+            // focused window's kind. Off-mac the item lives only on the
+            // launcher's menubar, is labelled New Standalone Terminal,
+            // and always means a standalone window.
             #[cfg(target_os = "macos")]
             handle_new_terminal(app);
             #[cfg(not(target_os = "macos"))]
@@ -5697,91 +5712,23 @@ const REMOTE_MENU_ID_PREFIX: &str = "remote:";
 /// Disabled section header above the remote entries.
 const REMOTE_MENU_HEADER_ID: &str = "remote-header";
 /// Linux/Windows Window-submenu id (macOS uses the system
-/// `WINDOW_SUBMENU_ID` from `Menu::default`). Every off-mac menu shape
-/// uses this id for its Window submenu, so the dynamic-tail rebuild can
-/// find it in each per-window menu by one key.
+/// `WINDOW_SUBMENU_ID` from `Menu::default`). The launcher's menubar --
+/// the only off-mac bar -- uses this id for its Window submenu, so the
+/// dynamic-tail rebuild can find it by one key.
 #[cfg(not(target_os = "macos"))]
 const LINUX_WINDOW_SUBMENU_ID: &str = "chan-window-submenu";
 
-/// Menu-id namespace for the workspace File-menu rows that dispatch an
-/// SPA command: `wscmd:<command>:<label>`. The owning window's label is
-/// encoded in the id because menu events never carry a source window
-/// and focus is unreliable at menu-click time (see `handle_menu_event`).
-/// Commands never contain `:`, so the first `:` after the prefix splits
-/// the two even for composite labels like `local::<window_id>`.
-#[cfg(not(target_os = "macos"))]
-const WORKSPACE_CMD_MENU_ID_PREFIX: &str = "wscmd:";
-/// Per-window window-level rows, label-addressed like `wscmd:` (id =
-/// prefix + label): New Window / Open in Browser / Close Window acting
-/// on the OWNING window. The workspace menu carries all three; owned
-/// launcher-shape instances (standalone and control terminals) carry
-/// New Window and Close Window.
-#[cfg(not(target_os = "macos"))]
-const WS_NEW_WINDOW_MENU_ID_PREFIX: &str = "ws-new-window:";
-#[cfg(not(target_os = "macos"))]
-const WS_OPEN_IN_BROWSER_MENU_ID_PREFIX: &str = "ws-open-in-browser:";
-#[cfg(not(target_os = "macos"))]
-const WS_CLOSE_WINDOW_MENU_ID_PREFIX: &str = "ws-close-window:";
-
-/// The workspace File menu's navigation rows: (SPA command id, label).
-/// Mirrors the top of the pane hamburger menu (Pane.svelte) -- one
-/// source of truth for what the rows DO; the ids dispatch through the
-/// same `chan:command` bridge the hamburger uses.
-#[cfg(not(target_os = "macos"))]
-const WORKSPACE_MENU_NAV_ROWS: &[(&str, &str)] = &[
-    ("app.launcher.toggle", "Commands"),
-    ("app.pane.mode", "Hybrid Nav"),
-];
-
-/// The workspace File menu's app-spawn rows, mirroring the pane
-/// hamburger's list (alphabetical by title, labels verbatim). The
-/// hamburger's focus-border colours and Close pane are deliberately
-/// absent: both are pane-local affordances, not window commands. No row
-/// carries an accelerator -- SPA chords are user-editable and the
-/// command launcher is the chord-discovery surface, so the native rows
-/// must not shadow them (New terminal's Ctrl+Shift+T reaches the SPA
-/// via KEY_BRIDGE_JS in workspace windows).
-#[cfg(not(target_os = "macos"))]
-const WORKSPACE_MENU_APP_ROWS: &[(&str, &str)] = &[
-    ("app.dashboard.open", "New dashboard"),
-    ("app.diagram.new", "New diagram"),
-    ("app.draft.new", "New draft"),
-    ("app.files.toggle", "New file browser"),
-    ("app.graph.toggle", "New graph"),
-    ("app.slides.new", "New slide deck"),
-    ("app.terminal.teamWork", "New team"),
-    ("app.terminal.toggle", "New terminal"),
-];
-
-/// Compose a `wscmd:` menu-item id for `command` on the window `label`.
-#[cfg(not(target_os = "macos"))]
-fn workspace_cmd_menu_id(command: &str, label: &str) -> String {
-    format!("{WORKSPACE_CMD_MENU_ID_PREFIX}{command}:{label}")
-}
-
-/// Recover (command, label) from a `wscmd:` menu-item id; `None` for
-/// every other id namespace (including a malformed `wscmd:` id with no
-/// label separator).
-#[cfg(not(target_os = "macos"))]
-fn parse_workspace_cmd_menu_id(id: &str) -> Option<(&str, &str)> {
-    id.strip_prefix(WORKSPACE_CMD_MENU_ID_PREFIX)?
-        .split_once(':')
-}
-
-/// Launcher-shape menubar (off-mac): File (New Standalone Terminal,
+/// Launcher menubar (off-mac): File (New Standalone Terminal,
 /// Close Window, About, Quit), Edit (the four clipboard items muda
 /// implements on GTK), Window (Workspaces, New Window, Open in Browser
-/// plus the dynamic tail `rebuild_window_menu` appends). Installed as
-/// the app-wide default by `install_app_menu` (the launcher and any
-/// window built without an explicit menu show it); standalone and
-/// control terminal windows get their own instances with `owner =
-/// Some(label)`, which label-addresses New Window and Close Window (the
-/// `ws-*:` id namespaces) so those rows act on the OWNING window
-/// instead of consulting focus. Standalone terminals also pass
-/// `claim_new_terminal_chord = false` so Ctrl+Shift+T stays with the
-/// SPA (new terminal tab via KEY_BRIDGE_JS) while the row keeps working
-/// by click; the launcher and control terminals keep the claim (their
-/// webviews do not serve the chord).
+/// plus the dynamic tail `rebuild_window_menu` appends). The launcher is
+/// the ONLY window with a bar: attached per-window with
+/// `Window::set_menu` when the launcher window is built (there is no
+/// app-wide default), so the bar's accelerators can never collide with
+/// another window's. Every other window is menu-less and gets its chords
+/// from KEY_BRIDGE_JS, which is why this bar keeps the Ctrl+Shift+T claim
+/// (the launcher webview loads no key bridge, so only a native
+/// accelerator can serve the chord there).
 ///
 /// "About Chan" opens a version dialog that also offers a manual update
 /// check - the only manual self-update entry point off macOS (the
@@ -5796,22 +5743,14 @@ fn parse_workspace_cmd_menu_id(id: &str) -> Option<(&str, &str)> {
 /// would orphan a leading separator), so Edit sticks to the four clipboard
 /// items muda does implement on GTK.
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn build_launcher_menu(
-    app: &tauri::AppHandle,
-    claim_new_terminal_chord: bool,
-    owner: Option<&str>,
-) -> tauri::Result<Menu<tauri::Wry>> {
+fn build_launcher_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     use tauri::menu::{MenuBuilder, SubmenuBuilder};
     // File ▸ New Standalone Terminal always opens a fresh standalone
-    // terminal window (the launcher-focused meaning of the old routed New
-    // Terminal item, now the item's ONLY meaning; workspace windows carry
-    // their own pane-terminal row instead). Ctrl+Shift+T rides along only
-    // where the SPA cannot claim the chord itself.
-    let mut new_terminal = MenuItemBuilder::with_id("app-new-terminal", "New Standalone Terminal");
-    if claim_new_terminal_chord {
-        new_terminal = new_terminal.accelerator("CmdOrCtrl+Shift+T");
-    }
-    let new_terminal = new_terminal.build(app)?;
+    // terminal window (workspace windows reach their pane-terminal
+    // toggle through KEY_BRIDGE_JS instead).
+    let new_terminal = MenuItemBuilder::with_id("app-new-terminal", "New Standalone Terminal")
+        .accelerator("CmdOrCtrl+Shift+T")
+        .build(app)?;
     let about = MenuItemBuilder::with_id("chan-about", "About Chan").build(app)?;
     let quit = MenuItemBuilder::with_id("chan-quit", "Quit")
         .accelerator("CmdOrCtrl+Q")
@@ -5820,14 +5759,10 @@ pub(crate) fn build_launcher_menu(
     // Ctrl+W stays a terminal readline chord). Same routed handler
     // as macOS's Cmd+W item: tab-close in SPA windows,
     // cancel-close on the connecting screen, native close
-    // elsewhere. KEY_BRIDGE_JS claims the same chord inside SPA
-    // webviews, mirroring the macOS menu/bridge shadow pair. An owned
-    // instance addresses the row to its window by label.
-    let close_window_id = match owner {
-        Some(label) => format!("{WS_CLOSE_WINDOW_MENU_ID_PREFIX}{label}"),
-        None => "app-close-window".to_string(),
-    };
-    let close_window = MenuItemBuilder::with_id(close_window_id, "Close Window")
+    // elsewhere. On the launcher that means the launcher's own
+    // hide-on-close. SPA windows claim the same chord inside
+    // KEY_BRIDGE_JS, mirroring the macOS menu/bridge shadow pair.
+    let close_window = MenuItemBuilder::with_id("app-close-window", "Close Window")
         .accelerator("CmdOrCtrl+Shift+W")
         .build(app)?;
     let file = SubmenuBuilder::new(app, "File")
@@ -5849,18 +5784,13 @@ pub(crate) fn build_launcher_menu(
     // bridge script in serve.rs). The menu entry still surfaces the
     // window by name.
     let workspace_manager = MenuItemBuilder::with_id("win-main", "Workspaces").build(app)?;
-    // New Window opens another window of this menubar's connection:
-    // another standalone terminal from a terminal window (owned
-    // instances address the row by label); a standalone terminal from
-    // the launcher (or nothing) focused -- the launcher itself is a
+    // New Window opens another window of the FOCUSED window's connection
+    // (open_new_window_for_focused_workspace): a standalone terminal
+    // from the launcher (or nothing) focused -- the launcher itself is a
     // singleton and is never multiplied. `CmdOrCtrl+Shift+N` (not plain
     // Cmd+N) so the SPA's New Draft handler can claim Cmd+N without the
     // menu accelerator intercepting first.
-    let new_window_id = match owner {
-        Some(label) => format!("{WS_NEW_WINDOW_MENU_ID_PREFIX}{label}"),
-        None => "app-new-window".to_string(),
-    };
-    let new_window = MenuItemBuilder::with_id(new_window_id, "New Window")
+    let new_window = MenuItemBuilder::with_id("app-new-window", "New Window")
         .accelerator("CmdOrCtrl+Shift+N")
         .build(app)?;
     // Open the FOCUSED workspace window's contents in the system browser.
@@ -5878,101 +5808,11 @@ pub(crate) fn build_launcher_menu(
         .build()
 }
 
-/// Per-window menubar for a WORKSPACE window (off-mac). File mirrors the
-/// pane hamburger (Commands, Hybrid Nav, the app-spawn rows), then the
-/// window-level rows (New Window, Open in Browser, Hide Window, Close
-/// Window) and the File tail every off-mac shape carries (About, Quit).
-/// Window keeps Workspaces plus the dynamic tail -- New Window / Open in
-/// Browser live in File here, so they are not duplicated into Window
-/// like the launcher shape does. Every window-scoped row encodes `label`
-/// in its id so the handler acts on THIS window regardless of focus.
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn build_workspace_menu(
-    app: &tauri::AppHandle,
-    label: &str,
-) -> tauri::Result<Menu<tauri::Wry>> {
-    use tauri::menu::{MenuBuilder, SubmenuBuilder};
-    let mut file = SubmenuBuilder::new(app, "File");
-    for (command, title) in WORKSPACE_MENU_NAV_ROWS {
-        let row =
-            MenuItemBuilder::with_id(workspace_cmd_menu_id(command, label), *title).build(app)?;
-        file = file.item(&row);
-    }
-    file = file.separator();
-    for (command, title) in WORKSPACE_MENU_APP_ROWS {
-        let row =
-            MenuItemBuilder::with_id(workspace_cmd_menu_id(command, label), *title).build(app)?;
-        file = file.item(&row);
-    }
-    // Window-level rows. New Window / Close Window carry the same chords
-    // the launcher shape claims -- GTK accel groups are per window, so
-    // each window resolves the chord against its own menubar and the
-    // net claims are unchanged.
-    let new_window = MenuItemBuilder::with_id(
-        format!("{WS_NEW_WINDOW_MENU_ID_PREFIX}{label}"),
-        "New Window",
-    )
-    .accelerator("CmdOrCtrl+Shift+N")
-    .build(app)?;
-    let open_in_browser = MenuItemBuilder::with_id(
-        format!("{WS_OPEN_IN_BROWSER_MENU_ID_PREFIX}{label}"),
-        "Open in Browser",
-    )
-    .build(app)?;
-    // Hide Window buries THIS window (sessions stay warm; the record
-    // persists hidden and reopens from the launcher or the Window
-    // menu's Hidden section) -- the SPA's `app.window.hide`, dispatched
-    // over the same bridge as the mirror rows. No accelerator: the SPA
-    // owns the user-editable Mod+Shift+H chord.
-    let hide_window = MenuItemBuilder::with_id(
-        workspace_cmd_menu_id("app.window.hide", label),
-        "Hide Window",
-    )
-    .build(app)?;
-    let close_window = MenuItemBuilder::with_id(
-        format!("{WS_CLOSE_WINDOW_MENU_ID_PREFIX}{label}"),
-        "Close Window",
-    )
-    .accelerator("CmdOrCtrl+Shift+W")
-    .build(app)?;
-    let about = MenuItemBuilder::with_id("chan-about", "About Chan").build(app)?;
-    let quit = MenuItemBuilder::with_id("chan-quit", "Quit")
-        .accelerator("CmdOrCtrl+Q")
-        .build(app)?;
-    let file = file
-        .separator()
-        .item(&new_window)
-        .item(&open_in_browser)
-        .item(&hide_window)
-        .item(&close_window)
-        .separator()
-        .item(&about)
-        .separator()
-        .item(&quit)
-        .build()?;
-    let edit = SubmenuBuilder::new(app, "Edit")
-        .cut()
-        .copy()
-        .paste()
-        .select_all()
-        .build()?;
-    let workspace_manager = MenuItemBuilder::with_id("win-main", "Workspaces").build(app)?;
-    let window = SubmenuBuilder::with_id(app, LINUX_WINDOW_SUBMENU_ID, "Window")
-        .item(&workspace_manager)
-        .build()?;
-    MenuBuilder::new(app)
-        .item(&file)
-        .item(&edit)
-        .item(&window)
-        .build()
-}
-
-/// Every live menubar's Window submenu. macOS has exactly one (the
-/// global menubar); off-mac each per-window menu carries its own, plus
-/// the app-wide default shown by windows without an explicit menu
-/// (deduped by menu id -- an inheriting window's `menu()` returns the
-/// shared default). Empty before `install_app_menu` ran (impossible in
-/// practice) or if every menu lost the submenu.
+/// The live Window submenu(s) the dynamic tail is stamped onto. macOS
+/// has exactly one (the global menubar); off-mac the launcher's menubar
+/// is the only bar, so this is its Window submenu alone. Empty before
+/// the launcher window exists (early setup) or if the bar lost the
+/// submenu.
 fn window_submenus(app: &tauri::AppHandle) -> Vec<Submenu<tauri::Wry>> {
     #[cfg(target_os = "macos")]
     {
@@ -5984,36 +5824,23 @@ fn window_submenus(app: &tauri::AppHandle) -> Vec<Submenu<tauri::Wry>> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let mut seen = std::collections::HashSet::new();
-        let mut menus: Vec<Menu<tauri::Wry>> = Vec::new();
-        if let Some(menu) = app.menu() {
-            seen.insert(menu.id().0.clone());
-            menus.push(menu);
-        }
-        for window in app.webview_windows().into_values() {
-            if let Some(menu) = window.menu() {
-                if seen.insert(menu.id().0.clone()) {
-                    menus.push(menu);
-                }
-            }
-        }
-        menus
-            .iter()
-            .filter_map(|m| m.get(LINUX_WINDOW_SUBMENU_ID))
-            .filter_map(|k| k.as_submenu().cloned())
+        app.get_webview_window("main")
+            .and_then(|window| window.menu())
+            .and_then(|m| m.get(LINUX_WINDOW_SUBMENU_ID))
+            .and_then(|k| k.as_submenu().cloned())
+            .into_iter()
             .collect()
     }
 }
 
-/// Re-sync every Window submenu's dynamic tail: remove every
+/// Re-sync the Window submenu's dynamic tail: remove every
 /// previously-appended `buried:*` / `remote:*` entry (and the section
 /// headers), then append the current snapshots -- buried windows most
 /// recent first, then reopenable remote windows sorted by title. Off-mac
-/// the tail is applied to EACH live menubar (per-window menus plus the
-/// app-wide default) so every window's Window menu shows the same
-/// sections. Runs on the main thread -- muda requires menu mutation
-/// there on macOS -- and is best-effort throughout: a menu glitch must
-/// never take down a close/destroy handler.
+/// the tail lands on the launcher's bar alone (the only menubar). Runs
+/// on the main thread -- muda requires menu mutation there on macOS --
+/// and is best-effort throughout: a menu glitch must never take down a
+/// close/destroy handler.
 pub fn rebuild_window_menu(app: &tauri::AppHandle) {
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
@@ -6581,13 +6408,10 @@ fn open_about_window(app: &tauri::AppHandle) -> Result<(), String> {
     .initialization_script(&init)
     .build()
     .map_err(|e| format!("building about window: {e}"))?;
-    // Off macOS the app menu renders as a per-window GTK menubar, and a
-    // File/Edit/Window bar on a fixed-size About dialog is noise (and
-    // eats its height). macOS keeps the global menubar -- nothing to
-    // remove there. Best-effort: a failure just leaves the bar.
-    #[cfg(not(target_os = "macos"))]
-    let _ = win.remove_menu();
-    #[cfg(target_os = "macos")]
+    // Off macOS the About window is born menu-less like every window but
+    // the launcher (there is no app-wide menu to inherit) -- a File/Edit/
+    // Window bar on a fixed-size dialog would be noise. macOS keeps the
+    // global menubar -- nothing to do there either.
     let _ = win;
     Ok(())
 }
@@ -6989,9 +6813,9 @@ fn eval_chan_command(window: &tauri::WebviewWindow, command: &str) {
 
 /// Eval a `chan:command` dispatch on the currently-focused workspace
 /// webview. macOS-only: the global menubar's items defer to chan's
-/// per-workspace behavior by focus; the off-mac per-window rows dispatch
-/// by owning label instead (`dispatch_to_workspace_window`).
-/// No-op when the focused window isn't a workspace.
+/// per-workspace behavior by focus; off-mac only the launcher has a
+/// menubar, and SPA windows route their chords through KEY_BRIDGE_JS
+/// instead. No-op when the focused window isn't a workspace.
 #[cfg(target_os = "macos")]
 fn dispatch_to_focused_workspace(app: &tauri::AppHandle, command: &str) {
     let Some(w) = app
@@ -6999,23 +6823,6 @@ fn dispatch_to_focused_workspace(app: &tauri::AppHandle, command: &str) {
         .into_values()
         .find(|w| serve::is_workspace_webview_label(w.label()) && w.is_focused().unwrap_or(false))
     else {
-        return;
-    };
-    eval_chan_command(&w, command);
-}
-
-/// Eval a `chan:command` dispatch on the window owning `label`, for the
-/// per-window workspace-menu rows (off-mac). The label always names a
-/// live window -- the menu firing the event belongs to it -- but a
-/// teardown race is tolerated with a warn.
-#[cfg(not(target_os = "macos"))]
-fn dispatch_to_workspace_window(app: &tauri::AppHandle, label: &str, command: &str) {
-    let Some(w) = app.get_webview_window(label) else {
-        tracing::warn!(
-            label,
-            command,
-            "workspace menu row pointed at a dead window"
-        );
         return;
     };
     eval_chan_command(&w, command);
@@ -7111,8 +6918,8 @@ fn close_spa_or_native_window(app: &tauri::AppHandle, window: tauri::WebviewWind
 /// Open a standalone terminal-only window. Mounting the
 /// embedded tenant is async (`EmbeddedServer::open_terminal`), so this
 /// hands off to the Tauri async runtime; a failure surfaces as a system
-/// notice rather than blocking the menu-event thread. Mirrors how the
-/// IPC commands drive `serve::start`.
+/// notice rather than blocking the menu-event / IPC thread. Mirrors how
+/// the IPC commands drive `serve::start`.
 fn spawn_terminal_window(app: &tauri::AppHandle) {
     let app_for_task = app.clone();
     let state = Arc::clone(&app.state::<Arc<AppState>>());
@@ -8123,129 +7930,26 @@ mod tests {
 
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn workspace_menu_rows_mirror_the_pane_hamburger() {
-        // The nav rows, then the app-spawn rows exactly as Pane.svelte's
-        // hamburger lists them (alphabetical by title). The hamburger's
-        // focus-border colours and Close pane are pane-local and stay
-        // out of the native menu.
-        assert_eq!(
-            WORKSPACE_MENU_NAV_ROWS,
-            &[
-                ("app.launcher.toggle", "Commands"),
-                ("app.pane.mode", "Hybrid Nav"),
-            ]
-        );
-        assert_eq!(
-            WORKSPACE_MENU_APP_ROWS,
-            &[
-                ("app.dashboard.open", "New dashboard"),
-                ("app.diagram.new", "New diagram"),
-                ("app.draft.new", "New draft"),
-                ("app.files.toggle", "New file browser"),
-                ("app.graph.toggle", "New graph"),
-                ("app.slides.new", "New slide deck"),
-                ("app.terminal.teamWork", "New team"),
-                ("app.terminal.toggle", "New terminal"),
-            ]
-        );
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn workspace_cmd_menu_ids_round_trip_composite_labels() {
-        // Watcher labels contain `::`, so the id parser must split at
-        // the FIRST `:` after the prefix -- which in turn requires every
-        // row command to stay colon-free.
-        for label in [
-            "workspace-1a2b3c4d5e6f7788-3",
-            "outbound-8899aabbccddeeff-1",
-            "local::w-42",
-            "lib-deadbeef::w-7",
-        ] {
-            // Hide Window is a window-level row (not part of the
-            // hamburger mirror) but rides the same wscmd namespace.
-            for (command, _) in WORKSPACE_MENU_NAV_ROWS
-                .iter()
-                .chain(WORKSPACE_MENU_APP_ROWS)
-                .chain(&[("app.window.hide", "Hide Window")])
-            {
-                assert!(
-                    !command.contains(':'),
-                    "{command} would break the id parser"
-                );
-                let id = workspace_cmd_menu_id(command, label);
-                assert_eq!(parse_workspace_cmd_menu_id(&id), Some((*command, label)));
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn workspace_cmd_menu_id_parser_ignores_other_namespaces() {
-        assert_eq!(parse_workspace_cmd_menu_id("buried:workspace-1-1"), None);
-        assert_eq!(parse_workspace_cmd_menu_id("open:local::w-1"), None);
-        assert_eq!(parse_workspace_cmd_menu_id("app-new-terminal"), None);
-        // A wscmd id without a label separator is malformed, not a panic.
-        assert_eq!(parse_workspace_cmd_menu_id("wscmd:app.pane.mode"), None);
-        assert_eq!(parse_workspace_cmd_menu_id("wscmd:"), None);
-        // The window-level row prefixes strip straight to the label,
-        // composite `::` labels included.
-        assert_eq!(
-            "ws-new-window:local::w-1".strip_prefix(WS_NEW_WINDOW_MENU_ID_PREFIX),
-            Some("local::w-1")
-        );
-        assert_eq!(
-            "ws-open-in-browser:lib-aa::w-2".strip_prefix(WS_OPEN_IN_BROWSER_MENU_ID_PREFIX),
-            Some("lib-aa::w-2")
-        );
-        assert_eq!(
-            "ws-close-window:terminal-3".strip_prefix(WS_CLOSE_WINDOW_MENU_ID_PREFIX),
-            Some("terminal-3")
-        );
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn per_kind_menus_rename_the_terminal_item_and_claim_no_new_chords() {
+    fn off_mac_the_menubar_lives_on_the_launcher_alone() {
         const MAIN_RS: &str = include_str!("main.rs");
-        // The launcher-shape item says what it does now that workspace
-        // windows carry their own pane-terminal row.
+        // The launcher menu item says what it does.
         assert!(MAIN_RS.contains("\"New Standalone Terminal\""));
-        // The hamburger-mirror rows are built bare: SPA chords are
-        // user-editable and must not be shadowed by native accelerators
-        // (the mirror region sits between the row loops and the
-        // window-level rows in build_workspace_menu).
-        let mirror = MAIN_RS
-            .split("fn build_workspace_menu")
-            .nth(1)
-            .expect("build_workspace_menu exists")
-            .split("// Window-level rows")
-            .next()
-            .expect("mirror region bounded");
-        assert!(
-            !mirror.contains(".accelerator("),
-            "hamburger-mirror rows must not claim native accelerators",
-        );
-        // The workspace menu carries the Hide Window row (item 10's
-        // command over the same bridge, chordless -- the SPA owns
-        // Mod+Shift+H). concat! so the pin doesn't match this test's
-        // own source.
-        assert!(MAIN_RS.contains(concat!(
-            "workspace_cmd_menu_id(\"app.window.",
-            "hide\", label)"
-        )));
-        // Owned launcher-shape instances label-address New Window and
-        // Close Window so terminal/control menu clicks act on their own
-        // window instead of consulting focus.
-        let launcher = MAIN_RS
-            .split("fn build_launcher_menu")
-            .nth(1)
-            .expect("build_launcher_menu exists")
-            .split("fn build_workspace_menu")
-            .next()
-            .expect("launcher region bounded");
-        assert!(launcher.contains("WS_NEW_WINDOW_MENU_ID_PREFIX"));
-        assert!(launcher.contains("WS_CLOSE_WINDOW_MENU_ID_PREFIX"));
+        // The per-window-kind menu machinery is gone: no workspace
+        // hamburger-mirror menu, no owned terminal/control shapes, and no
+        // label-encoded id namespaces to route them. concat! so the
+        // absence pins don't match this test's own source.
+        for gone in [
+            concat!("build_workspace", "_menu"),
+            concat!("WS_NEW_WINDOW_MENU_ID", "_PREFIX"),
+            concat!("WS_CLOSE_WINDOW_MENU_ID", "_PREFIX"),
+            concat!("WS_OPEN_IN_BROWSER_MENU_ID", "_PREFIX"),
+            concat!("WORKSPACE_CMD_MENU_ID", "_PREFIX"),
+            concat!("wsc", "md:"),
+            concat!("parse_workspace_cmd_menu", "_id"),
+            concat!("dispatch_to_workspace", "_window"),
+        ] {
+            assert!(!MAIN_RS.contains(gone), "{gone} must be gone");
+        }
     }
 
     #[test]

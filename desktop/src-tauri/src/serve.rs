@@ -911,7 +911,9 @@ struct WindowSpec<'a> {
 /// `spawn_remote_workspace_window` from outside. Centralising the
 /// key-bridge JS, the size defaults, the zoom-hotkey polyfill, and
 /// the drag-drop handler off in one place means workspace UX changes
-/// don't fork between the local and outbound paths.
+/// don't fork between the local and outbound paths. Off macOS these
+/// windows are born menu-less (only the launcher carries a menubar);
+/// their chords ride KEY_BRIDGE_JS.
 fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), String> {
     let WindowSpec {
         label: window_label,
@@ -956,6 +958,15 @@ fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), S
     // (same mechanism as KEY_BRIDGE_JS). `target` is the fully-assembled
     // navigate URL (remote + ?w=<label> + restored #fragment) so the SPA's
     // per-window state + restore survive the success navigation.
+    // The window kind rides the init script the same way so KEY_BRIDGE_JS
+    // can route kind-dependent chords -- a control terminal's New-terminal
+    // chord spawns a standalone window instead of toggling a tab it does
+    // not have -- without scraping the kind off a URL the SPA is free to
+    // rewrite.
+    let kind_global = format!(
+        "window.__CHAN_WINDOW_KIND__ = {};\n",
+        serde_json::json!(kind.unwrap_or("workspace"))
+    );
     let (webview_url, init_script) = match connecting {
         Some(display_url) => {
             // Follow the launcher's light/dark choice (WP3 local theme); null
@@ -969,10 +980,14 @@ fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), S
                 "target": parsed.as_str(),
                 "theme": theme,
             });
-            let script = format!("window.__CHAN_CONNECTING__ = {payload};\n{KEY_BRIDGE_JS}");
+            let script =
+                format!("window.__CHAN_CONNECTING__ = {payload};\n{kind_global}{KEY_BRIDGE_JS}");
             (WebviewUrl::App("connecting.html".into()), script)
         }
-        None => (WebviewUrl::External(parsed), KEY_BRIDGE_JS.to_string()),
+        None => (
+            WebviewUrl::External(parsed),
+            format!("{kind_global}{KEY_BRIDGE_JS}"),
+        ),
     };
     let app_owned = app.clone();
     let label_owned = window_label.to_string();
@@ -1060,45 +1075,6 @@ fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), S
             // `read_dropped_paths` (dropped_paths.rs) instead of
             // native drag events.
             .disable_drag_drop_handler();
-        // Off-mac the menubar renders per window, so each SPA window is
-        // born with its kind's bar (built in main.rs): workspace windows
-        // get the pane-hamburger-mirror File menu addressed to this
-        // window's label; standalone terminals get an owned launcher
-        // shape without the New-Terminal chord claim (KEY_BRIDGE_JS
-        // keeps Ctrl+Shift+T = new terminal tab); control terminals get
-        // an owned launcher shape WITH the claim (their chord spawns a
-        // standalone window). Owned instances address New Window / Close
-        // Window to this window's label. Best-effort: a menu-build
-        // failure just leaves the inherited default bar.
-        #[cfg(not(target_os = "macos"))]
-        let builder = {
-            let menu = match kind_owned.as_str() {
-                "workspace" => Some(crate::build_workspace_menu(&app_owned, &label_owned)),
-                "terminal" => Some(crate::build_launcher_menu(
-                    &app_owned,
-                    false,
-                    Some(&label_owned),
-                )),
-                "control" => Some(crate::build_launcher_menu(
-                    &app_owned,
-                    true,
-                    Some(&label_owned),
-                )),
-                _ => None,
-            };
-            match menu {
-                Some(Ok(menu)) => builder.menu(menu),
-                Some(Err(e)) => {
-                    tracing::warn!(
-                        label = %label_owned,
-                        error = %e,
-                        "building the per-window menu failed",
-                    );
-                    builder
-                }
-                None => builder,
-            }
-        };
         // Build hidden when restored geometry will be applied, so the window
         // never flashes at the default size/position before it is repositioned.
         let builder = if geometry_plan.builds_hidden() {
@@ -1111,10 +1087,10 @@ fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), S
                 // Apply the restored OS geometry (physical px) and reveal the
                 // window at its final size/position before anything else.
                 apply_geometry_plan(&window, &label_owned, geometry_plan);
-                // A per-window menubar is born without the dynamic
-                // Window-submenu tail (open/hidden/remote sections); one
-                // rebuild pass stamps it onto every live bar, this one
-                // included.
+                // The window set changed, so the launcher menubar's
+                // dynamic Window-submenu tail (open/hidden/remote
+                // sections) is due a rebuild -- off-mac the launcher's
+                // bar is the only menubar.
                 #[cfg(not(target_os = "macos"))]
                 crate::rebuild_window_menu(&app_owned);
                 // Register the OS title + kind so `cs window list` shows
@@ -2072,6 +2048,14 @@ pub(crate) fn close_windows_with_prefix(app: &AppHandle, prefix: &str) {
 /// (Cmd+W, Cmd+N, Cmd+Shift+[/], Cmd+1..9) are bound here because
 /// the native webview doesn't have those reservations. chan's web
 /// fallbacks (Alt+Shift, Ctrl+Alt) keep working independently.
+///
+/// Off macOS these windows carry no menubar (only the launcher has one),
+/// so the bridge also owns the chords the retired per-window menubars
+/// claimed -- New Window (Ctrl+Shift+N) and Quit (Ctrl+Q), routed over
+/// IPC like reload/zoom because the SPA command bus is dead on the
+/// connecting screen. The launcher itself never loads this script (it
+/// gets LAUNCHER_RELOAD_BRIDGE_JS), so its native menu chords can never
+/// double-fire against the bridge.
 const KEY_BRIDGE_JS: &str = r#"
 (() => {
   function fire(e, name, detail) {
@@ -2118,7 +2102,10 @@ const KEY_BRIDGE_JS: &str = r#"
   // (tab nav), Cmd+Shift+G (find prev), plus New terminal (Cmd+T on
   // macOS, Ctrl+Shift+T off-mac) and Reopen closed tab (Cmd+Shift+T on
   // macOS, Ctrl+Alt+Shift+T off-mac), which route through the
-  // context-aware helpers in App.svelte.
+  // context-aware helpers in App.svelte. Off-mac the bridge additionally
+  // claims New Window (Ctrl+Shift+N) and Quit (Ctrl+Q) -- the chords the
+  // retired per-window menubars owned -- gated on !metaKey so macOS,
+  // whose menubar still owns them, never double-fires.
   function onKey(e) {
     const meta = e.metaKey || e.ctrlKey;
     if (!meta) return;
@@ -2161,6 +2148,15 @@ const KEY_BRIDGE_JS: &str = r#"
     }
     if (!shift) {
       switch (code) {
+        // Quit on Linux/Windows: Ctrl+Q. The native Quit item owned this
+        // chord while these windows had menubars; with the bars gone the
+        // bridge claims it and routes to the same confirm-then-quit flow
+        // the launcher's Quit item runs. Routed over IPC (like reload/
+        // zoom) so a frozen SPA can't lock it away, and gated on
+        // !metaKey so macOS Cmd+Q stays with the menubar. Claiming Ctrl+Q
+        // costs a focused terminal its XON chord exactly as the menu
+        // accelerator already did.
+        case 'KeyQ': if (!e.metaKey) invokeIpc(e, 'request_app_quit'); return;
         // Reload. macOS binds Cmd+R (metaKey); Linux/Windows moves to
         // Ctrl+Shift+R (shift branch below) so plain Ctrl+R reaches a
         // focused terminal's shell reverse-search. Gating on metaKey
@@ -2222,6 +2218,14 @@ const KEY_BRIDGE_JS: &str = r#"
       }
     } else {
       switch (code) {
+        // New Window on Linux/Windows: Ctrl+Shift+N -- another chord the
+        // retired per-window menubars owned. The IPC routes by the
+        // INVOKING window's label (another window of its connection, a
+        // standalone terminal from a control window), which is
+        // focus-proof and works on the connecting screen, where the SPA
+        // command bus is dead. !metaKey: macOS Cmd+Shift+N stays with
+        // the menubar.
+        case 'KeyN': if (!e.metaKey) invokeIpc(e, 'open_new_window'); return;
         // Reload on Linux/Windows: Ctrl+Shift+R. Gate on !metaKey so
         // macOS Cmd+Shift+R does NOT reload (macOS reloads on Cmd+R in
         // the !shift branch above); the !metaKey form fires only for the
@@ -2246,6 +2250,12 @@ const KEY_BRIDGE_JS: &str = r#"
         // moves to Ctrl+Alt+Shift+T (the alt branch above).
         case 'KeyT':
           if (e.metaKey) fire(e, 'app.tab.reopenClosed');
+          // A control terminal is a singleton (no tabs; the SPA blocks
+          // app.terminal.toggle there), so off-mac its New-terminal chord
+          // spawns a standalone terminal window -- the claim its retired
+          // per-window menubar held. The kind rides the init script
+          // (window.__CHAN_WINDOW_KIND__).
+          else if (!e.metaKey && window.__CHAN_WINDOW_KIND__ === 'control') invokeIpc(e, 'open_new_window');
           else fire(e, 'app.terminal.toggle');
           return;
         case 'BracketLeft':  fire(e, 'app.tab.prev');      return;
@@ -2682,6 +2692,47 @@ mod tests {
             KEY_BRIDGE_JS.contains("case 'KeyR': if (!e.metaKey) invokeIpc(e, 'reload_window')")
         );
         assert!(KEY_BRIDGE_JS.contains("code === 'KeyI'"));
+    }
+
+    #[test]
+    fn key_bridge_serves_the_retired_menu_chords_off_mac() {
+        // With no per-window menubars off-mac, the chords the menus owned
+        // move into the bridge, gated on !metaKey so macOS (whose menubar
+        // still owns them) never double-fires. New Window / Quit route
+        // over IPC (not the SPA bus) so the connecting screen can serve
+        // them too; a control terminal's New-terminal chord spawns a
+        // standalone window instead of toggling a tab it does not have.
+        assert!(
+            KEY_BRIDGE_JS.contains("case 'KeyN': if (!e.metaKey) invokeIpc(e, 'open_new_window')")
+        );
+        assert!(
+            KEY_BRIDGE_JS.contains("case 'KeyQ': if (!e.metaKey) invokeIpc(e, 'request_app_quit')")
+        );
+        assert!(KEY_BRIDGE_JS.contains("window.__CHAN_WINDOW_KIND__ === 'control'"));
+        // The kind global is stamped per window at build time, ahead of
+        // the bridge in both init-script shapes (direct load and the
+        // connecting screen).
+        const SERVE_RS: &str = include_str!("serve.rs");
+        assert!(SERVE_RS.contains("window.__CHAN_WINDOW_KIND__ = "));
+    }
+
+    #[test]
+    fn off_mac_workspace_windows_are_born_menu_less() {
+        // Off-mac only the launcher carries a menubar (main.rs attaches
+        // it per-window with `Window::set_menu`; there is no app-wide
+        // default), so `build_workspace_window` must attach NO menu: a
+        // window built without one then has no bar at all. concat! so
+        // the absence pin doesn't match this test's own source.
+        const SERVE_RS: &str = include_str!("serve.rs");
+        assert!(
+            !SERVE_RS.contains(concat!("builder.", "menu(")),
+            "build_workspace_window must not attach a per-window menu",
+        );
+        const MAIN_RS: &str = include_str!("main.rs");
+        assert!(
+            MAIN_RS.contains("main.set_menu(menu)"),
+            "the launcher menu must be attached per-window on the main window",
+        );
     }
 
     #[test]
