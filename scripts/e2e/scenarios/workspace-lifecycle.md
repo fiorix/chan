@@ -11,6 +11,7 @@ Each scenario states behavior that must hold today. Where an executable check or
 - durable workspace, session, document, and scene state survives a clean cycle;
 - terminal, editor, collaboration, pane, index, graph, and file browser behavior keeps working across a cycle;
 - stopping a workspace is distinct from removing it;
+- an editor open on a file converges on external filesystem edits in both directions, including shrinkage, byte-exact restores, and truncation;
 - a workspace root that disappears is a terminal filesystem state, never an empty workspace and never an invitation to recreate the root.
 
 ## When to re-run
@@ -19,8 +20,8 @@ Look up the area you changed and run the scenarios listed against it.
 
 - **Workspace open, mount, host registry**: WL-01, WL-02, WL-03, WL-13
 - **Shutdown, task ownership, cancellation**: WL-02, WL-03, WL-04
-- **Editor and scene sessions, collaboration, CAS**: WL-07, WL-08, WL-09, WL-10
-- **Watcher, index, graph, recovery**: WL-11, WL-14
+- **Editor and scene sessions, collaboration, CAS**: WL-07, WL-08, WL-09, WL-10, WL-15
+- **Watcher, index, graph, recovery**: WL-11, WL-14, WL-15
 - **Terminal and pane state, layout restore**: WL-05, WL-06, WL-10
 - **File browser**: WL-12, WL-14
 - **Anything that touches path resolution or the workspace root**: WL-13, WL-14
@@ -43,11 +44,12 @@ Look up the area you changed and run the scenarios listed against it.
 | WL-12 | File browser in a shared window | bounded fixture |
 | WL-13 | Root disappears during startup | automated |
 | WL-14 | Root disappears while fully in use | destructive |
+| WL-15 | Filesystem-driven edits converge in an open editor | automated |
 
 Automated coverage runs from two places. The Rust cases run under the normal test command; the browser cases run through the smoke harness:
 
 ```sh
-SMOKE_ONLY=40,50,55,56,57,58,61,97,120 node scripts/e2e/browser-smoke/run.mjs
+SMOKE_ONLY=40,50,55,56,57,58,61,63,97,120 node scripts/e2e/browser-smoke/run.mjs
 SMOKE_ONLY=98 node scripts/e2e/browser-smoke/run.mjs
 ```
 
@@ -117,7 +119,7 @@ The existing refusal contract also holds: a hosted workspace with live terminals
 
 **Expectation.** Edits persist, external changes reconcile, and readonly state is enforced and recovers.
 
-**Run.** Browser checks `55-external-edit-reopen.mjs`, `56-external-edit-matrix.mjs`, `57-external-restore-swallow.mjs`, `58-chmod-readonly-lamp.mjs`.
+**Run.** Browser checks `55-external-edit-reopen.mjs`, `56-external-edit-matrix.mjs`, `57-external-restore-converge.mjs`, `58-chmod-readonly-lamp.mjs`.
 
 **Backing.** Those checks.
 
@@ -194,6 +196,20 @@ Capture the expanded paths, graph node set, editor content and dirty state, API 
 **Backing.** `scripts/e2e/browser-smoke/checks/98-workspace-root-loss.mjs`, which validates the throwaway path shape immediately before invoking `/bin/rm -rf -- <exact-root>`.
 
 **Evidence.** Screenshots at each sampling point, the four creation attempts and their errors, a final filesystem check.
+
+### WL-15 - filesystem-driven edits converge in an open editor
+
+**Expectation.** An open editor converges on every external change to its file, in both directions, without needing a later unrelated edit to shake it loose. Growth, shrinkage, a byte-exact restore of content the session recently read, rapid alternation between two states, and truncation to empty all reach the editor, `GET /api/files`, and later `cs open` calls within a bounded time. Convergence must not depend on the new content being novel: an edit that returns a file to bytes the session already saw is an ordinary external edit, not an echo of the session's own writes.
+
+One asymmetry is deliberate and must survive. Content this session wrote to disk stays suspect for far longer than content it merely read, because a filesystem that commits asynchronously can replay our own bytes under a re-stamped mtime, and folding that replay back in destroys live state. Bytes the session only read carry no such risk and must not buy an external restore the same protection. An empty read is refused only while the session itself has a recent write to blame it on.
+
+**Why this is load-bearing.** Agents routinely edit files through the filesystem rather than through chan's MCP server, while a human watches the same file in the editor. A stale editor in that loop is indistinguishable from an agent that did nothing, and the reviewer then acts on content that is no longer on disk. Deletions are the dangerous direction: an addition almost always produces content the session has never seen, so it converges regardless, while removals frequently restore a prior state.
+
+**Run.** Browser checks `57-external-restore-converge.mjs` and `63-external-shrink-convergence.mjs`. The collaboration path must stay green alongside them, so run WL-08 and WL-09 in the same pass.
+
+**Backing.** Those checks, plus `doc_sessions::tests::external_restore_of_adopted_content_converges_at_watcher_speed`, `doc_sessions::tests::truncation_on_a_never_flushed_session_needs_only_corroboration`, and the origin-window cases in `disk_echo::tests`.
+
+**Evidence.** Per-step convergence timings from both checks, the restore and truncate steps included, and the `apiShows` field showing the HTTP read agrees with the editor.
 
 ## Manual and soak
 

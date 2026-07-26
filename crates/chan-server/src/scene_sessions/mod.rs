@@ -313,7 +313,7 @@ impl SceneSession {
         // edit. The ring holds raw file text, not the serialize_file
         // form, because a stale read returns exactly what was on disk.
         let mut disk_echo = DiskEchoRing::new();
-        disk_echo.note(content_hash(seed_text));
+        disk_echo.note_adopted(content_hash(seed_text));
         let baseline_content = scene.serialize_file();
         let baseline = DurableBaseline {
             content_hash: content_hash(&baseline_content),
@@ -488,7 +488,7 @@ impl SceneSession {
             baseline
         };
         let mut disk_echo = DiskEchoRing::new();
-        disk_echo.note(disk_hash);
+        disk_echo.note_adopted(disk_hash);
         Ok(Self {
             path: path.to_string(),
             state: Mutex::new(SceneState {
@@ -607,7 +607,7 @@ impl SceneSession {
     /// Discards existing entries; call before the writes under test.
     #[cfg(test)]
     fn test_set_disk_echo_ttl(&self, ttl: Duration) {
-        self.lock_state().disk_echo = DiskEchoRing::with_ttl(ttl);
+        self.lock_state().disk_echo = DiskEchoRing::with_ttls(ttl, ttl);
     }
 
     /// Age the pending absence past CORROBORATE_AFTER so the next
@@ -789,7 +789,7 @@ impl SceneSession {
                         return;
                     }
                 };
-                st.disk_echo.note(disk_hash);
+                st.disk_echo.note_adopted(disk_hash);
                 st.flushed_mtime_ns = stat.mtime_ns;
                 if !applied.is_empty() {
                     st.version += 1;
@@ -876,7 +876,7 @@ impl SceneSession {
         // same bytes again is not a fresh observation.
         let disk_hash = content_hash(&disk_text);
         let disk_budget = semantic_write_budget(Some(stat.size));
-        st.disk_echo.note(disk_hash);
+        st.disk_echo.note_adopted(disk_hash);
         match st
             .scene
             .apply_replace_with_limit(&disk_text, &mut fresh_nonce, disk_budget)
@@ -976,7 +976,7 @@ impl SceneSession {
             let frame = update_frame(st.version, applied);
             st.fan(&frame);
         }
-        st.disk_echo.note(disk_hash);
+        st.disk_echo.note_adopted(disk_hash);
         st.flushed_mtime_ns = disk_mtime_ns;
         let baseline_content = disk_scene.serialize_file();
         st.baseline = DurableBaseline {
@@ -1049,7 +1049,7 @@ impl SceneSession {
         let mut st = self.lock_state();
         st.flushed_mtime_ns = stat.mtime_ns;
         let flushed_hash = content_hash(content);
-        st.disk_echo.note(flushed_hash);
+        st.disk_echo.note_written(flushed_hash);
         st.flush_failures = 0;
         st.baseline = DurableBaseline {
             content: content.to_string(),
@@ -1745,7 +1745,7 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
             return;
         }
         let dirty = st.session_state.is_dirty();
-        if disk_text.is_empty() && (dirty || st.disk_echo.any_recent()) {
+        if disk_text.is_empty() && (dirty || st.disk_echo.any_recent_write()) {
             // The in-flight-upload placeholder guard; parity with
             // doc_sessions, and load-bearing here too: an empty body
             // parses as a valid empty scene, so without this refusal a
@@ -3579,7 +3579,7 @@ mod tests {
         ha.session()
             .lock_state()
             .disk_echo
-            .note(content_hash(&seed));
+            .note_written(content_hash(&seed));
 
         std::fs::write(fx.root.path().join("b.excalidraw"), &changed).unwrap();
         reconcile_session(ha.session(), &fx.workspace).await;
