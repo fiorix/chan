@@ -5,6 +5,12 @@
 // previous must traverse side A's tab order followed by side B's tab order,
 // with one visit per tab and full-order wrapping. Closing an empty visible
 // side must reveal the populated opposite side and flash its A/B toggle.
+//
+// Every side flip animates .pane-card-inner for 520ms (pane-side-flip in
+// Pane.svelte), and mid-flip the pane header is rotated out of the viewport,
+// so a puppeteer click on the toggle or a tab during the animation fails as
+// not clickable. The check waits each flip out before the next click, so its
+// pacing never depends on how busy the suite around it is.
 
 async function dispatchCommand(page, name) {
   await page.evaluate((commandName) => {
@@ -76,12 +82,29 @@ async function waitForTabCount(page, paneId, count) {
   );
 }
 
+async function waitSideFlipSettled(page, paneId) {
+  await page.waitForFunction(
+    (id) => {
+      const pane = document.querySelector(`.pane[data-pane-id="${id}"]`);
+      return !!pane && !pane.classList.contains("sideFlipActive");
+    },
+    { timeout: 10_000 },
+    paneId,
+  );
+}
+
 async function ensureSide(page, paneId, side) {
+  // The pane raises sideFlipActive one frame after the side changes and
+  // clears it on animationend; settle() first so a just-started flip is
+  // visible to the wait.
+  await settle(page);
+  await waitSideFlipSettled(page, paneId);
   const state = await paneState(page, paneId);
   if (state.side === side) return;
   await page.click(`${paneSelector(paneId)} .side-toggle`);
   await waitForSide(page, paneId, side);
   await settle(page);
+  await waitSideFlipSettled(page, paneId);
 }
 
 async function selectVisibleTab(page, paneId, index) {
@@ -145,9 +168,7 @@ export default {
     await waitForTabCount(page, paneId, 2);
     const sideA = await paneState(page, paneId);
 
-    await page.click(`${paneSelector(paneId)} .side-toggle`);
-    await waitForSide(page, paneId, "B");
-    await settle(page);
+    await ensureSide(page, paneId, "B");
     await dispatchCommand(page, "app.graph.toggle");
     await waitForTabCount(page, paneId, 1);
     await dispatchCommand(page, "app.files.toggle");

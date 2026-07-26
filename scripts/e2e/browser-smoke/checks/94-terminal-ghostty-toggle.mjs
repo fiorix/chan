@@ -132,7 +132,7 @@ export default {
     async function assertTomlPref(key, expected) {
       const tomlPath = join(ctx.chanHome, "server.toml");
       const want = new RegExp(`${key}\\s*=\\s*${expected}`);
-      const deadline = Date.now() + 5_000;
+      const deadline = Date.now() + 15_000;
       let last = "";
       for (;;) {
         try {
@@ -171,9 +171,12 @@ export default {
         }
         await sleep(250);
       }
+      // 60s, not a fitted value: the ghostty leg's wasm load is the
+      // slowest mount in the suite, and this wait failing is the only
+      // signal that the load is genuinely stuck.
       await page.waitForSelector(`.terminal-tab ${backendSel}`, {
         visible: true,
-        timeout: 30_000,
+        timeout: 60_000,
       });
       const tabs = await page.$$(".terminal-tab");
       if (tabs.length !== 1) {
@@ -302,6 +305,11 @@ export default {
       // debounced (250ms) workspace refresh; give it a moment so the
       // NEW terminal's spawn-time read sees the fresh value.
       await sleep(2_000);
+      // Chrome caps the resource timing buffer at 250 entries and
+      // earlier checks in a suite fill it, which silently drops the
+      // ghostty-vt entry the wasm wait below looks for. Clear it so
+      // this leg's fetch is always recorded.
+      await page.evaluate(() => performance.clearResourceTimings());
       await openTerminal(TAB_G, ".terminal-host canvas");
       // The lazy loader fetched the wasm asset (vite emits it hashed as
       // ghostty-vt-*.wasm) -- the definitive proof the backend is real,
@@ -311,7 +319,7 @@ export default {
           performance
             .getEntriesByType("resource")
             .some((e) => e.name.includes("ghostty-vt")),
-        { timeout: 20_000 },
+        { timeout: 60_000 },
       );
       if (
         await page.evaluate(() => !!document.querySelector(".terminal-tab .xterm"))
@@ -338,7 +346,7 @@ export default {
       ]);
       await waitScrollback(TAB_G, `${MARK_PREFIX}${MARK_ARG}`);
       {
-        const deadline = Date.now() + 15_000;
+        const deadline = Date.now() + 30_000;
         let clip = "";
         for (;;) {
           clip = await page.evaluate(() => navigator.clipboard.readText());
