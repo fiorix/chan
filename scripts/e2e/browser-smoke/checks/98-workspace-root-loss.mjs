@@ -1,6 +1,6 @@
 // Destructive tail check: remove the harness-owned workspace root while a
 // fully expanded File Browser, max-depth Graph, and dirty >2 MiB editor are
-// live. This filename MUST remain lexically last: every later check would
+// live. The runner pins this check last because every later check would
 // inherit a deliberately missing workspace.
 
 import {

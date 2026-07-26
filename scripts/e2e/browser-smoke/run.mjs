@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Browser-smoke runner: build (unless SMOKE_SKIP_BUILD=1), seed a
 // throwaway workspace, launch a chan test server + headless Chrome,
-// run every check under checks/ in filename order, and write
-// results.json + screenshots to the out dir. Nonzero exit on any
-// failed (not skipped) check. See README.md for the check contract.
+// run every check under checks/ in filename order, pin the destructive
+// workspace-root-loss check last, and write results.json + screenshots to the
+// out dir. Nonzero exit on any failed (not skipped) check. See README.md for
+// the check contract.
 
 import { execFileSync, execFile } from "node:child_process";
 import {
@@ -23,6 +24,14 @@ import { promisify } from "node:util";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..", "..", "..");
 const execFileP = promisify(execFile);
+const DESTRUCTIVE_TAIL_CHECK = "98-workspace-root-loss.mjs";
+
+function compareCheckFiles(left, right) {
+  if (left === right) return 0;
+  if (left === DESTRUCTIVE_TAIL_CHECK) return 1;
+  if (right === DESTRUCTIVE_TAIL_CHECK) return -1;
+  return left.localeCompare(right);
+}
 
 // Self-install harness deps on first run (hands-off requirement).
 if (!existsSync(join(HERE, "node_modules"))) {
@@ -180,13 +189,14 @@ try {
 
   // SMOKE_ONLY=50,55 runs just the checks whose filenames start with one
   // of the comma-separated prefixes; everything else still runs in order.
-  // Prefix matching (and the run order) is LEXICAL, not numeric: see
-  // README.md.
+  // Prefix matching and ordinary run order are LEXICAL, not numeric. The
+  // destructive workspace-root-loss check is the sole exception and always
+  // runs last: see README.md.
   const only = process.env.SMOKE_ONLY?.split(",").map((s) => s.trim()).filter(Boolean);
   const checkFiles = readdirSync(join(HERE, "checks"))
     .filter((f) => f.endsWith(".mjs"))
     .filter((f) => !only || only.some((p) => f.startsWith(p)))
-    .sort();
+    .sort(compareCheckFiles);
   for (const file of checkFiles) {
     const mod = (await import(pathToFileURL(join(HERE, "checks", file)).href)).default;
     currentCheck = {

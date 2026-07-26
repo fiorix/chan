@@ -475,7 +475,7 @@ export default {
         await assertTomlMouseCapture(true);
       } catch (e) {
         console.error(
-          `[98-terminal-ghostty-toggle] WARNING: failed to restore mouse_capture=true: ${e.message}`,
+          `[z98-terminal-ghostty-toggle] WARNING: failed to restore mouse_capture=true: ${e.message}`,
         );
       }
       try {
@@ -486,7 +486,7 @@ export default {
         // but a silently-failed restore would leave every later check
         // running with terminal.ghostty=true.
         console.error(
-          `[98-terminal-ghostty-toggle] WARNING: failed to restore ghostty=false: ${e.message}`,
+          `[z98-terminal-ghostty-toggle] WARNING: failed to restore ghostty=false: ${e.message}`,
         );
       }
       for (const tab of [TAB_G, TAB_X]) {

@@ -5,6 +5,14 @@
 import { describe, expect, test } from "vitest";
 import app from "../App.svelte?raw";
 
+function sourceBetween(startMarker: string, endMarker: string): string {
+  const start = app.indexOf(startMarker);
+  const end = app.indexOf(endMarker, start + startMarker.length);
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
+  return app.slice(start, end);
+}
+
 describe("Hybrid Nav keymap (inversion)", () => {
   test("arrow keys move focus", () => {
     expect(app).toContain('case "ArrowUp":\n        paneModeMoveFocus("up");');
@@ -205,9 +213,13 @@ describe("Track C pane shortcut wiring", () => {
     );
   });
 
-  test("empty visible side with hidden-side tabs flashes the A/B button and blocks close", () => {
-    expect(app).toMatch(
-      /function closeActiveEmptyPane\(\): boolean \{[\s\S]*?if \(paneTabs\(p\)\.length !== 0\) return false;[\s\S]*?if \(allPaneTabs\(p\)\.length !== 0\) \{[\s\S]*?requestPaneSideToggleFlash\(p\.id\);[\s\S]*?return true;/,
+  test("empty visible side flips to hidden tabs, flashes the A/B button, and blocks close", () => {
+    const closeActiveEmptyPane = sourceBetween(
+      "function closeActiveEmptyPane(): boolean",
+      "// Terminal-only windows never sit empty",
+    );
+    expect(closeActiveEmptyPane).toMatch(
+      /function closeActiveEmptyPane\(\): boolean \{[\s\S]*?if \(paneTabs\(p\)\.length !== 0\) return false;[\s\S]*?if \(allPaneTabs\(p\)\.length !== 0\) \{[\s\S]*?requestPaneSideToggleFlash\(p\.id\);[\s\S]*?flipHybrid\(p\.id\);[\s\S]*?return true;/,
     );
   });
 });

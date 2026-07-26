@@ -1009,6 +1009,20 @@ export function allPaneTabs(p: Pane): Tab[] {
   return [...p.tabs, ...(p.bTabs ?? [])];
 }
 
+type PaneTabOrderEntry = {
+  side: PaneSide;
+  tab: Tab;
+};
+
+/// Stable whole-Hybrid tab order: side A in strip order, then side B in strip
+/// order. Tab rotation wraps across this combined list.
+function paneTabOrder(p: Pane): PaneTabOrderEntry[] {
+  return [
+    ...paneTabs(p, "a").map((tab) => ({ side: "a" as const, tab })),
+    ...paneTabs(p, "b").map((tab) => ({ side: "b" as const, tab })),
+  ];
+}
+
 function paneHasAnyTabs(p: Pane): boolean {
   return p.tabs.length > 0 || (p.bTabs?.length ?? 0) > 0;
 }
@@ -1170,9 +1184,9 @@ export function requestPaneWobble(paneId: string): void {
   paneWobble.versions[paneId] = (paneWobble.versions[paneId] ?? 0) + 1;
 }
 
-/// Single-fire attention flash for the A/B side-toggle button. Used when a
-/// close shortcut hits an empty visible side but the opposite side still has
-/// tabs, so the pane/window stays open and the chrome points at why.
+/// Single-fire attention flash for the A/B side-toggle button. A close
+/// shortcut on an empty visible side flips to the populated opposite side,
+/// while the flash explains why the pane/window stays open.
 export const paneSideToggleFlash = $state<{ versions: Record<string, number> }>({
   versions: {},
 });
@@ -2871,11 +2885,10 @@ export async function openLinkTarget(
   await openInActivePane(path, opts);
 }
 
-/// Move the active pane's selection to the previous tab. Wraps from
-/// the first tab back to the last (iTerm-style cycle), so repeated
-/// presses keep rotating instead of dead-ending at the edges. No-op
-/// when the pane is empty or the active tab is somehow not in the
-/// tab list (shouldn't happen but keeps a bad state from crashing).
+/// Move the active pane's selection through side A's tabs followed by side
+/// B's tabs. Previous wraps from side A's first tab to side B's last tab;
+/// next wraps from side B's last tab to side A's first tab. A one-sided pane
+/// therefore cycles within that side.
 ///
 /// Chord-driven tab switches need to also move keyboard focus to the
 /// new active surface; otherwise the next keystroke lands in the prior
@@ -2908,26 +2921,30 @@ export function bumpTabFocusPulse(): void {
 export function selectPrevTabInActivePane(): void {
   const p = activePane();
   const side = paneSide(p);
-  const tabs = paneTabs(p, side);
+  const tabs = paneTabOrder(p);
   const activeId = paneActiveTabId(p, side);
   if (tabs.length === 0 || activeId === null) return;
-  const idx = tabs.findIndex((t) => t.id === activeId);
+  const idx = tabs.findIndex((entry) => entry.side === side && entry.tab.id === activeId);
   if (idx < 0) return;
   const next = (idx - 1 + tabs.length) % tabs.length;
-  setPaneActiveTabId(p, tabs[next].id, side);
+  const target = tabs[next]!;
+  setPaneActiveTabId(p, target.tab.id, target.side);
+  p.side = target.side;
   bumpTabFocusPulse();
 }
 
 export function selectNextTabInActivePane(): void {
   const p = activePane();
   const side = paneSide(p);
-  const tabs = paneTabs(p, side);
+  const tabs = paneTabOrder(p);
   const activeId = paneActiveTabId(p, side);
   if (tabs.length === 0 || activeId === null) return;
-  const idx = tabs.findIndex((t) => t.id === activeId);
+  const idx = tabs.findIndex((entry) => entry.side === side && entry.tab.id === activeId);
   if (idx < 0) return;
   const next = (idx + 1) % tabs.length;
-  setPaneActiveTabId(p, tabs[next].id, side);
+  const target = tabs[next]!;
+  setPaneActiveTabId(p, target.tab.id, target.side);
+  p.side = target.side;
   bumpTabFocusPulse();
 }
 

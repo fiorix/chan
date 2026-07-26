@@ -6,6 +6,14 @@ import pane from "./Pane.svelte?raw";
 import source from "../editor/Source.svelte?raw";
 import wysiwyg from "../editor/Wysiwyg.svelte?raw";
 
+function sourceBetween(startMarker: string, endMarker: string): string {
+  const start = tabs.indexOf(startMarker);
+  const end = tabs.indexOf(endMarker, start + startMarker.length);
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
+  return tabs.slice(start, end);
+}
+
 // Chord-driven tab switch (Cmd+Shift+[/], Ctrl+Alt+1..9) must
 // move keyboard focus to the new tab so keystrokes go to the
 // correct surface. The `tabFocusPulse` $state mechanism drives
@@ -27,14 +35,22 @@ describe("tabFocusPulse mechanism", () => {
   });
 
   test("selectPrevTabInActivePane bumps the pulse after mutating activeTabId", () => {
-    expect(tabs).toMatch(
-      /export function selectPrevTabInActivePane\(\): void \{[\s\S]*?const side = paneSide\(p\);[\s\S]*?const tabs = paneTabs\(p, side\);[\s\S]*?setPaneActiveTabId\(p, tabs\[next\]\.id, side\);[\s\S]*?bumpTabFocusPulse\(\);/,
+    const selector = sourceBetween(
+      "export function selectPrevTabInActivePane",
+      "export function selectNextTabInActivePane",
+    );
+    expect(selector).toMatch(
+      /export function selectPrevTabInActivePane\(\): void \{[\s\S]*?const side = paneSide\(p\);[\s\S]*?const tabs = paneTabOrder\(p\);[\s\S]*?setPaneActiveTabId\(p, target\.tab\.id, target\.side\);[\s\S]*?p\.side = target\.side;[\s\S]*?bumpTabFocusPulse\(\);/,
     );
   });
 
-  test("selectNextTabInActivePane bumps the pulse", () => {
-    expect(tabs).toMatch(
-      /export function selectNextTabInActivePane\(\): void \{[\s\S]*?const side = paneSide\(p\);[\s\S]*?const tabs = paneTabs\(p, side\);[\s\S]*?setPaneActiveTabId\(p, tabs\[next\]\.id, side\);[\s\S]*?bumpTabFocusPulse\(\);/,
+  test("selectNextTabInActivePane bumps the pulse after selecting and flipping", () => {
+    const selector = sourceBetween(
+      "export function selectNextTabInActivePane",
+      "export function selectTabAtIndexInActivePane",
+    );
+    expect(selector).toMatch(
+      /export function selectNextTabInActivePane\(\): void \{[\s\S]*?const side = paneSide\(p\);[\s\S]*?const tabs = paneTabOrder\(p\);[\s\S]*?setPaneActiveTabId\(p, target\.tab\.id, target\.side\);[\s\S]*?p\.side = target\.side;[\s\S]*?bumpTabFocusPulse\(\);/,
     );
   });
 

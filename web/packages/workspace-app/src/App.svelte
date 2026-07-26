@@ -1051,6 +1051,7 @@
     if (paneTabs(p).length !== 0) return false;
     if (allPaneTabs(p).length !== 0) {
       requestPaneSideToggleFlash(p.id);
+      flipHybrid(p.id);
       return true;
     }
     // The last empty pane triggers window close on desktop, returning focus

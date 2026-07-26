@@ -92,6 +92,8 @@ import {
   scheduleAutosave,
   serializeLayout,
   setActivePane,
+  selectNextTabInActivePane,
+  selectPrevTabInActivePane,
   selectTabInPane,
   setTabCaret,
   setTerminalActivity,
@@ -2560,6 +2562,62 @@ describe("Hybrid side flip", () => {
     flipHybrid(leftPane.id);
     expect(paneSide(layout.nodes[leftPane.id] as LeafNode)).toBe("a");
     expect(paneSide(layout.nodes[rightPaneId] as LeafNode)).toBe("b");
+  });
+});
+
+describe("Hybrid tab rotation", () => {
+  function twoSidedRotationPane(): LeafNode {
+    const a1 = fileTab({ id: "a1", path: "a1.md" });
+    const a2 = fileTab({ id: "a2", path: "a2.md" });
+    const b1 = fileTab({ id: "b1", path: "b1.md" });
+    const b2 = fileTab({ id: "b2", path: "b2.md" });
+    const seed = resetLayout([a1, a2]);
+    seed.activeTabId = a1.id;
+    seed.bTabs = [b1, b2];
+    seed.bActiveTabId = b1.id;
+    return seed;
+  }
+
+  function selectedPosition(): string {
+    const live = activePane();
+    return `${paneSide(live)}:${activeTabInPane(live)?.id ?? "none"}`;
+  }
+
+  test("next visits side A then side B exactly once and wraps", () => {
+    twoSidedRotationPane();
+    const selected = [];
+
+    for (let step = 0; step < 4; step += 1) {
+      selectNextTabInActivePane();
+      selected.push(selectedPosition());
+    }
+
+    expect(selected).toEqual(["a:a2", "b:b1", "b:b2", "a:a1"]);
+  });
+
+  test("previous visits the reverse whole-Hybrid order and wraps", () => {
+    twoSidedRotationPane();
+    const selected = [];
+
+    for (let step = 0; step < 4; step += 1) {
+      selectPrevTabInActivePane();
+      selected.push(selectedPosition());
+    }
+
+    expect(selected).toEqual(["b:b2", "b:b1", "a:a2", "a:a1"]);
+  });
+
+  test("a pane with no side B tabs keeps rotating within side A", () => {
+    const a1 = fileTab({ id: "a1", path: "a1.md" });
+    const a2 = fileTab({ id: "a2", path: "a2.md" });
+    resetLayout([a1, a2]);
+
+    selectNextTabInActivePane();
+    expect(selectedPosition()).toBe("a:a2");
+    selectNextTabInActivePane();
+    expect(selectedPosition()).toBe("a:a1");
+    selectPrevTabInActivePane();
+    expect(selectedPosition()).toBe("a:a2");
   });
 });
 
