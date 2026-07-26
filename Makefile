@@ -204,6 +204,7 @@ pre-push: ## Run the local pre-push gate.
 	RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
 	RUSTFLAGS="-D warnings" $(CARGO) test --all-targets
 	RUSTFLAGS="-D warnings" $(CARGO) build --no-default-features
+	$(MAKE) gateway-lint
 	RUSTFLAGS="-D warnings" $(MAKE) gateway-build
 	$(MAKE) web-check
 	$(MAKE) web-marketing-check
@@ -286,6 +287,13 @@ gateway-build: gateway-spa ## Build the gateway release crates (GATEWAY_CARGO_FL
 	# compile time, so the bundle must exist or the derive fails to build.
 	cd gateway && $(CARGO) build $(GATEWAY_CARGO_FLAGS) \
 		$(foreach crate,$(GATEWAY_RELEASE_CRATES),-p $(crate))
+
+.PHONY: gateway-lint
+gateway-lint: gateway-spa ## Clippy the gateway workspace with warnings denied.
+	# The gateway is a separate Cargo workspace, so the root clippy run does
+	# not reach it. Depends on gateway-spa for the same rust-embed reason as
+	# gateway-build.
+	cd gateway && RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
 
 .PHONY: gateway-release-crates
 gateway-release-crates: ## Print the gateway release crate names on one line.

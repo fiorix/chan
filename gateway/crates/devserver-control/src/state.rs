@@ -422,6 +422,12 @@ impl ControllerState {
             .expect("test session id is unique")
     }
 
+    /// One snapshot carries both authority classes, and the caller supplies
+    /// the monotonic and wall clocks separately because deadlines and
+    /// persisted timestamps read from different sources. Each argument is a
+    /// distinct required input, so grouping them would hide the contract
+    /// rather than simplify it.
+    #[allow(clippy::too_many_arguments)]
     pub fn accept_snapshot(
         &mut self,
         proxy_id: &ProxyId,
