@@ -35,6 +35,7 @@ Two integration hazards showed up in the shared tree and are worth carrying forw
 - Both new browser checks were proven to fail against the pre-change behavior and pass after. Check 99 was run before the fix and recorded next and previous staying on side A and the empty-side close leaving side A visible; the same command passed after.
 - The replacement coalescing assertion was proven to still detect the defect by disabling coalescing and rebuilding the bundle, which produced 512 rendered updates against a cap of 130, then restoring and re-running green at 102 against a cap of 112.
 - The self-write module ran 50 consecutive times under a parallel web build with zero failures.
+- The two checks this release adds are verified alone, together, and inside an eight-check suite, because a check verified only in the arrangement it was written against is how both of them first reported green. Check 94 clears Chrome's resource timing buffer, which caps at 250 entries and otherwise drops the entry its wasm wait reads once earlier checks fill it, and check 99 waits out the 520ms pane side-flip animation that rotates the pane header out of the viewport and makes a click land on a non-clickable node.
 
 ## Retrospective
 
