@@ -9,20 +9,29 @@
 //! write. Both make the session's OWN flush echo look like an external
 //! edit, and folding that echo back in destroys live user state.
 //!
-//! Each session keeps a ring of hashes of every content it has itself
-//! put on (or adopted from) disk: the attach seed, every successful
-//! flush, every reconciled merge. A disk read whose hash is in the
-//! ring is our own bytes coming back, no matter what the mtime says.
-//! The reconciler adopts the token and keeps the authority while the
-//! entry is live. A divergent observation remains scheduled so bytes
-//! that persist past expiry fold as durable external state.
+//! Each session keeps a ring of hashes of content it has put on, or
+//! adopted from, disk. A disk read whose hash is in the ring is bytes
+//! this session has already accounted for, no matter what the mtime
+//! says. The reconciler adopts the token and keeps the authority while
+//! the entry is live. A divergent observation remains scheduled so
+//! bytes that persist past expiry fold as durable external state.
 //!
-//! A RING, not just the last flush: a stale read can serve content
+//! A RING, not just the last entry: a stale read can serve content
 //! from several writes ago (upload queues), so recent history must
-//! match too. Entries expire so the window in which an external edit
-//! that byte-exactly restores recently-flushed content is deferred
-//! stays bounded; that temporary over-suppression is the same class as
-//! the coarser `SelfWrites` path dedupe.
+//! match too.
+//!
+//! Entries carry their ORIGIN, because the two kinds age differently.
+//! An async-committing filesystem can replay bytes this session WROTE
+//! for as long as its upload queue runs, so those need a wide window.
+//! Bytes this session merely ADOPTED from disk can only come back via a
+//! stale read racing the watcher event that announced them, which is a
+//! burst-scale effect. Holding adopted bytes for the write window is
+//! what makes an external edit that restores recently-seen content look
+//! like an echo: `# Hello` -> `# Hello world` -> `# Hello` is the shape
+//! every undo, revert, and git checkout takes, and agents editing files
+//! through the filesystem hit it constantly. Separating the windows
+//! keeps the lying-filesystem defense where it is earned and lets an
+//! honest restore converge at watcher speed.
 //!
 //! Not thread-safe by design: each ring lives inside its session's
 //! state mutex.
@@ -30,16 +39,34 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-/// How long a self-written content hash keeps matching. Flushes are
-/// at least the flush debounce (800 ms) apart, so the default cap
-/// covers far more history than any plausible echo lag; the TTL is
-/// what bounds the external-restore swallow window.
-const DISK_ECHO_TTL: Duration = Duration::from_secs(60);
+/// How long content this session WROTE keeps matching. Flushes are at
+/// least the flush debounce (800 ms) apart, so the cap covers far more
+/// history than any plausible echo lag; this TTL is what bounds the
+/// window in which our own bytes can come back under a re-stamped
+/// mtime.
+const DISK_ECHO_WRITE_TTL: Duration = Duration::from_secs(60);
+
+/// How long content this session ADOPTED from disk keeps matching.
+/// Only a stale read racing the announcing watcher event can serve
+/// these back, so this covers an event burst rather than an upload
+/// queue. It also bounds how long an honest external restore is
+/// deferred, which is why it is small.
+const DISK_ECHO_ADOPT_TTL: Duration = Duration::from_millis(1500);
 
 /// Entry cap; eviction is oldest-first. 16 entries at the 800 ms
 /// flush floor is ~13 s of maximum-rate history, plenty for watcher
 /// echo bursts while keeping the ring trivially small.
 const DISK_ECHO_CAP: usize = 16;
+
+/// Where a ring entry's bytes came from. Written bytes are the ones an
+/// async-committing filesystem can replay; adopted bytes are not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EchoOrigin {
+    /// This session wrote these bytes to disk.
+    Written,
+    /// This session read these bytes from disk and took them as truth.
+    Adopted,
+}
 
 /// Version-stable FNV-1a hash of session/file content. The durable recovery
 /// record persists baseline hashes across processes and toolchain upgrades, so
@@ -56,13 +83,14 @@ pub(crate) fn content_hash(text: &str) -> u64 {
 
 #[derive(Debug)]
 pub(crate) struct DiskEchoRing {
-    inner: VecDeque<(u64, Instant)>,
-    ttl: Duration,
+    inner: VecDeque<(u64, EchoOrigin, Instant)>,
+    write_ttl: Duration,
+    adopt_ttl: Duration,
 }
 
 impl Default for DiskEchoRing {
     fn default() -> Self {
-        Self::with_ttl(DISK_ECHO_TTL)
+        Self::with_ttls(DISK_ECHO_WRITE_TTL, DISK_ECHO_ADOPT_TTL)
     }
 }
 
@@ -71,50 +99,67 @@ impl DiskEchoRing {
         Self::default()
     }
 
-    /// Construct with a custom TTL. Tests use a short TTL so expiry
-    /// can be observed without sleeping through the production 60 s.
-    pub fn with_ttl(ttl: Duration) -> Self {
+    /// Construct with custom TTLs. Tests use short ones so expiry can
+    /// be observed without sleeping through the production windows.
+    pub fn with_ttls(write_ttl: Duration, adopt_ttl: Duration) -> Self {
         Self {
             inner: VecDeque::new(),
-            ttl,
+            write_ttl,
+            adopt_ttl,
         }
     }
 
-    /// Record content this session just put on (or adopted from) disk.
-    pub fn note(&mut self, hash: u64) {
+    /// Record content this session just wrote to disk.
+    pub fn note_written(&mut self, hash: u64) {
+        self.note(hash, EchoOrigin::Written);
+    }
+
+    /// Record content this session just adopted from disk.
+    pub fn note_adopted(&mut self, hash: u64) {
+        self.note(hash, EchoOrigin::Adopted);
+    }
+
+    fn note(&mut self, hash: u64, origin: EchoOrigin) {
         let now = Instant::now();
         self.evict(now);
         while self.inner.len() >= DISK_ECHO_CAP {
             self.inner.pop_front();
         }
-        self.inner.push_back((hash, now));
+        self.inner.push_back((hash, origin, now));
     }
 
     /// True when `hash` matches content this session wrote or adopted
-    /// within the TTL. Lookup does not consume or refresh the entry:
-    /// refreshing on match would let a repeating echo extend its own
-    /// window indefinitely.
+    /// within that entry's window. Lookup does not consume or refresh
+    /// the entry: refreshing on match would let a repeating echo extend
+    /// its own window indefinitely.
     pub fn contains(&mut self, hash: u64) -> bool {
         self.evict(Instant::now());
-        self.inner.iter().any(|(h, _)| *h == hash)
+        self.inner.iter().any(|(h, _, _)| *h == hash)
     }
 
-    /// True when any entry is still live: the session wrote to disk
-    /// recently, so a suspicious observation (an empty read) may be an
-    /// in-flight-write artifact rather than a real external edit.
-    pub fn any_recent(&mut self) -> bool {
+    /// True when this session wrote to disk recently enough that a
+    /// suspicious observation (an empty read) may be an in-flight-write
+    /// artifact rather than a real external edit. Adopted entries do
+    /// not count: reading bytes never put an upload queue in flight, so
+    /// they are no reason to distrust a truncation.
+    pub fn any_recent_write(&mut self) -> bool {
         self.evict(Instant::now());
-        !self.inner.is_empty()
+        self.inner
+            .iter()
+            .any(|(_, origin, _)| *origin == EchoOrigin::Written)
     }
 
     fn evict(&mut self, now: Instant) {
-        while let Some(&(_, t)) = self.inner.front() {
-            if now.duration_since(t) > self.ttl {
-                self.inner.pop_front();
-            } else {
-                break;
-            }
-        }
+        // Mixed windows mean age order is not expiry order, so this
+        // cannot pop from the front the way a single-TTL ring would.
+        let (write_ttl, adopt_ttl) = (self.write_ttl, self.adopt_ttl);
+        self.inner.retain(|(_, origin, t)| {
+            let ttl = match origin {
+                EchoOrigin::Written => write_ttl,
+                EchoOrigin::Adopted => adopt_ttl,
+            };
+            now.duration_since(*t) <= ttl
+        });
     }
 }
 
@@ -127,7 +172,7 @@ mod tests {
     fn unknown_hash_does_not_match() {
         let mut ring = DiskEchoRing::new();
         assert!(!ring.contains(content_hash("x")));
-        assert!(!ring.any_recent());
+        assert!(!ring.any_recent_write());
     }
 
     #[test]
@@ -139,39 +184,87 @@ mod tests {
     #[test]
     fn noted_hash_matches_and_is_not_consumed() {
         let mut ring = DiskEchoRing::new();
-        ring.note(content_hash("hello"));
+        ring.note_written(content_hash("hello"));
         assert!(ring.contains(content_hash("hello")));
         assert!(ring.contains(content_hash("hello")));
         assert!(!ring.contains(content_hash("other")));
-        assert!(ring.any_recent());
+        assert!(ring.any_recent_write());
     }
 
     #[test]
     fn history_matches_not_just_last() {
         let mut ring = DiskEchoRing::new();
-        ring.note(content_hash("v1"));
-        ring.note(content_hash("v2"));
-        ring.note(content_hash("v3"));
+        ring.note_written(content_hash("v1"));
+        ring.note_written(content_hash("v2"));
+        ring.note_written(content_hash("v3"));
         assert!(ring.contains(content_hash("v1")));
         assert!(ring.contains(content_hash("v3")));
     }
 
     #[test]
     fn entries_expire_after_ttl() {
-        let mut ring = DiskEchoRing::with_ttl(Duration::from_millis(20));
-        ring.note(content_hash("v1"));
+        let mut ring =
+            DiskEchoRing::with_ttls(Duration::from_millis(20), Duration::from_millis(20));
+        ring.note_written(content_hash("v1"));
         sleep(Duration::from_millis(40));
         assert!(!ring.contains(content_hash("v1")));
-        assert!(!ring.any_recent());
+        assert!(!ring.any_recent_write());
     }
 
     #[test]
     fn cap_evicts_oldest_first() {
         let mut ring = DiskEchoRing::new();
         for i in 0..(DISK_ECHO_CAP + 1) {
-            ring.note(content_hash(&format!("v{i}")));
+            ring.note_written(content_hash(&format!("v{i}")));
         }
         assert!(!ring.contains(content_hash("v0")), "oldest evicted");
         assert!(ring.contains(content_hash(&format!("v{DISK_ECHO_CAP}"))));
+    }
+
+    #[test]
+    fn adopted_entries_expire_before_written_ones() {
+        // The reported bug: an external edit restoring recently adopted
+        // content was held for the full write window, so `# Hello` ->
+        // `# Hello world` -> `# Hello` never converged in the editor.
+        let mut ring =
+            DiskEchoRing::with_ttls(Duration::from_millis(400), Duration::from_millis(20));
+        ring.note_written(content_hash("flushed"));
+        ring.note_adopted(content_hash("restored"));
+        sleep(Duration::from_millis(60));
+        assert!(
+            !ring.contains(content_hash("restored")),
+            "an adopted entry stops protecting quickly so restores converge"
+        );
+        assert!(
+            ring.contains(content_hash("flushed")),
+            "our own written bytes keep the wide replay window"
+        );
+    }
+
+    #[test]
+    fn adopted_entries_never_justify_distrusting_a_truncation() {
+        let mut ring = DiskEchoRing::new();
+        ring.note_adopted(content_hash("read from disk"));
+        assert!(ring.contains(content_hash("read from disk")));
+        assert!(
+            !ring.any_recent_write(),
+            "reading bytes puts no write in flight, so an empty read is not suspect"
+        );
+        ring.note_written(content_hash("we wrote this"));
+        assert!(ring.any_recent_write());
+    }
+
+    #[test]
+    fn eviction_handles_mixed_windows_out_of_age_order() {
+        // Adopted-then-written insertion order means the older entry
+        // outlives the newer one; a front-popping evictor would stop at
+        // the live adopted entry and leak the expired one.
+        let mut ring =
+            DiskEchoRing::with_ttls(Duration::from_millis(400), Duration::from_millis(20));
+        ring.note_adopted(content_hash("early adopted"));
+        ring.note_written(content_hash("late written"));
+        sleep(Duration::from_millis(60));
+        assert!(!ring.contains(content_hash("early adopted")));
+        assert!(ring.contains(content_hash("late written")));
     }
 }

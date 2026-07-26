@@ -472,7 +472,7 @@ impl DocSession {
         // The seed is disk-adopted content: a stale read serving it
         // back later must count as an echo, not an external edit.
         let mut disk_echo = DiskEchoRing::new();
-        disk_echo.note(content_hash(&text));
+        disk_echo.note_adopted(content_hash(&text));
         Self {
             path: path.to_string(),
             state: Mutex::new(DocState {
@@ -629,8 +629,8 @@ impl DocSession {
             baseline
         };
         let mut disk_echo = DiskEchoRing::new();
-        disk_echo.note(baseline.content_hash);
-        disk_echo.note(disk_hash);
+        disk_echo.note_written(baseline.content_hash);
+        disk_echo.note_adopted(disk_hash);
         Ok(Self {
             path: path.to_string(),
             state: Mutex::new(DocState {
@@ -753,7 +753,7 @@ impl DocSession {
     /// Discards existing entries; call before the writes under test.
     #[cfg(test)]
     fn test_set_disk_echo_ttl(&self, ttl: Duration) {
-        self.lock_state().disk_echo = DiskEchoRing::with_ttl(ttl);
+        self.lock_state().disk_echo = DiskEchoRing::with_ttls(ttl, ttl);
     }
 
     /// Age the pending absence past CORROBORATE_AFTER so the next
@@ -935,7 +935,7 @@ impl DocSession {
             MergeOutcome::Merged(merged_text) => {
                 let merged_text = normalize_lf(merged_text);
                 let dirty_since = st.session_state.dirty_since().unwrap_or_else(Instant::now);
-                st.disk_echo.note(disk_hash);
+                st.disk_echo.note_adopted(disk_hash);
                 st.flushed_mtime_ns = stat.mtime_ns;
                 if merged_text != st.text {
                     self.replace_locked(st, DISK_CLIENT, merged_text);
@@ -1004,7 +1004,7 @@ impl DocSession {
         // Adopted disk content joins the echo ring: a stale read
         // serving these bytes again is not a fresh external edit.
         let disk_hash = content_hash(&disk_text);
-        st.disk_echo.note(disk_hash);
+        st.disk_echo.note_adopted(disk_hash);
         if disk_text != st.text {
             self.replace_locked(&mut st, DISK_CLIENT, disk_text.clone());
         }
@@ -1073,7 +1073,7 @@ impl DocSession {
         if changed {
             self.replace_locked(&mut st, DISK_CLIENT, disk_content.clone());
         }
-        st.disk_echo.note(disk_hash);
+        st.disk_echo.note_adopted(disk_hash);
         st.flushed_mtime_ns = disk_mtime_ns;
         st.baseline = DurableBaseline {
             content: disk_content,
@@ -1145,7 +1145,7 @@ impl DocSession {
         let mut st = self.lock_state();
         st.flushed_mtime_ns = stat.mtime_ns;
         let flushed_hash = content_hash(content);
-        st.disk_echo.note(flushed_hash);
+        st.disk_echo.note_written(flushed_hash);
         st.flush_failures = 0;
         st.baseline = DurableBaseline {
             content: content.to_string(),
@@ -1912,7 +1912,7 @@ async fn reconcile_session_locked(session: &Arc<DocSession>, workspace: &Arc<Wor
             return;
         }
         let dirty = st.session_state.is_dirty();
-        if disk_text.is_empty() && (dirty || st.disk_echo.any_recent()) {
+        if disk_text.is_empty() && (dirty || st.disk_echo.any_recent_write()) {
             // An empty read right after our own writes is the classic
             // in-flight-upload placeholder; folding it in blanks every
             // client and the next flush persists the blank. Refuse the
@@ -3751,7 +3751,10 @@ mod tests {
         drain(&mut rxa);
         ha.session()
             .test_set_disk_echo_ttl(Duration::from_millis(500));
-        ha.session().lock_state().disk_echo.note(content_hash("v1"));
+        ha.session()
+            .lock_state()
+            .disk_echo
+            .note_written(content_hash("v1"));
 
         std::fs::write(fx.root.path().join("a.md"), "v2").unwrap();
         reconcile_session(ha.session(), &fx.workspace).await;
@@ -3777,6 +3780,78 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(600)).await;
         fx.registry.reconcile_pending(&fx.workspace).await;
         assert_eq!(ha.session().authority_view().0, "v1");
+        let frames = drain(&mut rxa);
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(frames[0]["updates"][0]["clientID"], "$disk");
+    }
+
+    #[tokio::test]
+    async fn external_restore_of_adopted_content_converges_at_watcher_speed() {
+        // `# Hello` -> `# Hello world` -> `# Hello`, the shape every
+        // undo, revert and `git checkout` takes, and the one agents hit
+        // when they edit through the filesystem instead of the MCP
+        // server. The restore matches bytes this session adopted
+        // moments earlier; holding those for the write window left the
+        // editor stale for the better part of a minute.
+        let fx = fixture(&[("a.md", "# Hello")]);
+        let (ha, mut rxa) = attach(&fx, "a.md", "w1", None).await;
+        drain(&mut rxa);
+        // Production asymmetry, compressed: a wide window for bytes we
+        // wrote, a burst-scale one for bytes we merely read. Re-seed
+        // the attach hash so the ring matches a freshly opened tab.
+        {
+            let mut st = ha.session().lock_state();
+            st.disk_echo =
+                DiskEchoRing::with_ttls(Duration::from_secs(60), Duration::from_millis(20));
+            st.disk_echo.note_adopted(content_hash("# Hello"));
+        }
+
+        std::fs::write(fx.root.path().join("a.md"), "# Hello world").unwrap();
+        reconcile_session(ha.session(), &fx.workspace).await;
+        assert_eq!(ha.session().authority_view().0, "# Hello world");
+        drain(&mut rxa);
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        std::fs::write(fx.root.path().join("a.md"), "# Hello").unwrap();
+        reconcile_session(ha.session(), &fx.workspace).await;
+        assert_eq!(
+            ha.session().authority_view().0,
+            "# Hello",
+            "an adopted-content restore folds without waiting out the write window"
+        );
+        let frames = drain(&mut rxa);
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(frames[0]["updates"][0]["clientID"], "$disk");
+    }
+
+    #[tokio::test]
+    async fn truncation_on_a_never_flushed_session_needs_only_corroboration() {
+        // Emptying a file from a shell used to be refused for the whole
+        // echo window, because the attach seed alone made the ring look
+        // busy. A session that has never written has no in-flight
+        // upload to blame an empty read on, so corroboration is the
+        // only guard it needs. No TTL override here on purpose: the
+        // production windows must already allow this.
+        let fx = fixture(&[("a.md", "content")]);
+        let (ha, mut rxa) = attach(&fx, "a.md", "w1", None).await;
+        drain(&mut rxa);
+
+        std::fs::write(fx.root.path().join("a.md"), "").unwrap();
+        reconcile_session(ha.session(), &fx.workspace).await;
+        assert_eq!(
+            ha.session().authority_view().0,
+            "content",
+            "an uncorroborated empty read still parks"
+        );
+        assert_eq!(
+            drain(&mut rxa).len(),
+            0,
+            "nothing fanned before corroboration"
+        );
+
+        backdate_pending_fold(ha.session());
+        fx.registry.reconcile_pending(&fx.workspace).await;
+        assert_eq!(ha.session().authority_view().0, "");
         let frames = drain(&mut rxa);
         assert_eq!(frames.len(), 1, "{frames:?}");
         assert_eq!(frames[0]["updates"][0]["clientID"], "$disk");

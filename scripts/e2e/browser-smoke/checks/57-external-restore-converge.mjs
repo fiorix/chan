@@ -1,15 +1,20 @@
-// An external edit that byte-exactly restores recently written
-// content is deferred while the doc-session echo entry remains live.
-// Once the 60s entry expires, the scheduled observation must fold into
-// the editor, GET /api/files, and later `cs open` calls without another
-// filesystem event.
+// An external edit that byte-exactly restores content the session
+// recently adopted from disk must converge at watcher speed, the same
+// as any other external edit. The restore shape is what undo, revert,
+// `git checkout` and filesystem-editing agents all produce, so it
+// cannot be treated as a suspect echo of the session's own writes.
+// Convergence has to reach the editor, GET /api/files, and later
+// `cs open` calls without another filesystem event.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const TS = Date.now();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const ECHO_TTL_MS = 60_000;
+// Generous next to the sub-second convergence this asserts, but tight
+// enough to fail loudly if a restore ever falls back to being held for
+// the self-write echo window.
+const CONVERGE_BUDGET_MS = 8000;
 
 async function editorText(page) {
   return page.evaluate(() => {
@@ -35,7 +40,7 @@ async function waitEditorHas(page, marker, timeoutMs) {
 }
 
 export default {
-  name: "external-restore-echo-swallow",
+  name: "external-restore-converges",
   async run(ctx) {
     const socket = ctx.controlSocket;
     if (!socket) ctx.skip("control socket not found for the server pid");
@@ -92,7 +97,7 @@ export default {
         console.log(`[smoke:57] ${step}: ${JSON.stringify(data)}`);
       };
 
-      // 1. Open V1: the attach seed notes hash(V1) in the echo ring.
+      // 1. Open V1. The attach read enters the session's echo ring.
       writeDisk(`${v1}\n`);
       await page.bringToFront();
       await csOpen();
@@ -102,28 +107,20 @@ export default {
       await sleep(1500);
       record("opened-v1", { ok: true });
 
-      // 2. External edit to V2: folds live (merge notes hash(V2) too).
+      // 2. External edit to V2. Novel content, the easy direction.
       writeDisk(`${v2}\n`);
       const merged = await waitEditorHas(page, v2, 10_000);
       record("external-edit-v2", { mergedLive: merged });
       if (!merged) throw new Error("baseline live merge to v2 failed");
       await sleep(500);
 
-      // 3. External RESTORE of V1, well inside the 60s ring TTL. It is
-      // safe to defer while the entry is live, but the scheduled
-      // observation must converge without another filesystem event.
+      // 3. External RESTORE of V1. Byte-identical to what the session
+      // adopted at open, and it must still converge promptly.
       writeDisk(`${v1}\n`);
       const restoreStarted = Date.now();
-      const followedBeforeExpiry = await waitEditorHas(page, v1, 3000);
-      record("external-restore-v1", {
-        followedBeforeExpiry,
-        diskShows: disk().includes(v1) ? "v1" : "other",
-      });
-      const backToV1 = followedBeforeExpiry
-        ? true
-        : await waitEditorHas(page, v1, ECHO_TTL_MS + 15_000);
+      const backToV1 = await waitEditorHas(page, v1, CONVERGE_BUDGET_MS);
       const edAfterRestore = await editorText(page);
-      record("external-restore-after-expiry", {
+      record("external-restore-v1", {
         editorFollowed: backToV1,
         elapsedMs: Date.now() - restoreStarted,
         editorShows: edAfterRestore?.includes(v1) ? "v1" : "other",
@@ -151,7 +148,7 @@ export default {
       record("external-edit-v3", { editorFollowed: toV3 });
 
       const restore = evidence.steps.find(
-        (s) => s.step === "external-restore-after-expiry",
+        (s) => s.step === "external-restore-v1",
       );
       const reopen = evidence.steps.find((s) => s.step === "second-cs-open");
       if (
@@ -161,7 +158,7 @@ export default {
         !toV3
       ) {
         throw new Error(
-          `external restore did not converge after echo expiry: ${JSON.stringify(evidence.steps)}`,
+          `external restore did not converge: ${JSON.stringify(evidence.steps)}`,
         );
       }
       return evidence;
