@@ -3752,12 +3752,10 @@ fn platform_os() -> String {
 /// Clipboard text for the terminal's right-click "Paste". Read natively
 /// via `arboard` rather than the webview's `navigator.clipboard.readText()`,
 /// which pops WKWebView's DOM-paste "Paste" button (a WebKit privacy
-/// affordance with no JS opt-out). Sync so it runs on the main thread,
-/// which macOS's NSPasteboard expects. An empty / non-text clipboard maps
+/// affordance with no JS opt-out). An empty / non-text clipboard maps
 /// to "" so the SPA just treats it as nothing-to-paste; other failures
 /// surface as an Err the SPA logs before falling back to the web API.
-#[tauri::command]
-fn read_clipboard_text() -> Result<String, String> {
+fn clipboard_read_text() -> Result<String, String> {
     match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
         Ok(text) => Ok(text),
         Err(arboard::Error::ContentNotAvailable) => Ok(String::new()),
@@ -3768,11 +3766,9 @@ fn read_clipboard_text() -> Result<String, String> {
 /// Write clipboard text natively for the terminal's OSC 52 copy. An OSC 52
 /// sequence carries no user gesture, which a WKWebView's
 /// `navigator.clipboard.writeText()` can reject, so the SPA routes the write
-/// here through `arboard`. Sync so it runs on the main thread, which macOS's
-/// NSPasteboard expects. Any failure surfaces as an Err the SPA logs before
+/// here through `arboard`. Any failure surfaces as an Err the SPA logs before
 /// falling back to the web API.
-#[tauri::command]
-fn write_clipboard_text(text: String) -> Result<(), String> {
+fn clipboard_write_text(text: String) -> Result<(), String> {
     arboard::Clipboard::new()
         .and_then(|mut c| c.set_text(text))
         .map_err(|e| e.to_string())
@@ -3782,9 +3778,8 @@ fn write_clipboard_text(text: String) -> Result<(), String> {
 /// WKWebView's paste button like the text read. arboard returns raw RGBA
 /// (`ImageData`), so encode it to PNG (what the terminal deals in). An
 /// image-less clipboard maps to `Ok(None)` so the SPA just tries the next
-/// representation. Sync so it runs on the main thread NSPasteboard expects.
-#[tauri::command]
-fn read_clipboard_image() -> Result<Option<Vec<u8>>, String> {
+/// representation.
+fn clipboard_read_image() -> Result<Option<Vec<u8>>, String> {
     let image = match arboard::Clipboard::new().and_then(|mut c| c.get_image()) {
         Ok(image) => image,
         Err(arboard::Error::ContentNotAvailable) => return Ok(None),
@@ -3817,9 +3812,8 @@ fn clipboard_image_limits() -> image::Limits {
 /// sends PNG bytes (it normalizes any raster to PNG first); arboard wants raw
 /// RGBA, so decode the PNG to RGBA `ImageData` under a bounded decoder (a
 /// hostile PNG can declare huge dimensions). Any failure surfaces as an Err the
-/// CLI reports. Sync so it runs on the main thread NSPasteboard expects.
-#[tauri::command]
-fn write_clipboard_image(bytes: Vec<u8>) -> Result<(), String> {
+/// CLI reports.
+fn clipboard_write_image(bytes: Vec<u8>) -> Result<(), String> {
     let mut reader = image::ImageReader::with_format(
         std::io::Cursor::new(bytes.as_slice()),
         image::ImageFormat::Png,
@@ -3841,9 +3835,8 @@ fn write_clipboard_image(bytes: Vec<u8>) -> Result<(), String> {
 }
 
 /// Read HTML off the OS clipboard for `cs paste --html`. An HTML-less clipboard
-/// maps to `Ok(None)`. Native arboard read, mirroring `read_clipboard_text`.
-#[tauri::command]
-fn read_clipboard_html() -> Result<Option<String>, String> {
+/// maps to `Ok(None)`. Native arboard read, mirroring [`clipboard_read_text`].
+fn clipboard_read_html() -> Result<Option<String>, String> {
     match arboard::Clipboard::new().and_then(|mut c| c.get().html()) {
         Ok(html) => Ok(Some(html)),
         Err(arboard::Error::ContentNotAvailable) => Ok(None),
@@ -3855,11 +3848,140 @@ fn read_clipboard_html() -> Result<Option<String>, String> {
 /// `cs copy --html`, so a real browser reading the OS clipboard (a paste into
 /// Gmail) keeps the formatting. arboard's HTML setter carries the alt text for
 /// plain-only targets.
-#[tauri::command]
-fn write_clipboard_html(html: String, alt_text: String) -> Result<(), String> {
+fn clipboard_write_html(html: String, alt_text: String) -> Result<(), String> {
     arboard::Clipboard::new()
         .and_then(|mut c| c.set().html(html, Some(alt_text)))
         .map_err(|e| e.to_string())
+}
+
+/// Process-wide serialization for the native clipboard off macOS. Each
+/// operation creates, uses, and drops its own `arboard::Clipboard` while
+/// holding this guard: the X11 selection dance and Windows' OLE clipboard both
+/// misbehave when two of them run at once, and the synchronous commands used to
+/// get that mutual exclusion for free from the single invoke thread.
+#[cfg(not(target_os = "macos"))]
+fn clipboard_serial_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Run one clipboard operation on the blocking pool, serialized against every
+/// other one. arboard's X11 backend waits on the selection owner to answer a
+/// target, which a dead or uncooperative owner never does, so a synchronous
+/// command holds the Tauri invoke thread for seconds and the window cannot even
+/// render the `cs paste` request card. The guard is taken INSIDE the blocking
+/// closure so a queued operation parks a pool thread, never the async runtime.
+#[cfg(not(target_os = "macos"))]
+async fn run_clipboard_op<T, F>(op: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = clipboard_serial_lock()
+            .lock()
+            .map_err(|_| "clipboard lock poisoned".to_string())?;
+        op()
+    })
+    .await;
+    clipboard_join_result(joined)
+}
+
+/// Flatten a clipboard blocking task's join result: the operation's own error
+/// rides through untouched, and a task that panicked or was cancelled becomes
+/// an ordinary command error rather than an unwrap on the invoke path.
+#[cfg(not(target_os = "macos"))]
+fn clipboard_join_result<T>(joined: tauri::Result<Result<T, String>>) -> Result<T, String> {
+    joined.map_err(|e| format!("clipboard task failed: {e}"))?
+}
+
+// The six clipboard commands. macOS keeps them synchronous, so each one runs on
+// the main thread NSPasteboard expects; every other platform makes them async
+// over `run_clipboard_op`, so a stalled clipboard owner cannot hold the invoke
+// thread. Same names either way, so the ACL and the SPA see one surface.
+
+/// See [`clipboard_read_text`].
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn read_clipboard_text() -> Result<String, String> {
+    clipboard_read_text()
+}
+
+/// See [`clipboard_read_text`].
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn read_clipboard_text() -> Result<String, String> {
+    run_clipboard_op(clipboard_read_text).await
+}
+
+/// See [`clipboard_write_text`].
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn write_clipboard_text(text: String) -> Result<(), String> {
+    clipboard_write_text(text)
+}
+
+/// See [`clipboard_write_text`].
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn write_clipboard_text(text: String) -> Result<(), String> {
+    run_clipboard_op(move || clipboard_write_text(text)).await
+}
+
+/// See [`clipboard_read_image`].
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn read_clipboard_image() -> Result<Option<Vec<u8>>, String> {
+    clipboard_read_image()
+}
+
+/// See [`clipboard_read_image`].
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn read_clipboard_image() -> Result<Option<Vec<u8>>, String> {
+    run_clipboard_op(clipboard_read_image).await
+}
+
+/// See [`clipboard_write_image`].
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn write_clipboard_image(bytes: Vec<u8>) -> Result<(), String> {
+    clipboard_write_image(bytes)
+}
+
+/// See [`clipboard_write_image`].
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn write_clipboard_image(bytes: Vec<u8>) -> Result<(), String> {
+    run_clipboard_op(move || clipboard_write_image(bytes)).await
+}
+
+/// See [`clipboard_read_html`].
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn read_clipboard_html() -> Result<Option<String>, String> {
+    clipboard_read_html()
+}
+
+/// See [`clipboard_read_html`].
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn read_clipboard_html() -> Result<Option<String>, String> {
+    run_clipboard_op(clipboard_read_html).await
+}
+
+/// See [`clipboard_write_html`].
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn write_clipboard_html(html: String, alt_text: String) -> Result<(), String> {
+    clipboard_write_html(html, alt_text)
+}
+
+/// See [`clipboard_write_html`].
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn write_clipboard_html(html: String, alt_text: String) -> Result<(), String> {
+    run_clipboard_op(move || clipboard_write_html(html, alt_text)).await
 }
 
 /// User's home directory as a plain string, for the Workspaces window
@@ -6947,6 +7069,110 @@ fn spawn_terminal_window(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The clipboard runner must not execute its operation on the thread that
+    /// awaits it: a current-thread runtime is the strictest witness, because an
+    /// inline call would starve the timer below for the operation's whole life.
+    /// A blocked X11 selection read is exactly this shape, and holding the
+    /// invoke thread through it is what froze the window.
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn clipboard_op_leaves_the_awaiting_thread_free() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        // The fake operation parks until a separate thread releases it ~200ms
+        // from now, standing in for a clipboard owner that answers slowly.
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            let _ = release_tx.send(());
+        });
+
+        let op = run_clipboard_op(move || {
+            release_rx
+                .recv()
+                .map(|()| "released")
+                .map_err(|e| e.to_string())
+        });
+        tokio::pin!(op);
+        let timer_won = tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(20)) => true,
+            _ = &mut op => false,
+        };
+        assert!(
+            timer_won,
+            "the awaiting thread stalled until the clipboard operation finished"
+        );
+        assert_eq!(op.await, Ok("released"), "the parked operation still lands");
+    }
+
+    /// Two clipboard operations must never be inside the guard at once: one
+    /// `arboard::Clipboard` at a time is what the old single-threaded invoke
+    /// path gave for free, and X11 selections / Windows OLE both misbehave
+    /// under parallel access.
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn clipboard_ops_never_overlap() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+        static PEAK: AtomicUsize = AtomicUsize::new(0);
+        static DONE: AtomicUsize = AtomicUsize::new(0);
+
+        fn tracked_op() -> Result<(), String> {
+            let now = IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
+            PEAK.fetch_max(now, Ordering::SeqCst);
+            // Long enough that a second unserialized operation would be seen
+            // inside the window, short enough to keep the test quick.
+            std::thread::sleep(Duration::from_millis(20));
+            IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+            DONE.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        let (a, b, c, d) = tokio::join!(
+            run_clipboard_op(tracked_op),
+            run_clipboard_op(tracked_op),
+            run_clipboard_op(tracked_op),
+            run_clipboard_op(tracked_op),
+        );
+        assert_eq!((a, b, c, d), (Ok(()), Ok(()), Ok(()), Ok(())));
+        assert_eq!(DONE.load(Ordering::SeqCst), 4, "every operation ran");
+        assert_eq!(
+            PEAK.load(Ordering::SeqCst),
+            1,
+            "clipboard operations overlapped"
+        );
+    }
+
+    /// An operation's own error is the command's error, verbatim: the runner
+    /// adds no wrapping the SPA's fallback logic would have to parse.
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn clipboard_op_error_rides_through() {
+        assert_eq!(
+            run_clipboard_op(|| Err::<(), String>("clipboard is empty".into())).await,
+            Err("clipboard is empty".into())
+        );
+    }
+
+    /// A blocking task that dies (a panic inside arboard, or a cancelled task)
+    /// becomes an ordinary command error instead of an unwrap on the invoke
+    /// path. The panicking task here deliberately never touches the clipboard
+    /// guard, so it cannot poison it for the other tests in this binary.
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn clipboard_join_failure_becomes_a_command_error() {
+        let joined = tauri::async_runtime::spawn_blocking(|| -> Result<(), String> {
+            panic!("blocking clipboard task died")
+        })
+        .await;
+        assert!(joined.is_err(), "a panicking blocking task joins as an Err");
+        let err = clipboard_join_result(joined).expect_err("join failure maps to an Err");
+        assert!(err.contains("clipboard task failed"), "unexpected: {err}");
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
