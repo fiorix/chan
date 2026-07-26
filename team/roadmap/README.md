@@ -23,9 +23,16 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 | item | state | what needs to happen |
 | --- | --- | --- |
-| [video-preview-and-range-serving](v0.79.0/video-preview-and-range-serving.md) | registered, grounded but not specced | spec first; the real chunk is HTTP range/206 in the file route (mirrors the image path on the frontend). Deferred from v0.78.0 |
-| [ghostty-terminal-backend](v0.79.0/ghostty-terminal-backend.md) | registered, prototyped but not specced | decide whether a second terminal backend is wanted at all; branch `v076/ghostty-backend` needs rebasing onto post-0.78.0 main (expect a CHANGELOG conflict) |
-| [doom-overlay-remote-protocol](v0.79.0/doom-overlay-remote-protocol.md) | registered, not specced | the ask is the remote protocol, which the prototype does not implement; mirror the scene-session shape. Branch `doom-overlay` needs rebasing onto post-0.78.0 main |
+| [desktop-launcher-only-menubar](v0.79.0/desktop-launcher-only-menubar.md) | implemented, not merged | merge branch `desktop-launcher-only-menubar`; verify every retired-menubar chord still fires per window kind and that macOS is unchanged |
+| [ghostty-terminal-backend](v0.79.0/ghostty-terminal-backend.md) | prototyped, not merged | rebase branch `v076/ghostty-backend` onto v0.79.0 integration (expect a CHANGELOG conflict), then decide whether a second terminal backend is wanted at all |
+| [gw-ctrl-plane](v0.79.0/gw-ctrl-plane.md) | in progress | gateway product control plane; owned separately |
+
+### v0.80.0
+
+| item | state | what needs to happen |
+| --- | --- | --- |
+| [video-preview-and-range-serving](v0.80.0/video-preview-and-range-serving.md) | registered, grounded but not specced | spec first; the real chunk is HTTP range/206 in the file route, mirroring the image path on the frontend |
+| [doom-overlay-remote-protocol](v0.80.0/doom-overlay-remote-protocol.md) | registered, not specced | the ask is the remote protocol, which the prototype does not implement; mirror the scene-session shape. Branch `doom-overlay` needs rebasing |
 
 ## Completed
 

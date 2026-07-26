@@ -1,6 +1,6 @@
 # DOOM overlay: a remote protocol tied to the cs session
 
-Status: REGISTERED for v0.79.0, NOT specced. A prototype overlay exists on a branch; **the actual ask is the remote protocol, which the branch does not implement.** Spec the protocol first.
+Status: REGISTERED for v0.80.0, NOT specced. A prototype overlay exists on a branch; **the actual ask is the remote protocol, which the branch does not implement.** Spec the protocol first.
 
 ## The ask
 

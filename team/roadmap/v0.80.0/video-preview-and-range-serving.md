@@ -1,6 +1,6 @@
 # Video (and audio) preview + View, with HTTP range serving
 
-Status: REGISTERED for v0.79.0, NOT specced. Deferred from v0.78.0, which shipped only the editor convergence and Linux clipboard fixes. This is captured knowledge for the next session, not a design. Do not implement from this as-is; spec it first.
+Status: REGISTERED for v0.80.0, NOT specced. This is captured knowledge, not a design. Do not implement from this as-is; spec it first.
 
 ## What
 
