@@ -4,15 +4,16 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use devserver_control_proto::{
-    AdmissionLease, CanonicalOrigin, ProxyId, ServerFrame, SessionRevocation, TunnelRow,
+    AdmissionLease, BrowserSessionRow, CanonicalOrigin, ProxyId, ServerFrame, SessionRevocation,
+    TunnelRow,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Instant, MissedTickBehavior};
 use uuid::Uuid;
 
 use crate::{
-    CommandOutcome, ControllerState, Effect, ProxyView, SessionIncarnation, SessionKey, StateError,
-    TunnelView,
+    BrowserSessionView, CommandOutcome, ControllerState, Effect, ProxyView, SessionIncarnation,
+    SessionKey, StateError, TunnelView,
 };
 
 const ACTOR_QUEUE_CAPACITY: usize = 1024;
@@ -25,6 +26,7 @@ pub struct ControllerHandle {
     readiness_watch: watch::Receiver<bool>,
     tunnel_watch: watch::Receiver<Arc<Vec<TunnelView>>>,
     proxy_watch: watch::Receiver<Arc<Vec<ProxyView>>>,
+    browser_session_watch: watch::Receiver<Arc<Vec<BrowserSessionView>>>,
 }
 
 pub struct ProxyControlSession {
@@ -69,6 +71,7 @@ enum Command {
         incarnation: SessionIncarnation,
         base_generation: u64,
         rows: Vec<TunnelRow>,
+        browser_sessions: Vec<BrowserSessionRow>,
         reply: StateReply,
     },
     TunnelUp {
@@ -85,6 +88,20 @@ enum Command {
         registration_id: Uuid,
         reply: StateReply,
     },
+    BrowserSessionUp {
+        proxy_id: ProxyId,
+        incarnation: SessionIncarnation,
+        generation: u64,
+        row: BrowserSessionRow,
+        reply: StateReply,
+    },
+    BrowserSessionDown {
+        proxy_id: ProxyId,
+        incarnation: SessionIncarnation,
+        generation: u64,
+        admin_session_id: Uuid,
+        reply: StateReply,
+    },
     RequestAdmission {
         proxy_id: ProxyId,
         incarnation: SessionIncarnation,
@@ -93,6 +110,7 @@ enum Command {
         owner_user_id: Uuid,
         user: String,
         devserver_id: String,
+        max_connected_devservers: u32,
         admission_lease: AdmissionLease,
         admission_lease_expires_at: DateTime<Utc>,
         reply: StateReply,
@@ -104,6 +122,7 @@ enum Command {
         owner_user_id: Uuid,
         user: String,
         devserver_id: String,
+        max_connected_devservers: u32,
         admission_lease: AdmissionLease,
         admission_lease_expires_at: DateTime<Utc>,
         reply: StateReply,
@@ -165,6 +184,9 @@ enum Command {
     Proxies {
         reply: oneshot::Sender<Result<Vec<ProxyView>, StateError>>,
     },
+    BrowserSessions {
+        reply: oneshot::Sender<Result<Vec<BrowserSessionView>, StateError>>,
+    },
     KillTunnel {
         owner_user_id: Uuid,
         devserver_id: String,
@@ -172,6 +194,9 @@ enum Command {
     },
     KillUserTunnels {
         owner_user_id: Uuid,
+        reply: oneshot::Sender<Result<KillPlan, StateError>>,
+    },
+    KillAllTunnels {
         reply: oneshot::Sender<Result<KillPlan, StateError>>,
     },
     RevokeSessions {
@@ -188,6 +213,7 @@ impl Command {
                 | Self::Tunnels { .. }
                 | Self::OwnerTunnels { .. }
                 | Self::Proxies { .. }
+                | Self::BrowserSessions { .. }
         )
     }
 }
@@ -205,6 +231,7 @@ pub fn spawn_controller_owned(
     let (readiness_watch_tx, readiness_watch) = watch::channel(false);
     let (tunnel_watch_tx, tunnel_watch) = watch::channel(Arc::new(Vec::new()));
     let (proxy_watch_tx, proxy_watch) = watch::channel(Arc::new(Vec::new()));
+    let (browser_session_watch_tx, browser_session_watch) = watch::channel(Arc::new(Vec::new()));
 
     let task = tokio::spawn(async move {
         let mut state = ControllerState::new(max_devservers_per_user);
@@ -228,6 +255,7 @@ pub fn spawn_controller_owned(
                             &readiness_watch_tx,
                             &tunnel_watch_tx,
                             &proxy_watch_tx,
+                            &browser_session_watch_tx,
                         );
                         watch_views_dirty = false;
                     }
@@ -251,6 +279,7 @@ pub fn spawn_controller_owned(
             readiness_watch,
             tunnel_watch,
             proxy_watch,
+            browser_session_watch,
         },
         task,
     )
@@ -303,10 +332,19 @@ fn handle_command(
             incarnation,
             base_generation,
             rows,
+            browser_sessions,
             reply,
         } => finish(
             reply,
-            state.accept_snapshot(&proxy_id, incarnation, base_generation, rows, now, wall_now),
+            state.accept_snapshot(
+                &proxy_id,
+                incarnation,
+                base_generation,
+                rows,
+                browser_sessions,
+                now,
+                wall_now,
+            ),
         ),
         Command::TunnelUp {
             proxy_id,
@@ -335,6 +373,33 @@ fn handle_command(
                 wall_now,
             ),
         ),
+        Command::BrowserSessionUp {
+            proxy_id,
+            incarnation,
+            generation,
+            row,
+            reply,
+        } => finish(
+            reply,
+            state.browser_session_up(&proxy_id, incarnation, generation, row, now, wall_now),
+        ),
+        Command::BrowserSessionDown {
+            proxy_id,
+            incarnation,
+            generation,
+            admin_session_id,
+            reply,
+        } => finish(
+            reply,
+            state.browser_session_down(
+                &proxy_id,
+                incarnation,
+                generation,
+                admin_session_id,
+                now,
+                wall_now,
+            ),
+        ),
         Command::RequestAdmission {
             proxy_id,
             incarnation,
@@ -343,6 +408,7 @@ fn handle_command(
             owner_user_id,
             user,
             devserver_id,
+            max_connected_devservers,
             admission_lease,
             admission_lease_expires_at,
             reply,
@@ -356,6 +422,7 @@ fn handle_command(
                 owner_user_id,
                 user,
                 devserver_id,
+                max_connected_devservers,
                 admission_lease,
                 admission_lease_expires_at,
                 now,
@@ -369,6 +436,7 @@ fn handle_command(
             owner_user_id,
             user,
             devserver_id,
+            max_connected_devservers,
             admission_lease,
             admission_lease_expires_at,
             reply,
@@ -381,6 +449,7 @@ fn handle_command(
                 owner_user_id,
                 user,
                 devserver_id,
+                max_connected_devservers,
                 admission_lease,
                 admission_lease_expires_at,
                 now,
@@ -487,6 +556,10 @@ fn handle_command(
             let _ = reply.send(state.read_proxies());
             Vec::new()
         }
+        Command::BrowserSessions { reply } => {
+            let _ = reply.send(state.read_browser_sessions());
+            Vec::new()
+        }
         Command::KillTunnel {
             owner_user_id,
             devserver_id,
@@ -512,6 +585,21 @@ fn handle_command(
             reply,
         } => {
             let (command_ids, effects) = match state.begin_owner_kill(owner_user_id, now) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return Vec::new();
+                }
+            };
+            let confirmations = command_ids
+                .into_iter()
+                .map(|command_id| register_waiter(waiters, command_id))
+                .collect();
+            let _ = reply.send(Ok(KillPlan::Issued(confirmations)));
+            effects
+        }
+        Command::KillAllTunnels { reply } => {
+            let (command_ids, effects) = match state.begin_all_kill(now) {
                 Ok(plan) => plan,
                 Err(error) => {
                     let _ = reply.send(Err(error));
@@ -650,6 +738,7 @@ fn publish_watches(
     readiness_watch: &watch::Sender<bool>,
     tunnel_watch: &watch::Sender<Arc<Vec<TunnelView>>>,
     proxy_watch: &watch::Sender<Arc<Vec<ProxyView>>>,
+    browser_session_watch: &watch::Sender<Arc<Vec<BrowserSessionView>>>,
 ) {
     readiness_watch.send_if_modified(|ready| {
         let next = state.is_ready();
@@ -662,6 +751,10 @@ fn publish_watches(
     });
     publish(tunnel_watch, Arc::new(state.tunnel_views()));
     publish(proxy_watch, Arc::new(state.proxy_views()));
+    publish(
+        browser_session_watch,
+        Arc::new(state.browser_session_views()),
+    );
 }
 
 fn publish<T: PartialEq>(sender: &watch::Sender<Arc<Vec<T>>>, next: Arc<Vec<T>>) {
@@ -707,12 +800,14 @@ impl ControllerHandle {
         incarnation: SessionIncarnation,
         base_generation: u64,
         rows: Vec<TunnelRow>,
+        browser_sessions: Vec<BrowserSessionRow>,
     ) -> Result<MutationStatus, ActorError> {
         self.state_request(|reply| Command::AcceptSnapshot {
             proxy_id,
             incarnation,
             base_generation,
             rows,
+            browser_sessions,
             reply,
         })
         .await
@@ -752,6 +847,40 @@ impl ControllerHandle {
         .await
     }
 
+    pub async fn browser_session_up(
+        &self,
+        proxy_id: ProxyId,
+        incarnation: SessionIncarnation,
+        generation: u64,
+        row: BrowserSessionRow,
+    ) -> Result<MutationStatus, ActorError> {
+        self.state_request(|reply| Command::BrowserSessionUp {
+            proxy_id,
+            incarnation,
+            generation,
+            row,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn browser_session_down(
+        &self,
+        proxy_id: ProxyId,
+        incarnation: SessionIncarnation,
+        generation: u64,
+        admin_session_id: Uuid,
+    ) -> Result<MutationStatus, ActorError> {
+        self.state_request(|reply| Command::BrowserSessionDown {
+            proxy_id,
+            incarnation,
+            generation,
+            admin_session_id,
+            reply,
+        })
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn request_admission_authorized(
         &self,
@@ -762,6 +891,7 @@ impl ControllerHandle {
         owner_user_id: Uuid,
         user: String,
         devserver_id: String,
+        max_connected_devservers: u32,
         admission_lease: AdmissionLease,
         admission_lease_expires_at: DateTime<Utc>,
     ) -> Result<MutationStatus, ActorError> {
@@ -773,6 +903,7 @@ impl ControllerHandle {
             owner_user_id,
             user,
             devserver_id,
+            max_connected_devservers,
             admission_lease,
             admission_lease_expires_at,
             reply,
@@ -798,6 +929,7 @@ impl ControllerHandle {
             crate::state::legacy_owner_user_id(&user),
             user,
             devserver_id,
+            devserver_control_proto::MAX_SIGNED_CONNECTED_DEVSERVERS,
             AdmissionLease::parse("test").expect("test lease"),
             Utc::now() + chrono::Duration::minutes(5),
         )
@@ -813,6 +945,7 @@ impl ControllerHandle {
         owner_user_id: Uuid,
         user: String,
         devserver_id: String,
+        max_connected_devservers: u32,
         admission_lease: AdmissionLease,
         admission_lease_expires_at: DateTime<Utc>,
     ) -> Result<MutationStatus, ActorError> {
@@ -823,6 +956,7 @@ impl ControllerHandle {
             owner_user_id,
             user,
             devserver_id,
+            max_connected_devservers,
             admission_lease,
             admission_lease_expires_at,
             reply,
@@ -965,6 +1099,12 @@ impl ControllerHandle {
             .map_err(ActorError::State)
     }
 
+    pub async fn browser_sessions(&self) -> Result<Vec<BrowserSessionView>, ActorError> {
+        self.request(|reply| Command::BrowserSessions { reply })
+            .await?
+            .map_err(ActorError::State)
+    }
+
     pub async fn plan_tunnel_kill(
         &self,
         owner_user_id: Uuid,
@@ -988,6 +1128,12 @@ impl ControllerHandle {
         .map_err(ActorError::State)
     }
 
+    pub async fn plan_all_kill(&self) -> Result<KillPlan, ActorError> {
+        self.request(|reply| Command::KillAllTunnels { reply })
+            .await?
+            .map_err(ActorError::State)
+    }
+
     pub async fn plan_session_revocation(
         &self,
         revocation: SessionRevocation,
@@ -1007,6 +1153,10 @@ impl ControllerHandle {
 
     pub fn watch_proxies(&self) -> watch::Receiver<Arc<Vec<ProxyView>>> {
         self.proxy_watch.clone()
+    }
+
+    pub fn watch_browser_sessions(&self) -> watch::Receiver<Arc<Vec<BrowserSessionView>>> {
+        self.browser_session_watch.clone()
     }
 
     async fn state_request(
@@ -1087,7 +1237,7 @@ mod tests {
             .await
             .unwrap();
         actor
-            .accept_snapshot(proxy(), session.incarnation, 0, Vec::new())
+            .accept_snapshot(proxy(), session.incarnation, 0, Vec::new(), Vec::new())
             .await
             .unwrap();
         assert!(matches!(
@@ -1175,7 +1325,7 @@ mod tests {
         proxies.changed().await.unwrap();
         assert_eq!(proxies.borrow().len(), 1);
         actor
-            .accept_snapshot(proxy(), session.incarnation, 0, Vec::new())
+            .accept_snapshot(proxy(), session.incarnation, 0, Vec::new(), Vec::new())
             .await
             .unwrap();
         keep_alive_until_ready(&actor, &mut session).await;
@@ -1202,6 +1352,8 @@ mod tests {
                     owner_user_id: crate::state::legacy_owner_user_id("alice"),
                     user: "alice".into(),
                     devserver_id: "one".into(),
+                    max_connected_devservers:
+                        devserver_control_proto::MAX_SIGNED_CONNECTED_DEVSERVERS,
                     admission_lease: AdmissionLease::parse("test").unwrap(),
                     admission_lease_expires_at: Utc::now() + chrono::Duration::days(365),
                     peer_addr: None,
@@ -1221,6 +1373,7 @@ mod tests {
             owner_user_id: crate::state::legacy_owner_user_id(user),
             user: user.into(),
             devserver_id: devserver_id.into(),
+            max_connected_devservers: devserver_control_proto::MAX_SIGNED_CONNECTED_DEVSERVERS,
             admission_lease: AdmissionLease::parse("test").unwrap(),
             admission_lease_expires_at: Utc::now() + chrono::Duration::days(365),
             peer_addr: None,
@@ -1313,6 +1466,7 @@ mod tests {
                     session.incarnation,
                     0,
                     vec![row("alice", devserver_id, registration_id)],
+                    Vec::new(),
                 )
                 .await
                 .unwrap();
@@ -1392,6 +1546,7 @@ mod tests {
                 session.incarnation,
                 0,
                 vec![row("alice", "one", registration_id)],
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1431,6 +1586,7 @@ mod tests {
                 session.incarnation,
                 0,
                 vec![row("alice", "one", registration_id)],
+                Vec::new(),
             )
             .await
             .unwrap();

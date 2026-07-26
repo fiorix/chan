@@ -2,20 +2,21 @@
 
 ## Problem
 
-Operators need to manage users, tokens, and live tunnels without SSH plus direct database access. A CLI is faster for routine tasks (block a user, check an audit log, kill a tunnel) than a web UI; it composes with shell loops, jq pipelines, and CI.
+Operators need to manage users, tokens, OAuth sessions, tenant sessions, durable access policy, and live tunnels without direct database access. The CLI composes with shell loops, jq pipelines, and CI.
 
 ## Architecture
 
-Single Rust binary that talks HTTP to profile-service and devserver-control. No database access; the CLI only consumes the existing admin HTTP routes.
+Single Rust binary that talks HTTP to profile-service, identity-service, and devserver-control. No database access; the CLI only consumes documented admin HTTP routes.
 
 The `tokio` runtime is `current_thread` (commands are sequential and short-lived; a multi-threaded runtime is unnecessary overhead). `clap` derives the command tree.
 
-Two HTTP clients live inside the binary:
+Three HTTP clients live inside the binary:
 
 - `AdminClient`: profile-service (`CHAN_ADMIN_PROFILE_URL`). Resolves `<ident>` and calls the admin tree.
+- `IdentityClient`: identity-service (`CHAN_ADMIN_IDENTITY_URL`). Calls OAuth-session and composite policy/access routes.
 - `WorkspaceClient`: devserver-control (`CHAN_ADMIN_WORKSPACE_URL`). Talks to `/admin/v1/*` and decodes the SSE snapshot streams for `tunnel watch` and `proxy watch`.
 
-Both clients use plain `reqwest` with a shared bearer configuration; the CLI sets a 15-second per-call timeout (no global timeout on the watch stream so it can idle between snapshots).
+Each client has its own bearer and destination. The CLI sets a 15-second per-call timeout, permits 65 seconds for user-deletion quiet-window settlement, and sets no global timeout on watch streams.
 
 ## Operational contracts
 
@@ -23,24 +24,23 @@ Both clients use plain `reqwest` with a shared bearer configuration; the CLI set
 
 User-facing identifiers resolve by uuid, email substring, or exact username, in that order. Ambiguous and missing matches are distinct operator errors.
 
-### User block
+### Composite mutations
 
-The block flow lives server-side: profile-service fans out to devserver-control in the same operation. The CLI still calls both for robustness against split deployments where the CLI's devserver-control URL may differ from the profile container's view of devserver-control, but the second call is idempotent (`killed: 0` is fine when profile already swept the registrations).
+`user block` first persists profile block, PAT revocation, audit, and durable subject revocation. It then calls identity's access-revoke composite for OAuth sessions, tenant sessions, and owner tunnels. `user delete`, policy decrease/suspend, and fleet pause also run through identity composites. Durable state remains visible in stdout when a downstream cut is partial, the diagnostic goes to stderr, and the command exits 1. Retrying repeats the required drain.
 
-Order:
+Policy resume reads the current policy first and refuses 404 instead of inventing a limit. Fleet pause requires the explicit `--drain` acknowledgement and always calls the drain route.
 
-1. `POST /v1/admin/users/{id}/block` on profile-service. This sets `blocked_at`, revokes every live PAT, writes an `auth_audit` row and, server-side, fires devserver-control `kill_user_tunnels` for the user. If profile fails the CLI stops here.
-2. `POST /admin/v1/users/{user}/tunnels/kill` on devserver-control. Belt-and-braces. A failure here surfaces as a warning on stderr but does not change the profile-side outcome.
+### Session and aggregate reads
 
-The ordering ensures a partial failure leaves the user in a "blocked but maybe a tunnel still alive" state rather than the inverse, which is the safer direction.
+OAuth-session reads use identity's bounded inventory. Tenant-session reads and watches use controller snapshots with subject, owner, and proxy filters. Global audit uses profile's filtered pagination. `overview` calls the profile, identity, and controller aggregate endpoints plus fleet status; it never lists rows to count them.
 
 ### Feature flags
 
 Manage feature flags and per-user overrides via profile-service's admin tree. `flag list` and `flag overrides <key>` render a table / `--json`; `flag create` is idempotent (re-issuing for the same key bumps `default_enabled` and description); `flag grant <key> <ident> [--enabled|--disabled]` upserts the per-user override, and `flag revoke` clears it. `<ident>` resolution is the same uuid / email / username pipeline as the user subcommand. Default for `flag grant` is `--enabled`; `--disabled` lets an operator record a deny override against a default-on flag.
 
-### Tunnel and proxy watch
+### Tunnel, proxy, and tenant-session watch
 
-devserver-control's `/admin/v1/tunnels/watch` and `/admin/v1/proxies/watch` are SSE streams. `watch_loop` consumes the stream, parses `event: snapshot` blocks, and re-renders. TTY mode clears the screen between renders (`\x1b[2J\x1b[H`) so the output behaves like `watch -n1`. `--json` emits one JSON line per event for `jq` piping.
+devserver-control's tunnel, proxy, and browser-session watch routes are SSE streams. `watch_loop` consumes `event: snapshot` blocks and re-renders. TTY mode clears the screen between renders (`\x1b[2J\x1b[H`). `--json` emits one JSON line per event.
 
 `tunnel ps` and `proxy ps` read the matching one-shot snapshots (`/admin/v1/tunnels`, `/admin/v1/proxies`). Tunnel rows carry the owning node's `proxy_id` and `proxy_base_url` so an operator can tell which proxy holds a registration; proxy rows carry the node's status, package version, tunnel count, and liveness timestamps.
 
@@ -75,10 +75,10 @@ Path segments contain only `[a-z0-9_.-]` (validated upstream), so the CLI ships 
 ## Invariants
 
 - The CLI is read-mostly. State changes go through documented HTTP routes; there are no direct database writes.
-- A blocked user always has every PAT revoked; the profile block flow handles this server-side, and also fires devserver-control eviction in the same transaction.
-- `user delete` cascades through profile-service's FK chain; the CLI does not orchestrate the deletion across multiple endpoints.
+- A block or stricter policy is durable before the CLI reports any live-drain result.
+- `user delete` uses identity's convergent composite and never deletes profile state before controller settlement.
 - `tunnel kill` is idempotent: a second kill of the same registration returns 404, which the CLI surfaces as exit 3.
-- Output is deterministic on TTY-vs-`--json` choice. No mixed output on a single command.
+- Output is deterministic on TTY-vs-`--json` choice. stdout contains data; stderr contains diagnostics.
 
 ## Error model
 

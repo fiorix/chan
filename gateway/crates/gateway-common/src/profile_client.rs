@@ -161,11 +161,44 @@ pub struct IncomingShare {
     pub accepted_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DevserverUserPolicy {
+    pub user_id: Uuid,
+    pub enabled: bool,
+    pub max_connected_devservers: i32,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DevserverFleetPolicy {
+    pub admissions_enabled: bool,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AccessRevocation {
+    pub user_id: Uuid,
+    pub username: String,
+    pub pats_revoked: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UpdateDevserverUserPolicy {
+    enabled: bool,
+    max_connected_devservers: i32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UpdateDevserverFleetPolicy {
+    admissions_enabled: bool,
+}
+
 #[derive(Clone)]
 pub struct ProfileClient {
     base: Url,
     http: reqwest::Client,
     token: String,
+    admin_token: Option<String>,
 }
 
 impl std::fmt::Debug for ProfileClient {
@@ -183,7 +216,20 @@ impl ProfileClient {
             .timeout(std::time::Duration::from_secs(10))
             .connect_timeout(std::time::Duration::from_secs(2))
             .build()?;
-        Ok(Self { base, http, token })
+        Ok(Self {
+            base,
+            http,
+            token,
+            admin_token: None,
+        })
+    }
+
+    pub fn with_admin_token(mut self, token: String) -> anyhow::Result<Self> {
+        if token.is_empty() {
+            anyhow::bail!("profile admin token must not be empty");
+        }
+        self.admin_token = Some(token);
+        Ok(self)
     }
 
     fn url(&self, path: &str) -> Url {
@@ -196,6 +242,16 @@ impl ProfileClient {
         self.http
             .request(method, self.url(path))
             .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
+    }
+
+    fn admin_req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        self.http.request(method, self.url(path)).header(
+            header::AUTHORIZATION,
+            format!(
+                "Bearer {}",
+                self.admin_token.as_ref().unwrap_or(&self.token)
+            ),
+        )
     }
 
     /// Send a request that is safe to replay: one retry after 100 ms
@@ -232,6 +288,87 @@ impl ProfileClient {
         match res.status() {
             StatusCode::OK => Ok(Some(res.json().await?)),
             StatusCode::NOT_FOUND => Ok(None),
+            s => Err(upstream(s, res).await),
+        }
+    }
+
+    pub async fn admin_get_devserver_policy(
+        &self,
+        user_id: Uuid,
+    ) -> ProfileResult<Option<DevserverUserPolicy>> {
+        let builder = self.admin_req(
+            reqwest::Method::GET,
+            &format!("/v1/admin/users/{user_id}/devserver-policy"),
+        );
+        let res = Self::send_idempotent(builder).await?;
+        match res.status() {
+            StatusCode::OK => Ok(Some(res.json().await?)),
+            StatusCode::NOT_FOUND => Ok(None),
+            s => Err(upstream(s, res).await),
+        }
+    }
+
+    pub async fn admin_put_devserver_policy(
+        &self,
+        user_id: Uuid,
+        enabled: bool,
+        max_connected_devservers: i32,
+    ) -> ProfileResult<DevserverUserPolicy> {
+        let res = self
+            .admin_req(
+                reqwest::Method::PUT,
+                &format!("/v1/admin/users/{user_id}/devserver-policy"),
+            )
+            .json(&UpdateDevserverUserPolicy {
+                enabled,
+                max_connected_devservers,
+            })
+            .send()
+            .await?;
+        match res.status() {
+            StatusCode::OK => Ok(res.json().await?),
+            StatusCode::NOT_FOUND => Err(ProfileError::NotFound),
+            StatusCode::BAD_REQUEST => Err(ProfileError::BadRequest(read_error(res).await)),
+            s => Err(upstream(s, res).await),
+        }
+    }
+
+    pub async fn admin_get_fleet_policy(&self) -> ProfileResult<DevserverFleetPolicy> {
+        let builder = self.admin_req(reqwest::Method::GET, "/v1/admin/devserver-policy");
+        let res = Self::send_idempotent(builder).await?;
+        match res.status() {
+            StatusCode::OK => Ok(res.json().await?),
+            s => Err(upstream(s, res).await),
+        }
+    }
+
+    pub async fn admin_put_fleet_policy(
+        &self,
+        admissions_enabled: bool,
+    ) -> ProfileResult<DevserverFleetPolicy> {
+        let res = self
+            .admin_req(reqwest::Method::PUT, "/v1/admin/devserver-policy")
+            .json(&UpdateDevserverFleetPolicy { admissions_enabled })
+            .send()
+            .await?;
+        match res.status() {
+            StatusCode::OK => Ok(res.json().await?),
+            StatusCode::BAD_REQUEST => Err(ProfileError::BadRequest(read_error(res).await)),
+            s => Err(upstream(s, res).await),
+        }
+    }
+
+    pub async fn admin_revoke_user_access(&self, user_id: Uuid) -> ProfileResult<AccessRevocation> {
+        let res = self
+            .admin_req(
+                reqwest::Method::POST,
+                &format!("/v1/admin/users/{user_id}/access/revoke"),
+            )
+            .send()
+            .await?;
+        match res.status() {
+            StatusCode::OK => Ok(res.json().await?),
+            StatusCode::NOT_FOUND => Err(ProfileError::NotFound),
             s => Err(upstream(s, res).await),
         }
     }
@@ -799,12 +936,8 @@ impl ProfileClient {
 }
 
 async fn upstream(status: StatusCode, res: reqwest::Response) -> ProfileError {
-    // Log the raw profile-service body for operator diagnostics, but do not
-    // propagate it through the error variant. profile error bodies can carry
-    // SQL constraint names and user-supplied fragments that should not leak
-    // through identity's 502 to a public client.
-    let body = read_error(res).await;
-    tracing::warn!(%status, body = %body, "profile-service upstream error");
+    drop(res);
+    tracing::warn!(%status, "profile-service upstream error");
     ProfileError::Upstream(format!("profile-service {status}"))
 }
 

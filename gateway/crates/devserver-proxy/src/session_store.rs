@@ -3,8 +3,10 @@ use std::collections::{BinaryHeap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+use devserver_control_proto::BrowserSessionRow;
 use rand::RngCore;
-use tokio::sync::Notify;
+use tokio::sync::{broadcast, Notify};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -39,9 +41,12 @@ impl std::fmt::Debug for SessionPrincipal {
 
 #[derive(Clone)]
 pub struct SessionRecord {
+    pub admin_session_id: Uuid,
     pub principal: SessionPrincipal,
     pub created_at: Instant,
     pub expires_at: Instant,
+    pub created_at_wall: DateTime<Utc>,
+    pub expires_at_wall: DateTime<Utc>,
     pub cancellation: CancellationToken,
     operations: Arc<ActiveOperations>,
 }
@@ -49,6 +54,7 @@ pub struct SessionRecord {
 impl std::fmt::Debug for SessionRecord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionRecord")
+            .field("admin_session_id", &self.admin_session_id)
             .field("principal", &self.principal)
             .field("created_at", &self.created_at)
             .field("expires_at", &self.expires_at)
@@ -213,6 +219,19 @@ pub enum Revocation {
     Subject {
         subject_user_id: Uuid,
     },
+    SessionId {
+        admin_session_id: Uuid,
+    },
+    Owner {
+        owner_user_id: Uuid,
+    },
+    All,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SessionEvent {
+    Up(BrowserSessionRow),
+    Down(Uuid),
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -236,6 +255,7 @@ pub enum RevokeError {
 #[derive(Clone)]
 pub struct SessionStore {
     inner: Arc<Mutex<SessionState>>,
+    events: broadcast::Sender<SessionEvent>,
     max_sessions: usize,
     max_sessions_per_subject: usize,
     max_sessions_per_principal: usize,
@@ -267,8 +287,10 @@ impl std::fmt::Debug for SessionStore {
 
 impl SessionStore {
     pub fn new(max_sessions: usize, lifetime: Duration) -> Self {
+        let (events, _) = broadcast::channel(max_sessions.saturating_mul(2).clamp(128, 65_536));
         Self {
             inner: Arc::new(Mutex::new(SessionState::default())),
+            events,
             max_sessions,
             max_sessions_per_subject: max_sessions.min(MAX_SESSIONS_PER_SUBJECT),
             max_sessions_per_principal: max_sessions.min(MAX_SESSIONS_PER_PRINCIPAL),
@@ -283,8 +305,10 @@ impl SessionStore {
         max_sessions_per_subject: usize,
         max_sessions_per_principal: usize,
     ) -> Self {
+        let (events, _) = broadcast::channel(max_sessions.saturating_mul(2).clamp(128, 65_536));
         Self {
             inner: Arc::new(Mutex::new(SessionState::default())),
+            events,
             max_sessions,
             max_sessions_per_subject,
             max_sessions_per_principal,
@@ -294,11 +318,18 @@ impl SessionStore {
 
     pub fn issue(&self, principal: SessionPrincipal) -> Result<IssuedSession, IssueError> {
         let now = Instant::now();
+        let wall_now = Utc::now();
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         if state.authority_suspended {
             return Err(IssueError::AuthoritySuspended);
         }
-        prune_expired(&mut state, now);
+        let expired = take_expired(&mut state, now);
+        for record in expired {
+            record.revoke_authority();
+            let _ = self
+                .events
+                .send(SessionEvent::Down(record.admin_session_id));
+        }
         if state.sessions.len() >= self.max_sessions {
             return Err(IssueError::AtCapacity);
         }
@@ -328,9 +359,16 @@ impl SessionStore {
             }
         };
         let record = SessionRecord {
+            admin_session_id: Uuid::new_v4(),
             principal,
             created_at: now,
             expires_at: now + self.lifetime,
+            created_at_wall: wall_now,
+            expires_at_wall: wall_now
+                .checked_add_signed(
+                    chrono::Duration::from_std(self.lifetime).unwrap_or(chrono::Duration::MAX),
+                )
+                .unwrap_or(DateTime::<Utc>::MAX_UTC),
             cancellation: CancellationToken::new(),
             operations: Arc::new(ActiveOperations::default()),
         };
@@ -346,6 +384,9 @@ impl SessionStore {
         state
             .expiries
             .push(Reverse((record.expires_at, id.clone())));
+        let _ = self
+            .events
+            .send(SessionEvent::Up(browser_session_row(&record)));
         Ok(IssuedSession { id, record })
     }
 
@@ -366,6 +407,9 @@ impl SessionStore {
         if record.expires_at <= now {
             remove_session(&mut state, id);
             record.revoke_authority();
+            let _ = self
+                .events
+                .send(SessionEvent::Down(record.admin_session_id));
             return None;
         }
         Some(record)
@@ -394,7 +438,11 @@ impl SessionStore {
 
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         for (id, _) in &revoked {
-            remove_session(&mut state, id);
+            if let Some(record) = remove_session(&mut state, id) {
+                let _ = self
+                    .events
+                    .send(SessionEvent::Down(record.admin_session_id));
+            }
         }
         Ok(revoked.len())
     }
@@ -425,7 +473,11 @@ impl SessionStore {
 
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         for (id, _) in &cleared {
-            remove_session(&mut state, id);
+            if let Some(record) = remove_session(&mut state, id) {
+                let _ = self
+                    .events
+                    .send(SessionEvent::Down(record.admin_session_id));
+            }
         }
         Ok(cleared.len())
     }
@@ -448,6 +500,34 @@ impl SessionStore {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    pub(crate) fn snapshot_and_subscribe(
+        &self,
+    ) -> (Vec<BrowserSessionRow>, broadcast::Receiver<SessionEvent>) {
+        self.prune_expired();
+        let state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let events = self.events.subscribe();
+        let rows = state
+            .sessions
+            .values()
+            .filter(|record| !record.cancellation.is_cancelled())
+            .map(browser_session_row)
+            .collect();
+        (rows, events)
+    }
+
+    pub(crate) fn prune_expired(&self) {
+        let expired = {
+            let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+            take_expired(&mut state, Instant::now())
+        };
+        for record in expired {
+            record.revoke_authority();
+            let _ = self
+                .events
+                .send(SessionEvent::Down(record.admin_session_id));
+        }
+    }
 }
 
 impl Revocation {
@@ -465,11 +545,15 @@ impl Revocation {
             Self::Subject { subject_user_id } => {
                 record.principal.subject_user_id == *subject_user_id
             }
+            Self::SessionId { admin_session_id } => record.admin_session_id == *admin_session_id,
+            Self::Owner { owner_user_id } => record.principal.owner_user_id == *owner_user_id,
+            Self::All => true,
         }
     }
 }
 
-fn prune_expired(state: &mut SessionState, now: Instant) {
+fn take_expired(state: &mut SessionState, now: Instant) -> Vec<SessionRecord> {
+    let mut expired = Vec::new();
     while let Some(Reverse((expiry, id))) = state.expiries.peek().cloned() {
         if expiry > now {
             break;
@@ -479,9 +563,21 @@ fn prune_expired(state: &mut SessionState, now: Instant) {
             record.expires_at == expiry && !record.cancellation.is_cancelled()
         }) {
             if let Some(record) = remove_session(state, &id) {
-                record.revoke_authority();
+                expired.push(record);
             }
         }
+    }
+    expired
+}
+
+fn browser_session_row(record: &SessionRecord) -> BrowserSessionRow {
+    BrowserSessionRow {
+        admin_session_id: record.admin_session_id,
+        subject_user_id: record.principal.subject_user_id,
+        owner_user_id: record.principal.owner_user_id,
+        devserver_id: record.principal.devserver_id.clone(),
+        created_at: record.created_at_wall,
+        expires_at: record.expires_at_wall,
     }
 }
 
@@ -707,6 +803,45 @@ mod tests {
         assert!(second.record.cancellation.is_cancelled());
         assert!(!untouched.record.cancellation.is_cancelled());
         assert_eq!(store.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn admin_owner_and_all_revocations_target_redacted_inventory_ids() {
+        let store = SessionStore::new(6, Duration::from_secs(60));
+        let first = store.issue(principal(1, 10, "dev-a")).expect("issue");
+        let second = store.issue(principal(2, 10, "dev-b")).expect("issue");
+        let third = store.issue(principal(3, 20, "dev-c")).expect("issue");
+        let cookie_id = first.id().to_string();
+        let admin_id = first.record.admin_session_id;
+
+        let (snapshot, _) = store.snapshot_and_subscribe();
+        assert_eq!(snapshot.len(), 3);
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        assert!(!encoded.contains(&cookie_id));
+        assert!(encoded.contains(&admin_id.to_string()));
+
+        assert_eq!(
+            store
+                .revoke(&Revocation::SessionId {
+                    admin_session_id: admin_id,
+                })
+                .await,
+            Ok(1)
+        );
+        assert!(first.record.cancellation.is_cancelled());
+        assert_eq!(
+            store
+                .revoke(&Revocation::Owner {
+                    owner_user_id: Uuid::from_u128(10),
+                })
+                .await,
+            Ok(1)
+        );
+        assert!(second.record.cancellation.is_cancelled());
+        assert!(!third.record.cancellation.is_cancelled());
+        assert_eq!(store.revoke(&Revocation::All).await, Ok(1));
+        assert!(third.record.cancellation.is_cancelled());
+        assert!(store.is_empty());
     }
 
     #[tokio::test]

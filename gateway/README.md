@@ -10,9 +10,9 @@ A fleet of `chan devserver` instances dials in over the tunnel and this gateway 
 
 Seven crates; see [`CONTEXT.md`](CONTEXT.md) for the topology and request-flow diagram.
 
-- `profile`: internal HTTP API over Postgres. Users, OAuth identities, devserver grants, feature flags, auth audit.
-- `identity`: id.chan.app. OAuth2 sign-in (GitHub / Google / GitLab) with PKCE, Postgres-backed sessions, the embedded SPA, personal access tokens (incl. the `chan://` desktop-authorize consent flow).
-- `devserver-control`: singleton, database-free control plane. Owns the dynamic proxy directory, the aggregate tunnel view, fleet admission, and command routing. Serves the `/admin/v1/*` tree on 7003 and the h2c proxy-control listener on 7101.
+- `profile`: internal HTTP API over Postgres. Users, OAuth identities, devserver grants, feature flags, durable user/fleet devserver policy, and auth audit.
+- `identity`: id.chan.app. OAuth2 sign-in with PKCE, indexed account sessions, personal access tokens, policy enforcement, and composite account/fleet admin operations.
+- `devserver-control`: singleton, database-free control plane. Owns the dynamic proxy directory, signed-cap admission, aggregate tunnel and tenant-session inventory, and command routing.
 - `devserver-control-proto`: control protocol frames, validated ids/origins, and shared tunnel/proxy view types.
 - `devserver-proxy`: devserver.chan.app. Terminates each `chan devserver`'s yamux tunnel and reverse-proxies it back out at `{user}.devserver.chan.app/{workspace}/*`, behind the always-on devserver-gate (an unauthenticated request 404s like an unknown workspace, so probes can't enumerate). Every registration is admitted by devserver-control before the client sees `HelloAck::Ok`.
 - `admin`: operator CLI against profile's and devserver-control's admin trees.
@@ -131,7 +131,7 @@ The binaries listen on loopback by default: identity public `7000`, identity int
 
 ## Admin
 
-`chan-gateway-admin` (`crates/admin/`) is the operator CLI: list / block / unblock users, inspect personal access tokens, snapshot or kill live tunnels, read auth audit. It talks to profile-service's `/v1/admin/*` tree and devserver-control's `/admin/v1/*` tree over plain HTTP, so run it on a host that can reach the internal listeners.
+`chan-gateway-admin` (`crates/admin/`) is the operator CLI for users, PATs, OAuth sessions, tenant sessions, durable devserver policy, auth history, fleet state, and live tunnels. It calls the independently scoped profile, identity, and devserver-control admin trees over protected internal HTTP.
 
 ### Setup
 
@@ -189,6 +189,25 @@ chan-gateway-admin tunnel ps
 chan-gateway-admin tunnel ps --user alice
 chan-gateway-admin tunnel kill alice home          # force one workspace offline
 chan-gateway-admin tunnel watch                    # SSE stream, top-style
+
+# Durable user policy. Suspend preserves PAT rows and the stored limit.
+chan-gateway-admin policy set alice --enabled --max-connected-devservers 3
+chan-gateway-admin policy suspend alice
+chan-gateway-admin policy resume alice
+
+# OAuth and tenant-session inventory/revocation
+chan-gateway-admin session oauth ps --user alice
+chan-gateway-admin session tenant ps --owner alice
+chan-gateway-admin session tenant revoke <admin-session-uuid>
+
+# Persistent fleet incident control
+chan-gateway-admin fleet pause --drain
+chan-gateway-admin fleet status
+chan-gateway-admin fleet resume
+
+# Bounded cross-service aggregate view and global auth history
+chan-gateway-admin overview --since 24h
+chan-gateway-admin audit ps --user alice --action login
 
 # Feature flags. Fresh deploys ship oauth_login=off and
 # share_workspaces=off so nobody can sign in until you enrol them.

@@ -14,11 +14,12 @@ Profile data (canonical user record, identities, audit) lives in profile-service
 
 ## Architecture
 
-axum HTTP server with three layers of routing under `id.chan.app`:
+axum HTTP server with four routing surfaces:
 
 1. `/auth/*`: pre-session OAuth flow. Sets a transient session key (`pending_oauth`) carrying CSRF state and the PKCE verifier; the callback consumes it and either upgrades the session to authenticated (`user_id`) or fails.
 2. `/api/*`: session-gated JSON API for the embedded SPA. Covers `me`, profile management, PAT lifecycle, the workspace list, and the devserver-gate mint endpoint.
-3. `/internal/v1/tokens/validate`: Bearer-gated endpoint called by chan-tunnel-server during handshake. Lives on its own sub-router so the session middleware doesn't try to load a cookie session for a non-cookie caller. A per-token-fingerprint throttle wraps it as defense in depth alongside the primary throttle in devserver-proxy.
+3. `/internal/v1/*`: `IDENTITY_INTERNAL_TOKEN`-gated PAT validation and OAuth-session `whoami`. This listener never loads caller cookies implicitly.
+4. `/admin/v1/*`: `IDENTITY_ADMIN_TOKEN`-gated OAuth-session inventory and product-control composites. An empty token makes the tree indistinguishable from an absent route.
 
 Static SPA assets are baked in at build time via `rust_embed` and served by `gateway_common::static_files::serve`. Anything not matched by an explicit route falls through to the static handler; paths without an extension serve `index.html` (SPA fallback).
 
@@ -55,7 +56,7 @@ sequenceDiagram
         I->>PR: audit login_denied
         I-->>B: 303 /?denied=oauth_login
     end
-    Note over I: session.cycle_id() at privilege boundary<br/>then insert user_id
+    Note over I: session.cycle_id() at privilege boundary<br/>stamp authenticated_at and user_id<br/>index final store id
     I->>PR: audit login + claim_grants (sweep)
     I-->>B: 303 post-login dest
 ```
@@ -68,8 +69,9 @@ sequenceDiagram
 
 1. Look up the provider config. Unknown provider returns 404.
 2. Generate `(authorize_url, csrf_state, pkce_verifier)`.
-3. Insert `PendingOauth { provider, state, verifier }` into the session under `pending_oauth`.
-4. Redirect to `authorize_url`.
+3. Validate optional `return_to` as one same-origin, origin-relative path and store it separately from provider state. Absolute, scheme-relative, encoded-slash/backslash, fragment, control-character, and malformed-percent forms return 400.
+4. Insert `PendingOauth { provider, state, verifier }` into the session under `pending_oauth`.
+5. Redirect to `authorize_url`.
 
 `/auth/{provider}/callback` (GET):
 
@@ -82,8 +84,9 @@ sequenceDiagram
 7. `profile.upsert_by_identity` (one HTTP round trip, one Postgres transaction). Returns the user record.
 8. If `user.is_blocked()`, write a `login_denied` audit row and return 403 (`Error::Forbidden`).
 9. Resolve `profile.get_user_flags(user.id)`. If `oauth_login` resolves false, write a `login_denied` audit row (with note `oauth_login flag not granted`) and 303 to `/?denied=oauth_login`. The SPA's Login view reads the query param and renders a "sign-in is closed" panel. The gate runs *before* `cycle_id` so a denied callback never carries an authenticated session.
-10. **Rotate the session id (`session.cycle_id()`)** at the privilege boundary, before storing `user_id`. Closes session fixation.
-11. Insert `user_id`, write a `login` audit row, claim any pending workspace grants for this user's verified emails, 303 to the stashed post-login URL (or `/`).
+10. **Rotate the session id (`session.cycle_id()`)** at the privilege boundary.
+11. Stamp microsecond-normalized `authenticated_at`, insert `user_id`, and upsert `identity_session_index` with the post-cycle tower store id. Pre-index sessions fail `whoami` closed.
+12. Write a `login` audit row, claim pending grants, consume `return_to` exactly once, and 303 there (or `/`). An `oauth_login` denial appends its stable marker to the same validated target.
 
 ### PAT lifecycle
 
@@ -95,11 +98,27 @@ PAT shape: `chan_pat_<32 random bytes, base64url, no pad>`.
 - Origin: mints record `created` (SPA) or `created_via_desktop` (desktop-authorize flow) in `api_token_audit`, so operators can tell the two apart.
 - Validate (`/internal/v1/tokens/validate`):
   - Per-token-fingerprint throttle (4 rps refill, 16 burst, 4096-entry LRU map). Throttled requests return 401, identical on the wire to an unknown token.
-  - `WHERE t.token_hash = $1 AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > now()) AND u.blocked_at IS NULL` joined to `users`. One statement does the lookup and bumps `last_used_at`.
+  - One statement joins the user, seeded fleet singleton, and optional user policy while bumping `last_used_at`. Blocked, paused, disabled, required-but-missing, unreadable, and invalid-limit states all preserve the uniform 401.
+  - A successful admission validation signs the positive finite user limit into the 120-second admission lease. No-policy compatibility mode signs the protocol maximum, leaving `MAX_DEVSERVERS_PER_USER` as the effective controller ceiling.
   - Append `used` to `api_token_audit`.
 - Revoke (`DELETE /api/tokens/{id}`):
   - Profile atomically verifies ownership, marks the row revoked, writes its audit row, and reserves a durable subject-revocation generation.
   - Identity makes a best-effort immediate owner-tunnel/session cut and returns `202`; profile's worker confirms a post-commit first cut and a second fleet cut after the full entry-credential quiet window. Per-PAT tunnel eviction is not possible because registrations do not retain a token id, so the conservative scope is the subject.
+
+PAT minting uses the same policy projection. The insert locks the canonical user and fleet singleton, so concurrent block, suspend, or pause has a linear serialization point. Public mint returns 403 `devserver_access_disabled`; admin mint returns 409 with the same stable reason. Listing and revoking existing PATs remain available.
+
+### OAuth-session and product control plane
+
+Every successful post-cycle OAuth session has a random public `admin_session_id` mapped to its secret tower `store_id`. Inventory joins the index to live, unexpired tower rows and returns only admin id, user id, authentication time, and expiry. List/revoke lazily prune missing or expired tower rows. Exact and user-wide revoke delete both records and are idempotent. Logout removes its own index row.
+
+Identity is the composition boundary for product mutations:
+
+- user policy persists to profile first; disable and non-increasing retries revoke owner tenant sessions and kill owner tunnels;
+- fleet pause persists `admissions_enabled=false`, then revokes every tenant session and kills every tunnel; resume only persists true;
+- access revoke durably revokes PATs/audits in profile, then revokes OAuth and subject tenant sessions and kills owner tunnels; and
+- admin delete establishes pending-delete denial, performs the same live cut, and waits for profile's quiet-window worker to remove the row.
+
+Durable state is never rolled back after a partial drain. A 502 contains only the durable projection and confirmed counts, making a retry convergent without exposing a downstream body.
 
 ### Dashboard
 
@@ -246,6 +265,8 @@ Additional username guards:
 - `HttpOnly`, `SameSite=Lax`, 30-day inactivity expiry.
 - `Secure` follows the `COOKIE_SECURE` env var.
 - devserver-proxy does **not** read this cookie. Cross-service auth uses a short-lived Ed25519 entry credential, not cookie sharing.
+- Authenticated sessions are indexed only after `cycle_id`; the index's secret `store_id` is database-only and never appears in serialization, debug output, or tracing.
+- `/internal/v1/sessions/whoami` accepts the raw cookie only over the internal bearer surface and treats every invalid/pre-auth/pre-index/blocked/deleted case as the same 401.
 
 ### Session id rotates on login
 
@@ -283,6 +304,8 @@ The origin strings stay coupled to DNS, the per-node wildcard TLS certificates, 
 - Accounts whose `oauth_login` flag resolves to false cannot start a session either: the login flow writes `login_denied` and 303s to `/?denied=oauth_login` so the SPA can explain why.
 - PATs hash to `SHA-256(token)`; plaintext is never persisted.
 - Session id rotates on every successful sign-in.
+- `authenticated_at` and the final rotated store id are committed to `identity_session_index` before callback success.
+- Devserver PAT mint and validation both require readable enabled fleet/user policy; required-mode absence fails closed.
 - The id.chan.app cookie has no `Domain` attribute; it never spans subdomains.
 - Bearer comparisons run at constant time.
 

@@ -103,6 +103,9 @@ spec:
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: DATABASE_URL } }
         - name: PROFILE_AUTH_TOKEN
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: PROFILE_AUTH_TOKEN } }
+        - name: PROFILE_ADMIN_TOKEN
+          valueFrom: { secretKeyRef: { name: gateway-secrets, key: PROFILE_ADMIN_TOKEN } }
+        - { name: DEVSERVER_POLICY_REQUIRED, value: "false" }
         - name: IDENTITY_INTERNAL_TOKEN
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: IDENTITY_INTERNAL_TOKEN } }
         - name: DEVSERVER_ADMISSION_SIGNING_KEY
@@ -111,6 +114,8 @@ spec:
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: DEVSERVER_ADMISSION_VERIFYING_KEYS } }
         - name: DEVSERVER_ENTRY_SIGNING_KEY
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: DEVSERVER_ENTRY_SIGNING_KEY } }
+        - name: IDENTITY_ADMIN_TOKEN
+          valueFrom: { secretKeyRef: { name: gateway-secrets, key: IDENTITY_ADMIN_TOKEN } }
         - name: DEVSERVER_IDENTITY_ADMIN_TOKEN
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: DEVSERVER_IDENTITY_ADMIN_TOKEN } }
         - name: GITHUB_CLIENT_ID
@@ -166,6 +171,8 @@ spec:
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: IDENTITY_INTERNAL_TOKEN } }
         - name: DEVSERVER_ENTRY_VERIFYING_KEYS
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: DEVSERVER_ENTRY_VERIFYING_KEYS } }
+        - name: DEVSERVER_ADMISSION_VERIFYING_KEYS
+          valueFrom: { secretKeyRef: { name: gateway-secrets, key: DEVSERVER_ADMISSION_VERIFYING_KEYS } }
         - name: DEVSERVER_PROXY_TOKEN
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: DEVSERVER_PROXY_TOKEN } }
         - { name: DEVSERVER_TUNNEL_ORIGIN, value: "http://usr.localtest.me" }

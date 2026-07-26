@@ -2,21 +2,24 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use devserver_control_proto::SessionRevocation;
 use futures_util::stream::{self, Stream};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 use crate::config::{AdminCredentials, AdminScope};
-use crate::{ActorError, CommandOutcome, ControllerHandle, KillPlan, ProxyView, TunnelView};
+use crate::{
+    ActorError, BrowserSessionView, CommandOutcome, ControllerHandle, KillPlan, ProxyStatus,
+    ProxyView, TunnelView,
+};
 
 #[derive(Clone)]
 struct AppState {
@@ -39,6 +42,7 @@ pub fn router(
     let admin = Router::new()
         .route("/admin/v1/tunnels", get(list_tunnels))
         .route("/admin/v1/tunnels/watch", get(watch_tunnels))
+        .route("/admin/v1/tunnels/kill-all", post(kill_all_tunnels))
         .route(
             "/admin/v1/tunnels/{owner_user_id}/{devserver_id}/kill",
             post(kill_tunnel),
@@ -53,6 +57,28 @@ pub fn router(
         )
         .route("/admin/v1/proxies", get(list_proxies))
         .route("/admin/v1/proxies/watch", get(watch_proxies))
+        .route("/admin/v1/browser-sessions", get(list_browser_sessions))
+        .route(
+            "/admin/v1/browser-sessions/watch",
+            get(watch_browser_sessions),
+        )
+        .route(
+            "/admin/v1/browser-sessions/{admin_session_id}/revoke",
+            post(revoke_browser_session),
+        )
+        .route(
+            "/admin/v1/browser-sessions/subjects/{user_id}/revoke",
+            post(revoke_subject_sessions),
+        )
+        .route(
+            "/admin/v1/browser-sessions/owners/{user_id}/revoke",
+            post(revoke_owner_sessions),
+        )
+        .route(
+            "/admin/v1/browser-sessions/revoke-all",
+            post(revoke_all_sessions),
+        )
+        .route("/admin/v1/overview", get(overview))
         .route("/admin/v1/sessions/revoke", post(revoke_sessions))
         .route_layer(middleware::from_fn_with_state(state.clone(), admin_auth));
 
@@ -90,6 +116,72 @@ async fn list_proxies(State(state): State<AppState>) -> Result<Json<Vec<ProxyVie
         .await
         .map(Json)
         .map_err(admin_error)
+}
+
+#[derive(Clone, Default, Deserialize)]
+struct BrowserSessionFilter {
+    subject_user_id: Option<Uuid>,
+    owner_user_id: Option<Uuid>,
+    proxy_id: Option<String>,
+}
+
+impl BrowserSessionFilter {
+    fn apply(&self, rows: &[BrowserSessionView]) -> Vec<BrowserSessionView> {
+        rows.iter()
+            .filter(|row| {
+                self.subject_user_id
+                    .is_none_or(|user_id| row.subject_user_id == user_id)
+                    && self
+                        .owner_user_id
+                        .is_none_or(|user_id| row.owner_user_id == user_id)
+                    && self
+                        .proxy_id
+                        .as_deref()
+                        .is_none_or(|proxy_id| row.proxy_id == proxy_id)
+            })
+            .cloned()
+            .collect()
+    }
+}
+
+async fn list_browser_sessions(
+    State(state): State<AppState>,
+    Query(filter): Query<BrowserSessionFilter>,
+) -> Result<Json<Vec<BrowserSessionView>>, StatusCode> {
+    state
+        .controller
+        .browser_sessions()
+        .await
+        .map(|rows| Json(filter.apply(&rows)))
+        .map_err(admin_error)
+}
+
+#[derive(Serialize)]
+struct Overview {
+    generated_at: chrono::DateTime<chrono::Utc>,
+    proxies_connected: usize,
+    proxies_ready: usize,
+    devservers_connected: usize,
+    tenant_sessions_active: usize,
+}
+
+async fn overview(State(state): State<AppState>) -> Result<Json<Overview>, StatusCode> {
+    let (proxies, tunnels, sessions) = tokio::try_join!(
+        state.controller.proxies(),
+        state.controller.tunnels(),
+        state.controller.browser_sessions(),
+    )
+    .map_err(admin_error)?;
+    Ok(Json(Overview {
+        generated_at: chrono::Utc::now(),
+        proxies_connected: proxies.len(),
+        proxies_ready: proxies
+            .iter()
+            .filter(|proxy| proxy.status == ProxyStatus::Active)
+            .count(),
+        devservers_connected: tunnels.len(),
+        tenant_sessions_active: sessions.len(),
+    }))
 }
 
 /// Per-user aggregate snapshot. A well-formed user with nothing live
@@ -173,11 +265,115 @@ async fn kill_owner_tunnels(
     Ok(Json(serde_json::json!({ "killed": killed })))
 }
 
+async fn kill_all_tunnels(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, Response> {
+    let plan = state
+        .controller
+        .plan_all_kill()
+        .await
+        .map_err(|error| admin_error(error).into_response())?;
+    settle_kill_plan(plan).await
+}
+
+async fn settle_kill_plan(plan: KillPlan) -> Result<Json<serde_json::Value>, Response> {
+    let confirmations = match plan {
+        KillPlan::Issued(confirmations) => confirmations,
+        KillPlan::NotFound => Vec::new(),
+    };
+    let mut killed = 0;
+    let mut partial = false;
+    for outcome in futures_util::future::join_all(confirmations).await {
+        match outcome {
+            Ok(CommandOutcome::Confirmed {
+                killed: gone,
+                missing,
+            }) => killed += gone + missing,
+            Ok(_) | Err(_) => partial = true,
+        }
+    }
+    let body = serde_json::json!({ "tunnels_evicted": killed });
+    if partial {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": "partial kill",
+                "tunnels_evicted": killed,
+            })),
+        )
+            .into_response());
+    }
+    Ok(Json(body))
+}
+
+async fn revoke_browser_session(
+    State(state): State<AppState>,
+    Path(admin_session_id): Path<String>,
+) -> Result<Json<serde_json::Value>, Response> {
+    let admin_session_id = Uuid::parse_str(&admin_session_id).map_err(|_| not_found())?;
+    execute_revocation(&state, SessionRevocation::SessionId { admin_session_id }).await
+}
+
+async fn revoke_subject_sessions(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, Response> {
+    let user_id = Uuid::parse_str(&user_id).map_err(|_| not_found())?;
+    execute_revocation(
+        &state,
+        SessionRevocation::Subject {
+            subject_user_id: user_id,
+        },
+    )
+    .await
+}
+
+async fn revoke_owner_sessions(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, Response> {
+    let user_id = Uuid::parse_str(&user_id).map_err(|_| not_found())?;
+    execute_revocation(
+        &state,
+        SessionRevocation::Owner {
+            owner_user_id: user_id,
+        },
+    )
+    .await
+}
+
+async fn revoke_all_sessions(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, Response> {
+    execute_revocation(&state, SessionRevocation::All).await
+}
+
 async fn revoke_sessions(
     State(state): State<AppState>,
+    Extension(scope): Extension<AdminScope>,
     Json(revocation): Json<SessionRevocation>,
 ) -> Result<Json<serde_json::Value>, Response> {
     revocation.validate().map_err(|_| not_found())?;
+    if !scope_authorizes_revocation(scope, &revocation) {
+        return Err(StatusCode::FORBIDDEN.into_response());
+    }
+    execute_revocation(&state, revocation).await
+}
+
+fn scope_authorizes_revocation(scope: AdminScope, revocation: &SessionRevocation) -> bool {
+    match scope {
+        AdminScope::Operator | AdminScope::Identity => true,
+        AdminScope::Profile => matches!(
+            revocation,
+            SessionRevocation::Exact { .. } | SessionRevocation::Subject { .. }
+        ),
+    }
+}
+
+async fn execute_revocation(
+    state: &AppState,
+    revocation: SessionRevocation,
+) -> Result<Json<serde_json::Value>, Response> {
     let plan = state
         .controller
         .plan_session_revocation(revocation)
@@ -202,6 +398,7 @@ async fn revoke_sessions(
             Json(serde_json::json!({
                 "error": "partial session revocation",
                 "revoked": revoked,
+                "tenant_sessions_revoked": revoked,
                 "proxies_confirmed": confirmed,
                 "proxies_expected": expected,
                 "proxies_unreachable": unreachable,
@@ -212,6 +409,7 @@ async fn revoke_sessions(
     }
     Ok(Json(serde_json::json!({
         "revoked": revoked,
+        "tenant_sessions_revoked": revoked,
         "proxies_confirmed": confirmed,
         "proxies_expected": expected,
         "proxies_unreachable": unreachable,
@@ -277,14 +475,37 @@ async fn watch_proxies(
     .keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
-fn snapshot_stream<T>(
+async fn watch_browser_sessions(
+    State(state): State<AppState>,
+    Query(filter): Query<BrowserSessionFilter>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
+    let readiness = state.controller.watch_readiness();
+    if !*readiness.borrow() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let permit = state
+        .watchers
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
+    Ok(Sse::new(snapshot_stream(
+        state.controller.watch_browser_sessions(),
+        readiness,
+        permit,
+        move |rows| filter.apply(rows),
+    ))
+    .keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
+fn snapshot_stream<T, P>(
     values: watch::Receiver<Arc<Vec<T>>>,
     readiness: watch::Receiver<bool>,
     permit: OwnedSemaphorePermit,
-    project: fn(&[T]) -> Vec<T>,
+    project: P,
 ) -> impl Stream<Item = Result<Event, Infallible>>
 where
     T: Clone + Serialize + Send + Sync + 'static,
+    P: Fn(&[T]) -> Vec<T> + Clone + Send + 'static,
 {
     stream::unfold(
         (values, readiness, true, permit, project),
@@ -352,7 +573,7 @@ fn snapshot_event<T: Serialize>(snapshot: &T) -> Option<Event> {
 async fn admin_auth(
     State(state): State<AppState>,
     headers: HeaderMap,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
     let provided = headers
@@ -367,6 +588,7 @@ async fn admin_auth(
     if !scope_authorizes(scope, request.method(), request.uri().path()) {
         return Err(StatusCode::FORBIDDEN);
     }
+    request.extensions_mut().insert(scope);
     Ok(next.run(request).await)
 }
 
@@ -380,6 +602,16 @@ fn scope_authorizes(scope: AdminScope, method: &axum::http::Method, path: &str) 
         (&axum::http::Method::POST, ["admin", "v1", "owners", _, "tunnels", "kill"])
         | (&axum::http::Method::POST, ["admin", "v1", "tunnels", _, _, "kill"])
         | (&axum::http::Method::POST, ["admin", "v1", "sessions", "revoke"]) => true,
+        (&axum::http::Method::POST, ["admin", "v1", "tunnels", "kill-all"])
+        | (&axum::http::Method::POST, ["admin", "v1", "browser-sessions", _, "revoke"])
+        | (
+            &axum::http::Method::POST,
+            ["admin", "v1", "browser-sessions", "subjects", _, "revoke"],
+        )
+        | (&axum::http::Method::POST, ["admin", "v1", "browser-sessions", "owners", _, "revoke"])
+        | (&axum::http::Method::POST, ["admin", "v1", "browser-sessions", "revoke-all"]) => {
+            scope == AdminScope::Identity
+        }
         (&axum::http::Method::GET, ["admin", "v1", "tunnels"])
         | (&axum::http::Method::GET, ["admin", "v1", "proxies"]) => scope == AdminScope::Profile,
         _ => false,
@@ -447,6 +679,7 @@ mod tests {
             owner_user_id: crate::state::legacy_owner_user_id(user),
             user: user.into(),
             devserver_id: devserver_id.into(),
+            max_connected_devservers: devserver_control_proto::MAX_SIGNED_CONNECTED_DEVSERVERS,
             admission_lease: devserver_control_proto::AdmissionLease::parse("test").unwrap(),
             admission_lease_expires_at: chrono::Utc::now() + chrono::Duration::days(365),
             peer_addr: None,
@@ -470,7 +703,7 @@ mod tests {
             .await
             .unwrap();
         controller
-            .accept_snapshot(proxy_id.clone(), session.incarnation, 0, rows)
+            .accept_snapshot(proxy_id.clone(), session.incarnation, 0, rows, Vec::new())
             .await
             .unwrap();
         (proxy_id, session)
@@ -625,6 +858,55 @@ mod tests {
                 .await
                 .status(),
             StatusCode::SERVICE_UNAVAILABLE,
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_scope_cannot_expand_legacy_revocation_to_identity_actions() {
+        let credentials = crate::config::AdminCredentials::for_test(
+            "operator-token",
+            "identity-token",
+            "profile-token",
+        );
+        let app = router(crate::spawn_controller(100), credentials);
+
+        for body in [
+            serde_json::json!({"scope": "all"}),
+            serde_json::json!({
+                "scope": "owner",
+                "owner_user_id": Uuid::new_v4(),
+            }),
+            serde_json::json!({
+                "scope": "session_id",
+                "admin_session_id": Uuid::new_v4(),
+            }),
+        ] {
+            assert_eq!(
+                post_json(
+                    app.clone(),
+                    "/admin/v1/sessions/revoke",
+                    Some("profile-token"),
+                    body,
+                )
+                .await
+                .status(),
+                StatusCode::FORBIDDEN,
+            );
+        }
+
+        assert_eq!(
+            post_json(
+                app,
+                "/admin/v1/sessions/revoke",
+                Some("profile-token"),
+                serde_json::json!({
+                    "scope": "subject",
+                    "subject_user_id": Uuid::new_v4(),
+                }),
+            )
+            .await
+            .status(),
+            StatusCode::BAD_GATEWAY,
         );
     }
 

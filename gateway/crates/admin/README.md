@@ -1,10 +1,10 @@
 # chan-gateway-admin
 
-Operator CLI for the chan-gateway suite. Manages users, personal access tokens, audit logs, live tunnel registrations, and the connected proxy fleet by calling profile-service and devserver-control admin routes over Bearer auth.
+Operator CLI for the chan-gateway suite. Manages users, personal access tokens, OAuth and tenant sessions, durable devserver policy, audit logs, live tunnels, and the connected proxy fleet through the scoped HTTP admin contracts.
 
 ## Role in the system
 
-Out-of-band admin surface. profile-service exposes `/v1/admin/*`; devserver-control exposes `/admin/v1/*`. This CLI is the human-friendly wrapper around both. Designed to run inside the chan infrastructure (an admin host that can reach the internal profile URL and the devserver-control admin port) or alongside the gateway services on a single host.
+Out-of-band admin surface. profile-service owns durable user data and aggregate auth history, identity-service owns OAuth sessions and composite policy/access mutations, and devserver-control owns tenant-session and tunnel authority. The CLI has no database access and never sends one service's bearer to another destination.
 
 ## Build
 
@@ -71,18 +71,43 @@ chan-gateway-admin flag delete    <key> [--yes]
 chan-gateway-admin flag grant     <key> <ident> [--enabled|--disabled]
 chan-gateway-admin flag revoke    <key> <ident>
 chan-gateway-admin flag overrides <key>
+
+chan-gateway-admin policy get <ident>
+chan-gateway-admin policy set <ident> --enabled --max-connected-devservers <n>
+chan-gateway-admin policy suspend <ident>
+chan-gateway-admin policy resume <ident>
+
+chan-gateway-admin session oauth ps [--user <ident>]
+chan-gateway-admin session oauth revoke <session-uuid>
+chan-gateway-admin session oauth revoke-user <ident>
+
+chan-gateway-admin session tenant ps [--subject <ident>] [--owner <ident>] [--proxy <id>]
+chan-gateway-admin session tenant watch [--subject <ident>] [--owner <ident>] [--proxy <id>]
+chan-gateway-admin session tenant revoke <session-uuid>
+chan-gateway-admin session tenant revoke-subject <ident>
+chan-gateway-admin session tenant revoke-owner <ident>
+
+chan-gateway-admin audit ps [--user <ident>] [--action <action>] [--since <rfc3339>] [--until <rfc3339>] [--limit <n>] [--offset <n>]
+
+chan-gateway-admin fleet pause --drain
+chan-gateway-admin fleet resume
+chan-gateway-admin fleet status
+
+chan-gateway-admin overview [--since <duration>]
 ```
 
 `<ident>` resolves in this order: a uuid (exact); an email substring (must match exactly one row); an exact username.
 
-`--json` is available on every command; the default is a `comfy_table` ASCII table sized for an 80-column terminal.
+`policy suspend` preserves the stored limit. `policy resume` requires an existing policy. `fleet pause` requires `--drain` and always invokes the fleet-wide tenant-session and tunnel cuts.
+
+`--json` is available on every command; the default is a `comfy_table` ASCII table sized for an 80-column terminal. Data and durable partial reports go to stdout. Warnings and errors go to stderr.
 
 ## Exit codes
 
 | Code | Meaning                                              |
 |------|------------------------------------------------------|
 | 0    | success                                              |
-| 1    | upstream / network / config error                    |
+| 1    | upstream / network / config / partial-drain error    |
 | 2    | user input error (bad uuid, missing argument)        |
 | 3    | not found (user / token id absent)                   |
 

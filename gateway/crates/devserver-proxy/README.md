@@ -22,6 +22,7 @@ export TUNNEL_BIND_ADDR=127.0.0.1:7100
 export IDENTITY_URL=http://127.0.0.1:7004
 export IDENTITY_INTERNAL_TOKEN=dev-internal-token
 export DEVSERVER_ENTRY_VERIFYING_KEYS=<base64-ed25519-public-key>
+export DEVSERVER_ADMISSION_VERIFYING_KEYS=<base64-ed25519-public-key>
 export IDENTITY_PUBLIC_ORIGIN=http://127.0.0.1:7000
 export DASHBOARD_URL=http://127.0.0.1:7000/workspaces
 export DEVSERVER_CONTROL_URL=http://127.0.0.1:7200
@@ -45,6 +46,7 @@ Required:
 |----------------------------|----------------------------------------------------|
 | `IDENTITY_INTERNAL_TOKEN`  | bearer presented on identity's validate            |
 | `DEVSERVER_ENTRY_VERIFYING_KEYS` | one or two Ed25519 public keys for entry verification |
+| `DEVSERVER_ADMISSION_VERIFYING_KEYS` | one or two identity admission public keys |
 | `IDENTITY_PUBLIC_ORIGIN`   | exact allowed Origin for entry exchange            |
 | `DASHBOARD_URL`            | sign-in redirect target for the bare wildcard root |
 | `DEVSERVER_CONTROL_URL`    | h2c origin of the devserver-control proxy listener |
@@ -72,6 +74,8 @@ Optional:
 
 - Apex (`devserver.<domain>`): `POST /v1/tunnel` (raw h2c, on the tunnel listener), `/healthz`, and `/readyz`. `/readyz` is 200 only once the controller session reaches `FleetReady`; until then new tunnel admissions are refused with the `control_unavailable` code. Per-user devserver capacity is a fleet-wide decision made by the controller at admission and surfaces as `too_many_workspaces`. The aggregate `/admin/v1/*` tree lives on devserver-control, not on the proxy.
 - Wildcard (`{user}--{disc}.devserver.<domain>` addressing one devserver by the first 12 hex chars of its id): the per-devserver reverse proxy. `POST /_chan/entry` exchanges a body credential; ordinary paths require the opaque `__Host-devserver_gate` cookie. On pass the full `/{workspace}/...` path is forwarded into the tunnel (segment-preserving) and the devserver routes the tenant. `/api/devserver/*` (the local-only management API) is 404'd here.
+
+Each opaque tenant session receives a separate random admin UUID plus wall-clock creation and expiry. The proxy publishes only that redacted record over control protocol v2. Cookie ids, entry replay ids, audiences, assertions, and transport internals stay local. Controller revocations support exact subject/owner/devserver, subject, admin UUID, owner, and all sessions, and acknowledgement waits for matching HTTP and WebSocket transports to drain.
 
 See [`design.md`](design.md) for the authoritative route list, the auth-gate order, and the reverse-proxy hygiene rules.
 

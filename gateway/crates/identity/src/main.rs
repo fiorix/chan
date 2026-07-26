@@ -78,7 +78,16 @@ async fn run() -> anyhow::Result<()> {
 
     let store = PostgresStore::new(pool.clone());
 
-    let api_tokens = ApiTokenService::with_admission_signer(pool, admission_signer);
+    let policy_required = match std::env::var("DEVSERVER_POLICY_REQUIRED")
+        .unwrap_or_else(|_| "false".into())
+        .as_str()
+    {
+        "true" => true,
+        "false" => false,
+        _ => anyhow::bail!("DEVSERVER_POLICY_REQUIRED must be true or false"),
+    };
+    let api_tokens = ApiTokenService::with_admission_signer(pool, admission_signer)
+        .with_policy_required(policy_required);
     let token_throttle = TokenThrottle::new();
 
     let (public, internal) =

@@ -256,6 +256,7 @@ fn signed_tunnel_row(
                 registration_id,
                 proxy_id: devserver_control_proto::ProxyId::parse(proxy_id).unwrap(),
             },
+            3,
             now,
             120,
         )
@@ -265,6 +266,7 @@ fn signed_tunnel_row(
         "owner_user_id": owner_user_id,
         "user": user,
         "devserver_id": devserver_id,
+        "max_connected_devservers": 3,
         "peer_addr": null,
         "connected_at": now.to_rfc3339(),
         "proxy_id": proxy_id,

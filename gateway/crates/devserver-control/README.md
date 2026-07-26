@@ -1,6 +1,6 @@
 # devserver-control
 
-Singleton, database-free control plane for the devserver-proxy fleet. Owns the dynamic proxy directory, the aggregate tunnel view, fleet admission, and kill-command routing. Every devserver-proxy node holds one authenticated h2c control session to it on a dedicated listener; identity, profile, and the admin CLI read one coherent fleet view from its `/admin/v1/*` tree. No SPA, no database, no tenant traffic: the controller carries metadata and commands only.
+Singleton, database-free control plane for the devserver-proxy fleet. Owns the dynamic proxy directory, aggregate tunnel and tenant-session views, signed per-user admission limits, and command routing. Every devserver-proxy node holds one authenticated h2c control session to it on a dedicated listener; identity, profile, and the admin CLI read one coherent fleet view from its `/admin/v1/*` tree. No SPA, no database, no tenant traffic: the controller carries metadata and commands only.
 
 ## Role in the system
 
@@ -34,7 +34,7 @@ For the full local stack (with identity + profile + Postgres), prefer `packaging
 - `BIND_ADDR` (7003): admin HTTP. `/healthz` and `/readyz` are unauthenticated; `/admin/v1/*` is Bearer-gated by route-scoped operator, identity, and profile credentials.
 - `PROXY_BIND_ADDR` (7101): h2c. Each devserver-proxy node dials `POST /v1/proxies/connect` with its proxy-id-scoped credential and holds the stream for the life of its control session.
 
-Both listeners must be loopback unless the deployment explicitly sets `CHAN_GATEWAY_INTERNAL_TRANSPORT=overlay-encrypted`; that value is an assertion that the surrounding network provides confidentiality and peer isolation for these cleartext HTTP/h2c listeners.
+Both listeners must be loopback unless the deployment explicitly sets `CHAN_GATEWAY_INTERNAL_TRANSPORT=protected-overlay`; that value is an assertion that the surrounding network provides confidentiality and peer isolation for these cleartext HTTP/h2c listeners.
 
 The template must expand each proxy's `DEVSERVER_PROXY_ID` to exactly that node's `DEVSERVER_PROXY_BASE_URL`; a mismatch closes the control session at the handshake. With the dev values above, a proxy runs with `DEVSERVER_PROXY_ID=p1` and `DEVSERVER_PROXY_BASE_URL=http://p1.devserver.localtest.me:7002`.
 
@@ -58,7 +58,7 @@ Optional:
 | `BIND_ADDR`               | `127.0.0.1:7003` | admin listener               |
 | `PROXY_BIND_ADDR`         | `127.0.0.1:7101` | proxy control listener (h2c) |
 | `MAX_DEVSERVERS_PER_USER` | `100`            | positive fleet-wide per-owner cap |
-| `CHAN_GATEWAY_INTERNAL_TRANSPORT` | unset | set exactly `overlay-encrypted` only behind a protected overlay |
+| `CHAN_GATEWAY_INTERNAL_TRANSPORT` | unset | set exactly `protected-overlay` only behind a protected overlay |
 | `RUST_LOG`                | `info`           | tracing filter               |
 
 Every credential is visible ASCII, 32–256 bytes, and credentials may not be reused across proxy ids or admin scopes. Rotation accepts at most two values per authority.
@@ -73,12 +73,20 @@ Admin listener (`BIND_ADDR`); all `/admin/v1/*` routes Bearer-gated and scope-ch
 | GET    | `/readyz`                                    | 503 while warming   |
 | GET    | `/admin/v1/tunnels`                          | aggregate tunnels   |
 | GET    | `/admin/v1/tunnels/watch`                    | SSE snapshot stream |
+| POST   | `/admin/v1/tunnels/kill-all`                 | fleet-wide tunnel drain |
 | POST   | `/admin/v1/tunnels/{owner_user_id}/{devserver_id}/kill` | exact kill; 204 |
 | GET    | `/admin/v1/owners/{owner_user_id}/tunnels`   | one owner's indexed rows |
 | POST   | `/admin/v1/owners/{owner_user_id}/tunnels/kill` | owner-wide kill |
-| POST   | `/admin/v1/sessions/revoke`                  | exact or subject session revocation |
+| POST   | `/admin/v1/sessions/revoke`                  | scoped legacy session revocation |
 | GET    | `/admin/v1/proxies`                          | proxy directory     |
 | GET    | `/admin/v1/proxies/watch`                    | SSE proxy stream    |
+| GET    | `/admin/v1/browser-sessions`                 | tenant-session inventory |
+| GET    | `/admin/v1/browser-sessions/watch`           | tenant-session SSE snapshots |
+| POST   | `/admin/v1/browser-sessions/{id}/revoke`     | revoke one admin session id |
+| POST   | `/admin/v1/browser-sessions/subjects/{id}/revoke` | revoke by caller |
+| POST   | `/admin/v1/browser-sessions/owners/{id}/revoke` | revoke by devserver owner |
+| POST   | `/admin/v1/browser-sessions/revoke-all`      | fleet-wide session drain |
+| GET    | `/admin/v1/overview`                         | bounded fleet aggregates |
 
 Proxy listener (`PROXY_BIND_ADDR`):
 
@@ -86,7 +94,7 @@ Proxy listener (`PROXY_BIND_ADDR`):
 |--------|-----------------------|------------------------------------|
 | POST   | `/v1/proxies/connect` | raw h2c control stream per proxy   |
 
-Aggregate reads return 503 until the controller is ready (a full convergence window plus reconciliation; see [`design.md`](design.md)). Kills route by registration UUID to the owning proxy only. Session revocation returns a partial 502 unless every connected proxy confirms bridge drain and no retained disconnected authority is unreachable. See [`design.md`](design.md) for lease authority, session lifecycle, resource/rate bounds, reconciliation, and command semantics.
+Aggregate reads return 503 until the controller is ready (a full convergence window plus reconciliation; see [`design.md`](design.md)). Kills route by registration UUID to the owning proxy only. Session revocation returns a partial 502 unless every connected proxy confirms tenant-session drain and no retained disconnected authority is unreachable. Operator credentials can use every route. Identity credentials can use owner, exact, and fleet drain mutations. Profile credentials retain exact and subject revocation plus their existing tunnel reads and kills; request-body authorization prevents a profile token from selecting identity-only revocation variants.
 
 ## Design rationale
 

@@ -18,6 +18,12 @@ pub enum Error {
     #[error("forbidden: {0}")]
     Forbidden(&'static str),
 
+    #[error("devserver access disabled")]
+    DevserverAccessDisabled,
+
+    #[error("devserver access disabled")]
+    AdminDevserverAccessDisabled,
+
     #[error("bad request: {0}")]
     BadRequest(String),
 
@@ -57,6 +63,9 @@ pub enum Error {
 
     #[error(transparent)]
     Reqwest(#[from] reqwest::Error),
+
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
 }
 
 /// Map profile-service client errors onto the local axum error so
@@ -93,6 +102,14 @@ impl IntoResponse for Error {
         let (status, body) = match &self {
             Error::Unauthorized => (StatusCode::UNAUTHORIZED, error_body("unauthorized")),
             Error::Forbidden(m) => (StatusCode::FORBIDDEN, error_body(m)),
+            Error::DevserverAccessDisabled => (
+                StatusCode::FORBIDDEN,
+                error_body("devserver_access_disabled"),
+            ),
+            Error::AdminDevserverAccessDisabled => (
+                StatusCode::CONFLICT,
+                error_body("devserver_access_disabled"),
+            ),
             Error::BadRequest(m) => (StatusCode::BAD_REQUEST, error_body(m)),
             Error::NotFound => (StatusCode::NOT_FOUND, error_body("not found")),
             // Superset of the plain {"error": msg} 404 body: a desktop
@@ -134,6 +151,13 @@ impl IntoResponse for Error {
             Error::Reqwest(e) => {
                 tracing::error!(error = ?e, "reqwest error");
                 (StatusCode::BAD_GATEWAY, error_body("upstream unreachable"))
+            }
+            Error::Database(e) => {
+                tracing::error!(error = ?e, "database error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_body("internal error"),
+                )
             }
         };
         (status, Json(body)).into_response()

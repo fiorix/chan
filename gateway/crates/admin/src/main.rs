@@ -105,6 +105,139 @@ enum Cmd {
         #[command(subcommand)]
         cmd: FlagCmd,
     },
+    /// Manage durable per-user devserver access policy.
+    Policy {
+        #[command(subcommand)]
+        cmd: PolicyCmd,
+    },
+    /// Inspect and revoke OAuth and tenant browser sessions.
+    Session {
+        #[command(subcommand)]
+        cmd: SessionCmd,
+    },
+    /// Query the global authentication audit log.
+    Audit {
+        #[command(subcommand)]
+        cmd: AuditCmd,
+    },
+    /// Pause, resume, and inspect fleet admission.
+    Fleet {
+        #[command(subcommand)]
+        cmd: FleetCmd,
+    },
+    /// Show bounded gateway-wide utilization aggregates.
+    Overview {
+        /// Window such as 30m, 24h, or 7d. Defaults to 24h.
+        #[arg(long, default_value = "24h")]
+        since: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PolicyCmd {
+    Get {
+        ident: String,
+    },
+    Set {
+        ident: String,
+        #[arg(long, required = true)]
+        enabled: bool,
+        #[arg(long)]
+        max_connected_devservers: i32,
+    },
+    Suspend {
+        ident: String,
+    },
+    Resume {
+        ident: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCmd {
+    #[command(name = "oauth")]
+    OAuth {
+        #[command(subcommand)]
+        cmd: OAuthSessionCmd,
+    },
+    Tenant {
+        #[command(subcommand)]
+        cmd: TenantSessionCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum OAuthSessionCmd {
+    Ps {
+        #[arg(long)]
+        user: Option<String>,
+    },
+    Revoke {
+        session_id: Uuid,
+    },
+    RevokeUser {
+        ident: String,
+    },
+}
+
+#[derive(Args, Clone)]
+struct TenantSessionFilters {
+    #[arg(long)]
+    subject: Option<String>,
+    #[arg(long)]
+    owner: Option<String>,
+    #[arg(long)]
+    proxy: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum TenantSessionCmd {
+    Ps {
+        #[command(flatten)]
+        filters: TenantSessionFilters,
+    },
+    Watch {
+        #[command(flatten)]
+        filters: TenantSessionFilters,
+    },
+    Revoke {
+        session_id: Uuid,
+    },
+    RevokeSubject {
+        ident: String,
+    },
+    RevokeOwner {
+        ident: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuditCmd {
+    Ps {
+        #[arg(long)]
+        user: Option<String>,
+        #[arg(long)]
+        action: Option<String>,
+        #[arg(long)]
+        since: Option<DateTime<Utc>>,
+        #[arg(long)]
+        until: Option<DateTime<Utc>>,
+        #[arg(long, default_value_t = 100)]
+        limit: i64,
+        #[arg(long, default_value_t = 0)]
+        offset: i64,
+    },
+}
+
+#[derive(Subcommand)]
+enum FleetCmd {
+    Pause {
+        /// Required acknowledgement: fleet pause always drains.
+        #[arg(long, required = true)]
+        drain: bool,
+    },
+    Resume,
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -322,19 +455,62 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Cmd::User {
             cmd: UserCmd::Block { ident, reason },
         } => {
-            // Profile owns the block transaction and uses its own scoped
-            // controller credential for tunnel/session revocation. The
-            // operator CLI does not receive or impersonate that identity.
-            let token = required_token(
+            let profile_token = required_token(
                 profile_token.as_deref(),
                 "CHAN_ADMIN_PROFILE_TOKEN",
                 "--profile-token",
             )?;
-            let profile = build_profile_client(cli.profile_url.as_deref(), token)?;
+            let identity_token = required_token(
+                identity_token.as_deref(),
+                "CHAN_ADMIN_IDENTITY_TOKEN",
+                "--identity-token",
+            )?;
+            let profile = build_profile_client(cli.profile_url.as_deref(), profile_token)?;
+            let identity = build_identity_client(cli.identity_url.as_deref(), identity_token)?;
             let u = profile.resolve_user(&ident).await?;
-            let blocked = profile.block_user(u.id, reason.as_deref()).await?;
-            render_users(std::slice::from_ref(&blocked), json);
-            Ok(())
+            profile.block_user(u.id, reason.as_deref()).await?;
+            let (status, report) = match identity.revoke_access(u.id).await {
+                Ok(report) => report,
+                Err(error) => {
+                    render_report(
+                        &serde_json::json!({
+                            "user_id": u.id,
+                            "username": u.username,
+                            "blocked": true,
+                            "drain_confirmed": false,
+                        }),
+                        json,
+                    );
+                    return Err(
+                        error.context("user is blocked but live-access drain is unconfirmed")
+                    );
+                }
+            };
+            render_report(&report, json);
+            finish_report(status)
+        }
+        Cmd::User {
+            cmd: UserCmd::Delete { ident, yes },
+        } => {
+            let profile_token = required_token(
+                profile_token.as_deref(),
+                "CHAN_ADMIN_PROFILE_TOKEN",
+                "--profile-token",
+            )?;
+            let identity_token = required_token(
+                identity_token.as_deref(),
+                "CHAN_ADMIN_IDENTITY_TOKEN",
+                "--identity-token",
+            )?;
+            let profile = build_profile_client(cli.profile_url.as_deref(), profile_token)?;
+            let identity = build_identity_client(cli.identity_url.as_deref(), identity_token)?;
+            let u = profile.resolve_user(&ident).await?;
+            if !yes && !confirm(&format!("delete user {} <{}>?", u.username, u.email))? {
+                return Err(anyhow!("aborted"));
+            }
+            let (status, report) = identity.delete_user(u.id).await?;
+            render_report(&report, json);
+            finish_report(status)
         }
         Cmd::User { cmd } => {
             let token = required_token(
@@ -409,6 +585,94 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             )?;
             let client = build_profile_client(cli.profile_url.as_deref(), token)?;
             flag_cmd(&client, json, cmd).await
+        }
+        Cmd::Policy { cmd } => {
+            let profile_token = required_token(
+                profile_token.as_deref(),
+                "CHAN_ADMIN_PROFILE_TOKEN",
+                "--profile-token",
+            )?;
+            let identity_token = required_token(
+                identity_token.as_deref(),
+                "CHAN_ADMIN_IDENTITY_TOKEN",
+                "--identity-token",
+            )?;
+            let profile = build_profile_client(cli.profile_url.as_deref(), profile_token)?;
+            let identity = build_identity_client(cli.identity_url.as_deref(), identity_token)?;
+            policy_cmd(&identity, &profile, json, cmd).await
+        }
+        Cmd::Session {
+            cmd: SessionCmd::OAuth { cmd },
+        } => {
+            let profile_token = required_token(
+                profile_token.as_deref(),
+                "CHAN_ADMIN_PROFILE_TOKEN",
+                "--profile-token",
+            )?;
+            let identity_token = required_token(
+                identity_token.as_deref(),
+                "CHAN_ADMIN_IDENTITY_TOKEN",
+                "--identity-token",
+            )?;
+            let profile = build_profile_client(cli.profile_url.as_deref(), profile_token)?;
+            let identity = build_identity_client(cli.identity_url.as_deref(), identity_token)?;
+            oauth_session_cmd(&identity, &profile, json, cmd).await
+        }
+        Cmd::Session {
+            cmd: SessionCmd::Tenant { cmd },
+        } => {
+            let profile_token = required_token(
+                profile_token.as_deref(),
+                "CHAN_ADMIN_PROFILE_TOKEN",
+                "--profile-token",
+            )?;
+            let operator_token = required_token(
+                operator_token.as_deref(),
+                "CHAN_ADMIN_OPERATOR_TOKEN",
+                "--operator-token",
+            )?;
+            let profile = build_profile_client(cli.profile_url.as_deref(), profile_token)?;
+            let workspace = build_workspace_client(cli.workspace_url.as_deref(), operator_token)?;
+            tenant_session_cmd(&workspace, &profile, json, cmd).await
+        }
+        Cmd::Audit { cmd } => {
+            let token = required_token(
+                profile_token.as_deref(),
+                "CHAN_ADMIN_PROFILE_TOKEN",
+                "--profile-token",
+            )?;
+            let profile = build_profile_client(cli.profile_url.as_deref(), token)?;
+            audit_cmd(&profile, json, cmd).await
+        }
+        Cmd::Fleet { cmd } => {
+            let token = required_token(
+                identity_token.as_deref(),
+                "CHAN_ADMIN_IDENTITY_TOKEN",
+                "--identity-token",
+            )?;
+            let identity = build_identity_client(cli.identity_url.as_deref(), token)?;
+            fleet_cmd(&identity, json, cmd).await
+        }
+        Cmd::Overview { since } => {
+            let profile_token = required_token(
+                profile_token.as_deref(),
+                "CHAN_ADMIN_PROFILE_TOKEN",
+                "--profile-token",
+            )?;
+            let identity_token = required_token(
+                identity_token.as_deref(),
+                "CHAN_ADMIN_IDENTITY_TOKEN",
+                "--identity-token",
+            )?;
+            let operator_token = required_token(
+                operator_token.as_deref(),
+                "CHAN_ADMIN_OPERATOR_TOKEN",
+                "--operator-token",
+            )?;
+            let profile = build_profile_client(cli.profile_url.as_deref(), profile_token)?;
+            let identity = build_identity_client(cli.identity_url.as_deref(), identity_token)?;
+            let workspace = build_workspace_client(cli.workspace_url.as_deref(), operator_token)?;
+            overview_cmd(&profile, &identity, &workspace, json, &since).await
         }
     }
 }
@@ -637,6 +901,286 @@ async fn token_cmd(c: &AdminClient, json: bool, cmd: TokenCmd) -> anyhow::Result
         }
     }
     Ok(())
+}
+
+async fn policy_cmd(
+    identity: &IdentityClient,
+    profile: &AdminClient,
+    json: bool,
+    cmd: PolicyCmd,
+) -> anyhow::Result<()> {
+    let (status, report) = match cmd {
+        PolicyCmd::Get { ident } => {
+            let user = profile.resolve_user(&ident).await?;
+            identity.policy(user.id).await?
+        }
+        PolicyCmd::Set {
+            ident,
+            enabled,
+            max_connected_devservers,
+        } => {
+            let user = profile.resolve_user(&ident).await?;
+            identity
+                .put_policy(user.id, enabled, max_connected_devservers)
+                .await?
+        }
+        PolicyCmd::Suspend { ident } => {
+            let user = profile.resolve_user(&ident).await?;
+            let (status, current) = identity.policy(user.id).await?;
+            if !status.is_success() {
+                render_report(&current, json);
+                return finish_report(status);
+            }
+            let limit = policy_limit(&current)?;
+            identity.put_policy(user.id, false, limit).await?
+        }
+        PolicyCmd::Resume { ident } => {
+            let user = profile.resolve_user(&ident).await?;
+            let (status, current) = identity.policy(user.id).await?;
+            if !status.is_success() {
+                render_report(&current, json);
+                return finish_report(status);
+            }
+            let limit = policy_limit(&current)?;
+            identity.put_policy(user.id, true, limit).await?
+        }
+    };
+    render_report(&report, json);
+    finish_report(status)
+}
+
+fn policy_limit(report: &serde_json::Value) -> anyhow::Result<i32> {
+    report
+        .pointer("/policy/max_connected_devservers")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| anyhow!("identity returned a malformed policy response"))
+}
+
+async fn oauth_session_cmd(
+    identity: &IdentityClient,
+    profile: &AdminClient,
+    json: bool,
+    cmd: OAuthSessionCmd,
+) -> anyhow::Result<()> {
+    match cmd {
+        OAuthSessionCmd::Ps { user } => {
+            let user_id = match user {
+                Some(ident) => Some(profile.resolve_user(&ident).await?.id),
+                None => None,
+            };
+            let rows = identity.list_oauth_sessions(user_id).await?;
+            render_oauth_sessions(&rows, json);
+        }
+        OAuthSessionCmd::Revoke { session_id } => {
+            let (status, report) = identity.revoke_oauth_session(session_id).await?;
+            render_report(&report, json);
+            finish_report(status)?;
+        }
+        OAuthSessionCmd::RevokeUser { ident } => {
+            let user = profile.resolve_user(&ident).await?;
+            let (status, report) = identity.revoke_user_oauth_sessions(user.id).await?;
+            render_report(&report, json);
+            finish_report(status)?;
+        }
+    }
+    Ok(())
+}
+
+async fn resolve_tenant_filters(
+    profile: &AdminClient,
+    filters: &TenantSessionFilters,
+) -> anyhow::Result<(Option<Uuid>, Option<Uuid>)> {
+    let subject = match filters.subject.as_deref() {
+        Some(ident) => Some(profile.resolve_user(ident).await?.id),
+        None => None,
+    };
+    let owner = match filters.owner.as_deref() {
+        Some(ident) => Some(profile.resolve_user(ident).await?.id),
+        None => None,
+    };
+    Ok((subject, owner))
+}
+
+async fn tenant_session_cmd(
+    workspace: &WorkspaceClient,
+    profile: &AdminClient,
+    json: bool,
+    cmd: TenantSessionCmd,
+) -> anyhow::Result<()> {
+    match cmd {
+        TenantSessionCmd::Ps { filters } => {
+            let (subject, owner) = resolve_tenant_filters(profile, &filters).await?;
+            let rows = workspace
+                .list_browser_sessions(subject, owner, filters.proxy.as_deref())
+                .await?;
+            render_browser_sessions(&rows, json);
+        }
+        TenantSessionCmd::Watch { filters } => {
+            let (subject, owner) = resolve_tenant_filters(profile, &filters).await?;
+            let response = workspace
+                .watch_browser_sessions(subject, owner, filters.proxy.as_deref())
+                .await?;
+            watch_loop(response, json, "tenant session", |payload| {
+                let rows: Vec<BrowserSessionView> = serde_json::from_slice(payload).ok()?;
+                Some((
+                    rows,
+                    render_browser_sessions as fn(&[BrowserSessionView], bool),
+                ))
+            })
+            .await?;
+        }
+        TenantSessionCmd::Revoke { session_id } => {
+            let (status, report) = workspace
+                .revoke_browser_path(&format!("/admin/v1/browser-sessions/{session_id}/revoke"))
+                .await?;
+            render_report(&report, json);
+            finish_report(status)?;
+        }
+        TenantSessionCmd::RevokeSubject { ident } => {
+            let user = profile.resolve_user(&ident).await?;
+            let (status, report) = workspace
+                .revoke_browser_path(&format!(
+                    "/admin/v1/browser-sessions/subjects/{}/revoke",
+                    user.id
+                ))
+                .await?;
+            render_report(&report, json);
+            finish_report(status)?;
+        }
+        TenantSessionCmd::RevokeOwner { ident } => {
+            let user = profile.resolve_user(&ident).await?;
+            let (status, report) = workspace
+                .revoke_browser_path(&format!(
+                    "/admin/v1/browser-sessions/owners/{}/revoke",
+                    user.id
+                ))
+                .await?;
+            render_report(&report, json);
+            finish_report(status)?;
+        }
+    }
+    Ok(())
+}
+
+async fn audit_cmd(c: &AdminClient, json: bool, cmd: AuditCmd) -> anyhow::Result<()> {
+    match cmd {
+        AuditCmd::Ps {
+            user,
+            action,
+            since,
+            until,
+            limit,
+            offset,
+        } => {
+            let user_id = match user {
+                Some(ident) => Some(c.resolve_user(&ident).await?.id),
+                None => None,
+            };
+            let rows = c
+                .global_audit(user_id, action.as_deref(), since, until, limit, offset)
+                .await?;
+            render_audit(&rows, json);
+        }
+    }
+    Ok(())
+}
+
+async fn fleet_cmd(identity: &IdentityClient, json: bool, cmd: FleetCmd) -> anyhow::Result<()> {
+    let (status, report) = match cmd {
+        FleetCmd::Pause { drain } => {
+            debug_assert!(drain, "clap requires --drain");
+            identity.pause_fleet().await?
+        }
+        FleetCmd::Resume => identity.resume_fleet().await?,
+        FleetCmd::Status => identity.fleet().await?,
+    };
+    render_report(&report, json);
+    finish_report(status)
+}
+
+async fn overview_cmd(
+    profile: &AdminClient,
+    identity: &IdentityClient,
+    workspace: &WorkspaceClient,
+    json: bool,
+    raw_since: &str,
+) -> anyhow::Result<()> {
+    let since = Utc::now()
+        - chrono::Duration::from_std(parse_duration(raw_since)?)
+            .map_err(|_| anyhow!("--since is out of range"))?;
+    let (users, oauth, control, fleet) = tokio::try_join!(
+        profile.overview(since),
+        identity.oauth_overview(),
+        workspace.overview(),
+        identity.fleet(),
+    )?;
+    let (fleet_status, fleet) = fleet;
+    if !fleet_status.is_success() {
+        render_report(&fleet, json);
+        return finish_report(fleet_status);
+    }
+    let report = GatewayOverview {
+        generated_at: Utc::now(),
+        since,
+        users: OverviewUsers {
+            total: users.users_total,
+            active: users.users_active,
+            blocked: users.users_blocked,
+            logged_in_since: users.users_logged_in_since,
+            login_events_since: users.login_events_since,
+        },
+        sessions: OverviewSessions {
+            oauth: oauth.oauth_sessions_active,
+            tenant: control.tenant_sessions_active,
+            tunnels: control.devservers_connected,
+        },
+        proxies: OverviewProxies {
+            connected: control.proxies_connected,
+            ready: control.proxies_ready,
+        },
+        fleet_admissions_enabled: fleet
+            .get("admissions_enabled")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| anyhow!("identity returned a malformed fleet response"))?,
+    };
+    render_gateway_overview(&report, json);
+    Ok(())
+}
+
+fn parse_duration(raw: &str) -> anyhow::Result<std::time::Duration> {
+    let (number, multiplier) = match raw.as_bytes().last().copied() {
+        Some(b's') => (&raw[..raw.len() - 1], 1_u64),
+        Some(b'm') => (&raw[..raw.len() - 1], 60),
+        Some(b'h') => (&raw[..raw.len() - 1], 60 * 60),
+        Some(b'd') => (&raw[..raw.len() - 1], 24 * 60 * 60),
+        _ => return Err(anyhow!("invalid duration {raw:?}; use s, m, h, or d")),
+    };
+    let value = number
+        .parse::<u64>()
+        .with_context(|| format!("invalid duration {raw:?}"))?;
+    if value == 0 {
+        return Err(anyhow!("duration must be positive"));
+    }
+    let seconds = value
+        .checked_mul(multiplier)
+        .ok_or_else(|| anyhow!("duration is out of range"))?;
+    Ok(std::time::Duration::from_secs(seconds))
+}
+
+fn finish_report(status: StatusCode) -> anyhow::Result<()> {
+    if status.is_success() {
+        return Ok(());
+    }
+    match status {
+        StatusCode::NOT_FOUND => Err(ClientError::NotFound.into()),
+        StatusCode::BAD_REQUEST => Err(ClientError::BadInput("request rejected".into()).into()),
+        _ => Err(ClientError::Upstream {
+            status,
+            body: "operation did not fully converge; report printed above".into(),
+        }
+        .into()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1009,6 +1553,62 @@ impl AdminClient {
             s => Err(upstream(s, res).await.into()),
         }
     }
+
+    async fn global_audit(
+        &self,
+        user_id: Option<Uuid>,
+        action: Option<&str>,
+        since: Option<DateTime<Utc>>,
+        until: Option<DateTime<Utc>>,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<Vec<AuthAudit>> {
+        let mut url = self.url("/v1/admin/auth-audit");
+        {
+            let mut query = url.query_pairs_mut();
+            if let Some(user_id) = user_id {
+                query.append_pair("user_id", &user_id.to_string());
+            }
+            if let Some(action) = action {
+                query.append_pair("action", action);
+            }
+            if let Some(since) = since {
+                query.append_pair("since", &since.to_rfc3339());
+            }
+            if let Some(until) = until {
+                query.append_pair("until", &until.to_rfc3339());
+            }
+            query.append_pair("limit", &limit.to_string());
+            query.append_pair("offset", &offset.to_string());
+        }
+        let res = self
+            .http
+            .get(url)
+            .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
+            .send()
+            .await?;
+        match res.status() {
+            StatusCode::OK => Ok(res.json().await?),
+            StatusCode::BAD_REQUEST => Err(ClientError::BadInput(read_body(res).await).into()),
+            status => Err(upstream(status, res).await.into()),
+        }
+    }
+
+    async fn overview(&self, since: DateTime<Utc>) -> anyhow::Result<ProfileOverview> {
+        let mut url = self.url("/v1/admin/overview");
+        url.query_pairs_mut()
+            .append_pair("since", &since.to_rfc3339());
+        let res = self
+            .http
+            .get(url)
+            .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
+            .send()
+            .await?;
+        match res.status() {
+            StatusCode::OK => Ok(res.json().await?),
+            status => Err(upstream(status, res).await.into()),
+        }
+    }
 }
 
 async fn upstream(status: StatusCode, res: reqwest::Response) -> ClientError {
@@ -1050,6 +1650,155 @@ impl IdentityClient {
         u.set_path(path);
         u.set_query(None);
         u
+    }
+
+    fn req(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
+        self.http
+            .request(method, self.url(path))
+            .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
+    }
+
+    async fn report(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+        let mut request = self.req(method, path);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        Self::send_report(request).await
+    }
+
+    async fn send_report(
+        request: reqwest::RequestBuilder,
+    ) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+        let response = request.send().await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+        let value = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+            serde_json::json!({
+                "error": format!("identity returned {status} with a non-JSON body")
+            })
+        });
+        Ok((status, value))
+    }
+
+    async fn policy(&self, user_id: Uuid) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+        self.report(
+            Method::GET,
+            &format!("/admin/v1/users/{user_id}/devserver-policy"),
+            None,
+        )
+        .await
+    }
+
+    async fn put_policy(
+        &self,
+        user_id: Uuid,
+        enabled: bool,
+        max_connected_devservers: i32,
+    ) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+        self.report(
+            Method::PUT,
+            &format!("/admin/v1/users/{user_id}/devserver-policy"),
+            Some(&serde_json::json!({
+                "enabled": enabled,
+                "max_connected_devservers": max_connected_devservers,
+            })),
+        )
+        .await
+    }
+
+    async fn list_oauth_sessions(
+        &self,
+        user_id: Option<Uuid>,
+    ) -> anyhow::Result<Vec<OAuthSessionView>> {
+        let mut url = self.url("/admin/v1/sessions");
+        if let Some(user_id) = user_id {
+            url.query_pairs_mut()
+                .append_pair("user_id", &user_id.to_string());
+        }
+        let response = self
+            .http
+            .get(url)
+            .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
+            .send()
+            .await?;
+        match response.status() {
+            StatusCode::OK => Ok(response.json().await?),
+            status => Err(upstream(status, response).await.into()),
+        }
+    }
+
+    async fn revoke_oauth_session(
+        &self,
+        session_id: Uuid,
+    ) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+        self.report(
+            Method::POST,
+            &format!("/admin/v1/sessions/{session_id}/revoke"),
+            None,
+        )
+        .await
+    }
+
+    async fn revoke_user_oauth_sessions(
+        &self,
+        user_id: Uuid,
+    ) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+        self.report(
+            Method::POST,
+            &format!("/admin/v1/users/{user_id}/sessions/revoke"),
+            None,
+        )
+        .await
+    }
+
+    async fn fleet(&self) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+        self.report(Method::GET, "/admin/v1/fleet", None).await
+    }
+
+    async fn pause_fleet(&self) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+        self.report(Method::POST, "/admin/v1/fleet/pause", None)
+            .await
+    }
+
+    async fn resume_fleet(&self) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+        self.report(Method::POST, "/admin/v1/fleet/resume", None)
+            .await
+    }
+
+    async fn revoke_access(
+        &self,
+        user_id: Uuid,
+    ) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+        self.report(
+            Method::POST,
+            &format!("/admin/v1/users/{user_id}/access/revoke"),
+            None,
+        )
+        .await
+    }
+
+    async fn delete_user(&self, user_id: Uuid) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+        Self::send_report(
+            self.req(Method::DELETE, &format!("/admin/v1/users/{user_id}"))
+                .timeout(std::time::Duration::from_secs(65)),
+        )
+        .await
+    }
+
+    async fn oauth_overview(&self) -> anyhow::Result<OAuthOverview> {
+        let response = self
+            .req(Method::GET, "/admin/v1/sessions/overview")
+            .send()
+            .await?;
+        match response.status() {
+            StatusCode::OK => Ok(response.json().await?),
+            status => Err(upstream(status, response).await.into()),
+        }
     }
 
     async fn create_token(
@@ -1143,6 +1892,32 @@ impl WorkspaceClient {
         u
     }
 
+    fn req(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
+        self.http
+            .request(method, self.url(path))
+            .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
+    }
+
+    async fn report(
+        &self,
+        method: Method,
+        path: &str,
+    ) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+        let response = self
+            .req(method, path)
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+        let value = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+            serde_json::json!({
+                "error": format!("controller returned {status} with a non-JSON body")
+            })
+        });
+        Ok((status, value))
+    }
+
     async fn list(&self) -> anyhow::Result<Vec<TunnelView>> {
         let res = self
             .http
@@ -1222,6 +1997,97 @@ impl WorkspaceClient {
             return Err(upstream(status, res).await.into());
         }
         Ok(res)
+    }
+
+    fn browser_sessions_url(
+        &self,
+        path: &str,
+        subject_user_id: Option<Uuid>,
+        owner_user_id: Option<Uuid>,
+        proxy_id: Option<&str>,
+    ) -> url::Url {
+        let mut url = self.url(path);
+        {
+            let mut query = url.query_pairs_mut();
+            if let Some(user_id) = subject_user_id {
+                query.append_pair("subject_user_id", &user_id.to_string());
+            }
+            if let Some(user_id) = owner_user_id {
+                query.append_pair("owner_user_id", &user_id.to_string());
+            }
+            if let Some(proxy_id) = proxy_id {
+                query.append_pair("proxy_id", proxy_id);
+            }
+        }
+        url
+    }
+
+    async fn list_browser_sessions(
+        &self,
+        subject_user_id: Option<Uuid>,
+        owner_user_id: Option<Uuid>,
+        proxy_id: Option<&str>,
+    ) -> anyhow::Result<Vec<BrowserSessionView>> {
+        let response = self
+            .http
+            .get(self.browser_sessions_url(
+                "/admin/v1/browser-sessions",
+                subject_user_id,
+                owner_user_id,
+                proxy_id,
+            ))
+            .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await?;
+        match response.status() {
+            StatusCode::OK => Ok(response.json().await?),
+            status => Err(upstream(status, response).await.into()),
+        }
+    }
+
+    async fn watch_browser_sessions(
+        &self,
+        subject_user_id: Option<Uuid>,
+        owner_user_id: Option<Uuid>,
+        proxy_id: Option<&str>,
+    ) -> anyhow::Result<reqwest::Response> {
+        let response = self
+            .http
+            .get(self.browser_sessions_url(
+                "/admin/v1/browser-sessions/watch",
+                subject_user_id,
+                owner_user_id,
+                proxy_id,
+            ))
+            .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(header::ACCEPT, "text/event-stream")
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(upstream(status, response).await.into());
+        }
+        Ok(response)
+    }
+
+    async fn revoke_browser_path(
+        &self,
+        path: &str,
+    ) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+        self.report(Method::POST, path).await
+    }
+
+    async fn overview(&self) -> anyhow::Result<ControlOverview> {
+        let response = self
+            .req(Method::GET, "/admin/v1/overview")
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await?;
+        match response.status() {
+            StatusCode::OK => Ok(response.json().await?),
+            status => Err(upstream(status, response).await.into()),
+        }
     }
 }
 
@@ -1452,6 +2318,7 @@ struct TunnelView {
     connected_at: DateTime<Utc>,
     proxy_id: String,
     proxy_base_url: String,
+    max_connected_devservers: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1464,6 +2331,79 @@ struct ProxyView {
     last_seen_at: DateTime<Utc>,
     tunnel_count: usize,
     status: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct OAuthSessionView {
+    id: Uuid,
+    user_id: Uuid,
+    authenticated_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct BrowserSessionView {
+    id: Uuid,
+    subject_user_id: Uuid,
+    owner_user_id: Uuid,
+    devserver_id: String,
+    proxy_id: String,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ProfileOverview {
+    users_total: i64,
+    users_active: i64,
+    users_blocked: i64,
+    users_logged_in_since: i64,
+    login_events_since: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OAuthOverview {
+    oauth_sessions_active: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ControlOverview {
+    proxies_connected: usize,
+    proxies_ready: usize,
+    devservers_connected: usize,
+    tenant_sessions_active: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct GatewayOverview {
+    generated_at: DateTime<Utc>,
+    since: DateTime<Utc>,
+    users: OverviewUsers,
+    sessions: OverviewSessions,
+    proxies: OverviewProxies,
+    fleet_admissions_enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct OverviewUsers {
+    total: i64,
+    active: i64,
+    blocked: i64,
+    logged_in_since: i64,
+    login_events_since: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct OverviewSessions {
+    oauth: i64,
+    tenant: usize,
+    tunnels: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct OverviewProxies {
+    connected: usize,
+    ready: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -1550,7 +2490,15 @@ fn render_tunnels(rows: &[TunnelView], json: bool) {
         return;
     }
     let mut t = make_table();
-    t.set_header(["USER", "DEVSERVER", "PROXY", "PEER", "UPTIME", "CONNECTED"]);
+    t.set_header([
+        "USER",
+        "DEVSERVER",
+        "PROXY",
+        "CAP",
+        "PEER",
+        "UPTIME",
+        "CONNECTED",
+    ]);
     let now = Utc::now();
     for r in rows {
         let uptime = now
@@ -1562,12 +2510,123 @@ fn render_tunnels(rows: &[TunnelView], json: bool) {
             Cell::new(&r.user),
             Cell::new(&r.devserver_id),
             Cell::new(format!("{} ({})", r.proxy_id, r.proxy_base_url)),
+            Cell::new(r.max_connected_devservers),
             Cell::new(r.peer_addr.as_deref().unwrap_or("-")),
             Cell::new(uptime),
             Cell::new(fmt_dt(r.connected_at)),
         ]);
     }
     println!("{t}");
+}
+
+fn render_oauth_sessions(rows: &[OAuthSessionView], json: bool) {
+    if json {
+        print_json(rows);
+        return;
+    }
+    let mut table = make_table();
+    table.set_header(["ID", "USER", "AUTHENTICATED", "EXPIRES"]);
+    for row in rows {
+        table.add_row([
+            Cell::new(short_uuid(&row.id)),
+            Cell::new(short_uuid(&row.user_id)),
+            Cell::new(fmt_dt(row.authenticated_at)),
+            Cell::new(fmt_dt(row.expires_at)),
+        ]);
+    }
+    println!("{table}");
+}
+
+fn render_browser_sessions(rows: &[BrowserSessionView], json: bool) {
+    if json {
+        print_json(rows);
+        return;
+    }
+    let mut table = make_table();
+    table.set_header(["ID", "SUBJECT", "OWNER", "DEVSERVER", "PROXY", "EXPIRES"]);
+    for row in rows {
+        table.add_row([
+            Cell::new(short_uuid(&row.id)),
+            Cell::new(short_uuid(&row.subject_user_id)),
+            Cell::new(short_uuid(&row.owner_user_id)),
+            Cell::new(truncate(&row.devserver_id, 12)),
+            Cell::new(&row.proxy_id),
+            Cell::new(fmt_dt(row.expires_at)),
+        ]);
+    }
+    println!("{table}");
+}
+
+fn render_report(report: &serde_json::Value, json: bool) {
+    if json {
+        print_json(report);
+        return;
+    }
+    let mut table = make_table();
+    table.set_header(["FIELD", "VALUE"]);
+    if let Some(fields) = report.as_object() {
+        for (key, value) in fields {
+            let value = match value {
+                serde_json::Value::String(value) => value.clone(),
+                _ => value.to_string(),
+            };
+            table.add_row([Cell::new(key), Cell::new(truncate(&value, 58))]);
+        }
+    } else {
+        table.add_row([Cell::new("result"), Cell::new(report.to_string())]);
+    }
+    println!("{table}");
+}
+
+fn render_gateway_overview(report: &GatewayOverview, json: bool) {
+    if json {
+        print_json(report);
+        return;
+    }
+    let mut table = make_table();
+    table.set_header(["RESOURCE", "ACTIVE", "DETAIL"]);
+    table.add_row([
+        Cell::new("users"),
+        Cell::new(report.users.active),
+        Cell::new(format!(
+            "{} total, {} blocked, {} logged in",
+            report.users.total, report.users.blocked, report.users.logged_in_since
+        )),
+    ]);
+    table.add_row([
+        Cell::new("oauth sessions"),
+        Cell::new(report.sessions.oauth),
+        Cell::new(format!(
+            "{} login events since {}",
+            report.users.login_events_since,
+            fmt_dt(report.since)
+        )),
+    ]);
+    table.add_row([
+        Cell::new("tenant sessions"),
+        Cell::new(report.sessions.tenant),
+        Cell::new("-"),
+    ]);
+    table.add_row([
+        Cell::new("tunnels"),
+        Cell::new(report.sessions.tunnels),
+        Cell::new("-"),
+    ]);
+    table.add_row([
+        Cell::new("proxies"),
+        Cell::new(report.proxies.ready),
+        Cell::new(format!("{} connected", report.proxies.connected)),
+    ]);
+    table.add_row([
+        Cell::new("fleet admission"),
+        Cell::new(if report.fleet_admissions_enabled {
+            "enabled"
+        } else {
+            "paused"
+        }),
+        Cell::new("-"),
+    ]);
+    println!("{table}");
 }
 
 fn render_proxies(rows: &[ProxyView], json: bool) {
@@ -1721,7 +2780,7 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-        out.push('…');
+        out.push_str("...");
         out
     }
 }
@@ -1773,6 +2832,58 @@ mod tests {
         assert_eq!(cli.operator_token.as_deref(), Some("operator-secret"));
         assert_eq!(cli.profile_token.as_deref(), Some("profile-secret"));
         assert_eq!(cli.identity_token.as_deref(), Some("identity-secret"));
+    }
+
+    #[test]
+    fn control_plane_commands_pin_required_drain_and_policy_limit() {
+        assert!(Cli::try_parse_from(["chan-gateway-admin", "fleet", "pause",]).is_err());
+        let cli = Cli::try_parse_from(["chan-gateway-admin", "fleet", "pause", "--drain"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Fleet {
+                cmd: FleetCmd::Pause { drain: true }
+            }
+        ));
+
+        let cli = Cli::try_parse_from([
+            "chan-gateway-admin",
+            "policy",
+            "set",
+            "alice",
+            "--enabled",
+            "--max-connected-devservers",
+            "3",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Policy {
+                cmd: PolicyCmd::Set {
+                    enabled: true,
+                    max_connected_devservers: 3,
+                    ..
+                }
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["chan-gateway-admin", "session", "oauth", "ps"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Session {
+                cmd: SessionCmd::OAuth {
+                    cmd: OAuthSessionCmd::Ps { user: None }
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn overview_duration_is_positive_bounded_and_explicit() {
+        assert_eq!(parse_duration("30m").unwrap().as_secs(), 1800);
+        assert_eq!(parse_duration("7d").unwrap().as_secs(), 604_800);
+        for invalid in ["", "0s", "-1h", "forever", "1w"] {
+            assert!(parse_duration(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]

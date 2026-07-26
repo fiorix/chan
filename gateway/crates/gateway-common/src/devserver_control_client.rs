@@ -53,6 +53,7 @@ pub struct TunnelView {
     /// devserver ids (a user can hold several). Pinned to the
     /// producer's JSON field name (`devserver_id`).
     pub devserver_id: String,
+    pub max_connected_devservers: u32,
     pub peer_addr: Option<String>,
     pub connected_at: DateTime<Utc>,
     pub proxy_id: String,
@@ -96,11 +97,44 @@ pub struct ProxyView {
     pub status: ProxyStatus,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SessionRevocationResult {
-    pub revoked: usize,
+    pub tenant_sessions_revoked: usize,
     pub proxies_confirmed: usize,
     pub proxies_expected: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionRevocationWire {
+    revoked: Option<usize>,
+    tenant_sessions_revoked: Option<usize>,
+    proxies_confirmed: usize,
+    proxies_expected: usize,
+}
+
+fn normalize_session_revocation(
+    body: SessionRevocationWire,
+) -> DevserverControlResult<SessionRevocationResult> {
+    let tenant_sessions_revoked = match (body.tenant_sessions_revoked, body.revoked) {
+        (Some(current), Some(compatibility)) if current == compatibility => current,
+        (Some(current), None) => current,
+        (None, Some(compatibility)) => compatibility,
+        (Some(_), Some(_)) => {
+            return Err(DevserverControlError::Upstream(
+                "devserver-control returned inconsistent session revoke counts".into(),
+            ));
+        }
+        (None, None) => {
+            return Err(DevserverControlError::Upstream(
+                "devserver-control omitted the session revoke count".into(),
+            ));
+        }
+    };
+    Ok(SessionRevocationResult {
+        tenant_sessions_revoked,
+        proxies_confirmed: body.proxies_confirmed,
+        proxies_expected: body.proxies_expected,
+    })
 }
 
 #[derive(Serialize)]
@@ -114,6 +148,33 @@ enum SessionRevocationRequest<'a> {
     Subject {
         subject_user_id: Uuid,
     },
+    Owner {
+        owner_user_id: Uuid,
+    },
+    SessionId {
+        admin_session_id: Uuid,
+    },
+    All,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BrowserSessionView {
+    pub id: Uuid,
+    pub subject_user_id: Uuid,
+    pub owner_user_id: Uuid,
+    pub devserver_id: String,
+    pub proxy_id: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ControlOverview {
+    pub generated_at: DateTime<Utc>,
+    pub proxies_connected: usize,
+    pub proxies_ready: usize,
+    pub devservers_connected: usize,
+    pub tenant_sessions_active: usize,
 }
 
 /// Session state the controller publishes for a proxy. Serialized
@@ -176,8 +237,7 @@ impl DevserverControlClient {
         let res = self.http.post(url).bearer_auth(&self.token).send().await?;
         let status = res.status();
         if !status.is_success() {
-            let body = res.text().await.unwrap_or_default();
-            tracing::warn!(%status, body = %body, "devserver-control admin upstream error");
+            tracing::warn!(%status, "devserver-control admin upstream error");
             return Err(DevserverControlError::Upstream(format!("{status}")));
         }
         // The endpoint returns 200 with a JSON body; tolerate 204 to
@@ -205,8 +265,7 @@ impl DevserverControlClient {
         if status == StatusCode::NO_CONTENT {
             return Ok(());
         }
-        let body = res.text().await.unwrap_or_default();
-        tracing::warn!(%status, body = %body, "devserver-control admin upstream error");
+        tracing::warn!(%status, "devserver-control admin upstream error");
         Err(DevserverControlError::Upstream(format!("{status}")))
     }
 
@@ -223,8 +282,7 @@ impl DevserverControlClient {
         let res = self.http.get(url).bearer_auth(&self.token).send().await?;
         let status = res.status();
         if !status.is_success() {
-            let body = res.text().await.unwrap_or_default();
-            tracing::warn!(%status, body = %body, "devserver-control admin upstream error");
+            tracing::warn!(%status, "devserver-control admin upstream error");
             return Err(DevserverControlError::Upstream(format!("{status}")));
         }
         let tunnels: Vec<TunnelView> = res.json().await?;
@@ -247,8 +305,7 @@ impl DevserverControlClient {
         let res = self.http.get(url).bearer_auth(&self.token).send().await?;
         let status = res.status();
         if !status.is_success() {
-            let body = res.text().await.unwrap_or_default();
-            tracing::warn!(%status, body = %body, "devserver-control admin upstream error");
+            tracing::warn!(%status, "devserver-control admin upstream error");
             return Err(DevserverControlError::Upstream(format!("{status}")));
         }
         let tunnels: Vec<TunnelView> = res.json().await?;
@@ -265,8 +322,7 @@ impl DevserverControlClient {
         let res = self.http.get(url).bearer_auth(&self.token).send().await?;
         let status = res.status();
         if !status.is_success() {
-            let body = res.text().await.unwrap_or_default();
-            tracing::warn!(%status, body = %body, "devserver-control admin upstream error");
+            tracing::warn!(%status, "devserver-control admin upstream error");
             return Err(DevserverControlError::Upstream(format!("{status}")));
         }
         let proxies: Vec<ProxyView> = res.json().await?;
@@ -295,6 +351,80 @@ impl DevserverControlClient {
             .await
     }
 
+    pub async fn revoke_owner_sessions(
+        &self,
+        owner_user_id: Uuid,
+    ) -> DevserverControlResult<SessionRevocationResult> {
+        self.revoke_sessions(SessionRevocationRequest::Owner { owner_user_id })
+            .await
+    }
+
+    pub async fn revoke_session_id(
+        &self,
+        admin_session_id: Uuid,
+    ) -> DevserverControlResult<SessionRevocationResult> {
+        self.revoke_sessions(SessionRevocationRequest::SessionId { admin_session_id })
+            .await
+    }
+
+    pub async fn revoke_all_sessions(&self) -> DevserverControlResult<SessionRevocationResult> {
+        self.revoke_sessions(SessionRevocationRequest::All).await
+    }
+
+    pub async fn kill_all_tunnels(&self) -> DevserverControlResult<usize> {
+        let mut url = self.base.clone();
+        url.set_path("/admin/v1/tunnels/kill-all");
+        let res = self.http.post(url).bearer_auth(&self.token).send().await?;
+        let status = res.status();
+        if !status.is_success() {
+            tracing::warn!(%status, "devserver-control tunnel drain failed");
+            return Err(DevserverControlError::Upstream(format!("{status}")));
+        }
+        let body: KillAllResponse = res.json().await?;
+        Ok(body.tunnels_evicted)
+    }
+
+    pub async fn list_browser_sessions(
+        &self,
+        subject_user_id: Option<Uuid>,
+        owner_user_id: Option<Uuid>,
+        proxy_id: Option<&str>,
+    ) -> DevserverControlResult<Vec<BrowserSessionView>> {
+        let mut url = self.base.clone();
+        url.set_path("/admin/v1/browser-sessions");
+        {
+            let mut query = url.query_pairs_mut();
+            if let Some(subject_user_id) = subject_user_id {
+                query.append_pair("subject_user_id", &subject_user_id.to_string());
+            }
+            if let Some(owner_user_id) = owner_user_id {
+                query.append_pair("owner_user_id", &owner_user_id.to_string());
+            }
+            if let Some(proxy_id) = proxy_id {
+                query.append_pair("proxy_id", proxy_id);
+            }
+        }
+        let res = self.http.get(url).bearer_auth(&self.token).send().await?;
+        let status = res.status();
+        if !status.is_success() {
+            tracing::warn!(%status, "devserver-control browser-session list failed");
+            return Err(DevserverControlError::Upstream(format!("{status}")));
+        }
+        Ok(res.json().await?)
+    }
+
+    pub async fn overview(&self) -> DevserverControlResult<ControlOverview> {
+        let mut url = self.base.clone();
+        url.set_path("/admin/v1/overview");
+        let res = self.http.get(url).bearer_auth(&self.token).send().await?;
+        let status = res.status();
+        if !status.is_success() {
+            tracing::warn!(%status, "devserver-control overview failed");
+            return Err(DevserverControlError::Upstream(format!("{status}")));
+        }
+        Ok(res.json().await?)
+    }
+
     async fn revoke_sessions(
         &self,
         request: SessionRevocationRequest<'_>,
@@ -310,17 +440,21 @@ impl DevserverControlClient {
             .await?;
         let status = res.status();
         if !status.is_success() {
-            let body = res.text().await.unwrap_or_default();
-            tracing::warn!(%status, body = %body, "devserver-control session revoke failed");
+            tracing::warn!(%status, "devserver-control session revoke failed");
             return Err(DevserverControlError::Upstream(format!("{status}")));
         }
-        Ok(res.json().await?)
+        normalize_session_revocation(res.json().await?)
     }
 }
 
 #[derive(Debug, Deserialize)]
 struct KillResponse {
     killed: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct KillAllResponse {
+    tunnels_evicted: usize,
 }
 
 #[cfg(test)]
@@ -346,6 +480,7 @@ mod tests {
                 "connected_at": "2026-07-15T00:00:00Z",
                 "proxy_id": "p1",
                 "proxy_base_url": "https://p1.usr.chan.app",
+                "max_connected_devservers": 3,
                 "admission_lease": "v1.payload.signature",
                 "admission_lease_expires_at": "2026-07-15T00:02:00Z"
             }"#,
@@ -428,5 +563,46 @@ mod tests {
         )
         .expect("joining status parses");
         assert_eq!(joining.status, ProxyStatus::Joining);
+    }
+
+    #[test]
+    fn session_revocation_accepts_matching_current_and_compatibility_counts() {
+        let both: SessionRevocationWire = serde_json::from_str(
+            r#"{
+                "revoked": 2,
+                "tenant_sessions_revoked": 2,
+                "proxies_confirmed": 3,
+                "proxies_expected": 3
+            }"#,
+        )
+        .unwrap();
+        let normalized = normalize_session_revocation(both).unwrap();
+        assert_eq!(normalized.tenant_sessions_revoked, 2);
+
+        let legacy: SessionRevocationWire = serde_json::from_str(
+            r#"{
+                "revoked": 1,
+                "proxies_confirmed": 2,
+                "proxies_expected": 2
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            normalize_session_revocation(legacy)
+                .unwrap()
+                .tenant_sessions_revoked,
+            1
+        );
+
+        let inconsistent: SessionRevocationWire = serde_json::from_str(
+            r#"{
+                "revoked": 1,
+                "tenant_sessions_revoked": 2,
+                "proxies_confirmed": 2,
+                "proxies_expected": 2
+            }"#,
+        )
+        .unwrap();
+        assert!(normalize_session_revocation(inconsistent).is_err());
     }
 }

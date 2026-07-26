@@ -40,6 +40,8 @@ spec:
               valueFrom: { secretKeyRef: { name: chan-gateway-devserver-proxy, key: IDENTITY_INTERNAL_TOKEN } }
             - name: DEVSERVER_ENTRY_VERIFYING_KEYS
               valueFrom: { secretKeyRef: { name: chan-gateway-devserver-proxy, key: DEVSERVER_ENTRY_VERIFYING_KEYS } }
+            - name: DEVSERVER_ADMISSION_VERIFYING_KEYS
+              valueFrom: { secretKeyRef: { name: chan-gateway-devserver-proxy, key: DEVSERVER_ADMISSION_VERIFYING_KEYS } }
             - name: DEVSERVER_PROXY_TOKEN
               valueFrom: { secretKeyRef: { name: chan-gateway-devserver-proxy, key: DEVSERVER_PROXY_TOKEN } }
           ports:

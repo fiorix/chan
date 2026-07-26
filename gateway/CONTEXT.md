@@ -12,10 +12,10 @@ flowchart TB
     end
 
     subgraph gw["chan gateway (nested Cargo workspace)"]
-        ID["identity-service · id.chan.app<br/>OAuth · sessions · PATs · /s/{owner} open · token validate"]
-        PROXY["devserver-proxy<br/>devserver.chan.app apex: tunnel + healthz/readyz<br/>*.devserver.chan.app wildcard: launcher root + tenants + devserver_gate"]
-        CONTROL["devserver-control<br/>fleet directory · admission · command routing<br/>/admin/v1/* on 7003 · h2c proxy control on 7101"]
-        PROFILE["profile-service<br/>internal HTTP over Postgres · users · identities · devserver grants"]
+        ID["identity-service: id.chan.app<br/>OAuth sessions | PATs | policy composites | token/session validate"]
+        PROXY["devserver-proxy<br/>tunnels | tenant HTTP/WS | opaque tenant sessions"]
+        CONTROL["devserver-control<br/>fleet directory | signed-cap admission | tunnel/session inventory and commands"]
+        PROFILE["profile-service<br/>users | identities | grants | durable user/fleet policy | auth audit"]
         ADMIN["admin-service"]
         COMMON["gateway-common<br/>devserver_gate · profile_client · devserver_control_client"]
         PG[("Postgres")]
@@ -66,3 +66,11 @@ flowchart TB
 **devserver grant**: A profile record that a caller may access an owner's devserver, meaning its whole library. The sharing unit. Replaces the per-workspace grant. _Avoid_: workspace-grant, share, ACL
 
 **entry credential**: The short-lived, single-use Ed25519 credential that identity mints after a devserver access check. The browser submits it in the body of the fixed `POST /_chan/entry` exchange; it never belongs in a URL. _Avoid_: handoff-token
+
+## Session terminology
+
+**OAuth session**: The identity-service account session behind `__Host-id_session` and `tower_sessions`. Its operator id is `identity_session_index.admin_session_id`; the secret tower store id is never serialized. _Avoid_: browser session, tenant session
+
+**tenant session**: The proxy-local opaque authorization behind `__Host-devserver_gate`. Its separate admin UUID is published to devserver-control for inventory and revocation. _Avoid_: OAuth session, cookie id
+
+**tunnel**: One live `chan devserver` registration and yamux transport, keyed by owner plus devserver id and addressed for commands by registration UUID. A tunnel is not a session count. _Avoid_: session

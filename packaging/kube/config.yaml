@@ -61,5 +61,5 @@ data:
   POSTGRES_USER: "chan_gateway_migrate"
   POSTGRES_DB: "chan_gateway"
   # Must advance with gateway/migrations and the exact reconcile ACL matrix.
-  EXPECTED_SQLX_MIGRATION: "15"
+  EXPECTED_SQLX_MIGRATION: "16"
   DATABASE_ROLE_POLICY_VERSION: "1"

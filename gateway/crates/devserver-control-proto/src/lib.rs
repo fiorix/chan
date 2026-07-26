@@ -12,9 +12,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use url::Url;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const CONNECT_PATH: &str = "/v1/proxies/connect";
-pub const CONTENT_TYPE: &str = "application/x-chan-devserver-control+json; version=1";
+pub const CONTENT_TYPE: &str = "application/x-chan-devserver-control+json; version=2";
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_SNAPSHOT_CHUNK_ROWS: usize = 128;
 pub const MAX_SNAPSHOT_ROWS: usize = 2_048;
@@ -26,6 +26,9 @@ pub const MAX_ADMISSION_LEASE_BYTES: usize = 4096;
 pub const MAX_ORIGIN_BYTES: usize = 256;
 pub const MAX_COMMAND_REGISTRATIONS: usize = 4096;
 pub const MAX_SESSION_REVOCATION_COUNT: usize = 100_000;
+pub const MAX_BROWSER_SESSION_SNAPSHOT_ROWS: usize = 100_000;
+pub const MAX_BROWSER_SESSION_SNAPSHOT_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_SIGNED_CONNECTED_DEVSERVERS: u32 = 1_000_000;
 /// Normal proxy-side retention after a healthy control session is lost.
 pub const PROXY_CONTROL_LOSS_GRACE_SECONDS: u64 = 30;
 /// Hard proxy-side retention after a reconnect snapshot is accepted but the
@@ -71,6 +74,7 @@ pub struct AdmissionLeaseClaims {
     pub protocol_version: u16,
     #[serde(flatten)]
     pub binding: AdmissionLeaseBinding,
+    pub max_connected_devservers: u32,
     pub issued_at: i64,
     pub expires_at: i64,
 }
@@ -129,10 +133,12 @@ impl AdmissionLeaseSigner {
     pub fn sign(
         &self,
         binding: AdmissionLeaseBinding,
+        max_connected_devservers: u32,
         now: DateTime<Utc>,
         ttl_seconds: i64,
     ) -> Result<AdmissionLease, LeaseError> {
         binding.validate()?;
+        validate_signed_limit(max_connected_devservers)?;
         if !(1..=MAX_ADMISSION_LEASE_TTL_SECONDS).contains(&ttl_seconds) {
             return Err(LeaseError::Ttl);
         }
@@ -140,6 +146,7 @@ impl AdmissionLeaseSigner {
             purpose: ADMISSION_LEASE_PURPOSE.into(),
             protocol_version: PROTOCOL_VERSION,
             binding,
+            max_connected_devservers,
             issued_at: now.timestamp(),
             expires_at: now.timestamp() + ttl_seconds,
         };
@@ -215,6 +222,7 @@ impl AdmissionLeaseVerifier {
         {
             return Err(LeaseError::Claims);
         }
+        validate_signed_limit(claims.max_connected_devservers)?;
         let timestamp = now.timestamp();
         if claims.issued_at > timestamp + ADMISSION_LEASE_CLOCK_SKEW_SECONDS
             || claims.expires_at <= timestamp
@@ -246,6 +254,13 @@ fn validate_text(value: &str, max: usize, error: ValidationError) -> Result<(), 
     Ok(())
 }
 
+fn validate_signed_limit(limit: u32) -> Result<(), LeaseError> {
+    if !(1..=MAX_SIGNED_CONNECTED_DEVSERVERS).contains(&limit) {
+        return Err(LeaseError::Limit);
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LeaseError {
     #[error("admission lease has invalid length")]
@@ -268,6 +283,8 @@ pub enum LeaseError {
     Time,
     #[error("admission lease TTL is invalid")]
     Ttl,
+    #[error("admission lease devserver limit is invalid")]
+    Limit,
     #[error("admission lease JSON: {0}")]
     Json(serde_json::Error),
     #[error(transparent)]
@@ -382,8 +399,12 @@ pub enum ValidationError {
     Username,
     #[error("devserver id is empty, too long, or contains control characters")]
     DevserverId,
+    #[error("devserver limit is outside the accepted range")]
+    DevserverLimit,
     #[error("owner and registration ids must be non-nil UUIDs")]
     Uuid,
+    #[error("browser session expiry must be after creation")]
+    SessionTime,
     #[error("package version is empty, too long, or contains control characters")]
     PackageVersion,
 }
@@ -394,10 +415,41 @@ pub struct TunnelRow {
     pub owner_user_id: Uuid,
     pub user: String,
     pub devserver_id: String,
+    pub max_connected_devservers: u32,
     pub admission_lease: AdmissionLease,
     pub admission_lease_expires_at: DateTime<Utc>,
     pub peer_addr: Option<SocketAddr>,
     pub connected_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserSessionRow {
+    pub admin_session_id: Uuid,
+    pub subject_user_id: Uuid,
+    pub owner_user_id: Uuid,
+    pub devserver_id: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl BrowserSessionRow {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.admin_session_id.is_nil()
+            || self.subject_user_id.is_nil()
+            || self.owner_user_id.is_nil()
+        {
+            return Err(ValidationError::Uuid);
+        }
+        validate_text(
+            &self.devserver_id,
+            MAX_DEVSERVER_ID_BYTES,
+            ValidationError::DevserverId,
+        )?;
+        if self.expires_at <= self.created_at {
+            return Err(ValidationError::SessionTime);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -416,6 +468,9 @@ pub enum ClientFrame {
     SnapshotChunk {
         rows: Vec<TunnelRow>,
     },
+    BrowserSessionSnapshotChunk {
+        rows: Vec<BrowserSessionRow>,
+    },
     SnapshotEnd {
         base_generation: u64,
     },
@@ -426,6 +481,14 @@ pub enum ClientFrame {
     TunnelDown {
         generation: u64,
         registration_id: Uuid,
+    },
+    BrowserSessionUp {
+        generation: u64,
+        row: BrowserSessionRow,
+    },
+    BrowserSessionDown {
+        generation: u64,
+        admin_session_id: Uuid,
     },
     AdmissionRequest {
         request_id: Uuid,
@@ -476,7 +539,19 @@ impl ClientFrame {
                     row.validate_fields()?;
                 }
             }
+            Self::BrowserSessionSnapshotChunk { rows } => {
+                if rows.len() > MAX_SNAPSHOT_CHUNK_ROWS {
+                    return Err(FrameError::SnapshotChunkTooLarge(rows.len()));
+                }
+                for row in rows {
+                    row.validate()?;
+                }
+            }
             Self::TunnelUp { row, .. } => row.validate_fields()?,
+            Self::BrowserSessionUp { row, .. } => row.validate()?,
+            Self::BrowserSessionDown {
+                admin_session_id, ..
+            } if admin_session_id.is_nil() => return Err(ValidationError::Uuid.into()),
             Self::AdmissionRequest {
                 registration_id,
                 owner_user_id,
@@ -529,7 +604,11 @@ impl TunnelRow {
 
     fn validate_fields(&self) -> Result<(), ValidationError> {
         self.binding_for(ProxyId::parse("placeholder").expect("constant proxy id"))
-            .validate()
+            .validate()?;
+        if !(1..=MAX_SIGNED_CONNECTED_DEVSERVERS).contains(&self.max_connected_devservers) {
+            return Err(ValidationError::DevserverLimit);
+        }
+        Ok(())
     }
 }
 
@@ -553,6 +632,13 @@ pub enum SessionRevocation {
     Subject {
         subject_user_id: Uuid,
     },
+    SessionId {
+        admin_session_id: Uuid,
+    },
+    Owner {
+        owner_user_id: Uuid,
+    },
+    All,
 }
 
 impl SessionRevocation {
@@ -578,6 +664,19 @@ impl SessionRevocation {
                 }
                 Ok(())
             }
+            Self::SessionId { admin_session_id } => {
+                if admin_session_id.is_nil() {
+                    return Err(ValidationError::Uuid);
+                }
+                Ok(())
+            }
+            Self::Owner { owner_user_id } => {
+                if owner_user_id.is_nil() {
+                    return Err(ValidationError::Uuid);
+                }
+                Ok(())
+            }
+            Self::All => Ok(()),
         }
     }
 }
@@ -696,6 +795,7 @@ mod tests {
                     registration_id,
                     proxy_id: ProxyId::parse("p1").unwrap(),
                 },
+                3,
                 Utc::now(),
                 120,
             )
@@ -713,6 +813,7 @@ mod tests {
         let claims = verifier.verify(&lease, now).unwrap();
         assert_eq!(claims.binding.owner_user_id, owner_user_id);
         assert_eq!(claims.binding.registration_id, registration_id);
+        assert_eq!(claims.max_connected_devservers, 3);
 
         let other =
             AdmissionLeaseSigner::from_base64("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE")
@@ -739,6 +840,57 @@ mod tests {
     }
 
     #[test]
+    fn admission_lease_limit_is_required_positive_and_finite() {
+        let owner_user_id = Uuid::new_v4();
+        let registration_id = Uuid::new_v4();
+        let (signer, lease) = lease_fixture(owner_user_id, registration_id);
+        let binding = AdmissionLeaseBinding {
+            owner_user_id,
+            user: "alice".into(),
+            devserver_id: "devserver".into(),
+            registration_id,
+            proxy_id: ProxyId::parse("p1").unwrap(),
+        };
+        let now = Utc::now();
+        assert!(matches!(
+            signer.sign(binding.clone(), 0, now, 120),
+            Err(LeaseError::Limit)
+        ));
+        assert!(matches!(
+            signer.sign(
+                binding,
+                MAX_SIGNED_CONNECTED_DEVSERVERS.saturating_add(1),
+                now,
+                120,
+            ),
+            Err(LeaseError::Limit)
+        ));
+
+        // Sign an otherwise-valid legacy payload with the claim removed. The
+        // verifier must reject it after crypto rather than supplying a default.
+        let payload = lease.as_str().split('.').nth(1).unwrap();
+        let mut claims: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
+        claims
+            .as_object_mut()
+            .unwrap()
+            .remove("max_connected_devservers");
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+        let signed = format!("v1.{payload}");
+        let signature = signer.0.sign(signed.as_bytes());
+        let missing = AdmissionLease::parse(format!(
+            "{signed}.{}",
+            URL_SAFE_NO_PAD.encode(signature.to_bytes())
+        ))
+        .unwrap();
+        let verifier = AdmissionLeaseVerifier::from_base64(&signer.verifying_key_base64()).unwrap();
+        assert!(matches!(
+            verifier.verify(&missing, now),
+            Err(LeaseError::Json(_))
+        ));
+    }
+
+    #[test]
     fn admission_verifier_rotation_accepts_two_distinct_keys_only() {
         let first =
             AdmissionLeaseSigner::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
@@ -754,8 +906,8 @@ mod tests {
             proxy_id: ProxyId::parse("p1").unwrap(),
         };
         let now = Utc::now();
-        let first_lease = first.sign(binding.clone(), now, 120).unwrap();
-        let second_lease = second.sign(binding, now, 120).unwrap();
+        let first_lease = first.sign(binding.clone(), 3, now, 120).unwrap();
+        let second_lease = second.sign(binding, 3, now, 120).unwrap();
         let first_key = first.verifying_key_base64();
         let second_key = second.verifying_key_base64();
         let ring =
@@ -908,10 +1060,19 @@ mod tests {
             owner_user_id,
             user: "alice".into(),
             devserver_id: "devserver".into(),
+            max_connected_devservers: 3,
             admission_lease: admission_lease.clone(),
             admission_lease_expires_at: Utc::now() + chrono::Duration::seconds(120),
             peer_addr: Some("127.0.0.1:7001".parse().unwrap()),
             connected_at: Utc::now(),
+        };
+        let browser_session = BrowserSessionRow {
+            admin_session_id: Uuid::new_v4(),
+            subject_user_id: Uuid::new_v4(),
+            owner_user_id,
+            devserver_id: "devserver".into(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::minutes(30),
         };
         let clients = vec![
             ClientFrame::ClientHello {
@@ -925,6 +1086,9 @@ mod tests {
             ClientFrame::SnapshotChunk {
                 rows: vec![row.clone()],
             },
+            ClientFrame::BrowserSessionSnapshotChunk {
+                rows: vec![browser_session.clone()],
+            },
             ClientFrame::SnapshotEnd { base_generation: 7 },
             ClientFrame::TunnelUp {
                 generation: 8,
@@ -933,6 +1097,14 @@ mod tests {
             ClientFrame::TunnelDown {
                 generation: 9,
                 registration_id,
+            },
+            ClientFrame::BrowserSessionUp {
+                generation: 10,
+                row: browser_session.clone(),
+            },
+            ClientFrame::BrowserSessionDown {
+                generation: 11,
+                admin_session_id: browser_session.admin_session_id,
             },
             ClientFrame::AdmissionRequest {
                 request_id,
@@ -951,6 +1123,10 @@ mod tests {
                 killed: vec![registration_id],
                 missing: Vec::new(),
                 failed: Vec::new(),
+            },
+            ClientFrame::SessionRevocationResult {
+                command_id,
+                revoked: 1,
             },
             ClientFrame::LeaseRefresh {
                 registration_id,
@@ -983,6 +1159,12 @@ mod tests {
             ServerFrame::KillRegistrations {
                 command_id,
                 registration_ids: vec![registration_id],
+            },
+            ServerFrame::RevokeSessions {
+                command_id,
+                revocation: SessionRevocation::SessionId {
+                    admin_session_id: browser_session.admin_session_id,
+                },
             },
             ServerFrame::ResyncRequired {
                 expected_generation: 8,
@@ -1048,6 +1230,7 @@ mod tests {
             owner_user_id,
             user: "alice".into(),
             devserver_id: "devserver".into(),
+            max_connected_devservers: 3,
             admission_lease,
             admission_lease_expires_at: Utc::now() + chrono::Duration::seconds(120),
             peer_addr: None,

@@ -57,6 +57,7 @@
 # service logs under $WORK/logs/. The run aborts with exit 1 on the
 # FIRST failed assertion; exit 0 means every assertion passed.
 set -uo pipefail
+unset FORCE_COLOR
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${E2E_WORK:-$REPO/target/gateway-zone-e2e}"
@@ -79,7 +80,7 @@ TUNNEL_PORT="${E2E_TUNNEL_PORT:-17910}"
 OAUTH_PORT="${E2E_OAUTH_PORT:-17830}"
 CTL_ADMIN_PORT="${E2E_CTL_ADMIN_PORT:-17840}"
 CTL_PROXY_PORT="${E2E_CTL_PROXY_PORT:-17841}"
-DS_PORTS=(17821 17822 17823 17824 17825 17826 17827 17828)
+DS_PORTS=(17821 17822 17823 17824 17825 17826 17827 17828 17829 17831 17832)
 
 # Fleet shape: three proxy nodes on their own loopback aliases.
 PROXY_IDS=(p1 p2 p3)
@@ -108,6 +109,7 @@ CHROME_BIN="${E2E_CHROME_BIN:-$(ls -d "$HOME"/.cache/puppeteer/chrome/linux-*/ch
 ALICE_EMAIL="e2e-alice@example.com"
 CAROL_EMAIL="e2e-carol@example.com"
 DAVE_EMAIL="e2e-dave@example.com"
+ERIN_EMAIL="e2e-erin@example.com"
 
 DOMAIN=localtest.me
 ID_NAME="id.$DOMAIN"
@@ -140,7 +142,7 @@ MAX_DEVSERVERS=2
 # Scenario dispatch: "all" (default) = core suite + every registered
 # scenario; "core" = the inline suite only; a registered name = stack
 # bring-up + that scenario only. Lanes append their scenario name here.
-SCENARIOS="sweeper watchdog roster upload windowclose matrix sharedingress movenode ctlrestart proxydown ctloutage"
+SCENARIOS="sweeper watchdog roster upload windowclose matrix sharedingress movenode ctlrestart proxydown ctloutage ctrlplane"
 SCENARIO="${1:-all}"
 RUN_CORE=1
 case "$SCENARIO" in all | core) ;; *) RUN_CORE=0 ;; esac
@@ -411,28 +413,33 @@ spawn profile env \
     RUST_LOG=info \
     "$GW_BIN/profile-service"
 
-spawn identity env \
-    BIND_ADDR="127.0.0.1:$ID_INNER_PORT" \
-    INTERNAL_BIND_ADDR="127.0.0.1:$ID_INTERNAL_PORT" \
-    BASE_URL="https://$ID_HOST" \
-    DATABASE_URL="$DB_URL" \
-    CHAN_GATEWAY_MIGRATIONS=external \
-    PROFILE_SERVICE_URL="http://127.0.0.1:$PROFILE_PORT" \
-    PROFILE_AUTH_TOKEN="$TOK_PROFILE" \
-    IDENTITY_INTERNAL_TOKEN="$TOK_INTERNAL" \
-    IDENTITY_ADMIN_TOKEN="$TOK_IDENTITY_ADMIN" \
-    DEVSERVER_IDENTITY_ADMIN_TOKEN="$TOK_CONTROL_IDENTITY" \
-    DEVSERVER_ADMIN_URL="http://127.0.0.1:$CTL_ADMIN_PORT" \
-    DEVSERVER_ADMISSION_SIGNING_KEY="$ADMISSION_SIGNING_KEY" \
-    DEVSERVER_ADMISSION_VERIFYING_KEYS="$ADMISSION_VERIFYING_KEY" \
-    DEVSERVER_ENTRY_SIGNING_KEY="$ENTRY_SIGNING_KEY" \
-    DEVSERVER_PROXY_ORIGIN="$APEX_ORIGIN" \
-    DEVSERVER_TUNNEL_ORIGIN="$TUNNEL_ORIGIN" \
-    GITHUB_CLIENT_ID=e2e-dummy \
-    GITHUB_CLIENT_SECRET=e2e-dummy \
-    IDENTITY_OAUTH_ENDPOINTS_BASE="http://127.0.0.1:$OAUTH_PORT" \
-    RUST_LOG=info \
-    "$GW_BIN/identity-service"
+spawn_identity() {
+    spawn identity env \
+        BIND_ADDR="127.0.0.1:$ID_INNER_PORT" \
+        INTERNAL_BIND_ADDR="127.0.0.1:$ID_INTERNAL_PORT" \
+        BASE_URL="https://$ID_HOST" \
+        DATABASE_URL="$DB_URL" \
+        CHAN_GATEWAY_MIGRATIONS=external \
+        PROFILE_SERVICE_URL="http://127.0.0.1:$PROFILE_PORT" \
+        PROFILE_AUTH_TOKEN="$TOK_PROFILE" \
+        PROFILE_ADMIN_TOKEN="$TOK_PROFILE_ADMIN" \
+        DEVSERVER_POLICY_REQUIRED=false \
+        IDENTITY_INTERNAL_TOKEN="$TOK_INTERNAL" \
+        IDENTITY_ADMIN_TOKEN="$TOK_IDENTITY_ADMIN" \
+        DEVSERVER_IDENTITY_ADMIN_TOKEN="$TOK_CONTROL_IDENTITY" \
+        DEVSERVER_ADMIN_URL="http://127.0.0.1:$CTL_ADMIN_PORT" \
+        DEVSERVER_ADMISSION_SIGNING_KEY="$ADMISSION_SIGNING_KEY" \
+        DEVSERVER_ADMISSION_VERIFYING_KEYS="$ADMISSION_VERIFYING_KEY" \
+        DEVSERVER_ENTRY_SIGNING_KEY="$ENTRY_SIGNING_KEY" \
+        DEVSERVER_PROXY_ORIGIN="$APEX_ORIGIN" \
+        DEVSERVER_TUNNEL_ORIGIN="$TUNNEL_ORIGIN" \
+        GITHUB_CLIENT_ID=e2e-dummy \
+        GITHUB_CLIENT_SECRET=e2e-dummy \
+        IDENTITY_OAUTH_ENDPOINTS_BASE="http://127.0.0.1:$OAUTH_PORT" \
+        RUST_LOG=info \
+        "$GW_BIN/identity-service"
+}
+spawn_identity
 
 # The controller is a function because the restart scenarios respawn
 # it against the same template.
@@ -475,6 +482,7 @@ spawn_proxy() { # spawn_proxy <proxy-id>
         IDENTITY_URL="http://127.0.0.1:$ID_INTERNAL_PORT" \
         IDENTITY_INTERNAL_TOKEN="$TOK_INTERNAL" \
         IDENTITY_PUBLIC_ORIGIN="https://$ID_HOST" \
+        DEVSERVER_ADMISSION_VERIFYING_KEYS="$ADMISSION_VERIFYING_KEY" \
         DEVSERVER_ENTRY_VERIFYING_KEYS="$ENTRY_VERIFYING_KEY" \
         DASHBOARD_URL="https://$ID_HOST/workspaces" \
         DEVSERVER_TUNNEL_ORIGIN="$TUNNEL_ORIGIN" \
@@ -544,12 +552,20 @@ log "stack is up (controller ready, p1-p3 at FleetReady)"
 # devserver id stays derivable client-side: lowercase hex
 # sha256(secret), the api_tokens cross-service contract.
 
+admin_json() {
+    "$GW_BIN/chan-gateway-admin" \
+        --profile-url "http://127.0.0.1:$PROFILE_PORT" \
+        --workspace-url "http://127.0.0.1:$CTL_ADMIN_PORT" \
+        --identity-url "http://127.0.0.1:$ID_INTERNAL_PORT" \
+        --profile-token "$TOK_PROFILE_ADMIN" \
+        --operator-token "$TOK_CONTROL_OPERATOR" \
+        --identity-token "$TOK_IDENTITY_ADMIN" \
+        --json "$@"
+}
+
 admin_mint() { # admin_mint <email> <label> -> "secret dsid"
     local out secret dsid
-    out="$("$GW_BIN/chan-gateway-admin" \
-        --identity-url "http://127.0.0.1:$ID_INTERNAL_PORT" \
-        --identity-token "$TOK_IDENTITY_ADMIN" --json \
-        token create "$1" \
+    out="$(admin_json token create "$1" \
         --scope tunnel --scope desktop.connect --label "$2" \
         2>> "$LOGS/admin-mint.log")" || return 1
     secret="$(printf %s "$out" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(JSON.parse(d).secret||"")}catch{console.log("")}})')"
@@ -586,7 +602,8 @@ seed_user() { # seed_user <email> -> "id username"
 read -r ALICE_ID ALICE_USER <<< "$(seed_user "$ALICE_EMAIL")"
 read -r CAROL_ID CAROL_USER <<< "$(seed_user "$CAROL_EMAIL")"
 read -r DAVE_ID DAVE_USER <<< "$(seed_user "$DAVE_EMAIL")"
-log "seeded users alice=$ALICE_USER carol=$CAROL_USER dave=$DAVE_USER"
+read -r ERIN_ID ERIN_USER <<< "$(seed_user "$ERIN_EMAIL")"
+log "seeded users alice=$ALICE_USER carol=$CAROL_USER dave=$DAVE_USER erin=$ERIN_USER"
 
 # The mint IS an assertion (v0.68 item 8: admin token create end to
 # end); everything downstream then proves the minted PATs actually
@@ -700,6 +717,36 @@ wait_fleet() { # wait_fleet <expected-total-rows> [tries]
     local want="$1" tries="${2:-75}"
     for _ in $(seq "$tries"); do
         [ "$(fleet_count)" = "$want" ] && return 0
+        sleep 0.4
+    done
+    return 1
+}
+
+json_array_len() {
+    node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const v=JSON.parse(d);console.log(Array.isArray(v)?v.length:-1)}catch{console.log(-1)}})'
+}
+
+owner_tunnels() { admin_read "/admin/v1/owners/$1/tunnels"; }
+owner_tunnel_count() { owner_tunnels "$1" | json_array_len; }
+
+wait_owner_tunnels() { # wait_owner_tunnels <owner-id> <expected-count> [tries]
+    local owner="$1" want="$2" tries="${3:-75}"
+    for _ in $(seq "$tries"); do
+        [ "$(owner_tunnel_count "$owner")" = "$want" ] && return 0
+        sleep 0.4
+    done
+    return 1
+}
+
+owner_sessions() {
+    admin_read "/admin/v1/browser-sessions?owner_user_id=$1"
+}
+owner_session_count() { owner_sessions "$1" | json_array_len; }
+
+wait_owner_sessions() { # wait_owner_sessions <owner-id> <expected-count> [tries]
+    local owner="$1" want="$2" tries="${3:-75}"
+    for _ in $(seq "$tries"); do
+        [ "$(owner_session_count "$owner")" = "$want" ] && return 0
         sleep 0.4
     done
     return 1
@@ -2747,6 +2794,407 @@ $owners"
         assert_fail "ctloutage: G registered during the outage"
     fi
     check_entry_routes ctloutage-a "$PAT_A" "$ALICE_USER" "$ALICE_ID" "$DS_A"
+}
+
+# Scenario: product control plane. Exercises durable per-user policy, signed
+# limits, session inventory and revocation, account cuts, fleet pause
+# persistence, and aggregate reports against the three real proxies.
+scenario_ctrlplane() {
+    local cp_log="$LOGS/ctrlplane-admin.log"
+    : > "$cp_log"
+
+    cp_stop() {
+        local name="$1" pid
+        [ -f "$WORK/pids/$name.pid" ] || return 0
+        pid="$(cat "$WORK/pids/$name.pid")"
+        kill "$pid" 2>/dev/null || true
+        for _ in $(seq 25); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.2
+        done
+        rm -f "$WORK/pids/$name.pid"
+    }
+
+    cp_policy_value() {
+        node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const v=JSON.parse(d).policy[process.argv[1]];process.stdout.write(String(v))}catch{}})' "$1"
+    }
+
+    cp_unrevoked_tokens() {
+        node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(JSON.parse(d).filter(x=>x.revoked_at===null).length)}catch{console.log(-1)}})'
+    }
+
+    cp_oauth_rows() {
+        admin_json session oauth ps --user "$ERIN_EMAIL" 2>> "$cp_log"
+    }
+
+    cp_run_oauth_login() {
+        cp "$REPO/scripts/e2e/gateway-zone-browser.mjs" "$WORK/"
+        CHROME_BIN="$CHROME_BIN" ID_ORIGIN="https://$ID_HOST" LOGIN_ONLY=1 \
+            node "$WORK/gateway-zone-browser.mjs" >> "$LOGS/ctrlplane-browser.log" 2>&1
+    }
+
+    # The core suite runs with the two-slot deployment ceiling. Raise it to
+    # three for this isolated scenario, then reconstruct controller authority.
+    MAX_DEVSERVERS=3
+    cp_stop controller
+    spawn_controller
+    if wait_ready controller "http://127.0.0.1:$CTL_ADMIN_PORT/readyz"; then
+        assert_pass "ctrlplane: controller reconverged with deployment ceiling 3"
+    else
+        assert_fail "ctrlplane: controller did not reconverge with deployment ceiling 3"
+    fi
+
+    local policy
+    policy="$(admin_json policy set "$ERIN_EMAIL" --enabled \
+        --max-connected-devservers 3 2>> "$cp_log")" ||
+        assert_fail "ctrlplane: policy set to three failed"
+    if [ "$(printf %s "$policy" | cp_policy_value enabled)" = "true" ] &&
+        [ "$(printf %s "$policy" | cp_policy_value max_connected_devservers)" = "3" ]; then
+        assert_pass "ctrlplane: durable user policy set enabled with limit 3"
+    else
+        assert_fail "ctrlplane: policy response did not contain enabled limit 3: $policy"
+    fi
+
+    local CP_PAT1 CP_PAT2 CP_PAT3 CP_PAT4 CP_DS1 CP_DS2 CP_DS3 CP_DS4
+    if mint_into "$ERIN_EMAIL" ctrlplane-1 CP_PAT1 CP_DS1 &&
+        mint_into "$ERIN_EMAIL" ctrlplane-2 CP_PAT2 CP_DS2 &&
+        mint_into "$ERIN_EMAIL" ctrlplane-3 CP_PAT3 CP_DS3 &&
+        mint_into "$ERIN_EMAIL" ctrlplane-4 CP_PAT4 CP_DS4; then
+        assert_pass "ctrlplane: four distinct PATs minted under enabled policy"
+    else
+        assert_fail "ctrlplane: PAT mint under enabled policy failed"
+    fi
+
+    spawn_devserver cp1 "${DS_PORTS[7]}" "$CP_PAT1" "$(node_tunnel_url p1)"
+    spawn_devserver cp2 "${DS_PORTS[8]}" "$CP_PAT2" "$(node_tunnel_url p2)"
+    spawn_devserver cp3 "${DS_PORTS[9]}" "$CP_PAT3" "$(node_tunnel_url p3)"
+    if wait_owner_tunnels "$ERIN_ID" 3 200; then
+        local cp_nodes
+        cp_nodes="$(owner_tunnels "$ERIN_ID" | jrows proxy_id | sort | paste -sd' ')"
+        if [ "$cp_nodes" = "p1 p2 p3" ]; then
+            assert_pass "ctrlplane: three devservers admitted across all three proxies"
+        else
+            assert_fail "ctrlplane: expected p1 p2 p3 ownership, got: $cp_nodes"
+        fi
+    else
+        assert_fail "ctrlplane: expected three admitted devservers, got $(owner_tunnel_count "$ERIN_ID")"
+    fi
+
+    spawn_devserver cp4 "${DS_PORTS[10]}" "$CP_PAT4" "$SHIM_TUNNEL_URL"
+    sleep 6
+    if [ "$(owner_tunnel_count "$ERIN_ID")" = "3" ] &&
+        ! owner_tunnels "$ERIN_ID" | grep -q "$CP_DS4"; then
+        assert_pass "ctrlplane: fourth concurrent admission refused at signed limit 3"
+    else
+        assert_fail "ctrlplane: fourth admission was not refused: $(owner_tunnels "$ERIN_ID")"
+    fi
+    cp_stop ds-cp4
+
+    check_entry_routes ctrlplane-limit-1 "$CP_PAT1" "$ERIN_USER" "$ERIN_ID" "$CP_DS1"
+    check_entry_routes ctrlplane-limit-2 "$CP_PAT2" "$ERIN_USER" "$ERIN_ID" "$CP_DS2"
+    if wait_owner_sessions "$ERIN_ID" 2; then
+        assert_pass "ctrlplane: controller converged two tenant sessions before policy reduction"
+    else
+        assert_fail "ctrlplane: expected two tenant sessions before policy reduction"
+    fi
+
+    local cp_oauth_enabled=0
+    if [ -x "$CHROME_BIN" ]; then
+        cp_stop stub-oauth
+        spawn stub-oauth node "$REPO/scripts/e2e/stub-oauth.mjs" "$OAUTH_PORT" "$ERIN_EMAIL" 424243
+        if wait_http stub-oauth "http://127.0.0.1:$OAUTH_PORT/user" 25 &&
+            cp_run_oauth_login; then
+            if [ "$(cp_oauth_rows | json_array_len)" = "1" ]; then
+                cp_oauth_enabled=1
+                assert_pass "ctrlplane: OAuth login created one indexed operator session"
+            else
+                assert_fail "ctrlplane: OAuth login did not create one indexed session"
+            fi
+        else
+            assert_fail "ctrlplane: OAuth fixture failed with local Chrome present"
+        fi
+    else
+        assert_pass "ctrlplane: OAuth browser checks skipped because local Chrome is unavailable"
+    fi
+
+    local reduced reduced_evicted reduced_sessions
+    reduced="$(admin_json policy set "$ERIN_EMAIL" --enabled \
+        --max-connected-devservers 1 2>> "$cp_log")" ||
+        assert_fail "ctrlplane: policy reduction to one failed"
+    reduced_evicted="$(printf %s "$reduced" | json_get tunnels_evicted)"
+    reduced_sessions="$(printf %s "$reduced" | json_get tenant_sessions_revoked)"
+    if [ "$reduced_evicted" = "3" ] && [ "$reduced_sessions" = "2" ] &&
+        wait_owner_tunnels "$ERIN_ID" 1 200 && wait_owner_sessions "$ERIN_ID" 0; then
+        assert_pass "ctrlplane: limit reduction drained 3 tunnels and 2 sessions; one tunnel reconnected"
+    else
+        assert_fail "ctrlplane: reduction did not converge: $reduced"
+    fi
+    sleep 5
+    [ "$(owner_tunnel_count "$ERIN_ID")" = "1" ] &&
+        assert_pass "ctrlplane: reduced limit remained exact under reconnect contention" ||
+        assert_fail "ctrlplane: reduced limit admitted more than one reconnect"
+
+    local winner winner_pat
+    winner="$(owner_tunnels "$ERIN_ID" | jrows devserver_id | head -1)"
+    case "$winner" in
+    "$CP_DS1") winner_pat="$CP_PAT1" ;;
+    "$CP_DS2") winner_pat="$CP_PAT2" ;;
+    "$CP_DS3") winner_pat="$CP_PAT3" ;;
+    *) assert_fail "ctrlplane: unknown reconnect winner '$winner'" ;;
+    esac
+    check_entry_routes ctrlplane-suspend "$winner_pat" "$ERIN_USER" "$ERIN_ID" "$winner"
+    wait_owner_sessions "$ERIN_ID" 1 ||
+        assert_fail "ctrlplane: pre-suspend tenant session did not converge"
+
+    local tokens_before tokens_before_n tokens_before_live
+    tokens_before="$(admin_json token list "$ERIN_EMAIL" 2>> "$cp_log")" ||
+        assert_fail "ctrlplane: pre-suspend token list failed"
+    tokens_before_n="$(printf %s "$tokens_before" | json_array_len)"
+    tokens_before_live="$(printf %s "$tokens_before" | cp_unrevoked_tokens)"
+
+    local suspended
+    suspended="$(admin_json policy suspend "$ERIN_EMAIL" 2>> "$cp_log")" ||
+        assert_fail "ctrlplane: policy suspend failed"
+    if [ "$(printf %s "$suspended" | cp_policy_value enabled)" = "false" ] &&
+        [ "$(printf %s "$suspended" | cp_policy_value max_connected_devservers)" = "1" ] &&
+        [ "$(printf %s "$suspended" | json_get tunnels_evicted)" = "1" ] &&
+        [ "$(printf %s "$suspended" | json_get tenant_sessions_revoked)" = "1" ] &&
+        wait_owner_tunnels "$ERIN_ID" 0 && wait_owner_sessions "$ERIN_ID" 0; then
+        assert_pass "ctrlplane: suspend preserved limit 1 and drained tunnel and tenant session"
+    else
+        assert_fail "ctrlplane: suspend did not converge: $suspended"
+    fi
+    local tokens_suspended
+    tokens_suspended="$(admin_json token list "$ERIN_EMAIL" 2>> "$cp_log")" ||
+        assert_fail "ctrlplane: suspended token list failed"
+    if [ "$(printf %s "$tokens_suspended" | json_array_len)" = "$tokens_before_n" ] &&
+        [ "$(printf %s "$tokens_suspended" | cp_unrevoked_tokens)" = "$tokens_before_live" ]; then
+        assert_pass "ctrlplane: suspend preserved every PAT row and revocation state"
+    else
+        assert_fail "ctrlplane: suspend changed PAT rows"
+    fi
+    sleep 6
+    [ "$(owner_tunnel_count "$ERIN_ID")" = "0" ] &&
+        assert_pass "ctrlplane: suspended PATs could not reconnect" ||
+        assert_fail "ctrlplane: a suspended PAT reconnected"
+
+    local resumed
+    resumed="$(admin_json policy resume "$ERIN_EMAIL" 2>> "$cp_log")" ||
+        assert_fail "ctrlplane: policy resume failed"
+    if [ "$(printf %s "$resumed" | cp_policy_value enabled)" = "true" ] &&
+        [ "$(printf %s "$resumed" | cp_policy_value max_connected_devservers)" = "1" ] &&
+        wait_owner_tunnels "$ERIN_ID" 1 200; then
+        assert_pass "ctrlplane: resume preserved limit and an existing PAT reconnected"
+    else
+        assert_fail "ctrlplane: resume did not restore one existing PAT: $resumed"
+    fi
+
+    winner="$(owner_tunnels "$ERIN_ID" | jrows devserver_id | head -1)"
+    case "$winner" in
+    "$CP_DS1") winner_pat="$CP_PAT1" ;;
+    "$CP_DS2") winner_pat="$CP_PAT2" ;;
+    "$CP_DS3") winner_pat="$CP_PAT3" ;;
+    *) assert_fail "ctrlplane: unknown post-resume winner '$winner'" ;;
+    esac
+    check_entry_routes ctrlplane-block "$winner_pat" "$ERIN_USER" "$ERIN_ID" "$winner"
+    wait_owner_sessions "$ERIN_ID" 1 ||
+        assert_fail "ctrlplane: pre-block tenant session did not converge"
+
+    local blocked
+    blocked="$(admin_json user block "$ERIN_EMAIL" --reason ctrlplane-e2e 2>> "$cp_log")" ||
+        assert_fail "ctrlplane: account block failed"
+    if wait_owner_tunnels "$ERIN_ID" 0 && wait_owner_sessions "$ERIN_ID" 0; then
+        assert_pass "ctrlplane: block drained owned tunnels and tenant sessions"
+    else
+        assert_fail "ctrlplane: block left live tunnel or tenant state: $blocked"
+    fi
+    if [ "$cp_oauth_enabled" = "1" ]; then
+        [ "$(cp_oauth_rows | json_array_len)" = "0" ] &&
+            assert_pass "ctrlplane: block revoked the indexed OAuth session" ||
+            assert_fail "ctrlplane: block left an indexed OAuth session"
+    fi
+    local tokens_blocked
+    tokens_blocked="$(admin_json token list "$ERIN_EMAIL" 2>> "$cp_log")" ||
+        assert_fail "ctrlplane: blocked token list failed"
+    if [ "$(printf %s "$tokens_blocked" | json_array_len)" = "$tokens_before_n" ] &&
+        [ "$(printf %s "$tokens_blocked" | cp_unrevoked_tokens)" = "0" ]; then
+        assert_pass "ctrlplane: block retained PAT rows and revoked every PAT"
+    else
+        assert_fail "ctrlplane: block did not revoke every PAT"
+    fi
+
+    admin_json user unblock "$ERIN_EMAIL" 2>> "$cp_log" >/dev/null ||
+        assert_fail "ctrlplane: account unblock failed"
+    sleep 6
+    if [ "$(owner_tunnel_count "$ERIN_ID")" = "0" ]; then
+        assert_pass "ctrlplane: unblock did not resurrect revoked PATs"
+    else
+        assert_fail "ctrlplane: an old PAT reconnected after unblock"
+    fi
+
+    local pre_pause pause_report
+    pre_pause="$(fleet_count)"
+    [ "$pre_pause" -ge 1 ] ||
+        assert_fail "ctrlplane: fleet had no live tunnel before pause"
+    pause_report="$(admin_json fleet pause --drain 2>> "$cp_log")" ||
+        assert_fail "ctrlplane: fleet pause failed"
+    if [ "$(printf %s "$pause_report" | json_get admissions_enabled)" = "false" ] &&
+        wait_fleet 0 200 &&
+        [ "$(admin_read /admin/v1/browser-sessions | json_array_len)" = "0" ]; then
+        assert_pass "ctrlplane: fleet pause persisted and drained every tunnel and tenant session"
+    else
+        assert_fail "ctrlplane: fleet pause did not drain: $pause_report"
+    fi
+    if admin_mint "$ERIN_EMAIL" ctrlplane-paused >/dev/null 2>&1; then
+        assert_fail "ctrlplane: PAT mint succeeded while fleet was paused"
+    else
+        assert_pass "ctrlplane: fleet pause refused PAT creation"
+    fi
+    sleep 6
+    [ "$(fleet_count)" = "0" ] &&
+        assert_pass "ctrlplane: existing PATs could not readmit while paused" ||
+        assert_fail "ctrlplane: a tunnel readmitted while fleet was paused"
+
+    cp_stop identity
+    spawn_identity
+    wait_http identity "http://127.0.0.1:$ID_INNER_PORT/healthz" ||
+        assert_fail "ctrlplane: identity did not restart"
+    require_alive identity
+    local paused_after_restart
+    paused_after_restart="$(admin_json fleet status 2>> "$cp_log")" ||
+        assert_fail "ctrlplane: fleet status failed after identity restart"
+    if [ "$(printf %s "$paused_after_restart" | json_get admissions_enabled)" = "false" ]; then
+        assert_pass "ctrlplane: identity restart did not clear durable fleet pause"
+    else
+        assert_fail "ctrlplane: fleet pause cleared across identity restart"
+    fi
+    if admin_mint "$ERIN_EMAIL" ctrlplane-paused-restart >/dev/null 2>&1; then
+        assert_fail "ctrlplane: PAT mint succeeded after paused identity restart"
+    else
+        assert_pass "ctrlplane: restarted identity still refused PAT creation while paused"
+    fi
+
+    local fleet_resumed
+    fleet_resumed="$(admin_json fleet resume 2>> "$cp_log")" ||
+        assert_fail "ctrlplane: fleet resume failed"
+    if [ "$(printf %s "$fleet_resumed" | json_get admissions_enabled)" = "true" ] &&
+        wait_fleet 3 300; then
+        assert_pass "ctrlplane: fleet resume restored normal admission"
+    else
+        assert_fail "ctrlplane: fleet resume did not restore the steady fleet: $fleet_resumed"
+    fi
+
+    local CP_PAT5 CP_DS5
+    mint_into "$ERIN_EMAIL" ctrlplane-5 CP_PAT5 CP_DS5 ||
+        assert_fail "ctrlplane: fresh PAT mint failed after fleet resume"
+    spawn_devserver cp5 "${DS_PORTS[10]}" "$CP_PAT5" "$(node_tunnel_url p1)"
+    if wait_owner_tunnels "$ERIN_ID" 1 200; then
+        assert_pass "ctrlplane: fresh post-resume PAT admitted normally"
+    else
+        assert_fail "ctrlplane: fresh post-resume PAT did not connect"
+    fi
+
+    check_entry_routes ctrlplane-exact-erin "$CP_PAT5" "$ERIN_USER" "$ERIN_ID" "$CP_DS5"
+    check_entry_routes ctrlplane-exact-carol "$PAT_D" "$CAROL_USER" "$CAROL_ID" "$DS_D"
+    if wait_owner_sessions "$ERIN_ID" 1 && wait_owner_sessions "$CAROL_ID" 1; then
+        assert_pass "ctrlplane: two exact tenant sessions converged on separate owners"
+    else
+        assert_fail "ctrlplane: exact tenant session fixtures did not converge"
+    fi
+
+    if [ "$cp_oauth_enabled" = "1" ]; then
+        cp_run_oauth_login || assert_fail "ctrlplane: first exact OAuth fixture failed"
+        cp_run_oauth_login || assert_fail "ctrlplane: second exact OAuth fixture failed"
+        [ "$(cp_oauth_rows | json_array_len)" = "2" ] &&
+            assert_pass "ctrlplane: two fresh OAuth sessions indexed after restart" ||
+            assert_fail "ctrlplane: expected two indexed OAuth sessions after restart"
+    fi
+
+    local overview oauth_rows tenant_rows tunnel_rows
+    overview="$(admin_json overview --since 24h 2>> "$cp_log")" ||
+        assert_fail "ctrlplane: gateway overview failed"
+    oauth_rows="$(admin_json session oauth ps 2>> "$cp_log")" ||
+        assert_fail "ctrlplane: OAuth session list failed"
+    tenant_rows="$(admin_json session tenant ps 2>> "$cp_log")" ||
+        assert_fail "ctrlplane: tenant session list failed"
+    tunnel_rows="$(admin_json tunnel ps 2>> "$cp_log")" ||
+        assert_fail "ctrlplane: tunnel list failed"
+    local overview_oauth overview_tenant overview_tunnels
+    read -r overview_oauth overview_tenant overview_tunnels <<< "$(printf %s "$overview" |
+        node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const v=JSON.parse(d).sessions;console.log(`${v.oauth} ${v.tenant} ${v.tunnels}`)})')"
+    if [ "$overview_oauth" = "$(printf %s "$oauth_rows" | json_array_len)" ] &&
+        [ "$overview_tenant" = "$(printf %s "$tenant_rows" | json_array_len)" ] &&
+        [ "$overview_tunnels" = "$(printf %s "$tunnel_rows" | json_array_len)" ]; then
+        assert_pass "ctrlplane: overview OAuth, tenant, and tunnel counts matched authoritative lists"
+    else
+        assert_fail "ctrlplane: overview session counts did not match authoritative lists: $overview"
+    fi
+
+    local tenant_id tenant_revoke
+    tenant_id="$(owner_sessions "$ERIN_ID" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(JSON.parse(d)[0].id)}catch{}})')"
+    tenant_revoke="$(admin_json session tenant revoke "$tenant_id" 2>> "$cp_log")" ||
+        assert_fail "ctrlplane: exact tenant session revoke failed"
+    if [ "$(printf %s "$tenant_revoke" | json_get tenant_sessions_revoked)" = "1" ] &&
+        wait_owner_sessions "$ERIN_ID" 0 && wait_owner_sessions "$CAROL_ID" 1; then
+        assert_pass "ctrlplane: exact tenant revoke removed only its target"
+    else
+        assert_fail "ctrlplane: exact tenant revoke was not isolated: $tenant_revoke"
+    fi
+    local erin_node erin_host erin_cookie carol_node carol_host carol_cookie erin_code carol_code
+    erin_node="$(tunnel_field "$CP_DS5" proxy_id)"
+    erin_host="$ERIN_USER--$(disc "$CP_DS5").$erin_node.$APEX"
+    erin_cookie="$(cat "$WORK/cookie-ctrlplane-exact-erin.txt")"
+    carol_node="$(tunnel_field "$DS_D" proxy_id)"
+    carol_host="$CAROL_USER--$(disc "$DS_D").$carol_node.$APEX"
+    carol_cookie="$(cat "$WORK/cookie-ctrlplane-exact-carol.txt")"
+    erin_code="$(curl_node "$erin_node" "$erin_host" -o /dev/null -w '%{http_code}' \
+        -H "Cookie: $erin_cookie" "https://$erin_host:$PROXY_PORT/api/health")"
+    carol_code="$(curl_node "$carol_node" "$carol_host" -o /dev/null -w '%{http_code}' \
+        -H "Cookie: $carol_cookie" "https://$carol_host:$PROXY_PORT/api/health")"
+    if [ "$erin_code" = "404" ] && [ "$carol_code" = "200" ]; then
+        assert_pass "ctrlplane: revoked tenant cookie failed while unrelated cookie remained admitted"
+    else
+        assert_fail "ctrlplane: exact tenant cookie isolation expected 404/200, got $erin_code/$carol_code"
+    fi
+
+    if [ "$cp_oauth_enabled" = "1" ]; then
+        local oauth_id oauth_revoke oauth_user_revoke
+        oauth_id="$(cp_oauth_rows | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(JSON.parse(d)[0].id)}catch{}})')"
+        oauth_revoke="$(admin_json session oauth revoke "$oauth_id" 2>> "$cp_log")" ||
+            assert_fail "ctrlplane: exact OAuth session revoke failed"
+        if [ "$(printf %s "$oauth_revoke" | json_get oauth_sessions_revoked)" = "1" ] &&
+            [ "$(cp_oauth_rows | json_array_len)" = "1" ]; then
+            assert_pass "ctrlplane: exact OAuth revoke removed one of two sessions"
+        else
+            assert_fail "ctrlplane: exact OAuth revoke was not isolated: $oauth_revoke"
+        fi
+        oauth_user_revoke="$(admin_json session oauth revoke-user "$ERIN_EMAIL" 2>> "$cp_log")" ||
+            assert_fail "ctrlplane: OAuth user-wide revoke failed"
+        if [ "$(printf %s "$oauth_user_revoke" | json_get oauth_sessions_revoked)" = "1" ] &&
+            [ "$(cp_oauth_rows | json_array_len)" = "0" ]; then
+            assert_pass "ctrlplane: OAuth user-wide revoke removed the remaining session"
+        else
+            assert_fail "ctrlplane: OAuth user-wide revoke did not converge: $oauth_user_revoke"
+        fi
+    fi
+
+    local final_overview audit_since audit_rows audit_count audit_users history_count
+    final_overview="$(admin_json overview --since 24h 2>> "$cp_log")" ||
+        assert_fail "ctrlplane: final overview failed"
+    audit_since="$(printf %s "$final_overview" | json_get since)"
+    audit_rows="$(admin_json audit ps --action login --since "$audit_since" \
+        --limit 200 2>> "$cp_log")" ||
+        assert_fail "ctrlplane: global login history failed"
+    audit_count="$(printf %s "$audit_rows" | json_array_len)"
+    audit_users="$(printf %s "$audit_rows" |
+        node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(new Set(JSON.parse(d).map(x=>x.user_id)).size)}catch{console.log(-1)}})')"
+    read -r history_count history_users <<< "$(printf %s "$final_overview" |
+        node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const v=JSON.parse(d).users;console.log(`${v.login_events_since} ${v.logged_in_since}`)})')"
+    if [ "$audit_count" = "$history_count" ] && [ "$audit_users" = "$history_users" ]; then
+        assert_pass "ctrlplane: global login history matched overview event and distinct-user counts"
+    else
+        assert_fail "ctrlplane: login history and overview diverged: history=$audit_count/$audit_users overview=$history_count/$history_users"
+    fi
 }
 
 run_scenarios() { # run_scenarios <all|name>

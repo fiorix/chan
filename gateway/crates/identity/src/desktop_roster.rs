@@ -440,6 +440,7 @@ mod tests {
             "connected_at": Utc::now().to_rfc3339(),
             "proxy_id": proxy_id,
             "proxy_base_url": proxy_base_url,
+            "max_connected_devservers": 3,
             "admission_lease": "test",
             "admission_lease_expires_at": (Utc::now() + chrono::Duration::minutes(2)).to_rfc3339(),
         }))

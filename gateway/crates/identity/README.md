@@ -40,7 +40,10 @@ export DEVSERVER_PROXY_ORIGIN=http://usr.localtest.me:7002
 export DEVSERVER_TUNNEL_ORIGIN=http://usr.localtest.me:7002
 export PROFILE_SERVICE_URL=http://127.0.0.1:7001
 export PROFILE_AUTH_TOKEN=dev-service-token
+export PROFILE_ADMIN_TOKEN=dev-profile-admin-token
 export IDENTITY_INTERNAL_TOKEN=dev-internal-token
+export IDENTITY_ADMIN_TOKEN=dev-identity-admin-token
+export DEVSERVER_POLICY_REQUIRED=false
 export DEVSERVER_ENTRY_SIGNING_KEY=<base64-ed25519-private-key>
 export GITHUB_CLIENT_ID=...
 export GITHUB_CLIENT_SECRET=...
@@ -64,6 +67,7 @@ Required:
 | `DEVSERVER_TUNNEL_ORIGIN` | tunnel ingress origin                       |
 | `PROFILE_SERVICE_URL`     | profile-service HTTP base URL               |
 | `PROFILE_AUTH_TOKEN`      | bearer for profile-service calls            |
+| `PROFILE_ADMIN_TOKEN`     | profile admin bearer for policy/composites  |
 | `IDENTITY_INTERNAL_TOKEN` | bearer devserver-proxy presents on validate |
 | `DEVSERVER_ADMIN_URL`     | protected devserver-control admin base     |
 | `DEVSERVER_IDENTITY_ADMIN_TOKEN` | identity-scoped controller bearer |
@@ -83,7 +87,8 @@ Optional knobs:
 |----------------------------|---------------------------|-----------------------|
 | `BIND_ADDR`                | `127.0.0.1:7000`          | listen address        |
 | `COOKIE_SECURE`            | `false`                   | HTTPS-only cookie     |
-| `IDENTITY_ADMIN_TOKEN`     | unset                     | enables identity's operator PAT surface |
+| `IDENTITY_ADMIN_TOKEN`     | unset                     | enables identity's operator admin tree |
+| `DEVSERVER_POLICY_REQUIRED` | `false`                  | deny PAT mint/admission when user policy is absent |
 | `RUSTRICT_ALLOWLIST`       | unset                     | comma-separated usernames exempt from the profanity filter |
 | `IDENTITY_OAUTH_ENDPOINTS_BASE` | unset (stock github.com) | GitHub OAuth/API endpoint origin override for local e2e stubs; never set in production |
 
@@ -95,7 +100,7 @@ Public (no session required):
 |--------|-----------------------------|-----------------------|
 | GET    | `/`                         | SPA root (index.html) |
 | GET    | `/healthz`                  | health check          |
-| GET    | `/auth/{provider}`          | OAuth start (PKCE)    |
+| GET    | `/auth/{provider}`          | OAuth start (PKCE; optional safe `return_to`) |
 | GET    | `/auth/{provider}/callback` | OAuth callback        |
 
 Session-gated SPA API (`/api/*`):
@@ -145,8 +150,27 @@ Internal (Bearer-gated by `IDENTITY_INTERNAL_TOKEN`):
 | Method | Path                                   | Purpose                |
 |--------|----------------------------------------|------------------------|
 | POST   | `/internal/v1/tokens/validate`         | validate a PAT         |
+| POST   | `/internal/v1/sessions/whoami`         | resolve an indexed OAuth cookie |
 
-The internal route is called by devserver-proxy during the tunnel handshake. The primary PAT brute-force throttle runs one hop earlier in devserver-proxy, keyed on a hash of the candidate token; this handler runs a defense-in-depth twin of the same throttle. A per-IP governor would be useless at either hop (every request arrives from one container IP). See identity's `design.md` for the rationale.
+The token route is called by devserver-proxy during tunnel handshake and lease refresh. `whoami` accepts a raw `__Host-id_session` value from a trusted internal caller and returns only the indexed user plus authentication time. Malformed, unknown, expired, pre-index, deleted-user, and blocked-user cookies share one 401 response.
+
+Admin (internal listener, enabled only when `IDENTITY_ADMIN_TOKEN` is non-empty):
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/admin/v1/tokens` | mint a PAT |
+| GET | `/admin/v1/sessions` | list OAuth sessions |
+| POST | `/admin/v1/sessions/{id}/revoke` | revoke one OAuth session |
+| POST | `/admin/v1/users/{id}/sessions/revoke` | revoke a user's OAuth sessions |
+| GET | `/admin/v1/sessions/overview` | active OAuth-session count |
+| GET/PUT | `/admin/v1/users/{id}/devserver-policy` | read/persist and drain user policy |
+| GET | `/admin/v1/fleet` | persistent admissions state |
+| POST | `/admin/v1/fleet/pause` | persist pause and drain all sessions/tunnels |
+| POST | `/admin/v1/fleet/resume` | persist resume |
+| POST | `/admin/v1/users/{id}/access/revoke` | PAT/OAuth/tenant/tunnel access cut |
+| DELETE | `/admin/v1/users/{id}` | convergent account deletion |
+
+Composite mutations persist denial before issuing controller commands. Any unconfirmed downstream cut returns 502 with durable state and confirmed counts; raw downstream response bodies and credentials are not propagated.
 
 ## Design rationale
 

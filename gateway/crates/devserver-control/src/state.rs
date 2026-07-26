@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use devserver_control_proto::{
-    AdmissionDecision, CanonicalOrigin, ProxyId, ServerFrame, SessionRevocation, TunnelRow,
-    CONTROLLER_DISCONNECTED_AUTHORITY_RETENTION_SECONDS,
+    AdmissionDecision, BrowserSessionRow, CanonicalOrigin, ProxyId, ServerFrame, SessionRevocation,
+    TunnelRow, CONTROLLER_DISCONNECTED_AUTHORITY_RETENTION_SECONDS,
+    MAX_BROWSER_SESSION_SNAPSHOT_BYTES, MAX_BROWSER_SESSION_SNAPSHOT_ROWS,
 };
 use serde::Serialize;
 use tokio::time::Instant;
@@ -36,6 +37,8 @@ const MAX_PROXY_AUTHORITIES: usize = MAX_PROXY_SESSIONS * 2;
 const MAX_ROWS_PER_SESSION: usize = devserver_control_proto::MAX_SNAPSHOT_ROWS;
 const MAX_FLEET_ROWS: usize = 16_384;
 const MAX_FLEET_RESIDENT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_FLEET_BROWSER_SESSION_ROWS: usize = 500_000;
+const MAX_FLEET_BROWSER_SESSION_BYTES: usize = 128 * 1024 * 1024;
 const MAX_PENDING_PER_SESSION: usize = 1024;
 const MAX_PENDING_FLEET: usize = 16_384;
 const MAX_BOOT_HISTORY: usize = 1024;
@@ -68,6 +71,7 @@ pub struct TunnelView {
     pub owner_user_id: Uuid,
     pub user: String,
     pub devserver_id: String,
+    pub max_connected_devservers: u32,
     pub peer_addr: Option<std::net::SocketAddr>,
     pub connected_at: DateTime<Utc>,
     pub proxy_id: String,
@@ -86,6 +90,7 @@ impl std::fmt::Debug for TunnelView {
             .field("owner_user_id", &self.owner_user_id)
             .field("user", &self.user)
             .field("devserver_id", &self.devserver_id)
+            .field("max_connected_devservers", &self.max_connected_devservers)
             .field("has_peer_addr", &self.peer_addr.is_some())
             .field("connected_at", &self.connected_at)
             .field("proxy_id", &self.proxy_id)
@@ -106,6 +111,23 @@ struct OwnedTunnel {
     row: TunnelRow,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnedBrowserSession {
+    session: SessionKey,
+    row: BrowserSessionRow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BrowserSessionView {
+    pub id: Uuid,
+    pub subject_user_id: Uuid,
+    pub owner_user_id: Uuid,
+    pub devserver_id: String,
+    pub proxy_id: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone)]
 struct ProxySession {
     incarnation: SessionIncarnation,
@@ -115,6 +137,8 @@ struct ProxySession {
     generation: Option<u64>,
     rows: HashMap<Uuid, TunnelRow>,
     resident_bytes: usize,
+    browser_sessions: HashMap<Uuid, BrowserSessionRow>,
+    browser_session_resident_bytes: usize,
     /// Registration ids whose removal the controller already applied from
     /// a confirmed kill command. The proxy still publishes its own
     /// contiguous `TunnelDown` for each confirmed eviction, and without
@@ -135,6 +159,7 @@ struct PendingClaim {
     session: SessionKey,
     request_id: Uuid,
     registration_id: Uuid,
+    max_connected_devservers: u32,
     expires_at: Instant,
 }
 
@@ -230,6 +255,10 @@ pub enum StateError {
     SnapshotTooLarge(usize),
     #[error("snapshot contains duplicate registration id {0}")]
     DuplicateRegistration(Uuid),
+    #[error("browser-session snapshot exceeds the row limit: {0}")]
+    BrowserSessionSnapshotTooLarge(usize),
+    #[error("snapshot contains duplicate browser session id {0}")]
+    DuplicateBrowserSession(Uuid),
     #[error("another reconciliation is in progress")]
     ReconciliationInProgress,
     #[error("pong nonce is not outstanding")]
@@ -246,6 +275,8 @@ pub enum StateError {
     BootHistoryCapacity,
     #[error("admission lease expired before controller mutation")]
     ExpiredAdmissionLease,
+    #[error("browser session expired before controller mutation")]
+    ExpiredBrowserSession,
     #[error("authoritative proxy is reconnecting")]
     AuthorityTemporarilyUnavailable,
 }
@@ -257,6 +288,7 @@ pub(crate) struct ControllerState {
     next_ping_nonce: u64,
     proxies: BTreeMap<String, ProxySession>,
     tunnels: HashMap<TunnelKey, OwnedTunnel>,
+    browser_sessions: HashMap<Uuid, OwnedBrowserSession>,
     owner_occupancy: HashMap<Uuid, HashMap<String, usize>>,
     pending: HashMap<TunnelKey, PendingClaim>,
     pending_index: HashMap<PendingIdentity, TunnelKey>,
@@ -268,6 +300,8 @@ pub(crate) struct ControllerState {
     disconnected_proxy_deadlines: HashMap<(String, Uuid), Instant>,
     orphan_usage: HashMap<SessionKey, FleetUsage>,
     orphan_total: FleetUsage,
+    browser_orphan_usage: HashMap<SessionKey, FleetUsage>,
+    browser_orphan_total: FleetUsage,
     boot_history: HashMap<String, Uuid>,
     reconciliation: Option<Reconciliation>,
     convergence_deadline: Option<Instant>,
@@ -282,6 +316,7 @@ impl ControllerState {
             next_ping_nonce: 1,
             proxies: BTreeMap::new(),
             tunnels: HashMap::new(),
+            browser_sessions: HashMap::new(),
             owner_occupancy: HashMap::new(),
             pending: HashMap::new(),
             pending_index: HashMap::new(),
@@ -293,6 +328,8 @@ impl ControllerState {
             disconnected_proxy_deadlines: HashMap::new(),
             orphan_usage: HashMap::new(),
             orphan_total: FleetUsage::default(),
+            browser_orphan_usage: HashMap::new(),
+            browser_orphan_total: FleetUsage::default(),
             boot_history: HashMap::new(),
             reconciliation: None,
             convergence_deadline: None,
@@ -303,8 +340,13 @@ impl ControllerState {
         self.ready
     }
 
-    pub(crate) fn watch_shape(&self) -> (bool, usize, usize) {
-        (self.ready, self.tunnels.len(), self.proxies.len())
+    pub(crate) fn watch_shape(&self) -> (bool, usize, usize, usize) {
+        (
+            self.ready,
+            self.tunnels.len(),
+            self.proxies.len(),
+            self.browser_sessions.len(),
+        )
     }
 
     pub fn begin_session_authorized(
@@ -351,6 +393,8 @@ impl ControllerState {
                 generation: None,
                 rows: HashMap::new(),
                 resident_bytes: 0,
+                browser_sessions: HashMap::new(),
+                browser_session_resident_bytes: 0,
                 confirmed_downs: HashSet::new(),
                 status: ProxyStatus::Joining,
                 fleet_ready: false,
@@ -384,6 +428,7 @@ impl ControllerState {
         incarnation: SessionIncarnation,
         base_generation: u64,
         rows: Vec<TunnelRow>,
+        browser_sessions: Vec<BrowserSessionRow>,
         now: Instant,
         wall_now: DateTime<Utc>,
     ) -> Result<Vec<Effect>, StateError> {
@@ -392,6 +437,11 @@ impl ControllerState {
         }
         if rows.len() > MAX_ROWS_PER_SESSION {
             return Err(StateError::SnapshotTooLarge(rows.len()));
+        }
+        if browser_sessions.len() > MAX_BROWSER_SESSION_SNAPSHOT_ROWS {
+            return Err(StateError::BrowserSessionSnapshotTooLarge(
+                browser_sessions.len(),
+            ));
         }
         let (retained_rows, retained_bytes) = self.fleet_usage(Some(proxy_id.as_str()));
         if retained_rows.saturating_add(rows.len()) > MAX_FLEET_ROWS {
@@ -403,6 +453,22 @@ impl ControllerState {
         if retained_bytes.saturating_add(snapshot_bytes) > MAX_FLEET_RESIDENT_BYTES {
             return Err(StateError::FleetCapacity);
         }
+        let (retained_browser_rows, retained_browser_bytes) =
+            self.browser_session_usage(Some(proxy_id.as_str()));
+        if retained_browser_rows.saturating_add(browser_sessions.len())
+            > MAX_FLEET_BROWSER_SESSION_ROWS
+        {
+            return Err(StateError::FleetCapacity);
+        }
+        let browser_snapshot_bytes = browser_sessions.iter().try_fold(0_usize, |total, row| {
+            browser_session_resident_bytes(row).map(|bytes| total.saturating_add(bytes))
+        })?;
+        if browser_snapshot_bytes > MAX_BROWSER_SESSION_SNAPSHOT_BYTES
+            || retained_browser_bytes.saturating_add(browser_snapshot_bytes)
+                > MAX_FLEET_BROWSER_SESSION_BYTES
+        {
+            return Err(StateError::FleetCapacity);
+        }
         let mut by_id = HashMap::with_capacity(rows.len());
         for row in rows {
             if row.admission_lease_expires_at <= wall_now {
@@ -411,6 +477,21 @@ impl ControllerState {
             let registration_id = row.registration_id;
             if by_id.insert(registration_id, row).is_some() {
                 return Err(StateError::DuplicateRegistration(registration_id));
+            }
+        }
+        let mut browser_by_id = HashMap::with_capacity(browser_sessions.len());
+        for row in browser_sessions {
+            if row.expires_at <= wall_now {
+                return Err(StateError::ExpiredBrowserSession);
+            }
+            let admin_session_id = row.admin_session_id;
+            if browser_by_id.insert(admin_session_id, row).is_some()
+                || self.proxies.iter().any(|(known_proxy_id, session)| {
+                    known_proxy_id != proxy_id.as_str()
+                        && session.browser_sessions.contains_key(&admin_session_id)
+                })
+            {
+                return Err(StateError::DuplicateBrowserSession(admin_session_id));
             }
         }
 
@@ -451,6 +532,8 @@ impl ControllerState {
         session.generation = Some(base_generation);
         session.rows = by_id;
         session.resident_bytes = snapshot_bytes;
+        session.browser_sessions = browser_by_id;
+        session.browser_session_resident_bytes = browser_snapshot_bytes;
         session.status = if self.ready {
             ProxyStatus::Joining
         } else {
@@ -597,6 +680,103 @@ impl ControllerState {
         Ok(Vec::new())
     }
 
+    pub fn browser_session_up(
+        &mut self,
+        proxy_id: &ProxyId,
+        incarnation: SessionIncarnation,
+        generation: u64,
+        row: BrowserSessionRow,
+        now: Instant,
+        wall_now: DateTime<Utc>,
+    ) -> Result<Vec<Effect>, StateError> {
+        if row.expires_at <= wall_now {
+            return Err(StateError::ExpiredBrowserSession);
+        }
+        let key = self.require_key(proxy_id, incarnation)?;
+        if let Some(effects) = self.advance_or_resync(&key, generation)? {
+            return Ok(effects);
+        }
+        self.touch(&key, now, wall_now)?;
+        let duplicate = self
+            .proxies
+            .values()
+            .any(|session| session.browser_sessions.contains_key(&row.admin_session_id));
+        if duplicate {
+            return Ok(self.force_resync(&key, generation.saturating_add(1)));
+        }
+        let (fleet_rows, fleet_bytes) = self.browser_session_usage(None);
+        let row_bytes = browser_session_resident_bytes(&row)?;
+        let session = self
+            .proxies
+            .get_mut(proxy_id.as_str())
+            .expect("key was validated");
+        if session.browser_sessions.len() >= MAX_BROWSER_SESSION_SNAPSHOT_ROWS
+            || fleet_rows >= MAX_FLEET_BROWSER_SESSION_ROWS
+            || session
+                .browser_session_resident_bytes
+                .saturating_add(row_bytes)
+                > MAX_BROWSER_SESSION_SNAPSHOT_BYTES
+            || fleet_bytes.saturating_add(row_bytes) > MAX_FLEET_BROWSER_SESSION_BYTES
+        {
+            return Err(StateError::FleetCapacity);
+        }
+        session.browser_session_resident_bytes = session
+            .browser_session_resident_bytes
+            .saturating_add(row_bytes);
+        session
+            .browser_sessions
+            .insert(row.admin_session_id, row.clone());
+        if session.status == ProxyStatus::Active && session.fleet_ready {
+            self.browser_sessions.insert(
+                row.admin_session_id,
+                OwnedBrowserSession { session: key, row },
+            );
+        }
+        Ok(Vec::new())
+    }
+
+    pub fn browser_session_down(
+        &mut self,
+        proxy_id: &ProxyId,
+        incarnation: SessionIncarnation,
+        generation: u64,
+        admin_session_id: Uuid,
+        now: Instant,
+        wall_now: DateTime<Utc>,
+    ) -> Result<Vec<Effect>, StateError> {
+        let key = self.require_key(proxy_id, incarnation)?;
+        if let Some(effects) = self.advance_or_resync(&key, generation)? {
+            return Ok(effects);
+        }
+        self.touch(&key, now, wall_now)?;
+        let row = self
+            .proxies
+            .get_mut(proxy_id.as_str())
+            .expect("key was validated")
+            .browser_sessions
+            .remove(&admin_session_id);
+        let Some(row) = row else {
+            return Ok(self.force_resync(&key, generation.saturating_add(1)));
+        };
+        let row_bytes = browser_session_resident_bytes(&row).unwrap_or(0);
+        let session = self
+            .proxies
+            .get_mut(proxy_id.as_str())
+            .expect("key was validated");
+        session.browser_session_resident_bytes = session
+            .browser_session_resident_bytes
+            .saturating_sub(row_bytes);
+        let published = self
+            .browser_sessions
+            .get(&admin_session_id)
+            .filter(|owned| owned.session == key)
+            .is_some();
+        if published {
+            self.browser_sessions.remove(&admin_session_id);
+        }
+        Ok(Vec::new())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn request_admission_authorized(
         &mut self,
@@ -607,6 +787,7 @@ impl ControllerState {
         owner_user_id: Uuid,
         _user: String,
         devserver_id: String,
+        max_connected_devservers: u32,
         _admission_lease: devserver_control_proto::AdmissionLease,
         admission_lease_expires_at: DateTime<Utc>,
         now: Instant,
@@ -646,10 +827,8 @@ impl ControllerState {
         }
         let reconnect =
             self.tunnels.contains_key(&tunnel_key) || self.pending.contains_key(&tunnel_key);
-        if self.max_devservers_per_user > 0
-            && !reconnect
-            && self.distinct_for_owner(owner_user_id) >= self.max_devservers_per_user
-        {
+        let effective_limit = self.effective_owner_limit(owner_user_id, max_connected_devservers);
+        if !reconnect && self.distinct_for_owner(owner_user_id) >= effective_limit {
             return Ok(vec![admission_effect(
                 session_key,
                 request_id,
@@ -690,6 +869,7 @@ impl ControllerState {
                 session: session_key.clone(),
                 request_id,
                 registration_id,
+                max_connected_devservers,
                 expires_at: now + ADMISSION_CLAIM_TTL,
             },
         );
@@ -723,6 +903,7 @@ impl ControllerState {
             legacy_owner_user_id(&user),
             user,
             devserver_id,
+            u32::try_from(self.max_devservers_per_user.max(1)).unwrap_or(u32::MAX),
             devserver_control_proto::AdmissionLease::parse("test").expect("test lease"),
             wall_now + chrono::Duration::minutes(5),
             now,
@@ -757,6 +938,7 @@ impl ControllerState {
         owner_user_id: Uuid,
         user: String,
         devserver_id: String,
+        max_connected_devservers: u32,
         admission_lease: devserver_control_proto::AdmissionLease,
         admission_lease_expires_at: DateTime<Utc>,
         now: Instant,
@@ -781,6 +963,7 @@ impl ControllerState {
         }
         let old_bytes = row_resident_bytes(&old).unwrap_or(0);
         let mut refreshed = old;
+        refreshed.max_connected_devservers = max_connected_devservers;
         refreshed.admission_lease = admission_lease;
         refreshed.admission_lease_expires_at = admission_lease_expires_at;
         let refreshed_bytes = row_resident_bytes(&refreshed)?;
@@ -1043,7 +1226,9 @@ impl ControllerState {
         for session in expired_orphans {
             self.orphan_deadlines.remove(&session);
             self.remove_orphan_usage(&session);
+            self.remove_browser_orphan_usage(&session);
             self.remove_tunnels_for_session(&session);
+            self.remove_browser_sessions_for_session(&session);
         }
         self.disconnected_proxy_deadlines
             .retain(|_, deadline| *deadline > now);
@@ -1161,6 +1346,34 @@ impl ControllerState {
     pub fn read_tunnels(&self) -> Result<Vec<TunnelView>, StateError> {
         self.ready
             .then(|| self.tunnel_views())
+            .ok_or(StateError::NotReady)
+    }
+
+    pub fn browser_session_views(&self) -> Vec<BrowserSessionView> {
+        let mut views: Vec<_> = self
+            .browser_sessions
+            .values()
+            .map(|owned| BrowserSessionView {
+                id: owned.row.admin_session_id,
+                subject_user_id: owned.row.subject_user_id,
+                owner_user_id: owned.row.owner_user_id,
+                devserver_id: owned.row.devserver_id.clone(),
+                proxy_id: owned.session.proxy_id.clone(),
+                created_at: owned.row.created_at,
+                expires_at: owned.row.expires_at,
+            })
+            .collect();
+        views.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        views
+    }
+
+    pub fn read_browser_sessions(&self) -> Result<Vec<BrowserSessionView>, StateError> {
+        self.ready
+            .then(|| self.browser_session_views())
             .ok_or(StateError::NotReady)
     }
 
@@ -1286,6 +1499,44 @@ impl ControllerState {
         Ok((command_ids, effects))
     }
 
+    pub fn begin_all_kill(&mut self, now: Instant) -> Result<(Vec<Uuid>, Vec<Effect>), StateError> {
+        if !self.ready {
+            return Err(StateError::NotReady);
+        }
+        if !self.disconnected_proxy_deadlines.is_empty()
+            || self
+                .proxies
+                .values()
+                .any(|proxy| proxy.status != ProxyStatus::Active || !proxy.fleet_ready)
+            || self
+                .tunnels
+                .values()
+                .any(|owned| !self.owns_aggregate_rows(&owned.session))
+        {
+            return Err(StateError::AuthorityTemporarilyUnavailable);
+        }
+        let pending: Vec<_> = self.pending.keys().cloned().collect();
+        for key in pending {
+            self.remove_pending(&key);
+        }
+        let mut grouped: BTreeMap<SessionKey, Vec<Uuid>> = BTreeMap::new();
+        for owned in self.tunnels.values() {
+            grouped
+                .entry(owned.session.clone())
+                .or_default()
+                .push(owned.row.registration_id);
+        }
+        let mut command_ids = Vec::new();
+        let mut effects = Vec::new();
+        for (session, registration_ids) in grouped {
+            let (command_id, kill) =
+                self.issue_kill(session, registration_ids, CommandPurpose::Runtime, now);
+            command_ids.push(command_id);
+            effects.extend(kill);
+        }
+        Ok((command_ids, effects))
+    }
+
     /// Aggregate rows are only ever published from Active sessions:
     /// `force_resync` and session removal retract a session's rows before
     /// its status can leave Active. A kill must route to a session that
@@ -1367,9 +1618,12 @@ impl ControllerState {
             session.generation = None;
             session.rows.clear();
             session.resident_bytes = 0;
+            session.browser_sessions.clear();
+            session.browser_session_resident_bytes = 0;
             session.confirmed_downs.clear();
         }
         self.remove_tunnels_for_session(key);
+        self.remove_browser_sessions_for_session(key);
         self.remove_pending_for_session(key);
         self.leave_readiness_if_no_active_sessions();
         vec![Effect::Send {
@@ -1454,6 +1708,7 @@ impl ControllerState {
                 session.status = ProxyStatus::Active;
                 session.fleet_ready = true;
             }
+            self.replace_browser_sessions();
             self.clear_orphans_for_proxy_authority(&joining.proxy_id, boot_id);
             return Ok(vec![Effect::Send {
                 session: joining,
@@ -1472,7 +1727,21 @@ impl ControllerState {
         candidates: impl IntoIterator<Item = OwnedTunnel>,
     ) -> (HashMap<TunnelKey, OwnedTunnel>, Vec<OwnedTunnel>) {
         let mut grouped: BTreeMap<TunnelKey, Vec<OwnedTunnel>> = BTreeMap::new();
+        let mut signed_limits: HashMap<Uuid, usize> = HashMap::new();
         for candidate in candidates {
+            let deployment_limit = if self.max_devservers_per_user == 0 {
+                usize::MAX
+            } else {
+                self.max_devservers_per_user
+            };
+            signed_limits
+                .entry(candidate.row.owner_user_id)
+                .and_modify(|limit| {
+                    *limit = (*limit).min(candidate.row.max_connected_devservers as usize)
+                })
+                .or_insert_with(|| {
+                    deployment_limit.min(candidate.row.max_connected_devservers as usize)
+                });
             grouped
                 .entry((
                     candidate.row.owner_user_id,
@@ -1500,15 +1769,15 @@ impl ControllerState {
             losers.extend(rows);
         }
 
-        if self.max_devservers_per_user > 0 {
-            let mut by_user: BTreeMap<Uuid, Vec<(TunnelKey, OwnedTunnel)>> = BTreeMap::new();
-            for (key, owned) in &desired {
-                by_user
-                    .entry(key.0)
-                    .or_default()
-                    .push((key.clone(), owned.clone()));
-            }
-            for rows in by_user.values_mut() {
+        let mut by_user: BTreeMap<Uuid, Vec<(TunnelKey, OwnedTunnel)>> = BTreeMap::new();
+        for (key, owned) in &desired {
+            by_user
+                .entry(key.0)
+                .or_default()
+                .push((key.clone(), owned.clone()));
+        }
+        for (owner_user_id, rows) in &mut by_user {
+            if let Some(limit) = signed_limits.get(owner_user_id).copied() {
                 rows.sort_by(|(a_key, a), (b_key, b)| {
                     a_key
                         .1
@@ -1516,7 +1785,7 @@ impl ControllerState {
                         .then_with(|| a.session.proxy_id.cmp(&b.session.proxy_id))
                         .then_with(|| a.row.registration_id.cmp(&b.row.registration_id))
                 });
-                for (key, loser) in rows.iter().skip(self.max_devservers_per_user) {
+                for (key, loser) in rows.iter().skip(limit) {
                     desired.remove(key);
                     losers.push(loser.clone());
                 }
@@ -1550,15 +1819,51 @@ impl ControllerState {
         // same way live rows do: the claim is strictly earlier than the
         // joining snapshot, so recency favors it.
         let mut ids_per_user: HashMap<Uuid, HashSet<String>> = HashMap::new();
+        let mut limits_per_user: HashMap<Uuid, usize> = HashMap::new();
         for (user, devserver_id) in desired.keys().chain(self.pending.keys()) {
             ids_per_user
                 .entry(*user)
                 .or_default()
                 .insert(devserver_id.clone());
         }
+        for ((owner, _), tunnel) in &desired {
+            let deployment_limit = if self.max_devservers_per_user == 0 {
+                usize::MAX
+            } else {
+                self.max_devservers_per_user
+            };
+            limits_per_user
+                .entry(*owner)
+                .and_modify(|limit| {
+                    *limit = (*limit).min(tunnel.row.max_connected_devservers as usize)
+                })
+                .or_insert_with(|| {
+                    deployment_limit.min(tunnel.row.max_connected_devservers as usize)
+                });
+        }
+        for ((owner, _), claim) in &self.pending {
+            let deployment_limit = if self.max_devservers_per_user == 0 {
+                usize::MAX
+            } else {
+                self.max_devservers_per_user
+            };
+            limits_per_user
+                .entry(*owner)
+                .and_modify(|limit| *limit = (*limit).min(claim.max_connected_devservers as usize))
+                .or_insert_with(|| deployment_limit.min(claim.max_connected_devservers as usize));
+        }
 
         let mut grouped: BTreeMap<TunnelKey, Vec<TunnelRow>> = BTreeMap::new();
         for row in rows {
+            let deployment_limit = if self.max_devservers_per_user == 0 {
+                usize::MAX
+            } else {
+                self.max_devservers_per_user
+            };
+            limits_per_user
+                .entry(row.owner_user_id)
+                .and_modify(|limit| *limit = (*limit).min(row.max_connected_devservers as usize))
+                .or_insert_with(|| deployment_limit.min(row.max_connected_devservers as usize));
             grouped
                 .entry((row.owner_user_id, row.devserver_id.clone()))
                 .or_default()
@@ -1585,8 +1890,9 @@ impl ControllerState {
             }
             let live = ids_per_user.get(&key.0).map_or(0, |ids| ids.len());
             let occupied = desired.contains_key(&key) || self.pending.contains_key(&key);
-            let over_capacity =
-                self.max_devservers_per_user > 0 && live >= self.max_devservers_per_user;
+            let over_capacity = limits_per_user
+                .get(&key.0)
+                .is_some_and(|limit| live >= *limit);
             if occupied || over_capacity {
                 losers.extend(rows);
                 continue;
@@ -1724,6 +2030,7 @@ impl ControllerState {
                 proxy.status = ProxyStatus::Active;
                 proxy.fleet_ready = true;
                 let boot_id = proxy.boot_id;
+                self.replace_browser_sessions();
                 self.clear_orphans_for_proxy_authority(&session.proxy_id, boot_id);
                 vec![Effect::Send {
                     session,
@@ -1748,6 +2055,7 @@ impl ControllerState {
                 frame: ServerFrame::FleetReady,
             });
         }
+        self.replace_browser_sessions();
         effects
     }
 
@@ -1793,6 +2101,14 @@ impl ControllerState {
             .get(&key.proxy_id)
             .expect("current key was checked")
             .boot_id;
+        let browser_orphan_usage = self
+            .proxies
+            .get(&key.proxy_id)
+            .map(|session| FleetUsage {
+                rows: session.browser_sessions.len(),
+                bytes: session.browser_session_resident_bytes,
+            })
+            .unwrap_or_default();
         self.proxies.remove(&key.proxy_id);
         let retain_until = now + DISCONNECTED_AUTHORITY_RETENTION;
         self.disconnected_proxy_deadlines
@@ -1810,13 +2126,28 @@ impl ControllerState {
                     .saturating_add(row_resident_bytes(&owned.row).unwrap_or(0));
                 usage
             });
-        if orphan_usage.rows > 0 {
+        if orphan_usage.rows > 0 || browser_orphan_usage.rows > 0 {
             self.orphan_deadlines
                 .insert(key.clone(), now + CONVERGENCE_WINDOW);
+        }
+        if orphan_usage.rows > 0 {
             self.remove_orphan_usage(key);
             self.orphan_total.rows = self.orphan_total.rows.saturating_add(orphan_usage.rows);
             self.orphan_total.bytes = self.orphan_total.bytes.saturating_add(orphan_usage.bytes);
             self.orphan_usage.insert(key.clone(), orphan_usage);
+        }
+        if browser_orphan_usage.rows > 0 {
+            self.remove_browser_orphan_usage(key);
+            self.browser_orphan_total.rows = self
+                .browser_orphan_total
+                .rows
+                .saturating_add(browser_orphan_usage.rows);
+            self.browser_orphan_total.bytes = self
+                .browser_orphan_total
+                .bytes
+                .saturating_add(browser_orphan_usage.bytes);
+            self.browser_orphan_usage
+                .insert(key.clone(), browser_orphan_usage);
         }
         self.remove_pending_for_session(key);
 
@@ -1917,6 +2248,24 @@ impl ControllerState {
             .map_or(0, HashMap::len)
     }
 
+    fn effective_owner_limit(&self, owner_user_id: Uuid, candidate_limit: u32) -> usize {
+        let deployment_limit = if self.max_devservers_per_user == 0 {
+            usize::MAX
+        } else {
+            self.max_devservers_per_user
+        };
+        self.tunnels
+            .iter()
+            .filter_map(|((owner, _), tunnel)| {
+                (*owner == owner_user_id).then_some(tunnel.row.max_connected_devservers as usize)
+            })
+            .chain(self.pending.iter().filter_map(|((owner, _), claim)| {
+                (*owner == owner_user_id).then_some(claim.max_connected_devservers as usize)
+            }))
+            .chain(std::iter::once(candidate_limit as usize))
+            .fold(deployment_limit, usize::min)
+    }
+
     fn insert_pending(&mut self, tunnel_key: TunnelKey, claim: PendingClaim) {
         debug_assert!(!self.pending.contains_key(&tunnel_key));
         let identity = (
@@ -2012,15 +2361,47 @@ impl ControllerState {
         }
     }
 
+    fn remove_browser_sessions_for_session(&mut self, session: &SessionKey) {
+        self.browser_sessions
+            .retain(|_, owned| owned.session != *session);
+    }
+
+    fn replace_browser_sessions(&mut self) {
+        self.browser_sessions
+            .retain(|_, owned| self.browser_orphan_usage.contains_key(&owned.session));
+        for (proxy_id, proxy) in &self.proxies {
+            if proxy.status != ProxyStatus::Active || !proxy.fleet_ready {
+                continue;
+            }
+            let session = SessionKey {
+                proxy_id: proxy_id.clone(),
+                incarnation: proxy.incarnation,
+            };
+            for row in proxy.browser_sessions.values() {
+                self.browser_sessions.insert(
+                    row.admin_session_id,
+                    OwnedBrowserSession {
+                        session: session.clone(),
+                        row: row.clone(),
+                    },
+                );
+            }
+        }
+    }
+
     fn clear_orphans_for_proxy_authority(&mut self, proxy_id: &str, boot_id: Uuid) {
-        let sessions: Vec<_> = self
+        let sessions: HashSet<_> = self
             .orphan_usage
             .keys()
+            .chain(self.browser_orphan_usage.keys())
+            .chain(self.orphan_deadlines.keys())
             .filter(|session| session.proxy_id == proxy_id)
             .cloned()
             .collect();
         for session in sessions {
             self.remove_orphan_usage(&session);
+            self.remove_browser_orphan_usage(&session);
+            self.remove_browser_sessions_for_session(&session);
         }
         self.orphan_deadlines
             .retain(|session, _| session.proxy_id != proxy_id);
@@ -2032,6 +2413,15 @@ impl ControllerState {
         if let Some(usage) = self.orphan_usage.remove(session) {
             self.orphan_total.rows = self.orphan_total.rows.saturating_sub(usage.rows);
             self.orphan_total.bytes = self.orphan_total.bytes.saturating_sub(usage.bytes);
+        }
+    }
+
+    fn remove_browser_orphan_usage(&mut self, session: &SessionKey) {
+        if let Some(usage) = self.browser_orphan_usage.remove(session) {
+            self.browser_orphan_total.rows =
+                self.browser_orphan_total.rows.saturating_sub(usage.rows);
+            self.browser_orphan_total.bytes =
+                self.browser_orphan_total.bytes.saturating_sub(usage.bytes);
         }
     }
 
@@ -2063,11 +2453,42 @@ impl ControllerState {
         }
         (rows, bytes)
     }
+
+    fn browser_session_usage(&self, replacing_proxy_id: Option<&str>) -> (usize, usize) {
+        let mut rows = 0_usize;
+        let mut bytes = 0_usize;
+        for (proxy_id, session) in &self.proxies {
+            if replacing_proxy_id == Some(proxy_id.as_str()) {
+                continue;
+            }
+            rows = rows.saturating_add(session.browser_sessions.len());
+            bytes = bytes.saturating_add(session.browser_session_resident_bytes);
+        }
+        if let Some(replacing_proxy_id) = replacing_proxy_id {
+            for (session, usage) in &self.browser_orphan_usage {
+                if session.proxy_id == replacing_proxy_id {
+                    continue;
+                }
+                rows = rows.saturating_add(usage.rows);
+                bytes = bytes.saturating_add(usage.bytes);
+            }
+        } else {
+            rows = rows.saturating_add(self.browser_orphan_total.rows);
+            bytes = bytes.saturating_add(self.browser_orphan_total.bytes);
+        }
+        (rows, bytes)
+    }
 }
 
 fn row_resident_bytes(row: &TunnelRow) -> Result<usize, StateError> {
     #[cfg(test)]
     ROW_SIZE_SERIALIZATIONS.with(|count| count.set(count.get().saturating_add(1)));
+    serde_json::to_vec(row)
+        .map(|serialized| serialized.len())
+        .map_err(|_| StateError::FleetCapacity)
+}
+
+fn browser_session_resident_bytes(row: &BrowserSessionRow) -> Result<usize, StateError> {
     serde_json::to_vec(row)
         .map(|serialized| serialized.len())
         .map_err(|_| StateError::FleetCapacity)
@@ -2081,6 +2502,7 @@ fn tunnel_view(owned: &OwnedTunnel) -> TunnelView {
         owner_user_id: owned.row.owner_user_id,
         user: owned.row.user.clone(),
         devserver_id: owned.row.devserver_id.clone(),
+        max_connected_devservers: owned.row.max_connected_devservers,
         peer_addr: owned.row.peer_addr,
         connected_at: owned.row.connected_at,
         proxy_id: owned.session.proxy_id.clone(),
@@ -2134,10 +2556,28 @@ mod tests {
             owner_user_id: legacy_owner_user_id(user),
             user: user.into(),
             devserver_id: devserver.into(),
+            max_connected_devservers: 100,
             admission_lease: devserver_control_proto::AdmissionLease::parse("test").unwrap(),
             admission_lease_expires_at: Utc::now() + chrono::Duration::days(365),
             peer_addr: Some("203.0.113.9:4321".parse().unwrap()),
             connected_at: Utc::now(),
+        }
+    }
+
+    fn browser_row(
+        admin_session_id: Uuid,
+        subject_user_id: Uuid,
+        owner_user_id: Uuid,
+        devserver_id: &str,
+    ) -> BrowserSessionRow {
+        let created_at = Utc::now();
+        BrowserSessionRow {
+            admin_session_id,
+            subject_user_id,
+            owner_user_id,
+            devserver_id: devserver_id.to_string(),
+            created_at,
+            expires_at: created_at + chrono::Duration::hours(1),
         }
     }
 
@@ -2174,7 +2614,7 @@ mod tests {
         now: Instant,
     ) -> Vec<Effect> {
         state
-            .accept_snapshot(id, incarnation, 0, rows, now, Utc::now())
+            .accept_snapshot(id, incarnation, 0, rows, Vec::new(), now, Utc::now())
             .unwrap()
     }
 
@@ -2277,6 +2717,7 @@ mod tests {
                 changed_boot,
                 0,
                 vec![row("alice", "one", Uuid::new_v4())],
+                Vec::new(),
                 now + CONVERGENCE_WINDOW + Duration::from_millis(500),
                 Utc::now(),
             ),
@@ -2382,6 +2823,7 @@ mod tests {
                 incarnation,
                 0,
                 vec![row("bob", "novel", Uuid::new_v4())],
+                Vec::new(),
                 now,
                 Utc::now(),
             ),
@@ -2435,6 +2877,7 @@ mod tests {
                 legacy_owner_user_id("alice"),
                 "alice".into(),
                 "one".into(),
+                100,
                 devserver_control_proto::AdmissionLease::parse("refreshed").unwrap(),
                 wall_now + chrono::Duration::seconds(120),
                 now + CONVERGENCE_WINDOW,
@@ -2459,6 +2902,7 @@ mod tests {
                     legacy_owner_user_id("alice"),
                     "alice".into(),
                     "one".into(),
+                    10_000,
                     devserver_control_proto::AdmissionLease::parse("lease").unwrap(),
                     wall_now + chrono::Duration::seconds(120),
                     now + CONVERGENCE_WINDOW,
@@ -2490,6 +2934,7 @@ mod tests {
                     novel_owner,
                     "novel-owner".into(),
                     format!("novel-{index}"),
+                    10_000,
                     devserver_control_proto::AdmissionLease::parse("lease").unwrap(),
                     wall_now + chrono::Duration::seconds(120),
                     now + CONVERGENCE_WINDOW,
@@ -2650,6 +3095,7 @@ mod tests {
                 expired_incarnation,
                 0,
                 vec![expired],
+                Vec::new(),
                 now,
                 wall_now,
             ),
@@ -2661,8 +3107,271 @@ mod tests {
         let mut live = row("alice", "one", Uuid::new_v4());
         live.admission_lease_expires_at = wall_now + chrono::Duration::seconds(1);
         assert!(live_state
-            .accept_snapshot(&live_proxy, live_incarnation, 0, vec![live], now, wall_now,)
+            .accept_snapshot(
+                &live_proxy,
+                live_incarnation,
+                0,
+                vec![live],
+                Vec::new(),
+                now,
+                wall_now,
+            )
             .is_ok());
+    }
+
+    #[test]
+    fn signed_and_deployment_caps_serialize_the_exact_last_slot() {
+        let now = Instant::now();
+        let wall_now = Utc::now();
+        let owner_user_id = Uuid::new_v4();
+        let mut signed = ControllerState::new(10);
+        let (proxy_id, incarnation, _) = ready_one(&mut signed, "p1", Vec::new(), now);
+
+        for devserver_id in ["one", "two"] {
+            let effects = signed
+                .request_admission_authorized(
+                    &proxy_id,
+                    incarnation,
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    owner_user_id,
+                    "alice".into(),
+                    devserver_id.into(),
+                    2,
+                    devserver_control_proto::AdmissionLease::parse("lease").unwrap(),
+                    wall_now + chrono::Duration::seconds(120),
+                    now + CONVERGENCE_WINDOW,
+                    wall_now,
+                )
+                .unwrap();
+            assert!(has_decision(&effects, AdmissionDecision::Admit));
+        }
+        let over_signed_cap = signed
+            .request_admission_authorized(
+                &proxy_id,
+                incarnation,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                owner_user_id,
+                "alice".into(),
+                "three".into(),
+                10,
+                devserver_control_proto::AdmissionLease::parse("lease").unwrap(),
+                wall_now + chrono::Duration::seconds(120),
+                now + CONVERGENCE_WINDOW,
+                wall_now,
+            )
+            .unwrap();
+        assert!(has_decision(
+            &over_signed_cap,
+            AdmissionDecision::AtCapacity
+        ));
+
+        let mut deployment = ControllerState::new(1);
+        let (proxy_id, incarnation, _) = ready_one(&mut deployment, "p1", Vec::new(), now);
+        for (devserver_id, expected) in [
+            ("one", AdmissionDecision::Admit),
+            ("two", AdmissionDecision::AtCapacity),
+        ] {
+            let effects = deployment
+                .request_admission_authorized(
+                    &proxy_id,
+                    incarnation,
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    owner_user_id,
+                    "alice".into(),
+                    devserver_id.into(),
+                    3,
+                    devserver_control_proto::AdmissionLease::parse("lease").unwrap(),
+                    wall_now + chrono::Duration::seconds(120),
+                    now + CONVERGENCE_WINDOW,
+                    wall_now,
+                )
+                .unwrap();
+            assert!(has_decision(&effects, expected));
+        }
+    }
+
+    #[test]
+    fn initial_mixed_signed_caps_reconcile_to_the_minimum() {
+        let now = Instant::now();
+        let wall_now = Utc::now();
+        let mut state = ControllerState::new(100);
+        let (proxy_id, incarnation) = begin(&mut state, "p1", now);
+        let first_id = Uuid::new_v4();
+        let second_id = Uuid::new_v4();
+        let mut first = row("alice", "one", first_id);
+        first.max_connected_devservers = 1;
+        let mut second = row("alice", "two", second_id);
+        second.max_connected_devservers = 3;
+        state
+            .accept_snapshot(
+                &proxy_id,
+                incarnation,
+                0,
+                vec![first, second],
+                Vec::new(),
+                now,
+                wall_now,
+            )
+            .unwrap();
+        state
+            .record_activity(&proxy_id, incarnation, now + CONVERGENCE_WINDOW, wall_now)
+            .unwrap();
+        let effects = state.tick(now + CONVERGENCE_WINDOW, wall_now);
+        let (command_id, registration_ids) = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Send {
+                    frame:
+                        ServerFrame::KillRegistrations {
+                            command_id,
+                            registration_ids,
+                        },
+                    ..
+                } => Some((*command_id, registration_ids.clone())),
+                _ => None,
+            })
+            .expect("mixed-cap loser must be evicted");
+        assert_eq!(registration_ids, vec![second_id]);
+        state
+            .command_result(
+                &proxy_id,
+                incarnation,
+                command_id,
+                registration_ids,
+                Vec::new(),
+                Vec::new(),
+                now + CONVERGENCE_WINDOW,
+                wall_now,
+            )
+            .unwrap();
+        assert!(state.is_ready());
+        assert_eq!(state.tunnel_views().len(), 1);
+        assert_eq!(state.tunnel_views()[0].registration_id, first_id);
+    }
+
+    #[test]
+    fn browser_snapshot_deltas_and_generation_gap_share_one_authority() {
+        let now = Instant::now();
+        let wall_now = Utc::now();
+        let subject_user_id = Uuid::new_v4();
+        let owner_user_id = Uuid::new_v4();
+        let first_id = Uuid::new_v4();
+        let second_id = Uuid::new_v4();
+        let mut state = ControllerState::new(100);
+        let (proxy_id, incarnation) = begin(&mut state, "p1", now);
+        state
+            .accept_snapshot(
+                &proxy_id,
+                incarnation,
+                0,
+                Vec::new(),
+                vec![browser_row(first_id, subject_user_id, owner_user_id, "one")],
+                now,
+                wall_now,
+            )
+            .unwrap();
+        state
+            .record_activity(&proxy_id, incarnation, now + CONVERGENCE_WINDOW, wall_now)
+            .unwrap();
+        state.tick(now + CONVERGENCE_WINDOW, wall_now);
+        assert_eq!(state.read_browser_sessions().unwrap().len(), 1);
+
+        state
+            .browser_session_up(
+                &proxy_id,
+                incarnation,
+                1,
+                browser_row(second_id, subject_user_id, owner_user_id, "two"),
+                now + CONVERGENCE_WINDOW,
+                wall_now,
+            )
+            .unwrap();
+        assert_eq!(state.read_browser_sessions().unwrap().len(), 2);
+        state
+            .browser_session_down(
+                &proxy_id,
+                incarnation,
+                2,
+                first_id,
+                now + CONVERGENCE_WINDOW,
+                wall_now,
+            )
+            .unwrap();
+        assert_eq!(state.read_browser_sessions().unwrap()[0].id, second_id);
+
+        let effects = state
+            .browser_session_up(
+                &proxy_id,
+                incarnation,
+                4,
+                browser_row(Uuid::new_v4(), subject_user_id, owner_user_id, "three"),
+                now + CONVERGENCE_WINDOW,
+                wall_now,
+            )
+            .unwrap();
+        assert!(has_resync(&effects, 3));
+        assert!(state.browser_session_views().is_empty());
+        assert!(!state.is_ready());
+    }
+
+    #[test]
+    fn disconnected_browser_inventory_is_retained_until_grace_expires() {
+        let now = Instant::now();
+        let wall_now = Utc::now();
+        let admin_session_id = Uuid::new_v4();
+        let mut state = ControllerState::new(100);
+        let (p1, p1_incarnation) = begin(&mut state, "p1", now);
+        state
+            .accept_snapshot(
+                &p1,
+                p1_incarnation,
+                0,
+                Vec::new(),
+                vec![browser_row(
+                    admin_session_id,
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    "one",
+                )],
+                now,
+                wall_now,
+            )
+            .unwrap();
+        let (p2, p2_incarnation) = begin(&mut state, "p2", now);
+        snapshot(&mut state, &p2, p2_incarnation, Vec::new(), now);
+        for (proxy_id, incarnation) in [(&p1, p1_incarnation), (&p2, p2_incarnation)] {
+            state
+                .record_activity(proxy_id, incarnation, now + CONVERGENCE_WINDOW, wall_now)
+                .unwrap();
+        }
+        state.tick(now + CONVERGENCE_WINDOW, wall_now);
+        let disconnected_at = now + CONVERGENCE_WINDOW;
+        state
+            .disconnect(&p1, p1_incarnation, disconnected_at)
+            .unwrap();
+        assert_eq!(
+            state.read_browser_sessions().unwrap()[0].id,
+            admin_session_id
+        );
+        assert_eq!(state.browser_orphan_total.rows, 1);
+
+        let before_expiry = disconnected_at + CONVERGENCE_WINDOW - Duration::from_millis(1);
+        state
+            .record_activity(&p2, p2_incarnation, before_expiry, wall_now)
+            .unwrap();
+        state.tick(before_expiry, wall_now);
+        assert_eq!(state.read_browser_sessions().unwrap().len(), 1);
+
+        let expiry = disconnected_at + CONVERGENCE_WINDOW;
+        state
+            .record_activity(&p2, p2_incarnation, expiry, wall_now)
+            .unwrap();
+        state.tick(expiry, wall_now);
+        assert!(state.read_browser_sessions().unwrap().is_empty());
+        assert_eq!(state.browser_orphan_total, FleetUsage::default());
     }
 
     #[test]
@@ -2673,6 +3382,7 @@ mod tests {
             owner_user_id: Uuid::new_v4(),
             user: "alice".into(),
             devserver_id: "devserver".into(),
+            max_connected_devservers: 3,
             peer_addr: None,
             connected_at: Utc::now(),
             proxy_id: "p1".into(),
@@ -4550,6 +5260,7 @@ mod tests {
                 &p0,
                 p0_incarnation,
                 0,
+                Vec::new(),
                 Vec::new(),
                 now + CONVERGENCE_WINDOW,
                 Utc::now(),
