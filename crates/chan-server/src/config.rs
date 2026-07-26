@@ -137,6 +137,7 @@ mod tests {
                 font: chan_library::TerminalFontChoice::SourceCodePro,
                 mcp_env: true,
                 mouse_capture: false,
+                ghostty: true,
             },
         };
         cfg.save_to(&p).unwrap();

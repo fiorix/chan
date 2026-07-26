@@ -21,9 +21,12 @@ describe("TerminalTab scrollback wiring", () => {
   });
 
   test("copy-scrollback actions use the configured cap, not a hardcoded constant", () => {
-    // Both serialize call-sites must thread the per-component value
-    // so the "copy scrollback" menu matches the buffer actually held.
-    const matches = tab.match(/serialize\?\.serialize\(\{ scrollback: scrollbackLines \}\)/g) ?? [];
-    expect(matches.length).toBeGreaterThanOrEqual(2);
+    // Both copy actions thread the per-component value through the
+    // shared scrollbackText() helper, so the "copy scrollback" menu
+    // matches the buffer actually held on either backend (ghostty's
+    // branch dumps its WASM buffer instead of serializing).
+    expect(tab).toMatch(/serialize\?\.serialize\(\{ scrollback: scrollbackLines \}\)/);
+    const actions = tab.match(/const text = (term\?\.getSelection\(\) \|\| )?scrollbackText\(\);/g) ?? [];
+    expect(actions.length).toBeGreaterThanOrEqual(2);
   });
 });

@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Terminal ghostty-web backend toggle.** New `terminal.ghostty` server setting (default off) with a checkbox in Settings, Terminal section. Turned on, newly opened terminals parse and render through [ghostty-web](https://github.com/coder/ghostty-web) -- Ghostty's WASM-compiled VT engine with an xterm.js-compatible API -- instead of xterm.js, fetching the ~420 KB wasm asset lazily on first use. Pinned to `0.4.0-next.20` (the 0.4.0 release predates its InputHandler mouse reporting). OSC 52 clipboard writes keep working via a byte-level observer on the PTY output path (ghostty-web's WASM parser swallows the sequence with no JS hook), SGR wheel reporting rides a chan-side shim (upstream's capture-phase scroller swallows the wheel before its InputHandler sees it), and the `terminal.mouse_capture` toggle keeps its behavior because its DECSET strip runs ahead of either parser. Under ghostty, drag selection works even while a TUI tracks the mouse (no Shift needed); the find bar, styled scrollback snapshots, and desktop `openExternalUrl` link routing remain xterm-only for now.
+
 ## [v0.78.0] - 2026-07-26
 
 v0.78.0 is a narrow correctness release: external filesystem edits that restore or shrink a file now converge in the open editor, and the Linux desktop clipboard survives a copy while generated supervisors keep pointing at the CLI instead of the GUI.

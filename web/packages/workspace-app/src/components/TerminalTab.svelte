@@ -96,6 +96,7 @@
   import {
     PtyWriteTracker,
     type PtyWriteOrigin,
+    type TerminalByteWriter,
     routeXtermData,
     shouldForwardGeneratedTerminalInput,
     terminalMessageBytes,
@@ -107,6 +108,17 @@
   import { installTerminalReportGuards } from "../terminal/xtermReports";
   import { MouseModeFilter } from "../terminal/mouseModeFilter";
   import { installShiftSelectionBypass } from "../terminal/selectionBypass";
+  import {
+    loadGhosttyKit,
+    terminalBackendFromPrefs,
+    type GhosttyKit,
+    type TerminalBackend,
+  } from "../terminal/backend";
+  import { Osc52Bridge } from "../terminal/osc52Bridge";
+  import type {
+    Terminal as GhosttyTerminal,
+    FitAddon as GhosttyFitAddon,
+  } from "ghostty-web";
   import {
     refreshTerminalRows as refreshTerminalRowsImpl,
     shouldUseWebglRenderer,
@@ -219,8 +231,8 @@
 
   let host: HTMLDivElement | undefined = $state();
   let searchInput: HTMLInputElement | undefined = $state();
-  let term: Terminal | null = null;
-  let fit: FitAddon | null = null;
+  let term: Terminal | GhosttyTerminal | null = null;
+  let fit: FitAddon | GhosttyFitAddon | null = null;
   let search: SearchAddon | null = null;
   let serialize: SerializeAddon | null = null;
   // Scrollback line cap captured at construction time from the
@@ -263,11 +275,36 @@
   let webglRendererActive = false;
   let webglContextLossRetries = 0;
   const ptyWrites = new PtyWriteTracker();
+  // The writer handed to ptyWrites. On xterm this is the terminal
+  // itself (its write callback fires off xterm's own queue). On
+  // ghostty it is a SYNCHRONOUS wrapper: ghostty-web parses inside
+  // write() synchronously and only defers the optional callback to
+  // requestAnimationFrame, which STALLS in a backgrounded or headless
+  // page -- a stalled callback would wedge the tracker's replay-origin
+  // suppression window open and silently eat every ESC-prefixed input
+  // (mouse reports, Alt+keys) until the next frame. ghostty emits its
+  // device replies synchronously during write(), so firing the tracker
+  // callback immediately keeps the origin window correct.
+  let termWriter: TerminalByteWriter | null = null;
   // Mouse-capture refusal (Settings: terminal.mouse_capture, default on).
   // Non-null ONLY when the setting was off at start(); with the setting on
   // the filter does not exist on the write path at all, keeping the default
   // byte-for-byte identical to an unfiltered terminal.
   let mouseFilter: MouseModeFilter | null = null;
+  // Terminal backend (Settings: terminal.ghostty, default xterm.js).
+  // Read once in start() under the same spawn-time-only contract as the
+  // scrollback / mouse_capture settings above it. The ghostty backend
+  // swaps the parser/renderer for Ghostty's WASM engine; xterm-only
+  // addons (search, serialize, web-links, WebGL) and xterm-internal
+  // hooks (OSC guards, keyboard-protocol tracking, Shift-selection
+  // bypass) stay on the xterm branch.
+  let backend = $state<TerminalBackend>("xterm");
+  // OSC 52 clipboard observer, non-null ONLY on the ghostty backend:
+  // ghostty-web's WASM parser swallows OSC 52 with no JS hook, so the
+  // clipboard copy rides this byte observer instead of xterm's
+  // registerOscHandler (see osc52Bridge.ts). The xterm backend keeps
+  // installTerminalReportGuards.
+  let osc52Bridge: Osc52Bridge | null = null;
   let hostResumeTimers: ReturnType<typeof setTimeout>[] = [];
   let hostResumeListenerCleanup: (() => void) | null = null;
   // Wall-clock-gap sleep/wake detector (shared `installWakeGapDetector`). See
@@ -634,7 +671,9 @@
   let suppressAttachReplayGeneratedReplies = false;
 
   function enableWebglRenderer(): void {
-    if (!term) return;
+    // xterm-backend only: the ghostty backend paints through its own
+    // canvas renderer, and the WebglAddon needs xterm internals.
+    if (!term || backend !== "xterm") return;
     // WebKitGTK (the Linux desktop webview) does not reliably composite the
     // WebGL render layer while the page is idle: a write (paste, keystroke
     // echo) is drawn into the GL canvas but not presented to screen until a
@@ -670,7 +709,7 @@
           );
         }
       });
-      term.loadAddon(webgl);
+      (term as Terminal).loadAddon(webgl);
       webglRendererActive = true;
       // Repaint so a recreated renderer redraws the visible rows and
       // clears any garbled glyphs left behind by the lost context.
@@ -685,7 +724,7 @@
     }
   }
 
-  function start(): void {
+  async function start(): Promise<void> {
     if (!host || term) return;
     // Scrollback honors the Settings MB budget. Read once here so a
     // settings change after spawn doesn't reach through and resize
@@ -701,6 +740,28 @@
     mouseFilter = (workspace.info?.preferences?.terminal?.mouse_capture ?? true)
       ? null
       : new MouseModeFilter();
+    // Backend honors the Settings toggle under the same spawn-time
+    // contract (read once here; flipping it affects only newly opened
+    // terminals). Absent field (older server) means xterm.js. The
+    // ghostty kit lazy-loads ~420KB of WASM + JS only on this branch;
+    // a failed load falls back to xterm.js rather than breaking the
+    // spawn (fail-open, matching the mouse filter's philosophy).
+    backend = terminalBackendFromPrefs(workspace.info?.preferences?.terminal);
+    let ghosttyKit: GhosttyKit | null = null;
+    if (backend === "ghostty") {
+      try {
+        ghosttyKit = await loadGhosttyKit();
+      } catch (err) {
+        console.warn(
+          "[chan] ghostty-web failed to load; falling back to xterm.js:",
+          err,
+        );
+        backend = "xterm";
+      }
+      // The wasm fetch yields: a teardown (or a restart racing it) may
+      // have disposed this component while the load was in flight.
+      if (!host || term) return;
+    }
     // lineHeight is 1.2 (not xterm.js's 1.0 default) so multi-row
     // ASCII glyphs (e.g. the Claude Code splash cube, figlet output,
     // nethack tiles) render with the row separation a user gets from
@@ -728,23 +789,6 @@
       fontPref === "source-code-pro"
         ? FONT_CHAIN_SOURCE_CODE_PRO
         : FONT_CHAIN_OS_DEFAULT;
-    term = new Terminal({
-      // xterm gates registerDecoration (plus the markers / unicode
-      // namespaces) behind this flag; the search addon's decorated
-      // find (runFind) throws without it and the find bar matches
-      // nothing.
-      allowProposedApi: true,
-      allowTransparency: false,
-      cursorBlink: false,
-      cursorStyle: "block",
-      fontFamily,
-      fontSize: 14,
-      lineHeight: 1.2,
-      macOptionIsMeta: true,
-      scrollback: scrollbackLines,
-      tabStopWidth: 8,
-      theme: terminalTheme(),
-    });
     // Reset the negotiated keyboard-protocol state ONLY on a fresh spawn
     // (no surviving session to reattach to). Reattaching to a long-lived
     // PTY keeps the protocol the program already announced, since a
@@ -754,50 +798,123 @@
       tab,
       !tab.terminalSessionId,
     );
-    installTerminalReportGuards(term);
-    installKeyboardProtocolHandlers(term, keyboardProtocol, sendGeneratedTerminalInput);
-    fit = new FitAddon();
-    search = new SearchAddon({ highlightLimit: 1000 });
-    serialize = new SerializeAddon();
-    term.loadAddon(fit);
-    term.loadAddon(search);
-    term.loadAddon(serialize);
-    // Route terminal link clicks through the editor's external-open
-    // path: a new browser tab on web, the OS default browser under
-    // chan-desktop's Tauri webview. The default WebLinksAddon handler
-    // is window.open(_blank), which under WKWebView either no-ops or
-    // opens inside the app shell, so links highlighted on hover but the
-    // click never reached a real browser. openExternalUrl also gates on
-    // the scheme (http/https/mailto/tel).
-    term.loadAddon(
-      new WebLinksAddon((_event, uri) => {
-        void openExternalUrl(uri);
-      }),
-    );
+    if (backend === "ghostty" && ghosttyKit) {
+      // Ghostty backend: Ghostty's WASM VT parser + its own canvas
+      // renderer (no xterm addons exist for it). Options are limited to
+      // ghostty-web's ITerminalOptions -- no lineHeight (its renderer
+      // uses its own metrics), no macOptionIsMeta / tabStopWidth.
+      term = new ghosttyKit.Terminal({
+        allowTransparency: false,
+        cursorBlink: false,
+        cursorStyle: "block",
+        fontFamily,
+        fontSize: 14,
+        ghostty: ghosttyKit.ghostty,
+        scrollback: scrollbackLines,
+        theme: terminalTheme(),
+      });
+      fit = new ghosttyKit.FitAddon();
+      term.loadAddon(fit);
+      // OSC 52 rides the byte observer: ghostty-web's WASM parser
+      // swallows the sequence and exposes no registerOscHandler
+      // equivalent (see osc52Bridge.ts). Applied in writePtyOutput.
+      osc52Bridge = new Osc52Bridge();
+      // Sync-callback writer for the origin tracker (see termWriter).
+      const ghosttyTerm = term;
+      termWriter = {
+        write: (bytes, done) => {
+          ghosttyTerm.write(bytes);
+          done?.();
+        },
+      };
+      // Wheel reporting shim: ghostty-web's capture-phase viewport
+      // scroller stopPropagation()s the wheel before its own
+      // InputHandler can report it, so SGR wheel-over-TUI reporting
+      // never fires upstream (clicks do work). See handleGhosttyWheel.
+      term.attachCustomWheelEventHandler(handleGhosttyWheel);
+    } else {
+      term = new Terminal({
+        // xterm gates registerDecoration (plus the markers / unicode
+        // namespaces) behind this flag; the search addon's decorated
+        // find (runFind) throws without it and the find bar matches
+        // nothing.
+        allowProposedApi: true,
+        allowTransparency: false,
+        cursorBlink: false,
+        cursorStyle: "block",
+        fontFamily,
+        fontSize: 14,
+        lineHeight: 1.2,
+        macOptionIsMeta: true,
+        scrollback: scrollbackLines,
+        tabStopWidth: 8,
+        theme: terminalTheme(),
+      });
+      installTerminalReportGuards(term);
+      installKeyboardProtocolHandlers(term, keyboardProtocol, sendGeneratedTerminalInput);
+      fit = new FitAddon();
+      search = new SearchAddon({ highlightLimit: 1000 });
+      serialize = new SerializeAddon();
+      term.loadAddon(fit);
+      term.loadAddon(search);
+      term.loadAddon(serialize);
+      // Route terminal link clicks through the editor's external-open
+      // path: a new browser tab on web, the OS default browser under
+      // chan-desktop's Tauri webview. The default WebLinksAddon handler
+      // is window.open(_blank), which under WKWebView either no-ops or
+      // opens inside the app shell, so links highlighted on hover but the
+      // click never reached a real browser. openExternalUrl also gates on
+      // the scheme (http/https/mailto/tel).
+      term.loadAddon(
+        new WebLinksAddon((_event, uri) => {
+          void openExternalUrl(uri);
+        }),
+      );
+      termWriter = term;
+    }
     term.open(host);
-    // Hold Shift to force a native selection while a TUI holds mouse tracking,
-    // on every platform (xterm.js ignores Shift on macOS). Must run after
-    // open(): the SelectionService it wraps is created there.
-    installShiftSelectionBypass(term);
-    // The WebGL renderer makes xterm.js's built-in customGlyphs path
-    // fire: under the default DOM renderer, box-drawing +
-    // block-element characters fall through to the system font which
-    // (with lineHeight: 1.2) renders with vertical gaps between
-    // cells. The WebglAddon draws pixel-perfect glyphs into the cell
-    // rectangle including the line-height padding, so ASCII tables +
-    // pixel-art mascots render gap-free.
-    //
-    // WebGL initialisation throws on contexts where the browser
-    // declined to allocate a WebGL context (rare on chan-desktop's
-    // WKWebView / WebView2, but possible inside headless test
-    // harnesses or odd Linux GPU setups), and the live context can
-    // later be LOST. enableWebglRenderer() handles both: try/catch on
-    // init, then recreate-on-loss (bounded) before settling on the
-    // DOM renderer. See the helper for the WKWebView rationale.
-    enableWebglRenderer();
+    if (backend === "xterm") {
+      // Hold Shift to force a native selection while a TUI holds mouse
+      // tracking, on every platform (xterm.js ignores Shift on macOS).
+      // Must run after open(): the SelectionService it wraps is created
+      // there. Unneeded under ghostty: its SelectionManager starts a
+      // selection on every drag regardless of mouse-tracking state.
+      installShiftSelectionBypass(term as Terminal);
+      // The WebGL renderer makes xterm.js's built-in customGlyphs path
+      // fire: under the default DOM renderer, box-drawing +
+      // block-element characters fall through to the system font which
+      // (with lineHeight: 1.2) renders with vertical gaps between
+      // cells. The WebglAddon draws pixel-perfect glyphs into the cell
+      // rectangle including the line-height padding, so ASCII tables +
+      // pixel-art mascots render gap-free.
+      //
+      // WebGL initialisation throws on contexts where the browser
+      // declined to allocate a WebGL context (rare on chan-desktop's
+      // WKWebView / WebView2, but possible inside headless test
+      // harnesses or odd Linux GPU setups), and the live context can
+      // later be LOST. enableWebglRenderer() handles both: try/catch on
+      // init, then recreate-on-loss (bounded) before settling on the
+      // DOM renderer. See the helper for the WKWebView rationale.
+      enableWebglRenderer();
+    } else if (!focused) {
+      // ghostty-web's open() auto-focuses its textarea (xterm waits for
+      // the `focused` check at the end of start()). Blur back so a
+      // background pane's spawn can't steal keyboard focus.
+      term.blur();
+    }
     refreshTerminalRenderer();
     installHostResumeListeners();
-    term.attachCustomKeyEventHandler(handleTerminalKeyEvent);
+    // The custom-key-handler contracts are INVERTED between the
+    // backends: xterm skips the keystroke when the handler returns
+    // FALSE, ghostty-web skips it when the handler returns TRUE.
+    // handleTerminalKeyEvent is written to xterm's semantics; wrap it
+    // for ghostty so "chan consumed this chord" maps to ghostty's
+    // "handled" on both backends.
+    if (backend === "ghostty") {
+      term.attachCustomKeyEventHandler((e) => !handleTerminalKeyEvent(e));
+    } else {
+      term.attachCustomKeyEventHandler(handleTerminalKeyEvent);
+    }
     term.onData(handleXtermData);
     term.onResize(({ cols, rows }) => send({ type: "resize", cols, rows }));
     resizeObserver = new ResizeObserver(queueFit);
@@ -920,7 +1037,11 @@
       receivedSeq = 0;
       serverGeneration = null;
     }
-    if (resumeSince === undefined && reattaching && tab.terminalSessionId) {
+    // Snapshot priming is xterm-only: the cached ANSI is a SerializeAddon
+    // dump and the ghostty backend never captures one (serialize stays
+    // null there), so a reattach under ghostty lets the server ring
+    // replay restore the screen instead.
+    if (resumeSince === undefined && reattaching && tab.terminalSessionId && backend === "xterm") {
       const cached = readTerminalSnapshot(tab.terminalSessionId);
       if (cached && cached.cols === term.cols && cached.rows === term.rows) {
         pendingSnapshot = cached;
@@ -1398,7 +1519,7 @@
   }
 
   function writePtyOutput(bytes: Uint8Array, origin: PtyWriteOrigin = "live"): void {
-    if (!term) return;
+    if (!term || !termWriter) return;
     // The mouse-capture refusal filters HERE, not at the ws.onmessage
     // callsite: receivedSeq must keep counting ORIGINAL frame bytes so the
     // server ring cursor / missed_bytes math never sees filtered lengths.
@@ -1406,7 +1527,10 @@
       bytes = mouseFilter.push(bytes);
       if (bytes.length === 0) return;
     }
-    ptyWrites.write(term, bytes, origin);
+    // Ghostty backend only: observe (never alter) the stream for OSC 52
+    // clipboard copies -- the WASM parser swallows them with no JS hook.
+    osc52Bridge?.push(bytes);
+    ptyWrites.write(termWriter, bytes, origin);
   }
 
   /// Decode a base64 agent-event payload into the string
@@ -1457,6 +1581,43 @@
 
   function handleXtermData(data: string): void {
     routeXtermData(data, ptyWrites, sendInput, sendUserInput);
+  }
+
+  /// Ghostty-backend wheel reporting. ghostty-web registers its
+  /// viewport scroller capture-phase with an unconditional
+  /// stopPropagation(), so its InputHandler's wheel reporter (SGR
+  /// 64/65) never sees the event; the custom-wheel hook runs before
+  /// the scroller and true claims the event. With mouse tracking
+  /// active, encode the report through the same sendInput path an
+  /// xterm report takes (terminal-generated, no broadcast fan-out) and
+  /// claim the event; without tracking, decline so ghostty keeps its
+  /// local scroll / alt-screen arrow behavior. Coordinates come from
+  /// the canvas rect / live grid size (SGR coords are 1-based cells).
+  function handleGhosttyWheel(e: WheelEvent): boolean {
+    const t = backend === "ghostty" ? (term as GhosttyTerminal | null) : null;
+    if (!t || !t.hasMouseTracking()) return false;
+    const canvas = e.target as HTMLElement | null;
+    const rect = canvas?.getBoundingClientRect?.();
+    if (!rect) return false;
+    const cellW = rect.width / t.cols;
+    const cellH = rect.height / t.rows;
+    if (!(cellW > 0) || !(cellH > 0)) return false;
+    const col = Math.min(t.cols, Math.max(1, Math.floor((e.clientX - rect.left) / cellW) + 1));
+    const row = Math.min(t.rows, Math.max(1, Math.floor((e.clientY - rect.top) / cellH) + 1));
+    // Modifier bits mirror xterm/ghostty-web: shift 4, alt 8, ctrl 16.
+    const mods = (e.shiftKey ? 4 : 0) + (e.altKey ? 8 : 0) + (e.ctrlKey ? 16 : 0);
+    // Wheel reports are press-only (xterm repeats the press per notch);
+    // 64 = up, 65 = down. SGR encoding when mode 1006 is set (and by
+    // default, mirroring ghostty-web's hasSgrMouseMode fallback);
+    // legacy X10 otherwise.
+    const button = (e.deltaY < 0 ? 64 : 65) + mods;
+    if (t.getMode(1006, false)) {
+      sendInput(`\x1b[<${button};${col};${row}M`);
+    } else {
+      const ch = (v: number) => String.fromCharCode(Math.min(v + 32, 255));
+      sendInput(`\x1b[M${ch(button)}${ch(col)}${ch(row)}`);
+    }
+    return true;
   }
 
   function queueFit(): void {
@@ -1519,8 +1680,11 @@
     resizeObserver = null;
     term?.dispose();
     term = null;
+    termWriter = null;
     ptyWrites.reset();
     mouseFilter = null;
+    osc52Bridge = null;
+    backend = "xterm";
     webglRendererActive = false;
     fit = null;
     search = null;
@@ -1606,9 +1770,26 @@
     return true;
   }
 
+  /// Scrollback text for the copy actions. The xterm backend serializes
+  /// through the SerializeAddon (ANSI styling preserved). The ghostty
+  /// backend has no serialize addon, so walk its WASM buffer and join
+  /// the translated lines -- plain text, styling lost.
+  function scrollbackText(): string {
+    if (backend === "ghostty") {
+      const buf = (term as GhosttyTerminal | null)?.buffer.active;
+      if (!buf) return "";
+      const lines: string[] = [];
+      for (let y = 0; y < buf.length; y++) {
+        lines.push(buf.getLine(y)?.translateToString(true) ?? "");
+      }
+      return lines.join("\n").trimEnd();
+    }
+    return serialize?.serialize({ scrollback: scrollbackLines }) ?? "";
+  }
+
   async function copyScrollback(): Promise<void> {
     closeTabMenu();
-    const text = serialize?.serialize({ scrollback: scrollbackLines }) ?? "";
+    const text = scrollbackText();
     if (!text) return;
     await navigator.clipboard?.writeText(text);
     term?.focus();
@@ -1616,10 +1797,7 @@
 
   async function copySelectionOrScrollback(): Promise<void> {
     closeTabMenu();
-    const text =
-      term?.getSelection() ||
-      serialize?.serialize({ scrollback: scrollbackLines }) ||
-      "";
+    const text = term?.getSelection() || scrollbackText();
     if (!text) return;
     await navigator.clipboard?.writeText(text);
     term?.focus();
@@ -1694,6 +1872,10 @@
 
   function openFind(): void {
     closeTabMenu();
+    // The find bar runs on xterm's SearchAddon; there is no ghostty-web
+    // search addon, so under the ghostty backend the bar stays closed
+    // (the right-click menu entry is hidden too).
+    if (backend !== "xterm") return;
     findOpen = true;
     void tick().then(() => searchInput?.focus());
   }
@@ -1874,6 +2056,12 @@
     ) {
       return false;
     }
+    // Meta/Enter byte encoding per the negotiated keyboard protocol is an
+    // xterm-path concern (keymap.ts tracks the protocol through xterm's
+    // parser hooks): ghostty-web's WASM key encoder applies the kitty /
+    // modifyOtherKeys flags natively, so the keystroke goes to it
+    // untouched (true = the terminal handles it).
+    if (backend === "ghostty") return true;
     return handleTerminalMetaKey(e, sendUserInput, tab.keyboardProtocol);
   }
 
@@ -1961,13 +2149,16 @@
              Scrollback. Name / Group / broadcast / MCP / spawn config
              lives on the tab-name menu. -->
         <div class="action-list">
-          <button class="mbtn" onclick={openFind}>
-            <span class="mbtn-icon">
-              <Search size={16} strokeWidth={1.75} aria-hidden="true" />
-            </span>
-            <span class="mbtn-label">Find</span>
-            <span class="mbtn-chord">{chordFor("app.find.open") ?? ""}</span>
-          </button>
+          {#if backend === "xterm"}
+            <!-- Find rides xterm's SearchAddon; no ghostty-web equivalent. -->
+            <button class="mbtn" onclick={openFind}>
+              <span class="mbtn-icon">
+                <Search size={16} strokeWidth={1.75} aria-hidden="true" />
+              </span>
+              <span class="mbtn-label">Find</span>
+              <span class="mbtn-chord">{chordFor("app.find.open") ?? ""}</span>
+            </button>
+          {/if}
           <button class="mbtn" onclick={copySelectionOrScrollback}>
             <span class="mbtn-icon">
               <Clipboard size={16} strokeWidth={1.75} aria-hidden="true" />

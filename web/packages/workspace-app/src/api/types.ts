@@ -168,6 +168,12 @@ export type TerminalPreferences = {
   /// SPA treats `undefined` as true. Applies to newly opened
   /// terminals.
   mouse_capture?: boolean;
+  /// Whether newly opened terminals use the ghostty-web backend
+  /// (Ghostty's WASM VT parser) instead of xterm.js. Off by default
+  /// (xterm.js stays the default path). Optional on the wire so
+  /// older servers (no field) deserialize cleanly; the SPA treats
+  /// `undefined` as false. Applies to newly opened terminals.
+  ghostty?: boolean;
 };
 
 export type TerminalFontChoice = "os-default" | "source-code-pro";

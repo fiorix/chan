@@ -183,7 +183,7 @@ describe("TerminalTab mouse-capture wiring", () => {
 
   test("filter applies inside writePtyOutput, before ptyWrites.write", () => {
     expect(tab).toMatch(
-      /if \(mouseFilter\) \{\s*bytes = mouseFilter\.push\(bytes\);\s*if \(bytes\.length === 0\) return;\s*\}\s*ptyWrites\.write\(term, bytes, origin\);/,
+      /if \(mouseFilter\) \{\s*bytes = mouseFilter\.push\(bytes\);\s*if \(bytes\.length === 0\) return;\s*\}[\s\S]*?osc52Bridge\?\.push\(bytes\);\s*ptyWrites\.write\(termWriter, bytes, origin\);/,
     );
   });
 

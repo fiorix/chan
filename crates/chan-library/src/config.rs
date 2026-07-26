@@ -57,6 +57,13 @@ pub struct TerminalConfig {
     /// Applies to newly opened terminals.
     #[serde(default = "default_terminal_mouse_capture")]
     pub mouse_capture: bool,
+    /// Whether newly opened terminals use the ghostty-web backend
+    /// (Ghostty's WASM VT parser) instead of xterm.js. Consumed by the
+    /// SPA at terminal start time; the server only persists the value.
+    /// Off by default (xterm.js stays the battle-tested path). Applies
+    /// to newly opened terminals.
+    #[serde(default)]
+    pub ghostty: bool,
 }
 
 /// Terminal-font preference. Wire shape kept narrow (string enum)
@@ -85,6 +92,7 @@ impl Default for TerminalConfig {
             font: TerminalFontChoice::default(),
             mcp_env: false,
             mouse_capture: default_terminal_mouse_capture(),
+            ghostty: false,
         }
     }
 }

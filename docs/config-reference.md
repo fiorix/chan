@@ -23,6 +23,8 @@ Source: `crates/chan-server/src/config.rs`.
 | `terminal.default_term` | `String` | `"xterm-256color"` | `PATCH /api/config` | PTY spawn `TERM` env |
 | `terminal.font` | `TerminalFontChoice` | `os-default` | `PATCH /api/config` + Settings | xterm.js fontFamily chain; `source-code-pro` opts into the bundled font (download flow on non-embed builds) |
 | `terminal.mcp_env` | `bool` | `false` | `PATCH /api/config` + Settings | whether new non-team terminals export `CHAN_MCP_*`; per-request `?mcp_env=on` overrides, team spawns use the team config's own `mcp_env` |
+| `terminal.mouse_capture` | `bool` | `true` | `PATCH /api/config` + Settings | whether full-screen TUIs may capture the mouse; off strips the DECSET mouse-enable sequences in the SPA so click-drag selection keeps working (new terminals only) |
+| `terminal.ghostty` | `bool` | `false` | `PATCH /api/config` + Settings | experimental: new terminals use the ghostty-web backend (Ghostty's WASM VT parser, ~420 KB fetched on first enable) instead of xterm.js |
 
 `GET /api/config` returns the editor and server preference aggregate with a revision. `PATCH /api/config` accepts one owner-specific partial preferences object plus `expected_revision`; stale revisions return `409 config_conflict` with the current aggregate.
 
