@@ -23,7 +23,9 @@ use chan_tunnel_proto::{H2Duplex, TUNNEL_PATH};
 use chan_tunnel_server::{
     serve_tunnel_listener_with_admission, AllowAllAdmission, ServerError, Validated, Validator,
 };
-use devserver_control_proto::{CanonicalOrigin, ProxyId};
+use devserver_control_proto::{
+    AdmissionLeaseSigner, AdmissionLeaseVerifier, CanonicalOrigin, ProxyId,
+};
 use futures_util::{SinkExt, StreamExt};
 use gateway_common::devserver_gate;
 use http::Method as HttpMethod;
@@ -49,6 +51,12 @@ fn test_entry_signer() -> devserver_gate::EntrySigner {
 fn test_entry_verifiers() -> devserver_gate::EntryVerifierRing {
     let signer = test_entry_signer();
     devserver_gate::EntryVerifierRing::from_base64_list(&signer.verifying_key_base64()).unwrap()
+}
+
+fn test_admission_verifier() -> AdmissionLeaseVerifier {
+    let signer =
+        AdmissionLeaseSigner::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
+    AdmissionLeaseVerifier::from_base64(&signer.verifying_key_base64()).unwrap()
 }
 
 /// (user_id, username, devserver_id, scopes) row stored per-token in
@@ -141,6 +149,7 @@ impl TestApp {
             dashboard_url: "https://id.chan.app/workspaces".into(),
             identity_origin: CanonicalOrigin::parse("https://id.chan.app").unwrap(),
             entry_verifiers: test_entry_verifiers(),
+            admission_lease_verifier: test_admission_verifier(),
             control_url: "http://127.0.0.1:7101/".parse().unwrap(),
             proxy_token: "unused-control-token".into(),
             proxy_id: ProxyId::parse("p1").unwrap(),
@@ -498,6 +507,7 @@ async fn apex_readyz_reflects_control_readiness() {
         dashboard_url: "https://id.chan.app/workspaces".into(),
         identity_origin: CanonicalOrigin::parse("https://id.chan.app").unwrap(),
         entry_verifiers: test_entry_verifiers(),
+        admission_lease_verifier: test_admission_verifier(),
         control_url: "http://127.0.0.1:7101/".parse().unwrap(),
         proxy_token: "unused-control-token".into(),
         proxy_id: ProxyId::parse("p1").unwrap(),

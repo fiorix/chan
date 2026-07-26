@@ -69,6 +69,7 @@ expected = {
     "identity": {
         "DATABASE_URL",
         "PROFILE_AUTH_TOKEN",
+        "PROFILE_ADMIN_TOKEN",
         "IDENTITY_INTERNAL_TOKEN",
         "DEVSERVER_ADMISSION_SIGNING_KEY",
         "DEVSERVER_ADMISSION_VERIFYING_KEYS",
@@ -88,6 +89,7 @@ expected = {
     "devserver-proxy": {
         "IDENTITY_INTERNAL_TOKEN",
         "DEVSERVER_ENTRY_VERIFYING_KEYS",
+        "DEVSERVER_ADMISSION_VERIFYING_KEYS",
         "DEVSERVER_PROXY_TOKEN",
     },
 }

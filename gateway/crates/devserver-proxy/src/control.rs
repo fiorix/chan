@@ -20,7 +20,11 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use crate::{registry::Registry, session_store::SessionStore, Config};
+use crate::{
+    registry::Registry,
+    session_store::{SessionEvent, SessionStore},
+    Config,
+};
 
 const REQUEST_QUEUE_CAPACITY: usize = 1024;
 const SERVER_FRAME_QUEUE_CAPACITY: usize = 1024;
@@ -580,12 +584,18 @@ where
         }
     }
 
-    let (base_generation, snapshot, mut events) = registry.tunnels().snapshot_and_subscribe();
+    let (_registry_generation, snapshot, mut events) = registry.tunnels().snapshot_and_subscribe();
+    let (session_snapshot, mut session_events) = sessions.snapshot_and_subscribe();
+    // Tunnel and browser-session mutations share one connection-local
+    // generation. Source registries retain their own counters only for their
+    // local broadcast mechanics.
+    let base_generation = 0;
     tracing::info!(
         proxy_id = config.proxy_id.as_str(),
         %boot_id,
         base_generation,
         rows = snapshot.len(),
+        browser_sessions = session_snapshot.len(),
         "publishing controller registry snapshot"
     );
     let publish_snapshot = async {
@@ -596,8 +606,17 @@ where
                 &ClientFrame::SnapshotChunk {
                     rows: chunk
                         .iter()
-                        .map(tunnel_row)
+                        .map(|row| tunnel_row(row, config))
                         .collect::<Result<Vec<_>, _>>()?,
+                },
+            )
+            .await?;
+        }
+        for chunk in session_snapshot.chunks(MAX_SNAPSHOT_CHUNK_ROWS) {
+            write_control(
+                &mut writer,
+                &ClientFrame::BrowserSessionSnapshotChunk {
+                    rows: chunk.to_vec(),
                 },
             )
             .await?;
@@ -635,6 +654,9 @@ where
     let mut controller_deadline = Instant::now() + CONTROLLER_DEAD_AFTER;
     let mut pending: HashMap<Uuid, PendingAdmission> = HashMap::new();
     let mut overflow_open = true;
+    let mut generation = base_generation;
+    let mut expiry_tick = tokio::time::interval(Duration::from_secs(1));
+    expiry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let result = async {
         loop {
             tokio::select! {
@@ -742,6 +764,13 @@ where
                             SessionRevocation::Subject { subject_user_id } => {
                                 crate::session_store::Revocation::Subject { subject_user_id }
                             }
+                            SessionRevocation::SessionId { admin_session_id } => {
+                                crate::session_store::Revocation::SessionId { admin_session_id }
+                            }
+                            SessionRevocation::Owner { owner_user_id } => {
+                                crate::session_store::Revocation::Owner { owner_user_id }
+                            }
+                            SessionRevocation::All => crate::session_store::Revocation::All,
                         };
                         let revoked = sessions.revoke(&revocation).await.map_err(|error| {
                             AttemptError::Retry(format!(
@@ -784,7 +813,8 @@ where
                 }
                 event = events.recv() => {
                     match event {
-                        Ok(RegistryEvent::TunnelUp { generation, row }) => {
+                        Ok(RegistryEvent::TunnelUp { generation: _, row }) => {
+                            generation = next_generation(generation)?;
                             tracing::debug!(
                                 proxy_id = config.proxy_id.as_str(),
                                 generation,
@@ -793,12 +823,16 @@ where
                             );
                             write_active(
                                 &mut writer,
-                                &ClientFrame::TunnelUp { generation, row: tunnel_row(&row)? },
+                                &ClientFrame::TunnelUp {
+                                    generation,
+                                    row: tunnel_row(&row, config)?,
+                                },
                                 controller_deadline,
                             )
                             .await?;
                         }
-                        Ok(RegistryEvent::TunnelDown { generation, registration_id }) => {
+                        Ok(RegistryEvent::TunnelDown { generation: _, registration_id }) => {
+                            generation = next_generation(generation)?;
                             tracing::debug!(
                                 proxy_id = config.proxy_id.as_str(),
                                 generation,
@@ -837,6 +871,34 @@ where
                             break Err(AttemptError::Permanent("registry event stream closed".into()));
                         }
                     }
+                }
+                event = session_events.recv() => {
+                    generation = next_generation(generation)?;
+                    let frame = match event {
+                        Ok(SessionEvent::Up(row)) => {
+                            ClientFrame::BrowserSessionUp { generation, row }
+                        }
+                        Ok(SessionEvent::Down(admin_session_id)) => {
+                            ClientFrame::BrowserSessionDown {
+                                generation,
+                                admin_session_id,
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            break Err(AttemptError::Retry(
+                                "browser-session event receiver lagged".into(),
+                            ));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            break Err(AttemptError::Permanent(
+                                "browser-session event stream closed".into(),
+                            ));
+                        }
+                    };
+                    write_active(&mut writer, &frame, controller_deadline).await?;
+                }
+                _ = expiry_tick.tick() => {
+                    sessions.prune_expired();
                 }
                 request = requests.recv() => {
                     let Some(request) = request else {
@@ -899,7 +961,7 @@ where
     result
 }
 
-fn tunnel_row(info: &TunnelInfo) -> Result<TunnelRow, AttemptError> {
+fn tunnel_row(info: &TunnelInfo, config: &Config) -> Result<TunnelRow, AttemptError> {
     let admission_lease = info
         .admission_lease
         .as_deref()
@@ -907,17 +969,29 @@ fn tunnel_row(info: &TunnelInfo) -> Result<TunnelRow, AttemptError> {
     let admission_lease_expires_at = info
         .admission_lease_expires_at
         .ok_or_else(|| AttemptError::Retry("local tunnel has no admission lease expiry".into()))?;
+    let admission_lease = AdmissionLease::parse(admission_lease.to_string())
+        .map_err(|error| AttemptError::Retry(format!("local admission lease: {error}")))?;
+    let claims = config
+        .admission_lease_verifier
+        .verify(&admission_lease, chrono::Utc::now())
+        .map_err(|error| AttemptError::Retry(format!("local admission lease: {error}")))?;
     Ok(TunnelRow {
         registration_id: info.registration_id,
         owner_user_id: info.owner_user_id,
         user: info.user.as_ref().to_string(),
         devserver_id: info.workspace.as_ref().to_string(),
-        admission_lease: AdmissionLease::parse(admission_lease.to_string())
-            .map_err(|error| AttemptError::Retry(format!("local admission lease: {error}")))?,
+        max_connected_devservers: claims.max_connected_devservers,
+        admission_lease,
         admission_lease_expires_at,
         peer_addr: info.peer_addr,
         connected_at: info.connected_at,
     })
+}
+
+fn next_generation(current: u64) -> Result<u64, AttemptError> {
+    current
+        .checked_add(1)
+        .ok_or_else(|| AttemptError::Retry("control generation overflowed".into()))
 }
 
 async fn write_control<S>(stream: &mut S, frame: &ClientFrame) -> Result<(), AttemptError>
@@ -1029,6 +1103,13 @@ mod tests {
                     &signer.verifying_key_base64(),
                 )
                 .unwrap()
+            },
+            admission_lease_verifier: {
+                let signer = AdmissionLeaseSigner::from_base64(
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                )
+                .unwrap();
+                AdmissionLeaseVerifier::from_base64(&signer.verifying_key_base64()).unwrap()
             },
             control_url: format!("http://{control_addr}/").parse().unwrap(),
             proxy_token: TEST_PROXY_TOKEN.into(),
@@ -1690,6 +1771,7 @@ mod tests {
             match read_frame::<_, ClientFrame>(&mut reader).await {
                 Ok(ClientFrame::SnapshotStart { .. }) => {}
                 Ok(ClientFrame::SnapshotChunk { rows: chunk }) => rows += chunk.len(),
+                Ok(ClientFrame::BrowserSessionSnapshotChunk { .. }) => {}
                 Ok(ClientFrame::SnapshotEnd { base_generation }) => break base_generation,
                 _ => return,
             }
@@ -1766,18 +1848,46 @@ mod tests {
     #[async_trait]
     impl Validator for StubValidator {
         async fn validate(&self, token: &str) -> Result<Validated, ServerError> {
+            self.validate_registration(token, Uuid::new_v4()).await
+        }
+
+        async fn validate_registration(
+            &self,
+            token: &str,
+            registration_id: Uuid,
+        ) -> Result<Validated, ServerError> {
             match token {
-                "good" => Ok(Validated {
-                    user_id: Uuid::new_v4(),
-                    username: "alice".into(),
-                    devserver_id: "ds-1".into(),
-                    scopes: vec!["tunnel".into()],
-                    gateway_assertion_key: None,
-                    admission_lease: Some("test".into()),
-                    admission_lease_expires_at: Some(
-                        chrono::Utc::now() + chrono::Duration::days(1),
-                    ),
-                }),
+                "good" => {
+                    let user_id = Uuid::from_u128(1);
+                    let now = chrono::Utc::now();
+                    let signer = AdmissionLeaseSigner::from_base64(
+                        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                    )
+                    .unwrap();
+                    let lease = signer
+                        .sign(
+                            devserver_control_proto::AdmissionLeaseBinding {
+                                owner_user_id: user_id,
+                                user: "alice".into(),
+                                devserver_id: "ds-1".into(),
+                                registration_id,
+                                proxy_id: devserver_control_proto::ProxyId::parse("p1").unwrap(),
+                            },
+                            100,
+                            now,
+                            120,
+                        )
+                        .unwrap();
+                    Ok(Validated {
+                        user_id,
+                        username: "alice".into(),
+                        devserver_id: "ds-1".into(),
+                        scopes: vec!["tunnel".into()],
+                        gateway_assertion_key: None,
+                        admission_lease: Some(lease.as_str().into()),
+                        admission_lease_expires_at: Some(now + chrono::Duration::seconds(120)),
+                    })
+                }
                 _ => Err(ServerError::InvalidToken),
             }
         }

@@ -55,6 +55,9 @@ spec:
             - { name: INTERNAL_BIND_ADDR, value: "0.0.0.0:7004" }
             - name: PROFILE_AUTH_TOKEN
               valueFrom: { secretKeyRef: { name: chan-gateway-identity, key: PROFILE_AUTH_TOKEN } }
+            - name: PROFILE_ADMIN_TOKEN
+              valueFrom: { secretKeyRef: { name: chan-gateway-identity, key: PROFILE_ADMIN_TOKEN } }
+            - { name: DEVSERVER_POLICY_REQUIRED, value: "false" }
             - name: IDENTITY_INTERNAL_TOKEN
               valueFrom: { secretKeyRef: { name: chan-gateway-identity, key: IDENTITY_INTERNAL_TOKEN } }
             - name: DEVSERVER_ADMISSION_SIGNING_KEY

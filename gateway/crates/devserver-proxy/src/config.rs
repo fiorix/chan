@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use anyhow::Context;
-use devserver_control_proto::{CanonicalOrigin, ProxyId};
+use devserver_control_proto::{AdmissionLeaseVerifier, CanonicalOrigin, ProxyId};
 use url::Url;
 
 /// Both-directions idle window after which a bridged WebSocket is cut.
@@ -51,6 +51,9 @@ pub struct Config {
     /// A second key is rotation overlap only and should be removed after the
     /// 30-second entry lifetime plus clock skew.
     pub entry_verifiers: gateway_common::devserver_gate::EntryVerifierRing,
+    /// Public-key ring used to retain the verified signed per-user cap in
+    /// tunnel snapshot rows. No signing authority is present on a proxy.
+    pub admission_lease_verifier: AdmissionLeaseVerifier,
     /// h2c origin of the singleton fleet controller proxy listener.
     pub control_url: Url,
     /// Bearer presented only to the controller proxy listener.
@@ -166,6 +169,12 @@ impl Config {
         .context(
             "DEVSERVER_ENTRY_VERIFYING_KEYS must contain one or two canonical Ed25519 public keys",
         )?;
+        let admission_verifying_keys = std::env::var("DEVSERVER_ADMISSION_VERIFYING_KEYS")
+            .context("DEVSERVER_ADMISSION_VERIFYING_KEYS is required")?;
+        let admission_lease_verifier =
+            AdmissionLeaseVerifier::from_base64_rotation(admission_verifying_keys.trim()).context(
+                "DEVSERVER_ADMISSION_VERIFYING_KEYS must contain one or two canonical Ed25519 public keys",
+            )?;
 
         let dashboard_url = std::env::var("DASHBOARD_URL")
             .context("DASHBOARD_URL is required")?
@@ -230,6 +239,12 @@ impl Config {
             Err(_) => Some(std::time::Duration::from_secs(60)),
         };
         let session_max_active = parse_nonzero_usize("SESSION_MAX_ACTIVE", 10_000)?;
+        if session_max_active > devserver_control_proto::MAX_BROWSER_SESSION_SNAPSHOT_ROWS {
+            anyhow::bail!(
+                "SESSION_MAX_ACTIVE must be at most {}",
+                devserver_control_proto::MAX_BROWSER_SESSION_SNAPSHOT_ROWS
+            );
+        }
         let session_lifetime_secs = validate_session_lifetime_secs(parse_nonzero_usize(
             "SESSION_LIFETIME_SECS",
             MAX_SESSION_LIFETIME_SECS,
@@ -246,6 +261,7 @@ impl Config {
             dashboard_url,
             identity_origin,
             entry_verifiers,
+            admission_lease_verifier,
             control_url,
             proxy_token,
             proxy_id,
@@ -444,6 +460,13 @@ mod tests {
                     &signer.verifying_key_base64(),
                 )
                 .unwrap()
+            },
+            admission_lease_verifier: {
+                let signer = devserver_control_proto::AdmissionLeaseSigner::from_base64(
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                )
+                .unwrap();
+                AdmissionLeaseVerifier::from_base64(&signer.verifying_key_base64()).unwrap()
             },
             control_url: "http://127.0.0.1:7101/".parse().unwrap(),
             proxy_token: "x".into(),

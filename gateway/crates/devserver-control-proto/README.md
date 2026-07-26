@@ -17,12 +17,14 @@ cargo test  -p devserver-control-proto
 
 ## Contents
 
-- `ClientFrame` / `ServerFrame`: the versioned, serde-tagged frame enums for the control stream (`ClientHello`, snapshot staging, `TunnelUp` / `TunnelDown`, admission request / decision, kill commands and results, `Ping` / `Pong`, `ResyncRequired`, `FleetReady`, `Shutdown`).
+- `ClientFrame` / `ServerFrame`: the versioned, serde-tagged frame enums for combined tunnel and tenant-session snapshot staging, contiguous deltas, admission, kills, revocations, heartbeat, resync, and readiness.
 - `read_frame` / `write_frame`: u32 big-endian length prefix plus a JSON body, capped at `MAX_FRAME_BYTES` (1 MiB).
-- `TunnelRow`: one registration as published by a proxy.
+- `TunnelRow`: one registration with its verified signed per-user limit.
+- `BrowserSessionRow`: one redacted tenant-session row keyed by an admin UUID, never by its cookie id.
+- `SessionRevocation`: exact, subject, admin-session-id, owner, and fleet-wide revocation selectors.
 - `AdmissionDecision`: `Admit`, `AtCapacity`, `ControlWarming`, `Stale`.
 - `ProxyId`, `CanonicalOrigin`, `ProxyOriginTemplate`: validated node id (one lowercase DNS label), canonical http(s) origin, and the origin template with exactly one `{proxy_id}` placeholder used to check a proxy's announced base URL.
-- Limits: `PROTOCOL_VERSION` (1), `CONNECT_PATH` (`/v1/proxies/connect`), `CONTENT_TYPE`, `MAX_SNAPSHOT_CHUNK_ROWS` (128), `MAX_SNAPSHOT_ROWS` (100,000).
+- Limits: `PROTOCOL_VERSION` (2), `CONNECT_PATH` (`/v1/proxies/connect`), `CONTENT_TYPE`, `MAX_SNAPSHOT_CHUNK_ROWS` (128), `MAX_SNAPSHOT_ROWS` (2,048), `MAX_BROWSER_SESSION_SNAPSHOT_ROWS` (100,000), and explicit byte/count bounds.
 
 ## Design rationale
 

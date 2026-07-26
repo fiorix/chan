@@ -36,7 +36,7 @@ case "$1" in
         '^CHAN_GATEWAY_MIGRATIONS=external$' \
         'CHAN_GATEWAY_MIGRATIONS=external setting'
       require_one_line /etc/chan-gateway/profile.env \
-        '^EXPECTED_SQLX_MIGRATION=15$' 'release EXPECTED_SQLX_MIGRATION=15 setting'
+        '^EXPECTED_SQLX_MIGRATION=16$' 'release EXPECTED_SQLX_MIGRATION=16 setting'
       require_one_line /etc/chan-gateway/profile.env \
         '^DATABASE_ROLE_POLICY_VERSION=1$' 'release DATABASE_ROLE_POLICY_VERSION=1 setting'
     fi

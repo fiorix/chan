@@ -34,7 +34,7 @@ use tower::ServiceExt;
 use tower_sessions_sqlx_store::PostgresStore;
 use url::Url;
 use uuid::Uuid;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use identity::config::Config;
@@ -47,6 +47,7 @@ const PROFILE_TOKEN: &str = "test-profile-token";
 
 struct TestApp {
     router: Router,
+    pool: PgPool,
     schema: String,
     admin_url: String,
     profile: MockServer,
@@ -130,7 +131,7 @@ impl TestApp {
             cookie_secure: true,
             profile_client,
             internal_auth_token: "test-internal".to_string(),
-            identity_admin_token: String::new(),
+            identity_admin_token: "test-identity-admin".to_string(),
             // Point the proxy-admin client at the same mock server; its
             // /admin/v1/* paths don't collide with profile's /v1/users/*.
             // Tests that need a live devserver mock the tunnel list (see
@@ -167,6 +168,7 @@ impl TestApp {
 
         Self {
             router,
+            pool,
             schema,
             admin_url: url,
             profile,
@@ -175,6 +177,7 @@ impl TestApp {
     }
 
     async fn cleanup(self) {
+        self.pool.close().await;
         let admin = admin_pool(&self.admin_url).await;
         let _ = sqlx::query(&format!("DROP SCHEMA \"{}\" CASCADE", self.schema))
             .execute(&admin)
@@ -252,6 +255,188 @@ impl<'a> Client<'a> {
     }
 }
 
+async fn authenticated_json(
+    router: &Router,
+    method: Method,
+    uri: &str,
+    bearer: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+    let body = match body {
+        Some(value) => {
+            request = request.header(header::CONTENT_TYPE, "application/json");
+            Body::from(serde_json::to_vec(&value).unwrap())
+        }
+        None => Body::empty(),
+    };
+    let response = router
+        .clone()
+        .oneshot(request.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let body = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
+    (status, body)
+}
+
+fn raw_session_cookie(client: &Client<'_>) -> String {
+    client
+        .cookie
+        .as_deref()
+        .and_then(|cookie| cookie.split_once('='))
+        .map(|(_, value)| value.to_string())
+        .expect("session cookie")
+}
+
+async fn assert_whoami_unauthorized(app: &TestApp, session: &str) {
+    let (status, body) = authenticated_json(
+        &app.router,
+        Method::POST,
+        "/internal/v1/sessions/whoami",
+        "test-internal",
+        Some(json!({"session": session})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, json!({"error": "unauthorized"}));
+}
+
+fn session_revocation_response(status: StatusCode, revoked: usize) -> ResponseTemplate {
+    let response = ResponseTemplate::new(status.as_u16());
+    if status.is_success() {
+        response.set_body_json(json!({
+            "revoked": revoked,
+            "tenant_sessions_revoked": revoked,
+            "proxies_confirmed": 2,
+            "proxies_expected": 2,
+        }))
+    } else {
+        response
+    }
+}
+
+async fn mock_session_drain(app: &TestApp, scope: Value, status: StatusCode, revoked: usize) {
+    Mock::given(method("POST"))
+        .and(path("/admin/v1/sessions/revoke"))
+        .and(body_json(scope))
+        .respond_with(session_revocation_response(status, revoked))
+        .expect(1)
+        .mount(&app.profile)
+        .await;
+}
+
+async fn mock_owner_tunnel_drain(app: &TestApp, user_id: Uuid, killed: usize) {
+    Mock::given(method("POST"))
+        .and(path(format!("/admin/v1/owners/{user_id}/tunnels/kill")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"killed": killed})))
+        .expect(1)
+        .mount(&app.profile)
+        .await;
+}
+
+async fn mock_all_tunnel_drain(app: &TestApp, killed: usize) {
+    Mock::given(method("POST"))
+        .and(path("/admin/v1/tunnels/kill-all"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"tunnels_evicted": killed})))
+        .expect(1)
+        .mount(&app.profile)
+        .await;
+}
+
+async fn mock_policy_update_round(
+    app: &TestApp,
+    user_id: Uuid,
+    previous_limit: i32,
+    requested_limit: i32,
+    session_status: StatusCode,
+) {
+    let updated_at = chrono::Utc::now().to_rfc3339();
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/admin/users/{user_id}/devserver-policy")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "user_id": user_id,
+            "enabled": true,
+            "max_connected_devservers": previous_limit,
+            "updated_at": updated_at,
+        })))
+        .expect(1)
+        .mount(&app.profile)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path(format!("/v1/admin/users/{user_id}/devserver-policy")))
+        .and(body_json(json!({
+            "enabled": true,
+            "max_connected_devservers": requested_limit,
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "user_id": user_id,
+            "enabled": true,
+            "max_connected_devservers": requested_limit,
+            "updated_at": updated_at,
+        })))
+        .expect(1)
+        .mount(&app.profile)
+        .await;
+    mock_session_drain(
+        app,
+        json!({"scope": "owner", "owner_user_id": user_id}),
+        session_status,
+        2,
+    )
+    .await;
+    mock_owner_tunnel_drain(app, user_id, 2).await;
+}
+
+async fn mock_fleet_pause_round(app: &TestApp, session_status: StatusCode) {
+    Mock::given(method("PUT"))
+        .and(path("/v1/admin/devserver-policy"))
+        .and(body_json(json!({"admissions_enabled": false})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "admissions_enabled": false,
+            "updated_at": chrono::Utc::now().to_rfc3339(),
+        })))
+        .expect(1)
+        .mount(&app.profile)
+        .await;
+    mock_session_drain(app, json!({"scope": "all"}), session_status, 4).await;
+    mock_all_tunnel_drain(app, 3).await;
+}
+
+async fn mock_access_revoke_round(
+    app: &TestApp,
+    user_id: Uuid,
+    pats_revoked: usize,
+    session_status: StatusCode,
+) {
+    Mock::given(method("POST"))
+        .and(path(format!("/v1/admin/users/{user_id}/access/revoke")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "user_id": user_id,
+            "username": "alice",
+            "pats_revoked": pats_revoked,
+        })))
+        .expect(1)
+        .mount(&app.profile)
+        .await;
+    mock_session_drain(
+        app,
+        json!({"scope": "subject", "subject_user_id": user_id}),
+        session_status,
+        3,
+    )
+    .await;
+    mock_owner_tunnel_drain(app, user_id, 2).await;
+}
+
 fn extract_state(authorize_url: &str) -> String {
     let u = Url::parse(authorize_url).unwrap();
     u.query_pairs()
@@ -308,6 +493,45 @@ async fn auth_start_redirects_to_provider() {
 }
 
 #[tokio::test]
+async fn oauth_return_to_is_safe_and_consumed_once() {
+    let app = TestApp::new().await;
+    for invalid in [
+        "https%3A%2F%2Fevil.example%2F",
+        "%2F%2Fevil.example%2F",
+        "%2F%252Fevil.example",
+        "%2F%255Cevil.example",
+        "%2Faccount%2F%23fragment",
+        "%2Faccount%2F%250aheader",
+        "%25",
+    ] {
+        let mut client = Client::new(&app);
+        let (status, _, _, _) = client
+            .send(
+                Method::GET,
+                &format!("/auth/github?return_to={invalid}"),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}");
+    }
+
+    let uid = fake_user_id();
+    let mut client = Client::new(&app);
+    happy_login_at(
+        &app,
+        &mut client,
+        uid,
+        "return@example.com",
+        "/auth/github?return_to=%2Faccount%2F%3Ftab%3Dsessions",
+        "/account/?tab=sessions",
+    )
+    .await;
+    // A new flow on the same cookie has no inherited destination.
+    happy_login(&app, &mut client, uid, "return@example.com").await;
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn unknown_provider_is_404() {
     let app = TestApp::new().await;
     let mut c = Client::new(&app);
@@ -317,8 +541,19 @@ async fn unknown_provider_is_404() {
 }
 
 async fn happy_login(app: &TestApp, c: &mut Client<'_>, user_id: Uuid, email: &str) {
+    happy_login_at(app, c, user_id, email, "/auth/github", "/").await;
+}
+
+async fn happy_login_at(
+    app: &TestApp,
+    c: &mut Client<'_>,
+    user_id: Uuid,
+    email: &str,
+    auth_uri: &str,
+    expected_return_to: &str,
+) {
     // 1. /auth/github -> redirect with state + Set-Cookie session.
-    let (_, _, _, location) = c.send(Method::GET, "/auth/github", None).await;
+    let (_, _, _, location) = c.send(Method::GET, auth_uri, None).await;
     let state = extract_state(&location);
 
     // 2. wiremock GitHub: token exchange + user info.
@@ -356,6 +591,18 @@ async fn happy_login(app: &TestApp, c: &mut Client<'_>, user_id: Uuid, email: &s
         "created_at": now,
         "updated_at": now,
     });
+    sqlx::query(
+        "INSERT INTO users (id, email, display_name, username) \
+         VALUES ($1, $2, $3, $4) \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(user_id)
+    .bind(email)
+    .bind("Octo Cat")
+    .bind(format!("u{}", &user_id.simple().to_string()[..12]))
+    .execute(&app.pool)
+    .await
+    .expect("seed profile-owned user for the shared session-index FK");
     Mock::given(method("POST"))
         .and(path("/v1/users/upsert-by-identity"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -396,7 +643,7 @@ async fn happy_login(app: &TestApp, c: &mut Client<'_>, user_id: Uuid, email: &s
         )
         .await;
     assert_eq!(s, StatusCode::SEE_OTHER, "callback should redirect");
-    assert_eq!(location, "/");
+    assert_eq!(location, expected_return_to);
 }
 
 #[tokio::test]
@@ -431,6 +678,353 @@ async fn login_then_me() {
         body["devservers"].as_array().expect("devservers present"),
         &Vec::<serde_json::Value>::new()
     );
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn indexed_oauth_session_whoami_inventory_and_exact_revoke_converge() {
+    let app = TestApp::new().await;
+    let mut client = Client::new(&app);
+    let uid = fake_user_id();
+    happy_login(&app, &mut client, uid, "indexed@example.com").await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/users/{uid}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": uid,
+            "email": "indexed@example.com",
+            "display_name": "Indexed User",
+            "username": format!("u{}", &uid.simple().to_string()[..12]),
+            "username_edits": 0,
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "updated_at": chrono::Utc::now().to_rfc3339(),
+        })))
+        .mount(&app.profile)
+        .await;
+
+    let raw_session = client
+        .cookie
+        .as_deref()
+        .and_then(|cookie| cookie.split_once('='))
+        .map(|(_, value)| value.to_string())
+        .expect("authenticated session cookie");
+    let (status, whoami) = authenticated_json(
+        &app.router,
+        Method::POST,
+        "/internal/v1/sessions/whoami",
+        "test-internal",
+        Some(json!({"session": raw_session})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(whoami["user"]["id"], uid.to_string());
+    assert!(whoami["session"]["authenticated_at"].is_string());
+
+    let (status, rows) = authenticated_json(
+        &app.router,
+        Method::GET,
+        "/admin/v1/sessions",
+        "test-identity-admin",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = rows.as_array().expect("session list");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["user_id"], uid.to_string());
+    assert!(rows[0].get("store_id").is_none());
+    assert!(!serde_json::to_string(rows).unwrap().contains(&raw_session));
+    let admin_session_id = rows[0]["id"].as_str().unwrap();
+
+    let (status, revoked) = authenticated_json(
+        &app.router,
+        Method::POST,
+        &format!("/admin/v1/sessions/{admin_session_id}/revoke"),
+        "test-identity-admin",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(revoked["oauth_sessions_revoked"], 1);
+    let (status, retried) = authenticated_json(
+        &app.router,
+        Method::POST,
+        &format!("/admin/v1/sessions/{admin_session_id}/revoke"),
+        "test-identity-admin",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(retried["oauth_sessions_revoked"], 0);
+    let (status, _) = authenticated_json(
+        &app.router,
+        Method::POST,
+        "/internal/v1/sessions/whoami",
+        "test-internal",
+        Some(json!({"session": raw_session})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, _) = authenticated_json(
+        &app.router,
+        Method::POST,
+        "/internal/v1/sessions/whoami",
+        "test-internal",
+        Some(json!({"session": "malformed"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn whoami_refusal_shape_is_uniform() {
+    let app = TestApp::new().await;
+
+    assert_whoami_unauthorized(&app, "malformed").await;
+
+    let mut pre_auth = Client::new(&app);
+    let (status, _, _, _) = pre_auth.send(Method::GET, "/auth/github", None).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_whoami_unauthorized(&app, &raw_session_cookie(&pre_auth)).await;
+
+    let uid = fake_user_id();
+    let mut authenticated = Client::new(&app);
+    happy_login(&app, &mut authenticated, uid, "whoami-refusal@example.com").await;
+    let raw_session = raw_session_cookie(&authenticated);
+
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/users/{uid}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(blocked_user_body(uid, "whoami-refusal@example.com")),
+        )
+        .mount(&app.profile)
+        .await;
+    assert_whoami_unauthorized(&app, &raw_session).await;
+
+    app.profile.reset().await;
+    assert_whoami_unauthorized(&app, &raw_session).await;
+
+    sqlx::query(
+        "UPDATE tower_sessions.session \
+         SET expiry_date = now() - interval '1 second' \
+         WHERE id = $1",
+    )
+    .bind(&raw_session)
+    .execute(&app.pool)
+    .await
+    .expect("expire tower session");
+    assert_whoami_unauthorized(&app, &raw_session).await;
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn composite_policy_and_fleet_retries_converge_after_partial_drain() {
+    let app = TestApp::new().await;
+    let user_id = fake_user_id();
+
+    mock_policy_update_round(&app, user_id, 3, 1, StatusCode::BAD_GATEWAY).await;
+    let (status, report) = authenticated_json(
+        &app.router,
+        Method::PUT,
+        &format!("/admin/v1/users/{user_id}/devserver-policy"),
+        "test-identity-admin",
+        Some(json!({
+            "enabled": true,
+            "max_connected_devservers": 1,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(report["durable"]["policy"]["max_connected_devservers"], 1);
+    assert_eq!(report["tenant_sessions_revoked"], 0);
+    assert_eq!(report["tunnels_evicted"], 2);
+    app.profile.verify().await;
+    app.profile.reset().await;
+
+    mock_policy_update_round(&app, user_id, 1, 1, StatusCode::OK).await;
+    let (status, report) = authenticated_json(
+        &app.router,
+        Method::PUT,
+        &format!("/admin/v1/users/{user_id}/devserver-policy"),
+        "test-identity-admin",
+        Some(json!({
+            "enabled": true,
+            "max_connected_devservers": 1,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(report["policy"]["max_connected_devservers"], 1);
+    assert_eq!(report["tenant_sessions_revoked"], 2);
+    assert_eq!(report["tunnels_evicted"], 2);
+    app.profile.verify().await;
+    app.profile.reset().await;
+
+    mock_fleet_pause_round(&app, StatusCode::BAD_GATEWAY).await;
+    let (status, report) = authenticated_json(
+        &app.router,
+        Method::POST,
+        "/admin/v1/fleet/pause",
+        "test-identity-admin",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(report["durable"]["admissions_enabled"], false);
+    assert_eq!(report["tenant_sessions_revoked"], 0);
+    assert_eq!(report["tunnels_evicted"], 3);
+    app.profile.verify().await;
+    app.profile.reset().await;
+
+    mock_fleet_pause_round(&app, StatusCode::OK).await;
+    let (status, report) = authenticated_json(
+        &app.router,
+        Method::POST,
+        "/admin/v1/fleet/pause",
+        "test-identity-admin",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(report["admissions_enabled"], false);
+    assert_eq!(report["tenant_sessions_revoked"], 4);
+    assert_eq!(report["tunnels_evicted"], 3);
+    app.profile.verify().await;
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn composite_access_revoke_and_delete_retry_to_completion() {
+    let app = TestApp::new().await;
+    let access_user_id = fake_user_id();
+
+    mock_access_revoke_round(&app, access_user_id, 2, StatusCode::BAD_GATEWAY).await;
+    let (status, report) = authenticated_json(
+        &app.router,
+        Method::POST,
+        &format!("/admin/v1/users/{access_user_id}/access/revoke"),
+        "test-identity-admin",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(report["durable"]["pats_revoked"], 2);
+    assert_eq!(report["tenant_sessions_revoked"], 0);
+    assert_eq!(report["tunnels_evicted"], 2);
+    app.profile.verify().await;
+    app.profile.reset().await;
+
+    mock_access_revoke_round(&app, access_user_id, 0, StatusCode::OK).await;
+    let (status, report) = authenticated_json(
+        &app.router,
+        Method::POST,
+        &format!("/admin/v1/users/{access_user_id}/access/revoke"),
+        "test-identity-admin",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(report["pats_revoked"], 0);
+    assert_eq!(report["oauth_sessions_revoked"], 0);
+    assert_eq!(report["tenant_sessions_revoked"], 3);
+    assert_eq!(report["tunnels_evicted"], 2);
+    app.profile.verify().await;
+    app.profile.reset().await;
+
+    let delete_user_id = fake_user_id();
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/users/{delete_user_id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(live_user_body(
+            delete_user_id,
+            "delete@example.com",
+            "delete-user",
+        )))
+        .expect(1)
+        .mount(&app.profile)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/v1/users/{delete_user_id}/pending-delete")))
+        .respond_with(ResponseTemplate::new(202))
+        .expect(1)
+        .mount(&app.profile)
+        .await;
+    mock_session_drain(
+        &app,
+        json!({"scope": "subject", "subject_user_id": delete_user_id}),
+        StatusCode::BAD_GATEWAY,
+        1,
+    )
+    .await;
+    mock_owner_tunnel_drain(&app, delete_user_id, 1).await;
+    let (status, report) = authenticated_json(
+        &app.router,
+        Method::DELETE,
+        &format!("/admin/v1/users/{delete_user_id}"),
+        "test-identity-admin",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(report["durable"]["profile_existed"], true);
+    assert_eq!(report["tenant_sessions_revoked"], 0);
+    assert_eq!(report["tunnels_evicted"], 1);
+    app.profile.verify().await;
+    app.profile.reset().await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/users/{delete_user_id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(live_user_body(
+            delete_user_id,
+            "delete@example.com",
+            "delete-user",
+        )))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&app.profile)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/v1/users/{delete_user_id}/pending-delete")))
+        .respond_with(ResponseTemplate::new(202))
+        .expect(1)
+        .mount(&app.profile)
+        .await;
+    mock_session_drain(
+        &app,
+        json!({"scope": "subject", "subject_user_id": delete_user_id}),
+        StatusCode::OK,
+        1,
+    )
+    .await;
+    mock_owner_tunnel_drain(&app, delete_user_id, 1).await;
+    let (status, report) = authenticated_json(
+        &app.router,
+        Method::DELETE,
+        &format!("/admin/v1/users/{delete_user_id}"),
+        "test-identity-admin",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(report["profile_existed"], true);
+    assert_eq!(report["sessions_deleted"], 0);
+
+    let (status, report) = authenticated_json(
+        &app.router,
+        Method::DELETE,
+        &format!("/admin/v1/users/{delete_user_id}"),
+        "test-identity-admin",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(report["profile_existed"], false);
+    assert_eq!(report["sessions_deleted"], 0);
+    app.profile.verify().await;
+
     app.cleanup().await;
 }
 
@@ -744,6 +1338,7 @@ async fn mock_live_devservers(
                         registration_id,
                         proxy_id: devserver_control_proto::ProxyId::parse("p1").unwrap(),
                     },
+                    3,
                     now,
                     120,
                 )
@@ -753,6 +1348,7 @@ async fn mock_live_devservers(
                 "owner_user_id": owner_user_id,
                 "user": username,
                 "devserver_id": id,
+                "max_connected_devservers": 3,
                 "peer_addr": null,
                 "connected_at": now.to_rfc3339(),
                 "proxy_id": "p1",
@@ -902,6 +1498,17 @@ async fn share_landing_unauthed_stashes_redirect() {
         })))
         .mount(&app.profile)
         .await;
+    sqlx::query(
+        "INSERT INTO users (id, email, display_name, username) \
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(uid)
+    .bind("octo@example.com")
+    .bind("Octo Cat")
+    .bind("octocat")
+    .execute(&app.pool)
+    .await
+    .expect("seed profile-owned user for the shared session-index FK");
     Mock::given(method("POST"))
         .and(path(format!("/v1/users/{uid}/grants/claim")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"claimed": 0})))
@@ -1209,6 +1816,7 @@ async fn share_landing_node_base_outside_the_namespace_is_502() {
             registration_id,
             proxy_id: devserver_control_proto::ProxyId::parse("p1").unwrap(),
         },
+        3,
         now,
         120,
     )
@@ -1220,6 +1828,7 @@ async fn share_landing_node_base_outside_the_namespace_is_502() {
             "owner_user_id": owner_uid,
             "user": "owner-handle",
             "devserver_id": dsid,
+            "max_connected_devservers": 3,
             "peer_addr": null,
             "connected_at": now.to_rfc3339(),
             "proxy_id": "p1",

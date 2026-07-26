@@ -50,7 +50,7 @@ flowchart TD
 
 ## Tunnel registration and admission
 
-The tunnel listener runs `CapturingValidator -> ThrottlingValidator -> IdentityValidator` before controller admission. Identity validation returns immutable `owner_user_id`, canonical username and devserver id, a short-lived admission lease bound to the proposed registration and proxy, and the per-tunnel assertion authority. The raw PAT is used only during validation and lease refresh; it is never sent to devserver-control or retained as a proxy-wide credential.
+The tunnel listener runs `CapturingValidator -> ThrottlingValidator -> IdentityValidator` before controller admission. Identity validation returns immutable `owner_user_id`, canonical username and devserver id, a short-lived admission lease bound to the proposed registration and proxy, the signed positive `max_connected_devservers`, and the per-tunnel assertion authority. The proxy verifies the admission lease locally under `DEVSERVER_ADMISSION_VERIFYING_KEYS` before publishing any row. The raw PAT is used only during validation and lease refresh; it is never sent to devserver-control or retained as a proxy-wide credential.
 
 The listener generates the registration UUID. The control session sends the lease and exact registration tuple to devserver-control and waits. Only an `Admit` decision permits `HelloAck::Ok` and registry insertion. `AtCapacity` maps to `too_many_workspaces`; warming, stale, or unavailable authority maps to `control_unavailable`. There is no local admission fallback.
 
@@ -82,7 +82,7 @@ Both cookies are host-only. The entry credential never appears in browser histor
 
 ## Opaque sessions and revocation
 
-The gate cookie is an opaque lookup key, not a self-contained authorization token. A session record contains the immutable caller, owner, devserver and audience plus creation time, absolute expiry, a cancellation token, and the set of active bridge tasks admitted under it.
+The gate cookie is an opaque lookup key, not a self-contained authorization token. A session record contains a separate random `admin_session_id`, the immutable caller, owner, devserver and audience, monotonic and wall-clock creation/expiry, a cancellation token, and the set of active bridge tasks admitted under it.
 
 Bounds are fail-closed:
 
@@ -92,7 +92,9 @@ Bounds are fail-closed:
 - `SESSION_LIFETIME_SECS` defaults to and cannot exceed one hour; and
 - proxy restart clears every session.
 
-`RevokeSessions` has exact `(subject, owner, devserver)` and subject-wide forms. The proxy first makes matching records lookup-dead, cancels their HTTP and WebSocket tasks, and waits for every registered operation guard to drop before acknowledging. A drain timeout leaves a tombstone in the store, so a retried command cannot observe zero records and falsely confirm. New session issuance is suspended during control-loss cleanup and resumes only after a fresh `FleetReady`.
+The session store publishes a redacted snapshot and `Up`/`Down` events to the control supervisor. Snapshot chunks and tunnel/session deltas share one connection-local generation, so a gap retracts both authorities and forces a full resync. The public admin view contains only admin id, subject user, owner user, devserver id, proxy id, creation, and expiry.
+
+`RevokeSessions` supports exact `(subject, owner, devserver)`, subject, admin session id, owner, and all forms. The proxy first makes matching records lookup-dead, cancels their HTTP and WebSocket tasks, and waits for every registered operation guard to drop before acknowledging. A drain timeout leaves a tombstone in the store, so a retried command cannot observe zero records and falsely confirm. New session issuance is suspended during control-loss cleanup and resumes only after a fresh `FleetReady`.
 
 Profile persists revocation work transactionally with each grant delete, block, PAT revoke, or account delete. Its first confirmed fleet cut starts a 40-second quiet window covering entry lifetime and symmetric skew; a later same-generation cut settles the job. The controller reports partial failure while any connected proxy has not confirmed or any disconnected proxy authority marker remains. Absolute one-hour expiry is the final backstop after the bounded retry window is exhausted and audited.
 
@@ -143,6 +145,7 @@ The replay cache, opaque sessions, registry, and controller fleet view are memor
 - No tunnel enters the registry before identity validation and synchronous controller admission of its signed immutable tuple.
 - Entry credentials are body-only, single-use, short-lived, and bound to the exact proxy, audience, owner, devserver, caller, and clean path.
 - Browser sessions are opaque, bounded, revocable, lookup-checked on every request, and expire absolutely within one hour.
+- Browser-session publication never contains the cookie id, replay id, audience, assertion, peer address, or cancellation internals.
 - Revocation acknowledgement means every registered matching transport has stopped; timeouts remain visible to retries.
 - Every tunnel-bound HTTP request and WebSocket carries a fresh per-tunnel gateway assertion; the client cannot supply one.
 - Unsafe browser methods require CSRF and cookie-authenticated WebSockets require exact Origin.

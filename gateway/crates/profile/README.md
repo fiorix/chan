@@ -1,6 +1,6 @@
 # profile-service
 
-Internal HTTP API in front of Postgres. Owns the canonical user record, linked OAuth identities, devservers + sharing grants, feature flags, and the authentication audit log; serves the admin views over `api_tokens`. Called only by `identity-service` and the operator CLI; not exposed publicly.
+Internal HTTP API in front of Postgres. Owns the canonical user record, linked OAuth identities, devservers + sharing grants, feature flags, durable per-user and fleet devserver policy, and the authentication audit log; serves the admin views over `api_tokens`. Called only by `identity-service` and the operator CLI; not exposed publicly.
 
 ## Role in the system
 
@@ -52,6 +52,8 @@ Service API (`/v1/users/*`, `/v1/auth-audit`):
 | GET    | `/v1/users/{id}`                      | fetch one user                     |
 | PATCH  | `/v1/users/{id}`                      | update mutable fields              |
 | DELETE | `/v1/users/{id}`                      | hard delete (cascades)             |
+| POST   | `/v1/users/{id}/pending-delete`       | durable account-delete denial      |
+| POST   | `/v1/users/{id}/tokens/{token_id}/revoke` | owned PAT revoke + durable session cut |
 | PATCH  | `/v1/users/{id}/username`             | rename handle (cap 4)              |
 | GET    | `/v1/users/by-identity`               | lookup by (provider, subject)      |
 | GET    | `/v1/users/by-username`               | case-insensitive handle lookup     |
@@ -78,10 +80,17 @@ Admin API (`/v1/admin/*`):
 | POST   | `/v1/admin/users/{id}/block`                | block + revoke PATs            |
 | POST   | `/v1/admin/users/{id}/unblock`              | clear block                    |
 | POST   | `/v1/admin/users/{id}/email`                | rewrite email (audited)        |
+| POST   | `/v1/admin/users/{id}/access/revoke`        | revoke all PAT access          |
+| GET    | `/v1/admin/users/{id}/devserver-policy`     | read durable user policy       |
+| PUT    | `/v1/admin/users/{id}/devserver-policy`     | idempotent user-policy upsert  |
 | GET    | `/v1/admin/users/{id}/auth-audit`           | per-user audit log             |
 | GET    | `/v1/admin/users/{id}/tokens`               | list user's PATs               |
 | POST   | `/v1/admin/tokens/{id}/revoke`              | revoke a PAT                   |
 | GET    | `/v1/admin/tokens/{id}/audit`               | per-token audit log            |
+| GET    | `/v1/admin/devserver-policy`                | read fleet admissions state    |
+| PUT    | `/v1/admin/devserver-policy`                | pause/resume fleet admissions  |
+| GET    | `/v1/admin/auth-audit`                      | filtered global auth history   |
+| GET    | `/v1/admin/overview`                        | bounded user/login aggregates  |
 | GET    | `/v1/admin/flags`                           | list flags + override count    |
 | POST   | `/v1/admin/flags`                           | create / update a flag         |
 | DELETE | `/v1/admin/flags/{key}`                     | drop flag (cascades overrides) |
@@ -90,6 +99,10 @@ Admin API (`/v1/admin/*`):
 | DELETE | `/v1/admin/flags/{key}/overrides/{user_id}` | clear per-user override        |
 
 Plus `GET /healthz` (no auth).
+
+`devserver_user_policies` stores reversible per-user access plus a positive `max_connected_devservers` value. No row is the compatibility default; identity may instead require a row with `DEVSERVER_POLICY_REQUIRED=true`. `devserver_fleet_policy` is a seeded singleton and survives every service restart. Profile policy routes only persist state. Identity owns the composite drain that follows a stricter user policy or fleet pause.
+
+Global audit accepts exact `user_id` and `action`, RFC3339 `since`/`until`, `limit=1..500`, and non-negative `offset`. Overview counts users and login events in one aggregate query rather than listing and counting rows client-side.
 
 ## Design rationale
 

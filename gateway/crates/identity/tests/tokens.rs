@@ -67,6 +67,10 @@ impl TestEnv {
     }
 
     async fn new() -> Self {
+        Self::new_with_policy_required(false).await
+    }
+
+    async fn new_with_policy_required(policy_required: bool) -> Self {
         let url = std::env::var("TEST_DATABASE_URL")
             .expect("TEST_DATABASE_URL must be set; e.g. postgres://localhost/chan_gateway_test");
         pg_reaper::reap_idle(&url).await;
@@ -117,7 +121,8 @@ impl TestEnv {
                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             )
             .unwrap(),
-        );
+        )
+        .with_policy_required(policy_required);
         let api_tokens_for_state = api_tokens.clone();
         let cfg = Arc::new(Config {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
@@ -351,6 +356,138 @@ async fn pat_validate_skips_blocked_user() {
         .await;
     assert!(res.is_err(), "blocked-user validate should fail");
     env.cleanup().await;
+}
+
+#[tokio::test]
+async fn pat_policy_enforces_compatibility_required_user_and_fleet_states() {
+    let env = TestEnv::new().await;
+    let uid = env.insert_user().await;
+    let scopes = default_scopes();
+    let created = env
+        .api_tokens_service()
+        .create(
+            NewToken {
+                user_id: uid,
+                label: "compat",
+                expires_at: None,
+                scopes: &scopes,
+                origin: TokenOrigin::Spa,
+            },
+            &RequestMeta::default(),
+        )
+        .await
+        .expect("missing policy remains compatible by default");
+
+    sqlx::query(
+        "INSERT INTO devserver_user_policies \
+         (user_id, enabled, max_connected_devservers) VALUES ($1, true, 3)",
+    )
+    .bind(uid)
+    .execute(&env.pool)
+    .await
+    .unwrap();
+    let registration_id = Uuid::new_v4();
+    let validated = env
+        .api_tokens_service()
+        .validate_for_admission(
+            &created.secret,
+            devserver_control_proto::ProxyId::parse("p1").unwrap(),
+            registration_id,
+            &RequestMeta::default(),
+        )
+        .await
+        .expect("enabled policy validates");
+    let lease = validated.admission_lease.expect("signed lease");
+    let signer = devserver_control_proto::AdmissionLeaseSigner::from_base64(
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    )
+    .unwrap();
+    let verifier = devserver_control_proto::AdmissionLeaseVerifier::from_base64(
+        &signer.verifying_key_base64(),
+    )
+    .unwrap();
+    let claims = verifier.verify(&lease, chrono::Utc::now()).unwrap();
+    assert_eq!(claims.max_connected_devservers, 3);
+    assert_eq!(claims.binding.registration_id, registration_id);
+
+    sqlx::query("UPDATE devserver_user_policies SET enabled = false WHERE user_id = $1")
+        .bind(uid)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        env.api_tokens_service()
+            .create(
+                NewToken {
+                    user_id: uid,
+                    label: "disabled",
+                    expires_at: None,
+                    scopes: &scopes,
+                    origin: TokenOrigin::Spa,
+                },
+                &RequestMeta::default(),
+            )
+            .await,
+        Err(identity::error::Error::DevserverAccessDisabled)
+    ));
+    assert!(matches!(
+        env.api_tokens_service()
+            .validate(&created.secret, &RequestMeta::default())
+            .await,
+        Err(identity::error::Error::Unauthorized)
+    ));
+
+    sqlx::query("UPDATE devserver_user_policies SET enabled = true WHERE user_id = $1")
+        .bind(uid)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE devserver_fleet_policy SET admissions_enabled = false")
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        env.api_tokens_service()
+            .create(
+                NewToken {
+                    user_id: uid,
+                    label: "paused",
+                    expires_at: None,
+                    scopes: &scopes,
+                    origin: TokenOrigin::Admin,
+                },
+                &RequestMeta::default(),
+            )
+            .await,
+        Err(identity::error::Error::AdminDevserverAccessDisabled)
+    ));
+    assert!(matches!(
+        env.api_tokens_service()
+            .validate(&created.secret, &RequestMeta::default())
+            .await,
+        Err(identity::error::Error::Unauthorized)
+    ));
+    env.cleanup().await;
+
+    let required = TestEnv::new_with_policy_required(true).await;
+    let uid = required.insert_user().await;
+    assert!(matches!(
+        required
+            .api_tokens_service()
+            .create(
+                NewToken {
+                    user_id: uid,
+                    label: "missing",
+                    expires_at: None,
+                    scopes: &scopes,
+                    origin: TokenOrigin::Spa,
+                },
+                &RequestMeta::default(),
+            )
+            .await,
+        Err(identity::error::Error::DevserverAccessDisabled)
+    ));
+    required.cleanup().await;
 }
 
 #[tokio::test]

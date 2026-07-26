@@ -90,7 +90,10 @@ impl Config {
         )?;
         let profile_token =
             std::env::var("PROFILE_AUTH_TOKEN").context("PROFILE_AUTH_TOKEN is required")?;
-        let profile_client = ProfileClient::new(profile_url, profile_token)?;
+        let profile_admin_token =
+            std::env::var("PROFILE_ADMIN_TOKEN").context("PROFILE_ADMIN_TOKEN is required")?;
+        let profile_client = ProfileClient::new(profile_url, profile_token)?
+            .with_admin_token(profile_admin_token)?;
 
         // Required, no fallback. devserver-proxy holds the matching
         // value via the same env var. Rotating PROFILE_AUTH_TOKEN

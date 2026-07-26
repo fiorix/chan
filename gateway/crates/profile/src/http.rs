@@ -3,6 +3,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
+use chrono::{DateTime, Utc};
 use gateway_common::devserver_control_client::DevserverControlClient;
 use gateway_common::validators::{valid_username, MAX_USERNAME_EDITS};
 use serde::Deserialize;
@@ -13,11 +14,13 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::models::{
-    AdminChangeEmail, AdminToken, AdminTokenAudit, AuthAudit, BlockUser, ClaimGrantsRequest,
-    ClaimGrantsResponse, CreateAuthAudit, CreateDevserver, CreateDevserverGrant, CreateIdentity,
-    CreateUser, Devserver, DevserverAccess, DevserverGrant, FeatureFlag, FeatureFlagOverride,
-    FeatureFlagSummary, Identity, IncomingShare, OwnedDevserverSummary, UpdateUser, UpdateUsername,
-    UpsertByIdentity, UpsertFlag, UpsertFlagOverride, UpsertResponse, User,
+    AccessRevocation, AdminChangeEmail, AdminOverview, AdminToken, AdminTokenAudit, AuthAudit,
+    BlockUser, ClaimGrantsRequest, ClaimGrantsResponse, CreateAuthAudit, CreateDevserver,
+    CreateDevserverGrant, CreateIdentity, CreateUser, Devserver, DevserverAccess,
+    DevserverFleetPolicy, DevserverGrant, DevserverUserPolicy, FeatureFlag, FeatureFlagOverride,
+    FeatureFlagSummary, Identity, IncomingShare, OwnedDevserverSummary, UpdateDevserverFleetPolicy,
+    UpdateUser, UpdateUsername, UpsertByIdentity, UpsertDevserverUserPolicy, UpsertFlag,
+    UpsertFlagOverride, UpsertResponse, User,
 };
 
 /// Single source of truth for the column list returned for `users`
@@ -25,6 +28,10 @@ use crate::models::{
 const USER_COLS: &str =
     "id, email, display_name, username, username_edits, created_at, updated_at, \
      blocked_at, block_reason, avatar_url";
+
+/// Protects API and controller allocations from an operator typo while leaving
+/// the deployment's lower safety ceiling authoritative at admission.
+pub const MAX_CONNECTED_DEVSERVERS_POLICY: i32 = 1_000_000;
 
 fn user_cols_prefixed(alias: &str) -> String {
     USER_COLS
@@ -120,10 +127,24 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/users/{id}/block", post(admin_block_user))
         .route("/v1/admin/users/{id}/unblock", post(admin_unblock_user))
         .route("/v1/admin/users/{id}/email", post(admin_change_email))
+        .route(
+            "/v1/admin/users/{id}/access/revoke",
+            post(admin_revoke_user_access),
+        )
+        .route(
+            "/v1/admin/users/{id}/devserver-policy",
+            get(admin_get_user_policy).put(admin_put_user_policy),
+        )
         .route("/v1/admin/users/{id}/auth-audit", get(admin_user_audit))
         .route("/v1/admin/users/{id}/tokens", get(admin_user_tokens))
         .route("/v1/admin/tokens/{id}/revoke", post(admin_revoke_token))
         .route("/v1/admin/tokens/{id}/audit", get(admin_token_audit))
+        .route(
+            "/v1/admin/devserver-policy",
+            get(admin_get_fleet_policy).put(admin_put_fleet_policy),
+        )
+        .route("/v1/admin/auth-audit", get(admin_auth_audit))
+        .route("/v1/admin/overview", get(admin_overview))
         .route(
             "/v1/admin/flags",
             get(admin_list_flags).post(admin_upsert_flag),
@@ -775,6 +796,161 @@ async fn admin_list_users(
     Ok(Json(rows))
 }
 
+async fn admin_get_user_policy(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<DevserverUserPolicy>> {
+    let policy = sqlx::query_as::<_, DevserverUserPolicy>(
+        "SELECT user_id, enabled, max_connected_devservers, updated_at \
+         FROM devserver_user_policies WHERE user_id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(Error::NotFound)?;
+    Ok(Json(policy))
+}
+
+async fn admin_put_user_policy(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<UpsertDevserverUserPolicy>,
+) -> Result<Json<DevserverUserPolicy>> {
+    if !(1..=MAX_CONNECTED_DEVSERVERS_POLICY).contains(&body.max_connected_devservers) {
+        return Err(Error::BadRequest(format!(
+            "max_connected_devservers must be between 1 and {MAX_CONNECTED_DEVSERVERS_POLICY}"
+        )));
+    }
+    let policy = sqlx::query_as::<_, DevserverUserPolicy>(
+        "WITH locked_user AS MATERIALIZED ( \
+             SELECT id FROM users WHERE id = $1 FOR UPDATE \
+         ) \
+         INSERT INTO devserver_user_policies \
+             (user_id, enabled, max_connected_devservers) \
+         SELECT id, $2, $3 FROM locked_user \
+         ON CONFLICT (user_id) DO UPDATE \
+         SET enabled = EXCLUDED.enabled, \
+             max_connected_devservers = EXCLUDED.max_connected_devservers, \
+             updated_at = now() \
+         RETURNING user_id, enabled, max_connected_devservers, updated_at",
+    )
+    .bind(id)
+    .bind(body.enabled)
+    .bind(body.max_connected_devservers)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(Error::NotFound)?;
+    Ok(Json(policy))
+}
+
+async fn admin_get_fleet_policy(
+    State(state): State<AppState>,
+) -> Result<Json<DevserverFleetPolicy>> {
+    let policy = sqlx::query_as::<_, DevserverFleetPolicy>(
+        "SELECT admissions_enabled, updated_at \
+         FROM devserver_fleet_policy WHERE singleton = true",
+    )
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(Error::Unavailable("fleet policy is unavailable"))?;
+    Ok(Json(policy))
+}
+
+async fn admin_put_fleet_policy(
+    State(state): State<AppState>,
+    Json(body): Json<UpdateDevserverFleetPolicy>,
+) -> Result<Json<DevserverFleetPolicy>> {
+    let policy = sqlx::query_as::<_, DevserverFleetPolicy>(
+        "INSERT INTO devserver_fleet_policy (singleton, admissions_enabled) \
+         VALUES (true, $1) \
+         ON CONFLICT (singleton) DO UPDATE \
+         SET admissions_enabled = EXCLUDED.admissions_enabled, updated_at = now() \
+         RETURNING admissions_enabled, updated_at",
+    )
+    .bind(body.admissions_enabled)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(Json(policy))
+}
+
+#[derive(Debug, Deserialize)]
+struct GlobalAuditQuery {
+    user_id: Option<Uuid>,
+    action: Option<String>,
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+async fn admin_auth_audit(
+    State(state): State<AppState>,
+    Query(q): Query<GlobalAuditQuery>,
+) -> Result<Json<Vec<AuthAudit>>> {
+    let limit = q.limit.unwrap_or(100);
+    let offset = q.offset.unwrap_or(0);
+    if !(1..=500).contains(&limit) {
+        return Err(Error::BadRequest("limit must be between 1 and 500".into()));
+    }
+    if offset < 0 {
+        return Err(Error::BadRequest("offset must be non-negative".into()));
+    }
+    if q.action.as_deref().is_some_and(str::is_empty) {
+        return Err(Error::BadRequest("action must not be empty".into()));
+    }
+    if q.since
+        .zip(q.until)
+        .is_some_and(|(since, until)| since > until)
+    {
+        return Err(Error::BadRequest("since must not be after until".into()));
+    }
+    let rows = sqlx::query_as::<_, AuthAudit>(
+        "SELECT id, user_id, ts, action, ip, user_agent, note \
+         FROM auth_audit \
+         WHERE ($1::uuid IS NULL OR user_id = $1) \
+           AND ($2::text IS NULL OR action = $2) \
+           AND ($3::timestamptz IS NULL OR ts >= $3) \
+           AND ($4::timestamptz IS NULL OR ts <= $4) \
+         ORDER BY ts DESC, id DESC \
+         LIMIT $5 OFFSET $6",
+    )
+    .bind(q.user_id)
+    .bind(q.action)
+    .bind(q.since)
+    .bind(q.until)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(rows))
+}
+
+#[derive(Debug, Deserialize)]
+struct OverviewQuery {
+    since: DateTime<Utc>,
+}
+
+async fn admin_overview(
+    State(state): State<AppState>,
+    Query(q): Query<OverviewQuery>,
+) -> Result<Json<AdminOverview>> {
+    let overview = sqlx::query_as::<_, AdminOverview>(
+        "SELECT now() AS generated_at, \
+                COUNT(*)::bigint AS users_total, \
+                COUNT(*) FILTER (WHERE blocked_at IS NULL)::bigint AS users_active, \
+                COUNT(*) FILTER (WHERE blocked_at IS NOT NULL)::bigint AS users_blocked, \
+                (SELECT COUNT(DISTINCT user_id)::bigint FROM auth_audit \
+                 WHERE action = 'login' AND ts >= $1) AS users_logged_in_since, \
+                (SELECT COUNT(*)::bigint FROM auth_audit \
+                 WHERE action = 'login' AND ts >= $1) AS login_events_since \
+         FROM users",
+    )
+    .bind(q.since)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(Json(overview))
+}
+
 /// Set blocked_at if not already set, stash the reason, revoke
 /// every active token, and write one auth_audit row. Single tx so
 /// the CLI sees an atomic state change.
@@ -820,6 +996,49 @@ async fn admin_block_user(
 
     tx.commit().await?;
     Ok((StatusCode::ACCEPTED, Json(user)))
+}
+
+async fn admin_revoke_user_access(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<AccessRevocation>> {
+    let mut tx = state.pool.begin().await?;
+    let username =
+        sqlx::query_scalar::<_, String>("SELECT username FROM users WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(Error::NotFound)?;
+    let pats_revoked = sqlx::query(
+        "UPDATE api_tokens SET revoked_at = now() \
+         WHERE user_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected() as i64;
+    let prior = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM auth_audit \
+         WHERE user_id = $1 AND action = 'access_revoked')",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if pats_revoked > 0 || !prior {
+        sqlx::query(
+            "INSERT INTO auth_audit (user_id, action, note) \
+             VALUES ($1, 'access_revoked', 'admin access cut')",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(Json(AccessRevocation {
+        user_id: id,
+        username,
+        pats_revoked,
+    }))
 }
 
 /// Admin-only: rewrite a user's email. Records the change in

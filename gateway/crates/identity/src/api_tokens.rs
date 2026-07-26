@@ -124,6 +124,10 @@ pub struct ValidatedToken {
     /// never leaves this service. Distinct encoding from the stored
     /// `token_hash` (base64url) but the same underlying digest.
     pub devserver_id: String,
+    /// Authorization state retained only long enough to sign the admission
+    /// lease. The proxy learns it from the verified lease, not this response.
+    #[serde(skip_serializing)]
+    pub max_connected_devservers: u32,
     /// Identity-signed, short-lived controller authority for one exact
     /// registration. Present only on admission validation calls.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -173,13 +177,19 @@ pub struct NewToken<'a> {
 pub struct ApiTokenService {
     pool: PgPool,
     admission_signer: Option<AdmissionLeaseSigner>,
+    policy_required: bool,
 }
 
 impl ApiTokenService {
+    pub(crate) fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
             admission_signer: None,
+            policy_required: false,
         }
     }
 
@@ -187,7 +197,13 @@ impl ApiTokenService {
         Self {
             pool,
             admission_signer: Some(admission_signer),
+            policy_required: false,
         }
+    }
+
+    pub fn with_policy_required(mut self, policy_required: bool) -> Self {
+        self.policy_required = policy_required;
+        self
     }
 
     /// Single PAT-mint entry point for both the SPA and the
@@ -204,8 +220,22 @@ impl ApiTokenService {
 
         let (secret, hash) = generate_token();
         let token = sqlx::query_as::<_, ApiToken>(
-            "INSERT INTO api_tokens (user_id, label, token_hash, expires_at, scopes) \
-             VALUES ($1, $2, $3, $4, $5) \
+            "WITH locked_user AS MATERIALIZED ( \
+                 SELECT id, blocked_at FROM users WHERE id = $1 FOR UPDATE \
+             ), locked_fleet AS MATERIALIZED ( \
+                 SELECT admissions_enabled FROM devserver_fleet_policy \
+                 WHERE singleton = true FOR SHARE \
+             ) \
+             INSERT INTO api_tokens (user_id, label, token_hash, expires_at, scopes) \
+             SELECT u.id, $2, $3, $4, $5 \
+             FROM locked_user u \
+             CROSS JOIN locked_fleet f \
+             LEFT JOIN devserver_user_policies p ON p.user_id = u.id \
+             WHERE u.blocked_at IS NULL \
+               AND f.admissions_enabled = true \
+               AND ((p.user_id IS NOT NULL AND p.enabled = true \
+                     AND p.max_connected_devservers <= $7) \
+                    OR (p.user_id IS NULL AND NOT $6)) \
              RETURNING id, user_id, label, expires_at, created_at, \
                        revoked_at, last_used_at, scopes",
         )
@@ -214,9 +244,26 @@ impl ApiTokenService {
         .bind(&hash)
         .bind(new.expires_at)
         .bind(new.scopes)
-        .fetch_one(&self.pool)
+        .bind(self.policy_required)
+        .bind(i32::try_from(devserver_control_proto::MAX_SIGNED_CONNECTED_DEVSERVERS).unwrap())
+        .fetch_optional(&self.pool)
         .await
         .map_err(map_db)?;
+        let Some(token) = token else {
+            let exists =
+                sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
+                    .bind(new.user_id)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_db)?;
+            if !exists {
+                return Err(Error::NotFound);
+            }
+            return Err(match new.origin {
+                TokenOrigin::Admin => Error::AdminDevserverAccessDisabled,
+                TokenOrigin::Spa | TokenOrigin::Desktop => Error::DevserverAccessDisabled,
+            });
+        };
 
         self.write_audit(token.id, new.origin.audit_action(), meta)
             .await?;
@@ -349,6 +396,7 @@ impl ApiTokenService {
                     registration_id,
                     proxy_id,
                 },
+                validated.max_connected_devservers,
                 now,
                 120,
             )
@@ -377,22 +425,33 @@ impl ApiTokenService {
         // here so a token issued before the block stops working
         // immediately, even if the admin block step somehow missed
         // its auto-revoke pass.
-        let row = sqlx::query_as::<_, (Uuid, Uuid, String, Option<DateTime<Utc>>, Vec<String>)>(
-            "UPDATE api_tokens t \
+        let row =
+            sqlx::query_as::<_, (Uuid, Uuid, String, Option<DateTime<Utc>>, Vec<String>, i32)>(
+                "UPDATE api_tokens t \
              SET last_used_at = now() \
              FROM users u \
+             CROSS JOIN devserver_fleet_policy f \
+             LEFT JOIN devserver_user_policies p ON p.user_id = u.id \
              WHERE t.token_hash = $1 \
                AND t.user_id = u.id \
                AND t.revoked_at IS NULL \
                AND (t.expires_at IS NULL OR t.expires_at > now()) \
                AND u.blocked_at IS NULL \
-             RETURNING t.id, u.id, u.username, t.expires_at, t.scopes",
-        )
-        .bind(&hash)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(map_db)?
-        .ok_or(Error::Unauthorized)?;
+               AND f.singleton = true \
+               AND f.admissions_enabled = true \
+               AND ((p.user_id IS NOT NULL AND p.enabled = true \
+                     AND p.max_connected_devservers <= $3) \
+                    OR (p.user_id IS NULL AND NOT $2)) \
+             RETURNING t.id, u.id, u.username, t.expires_at, t.scopes, \
+                       COALESCE(p.max_connected_devservers, $3)",
+            )
+            .bind(&hash)
+            .bind(self.policy_required)
+            .bind(i32::try_from(devserver_control_proto::MAX_SIGNED_CONNECTED_DEVSERVERS).unwrap())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_db)?
+            .ok_or(Error::Unauthorized)?;
 
         Ok(ValidatedToken {
             token_id: row.0,
@@ -401,6 +460,7 @@ impl ApiTokenService {
             expires_at: row.3,
             scopes: row.4,
             devserver_id,
+            max_connected_devservers: u32::try_from(row.5).map_err(|_| Error::Unauthorized)?,
             admission_lease: None,
             admission_lease_expires_at: None,
         })
@@ -546,6 +606,7 @@ mod tests {
             expires_at: None,
             scopes: vec!["tunnel".into()],
             devserver_id: "a".repeat(64),
+            max_connected_devservers: 3,
             admission_lease: None,
             admission_lease_expires_at: None,
         };

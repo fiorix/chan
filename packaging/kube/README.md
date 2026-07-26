@@ -14,6 +14,7 @@ The service env-var contract is `gateway/crates/*/packaging/*.env` and `gateway/
 | Edge                                   | Variable                  | Carried by |
 |----------------------------------------|---------------------------|------------|
 | identity -> profile (service API)      | `PROFILE_AUTH_TOKEN`      | Secret     |
+| identity -> profile (admin policy)     | `PROFILE_ADMIN_TOKEN`     | Secret     |
 | proxy -> identity (PAT validate)       | `IDENTITY_INTERNAL_TOKEN` | Secret     |
 | identity mint / proxy verify (entry)   | `DEVSERVER_ENTRY_*_KEY(S)` | Secrets   |
 | identity -> control admission proof    | `DEVSERVER_ADMISSION_*_KEY` | Secrets  |

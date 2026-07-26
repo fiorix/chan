@@ -175,6 +175,222 @@ impl TestApp {
 }
 
 #[tokio::test]
+async fn control_plane_migration_seeds_and_constrains_policy() {
+    let app = TestApp::new().await;
+    let admissions_enabled: bool = sqlx::query_scalar(
+        "SELECT admissions_enabled FROM devserver_fleet_policy WHERE singleton = true",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert!(admissions_enabled);
+    let singleton_violation = sqlx::query(
+        "INSERT INTO devserver_fleet_policy (singleton, admissions_enabled) VALUES (false, true)",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap_err();
+    assert_eq!(
+        singleton_violation
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn admin_user_policy_is_idempotent_bounded_and_user_scoped() {
+    let app = TestApp::new().await;
+    let (_, user) = app
+        .req(
+            Method::POST,
+            "/v1/users",
+            Some(json!({"email": "policy@example.com"})),
+        )
+        .await;
+    let user_id = user["id"].as_str().unwrap();
+    let path = format!("/v1/admin/users/{user_id}/devserver-policy");
+
+    assert_eq!(
+        app.admin(Method::GET, &path, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let body = json!({"enabled": true, "max_connected_devservers": 3});
+    let (status, first) = app.admin(Method::PUT, &path, Some(body.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["max_connected_devservers"], 3);
+    let (_, second) = app.admin(Method::PUT, &path, Some(body)).await;
+    assert_eq!(second["user_id"], first["user_id"]);
+    assert_eq!(app.admin(Method::GET, &path, None).await.1["enabled"], true);
+
+    let (status, _) = app
+        .admin(
+            Method::PUT,
+            &path,
+            Some(json!({"enabled": true, "max_connected_devservers": 0})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = app
+        .admin(
+            Method::PUT,
+            &format!("/v1/admin/users/{}/devserver-policy", Uuid::new_v4()),
+            Some(json!({"enabled": true, "max_connected_devservers": 3})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn concurrent_user_policy_upserts_serialize_and_leave_one_valid_row() {
+    let app = TestApp::new().await;
+    let (_, user) = app
+        .req(
+            Method::POST,
+            "/v1/users",
+            Some(json!({"email": "policy-race@example.com"})),
+        )
+        .await;
+    let user_id = user["id"].as_str().unwrap();
+    let path = format!("/v1/admin/users/{user_id}/devserver-policy");
+
+    let first = app.admin(
+        Method::PUT,
+        &path,
+        Some(json!({"enabled": false, "max_connected_devservers": 1})),
+    );
+    let second = app.admin(
+        Method::PUT,
+        &path,
+        Some(json!({"enabled": true, "max_connected_devservers": 7})),
+    );
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(first.0, StatusCode::OK);
+    assert_eq!(second.0, StatusCode::OK);
+
+    let rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM devserver_user_policies WHERE user_id = $1")
+            .bind(Uuid::parse_str(user_id).unwrap())
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, 1);
+    let (_, persisted) = app.admin(Method::GET, &path, None).await;
+    assert!(
+        (persisted["enabled"] == false && persisted["max_connected_devservers"] == 1)
+            || (persisted["enabled"] == true && persisted["max_connected_devservers"] == 7)
+    );
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn admin_fleet_policy_persists_pause_and_resume() {
+    let app = TestApp::new().await;
+    let path = "/v1/admin/devserver-policy";
+    assert_eq!(
+        app.admin(Method::GET, path, None).await.1["admissions_enabled"],
+        true
+    );
+    let (status, paused) = app
+        .admin(
+            Method::PUT,
+            path,
+            Some(json!({"admissions_enabled": false})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(paused["admissions_enabled"], false);
+    assert_eq!(
+        app.admin(Method::GET, path, None).await.1["admissions_enabled"],
+        false
+    );
+    assert_eq!(
+        app.admin(Method::PUT, path, Some(json!({"admissions_enabled": true})))
+            .await
+            .1["admissions_enabled"],
+        true
+    );
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn global_auth_audit_filters_order_and_overview_are_bounded() {
+    let app = TestApp::new().await;
+    let (_, first) = app
+        .req(
+            Method::POST,
+            "/v1/users",
+            Some(json!({"email": "audit-a@example.com"})),
+        )
+        .await;
+    let (_, second) = app
+        .req(
+            Method::POST,
+            "/v1/users",
+            Some(json!({"email": "audit-b@example.com"})),
+        )
+        .await;
+    let first_id = first["id"].as_str().unwrap();
+    let second_id = second["id"].as_str().unwrap();
+    for (user_id, action) in [
+        (first_id, "login"),
+        (first_id, "login"),
+        (second_id, "logout"),
+    ] {
+        assert_eq!(
+            app.req(
+                Method::POST,
+                "/v1/auth-audit",
+                Some(json!({
+                    "user_id": user_id,
+                    "action": action,
+                    "ip": null,
+                    "user_agent": null,
+                    "note": null
+                }))
+            )
+            .await
+            .0,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    let (_, login_rows) = app
+        .admin(
+            Method::GET,
+            &format!("/v1/admin/auth-audit?user_id={first_id}&action=login&limit=1&offset=1"),
+            None,
+        )
+        .await;
+    assert_eq!(login_rows.as_array().unwrap().len(), 1);
+    assert_eq!(login_rows[0]["user_id"], first_id);
+    let (status, _) = app
+        .admin(Method::GET, "/v1/admin/auth-audit?limit=501", None)
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let since = (chrono::Utc::now() - chrono::Duration::minutes(1))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let (status, overview) = app
+        .admin(
+            Method::GET,
+            &format!("/v1/admin/overview?since={since}"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(overview["users_total"], 2);
+    assert_eq!(overview["users_active"], 2);
+    assert_eq!(overview["users_blocked"], 0);
+    assert_eq!(overview["users_logged_in_since"], 1);
+    assert_eq!(overview["login_events_since"], 2);
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn auth_required() {
     let app = TestApp::new().await;
     let req = Request::builder()

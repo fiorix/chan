@@ -275,3 +275,49 @@ pub struct ClaimGrantsRequest {
 pub struct ClaimGrantsResponse {
     pub claimed: i64,
 }
+
+/// Durable product policy for one user's devserver access. The deployment's
+/// fleet safety ceiling remains authoritative when it is lower.
+#[derive(Debug, Clone, Deserialize, Serialize, sqlx::FromRow)]
+pub struct DevserverUserPolicy {
+    pub user_id: Uuid,
+    pub enabled: bool,
+    pub max_connected_devservers: i32,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpsertDevserverUserPolicy {
+    pub enabled: bool,
+    pub max_connected_devservers: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, sqlx::FromRow)]
+pub struct DevserverFleetPolicy {
+    pub admissions_enabled: bool,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateDevserverFleetPolicy {
+    pub admissions_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct AdminOverview {
+    pub generated_at: DateTime<Utc>,
+    pub users_total: i64,
+    pub users_active: i64,
+    pub users_blocked: i64,
+    pub users_logged_in_since: i64,
+    pub login_events_since: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AccessRevocation {
+    pub user_id: Uuid,
+    pub username: String,
+    pub pats_revoked: i64,
+}

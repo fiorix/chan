@@ -28,6 +28,7 @@ pub fn verify_tunnel(
         || binding.user != row.user
         || binding.devserver_id != row.devserver_id
         || binding.proxy_id.as_str() != row.proxy_id
+        || claims.max_connected_devservers != row.max_connected_devservers
         || claims.expires_at != row.admission_lease_expires_at.timestamp()
     {
         return Err(AuthorityError::BindingMismatch);
@@ -57,7 +58,7 @@ mod tests {
             registration_id,
             proxy_id: ProxyId::parse("p1").unwrap(),
         };
-        let lease = signer.sign(binding, now, 120).unwrap();
+        let lease = signer.sign(binding, 3, now, 120).unwrap();
         (
             verifier,
             TunnelView {
@@ -65,6 +66,7 @@ mod tests {
                 owner_user_id,
                 user: "alice".into(),
                 devserver_id: "a".repeat(64),
+                max_connected_devservers: 3,
                 peer_addr: None,
                 connected_at: now,
                 proxy_id: "p1".into(),

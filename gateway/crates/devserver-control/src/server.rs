@@ -6,8 +6,9 @@ use std::time::Duration;
 use chan_tunnel_proto::H2Duplex;
 use devserver_control_proto::{
     read_frame, write_frame, AdmissionLease, AdmissionLeaseBinding, AdmissionLeaseVerifier,
-    CanonicalOrigin, ClientFrame, FrameError, ProxyId, ProxyOriginTemplate, ServerFrame, TunnelRow,
-    CONNECT_PATH, CONTENT_TYPE, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_ROWS, PROTOCOL_VERSION,
+    BrowserSessionRow, CanonicalOrigin, ClientFrame, FrameError, ProxyId, ProxyOriginTemplate,
+    ServerFrame, TunnelRow, CONNECT_PATH, CONTENT_TYPE, MAX_BROWSER_SESSION_SNAPSHOT_BYTES,
+    MAX_BROWSER_SESSION_SNAPSHOT_ROWS, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_ROWS, PROTOCOL_VERSION,
 };
 use h2::server::SendResponse;
 use http::{header, Method, Request, Response, StatusCode};
@@ -495,6 +496,9 @@ where
                     rows: Vec::new(),
                     registration_ids: HashSet::new(),
                     bytes: 0,
+                    browser_sessions: Vec::new(),
+                    browser_session_ids: HashSet::new(),
+                    browser_session_bytes: 0,
                 };
             }
             ClientFrame::ClientHello { .. } => {
@@ -511,6 +515,9 @@ where
             rows,
             registration_ids,
             bytes,
+            browser_sessions,
+            browser_session_ids,
+            browser_session_bytes,
         } => match frame {
             ClientFrame::SnapshotChunk { rows: chunk } => {
                 controller
@@ -526,16 +533,7 @@ where
                     return Err(SessionError::SnapshotTooLarge);
                 }
                 for row in &chunk {
-                    let claims = verify_lease(
-                        admission_lease_verifier,
-                        &row.admission_lease,
-                        row.binding_for(proxy_id.clone()),
-                    )?;
-                    if row.admission_lease_expires_at.timestamp() != claims.expires_at {
-                        return Err(SessionError::Protocol(
-                            "admission lease expiry mismatch".into(),
-                        ));
-                    }
+                    verify_tunnel_row(admission_lease_verifier, proxy_id, row)?;
                 }
                 let mut chunk_ids = HashSet::with_capacity(chunk.len());
                 if chunk.iter().any(|row| {
@@ -550,14 +548,55 @@ where
                 *bytes += chunk_bytes;
                 rows.extend(chunk);
             }
+            ClientFrame::BrowserSessionSnapshotChunk { rows: chunk } => {
+                controller
+                    .record_activity(proxy_id.clone(), incarnation)
+                    .await?;
+                if !bounded_add(
+                    browser_sessions.len(),
+                    chunk.len(),
+                    MAX_BROWSER_SESSION_SNAPSHOT_ROWS,
+                ) {
+                    send_shutdown(writer, "browser-session snapshot row limit exceeded").await?;
+                    return Err(SessionError::SnapshotTooLarge);
+                }
+                let chunk_bytes = serde_json::to_vec(&chunk).map_err(FrameError::Json)?.len();
+                if !bounded_add(
+                    *browser_session_bytes,
+                    chunk_bytes,
+                    MAX_BROWSER_SESSION_SNAPSHOT_BYTES,
+                ) {
+                    send_shutdown(writer, "browser-session snapshot byte limit exceeded").await?;
+                    return Err(SessionError::SnapshotTooLarge);
+                }
+                let mut chunk_ids = HashSet::with_capacity(chunk.len());
+                if chunk.iter().any(|row| {
+                    browser_session_ids.contains(&row.admin_session_id)
+                        || !chunk_ids.insert(row.admin_session_id)
+                }) {
+                    send_resync(writer, *base_generation).await?;
+                    *phase = Phase::awaiting_snapshot();
+                    return Ok(());
+                }
+                browser_session_ids.extend(chunk_ids);
+                *browser_session_bytes += chunk_bytes;
+                browser_sessions.extend(chunk);
+            }
             ClientFrame::SnapshotEnd {
                 base_generation: end_generation,
             } if end_generation == *base_generation => {
                 let base_generation = *base_generation;
                 let rows = std::mem::take(rows);
+                let browser_sessions = std::mem::take(browser_sessions);
                 *phase = Phase::Active;
                 controller
-                    .accept_snapshot(proxy_id.clone(), incarnation, base_generation, rows)
+                    .accept_snapshot(
+                        proxy_id.clone(),
+                        incarnation,
+                        base_generation,
+                        rows,
+                        browser_sessions,
+                    )
                     .await?;
             }
             ClientFrame::ClientHello { .. } => {
@@ -571,18 +610,33 @@ where
         },
         Phase::Active => match frame {
             ClientFrame::TunnelUp { generation, row } => {
-                let claims = verify_lease(
-                    admission_lease_verifier,
-                    &row.admission_lease,
-                    row.binding_for(proxy_id.clone()),
-                )?;
-                if row.admission_lease_expires_at.timestamp() != claims.expires_at {
-                    return Err(SessionError::Protocol(
-                        "admission lease expiry mismatch".into(),
-                    ));
-                }
+                verify_tunnel_row(admission_lease_verifier, proxy_id, &row)?;
                 let status = controller
                     .tunnel_up(proxy_id.clone(), incarnation, generation, row)
+                    .await?;
+                if status == MutationStatus::Resyncing {
+                    *phase = Phase::awaiting_snapshot();
+                }
+            }
+            ClientFrame::BrowserSessionUp { generation, row } => {
+                let status = controller
+                    .browser_session_up(proxy_id.clone(), incarnation, generation, row)
+                    .await?;
+                if status == MutationStatus::Resyncing {
+                    *phase = Phase::awaiting_snapshot();
+                }
+            }
+            ClientFrame::BrowserSessionDown {
+                generation,
+                admin_session_id,
+            } => {
+                let status = controller
+                    .browser_session_down(
+                        proxy_id.clone(),
+                        incarnation,
+                        generation,
+                        admin_session_id,
+                    )
                     .await?;
                 if status == MutationStatus::Resyncing {
                     *phase = Phase::awaiting_snapshot();
@@ -627,6 +681,7 @@ where
                         owner_user_id,
                         user,
                         devserver_id,
+                        claims.max_connected_devservers,
                         admission_lease,
                         chrono::DateTime::from_timestamp(claims.expires_at, 0).ok_or_else(
                             || SessionError::Protocol("lease expiry is out of range".into()),
@@ -658,6 +713,7 @@ where
                         claims.binding.owner_user_id,
                         claims.binding.user,
                         claims.binding.devserver_id,
+                        claims.max_connected_devservers,
                         admission_lease,
                         chrono::DateTime::from_timestamp(claims.expires_at, 0).ok_or_else(
                             || SessionError::Protocol("lease expiry is out of range".into()),
@@ -705,6 +761,7 @@ where
             }
             ClientFrame::SnapshotStart { .. }
             | ClientFrame::SnapshotChunk { .. }
+            | ClientFrame::BrowserSessionSnapshotChunk { .. }
             | ClientFrame::SnapshotEnd { .. } => {
                 controller
                     .require_resync(proxy_id.clone(), incarnation)
@@ -726,9 +783,13 @@ fn snapshot_rows_fit(current: usize, incoming: usize) -> bool {
 }
 
 fn snapshot_bytes_fit(current: usize, incoming: usize) -> bool {
+    bounded_add(current, incoming, MAX_SNAPSHOT_BYTES)
+}
+
+fn bounded_add(current: usize, incoming: usize, maximum: usize) -> bool {
     current
         .checked_add(incoming)
-        .is_some_and(|total| total <= MAX_SNAPSHOT_BYTES)
+        .is_some_and(|total| total <= maximum)
 }
 
 fn verify_lease(
@@ -745,6 +806,29 @@ fn verify_lease(
         ));
     }
     Ok(claims)
+}
+
+fn verify_tunnel_row(
+    verifier: &AdmissionLeaseVerifier,
+    proxy_id: &ProxyId,
+    row: &TunnelRow,
+) -> Result<(), SessionError> {
+    let claims = verify_lease(
+        verifier,
+        &row.admission_lease,
+        row.binding_for(proxy_id.clone()),
+    )?;
+    if row.admission_lease_expires_at.timestamp() != claims.expires_at {
+        return Err(SessionError::Protocol(
+            "admission lease expiry mismatch".into(),
+        ));
+    }
+    if row.max_connected_devservers != claims.max_connected_devservers {
+        return Err(SessionError::Protocol(
+            "admission lease devserver limit mismatch".into(),
+        ));
+    }
+    Ok(())
 }
 
 async fn illegal_frame<W>(writer: &mut W, reason: &'static str) -> Result<(), SessionError>
@@ -800,6 +884,9 @@ enum Phase {
         rows: Vec<TunnelRow>,
         registration_ids: HashSet<Uuid>,
         bytes: usize,
+        browser_sessions: Vec<BrowserSessionRow>,
+        browser_session_ids: HashSet<Uuid>,
+        browser_session_bytes: usize,
     },
     Active,
 }
@@ -863,6 +950,7 @@ mod tests {
                     registration_id,
                     proxy_id: ProxyId::parse("p1").unwrap(),
                 },
+                3,
                 now,
                 120,
             )
@@ -872,6 +960,7 @@ mod tests {
             owner_user_id,
             user: user.into(),
             devserver_id: devserver_id.into(),
+            max_connected_devservers: 3,
             admission_lease,
             admission_lease_expires_at: chrono::DateTime::from_timestamp(now.timestamp() + 120, 0)
                 .unwrap(),

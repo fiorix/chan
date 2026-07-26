@@ -9,7 +9,7 @@ A scenario graduates into the gate only after it has proven stable across severa
 - **`browser-smoke/`** drives a real chan server through headless Chrome: build the SPA and binary, seed a throwaway workspace, launch `chan open`, run every check under `checks/`, write `results.json` plus screenshots. `SMOKE_ONLY=` filters by filename prefix. See [`browser-smoke/README.md`](browser-smoke/README.md) for the check API and the environment.
 - **`storm-check.sh`** overflows the host's real inotify queue and asserts rebuild-storm convergence. `CHAN_STORM_ACCEPTANCE=1` scales it to the full torrent.
 - **`terminal-queue-drain.sh`** validates chronological `cs terminal write` batching against a live agent. Run it from a chan terminal whose `CHAN_CONTROL_SOCKET` targets the server under test, over a workspace that agent already trusts.
-- **`gateway-zone.sh`** exercises the full gateway control plane: one controller, three proxy nodes, real identity and profile services, real `chan devserver` processes, tunnel reconnect, and failure scenarios. `gateway-zone-browser.mjs` and `stub-oauth.mjs` support it.
+- **`gateway-zone.sh`** exercises the full gateway control plane: one controller, three proxy nodes, real identity and profile services, real `chan devserver` processes, tunnel reconnect, and failure scenarios. Its `ctrlplane` scenario covers signed user limits, policy transitions, account cuts, persistent fleet pause, OAuth and tenant-session revocation, and bounded aggregate reports. `gateway-zone-browser.mjs` and `stub-oauth.mjs` support it.
 - **`lp-skip-test.sh`** with `lp-mock.py` covers the PPA publish retry-idempotence offline.
 
 ## Scenario packs

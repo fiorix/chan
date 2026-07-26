@@ -17,6 +17,9 @@ Small axum service in front of Postgres. Schema:
 - `devserver_grants (id, owner_user_id, devserver_id, grantee_email, grantee_user_id, role, created_at, accepted_at)` with `UNIQUE (owner_user_id, devserver_id, lower(grantee_email))` and an FK on `(owner_user_id, devserver_id)` -> `devservers` (cascade delete).
 - `feature_flags (key PK, description, default_enabled, created_at, updated_at)`: registry of named flags.
 - `feature_flag_overrides (flag_key, user_id, enabled, set_at, PRIMARY KEY (flag_key, user_id))`: per-user explicit enable/disable rows. The effective value for `(flag, user)` is the override row when present, else `default_enabled`.
+- `devserver_user_policies (user_id, enabled, max_connected_devservers, updated_at)`: durable, product-agnostic per-user tunnel policy. No row is the compatibility default; identity can require a row at deployment time.
+- `devserver_fleet_policy (singleton, admissions_enabled, updated_at)`: seeded singleton for a persistent fleet pause. Missing or unreadable state is an authorization failure.
+- `identity_session_index (admin_session_id, user_id, store_id, authenticated_at, created_at)`: identity-owned index stored in the shared database. `store_id` is a bearer secret used only to delete the matching tower session and is never returned.
 
 ```mermaid
 erDiagram
@@ -128,16 +131,26 @@ New users get `u<12 hex chars from the row id>` as a placeholder handle. identit
 
 When the CTE returns no rows the handler runs one follow-up SELECT to distinguish "user not found" (404) from "rename cap reached" (409). Collapsing the original two-statement diagnosis into the CTE closes the TOCTOU window where a concurrent rename could change state between the CAS UPDATE and the diagnostic SELECT. The unique index on `lower(username)` still raises `23505` on the rare name collision, which surfaces as 409 with the database's error message.
 
-### Block fans out to devserver-control server-side
+### Durable devserver policy and access denial
+
+User policy PUT is one lock-coupled upsert: it locks the canonical user row, serializes with block and PAT minting, and inserts or replaces the one policy row. The API accepts limits from 1 through 1,000,000; the controller still applies its lower deployment safety ceiling. The fleet singleton is updated independently and defaults to admissions enabled.
+
+Profile does not perform the product-facing drain inside policy PUT. Identity first persists through these routes, then confirms owner-session revocation and owner-tunnel eviction. A failed drain cannot roll policy back, and an equal stricter retry repeats the drain until the fleet converges.
+
+`POST /v1/admin/users/{id}/access/revoke` locks the user, revokes every live PAT, and writes one canonical `access_revoked` row. Identity adds OAuth-session, tenant-session, and tunnel cuts through its composite admin route.
+
+### Block and delete use durable revocation
 
 `POST /v1/admin/users/{id}/block`:
 
 1. Set `users.blocked_at = now()` and `block_reason` in one transaction with the next two steps.
 2. Update `api_tokens` to set `revoked_at = now()` for every live PAT belonging to the user.
 3. Append an `auth_audit` row with action `blocked`.
-4. Best-effort: if a `DevserverControlClient` is configured, call devserver-control `/admin/v1/users/{username}/tunnels/kill` to evict live yamux substreams. Failures are logged at warn; the next handshake from a peer with a stale PAT fails on the DB join anyway, so the gap closes either way.
+4. Reserve a durable subject-revocation generation in the same transaction.
 
-devserver-control is the authority on live registrations; profile is the authority on `blocked_at`. The block flow keeps both views consistent within the same operation.
+The worker confirms a post-commit fleet cut, waits the entry-credential quiet window, and confirms a second cut. identity's composite block path additionally revokes OAuth sessions and kills owner tunnels synchronously; partial confirmation is a retryable 502 and never rolls back `blocked_at`.
+
+Account deletion uses the dominant `AccountDelete` outbox job. The initial transaction blocks the user and revokes PATs but retains the profile row. Only after the quiet-window cuts settle does the worker delete the user and let foreign-key cascades remove identities, indexed OAuth sessions, tokens, and grants.
 
 ### Email rewrite is admin-only
 
@@ -180,7 +193,10 @@ Column lists are constants `format!`'d into queries; user input always rides thr
 - `users.username_edits` only increases; never reset.
 - `users.blocked_at` is `NULL` or a timestamp; `NULL` means active.
 - `api_token_audit.action` is one of `created`, `created_via_desktop`, `used`, `revoked`.
-- Block always: revokes every active PAT, fires the devserver-control eviction (if configured), appends one `auth_audit` row.
+- Block always: revokes every active PAT, appends one `auth_audit` row, and reserves durable fleet revocation in the same transaction.
+- User-policy writes serialize with PAT mint and block on the canonical user row.
+- The fleet policy singleton always exists after migration; an unreadable row is never interpreted as enabled.
+- Access revoke and pending delete establish durable denial before any live-data-plane acknowledgement.
 - Bearer comparisons run at constant time.
 - `devserver_grants.role` is one of `viewer`, `editor` (CHECK constraint). `accepted_at` is `NULL` iff `grantee_user_id` is `NULL`; both flip together at claim time.
 

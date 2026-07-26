@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -11,9 +12,13 @@ use gateway_common::validators::{valid_username, MAX_USERNAME_EDITS};
 use oauth2::PkceCodeVerifier;
 use rustrict::CensorStr;
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use subtle::ConstantTimeEq;
 use tower_http::trace::TraceLayer;
-use tower_sessions::{cookie::time::Duration, Expiry, Session, SessionManagerLayer};
+use tower_sessions::{
+    cookie::time::Duration, session::Id as TowerSessionId, Expiry, Session, SessionManagerLayer,
+    SessionStore,
+};
 use tower_sessions_sqlx_store::PostgresStore;
 use uuid::Uuid;
 
@@ -46,6 +51,7 @@ fn session_cookie_name(cookie_secure: bool) -> &'static str {
     }
 }
 const KEY_USER: &str = "user_id";
+const KEY_AUTHENTICATED_AT: &str = "authenticated_at";
 const KEY_PENDING: &str = "pending_oauth";
 /// Optional post-login redirect target. Set by the share landing
 /// when an unauthenticated user lands on `/s/{owner}/{workspace}` so the
@@ -68,6 +74,8 @@ pub struct AppState {
     /// One-time desktop-authorize redemption codes; written by the
     /// confirm handler, consumed by `/desktop/authorize/redeem`.
     pub desktop_redemptions: crate::desktop_authorize::RedemptionStore,
+    pub pool: PgPool,
+    pub session_store: PostgresStore,
 }
 
 /// Reserved usernames. Anything that could collide with an existing
@@ -122,6 +130,11 @@ struct PendingOauth {
     verifier: String,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct AuthStartQuery {
+    return_to: Option<String>,
+}
+
 pub fn router(
     cfg: Arc<Config>,
     store: PostgresStore,
@@ -147,18 +160,21 @@ pub fn routers(
     // crates/identity/design.md. The `__Host-` name additionally makes
     // the browser reject any Domain-carrying shadow of it (A11), which
     // is why the insecure dev fallback must use a different name.
-    let session_layer = SessionManagerLayer::new(store)
+    let session_layer = SessionManagerLayer::new(store.clone())
         .with_name(session_cookie_name(cfg.cookie_secure))
         .with_secure(cfg.cookie_secure)
         .with_http_only(true)
         .with_same_site(tower_sessions::cookie::SameSite::Lax)
         .with_expiry(Expiry::OnInactivity(Duration::days(30)));
 
+    let pool = api_tokens.pool().clone();
     let state = AppState {
         cfg,
         api_tokens,
         token_throttle,
         desktop_redemptions: Default::default(),
+        pool,
+        session_store: store,
     };
 
     // /internal/* is gated by IDENTITY_INTERNAL_TOKEN (distinct from
@@ -176,6 +192,7 @@ pub fn routers(
     // validate handler is its defense-in-depth twin.
     let internal = Router::new()
         .route("/internal/v1/tokens/validate", post(validate_token))
+        .route("/internal/v1/sessions/whoami", post(session_whoami))
         .route_layer(middleware::from_fn_with_state(state.clone(), internal_auth));
 
     // /admin/v1/* is the operator surface for chan-gateway-admin,
@@ -184,6 +201,34 @@ pub fn routers(
     // for the same session-layer reason.
     let admin = Router::new()
         .route("/admin/v1/tokens", post(admin_tokens_create))
+        .route("/admin/v1/sessions", get(admin_list_oauth_sessions))
+        .route(
+            "/admin/v1/sessions/{admin_session_id}/revoke",
+            post(admin_revoke_oauth_session),
+        )
+        .route(
+            "/admin/v1/users/{user_id}/sessions/revoke",
+            post(admin_revoke_user_oauth_sessions),
+        )
+        .route(
+            "/admin/v1/sessions/overview",
+            get(admin_oauth_session_overview),
+        )
+        .route(
+            "/admin/v1/users/{user_id}/access/revoke",
+            post(admin_revoke_user_access),
+        )
+        .route(
+            "/admin/v1/users/{user_id}",
+            axum::routing::delete(admin_delete_user),
+        )
+        .route(
+            "/admin/v1/users/{user_id}/devserver-policy",
+            get(admin_get_devserver_policy).put(admin_put_devserver_policy),
+        )
+        .route("/admin/v1/fleet", get(admin_get_fleet))
+        .route("/admin/v1/fleet/pause", post(admin_pause_fleet))
+        .route("/admin/v1/fleet/resume", post(admin_resume_fleet))
         .route_layer(middleware::from_fn_with_state(state.clone(), admin_auth));
 
     let internal = internal
@@ -317,6 +362,7 @@ async fn gateway_discovery(State(state): State<AppState>) -> Result<Json<Gateway
 async fn auth_start(
     State(state): State<AppState>,
     Path(provider): Path<String>,
+    Query(query): Query<AuthStartQuery>,
     session: Session,
 ) -> Result<Response> {
     let p = state.cfg.provider(&provider).ok_or(Error::NotFound)?;
@@ -333,6 +379,13 @@ async fn auth_start(
         )
         .await
         .map_err(|e| Error::Anyhow(anyhow::anyhow!("session insert: {e}")))?;
+    if let Some(return_to) = query.return_to {
+        let return_to = validate_return_to(&state.cfg.base_url, &return_to)?;
+        session
+            .insert(KEY_POST_LOGIN_REDIRECT, &return_to)
+            .await
+            .map_err(|e| Error::Anyhow(anyhow::anyhow!("session insert: {e}")))?;
+    }
     Ok(Redirect::to(url.as_str()).into_response())
 }
 
@@ -510,7 +563,11 @@ async fn auth_callback_inner(
                 "oauth_denied",
             )));
         }
-        return Ok(Redirect::to("/?denied=oauth_login"));
+        let destination = take_post_login_redirect(&state, &session).await;
+        return Ok(Redirect::to(&append_denied_marker(
+            &state.cfg.base_url,
+            &destination,
+        )?));
     }
 
     // Rotate the session id at the privilege boundary: anything that
@@ -519,15 +576,45 @@ async fn auth_callback_inner(
     // browser pre-login) keeps the old id, the freshly authenticated
     // state lives under a new one. Prevents session fixation: a
     // pre-set `__Host-id_session` cannot survive the authentication step.
+    let old_store_id = session.id().map(|id| id.to_string());
     session
         .cycle_id()
         .await
         .map_err(|e| Error::Anyhow(anyhow::anyhow!("session cycle_id: {e}")))?;
 
+    // Postgres timestamptz stores microseconds. Stamp the session record at
+    // that same precision so whoami can require exact index/record agreement
+    // without rejecting every timestamp whose clock supplied nanoseconds.
+    let authenticated_at = DateTime::<Utc>::from_timestamp_micros(Utc::now().timestamp_micros())
+        .expect("current timestamp is representable");
     session
         .insert(KEY_USER, &user.id)
         .await
         .map_err(|e| Error::Anyhow(anyhow::anyhow!("session insert: {e}")))?;
+    session
+        .insert(KEY_AUTHENTICATED_AT, &authenticated_at)
+        .await
+        .map_err(|e| Error::Anyhow(anyhow::anyhow!("session insert: {e}")))?;
+    session
+        .save()
+        .await
+        .map_err(|e| Error::Anyhow(anyhow::anyhow!("session save: {e}")))?;
+    let store_id = session
+        .id()
+        .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("authenticated session has no id")))?
+        .to_string();
+    if let Err(error) = index_authenticated_session(
+        &state,
+        user.id,
+        &store_id,
+        authenticated_at,
+        old_store_id.as_deref(),
+    )
+    .await
+    {
+        let _ = session.flush().await;
+        return Err(error);
+    }
 
     if let Err(e) = state
         .cfg
@@ -597,30 +684,108 @@ async fn auth_callback_inner(
     // starts with `/` and is not a protocol-relative URL (`//host`)
     // so an attacker cannot use the stash to point us at another
     // origin after login.
-    let dest = match session.remove::<String>(KEY_POST_LOGIN_REDIRECT).await {
-        Ok(Some(p)) if is_safe_local_redirect(&p) => p,
-        Ok(_) => "/".to_string(),
-        Err(e) => {
-            tracing::warn!(error = ?e, "session remove post_login_redirect failed");
-            "/".to_string()
-        }
-    };
+    let dest = take_post_login_redirect(&state, &session).await;
     Ok(Redirect::to(&dest))
 }
 
-/// Allow only paths that stay on this origin: must start with a
-/// single `/`, must not be protocol-relative (`//evil.com`), and
-/// must not contain a scheme separator. Empty / malformed strings
-/// fall through to `/` at the caller.
-///
-/// Intentionally coarse: this is a denylist over "could a browser
-/// follow this off-origin?" The `!contains(':')` clause forbids
-/// `javascript:` and any path containing a colon (e.g. matrix-style
-/// `;jsessionid=`). It also rejects benign paths like `/foo:bar`,
-/// which we don't mint anywhere, so the false-positive cost is zero
-/// against the same-origin safety win.
-fn is_safe_local_redirect(p: &str) -> bool {
-    p.starts_with('/') && !p.starts_with("//") && !p.contains(':')
+fn validate_return_to(base: &url::Url, target: &str) -> Result<String> {
+    let unsafe_percent_encoding = target.as_bytes().iter().enumerate().any(|(index, byte)| {
+        if *byte != b'%' {
+            return false;
+        }
+        let Some(digits) = target.as_bytes().get(index + 1..index + 3) else {
+            return true;
+        };
+        if digits.len() != 2 || !digits.iter().all(u8::is_ascii_hexdigit) {
+            return true;
+        }
+        let decode = |digit: u8| match digit {
+            b'0'..=b'9' => digit - b'0',
+            b'a'..=b'f' => digit - b'a' + 10,
+            b'A'..=b'F' => digit - b'A' + 10,
+            _ => unreachable!("hex digits checked above"),
+        };
+        let decoded = decode(digits[0]) * 16 + decode(digits[1]);
+        decoded == b'/' || decoded == b'\\' || decoded.is_ascii_control()
+    });
+    if target.is_empty()
+        || !target.starts_with('/')
+        || target.as_bytes().get(1) == Some(&b'/')
+        || target.contains('\\')
+        || target.contains('#')
+        || target.chars().any(char::is_control)
+        || unsafe_percent_encoding
+    {
+        return Err(Error::BadRequest("invalid return_to".into()));
+    }
+    let parsed = base
+        .join(target)
+        .map_err(|_| Error::BadRequest("invalid return_to".into()))?;
+    if parsed.origin() != base.origin()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(Error::BadRequest("invalid return_to".into()));
+    }
+    Ok(target.to_string())
+}
+
+async fn take_post_login_redirect(state: &AppState, session: &Session) -> String {
+    match session.remove::<String>(KEY_POST_LOGIN_REDIRECT).await {
+        Ok(Some(path)) => {
+            validate_return_to(&state.cfg.base_url, &path).unwrap_or_else(|_| "/".to_string())
+        }
+        Ok(None) => "/".to_string(),
+        Err(error) => {
+            tracing::warn!(?error, "session return path removal failed");
+            "/".to_string()
+        }
+    }
+}
+
+fn append_denied_marker(base: &url::Url, destination: &str) -> Result<String> {
+    let mut target = base
+        .join(destination)
+        .map_err(|_| Error::BadRequest("invalid return_to".into()))?;
+    target
+        .query_pairs_mut()
+        .append_pair("denied", "oauth_login");
+    let mut relative = target.path().to_string();
+    if let Some(query) = target.query() {
+        relative.push('?');
+        relative.push_str(query);
+    }
+    Ok(relative)
+}
+
+async fn index_authenticated_session(
+    state: &AppState,
+    user_id: Uuid,
+    store_id: &str,
+    authenticated_at: DateTime<Utc>,
+    old_store_id: Option<&str>,
+) -> Result<()> {
+    let mut tx = state.pool.begin().await?;
+    if let Some(old_store_id) = old_store_id.filter(|old| *old != store_id) {
+        sqlx::query("DELETE FROM identity_session_index WHERE store_id = $1")
+            .bind(old_store_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query(
+        "INSERT INTO identity_session_index (user_id, store_id, authenticated_at) \
+         VALUES ($1, $2, $3) \
+         ON CONFLICT (store_id) DO UPDATE SET \
+           user_id = EXCLUDED.user_id, authenticated_at = EXCLUDED.authenticated_at",
+    )
+    .bind(user_id)
+    .bind(store_id)
+    .bind(authenticated_at)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 pub(crate) async fn current_user_id(session: &Session) -> Result<Uuid> {
@@ -757,10 +922,17 @@ async fn logout(
     // Read the user_id before flushing so we can attribute the audit
     // row; absent (already-logged-out) sessions just skip the write.
     let uid = session.get::<Uuid>(KEY_USER).await.ok().flatten();
+    let store_id = session.id().map(|id| id.to_string());
     session
         .flush()
         .await
         .map_err(|e| Error::Anyhow(anyhow::anyhow!("session flush: {e}")))?;
+    if let Some(store_id) = store_id {
+        sqlx::query("DELETE FROM identity_session_index WHERE store_id = $1")
+            .bind(store_id)
+            .execute(&state.pool)
+            .await?;
+    }
     if let Some(uid) = uid {
         let ip = client_ip(&headers);
         let ua = user_agent(&headers);
@@ -806,10 +978,14 @@ async fn delete_profile(State(state): State<AppState>, session: Session) -> Resu
     // The profile transaction above also reserves a durable AccountDelete
     // outbox row. This first cut only reduces latency; profile performs the
     // mandatory post-quiet-period cut and finalization after any restart.
-    let (kill, revoke) = tokio::join!(
+    let (oauth, kill, revoke) = tokio::join!(
+        revoke_user_oauth_sessions(&state, uid),
         state.cfg.workspace_admin.kill_owner_tunnels(uid),
         state.cfg.workspace_admin.revoke_subject_sessions(uid),
     );
+    if let Err(error) = oauth {
+        tracing::warn!(%uid, ?error, "account deletion OAuth session cut failed");
+    }
     if let Err(error) = kill {
         tracing::warn!(%uid, ?error, "account deletion first tunnel cut failed");
     }
@@ -1931,6 +2107,525 @@ async fn admin_auth(
     }
 }
 
+#[derive(Deserialize)]
+struct SessionWhoamiRequest {
+    session: String,
+}
+
+impl std::fmt::Debug for SessionWhoamiRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionWhoamiRequest")
+            .field("session", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
+struct SessionWhoamiUser {
+    id: Uuid,
+    username: String,
+    blocked: bool,
+}
+
+#[derive(Serialize)]
+struct SessionWhoamiSession {
+    authenticated_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+struct SessionWhoamiResponse {
+    user: SessionWhoamiUser,
+    session: SessionWhoamiSession,
+}
+
+async fn session_whoami(
+    State(state): State<AppState>,
+    Json(body): Json<SessionWhoamiRequest>,
+) -> Result<Json<SessionWhoamiResponse>> {
+    let session_id = TowerSessionId::from_str(&body.session).map_err(|_| Error::Unauthorized)?;
+    let record = state
+        .session_store
+        .load(&session_id)
+        .await
+        .map_err(|error| Error::Anyhow(anyhow::anyhow!("session load: {error}")))?
+        .ok_or(Error::Unauthorized)?;
+    let indexed = sqlx::query_as::<_, (Uuid, DateTime<Utc>)>(
+        "SELECT user_id, authenticated_at FROM identity_session_index WHERE store_id = $1",
+    )
+    .bind(session_id.to_string())
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(Error::Unauthorized)?;
+    let record_user_id = record
+        .data
+        .get(KEY_USER)
+        .and_then(|value| serde_json::from_value::<Uuid>(value.clone()).ok())
+        .ok_or(Error::Unauthorized)?;
+    let record_authenticated_at = record
+        .data
+        .get(KEY_AUTHENTICATED_AT)
+        .and_then(|value| serde_json::from_value::<DateTime<Utc>>(value.clone()).ok())
+        .ok_or(Error::Unauthorized)?;
+    if record_user_id != indexed.0 || record_authenticated_at != indexed.1 {
+        return Err(Error::Unauthorized);
+    }
+    let user = state
+        .cfg
+        .profile_client
+        .get_user(indexed.0)
+        .await?
+        .ok_or(Error::Unauthorized)?;
+    if user.is_blocked() {
+        return Err(Error::Unauthorized);
+    }
+    Ok(Json(SessionWhoamiResponse {
+        user: SessionWhoamiUser {
+            id: user.id,
+            username: user.username,
+            blocked: false,
+        },
+        session: SessionWhoamiSession {
+            authenticated_at: indexed.1,
+        },
+    }))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OAuthSessionQuery {
+    user_id: Option<Uuid>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+struct OAuthSessionView {
+    id: Uuid,
+    user_id: Uuid,
+    authenticated_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
+async fn prune_session_index(state: &AppState) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM identity_session_index i \
+         WHERE NOT EXISTS ( \
+           SELECT 1 FROM tower_sessions.session s \
+           WHERE s.id = i.store_id AND s.expiry_date > now() \
+         )",
+    )
+    .execute(&state.pool)
+    .await?;
+    Ok(())
+}
+
+async fn admin_list_oauth_sessions(
+    State(state): State<AppState>,
+    Query(query): Query<OAuthSessionQuery>,
+) -> Result<Json<Vec<OAuthSessionView>>> {
+    let limit = query.limit.unwrap_or(100);
+    let offset = query.offset.unwrap_or(0);
+    if !(1..=200).contains(&limit) || offset < 0 {
+        return Err(Error::BadRequest("invalid pagination".into()));
+    }
+    prune_session_index(&state).await?;
+    let rows = sqlx::query_as::<_, OAuthSessionView>(
+        "SELECT i.admin_session_id AS id, i.user_id, i.authenticated_at, \
+                s.expiry_date AS expires_at \
+         FROM identity_session_index i \
+         JOIN tower_sessions.session s ON s.id = i.store_id \
+         WHERE ($1::uuid IS NULL OR i.user_id = $1) \
+           AND s.expiry_date > now() \
+         ORDER BY i.authenticated_at DESC, i.admin_session_id DESC \
+         LIMIT $2 OFFSET $3",
+    )
+    .bind(query.user_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(rows))
+}
+
+#[derive(Serialize)]
+struct OAuthRevocationResponse {
+    oauth_sessions_revoked: usize,
+}
+
+async fn revoke_oauth_session_by_admin_id(
+    state: &AppState,
+    admin_session_id: Uuid,
+) -> Result<usize> {
+    let store_id = sqlx::query_scalar::<_, String>(
+        "SELECT store_id FROM identity_session_index WHERE admin_session_id = $1",
+    )
+    .bind(admin_session_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some(store_id) = store_id else {
+        return Ok(0);
+    };
+    let active = match TowerSessionId::from_str(&store_id) {
+        Ok(session_id) => {
+            let active = state
+                .session_store
+                .load(&session_id)
+                .await
+                .map_err(|error| Error::Anyhow(anyhow::anyhow!("session load: {error}")))?
+                .is_some();
+            state
+                .session_store
+                .delete(&session_id)
+                .await
+                .map_err(|error| Error::Anyhow(anyhow::anyhow!("session delete: {error}")))?;
+            active
+        }
+        Err(_) => false,
+    };
+    sqlx::query("DELETE FROM identity_session_index WHERE admin_session_id = $1")
+        .bind(admin_session_id)
+        .execute(&state.pool)
+        .await?;
+    Ok(usize::from(active))
+}
+
+async fn admin_revoke_oauth_session(
+    State(state): State<AppState>,
+    Path(admin_session_id): Path<Uuid>,
+) -> Result<Json<OAuthRevocationResponse>> {
+    let revoked = revoke_oauth_session_by_admin_id(&state, admin_session_id).await?;
+    Ok(Json(OAuthRevocationResponse {
+        oauth_sessions_revoked: revoked,
+    }))
+}
+
+async fn revoke_user_oauth_sessions(state: &AppState, user_id: Uuid) -> Result<usize> {
+    let ids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT admin_session_id FROM identity_session_index WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let mut revoked = 0;
+    for id in ids {
+        revoked += revoke_oauth_session_by_admin_id(state, id).await?;
+    }
+    Ok(revoked)
+}
+
+async fn admin_revoke_user_oauth_sessions(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+) -> Result<Json<OAuthRevocationResponse>> {
+    let revoked = revoke_user_oauth_sessions(&state, user_id).await?;
+    Ok(Json(OAuthRevocationResponse {
+        oauth_sessions_revoked: revoked,
+    }))
+}
+
+#[derive(Serialize)]
+struct OAuthSessionOverview {
+    generated_at: DateTime<Utc>,
+    oauth_sessions_active: i64,
+}
+
+async fn admin_oauth_session_overview(
+    State(state): State<AppState>,
+) -> Result<Json<OAuthSessionOverview>> {
+    prune_session_index(&state).await?;
+    let active = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint \
+         FROM identity_session_index i \
+         JOIN tower_sessions.session s ON s.id = i.store_id \
+         WHERE s.expiry_date > now()",
+    )
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(Json(OAuthSessionOverview {
+        generated_at: Utc::now(),
+        oauth_sessions_active: active,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminDevserverPolicyBody {
+    enabled: bool,
+    max_connected_devservers: i32,
+}
+
+fn composite_failure(
+    durable: serde_json::Value,
+    oauth_sessions_revoked: usize,
+    tenant_sessions_revoked: usize,
+    tunnels_evicted: usize,
+) -> Response {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(serde_json::json!({
+            "error": "partial control-plane drain",
+            "durable": durable,
+            "oauth_sessions_revoked": oauth_sessions_revoked,
+            "tenant_sessions_revoked": tenant_sessions_revoked,
+            "tunnels_evicted": tunnels_evicted,
+        })),
+    )
+        .into_response()
+}
+
+async fn admin_get_devserver_policy(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+) -> std::result::Result<Json<serde_json::Value>, Response> {
+    let policy = state
+        .cfg
+        .profile_client
+        .admin_get_devserver_policy(user_id)
+        .await
+        .map_err(|error| Error::from(error).into_response())?
+        .ok_or_else(|| Error::NotFound.into_response())?;
+    Ok(Json(serde_json::json!({
+        "policy": policy,
+        "tenant_sessions_revoked": 0,
+        "tunnels_evicted": 0,
+    })))
+}
+
+async fn admin_put_devserver_policy(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    Json(body): Json<AdminDevserverPolicyBody>,
+) -> std::result::Result<Json<serde_json::Value>, Response> {
+    let previous = state
+        .cfg
+        .profile_client
+        .admin_get_devserver_policy(user_id)
+        .await
+        .map_err(|error| Error::from(error).into_response())?;
+    let policy = state
+        .cfg
+        .profile_client
+        .admin_put_devserver_policy(user_id, body.enabled, body.max_connected_devservers)
+        .await
+        .map_err(|error| Error::from(error).into_response())?;
+    let drain = !body.enabled
+        || previous.as_ref().is_some_and(|old| {
+            old.enabled
+                && body.enabled
+                && body.max_connected_devservers <= old.max_connected_devservers
+        });
+    if !drain {
+        return Ok(Json(serde_json::json!({
+            "policy": policy,
+            "tenant_sessions_revoked": 0,
+            "tunnels_evicted": 0,
+        })));
+    }
+    let (sessions, tunnels) = tokio::join!(
+        state.cfg.workspace_admin.revoke_owner_sessions(user_id),
+        state.cfg.workspace_admin.kill_owner_tunnels(user_id),
+    );
+    let tenant_sessions_revoked = sessions
+        .as_ref()
+        .map(|result| result.tenant_sessions_revoked)
+        .unwrap_or(0);
+    let tunnels_evicted = tunnels.as_ref().copied().unwrap_or(0);
+    if sessions.is_err() || tunnels.is_err() {
+        return Err(composite_failure(
+            serde_json::json!({ "policy": policy }),
+            0,
+            tenant_sessions_revoked,
+            tunnels_evicted,
+        ));
+    }
+    Ok(Json(serde_json::json!({
+        "policy": policy,
+        "tenant_sessions_revoked": tenant_sessions_revoked,
+        "tunnels_evicted": tunnels_evicted,
+    })))
+}
+
+async fn admin_get_fleet(
+    State(state): State<AppState>,
+) -> std::result::Result<Json<serde_json::Value>, Response> {
+    let policy = state
+        .cfg
+        .profile_client
+        .admin_get_fleet_policy()
+        .await
+        .map_err(|error| Error::from(error).into_response())?;
+    Ok(Json(serde_json::json!(policy)))
+}
+
+async fn admin_pause_fleet(
+    State(state): State<AppState>,
+) -> std::result::Result<Json<serde_json::Value>, Response> {
+    let policy = state
+        .cfg
+        .profile_client
+        .admin_put_fleet_policy(false)
+        .await
+        .map_err(|error| Error::from(error).into_response())?;
+    let (sessions, tunnels) = tokio::join!(
+        state.cfg.workspace_admin.revoke_all_sessions(),
+        state.cfg.workspace_admin.kill_all_tunnels(),
+    );
+    let tenant_sessions_revoked = sessions
+        .as_ref()
+        .map(|result| result.tenant_sessions_revoked)
+        .unwrap_or(0);
+    let tunnels_evicted = tunnels.as_ref().copied().unwrap_or(0);
+    if sessions.is_err() || tunnels.is_err() {
+        return Err(composite_failure(
+            serde_json::json!({ "admissions_enabled": policy.admissions_enabled }),
+            0,
+            tenant_sessions_revoked,
+            tunnels_evicted,
+        ));
+    }
+    Ok(Json(serde_json::json!({
+        "admissions_enabled": policy.admissions_enabled,
+        "tenant_sessions_revoked": tenant_sessions_revoked,
+        "tunnels_evicted": tunnels_evicted,
+    })))
+}
+
+async fn admin_resume_fleet(
+    State(state): State<AppState>,
+) -> std::result::Result<Json<serde_json::Value>, Response> {
+    let policy = state
+        .cfg
+        .profile_client
+        .admin_put_fleet_policy(true)
+        .await
+        .map_err(|error| Error::from(error).into_response())?;
+    Ok(Json(serde_json::json!({
+        "admissions_enabled": policy.admissions_enabled,
+        "tenant_sessions_revoked": 0,
+        "tunnels_evicted": 0,
+    })))
+}
+
+async fn admin_revoke_user_access(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+) -> std::result::Result<Json<serde_json::Value>, Response> {
+    let durable = state
+        .cfg
+        .profile_client
+        .admin_revoke_user_access(user_id)
+        .await
+        .map_err(|error| Error::from(error).into_response())?;
+    let (oauth, sessions, tunnels) = tokio::join!(
+        revoke_user_oauth_sessions(&state, user_id),
+        state.cfg.workspace_admin.revoke_subject_sessions(user_id),
+        state.cfg.workspace_admin.kill_owner_tunnels(user_id),
+    );
+    let oauth_sessions_revoked = oauth.as_ref().copied().unwrap_or(0);
+    let tenant_sessions_revoked = sessions
+        .as_ref()
+        .map(|result| result.tenant_sessions_revoked)
+        .unwrap_or(0);
+    let tunnels_evicted = tunnels.as_ref().copied().unwrap_or(0);
+    if oauth.is_err() || sessions.is_err() || tunnels.is_err() {
+        return Err(composite_failure(
+            serde_json::json!({
+                "user_id": durable.user_id,
+                "username": durable.username,
+                "pats_revoked": durable.pats_revoked,
+            }),
+            oauth_sessions_revoked,
+            tenant_sessions_revoked,
+            tunnels_evicted,
+        ));
+    }
+    Ok(Json(serde_json::json!({
+        "user_id": durable.user_id,
+        "username": durable.username,
+        "pats_revoked": durable.pats_revoked,
+        "oauth_sessions_revoked": oauth_sessions_revoked,
+        "tenant_sessions_revoked": tenant_sessions_revoked,
+        "tunnels_evicted": tunnels_evicted,
+    })))
+}
+
+async fn admin_delete_user(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+) -> std::result::Result<Json<serde_json::Value>, Response> {
+    let profile_existed = state
+        .cfg
+        .profile_client
+        .get_user(user_id)
+        .await
+        .map_err(|error| Error::from(error).into_response())?
+        .is_some();
+    if !profile_existed {
+        return Ok(Json(serde_json::json!({
+            "user_id": user_id,
+            "profile_existed": false,
+            "sessions_deleted": 0,
+        })));
+    }
+    state
+        .cfg
+        .profile_client
+        .mark_user_pending_delete(user_id)
+        .await
+        .map_err(|error| Error::from(error).into_response())?;
+    let (oauth, sessions, tunnels) = tokio::join!(
+        revoke_user_oauth_sessions(&state, user_id),
+        state.cfg.workspace_admin.revoke_subject_sessions(user_id),
+        state.cfg.workspace_admin.kill_owner_tunnels(user_id),
+    );
+    let oauth_sessions_revoked = oauth.as_ref().copied().unwrap_or(0);
+    let tenant_sessions_revoked = sessions
+        .as_ref()
+        .map(|result| result.tenant_sessions_revoked)
+        .unwrap_or(0);
+    let tunnels_evicted = tunnels.as_ref().copied().unwrap_or(0);
+    if oauth.is_err() || sessions.is_err() || tunnels.is_err() {
+        return Err(composite_failure(
+            serde_json::json!({
+                "user_id": user_id,
+                "profile_existed": true,
+            }),
+            oauth_sessions_revoked,
+            tenant_sessions_revoked,
+            tunnels_evicted,
+        ));
+    }
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(55);
+    loop {
+        if state
+            .cfg
+            .profile_client
+            .get_user(user_id)
+            .await
+            .map_err(|error| Error::from(error).into_response())?
+            .is_none()
+        {
+            return Ok(Json(serde_json::json!({
+                "user_id": user_id,
+                "profile_existed": true,
+                "sessions_deleted": oauth_sessions_revoked,
+            })));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(composite_failure(
+                serde_json::json!({
+                    "user_id": user_id,
+                    "profile_existed": true,
+                    "delete_pending": true,
+                }),
+                oauth_sessions_revoked,
+                tenant_sessions_revoked,
+                tunnels_evicted,
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct AdminCreateTokenBody {
     email: String,
@@ -2313,5 +3008,44 @@ mod tests {
         // Browsers reject `__Host-` without Secure; the insecure dev
         // name must be visibly distinct from the production one.
         assert_eq!(session_cookie_name(false), "id_session_insecure_dev");
+    }
+
+    #[test]
+    fn oauth_return_to_accepts_only_same_origin_relative_paths() {
+        let base = url::Url::parse("https://id.example.test").unwrap();
+        for valid in ["/", "/account/", "/account/?tab=sessions&sort=newest"] {
+            assert_eq!(validate_return_to(&base, valid).unwrap(), valid);
+        }
+        for invalid in [
+            "",
+            "account/",
+            "https://evil.example/account",
+            "//evil.example/account",
+            "/\\evil.example",
+            "/account/#fragment",
+            "/%2fevil.example",
+            "/%2Fevil.example",
+            "/%5cevil.example",
+            "/%5Cevil.example",
+            "/account/%0aheader",
+            "/account/%",
+            "/account/%0",
+            "/account/%gg",
+            "/account/\r\nheader",
+        ] {
+            assert!(
+                validate_return_to(&base, invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn oauth_denial_marker_preserves_safe_query_parameters() {
+        let base = url::Url::parse("https://id.example.test").unwrap();
+        assert_eq!(
+            append_denied_marker(&base, "/account/?tab=access").unwrap(),
+            "/account/?tab=access&denied=oauth_login"
+        );
     }
 }
