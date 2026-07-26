@@ -152,6 +152,8 @@ export CHAN_ADMIN_IDENTITY_URL=http://127.0.0.1:7004   # optional, internal list
 export CHAN_ADMIN_WORKSPACE_URL=http://127.0.0.1:7003  # optional, default
 ```
 
+Product account callers use `IDENTITY_SESSION_INTERNAL_TOKEN` only for OAuth-session `whoami` and `IDENTITY_ACCOUNT_ADMIN_TOKEN` only for access revoke, profile delete, and per-user devserver policy. They never receive `IDENTITY_INTERNAL_TOKEN` or `IDENTITY_ADMIN_TOKEN`.
+
 Build / install:
 
 ```sh

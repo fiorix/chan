@@ -31,11 +31,17 @@ pub struct Config {
     /// Required and distinct from PROFILE_AUTH_TOKEN; rotating one
     /// does not rotate the other.
     pub internal_auth_token: String,
+    /// Bearer gating only /internal/v1/sessions/whoami. Empty disables
+    /// the route with the same not-found posture as a disabled admin scope.
+    pub session_internal_auth_token: String,
     /// Bearer gating the operator surface under /admin/v1/*. Empty
     /// (the default) disables the surface outright: the routes answer
     /// 404 as if they did not exist. chan-gateway-admin presents this
     /// via CHAN_ADMIN_IDENTITY_TOKEN.
     pub identity_admin_token: String,
+    /// Bearer accepted only by account access-revoke, profile-delete, and
+    /// per-user devserver-policy routes. Empty disables this caller scope.
+    pub account_admin_token: String,
     /// Scope-specific controller client. Runtime startup fails closed when the
     /// URL or identity-scoped bearer is absent.
     pub workspace_admin: DevserverControlClient,
@@ -104,10 +110,23 @@ impl Config {
             anyhow::bail!("IDENTITY_INTERNAL_TOKEN must not be empty");
         }
 
+        let session_internal_auth_token =
+            std::env::var("IDENTITY_SESSION_INTERNAL_TOKEN").unwrap_or_default();
+
         // Optional on purpose: most deployments never mint PATs from
         // the CLI, and an unset/empty token keeps the admin surface
         // disabled rather than guarded by an empty string.
         let identity_admin_token = std::env::var("IDENTITY_ADMIN_TOKEN").unwrap_or_default();
+        let account_admin_token = std::env::var("IDENTITY_ACCOUNT_ADMIN_TOKEN").unwrap_or_default();
+        validate_distinct_auth_tokens(&[
+            ("IDENTITY_INTERNAL_TOKEN", &internal_auth_token),
+            (
+                "IDENTITY_SESSION_INTERNAL_TOKEN",
+                &session_internal_auth_token,
+            ),
+            ("IDENTITY_ADMIN_TOKEN", &identity_admin_token),
+            ("IDENTITY_ACCOUNT_ADMIN_TOKEN", &account_admin_token),
+        ])?;
 
         let admin_url: Url = std::env::var("DEVSERVER_ADMIN_URL")
             .context("DEVSERVER_ADMIN_URL is required")?
@@ -197,7 +216,9 @@ impl Config {
             cookie_secure,
             profile_client,
             internal_auth_token,
+            session_internal_auth_token,
             identity_admin_token,
+            account_admin_token,
             workspace_admin,
             admission_lease_verifier,
             entry_signer,
@@ -385,6 +406,20 @@ fn parse_bool_env(name: &str, default: bool) -> anyhow::Result<bool> {
     }
 }
 
+fn validate_distinct_auth_tokens(tokens: &[(&str, &str)]) -> anyhow::Result<()> {
+    for (index, (left_name, left)) in tokens.iter().enumerate() {
+        if left.is_empty() {
+            continue;
+        }
+        for (right_name, right) in &tokens[index + 1..] {
+            if !right.is_empty() && left == right {
+                anyhow::bail!("{left_name} and {right_name} must be distinct");
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,7 +435,9 @@ mod tests {
             cookie_secure: true,
             profile_client: ProfileClient::new("http://x/".parse().unwrap(), "x".into()).unwrap(),
             internal_auth_token: "x".into(),
+            session_internal_auth_token: String::new(),
             identity_admin_token: String::new(),
+            account_admin_token: String::new(),
             workspace_admin: DevserverControlClient::new(
                 "http://127.0.0.1:7002".parse().unwrap(),
                 "test-identity-admin-token".into(),
@@ -418,6 +455,47 @@ mod tests {
             )
             .unwrap(),
             providers: vec![],
+        }
+    }
+
+    #[test]
+    fn configured_identity_auth_tokens_must_be_pairwise_distinct() {
+        let names = [
+            "IDENTITY_INTERNAL_TOKEN",
+            "IDENTITY_SESSION_INTERNAL_TOKEN",
+            "IDENTITY_ADMIN_TOKEN",
+            "IDENTITY_ACCOUNT_ADMIN_TOKEN",
+        ];
+        assert!(validate_distinct_auth_tokens(&[
+            (names[0], "validation"),
+            (names[1], "session"),
+            (names[2], "operator"),
+            (names[3], "account"),
+        ])
+        .is_ok());
+        assert!(validate_distinct_auth_tokens(&[
+            (names[0], "validation"),
+            (names[1], ""),
+            (names[2], ""),
+            (names[3], ""),
+        ])
+        .is_ok());
+
+        for left in 0..names.len() {
+            for right in left + 1..names.len() {
+                let mut values = ["validation", "session", "operator", "account"];
+                values[right] = values[left];
+                let error = validate_distinct_auth_tokens(&[
+                    (names[0], values[0]),
+                    (names[1], values[1]),
+                    (names[2], values[2]),
+                    (names[3], values[3]),
+                ])
+                .expect_err("duplicate configured identity bearer");
+                let message = error.to_string();
+                assert!(message.contains(names[left]), "{message}");
+                assert!(message.contains(names[right]), "{message}");
+            }
         }
     }
 

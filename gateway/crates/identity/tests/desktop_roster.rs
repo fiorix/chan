@@ -113,10 +113,12 @@ impl TestApp {
             cookie_secure: true,
             profile_client,
             internal_auth_token: "test-internal".to_string(),
+            session_internal_auth_token: "test-session-internal".to_string(),
             // Non-empty: the tests seed PATs through POST
             // /admin/v1/tokens, the same surface an operator (and the
             // e2e rig) uses to mint account-scoped tokens.
             identity_admin_token: ADMIN_TOKEN.to_string(),
+            account_admin_token: "test-account-admin".to_string(),
             // Same mock server backs the proxy-admin client; its
             // /admin/v1/* paths don't collide with profile's /v1/*.
             workspace_admin: DevserverControlClient::new(

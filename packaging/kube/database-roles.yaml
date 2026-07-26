@@ -205,8 +205,9 @@ data:
           AND tablename NOT IN ('_sqlx_migrations', 'chan_gateway_deployment_state');
         IF actual_public_tables IS DISTINCT FROM ARRAY[
             'api_token_audit', 'api_tokens', 'auth_audit',
-            'control_revocation_jobs', 'devserver_grants', 'devservers',
-            'feature_flag_overrides', 'feature_flags', 'identities', 'users'
+            'control_revocation_jobs', 'devserver_fleet_policy', 'devserver_grants',
+            'devserver_user_policies', 'devservers', 'feature_flag_overrides',
+            'feature_flags', 'identities', 'identity_session_index', 'users'
         ]::text[] THEN
             RAISE EXCEPTION 'unexpected public table inventory: %', actual_public_tables;
         END IF;
@@ -302,11 +303,16 @@ data:
     GRANT USAGE ON SCHEMA public TO chan_gateway_identity, chan_gateway_profile;
     GRANT USAGE ON SCHEMA tower_sessions TO chan_gateway_identity;
 
-    -- identity-service: PAT lifecycle plus its private session store.
-    GRANT SELECT ON public.users, public.api_tokens, public.api_token_audit
+    -- identity-service: PAT lifecycle, admission policy reads, and its private
+    -- OAuth-session index/store.
+    GRANT SELECT ON
+        public.users, public.api_tokens, public.api_token_audit,
+        public.devserver_fleet_policy, public.devserver_user_policies
         TO chan_gateway_identity;
     GRANT INSERT, UPDATE ON public.api_tokens TO chan_gateway_identity;
     GRANT INSERT ON public.api_token_audit TO chan_gateway_identity;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON public.identity_session_index
+        TO chan_gateway_identity;
     GRANT USAGE ON SEQUENCE public.api_token_audit_id_seq TO chan_gateway_identity;
     GRANT SELECT, INSERT, UPDATE, DELETE ON tower_sessions.session
         TO chan_gateway_identity;
@@ -315,7 +321,9 @@ data:
     GRANT SELECT ON
         public.users, public.identities, public.api_tokens, public.api_token_audit,
         public.auth_audit, public.control_revocation_jobs, public.devservers,
-        public.devserver_grants, public.feature_flags, public.feature_flag_overrides
+        public.devserver_fleet_policy, public.devserver_grants,
+        public.devserver_user_policies, public.feature_flags,
+        public.feature_flag_overrides
         TO chan_gateway_profile;
     GRANT INSERT, UPDATE, DELETE ON public.users TO chan_gateway_profile;
     GRANT INSERT ON public.identities TO chan_gateway_profile;
@@ -324,6 +332,9 @@ data:
     GRANT INSERT, UPDATE, DELETE ON
         public.control_revocation_jobs, public.devservers, public.devserver_grants,
         public.feature_flags, public.feature_flag_overrides
+        TO chan_gateway_profile;
+    GRANT INSERT, UPDATE ON
+        public.devserver_fleet_policy, public.devserver_user_policies
         TO chan_gateway_profile;
     GRANT USAGE ON SEQUENCE
         public.api_token_audit_id_seq, public.auth_audit_id_seq

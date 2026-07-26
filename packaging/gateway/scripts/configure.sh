@@ -126,29 +126,31 @@ IDENTITY_INTERNAL_TOKEN=$(openssl rand -hex 32)
 DEVSERVER_PROXY_TOKEN=$(openssl rand -hex 32)
 
 # Never reuse a bearer across an inbound API or controller authorization scope.
-GENERATED_ADMIN_TOKENS=()
-generate_unique_admin_token() {
+GENERATED_BEARER_TOKENS=("$IDENTITY_INTERNAL_TOKEN")
+generate_unique_bearer_token() {
     local candidate existing collision
     while :; do
         candidate=$(openssl rand -hex 32)
         collision=false
-        for existing in "${GENERATED_ADMIN_TOKENS[@]:-}"; do
+        for existing in "${GENERATED_BEARER_TOKENS[@]:-}"; do
             if [[ $candidate == "$existing" ]]; then
                 collision=true
                 break
             fi
         done
         [[ $collision == false ]] || continue
-        GENERATED_ADMIN_TOKENS+=("$candidate")
-        UNIQUE_ADMIN_TOKEN=$candidate
+        GENERATED_BEARER_TOKENS+=("$candidate")
+        UNIQUE_BEARER_TOKEN=$candidate
         return
     done
 }
-generate_unique_admin_token; PROFILE_ADMIN_TOKEN=$UNIQUE_ADMIN_TOKEN
-generate_unique_admin_token; IDENTITY_ADMIN_TOKEN=$UNIQUE_ADMIN_TOKEN
-generate_unique_admin_token; DEVSERVER_OPERATOR_ADMIN_TOKEN=$UNIQUE_ADMIN_TOKEN
-generate_unique_admin_token; DEVSERVER_IDENTITY_ADMIN_TOKEN=$UNIQUE_ADMIN_TOKEN
-generate_unique_admin_token; DEVSERVER_PROFILE_ADMIN_TOKEN=$UNIQUE_ADMIN_TOKEN
+generate_unique_bearer_token; IDENTITY_SESSION_INTERNAL_TOKEN=$UNIQUE_BEARER_TOKEN
+generate_unique_bearer_token; IDENTITY_ACCOUNT_ADMIN_TOKEN=$UNIQUE_BEARER_TOKEN
+generate_unique_bearer_token; PROFILE_ADMIN_TOKEN=$UNIQUE_BEARER_TOKEN
+generate_unique_bearer_token; IDENTITY_ADMIN_TOKEN=$UNIQUE_BEARER_TOKEN
+generate_unique_bearer_token; DEVSERVER_OPERATOR_ADMIN_TOKEN=$UNIQUE_BEARER_TOKEN
+generate_unique_bearer_token; DEVSERVER_IDENTITY_ADMIN_TOKEN=$UNIQUE_BEARER_TOKEN
+generate_unique_bearer_token; DEVSERVER_PROFILE_ADMIN_TOKEN=$UNIQUE_BEARER_TOKEN
 
 mapfile -t ADMISSION_KEYS < <("$SCRIPT_DIR/generate-admission-keypair.py")
 [[ ${#ADMISSION_KEYS[@]} -eq 2 ]] || { echo "admission key generation failed" >&2; exit 1; }
@@ -239,10 +241,12 @@ PROFILE_AUTH_TOKEN=${PROFILE_AUTH_TOKEN}
 PROFILE_ADMIN_TOKEN=${PROFILE_ADMIN_TOKEN}
 DEVSERVER_POLICY_REQUIRED=false
 IDENTITY_INTERNAL_TOKEN=${IDENTITY_INTERNAL_TOKEN}
+IDENTITY_SESSION_INTERNAL_TOKEN=${IDENTITY_SESSION_INTERNAL_TOKEN}
 DEVSERVER_ADMISSION_SIGNING_KEY=${DEVSERVER_ADMISSION_SIGNING_KEY}
 DEVSERVER_ADMISSION_VERIFYING_KEYS=${DEVSERVER_ADMISSION_VERIFYING_KEY}
 DEVSERVER_ENTRY_SIGNING_KEY=${DEVSERVER_ENTRY_SIGNING_KEY}
 IDENTITY_ADMIN_TOKEN=${IDENTITY_ADMIN_TOKEN}
+IDENTITY_ACCOUNT_ADMIN_TOKEN=${IDENTITY_ACCOUNT_ADMIN_TOKEN}
 DEVSERVER_ADMIN_URL=http://127.0.0.1:7003
 DEVSERVER_IDENTITY_ADMIN_TOKEN=${DEVSERVER_IDENTITY_ADMIN_TOKEN}
 ${PROVIDER_ENV}

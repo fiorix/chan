@@ -270,6 +270,16 @@ if grep -Fq 'DEVSERVER_ADMISSION_VERIFYING_KEY=' \
 fi
 assert_contains "$REPO/gateway/crates/identity/packaging/identity.env" \
     "DEVSERVER_IDENTITY_ADMIN_TOKEN="
+assert_contains "$REPO/gateway/crates/identity/packaging/identity.env" \
+    "IDENTITY_SESSION_INTERNAL_TOKEN="
+assert_contains "$REPO/gateway/crates/identity/packaging/identity.env" \
+    "IDENTITY_ACCOUNT_ADMIN_TOKEN="
+for scoped_env in IDENTITY_SESSION_INTERNAL_TOKEN IDENTITY_ACCOUNT_ADMIN_TOKEN; do
+    assert_contains "$REPO/packaging/gateway/scripts/configure.sh" \
+        "$scoped_env=\${$scoped_env}"
+    assert_contains "$REPO/packaging/gateway/scripts/dev/setup.sh" \
+        "$scoped_env=\$$scoped_env"
+done
 assert_contains "$REPO/gateway/crates/profile/packaging/profile.env" \
     "DEVSERVER_PROFILE_ADMIN_TOKEN="
 for scoped_env in \
@@ -286,6 +296,11 @@ if rg -n '^DEVSERVER_GATE_SECRET=' \
     "$REPO/packaging/gateway/scripts/configure.sh" \
     "$REPO/packaging/gateway/scripts/dev/setup.sh"; then
     die "runtime packaging retains the retired cross-service session secret"
+fi
+if rg -n '^IDENTITY_(SESSION_INTERNAL|ACCOUNT_ADMIN)_TOKEN=' \
+    "$REPO/gateway/crates/devserver-proxy/packaging/devserver-proxy.env" \
+    "$REPO/gateway/crates/admin/packaging/admin.env"; then
+    die "a narrow account bearer escaped identity packaging"
 fi
 
 # Keep both developer E2E paths on the production credential and transport
@@ -336,6 +351,12 @@ grep -Fq "public._sqlx_migrations" "$reconcile" \
     || die "$reconcile does not explicitly isolate sqlx history"
 grep -Fq "chan_gateway_deployment_state" "$reconcile" \
     || die "$reconcile does not publish an exact readiness marker"
+for table in devserver_user_policies devserver_fleet_policy identity_session_index; do
+    grep -Fq "public.$table" "$reconcile" \
+        || die "$reconcile does not inventory and grant $table"
+    grep -Fq "public.$table" "$REPO/packaging/gateway/scripts/test-database-roles.sh" \
+        || die "database role test does not exercise $table"
+done
 grep -Fq "application database role owns an object" "$prepare" \
     || die "$prepare does not reject app-owned database objects"
 grep -Fq "application database role owns an object" "$reconcile" \

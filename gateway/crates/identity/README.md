@@ -42,7 +42,9 @@ export PROFILE_SERVICE_URL=http://127.0.0.1:7001
 export PROFILE_AUTH_TOKEN=dev-service-token
 export PROFILE_ADMIN_TOKEN=dev-profile-admin-token
 export IDENTITY_INTERNAL_TOKEN=dev-internal-token
+export IDENTITY_SESSION_INTERNAL_TOKEN=dev-session-internal-token
 export IDENTITY_ADMIN_TOKEN=dev-identity-admin-token
+export IDENTITY_ACCOUNT_ADMIN_TOKEN=dev-account-admin-token
 export DEVSERVER_POLICY_REQUIRED=false
 export DEVSERVER_ENTRY_SIGNING_KEY=<base64-ed25519-private-key>
 export GITHUB_CLIENT_ID=...
@@ -69,6 +71,7 @@ Required:
 | `PROFILE_AUTH_TOKEN`      | bearer for profile-service calls            |
 | `PROFILE_ADMIN_TOKEN`     | profile admin bearer for policy/composites  |
 | `IDENTITY_INTERNAL_TOKEN` | bearer devserver-proxy presents on validate |
+| `IDENTITY_SESSION_INTERNAL_TOKEN` | narrow bearer for OAuth-session `whoami` |
 | `DEVSERVER_ADMIN_URL`     | protected devserver-control admin base     |
 | `DEVSERVER_IDENTITY_ADMIN_TOKEN` | identity-scoped controller bearer |
 | `DEVSERVER_ADMISSION_VERIFYING_KEYS` | controller admission public-key ring |
@@ -88,6 +91,7 @@ Optional knobs:
 | `BIND_ADDR`                | `127.0.0.1:7000`          | listen address        |
 | `COOKIE_SECURE`            | `false`                   | HTTPS-only cookie     |
 | `IDENTITY_ADMIN_TOKEN`     | unset                     | enables identity's operator admin tree |
+| `IDENTITY_ACCOUNT_ADMIN_TOKEN` | unset                  | enables account-service composite access |
 | `DEVSERVER_POLICY_REQUIRED` | `false`                  | deny PAT mint/admission when user policy is absent |
 | `RUSTRICT_ALLOWLIST`       | unset                     | comma-separated usernames exempt from the profanity filter |
 | `IDENTITY_OAUTH_ENDPOINTS_BASE` | unset (stock github.com) | GitHub OAuth/API endpoint origin override for local e2e stubs; never set in production |
@@ -145,16 +149,16 @@ Desktop devserver entry (Bearer PAT with the `desktop.connect` scope):
 
 A 404 keeps the `{"error": msg}` shape and adds `reason` (`no_devserver`, `devserver_offline`, `access_denied`), `username`, and `label` (offline only) so chan-desktop can narrate the failure; see `design.md`.
 
-Internal (Bearer-gated by `IDENTITY_INTERNAL_TOKEN`):
+Internal (route-scoped Bearer authentication):
 
 | Method | Path                                   | Purpose                |
 |--------|----------------------------------------|------------------------|
-| POST   | `/internal/v1/tokens/validate`         | validate a PAT         |
-| POST   | `/internal/v1/sessions/whoami`         | resolve an indexed OAuth cookie |
+| POST   | `/internal/v1/tokens/validate`         | validate a PAT using `IDENTITY_INTERNAL_TOKEN` |
+| POST   | `/internal/v1/sessions/whoami`         | resolve an indexed OAuth cookie using `IDENTITY_SESSION_INTERNAL_TOKEN` |
 
-The token route is called by devserver-proxy during tunnel handshake and lease refresh. `whoami` accepts a raw `__Host-id_session` value from a trusted internal caller and returns only the indexed user plus authentication time. Malformed, unknown, expired, pre-index, deleted-user, and blocked-user cookies share one 401 response.
+The token route is called by devserver-proxy during tunnel handshake and lease refresh. `whoami` accepts a raw `__Host-id_session` value from the separately authenticated account caller and returns only the indexed user plus authentication time. Malformed, unknown, expired, pre-index, deleted-user, and blocked-user cookies share one 401 response.
 
-Admin (internal listener, enabled only when `IDENTITY_ADMIN_TOKEN` is non-empty):
+Admin (internal listener):
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -169,6 +173,8 @@ Admin (internal listener, enabled only when `IDENTITY_ADMIN_TOKEN` is non-empty)
 | POST | `/admin/v1/fleet/resume` | persist resume |
 | POST | `/admin/v1/users/{id}/access/revoke` | PAT/OAuth/tenant/tunnel access cut |
 | DELETE | `/admin/v1/users/{id}` | convergent account deletion |
+
+`IDENTITY_ADMIN_TOKEN` is the operator credential and may call every admin route. `IDENTITY_ACCOUNT_ADMIN_TOKEN` may call only access revoke, profile delete, and per-user devserver-policy GET/PUT. An unset narrow token disables its caller scope. Every configured identity bearer must be distinct or startup fails.
 
 Composite mutations persist denial before issuing controller commands. Any unconfirmed downstream cut returns 502 with durable state and confirmed counts; raw downstream response bodies and credentials are not propagated.
 

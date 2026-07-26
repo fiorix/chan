@@ -4,7 +4,7 @@ Kubernetes manifests for the chan-gateway stack, plus the local sdme validation 
 
 ## Two shapes
 
-- **Cluster manifests** (`config.yaml`, `secret.example.yaml`, `database-roles.yaml`, `database-prepare.yaml`, `migrate.yaml`, `database-reconcile.yaml`, `network-policy.yaml`, `postgres.yaml`, `profile.yaml`, `identity.yaml`, `devserver-proxy.yaml`, `devserver-control.yaml`): separate Deployments + Services plus three ordered database Jobs. Services reach each other by Service DNS name (`chan-gateway-profile:7001`, etc.). Identity deliberately has separate public `chan-gateway-identity:7000` and internal `chan-gateway-identity-internal:7004` Services. This is what you apply to a real cluster. The four service Deployments and owner-only migration Job pull the published images from Docker Hub as `fiorix/<service>:<version>`; `<version>` is a placeholder you set to the release tag you are deploying (`0.55.0`, or `latest` for the newest GA -- see `packaging/docker/README.md` "Pull from Docker Hub" for the tag policy).
+- **Cluster manifests** (`config.yaml`, `secret.example.yaml`, `database-roles.yaml`, `database-prepare.yaml`, `migrate.yaml`, `database-reconcile.yaml`, `network-policy.yaml`, `postgres.yaml`, `profile.yaml`, `identity.yaml`, `devserver-proxy.yaml`, `devserver-control.yaml`): separate Deployments + Services plus three ordered database Jobs. Services reach each other by Service DNS name (`chan-gateway-profile:7001`, etc.). Identity deliberately has separate public `chan-gateway-identity:7000` and internal `chan-gateway-identity-internal:7004` Services. This is what you apply to a real cluster. The four service Deployments and owner-only migration Job pull the published images from Docker Hub as `fiorix/<service>:<version>`; `<version>` must be the immutable release tag being deployed.
 - **sdme validation pod** (`sdme/gateway-pod.yaml`): the whole stack as ONE Pod. sdme runs a multi-container Pod as a single systemd-nspawn container sharing a network namespace via localhost, so there is no Service DNS; the manifest wires the inter-service URLs to `127.0.0.1`. This is a local functional-validation shape, not a production credential-isolation boundary. Do not treat its per-container Secret projections as protection from a sibling process inside the same nspawn container.
 
 The service env-var contract is `gateway/crates/*/packaging/*.env` and `gateway/README.md`. The inter-service trust model (which token each service shares) is in `.agents/gateway.md` "Service-to-service bearers".
@@ -16,6 +16,8 @@ The service env-var contract is `gateway/crates/*/packaging/*.env` and `gateway/
 | identity -> profile (service API)      | `PROFILE_AUTH_TOKEN`      | Secret     |
 | identity -> profile (admin policy)     | `PROFILE_ADMIN_TOKEN`     | Secret     |
 | proxy -> identity (PAT validate)       | `IDENTITY_INTERNAL_TOKEN` | Secret     |
+| account -> identity (session lookup)   | `IDENTITY_SESSION_INTERNAL_TOKEN` | Secret |
+| account -> identity (account composites) | `IDENTITY_ACCOUNT_ADMIN_TOKEN` | Secret |
 | identity mint / proxy verify (entry)   | `DEVSERVER_ENTRY_*_KEY(S)` | Secrets   |
 | identity -> control admission proof    | `DEVSERVER_ADMISSION_*_KEY` | Secrets  |
 | operator / identity / profile -> control | scoped `DEVSERVER_*_ADMIN_TOKEN(S)` | Secrets |
@@ -24,7 +26,7 @@ The service env-var contract is `gateway/crates/*/packaging/*.env` and `gateway/
 | profile + identity -> Postgres app roles | distinct `DATABASE_URL`  | Secrets    |
 | public origins (`BASE_URL`, `DEVSERVER_*`) | (see config.yaml)     | ConfigMap  |
 
-`secret.example.yaml` defines one Secret per workload plus a root/operator-only CLI Secret. Shared values are duplicated only across their intended endpoints: identity and profile share `PROFILE_AUTH_TOKEN`; identity and proxy share only `IDENTITY_INTERNAL_TOKEN`; identity holds private admission and entry signing keys while consumers receive only the matching public-key rings; control's three admin verifier rings are scope-specific and each caller receives only its singular current bearer; control's `DEVSERVER_PROXY_CREDENTIALS` contains the allowlisted token for each proxy id while each proxy receives only its own `DEVSERVER_PROXY_TOKEN`. Browser sessions are proxy-local opaque identifiers, so no session-signing secret crosses services. No admin token may be reused across control scopes. The duplicated endpoint values MUST match or startup, handoff, or control authentication fails. identity refuses to start with no OAuth provider, so its Secret carries placeholder GitHub creds for boot.
+`secret.example.yaml` defines one Secret per workload plus a root/operator-only CLI Secret. Shared values are duplicated only across their intended endpoints: identity and profile share `PROFILE_AUTH_TOKEN`; identity and proxy share only `IDENTITY_INTERNAL_TOKEN`; the account caller receives only `IDENTITY_SESSION_INTERNAL_TOKEN` and `IDENTITY_ACCOUNT_ADMIN_TOKEN`; identity holds private admission and entry signing keys while consumers receive only the matching public-key rings; control's three admin verifier rings are scope-specific and each caller receives only its singular current bearer; control's `DEVSERVER_PROXY_CREDENTIALS` contains the allowlisted token for each proxy id while each proxy receives only its own `DEVSERVER_PROXY_TOKEN`. Browser sessions are proxy-local opaque identifiers, so no session-signing secret crosses services. No identity or control bearer may be reused across scopes. The duplicated endpoint values MUST match or startup, handoff, or control authentication fails. identity refuses to start with no OAuth provider, so its Secret carries placeholder GitHub creds for boot.
 
 Admission signing-key rotation is overlap-first: set control's `DEVSERVER_ADMISSION_VERIFYING_KEYS` to `old;new`, switch identity's signer and local verifier to `new`, wait at least 330 seconds (the maximum lease TTL plus clock skew) and confirm old leases have drained, then set control to `new` only. The ring accepts at most two distinct keys; never switch the signer before the new verifier is live.
 
@@ -82,6 +84,8 @@ sudo sdme kube secret create gateway-secrets \
     --from-literal=PROFILE_ADMIN_TOKEN=$(openssl rand -hex 32) \
     --from-literal=IDENTITY_ADMIN_TOKEN=$(openssl rand -hex 32) \
     --from-literal=IDENTITY_INTERNAL_TOKEN=$(openssl rand -hex 32) \
+    --from-literal=IDENTITY_SESSION_INTERNAL_TOKEN=$(openssl rand -hex 32) \
+    --from-literal=IDENTITY_ACCOUNT_ADMIN_TOKEN=$(openssl rand -hex 32) \
     --from-literal=DEVSERVER_ADMISSION_SIGNING_KEY="$admission_signing_key" \
     --from-literal=DEVSERVER_ADMISSION_VERIFYING_KEYS="$admission_verifying_key" \
     --from-literal=DEVSERVER_ENTRY_SIGNING_KEY="$entry_signing_key" \

@@ -87,6 +87,8 @@ PROFILE_AUTH_TOKEN=$(get_existing "$SECRETS_DIR/profile.env" PROFILE_AUTH_TOKEN 
 IDENTITY_INTERNAL_TOKEN=$(get_existing "$SECRETS_DIR/identity.env" IDENTITY_INTERNAL_TOKEN || true)
 [[ -z "$IDENTITY_INTERNAL_TOKEN" || $FORCE -eq 1 ]] && IDENTITY_INTERNAL_TOKEN=$(rand_hex)
 
+IDENTITY_SESSION_INTERNAL_TOKEN=$(get_existing "$SECRETS_DIR/identity.env" IDENTITY_SESSION_INTERNAL_TOKEN || true)
+IDENTITY_ACCOUNT_ADMIN_TOKEN=$(get_existing "$SECRETS_DIR/identity.env" IDENTITY_ACCOUNT_ADMIN_TOKEN || true)
 PROFILE_ADMIN_TOKEN=$(get_existing "$SECRETS_DIR/profile.env" PROFILE_ADMIN_TOKEN || true)
 IDENTITY_ADMIN_TOKEN=$(get_existing "$SECRETS_DIR/identity.env" IDENTITY_ADMIN_TOKEN || true)
 DEVSERVER_OPERATOR_ADMIN_TOKEN=$(get_existing "$SECRETS_DIR/devserver-control.env" DEVSERVER_OPERATOR_ADMIN_TOKENS || true)
@@ -94,21 +96,22 @@ DEVSERVER_OPERATOR_ADMIN_TOKEN=${DEVSERVER_OPERATOR_ADMIN_TOKEN%%;*}
 DEVSERVER_IDENTITY_ADMIN_TOKEN=$(get_existing "$SECRETS_DIR/identity.env" DEVSERVER_IDENTITY_ADMIN_TOKEN || true)
 DEVSERVER_PROFILE_ADMIN_TOKEN=$(get_existing "$SECRETS_DIR/profile.env" DEVSERVER_PROFILE_ADMIN_TOKEN || true)
 
-admin_tokens=()
-for token_name in PROFILE_ADMIN_TOKEN IDENTITY_ADMIN_TOKEN \
+scoped_tokens=("$IDENTITY_INTERNAL_TOKEN")
+for token_name in IDENTITY_SESSION_INTERNAL_TOKEN IDENTITY_ACCOUNT_ADMIN_TOKEN \
+    PROFILE_ADMIN_TOKEN IDENTITY_ADMIN_TOKEN \
     DEVSERVER_OPERATOR_ADMIN_TOKEN DEVSERVER_IDENTITY_ADMIN_TOKEN \
     DEVSERVER_PROFILE_ADMIN_TOKEN; do
     token=${!token_name}
     duplicate=false
-    for existing_token in "${admin_tokens[@]:-}"; do
+    for existing_token in "${scoped_tokens[@]:-}"; do
         [[ "$token" != "$existing_token" ]] || duplicate=true
     done
     if [[ -z "$token" || $duplicate == true || $FORCE -eq 1 ]]; then
         token=$(rand_hex)
-        while [[ " ${admin_tokens[*]:-} " == *" $token "* ]]; do token=$(rand_hex); done
+        while [[ " ${scoped_tokens[*]:-} " == *" $token "* ]]; do token=$(rand_hex); done
         printf -v "$token_name" '%s' "$token"
     fi
-    admin_tokens+=("${!token_name}")
+    scoped_tokens+=("${!token_name}")
 done
 
 DEVSERVER_ADMISSION_SIGNING_KEY=$(get_existing "$SECRETS_DIR/identity.env" DEVSERVER_ADMISSION_SIGNING_KEY || true)
@@ -195,12 +198,14 @@ PROFILE_AUTH_TOKEN=$PROFILE_AUTH_TOKEN
 PROFILE_ADMIN_TOKEN=$PROFILE_ADMIN_TOKEN
 DEVSERVER_POLICY_REQUIRED=false
 IDENTITY_INTERNAL_TOKEN=$IDENTITY_INTERNAL_TOKEN
+IDENTITY_SESSION_INTERNAL_TOKEN=$IDENTITY_SESSION_INTERNAL_TOKEN
 DEVSERVER_ADMIN_URL=http://127.0.0.1:17003
 DEVSERVER_IDENTITY_ADMIN_TOKEN=$DEVSERVER_IDENTITY_ADMIN_TOKEN
 DEVSERVER_ADMISSION_SIGNING_KEY=$DEVSERVER_ADMISSION_SIGNING_KEY
 DEVSERVER_ADMISSION_VERIFYING_KEYS=$DEVSERVER_ADMISSION_VERIFYING_KEY
 DEVSERVER_ENTRY_SIGNING_KEY=$DEVSERVER_ENTRY_SIGNING_KEY
 IDENTITY_ADMIN_TOKEN=$IDENTITY_ADMIN_TOKEN
+IDENTITY_ACCOUNT_ADMIN_TOKEN=$IDENTITY_ACCOUNT_ADMIN_TOKEN
 $PROVIDER_ENV
 RUST_LOG=${RUST_LOG:-info,identity=debug}"
 

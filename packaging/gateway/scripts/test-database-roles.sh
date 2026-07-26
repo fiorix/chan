@@ -87,6 +87,32 @@ BEGIN
     ) OR has_table_privilege(
         'chan_gateway_identity', 'public.control_revocation_jobs',
         'SELECT,INSERT,UPDATE,DELETE'
+    ) OR NOT has_table_privilege(
+        'chan_gateway_identity', 'public.devserver_fleet_policy', 'SELECT'
+    ) OR has_table_privilege(
+        'chan_gateway_identity', 'public.devserver_fleet_policy',
+        'INSERT,UPDATE,DELETE'
+    ) OR NOT has_table_privilege(
+        'chan_gateway_identity', 'public.devserver_user_policies', 'SELECT'
+    ) OR has_table_privilege(
+        'chan_gateway_identity', 'public.devserver_user_policies',
+        'INSERT,UPDATE,DELETE'
+    ) OR NOT has_table_privilege(
+        'chan_gateway_identity', 'public.identity_session_index',
+        'SELECT,INSERT,UPDATE,DELETE'
+    ) OR NOT has_table_privilege(
+        'chan_gateway_profile', 'public.devserver_fleet_policy',
+        'SELECT,INSERT,UPDATE'
+    ) OR has_table_privilege(
+        'chan_gateway_profile', 'public.devserver_fleet_policy', 'DELETE'
+    ) OR NOT has_table_privilege(
+        'chan_gateway_profile', 'public.devserver_user_policies',
+        'SELECT,INSERT,UPDATE'
+    ) OR has_table_privilege(
+        'chan_gateway_profile', 'public.devserver_user_policies', 'DELETE'
+    ) OR has_table_privilege(
+        'chan_gateway_profile', 'public.identity_session_index',
+        'SELECT,INSERT,UPDATE,DELETE'
     ) THEN
         RAISE EXCEPTION 'application role matrix is not exact';
     END IF;
@@ -107,6 +133,22 @@ DATABASE_URL="postgres://chan_gateway_profile:${PROFILE_DATABASE_PASSWORD}@127.0
     | grep -qx "$latest_migration"
 "${profile_psql[@]}" -Atqc 'SELECT count(*) FROM public.users' | grep -qx 0
 
+test_user_id=00000000-0000-0000-0000-000000000001
+"${profile_psql[@]}" -v ON_ERROR_STOP=1 \
+    -c "INSERT INTO public.users (id, email, username) VALUES ('$test_user_id', 'role-test@example.com', 'role-test')" \
+    -c "INSERT INTO public.devserver_user_policies (user_id, enabled, max_connected_devservers) VALUES ('$test_user_id', true, 3)" \
+    -c "INSERT INTO public.devserver_fleet_policy (singleton, admissions_enabled) VALUES (true, false) ON CONFLICT (singleton) DO UPDATE SET admissions_enabled = EXCLUDED.admissions_enabled"
+"${identity_psql[@]}" -Atqc \
+    "SELECT max_connected_devservers FROM public.devserver_user_policies WHERE user_id = '$test_user_id'" \
+    | grep -qx 3
+"${identity_psql[@]}" -Atqc \
+    'SELECT admissions_enabled FROM public.devserver_fleet_policy WHERE singleton' \
+    | grep -qx f
+"${identity_psql[@]}" -v ON_ERROR_STOP=1 \
+    -c "INSERT INTO public.identity_session_index (user_id, store_id, authenticated_at) VALUES ('$test_user_id', 'role-test-session', now())" \
+    -c "UPDATE public.identity_session_index SET authenticated_at = now() WHERE store_id = 'role-test-session'" \
+    -c "DELETE FROM public.identity_session_index WHERE store_id = 'role-test-session'"
+
 if "${identity_psql[@]}" -c 'CREATE TABLE public.forbidden (id int)' >/dev/null 2>&1; then
     echo "identity role unexpectedly created a table" >&2
     exit 1
@@ -121,6 +163,21 @@ if "${identity_psql[@]}" -c 'SELECT * FROM public.identities' >/dev/null 2>&1; t
 fi
 if "${profile_psql[@]}" -c 'SELECT * FROM tower_sessions.session' >/dev/null 2>&1; then
     echo "profile role unexpectedly read identity sessions" >&2
+    exit 1
+fi
+if "${profile_psql[@]}" -c 'SELECT * FROM public.identity_session_index' >/dev/null 2>&1; then
+    echo "profile role unexpectedly read the identity session index" >&2
+    exit 1
+fi
+if "${identity_psql[@]}" -c \
+    "INSERT INTO public.devserver_user_policies (user_id, enabled, max_connected_devservers) VALUES ('$test_user_id', true, 4)" \
+    >/dev/null 2>&1; then
+    echo "identity role unexpectedly wrote user policy" >&2
+    exit 1
+fi
+if "${profile_psql[@]}" -c \
+    'DELETE FROM public.devserver_fleet_policy WHERE singleton' >/dev/null 2>&1; then
+    echo "profile role unexpectedly deleted fleet policy" >&2
     exit 1
 fi
 

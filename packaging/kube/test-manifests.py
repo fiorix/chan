@@ -71,10 +71,12 @@ expected = {
         "PROFILE_AUTH_TOKEN",
         "PROFILE_ADMIN_TOKEN",
         "IDENTITY_INTERNAL_TOKEN",
+        "IDENTITY_SESSION_INTERNAL_TOKEN",
         "DEVSERVER_ADMISSION_SIGNING_KEY",
         "DEVSERVER_ADMISSION_VERIFYING_KEYS",
         "DEVSERVER_ENTRY_SIGNING_KEY",
         "IDENTITY_ADMIN_TOKEN",
+        "IDENTITY_ACCOUNT_ADMIN_TOKEN",
         "DEVSERVER_IDENTITY_ADMIN_TOKEN",
         "GITHUB_CLIENT_ID",
         "GITHUB_CLIENT_SECRET",
@@ -232,6 +234,16 @@ assert operator_secret["CHAN_ADMIN_PROFILE_TOKEN"] == secret_data["chan-gateway-
 assert operator_secret["CHAN_ADMIN_IDENTITY_TOKEN"] == secret_data["chan-gateway-identity"][
     "IDENTITY_ADMIN_TOKEN"
 ]
+identity_auth_tokens = [
+    secret_data["chan-gateway-identity"][name]
+    for name in (
+        "IDENTITY_INTERNAL_TOKEN",
+        "IDENTITY_SESSION_INTERNAL_TOKEN",
+        "IDENTITY_ADMIN_TOKEN",
+        "IDENTITY_ACCOUNT_ADMIN_TOKEN",
+    )
+]
+assert len(identity_auth_tokens) == len(set(identity_auth_tokens))
 
 migration_jobs = {
     job["metadata"]["name"]: job
@@ -402,6 +414,8 @@ for workload in ("profile", "identity"):
     )
 sdme_identity = sdme_containers["identity"]
 assert container_env(sdme_identity)["INTERNAL_BIND_ADDR"]["value"] == "127.0.0.1:7004"
+for name in ("IDENTITY_SESSION_INTERNAL_TOKEN", "IDENTITY_ACCOUNT_ADMIN_TOKEN"):
+    assert secret_refs(sdme_identity)[name] == ("gateway-secrets", name)
 assert "CHAN_GATEWAY_MIGRATIONS=only /usr/local/bin/chan-gateway-identity" in "\n".join(
     sdme_identity["args"]
 )
