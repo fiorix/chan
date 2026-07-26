@@ -1,6 +1,6 @@
 # Launcher-only menubar on Linux and Windows
 
-Status: REGISTERED for v0.79.0. Implemented on branch `desktop-launcher-only-menubar`, based on the v0.78.0 GA commit. Not yet merged or gated.
+Status: INTEGRATED on `v079/integration` for v0.79.0. Owner acceptance remains open.
 
 ## What
 
@@ -20,9 +20,9 @@ The launcher never loads the bridge, so its native menu chords cannot double-fir
 
 ## Boundaries
 
-The branch touches `desktop/src-tauri/src/main.rs`, `desktop/src-tauri/src/serve.rs`, and `desktop/src-tauri/permissions/app.toml`. It is a net deletion in `main.rs`.
+The implementation touches `desktop/src-tauri/src/main.rs`, `desktop/src-tauri/src/serve.rs`, and `desktop/src-tauri/permissions/app.toml`. It is a net deletion in `main.rs`.
 
-The v0.78.0 clipboard work lives in the same file. The branch preserves it: the `on_clipboard` helper, `with_cached_clipboard`, the `spawn_blocking` command split, and the `wayland-data-control` feature are all present at the same call counts as `main`.
+The v0.78.0 clipboard work lives in the same file and stays intact: the `on_clipboard` helper, `with_cached_clipboard`, the `spawn_blocking` command split, and the `wayland-data-control` feature are all present.
 
 ## Acceptance
 

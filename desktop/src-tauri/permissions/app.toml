@@ -32,6 +32,8 @@ description = "Allows per-workspace windows to call their app commands."
 permissions = [
   "allow-reload-window",
   "allow-open-devtools",
+  "allow-open-new-window",
+  "allow-request-app-quit",
   "allow-request-close-window",
   "allow-hide-window-from-close-confirm",
   "allow-abandon-devserver-for-window",
@@ -93,6 +95,16 @@ commands.allow = ["reload_window"]
 identifier = "allow-open-devtools"
 description = "Enables the open_devtools command."
 commands.allow = ["open_devtools"]
+
+[[permission]]
+identifier = "allow-open-new-window"
+description = "Enables the open_new_window command (KEY_BRIDGE_JS New Window chord on menu-less windows)."
+commands.allow = ["open_new_window"]
+
+[[permission]]
+identifier = "allow-request-app-quit"
+description = "Enables the request_app_quit command (KEY_BRIDGE_JS Quit chord on menu-less windows)."
+commands.allow = ["request_app_quit"]
 
 [[permission]]
 identifier = "allow-request-close-window"
