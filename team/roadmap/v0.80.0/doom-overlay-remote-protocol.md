@@ -15,7 +15,11 @@ What "tied to chan's `cs` session" should mean concretely (frame authority, inpu
 
 ## Where the prototype sits
 
-Branch `doom-overlay`, one commit `d776cbcb`, based on `3674d30b` (the v0.77.0 GA commit), with a worktree at `../chan-doom`. **It needs rebasing onto post-0.78.0 main before any further work.**
+Branch `doom-overlay`, based on `3674d30b` (the v0.77.0 GA commit), with a worktree at `../chan-doom`. **It needs rebasing before any further work.**
+
+Read this before rebasing. The branch carries a second commit, `808e59c4`, that adds `team/roadmap/v0.78.0/doom-multiplayer.md` and a roadmap README row, and it also still holds `team/roadmap/v0.78.0/video-preview-and-range-serving.md`. Neither path exists on the rebase target: `team/roadmap/v0.78.0/` was removed at the v0.78.0 GA close under lifecycle rule 6, the video item now lives at `team/roadmap/v0.80.0/video-preview-and-range-serving.md`, and this item is its sibling there. A naive rebase therefore re-creates a forbidden `v0.78.0/` directory and conflicts in `team/roadmap/README.md`.
+
+Resolve it by moving `doom-multiplayer.md` to `team/roadmap/v0.80.0/`, dropping the branch's copy of the video item in favor of the one already on the target, and taking the target's roadmap README.
 
 The prototype adds a `DoomOverlay` (`OverlayShell` plus a launcher command "Play DOOM") that runs rojo2/wasm-doom (GPL-2.0) with the shareware IWAD in an iframe. Nothing is embedded in the binary or `web/dist`: the first open calls `POST /api/doom/download`, which fetches the ~5.5 MB bundle into `<user-config>/chan/doom/`, and the game loads from a `GET /doom/{name}` allowlist-only route mirroring `serve_font`. Bundle provenance, build recipe, and hashes are in `crates/chan-server/resources/doom/README.md`.
 

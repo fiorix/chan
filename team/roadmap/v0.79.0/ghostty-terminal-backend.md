@@ -19,8 +19,11 @@ The implementation pins ghostty-web `0.4.0-next.20`, because the `0.4.0` release
 
 Browser-smoke check `94` covers the default-off contract, lazy loading, fallback, OSC 52, key input, mouse capture, selection, and SGR wheel reports. Check `97` remains the xterm regression proof.
 
+## Settled
+
+The backend ships as an opt-in alternative, never the default. Its known bugs and its narrower feature set are the reason for that shape rather than an argument against carrying it: a user who enables `terminal.ghostty` is choosing a backend that trades parity for the WASM VT engine, and a user who does not is unaffected. The four upstream-behavior workarounds and the xterm-only gaps below are accepted maintenance under that framing.
+
 ## Open owner decisions
 
-- Whether v0.79.0 should include a second terminal backend.
 - Whether the pin can move to a stable ghostty-web release, and what the upgrade contract is.
 - Whether check `94` belongs in the default browser-smoke run or stays gated, given the suite's existing contention flakiness on the dev host.

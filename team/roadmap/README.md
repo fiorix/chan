@@ -24,7 +24,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | item | state | what needs to happen |
 | --- | --- | --- |
 | [desktop-launcher-only-menubar](v0.79.0/desktop-launcher-only-menubar.md) | implemented, not merged | merge branch `desktop-launcher-only-menubar`; verify every retired-menubar chord still fires per window kind and that macOS is unchanged |
-| [ghostty-terminal-backend](v0.79.0/ghostty-terminal-backend.md) | prototyped, not merged | rebase branch `v076/ghostty-backend` onto v0.79.0 integration (expect a CHANGELOG conflict), then decide whether a second terminal backend is wanted at all |
+| [ghostty-terminal-backend](v0.79.0/ghostty-terminal-backend.md) | integrated | ships opt-in and never as the default; its narrower feature set is the reason for that shape. Open: whether the pin can move off the ghostty-web pre-release |
 | [gw-ctrl-plane](v0.79.0/gw-ctrl-plane.md) | in progress | gateway product control plane; owned separately |
 | [tab-rotation-across-sides](v0.79.0/tab-rotation-across-sides.md) | registered, not implemented | rotate a pane's tabs across both Hybrid sides, and flip to the populated side when the close shortcut hits an empty one |
 
