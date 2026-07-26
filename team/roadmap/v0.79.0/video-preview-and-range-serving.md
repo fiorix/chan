@@ -1,6 +1,6 @@
 # Video (and audio) preview + View, with HTTP range serving
 
-Status: REGISTERED for v0.78.0, NOT specced. This is captured knowledge for the next session, not a design. Do not implement from this as-is; spec it first.
+Status: REGISTERED for v0.79.0, NOT specced. Deferred from v0.78.0, which shipped only the editor convergence and Linux clipboard fixes. This is captured knowledge for the next session, not a design. Do not implement from this as-is; spec it first.
 
 ## What
 
@@ -24,7 +24,7 @@ The one real task is server-side HTTP RANGE support (this is what makes it "some
 
 ## Rough size
 
-Frontend: small, a mirror of the image path. Server range support: the one moderate chunk (real, because the route currently buffers whole files). Call it a focused day or two. The same range work makes audio trivial and helps the large-file download hang (see upload-download-budgets.md).
+Frontend: small, a mirror of the image path. Server range support: the one moderate chunk (real, because the route currently buffers whole files). Call it a focused day or two. The same range work makes audio trivial and helps the large-file download hang (see [`../done/upload-download-budgets.md`](../done/upload-download-budgets.md), which closed in v0.76.0 with bounded streaming transfers; the range work is the remaining piece, not a blocked dependency).
 
 ## Open (decide at spec time, not now)
 

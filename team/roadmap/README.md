@@ -19,13 +19,22 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-### v0.78.0
+### v0.79.0
 
 | item | state | what needs to happen |
 | --- | --- | --- |
-| [video-preview-and-range-serving](v0.78.0/video-preview-and-range-serving.md) | registered, grounded but not specced | spec first; the real chunk is HTTP range/206 in the file route (mirrors the image path on the frontend) |
+| [video-preview-and-range-serving](v0.79.0/video-preview-and-range-serving.md) | registered, grounded but not specced | spec first; the real chunk is HTTP range/206 in the file route (mirrors the image path on the frontend). Deferred from v0.78.0 |
+| [ghostty-terminal-backend](v0.79.0/ghostty-terminal-backend.md) | registered, prototyped but not specced | decide whether a second terminal backend is wanted at all; branch `v076/ghostty-backend` needs rebasing onto post-0.78.0 main (expect a CHANGELOG conflict) |
+| [doom-overlay-remote-protocol](v0.79.0/doom-overlay-remote-protocol.md) | registered, not specced | the ask is the remote protocol, which the prototype does not implement; mirror the scene-session shape. Branch `doom-overlay` needs rebasing onto post-0.78.0 main |
 
 ## Completed
+
+### v0.78.0
+
+Shipped 2026-07-26; see [release-v0.78.0](../release/release-v0.78.0.md). Closed items in [`done/`](done/):
+
+- [editor-filesystem-edit-convergence](done/editor-filesystem-edit-convergence.md) - disk-echo ring entries carry an origin, so read bytes no longer inherit the 60s protection meant for written bytes; an external restore reaches the editor in 28ms rather than 58.6s and a truncation in 407ms rather than not at all. Closes the root cause the v0.76.0 fix had only bounded.
+- [desktop-linux-clipboard-and-supervisor-entry](done/desktop-linux-clipboard-and-supervisor-entry.md) - native clipboard operations run off the Tauri invoke thread, Linux holds one process-wide clipboard handle so a copy outlives the operation, and the systemd/launchd writers select a `chan`-named entry point instead of persisting the desktop binary.
 
 ### v0.77.0
 

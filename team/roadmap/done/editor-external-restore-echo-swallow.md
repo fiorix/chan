@@ -1,6 +1,8 @@
 # Editor serves stale content after an external restore (echo-ring swallow)
 
 > Status: shipped in [v0.76.0](../../release/release-v0.76.0.md): the echo ring parks an unmatched external-restore observation and re-checks after the ring TTL instead of clearing it (mirrored in scene_sessions); browser smoke check 57 is ungated.
+>
+> Superseded by [editor-filesystem-edit-convergence](editor-filesystem-edit-convergence.md) in [v0.78.0](../../release/release-v0.78.0.md). The fix recorded here converted permanent staleness into a bounded 60s window and accepted that window; v0.78.0 removed it by giving ring entries an origin, so read bytes no longer inherit the protection meant for written bytes.
 
 Status: REGISTERED for v0.76.0. Root-caused and reproduced; the fix
 is scoped below. Found during the v0.76.0 external-edit reliability
