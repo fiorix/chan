@@ -1,6 +1,6 @@
 # ghostty-web as an alternate terminal backend
 
-Status: ACCEPTED on `v079/integration` for v0.79.0 as an optional, default-off backend.
+Status: INTEGRATED on `v079/integration` for v0.79.0. Owner acceptance remains open.
 
 ## What
 
@@ -17,9 +17,10 @@ The implementation pins ghostty-web `0.4.0-next.20`, because the `0.4.0` release
 
 `terminal.mouse_capture` keeps working: its DECSET strip is byte-level and runs ahead of either parser.
 
-Browser-smoke check `z98` covers the default-off contract, lazy loading, fallback, OSC 52, key input, mouse capture, selection, and SGR wheel reports. Check `97` remains the xterm regression proof.
+Browser-smoke check `94` covers the default-off contract, lazy loading, fallback, OSC 52, key input, mouse capture, selection, and SGR wheel reports. Check `97` remains the xterm regression proof.
 
 ## Open owner decisions
 
+- Whether v0.79.0 should include a second terminal backend.
 - Whether the pin can move to a stable ghostty-web release, and what the upgrade contract is.
-- Whether check `z98` belongs in the default browser-smoke run or stays gated, given the suite's existing contention flakiness on the dev host.
+- Whether check `94` belongs in the default browser-smoke run or stays gated, given the suite's existing contention flakiness on the dev host.

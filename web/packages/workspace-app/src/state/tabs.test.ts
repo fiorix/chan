@@ -2619,6 +2619,25 @@ describe("Hybrid tab rotation", () => {
     selectPrevTabInActivePane();
     expect(selectedPosition()).toBe("a:a2");
   });
+
+  test("rotation enters the populated side when the visible selection is missing", () => {
+    const b1 = fileTab({ id: "b1", path: "b1.md" });
+    const b2 = fileTab({ id: "b2", path: "b2.md" });
+    const emptySelection = resetLayout([]);
+    emptySelection.bTabs = [b1, b2];
+    emptySelection.bActiveTabId = b1.id;
+
+    selectNextTabInActivePane();
+    expect(selectedPosition()).toBe("b:b1");
+
+    const staleSelection = resetLayout([]);
+    staleSelection.activeTabId = "closed-a-tab";
+    staleSelection.bTabs = [b1, b2];
+    staleSelection.bActiveTabId = b1.id;
+
+    selectPrevTabInActivePane();
+    expect(selectedPosition()).toBe("b:b2");
+  });
 });
 
 describe("find state", () => {

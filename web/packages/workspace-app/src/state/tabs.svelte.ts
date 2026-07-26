@@ -2888,7 +2888,9 @@ export async function openLinkTarget(
 /// Move the active pane's selection through side A's tabs followed by side
 /// B's tabs. Previous wraps from side A's first tab to side B's last tab;
 /// next wraps from side B's last tab to side A's first tab. A one-sided pane
-/// therefore cycles within that side.
+/// therefore cycles within that side. If the visible side has no valid active
+/// tab, next enters the first tab and previous enters the last tab in the
+/// combined order.
 ///
 /// Chord-driven tab switches need to also move keyboard focus to the
 /// new active surface; otherwise the next keystroke lands in the prior
@@ -2923,11 +2925,10 @@ export function selectPrevTabInActivePane(): void {
   const side = paneSide(p);
   const tabs = paneTabOrder(p);
   const activeId = paneActiveTabId(p, side);
-  if (tabs.length === 0 || activeId === null) return;
+  if (tabs.length === 0) return;
   const idx = tabs.findIndex((entry) => entry.side === side && entry.tab.id === activeId);
-  if (idx < 0) return;
-  const next = (idx - 1 + tabs.length) % tabs.length;
-  const target = tabs[next]!;
+  const target =
+    idx < 0 ? tabs[tabs.length - 1]! : tabs[(idx - 1 + tabs.length) % tabs.length]!;
   setPaneActiveTabId(p, target.tab.id, target.side);
   p.side = target.side;
   bumpTabFocusPulse();
@@ -2938,11 +2939,9 @@ export function selectNextTabInActivePane(): void {
   const side = paneSide(p);
   const tabs = paneTabOrder(p);
   const activeId = paneActiveTabId(p, side);
-  if (tabs.length === 0 || activeId === null) return;
+  if (tabs.length === 0) return;
   const idx = tabs.findIndex((entry) => entry.side === side && entry.tab.id === activeId);
-  if (idx < 0) return;
-  const next = (idx + 1) % tabs.length;
-  const target = tabs[next]!;
+  const target = idx < 0 ? tabs[0]! : tabs[(idx + 1) % tabs.length]!;
   setPaneActiveTabId(p, target.tab.id, target.side);
   p.side = target.side;
   bumpTabFocusPulse();

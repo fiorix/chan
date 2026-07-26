@@ -8,7 +8,7 @@ Status: IMPLEMENTED on `v079/integration` for v0.79.0.
 
 The bindings are `Mod+Shift+]` and `Mod+Shift+[` natively, which is Cmd on macOS and Ctrl on Linux and Windows, and `Alt+Shift+]` / `Alt+Shift+[` on web. Both paths call `selectNextTabInActivePane` and `selectPrevTabInActivePane` in `web/packages/workspace-app/src/state/tabs.svelte.ts`.
 
-A pane with tabs on only one side rotates and wraps within that side.
+A pane with tabs on only one side rotates and wraps within that side. If the visible side is empty or its active id is stale while the opposite side has tabs, next selects the first tab in the total order and previous selects the last tab instead of leaving the chord inert.
 
 `closeActiveEmptyPane` in `web/packages/workspace-app/src/App.svelte` handles the close shortcut on a pane whose visible side has no tabs. When the opposite side holds tabs, it flashes the A/B toggle, flips to that populated side, keeps the pane open, and leaves the opposite side's active tab selected. A pane empty on both sides keeps the normal pane or window close path.
 
@@ -26,6 +26,6 @@ The A/B side model, the side-toggle button, `requestPaneSideToggleFlash`, the si
 
 ## Verification surface
 
-`web/packages/workspace-app/src/state/tabs.test.ts` covers complete next and previous cycles across two tabs per side and the one-sided cycle.
+`web/packages/workspace-app/src/state/tabs.test.ts` covers complete next and previous cycles across two tabs per side, the one-sided cycle, and entry into a populated opposite side from both null and stale visible-side selections.
 
 Browser-smoke check `99` creates a dedicated pane with two tabs on each side, exercises complete next and previous cycles, empties side A, and proves the close command both flashes and reveals side B. Checks `10` and `15` remain the neighboring close-pane and explicit side-flip regression surfaces.
