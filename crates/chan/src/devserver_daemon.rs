@@ -269,7 +269,7 @@ fn spawn_daemon_child(
     tunnel: Option<chan_server::DevserverTunnel>,
     log_path: &Path,
 ) -> Result<Child> {
-    let exe = crate::resolve_relaunchable_exe();
+    let exe = crate::resolve_relaunchable_exe()?;
     let (stdout, stderr) = open_daemon_log(log_path)?;
     let mut cmd = Command::new(&exe);
     cmd.arg("__devserver-daemon")
