@@ -50,8 +50,9 @@ SIDE EFFECTS:
 
 CAUTIONS:
   After 2 seconds with no reply it prints a waiting notice on stderr
-  (a browser may be showing a clipboard permission prompt) and keeps
-  waiting; the server gives up at 30 seconds and the CLI exits 124.
+  (the window may be waiting on a clipboard permission prompt, or on
+  the viewing machine's clipboard owner) and keeps waiting; the server
+  gives up at 30 seconds and the CLI exits 124.
   Payloads are capped at 32 MB. Empty stdin, an over-cap payload,
   unsniffable bytes, and a forced --mime text/* over non-UTF-8 bytes
   all fail with exit 1.
@@ -520,9 +521,11 @@ CAUTIONS:
   escape sequences. Redirect to a file, or pipe through a sanitizer.
   After 2 seconds with no reply the CLI prints a waiting notice; a
   browser that needs a user gesture raises a paste card in the window
-  whose [Paste] button carries the click the read wants. An
-  unanswered request ends at the server's 30-second bound and the CLI
-  exits 124. Payloads are capped at 32 MB.
+  whose [Paste] button carries the click the read wants, and the
+  desktop's native read can itself be waiting on the viewing
+  machine's clipboard owner. An unanswered request ends at the
+  server's 30-second bound and the CLI exits 124. Payloads are capped
+  at 32 MB.
 
 CAVEATS:
   --text, --html and --image are mutually exclusive. A forced

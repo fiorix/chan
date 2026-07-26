@@ -2469,9 +2469,9 @@ fn export_reply_response(payload: &serde_json::Value) -> ControlResponse {
 }
 
 /// How long a `cs copy` / `cs paste` round-trip waits for the SPA's reply.
-/// Longer than the pane query's 5s because a plain browser may raise a
-/// clipboard permission prompt the user has to click before the read/write
-/// resolves; the desktop's native path answers instantly.
+/// Longer than the pane query's 5s because the reply can wait on a person: a
+/// plain browser may raise a clipboard permission prompt to click, and the
+/// desktop's native backend may itself be waiting on the OS clipboard owner.
 const CLIPBOARD_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The shared `cs copy` / `cs paste` round-trip: mint a request id, push the
@@ -2481,9 +2481,10 @@ const CLIPBOARD_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// `Err` arm carries a ready-made [`ControlResponse`] for the failure paths
 /// (send failed, cancelled, or timed out) so the handlers just `?`-style
 /// early-return it. An elapsed reply window answers the typed
-/// [`ControlResponse::Timeout`] (the CLI maps it to exit 124), because the
-/// usual cause is a browser paste-permission prompt nobody clicked - the
-/// message says so instead of implying the window is gone.
+/// [`ControlResponse::Timeout`] (the CLI maps it to exit 124). The message
+/// names both stalls that produce it - the native clipboard backend and an
+/// unanswered browser permission prompt - instead of implying the window is
+/// gone or that a permission is the only possible cause.
 async fn clipboard_round_trip<F>(
     window_id: &str,
     make_command: F,
@@ -2512,9 +2513,9 @@ where
             window_bus.cancel(&request_id);
             Err(ControlResponse::Timeout {
                 message: format!(
-                    "no clipboard reply from the window within {}s; the browser may be \
-                     waiting on a paste-permission prompt - click it or grant clipboard \
-                     permission, then retry",
+                    "no clipboard reply from the window within {}s; the native clipboard \
+                     backend or the browser's clipboard permission may be stalled - focus \
+                     the Chan window and retry",
                     CLIPBOARD_REPLY_TIMEOUT.as_secs()
                 ),
             })
@@ -3870,8 +3871,8 @@ mod tests {
     async fn clipboard_round_trip_elapses_to_the_typed_timeout() {
         // No SPA ever replies: the paused clock auto-advances past the 30s
         // reply window and the round-trip answers the typed Timeout (the CLI
-        // maps it to exit 124), with the paste-permission hint - not the
-        // generic Error a disconnected window would get.
+        // maps it to exit 124), naming both stall causes - not the generic
+        // Error a disconnected window would get.
         let (events_tx, _rx) = broadcast::channel(4);
         let window_bus = Arc::new(crate::window_bus::WindowBus::new());
         let resp =
@@ -3880,7 +3881,11 @@ mod tests {
             ControlResponse::Timeout { message } => {
                 assert!(message.contains("within 30s"), "unexpected: {message}");
                 assert!(
-                    message.contains("paste-permission prompt"),
+                    message.contains("native clipboard backend"),
+                    "unexpected: {message}"
+                );
+                assert!(
+                    message.contains("clipboard permission may be stalled"),
                     "unexpected: {message}"
                 );
             }

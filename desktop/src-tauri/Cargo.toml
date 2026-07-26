@@ -31,7 +31,13 @@ dirs = { workspace = true }
 # Native clipboard for the terminal's right-click "Paste" (read_clipboard_text)
 # and the `cs copy` / `cs paste` bridge, bypassing WKWebView's DOM-paste "Paste"
 # button. `image-data` adds get_image/set_image (RGBA) for the image clipboard.
-arboard = { workspace = true, features = ["image-data"] }
+# `wayland-data-control` adds the wlr data-control backend, which arboard picks
+# when `WAYLAND_DISPLAY` is set and the compositor exposes the protocol; without
+# it a Wayland session is served through XWayland's X11 selection, where probing
+# a target the owner never answers stalls for seconds. X11 stays the fallback
+# (the dep is target-gated to non-macOS unix, so the feature is inert
+# elsewhere).
+arboard = { workspace = true, features = ["image-data", "wayland-data-control"] }
 # PNG codec for the image clipboard: decode the PNG the SPA sends into arboard's
 # RGBA ImageData on `cs copy`, and encode arboard's RGBA back to PNG on `cs paste`.
 image = { workspace = true, features = ["png"] }

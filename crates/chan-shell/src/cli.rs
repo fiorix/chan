@@ -1740,16 +1740,17 @@ fn render_pane_layout_markdown(raw: &str) -> Result<String> {
 }
 
 /// How long a clipboard round-trip stays silent before `cs` prints the
-/// waiting notice. A plain browser can park the read on a paste-permission
-/// prompt the user has to click; without a notice the CLI looks wedged for
-/// the whole 30s server-side reply bound.
+/// waiting notice. The window may be showing a Paste request card that nobody
+/// has clicked yet; without a notice the CLI looks wedged for the whole 30s
+/// server-side reply bound.
 const CLIPBOARD_WAIT_NOTICE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Round-trip a clipboard control request, printing ONE stderr notice if no
 /// reply arrived within [`CLIPBOARD_WAIT_NOTICE_DELAY`], then keep waiting
-/// (the server bounds the whole trip at 30s). The notice names the likely
-/// cause - a browser paste prompt in the window - so a blocking `cs paste` /
-/// `cs copy` is self-explaining instead of silent.
+/// (the server bounds the whole trip at 30s). The notice points at the window,
+/// which is where the answer comes from on every path (a Paste request card,
+/// a browser permission prompt, or the native clipboard backend), so a
+/// blocking `cs paste` / `cs copy` is self-explaining instead of silent.
 async fn send_clipboard_request(
     socket: &std::path::Path,
     request: ControlRequest,
@@ -1760,8 +1761,8 @@ async fn send_clipboard_request(
         Ok(result) => result,
         Err(_still_waiting) => {
             eprintln!(
-                "waiting for the window's clipboard (a browser may be showing a paste \
-                 prompt; Ctrl-C to cancel)"
+                "waiting for the window's clipboard (check the Chan window for a Paste \
+                 request; Ctrl-C to cancel)"
             );
             round_trip.await
         }
