@@ -13,6 +13,8 @@
 #       --from-literal=PROFILE_AUTH_TOKEN=$(openssl rand -hex 32) \
 #       --from-literal=PROFILE_ADMIN_TOKEN=$(openssl rand -hex 32) \
 #       --from-literal=IDENTITY_INTERNAL_TOKEN=$(openssl rand -hex 32) \
+#       --from-literal=IDENTITY_SESSION_INTERNAL_TOKEN=$(openssl rand -hex 32) \
+#       --from-literal=IDENTITY_ACCOUNT_ADMIN_TOKEN=$(openssl rand -hex 32) \
 #       --from-literal=DEVSERVER_ADMISSION_SIGNING_KEY=<base64url-key> \
 #       --from-literal=DEVSERVER_ADMISSION_VERIFYING_KEYS=<controller-base64url-key-ring> \
 #       --from-literal=DEVSERVER_OPERATOR_ADMIN_TOKENS=$(openssl rand -hex 32) \
@@ -108,6 +110,8 @@ spec:
         - { name: DEVSERVER_POLICY_REQUIRED, value: "false" }
         - name: IDENTITY_INTERNAL_TOKEN
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: IDENTITY_INTERNAL_TOKEN } }
+        - name: IDENTITY_SESSION_INTERNAL_TOKEN
+          valueFrom: { secretKeyRef: { name: gateway-secrets, key: IDENTITY_SESSION_INTERNAL_TOKEN } }
         - name: DEVSERVER_ADMISSION_SIGNING_KEY
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: DEVSERVER_ADMISSION_SIGNING_KEY } }
         - name: DEVSERVER_ADMISSION_VERIFYING_KEYS
@@ -116,6 +120,8 @@ spec:
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: DEVSERVER_ENTRY_SIGNING_KEY } }
         - name: IDENTITY_ADMIN_TOKEN
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: IDENTITY_ADMIN_TOKEN } }
+        - name: IDENTITY_ACCOUNT_ADMIN_TOKEN
+          valueFrom: { secretKeyRef: { name: gateway-secrets, key: IDENTITY_ACCOUNT_ADMIN_TOKEN } }
         - name: DEVSERVER_IDENTITY_ADMIN_TOKEN
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: DEVSERVER_IDENTITY_ADMIN_TOKEN } }
         - name: GITHUB_CLIENT_ID

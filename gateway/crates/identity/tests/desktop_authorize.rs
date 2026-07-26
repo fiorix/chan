@@ -130,7 +130,9 @@ impl TestApp {
             cookie_secure: true,
             profile_client,
             internal_auth_token: "test-internal".to_string(),
+            session_internal_auth_token: "test-session-internal".to_string(),
             identity_admin_token: String::new(),
+            account_admin_token: String::new(),
             workspace_admin: gateway_common::devserver_control_client::DevserverControlClient::new(
                 "http://127.0.0.1:7002".parse().unwrap(),
                 "test-identity-admin-token".into(),

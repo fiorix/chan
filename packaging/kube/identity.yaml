@@ -60,6 +60,8 @@ spec:
             - { name: DEVSERVER_POLICY_REQUIRED, value: "false" }
             - name: IDENTITY_INTERNAL_TOKEN
               valueFrom: { secretKeyRef: { name: chan-gateway-identity, key: IDENTITY_INTERNAL_TOKEN } }
+            - name: IDENTITY_SESSION_INTERNAL_TOKEN
+              valueFrom: { secretKeyRef: { name: chan-gateway-identity, key: IDENTITY_SESSION_INTERNAL_TOKEN } }
             - name: DEVSERVER_ADMISSION_SIGNING_KEY
               valueFrom: { secretKeyRef: { name: chan-gateway-identity, key: DEVSERVER_ADMISSION_SIGNING_KEY } }
             - name: DEVSERVER_ADMISSION_VERIFYING_KEYS
@@ -68,6 +70,8 @@ spec:
               valueFrom: { secretKeyRef: { name: chan-gateway-identity, key: DEVSERVER_ENTRY_SIGNING_KEY } }
             - name: IDENTITY_ADMIN_TOKEN
               valueFrom: { secretKeyRef: { name: chan-gateway-identity, key: IDENTITY_ADMIN_TOKEN } }
+            - name: IDENTITY_ACCOUNT_ADMIN_TOKEN
+              valueFrom: { secretKeyRef: { name: chan-gateway-identity, key: IDENTITY_ACCOUNT_ADMIN_TOKEN } }
             - name: DEVSERVER_IDENTITY_ADMIN_TOKEN
               valueFrom: { secretKeyRef: { name: chan-gateway-identity, key: DEVSERVER_IDENTITY_ADMIN_TOKEN } }
             - name: GITHUB_CLIENT_ID

@@ -111,7 +111,9 @@ impl TestApp {
             cookie_secure: true,
             profile_client,
             internal_auth_token: "test-internal".to_string(),
+            session_internal_auth_token: "test-session-internal".to_string(),
             identity_admin_token: String::new(),
+            account_admin_token: String::new(),
             // Same mock server backs the proxy-admin client; its
             // /admin/v1/* paths don't collide with profile's /v1/*.
             workspace_admin: DevserverControlClient::new(

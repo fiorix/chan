@@ -177,10 +177,9 @@ pub fn routers(
         session_store: store,
     };
 
-    // /internal/* is gated by IDENTITY_INTERNAL_TOKEN (distinct from
-    // PROFILE_AUTH_TOKEN; see internal_auth). Kept on its own
-    // sub-router so the session layer doesn't try to load a cookie
-    // session for callers that don't have one.
+    // PAT validation and OAuth-session lookup use separate internal
+    // credentials. Each route stays on a sub-router so the session layer
+    // does not load a caller cookie implicitly.
     //
     // No per-IP rate limit here. The only caller is devserver-proxy,
     // so a governor at this hop sees one peer IP regardless of how
@@ -190,16 +189,19 @@ pub fn routers(
     // primary PAT brute-force gate sits in devserver-proxy, keyed on
     // a hash of the candidate token; `token_throttle` inside the
     // validate handler is its defense-in-depth twin.
-    let internal = Router::new()
+    let validation_internal = Router::new()
         .route("/internal/v1/tokens/validate", post(validate_token))
-        .route("/internal/v1/sessions/whoami", post(session_whoami))
         .route_layer(middleware::from_fn_with_state(state.clone(), internal_auth));
+    let session_internal = Router::new()
+        .route("/internal/v1/sessions/whoami", post(session_whoami))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            session_internal_auth,
+        ));
 
-    // /admin/v1/* is the operator surface for chan-gateway-admin,
-    // gated by IDENTITY_ADMIN_TOKEN (empty = the routes answer 404 as
-    // if absent; see admin_auth). Same sub-router shape as /internal
-    // for the same session-layer reason.
-    let admin = Router::new()
+    // Operator-only routes accept IDENTITY_ADMIN_TOKEN. Account composite
+    // routes accept either that operator token or IDENTITY_ACCOUNT_ADMIN_TOKEN.
+    let operator_admin = Router::new()
         .route("/admin/v1/tokens", post(admin_tokens_create))
         .route("/admin/v1/sessions", get(admin_list_oauth_sessions))
         .route(
@@ -214,6 +216,11 @@ pub fn routers(
             "/admin/v1/sessions/overview",
             get(admin_oauth_session_overview),
         )
+        .route("/admin/v1/fleet", get(admin_get_fleet))
+        .route("/admin/v1/fleet/pause", post(admin_pause_fleet))
+        .route("/admin/v1/fleet/resume", post(admin_resume_fleet))
+        .route_layer(middleware::from_fn_with_state(state.clone(), admin_auth));
+    let account_admin = Router::new()
         .route(
             "/admin/v1/users/{user_id}/access/revoke",
             post(admin_revoke_user_access),
@@ -226,13 +233,15 @@ pub fn routers(
             "/admin/v1/users/{user_id}/devserver-policy",
             get(admin_get_devserver_policy).put(admin_put_devserver_policy),
         )
-        .route("/admin/v1/fleet", get(admin_get_fleet))
-        .route("/admin/v1/fleet/pause", post(admin_pause_fleet))
-        .route("/admin/v1/fleet/resume", post(admin_resume_fleet))
-        .route_layer(middleware::from_fn_with_state(state.clone(), admin_auth));
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            account_admin_auth,
+        ));
 
-    let internal = internal
-        .merge(admin)
+    let internal = validation_internal
+        .merge(session_internal)
+        .merge(operator_admin)
+        .merge(account_admin)
         .with_state(state.clone())
         .layer(TraceLayer::new_for_http());
 
@@ -2082,6 +2091,22 @@ async fn internal_auth(
     }
 }
 
+async fn session_internal_auth(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: Next,
+) -> std::result::Result<Response, Error> {
+    let expected = &state.cfg.session_internal_auth_token;
+    if expected.is_empty() {
+        return Err(Error::NotFound);
+    }
+    match bearer_token(&headers) {
+        Some(token) if ct_eq(token, expected) => Ok(next.run(request).await),
+        _ => Err(Error::Unauthorized),
+    }
+}
+
 /// Gate for the /admin/v1/* operator surface. An empty
 /// IDENTITY_ADMIN_TOKEN disables the surface outright: 404, exactly
 /// what an unknown route answers, so a probe cannot tell a disabled
@@ -2105,6 +2130,33 @@ async fn admin_auth(
         Some(t) if ct_eq(t, expected) => Ok(next.run(request).await),
         _ => Err(Error::Unauthorized),
     }
+}
+
+async fn account_admin_auth(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: Next,
+) -> std::result::Result<Response, Error> {
+    let operator = &state.cfg.identity_admin_token;
+    let account = &state.cfg.account_admin_token;
+    if operator.is_empty() && account.is_empty() {
+        return Err(Error::NotFound);
+    }
+    let authorized = bearer_token(&headers)
+        .map(|token| {
+            configured_token_matches(token, operator) | configured_token_matches(token, account)
+        })
+        .unwrap_or(false);
+    if authorized {
+        Ok(next.run(request).await)
+    } else {
+        Err(Error::Unauthorized)
+    }
+}
+
+fn configured_token_matches(provided: &str, expected: &str) -> bool {
+    !expected.is_empty() & ct_eq(provided, expected)
 }
 
 #[derive(Deserialize)]

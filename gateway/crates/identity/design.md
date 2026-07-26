@@ -18,8 +18,8 @@ axum HTTP server with four routing surfaces:
 
 1. `/auth/*`: pre-session OAuth flow. Sets a transient session key (`pending_oauth`) carrying CSRF state and the PKCE verifier; the callback consumes it and either upgrades the session to authenticated (`user_id`) or fails.
 2. `/api/*`: session-gated JSON API for the embedded SPA. Covers `me`, profile management, PAT lifecycle, the workspace list, and the devserver-gate mint endpoint.
-3. `/internal/v1/*`: `IDENTITY_INTERNAL_TOKEN`-gated PAT validation and OAuth-session `whoami`. This listener never loads caller cookies implicitly.
-4. `/admin/v1/*`: `IDENTITY_ADMIN_TOKEN`-gated OAuth-session inventory and product-control composites. An empty token makes the tree indistinguishable from an absent route.
+3. `/internal/v1/*`: PAT validation uses `IDENTITY_INTERNAL_TOKEN`; OAuth-session `whoami` uses `IDENTITY_SESSION_INTERNAL_TOKEN`. This listener never loads caller cookies implicitly.
+4. `/admin/v1/*`: Operator routes use `IDENTITY_ADMIN_TOKEN`; access revoke, profile delete, and per-user devserver policy additionally accept `IDENTITY_ACCOUNT_ADMIN_TOKEN`.
 
 Static SPA assets are baked in at build time via `rust_embed` and served by `gateway_common::static_files::serve`. Anything not matched by an explicit route falls through to the static handler; paths without an extension serve `index.html` (SPA fallback).
 
@@ -282,9 +282,9 @@ Additional username guards:
 
 Identity alone holds `DEVSERVER_ENTRY_SIGNING_KEY`; proxy nodes receive only the matching `DEVSERVER_ENTRY_VERIFYING_KEYS` public-key ring. Identity signs a 30-second, single-use entry credential after verifying the controller's admission lease and profile authorization. The browser submits it only in the body of `POST /_chan/entry`. The proxy consumes its `jti` and replaces it with an opaque, proxy-local session cookie capped at one hour.
 
-### IDENTITY_INTERNAL_TOKEN is required and distinct
+### Identity bearer scopes are disjoint
 
-The bearer devserver-proxy presents on `/internal/v1/tokens/validate` is `IDENTITY_INTERNAL_TOKEN`. It is required; there is no fallback to `PROFILE_AUTH_TOKEN`. Rotating one bearer never rotates another.
+The bearer devserver-proxy presents on `/internal/v1/tokens/validate` is `IDENTITY_INTERNAL_TOKEN`; the account session lookup presents `IDENTITY_SESSION_INTERNAL_TOKEN`; operators present `IDENTITY_ADMIN_TOKEN`; and the account composite caller presents `IDENTITY_ACCOUNT_ADMIN_TOKEN`. Validation is required. Each narrow token is optional and an empty value disables that scope with a not-found posture when no operator credential also authorizes the route. Every configured value must be pairwise distinct or identity refuses startup. Wrong-scope and unknown bearers share the same authorization failure shape.
 
 ### PAT validate runs its own throttle
 

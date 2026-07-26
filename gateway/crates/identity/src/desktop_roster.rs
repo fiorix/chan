@@ -380,7 +380,9 @@ mod tests {
             )
             .unwrap(),
             internal_auth_token: "x".into(),
+            session_internal_auth_token: String::new(),
             identity_admin_token: String::new(),
+            account_admin_token: String::new(),
             workspace_admin: gateway_common::devserver_control_client::DevserverControlClient::new(
                 "http://127.0.0.1:7002".parse().unwrap(),
                 "test-identity-admin-token".into(),

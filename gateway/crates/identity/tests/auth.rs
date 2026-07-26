@@ -44,6 +44,10 @@ use identity::profile_client::ProfileClient;
 use identity::providers::github::{GitHubEndpoints, GitHubProvider};
 
 const PROFILE_TOKEN: &str = "test-profile-token";
+const VALIDATION_INTERNAL_TOKEN: &str = "test-validation-internal";
+const SESSION_INTERNAL_TOKEN: &str = "test-session-internal";
+const OPERATOR_ADMIN_TOKEN: &str = "test-identity-admin";
+const ACCOUNT_ADMIN_TOKEN: &str = "test-account-admin";
 
 struct TestApp {
     router: Router,
@@ -56,6 +60,19 @@ struct TestApp {
 
 impl TestApp {
     async fn new() -> Self {
+        Self::with_identity_tokens(
+            SESSION_INTERNAL_TOKEN,
+            OPERATOR_ADMIN_TOKEN,
+            ACCOUNT_ADMIN_TOKEN,
+        )
+        .await
+    }
+
+    async fn with_identity_tokens(
+        session_internal_auth_token: &str,
+        identity_admin_token: &str,
+        account_admin_token: &str,
+    ) -> Self {
         let url = std::env::var("TEST_DATABASE_URL")
             .expect("TEST_DATABASE_URL must be set; e.g. postgres://localhost/chan_gateway_test");
         // Reap leaked connections from prior test-process runs and
@@ -130,8 +147,10 @@ impl TestApp {
             database_url: url.clone(),
             cookie_secure: true,
             profile_client,
-            internal_auth_token: "test-internal".to_string(),
-            identity_admin_token: "test-identity-admin".to_string(),
+            internal_auth_token: VALIDATION_INTERNAL_TOKEN.to_string(),
+            session_internal_auth_token: session_internal_auth_token.to_string(),
+            identity_admin_token: identity_admin_token.to_string(),
+            account_admin_token: account_admin_token.to_string(),
             // Point the proxy-admin client at the same mock server; its
             // /admin/v1/* paths don't collide with profile's /v1/users/*.
             // Tests that need a live devserver mock the tunnel list (see
@@ -302,7 +321,7 @@ async fn assert_whoami_unauthorized(app: &TestApp, session: &str) {
         &app.router,
         Method::POST,
         "/internal/v1/sessions/whoami",
-        "test-internal",
+        SESSION_INTERNAL_TOKEN,
         Some(json!({"session": session})),
     )
     .await;
@@ -711,7 +730,7 @@ async fn indexed_oauth_session_whoami_inventory_and_exact_revoke_converge() {
         &app.router,
         Method::POST,
         "/internal/v1/sessions/whoami",
-        "test-internal",
+        SESSION_INTERNAL_TOKEN,
         Some(json!({"session": raw_session})),
     )
     .await;
@@ -723,7 +742,7 @@ async fn indexed_oauth_session_whoami_inventory_and_exact_revoke_converge() {
         &app.router,
         Method::GET,
         "/admin/v1/sessions",
-        "test-identity-admin",
+        OPERATOR_ADMIN_TOKEN,
         None,
     )
     .await;
@@ -739,7 +758,7 @@ async fn indexed_oauth_session_whoami_inventory_and_exact_revoke_converge() {
         &app.router,
         Method::POST,
         &format!("/admin/v1/sessions/{admin_session_id}/revoke"),
-        "test-identity-admin",
+        OPERATOR_ADMIN_TOKEN,
         None,
     )
     .await;
@@ -749,7 +768,7 @@ async fn indexed_oauth_session_whoami_inventory_and_exact_revoke_converge() {
         &app.router,
         Method::POST,
         &format!("/admin/v1/sessions/{admin_session_id}/revoke"),
-        "test-identity-admin",
+        OPERATOR_ADMIN_TOKEN,
         None,
     )
     .await;
@@ -759,7 +778,7 @@ async fn indexed_oauth_session_whoami_inventory_and_exact_revoke_converge() {
         &app.router,
         Method::POST,
         "/internal/v1/sessions/whoami",
-        "test-internal",
+        SESSION_INTERNAL_TOKEN,
         Some(json!({"session": raw_session})),
     )
     .await;
@@ -769,7 +788,7 @@ async fn indexed_oauth_session_whoami_inventory_and_exact_revoke_converge() {
         &app.router,
         Method::POST,
         "/internal/v1/sessions/whoami",
-        "test-internal",
+        SESSION_INTERNAL_TOKEN,
         Some(json!({"session": "malformed"})),
     )
     .await;
@@ -821,6 +840,118 @@ async fn whoami_refusal_shape_is_uniform() {
 }
 
 #[tokio::test]
+async fn identity_credentials_are_route_scoped_and_optional_scopes_hide() {
+    let app = TestApp::new().await;
+
+    let (status, _) = authenticated_json(
+        &app.router,
+        Method::POST,
+        "/internal/v1/sessions/whoami",
+        SESSION_INTERNAL_TOKEN,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    for token in [
+        VALIDATION_INTERNAL_TOKEN,
+        OPERATOR_ADMIN_TOKEN,
+        ACCOUNT_ADMIN_TOKEN,
+    ] {
+        let (status, _) = authenticated_json(
+            &app.router,
+            Method::POST,
+            "/internal/v1/sessions/whoami",
+            token,
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{token}");
+    }
+
+    let (status, _) = authenticated_json(
+        &app.router,
+        Method::POST,
+        "/internal/v1/tokens/validate",
+        VALIDATION_INTERNAL_TOKEN,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    for token in [
+        SESSION_INTERNAL_TOKEN,
+        OPERATOR_ADMIN_TOKEN,
+        ACCOUNT_ADMIN_TOKEN,
+    ] {
+        let (status, _) = authenticated_json(
+            &app.router,
+            Method::POST,
+            "/internal/v1/tokens/validate",
+            token,
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{token}");
+    }
+
+    let user_id = fake_user_id();
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/admin/users/{user_id}/devserver-policy")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "user_id": user_id,
+            "enabled": true,
+            "max_connected_devservers": 3,
+            "updated_at": chrono::Utc::now(),
+        })))
+        .expect(1)
+        .mount(&app.profile)
+        .await;
+    let (status, body) = authenticated_json(
+        &app.router,
+        Method::GET,
+        &format!("/admin/v1/users/{user_id}/devserver-policy"),
+        ACCOUNT_ADMIN_TOKEN,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    for (method, path) in [
+        (Method::POST, "/admin/v1/tokens"),
+        (Method::GET, "/admin/v1/sessions"),
+        (Method::GET, "/admin/v1/fleet"),
+    ] {
+        let (status, _) =
+            authenticated_json(&app.router, method, path, ACCOUNT_ADMIN_TOKEN, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+    }
+    let (status, _) = authenticated_json(
+        &app.router,
+        Method::GET,
+        &format!("/admin/v1/users/{user_id}/devserver-policy"),
+        SESSION_INTERNAL_TOKEN,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    app.profile.verify().await;
+    app.cleanup().await;
+
+    let disabled = TestApp::with_identity_tokens("", "", "").await;
+    for (method, path) in [
+        (Method::POST, "/internal/v1/sessions/whoami"),
+        (Method::GET, "/admin/v1/sessions"),
+        (
+            Method::GET,
+            "/admin/v1/users/00000000-0000-0000-0000-000000000001/devserver-policy",
+        ),
+    ] {
+        let (status, _) = authenticated_json(&disabled.router, method, path, "unused", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    }
+    disabled.cleanup().await;
+}
+
+#[tokio::test]
 async fn composite_policy_and_fleet_retries_converge_after_partial_drain() {
     let app = TestApp::new().await;
     let user_id = fake_user_id();
@@ -830,7 +961,7 @@ async fn composite_policy_and_fleet_retries_converge_after_partial_drain() {
         &app.router,
         Method::PUT,
         &format!("/admin/v1/users/{user_id}/devserver-policy"),
-        "test-identity-admin",
+        ACCOUNT_ADMIN_TOKEN,
         Some(json!({
             "enabled": true,
             "max_connected_devservers": 1,
@@ -849,7 +980,7 @@ async fn composite_policy_and_fleet_retries_converge_after_partial_drain() {
         &app.router,
         Method::PUT,
         &format!("/admin/v1/users/{user_id}/devserver-policy"),
-        "test-identity-admin",
+        ACCOUNT_ADMIN_TOKEN,
         Some(json!({
             "enabled": true,
             "max_connected_devservers": 1,
@@ -868,7 +999,7 @@ async fn composite_policy_and_fleet_retries_converge_after_partial_drain() {
         &app.router,
         Method::POST,
         "/admin/v1/fleet/pause",
-        "test-identity-admin",
+        OPERATOR_ADMIN_TOKEN,
         None,
     )
     .await;
@@ -884,7 +1015,7 @@ async fn composite_policy_and_fleet_retries_converge_after_partial_drain() {
         &app.router,
         Method::POST,
         "/admin/v1/fleet/pause",
-        "test-identity-admin",
+        OPERATOR_ADMIN_TOKEN,
         None,
     )
     .await;
@@ -907,7 +1038,7 @@ async fn composite_access_revoke_and_delete_retry_to_completion() {
         &app.router,
         Method::POST,
         &format!("/admin/v1/users/{access_user_id}/access/revoke"),
-        "test-identity-admin",
+        ACCOUNT_ADMIN_TOKEN,
         None,
     )
     .await;
@@ -923,7 +1054,7 @@ async fn composite_access_revoke_and_delete_retry_to_completion() {
         &app.router,
         Method::POST,
         &format!("/admin/v1/users/{access_user_id}/access/revoke"),
-        "test-identity-admin",
+        ACCOUNT_ADMIN_TOKEN,
         None,
     )
     .await;
@@ -964,7 +1095,7 @@ async fn composite_access_revoke_and_delete_retry_to_completion() {
         &app.router,
         Method::DELETE,
         &format!("/admin/v1/users/{delete_user_id}"),
-        "test-identity-admin",
+        ACCOUNT_ADMIN_TOKEN,
         None,
     )
     .await;
@@ -1004,7 +1135,7 @@ async fn composite_access_revoke_and_delete_retry_to_completion() {
         &app.router,
         Method::DELETE,
         &format!("/admin/v1/users/{delete_user_id}"),
-        "test-identity-admin",
+        ACCOUNT_ADMIN_TOKEN,
         None,
     )
     .await;
@@ -1016,7 +1147,7 @@ async fn composite_access_revoke_and_delete_retry_to_completion() {
         &app.router,
         Method::DELETE,
         &format!("/admin/v1/users/{delete_user_id}"),
-        "test-identity-admin",
+        ACCOUNT_ADMIN_TOKEN,
         None,
     )
     .await;
