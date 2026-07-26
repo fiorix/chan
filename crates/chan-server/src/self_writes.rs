@@ -137,7 +137,13 @@ impl SelfWrites {
     /// lives in that same coordinate system since the watcher's
     /// `WatchEvent.path` is also workspace-relative.
     pub fn note(&self, rel: &str) {
-        self.reserve(rel);
+        self.note_at(rel, Instant::now());
+    }
+
+    /// `note` against an explicit clock reading, so tests drive
+    /// synthetic times instead of sleeping.
+    fn note_at(&self, rel: &str, now: Instant) {
+        self.reserve_at(rel, now);
     }
 
     /// Reserve after the caller has completed the canonical strict
@@ -149,7 +155,10 @@ impl SelfWrites {
     }
 
     fn reserve(&self, rel: &str) -> SelfWriteReservation {
-        let now = Instant::now();
+        self.reserve_at(rel, Instant::now())
+    }
+
+    fn reserve_at(&self, rel: &str, now: Instant) -> SelfWriteReservation {
         let mut q = self.inner.lock().expect("self-writes queue poisoned");
         evict_expired(&mut q, now, self.window);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -172,7 +181,12 @@ impl SelfWrites {
     /// notify's per-write event burst (often 2-3 events on macOS)
     /// is suppressed in full.
     pub fn should_suppress(&self, rel: &str) -> bool {
-        let now = Instant::now();
+        self.should_suppress_at(rel, Instant::now())
+    }
+
+    /// `should_suppress` against an explicit clock reading, so tests
+    /// drive synthetic times instead of sleeping.
+    fn should_suppress_at(&self, rel: &str, now: Instant) -> bool {
         let mut q = self.inner.lock().expect("self-writes queue poisoned");
         evict_expired(&mut q, now, self.window);
         q.iter().any(|entry| entry.path == rel)
@@ -192,7 +206,6 @@ fn evict_expired(q: &mut VecDeque<SelfWriteEntry>, now: Instant, window: Duratio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread::sleep;
 
     #[test]
     fn unrecorded_path_passes_through() {
@@ -220,18 +233,18 @@ mod tests {
     #[test]
     fn entry_expires_after_window() {
         let sw = SelfWrites::with_window(Duration::from_millis(20));
-        sw.note("notes/foo.md");
-        sleep(Duration::from_millis(40));
-        assert!(!sw.should_suppress("notes/foo.md"));
+        let base = Instant::now();
+        sw.note_at("notes/foo.md", base);
+        assert!(!sw.should_suppress_at("notes/foo.md", base + Duration::from_millis(40)));
     }
 
     #[test]
     fn fresh_note_after_expiry_resuppresses() {
         let sw = SelfWrites::with_window(Duration::from_millis(20));
-        sw.note("notes/foo.md");
-        sleep(Duration::from_millis(40));
-        sw.note("notes/foo.md");
-        assert!(sw.should_suppress("notes/foo.md"));
+        let base = Instant::now();
+        sw.note_at("notes/foo.md", base);
+        sw.note_at("notes/foo.md", base + Duration::from_millis(40));
+        assert!(sw.should_suppress_at("notes/foo.md", base + Duration::from_millis(45)));
     }
 
     #[test]

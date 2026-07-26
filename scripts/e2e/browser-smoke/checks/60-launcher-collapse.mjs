@@ -9,7 +9,7 @@
 // (config side-channel) is decomposed into unit tests + Alex's host smoke.
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -76,6 +76,14 @@ const TOGGLE = "section.machine .machine-actions button.count-badge.machine-togg
 export default {
   name: "launcher-collapse",
   async run(ctx) {
+    // Same launcher-dist precondition as 95-launcher-native-trust: without
+    // it the devserver serves no SPA and the selector wait below times out.
+    const distRoot = join(ctx.repoRoot, "web-launcher", "dist");
+    if (!existsSync(join(distRoot, "index.html"))) {
+      ctx.skip(
+        "launcher dist missing; the devserver has no launcher SPA to serve; run the web build before SMOKE_SKIP_BUILD=1",
+      );
+    }
     const chanHome = mkdtempSync(join(tmpdir(), "chan-launcher-collapse-"));
     const ds = spawnDevserver(ctx.chanBin, chanHome);
     let page = null;

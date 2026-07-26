@@ -226,10 +226,21 @@ function scheduleProgressPersist(): void {
   }, PROGRESS_INTERVAL_MS);
 }
 
+/// Diagnostic tick for the browser smoke's coalescing assertion: one
+/// increment per applied progress render, so the check can bound the
+/// rendered update count against the coalescing window. The app itself
+/// never reads it.
+function noteProgressApplied(): void {
+  if (typeof window === "undefined") return;
+  const w = window as unknown as { __chanTransferApplies?: number };
+  w.__chanTransferApplies = (w.__chanTransferApplies ?? 0) + 1;
+}
+
 function applyProgress(id: string, progress: number | null): void {
   const transfer = find(id);
   if (!transfer || transfer.state !== "active") return;
   transfer.progress = progress;
+  noteProgressApplied();
   lastProgressAt.set(id, Date.now());
   scheduleProgressPersist();
 }

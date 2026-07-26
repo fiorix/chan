@@ -1,7 +1,8 @@
 // Binary transfer acceptance over a real server + headless Chrome:
 // bounded server RSS and early first-byte delivery on a large download,
 // bounded multipart upload, cancelled-upload temp cleanup, and the SPA's
-// visible one-upload FIFO queue with <=10 Hz progress rendering.
+// visible one-upload FIFO queue with progress rendering coalesced far
+// below the upload chunk rate.
 
 import {
   existsSync,
@@ -271,6 +272,30 @@ export default {
         CHAN_CONTROL_SOCKET: ctx.controlSocket,
         CHAN_WINDOW_ID: windowId,
       };
+      // Coalescing probe, installed before any queue upload starts: it
+      // counts raw XHR upload progress events per multipart request (the
+      // producer's chunk rate). The transfers store ticks
+      // window.__chanTransferApplies once per rendered progress update.
+      await page.evaluate(() => {
+        const chunkCounts = [];
+        const originalSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.send = function (...args) {
+          if (args[0] instanceof FormData) {
+            const counter = { count: 0 };
+            chunkCounts.push(counter);
+            this.upload.addEventListener("progress", () => {
+              counter.count += 1;
+            });
+          }
+          return originalSend.apply(this, args);
+        };
+        window.__smokeUploadChunkCounts = {
+          chunkCounts,
+          restore: () => {
+            XMLHttpRequest.prototype.send = originalSend;
+          },
+        };
+      });
       for (const file of pickerFiles) {
         const chooserPromise = page.waitForFileChooser({ timeout: 15_000 });
         await ctx.exec(ctx.chanBin, ["shell", "upload", "."], {
@@ -345,7 +370,7 @@ export default {
         const match = line.match(/\((\d+)%\)/);
         if (match && match[1] !== lastProgress) {
           lastProgress = match[1];
-          progressChanges.push({ atMs: Date.now() - progressStarted, percent: Number(match[1]) });
+          progressChanges.push(Number(match[1]));
         }
         if (Date.now() - progressStarted > 30_000) {
           throw new Error("first queued upload did not finish");
@@ -374,16 +399,16 @@ export default {
       }, thirdFileName);
       await sleep(1500);
 
-      // The first sample may observe a percentage rendered before this loop
-      // started, so its timestamp is not an update timestamp. Measure only
-      // steady-state transitions after that initial observation.
-      const deltas = progressChanges
-        .slice(2)
-        .map((entry, index) => entry.atMs - progressChanges[index + 1].atMs);
-      if (progressChanges.length < 3 || Math.min(...deltas) < 75) {
-        throw new Error(
-          `upload progress was not coalesced to <=10 Hz: ${JSON.stringify(progressChanges)}`,
-        );
+      // The sampled percentages must climb monotonically to a complete
+      // commit; the coalescing ratio itself is probed below, where the
+      // producer runs unthrottled.
+      for (let index = 1; index < progressChanges.length; index += 1) {
+        if (progressChanges[index] < progressChanges[index - 1]) {
+          throw new Error(`upload progress went backwards: ${JSON.stringify(progressChanges)}`);
+        }
+      }
+      if (statSync(join(ctx.workspaceDir, firstFileName)).size !== 4 * MiB) {
+        throw new Error("first queued upload committed a truncated file");
       }
       if (existsSync(join(ctx.workspaceDir, secondFileName))) {
         throw new Error("queued-cancelled upload unexpectedly started");
@@ -393,13 +418,123 @@ export default {
       }
       record("queue-drain-progress", {
         progressChanges,
-        minProgressDeltaMs: Math.min(...deltas),
         firstCommitted: statSync(join(ctx.workspaceDir, firstFileName)).size,
         secondAbsent: true,
         thirdAbsent: true,
       });
+
+      // Coalescing property probe, not a rate: one multi-file upload op
+      // pushes one progress event per file plus one per-file start
+      // report (500+ producer ticks over a few seconds), while the
+      // transfers store may render at most one update per 100 ms
+      // coalescing window. The rendered count is asserted against that
+      // structural cap, not against any wall-clock threshold, so a
+      // loaded host cannot flip the result. A single throttled or raw
+      // loopback upload is a useless probe: the CDP throttler delivers
+      // progress at ~10 Hz per 100 ms tick (the same rate as the
+      // coalescing window) and raw loopback fires a handful of
+      // multi-MiB write events.
+      await cdp.send("Network.emulateNetworkConditions", {
+        offline: false,
+        latency: 0,
+        downloadThroughput: -1,
+        uploadThroughput: -1,
+        connectionType: "none",
+      });
+      const probeStamp = Date.now();
+      const probeFiles = [];
+      for (let index = 0; index < 256; index += 1) {
+        const probeFile = join(pickerDir, `probe-${index}-${probeStamp}.bin`);
+        writeFileSync(probeFile, Buffer.alloc(256 * 1024, (index % 251) + 1));
+        probeFiles.push(probeFile);
+      }
+      const probeChooserPromise = page.waitForFileChooser({ timeout: 15_000 });
+      await ctx.exec(ctx.chanBin, ["shell", "upload", "."], {
+        cwd: ctx.workspaceDir,
+        env,
+      });
+      const probeChooser = await probeChooserPromise;
+      const probeBaseline = await page.evaluate(() => ({
+        applied: window.__chanTransferApplies ?? 0,
+        uploads: window.__smokeUploadChunkCounts?.chunkCounts.length ?? 0,
+      }));
+      await probeChooser.accept(probeFiles);
+      const probePercents = [];
+      let lastProbePercent = null;
+      const lastProbeName = probeFiles.at(-1).split("/").at(-1);
+      const probeStarted = Date.now();
+      while (!existsSync(join(ctx.workspaceDir, lastProbeName))) {
+        const line = await page.evaluate(
+          () =>
+            [...document.querySelectorAll(".tb-line")]
+              .map((element) => element.textContent ?? "")
+              .find((text) => text.includes("256 files")) ?? "",
+        );
+        const match = line.match(/\((\d+)%\)/);
+        if (match && match[1] !== lastProbePercent) {
+          lastProbePercent = match[1];
+          probePercents.push(Number(match[1]));
+        }
+        if (Date.now() - probeStarted > 30_000) {
+          throw new Error("coalescing probe upload did not finish");
+        }
+        await sleep(20);
+      }
+      const probeDurationMs = Date.now() - probeStarted;
+      const probeApplied =
+        (await page.evaluate(() => window.__chanTransferApplies ?? 0)) - probeBaseline.applied;
+      const probeChunks = await page.evaluate((before) => {
+        const counts = window.__smokeUploadChunkCounts?.chunkCounts ?? [];
+        return counts.slice(before).reduce((sum, counter) => sum + counter.count, 0);
+      }, probeBaseline.uploads);
+      for (let index = 1; index < probePercents.length; index += 1) {
+        if (probePercents[index] < probePercents[index - 1]) {
+          throw new Error(`probe progress went backwards: ${JSON.stringify(probePercents)}`);
+        }
+      }
+      if (probeChunks < 100) {
+        throw new Error(
+          `coalescing probe saw only ${probeChunks} progress events; the burst assumption is broken`,
+        );
+      }
+      // The coalescing window is structural: two rendered updates for one
+      // transfer are always at least PROGRESS_INTERVAL_MS apart (the
+      // leading edge requires it and the trailing timer cannot fire
+      // early), so over any window the rendered count stays below
+      // window/100 plus one. Ten ticks of slack absorbs the leading edge
+      // and the measurement bracket, and a slow host only stretches the
+      // window and lowers the count, so load cannot flip the result.
+      // With the coalescing removed every producer tick renders (500+
+      // updates here) and the bound fails several times over. A naive
+      // ratio against the raw event count would be load-fragile: the
+      // event count is fixed at one per file while the rendered count
+      // scales with the wall time the host takes to push them through.
+      if (probeApplied > probeDurationMs / 100 + 10) {
+        throw new Error(
+          `upload progress was not coalesced: ${probeApplied} rendered updates in ${probeDurationMs} ms for ${probeChunks} progress events`,
+        );
+      }
+      const probeNames = new Set(probeFiles.map((file) => file.split("/").at(-1)));
+      const committedProbeFiles = workspaceNames(ctx.workspaceDir).filter((name) =>
+        probeNames.has(name),
+      );
+      if (committedProbeFiles.length !== probeFiles.length) {
+        throw new Error(
+          `coalescing probe committed ${committedProbeFiles.length} of ${probeFiles.length} files`,
+        );
+      }
+      record("coalescing-probe", {
+        probePercents,
+        probeApplied,
+        probeChunks,
+        probeDurationMs,
+        files: committedProbeFiles.length,
+      });
       return evidence;
     } finally {
+      await page
+        .evaluate(() => window.__smokeUploadChunkCounts?.restore?.())
+        .catch(() => {});
       await cdp.send("Network.emulateNetworkConditions", {
         offline: false,
         latency: 0,

@@ -35,4 +35,6 @@ Files under `checks/` run in sorted filename order. The sort is LEXICAL, not num
 - `ctx.assertNoDuplicateBands(bytes)`: fails when the head band of a page also appears on the previous page (pagination duplication). Only meaningful for documents whose content does not repeat itself.
 - `ctx.latencyProxy(latencyMs)`: a TCP delay proxy in front of the server (WebSockets included; CDP network emulation cannot delay them). Returns `{ url, setLatency, close }`; the check drives its own page against `url` and must `close()` the handle.
 
+A check asserts a property, not a rate. A wall-clock threshold with no slack fails on a loaded host. A check whose external precondition is absent calls `ctx.skip`, it does not fail.
+
 Add a new check by dropping a numbered file into `checks/`; nothing else needs editing.
