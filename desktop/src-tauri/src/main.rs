@@ -3756,7 +3756,7 @@ fn platform_os() -> String {
 /// to "" so the SPA just treats it as nothing-to-paste; other failures
 /// surface as an Err the SPA logs before falling back to the web API.
 fn clipboard_read_text() -> Result<String, String> {
-    match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+    match on_clipboard(|c| c.get_text()) {
         Ok(text) => Ok(text),
         Err(arboard::Error::ContentNotAvailable) => Ok(String::new()),
         Err(e) => Err(e.to_string()),
@@ -3769,9 +3769,7 @@ fn clipboard_read_text() -> Result<String, String> {
 /// here through `arboard`. Any failure surfaces as an Err the SPA logs before
 /// falling back to the web API.
 fn clipboard_write_text(text: String) -> Result<(), String> {
-    arboard::Clipboard::new()
-        .and_then(|mut c| c.set_text(text))
-        .map_err(|e| e.to_string())
+    on_clipboard(|c| c.set_text(text)).map_err(|e| e.to_string())
 }
 
 /// Read a PNG image off the OS clipboard for `cs paste` of an image, bypassing
@@ -3780,7 +3778,7 @@ fn clipboard_write_text(text: String) -> Result<(), String> {
 /// image-less clipboard maps to `Ok(None)` so the SPA just tries the next
 /// representation.
 fn clipboard_read_image() -> Result<Option<Vec<u8>>, String> {
-    let image = match arboard::Clipboard::new().and_then(|mut c| c.get_image()) {
+    let image = match on_clipboard(|c| c.get_image()) {
         Ok(image) => image,
         Err(arboard::Error::ContentNotAvailable) => return Ok(None),
         Err(e) => return Err(e.to_string()),
@@ -3829,15 +3827,13 @@ fn clipboard_write_image(bytes: Vec<u8>) -> Result<(), String> {
         height,
         bytes: std::borrow::Cow::Owned(decoded.into_raw()),
     };
-    arboard::Clipboard::new()
-        .and_then(|mut c| c.set_image(image))
-        .map_err(|e| e.to_string())
+    on_clipboard(|c| c.set_image(image)).map_err(|e| e.to_string())
 }
 
 /// Read HTML off the OS clipboard for `cs paste --html`. An HTML-less clipboard
 /// maps to `Ok(None)`. Native arboard read, mirroring [`clipboard_read_text`].
 fn clipboard_read_html() -> Result<Option<String>, String> {
-    match arboard::Clipboard::new().and_then(|mut c| c.get().html()) {
+    match on_clipboard(|c| c.get().html()) {
         Ok(html) => Ok(Some(html)),
         Err(arboard::Error::ContentNotAvailable) => Ok(None),
         Err(e) => Err(e.to_string()),
@@ -3849,16 +3845,82 @@ fn clipboard_read_html() -> Result<Option<String>, String> {
 /// Gmail) keeps the formatting. arboard's HTML setter carries the alt text for
 /// plain-only targets.
 fn clipboard_write_html(html: String, alt_text: String) -> Result<(), String> {
-    arboard::Clipboard::new()
-        .and_then(|mut c| c.set().html(html, Some(alt_text)))
-        .map_err(|e| e.to_string())
+    on_clipboard(|c| c.set().html(html, Some(alt_text))).map_err(|e| e.to_string())
 }
 
-/// Process-wide serialization for the native clipboard off macOS. Each
-/// operation creates, uses, and drops its own `arboard::Clipboard` while
-/// holding this guard: the X11 selection dance and Windows' OLE clipboard both
-/// misbehave when two of them run at once, and the synchronous commands used to
-/// get that mutual exclusion for free from the single invoke thread.
+/// Acquire the OS clipboard and run one operation on it, off Linux: a fresh
+/// handle per operation, which is what every platform did before Linux needed
+/// its own lifetime. macOS's NSPasteboard is a server-side clipboard, so the
+/// handle's lifetime carries no meaning, and on Windows `Clipboard::new()` OPENS
+/// the OLE clipboard, which must be closed promptly or every other app is
+/// locked out of it. Errors stay `arboard::Error` so each command keeps mapping
+/// acquisition and operation failures together, exactly as before.
+#[cfg(not(target_os = "linux"))]
+fn on_clipboard<T>(
+    op: impl FnOnce(&mut arboard::Clipboard) -> Result<T, arboard::Error>,
+) -> Result<T, arboard::Error> {
+    arboard::Clipboard::new().and_then(|mut clipboard| op(&mut clipboard))
+}
+
+/// Acquire the OS clipboard and run one operation on it, on Linux: ONE handle
+/// for the whole process, connected on first use and reused afterwards.
+///
+/// X11 and the wlr data-control protocol serve a selection FROM THE OWNING
+/// CLIENT -- the bytes live in the owner, not in the display server. A handle
+/// created per operation makes chan the owner for microseconds and then drops
+/// it, so a `cs copy` is released before the session's clipboard manager can
+/// take a copy and the paste target still sees the previous contents (arboard
+/// says as much in its own drop-time warning). Keeping the handle alive keeps
+/// chan a real owner, which is what arboard documents as the fix.
+///
+/// Every caller already runs under [`run_clipboard_op`]'s guard, so this lock is
+/// uncontended in practice; it is here to own mutable static state safely, not
+/// to serialize.
+#[cfg(target_os = "linux")]
+fn on_clipboard<T>(
+    op: impl FnOnce(&mut arboard::Clipboard) -> Result<T, arboard::Error>,
+) -> Result<T, arboard::Error> {
+    static CLIPBOARD: OnceLock<Mutex<Option<arboard::Clipboard>>> = OnceLock::new();
+    let mut slot = match CLIPBOARD.get_or_init(|| Mutex::new(None)).lock() {
+        Ok(slot) => slot,
+        // A panic inside an operation leaves the cached handle's state unknown,
+        // so recover the lock but reconnect from scratch.
+        Err(poisoned) => {
+            let mut slot = poisoned.into_inner();
+            *slot = None;
+            slot
+        }
+    };
+    with_cached_clipboard(&mut slot, arboard::Clipboard::new, op)
+}
+
+/// Reuse `slot`'s handle, connecting on first use, and discard it whenever an
+/// operation fails so the next one reconnects: a handle whose display-server
+/// connection died (the X session restarted under us) would otherwise fail every
+/// later operation for the life of the process. Generic over the handle so the
+/// reuse and discard rules are testable without a clipboard server.
+#[cfg(target_os = "linux")]
+fn with_cached_clipboard<C, T, E>(
+    slot: &mut Option<C>,
+    connect: impl FnOnce() -> Result<C, E>,
+    op: impl FnOnce(&mut C) -> Result<T, E>,
+) -> Result<T, E> {
+    let handle = match slot {
+        Some(handle) => handle,
+        None => slot.insert(connect()?),
+    };
+    let result = op(handle);
+    if result.is_err() {
+        *slot = None;
+    }
+    result
+}
+
+/// Process-wide serialization for the native clipboard off macOS: one clipboard
+/// operation at a time while holding this guard. The X11 selection dance and
+/// Windows' OLE clipboard both misbehave when two of them run at once, and the
+/// synchronous commands used to get that mutual exclusion for free from the
+/// single invoke thread.
 #[cfg(not(target_os = "macos"))]
 fn clipboard_serial_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -7145,6 +7207,75 @@ mod tests {
             1,
             "clipboard operations overlapped"
         );
+    }
+
+    /// The Linux clipboard handle is connected once and reused, so chan stays
+    /// the selection owner and a `cs copy` survives long enough for the
+    /// session's clipboard manager to take a copy. A failed operation discards
+    /// the handle, so a connection that died with its X session cannot wedge
+    /// every later operation.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cached_clipboard_reuses_one_handle_and_discards_a_broken_one() {
+        use std::cell::Cell;
+
+        /// Stands in for `arboard::Clipboard`: numbered, so an operation can
+        /// tell whether it was handed the same handle back.
+        struct Handle(u32);
+
+        let connects = Cell::new(0u32);
+        let connect = || {
+            connects.set(connects.get() + 1);
+            Ok::<_, String>(Handle(connects.get()))
+        };
+
+        let mut slot: Option<Handle> = None;
+        let first = with_cached_clipboard(&mut slot, connect, |h| Ok(h.0)).expect("first op");
+        let second = with_cached_clipboard(&mut slot, connect, |h| Ok(h.0)).expect("second op");
+        assert_eq!(
+            (first, second, connects.get()),
+            (1, 1, 1),
+            "the handle is connected once and reused"
+        );
+
+        // The connect closure panics: reaching it at all would disprove reuse.
+        let err = with_cached_clipboard(
+            &mut slot,
+            || panic!("a cached handle must not reconnect"),
+            |_h| Err::<u32, String>("dead connection".into()),
+        )
+        .expect_err("the operation failed");
+        assert_eq!(
+            err, "dead connection",
+            "the operation's error rides through"
+        );
+        assert!(slot.is_none(), "a failed operation discards the handle");
+
+        let third = with_cached_clipboard(&mut slot, connect, |h| Ok(h.0)).expect("third op");
+        assert_eq!(
+            (third, connects.get()),
+            (2, 2),
+            "the next operation reconnects"
+        );
+    }
+
+    /// A failed connect surfaces as the operation's error and caches nothing,
+    /// so a desktop started without a reachable display server retries instead
+    /// of pinning the failure for the life of the process.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cached_clipboard_connect_failure_caches_nothing() {
+        struct Handle;
+
+        let mut slot: Option<Handle> = None;
+        let err = with_cached_clipboard(
+            &mut slot,
+            || Err::<Handle, String>("no display server".into()),
+            |_h| Ok(0u32),
+        )
+        .expect_err("connect failed");
+        assert_eq!(err, "no display server");
+        assert!(slot.is_none(), "a failed connect caches nothing");
     }
 
     /// An operation's own error is the command's error, verbatim: the runner
