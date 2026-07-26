@@ -1,6 +1,6 @@
 # ghostty-web as an alternate terminal backend
 
-Status: INTEGRATED on `v079/integration` for v0.79.0, default off. The optional compatibility boundary is owner-confirmed; release acceptance remains open.
+Status: ACCEPTED on `v079/integration` for v0.79.0 as an optional, default-off backend.
 
 ## What
 
@@ -21,6 +21,5 @@ Browser-smoke check `98` covers the default-off contract, lazy loading, fallback
 
 ## Open owner decisions
 
-- Whether the pre-release pin, four ongoing workarounds, and xterm-only find bar, styled scrollback snapshots, and `openExternalUrl` link routing are acceptable for the optional backend in v0.79.
 - Whether the pin can move to a stable ghostty-web release, and what the upgrade contract is.
 - Whether check `98` belongs in the default browser-smoke run or stays gated, given the suite's existing contention flakiness on the dev host.
