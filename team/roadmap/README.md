@@ -19,15 +19,6 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-### v0.79.0
-
-| item | state | what needs to happen |
-| --- | --- | --- |
-| [desktop-launcher-only-menubar](v0.79.0/desktop-launcher-only-menubar.md) | implemented, not merged | merge branch `desktop-launcher-only-menubar`; verify every retired-menubar chord still fires per window kind and that macOS is unchanged |
-| [ghostty-terminal-backend](v0.79.0/ghostty-terminal-backend.md) | integrated | ships opt-in and never as the default; its narrower feature set is the reason for that shape. Open: whether the pin can move off the ghostty-web pre-release |
-| [gw-ctrl-plane](v0.79.0/gw-ctrl-plane.md) | in progress | gateway product control plane; owned separately |
-| [tab-rotation-across-sides](v0.79.0/tab-rotation-across-sides.md) | registered, not implemented | rotate a pane's tabs across both Hybrid sides, and flip to the populated side when the close shortcut hits an empty one |
-
 ### v0.80.0
 
 | item | state | what needs to happen |
@@ -36,6 +27,16 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [doom-overlay-remote-protocol](v0.80.0/doom-overlay-remote-protocol.md) | registered, not specced | the ask is the remote protocol, which the prototype does not implement; mirror the scene-session shape. Branch `doom-overlay` needs rebasing |
 
 ## Completed
+
+### v0.79.0
+
+Shipped 2026-07-26; see [release-v0.79.0](../release/release-v0.79.0.md). Closed items in [`done/`](done/):
+
+- [gw-ctrl-plane](done/gw-ctrl-plane.md) - the gateway is administrable as a product boundary without database access: explicit user access states, a durable per-user connected-devserver limit across the proxy fleet, session and tunnel inspection and revocation, an idempotent admin API for an external account service, and account credentials separated from database roles.
+- [desktop-launcher-only-menubar](done/desktop-launcher-only-menubar.md) - off macOS only the Chan Launcher window carries a native menubar; the chords the retired per-window-kind bars owned move into the per-window key bridge, and macOS routing is unchanged.
+- [ghostty-terminal-backend](done/ghostty-terminal-backend.md) - ghostty-web available as an opt-in terminal backend behind `terminal.ghostty`, default off and never the default.
+- [tab-rotation-across-sides](done/tab-rotation-across-sides.md) - next and previous rotate a pane's whole tab set across both Hybrid sides, and the close shortcut on an empty visible side flips to the populated side rather than only flashing the toggle.
+- [wall-clock-test-flakiness](done/wall-clock-test-flakiness.md) - the self-write tests take a caller-supplied instant instead of reading the wall clock, browser check 62 asserts a load-monotone structural cap instead of a rate ceiling, and check 60 skips on an absent precondition instead of failing.
 
 ### v0.78.0
 

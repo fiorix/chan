@@ -1,6 +1,6 @@
 # ghostty-web as an alternate terminal backend
 
-Status: INTEGRATED on `v079/integration` for v0.79.0. Owner acceptance remains open.
+> Status: shipped in [v0.79.0](../../release/release-v0.79.0.md): ghostty-web is available as an opt-in terminal backend behind `terminal.ghostty`, default off, never the default. Its narrower feature set is the reason for that shape, and the four upstream-behavior workarounds are accepted maintenance.
 
 ## What
 

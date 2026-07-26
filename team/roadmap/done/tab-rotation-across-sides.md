@@ -1,6 +1,6 @@
 # Tab rotation crosses Hybrid sides, and an empty-pane close flips
 
-Status: IMPLEMENTED on `v079/integration` for v0.79.0.
+> Status: shipped in [v0.79.0](../../release/release-v0.79.0.md): next and previous rotate a pane's whole tab set across both Hybrid sides, and the close shortcut on an empty visible side flips to the populated side instead of only flashing the toggle.
 
 ## What
 

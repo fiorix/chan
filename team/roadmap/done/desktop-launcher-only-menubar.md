@@ -1,6 +1,6 @@
 # Launcher-only menubar on Linux and Windows
 
-Status: INTEGRATED on `v079/integration` for v0.79.0. Owner acceptance remains open.
+> Status: shipped in [v0.79.0](../../release/release-v0.79.0.md): off macOS only the Chan Launcher window carries a native menubar, and the chords the retired per-window-kind bars owned move into the per-window key bridge. macOS routing is unchanged.
 
 ## What
 

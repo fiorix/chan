@@ -1,6 +1,6 @@
 # Gateway product control plane
 
-Status: IMPLEMENTED on `v079/integration` for v0.79.0. Owner acceptance remains open.
+> Status: shipped in [v0.79.0](../../release/release-v0.79.0.md): the gateway is administrable as a product boundary without database access, with explicit user access states, a durable per-user connected-devserver limit across the fleet, session and tunnel inspection and revocation, and an idempotent admin API. Account credentials and database roles are separated.
 
 Consumer: the proprietary devsrv product. The contracts are deliberately generic gateway capabilities. No billing provider, product name, price, deployment topology, or devsrv-specific schema belongs in chan.
 
