@@ -7064,18 +7064,22 @@ mod tests {
             "an absent representation must keep the cached handle"
         );
 
-        // The production read must classify inside `on_clipboard`; doing it
+        // EVERY production read must classify inside `on_clipboard`; doing it
         // afterwards lets the cache see an error and release the selection.
+        // Auto paste probes image first, so the image read is the one an empty
+        // clipboard hits before any text read runs.
         let source = include_str!("main.rs");
         let production = source
             .split_once("#[cfg(test)]")
             .expect("main.rs has a test module")
             .0;
-        let inside_operation = ["on_clipboard(|c| optional_", "content(c.get_text()))"].concat();
-        assert!(
-            production.contains(&inside_operation),
-            "the text read classifies absent content outside the cached operation"
-        );
+        for read in ["c.get_text()", "c.get_image()", "c.get().html()"] {
+            let inside_operation = ["on_clipboard(|c| optional_", "content(", read, "))"].concat();
+            assert!(
+                production.contains(&inside_operation),
+                "the {read} read classifies absent content outside the cached operation"
+            );
+        }
     }
 
     /// The Linux clipboard handle is connected once and reused, so chan stays
