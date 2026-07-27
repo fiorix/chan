@@ -31,6 +31,20 @@ describe("trailing-edge fit converges after resize", () => {
     );
   });
 
+  test("mount fits synchronously before dialing the PTY", () => {
+    const mountPath = terminal.match(
+      /term\.onResize\([\s\S]*?void connect\(\);/,
+    )?.[0];
+    expect(mountPath).toBeDefined();
+    expect(mountPath).toMatch(
+      /resizeObserver\.observe\(host\);[\s\S]*?runTerminalFit\(fit, term[\s\S]*?void connect\(\);/,
+    );
+    expect(mountPath).not.toMatch(
+      /if\s*\([^)]*runTerminalFit\(fit, term/,
+    );
+    expect(mountPath).not.toContain("queueFit();");
+  });
+
   test("rationale comment explains the leading vs trailing split + idempotence", () => {
     expect(terminal).toMatch(/trailing-edge fit/i);
     expect(terminal).toMatch(/Idempotent[\s\S]{1,80}size hasn't drifted/i);

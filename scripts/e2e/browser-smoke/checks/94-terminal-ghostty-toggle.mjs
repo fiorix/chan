@@ -93,7 +93,11 @@ export default {
     // The OSC52 + selection probes read/write the real clipboard.
     const cdp = await page.createCDPSession();
     await cdp.send("Network.enable");
+    const terminalSocketUrls = [];
     const resizeFrames = [];
+    cdp.on("Network.webSocketCreated", ({ url }) => {
+      if (url.includes("/api/terminal/ws")) terminalSocketUrls.push(url);
+    });
     cdp.on("Network.webSocketFrameSent", ({ response }) => {
       try {
         const frame = JSON.parse(response.payloadData);
@@ -217,7 +221,7 @@ export default {
     /// Wait for the browser's PTY resize frame to settle, then capture the
     /// host content box and backend canvas. The restore leg compares the same
     /// measured box instead of assuming the viewport alone proves equal layout.
-    async function terminalFitSnapshot(backend, frameStart) {
+    async function terminalFitSnapshot(backend, tabName, frameStart, socketStart) {
       const deadline = Date.now() + 15_000;
       let lastFrame = null;
       let stableSince = 0;
@@ -262,7 +266,29 @@ export default {
           canvasWidth: canvas?.getBoundingClientRect().width ?? null,
         };
       }, backend);
-      return { ...layout, ...lastFrame };
+      const socketUrl = terminalSocketUrls
+        .slice(socketStart)
+        .find(
+          (url) => new URL(url).searchParams.get("tab_name") === tabName,
+        );
+      if (!socketUrl) {
+        throw new Error(`${backend} fit probe: terminal socket URL missing`);
+      }
+      const socketQuery = new URL(socketUrl).searchParams;
+      const initialSocket = {
+        cols: Number(socketQuery.get("cols")),
+        rows: Number(socketQuery.get("rows")),
+      };
+      if (
+        initialSocket.cols !== lastFrame.cols ||
+        initialSocket.rows !== lastFrame.rows
+      ) {
+        throw new Error(
+          `${backend} fit probe: initial socket grid did not match the measured grid; ` +
+            `socket=${JSON.stringify(initialSocket)} measured=${JSON.stringify(lastFrame)}`,
+        );
+      }
+      return { ...layout, ...lastFrame, initialSocket };
     }
 
     /// Poll the server-side scrollback (renderer-independent; see 97)
@@ -478,6 +504,7 @@ export default {
       // this leg's fetch is always recorded.
       await page.evaluate(() => performance.clearResourceTimings());
       const ghosttyResizeStart = resizeFrames.length;
+      const ghosttySocketStart = terminalSocketUrls.length;
       await openTerminal(TAB_G, ".terminal-host canvas");
       // The lazy loader fetched the wasm asset (vite emits it hashed as
       // ghostty-vt-*.wasm) -- the definitive proof the backend is real,
@@ -501,7 +528,9 @@ export default {
       details.onLeg = { wasmFetched: true, xtermDomAbsent: true };
       const ghosttyFit = await terminalFitSnapshot(
         "ghostty",
+        TAB_G,
         ghosttyResizeStart,
+        ghosttySocketStart,
       );
       details.fitLeg = { ghostty: ghosttyFit };
 
@@ -650,8 +679,14 @@ export default {
       await assertTomlGhostty(false);
       await sleep(2_000);
       const xtermResizeStart = resizeFrames.length;
+      const xtermSocketStart = terminalSocketUrls.length;
       await openTerminal(TAB_X, ".terminal.xterm .xterm-screen");
-      const xtermFit = await terminalFitSnapshot("xterm", xtermResizeStart);
+      const xtermFit = await terminalFitSnapshot(
+        "xterm",
+        TAB_X,
+        xtermResizeStart,
+        xtermSocketStart,
+      );
       details.fitLeg.xterm = xtermFit;
       if (
         ghosttyFit.hostWidth !== xtermFit.hostWidth ||
