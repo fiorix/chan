@@ -1,6 +1,6 @@
 // terminal.ghostty toggle: the ghostty-web backend end-to-end.
 //
-// Three legs against the REAL settings round-trip and the REAL wasm
+// Five legs against the REAL settings round-trip and the REAL wasm
 // terminal, mirroring 97-terminal-mouse-toggle's harness:
 //
 //   ON       -- flip terminal.ghostty=true via the same GET-mutate-PATCH
@@ -10,6 +10,9 @@
 //               and assert the ghostty backend actually loaded: its
 //               .wasm asset was fetched, the host holds ghostty's canvas
 //               and NO xterm DOM exists.
+//   KEYS     -- present the page as macOS, focus ghostty's textarea,
+//               dispatch Cmd+` and Cmd+Shift+N, and prove both retain
+//               their native default while sending no bytes to the PTY.
 //   OSC52    -- ghostty-web's WASM parser swallows OSC 52 with no JS
 //               hook, so chan bridges it byte-level (osc52Bridge.ts).
 //               Seed the clipboard with a sentinel, printf a real OSC 52
@@ -270,6 +273,100 @@ export default {
       await sleep(800);
     }
 
+    /// A real ghostty keydown reaches the hidden textarea under the host.
+    /// Override only the live userAgent while dispatching so TerminalTab's
+    /// currentOS() takes the macOS policy branch on this Linux Chrome host.
+    /// `cat -v` is the PTY-side witness: any encoded key bytes change the
+    /// server-side scrollback, independent of what the canvas renders.
+    async function probeHostOwnedKeys(tab) {
+      await startCatProbe(tab);
+      const before = (await cs(["scrollback", "--tab-name", tab])).stdout;
+      const events = await page.evaluate(() => {
+        const host = document.querySelector(".terminal-tab .terminal-host");
+        const textarea = host?.querySelector("textarea");
+        if (!(host instanceof HTMLElement) || !(textarea instanceof HTMLTextAreaElement)) {
+          throw new Error("ghostty host or textarea missing for key probe");
+        }
+        if (!host.contains(textarea)) {
+          throw new Error("ghostty textarea is outside the terminal host");
+        }
+        textarea.focus();
+        if (document.activeElement !== textarea) {
+          throw new Error("ghostty textarea did not take focus");
+        }
+
+        const ownUserAgent = Object.getOwnPropertyDescriptor(navigator, "userAgent");
+        Object.defineProperty(navigator, "userAgent", {
+          configurable: true,
+          value:
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
+            "AppleWebKit/537.36 Chrome/140 Safari/537.36",
+        });
+        try {
+          const dispatch = (name, init) => {
+            const event = new KeyboardEvent("keydown", {
+              bubbles: true,
+              cancelable: true,
+              composed: true,
+              metaKey: true,
+              ...init,
+            });
+            textarea.dispatchEvent(event);
+            return { name, defaultPrevented: event.defaultPrevented };
+          };
+          return [
+            dispatch("Cmd+`", { key: "`", code: "Backquote" }),
+            dispatch("Cmd+Shift+N", {
+              key: "N",
+              code: "KeyN",
+              shiftKey: true,
+            }),
+          ];
+        } finally {
+          if (ownUserAgent) {
+            Object.defineProperty(navigator, "userAgent", ownUserAgent);
+          } else {
+            delete navigator.userAgent;
+          }
+        }
+      });
+      await sleep(1_000);
+      const after = (await cs(["scrollback", "--tab-name", tab])).stdout;
+      const suppressed = events.filter((event) => event.defaultPrevented);
+      if (suppressed.length > 0) {
+        throw new Error(
+          `ghostty key leg: native default suppressed for ` +
+            suppressed.map((event) => event.name).join(", "),
+        );
+      }
+      if (after !== before) {
+        throw new Error(
+          "ghostty key leg: a host-owned macOS chord wrote bytes to the PTY; " +
+            `before tail=${JSON.stringify(before.slice(-240))} ` +
+            `after tail=${JSON.stringify(after.slice(-240))}`,
+        );
+      }
+
+      // Leave cat before the later shell-command legs. The expanded marker
+      // proves the shell, rather than cat's input echo, received the command.
+      await cs(["write", "--tab-name", tab, "\u0003"]);
+      await sleep(500);
+      await cs([
+        "write",
+        "--tab-name",
+        tab,
+        `printf '${MARK_PREFIX}KEYS_%s\\n' ${MARK_ARG}\n`,
+      ]);
+      await waitScrollback(tab, `${MARK_PREFIX}KEYS_${MARK_ARG}`);
+      return {
+        defaultPrevented: Object.fromEntries(
+          events.map((event) => [event.name, event.defaultPrevented]),
+        ),
+        ptyBytes: false,
+        textareaInsideHost: true,
+      };
+    }
+
     /// Selection probe via the terminal's own copy chord
     /// (Ctrl+Shift+C -> copySelectionToClipboard, a no-op on empty
     /// selection) with the clipboard pre-seeded with a sentinel.
@@ -332,7 +429,11 @@ export default {
       await ctx.shot("ghostty-backend-loaded");
       details.onLeg = { wasmFetched: true, xtermDomAbsent: true };
 
-      // ---- Leg 2: OSC52 clipboard copy reaches the system clipboard ----
+      // ---- Leg 2: KEYS -- macOS host chords bypass ghostty ----
+      details.keyLeg = await probeHostOwnedKeys(TAB_G);
+      await ctx.shot("ghostty-host-owned-keys");
+
+      // ---- Leg 3: OSC52 clipboard copy reaches the system clipboard ----
       await page.evaluate(
         (sentinel) => navigator.clipboard.writeText(sentinel),
         CLIPBOARD_SENTINEL,
@@ -364,7 +465,7 @@ export default {
       await ctx.shot("ghostty-osc52-clipboard");
       details.osc52Leg = { clipboard: true };
 
-      // ---- Leg 3a: mouse_capture ON -- click + wheel report, drag does not select ----
+      // ---- Leg 4a: mouse_capture ON -- click + wheel report, drag does not select ----
       // DECSET 1002 (drag tracking) + 1006 (SGR encoding) down the PTY.
       await cs([
         "write",
@@ -410,7 +511,7 @@ export default {
       details.mouseOnLeg.selection = "";
       await closeTerminal(TAB_G);
 
-      // ---- Leg 3b: mouse_capture OFF -- the DECSET strip works under ghostty ----
+      // ---- Leg 4b: mouse_capture OFF -- the DECSET strip works under ghostty ----
       await setMouseCapture(false);
       await assertTomlMouseCapture(false);
       // The SPA learns of the flip via config_changed; the NEW terminal's
@@ -465,7 +566,7 @@ export default {
       await setMouseCapture(true);
       await assertTomlMouseCapture(true);
 
-      // ---- Leg 4: RESTORE -- new terminals pick xterm again ----
+      // ---- Leg 5: RESTORE -- new terminals pick xterm again ----
       await setGhostty(false);
       await assertTomlGhostty(false);
       await sleep(2_000);

@@ -105,6 +105,7 @@
     handleTerminalMetaKey,
     installKeyboardProtocolHandlers,
   } from "../terminal/keymap";
+  import { isHostOwnedChord } from "../terminal/hostChord";
   import { installTerminalReportGuards } from "../terminal/xtermReports";
   import { MouseModeFilter } from "../terminal/mouseModeFilter";
   import { installShiftSelectionBypass } from "../terminal/selectionBypass";
@@ -873,6 +874,9 @@
       termWriter = term;
     }
     term.open(host);
+    if (backend === "ghostty") {
+      host.addEventListener("keydown", onGhosttyHostChord, true);
+    }
     if (backend === "xterm") {
       // Hold Shift to force a native selection while a TUI holds mouse
       // tracking, on every platform (xterm.js ignores Shift on macOS).
@@ -1583,6 +1587,25 @@
     routeXtermData(data, ptyWrites, sendInput, sendUserInput);
   }
 
+  /// Let unclaimed macOS Command chords reach the native host. ghostty-web
+  /// handles keydown in the bubble phase and suppresses every encoded key, so
+  /// this capture listener stops its handler without preventing the default
+  /// WKWebView needs to hand the chord to AppKit.
+  function onGhosttyHostChord(e: KeyboardEvent): void {
+    const claimedByChan =
+      shouldEscapeTerminal(e) ||
+      isTerminalCopyChord(e) ||
+      isTerminalPasteChord(e);
+    if (
+      isHostOwnedChord(e, {
+        os: currentOS(),
+        claimedByChan,
+      })
+    ) {
+      e.stopPropagation();
+    }
+  }
+
   /// Ghostty-backend wheel reporting. ghostty-web registers its
   /// viewport scroller capture-phase with an unconditional
   /// stopPropagation(), so its InputHandler's wheel reporter (SGR
@@ -1678,6 +1701,7 @@
     closeSocket();
     resizeObserver?.disconnect();
     resizeObserver = null;
+    host?.removeEventListener("keydown", onGhosttyHostChord, true);
     term?.dispose();
     term = null;
     termWriter = null;
@@ -1834,13 +1858,18 @@
   // collides with a control code) and every other platform uses the standard
   // Ctrl+Shift+C / Ctrl+Shift+V, leaving bare Ctrl+C/V for the shell.
   function isTerminalCopyChord(e: KeyboardEvent): boolean {
+    if (e.key.toLowerCase() !== "c") return false;
     if (currentOS() === "mac") {
       return e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
     }
     return e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey;
   }
   function isTerminalPasteChord(e: KeyboardEvent): boolean {
-    return isTerminalCopyChord(e);
+    if (e.key.toLowerCase() !== "v") return false;
+    if (currentOS() === "mac") {
+      return e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
+    }
+    return e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey;
   }
 
   // Resolve a clipboard chord on keydown. Returns true when the event was a
@@ -1854,13 +1883,12 @@
   // (no JS opt-out); the native path has no button and does bracketed paste.
   function handleTerminalClipboardChord(e: KeyboardEvent): boolean {
     if (e.type !== "keydown") return false;
-    const key = e.key.toLowerCase();
-    if (key === "c" && isTerminalCopyChord(e)) {
+    if (isTerminalCopyChord(e)) {
       e.preventDefault();
       void copySelectionToClipboard();
       return true;
     }
-    if (key === "v" && isTerminalPasteChord(e)) {
+    if (isTerminalPasteChord(e)) {
       // Do NOT preventDefault and do NOT read the clipboard here: the browser
       // then performs its native paste -> xterm's `paste` listener -> bracketed
       // paste -> onData -> handleXtermData. Returning true still makes
