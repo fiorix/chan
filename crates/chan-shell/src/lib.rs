@@ -106,10 +106,15 @@ pub fn invoked_arg0() -> std::ffi::OsString {
     })
 }
 
-/// Pure core of [`invoked_arg0`], split out so the `$ARGV0` preference is
-/// testable without mutating the process environment.
+/// Resolve the effective invocation name from an optional `$ARGV0` value and a
+/// caller-provided fallback.
+///
+/// A non-empty `argv0_env` is authoritative and the fallback is not evaluated.
+/// An absent or empty value evaluates `fallback` once. Keeping the fallback in
+/// the caller lets parsers honor their own argument source instead of reaching
+/// into the process environment.
 #[cfg(feature = "client")]
-fn resolve_arg0<F>(argv0_env: Option<std::ffi::OsString>, fallback: F) -> std::ffi::OsString
+pub fn resolve_arg0<F>(argv0_env: Option<std::ffi::OsString>, fallback: F) -> std::ffi::OsString
 where
     F: FnOnce() -> std::ffi::OsString,
 {

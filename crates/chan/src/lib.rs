@@ -1116,32 +1116,54 @@ enum ReportsAction {
     },
 }
 
-/// Parse `args` (typically `std::env::args_os()`) into the clap [`Cli`],
-/// resolving the `cs` alias. The `cs -> chan` symlink (or a chan-desktop
-/// launched as `cs`) makes `arg0`'s file_stem `cs`; that argv parses
-/// through chan-shell's own `cs` parser (`chan_shell::parse_cs`, the same
-/// parse chan-desktop uses), so every `cs` front end shares one help
-/// rendering whose usage lines read `cs <cmd>` -- never `cs shell <cmd>`.
-/// The parsed action then dispatches through [`Command::Shell`] exactly as
-/// an explicit `chan shell <action>` does, so `cs terminal list` == `chan
-/// shell terminal list`. How a `cs` name reaches PATH varies by install
-/// and does not matter here; `chan shell --help` covers adding one when
-/// an install did not provide it. Invoked as `chan` (the standalone shim
-/// or chan-desktop's `chan` dispatch) there is no aliasing. Takes `args`
-/// rather than reading the environment so chan-desktop can hand us its
-/// own argv.
+/// The `$ARGV0` the invoking shim left us, on the one platform that needs it.
+///
+/// Windows cannot hand a child a chosen `argv[0]`: there is no `exec -a` and no
+/// POSIX symlink, so the `chan` / `cs` shims pass the name they were invoked
+/// under in `$ARGV0` instead. Everywhere else the name arrives in `argv[0]`
+/// itself, so the variable is not consulted and an inherited one cannot steer
+/// the alias.
+#[cfg(windows)]
+fn shim_argv0() -> Option<std::ffi::OsString> {
+    std::env::var_os("ARGV0")
+}
+
+/// See the Windows [`shim_argv0`]. Off Windows `argv[0]` is authoritative.
+#[cfg(not(windows))]
+fn shim_argv0() -> Option<std::ffi::OsString> {
+    None
+}
+
+/// Parse process-facing `args` into the clap [`Cli`], resolving the `cs` alias.
+///
+/// Environment access stays at this edge so [`parse_cli_with_arg0`] keeps the
+/// alias decision deterministic.
 fn parse_cli<I, T>(args: I) -> Cli
 where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
+    parse_cli_with_arg0(shim_argv0(), args)
+}
+
+/// Parse caller-supplied `args` into the clap [`Cli`] using an explicit shim
+/// name, as [`shim_argv0`] resolves it.
+///
+/// A non-empty shim name wins, because the platform that supplies one cannot
+/// express the name any other way. An absent or empty one falls back to the
+/// passed `args`, never the process argv, so chan-desktop can preserve its own
+/// argument source. A `cs` stem parses through chan-shell's own `cs` parser,
+/// keeping every front end on the same help and action surface, so `cs terminal
+/// list` is `chan shell terminal list`. The original argv still goes to clap so
+/// its program-name slot is untouched.
+fn parse_cli_with_arg0<I, T>(argv0_env: Option<std::ffi::OsString>, args: I) -> Cli
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
     let argv: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
-    let Some(arg0) = argv.first() else {
-        // No arg0 is unreachable for a real process; fall back to the
-        // environment so a degenerate caller still parses something.
-        return Cli::parse();
-    };
-    if !chan_shell::invoked_as_cs(arg0) {
+    let arg0 = chan_shell::resolve_arg0(argv0_env, || argv.first().cloned().unwrap_or_default());
+    if !chan_shell::invoked_as_cs(&arg0) {
         return Cli::parse_from(argv);
     }
     let cs = chan_shell::parse_cs(argv);
@@ -7195,6 +7217,76 @@ fn print_import_summary(summary: &chan_workspace::ImportSummary) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_terminal_list(cli: Cli) {
+        let Command::Shell { action } = cli.command else {
+            panic!("expected shell command, got {:?}", cli.command);
+        };
+        let ShellAction::Terminal { action } = action else {
+            panic!("expected terminal action, got {action:?}");
+        };
+        let chan_shell::TerminalAction::List { json, pretty } = action else {
+            panic!("expected terminal list action, got {action:?}");
+        };
+        assert!(!json);
+        assert!(!pretty);
+    }
+
+    fn assert_not_shell(cli: Cli) {
+        assert!(
+            !matches!(cli.command, Command::Shell { .. }),
+            "unexpected shell command: {:?}",
+            cli.command
+        );
+    }
+
+    #[test]
+    fn parse_cli_windows_chan_exe_honors_cs_argv0_env() {
+        assert_terminal_list(parse_cli_with_arg0(
+            Some(std::ffi::OsString::from("cs")),
+            [r"C:\Program Files\chan\chan.exe", "terminal", "list"],
+        ));
+    }
+
+    #[test]
+    fn parse_cli_unix_cs_without_argv0_env() {
+        assert_terminal_list(parse_cli_with_arg0(
+            None,
+            ["/usr/local/bin/cs", "terminal", "list"],
+        ));
+    }
+
+    #[test]
+    fn parse_cli_chan_argv0_env_is_not_aliased() {
+        assert_not_shell(parse_cli_with_arg0(
+            Some(std::ffi::OsString::from("chan")),
+            ["chan", "completions", "bash"],
+        ));
+    }
+
+    #[test]
+    fn parse_cli_empty_argv0_env_falls_back_to_cs_argv() {
+        assert_terminal_list(parse_cli_with_arg0(
+            Some(std::ffi::OsString::new()),
+            ["/usr/local/bin/cs", "terminal", "list"],
+        ));
+    }
+
+    #[test]
+    fn parse_cli_windows_chan_exe_without_argv0_env_is_not_aliased() {
+        assert_not_shell(parse_cli_with_arg0(
+            None,
+            [r"C:\Program Files\chan\chan.exe", "completions", "bash"],
+        ));
+    }
+
+    #[test]
+    fn parse_cli_cs_exe_extension_is_aliased() {
+        assert_terminal_list(parse_cli_with_arg0(
+            None,
+            [r"C:/Program Files/chan/cs.exe", "terminal", "list"],
+        ));
+    }
 
     /// `make shortcuts-check` diffs the SOURCE text of `KEYBINDINGS_TABLE`
     /// against the generator, so it cannot see an escape that changes the
