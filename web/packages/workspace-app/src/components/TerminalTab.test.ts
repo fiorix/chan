@@ -13,6 +13,11 @@ import terminalSource from "./TerminalTab.svelte?raw";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
 
+const fitMock = vi.hoisted(() => ({
+  calls: 0,
+  failure: null as Error | null,
+  size: null as { cols: number; rows: number } | null,
+}));
 const mounted: Array<Record<string, any>> = [];
 const sockets: TestWebSocket[] = [];
 const terminalFocuses: string[] = [];
@@ -53,7 +58,12 @@ vi.mock("@xterm/xterm", () => ({
     rows = 24;
     options: Record<string, unknown> = {};
 
-    loadAddon() {}
+    loadAddon(addon: {
+      testFitAddon?: boolean;
+      activate?: (terminal: unknown) => void;
+    }) {
+      if (addon.testFitAddon) addon.activate?.(this);
+    }
     open() {}
     attachCustomKeyEventHandler() {}
     onData() {}
@@ -73,7 +83,21 @@ vi.mock("@xterm/xterm", () => ({
 
 vi.mock("@xterm/addon-fit", () => ({
   FitAddon: class {
-    fit() {}
+    testFitAddon = true;
+    terminal: { cols: number; rows: number } | null = null;
+
+    activate(terminal: { cols: number; rows: number }) {
+      this.terminal = terminal;
+    }
+
+    fit() {
+      fitMock.calls += 1;
+      if (fitMock.failure) throw fitMock.failure;
+      if (fitMock.size && this.terminal) {
+        this.terminal.cols = fitMock.size.cols;
+        this.terminal.rows = fitMock.size.rows;
+      }
+    }
   },
 }));
 
@@ -98,10 +122,11 @@ vi.mock("@xterm/addon-web-links", () => ({
 
 globalThis.ResizeObserver = TestResizeObserver as any;
 globalThis.WebSocket = TestWebSocket as any;
-globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {
+const immediateAnimationFrame = ((cb: FrameRequestCallback) => {
   cb(0);
   return 0;
 }) as any;
+globalThis.requestAnimationFrame = immediateAnimationFrame;
 HTMLCanvasElement.prototype.getContext = (() => ({})) as any;
 
 afterEach(() => {
@@ -110,6 +135,10 @@ afterEach(() => {
   terminalFocuses.splice(0);
   document.body.innerHTML = "";
   closeTabMenu();
+  fitMock.calls = 0;
+  fitMock.failure = null;
+  fitMock.size = null;
+  globalThis.requestAnimationFrame = immediateAnimationFrame;
 });
 
 function terminalTab(partial: Partial<TerminalTabState> = {}): TerminalTabState {
@@ -147,6 +176,34 @@ function openSocket(): TestWebSocket {
   socket.onopen?.();
   return socket;
 }
+
+describe("TerminalTab initial fit", () => {
+  test("dials with the measured grid before deferred resize callbacks", async () => {
+    fitMock.size = { cols: 132, rows: 41 };
+    globalThis.requestAnimationFrame = vi.fn(() => 1) as any;
+
+    await renderTerminal(terminalTab(), true);
+
+    expect(fitMock.calls).toBe(1);
+    expect(sockets).toHaveLength(1);
+    const query = new URL(sockets[0].url, "http://chan.test").searchParams;
+    expect(query.get("cols")).toBe("132");
+    expect(query.get("rows")).toBe("41");
+  });
+
+  test("still dials when the initial fit cannot measure the host", async () => {
+    fitMock.failure = new Error("host is not measurable");
+    globalThis.requestAnimationFrame = vi.fn(() => 1) as any;
+
+    await renderTerminal(terminalTab(), true);
+
+    expect(fitMock.calls).toBe(1);
+    expect(sockets).toHaveLength(1);
+    const query = new URL(sockets[0].url, "http://chan.test").searchParams;
+    expect(query.get("cols")).toBe("80");
+    expect(query.get("rows")).toBe("24");
+  });
+});
 
 describe("TerminalTab activity frames", () => {
   test("attaches with side and reports placement on the live socket", async () => {

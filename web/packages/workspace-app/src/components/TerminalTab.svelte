@@ -956,7 +956,12 @@
     term.onResize(({ cols, rows }) => send({ type: "resize", cols, rows }));
     resizeObserver = new ResizeObserver(queueFit);
     resizeObserver.observe(host);
-    queueFit();
+    // Measure before dialing so a fresh PTY starts at the renderer's real
+    // grid. A hidden or unsettled host can make the fitter decline or throw;
+    // runTerminalFit absorbs that and the connection still uses the defaults.
+    runTerminalFit(fit, term, (detail) => {
+      statusDetail = detail;
+    });
     // This xterm is brand-new and EMPTY, so the attach below carries no
     // byte cursor and the server replays the session's full ring. A
     // carried-over cursor once made the server skip everything the
