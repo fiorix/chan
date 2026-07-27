@@ -12,7 +12,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- **Windows `cs` runs the `cs` client instead of the `chan` CLI.** The bundled console `chan.exe` ignored the `ARGV0=cs` signal written by both Windows shims, so it parsed `cs terminal list` as a `chan` command. The console parser now honors that signal while retaining the shim's original argv for clap. This defect dates to the introduction of the bundled console `chan.exe`, not to v0.79.0.
+- **Windows `cs` runs the `cs` client instead of the `chan` CLI.** The bundled console `chan.exe` ignored the `ARGV0=cs` signal written by both Windows shims, so it parsed `cs terminal list` as a `chan` command. The console parser now honors that signal on Windows, which is the only platform whose shims cannot hand a child its `argv[0]`, while retaining the shim's original argv for clap. macOS and Linux are unchanged: `argv[0]` stays authoritative there, so an inherited `ARGV0` cannot steer the alias. This defect dates to the introduction of the bundled console `chan.exe`, not to v0.79.0.
 
 ## [v0.79.0] - 2026-07-26
 

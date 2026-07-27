@@ -1116,8 +1116,25 @@ enum ReportsAction {
     },
 }
 
-/// Parse process-facing `args` into the clap [`Cli`], resolving the `cs` alias
-/// from the current `$ARGV0` when needed.
+/// The `$ARGV0` the invoking shim left us, on the one platform that needs it.
+///
+/// Windows cannot hand a child a chosen `argv[0]`: there is no `exec -a` and no
+/// POSIX symlink, so the `chan` / `cs` shims pass the name they were invoked
+/// under in `$ARGV0` instead. Everywhere else the name arrives in `argv[0]`
+/// itself, so the variable is not consulted and an inherited one cannot steer
+/// the alias.
+#[cfg(windows)]
+fn shim_argv0() -> Option<std::ffi::OsString> {
+    std::env::var_os("ARGV0")
+}
+
+/// See the Windows [`shim_argv0`]. Off Windows `argv[0]` is authoritative.
+#[cfg(not(windows))]
+fn shim_argv0() -> Option<std::ffi::OsString> {
+    None
+}
+
+/// Parse process-facing `args` into the clap [`Cli`], resolving the `cs` alias.
 ///
 /// Environment access stays at this edge so [`parse_cli_with_arg0`] keeps the
 /// alias decision deterministic.
@@ -1126,18 +1143,19 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    parse_cli_with_arg0(std::env::var_os("ARGV0"), args)
+    parse_cli_with_arg0(shim_argv0(), args)
 }
 
-/// Parse caller-supplied `args` into the clap [`Cli`] using an explicit
-/// `$ARGV0` value.
+/// Parse caller-supplied `args` into the clap [`Cli`] using an explicit shim
+/// name, as [`shim_argv0`] resolves it.
 ///
-/// A non-empty `$ARGV0` wins for every caller because some platforms cannot
-/// set a real `argv[0]`. An absent or empty value falls back to the passed
-/// `args`, never the process argv, so chan-desktop can preserve its own argument
-/// source. A `cs` stem parses through chan-shell's own `cs` parser, keeping every
-/// front end on the same help and action surface. The original argv still goes
-/// to clap so its program-name slot is untouched.
+/// A non-empty shim name wins, because the platform that supplies one cannot
+/// express the name any other way. An absent or empty one falls back to the
+/// passed `args`, never the process argv, so chan-desktop can preserve its own
+/// argument source. A `cs` stem parses through chan-shell's own `cs` parser,
+/// keeping every front end on the same help and action surface, so `cs terminal
+/// list` is `chan shell terminal list`. The original argv still goes to clap so
+/// its program-name slot is untouched.
 fn parse_cli_with_arg0<I, T>(argv0_env: Option<std::ffi::OsString>, args: I) -> Cli
 where
     I: IntoIterator<Item = T>,

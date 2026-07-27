@@ -245,3 +245,47 @@ fn cs_prefix_match_resolves_terminal_list() {
         "expected the missing-control-socket error (proving t->terminal, l->list), got: {stderr}"
     );
 }
+
+#[test]
+fn inherited_argv0_does_not_steer_the_alias() {
+    // Off Windows the invoked name arrives in argv[0], so `$ARGV0` is not
+    // consulted at all. A packaged Linux AppImage exports the variable and
+    // every process it starts inherits it, so an inherited value must not be
+    // able to turn `chan` into `cs` or the reverse.
+    //
+    // `chan` invoked as `chan` with ARGV0=cs stays the chan CLI: `terminal`
+    // is not one of its subcommands.
+    let output = Command::new(env!("CARGO_BIN_EXE_chan"))
+        .args(["terminal", "list"])
+        .env("ARGV0", "cs")
+        .env_remove("CHAN_CONTROL_SOCKET")
+        .env_remove("CHAN_WINDOW_ID")
+        .output()
+        .expect("run chan terminal list with ARGV0=cs");
+
+    assert!(!output.status.success(), "chan terminal list should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unrecognized subcommand"),
+        "ARGV0 must not alias chan to cs off Windows, got: {stderr}"
+    );
+
+    // And the symlink keeps winning: `cs` invoked as `cs` with ARGV0=chan
+    // still dispatches the cs client, failing on the missing control socket
+    // rather than on an unknown subcommand.
+    let (_dir, cs) = cs_symlink();
+    let output = Command::new(&cs)
+        .args(["terminal", "list"])
+        .env("ARGV0", "chan")
+        .env_remove("CHAN_CONTROL_SOCKET")
+        .env_remove("CHAN_WINDOW_ID")
+        .output()
+        .expect("run cs terminal list with ARGV0=chan");
+
+    assert!(!output.status.success(), "cs terminal list should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("CHAN_CONTROL_SOCKET"),
+        "ARGV0 must not un-alias cs off Windows, got: {stderr}"
+    );
+}
