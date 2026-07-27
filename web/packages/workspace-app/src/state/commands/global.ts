@@ -1,13 +1,13 @@
 // Net-new Global commands: theme (system / light / dark), the screen-lock
 // family (enable / disable / test / set pin / theme), and the window
-// controls (Reload, Open Inspector, Hide window) that mirror the WebView
-// native menu. The reuse-existing Global entries live in core.ts; these
-// need a new action or an in-app prompt. Theme, screen lock, and Reload
-// are machine-global; Open Inspector and Hide window are desktop-only.
-// Register with registerCommands. See state/commands.ts for the Command
-// shape and helpers.
+// controls (Reload, Open Inspector, Hide window, New window, Close window)
+// that mirror the WebView native menu. The reuse-existing Global entries
+// live in core.ts; these need a new action or an in-app prompt. Theme,
+// screen lock, and Reload are machine-global; the other window controls
+// are desktop-only. Register with registerCommands. See state/commands.ts
+// for the Command shape and helpers.
 
-import { registerCommands, workspaceOnly } from "../commands";
+import { allowedInWindow, registerCommands, workspaceOnly } from "../commands";
 import {
   launcherReturnFocus,
   setThemeChoice,
@@ -23,8 +23,10 @@ import { api, sessionWindowId } from "../../api/client";
 import {
   hideWindowFromCloseConfirm,
   isTauriDesktop,
+  openNewWindow,
   openWebInspector,
   reloadWindow,
+  requestCloseWindow,
 } from "../../api/desktop";
 
 /// Run a config write and report the outcome as a transient pill, so a
@@ -256,5 +258,29 @@ registerCommands([
     keywords: ["hide", "window", "bury", "minimize"],
     available: () => isTauriDesktop(),
     run: () => void hideWindowFromCloseConfirm(),
+  },
+  {
+    // Desktop-only: the host routes by the invoking window's label, and the
+    // browser has no equivalent. The native host owns Cmd+Shift+N, so this
+    // launcher entry stays chordless.
+    id: "app.window.new",
+    title: "New window",
+    category: "Global",
+    keywords: ["new", "window", "open", "create"],
+    available: (ctx) =>
+      isTauriDesktop() && allowedInWindow("app.window.new", ctx),
+    run: () => void openNewWindow(),
+  },
+  {
+    // Desktop-only: the browser owns its window lifecycle and the wrapper
+    // no-ops there. Shares the SHORTCUTS id so the row renders its chord;
+    // allowedInWindow keeps the launcher aligned with the host bridge.
+    id: "app.window.close",
+    title: "Close window",
+    category: "Global",
+    keywords: ["close", "window", "discard", "destroy"],
+    available: (ctx) =>
+      isTauriDesktop() && allowedInWindow("app.window.close", ctx),
+    run: () => void requestCloseWindow(),
   },
 ]);
