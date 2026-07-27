@@ -170,6 +170,18 @@ export async function reloadWindow(): Promise<void> {
   window.location.reload();
 }
 
+/// Open another window for the invoking desktop window's connection.
+/// No-op off-desktop, where the browser owns its own window lifecycle.
+/// Best-effort: a failed IPC logs and leaves the current window as-is.
+export async function openNewWindow(): Promise<void> {
+  if (!isTauriDesktop()) return;
+  try {
+    await tauriInvoke("open_new_window");
+  } catch (err) {
+    console.warn("openNewWindow: open_new_window IPC failed", err);
+  }
+}
+
 /// Close the current workspace window and return focus to the
 /// launcher (the native-desktop workspace list). Called when the
 /// last tab and then the last empty pane are closed. No-op

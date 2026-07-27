@@ -8,6 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The command launcher offers native window lifecycle actions.** Desktop workspace and standalone-terminal launchers now include New window and Close window. New window opens another window for the invoking connection without claiming the host-owned shortcut; Close window shares the existing `Mod+Shift+W` chord. Web launchers remain unchanged.
 - **Terminal ghostty-web backend toggle.** New `terminal.ghostty` server setting (default off) with a checkbox in Settings, Terminal section. Turned on, newly opened terminals parse and render through [ghostty-web](https://github.com/coder/ghostty-web) -- Ghostty's WASM-compiled VT engine with an xterm.js-compatible API -- instead of xterm.js, fetching the ~420 KB wasm asset lazily on first use. Pinned to `0.4.0-next.20` (the 0.4.0 release predates its InputHandler mouse reporting). OSC 52 clipboard writes keep working via a byte-level observer on the PTY output path (ghostty-web's WASM parser swallows the sequence with no JS hook), SGR wheel reporting rides a chan-side shim (upstream's capture-phase scroller swallows the wheel before its InputHandler sees it), and the `terminal.mouse_capture` toggle keeps its behavior because its DECSET strip runs ahead of either parser. Under ghostty, drag selection works even while a TUI tracks the mouse (no Shift needed); the find bar, styled scrollback snapshots, and desktop `openExternalUrl` link routing remain xterm-only for now.
 
 ### Fixed
