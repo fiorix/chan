@@ -145,7 +145,7 @@
 
 <SettingField
   label="Ghostty backend"
-  hint="Experimental: parse and render new terminals with Ghostty's WASM engine instead of xterm.js. Downloads ~420 KB of WASM on first enable. New terminals only."
+  hint="Experimental: parse and render new terminals with Ghostty's WASM engine instead of xterm.js. The engine loads from this server the first time a ghostty terminal opens, and falls back to xterm.js if it cannot. New terminals only."
 >
   <PillToggle
     label="Use ghostty-web in new terminals"

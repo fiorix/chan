@@ -16,6 +16,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Linux clipboard reads keep the selection alive when a representation is absent.** Native text, image, and HTML probes classify unavailable content inside the cached operation, so an image-first automatic paste no longer discards the handle that owns a text selection.
 - **Ghostty leaves unclaimed macOS Command chords to AppKit.** A capture listener keeps native window cycling and New Window accelerators out of Ghostty's encoder without suppressing their default, while chan-owned shortcuts and terminal clipboard chords keep their existing behavior.
 - **Ghostty terminals use the full available width.** Their fitter no longer reserves 15 pixels for the auto-hiding scrollbar, which is painted over the canvas and consumes no layout space.
+- **Ghostty's settings hint matches its lazy loader.** It now identifies the chan server as the engine source, the first ghostty terminal as the load trigger, and xterm.js as the fallback when loading fails.
 
 ## [v0.79.0] - 2026-07-26
 
