@@ -3673,12 +3673,12 @@ mod tests {
             port: 9605,
         };
         store
-            .save_with_pre_persist_hook(&cfg, |tmp| {
+            .save_with_pre_persist_hook(&cfg, |_tmp| {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
 
-                    let mode = std::fs::metadata(tmp)?.permissions().mode() & 0o777;
+                    let mode = std::fs::metadata(_tmp)?.permissions().mode() & 0o777;
                     assert_eq!(mode, 0o600, "temporary config must be 0600");
                 }
                 Ok(())

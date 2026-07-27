@@ -3559,7 +3559,7 @@ fn term_write_outcome(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn term_write(
     registry: &TerminalRegistry,
     tab_name: Option<&str>,
