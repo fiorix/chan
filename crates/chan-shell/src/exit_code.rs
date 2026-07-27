@@ -1,6 +1,13 @@
 //! Named process exit codes for the `cs` client, and the typed error that
 //! carries one up to the dispatch edge.
 //!
+//! A `cs terminal write --submit` that the server cannot encode for at least
+//! one target exits [`SUBMIT_REFUSED`] (69). The bytes remain accepted into
+//! the asynchronous queue, but the server answers with
+//! `ControlResponse::SubmitRefused`; the client carries that as a
+//! [`ControlSubmitRefused`] so the terminal-write dispatch edge can preserve
+//! the acknowledgement and report that the requested submit did not happen.
+//!
 //! A bounded blocking request that gets no reply within its window exits
 //! [`CONTROL_TIMEOUT`] (124): a `cs terminal survey` whose `--timeout`
 //! elapsed, or a `cs copy` / `cs paste` whose clipboard round-trip got no
@@ -14,9 +21,31 @@
 use std::error::Error;
 use std::fmt;
 
+/// A requested hands-free submit was unavailable for at least one target.
+/// This matches `sysexits.h` `EX_UNAVAILABLE` (69): a shell session with no
+/// derived agent cannot provide the requested submit encoding.
+pub(crate) const SUBMIT_REFUSED: i32 = 69;
+
 /// A bounded blocking request elapsed with no reply. Matches GNU
 /// `timeout(1)`, which exits 124 when the command it guards times out.
 pub(crate) const CONTROL_TIMEOUT: i32 = 124;
+
+/// A control request the server answered with
+/// `ControlResponse::SubmitRefused`. The message is still the full queue
+/// acknowledgement because the bytes were accepted, while the typed error
+/// lets the dispatch edge exit 69 without parsing that prose.
+#[derive(Debug)]
+pub(crate) struct ControlSubmitRefused {
+    pub(crate) message: String,
+}
+
+impl fmt::Display for ControlSubmitRefused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl Error for ControlSubmitRefused {}
 
 /// A control request the server answered with `ControlResponse::Timeout` (a
 /// blocking `cs terminal survey` whose `--timeout` window elapsed, or a

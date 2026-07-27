@@ -126,6 +126,12 @@ pub async fn send_control_request(socket: &Path, request: ControlRequest) -> Res
     match response {
         ControlResponse::Ok { message } => Ok(message),
         ControlResponse::Error { message } => anyhow::bail!("{message}"),
+        // The write was accepted into the asynchronous queue, but at least
+        // one target had no submit encoding. Preserve its acknowledgement in
+        // a typed error so only `cs terminal write` maps it to exit 69.
+        ControlResponse::SubmitRefused { message } => {
+            Err(crate::exit_code::ControlSubmitRefused { message }.into())
+        }
         // A bounded blocking request whose window elapsed (a `cs terminal
         // survey --timeout`, or a `cs copy` / `cs paste` clipboard
         // round-trip). Surface it as a typed error the dispatch edge
@@ -316,6 +322,43 @@ mod tests {
         assert_eq!(
             timeout.message,
             "no clipboard reply from the window within 30s"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn send_control_request_types_a_submit_refusal_for_the_69_edge() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let socket = std::env::temp_dir().join(format!(
+            "chan-cs-submit-refused-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = conn.read(&mut buf).await.unwrap();
+            conn.write_all(
+                b"{\"status\":\"submit_refused\",\"message\":\"queued at position 1; Sh is a shell session: no codex chord applied\"}\n",
+            )
+            .await
+            .unwrap();
+        });
+
+        let err = send_control_request(&socket, ControlRequest::WindowList)
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        let _ = std::fs::remove_file(&socket);
+
+        let refusal = err
+            .downcast_ref::<crate::exit_code::ControlSubmitRefused>()
+            .expect("typed ControlSubmitRefused");
+        assert_eq!(
+            refusal.message,
+            "queued at position 1; Sh is a shell session: no codex chord applied"
         );
     }
 
