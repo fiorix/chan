@@ -1402,11 +1402,13 @@ session's own spawn command and CHAN_AGENT spawn env, and applies
 THAT agent's chord, so the value you pass only records what you
 believed the target runs. A mismatch is corrected server-side and
 noted in the ack; a target that derives to no agent (a shell)
-receives plain text with no chord. The applied encodings: claude
-appends a chord, codex and opencode wrap the text in bracketed
-paste plus a CR, gemini takes the CR as its own later queue
-entry, one idle gate after the body. Omit --submit and the text
-parks in the agent's compose box unsubmitted, since a bare
+receives plain text with no chord, and the command exits 69. Spawn
+the session with CHAN_AGENT set, or spawn the agent as the
+session's command instead of typing it into a shell. The applied
+encodings: claude appends a chord, codex and opencode wrap the text
+in bracketed paste plus a CR, gemini takes the CR as its own later
+queue entry, one idle gate after the body. Omit --submit and the
+text parks in the agent's compose box unsubmitted, since a bare
 newline is a newline to an agent, not a submit.
 
 CHAN_AGENT is read from the TARGET session's spawn environment

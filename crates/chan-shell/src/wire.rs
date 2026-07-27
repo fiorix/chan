@@ -859,6 +859,18 @@ mod survey_wire_tests {
     }
 
     #[test]
+    fn control_response_submit_refused_tag_round_trips() {
+        let resp = ControlResponse::SubmitRefused {
+            message: "queued, but no chord applied".into(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["status"], "submit_refused");
+        assert_eq!(v["message"], "queued, but no chord applied");
+        let back: ControlResponse = serde_json::from_str(&v.to_string()).unwrap();
+        assert!(matches!(back, ControlResponse::SubmitRefused { .. }));
+    }
+
+    #[test]
     fn control_response_queue_full_tag_round_trips() {
         // The queue-full refusal is a distinct `status` so the client renders
         // an explicit failure instead of a decode error or a silent drop.
@@ -1585,6 +1597,14 @@ pub enum ControlResponse {
         message: String,
     },
     Error {
+        message: String,
+    },
+    /// A `cs terminal write --submit` was queued, but at least one selected
+    /// shell session had no server-derived agent and therefore received no
+    /// submit chord. Distinct from `Ok` so the client can preserve the
+    /// acknowledgement while exiting 69, without inferring the refusal from
+    /// human-readable prose.
+    SubmitRefused {
         message: String,
     },
     /// A blocking request the server abandoned because its reply window

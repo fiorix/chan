@@ -1162,7 +1162,7 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
                     message: "terminal registry unavailable".into(),
                 };
             };
-            into_response(term_write(
+            term_write_response(
                 registry,
                 tab_name.as_deref(),
                 tab_group.as_deref(),
@@ -1171,7 +1171,7 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
                 // legacy client-resolved template is dropped here: the
                 // registry derives each session's chord itself.
                 submit.map(|s| s.agent()),
-            ))
+            )
         }
         ControlRequest::TermList => {
             let Some(registry) = terminal_registry else {
@@ -3466,6 +3466,32 @@ fn strip_leading_slash(p: &Path) -> String {
     p.to_string_lossy().trim_start_matches('/').to_string()
 }
 
+#[derive(Debug)]
+struct TermWriteOutcome {
+    message: String,
+    submit_refused: bool,
+}
+
+/// Convert a terminal write outcome into its typed control response. A shell
+/// target that received no submit chord is distinct from an ordinary success
+/// even though its text remains accepted into the asynchronous queue.
+fn term_write_response(
+    registry: &TerminalRegistry,
+    tab_name: Option<&str>,
+    tab_group: Option<&str>,
+    data: &str,
+    submit: Option<SubmitAgent>,
+) -> ControlResponse {
+    match term_write_outcome(registry, tab_name, tab_group, data, submit) {
+        Ok(TermWriteOutcome {
+            message,
+            submit_refused: true,
+        }) => ControlResponse::SubmitRefused { message },
+        Ok(TermWriteOutcome { message, .. }) => ControlResponse::Ok { message },
+        Err(message) => ControlResponse::Error { message },
+    }
+}
+
 /// Category 2: ENQUEUE logical input onto matching live sessions' write queues.
 /// At least one selector is required so a missing filter cannot fan out to
 /// every terminal by accident. The bytes are not written to the PTY here:
@@ -3477,13 +3503,13 @@ fn strip_leading_slash(p: &Path) -> String {
 /// registry derives each matched session's real agent and applies THAT
 /// chord. When they disagree, the reply says so next to the queue position,
 /// so a sender learns the correction instead of re-circulating a wrong name.
-fn term_write(
+fn term_write_outcome(
     registry: &TerminalRegistry,
     tab_name: Option<&str>,
     tab_group: Option<&str>,
     data: &str,
     submit: Option<SubmitAgent>,
-) -> Result<String, String> {
+) -> Result<TermWriteOutcome, String> {
     if tab_name.is_none() && tab_group.is_none() {
         return Err("term write needs a tab name and/or group selector".into());
     }
@@ -3497,6 +3523,7 @@ fn term_write(
             Err("no live terminal session matched".into())
         };
     }
+    let submit_refused = outcome.diverged.iter().any(|d| d.applied.is_none());
     let mut message = match outcome.position {
         Some(position) => format!("queued at position {position}"),
         None => format!("queued to {} terminal session(s)", outcome.queued),
@@ -3526,7 +3553,21 @@ fn term_write(
             }
         }
     }
-    Ok(message)
+    Ok(TermWriteOutcome {
+        message,
+        submit_refused,
+    })
+}
+
+#[cfg(test)]
+fn term_write(
+    registry: &TerminalRegistry,
+    tab_name: Option<&str>,
+    tab_group: Option<&str>,
+    data: &str,
+    submit: Option<SubmitAgent>,
+) -> Result<String, String> {
+    term_write_outcome(registry, tab_name, tab_group, data, submit).map(|outcome| outcome.message)
 }
 
 /// The queue cap, surfaced in the "queue full" message. Kept in sync with
@@ -5453,6 +5494,72 @@ mod tests {
             reply,
             "queued at position 1; Sh is a shell session: no claude chord applied"
         );
+    }
+
+    #[test]
+    fn term_write_types_only_submit_refusal_as_failure() {
+        let (_root, registry) = empty_registry();
+        use crate::terminal_sessions::CreateOptions;
+        let spawn = |name: &str, agent_env: Option<&str>, group: Option<&str>| {
+            registry
+                .create(CreateOptions {
+                    size: portable_pty::PtySize {
+                        rows: 24,
+                        cols: 80,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    },
+                    tab_name: Some(name.to_string()),
+                    tab_group: group.map(str::to_string),
+                    window_id: None,
+                    mcp_env: false,
+                    cwd: None,
+                    command: None,
+                    env: agent_env
+                        .map(|a| [("CHAN_AGENT".to_string(), a.to_string())].into())
+                        .unwrap_or_default(),
+                })
+                .expect("spawn session")
+        };
+        spawn("@@A", Some("claude"), Some("team"));
+        spawn("@@B", Some("codex"), Some("team"));
+        spawn("@@C", None, Some("team"));
+
+        let response = term_write_response(
+            &registry,
+            None,
+            Some("team"),
+            "poke",
+            Some(SubmitAgent::Claude),
+        );
+        match response {
+            ControlResponse::SubmitRefused { message } => assert_eq!(
+                message,
+                "queued to 3 terminal session(s); @@B runs codex, not claude: the codex chord was applied; @@C is a shell session: no claude chord applied"
+            ),
+            other => panic!("expected typed submit refusal, got {other:?}"),
+        }
+
+        assert!(matches!(
+            term_write_response(
+                &registry,
+                Some("@@B"),
+                None,
+                "poke",
+                Some(SubmitAgent::Claude),
+            ),
+            ControlResponse::Ok { .. }
+        ));
+        assert!(matches!(
+            term_write_response(
+                &registry,
+                Some("@@A"),
+                None,
+                "poke",
+                Some(SubmitAgent::Claude),
+            ),
+            ControlResponse::Ok { .. }
+        ));
     }
 
     #[test]

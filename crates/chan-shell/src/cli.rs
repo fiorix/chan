@@ -831,10 +831,12 @@ pub enum TerminalAction {
         /// command and CHAN_AGENT, so the value here only says what you
         /// believed the target runs; a mismatch is corrected server-side and
         /// noted in the ack, and a shell target gets plain text with no
-        /// chord. Values: claude | codex | gemini | opencode. Omit the flag
-        /// to write pure bytes: the input parks in the agent's compose box
-        /// unsubmitted (a bare newline is a newline to an agent, not a
-        /// submit).
+        /// chord and makes the command exit 69. Spawn such a session with
+        /// CHAN_AGENT set or the agent as its command instead of typing the
+        /// agent into a shell. Values: claude | codex | gemini | opencode.
+        /// Omit the flag to write pure bytes: the input parks in the agent's
+        /// compose box unsubmitted (a bare newline is a newline to an agent,
+        /// not a submit).
         #[arg(long, value_name = "AGENT", verbatim_doc_comment)]
         submit: Option<SubmitAgent>,
         /// Target every session with this tab name.
@@ -1934,7 +1936,7 @@ async fn cmd_shell_terminal(action: TerminalAction) -> Result<()> {
             // the chord template in ITS environment, so a CHAN_SUBMIT_<AGENT>
             // override must live server-side, not in this process.
             let socket = control_socket_env()?;
-            let message = send_control_request(
+            let result = send_control_request(
                 &socket,
                 ControlRequest::TermWrite {
                     tab_name,
@@ -1943,8 +1945,13 @@ async fn cmd_shell_terminal(action: TerminalAction) -> Result<()> {
                     submit: submit.map(TermWriteSubmit::Agent),
                 },
             )
-            .await?;
-            eprintln!("{message}");
+            .await;
+            let outcome = classify_term_write_result(result)?;
+            eprintln!("{}", outcome.message());
+            let exit_code = outcome.exit_code();
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
             Ok(())
         }
         TerminalAction::List { json, pretty } => {
@@ -2365,6 +2372,43 @@ async fn cmd_shell_survey(args: SurveyArgs) -> Result<()> {
     }
 }
 
+/// The typed result of `cs terminal write`. Both outcomes carry the server's
+/// acknowledgement because enqueue already succeeded; only
+/// [`TermWriteControlOutcome::SubmitRefused`] maps to a failure exit.
+#[derive(Debug)]
+enum TermWriteControlOutcome {
+    Queued(String),
+    SubmitRefused(String),
+}
+
+impl TermWriteControlOutcome {
+    fn message(&self) -> &str {
+        match self {
+            Self::Queued(message) | Self::SubmitRefused(message) => message,
+        }
+    }
+
+    fn exit_code(&self) -> i32 {
+        match self {
+            Self::Queued(_) => 0,
+            Self::SubmitRefused(_) => crate::exit_code::SUBMIT_REFUSED,
+        }
+    }
+}
+
+/// Classify a terminal-write control result without parsing its
+/// human-readable acknowledgement. Other control errors retain the generic
+/// exit-1 path.
+fn classify_term_write_result(result: Result<String>) -> Result<TermWriteControlOutcome> {
+    match result {
+        Ok(message) => Ok(TermWriteControlOutcome::Queued(message)),
+        Err(err) => match err.downcast::<crate::exit_code::ControlSubmitRefused>() {
+            Ok(refusal) => Ok(TermWriteControlOutcome::SubmitRefused(refusal.message)),
+            Err(other) => Err(other),
+        },
+    }
+}
+
 /// The terminal outcome of a bounded blocking control round-trip
 /// (`cs terminal survey`, `cs copy`, `cs paste`). Split from the commands so
 /// the print-stream + exit-code decision is unit-testable without a live
@@ -2773,6 +2817,39 @@ mod tests {
         }
         // Any other error propagates unchanged (the generic exit-1 path).
         let err = classify_control_result(Err(anyhow::anyhow!("connection refused"))).unwrap_err();
+        assert!(err.to_string().contains("connection refused"));
+    }
+
+    #[test]
+    fn classify_term_write_result_maps_submit_refusal_to_exit_69() {
+        let queued = classify_term_write_result(Ok("queued at position 1".into())).unwrap();
+        assert_eq!(queued.exit_code(), 0);
+        match queued {
+            TermWriteControlOutcome::Queued(message) => {
+                assert_eq!(message, "queued at position 1")
+            }
+            TermWriteControlOutcome::SubmitRefused(message) => {
+                panic!("unexpected refusal: {message}")
+            }
+        }
+
+        let refused = classify_term_write_result(Err(crate::exit_code::ControlSubmitRefused {
+            message: "queued, but no chord".into(),
+        }
+        .into()))
+        .unwrap();
+        assert_eq!(refused.exit_code(), crate::exit_code::SUBMIT_REFUSED);
+        match refused {
+            TermWriteControlOutcome::SubmitRefused(message) => {
+                assert_eq!(message, "queued, but no chord")
+            }
+            TermWriteControlOutcome::Queued(message) => {
+                panic!("expected refusal, got success: {message}")
+            }
+        }
+
+        let err =
+            classify_term_write_result(Err(anyhow::anyhow!("connection refused"))).unwrap_err();
         assert!(err.to_string().contains("connection refused"));
     }
 
