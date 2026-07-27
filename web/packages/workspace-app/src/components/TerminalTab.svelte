@@ -116,17 +116,16 @@
     type TerminalBackend,
   } from "../terminal/backend";
   import { Osc52Bridge } from "../terminal/osc52Bridge";
-  import type {
-    Terminal as GhosttyTerminal,
-    FitAddon as GhosttyFitAddon,
-  } from "ghostty-web";
+  import type { Terminal as GhosttyTerminal } from "ghostty-web";
   import {
     refreshTerminalRows as refreshTerminalRowsImpl,
     shouldUseWebglRenderer,
   } from "../terminal/renderer";
   import {
     createTrailingFitScheduler,
+    proposeGhosttyDimensions,
     runTerminalFit,
+    type FitLike,
   } from "../terminal/resize";
   import {
     clampScrollbackMb,
@@ -233,7 +232,7 @@
   let host: HTMLDivElement | undefined = $state();
   let searchInput: HTMLInputElement | undefined = $state();
   let term: Terminal | GhosttyTerminal | null = null;
-  let fit: FitAddon | GhosttyFitAddon | null = null;
+  let fit: FitAddon | FitLike | null = null;
   let search: SearchAddon | null = null;
   let serialize: SerializeAddon | null = null;
   // Scrollback line cap captured at construction time from the
@@ -804,7 +803,8 @@
       // renderer (no xterm addons exist for it). Options are limited to
       // ghostty-web's ITerminalOptions -- no lineHeight (its renderer
       // uses its own metrics), no macOptionIsMeta / tabStopWidth.
-      term = new ghosttyKit.Terminal({
+      const terminalHost = host;
+      const ghosttyTerm = new ghosttyKit.Terminal({
         allowTransparency: false,
         cursorBlink: false,
         cursorStyle: "block",
@@ -814,14 +814,46 @@
         scrollback: scrollbackLines,
         theme: terminalTheme(),
       });
-      fit = new ghosttyKit.FitAddon();
-      term.loadAddon(fit);
+      term = ghosttyTerm;
+      // Ghostty paints its auto-hiding scrollbar over the canvas, so it
+      // consumes no layout width. Its upstream fitter reserves a gutter for
+      // that overlay; this FitLike retains the rest of its measurement and
+      // clamp behavior while using the whole content box.
+      fit = {
+        fit() {
+          const metrics = ghosttyTerm.renderer?.getMetrics();
+          if (!metrics) return;
+          const style = window.getComputedStyle(terminalHost);
+          const proposed = proposeGhosttyDimensions(
+            {
+              width: terminalHost.clientWidth,
+              height: terminalHost.clientHeight,
+            },
+            {
+              top: Number.parseInt(style.getPropertyValue("padding-top")) || 0,
+              right:
+                Number.parseInt(style.getPropertyValue("padding-right")) || 0,
+              bottom:
+                Number.parseInt(style.getPropertyValue("padding-bottom")) || 0,
+              left: Number.parseInt(style.getPropertyValue("padding-left")) || 0,
+            },
+            metrics,
+          );
+          if (
+            !proposed ||
+            (proposed.cols === ghosttyTerm.cols &&
+              proposed.rows === ghosttyTerm.rows)
+          ) {
+            return;
+          }
+          ghosttyTerm.resize(proposed.cols, proposed.rows);
+        },
+      };
       // OSC 52 rides the byte observer: ghostty-web's WASM parser
       // swallows the sequence and exposes no registerOscHandler
       // equivalent (see osc52Bridge.ts). Applied in writePtyOutput.
       osc52Bridge = new Osc52Bridge();
       // Sync-callback writer for the origin tracker (see termWriter).
-      const ghosttyTerm = term;
       termWriter = {
         write: (bytes, done) => {
           ghosttyTerm.write(bytes);
@@ -853,10 +885,11 @@
       });
       installTerminalReportGuards(term);
       installKeyboardProtocolHandlers(term, keyboardProtocol, sendGeneratedTerminalInput);
-      fit = new FitAddon();
+      const xtermFit = new FitAddon();
+      fit = xtermFit;
       search = new SearchAddon({ highlightLimit: 1000 });
       serialize = new SerializeAddon();
-      term.loadAddon(fit);
+      term.loadAddon(xtermFit);
       term.loadAddon(search);
       term.loadAddon(serialize);
       // Route terminal link clicks through the editor's external-open

@@ -23,6 +23,12 @@ describe("TerminalTab ghostty backend wiring", () => {
     expect(tab).not.toMatch(/import \{[^}]*Terminal[^}]*\} from "ghostty-web"/);
   });
 
+  test("ghostty uses chan's fitter without its reserved scrollbar gutter", () => {
+    expect(tab).not.toMatch(/new ghosttyKit\.FitAddon\(\)/);
+    expect(tab).toContain("proposeGhosttyDimensions(");
+    expect(tab).toMatch(/ghosttyTerm\.resize\(proposed\.cols, proposed\.rows\)/);
+  });
+
   test("key handler is wrapped with INVERTED semantics on the ghostty branch", () => {
     expect(tab).toMatch(
       /term\.attachCustomKeyEventHandler\(\(e\) => !handleTerminalKeyEvent\(e\)\);/,
