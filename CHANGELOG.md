@@ -10,6 +10,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Terminal ghostty-web backend toggle.** New `terminal.ghostty` server setting (default off) with a checkbox in Settings, Terminal section. Turned on, newly opened terminals parse and render through [ghostty-web](https://github.com/coder/ghostty-web) -- Ghostty's WASM-compiled VT engine with an xterm.js-compatible API -- instead of xterm.js, fetching the ~420 KB wasm asset lazily on first use. Pinned to `0.4.0-next.20` (the 0.4.0 release predates its InputHandler mouse reporting). OSC 52 clipboard writes keep working via a byte-level observer on the PTY output path (ghostty-web's WASM parser swallows the sequence with no JS hook), SGR wheel reporting rides a chan-side shim (upstream's capture-phase scroller swallows the wheel before its InputHandler sees it), and the `terminal.mouse_capture` toggle keeps its behavior because its DECSET strip runs ahead of either parser. Under ghostty, drag selection works even while a TUI tracks the mouse (no Shift needed); the find bar, styled scrollback snapshots, and desktop `openExternalUrl` link routing remain xterm-only for now.
 
+### Fixed
+
+- **Windows `cs` runs the `cs` client instead of the `chan` CLI.** The bundled console `chan.exe` ignored the `ARGV0=cs` signal written by both Windows shims, so it parsed `cs terminal list` as a `chan` command. The console parser now honors that signal while retaining the shim's original argv for clap. This defect dates to the introduction of the bundled console `chan.exe`, not to v0.79.0.
+
 ## [v0.79.0] - 2026-07-26
 
 v0.79.0 makes the chan gateway administrable as a product boundary without database access, collapses the native menubar to the launcher window off macOS, adds an opt-in ghostty-web terminal backend, and makes tab rotation cover both Hybrid sides of a pane.
