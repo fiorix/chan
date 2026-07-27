@@ -105,6 +105,7 @@
     handleTerminalMetaKey,
     installKeyboardProtocolHandlers,
   } from "../terminal/keymap";
+  import { isHostOwnedChord } from "../terminal/hostChord";
   import { installTerminalReportGuards } from "../terminal/xtermReports";
   import { MouseModeFilter } from "../terminal/mouseModeFilter";
   import { installShiftSelectionBypass } from "../terminal/selectionBypass";
@@ -115,17 +116,16 @@
     type TerminalBackend,
   } from "../terminal/backend";
   import { Osc52Bridge } from "../terminal/osc52Bridge";
-  import type {
-    Terminal as GhosttyTerminal,
-    FitAddon as GhosttyFitAddon,
-  } from "ghostty-web";
+  import type { Terminal as GhosttyTerminal } from "ghostty-web";
   import {
     refreshTerminalRows as refreshTerminalRowsImpl,
     shouldUseWebglRenderer,
   } from "../terminal/renderer";
   import {
     createTrailingFitScheduler,
+    proposeGhosttyDimensions,
     runTerminalFit,
+    type FitLike,
   } from "../terminal/resize";
   import {
     clampScrollbackMb,
@@ -232,7 +232,7 @@
   let host: HTMLDivElement | undefined = $state();
   let searchInput: HTMLInputElement | undefined = $state();
   let term: Terminal | GhosttyTerminal | null = null;
-  let fit: FitAddon | GhosttyFitAddon | null = null;
+  let fit: FitAddon | FitLike | null = null;
   let search: SearchAddon | null = null;
   let serialize: SerializeAddon | null = null;
   // Scrollback line cap captured at construction time from the
@@ -803,7 +803,8 @@
       // renderer (no xterm addons exist for it). Options are limited to
       // ghostty-web's ITerminalOptions -- no lineHeight (its renderer
       // uses its own metrics), no macOptionIsMeta / tabStopWidth.
-      term = new ghosttyKit.Terminal({
+      const terminalHost = host;
+      const ghosttyTerm = new ghosttyKit.Terminal({
         allowTransparency: false,
         cursorBlink: false,
         cursorStyle: "block",
@@ -813,14 +814,46 @@
         scrollback: scrollbackLines,
         theme: terminalTheme(),
       });
-      fit = new ghosttyKit.FitAddon();
-      term.loadAddon(fit);
+      term = ghosttyTerm;
+      // Ghostty paints its auto-hiding scrollbar over the canvas, so it
+      // consumes no layout width. Its upstream fitter reserves a gutter for
+      // that overlay; this FitLike retains the rest of its measurement and
+      // clamp behavior while using the whole content box.
+      fit = {
+        fit() {
+          const metrics = ghosttyTerm.renderer?.getMetrics();
+          if (!metrics) return;
+          const style = window.getComputedStyle(terminalHost);
+          const proposed = proposeGhosttyDimensions(
+            {
+              width: terminalHost.clientWidth,
+              height: terminalHost.clientHeight,
+            },
+            {
+              top: Number.parseInt(style.getPropertyValue("padding-top")) || 0,
+              right:
+                Number.parseInt(style.getPropertyValue("padding-right")) || 0,
+              bottom:
+                Number.parseInt(style.getPropertyValue("padding-bottom")) || 0,
+              left: Number.parseInt(style.getPropertyValue("padding-left")) || 0,
+            },
+            metrics,
+          );
+          if (
+            !proposed ||
+            (proposed.cols === ghosttyTerm.cols &&
+              proposed.rows === ghosttyTerm.rows)
+          ) {
+            return;
+          }
+          ghosttyTerm.resize(proposed.cols, proposed.rows);
+        },
+      };
       // OSC 52 rides the byte observer: ghostty-web's WASM parser
       // swallows the sequence and exposes no registerOscHandler
       // equivalent (see osc52Bridge.ts). Applied in writePtyOutput.
       osc52Bridge = new Osc52Bridge();
       // Sync-callback writer for the origin tracker (see termWriter).
-      const ghosttyTerm = term;
       termWriter = {
         write: (bytes, done) => {
           ghosttyTerm.write(bytes);
@@ -852,10 +885,11 @@
       });
       installTerminalReportGuards(term);
       installKeyboardProtocolHandlers(term, keyboardProtocol, sendGeneratedTerminalInput);
-      fit = new FitAddon();
+      const xtermFit = new FitAddon();
+      fit = xtermFit;
       search = new SearchAddon({ highlightLimit: 1000 });
       serialize = new SerializeAddon();
-      term.loadAddon(fit);
+      term.loadAddon(xtermFit);
       term.loadAddon(search);
       term.loadAddon(serialize);
       // Route terminal link clicks through the editor's external-open
@@ -873,6 +907,9 @@
       termWriter = term;
     }
     term.open(host);
+    if (backend === "ghostty") {
+      host.addEventListener("keydown", onGhosttyHostChord, true);
+    }
     if (backend === "xterm") {
       // Hold Shift to force a native selection while a TUI holds mouse
       // tracking, on every platform (xterm.js ignores Shift on macOS).
@@ -1583,6 +1620,25 @@
     routeXtermData(data, ptyWrites, sendInput, sendUserInput);
   }
 
+  /// Let unclaimed macOS Command chords reach the native host. ghostty-web
+  /// handles keydown in the bubble phase and suppresses every encoded key, so
+  /// this capture listener stops its handler without preventing the default
+  /// WKWebView needs to hand the chord to AppKit.
+  function onGhosttyHostChord(e: KeyboardEvent): void {
+    const claimedByChan =
+      shouldEscapeTerminal(e) ||
+      isTerminalCopyChord(e) ||
+      isTerminalPasteChord(e);
+    if (
+      isHostOwnedChord(e, {
+        os: currentOS(),
+        claimedByChan,
+      })
+    ) {
+      e.stopPropagation();
+    }
+  }
+
   /// Ghostty-backend wheel reporting. ghostty-web registers its
   /// viewport scroller capture-phase with an unconditional
   /// stopPropagation(), so its InputHandler's wheel reporter (SGR
@@ -1678,6 +1734,7 @@
     closeSocket();
     resizeObserver?.disconnect();
     resizeObserver = null;
+    host?.removeEventListener("keydown", onGhosttyHostChord, true);
     term?.dispose();
     term = null;
     termWriter = null;
@@ -1834,13 +1891,18 @@
   // collides with a control code) and every other platform uses the standard
   // Ctrl+Shift+C / Ctrl+Shift+V, leaving bare Ctrl+C/V for the shell.
   function isTerminalCopyChord(e: KeyboardEvent): boolean {
+    if (e.key.toLowerCase() !== "c") return false;
     if (currentOS() === "mac") {
       return e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
     }
     return e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey;
   }
   function isTerminalPasteChord(e: KeyboardEvent): boolean {
-    return isTerminalCopyChord(e);
+    if (e.key.toLowerCase() !== "v") return false;
+    if (currentOS() === "mac") {
+      return e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
+    }
+    return e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey;
   }
 
   // Resolve a clipboard chord on keydown. Returns true when the event was a
@@ -1854,13 +1916,12 @@
   // (no JS opt-out); the native path has no button and does bracketed paste.
   function handleTerminalClipboardChord(e: KeyboardEvent): boolean {
     if (e.type !== "keydown") return false;
-    const key = e.key.toLowerCase();
-    if (key === "c" && isTerminalCopyChord(e)) {
+    if (isTerminalCopyChord(e)) {
       e.preventDefault();
       void copySelectionToClipboard();
       return true;
     }
-    if (key === "v" && isTerminalPasteChord(e)) {
+    if (isTerminalPasteChord(e)) {
       // Do NOT preventDefault and do NOT read the clipboard here: the browser
       // then performs its native paste -> xterm's `paste` listener -> bracketed
       // paste -> onData -> handleXtermData. Returning true still makes

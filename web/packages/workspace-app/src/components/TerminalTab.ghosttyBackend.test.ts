@@ -23,10 +23,31 @@ describe("TerminalTab ghostty backend wiring", () => {
     expect(tab).not.toMatch(/import \{[^}]*Terminal[^}]*\} from "ghostty-web"/);
   });
 
+  test("ghostty uses chan's fitter without its reserved scrollbar gutter", () => {
+    expect(tab).not.toMatch(/new ghosttyKit\.FitAddon\(\)/);
+    expect(tab).toContain("proposeGhosttyDimensions(");
+    expect(tab).toMatch(/ghosttyTerm\.resize\(proposed\.cols, proposed\.rows\)/);
+  });
+
   test("key handler is wrapped with INVERTED semantics on the ghostty branch", () => {
     expect(tab).toMatch(
       /term\.attachCustomKeyEventHandler\(\(e\) => !handleTerminalKeyEvent\(e\)\);/,
     );
+  });
+
+  test("host-owned chords stop before ghostty without suppressing the native default", () => {
+    expect(tab).toMatch(
+      /host\.addEventListener\("keydown", onGhosttyHostChord, true\);/,
+    );
+    expect(tab).toMatch(
+      /host\?\.removeEventListener\("keydown", onGhosttyHostChord, true\);/,
+    );
+    const handler = tab.match(
+      /function onGhosttyHostChord\(e: KeyboardEvent\): void \{[\s\S]*?\n  \}/,
+    )?.[0];
+    expect(handler).toBeDefined();
+    expect(handler).toContain("e.stopPropagation()");
+    expect(handler).not.toContain("preventDefault");
   });
 
   test("OSC 52 observer is fed on the write path (ghostty only)", () => {

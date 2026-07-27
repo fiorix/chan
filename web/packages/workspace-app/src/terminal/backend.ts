@@ -19,7 +19,7 @@
 /// for the terminal that failed (fail-open, same philosophy as
 /// MouseModeFilter).
 
-import type { FitAddon, Ghostty, Terminal } from "ghostty-web";
+import type { Ghostty, Terminal } from "ghostty-web";
 import type { TerminalPreferences } from "../api/types";
 
 export type TerminalBackend = "xterm" | "ghostty";
@@ -29,7 +29,6 @@ export type TerminalBackend = "xterm" | "ghostty";
 export type GhosttyKit = {
   ghostty: Ghostty;
   Terminal: typeof Terminal;
-  FitAddon: typeof FitAddon;
 };
 
 /// Backend for a newly spawned terminal. Spawn-time only, same contract
@@ -56,7 +55,7 @@ export function loadGhosttyKit(): Promise<GhosttyKit> {
         import("ghostty-web/ghostty-vt.wasm?url"),
       ]);
       const ghostty = await mod.Ghostty.load(wasmUrl.default);
-      return { ghostty, Terminal: mod.Terminal, FitAddon: mod.FitAddon };
+      return { ghostty, Terminal: mod.Terminal };
     })();
     kitPromise.catch(() => {
       kitPromise = null;
