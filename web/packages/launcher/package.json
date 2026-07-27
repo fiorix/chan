@@ -1,6 +1,6 @@
 {
   "name": "@chan/launcher",
-  "version": "0.79.0",
+  "version": "0.79.1",
   "private": true,
   "type": "module",
   "exports": {

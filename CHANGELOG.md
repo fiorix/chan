@@ -4,7 +4,9 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.79.1] - 2026-07-27
+
+v0.79.1 is a fix release for regressions found in the field after v0.79.0: the Linux clipboard no longer loses a copy to its own paste, the ghostty terminal backend stops swallowing the macOS chords and the terminal width it was never entitled to, Windows `cs` runs the `cs` client again, a new terminal's PTY starts at the size it will actually be, and a `cs terminal write` that could not submit says so with its exit status. The command launcher also gains New window and Close window.
 
 ### Added
 
