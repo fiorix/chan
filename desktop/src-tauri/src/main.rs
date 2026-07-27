@@ -3756,9 +3756,8 @@ fn platform_os() -> String {
 /// to "" so the SPA just treats it as nothing-to-paste; other failures
 /// surface as an Err the SPA logs before falling back to the web API.
 fn clipboard_read_text() -> Result<String, String> {
-    match on_clipboard(|c| c.get_text()) {
-        Ok(text) => Ok(text),
-        Err(arboard::Error::ContentNotAvailable) => Ok(String::new()),
+    match on_clipboard(|c| optional_content(c.get_text())) {
+        Ok(text) => Ok(text.unwrap_or_default()),
         Err(e) => Err(e.to_string()),
     }
 }
@@ -3778,9 +3777,9 @@ fn clipboard_write_text(text: String) -> Result<(), String> {
 /// image-less clipboard maps to `Ok(None)` so the SPA just tries the next
 /// representation.
 fn clipboard_read_image() -> Result<Option<Vec<u8>>, String> {
-    let image = match on_clipboard(|c| c.get_image()) {
-        Ok(image) => image,
-        Err(arboard::Error::ContentNotAvailable) => return Ok(None),
+    let image = match on_clipboard(|c| optional_content(c.get_image())) {
+        Ok(Some(image)) => image,
+        Ok(None) => return Ok(None),
         Err(e) => return Err(e.to_string()),
     };
     let width = u32::try_from(image.width).map_err(|_| "clipboard image too wide".to_string())?;
@@ -3833,9 +3832,8 @@ fn clipboard_write_image(bytes: Vec<u8>) -> Result<(), String> {
 /// Read HTML off the OS clipboard for `cs paste --html`. An HTML-less clipboard
 /// maps to `Ok(None)`. Native arboard read, mirroring [`clipboard_read_text`].
 fn clipboard_read_html() -> Result<Option<String>, String> {
-    match on_clipboard(|c| c.get().html()) {
-        Ok(html) => Ok(Some(html)),
-        Err(arboard::Error::ContentNotAvailable) => Ok(None),
+    match on_clipboard(|c| optional_content(c.get().html())) {
+        Ok(html) => Ok(html),
         Err(e) => Err(e.to_string()),
     }
 }
@@ -3846,6 +3844,18 @@ fn clipboard_read_html() -> Result<Option<String>, String> {
 /// plain-only targets.
 fn clipboard_write_html(html: String, alt_text: String) -> Result<(), String> {
     on_clipboard(|c| c.set().html(html, Some(alt_text))).map_err(|e| e.to_string())
+}
+
+/// An absent representation is not a failure: `ContentNotAvailable` means the
+/// clipboard holds no such kind, which every read treats as `None`. Classifying
+/// it inside the operation keeps `with_cached_clipboard` from mistaking it for a
+/// broken connection and discarding the handle that OWNS the selection on Linux.
+fn optional_content<T>(result: Result<T, arboard::Error>) -> Result<Option<T>, arboard::Error> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(arboard::Error::ContentNotAvailable) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// Acquire the OS clipboard and run one operation on it, off Linux: a fresh
@@ -7013,6 +7023,58 @@ mod tests {
             PEAK.load(Ordering::SeqCst),
             1,
             "clipboard operations overlapped"
+        );
+    }
+
+    #[test]
+    fn optional_content_classifies_absent_content_without_hiding_failures() {
+        assert_eq!(
+            optional_content::<u32>(Ok(7)).expect("present content"),
+            Some(7)
+        );
+        assert_eq!(
+            optional_content::<u32>(Err(arboard::Error::ContentNotAvailable))
+                .expect("absent content"),
+            None
+        );
+        assert!(matches!(
+            optional_content::<u32>(Err(arboard::Error::ClipboardNotSupported)),
+            Err(arboard::Error::ClipboardNotSupported)
+        ));
+    }
+
+    /// An absent representation is a successful read, so the cached Linux
+    /// handle remains the selection owner for the next representation probe.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cached_clipboard_keeps_handle_when_representation_is_absent() {
+        struct Handle;
+
+        let mut slot = Some(Handle);
+        let result = with_cached_clipboard(
+            &mut slot,
+            || panic!("a cached handle must not reconnect"),
+            |_handle| optional_content::<u32>(Err(arboard::Error::ContentNotAvailable)),
+        )
+        .expect("an absent representation is not an operation failure");
+
+        assert_eq!(result, None);
+        assert!(
+            slot.is_some(),
+            "an absent representation must keep the cached handle"
+        );
+
+        // The production read must classify inside `on_clipboard`; doing it
+        // afterwards lets the cache see an error and release the selection.
+        let source = include_str!("main.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("main.rs has a test module")
+            .0;
+        let inside_operation = ["on_clipboard(|c| optional_", "content(c.get_text()))"].concat();
+        assert!(
+            production.contains(&inside_operation),
+            "the text read classifies absent content outside the cached operation"
         );
     }
 
