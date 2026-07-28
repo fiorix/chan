@@ -11,9 +11,16 @@
 // <Excalidraw> React editor is ever mounted; the widget injects the SVG
 // exactly as it does for a mermaid render.
 
-import { type DiagramResult, parseErrorPos } from "./diagram_render";
+import {
+  type DiagramRenderer,
+  type DiagramResult,
+  parseErrorPos,
+} from "./diagram_render";
 import { configureExcalidrawAssets } from "./excalidrawAssets";
-import { renderMermaid } from "./mermaid_render";
+import {
+  renderMermaid,
+  renderMermaidForClipboard,
+} from "./mermaid_render";
 
 // mermaid-to-excalidraw lays a diagram out at its own hardcoded 20px mermaid
 // font while chan's plain mermaid renderer uses the 16px default, and
@@ -72,9 +79,10 @@ async function loadMermaidToExcalidraw(): Promise<
 /// message on the card's back face. mermaid-to-excalidraw parses mermaid
 /// underneath, so its errors carry the same "line N" format the mermaid
 /// renderer surfaces.
-export async function renderExcalidraw(
+async function renderExcalidrawWithFallback(
   source: string,
   dark: boolean,
+  renderFallback: DiagramRenderer,
 ): Promise<DiagramResult> {
   try {
     const [parseMermaidToExcalidraw, { convertToExcalidrawElements, exportToSvg }] =
@@ -106,12 +114,33 @@ export async function renderExcalidraw(
     // here. Degrade to the plain mermaid renderer so the block still shows
     // the diagram; only when mermaid ALSO fails (genuinely bad source) do we
     // surface the excalidraw error, so the failing source line is accented.
-    const fallback = await renderMermaid(source, dark);
+    const fallback = await renderFallback(source, dark);
     if (fallback.ok) return fallback;
     const error = (err as Error)?.message ?? String(err);
     const { line, col } = parseErrorPos(source, error);
     return { ok: false, error, errorLine: line, errorCol: col };
   }
+}
+
+export function renderExcalidraw(
+  source: string,
+  dark: boolean,
+): Promise<DiagramResult> {
+  return renderExcalidrawWithFallback(source, dark, renderMermaid);
+}
+
+/// Copy-only variant whose WebKit fallback uses pure SVG labels. The ordinary
+/// Excalidraw export is already SVG-native; this only differs when conversion
+/// falls back to Mermaid (notably subgraphs in WKWebView).
+export function renderExcalidrawForClipboard(
+  source: string,
+  dark: boolean,
+): Promise<DiagramResult> {
+  return renderExcalidrawWithFallback(
+    source,
+    dark,
+    renderMermaidForClipboard,
+  );
 }
 
 type ExcalidrawScene = {

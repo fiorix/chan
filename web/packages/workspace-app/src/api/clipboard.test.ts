@@ -43,6 +43,12 @@ describe("writeClipboardPayload", () => {
     await writeClipboardPayload("text/html", enc("<p>hi <b>there</b></p>"));
     expect(desktop.writeClipboardHtml).toHaveBeenCalledWith("<p>hi <b>there</b></p>", "hi there");
   });
+
+  test("png writes through the native image bridge", async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    await writeClipboardPayload("image/png", png);
+    expect(desktop.writeClipboardImage).toHaveBeenCalledWith(png);
+  });
 });
 
 describe("readClipboardPayload", () => {

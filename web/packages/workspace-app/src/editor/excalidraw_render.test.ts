@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { renderExcalidraw, renderExcalidrawFile } from "./excalidraw_render";
+import {
+  renderExcalidraw,
+  renderExcalidrawFile,
+  renderExcalidrawForClipboard,
+} from "./excalidraw_render";
 
 // Mock the two heavy libraries so the render path is exercised without
 // loading React / excalidraw. parseMermaidToExcalidraw throws on sentinel
@@ -51,6 +55,12 @@ vi.mock("./mermaid_render", () => ({
       return { ok: false, error: "mermaid parse failed" };
     }
     return { ok: true, svg: '<svg data-mermaid="1"></svg>' };
+  },
+  renderMermaidForClipboard: async (source: string) => {
+    if (source.includes("BOOM")) {
+      return { ok: false, error: "mermaid parse failed" };
+    }
+    return { ok: true, svg: '<svg data-copy-safe-mermaid="1"></svg>' };
   },
 }));
 
@@ -103,6 +113,12 @@ describe("renderExcalidraw", () => {
     const res = await renderExcalidraw("flowchart LR\n  subgraph SUBGRAPH\n    A --> B\n  end", false);
     expect(res.ok).toBe(true);
     expect(res.svg).toContain('data-mermaid="1"');
+  });
+
+  test("uses the copy-safe Mermaid fallback for a clipboard render", async () => {
+    const res = await renderExcalidrawForClipboard("SUBGRAPH", false);
+    expect(res.ok).toBe(true);
+    expect(res.svg).toContain('data-copy-safe-mermaid="1"');
   });
 
   test("resolves to a structured error when mermaid also fails (never throws)", async () => {

@@ -1,11 +1,10 @@
 // Copy-to-clipboard for rendered diagram faces: fenced mermaid /
 // mermaid-to-excalidraw blocks (diagram.ts) and inline `.excalidraw`
 // embeds (image.ts). The payload is a PNG rasterized client-side from the
-// rendered SVG markup - PNG is the one portable primary across surfaces
-// (the desktop clipboard IPC is PNG-only, and the async clipboard accepts
-// PNG everywhere) - written through `writeClipboardPayload`, which
-// branches the desktop arboard IPC vs the web `ClipboardItem` path (the
-// same fork that sidesteps WKWebView's async-clipboard image quirks).
+// rendered SVG markup. PNG is rasterized and written as an image; SVG is
+// copied as vector markup (the portable representation supported by both
+// the desktop text clipboard and browsers). Both ride
+// `writeClipboardPayload`, which owns the desktop/web fork.
 
 import { writeClipboardPayload } from "../../api/clipboard";
 
@@ -17,6 +16,8 @@ export const COPY_ICON_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
 export const CHECK_ICON_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
+
+export type DiagramCopyFormat = "svg" | "png";
 
 /// Largest rasterized diagram we will draw to a canvas, mirroring the
 /// paste-side `MAX_IMAGE_PIXELS` bound in api/clipboard.ts: a pathological
@@ -92,7 +93,18 @@ export async function copyDiagramPng(svg: string): Promise<void> {
   await writeClipboardPayload("image/png", await svgToPngBytes(svg));
 }
 
-/// An icon-only copy button for a rendered diagram face. Starts hidden;
+/// Copy the vector markup itself. System clipboards do not have a portable
+/// SVG-image representation (and arboard's image path is raster-only), so
+/// text is the lossless cross-surface form: it can be pasted into an `.svg`
+/// file or any editor without silently turning it back into a bitmap.
+export async function copyDiagramSvg(svg: string): Promise<void> {
+  await writeClipboardPayload(
+    "text/plain;charset=utf-8",
+    new TextEncoder().encode(svg),
+  );
+}
+
+/// One format-labelled copy button for a rendered diagram face. Starts hidden;
 /// the caller reveals it (`style.display = ""`) once a render succeeds -
 /// the same gating as the View button, so an errored diagram is never
 /// offered. `svg` resolves the markup to rasterize at click time (a dark
@@ -103,13 +115,23 @@ export async function copyDiagramPng(svg: string): Promise<void> {
 export function diagramCopyButton(
   className: string,
   svg: () => Promise<string | null> | string | null,
+  format: DiagramCopyFormat = "png",
+  showFormat = false,
 ): HTMLButtonElement {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = className;
-  btn.title = "copy diagram to clipboard";
-  btn.setAttribute("aria-label", "copy diagram to clipboard");
-  btn.innerHTML = COPY_ICON_SVG;
+  const label = format.toUpperCase();
+  btn.title =
+    format === "svg"
+      ? "copy SVG markup to clipboard"
+      : "copy PNG image to clipboard";
+  btn.setAttribute("aria-label", btn.title);
+  const showIdle = () => {
+    if (showFormat) btn.textContent = label;
+    else btn.innerHTML = COPY_ICON_SVG;
+  };
+  showIdle();
   btn.style.display = "none";
   // Swallow the press so copying never drops the caret into the source
   // (which would de-render a diagram block); the action runs on click,
@@ -124,13 +146,15 @@ export function diagramCopyButton(
     void Promise.resolve(svg())
       .then((markup) => {
         if (!markup) throw new Error("no rendered diagram");
-        return copyDiagramPng(markup);
+        return format === "svg"
+          ? copyDiagramSvg(markup)
+          : copyDiagramPng(markup);
       })
       .then(
         () => {
           btn.innerHTML = CHECK_ICON_SVG;
           setTimeout(() => {
-            btn.innerHTML = COPY_ICON_SVG;
+            showIdle();
           }, 1200);
         },
         () => {

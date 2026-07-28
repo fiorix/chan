@@ -1516,8 +1516,8 @@
     animation: cm-md-diagram-flip-in 0.45s ease;
   }
   /* Hover actions row over a rendered diagram: "View" (pan/zoom overlay)
-     plus the icon-only PNG copy. Hidden until the diagram is hovered (or
-     a button is keyboard-focused), mirroring the image actions row. */
+     plus explicit SVG / PNG copy choices. Hidden until the diagram is
+     hovered (or a button is keyboard-focused), mirroring the image row. */
   :global(.md-wysiwyg-cm6 .cm-md-diagram-actions) {
     position: absolute;
     top: 8px;
@@ -1546,8 +1546,7 @@
   :global(.md-wysiwyg-cm6 .cm-md-diagram-view:hover) {
     background: var(--bg-hover, rgba(0, 0, 0, 0.08));
   }
-  /* Icon-only Copy: flex-center the 12px SVG so it aligns with the View
-     label; tighter horizontal padding keeps the row balanced. */
+  /* Format buttons briefly show a 12px Check after copying. */
   :global(.md-wysiwyg-cm6 .cm-md-diagram-view.cm-md-diagram-copy) {
     display: inline-flex;
     align-items: center;

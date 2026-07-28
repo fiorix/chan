@@ -104,17 +104,20 @@ describe("openDiagramZoom", () => {
     expect(layer()!.style.transform).toBe(restTransform);
   });
 
-  test("wheel up zooms in by growing the SVG", () => {
+  test("four wheel notches equal one button zoom step", () => {
     openDiagramZoom(
       '<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 320 240"><rect width="10" height="10"/></svg>',
     );
     const svg = layer()!.querySelector("svg")!;
-    // deltaY < 0 is a zoom-in; with the pointer at the origin there is no pan
-    // drift, so the growth reads off the width alone.
-    backdrop()!.dispatchEvent(
-      new WheelEvent("wheel", { deltaY: -100, cancelable: true }),
-    );
-    expect(parseFloat(svg.style.width)).toBeGreaterThan(320);
+    // Wheel zoom is deliberately four times gentler than the 1.2x
+    // button/key step. With the pointer at the origin there is no pan
+    // drift, so four notches read as one full step off the width alone.
+    for (let i = 0; i < 4; i++) {
+      backdrop()!.dispatchEvent(
+        new WheelEvent("wheel", { deltaY: -100, cancelable: true }),
+      );
+    }
+    expect(parseFloat(svg.style.width)).toBeCloseTo(320 * 1.2, 5);
   });
 
   test("captures its shortcuts so they do not leak to the editor", () => {

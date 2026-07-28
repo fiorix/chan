@@ -179,7 +179,9 @@ describe("diagram copy affordance", () => {
       isDark: () => false,
     });
     const { parent, view } = mount(deco, MERMAID_DOC, 0);
-    const copyBtn = parent.querySelector<HTMLButtonElement>(".cm-md-diagram-copy");
+    const copyBtn = parent.querySelector<HTMLButtonElement>(
+      ".cm-md-diagram-copy-png",
+    );
     expect(copyBtn).toBeTruthy();
     // Same gating as View: hidden until the async render lands.
     expect(copyBtn!.style.display).toBe("none");
@@ -191,6 +193,32 @@ describe("diagram copy affordance", () => {
       expect(writeClipboardPayload).toHaveBeenCalledWith(
         "image/png",
         expect.any(Uint8Array),
+      );
+    });
+    view.destroy();
+    parent.remove();
+  });
+
+  test("SVG choice copies vector markup without rasterizing", async () => {
+    const svg = '<svg viewBox="0 0 40 20"><text>vector</text></svg>';
+    const deco = diagramDecorations({
+      lang: "mermaid",
+      label: "Mermaid",
+      render: async () => ({ ok: true, svg }),
+      isDark: () => false,
+    });
+    const { parent, view } = mount(deco, MERMAID_DOC, 0);
+    const copyBtn = parent.querySelector<HTMLButtonElement>(
+      ".cm-md-diagram-copy-svg",
+    );
+    await vi.waitFor(() => {
+      expect(copyBtn!.style.display).toBe("");
+    });
+    copyBtn!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await vi.waitFor(() => {
+      expect(writeClipboardPayload).toHaveBeenCalledWith(
+        "text/plain;charset=utf-8",
+        new TextEncoder().encode(svg),
       );
     });
     view.destroy();
@@ -209,7 +237,9 @@ describe("diagram copy affordance", () => {
       isDark: () => true,
     });
     const { parent, view } = mount(deco, MERMAID_DOC, 0);
-    const copyBtn = parent.querySelector<HTMLButtonElement>(".cm-md-diagram-copy");
+    const copyBtn = parent.querySelector<HTMLButtonElement>(
+      ".cm-md-diagram-copy-png",
+    );
     await vi.waitFor(() => {
       expect(copyBtn!.style.display).toBe("");
     });
@@ -220,6 +250,40 @@ describe("diagram copy affordance", () => {
       expect(render).toHaveBeenCalledWith(expect.any(String), false);
       expect(writeClipboardPayload).toHaveBeenCalledTimes(1);
     });
+    view.destroy();
+    parent.remove();
+  });
+
+  test("a copy-specific renderer replaces the visible face before rasterizing", async () => {
+    const render = vi.fn(async () => ({
+      ok: true,
+      svg: '<svg viewBox="0 0 40 20"><foreignObject/></svg>',
+    }));
+    const renderForCopy = vi.fn(async () => ({
+      ok: true,
+      svg: '<svg viewBox="0 0 40 20"><text>safe</text></svg>',
+    }));
+    const deco = diagramDecorations({
+      lang: "mermaid",
+      label: "Mermaid",
+      render,
+      renderForCopy,
+      isDark: () => false,
+    });
+    const { parent, view } = mount(deco, MERMAID_DOC, 0);
+    const copyBtn = parent.querySelector<HTMLButtonElement>(
+      ".cm-md-diagram-copy-png",
+    );
+    await vi.waitFor(() => {
+      expect(copyBtn!.style.display).toBe("");
+    });
+    copyBtn!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await vi.waitFor(() => {
+      expect(renderForCopy).toHaveBeenCalledWith(expect.any(String), false);
+      expect(writeClipboardPayload).toHaveBeenCalledTimes(1);
+    });
+    // Copy-only rendering must not replace the visible face.
+    expect(parent.querySelector(".cm-md-diagram-body foreignObject")).toBeTruthy();
     view.destroy();
     parent.remove();
   });
@@ -328,15 +392,15 @@ describe("diagram wiring", () => {
     expect(diagramSrc).toMatch(/onView\(renderedSvg\)/);
   });
 
-  test("copy affordance rasterizes the face to a PNG clipboard payload", () => {
-    // Both diagram surfaces mount the shared copy button: the fenced-block
-    // widget row and the inline .excalidraw embed row. The payload rides
-    // writeClipboardPayload so the desktop IPC / web ClipboardItem fork is
-    // the clipboard bridge's, not the widget's.
+  test("copy affordance offers vector SVG and raster PNG payloads", () => {
+    // The fenced-block widget exposes both formats. PNG rides the native
+    // image bridge; SVG markup rides the portable text clipboard.
     expect(diagramSrc).toMatch(
-      /diagramCopyButton\(\s*"cm-md-diagram-view cm-md-diagram-copy"/,
+      /cm-md-diagram-copy-svg/,
     );
+    expect(diagramSrc).toMatch(/cm-md-diagram-copy-png/);
     expect(diagramCopySrc).toMatch(/writeClipboardPayload\("image\/png"/);
+    expect(diagramCopySrc).toMatch(/"text\/plain;charset=utf-8"/);
     expect(wysiwygSrc).toMatch(/cm-md-diagram-actions/);
   });
 

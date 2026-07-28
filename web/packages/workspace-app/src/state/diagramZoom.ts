@@ -10,6 +10,9 @@
 const MIN_SCALE = 0.2;
 const MAX_SCALE = 8;
 const ZOOM_STEP = 1.2; // per button press / keypress
+// Four wheel notches cover one button/key step. Using the fourth root keeps
+// zoom-in and zoom-out reciprocal while making wheel zoom exactly 4x gentler.
+const WHEEL_ZOOM_STEP = ZOOM_STEP ** 0.25;
 const PAN_STEP = 48; // px per arrow / WASD press
 
 /// Open the diagram viewer for a rendered SVG string (mermaid's already
@@ -118,7 +121,9 @@ export function openDiagramZoom(svg: string): void {
       const rect = layer.getBoundingClientRect();
       const px = e.clientX - (rect.left + rect.width / 2);
       const py = e.clientY - (rect.top + rect.height / 2);
-      const next = clamp(scale * (e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP));
+      const next = clamp(
+        scale * (e.deltaY < 0 ? WHEEL_ZOOM_STEP : 1 / WHEEL_ZOOM_STEP),
+      );
       const ratio = next / scale;
       tx -= px * (ratio - 1);
       ty -= py * (ratio - 1);

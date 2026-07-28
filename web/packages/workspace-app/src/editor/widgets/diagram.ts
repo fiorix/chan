@@ -5,7 +5,7 @@
 // cursor LEAVES a COMPLETE (closed) block it is replaced by the rendered
 // diagram, which flips in on the horizontal (rotateX) axis. Cursor back
 // inside reveals the source again. A hover actions row offers "View"
-// (the pan/zoom overlay) and a PNG copy-to-clipboard; otherwise the
+// (the pan/zoom overlay) plus SVG and PNG copy-to-clipboard; otherwise the
 // cursor is the only trigger, like every other atom.
 //
 // The flip is symmetric: cursor-LEAVE plays the forward flip-in on the
@@ -46,8 +46,14 @@ import {
 import type { SyntaxNode } from "@lezer/common";
 import { selectionInRange } from "../decorations/selection";
 import { type DiagramRenderer, type DiagramResult } from "../diagram_render";
-import { renderMermaid } from "../mermaid_render";
-import { renderExcalidraw } from "../excalidraw_render";
+import {
+  renderMermaid,
+  renderMermaidForClipboard,
+} from "../mermaid_render";
+import {
+  renderExcalidraw,
+  renderExcalidrawForClipboard,
+} from "../excalidraw_render";
 import { diagramCopyButton } from "./diagram_copy";
 
 /// The fence token that triggers the mermaid-to-excalidraw renderer. One
@@ -62,6 +68,9 @@ interface DiagramConfig {
   label: string;
   /// Source + theme -> SVG (or error).
   render: DiagramRenderer;
+  /// Optional copy-only renderer for a canvas-portable SVG. The visible face
+  /// still uses `render`.
+  renderForCopy?: DiagramRenderer;
   /// Whether the editor surface is dark right now (read per scan).
   isDark: () => boolean;
   /// Open the pan/zoom overlay with a LIGHT render. When omitted, no View
@@ -75,6 +84,7 @@ interface DiagramSpec {
   lang: string;
   label: string;
   render: DiagramRenderer;
+  renderForCopy?: DiagramRenderer;
   onView?: (svg: string) => void;
   faceCache: Map<string, string>;
   errorCache: Map<string, DiagramError>;
@@ -302,9 +312,9 @@ class DiagramWidget extends WidgetType {
     diagram.textContent = "rendering…";
     inner.append(diagram);
 
-    // Hover actions row -> "View" opens the pan/zoom overlay with the
-    // rendered SVG; the icon-only copy rasterizes it to a PNG clipboard
-    // payload. Both hidden until a render succeeds (so they never offer a
+    // Hover actions row -> "View" opens the pan/zoom overlay; SVG copies
+    // vector markup and PNG copies a raster image. All stay hidden until a
+    // render succeeds (so they never offer a
     // missing / errored diagram); mousedown is swallowed so neither drops
     // the caret into the source, which would de-render the block via the
     // selection-intersect rule.
@@ -341,18 +351,32 @@ class DiagramWidget extends WidgetType {
       });
       actions.append(viewBtn);
     }
-    // Copy sits last in the row, like the image widget's action row. A
-    // dark editor rasterizes a fresh light render (View's discipline).
-    const copyBtn = diagramCopyButton(
-      "cm-md-diagram-view cm-md-diagram-copy",
-      async () => {
-        if (!renderedSvg) return null;
-        if (!this.dark) return renderedSvg;
-        const res = await this.spec.render(this.source, false);
+    // Copy sits last in the row, like the image widget's action row. Both
+    // formats share one copy-safe light render: WebKit-hostile SVG features
+    // are replaced without changing the visible face.
+    const copySvg = async (): Promise<string | null> => {
+      if (!renderedSvg) return null;
+      if (this.spec.renderForCopy) {
+        const res = await this.spec.renderForCopy(this.source, false);
         return res.ok && res.svg ? res.svg : null;
-      },
+      }
+      if (!this.dark) return renderedSvg;
+      const res = await this.spec.render(this.source, false);
+      return res.ok && res.svg ? res.svg : null;
+    };
+    const svgCopyBtn = diagramCopyButton(
+      "cm-md-diagram-view cm-md-diagram-copy cm-md-diagram-copy-svg",
+      copySvg,
+      "svg",
+      true,
     );
-    actions.append(copyBtn);
+    const pngCopyBtn = diagramCopyButton(
+      "cm-md-diagram-view cm-md-diagram-copy cm-md-diagram-copy-png",
+      copySvg,
+      "png",
+      true,
+    );
+    actions.append(svgCopyBtn, pngCopyBtn);
     inner.append(actions);
     wrap.append(inner);
 
@@ -361,7 +385,8 @@ class DiagramWidget extends WidgetType {
         diagram.innerHTML = res.svg;
         renderedSvg = res.svg;
         if (viewBtn) viewBtn.style.display = "";
-        copyBtn.style.display = "";
+        svgCopyBtn.style.display = "";
+        pngCopyBtn.style.display = "";
         // Stash the face so the reverse (enter) flip can ghost it after
         // CM tears the widget down, and clear any stale error so the
         // source view stops accenting a now-fixed line.
@@ -411,6 +436,7 @@ export function diagramDecorations(config: DiagramConfig): Extension {
     lang: config.lang.toLowerCase(),
     label: config.label,
     render: config.render,
+    renderForCopy: config.renderForCopy,
     onView: config.onView,
     faceCache: new Map(),
     errorCache: new Map(),
@@ -538,6 +564,7 @@ export function mermaidDecorations(
     lang: "mermaid",
     label: "Mermaid",
     render: renderMermaid,
+    renderForCopy: renderMermaidForClipboard,
     isDark,
     onView,
   });
@@ -554,6 +581,7 @@ export function excalidrawDecorations(
     lang: EXCALIDRAW_LANG,
     label: "Excalidraw",
     render: renderExcalidraw,
+    renderForCopy: renderExcalidrawForClipboard,
     isDark,
     onView,
   });

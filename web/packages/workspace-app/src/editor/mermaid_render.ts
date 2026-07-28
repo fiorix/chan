@@ -21,9 +21,10 @@ async function loadMermaid(): Promise<MermaidApi> {
 /// Render mermaid source to an SVG string. A parse/render failure (bad
 /// diagram source) resolves to { ok:false, error } rather than throwing,
 /// so the caller can show the message on the card's back face.
-export async function renderMermaid(
+async function renderMermaidWithLabels(
   source: string,
   dark: boolean,
+  htmlLabels: boolean,
 ): Promise<DiagramResult> {
   try {
     const mermaid = await loadMermaid();
@@ -34,6 +35,7 @@ export async function renderMermaid(
       startOnLoad: false,
       securityLevel: "strict",
       theme: dark ? "dark" : "default",
+      htmlLabels,
     });
     const id = `chan-mermaid-${seq++}`;
     const { svg } = await mermaid.render(id, source.trim());
@@ -43,4 +45,24 @@ export async function renderMermaid(
     const { line, col } = parseErrorPos(source, error);
     return { ok: false, error, errorLine: line, errorCol: col };
   }
+}
+
+export function renderMermaid(
+  source: string,
+  dark: boolean,
+): Promise<DiagramResult> {
+  return renderMermaidWithLabels(source, dark, true);
+}
+
+/// Copy-only render without Mermaid's HTML `<foreignObject>` labels.
+/// WebKit deliberately taints a canvas after drawing an SVG containing a
+/// foreignObject (https://bugs.webkit.org/show_bug.cgi?id=156176), so the
+/// ordinary rendered face cannot be exported with canvas.toBlob in
+/// chan-desktop. Pure SVG text keeps the visible face unchanged while giving
+/// the rasterizer a portable source.
+export function renderMermaidForClipboard(
+  source: string,
+  dark: boolean,
+): Promise<DiagramResult> {
+  return renderMermaidWithLabels(source, dark, false);
 }

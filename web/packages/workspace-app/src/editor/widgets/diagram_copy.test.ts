@@ -11,6 +11,7 @@ import {
   CHECK_ICON_SVG,
   COPY_ICON_SVG,
   copyDiagramPng,
+  copyDiagramSvg,
   diagramCopyButton,
   svgToPngBytes,
 } from "./diagram_copy";
@@ -76,15 +77,24 @@ describe("copyDiagramPng", () => {
   });
 });
 
+describe("copyDiagramSvg", () => {
+  test("writes the lossless SVG markup as text", async () => {
+    await copyDiagramSvg(SVG);
+    expect(writeClipboardPayload).toHaveBeenCalledWith(
+      "text/plain;charset=utf-8",
+      new TextEncoder().encode(SVG),
+    );
+  });
+});
+
 describe("diagramCopyButton", () => {
   test("starts hidden; click copies the resolved markup with Check feedback", async () => {
-    const btn = diagramCopyButton("x-copy", () => SVG);
+    const btn = diagramCopyButton("x-copy", () => SVG, "png", true);
     expect(btn.style.display).toBe("none");
-    // innerHTML re-serializes (self-closing tags expand), so pin the
-    // icons by their distinctive path data instead of the exact string.
+    expect(btn.textContent).toBe("PNG");
+    // Pin the shared icons by their distinctive path data.
     expect(COPY_ICON_SVG).toContain("M4 16");
     expect(CHECK_ICON_SVG).toContain("M20 6 9 17l-5-5");
-    expect(btn.innerHTML).toContain("M4 16");
     document.body.append(btn);
     btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await vi.waitFor(() => {
@@ -94,7 +104,7 @@ describe("diagramCopyButton", () => {
   });
 
   test("a null markup resolution fails softly (title flip, no write)", async () => {
-    const btn = diagramCopyButton("x-copy", () => null);
+    const btn = diagramCopyButton("x-copy", () => null, "svg");
     document.body.append(btn);
     btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await vi.waitFor(() => {
