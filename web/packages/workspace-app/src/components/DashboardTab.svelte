@@ -1,6 +1,6 @@
 <script lang="ts">
   // Dashboard tab body. The rotating carousel lives only INSIDE
-  // this tab (the welcome surface is the static chan mark + waves via
+  // this tab (the welcome surface is the static chan mark + animation via
   // EmptyPaneWelcome.svelte). The full carousel widget (rotation +
   // play/pause + pagination + 3 slides: Workspace / Search /
   // About) renders here.

@@ -1517,7 +1517,7 @@
         role="presentation"
       >
             <!-- Single-pane lone-pane case renders the static welcome
-                 surface: the chan mark over the dotted wave field. The
+                 surface: the chan mark over its decorative field. The
                  rotating carousel widget (About / Workspace metadata /
                  Indexing graph) lives inside the Dashboard tab.
                  Multi-pane empty panes keep the minimal chrome (just

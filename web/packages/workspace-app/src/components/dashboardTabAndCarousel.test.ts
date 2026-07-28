@@ -409,13 +409,40 @@ describe("Dashboard back card is per-slot (DashboardSlotBack)", () => {
 });
 
 describe("EmptyPaneWelcome empty-pane surface", () => {
-  test("EmptyPaneWelcome.svelte shows mark + waves and carries no actions", async () => {
+  test("EmptyPaneWelcome starts randomly and keeps every animation optional", async () => {
     const welcome = (await import("./EmptyPaneWelcome.svelte?raw"))
       .default as string;
-    // The surface is the mark over the dotted wave field, nothing else;
-    // the absolute workspace path label is gone.
+    // The surface is the mark over one decorative field and its transient
+    // catalog name, with no actions of its own.
     expect(welcome).toMatch(/<div class="welcome-mark"><\/div>/);
-    expect(welcome).toMatch(/<DottedSurface \/>/);
+    expect(welcome).toMatch(/animation = initialEmptyPaneAnimation\(\)/);
+    expect(welcome).toMatch(/persistEmptyPaneAnimation\(next\)/);
+    expect(welcome).toMatch(
+      /animationNameFlash = emptyPaneAnimationName\(next\)/,
+    );
+    expect(welcome).toMatch(
+      /class="animation-name-flash"[\s\S]{1,180}\{animationNameFlash\}/,
+    );
+    expect(welcome).toMatch(
+      /bottom: clamp\(24px, 6%, 64px\);[\s\S]{1,500}animation: empty-pane-animation-name-flash 1100ms ease-in-out;/,
+    );
+    expect(welcome).toMatch(
+      /<svelte:window onkeydown=\{onAnimationKeyDown\} \/>/,
+    );
+    expect(welcome).toMatch(
+      /event\.key === ">"[\s\S]{1,180}stepEmptyPaneAnimation\(animation, 1\)/,
+    );
+    expect(welcome).toMatch(
+      /event\.key === "<"[\s\S]{1,180}stepEmptyPaneAnimation\(animation, -1\)/,
+    );
+    expect(welcome).toMatch(
+      /event\.key === "\?"[\s\S]{1,180}randomEmptyPaneAnimation\(animation\)/,
+    );
+    expect(welcome).toMatch(
+      /const ANIMATION_COMPONENTS = \{[\s\S]{1,700}satisfies Record<EmptyPaneAnimationId, Component>;/,
+    );
+    expect(welcome).toMatch(/"dotted-waves": DottedSurface/);
+    expect(welcome).toMatch(/<ActiveAnimation \/>/);
     expect(welcome).not.toMatch(/workspace\.info/);
     expect(welcome).not.toMatch(/welcome-name/);
     expect(welcome).not.toMatch(/welcome-header/);
@@ -499,9 +526,12 @@ describe("EmptyPaneWelcome empty-pane surface", () => {
   test("DottedSurface sizing ignores transient flip transforms", async () => {
     const dotted = (await import("./DottedSurface.svelte?raw"))
       .default as string;
-    expect(dotted).toMatch(/canvas\.clientWidth/);
-    expect(dotted).toMatch(/canvas\.clientHeight/);
-    expect(dotted).not.toMatch(/canvas\.getBoundingClientRect\(\)/);
+    const lifecycle = (await import("./canvasAnimation.ts?raw"))
+      .default as string;
+    expect(dotted).toMatch(/runCanvasAnimation\(host/);
+    expect(lifecycle).toMatch(/canvas\.clientWidth/);
+    expect(lifecycle).toMatch(/canvas\.clientHeight/);
+    expect(lifecycle).not.toMatch(/canvas\.getBoundingClientRect\(\)/);
     expect(dotted).toMatch(/const HORIZON_RATIO = -0\.05;/);
     expect(dotted).toMatch(/height: clamp\(260px, 33%, 400px\);/);
     expect(dotted).toMatch(/bottom: 0;/);
