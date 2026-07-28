@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.79.2] - 2026-07-28
+
+v0.79.2 adds a library of selectable empty-pane animations, restores focus and physical-key routing across survey and terminal shortcuts, and makes diagram copying explicit and portable across browser and desktop surfaces.
+
+### Added
+
+- **Empty panes offer nine canvas animations.** A completely empty single pane chooses and remembers one of nine named animations, with `<` / `>` navigation and `?` random selection scoped to the focused welcome surface. The shared canvas lifecycle resizes with its pane, reacts to theme changes, and honors reduced-motion preferences.
+- **Rendered diagrams expose explicit copy formats.** Mermaid and Mermaid-to-Excalidraw widgets offer separate SVG and PNG actions. PNG copy uses the native desktop clipboard bridge when present and the browser clipboard elsewhere.
+
+### Changed
+
+- **Diagram wheel zoom is four times gentler.** The overlay keeps the existing zoom bounds while applying smaller steps, making trackpad and wheel navigation less abrupt.
+- **Decorative animation shortcuts stay below app shortcuts.** Empty-pane animation keys act only after the document-level shortcut path declines the event, and only while the welcome surface remains focused in a completely empty single pane.
+
+### Fixed
+
+- **Survey completion restores the originating terminal focus.** The survey overlay defers its focus claim past terminal refocus races and returns focus to the terminal that opened it.
+- **Terminal shortcut escape follows physical-key routing.** Option-mangled and code-based web chords now reach the existing keymap consistently instead of being swallowed by the terminal surface.
+- **Mermaid PNG copy works on WebKit.** Clipboard rendering avoids HTML labels that taint WebKit's SVG canvas conversion while leaving the visible diagram unchanged.
+
 ## [v0.79.1] - 2026-07-27
 
 v0.79.1 is a fix release for regressions found in the field after v0.79.0: the Linux clipboard no longer loses a copy to its own paste, the ghostty terminal backend stops swallowing the macOS chords and the terminal width it was never entitled to, Windows `cs` runs the `cs` client again, a new terminal's PTY starts at the size it will actually be, and a `cs terminal write` that could not submit says so with its exit status. The command launcher also gains New window and Close window.
