@@ -97,20 +97,98 @@ export default {
         visible: true,
         timeout: 30_000,
       });
+      await page.waitForFunction(
+        () => document.activeElement === document.querySelector(".survey-card"),
+        { timeout: 5_000 },
+      );
       await act();
       await page.waitForFunction(
         () => !document.querySelector(".survey-card"),
         { timeout: 15_000 },
       );
+      await page.waitForFunction(
+        () => {
+          const host = document.querySelector(".terminal-tab.active .terminal-host");
+          return host?.contains(document.activeElement) === true;
+        },
+        { timeout: 5_000 },
+      );
       return pending; // { stdout, stderr }
+    }
+
+    async function assertLauncherChordAfterSurvey() {
+      // macOS Option changes `event.key` for Ctrl+Alt+K (usually to `˚`).
+      // Dispatch that exact browser shape from the real xterm textarea: the
+      // terminal escape registry must match physical `code` like App does.
+      await page.evaluate(() => {
+        const focused = document.activeElement;
+        if (!(focused instanceof HTMLElement)) {
+          throw new Error("terminal has no focused element");
+        }
+        focused.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "˚",
+            code: "KeyK",
+            ctrlKey: true,
+            altKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+      await page.waitForSelector(".launcher .search", { timeout: 5_000 });
+      await page.keyboard.press("Escape");
+      await page.waitForSelector(".launcher", { hidden: true, timeout: 5_000 });
+
+      // Keep one trusted Linux/Windows-shaped chord in the same path too.
+      await page.keyboard.down("Control");
+      await page.keyboard.down("Alt");
+      await page.keyboard.press("KeyK");
+      await page.keyboard.up("Alt");
+      await page.keyboard.up("Control");
+      await page.waitForSelector(".launcher .search", { timeout: 5_000 });
+      await page.keyboard.press("Escape");
+      await page.waitForSelector(".launcher", { hidden: true, timeout: 5_000 });
+      await page.waitForFunction(
+        () => {
+          const host = document.querySelector(".terminal-tab.active .terminal-host");
+          return host?.contains(document.activeElement) === true;
+        },
+        { timeout: 5_000 },
+      );
+    }
+
+    async function assertSplitChordAfterSurvey() {
+      const before = await page.$$(".pane");
+      await page.evaluate(() => {
+        const focused = document.activeElement;
+        if (!(focused instanceof HTMLElement)) {
+          throw new Error("terminal has no focused element");
+        }
+        focused.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "/",
+            code: "Slash",
+            ctrlKey: true,
+            altKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+      await page.waitForFunction(
+        (count) => document.querySelectorAll(".pane").length === count + 1,
+        { timeout: 5_000 },
+        before.length,
+      );
     }
 
     try {
       // Open the target tab: a survey needs a LIVE terminal session
       // matching the selector, and the session registers only once the
       // SPA's terminal WS connects -- poll the list until the name shows.
-      // Clicks (not keypresses) throughout: the survey card steals focus
-      // on appear but can race the freshly-spawned xterm.
+      // Each leg asserts that the survey card took focus, then answers through
+      // its keyboard contract rather than bypassing focus with a click.
       await cs(["new", "--tab-name", TAB]);
       const deadline = Date.now() + 30_000;
       for (;;) {
@@ -125,17 +203,14 @@ export default {
       await ctx.shot("terminal-open");
 
       // Leg 1: option pick round-trips the label verbatim.
-      const opt = await surveyLeg(() =>
-        page.click(".survey-card .survey-option"),
-      );
+      const opt = await surveyLeg(() => page.keyboard.press("1"));
       if (opt.stdout.trim() !== "Alpha") {
         throw new Error(`option stdout: ${JSON.stringify(opt.stdout)}`);
       }
+      await assertLauncherChordAfterSurvey();
 
       // Leg 2: [X] dismiss keeps its distinct line.
-      const dis = await surveyLeg(() =>
-        page.click(".survey-card .survey-dismiss"),
-      );
+      const dis = await surveyLeg(() => page.keyboard.press("x"));
       if (dis.stdout.trim() !== "survey dismissed; no answer") {
         throw new Error(`dismiss stdout: ${JSON.stringify(dis.stdout)}`);
       }
@@ -143,7 +218,7 @@ export default {
       // Leg 3: [F] is the pure will-follow-up-later signal.
       const fol = await surveyLeg(async () => {
         await ctx.shot("survey-before-f");
-        await page.click(".survey-card .survey-followup");
+        await page.keyboard.press("f");
       });
       if (fol.stdout.trim() !== "host will follow up later") {
         throw new Error(`[F] stdout: ${JSON.stringify(fol.stdout)}`);
@@ -159,6 +234,9 @@ export default {
       if (hits.length) {
         throw new Error(`followup artifacts written: ${hits.join(", ")}`);
       }
+      // Run the layout-mutating shortcut last; the harness tears the
+      // throwaway layout down immediately after this check.
+      await assertSplitChordAfterSurvey();
       await ctx.shot("after-followup");
       return {
         option: opt.stdout.trim(),

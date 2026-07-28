@@ -389,6 +389,12 @@ describe("Pane right-click menus", () => {
     );
   });
 
+  test("reopen-tab listener matches the advertised Ctrl+Alt+Shift+T chord", () => {
+    expect(paneSource).toMatch(
+      /e\.ctrlKey &&\s*e\.altKey &&\s*e\.shiftKey &&\s*!e\.metaKey &&\s*e\.code === "KeyT"[\s\S]{0,80}reopenClosedTab\(\)/,
+    );
+  });
+
   test("empty pane right-click opens NO menu (empty-pane-menu)", async () => {
     // The command launcher carries spawn actions; right-clicking an
     // empty pane is a no-op.
@@ -399,6 +405,7 @@ describe("Pane right-click menus", () => {
       activeTabId: null,
     };
     const target = await renderPane(pane, { paneMode: false });
+    expect(target.querySelector(".welcome")).not.toBeNull();
 
     target.querySelector(".placeholder")?.dispatchEvent(
       new MouseEvent("contextmenu", {
@@ -501,6 +508,7 @@ describe("Pane side flip", () => {
       bActiveTabId: b.id,
     };
     const target = await renderPane(pane, { paneMode: false });
+    expect(target.querySelector(".welcome")).toBeNull();
     const button = target.querySelector<HTMLButtonElement>(".side-toggle");
     expect(button?.textContent?.trim()).toBe("A");
     expect(button?.title).toBe("Flip to side B (Ctrl+`)");
@@ -531,6 +539,7 @@ describe("Pane side flip", () => {
       side: "a",
     };
     const target = await renderPane(pane, { paneMode: false });
+    expect(target.querySelector(".welcome")).toBeNull();
     const button = target.querySelector<HTMLButtonElement>(".side-toggle");
     expect(button?.classList.contains("side-toggle-flash")).toBe(false);
 
@@ -549,6 +558,38 @@ describe("Pane side flip", () => {
     await tick();
 
     expect(button?.classList.contains("side-toggle-flash")).toBe(false);
+  });
+
+  test("split empty pane does not mount the welcome shortcuts", async () => {
+    const front = terminalTab({ id: "split-front" });
+    const leftPane: LeafNode = {
+      kind: "leaf",
+      id: "pane-split-front",
+      tabs: [front],
+      activeTabId: front.id,
+    };
+    layout.rootId = leftPane.id;
+    layout.activePaneId = leftPane.id;
+    layout.nodes = { [leftPane.id]: leftPane };
+    layout.focusColor = "blue";
+    splitPane(leftPane.id, "row", "after");
+    const root = layout.nodes[layout.rootId];
+    if (root?.kind !== "split") throw new Error("expected split");
+    const emptyPane = layout.nodes[root.b];
+    if (emptyPane?.kind !== "leaf") throw new Error("expected leaf");
+
+    cancelPaneMode();
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(Pane, {
+      target,
+      props: { pane: emptyPane },
+    });
+    mounted.push(component);
+    await tick();
+
+    expect(target.querySelector(".placeholder")).not.toBeNull();
+    expect(target.querySelector(".welcome")).toBeNull();
   });
 
   test("side changes trigger a shape-aware flip animation", async () => {

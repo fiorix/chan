@@ -31,12 +31,35 @@
   const busy = $derived(surveyBusy(slot));
 
   // Steal focus to the card when this slot's survey appears so option/F keys
-  // land here and not in the terminal/editor underneath. Keyed on surveyId so a
-  // replacing survey re-focuses.
+  // land here and not in the terminal/editor underneath. Blur immediately,
+  // then focus after the current flush so a terminal's already-queued refocus
+  // cannot take the keyboard back. Keyed on surveyId so a replacing survey
+  // re-focuses.
   let card = $state<HTMLDivElement | null>(null);
+  let returnFocus: HTMLElement | null = null;
+  let focusedSurveyId: string | null = null;
   $effect(() => {
-    const id = active?.surveyId;
-    if (id && card) card.focus();
+    const id = active?.surveyId ?? null;
+    if (!id) {
+      if (!focusedSurveyId) return;
+      focusedSurveyId = null;
+      const target = returnFocus;
+      returnFocus = null;
+      queueMicrotask(() => {
+        if (!active && target?.isConnected) target.focus({ preventScroll: true });
+      });
+      return;
+    }
+    if (!focusedSurveyId) {
+      const current = document.activeElement;
+      returnFocus =
+        current instanceof HTMLElement && current !== document.body ? current : null;
+    }
+    focusedSurveyId = id;
+    (document.activeElement as HTMLElement | null)?.blur();
+    queueMicrotask(() => {
+      if (active?.surveyId === id) card?.focus({ preventScroll: true });
+    });
   });
 
   // Number keys 1..N pick an option; F follows up; X or Escape dismisses. F

@@ -599,7 +599,7 @@
       layout.activePaneId === pane.id &&
       e.ctrlKey &&
       e.altKey &&
-      !e.shiftKey &&
+      e.shiftKey &&
       !e.metaKey &&
       e.code === "KeyT"
     ) {
@@ -1520,8 +1520,9 @@
                  surface: the chan mark over its decorative field. The
                  rotating carousel widget (About / Workspace metadata /
                  Indexing graph) lives inside the Dashboard tab.
-                 Multi-pane empty panes keep the minimal chrome (just
-                 the chan mark). Empty panes have no right-click menu;
+                 Multi-pane empty panes and panes with tabs on their hidden
+                 Hybrid side keep the minimal chrome (just the chan mark).
+                 Empty panes have no right-click menu;
                  spawn actions live in the pane hamburger's Apps rows
                  and the command launcher, so right-clicking an empty
                  pane is a no-op.
@@ -1531,7 +1532,7 @@
                  closes the window), so the lone Terminal spawn tile only ever
                  flashed during the transient empty boot layout. Fall through
                  to the minimal chan mark instead. -->
-        {#if !multiPane && !ui.terminalOnly}
+        {#if !multiPane && !ui.terminalOnly && everyTab.length === 0}
           <EmptyPaneWelcome />
         {:else}
           <div class="placeholder-stack">

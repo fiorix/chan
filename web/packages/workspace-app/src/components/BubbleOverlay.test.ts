@@ -62,6 +62,40 @@ describe("survey overlay", () => {
     expect(options[1].querySelector(".survey-option-label")?.textContent).toBe("Semantic");
   });
 
+  test("takes focus after a terminal's pending refocus", async () => {
+    const terminal = document.createElement("textarea");
+    const target = document.createElement("div");
+    document.body.append(terminal, target);
+    terminal.focus();
+    surveyState.windowWide = { spec: spec(), busy: false };
+
+    mounted.push(mount(BubbleOverlay, { target, props: { tabId: null } }));
+    queueMicrotask(() => terminal.focus());
+    await tick();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(document.activeElement).toBe(target.querySelector(".survey-card"));
+  });
+
+  test("returns focus to the terminal when the survey closes", async () => {
+    const terminal = document.createElement("textarea");
+    const target = document.createElement("div");
+    document.body.append(terminal, target);
+    terminal.focus();
+    surveyState.windowWide = { spec: spec(), busy: false };
+
+    mounted.push(mount(BubbleOverlay, { target, props: { tabId: null } }));
+    await tick();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(document.activeElement).toBe(target.querySelector(".survey-card"));
+
+    surveyState.windowWide = null;
+    await tick();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(document.activeElement).toBe(terminal);
+  });
+
   test("a per-terminal survey renders anchored (.per-terminal) for its tab only", async () => {
     surveyState.byTab = { t1: { spec: spec({ title: "On t1" }), busy: false } };
     const target = document.createElement("div");

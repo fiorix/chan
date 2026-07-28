@@ -1,10 +1,9 @@
 <script lang="ts">
   // Empty single-pane welcome surface: the chan mark over a decorative
-  // field. It carries no actions of its own; app
-  // spawns live in the pane hamburger's Apps rows and the command
-  // launcher (menu or global chord).
-  // Only mounted for a lone, non-terminal pane (see Pane.svelte), so it
-  // needs no terminal-window branch.
+  // field. Its animation keys are local to this focused surface; app
+  // shortcuts remain owned by the existing document-level shortcut path.
+  // Only mounted when a lone, non-terminal pane has no tabs on either side
+  // (see Pane.svelte), so it needs no terminal-window branch.
 
   import type { Component } from "svelte";
   import ConcentricPulse from "./ConcentricPulse.svelte";
@@ -48,6 +47,16 @@
   let animationNameFlashSequence = $state(0);
   let ActiveAnimation = $derived(ANIMATION_COMPONENTS[animation]);
 
+  $effect(() => {
+    const surface = welcome;
+    if (!surface) return;
+    queueMicrotask(() => {
+      if (surface.isConnected && document.activeElement === document.body) {
+        surface.focus({ preventScroll: true });
+      }
+    });
+  });
+
   function selectAnimation(next: EmptyPaneAnimationId): void {
     animation = next;
     persistEmptyPaneAnimation(next);
@@ -73,37 +82,40 @@
     ) {
       return;
     }
-    const active = document.activeElement;
-    if (
-      active instanceof HTMLElement &&
-      active !== document.body &&
-      active !== welcome
-    ) {
-      return;
-    }
+    const key = event.key;
+    if (key !== ">" && key !== "<" && key !== "?") return;
 
-    if (event.key === ">") {
-      event.preventDefault();
-      selectAnimation(stepEmptyPaneAnimation(animation, 1));
-    } else if (event.key === "<") {
-      event.preventDefault();
-      selectAnimation(stepEmptyPaneAnimation(animation, -1));
-    } else if (event.key === "?") {
-      event.preventDefault();
-      selectAnimation(randomEmptyPaneAnimation(animation));
-    }
+    const surface = welcome;
+    queueMicrotask(() => {
+      // App shortcuts receive the event through their unchanged document
+      // listener. If that path claimed it, or this empty surface disappeared
+      // because a tab/split opened, the decorative shortcut does nothing.
+      if (
+        event.defaultPrevented ||
+        !surface?.isConnected ||
+        document.activeElement !== surface
+      ) {
+        return;
+      }
+      if (key === ">") {
+        selectAnimation(stepEmptyPaneAnimation(animation, 1));
+      } else if (key === "<") {
+        selectAnimation(stepEmptyPaneAnimation(animation, -1));
+      } else {
+        selectAnimation(randomEmptyPaneAnimation(animation));
+      }
+    });
   }
 </script>
 
-<svelte:window onkeydown={onAnimationKeyDown} />
-
-<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+<!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
 <div
   class="welcome"
   role="region"
   aria-label="welcome"
   tabindex="0"
   bind:this={welcome}
+  onkeydown={onAnimationKeyDown}
 >
   <ActiveAnimation />
   <div class="welcome-mark"></div>

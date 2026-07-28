@@ -15,7 +15,7 @@ afterEach(() => {
 });
 
 describe("EmptyPaneWelcome animation names", () => {
-  test("flashes and persists the selected catalog name", async () => {
+  test("handles animation keys only on its focused empty-pane surface", async () => {
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
     const target = document.createElement("div");
     document.body.append(target);
@@ -25,9 +25,36 @@ describe("EmptyPaneWelcome animation names", () => {
     });
     await tick();
 
+    const welcome = target.querySelector<HTMLElement>(".welcome");
+    expect(welcome).not.toBeNull();
+    expect(document.activeElement).toBe(welcome);
+
     window.dispatchEvent(
       new KeyboardEvent("keydown", {
         key: ">",
+        cancelable: true,
+      }),
+    );
+    await tick();
+    expect(target.querySelector(".animation-name-flash")).toBeNull();
+    expect(window.sessionStorage.getItem("chan.empty-pane-animation")).toBeNull();
+
+    welcome?.focus();
+    const appShortcut = new KeyboardEvent("keydown", {
+      key: "k",
+      code: "KeyK",
+      ctrlKey: true,
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    welcome?.dispatchEvent(appShortcut);
+    expect(appShortcut.defaultPrevented).toBe(false);
+
+    welcome?.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: ">",
+        bubbles: true,
         cancelable: true,
       }),
     );

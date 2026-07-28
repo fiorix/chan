@@ -426,17 +426,18 @@ describe("EmptyPaneWelcome empty-pane surface", () => {
     expect(welcome).toMatch(
       /bottom: clamp\(24px, 6%, 64px\);[\s\S]{1,500}animation: empty-pane-animation-name-flash 1100ms ease-in-out;/,
     );
+    expect(welcome).not.toMatch(/<svelte:window/);
     expect(welcome).toMatch(
-      /<svelte:window onkeydown=\{onAnimationKeyDown\} \/>/,
+      /class="welcome"[\s\S]{1,180}onkeydown=\{onAnimationKeyDown\}/,
     );
     expect(welcome).toMatch(
-      /event\.key === ">"[\s\S]{1,180}stepEmptyPaneAnimation\(animation, 1\)/,
+      /key === ">"[\s\S]{1,180}stepEmptyPaneAnimation\(animation, 1\)/,
     );
     expect(welcome).toMatch(
-      /event\.key === "<"[\s\S]{1,180}stepEmptyPaneAnimation\(animation, -1\)/,
+      /key === "<"[\s\S]{1,180}stepEmptyPaneAnimation\(animation, -1\)/,
     );
     expect(welcome).toMatch(
-      /event\.key === "\?"[\s\S]{1,180}randomEmptyPaneAnimation\(animation\)/,
+      /else[\s\S]{1,180}randomEmptyPaneAnimation\(animation\)/,
     );
     expect(welcome).toMatch(
       /const ANIMATION_COMPONENTS = \{[\s\S]{1,700}satisfies Record<EmptyPaneAnimationId, Component>;/,
@@ -503,18 +504,18 @@ describe("EmptyPaneWelcome empty-pane surface", () => {
     );
   });
 
-  test("Pane.svelte mounts EmptyPaneWelcome (not EmptyPaneCarousel) on lone-pane empty case", async () => {
+  test("Pane.svelte mounts EmptyPaneWelcome only when the lone pane has no tabs", async () => {
     const pane = (await import("./Pane.svelte?raw")).default as string;
     expect(pane).toMatch(
       /import EmptyPaneWelcome from "\.\/EmptyPaneWelcome\.svelte";/,
     );
-    // EmptyPaneWelcome mounts on the lone-pane empty case, but NOT in a
-    // terminal-only window: those always hold a terminal, so the lone spawn
-    // tile only ever flashed during the empty boot layout.
+    // EmptyPaneWelcome mounts only on the completely empty lone-pane case:
+    // not in a split, a terminal-only window, or while a tab remains on the
+    // hidden Hybrid side.
     // EmptyPaneWelcome does not forward oncontextmenu because there
     // is no empty-pane right-click menu.
     expect(pane).toMatch(
-      /\{#if !multiPane && !ui\.terminalOnly\}[\s\S]{1,800}<EmptyPaneWelcome \/>/,
+      /\{#if !multiPane && !ui\.terminalOnly && everyTab\.length === 0\}[\s\S]{1,800}<EmptyPaneWelcome \/>/,
     );
     expect(pane).not.toMatch(/<EmptyPaneWelcome oncontextmenu=/);
     // EmptyPaneCarousel is owned by DashboardTab.svelte, not Pane.svelte.

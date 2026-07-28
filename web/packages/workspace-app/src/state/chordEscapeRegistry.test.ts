@@ -28,8 +28,17 @@ describe("chord-escape registry shape", () => {
       "app.terminal.toggle",
       "app.pane.mode",
       "app.pane.flip",
+      "app.pane.prev",
+      "app.pane.next",
+      "app.pane.splitRight",
+      "app.pane.splitDown",
       "app.window.reload",
       "app.window.close",
+      "app.tab.reopenClosed",
+      "app.tab.next",
+      "app.tab.prev",
+      "app.tab.jump",
+      "terminal.richPrompt",
     ];
     for (const id of required) {
       const entry = SHORTCUTS.find((s) => s.id === id);
@@ -173,6 +182,59 @@ describe("shouldEscapeTerminal lookup", () => {
       ctrlKey: true,
     });
     expect(shouldEscapeTerminal(e)).toBe(true);
+  });
+
+  test.each([
+    [
+      "Ctrl+Alt+K launcher with an Option-mangled key",
+      { key: "˚", code: "KeyK", ctrlKey: true, altKey: true },
+    ],
+    [
+      "Alt+[ pane navigation with an Option-mangled key",
+      { key: "“", code: "BracketLeft", altKey: true },
+    ],
+    [
+      "Alt+] pane navigation with an Option-mangled key",
+      { key: "‘", code: "BracketRight", altKey: true },
+    ],
+    [
+      "Alt+Shift+[ tab navigation with an Option-mangled key",
+      { key: "”", code: "BracketLeft", altKey: true, shiftKey: true },
+    ],
+    [
+      "Alt+Shift+] tab navigation with an Option-mangled key",
+      { key: "’", code: "BracketRight", altKey: true, shiftKey: true },
+    ],
+    [
+      "Ctrl+Alt+/ split right",
+      { key: "/", code: "Slash", ctrlKey: true, altKey: true },
+    ],
+    [
+      "Ctrl+Alt+? split down",
+      {
+        key: "?",
+        code: "Slash",
+        ctrlKey: true,
+        altKey: true,
+        shiftKey: true,
+      },
+    ],
+    [
+      "Ctrl+Alt+Shift+T reopen closed tab",
+      {
+        key: "T",
+        code: "KeyT",
+        ctrlKey: true,
+        altKey: true,
+        shiftKey: true,
+      },
+    ],
+    [
+      "Ctrl+Alt+3 jump to tab",
+      { key: "3", code: "Digit3", ctrlKey: true, altKey: true },
+    ],
+  ])("%s escapes", (_name, init) => {
+    expect(shouldEscapeTerminal(new KeyboardEvent("keydown", init))).toBe(true);
   });
 
   test("plain alphabet keys (typing in terminal) do NOT escape", () => {

@@ -2109,19 +2109,6 @@
     // flagged `escapeTerminal: true` in shortcuts.ts, return false so xterm
     // does not consume the keystroke.
     if (shouldEscapeTerminal(e)) return false;
-    // Alt+Shift+[ / ] is the web tab-nav chord (App.svelte onWindowKey). Let it
-    // through (false = browser dispatches it) so xterm does NOT write it to the
-    // PTY - otherwise the shell brace-expands `{...}` instead of switching tabs.
-    // Matched by `e.code` so an Option-mangled glyph on macOS still resolves.
-    if (
-      e.altKey &&
-      e.shiftKey &&
-      !e.metaKey &&
-      !e.ctrlKey &&
-      (e.code === "BracketLeft" || e.code === "BracketRight")
-    ) {
-      return false;
-    }
     // Meta/Enter byte encoding per the negotiated keyboard protocol is an
     // xterm-path concern (keymap.ts tracks the protocol through xterm's
     // parser hooks): ghostty-web's WASM key encoder applies the kitty /

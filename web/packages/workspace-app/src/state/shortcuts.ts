@@ -211,6 +211,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
     web: "Ctrl+Alt+/",
     native: "Mod+/",
     group: "Panes",
+    escapeTerminal: true,
   },
   {
     id: "app.pane.splitDown",
@@ -218,6 +219,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
     web: "Ctrl+Alt+?",
     native: "Mod+Shift+/",
     group: "Panes",
+    escapeTerminal: true,
   },
   // The explicit "close this window" action. Native chord: Cmd+Shift+W on
   // macOS, Ctrl+Shift+W on Linux / Windows. There is no in-page web chord:
@@ -283,6 +285,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
     native: "Mod+Shift+T",
     group: "Tabs",
     note: "Cmd+Shift+T on macOS desktop",
+    escapeTerminal: true,
   },
   {
     id: "app.tab.next",
@@ -290,6 +293,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
     web: "Alt+Shift+]",
     native: "Mod+Shift+]",
     group: "Tabs",
+    escapeTerminal: true,
   },
   {
     id: "app.tab.prev",
@@ -297,6 +301,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
     web: "Alt+Shift+[",
     native: "Mod+Shift+[",
     group: "Tabs",
+    escapeTerminal: true,
   },
   {
     id: "app.tab.jump",
@@ -304,6 +309,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
     web: "Ctrl+Alt+1..9",
     native: "Mod+1..9",
     group: "Tabs",
+    escapeTerminal: true,
   },
   // Find on page - browser owns Cmd+F/G/Shift+G in the web build.
   {
@@ -633,17 +639,32 @@ export function chordFromEvent(e: KeyboardEvent): string | null {
   return parts.join("+");
 }
 
-/// Normalise a `KeyboardEvent.key` to the registry's casing.
-/// Letters are uppercased; printable specials map to their
-/// registry-form (`,`, `[`, `]`, etc.). Returns `null` for
-/// modifier-only events (Shift / Alt / Control / Meta on their
-/// own).
+/// Normalise a keydown to the registry's physical-key casing. App.svelte's
+/// global handlers match `code` so Option-mangled and non-US-layout glyphs
+/// still trigger their advertised chord; terminal escape must use the same
+/// identity or xterm/ghostty will consume the event before App sees it.
 function canonicalKey(e: KeyboardEvent): string | null {
   const k = e.key;
   if (!k || k === "Shift" || k === "Alt" || k === "Control" || k === "Meta") {
     return null;
   }
-  if (e.code === "Backquote") return "`";
+  const letter = e.code.match(/^Key([A-Z])$/)?.[1];
+  if (letter) return letter;
+  const digit = e.code.match(/^Digit([0-9])$/)?.[1];
+  if (digit) return digit;
+  const physicalPunctuation: Readonly<Record<string, string>> = {
+    Backquote: "`",
+    BracketLeft: "[",
+    BracketRight: "]",
+    Comma: ",",
+    Equal: "=",
+    Minus: "-",
+    Period: ".",
+    Semicolon: ";",
+    Slash: "/",
+  };
+  const punctuation = physicalPunctuation[e.code];
+  if (punctuation) return punctuation;
   if (k.length === 1) return k.toUpperCase();
   // Multi-char keys: registry uses the browser's `KeyboardEvent.key`
   // names verbatim (`Enter`, `Tab`, `Escape`, `ArrowLeft`, ...).
@@ -681,7 +702,15 @@ function registryEscapeCommandId(chord: Chord): string | null {
     if (!registryChord) continue;
     const override = overrideResolver?.(s.id, platform, os);
     if (override && !chordsEqual(override, registryChord)) continue;
-    if (sameChord(eventTokens, canonicalChordTokens(registryChord))) {
+    const registryTokens = canonicalChordTokens(registryChord);
+    if (registryTokens.has("1..9")) {
+      const eventDigit = [...eventTokens].find((token) => /^[1-9]$/.test(token));
+      if (eventDigit) {
+        registryTokens.delete("1..9");
+        registryTokens.add(eventDigit);
+      }
+    }
+    if (sameChord(eventTokens, registryTokens)) {
       return s.id;
     }
   }
@@ -695,6 +724,13 @@ function registryEscapeCommandId(chord: Chord): string | null {
 /// normalise platform Ctrl as `Mod`.
 function canonicalChordTokens(chord: string): Set<string> {
   const tokens = new Set(chord.split("+"));
+  // `?` already implies Shift in the human-facing chord grammar. Events use
+  // the physical Slash code plus shiftKey, so compare both as Shift+/.
+  if (tokens.has("?")) {
+    tokens.delete("?");
+    tokens.add("Shift");
+    tokens.add("/");
+  }
   if (currentOS() === "mac" && tokens.has("Cmd")) {
     tokens.delete("Cmd");
     tokens.add("Mod");
