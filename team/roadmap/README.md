@@ -24,7 +24,6 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | item | state | what needs to happen |
 | --- | --- | --- |
 | [video-preview-and-range-serving](v0.80.0/video-preview-and-range-serving.md) | registered, grounded but not specced | spec first; the real chunk is HTTP range/206 in the file route, mirroring the image path on the frontend |
-| [doom-overlay-remote-protocol](v0.80.0/doom-overlay-remote-protocol.md) | registered, not specced | the ask is the remote protocol, which the prototype does not implement; mirror the scene-session shape. Branch `doom-overlay` needs rebasing |
 
 ## Completed
 
