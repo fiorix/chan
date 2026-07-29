@@ -2002,6 +2002,10 @@ mod tests {
     };
     use tempfile::TempDir;
 
+    /// Both drop tests assert absolute values against one process-global
+    /// producer counter, so they must not observe each other's readers.
+    static BOUNDED_READER_DROP_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn workspace_fixture() -> (TempDir, TempDir, std::sync::Arc<crate::Workspace>) {
         let cfg = TempDir::new().unwrap();
         let root = TempDir::new().unwrap();
@@ -2872,6 +2876,9 @@ mod tests {
 
     #[test]
     fn dropping_bounded_slice_reader_joins_blocked_producer() {
+        let _serial = BOUNDED_READER_DROP_TEST_GUARD
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let (_cfg, root, workspace) = workspace_fixture();
         let size = BINARY_STREAM_CHUNK_SIZE * (BINARY_STREAM_QUEUE_DEPTH + 16);
         std::fs::write(root.path().join("slice-disconnect.bin"), vec![0x5a; size]).unwrap();
@@ -2896,6 +2903,9 @@ mod tests {
 
     #[test]
     fn dropping_bounded_reader_joins_blocked_producer() {
+        let _serial = BOUNDED_READER_DROP_TEST_GUARD
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let (_cfg, root, workspace) = workspace_fixture();
         let size = BINARY_STREAM_CHUNK_SIZE * (BINARY_STREAM_QUEUE_DEPTH + 16);
         std::fs::write(root.path().join("disconnect.bin"), vec![0x5a; size]).unwrap();
