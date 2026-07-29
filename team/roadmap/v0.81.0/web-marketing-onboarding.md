@@ -1,6 +1,6 @@
 # Web marketing onboarding
 
-Status: REGISTERED for v0.80.0, NOT specced.
+Status: REGISTERED for v0.81.0, NOT specced.
 
 Create an onboarding page for the marketing site. It may later become the site's main page.
 
