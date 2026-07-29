@@ -79,7 +79,9 @@ pub struct AppState {
 }
 
 /// Reserved usernames. Anything that could collide with an existing
-/// or future top-level path under chan.app/ goes here. Kept short on
+/// or future top-level path under the identity origin (gw.{domain})
+/// goes here. Must stay sorted: the lookup is a binary_search
+/// (test-pinned). Kept short on
 /// purpose; profanity / leet-speak is handled separately by the
 /// rustrict pass.
 const RESERVED_USERNAMES: &[&str] = &[
@@ -95,8 +97,6 @@ const RESERVED_USERNAMES: &[&str] = &[
     "developer",
     "developers",
     "docs",
-    "workspace",
-    "workspaces",
     "help",
     "id",
     "identity",
@@ -120,6 +120,8 @@ const RESERVED_USERNAMES: &[&str] = &[
     "team",
     "user",
     "users",
+    "workspace",
+    "workspaces",
     "www",
 ];
 
@@ -154,7 +156,7 @@ pub fn routers(
     api_tokens: ApiTokenService,
     token_throttle: TokenThrottle,
 ) -> (Router, Router) {
-    // Host-only on id.chan.app: no Domain attribute, so the cookie
+    // Host-only on the identity origin: no Domain attribute, so the cookie
     // does not propagate to the proxy fleet's tenant origins. The
     // devserver-gate handoff covers the cross-service auth need; see
     // crates/identity/design.md. The `__Host-` name additionally makes
@@ -1478,7 +1480,7 @@ async fn resolve_entry_target(
 ///   2. With a session, resolve `{owner}` (username -> User), read the
 ///      owner's LIVE devserver_id from the proxy admin tunnel list, and
 ///      call profile `devserver_access?as=<self>` on it. Owner and grantee
-///      both return a role; no-access (or no live devserver) returns 404.
+///      both return access; no-access (or no live devserver) returns 404.
 ///      A grant gives the WHOLE devserver.
 ///   3. On access, mint an entry JWT (drv = the devserver_id) against
 ///      the tenant origin built from the controller row's node base
@@ -2917,6 +2919,21 @@ pub(crate) fn user_agent(headers: &HeaderMap) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reserved_usernames_are_strictly_sorted() {
+        // The lookup is a binary_search, whose result is unspecified on
+        // unsorted input: an out-of-order entry silently un-reserves every
+        // name the probe sequence skips past.
+        for pair in RESERVED_USERNAMES.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "out of order: {} >= {}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
 
     #[test]
     fn desktop_entry_path_accepts_single_slash_paths() {

@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Reserved usernames are enforced again for every entry.** The gateway's reserved-username list had drifted out of sorted order while its lookup is a binary search, whose result is unspecified on unsorted input, so some reserved names could be claimed as account usernames. The list is sorted again and a test now pins the ordering invariant.
+
 ## [v0.79.2] - 2026-07-28
 
 v0.79.2 adds a library of selectable empty-pane animations, restores focus and physical-key routing across survey and terminal shortcuts, and makes diagram copying explicit and portable across browser and desktop surfaces.
