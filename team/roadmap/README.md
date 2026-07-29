@@ -23,6 +23,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 | item | state | what needs to happen |
 | --- | --- | --- |
+| [devserver-terminals-survive-restart](v0.81.0/devserver-terminals-survive-restart.md) | registered, grounded, ruled, ready to spec | swap the transactional fdstore prepare protocol for continuous parking so systemctl restart, watchdog, and crash restarts rebuild terminals; stop keeps killing them |
 | [editor-media-copy-and-view-parity](v0.81.0/editor-media-copy-and-view-parity.md) | registered, grounded, ready to spec | add Copy PNG (and Copy SVG for `.svg`) to image previews, and build the View/copy chrome onto the slide overlay's rendered media |
 | [extensions-v1](v0.81.0/extensions-v1.md) | registered, grounded, needs rulings | rule the open decisions (spawn policy, handshake shape, desktop CSP scope), then spec the TOML discovery, subprocess supervision, and iframe tab |
 | [file-browser-media-double-click](v0.81.0/file-browser-media-double-click.md) | registered, grounded, ready to spec | route media-row double-click and Enter to the existing image/video/PDF viewers |
