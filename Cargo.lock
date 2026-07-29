@@ -968,6 +968,7 @@ version = "0.79.2"
 dependencies = [
  "anyhow",
  "chan-llm",
+ "chan-revtunnel",
  "chan-server",
  "chan-shell",
  "chan-systemd",
@@ -975,6 +976,7 @@ dependencies = [
  "clap 4.6.1",
  "clap_complete",
  "flate2",
+ "futures",
  "gethostname",
  "reqwest 0.12.28",
  "rustix 1.1.4",
@@ -984,6 +986,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "toml 0.8.2",
  "tracing",
  "tracing-subscriber",
@@ -997,6 +1000,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chan",
+ "chan-revtunnel",
  "chan-server",
  "chan-shell",
  "chan-workspace",
@@ -1043,6 +1047,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "chan-revtunnel",
  "chan-shell",
  "chan-systemd",
  "chan-workspace",
@@ -1089,6 +1094,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "chan-revtunnel"
+version = "0.79.2"
+dependencies = [
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+]
+
+[[package]]
 name = "chan-server"
 version = "0.79.2"
 dependencies = [
@@ -1098,6 +1115,7 @@ dependencies = [
  "base64 0.22.1",
  "chan-library",
  "chan-llm",
+ "chan-revtunnel",
  "chan-shell",
  "chan-systemd",
  "chan-tunnel-client",
@@ -1134,6 +1152,7 @@ version = "0.79.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "chan-revtunnel",
  "chan-workspace",
  "clap 4.6.1",
  "serde",

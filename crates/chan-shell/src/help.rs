@@ -706,8 +706,9 @@ whichever window (or none) hosts it. Of those, none targets a
 window; `new` does, the caller's own, via $CHAN_WINDOW_ID. Every
 subcommand needs $CHAN_CONTROL_SOCKET.
 
-Subcommand prefixes infer, so `cs t n` / `cs t w` / `cs t l` are
-terminal new / write / list.
+Subcommand prefixes infer, so `cs te n` / `cs te w` / `cs te l` are
+terminal new / write / list. A bare t is too short to infer: it
+matches both terminal and tunnel.
 
 A standalone terminal (the workspace-less terminal tenant) supports
 ALL of this: tab names, groups, the write queue, restart, close and
@@ -840,7 +841,7 @@ pub(crate) const CS_TERMINAL_LIST_AFTER: &str = r#"EXAMPLES:
   cs terminal list --json --pretty
     the same data as indented JSON
 
-  cs t l --json | jq -r '.groups.alpha[].name'
+  cs te l --json | jq -r '.groups.alpha[].name'
     just the tab names of group alpha
 
 SIDE EFFECTS:
@@ -1434,7 +1435,7 @@ pub(crate) const CS_TERMINAL_WRITE_AFTER: &str = r#"EXAMPLES:
     parks "draft: " in the compose box, unsubmitted
 
   printf 'review %s\n' notes.md \
-    | cs t w --tab-group alpha --stdin --submit codex
+    | cs te w --tab-group alpha --stdin --submit codex
     one poke broadcast to every tab of group alpha; each tab
     gets its own server-derived chord, mixed agents included
 
@@ -1468,6 +1469,67 @@ CAVEATS:
 SEE ALSO:
   cs terminal survey (ask and BLOCK for an answer), cs terminal scrollback
   (read what came back), cs terminal restart.
+"#;
+
+/// `cs tunnel` long help (manpage head).
+pub(crate) const CS_TUNNEL: &str = r#"Forward a port of the desktop machine back to this devserver host.
+
+`cs tunnel 8080:3000` asks the chan-desktop app viewing this window
+to listen on 127.0.0.1:8080 of ITS machine and forward every
+connection back to 127.0.0.1:3000 on this host -- the `ssh -R` shape,
+with the window standing in for the SSH connection. A dev web server
+running next to this terminal becomes reachable in the desktop
+machine's own browser.
+
+SPEC is [bind-address:]desktop-port:devserver-port. The bind address
+defaults to loopback; an explicit non-loopback address is accepted
+with a warning, because it exposes the forwarded port to the desktop
+machine's network. Desktop port 0 asks the OS there for a free port;
+the acknowledgement names the port that was bound.
+
+The command IS the tunnel: it stays in the foreground for the
+tunnel's whole life, the tunnel dies when it exits (Ctrl-C), and it
+exits when the tunnel dies (the desktop app disconnects, or the
+window closes). Today the tunnel carries TCP only; --proto udp is
+recognized but refused as not implemented yet.
+"#;
+
+/// `cs tunnel` examples, side effects, and caveats.
+pub(crate) const CS_TUNNEL_AFTER: &str = r#"EXAMPLES:
+  cs tunnel 8080:3000
+    The desktop machine's 127.0.0.1:8080 now reaches port 3000 on
+    this host; open http://127.0.0.1:8080 in a browser there.
+
+  cs tunnel 0:3000
+    The OS on the desktop machine picks a free port; read it from
+    the ack on stderr.
+
+  cs tunnel 0.0.0.0:8080:3000
+    Listens on every interface of the desktop machine. Warns:
+    whoever reaches that machine's network reaches this host's
+    port 3000.
+
+SIDE EFFECTS:
+  The desktop app binds a listening socket on its machine and keeps
+  it while this command runs. Each accepted connection dials
+  127.0.0.1:<devserver-port> on this host. The ack goes to stderr;
+  stdout stays empty and carries no tunnel traffic.
+
+CAUTIONS:
+  The command BLOCKS for the tunnel's whole life; Ctrl-C tears the
+  tunnel down. A bind failure on the desktop fails the command with
+  the desktop's error, and no listener acknowledged within 10
+  seconds exits 124. When the tunnel dies first (the desktop app
+  quits, the window closes), the command exits 1 with the reason.
+
+CAVEATS:
+  The window must be viewed by the chan-desktop app; a browser tab
+  cannot listen on your machine, so the request is refused there.
+  TCP only today: --proto udp is recognized but refused. One spec
+  per invocation; run one `cs tunnel` per forwarded port.
+
+SEE ALSO:
+  cs download, cs upload; chan devserver.
 "#;
 
 /// `cs upload` long help (manpage head).

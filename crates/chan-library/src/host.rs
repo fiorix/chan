@@ -367,6 +367,13 @@ pub struct WorkspaceHost {
     /// in. Empty on a host with no root surface -- the root `/` then 404s, the
     /// prior behavior.
     root_fallback: OnceLock<Router>,
+    /// Live reverse tunnels (`cs tunnel`) across every tenant this host
+    /// serves. Host-owned because the two desktop-dialed WebSocket legs
+    /// terminate on the host's launcher router while the registering
+    /// `cs tunnel` runs on a tenant control socket: one shared registry is
+    /// where they meet. In-memory only -- a tunnel's lifetime is its
+    /// foreground command's.
+    tunnels: Arc<chan_revtunnel::server::TunnelRegistry>,
     /// Transient mount-lifecycle overlay keyed by canonical workspace root: a
     /// root being mounted (`Starting`) or whose last mount failed (`Error`).
     /// The `workspaces` map is the running source of truth (presence = running);
@@ -474,8 +481,17 @@ impl WorkspaceHost {
             local_color_notify: Arc::new(Notify::new()),
             local_theme_notify: Arc::new(Notify::new()),
             root_fallback: OnceLock::new(),
+            tunnels: chan_revtunnel::server::TunnelRegistry::new(),
             mount_state: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The host's reverse-tunnel registry. The launcher router's tunnel
+    /// WebSocket routes attach control/data sockets here, and the tenant
+    /// control-socket handler registers a tunnel per foreground `cs tunnel`
+    /// (through the [`HostControl`] weak).
+    pub fn tunnel_registry(&self) -> Arc<chan_revtunnel::server::TunnelRegistry> {
+        Arc::clone(&self.tunnels)
     }
 
     /// Install this library's persisted window registry + its identity
@@ -2559,6 +2575,10 @@ impl HostControl for WorkspaceHost {
     fn live_terminal_count(&self, window_id: &str) -> usize {
         self.live_terminal_count(window_id)
     }
+
+    fn tunnel_registry(&self) -> Arc<chan_revtunnel::server::TunnelRegistry> {
+        self.tunnel_registry()
+    }
 }
 
 async fn host_dispatch(State(host): State<Arc<WorkspaceHost>>, req: Request<Body>) -> Response {
@@ -2985,6 +3005,23 @@ mod tests {
                 )
                 .await
         }
+    }
+
+    #[tokio::test]
+    async fn tunnel_registry_is_shared_across_both_access_paths() {
+        // `cs tunnel` registers through the control socket's `Weak<dyn
+        // HostControl>`, while the desktop's WebSocket legs attach through the
+        // launcher router's direct `Arc<WorkspaceHost>`. Both must land on ONE
+        // registry or a registered tunnel is invisible to its own control
+        // socket.
+        let cfg = tempfile::tempdir().expect("config dir");
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
+        let control: Arc<dyn HostControl> = host.clone();
+        let spec =
+            chan_revtunnel::parse_spec("8080:3000", chan_revtunnel::Proto::Tcp).expect("spec");
+        let _registration = control.tunnel_registry().register("tun-wire", &spec);
+        assert!(host.tunnel_registry().attach_control("tun-wire").is_ok());
     }
 
     #[tokio::test]

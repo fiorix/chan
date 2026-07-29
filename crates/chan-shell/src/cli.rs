@@ -13,6 +13,7 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
+use chan_revtunnel::{Proto, TunnelSpec};
 use chan_workspace::{
     WorkspaceReadiness, WorkspaceRelationshipKind, WorkspaceSearchDomain, WorkspaceSearchError,
     WorkspaceSearchRequest, WorkspaceSearchResult, WorkspaceSearchWarning, WorkspaceSelector,
@@ -23,7 +24,8 @@ use clap::{Args, Parser, Subcommand};
 use crate::help;
 
 use crate::control::{
-    absolutize, control_socket_env, open_env, open_env_from, send_control_request, OpenEnv,
+    absolutize, control_socket_env, open_env, open_env_from, send_control_request,
+    send_control_request_streaming, OpenEnv,
 };
 use crate::submit::SubmitAgent;
 use crate::wire::{
@@ -44,9 +46,10 @@ environment; run outside a chan terminal, each one errors clearly instead
 of guessing.
 
 Actions disambiguate on their first letters, iproute2 style, so `cs o`,
-`cs t l`, and `cs sea` resolve to open, terminal list, and search. The
-prefix has to be unambiguous: `se` matches both search and session, so it
-is rejected rather than guessed.";
+`cs te l`, and `cs sea` resolve to open, terminal list, and search. The
+prefix has to be unambiguous: `se` matches both search and session, and
+`t` matches both terminal and tunnel, so each is rejected rather than
+guessed.";
 
 /// The environment contract and the MCP bridge. This is the page an agent
 /// reads to work out where it is running and what it may call.
@@ -72,10 +75,10 @@ WORKSPACE ONLY:
 team` (including `--script`), and `terminal new` with a path need a
 workspace behind the window. In a standalone terminal they refuse and say
 so. Nothing else here does: `terminal`, `pane`, `copy`, `paste`, `upload`,
-and `download` all work in a plain terminal window.
+`download`, and `tunnel` all work in a plain terminal window.
 
 No environment variable distinguishes the two. That refusal IS the check.
-`window new|open|rm|hide` additionally need the desktop app.
+`window new|open|rm|hide` and `tunnel` additionally need the desktop app.
 
 EXAMPLES:
 Confirm you are in a chan terminal, and find out which one:
@@ -121,7 +124,7 @@ running a team, and `--topic graph` for the project graph.
 /// [`parse_cs`] and dispatches the action exactly as `chan shell <action>`
 /// does. One parse means one help rendering, so usage lines read
 /// `cs <cmd>` (never `cs shell <cmd>`) under both front ends.
-/// `infer_subcommands` mirrors the `chan shell` command so `cs t l` /
+/// `infer_subcommands` mirrors the `chan shell` command so `cs te l` /
 /// `cs o` resolve the same way everywhere.
 #[derive(Parser, Debug)]
 #[command(name = "cs", about = "Drive the current chan window from its terminal")]
@@ -392,6 +395,18 @@ pub enum ShellAction {
     Download {
         #[arg(value_hint = clap::ValueHint::AnyPath)]
         path: PathBuf,
+    },
+    /// Forward a port of the desktop machine back to this host
+    #[command(long_about = help::CS_TUNNEL)]
+    #[command(after_long_help = help::CS_TUNNEL_AFTER)]
+    Tunnel {
+        /// Transport to forward: tcp, or udp (not implemented yet).
+        #[arg(long, value_name = "PROTO", default_value = "tcp")]
+        #[arg(value_parser = parse_tunnel_proto)]
+        proto: Proto,
+        /// [bind-address:]desktop-port:devserver-port, e.g. 8080:3000.
+        #[arg(value_name = "SPEC", value_parser = parse_tunnel_spec_arg)]
+        spec: TunnelSpec,
     },
     /// Copy stdin onto the clipboard of the machine viewing this window
     #[command(long_about = help::CS_COPY)]
@@ -1085,6 +1100,7 @@ pub async fn dispatch(action: ShellAction) -> Result<()> {
             eprintln!("{message}");
             Ok(())
         }
+        ShellAction::Tunnel { proto, spec } => cmd_shell_tunnel(proto, spec).await,
         ShellAction::Copy { mime, html } => cmd_shell_copy(mime, html).await,
         ShellAction::Paste { text, html, image } => cmd_shell_paste(text, html, image).await,
         ShellAction::Terminal { action } => cmd_shell_terminal(action).await,
@@ -1739,6 +1755,88 @@ fn render_pane_layout_markdown(raw: &str) -> Result<String> {
         out.push('\n');
     }
     Ok(out)
+}
+
+/// `--proto` values for `cs tunnel`, parsed by hand because
+/// [`chan_revtunnel::Proto`] is a wire type without a clap derive. The two
+/// spellings match its serde rendering.
+fn parse_tunnel_proto(value: &str) -> Result<Proto, String> {
+    match value {
+        "tcp" => Ok(Proto::Tcp),
+        "udp" => Ok(Proto::Udp),
+        other => Err(format!("unknown protocol {other:?}: expected tcp or udp")),
+    }
+}
+
+/// The SPEC argument of `cs tunnel`, validated at parse time so a typo
+/// fails locally with the spec parser's own message and no round-trip. The
+/// proto stamped here is a placeholder: `--proto` is a separate flag,
+/// applied by [`tunnel_request_spec`] in the dispatch arm.
+fn parse_tunnel_spec_arg(value: &str) -> Result<TunnelSpec, String> {
+    chan_revtunnel::parse_spec(value, Proto::Tcp).map_err(|err| err.to_string())
+}
+
+/// Combine the `--proto` flag with the parsed SPEC, refusing what no end
+/// implements yet. Runs before the environment lookup so `--proto udp`
+/// names the real blocker even outside a chan terminal.
+fn tunnel_request_spec(proto: Proto, spec: TunnelSpec) -> Result<TunnelSpec> {
+    if proto == Proto::Udp {
+        anyhow::bail!("udp tunnels are not implemented yet; only --proto tcp forwards");
+    }
+    Ok(TunnelSpec { proto, ..spec })
+}
+
+/// Warn when a tunnel spec binds a non-loopback interface on the desktop
+/// machine: everything that can reach that interface reaches the forwarded
+/// devserver port, and there is no gate on the listener.
+fn warn_non_loopback_tunnel_bind(spec: &TunnelSpec) {
+    if !spec.is_loopback_bind() {
+        eprintln!(
+            "WARNING: binding {} exposes the tunnel on a non-loopback \
+             interface of the desktop machine; anything that reaches it \
+             reaches port {} on this host. Omit the bind address to keep \
+             the listener on loopback.",
+            chan_revtunnel::spec::render_authority(spec.bind_addr, spec.desktop_port),
+            spec.devserver_port
+        );
+    }
+}
+
+/// `cs tunnel`: ask the desktop viewing this window to listen on one of its
+/// ports and forward each connection back to a port on this host (the
+/// `ssh -R` shape). Unlike every other command, the control connection IS
+/// the tunnel's lifetime: the request line goes out without a half-close,
+/// the ack comes back when the desktop reports its listener, and the
+/// function then blocks until the tunnel dies (a second response line) or
+/// this process does (Ctrl-C closes the socket, which is the teardown
+/// signal -- no handler needed).
+async fn cmd_shell_tunnel(proto: Proto, spec: TunnelSpec) -> Result<()> {
+    let spec = tunnel_request_spec(proto, spec)?;
+    let env = open_env()?;
+    warn_non_loopback_tunnel_bind(&spec);
+    let request = ControlRequest::Tunnel {
+        window_id: env.window_id,
+        proto: spec.proto,
+        bind_addr: spec.bind_addr.to_string(),
+        desktop_port: spec.desktop_port,
+        devserver_port: spec.devserver_port,
+    };
+    let session = match send_control_request_streaming(&env.control_socket, request).await {
+        Ok(session) => session,
+        // Nothing acknowledged the tunnel within the server's ready window:
+        // the elapsed notice goes to stderr and the CLI exits 124, like the
+        // other bounded blocking commands. stderr is unbuffered, so the
+        // line lands before the hard exit skips the runtime shutdown.
+        Err(err) => match err.downcast::<crate::exit_code::ControlTimeout>() {
+            Ok(timeout) => {
+                eprintln!("{}", timeout.message);
+                std::process::exit(crate::exit_code::CONTROL_TIMEOUT);
+            }
+            Err(other) => return Err(other),
+        },
+    };
+    eprintln!("{} (Ctrl-C to stop)", session.ack);
+    session.wait().await
 }
 
 /// How long a clipboard round-trip stays silent before `cs` prints the
@@ -3170,6 +3268,62 @@ mod tests {
             ShellAction::Download { path } => assert_eq!(path.to_str(), Some("notes/a.md")),
             other => panic!("unexpected parse for `cs download notes/a.md`: {other:?}"),
         }
+    }
+
+    #[test]
+    fn tunnel_parses_spec_and_proto() {
+        // A bare port pair: tcp default, loopback bind. The SPEC is parsed
+        // (not carried as a string), so a typo fails at the clap edge with
+        // no round-trip.
+        match CsCli::try_parse_from(["cs", "tunnel", "8080:3000"])
+            .unwrap()
+            .action
+        {
+            ShellAction::Tunnel { proto, spec } => {
+                assert_eq!(proto, Proto::Tcp);
+                assert_eq!(spec.desktop_port, 8080);
+                assert_eq!(spec.devserver_port, 3000);
+                assert!(spec.is_loopback_bind());
+            }
+            other => panic!("unexpected parse for `cs tunnel 8080:3000`: {other:?}"),
+        }
+        // An explicit bind address and `--proto udp` both PARSE; udp is
+        // refused later, at dispatch, not by clap.
+        match CsCli::try_parse_from(["cs", "tunnel", "--proto", "udp", "0.0.0.0:53:5353"])
+            .unwrap()
+            .action
+        {
+            ShellAction::Tunnel { proto, spec } => {
+                assert_eq!(proto, Proto::Udp);
+                assert!(!spec.is_loopback_bind());
+            }
+            other => panic!("unexpected parse for `cs tunnel --proto udp`: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tunnel_rejects_bad_specs_and_protocols_at_parse_time() {
+        // SPEC is required, and each spec_error surfaces at the clap edge.
+        assert!(CsCli::try_parse_from(["cs", "tunnel"]).is_err());
+        // Missing devserver port.
+        assert!(CsCli::try_parse_from(["cs", "tunnel", "8080"]).is_err());
+        // Out-of-range port.
+        assert!(CsCli::try_parse_from(["cs", "tunnel", "70000:3000"]).is_err());
+        // Devserver port 0 has nothing to dial.
+        assert!(CsCli::try_parse_from(["cs", "tunnel", "8080:0"]).is_err());
+        // Unknown protocol.
+        assert!(CsCli::try_parse_from(["cs", "tunnel", "--proto", "icmp", "8080:3000"]).is_err());
+        // One spec per invocation.
+        assert!(CsCli::try_parse_from(["cs", "tunnel", "8080:3000", "8081:3001"]).is_err());
+    }
+
+    #[test]
+    fn tunnel_request_spec_stamps_proto_and_refuses_udp() {
+        let parsed = chan_revtunnel::parse_spec("8080:3000", Proto::Tcp).unwrap();
+        let spec = tunnel_request_spec(Proto::Tcp, parsed.clone()).unwrap();
+        assert_eq!(spec.proto, Proto::Tcp);
+        let err = tunnel_request_spec(Proto::Udp, parsed).unwrap_err();
+        assert!(err.to_string().contains("not implemented"), "{err}");
     }
 
     #[test]

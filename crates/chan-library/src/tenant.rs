@@ -94,6 +94,12 @@ pub trait HostControl: Send + Sync {
     /// tenants -- the read-only count behind the `cs window rm` `--force` guard, so
     /// a removal that would kill running shells is refused unless forced.
     fn live_terminal_count(&self, window_id: &str) -> usize;
+
+    /// The host's reverse-tunnel registry. `cs tunnel` registers here through
+    /// this weak while the desktop-dialed WebSocket routes attach on the
+    /// host's launcher router; the shared registry is where a tenant-scoped
+    /// command and the host-scoped routes meet.
+    fn tunnel_registry(&self) -> Arc<chan_revtunnel::server::TunnelRegistry>;
 }
 
 /// How a control socket's process tears down the workspace named by a

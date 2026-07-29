@@ -12,6 +12,7 @@ mod linux_gui_stack;
 mod native_dialog;
 mod native_transfer;
 mod registry;
+mod revtunnel;
 mod runtime_capability;
 mod serve;
 mod upload;
@@ -5384,6 +5385,10 @@ fn main() {
             // Native upload picker + HTTP stream. Paths and bytes stay in Rust;
             // the capability excludes outbound-* remote URL attachments.
             upload::upload_files_native,
+            // `cs tunnel` trigger: the SPA forwards the tunnel_open
+            // window_command here; the devserver to dial is resolved from the
+            // invoking window's own label, never from the payload.
+            revtunnel::open_reverse_tunnel,
             zoom_in,
             zoom_out,
             zoom_reset,

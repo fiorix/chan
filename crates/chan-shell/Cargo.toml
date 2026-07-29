@@ -22,6 +22,10 @@ client = ["dep:clap", "dep:tokio", "dep:serde_json", "dep:anyhow", "dep:toml", "
 # behind the `client` feature so chan-server stays clap-free.
 serde = { workspace = true }
 chan-workspace = { workspace = true }
+# `cs tunnel`'s spec parser and `Proto`, shared with the server so both ends
+# reject the same inputs with the same words. default-features off: the wire
+# types need no WebSocket client.
+chan-revtunnel = { workspace = true }
 clap = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }

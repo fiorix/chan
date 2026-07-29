@@ -50,6 +50,7 @@ mod terminal;
 // pub(crate) so the terminal router (`crate::lib`) mounts the standalone
 // transfer handlers.
 pub(crate) mod transfer;
+mod tunnel;
 mod window;
 // pub(crate) so the `cs window list` control-socket handler
 // (`crate::control_socket`) reuses `join_windows` + `WindowInfo` and

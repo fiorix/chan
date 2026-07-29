@@ -162,6 +162,15 @@ mod tests {
         "stub-os"
     }
 
+    /// Stub for the `open_reverse_tunnel` app command (also granted through
+    /// the `workspace-window` set): the `cs tunnel` trigger must reach
+    /// devserver-served `lib-*` windows, so the scope test pins the minted
+    /// grant carrying it.
+    #[tauri::command]
+    fn open_reverse_tunnel() -> &'static str {
+        "stub-tunnel"
+    }
+
     /// Stub for `read_dropped_paths` - the one command a loopback
     /// workspace window holds that `lib-*` windows never get, on any
     /// origin. Registered so the out-of-set denial pin cannot pass
@@ -179,7 +188,11 @@ mod tests {
     /// display server required.
     fn mock_desktop_app() -> tauri::App<tauri::test::MockRuntime> {
         mock_builder()
-            .invoke_handler(tauri::generate_handler![platform_os, read_dropped_paths])
+            .invoke_handler(tauri::generate_handler![
+                platform_os,
+                read_dropped_paths,
+                open_reverse_tunnel
+            ])
             .build(crate::app_context())
             .expect("mock app builds from the real context")
     }
@@ -316,6 +329,11 @@ mod tests {
         assert!(
             invoke_from(&lib, GATEWAY_PAGE, "read_dropped_paths").is_err(),
             "commands outside the granted set stay denied"
+        );
+        assert_eq!(
+            invoke_from(&lib, GATEWAY_PAGE, "open_reverse_tunnel"),
+            Ok("stub-tunnel".into()),
+            "the cs tunnel trigger is part of the minted lib-window vocabulary"
         );
 
         let non_lib = lib_window(&app, "settings-scoped", GATEWAY_PAGE);

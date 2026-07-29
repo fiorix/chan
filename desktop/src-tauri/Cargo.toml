@@ -54,6 +54,11 @@ chan-server = { workspace = true, features = ["embeddings"] }
 # wire-only), so chan-desktop must opt INTO `client` explicitly to get the
 # clap surface + transport. Cargo unifies to one build with `client` on.
 chan-shell = { workspace = true, features = ["client"] }
+# Desktop half of `cs tunnel` (src/revtunnel.rs): the listener plus the
+# control and per-connection WebSockets dialed back to the devserver. The
+# workspace dep is wire-only (`default-features = false`), so the `client`
+# feature is opted into here.
+chan-revtunnel = { workspace = true, features = ["client"] }
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
 keyring = { workspace = true }

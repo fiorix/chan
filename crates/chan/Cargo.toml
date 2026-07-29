@@ -78,6 +78,13 @@ flate2 = "1"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# The reverse-tunnel end-to-end harness (tests/revtunnel_e2e.rs) plays the
+# desktop role in-process: the `client` feature is the same Tauri-free
+# listener/dialer chan-desktop uses, which is what makes the flow runnable
+# on a host with no display server.
+chan-revtunnel = { workspace = true, features = ["client"] }
+futures = { workspace = true }
+tokio-tungstenite = { workspace = true }
 
 # macOS auto-wires candle's Metal backend so the default release
 # binary uses the GPU for embeddings without a feature flag. The

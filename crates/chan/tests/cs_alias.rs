@@ -224,25 +224,28 @@ fn plain_chan_rejects_terminal_subcommand() {
 #[test]
 fn cs_prefix_match_resolves_terminal_list() {
     let (_dir, cs) = cs_symlink();
-    // iproute2-style prefix matching: `cs t l` == `cs terminal list` via
-    // clap infer_subcommands (t -> terminal, l -> list). That it resolves
+    // iproute2-style prefix matching: `cs te l` == `cs terminal list` via
+    // clap infer_subcommands (te -> terminal, l -> list). That it resolves
     // far enough to fail on the missing control socket (rather than an
-    // unknown-subcommand error) proves the prefix dispatch.
+    // unknown-subcommand error) proves the prefix dispatch. A bare `t` is
+    // deliberately NOT used: it matches both terminal and tunnel, so clap
+    // refuses it, and a test pinned to an ambiguous prefix would break
+    // every time a command joined that letter.
     let output = Command::new(&cs)
-        .args(["t", "l"])
+        .args(["te", "l"])
         .env_remove("CHAN_CONTROL_SOCKET")
         .env_remove("CHAN_WINDOW_ID")
         .output()
-        .expect("run cs t l");
+        .expect("run cs te l");
 
     assert!(
         !output.status.success(),
-        "cs t l should fail without a control socket"
+        "cs te l should fail without a control socket"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("CHAN_CONTROL_SOCKET"),
-        "expected the missing-control-socket error (proving t->terminal, l->list), got: {stderr}"
+        "expected the missing-control-socket error (proving te->terminal, l->list), got: {stderr}"
     );
 }
 

@@ -94,6 +94,7 @@ import {
 } from "./transfers.svelte";
 import {
   isTauriDesktop,
+  openReverseTunnel,
   runDesktopDownload,
   runDesktopUpload,
 } from "../api/desktop";
@@ -1008,6 +1009,18 @@ type WindowCommandFrame =
   | {
       type: "window_command";
       window_id: string;
+      // `cs tunnel`: forwarded to the native host, which resolves the
+      // devserver to dial from this window's own connection record.
+      command: "tunnel_open";
+      tunnel_id: string;
+      proto: string;
+      bind_addr: string;
+      desktop_port: number;
+      devserver_port: number;
+    }
+  | {
+      type: "window_command";
+      window_id: string;
       command: "open_survey";
       survey: SurveySpec;
       // The target terminal's name (the survey's `--tab-name`), camelCase
@@ -1671,6 +1684,41 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     // `cs download`: reuse the Inspector's download-with-progress action.
     fileOps.downloadPathWithProgress(frame.path, frame.is_dir === true);
     setTransientStatus(`downloading ${frame.path || "/"}`);
+    return;
+  }
+  if (
+    frame.command === "tunnel_open" &&
+    typeof frame.tunnel_id === "string" &&
+    typeof frame.proto === "string" &&
+    typeof frame.bind_addr === "string" &&
+    typeof frame.desktop_port === "number" &&
+    typeof frame.devserver_port === "number"
+  ) {
+    // `cs tunnel`: only a native desktop can bind the listener and answer the
+    // devserver over its own control socket. A browser tab has no way to
+    // answer, so say so visibly instead of letting the blocked CLI time out
+    // in silence.
+    if (!isTauriDesktop()) {
+      setTransientStatus("cs tunnel needs this window open in chan-desktop");
+      return;
+    }
+    try {
+      await openReverseTunnel({
+        tunnel_id: frame.tunnel_id,
+        proto: frame.proto,
+        bind_addr: frame.bind_addr,
+        desktop_port: frame.desktop_port,
+        devserver_port: frame.devserver_port,
+      });
+    } catch (err) {
+      // The desktop refused (udp, gateway attach, no live connection) or the
+      // ACL denied. Bind failures are reported to the devserver by the native
+      // side; everything else only surfaces here.
+      console.warn("openReverseTunnel: open_reverse_tunnel IPC failed", err);
+      setTransientStatus(
+        `tunnel failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     return;
   }
   if (frame.command === "open_survey" && frame.survey) {

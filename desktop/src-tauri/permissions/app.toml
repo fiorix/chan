@@ -49,6 +49,7 @@ permissions = [
   "allow-write-clipboard-image",
   "allow-read-clipboard-html",
   "allow-write-clipboard-html",
+  "allow-open-reverse-tunnel",
 ]
 
 [[permission]]
@@ -185,6 +186,11 @@ commands.allow = ["read_clipboard_html"]
 identifier = "allow-write-clipboard-html"
 description = "Enables the write_clipboard_html command."
 commands.allow = ["write_clipboard_html"]
+
+[[permission]]
+identifier = "allow-open-reverse-tunnel"
+description = "Enables the open_reverse_tunnel command (the cs tunnel trigger; the devserver to dial resolves from the invoking window's own connection)."
+commands.allow = ["open_reverse_tunnel"]
 
 # Deliberately NOT in the workspace-window set: the macOS drag
 # pasteboard is system-wide, so this is granted only to locally-served

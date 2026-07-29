@@ -151,6 +151,25 @@ pub enum ControlRequest {
         window_id: String,
         path: PathBuf,
     },
+    // Category 5 (long-lived): `cs tunnel`. Unlike every other request, the
+    // client does NOT half-close after writing: the connection's lifetime IS
+    // the tunnel's, so its EOF is how the server learns the foreground command
+    // ended (Ctrl-C, or a killed shell). The server answers one ack line when
+    // the desktop reports its listener, then holds the connection open and
+    // writes a second line only if the tunnel dies before the client does.
+    //
+    // The spec is parsed CLI-side into its three fields so a typo fails
+    // locally with no round-trip, and re-validated server-side because the
+    // server does not trust clients. `bind_addr` is the rendered listen
+    // address on the DESKTOP machine (loopback unless the user overrode it);
+    // `devserver_port` is dialed on this host's loopback per connection.
+    Tunnel {
+        window_id: String,
+        proto: chan_revtunnel::Proto,
+        bind_addr: String,
+        desktop_port: u16,
+        devserver_port: u16,
+    },
     // Category 3 (blocking round-trip): bridge the terminal's stdin/stdout to
     // the window's clipboard (`cs copy` / `cs paste`). The clipboard lives in
     // the SPA (browser `navigator.clipboard`, or the desktop's native arboard

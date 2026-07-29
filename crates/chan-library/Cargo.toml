@@ -26,6 +26,10 @@ chan-workspace = { workspace = true, default-features = false }
 # Control-socket wire types (`ControlRequest`/`ControlResponse`); default-features
 # off drops the clap-backed `cs` client, same as chan-server.
 chan-shell = { workspace = true }
+# Reverse-tunnel registry (`cs tunnel`). The host owns the one registry both
+# WebSocket legs and the control-socket handler meet at; default-features off
+# (the desktop-side dialing client stays out of the server stack).
+chan-revtunnel = { workspace = true }
 chan-systemd = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }

@@ -3173,6 +3173,10 @@ mod tests {
             // through this command; without the ACL grant the IPC denies and
             // the screen never detects a reachable remote.
             "allow-probe-url",
+            // `cs tunnel` reaches the desktop through the SPA of a
+            // devserver-served window; the grant rides this shared set so
+            // loopback and gateway lib windows both carry it.
+            "allow-open-reverse-tunnel",
         ] {
             assert!(
                 workspace_set.iter().any(|p| p == expected),

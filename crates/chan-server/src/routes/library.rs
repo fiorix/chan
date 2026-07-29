@@ -192,6 +192,17 @@ pub fn launcher_router(
         // Native folder picker -- another desktop-bridge dispatch (the launcher's
         // New-Workspace "Browse…"), so it sits with the other bridge ops.
         .route("/api/library/fs/pick-folder", post(handle_pick_folder))
+        // The desktop-dialed reverse-tunnel legs (`cs tunnel`). They live under
+        // `/api/library/*` because `/api/devserver/*` is 404'd on the gateway's
+        // public wildcard; handlers + rationale in `routes::tunnel`.
+        .route(
+            chan_revtunnel::wire::CONTROL_PATH,
+            get(super::tunnel::handle_tunnel_control),
+        )
+        .route(
+            chan_revtunnel::wire::CONN_PATH,
+            get(super::tunnel::handle_tunnel_conn),
+        )
         .route_layer(middleware::from_fn(require_local_mutation))
         .with_state(host.clone());
     // Workspaces: list always; the mutation routes are always present but
@@ -352,7 +363,11 @@ async fn require_launcher_bearer(
     let path = req.uri().path();
     let query_token = (path == WATCH_WS_PATH
         || path == LOCAL_COLOR_WATCH_WS_PATH
-        || path == LOCAL_THEME_WATCH_WS_PATH)
+        || path == LOCAL_THEME_WATCH_WS_PATH
+        // The tunnel WS legs are desktop-dialed; a WebSocket client cannot
+        // always set the header, so they get the same `?t=` allowance.
+        || path == chan_revtunnel::wire::CONTROL_PATH
+        || path == chan_revtunnel::wire::CONN_PATH)
         .then(|| req.uri().query().and_then(query_bearer))
         .flatten();
     // Read the shared cell in a block so the guard drops before the await.

@@ -77,13 +77,11 @@ pub fn absolutize(path: PathBuf) -> Result<PathBuf> {
     }
 }
 
-/// Connect to the control socket, write one JSON request line, and return
-/// the server's reply message (or its error, surfaced as an `Err`).
-/// Platform-neutral over the `transport` module.
-pub async fn send_control_request(socket: &Path, request: ControlRequest) -> Result<String> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-    let (read, mut write) = transport::connect(socket).await.map_err(|err| {
+/// Connect to the control socket, mapping the two "server is gone" error
+/// kinds to a friendly message. Shared by the one-shot and streaming
+/// request paths so both report a dead server the same way.
+async fn connect_control(socket: &Path) -> Result<(transport::ReadEnd, transport::WriteEnd)> {
+    transport::connect(socket).await.map_err(|err| {
         // A missing or refused socket means the chan window or server that
         // spawned this terminal has exited, leaving a stale
         // $CHAN_CONTROL_SOCKET (common after a devserver restart). Say that
@@ -104,7 +102,48 @@ pub async fn send_control_request(socket: &Path, request: ControlRequest) -> Res
                 socket.display()
             ))
         }
-    })?;
+    })
+}
+
+/// Map the server's first response line to the request's outcome. Shared by
+/// the one-shot and streaming paths so both surface the same typed errors.
+fn first_response_outcome(response: ControlResponse) -> Result<String> {
+    match response {
+        ControlResponse::Ok { message } => Ok(message),
+        ControlResponse::Error { message } => anyhow::bail!("{message}"),
+        // The write was accepted into the asynchronous queue, but at least
+        // one target had no submit encoding. Preserve its acknowledgement in
+        // a typed error so only `cs terminal write` maps it to exit 69.
+        ControlResponse::SubmitRefused { message } => {
+            Err(crate::exit_code::ControlSubmitRefused { message }.into())
+        }
+        // A bounded blocking request whose window elapsed (a `cs terminal
+        // survey --timeout`, a `cs copy` / `cs paste` clipboard round-trip,
+        // or a `cs tunnel` nothing acknowledged). Surface it as a typed
+        // error the dispatch edge downcasts to a dedicated exit code (124),
+        // NOT the generic bail (exit 1), so a timeout is never confused
+        // with a real failure.
+        ControlResponse::Timeout { message } => {
+            Err(crate::exit_code::ControlTimeout { message }.into())
+        }
+        // The server refused the request outright because the queue that
+        // serializes it is full (today only `cs terminal survey` against a
+        // flooded target). A plain error: nothing was delivered and nothing
+        // waits server-side, so the caller may simply retry later.
+        ControlResponse::QueueFull { message } => anyhow::bail!("{message}"),
+        // `cs export`'s typed success: the final workspace-relative output
+        // path rides its own variant, and it IS the message the CLI prints.
+        ControlResponse::Export { out_path } => Ok(out_path),
+    }
+}
+
+/// Connect to the control socket, write one JSON request line, and return
+/// the server's reply message (or its error, surfaced as an `Err`).
+/// Platform-neutral over the `transport` module.
+pub async fn send_control_request(socket: &Path, request: ControlRequest) -> Result<String> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (read, mut write) = connect_control(socket).await?;
     let mut payload = serde_json::to_vec(&request).context("encoding control request")?;
     payload.push(b'\n');
     write
@@ -123,32 +162,96 @@ pub async fn send_control_request(socket: &Path, request: ControlRequest) -> Res
         .context("reading control response")?;
     let response: ControlResponse =
         serde_json::from_str(&line).context("decoding control response")?;
-    match response {
-        ControlResponse::Ok { message } => Ok(message),
-        ControlResponse::Error { message } => anyhow::bail!("{message}"),
-        // The write was accepted into the asynchronous queue, but at least
-        // one target had no submit encoding. Preserve its acknowledgement in
-        // a typed error so only `cs terminal write` maps it to exit 69.
-        ControlResponse::SubmitRefused { message } => {
-            Err(crate::exit_code::ControlSubmitRefused { message }.into())
+    first_response_outcome(response)
+}
+
+/// The still-open control connection behind a long-lived request
+/// (`cs tunnel`). The server's ack line has already been read; the
+/// connection stays up until [`TunnelSession::wait`] returns or the
+/// session is dropped, and that lifetime IS the request's lifetime on the
+/// server side.
+#[derive(Debug)]
+pub struct TunnelSession {
+    /// The server's acknowledgement, already unwrapped from its
+    /// [`ControlResponse`] envelope.
+    pub ack: String,
+    reader: tokio::io::BufReader<transport::ReadEnd>,
+    // Held open, never written again: the server reads this half's EOF as
+    // "the foreground command ended" and tears the tunnel down, so it must
+    // live exactly as long as the session. Dropping the session (Ctrl-C
+    // kills the process, or `wait` returns) is the teardown signal.
+    _write: transport::WriteEnd,
+}
+
+impl TunnelSession {
+    /// Block until the request ends. A clean server close (EOF) means the
+    /// server acknowledged this command going away and there is nothing to
+    /// report. A second response line means the tunnel died before the
+    /// client did; its message is surfaced as the error, whatever variant
+    /// carried it.
+    pub async fn wait(mut self) -> Result<()> {
+        use tokio::io::AsyncBufReadExt;
+
+        let mut line = String::new();
+        let n = self
+            .reader
+            .read_line(&mut line)
+            .await
+            .context("waiting on the tunnel's control connection")?;
+        if n == 0 {
+            return Ok(());
         }
-        // A bounded blocking request whose window elapsed (a `cs terminal
-        // survey --timeout`, or a `cs copy` / `cs paste` clipboard
-        // round-trip). Surface it as a typed error the dispatch edge
-        // downcasts to a dedicated exit code (124), NOT the generic bail
-        // (exit 1), so a timeout is never confused with a real failure.
-        ControlResponse::Timeout { message } => {
-            Err(crate::exit_code::ControlTimeout { message }.into())
-        }
-        // The server refused the request outright because the queue that
-        // serializes it is full (today only `cs terminal survey` against a
-        // flooded target). A plain error: nothing was delivered and nothing
-        // waits server-side, so the caller may simply retry later.
-        ControlResponse::QueueFull { message } => anyhow::bail!("{message}"),
-        // `cs export`'s typed success: the final workspace-relative output
-        // path rides its own variant, and it IS the message the CLI prints.
-        ControlResponse::Export { out_path } => Ok(out_path),
+        let response: ControlResponse =
+            serde_json::from_str(&line).context("decoding tunnel end notice")?;
+        let message = match response {
+            ControlResponse::Ok { message }
+            | ControlResponse::Error { message }
+            | ControlResponse::SubmitRefused { message }
+            | ControlResponse::Timeout { message }
+            | ControlResponse::QueueFull { message } => message,
+            ControlResponse::Export { out_path } => out_path,
+        };
+        anyhow::bail!("{message}");
     }
+}
+
+/// Connect, write one JSON request line WITHOUT half-closing the write
+/// side, read the first response line, and hand back the still-open
+/// connection. The sibling of [`send_control_request`] for requests whose
+/// connection lifetime is the request's lifetime (`cs tunnel`): the server
+/// treats this connection's EOF as the command ending, so the write half
+/// rides inside the returned [`TunnelSession`] and is only dropped with it.
+pub async fn send_control_request_streaming(
+    socket: &Path,
+    request: ControlRequest,
+) -> Result<TunnelSession> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (read, mut write) = connect_control(socket).await?;
+    let mut payload = serde_json::to_vec(&request).context("encoding control request")?;
+    payload.push(b'\n');
+    write
+        .write_all(&payload)
+        .await
+        .context("writing control request")?;
+
+    let mut reader = BufReader::new(read);
+    let mut line = String::new();
+    let n = reader
+        .read_line(&mut line)
+        .await
+        .context("reading control response")?;
+    if n == 0 {
+        anyhow::bail!("the server closed the control socket before answering");
+    }
+    let response: ControlResponse =
+        serde_json::from_str(&line).context("decoding control response")?;
+    let ack = first_response_outcome(response)?;
+    Ok(TunnelSession {
+        ack,
+        reader,
+        _write: write,
+    })
 }
 
 /// The `cs` control client's transport module -- the only `#[cfg]`-split
@@ -158,24 +261,25 @@ pub async fn send_control_request(socket: &Path, request: ControlRequest) -> Res
 mod transport {
     use std::path::Path;
 
+    // Named halves so [`super::TunnelSession`] can hold them without a
+    // `#[cfg]`-split of its own; the aliases are the only platform seam.
     #[cfg(unix)]
-    pub async fn connect(
-        socket: &Path,
-    ) -> std::io::Result<(
-        tokio::net::unix::OwnedReadHalf,
-        tokio::net::unix::OwnedWriteHalf,
-    )> {
+    pub type ReadEnd = tokio::net::unix::OwnedReadHalf;
+    #[cfg(unix)]
+    pub type WriteEnd = tokio::net::unix::OwnedWriteHalf;
+    #[cfg(windows)]
+    pub type ReadEnd = tokio::io::ReadHalf<tokio::net::windows::named_pipe::NamedPipeClient>;
+    #[cfg(windows)]
+    pub type WriteEnd = tokio::io::WriteHalf<tokio::net::windows::named_pipe::NamedPipeClient>;
+
+    #[cfg(unix)]
+    pub async fn connect(socket: &Path) -> std::io::Result<(ReadEnd, WriteEnd)> {
         let stream = tokio::net::UnixStream::connect(socket).await?;
         Ok(stream.into_split())
     }
 
     #[cfg(windows)]
-    pub async fn connect(
-        socket: &Path,
-    ) -> std::io::Result<(
-        tokio::io::ReadHalf<tokio::net::windows::named_pipe::NamedPipeClient>,
-        tokio::io::WriteHalf<tokio::net::windows::named_pipe::NamedPipeClient>,
-    )> {
+    pub async fn connect(socket: &Path) -> std::io::Result<(ReadEnd, WriteEnd)> {
         use tokio::net::windows::named_pipe::ClientOptions;
         use tokio::time::{sleep, Duration, Instant};
 
@@ -360,6 +464,147 @@ mod tests {
             refusal.message,
             "queued at position 1; Sh is a shell session: no codex chord applied"
         );
+    }
+
+    /// A `ControlRequest::Tunnel` for the streaming tests; the fake servers
+    /// below never decode it, they only need one framed request line.
+    #[cfg(unix)]
+    fn tunnel_request() -> ControlRequest {
+        ControlRequest::Tunnel {
+            window_id: "w-1".into(),
+            proto: chan_revtunnel::Proto::Tcp,
+            bind_addr: "127.0.0.1".into(),
+            desktop_port: 8080,
+            devserver_port: 3000,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn streaming_request_holds_the_connection_open_while_waiting() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        // The load-bearing property of the streaming path: after the ack the
+        // client's write half stays open, because the server reads its EOF as
+        // "the command ended" and would tear the tunnel down. The fake server
+        // proves it by reading again and expecting to time out, not to see
+        // EOF, while the client blocks in `wait`.
+        let socket =
+            std::env::temp_dir().join(format!("chan-cs-tunnel-hold-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&socket);
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            let (read, mut write) = conn.into_split();
+            let mut reader = BufReader::new(read);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(line.ends_with('\n'), "request line is newline-framed");
+            write
+                .write_all(b"{\"status\":\"ok\",\"message\":\"tunnel up\"}\n")
+                .await
+                .unwrap();
+            let mut buf = [0u8; 1];
+            let second_read =
+                tokio::time::timeout(std::time::Duration::from_millis(200), reader.read(&mut buf))
+                    .await;
+            assert!(
+                second_read.is_err(),
+                "the client half-closed its write side; the server would read \
+                 that EOF as the command ending"
+            );
+            // Dropping the connection here is the server closing: the
+            // client's `wait` resolves Ok with nothing to report.
+        });
+
+        let session = send_control_request_streaming(&socket, tunnel_request())
+            .await
+            .unwrap();
+        assert_eq!(session.ack, "tunnel up");
+        session.wait().await.unwrap();
+        server.await.unwrap();
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn streaming_wait_surfaces_a_second_line_as_the_tunnel_dying() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let socket =
+            std::env::temp_dir().join(format!("chan-cs-tunnel-died-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&socket);
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            let (read, mut write) = conn.into_split();
+            let mut reader = BufReader::new(read);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            write
+                .write_all(b"{\"status\":\"ok\",\"message\":\"tunnel up\"}\n")
+                .await
+                .unwrap();
+            write
+                .write_all(
+                    b"{\"status\":\"error\",\"message\":\"tunnel closed: desktop disconnected\"}\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let session = send_control_request_streaming(&socket, tunnel_request())
+            .await
+            .unwrap();
+        assert_eq!(session.ack, "tunnel up");
+        let err = session.wait().await.unwrap_err();
+        assert_eq!(err.to_string(), "tunnel closed: desktop disconnected");
+        server.await.unwrap();
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn streaming_request_maps_first_line_errors_like_the_one_shot_path() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        // Two first-line failures share the one-shot mapping: an Error line
+        // is a plain bail, and a Timeout line stays typed so the dispatch
+        // edge can exit 124.
+        let cases: [(&[u8], bool); 2] = [
+            (
+                b"{\"status\":\"error\",\"message\":\"no desktop is viewing window w-1\"}\n",
+                false,
+            ),
+            (
+                b"{\"status\":\"timeout\",\"message\":\"no tunnel listener within 10s\"}\n",
+                true,
+            ),
+        ];
+        for (index, (reply, expect_timeout)) in cases.into_iter().enumerate() {
+            let socket = std::env::temp_dir().join(format!(
+                "chan-cs-tunnel-first-{}-{index}.sock",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&socket);
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let server = tokio::spawn(async move {
+                let (conn, _) = listener.accept().await.unwrap();
+                let (read, mut write) = conn.into_split();
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                write.write_all(reply).await.unwrap();
+            });
+
+            let err = send_control_request_streaming(&socket, tunnel_request())
+                .await
+                .unwrap_err();
+            let typed = err.downcast_ref::<crate::exit_code::ControlTimeout>();
+            assert_eq!(typed.is_some(), expect_timeout, "{err}");
+            server.await.unwrap();
+            let _ = std::fs::remove_file(&socket);
+        }
     }
 
     #[tokio::test]

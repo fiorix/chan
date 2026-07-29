@@ -147,6 +147,13 @@ static SPINE: &[Section] = &[
         path: &["copy"],
     },
     Section {
+        slug: "cs-tunnel",
+        aliases: &["tunnel", "port-forward"],
+        title: "Forward a desktop port back to a devserver port",
+        root: Root::Cs,
+        path: &["tunnel"],
+    },
+    Section {
         slug: "cs-paste",
         aliases: &[],
         title: "Paste the window's clipboard to stdout",

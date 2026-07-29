@@ -55,6 +55,10 @@ chan-llm = { workspace = true, features = ["mcp"] }
 # clap-backed `cs` client is dropped here. control_socket.rs deserializes
 # ControlRequest + serializes ControlResponse.
 chan-shell = { workspace = true }
+# Reverse tunnels (`cs tunnel`): the devserver-side registry, wire contract,
+# and byte pump. default-features off keeps the desktop-side dialing client
+# out of the server build.
+chan-revtunnel = { workspace = true }
 chan-systemd = { workspace = true }
 chan-tunnel-client = { workspace = true }
 chan-tunnel-proto = { workspace = true }

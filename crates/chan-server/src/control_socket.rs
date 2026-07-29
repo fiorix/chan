@@ -12,7 +12,7 @@ use base64::Engine;
 use chan_workspace::{TeamConfig, Workspace};
 use portable_pty::PtySize;
 use serde::Serialize;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
@@ -213,6 +213,20 @@ enum WindowCommand {
     ClipboardRead {
         request_id: String,
         prefer: PastePrefer,
+    },
+    // `cs tunnel`: ask the window's native host (chan-desktop) to listen on
+    // `bind_addr:desktop_port` of the DESKTOP machine and dial this devserver
+    // back for every accepted connection. Fire-and-forget: the acknowledgement
+    // arrives out of band, on the control WebSocket the desktop opens for
+    // `tunnel_id` (see `chan_revtunnel::wire`). Addressing the window is also
+    // how the one desktop is selected -- a window's webview belongs to exactly
+    // one desktop process -- so a browser-only viewer simply never answers.
+    TunnelOpen {
+        tunnel_id: String,
+        proto: chan_revtunnel::Proto,
+        bind_addr: String,
+        desktop_port: u16,
+        devserver_port: u16,
     },
 }
 
@@ -792,21 +806,57 @@ async fn serve_connection(conn: transport::Conn, ctx: ControlSocketCtx) {
     // newline), so it fails to parse and answers a clean error instead of an OOM.
     let mut reader = BufReader::new(read.take(MAX_CONTROL_REQUEST_BYTES));
     let mut line = String::new();
-    let response = match reader.read_line(&mut line).await {
-        Ok(0) => ControlResponse::Error {
+    let request = match reader.read_line(&mut line).await {
+        Ok(0) => Err(ControlResponse::Error {
             message: "empty control request".into(),
-        },
-        Ok(_) => match serde_json::from_str::<ControlRequest>(&line) {
-            Ok(req) => handle_request(req, &ctx).await,
-            Err(e) => ControlResponse::Error {
+        }),
+        Ok(_) => {
+            serde_json::from_str::<ControlRequest>(&line).map_err(|e| ControlResponse::Error {
                 message: format!("invalid control request: {e}"),
-            },
-        },
-        Err(e) => ControlResponse::Error {
+            })
+        }
+        Err(e) => Err(ControlResponse::Error {
             message: format!("read control request: {e}"),
-        },
+        }),
     };
-    if let Ok(mut out) = serde_json::to_vec(&response) {
+    let response = match request {
+        Err(response) => response,
+        // `cs tunnel` is the one LONG-LIVED request: the tunnel lives exactly
+        // as long as this connection, so its handler owns both halves (it
+        // watches the read half for the client's exit and may write a second
+        // line when the desktop dies) instead of returning one response here.
+        Ok(ControlRequest::Tunnel {
+            window_id,
+            proto,
+            bind_addr,
+            desktop_port,
+            devserver_port,
+        }) => {
+            handle_tunnel(
+                reader,
+                &mut write,
+                &ctx,
+                TunnelRequest {
+                    window_id,
+                    proto,
+                    bind_addr,
+                    desktop_port,
+                    devserver_port,
+                },
+            )
+            .await;
+            return;
+        }
+        Ok(req) => handle_request(req, &ctx).await,
+    };
+    write_response(&mut write, &response).await;
+}
+
+/// Write one line-framed JSON `ControlResponse`. A write failure means the
+/// client is already gone, which every caller treats as the end of the
+/// exchange.
+async fn write_response<W: AsyncWrite + Unpin>(write: &mut W, response: &ControlResponse) {
+    if let Ok(mut out) = serde_json::to_vec(response) {
         out.push(b'\n');
         let _ = write.write_all(&out).await;
     }
@@ -1437,6 +1487,14 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
                 .map(|()| format!("hid window {id}")),
         ),
         ControlRequest::Close { path, remove } => handle_unserve(unserve, &path, remove).await,
+        // `cs tunnel` is served by `serve_connection` instead: the tunnel's
+        // lifetime is the connection's, so its handler needs both halves and
+        // may write more than one response line. This dispatch answers exactly
+        // one line per request, so it can only refuse.
+        ControlRequest::Tunnel { .. } => ControlResponse::Error {
+            message: "cs tunnel is served on the control connection, not the request dispatch"
+                .into(),
+        },
     }
 }
 
@@ -3068,6 +3126,195 @@ async fn handle_window_close(
         (false, false, false) => ControlResponse::Error {
             message: format!("no window or saved layout for {id}"),
         },
+    }
+}
+
+/// The fields of a `cs tunnel` request, as they arrive on the socket.
+struct TunnelRequest {
+    window_id: String,
+    proto: chan_revtunnel::Proto,
+    bind_addr: String,
+    desktop_port: u16,
+    devserver_port: u16,
+}
+
+/// Re-validate a `cs tunnel` request into a spec. The CLI already parsed the
+/// user's spec so a typo fails locally, and the server parses the result AGAIN
+/// because it does not trust clients: these fields are JSON from whatever
+/// wrote to the socket. UDP is refused here rather than downgraded, so a
+/// `--udp` request never silently forwards TCP.
+fn tunnel_spec_from_request(req: &TunnelRequest) -> Result<chan_revtunnel::TunnelSpec, String> {
+    if req.proto == chan_revtunnel::Proto::Udp {
+        return Err("udp tunnels are not implemented yet; cs tunnel forwards tcp only".into());
+    }
+    let bind_addr = req
+        .bind_addr
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| format!("invalid tunnel bind address {:?}", req.bind_addr))?;
+    if req.devserver_port == 0 {
+        return Err(
+            "devserver port 0 has nothing to dial; name the port your server listens on".into(),
+        );
+    }
+    Ok(chan_revtunnel::TunnelSpec {
+        proto: req.proto,
+        bind_addr,
+        desktop_port: req.desktop_port,
+        devserver_port: req.devserver_port,
+    })
+}
+
+/// `cs tunnel`: hold a reverse tunnel open for as long as this connection
+/// lives.
+///
+/// The tunnel's lifetime IS this command's. The registration guard is dropped
+/// by every exit below (including a cancelled task), which deregisters the
+/// tunnel and closes the desktop's control socket, so there is exactly one
+/// teardown path. Two lines can reach the client: the `Ok` acknowledgement
+/// once the desktop reports a bound listener, and a later `Error` if the
+/// desktop dies while the tunnel is up.
+async fn handle_tunnel<R, W>(
+    mut reader: R,
+    write: &mut W,
+    ctx: &ControlSocketCtx,
+    req: TunnelRequest,
+) where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let spec = match tunnel_spec_from_request(&req) {
+        Ok(spec) => spec,
+        Err(message) => return write_response(write, &ControlResponse::Error { message }).await,
+    };
+
+    // The registry lives on the host, which is also what makes a tunnel
+    // possible at all: a standalone `chan open` has no window a desktop owns.
+    let host = match &ctx.unserve {
+        UnserveScope::Host(weak) => weak.upgrade(),
+        UnserveScope::Standalone { .. } | UnserveScope::Unsupported => None,
+    };
+    let Some(host) = host else {
+        return write_response(
+            write,
+            &ControlResponse::Error {
+                message: "cs tunnel needs a devserver or chan-desktop host; \
+                          this server serves a single workspace and hosts no tunnels"
+                    .into(),
+            },
+        )
+        .await;
+    };
+
+    // The id is the ONLY thing naming this tunnel on its two public WebSocket
+    // paths, so it is minted here with the same unguessable token generator
+    // the per-window tokens use.
+    let tunnel_id = crate::auth::random_token();
+    let mut registration = host.tunnel_registry().register(&tunnel_id, &spec);
+
+    // The trigger. Fire-and-forget by construction: the answer comes back out
+    // of band on the control WebSocket the desktop dials. A zero-subscriber
+    // send means no window is connected at all, which is the error the user
+    // needs to see.
+    if let Err(message) = send_window_command(
+        &req.window_id,
+        WindowCommand::TunnelOpen {
+            tunnel_id,
+            proto: spec.proto,
+            bind_addr: spec.bind_addr.to_string(),
+            desktop_port: spec.desktop_port,
+            devserver_port: spec.devserver_port,
+        },
+        &ctx.events_tx,
+    ) {
+        return write_response(write, &ControlResponse::Error { message }).await;
+    }
+
+    let bound = tokio::select! {
+        report = &mut registration.ready => match report {
+            Ok(chan_revtunnel::server::ReadyReport::Ready { bound }) => bound,
+            Ok(chan_revtunnel::server::ReadyReport::Failed { message }) => {
+                return write_response(
+                    write,
+                    &ControlResponse::Error {
+                        message: format!("desktop refused the tunnel: {message}"),
+                    },
+                )
+                .await;
+            }
+            // The registry forgot this tunnel before it was answered; nothing
+            // is left to wait for.
+            Err(_) => {
+                return write_response(
+                    write,
+                    &ControlResponse::Error {
+                        message: "tunnel registration ended before the desktop answered".into(),
+                    },
+                )
+                .await;
+            }
+        },
+        // The client left while waiting: drop the registration and go.
+        _ = wait_for_client_eof(&mut reader) => return,
+        _ = tokio::time::sleep(std::time::Duration::from_secs(
+            chan_revtunnel::wire::READY_TIMEOUT_SECS,
+        )) => {
+            return write_response(
+                write,
+                &ControlResponse::Error {
+                    message: format!(
+                        "no chan-desktop answered within {}s: window {:?} must be open in \
+                         chan-desktop, which is the only client that can host a tunnel \
+                         (a browser tab cannot)",
+                        chan_revtunnel::wire::READY_TIMEOUT_SECS,
+                        req.window_id
+                    ),
+                },
+            )
+            .await;
+        }
+    };
+
+    // `bound` and not the request: a desktop-port-0 request asked the OS for
+    // a free port, so only the desktop knows what it actually listens on.
+    write_response(
+        write,
+        &ControlResponse::Ok {
+            message: format!(
+                "tunnel open: desktop {bound} -> devserver 127.0.0.1:{} ({})",
+                spec.devserver_port, spec.proto
+            ),
+        },
+    )
+    .await;
+
+    tokio::select! {
+        // The normal end: the user stopped `cs tunnel`.
+        _ = wait_for_client_eof(&mut reader) => {}
+        _ = &mut registration.desktop_gone => {
+            write_response(
+                write,
+                &ControlResponse::Error {
+                    message: format!(
+                        "tunnel closed: {}",
+                        chan_revtunnel::wire::TunnelEnd::DesktopGone.close_reason()
+                    ),
+                },
+            )
+            .await;
+        }
+    }
+}
+
+/// Resolve when the client's read half ends -- it exited, was killed, or its
+/// process died. Bytes after the request line are not part of the contract, so
+/// they are drained and ignored; only EOF or a read error ends the wait.
+async fn wait_for_client_eof<R: AsyncRead + Unpin>(reader: &mut R) {
+    let mut scratch = [0u8; 64];
+    loop {
+        match reader.read(&mut scratch).await {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
     }
 }
 
@@ -5625,11 +5872,24 @@ mod tests {
         assert_eq!(headless["window_kind"], "none");
     }
 
-    /// A host stub for the `cs window rm` guard: a fixed live-terminal count and
-    /// a flag recording whether the authoritative discard ran.
+    /// A host stub for the `cs window rm` guard and the `cs tunnel` handler: a
+    /// fixed live-terminal count, a flag recording whether the authoritative
+    /// discard ran, and a real tunnel registry (the tunnel tests attach to it
+    /// exactly as the WebSocket routes do).
     struct FakeHost {
         live: usize,
         discarded: std::sync::atomic::AtomicBool,
+        tunnels: Arc<chan_revtunnel::server::TunnelRegistry>,
+    }
+
+    impl FakeHost {
+        fn new(live: usize) -> Self {
+            Self {
+                live,
+                discarded: std::sync::atomic::AtomicBool::new(false),
+                tunnels: chan_revtunnel::server::TunnelRegistry::new(),
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -5659,15 +5919,15 @@ mod tests {
         fn live_terminal_count(&self, _window_id: &str) -> usize {
             self.live
         }
+        fn tunnel_registry(&self) -> Arc<chan_revtunnel::server::TunnelRegistry> {
+            Arc::clone(&self.tunnels)
+        }
     }
 
     async fn run_window_rm(live: usize, force: bool) -> (ControlResponse, Arc<FakeHost>) {
         let cell = Arc::new(RwLock::new(None));
         let mut ctx = test_ctx(cell, ControlTenant::Workspace);
-        let fake = Arc::new(FakeHost {
-            live,
-            discarded: std::sync::atomic::AtomicBool::new(false),
-        });
+        let fake = Arc::new(FakeHost::new(live));
         let host: Arc<dyn chan_library::HostControl> = fake.clone();
         ctx.unserve = UnserveScope::Host(Arc::downgrade(&host));
         let resp = handle_request(
@@ -6931,5 +7191,205 @@ is_lead = false
             }
             other => panic!("unexpected non-error response: {other:?}"),
         }
+    }
+
+    fn tunnel_request(bind_addr: &str, proto: chan_revtunnel::Proto) -> TunnelRequest {
+        TunnelRequest {
+            window_id: "w-1".into(),
+            proto,
+            bind_addr: bind_addr.into(),
+            desktop_port: 8080,
+            devserver_port: 3000,
+        }
+    }
+
+    #[test]
+    fn udp_is_refused_rather_than_forwarded_as_tcp() {
+        let error =
+            tunnel_spec_from_request(&tunnel_request("127.0.0.1", chan_revtunnel::Proto::Udp))
+                .unwrap_err();
+        assert!(error.contains("not implemented"), "{error}");
+        assert!(error.contains("udp"), "{error}");
+    }
+
+    #[test]
+    fn the_server_revalidates_the_spec_it_is_handed() {
+        // A client is not trusted to have validated anything: both fields the
+        // parser guards are checked again here.
+        let bad_addr =
+            tunnel_spec_from_request(&tunnel_request("not-an-ip", chan_revtunnel::Proto::Tcp))
+                .unwrap_err();
+        assert!(bad_addr.contains("bind address"), "{bad_addr}");
+        let mut zero_port = tunnel_request("127.0.0.1", chan_revtunnel::Proto::Tcp);
+        zero_port.devserver_port = 0;
+        let zero = tunnel_spec_from_request(&zero_port).unwrap_err();
+        assert!(zero.contains("nothing to dial"), "{zero}");
+
+        let spec = tunnel_spec_from_request(&tunnel_request("::1", chan_revtunnel::Proto::Tcp))
+            .expect("valid spec");
+        assert_eq!(
+            spec.bind_addr,
+            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+        );
+        assert_eq!(spec.desktop_port, 8080);
+        assert_eq!(spec.devserver_port, 3000);
+    }
+
+    /// A ctx whose unserve scope reaches `fake`, as a hosted tenant's does.
+    fn tunnel_ctx(host: &Arc<dyn chan_library::HostControl>) -> ControlSocketCtx {
+        let mut ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace);
+        ctx.unserve = UnserveScope::Host(Arc::downgrade(host));
+        ctx
+    }
+
+    /// Drive `handle_tunnel` over an in-memory connection. Dropping the
+    /// returned client end is how a test plays `cs tunnel` exiting.
+    fn spawn_tunnel(
+        ctx: ControlSocketCtx,
+        req: TunnelRequest,
+    ) -> (JoinHandle<()>, tokio::io::DuplexStream) {
+        let (client, server) = tokio::io::duplex(4096);
+        let task = tokio::spawn(async move {
+            let (read, mut write) = tokio::io::split(server);
+            handle_tunnel(read, &mut write, &ctx, req).await;
+        });
+        (task, client)
+    }
+
+    async fn read_response<R: tokio::io::AsyncBufRead + Unpin>(
+        reader: &mut R,
+    ) -> Option<ControlResponse> {
+        let mut line = String::new();
+        match reader.read_line(&mut line).await {
+            Ok(0) | Err(_) => None,
+            Ok(_) => Some(serde_json::from_str(&line).expect("response json")),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hostless_server_says_where_tunnels_live() {
+        // A standalone `chan open` owns no window a desktop could answer for.
+        let ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace);
+        let (task, mut client) =
+            spawn_tunnel(ctx, tunnel_request("127.0.0.1", chan_revtunnel::Proto::Tcp));
+        let mut reader = tokio::io::BufReader::new(&mut client);
+        match read_response(&mut reader).await {
+            Some(ControlResponse::Error { message }) => {
+                assert!(message.contains("devserver or chan-desktop"), "{message}");
+            }
+            other => panic!("expected the no-host error, got {other:?}"),
+        }
+        task.await.expect("handler");
+    }
+
+    #[tokio::test]
+    async fn a_ready_desktop_unblocks_the_command_and_a_dead_one_ends_it() {
+        let fake = Arc::new(FakeHost::new(0));
+        let host: Arc<dyn chan_library::HostControl> = fake.clone();
+        let ctx = tunnel_ctx(&host);
+        // Stands in for the connected window that receives the trigger.
+        let mut frames = ctx.events_tx.subscribe();
+        let (task, mut client) =
+            spawn_tunnel(ctx, tunnel_request("127.0.0.1", chan_revtunnel::Proto::Tcp));
+
+        let frame: Value =
+            serde_json::from_str(&frames.recv().await.expect("trigger frame")).expect("frame json");
+        assert_eq!(frame["type"], "window_command");
+        assert_eq!(frame["command"], "tunnel_open");
+        assert_eq!(frame["window_id"], "w-1");
+        assert_eq!(frame["proto"], "tcp");
+        assert_eq!(frame["bind_addr"], "127.0.0.1");
+        assert_eq!(frame["desktop_port"], 8080);
+        assert_eq!(frame["devserver_port"], 3000);
+        let tunnel_id = frame["tunnel_id"].as_str().expect("tunnel id").to_string();
+        // The id is the only thing naming this tunnel on two public paths.
+        assert!(tunnel_id.len() >= 32, "guessable tunnel id: {tunnel_id}");
+
+        let attach = fake.tunnels.attach_control(&tunnel_id).expect("attach");
+        assert!(attach.report(chan_revtunnel::server::ReadyReport::Ready {
+            bound: "127.0.0.1:8080".into(),
+        }));
+        let mut reader = tokio::io::BufReader::new(&mut client);
+        match read_response(&mut reader).await {
+            Some(ControlResponse::Ok { message }) => {
+                assert!(message.contains("desktop 127.0.0.1:8080"), "{message}");
+                assert!(message.contains("devserver 127.0.0.1:3000"), "{message}");
+                assert!(message.contains("(tcp)"), "{message}");
+            }
+            other => panic!("expected the ready acknowledgement, got {other:?}"),
+        }
+
+        // The desktop dies while the tunnel is up: a second line says so.
+        drop(attach);
+        match read_response(&mut reader).await {
+            Some(ControlResponse::Error { message }) => {
+                assert!(message.contains("desktop disconnected"), "{message}");
+            }
+            other => panic!("expected the desktop-gone line, got {other:?}"),
+        }
+        task.await.expect("handler");
+        assert!(
+            fake.tunnels.is_empty(),
+            "the registration drop must deregister the tunnel"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_client_that_exits_first_takes_its_tunnel_with_it() {
+        let fake = Arc::new(FakeHost::new(0));
+        let host: Arc<dyn chan_library::HostControl> = fake.clone();
+        let ctx = tunnel_ctx(&host);
+        let mut frames = ctx.events_tx.subscribe();
+        let (task, client) =
+            spawn_tunnel(ctx, tunnel_request("127.0.0.1", chan_revtunnel::Proto::Tcp));
+        frames.recv().await.expect("trigger frame");
+        assert_eq!(fake.tunnels.len(), 1);
+
+        // Ctrl-C before any desktop answered.
+        drop(client);
+        task.await.expect("handler");
+        assert!(fake.tunnels.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_desktop_answer_fails_with_the_real_cause() {
+        let fake = Arc::new(FakeHost::new(0));
+        let host: Arc<dyn chan_library::HostControl> = fake.clone();
+        let ctx = tunnel_ctx(&host);
+        // A browser-only viewer receives the trigger and never answers.
+        let _frames = ctx.events_tx.subscribe();
+        let (task, mut client) =
+            spawn_tunnel(ctx, tunnel_request("127.0.0.1", chan_revtunnel::Proto::Tcp));
+        let mut reader = tokio::io::BufReader::new(&mut client);
+        match read_response(&mut reader).await {
+            Some(ControlResponse::Error { message }) => {
+                assert!(message.contains("chan-desktop"), "{message}");
+                assert!(message.contains("w-1"), "{message}");
+            }
+            other => panic!("expected the timeout error, got {other:?}"),
+        }
+        task.await.expect("handler");
+        assert!(fake.tunnels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_window_that_is_not_connected_is_named_as_the_failure() {
+        // No `/ws` subscriber at all: the trigger would vanish silently, so
+        // the command fails instead of blocking until the ready timeout.
+        let fake = Arc::new(FakeHost::new(0));
+        let host: Arc<dyn chan_library::HostControl> = fake.clone();
+        let (task, mut client) = spawn_tunnel(
+            tunnel_ctx(&host),
+            tunnel_request("127.0.0.1", chan_revtunnel::Proto::Tcp),
+        );
+        let mut reader = tokio::io::BufReader::new(&mut client);
+        match read_response(&mut reader).await {
+            Some(ControlResponse::Error { message }) => {
+                assert!(message.contains("no chan window is connected"), "{message}");
+            }
+            other => panic!("expected the no-window error, got {other:?}"),
+        }
+        task.await.expect("handler");
+        assert!(fake.tunnels.is_empty());
     }
 }
