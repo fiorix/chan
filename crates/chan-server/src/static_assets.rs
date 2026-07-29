@@ -343,6 +343,10 @@ pub fn content_type_for(path: &str) -> &'static str {
         "otf" => "font/otf",
         "txt" | "md" => "text/plain; charset=utf-8",
         "webmanifest" => "application/manifest+json",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "mp3" => "audio/mpeg",
         _ => "application/octet-stream",
     }
 }

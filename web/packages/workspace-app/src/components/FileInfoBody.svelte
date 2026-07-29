@@ -30,7 +30,7 @@
     ReportPrefix,
     TreeEntry,
   } from "../api/types";
-  import { isImage, isMarkdown, isPdf } from "../state/fileTypes";
+  import { isImage, isMarkdown, isPdf, isVideo } from "../state/fileTypes";
   import { basename, formatMtime, formatSize } from "../state/format";
   import {
     ensureGraphLoaded,
@@ -39,6 +39,7 @@
   } from "../state/graphData.svelte";
   import { openImageZoom, type ZoomImage } from "../state/imageZoom";
   import { openPdfViewer } from "../state/pdfViewer";
+  import { openVideoViewer } from "../state/videoViewer";
   import {
     copyTextToClipboard,
     draftsDir,
@@ -66,16 +67,18 @@
 
   /// Visual / behavioural kind for a file reference. Images route to
   /// the fullscreen zoom overlay (editor's "Zoom" button shares the
-  /// same helper); contacts are markdown notes flagged with the
+  /// same helper); videos route to the fullscreen video viewer;
+  /// contacts are markdown notes flagged with the
   /// `chan.kind: contact` frontmatter and open in the editor like
   /// other docs but get their own chip color so a glance distinguishes
   /// them. The contact bit comes off the server-side tree listing
   /// (which joins chan-workspace's node-kind index) rather than a path
   /// heuristic, so contacts located outside `Contacts/` still classify
   /// correctly. Anything else is a doc.
-  type RefKind = "doc" | "image" | "contact";
+  type RefKind = "doc" | "image" | "video" | "contact";
   function classifyRef(path: string): RefKind {
     if (isImage(path)) return "image";
+    if (isVideo(path)) return "video";
     const e = entryByPath.get(path);
     if (e && !e.is_dir && e.kind === "contact") return "contact";
     return "doc";
@@ -598,13 +601,14 @@
     const p = entry.path;
     const image = !isDir && isImage(p);
     const pdf = !isDir && isPdf(p);
+    const video = !isDir && isVideo(p);
     // Editability follows the server-provided content kind, not the path
     // extension: the file browser's per-directory listing content-sniffs
     // an odd-suffix file to `text` / `binary`, so a plaintext file with an
     // unknown extension gets "Open" (matching the tree's double-click,
     // which peeks the content) instead of the extension-gated "Download".
     const editable = !isDir && isOpenableTextKind(classifyEntry(entry));
-    const media = image || pdf;
+    const media = image || pdf || video;
 
     const download: InspectorAction = {
       label: isDir ? "Download tarball" : "Download file",
@@ -644,7 +648,9 @@
             label: "View / Zoom",
             onClick: () => openImageZoom(p, null, dirImageSet(p)),
           }
-        : { label: "View PDF", onClick: () => openPdfViewer(p) };
+        : video
+          ? { label: "View Video", onClick: () => openVideoViewer(p) }
+          : { label: "View PDF", onClick: () => openPdfViewer(p) };
       secondary.push(download, newTerminal);
       if (graph) secondary.push(graph);
     } else if (editable) {
@@ -1028,6 +1034,7 @@
 {:else}
   {@const image = isImage(entry.path)}
   {@const pdf = isPdf(entry.path)}
+  {@const video = isVideo(entry.path)}
   {@const fileKind = classifyEntry(entry)}
   <div class="info">
     <header class="head">
@@ -1062,6 +1069,21 @@
           loading="lazy"
         />
       </button>
+    {:else if video}
+      <!-- Inline preview: native controls in the frame, so a clip is
+           playable without leaving the inspector. Same token-in-query
+           fetch as the image preview; `preload="metadata"` pulls only
+           the moov/duration bytes (the server answers with 206s), the
+           stream starts on user intent. The fullscreen surface is one
+           action away via "View Video". -->
+      <div class="video-preview">
+        <!-- svelte-ignore a11y_media_has_caption -->
+        <video
+          src={withTokenQuery(`/api/files/${encodeURIComponent(entry.path).replace(/%2F/g, "/")}`)}
+          controls
+          preload="metadata"
+        ></video>
+      </div>
     {/if}
     {@render actionsSection()}
     <div class="meta-grid">
@@ -1073,7 +1095,7 @@
         <span class="k">target</span>
         <span class="v mono" title={pathClass.target}>{pathClass.target}</span>
       {/if}
-      {#if showRefs && !image && !pdf}
+      {#if showRefs && !image && !pdf && !video}
         <span class="k">tags</span>
         <span class="v">{refs ? refs.tags.length : "..."}</span>
         <span class="k">contacts</span>
@@ -1084,9 +1106,9 @@
         <span class="v">{refs ? nonContactLinks.length : "..."}</span>
         <span class="k">backlinks</span>
         <span class="v">{backlinksLoading ? `${backlinks.length}...` : backlinks.length}</span>
-      {:else if showRefs && (image || pdf)}
-        <!-- Media files (images and PDFs) can be link targets but
-             carry no outgoing references of their own. Show just
+      {:else if showRefs && (image || pdf || video)}
+        <!-- Media files (images, PDFs, videos) can be link targets
+             but carry no outgoing references of their own. Show just
              the "linked from" count; tags / contacts / dates would
              always be zero. -->
         <span class="k">linked from</span>
@@ -1195,6 +1217,13 @@
                       title="Zoom"
                       onclick={() => openImageZoom(l.path, null, dirImageSet(l.path))}
                     >{l.label}</button>
+                  {:else if classifyRef(l.path) === "video"}
+                    <button
+                      class="ref file"
+                      data-refkind="video"
+                      title="View video"
+                      onclick={() => openVideoViewer(l.path)}
+                    >{l.label}</button>
                   {:else if onNavigate}
                     <button
                       class="ref file"
@@ -1221,6 +1250,13 @@
                       data-refkind="image"
                       title="Zoom"
                       onclick={() => openImageZoom(b.src, null, dirImageSet(b.src))}
+                    >{b.src}</button>
+                  {:else if classifyRef(b.src) === "video"}
+                    <button
+                      class="ref file"
+                      data-refkind="video"
+                      title="View video"
+                      onclick={() => openVideoViewer(b.src)}
                     >{b.src}</button>
                   {:else if onNavigate}
                     <button
@@ -1354,6 +1390,27 @@
     object-fit: contain;
     display: block;
     pointer-events: none;
+  }
+  /* Image-preview frame minus the zoom affordance: the inline video
+     keeps its native controls, so the frame is not a button. */
+  .video-preview {
+    margin: 0 0 0.6rem 0;
+    padding: 4px;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    max-height: 220px;
+    overflow: hidden;
+    width: 100%;
+  }
+  .video-preview video {
+    max-width: 100%;
+    max-height: 210px;
+    display: block;
+    background: #000;
   }
   .title {
     margin: 0 0 0.5rem 0;

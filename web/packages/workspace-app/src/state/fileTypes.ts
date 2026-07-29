@@ -36,6 +36,15 @@
 
 const MARKDOWN_EXTENSIONS = new Set(["md", "txt"]);
 
+// Browser-native video containers the server streams with HTTP range
+// support (`/api/files` answers plain GETs on these with
+// `Accept-Ranges` + 206). No transcode: a container whose codec the
+// browser can't decode still classifies as video, `<video>` just
+// reports it can't play. Keep in lockstep with the server's
+// `is_streamable_media` (chan-server files route), which also covers
+// mp3 audio; audio preview is a follow-up surface.
+const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov"]);
+
 const IMAGE_EXTENSIONS = new Set([
   "png",
   "jpg",
@@ -287,6 +296,15 @@ export function isImage(path: string): boolean {
 /// even though both share `media` kind on the wire.
 export function isPdf(path: string): boolean {
   return extOf(path) === "pdf";
+}
+
+/// True for browser-native video files. Standalone predicate rather
+/// than a `classifyPath` branch: the server still projects video as
+/// the sniffed `binary` wire kind, and `classifyPath` mirrors the
+/// server. Video-specific surfaces (inline preview, the fullscreen
+/// viewer) key off this path check, exactly like `isImage` callers.
+export function isVideo(path: string): boolean {
+  return VIDEO_EXTENSIONS.has(extOf(path) ?? "");
 }
 
 /// True for markdown-class files (.md / .txt): the note-shaped text

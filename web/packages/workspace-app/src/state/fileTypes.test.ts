@@ -1,6 +1,12 @@
 import { describe, expect, test } from "vitest";
 
-import { classifyPath, isEditableText, isExcalidraw, isMarkdown } from "./fileTypes";
+import {
+  classifyPath,
+  isEditableText,
+  isExcalidraw,
+  isMarkdown,
+  isVideo,
+} from "./fileTypes";
 
 // The path-only classifier is the fallback the editor uses when it holds a
 // bare path without a server-projected `kind` (graph ghost rows, broken
@@ -25,6 +31,24 @@ describe("classifyPath: only .md is a document", () => {
     expect(isMarkdown("notes/plain.txt")).toBe(true);
     expect(isMarkdown("notes/a.md")).toBe(true);
     expect(isMarkdown("src/main.rs")).toBe(false);
+  });
+});
+
+describe("video is a standalone predicate, not a classifyPath kind", () => {
+  test("isVideo keys on the browser-native container extensions", () => {
+    expect(isVideo("clips/demo.mp4")).toBe(true);
+    expect(isVideo("clips/DEMO.MOV")).toBe(true);
+    expect(isVideo("a.webm")).toBe(true);
+    expect(isVideo("song.mp3")).toBe(false);
+    expect(isVideo("logo.png")).toBe(false);
+    expect(isVideo("mp4")).toBe(false);
+  });
+
+  test("classifyPath still mirrors the server's sniffed wire kind", () => {
+    // The server projects video as `pending` -> sniffed `binary`;
+    // classifyPath stays in lockstep. Video surfaces key off isVideo.
+    expect(classifyPath("clips/demo.mp4")).toBe("binary");
+    expect(isEditableText("clips/demo.mp4")).toBe(false);
   });
 });
 

@@ -5,7 +5,7 @@ use std::{convert::Infallible, io::Cursor, sync::Arc};
 
 use axum::body::{Body, Bytes};
 use axum::extract::{multipart::Field, Multipart, Path as AxumPath, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures::{stream, StreamExt};
@@ -453,10 +453,33 @@ fn stream_binary_download_with_completion(
 
 fn stream_binary_download_inner(
     path: &str,
-    mut reader: BoundedFileReader,
+    reader: BoundedFileReader,
     completion: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> Response {
     let size = reader.stat().size;
+    let body = bounded_reader_body(reader, completion);
+    (
+        [
+            (header::CONTENT_TYPE, content_type_for(path).to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                content_disposition_attachment(path),
+            ),
+            (header::CONTENT_LENGTH, size.to_string()),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// Bridge a bounded reader onto a response body through a small async
+/// channel. The blocking side owns the reader, so an aborted response
+/// drops the channel, which stops the bridge and joins the reader's
+/// producer thread; no file handle outlives its response.
+fn bounded_reader_body(
+    mut reader: BoundedFileReader,
+    completion: Option<tokio::sync::oneshot::Sender<()>>,
+) -> Body {
     let (tx, rx) = mpsc::channel::<std::io::Result<Bytes>>(8);
     tokio::task::spawn_blocking(move || {
         for next in reader.by_ref() {
@@ -475,21 +498,9 @@ fn stream_binary_download_inner(
             let _ = completion.send(());
         }
     });
-    let body = Body::from_stream(stream::unfold(rx, |mut rx| async {
+    Body::from_stream(stream::unfold(rx, |mut rx| async {
         rx.recv().await.map(|message| (message, rx))
-    }));
-    (
-        [
-            (header::CONTENT_TYPE, content_type_for(path).to_string()),
-            (
-                header::CONTENT_DISPOSITION,
-                content_disposition_attachment(path),
-            ),
-            (header::CONTENT_LENGTH, size.to_string()),
-        ],
-        body,
-    )
-        .into_response()
+    }))
 }
 
 /// Pre-flight for a directory download: confirm every file in the tree we will
@@ -607,6 +618,193 @@ fn append_archive_file<W: std::io::Write>(
     Ok(())
 }
 
+/// Media formats the plain GET serves through the range-aware stream
+/// instead of the whole-file binary read. Browser-native containers
+/// only (no transcode): `<video>` / `<audio>` need `Accept-Ranges` +
+/// 206 to seek, and buffering a full video into server RAM is exactly
+/// what the bounded reader exists to avoid. Images and PDFs stay on
+/// the buffered path: their consumers fetch the whole body once.
+fn is_streamable_media(path: &str) -> bool {
+    let Some((_, ext)) = path.rsplit_once('.') else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "mp4" | "webm" | "mov" | "mp3"
+    )
+}
+
+/// Outcome of resolving a request's `Range` header against a media
+/// file's current size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeOutcome {
+    /// No header, a non-`bytes` unit, a syntactically invalid value, or
+    /// a multi-range request: serve the complete file as a plain 200.
+    /// RFC 9110 requires ignoring invalid `Range` headers and allows
+    /// answering any `Range` with the full representation.
+    Full,
+    /// One satisfiable byte range, resolved to a concrete window.
+    Slice { start: u64, len: u64 },
+    /// A syntactically valid range no byte of the file satisfies: 416.
+    Unsatisfiable,
+}
+
+/// Resolve a `Range` header value against `size`. Single-range
+/// `bytes=` forms only (`A-B`, `A-`, `-N`); anything else degrades to
+/// `Full`, never to an error, because a range-blind response is always
+/// a correct one.
+fn resolve_range(header: Option<&str>, size: u64) -> RangeOutcome {
+    let Some(value) = header else {
+        return RangeOutcome::Full;
+    };
+    let Some(spec) = value.trim().strip_prefix("bytes=") else {
+        return RangeOutcome::Full;
+    };
+    let spec = spec.trim();
+    if spec.contains(',') {
+        return RangeOutcome::Full;
+    }
+    let Some((start_text, end_text)) = spec.split_once('-') else {
+        return RangeOutcome::Full;
+    };
+    if start_text.is_empty() {
+        // Suffix form `-N`: the final N bytes. `-0` is well-formed but
+        // matches nothing, as does any suffix of an empty file.
+        let Ok(suffix) = end_text.parse::<u64>() else {
+            return RangeOutcome::Full;
+        };
+        if suffix == 0 || size == 0 {
+            return RangeOutcome::Unsatisfiable;
+        }
+        let start = size.saturating_sub(suffix);
+        return RangeOutcome::Slice {
+            start,
+            len: size - start,
+        };
+    }
+    let Ok(start) = start_text.parse::<u64>() else {
+        return RangeOutcome::Full;
+    };
+    if start >= size {
+        return RangeOutcome::Unsatisfiable;
+    }
+    if end_text.is_empty() {
+        // Open form `A-`: from A to EOF.
+        return RangeOutcome::Slice {
+            start,
+            len: size - start,
+        };
+    }
+    let Ok(end) = end_text.parse::<u64>() else {
+        return RangeOutcome::Full;
+    };
+    if end < start {
+        return RangeOutcome::Full;
+    }
+    RangeOutcome::Slice {
+        start,
+        len: end.min(size - 1) - start + 1,
+    }
+}
+
+/// Serve one media file with HTTP range semantics over the bounded
+/// reader: 200 + `Accept-Ranges` for a range-less GET, 206 +
+/// `Content-Range` for a satisfiable range, 416 otherwise. Framing
+/// headers derive from the open handle's own stat and window
+/// (`BoundedFileReader::slice`), so the advertised byte counts always
+/// match the bytes streamed even when the file changes between the
+/// planning stat and the open.
+async fn media_stream_response(
+    workspace: Arc<chan_workspace::Workspace>,
+    path: String,
+    range_header: Option<String>,
+) -> Response {
+    enum MediaPlan {
+        Full(BoundedFileReader),
+        Partial(BoundedFileReader),
+        Unsatisfiable { size: u64 },
+    }
+    let plan_path = path.clone();
+    let plan = tokio::task::spawn_blocking(move || {
+        let stat = workspace.stat(&plan_path)?;
+        // A directory with a media extension takes the whole-file open
+        // below so it fails with the canonical not-a-regular-file error
+        // instead of resolving a range against a directory size.
+        let outcome = if stat.is_dir {
+            RangeOutcome::Full
+        } else {
+            resolve_range(range_header.as_deref(), stat.size)
+        };
+        match outcome {
+            RangeOutcome::Full => workspace
+                .read_bytes_bounded(&plan_path)
+                .map(MediaPlan::Full),
+            RangeOutcome::Slice { start, len } => workspace
+                .read_bytes_bounded_slice(&plan_path, start, len)
+                .map(|reader| {
+                    // The handle's own window is authoritative; a file
+                    // truncated between stat and open can empty it, and
+                    // an empty 206 is a lie (416 carries the real size).
+                    if reader.slice().1 == 0 {
+                        MediaPlan::Unsatisfiable {
+                            size: reader.stat().size,
+                        }
+                    } else {
+                        MediaPlan::Partial(reader)
+                    }
+                }),
+            RangeOutcome::Unsatisfiable => Ok(MediaPlan::Unsatisfiable { size: stat.size }),
+        }
+    })
+    .await;
+    let plan = match plan {
+        Ok(Ok(plan)) => plan,
+        Ok(Err(e)) => return err_from(&e),
+        Err(join) => return err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+    };
+    let content_type = content_type_for(&path).to_string();
+    match plan {
+        MediaPlan::Full(reader) => {
+            let size = reader.stat().size;
+            (
+                [
+                    (header::CONTENT_TYPE, content_type),
+                    (header::ACCEPT_RANGES, "bytes".to_string()),
+                    (header::CONTENT_LENGTH, size.to_string()),
+                ],
+                bounded_reader_body(reader, None),
+            )
+                .into_response()
+        }
+        MediaPlan::Partial(reader) => {
+            let total = reader.stat().size;
+            let (start, len) = reader.slice();
+            (
+                StatusCode::PARTIAL_CONTENT,
+                [
+                    (header::CONTENT_TYPE, content_type),
+                    (header::ACCEPT_RANGES, "bytes".to_string()),
+                    (
+                        header::CONTENT_RANGE,
+                        format!("bytes {start}-{}/{total}", start + len - 1),
+                    ),
+                    (header::CONTENT_LENGTH, len.to_string()),
+                ],
+                bounded_reader_body(reader, None),
+            )
+                .into_response()
+        }
+        MediaPlan::Unsatisfiable { size } => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            [
+                (header::ACCEPT_RANGES, "bytes".to_string()),
+                (header::CONTENT_RANGE, format!("bytes */{size}")),
+            ],
+        )
+            .into_response(),
+    }
+}
+
 #[derive(Default, Deserialize)]
 pub struct ReadFileQuery {
     #[serde(default)]
@@ -626,6 +824,7 @@ pub async fn api_read_file(
     State(state): State<Arc<AppState>>,
     AxumPath(path): AxumPath<String>,
     Query(query): Query<ReadFileQuery>,
+    headers: HeaderMap,
 ) -> Response {
     // Editable-text files (.md / .txt) come back as FileResponse
     // JSON since the frontend's editor wants the content as a
@@ -696,6 +895,18 @@ pub async fn api_read_file(
 
     if query_flag(&query.stream) {
         return stream_read_file_response(workspace, path).await;
+    }
+
+    // Plain GET on a media file: range-aware bounded streaming so
+    // `<video>` / `<audio>` can seek and a large file never buffers
+    // whole into server memory. Explicit `?download=1` above keeps its
+    // attachment semantics for these paths.
+    if is_streamable_media(&path) {
+        let range_header = headers
+            .get(header::RANGE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        return media_stream_response(workspace, path, range_header).await;
     }
 
     let path_for_read = path.clone();
@@ -2506,6 +2717,228 @@ mod write_tests {
         assert_eq!(actual.as_ref(), expected);
     }
 
+    #[test]
+    fn resolve_range_covers_the_single_range_forms() {
+        use RangeOutcome::*;
+
+        // Well-formed, satisfiable.
+        assert_eq!(
+            resolve_range(Some("bytes=0-499"), 1000),
+            Slice { start: 0, len: 500 }
+        );
+        assert_eq!(
+            resolve_range(Some("bytes=500-"), 1000),
+            Slice {
+                start: 500,
+                len: 500
+            }
+        );
+        assert_eq!(
+            resolve_range(Some("bytes=-200"), 1000),
+            Slice {
+                start: 800,
+                len: 200
+            }
+        );
+        // End clamps to EOF; oversized suffix means the whole file.
+        assert_eq!(
+            resolve_range(Some("bytes=900-4096"), 1000),
+            Slice {
+                start: 900,
+                len: 100
+            }
+        );
+        assert_eq!(
+            resolve_range(Some("bytes=-4096"), 1000),
+            Slice {
+                start: 0,
+                len: 1000
+            }
+        );
+        // Single byte.
+        assert_eq!(
+            resolve_range(Some("bytes=0-0"), 1000),
+            Slice { start: 0, len: 1 }
+        );
+
+        // Unsatisfiable: start at or past EOF, zero suffix, empty file.
+        assert_eq!(resolve_range(Some("bytes=1000-"), 1000), Unsatisfiable);
+        assert_eq!(resolve_range(Some("bytes=2000-2100"), 1000), Unsatisfiable);
+        assert_eq!(resolve_range(Some("bytes=-0"), 1000), Unsatisfiable);
+        assert_eq!(resolve_range(Some("bytes=0-"), 0), Unsatisfiable);
+
+        // Ignored: absent, other units, malformed, inverted, multi-range.
+        assert_eq!(resolve_range(None, 1000), Full);
+        assert_eq!(resolve_range(Some("items=0-4"), 1000), Full);
+        assert_eq!(resolve_range(Some("bytes=abc-"), 1000), Full);
+        assert_eq!(resolve_range(Some("bytes=12"), 1000), Full);
+        assert_eq!(resolve_range(Some("bytes=500-100"), 1000), Full);
+        assert_eq!(resolve_range(Some("bytes=0-1,5-9"), 1000), Full);
+    }
+
+    #[test]
+    fn streamable_media_gate_is_extension_scoped() {
+        assert!(is_streamable_media("clips/demo.mp4"));
+        assert!(is_streamable_media("demo.MOV"));
+        assert!(is_streamable_media("a.webm"));
+        assert!(is_streamable_media("song.mp3"));
+        assert!(!is_streamable_media("poster.png"));
+        assert!(!is_streamable_media("paper.pdf"));
+        assert!(!is_streamable_media("notes.md"));
+        assert!(!is_streamable_media("mp4"));
+    }
+
+    fn media_workspace(
+        source: &[u8],
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        Arc<chan_workspace::Workspace>,
+    ) {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        workspace.write_bytes("clip.mp4", source).unwrap();
+        (cfg, root, workspace)
+    }
+
+    fn media_source() -> Vec<u8> {
+        (0..(chan_workspace::BINARY_STREAM_CHUNK_SIZE * 2 + 311))
+            .map(|index| (index % 251) as u8)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn media_get_without_range_streams_the_whole_file_with_accept_ranges() {
+        use axum::body::to_bytes;
+
+        let source = media_source();
+        let (_cfg, _root, workspace) = media_workspace(&source);
+
+        let response = media_stream_response(workspace, "clip.mp4".into(), None).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "video/mp4");
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(
+            response.headers()[header::CONTENT_LENGTH],
+            source.len().to_string()
+        );
+        assert!(!response.headers().contains_key(header::CONTENT_DISPOSITION));
+        let actual = to_bytes(response.into_body(), source.len() + 1)
+            .await
+            .unwrap();
+        assert_eq!(actual.as_ref(), source);
+    }
+
+    #[tokio::test]
+    async fn media_range_request_streams_the_exact_slice_as_206() {
+        use axum::body::to_bytes;
+
+        let source = media_source();
+        let (_cfg, _root, workspace) = media_workspace(&source);
+        let start = chan_workspace::BINARY_STREAM_CHUNK_SIZE - 7;
+        let end = chan_workspace::BINARY_STREAM_CHUNK_SIZE + 12;
+
+        let response = media_stream_response(
+            workspace,
+            "clip.mp4".into(),
+            Some(format!("bytes={start}-{end}")),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(
+            response.headers()[header::CONTENT_RANGE],
+            format!("bytes {start}-{end}/{}", source.len())
+        );
+        let len = end - start + 1;
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], len.to_string());
+        let actual = to_bytes(response.into_body(), len + 1).await.unwrap();
+        assert_eq!(actual.as_ref(), &source[start..=end]);
+    }
+
+    #[tokio::test]
+    async fn media_open_and_suffix_ranges_resolve_against_eof() {
+        use axum::body::to_bytes;
+
+        let source = media_source();
+        let (_cfg, _root, workspace) = media_workspace(&source);
+        let start = source.len() - 300;
+
+        let open_ended = media_stream_response(
+            workspace.clone(),
+            "clip.mp4".into(),
+            Some(format!("bytes={start}-")),
+        )
+        .await;
+        assert_eq!(open_ended.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            open_ended.headers()[header::CONTENT_RANGE],
+            format!("bytes {start}-{}/{}", source.len() - 1, source.len())
+        );
+        let tail = to_bytes(open_ended.into_body(), 301).await.unwrap();
+        assert_eq!(tail.as_ref(), &source[start..]);
+
+        let suffix =
+            media_stream_response(workspace, "clip.mp4".into(), Some("bytes=-300".into())).await;
+        assert_eq!(suffix.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            suffix.headers()[header::CONTENT_RANGE],
+            format!("bytes {start}-{}/{}", source.len() - 1, source.len())
+        );
+        let suffix_bytes = to_bytes(suffix.into_body(), 301).await.unwrap();
+        assert_eq!(suffix_bytes.as_ref(), &source[start..]);
+    }
+
+    #[tokio::test]
+    async fn media_unsatisfiable_range_is_416_and_invalid_range_degrades_to_full() {
+        use axum::body::to_bytes;
+
+        let source = media_source();
+        let (_cfg, _root, workspace) = media_workspace(&source);
+
+        let unsatisfiable = media_stream_response(
+            workspace.clone(),
+            "clip.mp4".into(),
+            Some(format!("bytes={}-", source.len())),
+        )
+        .await;
+        assert_eq!(unsatisfiable.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            unsatisfiable.headers()[header::CONTENT_RANGE],
+            format!("bytes */{}", source.len())
+        );
+
+        let ignored =
+            media_stream_response(workspace, "clip.mp4".into(), Some("bytes=0-1,5-9".into())).await;
+        assert_eq!(ignored.status(), StatusCode::OK);
+        let actual = to_bytes(ignored.into_body(), source.len() + 1)
+            .await
+            .unwrap();
+        assert_eq!(actual.as_ref(), source);
+    }
+
+    #[tokio::test]
+    async fn media_response_refuses_a_directory_with_a_media_extension() {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        std::fs::create_dir(root.path().join("weird.mp4")).unwrap();
+
+        let response =
+            media_stream_response(workspace, "weird.mp4".into(), Some("bytes=0-".into())).await;
+
+        assert!(response.status().is_client_error() || response.status().is_server_error());
+        assert_ne!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_ne!(response.status(), StatusCode::PARTIAL_CONTENT);
+    }
+
     #[tokio::test]
     async fn dropping_binary_download_body_joins_the_bounded_reader() {
         let cfg = tempfile::TempDir::new().unwrap();
@@ -3102,7 +3535,7 @@ mod doc_divert_tests {
 
     use axum::body::{to_bytes, Body, Bytes};
     use axum::extract::{Path as AxumPath, Query, State};
-    use axum::http::{header, Request, StatusCode};
+    use axum::http::{header, HeaderMap, Request, StatusCode};
     use axum::Json;
     use chan_workspace::{SearchAggression, WatchEvent, WatchKind};
     use serde_json::Value;
@@ -3383,6 +3816,7 @@ mod doc_divert_tests {
             State(state),
             AxumPath("active.svg".to_string()),
             Query(ReadFileQuery::default()),
+            HeaderMap::new(),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -3433,6 +3867,7 @@ mod doc_divert_tests {
                 download: None,
                 stream: None,
             }),
+            HeaderMap::new(),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -3452,6 +3887,7 @@ mod doc_divert_tests {
                 download: None,
                 stream: Some("1".into()),
             }),
+            HeaderMap::new(),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -3479,6 +3915,7 @@ mod doc_divert_tests {
                 download: Some("1".into()),
                 stream: None,
             }),
+            HeaderMap::new(),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -3866,6 +4303,7 @@ mod doc_divert_tests {
             State(state.clone()),
             AxumPath("n.md".into()),
             Query(ReadFileQuery::default()),
+            HeaderMap::new(),
         )
         .await;
         let get_body = body_json(get).await;
@@ -3879,6 +4317,7 @@ mod doc_divert_tests {
                 download: None,
                 stream: Some("1".into()),
             }),
+            HeaderMap::new(),
         )
         .await;
         let stream_bytes = to_bytes(stream.into_body(), usize::MAX).await.unwrap();
@@ -4087,7 +4526,7 @@ mod doc_divert_tests {
 mod scene_divert_tests {
     use axum::body::Body;
     use axum::extract::{Path as AxumPath, Query, State};
-    use axum::http::{header, Request, StatusCode};
+    use axum::http::{header, HeaderMap, Request, StatusCode};
     use axum::Json;
     use chan_workspace::{WatchEvent, WatchKind};
     use serde_json::{json, Value};
@@ -4146,6 +4585,7 @@ mod scene_divert_tests {
                 download: None,
                 stream: None,
             }),
+            HeaderMap::new(),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);

@@ -2815,6 +2815,86 @@ mod tests {
     }
 
     #[test]
+    fn bounded_slice_reader_is_byte_exact_and_reports_its_window() {
+        let (_cfg, root, workspace) = workspace_fixture();
+        // Position-dependent pattern: any off-by-one in seek or clamp
+        // produces bytes that cannot match the expected slice.
+        let source: Vec<u8> = (0..BINARY_STREAM_CHUNK_SIZE * 2 + 311)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        std::fs::write(root.path().join("sliced.bin"), &source).unwrap();
+
+        let start = BINARY_STREAM_CHUNK_SIZE as u64 - 7;
+        let len = BINARY_STREAM_CHUNK_SIZE as u64 + 19;
+        let mut reader = workspace
+            .read_bytes_bounded_slice("sliced.bin", start, len)
+            .unwrap();
+        assert_eq!(reader.stat().size, source.len() as u64);
+        assert_eq!(reader.slice(), (start, len));
+
+        let streamed: Vec<u8> = reader
+            .by_ref()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap()
+            .concat();
+        assert_eq!(
+            streamed,
+            source[start as usize..(start + len) as usize],
+            "slice reader must stream exactly the requested window"
+        );
+    }
+
+    #[test]
+    fn bounded_slice_reader_clamps_past_eof_windows() {
+        let (_cfg, root, workspace) = workspace_fixture();
+        let source: Vec<u8> = (0..1024).map(|i| (i % 251) as u8).collect();
+        std::fs::write(root.path().join("clamped.bin"), &source).unwrap();
+
+        // Tail window with an oversized length clamps to EOF.
+        let mut tail = workspace
+            .read_bytes_bounded_slice("clamped.bin", 1000, u64::MAX)
+            .unwrap();
+        assert_eq!(tail.slice(), (1000, 24));
+        let streamed: Vec<u8> = tail
+            .by_ref()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap()
+            .concat();
+        assert_eq!(streamed, source[1000..]);
+
+        // Start past EOF clamps to an empty window and streams nothing.
+        let mut empty = workspace
+            .read_bytes_bounded_slice("clamped.bin", 4096, 10)
+            .unwrap();
+        assert_eq!(empty.slice(), (1024, 0));
+        assert_eq!(empty.by_ref().count(), 0);
+    }
+
+    #[test]
+    fn dropping_bounded_slice_reader_joins_blocked_producer() {
+        let (_cfg, root, workspace) = workspace_fixture();
+        let size = BINARY_STREAM_CHUNK_SIZE * (BINARY_STREAM_QUEUE_DEPTH + 16);
+        std::fs::write(root.path().join("slice-disconnect.bin"), vec![0x5a; size]).unwrap();
+
+        let reader = workspace
+            .read_bytes_bounded_slice("slice-disconnect.bin", 1, size as u64)
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while active_bounded_file_readers() == 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(active_bounded_file_readers(), 1);
+
+        drop(reader);
+
+        assert_eq!(
+            active_bounded_file_readers(),
+            0,
+            "BoundedFileReader::drop must close the queue and join its producer"
+        );
+    }
+
+    #[test]
     fn dropping_bounded_reader_joins_blocked_producer() {
         let (_cfg, root, workspace) = workspace_fixture();
         let size = BINARY_STREAM_CHUNK_SIZE * (BINARY_STREAM_QUEUE_DEPTH + 16);
