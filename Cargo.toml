@@ -9,6 +9,7 @@ members = [
     "crates/chan-llm",
     "crates/chan-report",
     "crates/chan-library",
+    "crates/chan-revtunnel",
     "crates/chan-systemd",
     "crates/chan-server",
     "crates/chan-shell",
@@ -44,6 +45,10 @@ chan-workspace = { version = "0.79.2", path = "crates/chan-workspace", default-f
 chan-llm = { version = "0.79.2", path = "crates/chan-llm" }
 chan-report = { version = "0.79.2", path = "crates/chan-report" }
 chan-library = { version = "0.79.2", path = "crates/chan-library" }
+# default-features off drops the desktop half (the WebSocket dialer and the
+# listener) so chan-server links only the wire contract, the spec parser, and
+# the byte pump. chan-desktop and the end-to-end harness take the default.
+chan-revtunnel = { version = "0.79.2", path = "crates/chan-revtunnel", default-features = false }
 chan-systemd = { version = "0.79.2", path = "crates/chan-systemd" }
 chan-server = { version = "0.79.2", path = "crates/chan-server", default-features = false }
 # default-features off so chan-server can pull just the wire types
