@@ -25,7 +25,10 @@ use serde::Serialize;
 use tokio::sync::{broadcast, watch, Notify};
 use tokio::task::JoinHandle;
 
-use chan_shell::{plan_submitted_input, PaneSide, PtyInputPlan, ResolvedSubmit, SubmitAgent};
+use chan_shell::{
+    plan_submitted_input, PaneSide, PtyInputPlan, ResolvedSubmit, SubmitAgent,
+    MAX_TERMINAL_WRITE_BYTES,
+};
 
 use crate::config::TerminalConfig;
 use crate::time::{now_unix_millis, now_unix_secs};
@@ -493,7 +496,8 @@ pub struct RosterEntry {
 /// Result of enqueuing a `cs terminal write` onto the matched sessions'
 /// write queues. `queued` is how many sessions accepted it, `full` how many
 /// were already at `WRITE_QUEUE_CAP` (the write was dropped for those), and
-/// `position` the message depth after the push when EXACTLY one session
+/// `oversized` how many refused a body above `MAX_TERMINAL_WRITE_BYTES`.
+/// `position` is the message depth after the push when EXACTLY one session
 /// matched (the caller's 1-based position among the pending messages; `None`
 /// for a broadcast or a full single). `diverged` lists each QUEUED session
 /// whose server-derived agent disagrees with the agent the sender named, so
@@ -502,6 +506,7 @@ pub struct RosterEntry {
 pub struct EnqueueOutcome {
     pub queued: usize,
     pub full: usize,
+    pub oversized: usize,
     pub position: Option<usize>,
     pub diverged: Vec<SubmitDivergence>,
 }
@@ -1574,6 +1579,7 @@ impl Registry {
                         }
                     }
                 }
+                None if data.len() > MAX_TERMINAL_WRITE_BYTES => outcome.oversized += 1,
                 None => outcome.full += 1,
             }
         }
@@ -2050,9 +2056,10 @@ impl QueueSource {
 
 /// Which portion of a logical message a queue entry delivers. Gemini is the
 /// one agent whose submit chord must arrive as its OWN keypress, and live
-/// probing found no fixed sub-idle gap safe for a 64 KiB body. A Gemini message
-/// therefore takes a `Body` entry and a `Chord` entry that the drainer
-/// separates with a full idle gate. Everything else is one `Whole` entry.
+/// probing found no fixed sub-idle gap safe across the required input shapes.
+/// A Gemini message therefore takes a `Body` entry and a `Chord` entry that
+/// the drainer separates with a full idle gate. Everything else is one
+/// `Whole` entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MessagePart {
     Whole,
@@ -2116,8 +2123,8 @@ fn message_parts(data: &str, submit: Option<&ResolvedSubmit>) -> &'static [Messa
     }
 }
 
-/// Append one logical message as its ordered entries, all-or-nothing at
-/// `WRITE_QUEUE_CAP`: a partial push could deliver a body whose submit chord
+/// Append one logical message as its ordered entries, all-or-nothing at the
+/// byte and entry caps. A partial push could deliver a body whose submit chord
 /// was silently dropped. `None` leaves the queue untouched.
 fn push_message(
     queue: &mut VecDeque<QueuedMessage>,
@@ -2126,6 +2133,9 @@ fn push_message(
     source: QueueSource,
     prompt_id: Option<String>,
 ) -> Option<()> {
+    if data.len() > MAX_TERMINAL_WRITE_BYTES {
+        return None;
+    }
     let parts = message_parts(&data, submit.as_ref());
     if queue.len() + parts.len() > WRITE_QUEUE_CAP {
         return None;
@@ -2245,8 +2255,7 @@ fn select_batch_prefix(queue: &VecDeque<QueuedMessage>, max_bytes: usize) -> Bat
 const BATCH_HEADING: &str = "# Queued terminal notifications\n\n";
 const BATCH_PREAMBLE: &str = " messages, oldest first. Read the entire batch before acting. Later\nmessages may update or supersede earlier messages.\n\n";
 
-/// Message bytes a framed batch carries verbatim: the same trailing-newline
-/// trim submit encoding applies to a singleton.
+/// Message bytes a framed batch carries before its one framing newline.
 fn framed_content_len(message: &QueuedMessage) -> usize {
     message.data.trim_end_matches('\n').len()
 }
@@ -2280,9 +2289,9 @@ fn decimal_digits(n: usize) -> usize {
     digits
 }
 
-/// Frame logical notifications in chronological order. Content remains
-/// verbatim except for the same trailing-newline trim submit encoding applies
-/// to a singleton.
+/// Frame logical notifications in chronological order. Each body is trimmed
+/// and followed by exactly one framing newline, matching singleton submit-body
+/// normalization.
 fn format_notification_batch(messages: &[&QueuedMessage]) -> String {
     let count = messages.len();
     let mut out = String::with_capacity(
@@ -3124,8 +3133,9 @@ impl Session {
         )
     }
 
-    /// Push one `cs terminal write` message, all-or-nothing at the entry cap
-    /// (a partial push could deliver a body whose chord was silently dropped).
+    /// Push one `cs terminal write` message, all-or-nothing at the byte and
+    /// entry caps (a partial push could deliver a body whose chord was silently
+    /// dropped).
     /// Returns the message depth after the push: the poke's 1-based position
     /// among the PENDING MESSAGES, the same number the SPA badge and
     /// `cs terminal list --json` show. A Gemini poke occupies two entries and
@@ -3147,9 +3157,9 @@ impl Session {
         Some(depth)
     }
 
-    /// Push a Rich Prompt as one logical message, all-or-nothing at the entry
-    /// cap. Returns the message depth after the push, its 1-based queue
-    /// position.
+    /// Push a Rich Prompt as one logical message, all-or-nothing at the byte
+    /// and entry caps. Returns the message depth after the push, its 1-based
+    /// queue position.
     fn enqueue_prompt(
         &self,
         data: String,
@@ -3884,6 +3894,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn agent_submit_delivers_one_newline_ahead_of_the_chord() {
+        let registry = Registry::new(test_config(1024, 4, 10));
+        let (codex, rx) =
+            test_agent_session(1024, "s-codex", Some("@@Agent"), None, Some("codex"), &[]);
+        register_session(&registry, &codex);
+
+        let outcome = registry.enqueue_write_matching(
+            Some("@@Agent"),
+            None,
+            "body\n\n",
+            Some(SubmitAgent::Codex),
+        );
+        assert_eq!(outcome.queued, 1);
+
+        drain_now(&codex);
+        assert_eq!(delivered_input(&rx), b"\x1b[200~body\n\x1b[201~\r".to_vec());
+    }
+
+    #[test]
+    fn shell_raw_write_delivers_the_logical_bytes_verbatim() {
+        let registry = Registry::new(test_config(1024, 4, 10));
+        let (shell, rx) =
+            test_agent_session(1024, "s-shell", Some("@@Shell"), None, Some("bash"), &[]);
+        register_session(&registry, &shell);
+
+        let outcome = registry.enqueue_write_matching(Some("@@Shell"), None, "body\n\n", None);
+        assert_eq!(outcome.queued, 1);
+
+        drain_now(&shell);
+        assert_eq!(delivered_input(&rx), b"body\n\n".to_vec());
+    }
+
     // The server-side chord authority: the sender's `--submit` value never
     // picks delivery bytes; each matched session's chord derives from that
     // session's own spawn command + CHAN_AGENT at enqueue.
@@ -3910,7 +3953,7 @@ mod tests {
         drain_now(&codex);
         assert_eq!(
             delivered_input(&rx),
-            b"\x1b[200~poke\x1b[201~\r".to_vec(),
+            b"\x1b[200~poke\n\x1b[201~\r".to_vec(),
             "the target's codex chord must win over the sender's claude"
         );
     }
@@ -4004,8 +4047,8 @@ mod tests {
             delivered_input(&rx_codex),
             delivered_input(&rx_shell),
         ];
-        assert_eq!(delivered[0], b"poke\x1b[27;9;13~".to_vec());
-        assert_eq!(delivered[1], b"\x1b[200~poke\x1b[201~\r".to_vec());
+        assert_eq!(delivered[0], b"poke\n\x1b[27;9;13~".to_vec());
+        assert_eq!(delivered[1], b"\x1b[200~poke\n\x1b[201~\r".to_vec());
         assert_eq!(delivered[2], b"poke".to_vec());
         assert!(
             delivered[0] != delivered[1] && delivered[1] != delivered[2],
@@ -4050,9 +4093,9 @@ mod tests {
         drain_now(&env_claude);
         assert_eq!(
             delivered_input(&rx_codex),
-            b"\x1b[200~poke\x1b[201~\r".to_vec()
+            b"\x1b[200~poke\n\x1b[201~\r".to_vec()
         );
-        assert_eq!(delivered_input(&rx_claude), b"poke\x1b[27;9;13~".to_vec());
+        assert_eq!(delivered_input(&rx_claude), b"poke\n\x1b[27;9;13~".to_vec());
     }
 
     async fn collect_until(session: &mut AttachHandle, needle: &str, timeout: Duration) -> String {
@@ -4417,7 +4460,7 @@ mod tests {
         for index in 1..=5 {
             assert!(text.contains(&format!("message {index}")));
         }
-        assert!(text.ends_with("\x1b[201~\r"));
+        assert!(text.ends_with("\n\x1b[201~\r"));
         assert!(command_rx.try_recv().is_err(), "one controller command");
         assert_eq!(session.queue_depth(), 0);
         assert!(session.awaiting_gen.load(Ordering::Relaxed));
@@ -4446,7 +4489,7 @@ mod tests {
         for index in 1..=5 {
             assert!(text.contains(&format!("message {index}")));
         }
-        assert!(text.ends_with("\x1b[201~\r"));
+        assert!(text.ends_with("\n\x1b[201~\r"));
         assert!(command_rx.try_recv().is_err(), "one controller command");
         assert_eq!(session.queue_depth(), 0);
         assert!(session.awaiting_gen.load(Ordering::Relaxed));
@@ -4473,6 +4516,7 @@ mod tests {
         };
         assert_eq!(parts.len(), 2);
         assert!(String::from_utf8_lossy(&parts[0]).contains("message 5"));
+        assert!(parts[0].ends_with(b"\n"));
         assert_eq!(parts[1], b"\x1b[27;9;13~");
         assert_eq!(gap, WRITE_QUEUE_INPUT_GAP);
     }
@@ -4492,7 +4536,7 @@ mod tests {
         let PtyCommand::Input(data) = command_rx.try_recv().expect("singleton input") else {
             panic!("codex singleton must be one input");
         };
-        assert_eq!(data, b"\x1b[200~singleton\x1b[201~\r");
+        assert_eq!(data, b"\x1b[200~singleton\n\x1b[201~\r");
     }
 
     #[test]
@@ -4605,6 +4649,37 @@ mod tests {
             ),
             Some(WRITE_QUEUE_CAP),
             "1-write message fits; return is the message depth"
+        );
+    }
+
+    #[test]
+    fn write_queue_refuses_over_4096_bytes_on_raw_and_prompt_paths() {
+        let session = test_session_with_ring(1024);
+        let oversized = "x".repeat(MAX_TERMINAL_WRITE_BYTES + 1);
+
+        assert_eq!(
+            session.enqueue_cs_write(oversized.clone(), None),
+            None,
+            "raw cs write is refused"
+        );
+        assert_eq!(
+            session.enqueue_prompt(
+                oversized,
+                Some(built_in_submit(SubmitAgent::Codex)),
+                Some("too-large".into())
+            ),
+            None,
+            "Rich Prompt submit is refused"
+        );
+        assert!(
+            session.write_queue.lock().expect("queue").is_empty(),
+            "a refusal leaves the queue untouched"
+        );
+
+        assert_eq!(
+            session.enqueue_cs_write("x".repeat(MAX_TERMINAL_WRITE_BYTES), None),
+            Some(1),
+            "the exact byte limit is accepted"
         );
     }
 
@@ -4872,7 +4947,7 @@ mod tests {
         let PtyCommand::Input(data) = commands.try_recv().expect("the body write") else {
             panic!("a split body must be one input, not a sequence");
         };
-        assert_eq!(data, b"hi there");
+        assert_eq!(data, b"hi there\n");
         assert!(
             matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
             "a body drain completes no message"
@@ -4938,9 +5013,9 @@ mod tests {
         assert_eq!(
             writes,
             vec![
-                b"first".to_vec(),
+                b"first\n".to_vec(),
                 b"\r".to_vec(),
-                b"second".to_vec(),
+                b"second\n".to_vec(),
                 b"\r".to_vec()
             ]
         );

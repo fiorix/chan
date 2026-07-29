@@ -32,7 +32,7 @@ Source: `crates/chan-server/src/config.rs`.
 
 Source: `crates/chan-server/src/submit_config.rs` and `crates/chan-shell/src/submit.rs`.
 
-Each optional agent table has one `template` string containing at most one `{}` placeholder for the trailing-newline-trimmed prompt body. A template without `{}` is appended as a suffix. Escapes include `\e`, `\xHH`, `\r`, `\n`, `\t`, `\0`, and `\\`. Resolution is `CHAN_SUBMIT_<AGENT>` environment variable, then this file, then the built-in default.
+Each optional agent table has one `template` string containing at most one `{}` placeholder for the normalized prompt body: trailing newlines are removed, then one newline is appended when the body is non-empty. An empty body stays chord-only. A template without `{}` is appended as a suffix after that same normalized body. Escapes include `\e`, `\xHH`, `\r`, `\n`, `\t`, `\0`, and `\\`. Resolution is `CHAN_SUBMIT_<AGENT>` environment variable, then this file, then the built-in default.
 
 ```toml
 [claude]
@@ -48,7 +48,7 @@ template = '{}\r'
 template = '\e[200~{}\e[201~\r'
 ```
 
-The environment equivalents are `CHAN_SUBMIT_CLAUDE`, `CHAN_SUBMIT_CODEX`, `CHAN_SUBMIT_GEMINI`, and `CHAN_SUBMIT_OPENCODE`. Gemini alone splits its resolved body and submit chord into two ordered PTY writes; overriding its template does not change that write-splitting contract.
+The environment equivalents are `CHAN_SUBMIT_CLAUDE`, `CHAN_SUBMIT_CODEX`, `CHAN_SUBMIT_GEMINI`, and `CHAN_SUBMIT_OPENCODE`. Gemini alone splits its normalized body and submit chord into two ordered PTY writes; overriding its template does not change that write-splitting contract.
 
 ### `~/.chan/preferences.toml` -- `EditorPrefs`
 

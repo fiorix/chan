@@ -7,6 +7,10 @@ set -euo pipefail
 # codex and claude both park on a first-run trust prompt in an unfamiliar
 # directory and never print their ready pattern, so a probe over a fresh
 # random path fails every run on the ready-pattern timeout instead.
+# Each probe agent is spawned directly through a one-member team config so
+# the target session is born with the server-derived agent identity that
+# `--submit` requires. The hidden team materialization is owned by this run
+# and removed on exit.
 # Diagnostics go to stderr; one result row per run goes to stdout.
 #
 # Every run gets its OWN tab inside one probe group, so every scrollback read
@@ -37,17 +41,22 @@ set -euo pipefail
 #               five: it emits `QUEUE_DRAIN_BATCH_5` followed by the five tail
 #               tokens in order, and never a `QUEUE_DRAIN_BATCH_0..4` (which is
 #               what a per-message drain would produce).
-#   boundaries  A no-submit write and an override-backed write each END the
-#               batch prefix. Five messages whose every neighbour is a boundary
-#               must drain ONE AT A TIME, so the poller has to observe EVERY
-#               intermediate depth 4, 3, 2 and 1, the agent must never emit a
-#               `QUEUE_DRAIN_BATCH_2..5`, and the tail tokens still arrive in
-#               FIFO order, so nothing was skipped to batch a later message.
+#   boundaries  Raw no-submit writes END the batch prefix. Five alternating
+#               submitted/raw messages must drain ONE AT A TIME, so the poller
+#               has to observe EVERY intermediate depth 4, 3, 2 and 1, the
+#               agent must never emit a `QUEUE_DRAIN_BATCH_2..5`, and the tail
+#               tokens still arrive in FIFO order, so nothing was skipped to
+#               batch a later message. Runtime-override boundaries are pinned
+#               in the chan-library selector tests because overrides resolve in
+#               the server process and cannot be toggled by this client.
 #   late        A sixth notification enqueued once the batch has drained gets
 #               its OWN turn: the agent emits the batch sentinel and then a
 #               separate `QUEUE_DRAIN_LATE_<token>` it builds from that
 #               message alone, which proves the queue keeps draining after a
 #               batch delivery.
+#   cap         A 4096-byte raw write is accepted while the agent is busy;
+#               4097-byte raw and submitted writes are both refused by the
+#               client and never change the server-side queue depth.
 #
 # NOT covered here:
 #
@@ -67,11 +76,12 @@ set -euo pipefail
 #   chan-server unit tests and by a browser smoke.
 
 agent="codex"
-size_kib=64
+size_kib=16
 runs=3
 timeout_secs=180
 case_name="batch"
 gap_ms=50
+max_message_bytes=4096
 # Mirrors `WRITE_QUEUE_BATCH_MAX_BYTES` in
 # crates/chan-library/src/terminal_sessions.rs. The payload is sized against
 # THIS number rather than a hand-picked headroom, and a framing change that
@@ -89,7 +99,7 @@ default_gap_ms=50
 
 usage() {
   cat >&2 <<'EOF'
-usage: terminal-queue-drain.sh [--agent codex|claude|gemini|opencode] [--case gap|batch|boundaries|late|all]
+usage: terminal-queue-drain.sh [--agent codex|claude|gemini|opencode] [--case gap|batch|boundaries|late|cap|all]
                                [--size-kib N] [--runs N] [--timeout-secs N]
                                [--gap MS] [--max-batch-bytes N]
 
@@ -110,9 +120,12 @@ Environment:
                               Gemini bypasses message_parts' Body/Chord split
                               and drains as one atomic InputSequence. The final
                               boundary build deliberately does not do this.
+  CHAN_WORKSPACE_PATH         Workspace served by the test server. The harness
+                              creates one hidden team directory there and
+                              removes that exact owned directory on exit.
 
-Payloads above the batch ceiling are advisory and require a scratch build with
-a temporarily raised selector ceiling; pass --max-batch-bytes to match it.
+--size-kib targets the whole five-message batch. Every logical message remains
+at or below the production 4096-byte cap.
 EOF
 }
 
@@ -160,24 +173,20 @@ done
 
 case "$agent" in
   codex)
-    launch='codex --sandbox read-only -a never --no-alt-screen'
+    launch='codex -c check_for_update_on_startup=false --sandbox read-only -a never --no-alt-screen'
     ready_pattern='Codex'
-    submit_override='\e[200~{}\e[201~\r'
     ;;
   claude)
     launch='claude --permission-mode plan --tools ""'
     ready_pattern='plan mode on'
-    submit_override='{}\e[27;9;13~'
     ;;
   gemini)
     launch='gemini --approval-mode plan'
     ready_pattern='Type your message'
-    submit_override='{}\r'
     ;;
   opencode)
     launch='opencode --agent plan --model opencode/deepseek-v4-flash-free --mini --no-replay'
     ready_pattern='Ask anything'
-    submit_override='\e[200~{}\e[201~\r'
     ;;
   *)
     echo "unsupported agent: $agent" >&2
@@ -186,7 +195,7 @@ case "$agent" in
 esac
 
 case "$case_name" in
-  gap | batch | boundaries | late | all) ;;
+  gap | batch | boundaries | late | cap | all) ;;
   *)
     echo "unsupported case: $case_name" >&2
     exit 2
@@ -206,6 +215,7 @@ fi
 [[ $max_batch_bytes =~ ^[1-9][0-9]*$ ]] || { echo "--max-batch-bytes must be positive" >&2; exit 2; }
 : "${CHAN_CONTROL_SOCKET:?run from a chan terminal or export the test server control socket}"
 : "${CHAN_WINDOW_ID:?run from a chan terminal or export the test browser window id}"
+: "${CHAN_WORKSPACE_PATH:?run from a chan terminal or export the test server workspace path}"
 
 # The gap `parse_input_gap` derives from this env value: trimmed digits inside
 # 1..WRITE_QUEUE_QUIET_MS, otherwise the built-in default.
@@ -237,9 +247,23 @@ fi
 stamp="$(date +%s)-$$"
 group="queue-drain-probe-$stamp"
 tab=""
+workspace_path=""
+probe_root=""
+probe_rel=""
+created_groups=()
 
 cleanup() {
-  "$cs_bin" terminal close --tab-group="$group" >/dev/null 2>&1 || true
+  local probe_group
+  for probe_group in "${created_groups[@]}"; do
+    "$cs_bin" terminal close --tab-group="$probe_group" >/dev/null 2>&1 || true
+  done
+  if [[ -n $probe_root
+    && -d $probe_root
+    && $probe_root == "$workspace_path"/.chan-queue-drain.*
+    && -f $probe_root/.owner
+    && $(<"$probe_root/.owner") == "$stamp" ]]; then
+    rm -rf -- "$probe_root"
+  fi
 }
 trap cleanup EXIT INT TERM
 
@@ -247,6 +271,15 @@ fail() {
   echo "FAIL: $*" >&2
   exit 1
 }
+
+workspace_path=$(cd -- "$CHAN_WORKSPACE_PATH" && pwd -P)
+[[ $workspace_path == /* && $workspace_path != / ]] \
+  || fail "unsafe CHAN_WORKSPACE_PATH for probe materialization: $workspace_path"
+probe_root=$(mktemp -d "$workspace_path/.chan-queue-drain.XXXXXX")
+probe_rel=${probe_root#"$workspace_path"/}
+[[ $probe_rel != "$probe_root" && $probe_rel == .chan-queue-drain.* ]] \
+  || fail "probe directory escaped the workspace: $probe_root"
+printf '%s\n' "$stamp" > "$probe_root/.owner"
 
 # Scrollback with ANSI escapes removed and newlines folded away, so an
 # assertion is not defeated by a TUI wrapping a line at the pane width.
@@ -467,11 +500,24 @@ envelope_visibility() {
 # first message of a run also carries the instruction the agent must answer.
 emit_message() {
   local index=$1 fill=$2 token=$3 preamble=$4
-  awk -v message_index="$index" -v fill="$fill" -v token="$token" -v preamble="$preamble" 'BEGIN {
+  awk -v message_index="$index" -v fill="$fill" -v token="$token" \
+    -v preamble="$preamble" -v cap="$max_message_bytes" 'BEGIN {
+    body_bytes = fill + 9 + length(token)
+    if (preamble != "") body_bytes += length(preamble) + 1
+    if (body_bytes > cap) {
+      printf "message %d is %d bytes, above the %d-byte cap\n", message_index, body_bytes, cap > "/dev/stderr"
+      exit 2
+    }
     if (preamble != "") print preamble
     c = sprintf("%c", 64 + message_index)
     for (i = 0; i < fill; i++) printf "%s", c
     printf "\ntoken: %s\n", token
+  }'
+}
+
+emit_bytes() {
+  awk -v count="$1" 'BEGIN {
+    for (i = 0; i < count; i++) printf "X"
   }'
 }
 
@@ -513,11 +559,26 @@ forbid_batch_counts() {
 
 # A fresh tab per run keeps every scrollback assertion scoped to its own run.
 start_terminal() {
-  local run=$1
-  tab="QueueDrain-${agent}-${stamp}-${case_name}-${run}"
-  "$cs_bin" terminal new --tab-name="$tab" --tab-group="$group" >/dev/null
+  local run=$1 probe_case=$2
+  local probe_group="${group}-${probe_case}-${run}"
+  local team_dir="${probe_root}/${probe_case}-${run}"
+  tab="QueueDrain-${agent}-${stamp}-${probe_case}-${run}"
+  created_groups+=("$probe_group")
+  [[ $launch != *"'"* ]] || fail "agent launch cannot be represented in the probe TOML"
+  printf '%s\n' \
+    "team_name = \"$probe_group\"" \
+    'host_name = "Queue Drain"' \
+    'host_handle = "@@QueueDrainHost"' \
+    "tab_group = \"$probe_group\"" \
+    'auto_prefix_at = false' \
+    'mcp_env = false' \
+    '' \
+    '[[members]]' \
+    "handle = \"$tab\"" \
+    "command = '$launch'" \
+    'is_lead = true' \
+    | "$cs_bin" terminal team new "$team_dir" --stdin --window "$CHAN_WINDOW_ID" >/dev/null
   wait_for_session
-  "$cs_bin" terminal write --tab-name="$tab" "$launch"$'\n' >/dev/null
   wait_for_flat "$ready_pattern"
 }
 
@@ -548,15 +609,18 @@ margin=64
 budget=$((target_bytes - overhead - instruction_bytes - token_line_bytes - margin))
 ((budget > 0)) || fail "size ${size_kib}KiB leaves no room for five bodies (envelope ${overhead}B)"
 filler_bytes=$((budget / 5))
+first_message_filler_cap=$((max_message_bytes - instruction_bytes - 48))
+((first_message_filler_cap > 0)) || fail "batch instruction leaves no room under the ${max_message_bytes}B message cap"
+((filler_bytes <= first_message_filler_cap)) || filler_bytes=$first_message_filler_cap
 ((filler_bytes > 0)) || filler_bytes=1
-echo "payload: ceiling=${max_batch_bytes}B target=${target_bytes}B envelope=${overhead}B instruction=${instruction_bytes}B filler=${filler_bytes}B/message" >&2
+echo "payload: batch_ceiling=${max_batch_bytes}B message_cap=${max_message_bytes}B target=${target_bytes}B envelope=${overhead}B instruction=${instruction_bytes}B filler=${filler_bytes}B/message" >&2
 
 run_batch_case() {
   local run=$1
   local tokens=("a${run}x$$" "b${run}x$$" "c${run}x$$" "d${run}x$$" "e${run}x$$")
   local index token preamble trace placeholder=no
 
-  start_terminal "$run"
+  start_terminal "$run" batch
   warmup_until_busy "$run"
   for ((index = 1; index <= 5; index++)); do
     token=${tokens[index - 1]}
@@ -597,13 +661,15 @@ run_batch_case() {
 run_gap_case() {
   local run=$1
   local sentinel="GAP_OK_${run}_$$"
-  local probe_instruction probe_bytes probe_filler
+  local probe_instruction probe_bytes probe_filler probe_target_bytes
   [[ $agent == gemini ]] || fail "the gap case is specific to gemini"
 
-  start_terminal "$run"
+  start_terminal "$run" gap
   probe_instruction="Reply with exactly one line built by joining GAP, OK, $run, and $$ with underscores. Use exactly three underscores, including one immediately before $run. Do not use tools."
   probe_bytes=${#probe_instruction}
-  probe_filler=$((target_bytes - probe_bytes - 1))
+  probe_target_bytes=$target_bytes
+  ((probe_target_bytes <= max_message_bytes)) || probe_target_bytes=$max_message_bytes
+  probe_filler=$((probe_target_bytes - probe_bytes - 1))
   ((probe_filler >= 0)) || fail "size ${size_kib}KiB is too small for the gap instruction"
   awk -v instruction="$probe_instruction" -v fill="$probe_filler" 'BEGIN {
     print instruction
@@ -624,14 +690,13 @@ run_gap_case() {
 
 run_boundaries_case() {
   local run=$1
-  # Every neighbour is a boundary: submitted, raw, submitted, override,
+  # Every neighbour is a boundary: submitted, raw, submitted, raw,
   # submitted. Nothing may batch, and nothing may be skipped to reach a later
   # batchable message, so the tokens must still arrive in FIFO order.
   local tokens=("p${run}x$$" "q${run}x$$" "r${run}x$$" "s${run}x$$" "t${run}x$$")
-  local env_key trace missing
-  env_key="CHAN_SUBMIT_$(printf '%s' "$agent" | tr '[:lower:]' '[:upper:]')"
+  local trace missing
 
-  start_terminal "$run"
+  start_terminal "$run" boundaries
   warmup_until_busy "$run"
   emit_message 1 32 "${tokens[0]}" "$instruction" \
     | "$cs_bin" terminal write --stdin --submit="$agent" --tab-name="$tab" >/dev/null
@@ -641,10 +706,10 @@ run_boundaries_case() {
     | "$cs_bin" terminal write --stdin --tab-name="$tab" >/dev/null
   emit_message 3 32 "${tokens[2]}" "" \
     | "$cs_bin" terminal write --stdin --submit="$agent" --tab-name="$tab" >/dev/null
-  # A runtime template override is carried over the control wire and stays
-  # single-message even though its bytes match the built-in default.
+  # A second raw write proves the later submitted pair cannot batch past the
+  # same no-submit boundary.
   emit_message 4 32 "${tokens[3]}" "" \
-    | env "$env_key=$submit_override" "$cs_bin" terminal write --stdin --submit="$agent" --tab-name="$tab" >/dev/null
+    | "$cs_bin" terminal write --stdin --tab-name="$tab" >/dev/null
   emit_message 5 32 "${tokens[4]}" "" \
     | "$cs_bin" terminal write --stdin --submit="$agent" --tab-name="$tab" >/dev/null
 
@@ -676,7 +741,7 @@ run_late_case() {
   local late="k${run}x$$"
   local index token preamble trace
 
-  start_terminal "$run"
+  start_terminal "$run" late
   warmup_until_busy "$run"
   for ((index = 1; index <= 5; index++)); do
     token=${tokens[index - 1]}
@@ -709,16 +774,49 @@ run_late_case() {
     "$agent" "$run" "$late" "$(printf '%s\n' "$trace" | compact_trace)" "$(envelope_visibility 5)"
 }
 
+run_cap_case() {
+  local run=$1
+  local error
+
+  start_terminal "$run" cap
+  warmup_until_busy "$run"
+
+  emit_bytes "$max_message_bytes" \
+    | "$cs_bin" terminal write --stdin --tab-name="$tab" >/dev/null
+  require_depth 1
+
+  if error=$(emit_bytes "$((max_message_bytes + 1))" \
+    | "$cs_bin" terminal write --stdin --tab-name="$tab" 2>&1 >/dev/null); then
+    fail "a $((max_message_bytes + 1))-byte raw write exited 0"
+  fi
+  [[ $error == *"max ${max_message_bytes} bytes"* ]] \
+    || fail "raw over-cap refusal lost the byte limit: $error"
+  require_depth 1
+
+  if error=$(emit_bytes "$((max_message_bytes + 1))" \
+    | "$cs_bin" terminal write --stdin --submit="$agent" --tab-name="$tab" 2>&1 >/dev/null); then
+    fail "a $((max_message_bytes + 1))-byte submitted write exited 0"
+  fi
+  [[ $error == *"max ${max_message_bytes} bytes"* ]] \
+    || fail "submitted over-cap refusal lost the byte limit: $error"
+  require_depth 1
+
+  printf 'agent=%s case=cap run=%d accepted=%d refused=%d raw=ok submit=ok depth=1\n' \
+    "$agent" "$run" "$max_message_bytes" "$((max_message_bytes + 1))"
+}
+
 for ((run = 1; run <= runs; run++)); do
   case "$case_name" in
     gap) run_gap_case "$run" ;;
     batch) run_batch_case "$run" ;;
     boundaries) run_boundaries_case "$run" ;;
     late) run_late_case "$run" ;;
+    cap) run_cap_case "$run" ;;
     all)
       run_batch_case "$run"
       run_boundaries_case "$run"
       run_late_case "$run"
+      run_cap_case "$run"
       ;;
   esac
 done

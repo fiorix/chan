@@ -17,7 +17,7 @@ mod wire;
 pub use wire::{
     ControlRequest, ControlResponse, Identity, PaneOp, PaneSide, PastePrefer, ServeKind, SplitDir,
     SurveyReply, SurveySpec, TabDestination, TeamOp, TermWriteSubmit, GRAPH_LINK_PREFIX,
-    MAX_CLIPBOARD_BYTES, MAX_CONTROL_REQUEST_BYTES,
+    MAX_CLIPBOARD_BYTES, MAX_CONTROL_REQUEST_BYTES, MAX_TERMINAL_WRITE_BYTES,
 };
 
 #[cfg(feature = "client")]

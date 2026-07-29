@@ -34,6 +34,14 @@ fn default_survey_timeout_secs() -> u64 {
 /// copy-handler cap, and the `POST /api/window/reply` body limit agree.
 pub const MAX_CLIPBOARD_BYTES: usize = 32 * 1024 * 1024;
 
+/// Largest logical `cs terminal write` message, in bytes.
+///
+/// The terminal queue is a bus for short pokes, not bulk content. Both the
+/// client and the server-side queue enforce this bound so a direct control
+/// client cannot bypass the CLI check. The submit encoder may add one newline
+/// plus its chord after this logical-message check.
+pub const MAX_TERMINAL_WRITE_BYTES: usize = 4 * 1024;
+
 /// The serialized graph-link prefix (`chan://graph?...`) a `cs open` /
 /// `POST /api/open` target splits on: a matching target forwards to the
 /// window verbatim as a graph link (the SPA owns the parser), anything else

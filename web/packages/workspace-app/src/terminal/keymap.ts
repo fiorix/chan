@@ -68,7 +68,7 @@ export function terminalMetaKeyBytes(
       // programs: a plain shell's line discipline accepts `\n` exactly like
       // Enter (it submits the line, no stray bytes on the prompt), while
       // Claude Code reads `\n` as a newline inside its multi-line draft
-      // (live-probed; the inverse of AGENT_SUBMIT_CHORD in submitMode.ts).
+      // (live-probed; the inverse of the server-owned Claude submit chord).
       // Scoped to Shift+Enter only: Cmd/Ctrl+Enter (modifiers 9/5) keep
       // falling through to `\r` so their submit semantics are preserved.
       if (modifier === 2) return "\n";

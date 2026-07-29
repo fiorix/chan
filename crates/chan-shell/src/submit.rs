@@ -17,8 +17,8 @@
 //!     does not need a rebuild. See `apply_submit_chord` / `set_chord_overrides`.
 //!
 //! Rich Prompt sends the agent NAME and the server applies the chord. The SPA's
-//! `submitMode.ts` also pins the byte map for browser-side parity tests, so its
-//! agent union, detection, and default encodings must stay in sync.
+//! `submitMode.ts` mirrors only the agent union and identity fallback; submit
+//! bytes stay server-owned.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -186,7 +186,7 @@ impl SubmitAgent {
     }
 
     /// The built-in submit template for this agent: a string with a single
-    /// `{}` placeholder for the (trailing-newline-trimmed) text. These ARE
+    /// `{}` placeholder for the normalized submit body. These ARE
     /// the live-probed default bytes; an override (env / config file) replaces
     /// the whole template. claude appends the modifyOtherKeys Cmd+Enter CSI;
     /// gemini a bare CR; codex and opencode wrap the text in bracketed paste
@@ -279,11 +279,23 @@ fn template_without_text(template: &str) -> String {
     }
 }
 
-/// The body a submitted message delivers: the text with trailing newlines
-/// trimmed, which is what a `{}` template substitutes. A newline before the
-/// chord would land inside the agent's draft and split the buffer.
+/// Normalize one submitted body: trim every trailing newline, then append
+/// exactly one newline. An empty body stays empty so a chord-only poke remains
+/// chord-only.
+fn submitted_body(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let trimmed = text.trim_end_matches('\n');
+    let mut body = String::with_capacity(trimmed.len() + 1);
+    body.push_str(trimmed);
+    body.push('\n');
+    body
+}
+
+/// The normalized body bytes a submitted message delivers ahead of its chord.
 pub fn submitted_body_bytes(text: &str) -> Vec<u8> {
-    text.trim_end_matches('\n').as_bytes().to_vec()
+    submitted_body(text).into_bytes()
 }
 
 /// The resolved submit chord alone, the template with its text placeholder
@@ -300,9 +312,7 @@ pub fn submit_chord_bytes(submit: &ResolvedSubmit) -> Vec<u8> {
 /// missing either half has nothing to split. Cheap enough for the enqueue
 /// path: it never renders the template around the payload.
 pub fn splits_submit_chord(text: &str, submit: &ResolvedSubmit) -> bool {
-    submit.agent == SubmitAgent::Gemini
-        && !text.trim_end_matches('\n').is_empty()
-        && !chord_is_empty(&submit.template)
+    submit.agent == SubmitAgent::Gemini && !text.is_empty() && !chord_is_empty(&submit.template)
 }
 
 /// Whether a template's chord half (everything outside `{}`) is empty, the
@@ -332,7 +342,7 @@ pub fn plan_submitted_input(
     let parts = if claude_batch || splits_submit_chord(&text, submit) {
         vec![submitted_body_bytes(&text), submit_chord_bytes(submit)]
     } else {
-        vec![apply_template(text.trim_end_matches('\n'), &submit.template).into_bytes()]
+        vec![apply_template(&submitted_body(&text), &submit.template).into_bytes()]
     };
 
     PtyInputPlan { parts }
@@ -340,9 +350,9 @@ pub fn plan_submitted_input(
 
 /// `cs terminal write --submit=<agent>`: encode `data` into the PTY bytes
 /// that make a running agent submit it hands-free (the completion poke).
-/// `None` writes the bytes verbatim. Trailing newlines are stripped first: a
-/// newline before the submit would land inside the agent's draft, splitting
-/// the buffer before submit fires.
+/// `None` writes the bytes verbatim. A non-empty submitted body is normalized
+/// to exactly one trailing newline before the chord; an empty body stays
+/// chord-only.
 ///
 /// The agent's resolved template (default or overridden) drives the bytes. A
 /// template with a `{}` placeholder substitutes the text there (the codex and
@@ -350,14 +360,13 @@ pub fn plan_submitted_input(
 /// `{}` is treated as a pure suffix appended after the text, so a bare-chord override
 /// like `CHAN_SUBMIT_GEMINI=$'\r'` still works.
 ///
-/// Defaults mirror the live-probed bytes; the agent-name half is mirrored by
-/// `submitMode.ts` (the SPA sends the name, the server applies the chord).
+/// Defaults mirror the live-probed bytes. The SPA sends only the agent name;
+/// the server applies this encoding.
 pub fn apply_submit_chord(data: String, submit: Option<SubmitAgent>) -> String {
     let Some(agent) = submit else {
         return data;
     };
-    let text = data.trim_end_matches('\n');
-    apply_template(text, &agent.template())
+    apply_template(&submitted_body(&data), &agent.template())
 }
 
 /// The ordered PTY writes that deliver `data` to an agent and submit it. Most
@@ -499,29 +508,29 @@ mod tests {
         let claude = built_in(SubmitAgent::Claude);
         assert_eq!(
             plan_submitted_input("poke\n".into(), Some(&claude), false).parts,
-            vec![b"poke\x1b[27;9;13~".to_vec()]
+            vec![b"poke\n\x1b[27;9;13~".to_vec()]
         );
         assert_eq!(
             plan_submitted_input("batch\n".into(), Some(&claude), true).parts,
-            vec![b"batch".to_vec(), b"\x1b[27;9;13~".to_vec()]
+            vec![b"batch\n".to_vec(), b"\x1b[27;9;13~".to_vec()]
         );
 
         let codex = built_in(SubmitAgent::Codex);
         assert_eq!(
             plan_submitted_input("batch\n".into(), Some(&codex), true).parts,
-            vec![b"\x1b[200~batch\x1b[201~\r".to_vec()]
+            vec![b"\x1b[200~batch\n\x1b[201~\r".to_vec()]
         );
 
         let opencode = built_in(SubmitAgent::OpenCode);
         assert_eq!(
             plan_submitted_input("batch\n".into(), Some(&opencode), true).parts,
-            vec![b"\x1b[200~batch\x1b[201~\r".to_vec()]
+            vec![b"\x1b[200~batch\n\x1b[201~\r".to_vec()]
         );
 
         let gemini = built_in(SubmitAgent::Gemini);
         assert_eq!(
             plan_submitted_input("poke\n".into(), Some(&gemini), false).parts,
-            vec![b"poke".to_vec(), b"\r".to_vec()]
+            vec![b"poke\n".to_vec(), b"\r".to_vec()]
         );
         assert_eq!(
             plan_submitted_input("raw\n".into(), None, false).parts,
@@ -576,7 +585,7 @@ mod tests {
         assert!(!resolved.is_batchable(), "an override is never batchable");
         assert_eq!(
             plan_submitted_input("poke\n".into(), Some(&resolved), true).parts,
-            vec![b"\x1b[200~poke\x1b[201~\n".to_vec()],
+            vec![b"\x1b[200~poke\n\x1b[201~\n".to_vec()],
             "an override keeps its exact single-message expansion"
         );
     }
@@ -604,43 +613,58 @@ mod tests {
         assert!(!splits_submit_chord("body\n", &resolved));
         assert_eq!(
             plan_submitted_input("body\n".into(), Some(&resolved), false).parts,
-            vec![b"body".to_vec()]
+            vec![b"body\n".to_vec()]
         );
         // The built-in gemini template does split, on both halves being present.
         let gemini = built_in(SubmitAgent::Gemini);
         assert!(splits_submit_chord("body", &gemini));
-        assert!(!splits_submit_chord("\n\n", &gemini));
+        assert!(splits_submit_chord("\n\n", &gemini));
+        assert_eq!(
+            plan_submitted_input("\n\n".into(), Some(&gemini), false).parts,
+            vec![b"\n".to_vec(), b"\r".to_vec()]
+        );
+        assert!(!splits_submit_chord("", &gemini));
     }
 
     #[test]
-    fn submit_chord_strips_trailing_newlines_and_appends_per_agent() {
+    fn submit_chord_normalizes_one_newline_before_each_agent_chord() {
         // claude -> the modifyOtherKeys Cmd+Enter chord.
         assert_eq!(
             apply_submit_chord("poke\n\n".into(), Some(SubmitAgent::Claude)),
-            "poke\x1b[27;9;13~"
+            "poke\n\x1b[27;9;13~"
         );
         // codex -> bracketed-paste wrap, then CR. The wrap defeats codex's
         // paste-burst coalescing of a bare text+CR write (which would land
         // the CR as a literal newline and never submit).
         assert_eq!(
             apply_submit_chord("poke\n".into(), Some(SubmitAgent::Codex)),
-            "\x1b[200~poke\x1b[201~\r"
+            "\x1b[200~poke\n\x1b[201~\r"
         );
         // gemini -> a plain CR suffix.
         assert_eq!(
             apply_submit_chord("poke".into(), Some(SubmitAgent::Gemini)),
-            "poke\r"
+            "poke\n\r"
         );
         // opencode -> bracketed paste and CR in the same PTY write.
         assert_eq!(
             apply_submit_chord("poke\n".into(), Some(SubmitAgent::OpenCode)),
-            "\x1b[200~poke\x1b[201~\r"
+            "\x1b[200~poke\n\x1b[201~\r"
         );
         // codex keeps interior newlines inside the paste (a multi-line poke is
         // one message) and trims only the trailing ones before the wrap.
         assert_eq!(
             apply_submit_chord("line one\nline two\n\n".into(), Some(SubmitAgent::Codex)),
-            "\x1b[200~line one\nline two\x1b[201~\r"
+            "\x1b[200~line one\nline two\n\x1b[201~\r"
+        );
+        // Empty stays chord-only.
+        assert_eq!(
+            apply_submit_chord(String::new(), Some(SubmitAgent::Claude)),
+            "\x1b[27;9;13~"
+        );
+        // A newline-only body is non-empty: it normalizes to one newline.
+        assert_eq!(
+            apply_submit_chord("\n\n".into(), Some(SubmitAgent::Claude)),
+            "\n\x1b[27;9;13~"
         );
         // Unset -> bytes verbatim (no chord, trailing newline kept).
         assert_eq!(apply_submit_chord("poke\n".into(), None), "poke\n");
@@ -651,27 +675,27 @@ mod tests {
         // claude/codex/opencode/none: one write, identical to apply_submit_chord.
         assert_eq!(
             submit_writes("poke\n".into(), Some(SubmitAgent::Claude)),
-            vec!["poke\x1b[27;9;13~".to_string()]
+            vec!["poke\n\x1b[27;9;13~".to_string()]
         );
         assert_eq!(
             submit_writes("poke".into(), Some(SubmitAgent::Codex)),
-            vec!["\x1b[200~poke\x1b[201~\r".to_string()]
+            vec!["\x1b[200~poke\n\x1b[201~\r".to_string()]
         );
         assert_eq!(
             submit_writes("poke".into(), Some(SubmitAgent::OpenCode)),
-            vec!["\x1b[200~poke\x1b[201~\r".to_string()]
+            vec!["\x1b[200~poke\n\x1b[201~\r".to_string()]
         );
         assert_eq!(submit_writes("raw".into(), None), vec!["raw".to_string()]);
         // gemini: TWO writes - the text body, then the bare submit chord -
         // so Return is not converted to Shift+Return with the insertion.
         assert_eq!(
             submit_writes("poke\n".into(), Some(SubmitAgent::Gemini)),
-            vec!["poke".to_string(), "\r".to_string()]
+            vec!["poke\n".to_string(), "\r".to_string()]
         );
         // A text-only gemini body still splits off the chord write.
         assert_eq!(
             submit_writes("hi there".into(), Some(SubmitAgent::Gemini)),
-            vec!["hi there".to_string(), "\r".to_string()]
+            vec!["hi there\n".to_string(), "\r".to_string()]
         );
     }
 
@@ -766,13 +790,13 @@ mod tests {
         let mut file = HashMap::new();
         file.insert("gemini".to_string(), "\\r".to_string());
         let tmpl = resolve_template(SubmitAgent::Gemini, |_| None, Some(&file));
-        // mimic apply_submit_chord's suffix branch
+        // Mimic apply_submit_chord's suffix branch with a normalized body.
         let out = if tmpl.contains("{}") {
-            tmpl.replacen("{}", "poke", 1)
+            tmpl.replacen("{}", "poke\n", 1)
         } else {
-            format!("poke{tmpl}")
+            format!("poke\n{tmpl}")
         };
-        assert_eq!(out, "poke\r");
+        assert_eq!(out, "poke\n\r");
     }
 
     #[test]
@@ -801,13 +825,13 @@ mod tests {
     fn opencode_encoding_pins_multiline_trimming_and_paste_sized_bytes() {
         assert_eq!(
             apply_submit_chord("one\ntwo\n\n".into(), Some(SubmitAgent::OpenCode)),
-            "\x1b[200~one\ntwo\x1b[201~\r"
+            "\x1b[200~one\ntwo\n\x1b[201~\r"
         );
         let body = format!("HEAD{}TAIL", "x".repeat(20 * 1024));
         let encoded = apply_submit_chord(body.clone(), Some(SubmitAgent::OpenCode));
         assert_eq!(
             encoded,
-            format!("\x1b[200~{body}\x1b[201~\r"),
+            format!("\x1b[200~{body}\n\x1b[201~\r"),
             "paste-sized input must remain one exact bracketed PTY write"
         );
     }

@@ -17,8 +17,8 @@ import { TEAM_DIR_DEFAULT } from "./teamConfigPath";
 
 /// Submit-encoding target for a member's terminal. `"none"` is a shell
 /// member (no submit chord, plain Enter); the named values map to the
-/// shared submit map (`terminal/submitMode.ts` AGENT_SUBMIT_CHORDS) so a
-/// poke or the lead composer appends that agent's submit chord. Mirrors
+/// server-owned `SubmitAgent` map so a poke or the lead composer applies
+/// that agent's submit chord. Mirrors
 /// the picker type in TeamWork.svelte; the wire form drops `"none"` and
 /// omits the field entirely (`TeamMemberWire.agent?`).
 export type AgentTarget = "none" | "claude" | "codex" | "gemini" | "opencode";

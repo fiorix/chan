@@ -1367,14 +1367,18 @@ SEE ALSO:
 ";
 
 /// `cs terminal write` long help (manpage head).
-pub(crate) const CS_TERMINAL_WRITE: &str = r#"Write raw bytes into live terminal session(s), queued per target and
-delivered when that target is idle.
+pub(crate) const CS_TERMINAL_WRITE: &str = r#"Write up to 4096 UTF-8 bytes into live terminal session(s), queued
+per target and delivered when that target is idle.
 
 No newline is appended. `cs terminal write --tab-name @@A ls` only
 types "ls" and leaves it at the prompt; `cs terminal write
 --tab-name @@A $'ls\n'` runs it. --stdin reads the bytes from this
-process's stdin to EOF instead of the positional argument (UTF-8
-only). At least one of --tab-name / --tab-group is required.
+process's stdin instead of the positional argument (UTF-8 only).
+At least one of --tab-name / --tab-group is required.
+
+Every logical write, raw or submitted, is limited to 4096 bytes.
+Larger input is refused, never truncated. Put longer content in a
+file and send a short poke naming its path.
 
 The bytes are QUEUED, not written straight through. Each session
 has its own FIFO, and the drainer delivers only once that
@@ -1396,18 +1400,20 @@ detected from output quiescence, so a target sitting at its
 prompt with a PAUSED, half-typed buffer reads as idle; that rare
 case is not detected.
 
---submit submits the bytes into each target hands-free (trailing
-newlines are stripped first). The SERVER owns the encoding: for
-every matched session it derives that session's agent from the
-session's own spawn command and CHAN_AGENT spawn env, and applies
-THAT agent's chord, so the value you pass only records what you
-believed the target runs. A mismatch is corrected server-side and
-noted in the ack; a target that derives to no agent (a shell)
-receives plain text with no chord, and the command exits 69. Spawn
-the session with CHAN_AGENT set, or spawn the agent as the
-session's command instead of typing it into a shell. The applied
-encodings: claude appends a chord, codex and opencode wrap the text
-in bracketed paste plus a CR, gemini takes the CR as its own later
+--submit submits the bytes into each target hands-free. A non-empty
+body is delivered as its trailing newlines trimmed, then exactly
+one newline, then the chord; an empty body stays chord-only. The
+SERVER owns the encoding: for every matched session it derives
+that session's agent from the session's own spawn command and
+CHAN_AGENT spawn env, and applies THAT agent's chord, so the value
+you pass only records what you believed the target runs. A
+mismatch is corrected server-side and noted in the ack; a target
+that derives to no agent (a shell) receives the raw bytes
+untouched with no chord, and the command exits 69. Spawn the
+session with CHAN_AGENT set, or spawn the agent as the session's
+command instead of typing it into a shell. The applied encodings:
+claude appends a chord, codex and opencode wrap the text in
+bracketed paste plus a CR, gemini takes the CR as its own later
 queue entry, one idle gate after the body. Omit --submit and the
 text parks in the agent's compose box unsubmitted, since a bare
 newline is a newline to an agent, not a submit.
@@ -1429,7 +1435,7 @@ pub(crate) const CS_TERMINAL_WRITE_AFTER: &str = r#"EXAMPLES:
 
   cs terminal write --tab-name @@Alice --submit claude \
     'rebase onto main, then report'
-    claude receives the text AND submits it, hands-free
+    claude receives the text, one newline, then its submit chord
 
   cs terminal write --tab-name @@Alice 'draft: '
     parks "draft: " in the compose box, unsubmitted
@@ -1453,6 +1459,9 @@ SIDE EFFECTS:
   A 0.51 live sweep found no fixed sub-idle gap safe at 64 KiB.
 
 CAUTIONS:
+  Message cap: 4096 UTF-8 bytes before any submit newline or chord.
+  Put longer content in a file and poke the target with its path.
+
   Queue cap: 100 entries per target. A write to a full queue is
   dropped ("N at queue cap (dropped)"), and when every match is
   full the command fails with "matched session(s) at the 100-write

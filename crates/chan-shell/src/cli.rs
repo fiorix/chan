@@ -30,7 +30,7 @@ use crate::control::{
 use crate::submit::SubmitAgent;
 use crate::wire::{
     ControlRequest, PaneOp, PaneSide, PastePrefer, SplitDir, SurveySpec, TabDestination, TeamOp,
-    TermWriteSubmit, GRAPH_LINK_PREFIX, MAX_CLIPBOARD_BYTES,
+    TermWriteSubmit, GRAPH_LINK_PREFIX, MAX_CLIPBOARD_BYTES, MAX_TERMINAL_WRITE_BYTES,
 };
 
 /// What `cs` is and what it needs to work. Consts rather than doc
@@ -831,13 +831,15 @@ pub enum TerminalAction {
         #[command(flatten)]
         destination: TabDestinationArgs,
     },
-    /// Write bytes to live tabs: queued, idle-gated, no newline added
+    /// Queue up to 4096 bytes: raw verbatim, or newline plus agent chord
     #[command(long_about = help::CS_TERMINAL_WRITE)]
     #[command(after_long_help = help::CS_TERMINAL_WRITE_AFTER)]
     Write {
-        /// Literal bytes to write. Omit with --stdin to stream instead.
+        /// Literal UTF-8 text to write, up to 4096 bytes. Omit with
+        /// --stdin to read it instead.
         cmd: Option<String>,
-        /// Read the bytes from this process's stdin instead of `cmd`.
+        /// Read up to 4096 UTF-8 bytes from this process's stdin instead of
+        /// `cmd`; refuse larger input rather than truncating it.
         #[arg(long)]
         stdin: bool,
         /// Submit the input into each target hands-free (the completion-poke
@@ -846,9 +848,12 @@ pub enum TerminalAction {
         /// command and CHAN_AGENT, so the value here only says what you
         /// believed the target runs; a mismatch is corrected server-side and
         /// noted in the ack, and a shell target gets plain text with no
-        /// chord and makes the command exit 69. Spawn such a session with
-        /// CHAN_AGENT set or the agent as its command instead of typing the
-        /// agent into a shell. Values: claude | codex | gemini | opencode.
+        /// chord, keeps the raw bytes untouched, and makes the command exit
+        /// 69. A non-empty agent body is normalized to exactly one trailing
+        /// newline before its chord; an empty body stays chord-only. Spawn
+        /// such a session with CHAN_AGENT set or the agent as its command
+        /// instead of typing the agent into a shell. Values: claude | codex
+        /// | gemini | opencode.
         /// Omit the flag to write pure bytes: the input parks in the agent's
         /// compose box unsubmitted (a bare newline is a newline to an agent,
         /// not a submit).
@@ -1981,6 +1986,33 @@ async fn cmd_shell_paste(text: bool, html: bool, image: bool) -> Result<()> {
     Ok(())
 }
 
+fn validate_terminal_write_data(data: String) -> Result<String> {
+    if data.len() > MAX_TERMINAL_WRITE_BYTES {
+        anyhow::bail!(
+            "terminal write payload too large (max {MAX_TERMINAL_WRITE_BYTES} bytes); \
+             write the content to a file and send its path"
+        );
+    }
+    Ok(data)
+}
+
+fn read_terminal_write_stdin(reader: impl std::io::Read) -> Result<String> {
+    use std::io::Read;
+
+    let mut buf = Vec::new();
+    reader
+        .take(MAX_TERMINAL_WRITE_BYTES as u64 + 1)
+        .read_to_end(&mut buf)
+        .context("reading stdin for cs terminal write")?;
+    if buf.len() > MAX_TERMINAL_WRITE_BYTES {
+        anyhow::bail!(
+            "terminal write payload too large (max {MAX_TERMINAL_WRITE_BYTES} bytes); \
+             write the content to a file and send its path"
+        );
+    }
+    String::from_utf8(buf).context("stdin must be UTF-8 for cs terminal write")
+}
+
 async fn cmd_shell_terminal(action: TerminalAction) -> Result<()> {
     match action {
         TerminalAction::New {
@@ -2015,18 +2047,15 @@ async fn cmd_shell_terminal(action: TerminalAction) -> Result<()> {
             if tab_name.is_none() && tab_group.is_none() {
                 anyhow::bail!("cs terminal write needs --tab-name and/or --tab-group");
             }
-            // Raw bytes, no implicit newline. --stdin
-            // reads this process's stdin to EOF; otherwise the literal
-            // `cmd`. Terminal input is UTF-8 text.
+            // Raw bytes, no implicit newline. --stdin reads at most one byte
+            // beyond the logical-message cap so it can refuse, never truncate,
+            // oversized input. Terminal input is UTF-8 text.
             let data = if stdin {
-                use std::io::Read;
-                let mut buf = Vec::new();
-                std::io::stdin()
-                    .read_to_end(&mut buf)
-                    .context("reading stdin")?;
-                String::from_utf8(buf).context("stdin must be UTF-8 for cs terminal write")?
+                read_terminal_write_stdin(std::io::stdin())?
             } else {
-                cmd.ok_or_else(|| anyhow::anyhow!("cs terminal write needs a command or --stdin"))?
+                validate_terminal_write_data(cmd.ok_or_else(|| {
+                    anyhow::anyhow!("cs terminal write needs a command or --stdin")
+                })?)?
             };
             // The wire carries only the request: whether to submit, plus the
             // agent this sender named (for the server's divergence note). The
@@ -2590,6 +2619,39 @@ fn render_terminal_list_markdown(raw: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_write_stdin_accepts_4096_bytes_and_refuses_one_more() {
+        let exact = vec![b'x'; MAX_TERMINAL_WRITE_BYTES];
+        assert_eq!(
+            read_terminal_write_stdin(std::io::Cursor::new(exact.clone()))
+                .unwrap()
+                .into_bytes(),
+            exact
+        );
+
+        let error = read_terminal_write_stdin(std::io::Cursor::new(vec![
+            b'x';
+            MAX_TERMINAL_WRITE_BYTES
+                + 1
+        ]))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("max 4096 bytes"), "{error}");
+        assert!(error.contains("file"), "{error}");
+    }
+
+    #[test]
+    fn terminal_write_literal_cap_counts_utf8_bytes() {
+        let exact = "é".repeat(MAX_TERMINAL_WRITE_BYTES / 2);
+        assert!(validate_terminal_write_data(exact).is_ok());
+
+        let error =
+            validate_terminal_write_data(format!("{}x", "é".repeat(MAX_TERMINAL_WRITE_BYTES / 2)))
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("max 4096 bytes"), "{error}");
+    }
 
     #[test]
     fn cs_help_renders_cs_usage_without_a_shell_level() {

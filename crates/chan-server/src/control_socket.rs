@@ -43,6 +43,7 @@ pub use chan_shell::{ControlRequest, ControlResponse};
 use chan_shell::{
     submit_writes, Identity, PaneOp, PastePrefer, ServeKind, SubmitAgent, SurveyReply, SurveySpec,
     TabDestination, TeamOp, MAX_CLIPBOARD_BYTES, MAX_CONTROL_REQUEST_BYTES,
+    MAX_TERMINAL_WRITE_BYTES,
 };
 
 #[derive(Debug, Serialize)]
@@ -3762,7 +3763,12 @@ fn term_write_outcome(
     }
     let outcome = registry.enqueue_write_matching(tab_name, tab_group, data, submit);
     if outcome.queued == 0 {
-        return if outcome.full > 0 {
+        return if outcome.oversized > 0 {
+            Err(format!(
+                "terminal write payload too large (max {MAX_TERMINAL_WRITE_BYTES} bytes); \
+                 write the content to a file and send its path"
+            ))
+        } else if outcome.full > 0 {
             Err(format!(
                 "matched session(s) at the {WRITE_QUEUE_CAP_MSG}-entry queue cap; nothing queued"
             ))
@@ -5468,6 +5474,32 @@ mod tests {
     }
 
     #[test]
+    fn term_write_refuses_an_oversized_direct_control_body() {
+        let (_root, registry, _handles) = registry_with_sessions(&["Solo"], "probe");
+        let error = term_write(
+            &registry,
+            Some("Solo"),
+            None,
+            &"x".repeat(MAX_TERMINAL_WRITE_BYTES + 1),
+            None,
+        )
+        .expect_err("oversized body");
+        assert!(error.contains("max 4096 bytes"), "{error}");
+        assert!(error.contains("file"), "{error}");
+
+        assert_eq!(
+            term_write(
+                &registry,
+                Some("Solo"),
+                None,
+                &"x".repeat(MAX_TERMINAL_WRITE_BYTES),
+                None,
+            ),
+            Ok("queued at position 1".to_string())
+        );
+    }
+
+    #[test]
     fn term_write_fans_out_to_a_group_without_a_position() {
         let (_root, registry, _handles) = registry_with_sessions(&["A", "B"], "fanout");
         assert_eq!(
@@ -6269,7 +6301,7 @@ is_lead = false
         // claude is a SINGLE write ending in its modifyOtherKeys chord.
         assert_eq!(spawn.pokes[0].1.len(), 1, "claude poke is one write");
         assert!(
-            spawn.pokes[0].1[0].ends_with("\x1b[27;9;13~"),
+            spawn.pokes[0].1[0].ends_with("\n\x1b[27;9;13~"),
             "lead poke ends with claude chord: {:?}",
             spawn.pokes[0].1
         );
@@ -6282,7 +6314,8 @@ is_lead = false
         // codex is a SINGLE write (bracketed-paste wrap) ending in CR.
         assert_eq!(spawn.pokes[1].1.len(), 1, "codex poke is one write");
         assert!(
-            spawn.pokes[1].1[0].ends_with('\r') && !spawn.pokes[1].1[0].ends_with("\x1b[27;9;13~"),
+            spawn.pokes[1].1[0].ends_with("\n\x1b[201~\r")
+                && !spawn.pokes[1].1[0].ends_with("\x1b[27;9;13~"),
             "worker poke ends with codex CR: {:?}",
             spawn.pokes[1].1
         );
@@ -6325,7 +6358,7 @@ is_lead = false
             "opencode lead body starts inside bracketed paste: {writes:?}"
         );
         assert!(
-            writes[0].ends_with("\x1b[201~\r"),
+            writes[0].ends_with("\n\x1b[201~\r"),
             "opencode lead submits after bracketed paste: {writes:?}"
         );
     }
@@ -7159,7 +7192,7 @@ is_lead = false
             group: "alpha".into(),
             spawned: vec!["@@Lead".into(), "@@A".into()],
             failed: vec![("@@B".into(), "no such file".into())],
-            pokes: vec![("@@Lead".into(), vec!["hi\x1b[27;9;13~".into()])],
+            pokes: vec![("@@Lead".into(), vec!["hi\n\x1b[27;9;13~".into()])],
             members: vec![],
         };
         match team_spawn_summary("alpha", &spawn) {
