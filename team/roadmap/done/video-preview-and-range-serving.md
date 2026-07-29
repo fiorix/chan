@@ -1,5 +1,7 @@
 # Video (and audio) preview + View, with HTTP range serving
 
+> Status: shipped in [v0.80.0](../../release/release-v0.80.0.md): MP4/WebM/MOV preview inline and fullscreen over bounded single-range HTTP serving. MP3 has range and content-type support; audio UI, mixed-media viewer navigation, and resumable downloads remain follow-ups.
+
 Status: IMPLEMENTED on main (e0987974, 2026-07-29). Video (mp4/webm/mov) inline preview + fullscreen View in both inspectors; /api/files serves media with Accept-Ranges + 206 over the bounded reader; mp3 rides the server path with no audio UI yet. Riders carried forward: audio preview UI, viewer prev/next across mixed media, resumable downloads.
 
 ## What

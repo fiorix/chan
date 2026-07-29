@@ -4,11 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.80.0] - 2026-07-29
+
+v0.80.0 adds owner-gated reverse TCP tunnels through a connected desktop, seekable video preview over bounded HTTP ranges, and safer terminal-agent delivery; it also brings Ghostty behavior closer to xterm.js and extends the empty-pane animation catalog.
+
+### Added
+
+- **`cs tunnel` forwards a desktop port back to a devserver.** A foreground `cs tunnel [bind:]desktop-port:devserver-port` asks the desktop that owns the invoking terminal window to listen on the desktop machine and relay TCP connections to loopback on the devserver host. Direct and gateway-attached devservers use the same owner-gated tunnel legs, and command lifetime owns teardown. UDP is parsed and refused explicitly; it is not implemented in this release.
+- **Video files preview inline and in a fullscreen viewer.** MP4, WebM, and MOV files render with native controls in both file inspectors. `/api/files` serves media through the bounded reader with `Accept-Ranges`, single-range `206` responses, and honest `416` refusals, so playback can seek without buffering the whole file. MP3 gains the server range and content-type path but no audio UI yet.
+- **Empty panes offer fourteen selectable animations.** Exponential Echo, Spiral Spokes, Mutual Force Starburst, Recursive Arc Bloom, and Chaotic Halo join the existing catalog, with the same session persistence, navigation, lifecycle, and reduced-motion contract.
+
+### Changed
+
+- **Submitted terminal writes end with exactly one newline before the chord.** The encoding funnel trims trailing newlines and appends one for every non-empty agent submit, while raw terminal writes remain byte-identical. Raw and submitted logical writes are capped at 4,096 UTF-8 bytes and a larger payload is refused rather than truncated; longer content belongs in a file whose path the poke carries.
+- **Ghostty matches xterm.js terminal geometry and interaction more closely.** The opt-in backend adopts xterm-style measured cell metrics and continuous box glyphs, preserves scroll position across writes, and maps Shift+Enter to the same line-feed fallback as xterm.js.
 
 ### Fixed
 
 - **Reserved usernames are enforced again for every entry.** The gateway's reserved-username list had drifted out of sorted order while its lookup is a binary search, whose result is unspecified on unsorted input, so some reserved names could be claimed as account usernames. The list is sorted again and a test now pins the ordering invariant.
+- **Window status stays clear of a right-side file-browser dock.** The fixed status pill follows the live dock width instead of covering browser content, while terminal-only windows ignore persisted dock state.
 
 ## [v0.79.2] - 2026-07-28
 

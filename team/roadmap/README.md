@@ -19,14 +19,6 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-### v0.80.0
-
-| item | state | what needs to happen |
-| --- | --- | --- |
-| [chan-desktop-reverse-tunnel](v0.80.0/chan-desktop-reverse-tunnel.md) | registered, not specced | route reverse TCP/UDP tunnels and desktop window commands from a devserver terminal to its connected desktop |
-| [terminal-submit-suffix](v0.80.0/terminal-submit-suffix.md) | validated, ready to spec | spec and land the one-newline submit suffix and the 4096-byte all-writes cap, probe-validated on all four agents |
-| [video-preview-and-range-serving](v0.80.0/video-preview-and-range-serving.md) | implemented on main (e0987974) | close at GA; riders carried forward: audio preview UI, viewer prev/next across mixed media, resumable downloads |
-
 ### v0.81.0
 
 | item | state | what needs to happen |
@@ -38,6 +30,14 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [web-marketing-onboarding](v0.81.0/web-marketing-onboarding.md) | registered, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
 
 ## Completed
+
+### v0.80.0
+
+Shipped 2026-07-29; see [release-v0.80.0](../release/release-v0.80.0.md). Closed items in [`done/`](done/):
+
+- [chan-desktop-reverse-tunnel](done/chan-desktop-reverse-tunnel.md) - delivered in part: `cs tunnel` forwards TCP from the connected desktop to the devserver over direct and gateway paths with owner gating and foreground-lifetime teardown; UDP remains an explicit refusal and the broader desktop-window-command request did not ship as part of this item.
+- [terminal-submit-suffix](done/terminal-submit-suffix.md) - every non-empty agent submit carries exactly one trailing newline ahead of its server-owned chord, raw writes remain byte-identical, and all logical writes refuse above 4,096 UTF-8 bytes.
+- [video-preview-and-range-serving](done/video-preview-and-range-serving.md) - MP4/WebM/MOV inline and fullscreen video preview backed by bounded single-range HTTP serving; MP3 has range/content-type support while audio UI, mixed-media viewer navigation, and resumable downloads remain follow-ups.
 
 ### v0.79.0
 

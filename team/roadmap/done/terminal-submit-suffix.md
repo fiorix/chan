@@ -1,5 +1,7 @@
 # Agent terminal submit suffix
 
+> Status: shipped in [v0.80.0](../../release/release-v0.80.0.md): every non-empty submitted body is normalized to exactly one trailing newline ahead of the server-owned chord, raw writes remain byte-identical, and every logical terminal write refuses above 4,096 UTF-8 bytes.
+
 Status: REGISTERED for v0.80.0, validated 2026-07-29, ready to spec.
 
 When submitting content through the terminal queue to an agent, always append a newline. Shell terminal writes keep their existing behavior.

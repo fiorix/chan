@@ -1,5 +1,7 @@
 # Chan desktop reverse tunnel
 
+> Status: delivered in part in [v0.80.0](../../release/release-v0.80.0.md). Foreground reverse TCP tunnels ship over direct and gateway-attached devservers with owner gating and command-lifetime teardown. UDP remains a precise refusal, and the broader desktop-window-command request did not ship as part of this item.
+
 Status: REGISTERED for v0.80.0, NOT specced.
 
 ## Goal
