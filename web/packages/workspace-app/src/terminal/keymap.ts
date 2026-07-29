@@ -101,6 +101,28 @@ export function handleTerminalMetaKey(
   return false;
 }
 
+/// ghostty-web's current input encoder maps Enter with either no modifiers or
+/// Shift to the same CR byte. Intercept only Shift+Enter and preserve chan's
+/// fallback LF contract; all other keys keep flowing through Ghostty.
+export function handleGhosttyShiftEnter(
+  ev: KeyboardEvent,
+  sendInput: (data: string) => void,
+): boolean {
+  if (
+    ev.type !== "keydown" ||
+    ev.key !== "Enter" ||
+    !ev.shiftKey ||
+    ev.ctrlKey ||
+    ev.metaKey ||
+    ev.altKey
+  ) {
+    return true;
+  }
+  sendInput("\n");
+  ev.preventDefault();
+  return false;
+}
+
 export function installKeyboardProtocolHandlers(
   term: Terminal,
   protocol: TerminalKeyboardProtocolState,

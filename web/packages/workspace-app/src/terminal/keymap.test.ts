@@ -4,6 +4,7 @@ import {
   applyXtermModifierKeys,
   createTerminalKeyboardProtocolState,
   disableXtermModifierKeys,
+  handleGhosttyShiftEnter,
   handleTerminalMetaKey,
   queryXtermModifierKeys,
   resetTerminalKeyboardProtocolState,
@@ -127,6 +128,32 @@ describe("terminal meta key mapping", () => {
     expect(handleTerminalMetaKey(ev, sendInput)).toBe(true);
     expect(sendInput).not.toHaveBeenCalled();
     expect(ev.defaultPrevented).toBe(false);
+  });
+
+  test("Ghostty Shift+Enter sends LF instead of its plain Enter CR", () => {
+    const sendInput = vi.fn();
+    const ev = keyEvent({ key: "Enter", shiftKey: true });
+
+    expect(handleGhosttyShiftEnter(ev, sendInput)).toBe(false);
+    expect(sendInput).toHaveBeenCalledWith("\n");
+    expect(ev.defaultPrevented).toBe(true);
+  });
+
+  test("Ghostty leaves other Enter chords and keyup events untouched", () => {
+    const sendInput = vi.fn();
+    expect(
+      handleGhosttyShiftEnter(
+        keyEvent({ key: "Enter", ctrlKey: true }),
+        sendInput,
+      ),
+    ).toBe(true);
+    expect(
+      handleGhosttyShiftEnter(
+        keyEvent({ type: "keyup", key: "Enter", shiftKey: true }),
+        sendInput,
+      ),
+    ).toBe(true);
+    expect(sendInput).not.toHaveBeenCalled();
   });
 
   test("xterm modifyOtherKeys supports query and disable", () => {

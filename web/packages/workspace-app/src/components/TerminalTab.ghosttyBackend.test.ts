@@ -29,6 +29,19 @@ describe("TerminalTab ghostty backend wiring", () => {
     expect(tab).toMatch(/ghosttyTerm\.resize\(proposed\.cols, proposed\.rows\)/);
   });
 
+  test("ghostty adopts xterm's measured cell metrics after open", () => {
+    expect(tab).toContain("measureXtermCellDimensions(");
+    expect(tab).toContain("alignGhosttyRendererToXterm(");
+    expect(tab.indexOf("term.open(host);")).toBeLessThan(
+      tab.indexOf("alignGhosttyRendererToXterm("),
+    );
+  });
+
+  test("ghostty installs xterm-style continuous box glyphs", () => {
+    expect(tab).toContain("installGhosttyCustomGlyphs(renderer)");
+    expect(tab).toContain("using font-rendered box glyphs");
+  });
+
   test("key handler is wrapped with INVERTED semantics on the ghostty branch", () => {
     expect(tab).toMatch(
       /term\.attachCustomKeyEventHandler\(\(e\) => !handleTerminalKeyEvent\(e\)\);/,
@@ -66,7 +79,14 @@ describe("TerminalTab ghostty backend wiring", () => {
     // suppression open (eating mouse reports + Alt+keys). The sync
     // wrapper is load-bearing; do not "simplify" it back to term.
     expect(tab).toMatch(/termWriter = \{\s*write: \(bytes, done\) => \{/);
+    expect(tab).toMatch(/writeGhosttyPreservingScroll\(ghosttyTerm, bytes\)/);
     expect(tab).toMatch(/ptyWrites\.write\(termWriter, bytes, origin\);/);
+  });
+
+  test("Shift+Enter uses chan's LF fallback before Ghostty encodes it as Enter", () => {
+    expect(tab).toMatch(
+      /return handleGhosttyShiftEnter\(e, sendUserInput\);/,
+    );
   });
 
   test("wheel reporting shim is attached on the ghostty branch", () => {

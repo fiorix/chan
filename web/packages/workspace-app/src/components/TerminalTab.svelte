@@ -102,6 +102,7 @@
     terminalMessageBytes,
   } from "../terminal/connection";
   import {
+    handleGhosttyShiftEnter,
     handleTerminalMetaKey,
     installKeyboardProtocolHandlers,
   } from "../terminal/keymap";
@@ -115,6 +116,12 @@
     type GhosttyKit,
     type TerminalBackend,
   } from "../terminal/backend";
+  import {
+    alignGhosttyRendererToXterm,
+    installGhosttyCustomGlyphs,
+    measureXtermCellDimensions,
+    writeGhosttyPreservingScroll,
+  } from "../terminal/ghosttyCompat";
   import { Osc52Bridge } from "../terminal/osc52Bridge";
   import type { Terminal as GhosttyTerminal } from "ghostty-web";
   import {
@@ -856,7 +863,7 @@
       // Sync-callback writer for the origin tracker (see termWriter).
       termWriter = {
         write: (bytes, done) => {
-          ghosttyTerm.write(bytes);
+          writeGhosttyPreservingScroll(ghosttyTerm, bytes);
           done?.();
         },
       };
@@ -907,6 +914,35 @@
       termWriter = term;
     }
     term.open(host);
+    if (backend === "ghostty") {
+      const ghosttyTerm = term as GhosttyTerminal;
+      const renderer = ghosttyTerm.renderer;
+      const targetCell = measureXtermCellDimensions(
+        host,
+        fontFamily,
+        14,
+        1.2,
+      );
+      if (
+        !renderer ||
+        !targetCell ||
+        !alignGhosttyRendererToXterm(
+          renderer,
+          targetCell,
+          ghosttyTerm.cols,
+          ghosttyTerm.rows,
+        )
+      ) {
+        console.warn(
+          "[chan] ghostty-web renderer metrics unavailable; using its native font spacing.",
+        );
+      }
+      if (renderer && !installGhosttyCustomGlyphs(renderer)) {
+        console.warn(
+          "[chan] ghostty-web text hook unavailable; using font-rendered box glyphs.",
+        );
+      }
+    }
     if (backend === "ghostty") {
       host.addEventListener("keydown", onGhosttyHostChord, true);
     }
@@ -2109,12 +2145,11 @@
     // flagged `escapeTerminal: true` in shortcuts.ts, return false so xterm
     // does not consume the keystroke.
     if (shouldEscapeTerminal(e)) return false;
-    // Meta/Enter byte encoding per the negotiated keyboard protocol is an
-    // xterm-path concern (keymap.ts tracks the protocol through xterm's
-    // parser hooks): ghostty-web's WASM key encoder applies the kitty /
-    // modifyOtherKeys flags natively, so the keystroke goes to it
-    // untouched (true = the terminal handles it).
-    if (backend === "ghostty") return true;
+    // ghostty-web currently collapses Shift+Enter to plain Enter. Preserve
+    // chan's LF fallback while its remaining keys stay on Ghostty's encoder.
+    if (backend === "ghostty") {
+      return handleGhosttyShiftEnter(e, sendUserInput);
+    }
     return handleTerminalMetaKey(e, sendUserInput, tab.keyboardProtocol);
   }
 
