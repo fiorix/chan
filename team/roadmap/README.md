@@ -24,7 +24,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | item | state | what needs to happen |
 | --- | --- | --- |
 | [chan-desktop-reverse-tunnel](v0.80.0/chan-desktop-reverse-tunnel.md) | registered, not specced | route reverse TCP/UDP tunnels and desktop window commands from a devserver terminal to its connected desktop |
-| [terminal-submit-suffix](v0.80.0/terminal-submit-suffix.md) | registered, not specced | make the agent-queue newline suffix explicit, documented, and independently tested from shell writes |
+| [terminal-submit-suffix](v0.80.0/terminal-submit-suffix.md) | validated, ready to spec | spec and land the one-newline submit suffix and the 4096-byte all-writes cap, probe-validated on all four agents |
 | [video-preview-and-range-serving](v0.80.0/video-preview-and-range-serving.md) | registered, grounded but not specced | spec first; the real chunk is HTTP range/206 in the file route, mirroring the image path on the frontend |
 | [web-marketing-onboarding](v0.80.0/web-marketing-onboarding.md) | registered, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
 
