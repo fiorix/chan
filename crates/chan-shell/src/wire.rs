@@ -151,7 +151,7 @@ pub enum ControlRequest {
         window_id: String,
         path: PathBuf,
     },
-    // Category 5 (long-lived): `cs tunnel`. Unlike every other request, the
+    // Category 6 (long-lived): `cs tunnel`. Unlike every other request, the
     // client does NOT half-close after writing: the connection's lifetime IS
     // the tunnel's, so its EOF is how the server learns the foreground command
     // ended (Ctrl-C, or a killed shell). The server answers one ack line when

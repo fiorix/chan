@@ -8,6 +8,7 @@ The orchestration layer that mounts many tenants under one server and is the sin
 - **`WindowRegistry`** + the **window feed** `/api/library/windows` (+ `/watch` WS): the authoritative `WindowRecord` set, keyed by `library_id` (`local` vs `lib-<hex>`).
 - **`/api/library/workspaces`** (list + add/on/off/rm) over the `WorkspaceHost` pub API (`open_registered_workspace`, `close_workspace`, ...). Mutation requires the surface bearer (loopback) or a signed owner gateway assertion (tunnel); an unsigned or non-owner tunnel caller is read-only (403), and a tunnel-only devserver with no local bind stays read-only.
 - **Library-owned lifecycle**: first-open one-terminal marker, workspace on/off overlay (path-keyed + shared so standalone and devserver-restart reuse a persisted index -- no rebuild), terminal persistence.
+- **Reverse-tunnel registry slot**: the host holds the `chan_revtunnel::TunnelRegistry` and exposes it through `HostControl::tunnel_registry`; chan-server's control socket and tunnel WS legs consume it (same inversion seam as the launcher root).
 
 ```mermaid
 flowchart TB

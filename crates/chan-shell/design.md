@@ -10,7 +10,7 @@ In scope:
 
   - The control-socket wire types: `ControlRequest` / `ControlResponse` and the payload types they carry (`PaneOp`, `PaneSide`, `TabDestination`, `SurveySpec`, `SurveyReply`, `TeamOp`, `SplitDir`, `Identity`, `ServeKind`, and the shared workspace-search request). serde-only, no transport, no clap, always compiled.
   - The `cs` clap surface (`ShellAction` / `TerminalAction` and their subcommand trees) and the `dispatch` that turns each parsed action into one control-socket round-trip.
-  - The control-socket transport: connect, write one JSON request line, read one JSON response line, over a per-user Unix-domain socket on unix and a named pipe on windows.
+  - The control-socket transport: connect, write one JSON request line, read one JSON response line, over a per-user Unix-domain socket on unix and a named pipe on windows. `cs tunnel` is the one long-lived exception (below).
   - The agent submit-chord map: the per-agent PTY byte sequences that make a coding agent submit its compose buffer hands-free, plus the spawn-command -> agent derivation. Compiled even without the client feature, because chan-server's team spawner applies the chord server-side.
   - Named client exit codes (the 124 timeout path and the 69 submit-refused path) and the typed errors that carry them to the dispatch edge.
   - The `arg0` stem checks (`invoked_as_cs` / `invoked_as_chan`) so the `cs` / `chan` alias rewrite is recognized identically by the `chan` binary and by chan-desktop, including under an AppImage `exec -a` shim.
@@ -23,7 +23,7 @@ Out of scope, owned by chan-server:
 
 ## 2. Architecture overview
 
-A `cs` invocation is one synchronous line-framed round-trip. The client resolves the terminal environment, serializes a `ControlRequest`, writes it as a single JSON line, and reads back a single `ControlResponse` line, which it formats for the user.
+A `cs` invocation is one synchronous line-framed round-trip. The client resolves the terminal environment, serializes a `ControlRequest`, writes it as a single JSON line, and reads back a single `ControlResponse` line, which it formats for the user. The one exception is `ControlRequest::Tunnel` (`cs tunnel`, the long-lived category): the client does NOT half-close, the first response line is the ack (an `Ok` naming the resolved desktop bind authority) or a refusal, the server then holds the connection for the tunnel's lifetime, and a second `Error` line arrives only if the tunnel dies before the client does. The client's EOF (Ctrl-C, killed shell) IS the teardown signal; `send_control_request_streaming` + `TunnelSession` carry this shape, and the response vocabulary is unchanged (`Ok`, `Error`, and the typed `Timeout` mapping to exit 124).
 
 ```mermaid
 sequenceDiagram
@@ -41,6 +41,7 @@ sequenceDiagram
   SRV-->>SOCK: ControlResponse JSON line (status = ok|error|submit_refused|timeout|queue_full|export)
   SOCK-->>CS: one response line
   CS->>U: formatted output + process exit code
+  Note over CS,SRV: cs tunnel only: no half-close; ack line, then the connection stays open for the tunnel's lifetime
 ```
 
   - The client reads two environment values a chan terminal sets: `$CHAN_CONTROL_SOCKET` (which server to reach) and `$CHAN_WINDOW_ID` (the default window to act on). Tab openers and `cs pane` can override the default with `--window`; session-scoped actions (`cs terminal list`, `cs search`, `cs window list`) need only the socket, because the server resolves their target through its own registry.
@@ -114,7 +115,7 @@ Two serde conventions recur because byte-compatibility with the SPA and the serv
 
 The client transport layer resolves the environment, makes paths absolute, and round-trips one request. `OpenEnv` carries the `(window id, $CHAN_CONTROL_SOCKET)` pair a window-targeting action needs; the window id can be explicit `--window` or the `$CHAN_WINDOW_ID` default. `control_socket_env` resolves just the socket for a session-scoped action. The env lookups are split from the validation (`open_env_from`) so the validation is unit-testable without mutating the process environment.
 
-`send_control_request` is platform-neutral over a small `transport` module -- the only `#[cfg]`-split surface. On unix it connects a `UnixStream`; on windows it opens a named-pipe client (retrying `ERROR_PIPE_BUSY` and a momentarily-absent pipe under a bounded deadline so a genuinely-missing server still fails fast). Above that split the protocol is identical: serialize the request, append a newline, write it, half-close the write side, then read one response line. The `\n` frames the request, so the half-close is belt-and-suspenders rather than load-bearing.
+`send_control_request` is platform-neutral over a small `transport` module -- the only `#[cfg]`-split surface. On unix it connects a `UnixStream`; on windows it opens a named-pipe client (retrying `ERROR_PIPE_BUSY` and a momentarily-absent pipe under a bounded deadline so a genuinely-missing server still fails fast). Above that split the protocol is identical: serialize the request, append a newline, write it, half-close the write side, then read one response line. The `\n` frames the request, so the half-close is belt-and-suspenders rather than load-bearing. `cs tunnel` rides the same transport through `send_control_request_streaming`, which skips the half-close: the open write side is how the server distinguishes a live tunnel client from a finished one-shot request.
 
 A `ControlResponse::Timeout` is converted into a typed `ControlTimeout` error instead of a generic `anyhow` bail. The dispatch edge downcasts it, prints the elapsed-window line, and exits `CONTROL_TIMEOUT` (124, matching GNU `timeout(1)`), so a caller can tell "no answer in time" apart from a real failure (exit 1) and a delivered answer (exit 0).
 
@@ -126,7 +127,7 @@ The control socket serves two server tenants, and a command's availability follo
 
 - Standalone (runs on both a standalone terminal and a workspace window): `dashboard`, `upload`, `download`, `copy`, `paste`, pathless `terminal new`, `terminal write`/`list`/`restart`/`close`/`scrollback`/`survey`, `window list`, and `pane`. Uploads and downloads are cwd/shell-uid scoped on a standalone terminal and workspace-relative in a workspace window.
 - Workspace-only (refused on a standalone terminal, which has no workspace): `open`, `graph`, `search`, `export`, `terminal new --path`, every `session` subcommand, and every `terminal team` form including `--script`. The refusals share one message family via `workspace_only_refusal`, and `cs open` additionally points at `chan open PATH`.
-- Desktop-only (a separate axis): `window new`/`open`/`rm`/`hide` need the chan desktop app.
+- Desktop-only (a separate axis): `window new`/`open`/`rm`/`hide` need the chan desktop app. `tunnel` runs from any terminal window but needs a devserver or desktop HOST (a standalone `chan open` server refuses it) plus a chan-desktop-opened window to answer the trigger; a browser-only viewer times out the ready wait (exit 124) with a message naming the desktop as the only capable client.
 
 The server gate reaches old `cs` binaries immediately (it lives server-side); only the friendlier client wording for a stale socket needs the new binary.
 

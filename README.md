@@ -25,6 +25,7 @@ Tunnel:
 - [crates/chan-tunnel-proto](crates/chan-tunnel-proto/design.md) - the shared wire contracts.
 - [crates/chan-tunnel-client](crates/chan-tunnel-client/design.md) - the dial-side client embedded by `chan devserver`.
 - [crates/chan-tunnel-server](crates/chan-tunnel-server/design.md) - the terminator embedded by the gateway.
+- [crates/chan-revtunnel](crates/chan-revtunnel/design.md) - reverse port forwarding from a devserver to the connected desktop (`cs tunnel`); distinct from the gateway tunnel.
 
 Gateway (separate Cargo workspace; the chan.app account, sign-in, and proxy surface):
 
