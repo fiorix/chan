@@ -1,6 +1,6 @@
 # devserver tunnel e2e (cross-container, sdme)
 
-An end-to-end test that drives authenticated desktop entry handoffs through a real `devserver-control-service`, `devserver-proxy-service`, and `chan devserver --tunnel-url`, running in two separate sdme containers, over the gateway tunnel, into a mounted workspace. An authenticated `200` from the mounted workspace's `/api/health` is the data-path proof, so debug builds do not need a separately staged SPA bundle. The same binary owner/grantee sessions exercise both native-trust mutation routes: the immutable owner reaches the desktop-bridge guard, while a grantee is rejected by `require_local_mutation`. The production chan-gateway run (`--tunnel-url` against `devserver.chan.app`) is a separate follow-up.
+An end-to-end test that drives authenticated desktop entry handoffs through a real `devserver-control-service`, `devserver-proxy-service`, and `chan devserver --tunnel-url`, running in two separate sdme containers, over the gateway tunnel, into a mounted workspace. An authenticated `200` from the mounted workspace's `/api/health` is the data-path proof, so debug builds do not need a separately staged SPA bundle. The same binary owner/grantee sessions exercise both native-trust mutation routes: the immutable owner reaches the desktop-bridge guard, while a grantee is rejected by `require_local_mutation`. The production chan-gateway run (`--tunnel-url` against the `usr.chan.app` tunnel ingress) is a separate follow-up.
 
 ## What it proves
 

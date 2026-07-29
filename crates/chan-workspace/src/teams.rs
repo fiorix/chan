@@ -1,8 +1,7 @@
 //! Team config schema. `TeamConfig` (members, host, prefix
 //! policy) is persisted to a `config.toml` and consumed by the
-//! path-based Team Work flow via chan-server's `/api/team-config`
-//! route. The older name-based team registry (team-{name}/ dirs
-//! under Drafts) was retired; only the config structs remain.
+//! path-based Team Work flow via chan-server's
+//! `/api/team-config/read` and `/api/team-config/write` routes.
 
 use serde::{Deserialize, Serialize};
 

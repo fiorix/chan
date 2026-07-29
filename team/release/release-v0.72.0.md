@@ -54,4 +54,4 @@ The pattern behind the four defects above is a check that asserts on the wrong a
 - aarch64 for COPR and for the AUR is unproven anywhere; the AUR recipes declare it and the COPR matrix is configured for it, but no build has run.
 - Both AUR pkgbases are unclaimed, so the first GA publish is also the first push to a new repository.
 - Gemini and OpenCode queue-drain timing needs a host with those CLIs installed and authenticated to run the same three cases.
-- The distributed proxy control plane moves to [v0.73.0](../roadmap/v0.73.0/distributed-proxy-control-plane.md).
+- The distributed proxy control plane moves to [v0.73.0](../roadmap/done/distributed-proxy-control-plane.md).

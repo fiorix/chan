@@ -59,7 +59,7 @@ Connection lifecycle:
 
 1. `run` validates the config (token present, workspace name valid, scheme https/http) and builds the rustls config once (caches native roots).
 2. Loop: `dial_with_tls` opens TCP (optionally via an HTTP CONNECT proxy), runs TLS for https:// URLs, runs h2, sends `POST /v1/tunnel` with `Authorization: Bearer <token>`, awaits the 200 response, wraps `(SendStream, RecvStream)` in `H2Duplex`, runs `handshake()`.
-3. On success: emits `Connected(Registration)`, resets backoff, calls `serve_substreams_with_limit` which polls the yamux connection until it ends, then emits `Disconnected`.
+3. On success: emits `Connected(Registration)`, resets backoff, runs the shared substream loop (the engine behind `serve_substreams_with_limit`) with the PAT for lease refresh and the `Registration` layered onto the router, polling the yamux connection until it ends, then emits `Disconnected`.
 4. On failure: emits `DialFailed { error, retry_in }`.
 5. Sleep a jittered backoff (+/- 20%), double the base (capped at `max_backoff`), loop.
 
@@ -101,9 +101,9 @@ When `ClientConfig::proxy` is set, `open_tcp` connects to the proxy and issues a
 
 `run` is the long-lived future. Dropping it cancels everything (yamux, the h2 driver task, the in-flight dial). It returns only on configuration errors that retrying cannot recover from (empty token, invalid workspace name, unsupported URL scheme, no native CA roots available).
 
-The config boundary carries connection policy, identity, retry policy, optional proxy settings, the event channel, and the substream concurrency cap. Defaults point at the production tunnel host; callers that bypass `run` can still reuse the same dial / handshake / serve phases for tests and embedded integrations.
+The config boundary carries connection policy, identity, retry policy, optional proxy settings, the event channel, and the substream concurrency cap. Defaults carry no usable public host; production callers pass the tunnel URL explicitly (`chan devserver` requires `--tunnel-url` or `CHAN_TUNNEL_URL`). Callers that bypass `run` can still reuse the same dial / handshake / serve phases for tests and embedded integrations.
 
-A successful registration carries only the public prefix, user, and workspace name assigned by the terminator. Event delivery is best-effort: connected, disconnected, and dial-failed events are useful for UI/logs but never block reconnect progress.
+A successful registration carries the public prefix, user, workspace name, and immutable owner user id assigned by the terminator. Event delivery is best-effort: connected, disconnected, and dial-failed events are useful for UI/logs but never block reconnect progress.
 
 The error surface is intentionally flat. Structured remote refusals preserve the server's stable code for UI matching; transport, TLS, frame, and serialization details collapse before crossing this crate boundary.
 

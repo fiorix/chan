@@ -5,10 +5,10 @@
 //!
 //! - A management HTTP/JSON API under the reserved `/api/devserver/*`
 //!   namespace ([`crate::devserver_api`]): list, mount, forget workspaces
-//!   and open standalone terminals. Workspace tenants mount at their PUBLIC
-//!   slug `/{slug}` (top-level), so the gateway forwards
-//!   `{user}.devserver.chan.app/{slug}/` unchanged and the devserver routes
-//!   the tenant by it; the explicit `/api/devserver/*` and `/api/library/*`
+//!   and open standalone terminals. Workspace tenants mount at their keyed
+//!   pathspec `/{slug}-{8hex}` (top-level), so the gateway forwards
+//!   `{owner}--{disc}.{proxy}.usr.{domain}/{slug}-{8hex}/` unchanged and the
+//!   devserver routes the tenant by it; the explicit `/api/devserver/*` and `/api/library/*`
 //!   management routes match before the per-tenant fallback, and the only
 //!   reserved top-level slug is `api`.
 //! - A per-user discovery namespace ([`crate::devserver_handoff`]): each local
@@ -72,7 +72,7 @@ pub struct DevserverConfig {
     /// Human label for the box (drives the client's grouping header).
     pub host_label: String,
     /// When set, the devserver also dials the gateway and publishes its
-    /// tenant content at `{user}.devserver.chan.app/{workspace}/*`. `None`
+    /// tenant content at `{owner}--{disc}.{proxy}.usr.{domain}/{workspace}/*`. `None`
     /// leaves it local-only (management API + discovery socket on `addr`).
     pub tunnel: Option<DevserverTunnel>,
     /// Bind the local TCP listener on `addr`. `false` in tunnel-only mode
@@ -89,9 +89,10 @@ pub struct DevserverConfig {
 /// rides one registration. `name` is display-only metadata for the roster.
 #[derive(Clone)]
 pub struct DevserverTunnel {
-    /// Tunnel endpoint URL (default `https://devserver.chan.app/v1/tunnel`).
+    /// Tunnel endpoint URL (`--tunnel-url` / `CHAN_TUNNEL_URL`; required,
+    /// no compiled-in default).
     pub tunnel_url: String,
-    /// Personal access token (`chan_pat_*`) from id.chan.app.
+    /// Personal access token (`chan_pat_*`) from the gateway identity origin.
     pub token: String,
     /// Display name announced in the tunnel `Hello` for the gateway
     /// roster. The CLI resolves it (`--tunnel-devserver-name`, else the

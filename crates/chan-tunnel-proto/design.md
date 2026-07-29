@@ -17,7 +17,7 @@ sequenceDiagram
     S-->>C: 200 OK, h2 stream stays open
     C->>S: Hello frame (protocol, workspace, display name)
     S->>S: validate workspace and run pre_ack hook
-    S-->>C: HelloAck Ok frame (prefix, user, workspace)
+    S-->>C: HelloAck Ok frame (prefix, user, workspace, owner_user_id)
     Note over C,S: h2 stream now belongs to yamux, both directions
     V->>S: public HTTP request
     S->>C: open one yamux substream
@@ -45,6 +45,7 @@ This crate owns:
 - Workspace-name and username validators applied identically by client and server (defense-in-depth gate against URL-unsafe identifiers), plus `sanitize_workspace_name`.
 - `H2Duplex`: an `AsyncRead + AsyncWrite + Unpin` over an h2 `(SendStream<Bytes>, RecvStream)` pair, feeding the post-handshake byte stream into yamux on both ends.
 - `TUNNEL_PATH` and `MAX_CONTROL_FRAME_BYTES`.
+- The gateway caller assertion (`gateway_assertion`): per-tunnel key derivation, signed caller claims, `canonical_audience`, and the token-resolved devserver id (PAT SHA-256).
 
 Out of scope here, owned by the I/O crates:
 
@@ -69,7 +70,7 @@ The split between the sync codec (`BytesMut`-based `encode_frame` / `decode_fram
 
 This crate owns the stable tunnel path, the control-frame size cap, the Hello / HelloAck schemas, the refusal-code vocabulary, the shared identifier validators, the frame codec, and the h2 duplex adapter. Client and server crates may orchestrate I/O differently, but they must use these shared contracts for the bytes and validation rules.
 
-Control frames are owned serde values with plain strings and enums, no borrowed lifetimes. `Hello` carries protocol, client version for logs, workspace, and an optional display name; `HelloAck` is either success with the assigned prefix/user/workspace or refusal with a stable code plus safe message. `LeaseRefreshRequest` carries the PAT only for the duration of exact-registration revalidation and redacts it from `Debug`; its response is `Refreshed` or a safe refusal. Refusal codes are additive and machine-matchable.
+Control frames are owned serde values with plain strings and enums, no borrowed lifetimes. `Hello` carries protocol, client version for logs, workspace, and an optional display name; `HelloAck` is either success with the assigned prefix/user/workspace plus the immutable `owner_user_id` or refusal with a stable code plus safe message. `LeaseRefreshRequest` carries the PAT only for the duration of exact-registration revalidation and redacts it from `Debug`; its response is `Refreshed` or a safe refusal. Refusal codes are additive and machine-matchable.
 
 The codec split remains deliberate: the sync codec is reusable from any I/O loop, while the tokio helpers are convenience for the current callers. Errors flatten cleanly so client and server can convert them into their own umbrella enums without re-exporting h2 or serde internals.
 
@@ -113,7 +114,7 @@ Earlier revisions carried a `Hello.public` flag (`#[serde(default)]`, so absence
 
 ### HelloAckOk.prefix
 
-Server-assigned public path prefix, shape `/{workspace}` -- one leading slash, no trailing slash. The username is not in the path: the production fronting proxy routes per-user wildcard subdomains (`{user}.devserver.chan.app`), so the host carries the user and the path carries the workspace. chan-server embeds the prefix as `<meta name="chan-prefix">` so the SPA's relative URLs resolve under the workspace without the operator passing a prefix flag.
+Server-assigned public path prefix, shape `/{devserver_id}` -- one leading slash, no trailing slash. The username is not in the path: the fronting proxy routes tenant wildcard subdomains (`{owner}--{disc}.{proxy}.usr.{domain}`), so the host carries the owner and devserver while the `{workspace}` path segment carries the tenant. The devserver client ignores the prefix; each tenant self-prefixes at its keyed pathspec via `<meta name="chan-prefix">`.
 
 ### ProtocolVersion negotiation
 

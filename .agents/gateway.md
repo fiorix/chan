@@ -2,11 +2,11 @@
 
 Contribution guidelines for agents and contributors working on the `gateway/` workspace. Source files live under `gateway/`; this file documents them from the shared `.agents/` home.
 
-The gateway is what makes a local `chan devserver` reachable on a public URL with sign-in and sharing, without the user opening a port, configuring DNS, or running a TURN/STUN stack. It terminates the tunnel a devserver dials out, gates every request on the wildcard host, and hands a freshly authenticated browser off from the sign-in surface to the tenant content over a short-lived token. The unit it exposes, gates, and shares is the **devserver** (one per user, resolved from the owner's PAT), not an individual workspace; the `{workspace}` path segment is tenant routing inside that devserver, never a permission key.
+The gateway is what makes a local `chan devserver` reachable on a public URL with sign-in and sharing, without the user opening a port, configuring DNS, or running a TURN/STUN stack. It terminates the tunnel a devserver dials out, gates every request on the wildcard host, and hands a freshly authenticated browser off from the sign-in surface to the tenant content over a short-lived token. The unit it exposes, gates, and shares is the **devserver** (resolved from the owner's PAT; a user may run several, capped fleet-wide by devserver-control), not an individual workspace; the `{workspace}` path segment is tenant routing inside that devserver, never a permission key.
 
 ## What this workspace is
 
-The `gateway/` Cargo workspace runs the account, sign-in, and reverse-proxy surface for chan.app, a separate nested Cargo workspace. Its crates under `gateway/crates/` are the services in the Topology below, which names each one with the host it answers on and what it owns; each crate's `design.md` is the full surface. The ownership that is not obvious from the layout: `profile` is the only crate that touches the sharing tables (`devservers`, `devserver_grants`); `identity` holds the only cookie session, the PAT tables, and the `/internal/v1/tokens/validate` endpoint the proxy hits on every handshake; `devserver-proxy` holds no Postgres and ships no SPA; `gateway-common` is the single home of the `devserver_gate` JWT envelope and the cross-service clients.
+The `gateway/` Cargo workspace runs the account, sign-in, and reverse-proxy surface for chan.app, a separate nested Cargo workspace. Its crates under `gateway/crates/` are the services in the Topology below, which names each one with the host it answers on and what it owns; each crate's `design.md` is the full surface. The ownership that is not obvious from the layout: `profile` is the only crate that touches the sharing tables (`devservers`, `devserver_grants`); `identity` holds the only cookie session, the PAT tables, and the `/internal/v1/tokens/validate` endpoint the proxy hits on every handshake; `devserver-proxy` holds no Postgres and ships no SPA; `devserver-control` (with its `devserver-control-proto` frame crate) owns the authoritative proxy directory, fleet-wide admission, and the aggregate `/admin/v1/*` tree; `gateway-common` is the single home of the `devserver_gate` entry-credential envelope and the cross-service clients.
 
 Each public-facing crate ships two docs: `README.md` is the consumer-facing entry (pitch, install, build, route table, env vars) and `design.md` is the canonical design reference (problem, architecture, public surface, key decisions, invariants, error model). Update `design.md` in the same commit as any change that affects HTTP routes, the on-the-wire shape of a public response, the session contract, or the inter-service trust model.
 
@@ -15,30 +15,34 @@ Each public-facing crate ships two docs: `README.md` is the consumer-facing entr
 ```mermaid
 flowchart TB
     subgraph browser["Browser"]
-        IDSPA["identity SPA · id.chan.app"]
+        IDSPA["identity SPA · gw.{domain}"]
         LAUNCH["web-launcher SPA<br/>(served through the proxy at the devserver root)"]
     end
 
     subgraph gw["chan gateway (nested Cargo workspace)"]
-        ID["identity-service · id.chan.app<br/>OAuth · sessions · PATs · /s/{owner} open · token validate"]
-        PROXY["devserver-proxy<br/>devserver.chan.app apex: admin + tunnel + healthz<br/>*.devserver.chan.app wildcard: launcher root + tenants + gate cookies"]
+        ID["identity-service · gw.{domain}<br/>OAuth · sessions · PATs · /s/{owner} open · token validate · discovery"]
+        PROXY["devserver-proxy nodes · {proxy}.usr.{domain}<br/>node apex: tunnel + healthz<br/>*.{proxy}.usr.{domain} wildcard: launcher root + tenants + gate cookies"]
+        CTL["devserver-control<br/>proxy directory · admission · /admin/v1/*"]
         PROFILE["profile-service · internal, not public<br/>Postgres: users · identities · devservers + devserver_grants"]
         ADMIN["admin CLI"]
-        COMMON["gateway-common<br/>domain · devserver_gate · profile_client"]
+        COMMON["gateway-common<br/>domain · devserver_gate · profile_client · devserver_control_client"]
         PG[("Postgres")]
     end
 
     subgraph box["User's machine"]
-        DS["chan devserver · library = ~/.chan workspaces<br/>serves the launcher at / · tenants under /{workspace}/"]
+        DS["chan devserver · library = ~/.chan workspaces<br/>serves the launcher at / · tenants under /{slug}-{8hex}/"]
     end
 
     IDSPA -->|OAuth · manage devservers · Open| ID
-    ID -->|"mint entry token (drv, aud)"| IDSPA
+    ID -->|"mint entry credential (drv, aud)"| IDSPA
     ID <-->|users · grants · access| PROFILE
     PROFILE --- PG
     ID --- PG
     PROXY -->|validate PAT · /internal/v1/tokens/validate| ID
-    DS ==>|tunnel register with PAT · devserver.chan.app/v1/tunnel| PROXY
+    PROXY <-->|h2c control stream · snapshots + admission + kills| CTL
+    ID -->|aggregate reads · kills| CTL
+    PROFILE -->|block eviction · sweeper marks| CTL
+    DS ==>|tunnel register with PAT · usr.{domain}/v1/tunnel| PROXY
     PROXY ==>|gated tenant + root traffic over the tunnel| DS
     LAUNCH -->|/api/library/* via the proxy| PROXY
     ID --> COMMON
@@ -46,7 +50,7 @@ flowchart TB
     PROFILE --> COMMON
 ```
 
-The gated path is the tenant traffic the proxy forwards over the tunnel to the wildcard host (the thick arrows): a browser only reaches the devserver after identity has minted an entry token for it and devserver-proxy has exchanged that token for `devserver_gate` plus `devserver_csrf` host-only cookies. devserver-proxy never talks to Postgres; it resolves identity over HTTP at handshake time and keeps the live-tunnel state in an in-process registry.
+The gated path is the tenant traffic the proxy forwards over the tunnel to the tenant wildcard host (the thick arrows): a browser only reaches the devserver after identity has minted a short-lived Ed25519 entry credential for it and devserver-proxy has exchanged that credential (a POST to its `/_chan/entry` endpoint) for the `__Host-devserver_gate` plus `__Host-devserver_csrf` host-only cookies. devserver-proxy never talks to Postgres; it resolves identity over HTTP at handshake time, keeps its live-tunnel state in an in-process registry, and publishes it to devserver-control over one authenticated control stream.
 
 ## Build & Test
 
@@ -78,10 +82,10 @@ npm run build -w @chan/profile       # build the identity SPA bundle (or: make g
 Per-app dev:
 
 ```bash
-cd web && npm run dev -w @chan/profile    # vite dev server for id.chan.app
+cd web && npm run dev -w @chan/profile    # vite dev server for the identity SPA
 ```
 
-A fresh checkout without `web/dist/` still builds; identity's SPA endpoint returns a "frontend not built" banner that points at the right command. devserver-proxy has no SPA.
+The rust-embed input folder (`gateway/crates/identity/web/dist/`) is created by the SPA build; a fresh checkout does not compile the gateway workspace until `make gateway-spa` (or the npm build above) has run once. With an empty bundle, identity's SPA endpoint returns a "frontend not built" banner that points at the right command. devserver-proxy has no SPA.
 
 ## Writing Rules
 
@@ -106,15 +110,15 @@ Each request-handler crate (`profile`, `identity`, `devserver-proxy`) defines a 
 
 ### Session contract
 
-identity-service owns the only session cookie in the suite: `id_session`, host-only on `id.chan.app` (no `Domain` attribute), `HttpOnly`, `SameSite=Lax`, 30-day inactivity expiry. `Secure` follows `COOKIE_SECURE`. devserver-proxy does not read this cookie.
+identity-service owns the only session cookie in the suite: `__Host-id_session` (`id_session_insecure_dev` when `COOKIE_SECURE=false`), host-only on the identity origin `gw.{domain}` (no `Domain` attribute), `HttpOnly`, `SameSite=Lax`, 30-day inactivity expiry. devserver-proxy does not read this cookie.
 
-devserver-proxy writes two host-only cookies on `{user}.devserver.chan.app`, both scoped `Path=/` and not shared with id. `devserver_gate` is HttpOnly, Secure, SameSite=Lax, has a 24h hard exp, and carries an HS256 JWT signed with `DEVSERVER_GATE_SECRET`. `devserver_csrf` is Secure, SameSite=Lax, readable by same-origin launcher JS, and must match `X-Chan-CSRF` on unsafe proxied HTTP methods.
+devserver-proxy writes two host-only cookies on the tenant host `{owner}--{disc}.{proxy}.usr.{domain}`, both scoped `Path=/` and not shared with identity. `__Host-devserver_gate` is HttpOnly, Secure, SameSite=Lax, and carries an opaque revocable proxy-local session id (maximum one hour), minted when the proxy consumes a 30s Ed25519 entry credential POSTed to `/_chan/entry`. `__Host-devserver_csrf` is Secure, SameSite=Lax, readable by same-origin launcher JS, and must match `X-Chan-CSRF` on unsafe proxied HTTP methods.
 
-This split is the load-bearing piece of the cross-tenant isolation: no `.chan.app`-scoped cookie exists, so a browser does not auto-attach an id session to a fetch on `evil.devserver.chan.app`. Cookie sharing across the two services is replaced by an explicit entry-token handoff (entry JWT in the URL `?t=`, gate cookies set by devserver-proxy on validation). The whole-host `Path=/` scope is safe precisely because the gate is per-devserver: a collaborator is granted the entire devserver, so there is no non-granted sub-tenant on the same host to isolate the cookie away from. User-to-user isolation rides the host-only `aud` claim, not the cookie path. Unsafe writes need the CSRF mirror because SameSite is site-based, and sibling `*.devserver.chan.app` origins are same-site.
+This split is the load-bearing piece of the cross-tenant isolation: no parent-domain cookie exists, so a browser does not auto-attach an id session to a fetch on a sibling tenant origin, and the `__Host-` prefix makes the browser itself refuse any parent-domain shadow of the same name. Cookie sharing across the two services is replaced by an explicit entry-credential handoff (a POST body to the proxy's `/_chan/entry`, never a URL parameter; gate cookies set by devserver-proxy on exchange). The whole-host `Path=/` scope is safe precisely because the gate is per-devserver: a collaborator is granted the entire devserver, so there is no non-granted sub-tenant on the same host to isolate the cookie away from. User-to-user isolation rides the host-only `aud` claim, not the cookie path. Unsafe writes need the CSRF mirror because SameSite is site-based, and sibling `*.{proxy}.usr.{domain}` origins are same-site.
 
 ### Reverse-proxy trust boundary
 
-`devserver-proxy` strips hop-by-hop headers (RFC 7230 6.1) on both the request and response legs, **including every header named by the inbound `Connection` value** (also required by 6.1). It drops the inbound `Host`, `Cookie`, `Authorization`, and `X-Chan-CSRF` headers before forwarding (the gate cookies, CSRF mirror, and any user-presented PAT have no business at the tenant's upstream; auth on that leg is the entry handshake plus the tunnel trust boundary). It recomputes `X-Forwarded-For` as `<existing chain>, <peer ip>`, `X-Forwarded-Proto` from `FORWARDED_PROTO` (configured to match the terminator that fronts this listener; default `https`), and `X-Forwarded-Host` from the inbound `Host` header devserver-proxy itself routed on. Inbound `X-Forwarded-Host` / `X-Forwarded-Proto` from clients are NOT trusted; nginx may not scrub them and the gateway must not assume it does. Upstream is reached over a yamux substream owned by an authenticated tunnel; there is no SSRF risk because the upstream URL is never user-supplied. `Set-Cookie` is left intact on the response leg so tenant content can set its own host-only cookies.
+`devserver-proxy` strips hop-by-hop headers (RFC 7230 6.1) on both the request and response legs, **including every header named by the inbound `Connection` value** (also required by 6.1). It drops the inbound `Host`, `Cookie`, `Authorization`, and `X-Chan-CSRF` headers before forwarding (the gate cookies, CSRF mirror, and any user-presented PAT have no business at the tenant's upstream; auth on that leg is the entry handshake plus the tunnel trust boundary). It recomputes `X-Forwarded-For` as the socket peer only (the inbound chain is discarded), `X-Forwarded-Proto` from `FORWARDED_PROTO` (configured to match the terminator that fronts this listener; default `https`), and `X-Forwarded-Host` from the inbound `Host` header devserver-proxy itself routed on. Inbound `X-Forwarded-For` / `X-Forwarded-Host` / `X-Forwarded-Proto` from clients are NEVER trusted; nginx may not scrub them and the gateway must not assume it does. Upstream is reached over a yamux substream owned by an authenticated tunnel; there is no SSRF risk because the upstream URL is never user-supplied. `Set-Cookie` is left intact on the response leg so tenant content can set its own host-only cookies.
 
 Request bodies are bounded by `MAX_REQUEST_BYTES` (default 100 MiB). Response bodies are bounded by `MAX_RESPONSE_BYTES` (default 100 MiB). Setting either to `0` disables the cap. HTTP requests are bounded end-to-end by `REQUEST_TIMEOUT_SECS` (default 60s), including the response body stream (a slow-drip upstream is cut at the deadline via `DeadlineBody`); the same wrapper aborts the upstream conn task on client drop so a bailed request does not strand the yamux substream. WebSockets bypass the total-timeout and use a 300s per-half idle timeout instead.
 
@@ -135,9 +139,9 @@ Four distinct bearers, all `openssl rand -hex 32`:
 - `DEVSERVER_ADMIN_TOKEN`: identity-service and profile-service -> devserver-control `/admin/v1/*` tree. profile uses it on admin block; identity uses it on revoke, delete, and dashboard reads. `DEVSERVER_ADMIN_TOKEN` is a generic cross-service name; the service it points at is devserver-control.
 - `DEVSERVER_PROXY_TOKEN`: devserver-proxy -> devserver-control `/v1/proxies/connect` control session. Distinct from `DEVSERVER_ADMIN_TOKEN` on purpose: a proxy node holds no operator-admin credential.
 
-Plus one symmetric secret:
+Plus the asymmetric entry keys:
 
-- `DEVSERVER_GATE_SECRET`: HS256 signing key shared by identity (mints entry JWTs) and devserver-proxy (verifies entry, mints session JWTs). The env-var name is generic because it is a cross-service shared secret; it names the signing key's role, not the `devserver_gate` cookie it ends up in.
+- `DEVSERVER_ENTRY_SIGNING_KEY` (identity only) and `DEVSERVER_ENTRY_VERIFYING_KEYS` (each proxy, a 1-2 key ring for rotation): Ed25519 keys for the 30s entry credential identity mints and devserver-proxy consumes at `/_chan/entry`. The proxy holds no signing key; a compromised node cannot mint entries.
 
 ## Contributor Patterns
 
@@ -148,7 +152,7 @@ Per-crate rules that come up often when editing this code. For the full design r
 - **Two-tier auth.** Routes use `PROFILE_AUTH_TOKEN` for the service API (`/v1/users/*`, the grant routes, `/v1/auth-audit`) and `PROFILE_ADMIN_TOKEN` for the admin tree (`/v1/admin/*`). Single-token deployments may set them to the same value; the service-API middleware accepts either.
 - **Placeholder usernames are deterministic.** New rows seed `username = 'u' || substr(replace(uuid::text, '-', ''), 1, 12)`. identity-service renames on first sign-in; the hard cap of 4 lifetime renames is enforced in `update_username` via a CAS update. Don't invent an alternate seeding scheme.
 - **All SQL is parameterized.** Constants like `USER_COLS` are `format!`'d into queries; user input always goes through `.bind()` and `$N`.
-- **The devserver is the sharing unit.** `devserver_access(owner, devserver, caller)` is the single per-request access decision: `owner` when caller is the owner, the grant's `role` (`viewer` / `editor`) for a claimed grant, and 404 in every other case (no-grant and unknown-devserver share one shape so the endpoint cannot enumerate shares). A grant gives the WHOLE devserver, not a single workspace; `create_devserver_grant` auto-bootstraps the parent `devservers` row so callers don't need a separate hop.
+- **The devserver is the sharing unit.** `devserver_access(owner, devserver, caller)` is the single per-request access decision: `{access: true}` for the owner or a claimed grant, 404 in every other case (no-grant and unknown-devserver share one shape so the endpoint cannot enumerate shares). Access is binary; there are no roles. A grant gives the WHOLE devserver, not a single workspace; `create_devserver_grant` auto-bootstraps the parent `devservers` row so callers don't need a separate hop.
 - **Block fans out server-side.** `POST /v1/admin/users/{id}/block` also calls devserver-control `kill_user_tunnels` (best-effort) when a `DevserverControlClient` is configured, so the live registrations drop across the proxy fleet at the same time the DB row changes.
 
 ### identity
@@ -159,18 +163,18 @@ Per-crate rules that come up often when editing this code. For the full design r
 - **OAuth callback validates state before provider.** Plain `pending.provider != provider` runs only after a constant-time state compare so timing on the provider check can't be used to oracle the session's expected provider.
 - **Session id rotates on login.** `session.cycle_id()` runs at the privilege boundary, before storing `user_id`. Closes session fixation.
 - **Token revoke and account delete evict tunnels.** `DELETE /api/tokens/{id}` and profile delete fire devserver-proxy `kill_user_tunnels` best-effort after the DB update.
-- **Entry-token mint is the share-landing route.** `GET /s/{owner}` (whole-devserver open) and `GET /s/{owner}/{workspace}` (per-tenant) resolve the owner's single live devserver, call `profile.devserver_access`, mint a 30s entry JWT (`drv` = that live `devserver_id`, `aud` = canonical `{owner}.devserver.chan.app`), and 303 to the proxy with `?t=<jwt>` so the token is minted at click time. `/s/{owner}` is owner-only until the proxy injects a signed caller / role header; grantees use the per-tenant landing.
+- **Entry-credential mint is the share-landing route.** `GET /s/{owner}` (whole-devserver open, owner-only) and `GET /s/{owner}/{workspace}` (per-tenant) resolve a live devserver of the owner's (`?d=` selector, single live, else first accessible), call `profile.devserver_access`, and mint a 30s Ed25519 entry credential (`drv` = that live `devserver_id`, `aud` = the tenant origin `{owner}--{disc}.{proxy}.usr.{domain}` built from the controller-reported node base) that the browser POSTs to the proxy's `/_chan/entry`, so the credential is minted at click time and never rides a URL.
 
 ### devserver-proxy
 
-- **Apex vs wildcard.** `devserver.chan.app` (apex): tunnel + admin + healthz only. `*.devserver.chan.app` (wildcard): tenant content only. A single axum router dispatches on the raw `Host` header (never the `Host` extractor, which would honor a spoofable `X-Forwarded-Host`). The h2c tunnel endpoint runs on a separate internal listener; nginx `grpc_pass`es `/v1/tunnel` on the apex to it.
-- **The gate is per-devserver, not per-workspace.** `proxy::handle` looks up the user's single live devserver by the `{user}` host label alone and verifies the cookie's / entry token's `drv` against that devserver id. The `{workspace}` path segment is tenant routing only: it is forwarded into the tunnel unchanged (a segment-preserving forward, only `?t=` stripped) and the devserver routes each tenant internally. There is no path-segment gate key.
-- **Auth gate order on the wildcard** (`proxy::handle`): no live devserver for `{user}` -> 404; `/api/devserver/*` (the devserver's local-only management API) -> 404; `?t=<entry-jwt>` -> verify HS256 + exp + aud + drv, mint `devserver_gate` and `devserver_csrf`, 303 to the clean URL; a valid `devserver_gate` cookie (signature + aud + drv) -> pass through; unsafe HTTP methods also require `X-Chan-CSRF` matching `devserver_csrf`; anything else -> 404 or 403 for a failed CSRF check after auth. The same 404 shape covers "unknown devserver", "no token", and "wrong devserver in the cookie" so unauthenticated probes cannot enumerate registrations.
-- **The proxy is not the access authority.** The gate never compares `sub` against the registry-cached `owner_id`: that would lock out every accepted grantee. identity already checked `devserver_access` before minting, so a validly-signed entry / session with the right `aud` and `drv` is the authorization assertion. The `aud` claim (= the inbound host) is what enforces user-to-user isolation.
-- **Bare wildcard root depends on credentials.** A naked `{user}.devserver.chan.app/` with no `?t=` and no `devserver_gate` cookie redirects to `DASHBOARD_URL` (id.chan.app/workspaces) because devserver-proxy renders no UI. A root that carries a gate credential falls through to the gate and forwards `/` to the devserver root, where the launcher SPA is served.
+- **Apex vs wildcard.** The node apex (`{proxy}.usr.{domain}`): tunnel + healthz only (the aggregate admin tree lives on devserver-control). The node wildcard (`*.{proxy}.usr.{domain}`): tenant content only. A single axum router dispatches on the raw `Host` header (never the `Host` extractor, which would honor a spoofable `X-Forwarded-Host`). The h2c tunnel endpoint runs on a separate internal listener; nginx `grpc_pass`es `/v1/tunnel` to it.
+- **The gate is per-devserver, not per-workspace.** `proxy::handle` parses `{owner}` plus the `--{disc}` discriminator out of the tenant host and verifies the session's `drv` against that devserver id. The `{workspace}` path segment is tenant routing only: it is forwarded into the tunnel unchanged (a segment-preserving forward) and the devserver routes each tenant internally. There is no path-segment gate key.
+- **Auth gate order on the wildcard** (`proxy::handle`): no live devserver for the host -> 404; `/api/devserver/*` (the devserver's local-only management API) -> 404; `POST /_chan/entry` -> verify the Ed25519 entry credential (exp + aud + drv + one-time jti + exactly-one-Origin), mint `__Host-devserver_gate` and `__Host-devserver_csrf`, 303 to the signed clean path; a valid `__Host-devserver_gate` session cookie -> pass through; unsafe HTTP methods also require `X-Chan-CSRF` matching the CSRF cookie; anything else -> 404 or 403 for a failed CSRF check after auth. The same 404 shape covers "unknown devserver", "no credential", and "wrong devserver in the cookie" so unauthenticated probes cannot enumerate registrations.
+- **The proxy is not the access authority.** The gate never compares `sub` against the registry-cached `owner_id`: that would lock out every accepted grantee. identity already checked `devserver_access` before minting, so a validly-signed entry with the right `aud` and `drv` is the authorization assertion. The `aud` claim (= the inbound tenant host) is what enforces user-to-user isolation.
+- **Bare wildcard root depends on credentials.** A naked tenant root with no gate session redirects to `DASHBOARD_URL` (the gateway dashboard on the identity origin) because devserver-proxy renders no UI. A root that carries a gate session falls through to the gate and forwards `/` to the devserver root, where the launcher SPA is served.
 - **Hop-by-hop stripping is complete.** `HOP_BY_HOP_NAMES` lists the static names; `connection_listed_headers` parses the inbound `Connection` value and strips every name it lists. Both applied on every leg.
 - **Two listeners, one Registry.** The h2c tunnel listener and the axum HTTP listener share the in-process `Registry`. A registration on the tunnel listener is visible to the proxy handler on the very next request.
-- **JWT alg hard-required.** `gateway_common::devserver_gate::decode` rejects anything other than HS256. No "alg: none" path exists in this codebase.
+- **Signature scheme hard-required.** `gateway_common::devserver_gate` accepts Ed25519 only for entry credentials; the gate cookie itself is an opaque proxy-local session id, not a signed token.
 
 ### admin
 
@@ -179,18 +183,19 @@ Per-crate rules that come up often when editing this code. For the full design r
 
 ### gateway-common
 
-- **No axum / IntoResponse coupling in data-layer types.** `ProfileError`, `WorkspaceAdminError`, `DevserverGateError`, and `Claims` are plain thiserror / serde. Each consumer maps via `From` for its local error.
+- **No axum / IntoResponse coupling in data-layer types.** `ProfileError`, `DevserverControlError`, `DevserverGateError`, and `Claims` are plain thiserror / serde. Each consumer maps via `From` for its local error.
 - **`User` is the superset.** The struct carries every field profile-service can return; consumers ignore the fields they don't need. Don't fork the struct per consumer.
-- **`devserver_gate` is the single source of JWT shape.** Both identity (mint entry) and devserver-proxy (verify entry, mint + verify sessions) call through this module. The HS256 alg is hard-required on every decode, and the `aud` + `drv` claims are matched in-band by the caller. Gateway callers canonicalize `aud` as a lowercase host with default ports stripped and non-default ports preserved.
+- **`devserver_gate` is the single source of the entry-credential shape.** Identity (mint) and devserver-proxy (verify + consume) call through this module. Ed25519 is hard-required on every verify, and the `aud` + `drv` claims are matched in-band by the caller. Gateway callers canonicalize `aud` as a lowercase host with default ports stripped and non-default ports preserved.
 
 ## Documentation
 
 - **Workspace overview**: [`gateway/README.md`](../gateway/README.md)
-- **Domain glossary**: [`gateway/CONTEXT.md`](../gateway/CONTEXT.md) fixes the devserver / library / workspace / tenant language; the decision behind the per-devserver model is [`gateway/docs/adr/0001-devserver-is-the-sharing-unit.md`](../gateway/docs/adr/0001-devserver-is-the-sharing-unit.md).
+- **Domain glossary**: [`gateway/CONTEXT.md`](../gateway/CONTEXT.md) fixes the devserver / library / workspace / tenant language; the decision behind the per-devserver model is [`gateway/docs/adr/0001-devserver-is-the-sharing-unit.md`](../gateway/docs/adr/0001-devserver-is-the-sharing-unit.md), and the fleet control plane is [`gateway/docs/adr/0002-control-plane-owns-proxy-fleet-state.md`](../gateway/docs/adr/0002-control-plane-owns-proxy-fleet-state.md).
 - **Crate design references** (canonical; `README.md` next to each is the consumer-facing entry):
   - [`gateway/crates/profile/design.md`](../gateway/crates/profile/design.md): schema, two-tier auth, atomic upsert, devserver grants, block fan-out.
   - [`gateway/crates/identity/design.md`](../gateway/crates/identity/design.md): OAuth providers, PAT lifecycle, session contract, entry-token mint, dashboard.
   - [`gateway/crates/devserver-proxy/design.md`](../gateway/crates/devserver-proxy/design.md): apex / wildcard split, devserver-gate verify, registry model, reverse-proxy hygiene.
+  - [`gateway/crates/devserver-control/design.md`](../gateway/crates/devserver-control/design.md): proxy directory, fleet admission, aggregate admin tree, control protocol (frames in `devserver-control-proto`).
   - [`gateway/crates/admin/design.md`](../gateway/crates/admin/design.md): command surface, output contract, exit codes.
   - [`gateway/crates/gateway-common/design.md`](../gateway/crates/gateway-common/design.md): why a shared crate, what belongs and what does not.
 - **Issue tracker**: GitHub repo `fiorix/chan`.

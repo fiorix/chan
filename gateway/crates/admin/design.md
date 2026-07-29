@@ -16,7 +16,7 @@ Three HTTP clients live inside the binary:
 - `IdentityClient`: identity-service (`CHAN_ADMIN_IDENTITY_URL`). Calls OAuth-session and composite policy/access routes.
 - `WorkspaceClient`: devserver-control (`CHAN_ADMIN_WORKSPACE_URL`). Talks to `/admin/v1/*` and decodes the SSE snapshot streams for `tunnel watch` and `proxy watch`.
 
-Each client has its own bearer and destination. The CLI sets a 15-second per-call timeout, permits 65 seconds for user-deletion quiet-window settlement, and sets no global timeout on watch streams.
+Each client has its own bearer and destination. The CLI sets per-call timeouts (15 seconds on profile and identity calls, 10 or 15 seconds on controller calls), permits 65 seconds for user-deletion quiet-window settlement, and sets no global timeout on watch streams.
 
 ## Operational contracts
 
@@ -40,13 +40,13 @@ Manage feature flags and per-user overrides via profile-service's admin tree. `f
 
 ### Tunnel, proxy, and tenant-session watch
 
-devserver-control's tunnel, proxy, and browser-session watch routes are SSE streams. `watch_loop` consumes `event: snapshot` blocks and re-renders. TTY mode clears the screen between renders (`\x1b[2J\x1b[H`). `--json` emits one JSON line per event.
+devserver-control's tunnel, proxy, and browser-session watch routes are SSE streams. `watch_loop` consumes `event: snapshot` blocks and re-renders. TTY mode clears the screen between renders (`\x1b[2J\x1b[H`). `--json` emits one prettified JSON document per event.
 
 `tunnel ps` and `proxy ps` read the matching one-shot snapshots (`/admin/v1/tunnels`, `/admin/v1/proxies`). Tunnel rows carry the owning node's `proxy_id` and `proxy_base_url` so an operator can tell which proxy holds a registration; proxy rows carry the node's status, package version, tunnel count, and liveness timestamps.
 
 ### Output
 
-Default rendering uses `comfy_table` with the `NOTHING` preset (no Unicode lines), targeting 80 columns. Columns are chosen per command (e.g. `USER`, `DEVSERVER`, `PROXY`, `PEER`, `UPTIME`, `CONNECTED` for `tunnel ps`). UUIDs are truncated to 8 chars in table mode.
+Default rendering uses `comfy_table` with the `NOTHING` preset (no Unicode lines), targeting 80 columns. Columns are chosen per command (e.g. `USER`, `DEVSERVER`, `PROXY`, `CAP`, `PEER`, `UPTIME`, `CONNECTED` for `tunnel ps`). UUIDs are truncated to 8 chars in table mode.
 
 `--json` emits prettified JSON via `serde_json::to_string_pretty` because operators copy-paste output into tickets; the small overhead is fine for CLI workloads.
 
@@ -66,7 +66,7 @@ Every read command supports `--json` so the CLI can be piped into jq. Adding a n
 
 ### No interactive features
 
-No menus, no TUI. All commands are non-interactive except for `user delete` which prompts `[y/N]` (skippable with `--yes`). The CLI is meant to compose with `xargs` and `parallel`.
+No menus, no TUI. All commands are non-interactive except `user delete`, `user change-email`, and `flag delete`, which prompt `[y/N]` (skippable with `--yes`). The CLI is meant to compose with `xargs` and `parallel`.
 
 ### Minimal local URL encoding
 

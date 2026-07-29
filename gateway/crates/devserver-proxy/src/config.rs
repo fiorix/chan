@@ -14,20 +14,20 @@ const MAX_SESSION_LIFETIME_SECS: usize = 60 * 60;
 /// Runtime config sourced from environment variables.
 #[derive(Clone)]
 pub struct Config {
-    /// Public listener (devserver.chan.app apex + *.devserver.chan.app
-    /// wildcard). Behind nginx + TLS.
+    /// Public listener (node apex + node wildcard, e.g.
+    /// `p1.usr.chan.app` + `*.p1.usr.chan.app`). Behind nginx + TLS.
     pub bind_addr: SocketAddr,
     /// Tunnel listener (apex `/v1/tunnel`). h2c behind nginx
-    /// `grpc_pass`; `chan devserver` instances dial
-    /// `https://devserver.chan.app/v1/tunnel` over h2/TLS, terminated at
-    /// nginx and forwarded here cleartext.
+    /// `grpc_pass`; `chan devserver` instances dial the tunnel ingress
+    /// (e.g. `https://usr.chan.app/v1/tunnel`) over h2/TLS, terminated
+    /// at nginx and forwarded here cleartext.
     pub tunnel_bind_addr: SocketAddr,
-    /// Apex hostname (e.g. `devserver.chan.app`). Used to distinguish
+    /// Apex hostname (e.g. `p1.usr.chan.app`). Used to distinguish
     /// the health/readiness surface from the wildcard reverse-proxy
     /// surface in the Host-keyed router.
     pub apex_host: String,
     /// Wildcard suffix including the leading dot (e.g.
-    /// `.devserver.chan.app`). The proxy router parses `{user}` out of
+    /// `.p1.usr.chan.app`). The proxy router parses `{user}` out of
     /// every Host that ends with this suffix.
     pub wildcard_suffix: String,
     /// Base URL of identity-service. devserver-proxy POSTs to
@@ -38,12 +38,11 @@ pub struct Config {
     /// `/internal/v1/tokens/validate`. Sourced from
     /// `IDENTITY_INTERNAL_TOKEN`; required, no fallback.
     pub identity_auth_token: String,
-    /// Absolute URL the wildcard root (`{user}.devserver.chan.app/`)
-    /// 302s to. The dashboard lives at id.chan.app/workspaces in prod;
-    /// dev sets this to `http://id.localtest.me:17000/workspaces`. If
-    /// unset, devserver-proxy derives a sensible default by swapping
-    /// the `devserver.` prefix on `apex_host` for `id.` and assuming
-    /// `https`.
+    /// Absolute URL the wildcard root (`{user}--{disc}.p1.usr.chan.app/`)
+    /// 302s to: the gateway dashboard on the identity origin
+    /// (e.g. `https://gw.chan.app/workspaces`; dev sets
+    /// `http://id.localtest.me:17000/workspaces`). Required
+    /// (`DASHBOARD_URL`), no derived default.
     pub dashboard_url: String,
     /// Exact public identity origin allowed to POST an entry credential.
     pub identity_origin: CanonicalOrigin,
@@ -295,7 +294,7 @@ impl Config {
     /// insensitive; devserver ids are stored lowercase). A label with
     /// more than one `--`, a disc tail that is not exactly 12
     /// lowercase hex chars, a multi-label prefix (e.g. `evil.alice`
-    /// against `*.devserver.chan.app`), and non-label characters are
+    /// against `*.p1.usr.chan.app`), and non-label characters are
     /// all rejected so the resulting username matches the shape the
     /// downstream validators accept.
     pub fn parse_wildcard_host(&self, host: &str) -> Option<(String, Option<String>)> {

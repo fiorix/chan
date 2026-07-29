@@ -26,8 +26,9 @@ pub struct Hello {
     /// chan version string (e.g. "chan/0.4.0"). Server-side logs
     /// only; not used for routing.
     pub client_version: String,
-    /// Workspace name to register under. Combined with the token's
-    /// user to form the public path `/{user}/{workspace}/...`.
+    /// Workspace name to register under. Devserver registrations send
+    /// a fixed placeholder; the gateway keys the registration on the
+    /// token-resolved devserver identity, not this value.
     pub workspace: String,
     /// Display name the devserver announces for the gateway roster
     /// (`--tunnel-devserver-name`, defaulting to the client host's
@@ -66,11 +67,11 @@ pub enum HelloAck {
 pub struct HelloAckOk {
     pub protocol: ProtocolVersion,
     /// Public path prefix on the gateway's wildcard subdomain.
-    /// Shape: `/{workspace}` (one leading slash, no trailing slash).
-    /// The username lives in the host (`{user}.devserver.chan.app`),
-    /// not in the path; chan-server uses this value as
-    /// `<meta name="chan-prefix">` so the SPA's relative URLs
-    /// resolve under that workspace.
+    /// Shape: `/{devserver_id}` (one leading slash, no trailing
+    /// slash). The owner lives in the tenant host
+    /// (`{owner}--{disc}.{proxy}.usr.{domain}`), not in the path;
+    /// the devserver client ignores this value (each tenant
+    /// self-prefixes at its keyed pathspec).
     pub prefix: String,
     pub user: String,
     pub workspace: String,
@@ -101,8 +102,7 @@ pub mod error_code {
     /// `Hello.workspace` failed `is_valid_workspace_name`.
     pub const INVALID_WORKSPACE_NAME: &str = "invalid_workspace_name";
     /// `Hello.protocol` did not match the server's supported
-    /// version. Reserved for future use; today the listener still
-    /// closes the stream pre-ack for this case.
+    /// version; written in-band before the stream closes.
     pub const UNSUPPORTED_PROTOCOL: &str = "unsupported_protocol";
     /// Catch-all for refusals the client doesn't have a specific
     /// branch for. Treat the `message` as the only useful payload.

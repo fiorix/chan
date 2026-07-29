@@ -36,9 +36,10 @@ flowchart LR
   end
 
   subgraph Cloud["chan.app gateway (separate workspace)"]
-    Identity["identity + profile SPA"]
+    Identity["identity + profile SPA (gw.{domain})"]
     Pg[("Postgres")]
     Proxy["devserver-proxy + chan-tunnel-server"]
+    Ctl["devserver-control (fleet directory)"]
   end
 
   Desktop -->|"embeds"| Host
@@ -55,14 +56,15 @@ flowchart LR
   TunC ==>|"dial-out tunnel (h2/yamux, chan-tunnel-proto)"| Proxy
   Proxy -->|"yamux substream to tenant slug"| Dev
 
-  Browser -->|"user.devserver.chan.app"| Proxy
-  Browser -->|"login / share links"| Identity
+  Browser -->|"{owner}--{disc}.{proxy}.usr.{domain}"| Proxy
+  Browser -->|"gw.{domain}: login / share links"| Identity
   Identity --- Pg
   Proxy -.->|"devserver_access check"| Identity
+  Proxy -.->|"h2c control stream (admission, fleet view)"| Ctl
   Desktop -.->|"attach remote"| Proxy
 ```
 
-The whole-chan view: your machine (the CLI plus the desktop shell that embeds the host, the per-tenant server, the core, and the SPA), a box you own running a dial-out `chan devserver`, and the chan.app gateway (identity + Postgres + the devserver-proxy).
+The whole-chan view: your machine (the CLI plus the desktop shell that embeds the host, the per-tenant server, the core, and the SPA), a box you own running a dial-out `chan devserver`, and the chan.app gateway (identity + Postgres + the devserver-proxy fleet coordinated by devserver-control).
 
 Bottom-up layering: **chan-report** feeds **chan-workspace** (the core); chan-workspace is wrapped per-tenant by **chan-server**, orchestrated multi-tenant by **chan-library**, and exposed to agents by **chan-llm**; the **devserver** mode composes server + library + **chan-tunnel-client** (`-proto` shared); **chan** (CLI) and **chan-desktop** are the drivers, **chan-shell** their control client. The dependency direction is load-bearing for the inversion seams: chan-library holds the launcher's `DevserverRegistry` trait + the `WindowTransfers` signal as `Arc<dyn ...>`/owned types, and chan-server (which depends on chan-library) re-exports them and implements the routes -- the low-level crate exposes the slot, the higher one fills it.
 
@@ -120,8 +122,8 @@ The frontend is a Svelte/Vite/Tailwind build artifact consumed by chan-server th
 
 Vite is configured with `base: "./"` so asset URLs in the bundle are relative to whatever path the SPA shell is loaded from. That matters for two paths:
 
-- `--prefix /seg`: a reverse proxy can mount many `chan open` instances under one host, e.g. `workspace.example.com/{user}/`. The router is `Router::new().nest(prefix, inner)`, and every `index.html` response gets a `<meta name="chan-prefix" content="/seg">` injected after the `<head>` tag (`static_assets::inject_chan_prefix`). The frontend reads that meta tag at boot and prepends the prefix to every fetch and WebSocket URL.
-- Tunnel mode: a `chan devserver` carries its WHOLE library through one gateway registration. The proxy is segment-PRESERVING -- it forwards `{user}.devserver.chan.app/{workspace}/...` into the tunnel substream UNCHANGED (it does NOT strip the `{workspace}` segment). The devserver mounts each tenant at its public slug `/{workspace}`, and that tenant's SPA shell already carries `<meta name="chan-prefix" content="/{workspace}">`, so a multi-tenant devserver does not swap one prefix on connect: each tenant self-prefixes at its slug and the proxy forwards every API/WS URL under `/{workspace}/...` unchanged.
+- `--prefix /seg`: a reverse proxy can mount many `chan open` instances under one host, e.g. `workspace.example.com/{user}/`. The router is `Router::new().nest(prefix, inner)`, and every `index.html` response gets a `<meta name="chan-prefix" content="/seg">` injected after the `<head>` tag (`static_assets::inject_chan_meta`). The frontend reads that meta tag at boot and prepends the prefix to every fetch and WebSocket URL.
+- Tunnel mode: a `chan devserver` carries its WHOLE library through one gateway registration. The proxy is segment-PRESERVING -- it forwards `{owner}--{disc}.{proxy}.usr.{domain}/{workspace}/...` into the tunnel substream UNCHANGED (it does NOT strip the `{workspace}` segment). The devserver mounts each tenant at its keyed pathspec `/{slug}-{8hex}` (the `{workspace}` segment; `chan_library::prefix`), and that tenant's SPA shell already carries `<meta name="chan-prefix" content="/{workspace}">`, so a multi-tenant devserver does not swap one prefix on connect: each tenant self-prefixes at its pathspec and the proxy forwards every API/WS URL under `/{workspace}/...` unchanged.
 
 Single-page-app fallback: any path that isn't an `/api` route, a `/ws` upgrade, or a baked asset returns `index.html` so client-side routes work. Misses on `/api/*` and `/ws` return real 404s instead of the SPA shell so callers don't silently get HTML when they expected JSON.
 
@@ -129,10 +131,10 @@ Single-page-app fallback: any path that isn't an `/api` route, a `/ws` upgrade, 
 
 `chan open` always binds a local listener: `axum::serve(TcpListener, app)` on 127.0.0.1 (or `--host` / `-6`). A per-launch bearer token gates every `/api/*` and `/ws` route, accepted as `?t=TOKEN` or `Authorization: Bearer TOKEN`. No TLS; the loopback bind is the trust boundary. (Single-workspace remote serve was dropped: the gateway tunnel now carries a whole library through `chan devserver`, below, not one workspace per `chan open`.)
 
-The gateway tunnel is `chan devserver --tunnel-token <PAT>` (`CHAN_TUNNEL_TOKEN`). When set, the devserver runs its local management server AND hands the same devserver router to `chan_tunnel_client::run`, which dials `devserver.chan.app/v1/tunnel` and serves yamux substreams. The model is per-DEVSERVER, not per-workspace:
+The gateway tunnel is `chan devserver --tunnel-token <PAT>` (`CHAN_TUNNEL_TOKEN`) plus a required `--tunnel-url` (`CHAN_TUNNEL_URL`); there is no compiled-in endpoint. When set, the devserver runs its local management server AND hands the same devserver router to `chan_tunnel_client::run`, which dials the tunnel ingress (`https://usr.{domain}/v1/tunnel`; DNS or a layer-4 balancer may land the dial on any ready proxy node, and the tunnel stays attached to the node that accepted it) and serves yamux substreams. The model is per-DEVSERVER, not per-workspace:
 
-- One devserver per user; the public host is `{user}.devserver.chan.app`. The registration is keyed on the DEVSERVER identity (`devserver_id`), which the gateway resolves backend-side from the token (the PAT's SHA-256) via the `Validated.devserver_id` the tunnel validator returns -- NOT a workspace name the client supplies. The client's `Hello.workspace` is an ignored `"devserver"` placeholder.
-- Always authenticated; there is no anonymous-readable path (the `public` flag is gone). `{user}.devserver.chan.app` is the trust boundary: the gateway gates on one `devserver_access(owner, devserver, caller)` check (a grant is the whole devserver) and issues a host-only session cookie scoped `Path=/` over the whole host (no per-workspace path scope, since the grant is whole-devserver). The devserver's local management listener still uses its bearer token; tunnel-origin tenant requests bypass local bearer auth only after devserver-proxy authenticates the browser and forwards the request over the authenticated tunnel with a signed caller assertion.
+- A registration is keyed on `(username, devserver_id)`: the DEVSERVER identity, which the gateway resolves backend-side from the token (the PAT's SHA-256) via the `Validated.devserver_id` the tunnel validator returns -- NOT a workspace name the client supplies. The client's `Hello.workspace` is an ignored `"devserver"` placeholder. A user may run several devservers, capped fleet-wide by devserver-control (`MAX_DEVSERVERS_PER_USER`); each gets its own public tenant origin `{owner}--{disc}.{proxy}.usr.{domain}` (`disc` = the first 12 chars of the devserver id, `{proxy}` = the node that owns the tunnel), minted by identity from the controller-reported owning node.
+- Always authenticated; there is no anonymous-readable path (the `public` flag is gone). The tenant origin is the trust boundary: the gateway gates on one `devserver_access(owner, devserver, caller)` check (a grant is the whole devserver) and issues a host-only `__Host-devserver_gate` session cookie scoped `Path=/` over that origin (no per-workspace path scope, since the grant is whole-devserver). The devserver's local management listener still uses its bearer token; tunnel-origin tenant requests bypass local bearer auth only after devserver-proxy authenticates the browser and forwards the request over the authenticated tunnel with a signed caller assertion.
 - The path `{workspace}` segment is tenant routing only and never gates. The proxy forwards it unchanged (segment-preserving) and the devserver routes the tenant by it. The management API (`/api/devserver/*`) is local-only; the proxy 404s it on the public wildcard.
 
 `build_app` produces the byte-identical axum app for the local bind; the devserver mounts each tenant through the same `WorkspaceHost` tenant builder, so request handling is identical across local serve, the devserver, and the tunnel.
@@ -162,9 +164,9 @@ flowchart TB
   Mgmt -->|"list / mount / forget"| Host
   CLI["chan open PATH (exits, no 2nd bind)"] -->|"Surface 2: RegisterWorkspace RPC"| Disc["per-user Unix discovery socket"]
   Disc -->|"mount, returns prefix"| Host
-  App -->|"Surface 3: --tunnel-token PAT"| Tun["chan-tunnel-client (dials devserver.chan.app/v1/tunnel)"]
+  App -->|"Surface 3: --tunnel-token PAT"| Tun["chan-tunnel-client (dials usr.{domain}/v1/tunnel)"]
   Tun -->|"yamux substream, raw HTTP/WS"| Proxy["gateway devserver-proxy"]
-  Proxy -->|"{user}.devserver.chan.app/{slug}-{8hex}/"| Browser["browser"]
+  Proxy -->|"{owner}--{disc}.{proxy}.usr.{domain}/{slug}-{8hex}/"| Browser["browser"]
   Proxy -.->|"404s /api/devserver/*"| Mgmt
   classDef core fill:#eef,stroke:#557;
   class Host core;
@@ -174,10 +176,10 @@ Three surfaces ride one `WorkspaceHost`: local management (bearer), the per-user
 
 The devserver wraps the host in two surfaces:
 
-- A management HTTP/JSON API under the reserved `/api/devserver/*` namespace. It lists, mounts, and forgets workspaces and opens standalone terminals. Workspace tenants mount at their public slug, with `api` reserved and colliding workspace slugs rejected inside a devserver. Standalone terminal tenants keep opaque launcher-local prefixes rather than public workspace slugs.
+- A management HTTP/JSON API under the reserved `/api/devserver/*` namespace. It lists, mounts, and forgets workspaces and opens standalone terminals. Workspace tenants mount at their keyed pathspec `/{slug}-{8hex}` with `api` reserved; the hash suffix keys the prefix to the canonical root, so same-basename workspaces get distinct prefixes and both mount. Standalone terminal tenants keep opaque launcher-local prefixes rather than public workspace pathspecs.
 - A per-user Unix discovery socket. When a devserver is running on a box, a `chan open PATH` there registers its workspace with the running devserver and exits instead of binding a second listener, so the devserver keeps the single-writer flock. Discovery is a well-known per-user endpoint, separate from per-process MCP/control sockets and from the desktop handoff. It is Unix-only; other targets resolve to "no devserver" and the CLI stays standalone. The registration handshake carries a protocol version, and a mismatch falls back to standalone rather than decoding an unknown shape. `chan open --standalone` forces a standalone bind and skips both handoff paths.
 
-Optionally, `chan devserver --tunnel-token <PAT>` also publishes the whole library through the gateway (see "Bind vs tunnel"): the foreground devserver hands the SAME devserver router to `chan_tunnel_client`, registering ONE devserver at `{user}.devserver.chan.app`. The management API rides the same router but the proxy 404s `/api/devserver/*` on the public wildcard, so only tenant content (`/{slug}/...`) is reachable through the gateway; the owner manages the devserver over the direct (host:port / `ssh -L`) connection. Tunnel mode is foreground-only -- combined with `--service=systemd`/`--service=launchd` it is refused, since the supervised backend would have to persist the token in the unit file / launchd plist.
+Optionally, `chan devserver --tunnel-token <PAT>` also publishes the whole library through the gateway (see "Bind vs tunnel"): the foreground devserver hands the SAME devserver router to `chan_tunnel_client`, registering ONE devserver whose public tenant origin is `{owner}--{disc}.{proxy}.usr.{domain}`. The management API rides the same router but the proxy 404s `/api/devserver/*` on the public wildcard, so only tenant content (`/{slug}-{8hex}/...`) is reachable through the gateway; the owner manages the devserver over the direct (host:port / `ssh -L`) connection. Tunnel mode is foreground-only -- combined with `--service=systemd`/`--service=launchd` it is refused, since the supervised backend would have to persist the token in the unit file / launchd plist.
 
 What was mounted survives a restart. The enabled workspace roots and the devserver bearer token persist in `~/.chan/devserver/config.json` (0600); the enabled set is re-mounted on the next start, and the reused token keeps a reconnecting client working. Per-window pane and tab layout is not persisted by the devserver: each tenant is a full workspace mount that stores its own per-window SPA session, so a reconnecting client re-hydrates its panes from the tenant. Terminal PTY contents reset across a restart because PTYs are fresh processes.
 

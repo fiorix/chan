@@ -1,5 +1,5 @@
-//! Reverse proxy for `*.devserver.chan.app/{workspace}/...` into the
-//! `chan devserver` peer behind the registered tunnel.
+//! Reverse proxy for the node wildcard (`{user}--{disc}.p1.usr.chan.app/{workspace}/...`)
+//! into the `chan devserver` peer behind the registered tunnel.
 //!
 //! `{user}` and the optional `{disc}` (first 12 hex chars of a
 //! devserver id, in the `{user}--{disc}` host form) are parsed out of
@@ -30,14 +30,14 @@
 //! mints entry tokens only after calling `profile.devserver_access(owner,
 //! devserver, caller)`, so a validly-signed entry with the right aud and drv
 //! proves the caller is authorized, owner or accepted grantee. The aud
-//! claim (= `{owner}.devserver.chan.app`) is what enforces tenant isolation;
+//! claim (= the tenant host, `{owner}--{disc}.p1.usr.chan.app`) is what enforces tenant isolation;
 //! comparing `sub` against the cached owner would lock out every grantee.
 //!
 //! 404 is preferred over 401 / 403 on the proxy path so an
 //! unauthenticated probe cannot distinguish "devserver does not exist"
 //! from "devserver exists but you are not signed in" or "wrong devserver in
 //! the cookie." Owners returning after the one-hour maximum session expires bounce
-//! through the id.chan.app dashboard.
+//! through the gateway dashboard on the identity origin.
 //!
 //! Two transports, both ride a fresh yamux substream opened on the
 //! registered `TunnelHandle`:
@@ -166,7 +166,7 @@ impl http_body::Body for DeadlineBody {
 }
 
 /// Cookie name for the session-shape devserver-gate token. Host-only on
-/// `{user}.devserver.chan.app`; `Path=/`; HttpOnly; Secure; SameSite=Lax;
+/// the tenant host (`{user}--{disc}.p1.usr.chan.app`); `Path=/`; HttpOnly; Secure; SameSite=Lax;
 /// Absolute proxy-local session lifetime. The `__Host-` prefix makes the
 /// browser enforce exactly that shape (Secure, no `Domain`, `Path=/`), so
 /// a parent-domain cookie of the same name can never shadow it (A11).

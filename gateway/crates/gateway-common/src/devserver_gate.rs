@@ -6,8 +6,8 @@
 //! Entry credentials are carried only in a bounded POST body to the fixed
 //! exchange path and expire after 30 seconds. The proxy verifies Ed25519,
 //! consumes the random `jti` once, then returns a host-only opaque session
-//! cookie. `aud` binds the token to the wildcard
-//! host (`alice.devserver.chan.app`) so a token minted for one user is
+//! cookie. `aud` binds the token to the tenant
+//! host (`alice--0123456789ab.p1.usr.chan.app`) so a token minted for one user is
 //! not accepted on another user's subdomain. `drv` binds it to one
 //! live devserver registration for the same reason.
 

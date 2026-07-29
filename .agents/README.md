@@ -35,7 +35,7 @@ The Rust toolchain is pinned in `rust-toolchain.toml` (1.95.0). `cargo` auto-ins
 
 ## Documentation
 
-- **Design and architecture**: [`design.md`](../design.md). Single load-bearing reference for the workspace layout and the chan-workspace contract.
+- **Design and architecture**: [`design.md`](../design.md). Single load-bearing reference for the workspace layout and the chan-workspace contract. The full per-crate design-doc index, by category, is in the root [`README.md`](../README.md).
 - **chan-workspace design**: [`crates/chan-workspace/design.md`](../crates/chan-workspace/design.md). Read before proposing chan-workspace changes.
 - **chan-tunnel-proto design**: [`crates/chan-tunnel-proto/design.md`](../crates/chan-tunnel-proto/design.md).
 - **Issue tracker**: GitHub repo `fiorix/chan`.

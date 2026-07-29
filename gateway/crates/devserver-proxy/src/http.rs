@@ -44,10 +44,10 @@ pub fn router(
         // host-specific and wildcard tenant traffic shares this listener.
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        // Single fallback that dispatches on the Host header. Apex
-        // (devserver.chan.app) only carries health/readiness; everything
-        // else 404s. Wildcard ({user}.devserver.chan.app) hands off to
-        // the proxy module.
+        // Single fallback that dispatches on the Host header. The node
+        // apex (p1.usr.chan.app) only carries health/readiness; everything
+        // else 404s. The node wildcard ({user}--{disc}.p1.usr.chan.app)
+        // hands off to the proxy module.
         .fallback(dispatch)
         .with_state(state)
         .layer(TraceLayer::new_for_http())

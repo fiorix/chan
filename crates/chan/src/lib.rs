@@ -634,7 +634,8 @@ enum Command {
         /// CHAN_TUNNEL_URL env var for supervised or scripted deployments.
         #[arg(long, env = "CHAN_TUNNEL_URL", verbatim_doc_comment)]
         tunnel_url: Option<String>,
-        /// Personal access token (chan_pat_*) from id.chan.app. Setting this
+        /// Personal access token (chan_pat_*) from the gateway identity
+        /// origin (gw.chan.app for the hosted gateway). Setting this
         /// enables tunnel mode: the devserver dials the gateway and publishes
         /// every mounted workspace behind one registration. The devserver
         /// identity is resolved backend-side from the token; the display

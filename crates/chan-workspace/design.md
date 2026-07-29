@@ -52,7 +52,7 @@ flowchart TB
 ```
 
   - `Library` is a per-machine handle. Apps construct one at startup and keep it alive. It owns the registry and the config-file path.
-  - `Workspace` is one registered directory. Holds the writer lock for its lifetime; cheap reads (search query, graph traversal) do not contend. Lazily initializes search, graph, and report state on first use via `OnceLock`.
+  - `Workspace` is one registered directory. Holds the writer lock for its lifetime; cheap reads (search query, graph traversal) do not contend. Search and graph sidecars are metadata-opened during construction; `OnceLock` retries on first use only when that probe failed. Report state stays lazy.
   - `WatchHandle` owns a supervised watcher lifecycle. `health()` exposes starting, healthy, degraded, and stopped state with failure and retry counters; partial registration returns a degraded handle that retries; `stop()`, `join()`, and drop all synchronously reclaim the watcher thread and descriptors.
   - `GraphIndexer` is the built-in consumer of the watcher: a worker thread that debounces per-path events into `index_file` / `forget_file` / `reconcile` calls.
 
@@ -73,9 +73,9 @@ The registry also holds two global, hand-edited policy fields: `index_excluded_d
 
 `Library::sweep_orphans` reconciles the on-disk sidecar namespace against the registry: any entry whose key is not in the current metadata-key set is reclaimed. Used to clean up after unregisters that left state behind, or after a `move_workspace`-then-deleted-at-new-location workflow.
 
-`reset_workspace` wipes per-workspace chan-managed state (search index, graph DB, session blobs, app tokens). It never touches the user's notes tree. The trash is preserved (it holds user-deleted files, recoverable user data, not chan-managed cache). The lock dir is preserved (cross-process coordination, no data). `ResetMode::Everything` additionally drops the registry entry so the next `open_workspace` against the path treats it as a fresh, never-seen workspace.
+`reset_workspace` wipes per-workspace chan-managed state (search index, graph DB, session blobs, app tokens, persisted report). It never touches the user's notes tree. The trash is preserved (it holds user-deleted files, recoverable user data, not chan-managed cache). The lock dir is preserved (cross-process coordination, no data). `ResetMode::Everything` additionally drops the registry entry so the next `open_workspace` against the path treats it as a fresh, never-seen workspace.
 
-Precondition: caller must drop any open `Arc<Workspace>` for the target root first. `reset_workspace` acquires the writer lock to verify exclusive access; if any process (including the caller) holds it, the call fails with `WorkspaceLocked`. On Unix this is defense-in-depth (open files survive unlink); on Windows it is load-bearing because removing files-in-use fails. Skeleton recreation happens lazily on the next `open_workspace` plus first `index()` / `graph()` access; no explicit init step.
+Precondition: caller must drop any open `Arc<Workspace>` for the target root first. `reset_workspace` acquires the writer lock to verify exclusive access; if the caller still holds a handle the call fails with `WorkspaceAlreadyOpen`, and a foreign-process holder fails with `WorkspaceLocked`. On Unix this is defense-in-depth (open files survive unlink); on Windows it is load-bearing because removing files-in-use fails. Skeleton recreation happens lazily on the next `open_workspace` plus first `index()` / `graph()` access; no explicit init step.
 
 Registration is idempotent: re-registering an existing workspace only updates `last_seen_at` and preserves the metadata key.
 
@@ -161,7 +161,7 @@ Deliberately not included:
 
 ### Search index
 
-`tantivy` 0.24 backs the per-workspace index in sidecar state. BM25 runs over `path`, `filename`, `headings`, and `body`. Schema version lives in the `schema_version` field of the `IndexConfig` struct (alongside the embedding model id and the chunking strategy). Mismatched versions trigger a wipe and full rebuild on next open; user data is unaffected.
+`tantivy` 0.24 backs the per-workspace index in sidecar state. BM25 runs over `heading` and `body`; the schema also stores `path` and `chunk_id` as exact-match fields for delete-by-path and hit attribution. Schema version lives in the `schema_version` field of the `IndexConfig` struct (alongside the embedding model id and the chunking strategy). Mismatched versions trigger a wipe and full rebuild on next open; user data is unaffected.
 
 The index config also persists `excluded_dirs`, the per-workspace additions to the walk filter. Presentation and feature toggles live separately in `dashboard.toml`: `semantic_enabled` (hybrid-search opt-in, default false), `reports_enabled` (chan-report opt-in, default true), and the screensaver settings (`screensaver_enabled`, timeout, theme, and a base64-encoded PIN hash that is stored without interpretation and never echoed back over the wire). `Workspace` exposes typed accessors for these settings; dashboard writes serialize through one mutex and use the same atomic-write primitive as the index config.
 
@@ -173,7 +173,7 @@ Chunking is configurable per-index via `Chunking` (`Headings`, `WholeDoc`, `Fixe
 
 `reindex` is synchronous and blocking. It runs on the calling thread; the caller decides whether to spawn a worker. `reindex_with` accepts a progress callback driven by `ProgressStage` events; `reindex_with_aggression` additionally takes a `SearchAggression`. All flavors return `BuildSummary`. This keeps the API uniffi-clean and avoids leaking an async runtime through the FFI boundary.
 
-`Index::build_all` runs the per-file read + markdown chunking on a bounded thread pool. Worker count comes from `SearchAggression`: `Conservative` pins one reader, `Balanced` (the default) uses `available_parallelism - 2` clamped to [1, 6], `Aggressive` uses `available_parallelism - 1` clamped to [1, 8]. The file-descriptor budget (`fd_budget`) can cap the count further and paces workers when the process is near its `nofile` limit: the crate runs inside the editor process, where macOS commonly starts with a soft limit of 256, and an eager SQLite pool plus Tantivy fanout can otherwise exhaust the table during first boot on a large workspace. Workers ship parsed chunks to the main thread over a bounded `sync_channel` (workers * 4); the main thread is the only writer into tantivy and the only producer of embed batches, so writer-mutex contention and embed ordering stay simple. Cores are held back so the server's tokio runtime and the OS UI thread keep breathing during a reindex of a large workspace. Progress ticks remain monotonic from the consumer's perspective even when worker completions land out of order.
+`Index::build_all` runs the per-file read + markdown chunking on a bounded thread pool. Worker count comes from `SearchAggression`: `Conservative` pins one reader, `Balanced` (the default) uses `available_parallelism - 2` clamped to [1, 6], `Aggressive` uses `available_parallelism - 1` clamped to [1, 8]. The file-descriptor budget (`fd_budget`) can cap the count further and paces workers when the process is near its `nofile` limit: the crate runs inside the editor process, where macOS commonly starts with a soft limit of 256, and an eager SQLite pool plus Tantivy fanout can otherwise exhaust the table during first boot on a large workspace. Workers ship parsed chunks to the main thread over a bounded `sync_channel` (workers * 2 / 4 / 8 for Conservative / Balanced / Aggressive); the main thread is the only writer into tantivy and the only producer of embed batches, so writer-mutex contention and embed ordering stay simple. Cores are held back so the server's tokio runtime and the OS UI thread keep breathing during a reindex of a large workspace. Progress ticks remain monotonic from the consumer's perspective even when worker completions land out of order.
 
 #### Unified workspace search
 
@@ -220,7 +220,7 @@ flowchart TB
   Final -.->|"tail flush"| Shards
 ```
 
-*build_all fans file reads across an fd-budget-capped, SearchAggression-sized worker pool, funnels parsed chunks through a bounded sync_channel to the single main-thread writer that commits BM25 per flush and runs EMBED_BATCH embed passes into per-file vector shards.*
+*build_all fans file reads across an fd-budget-capped, SearchAggression-sized worker pool, funnels parsed chunks through a bounded sync_channel to the single main-thread writer that commits BM25 per flush and runs embed passes in embed_batch_chunks-sized flushes into per-file vector shards.*
 
 #### Embed-phase checkpointing
 
@@ -230,9 +230,9 @@ Each per-file shard under `embeddings/` carries its own `FORMAT_VERSION` (curren
 
 #### Embed batch cadence and the CPU backend
 
-`build_all` accumulates parsed chunks across files and flushes them to the embedder in `EMBED_BATCH_CHUNKS`-sized groups (the value comes from `SearchAggression::budget()`: 64 / 128 / 256 chunks for Conservative / Balanced / Aggressive). Each flush first commits the BM25 writer, then runs one blocking forward pass over the batch and writes the resulting per-file vector shards. Committing per flush is what makes `indexed_vectors`, the `reindex_with` progress events, and the BM25→hybrid search upgrade advance incrementally as a long cold build runs, instead of landing only when the whole pass returns: a large cold reindex would otherwise report zero vectors and a frozen progress chip for the minutes the embed takes. The cadence is deliberately kept below a typical workspace's chunk count (chunks-per-file is usually ~10), so a cold build commits in several visible steps rather than one tail flush. The batch size is a flush/commit cadence only -- the embedder always runs `INFER_BATCH`-sized forward passes internally -- so it carries no embedding-throughput cost.
+`build_all` accumulates parsed chunks across files and flushes them to the embedder in `EMBED_BATCH_CHUNKS`-sized groups (the value comes from `SearchAggression::budget()`: 64 / 128 / 256 chunks for Conservative / Balanced / Aggressive). Each flush first commits the BM25 writer, then runs one blocking forward pass over the batch and writes the resulting per-file vector shards. Committing per flush is what makes `indexed_vectors`, the `reindex_with` progress events, and the BM25->hybrid search upgrade advance incrementally as a long cold build runs, instead of landing only when the whole pass returns: a large cold reindex would otherwise report zero vectors and a frozen progress chip for the minutes the embed takes. The cadence is deliberately kept below a typical workspace's chunk count (chunks-per-file is usually ~10), so a cold build commits in several visible steps rather than one tail flush. The batch size is a flush/commit cadence only -- the embedder always runs `INFER_BATCH`-sized forward passes internally -- so it carries no embedding-throughput cost.
 
-Embedding runs on CPU by default: the candle Metal backend exhausts GPU memory and stalls on large workspaces, so the GPU path is opt-in via `CHAN_ENABLE_GPU=1`. On macOS the CPU path links Apple's Accelerate framework as candle's BLAS backend -- the target-gated `accelerate` feature, wired alongside `metal` under `cfg(target_os = "macos")` -- routing bge-small's matmuls through Accelerate's `sgemm` for a measured ~1.5–2× cold-reindex speedup over candle's default SIMD-threaded `gemm` (modest because the default is already vectorized, and the forward pass also spends time in non-matmul ops). The feature pulls the Apple-only `accelerate-src`, so the static-musl Linux release binary structurally cannot pull it in.
+Embedding runs on CPU by default: the candle Metal backend exhausts GPU memory and stalls on large workspaces, so the GPU path is opt-in via `CHAN_ENABLE_GPU=1`. On macOS the CPU path links Apple's Accelerate framework as candle's BLAS backend -- the target-gated `accelerate` feature, wired alongside `metal` under `cfg(target_os = "macos")` -- routing bge-small's matmuls through Accelerate's `sgemm` for a measured ~1.5-2x cold-reindex speedup over candle's default SIMD-threaded `gemm` (modest because the default is already vectorized, and the forward pass also spends time in non-matmul ops). The feature pulls the Apple-only `accelerate-src`, so the static-musl Linux release binary structurally cannot pull it in.
 
 #### Generated index scope
 
@@ -270,7 +270,7 @@ The same normalizer ships as a hand-port to TS for the editor's click handler so
 
 #### Link autocomplete (`[[`)
 
-`link_targets` backs the editor's `[[` typeahead: the user types a fragment and gets back files plus headings to anchor a wiki link to. The graph DB is the source of truth (`nodes` for files, `headings` for in-file anchors); BM25 over filename and heading text in the search index serves a parallel purpose for free-text search but is not used for the picker.
+`link_targets` backs the editor's `[[` typeahead: the user types a fragment and gets back files plus headings to anchor a wiki link to. The graph DB is the source of truth (`nodes` for files, `headings` for in-file anchors); BM25 over heading and body text in the search index serves a parallel purpose for free-text search but is not used for the picker.
 
 Each link target is either a file or a heading. Both carry the file path; file targets may include title and mtime, while heading targets carry heading text, anchor, and depth. This shape lets the picker render a single mixed list without issuing a second query for heading metadata.
 
@@ -373,7 +373,7 @@ The chan-llm tool sandbox (and the MCP server it backs) exposes contact lookup t
 
 ### Teams config
 
-`teams` is a schema-only module: `TeamConfig` (team name, host name/handle, terminal tab group, `@`-prefix policy, MCP-env opt-in) plus `Member` / `Position`. The struct is persisted to a `config.toml` next to the team's working files and consumed by chan-server's `/api/team-config` route; chan-workspace owns the shape so serialization stays uniform across consumers, but no team behavior lives here.
+`teams` is a schema-only module: `TeamConfig` (team name, host name/handle, terminal tab group, `@`-prefix policy, MCP-env opt-in) plus `Member` / `Position`. The struct is persisted to a `config.toml` next to the team's working files and consumed by chan-server's `/api/team-config/read` and `/api/team-config/write` routes; chan-workspace owns the shape so serialization stays uniform across consumers, but no team behavior lives here.
 
 ## 4. Interface contracts
 

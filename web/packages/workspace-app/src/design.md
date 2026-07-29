@@ -4,10 +4,10 @@ Design reference for the chan web frontend: first the two web SPAs and how each 
 
 ## Two web frontends
 
-chan ships **two** Svelte 5 + Vite web SPAs, both embedded into chan-server as bundles and both built on the color system below:
+chan ships **three** Svelte 5 + Vite web SPAs: the gateway profile SPA (`@chan/profile`, served by the gateway identity service), plus the two below, embedded into chan-server as bundles and built on the color system below:
 
 - **The main SPA** is served as the workspace tenant fallback. The server stamps boot metadata for the URL mount prefix and whether Settings is disabled, so a reverse-proxied instance builds correct `/api` URLs and can grey restricted controls.
-- **The launcher SPA** is served at the host/library root `/` through the `WorkspaceHost` root fallback. It reads `<meta name="chan-launcher-surface">` to derive registry-mutation, desktop-bridge, and self-managed-window capabilities. The launcher is reached on **all three surfaces** -- devserver/tunnel, gateway-proxied (`{owner}.devserver.chan.app/`), and desktop loopback -- the same bundle per-surface installed, with per-surface auth (None tunnel-trust / Some loopback window token) and a read-only-gateway vs full-loopback workspace-mutation split. Its serving and auth contract is documented in the launcher design doc.
+- **The launcher SPA** is served at the host/library root `/` through the `WorkspaceHost` root fallback. It reads `<meta name="chan-launcher-surface">` to derive registry-mutation, desktop-bridge, and self-managed-window capabilities. The launcher is reached on **all three surfaces** -- devserver/tunnel, gateway-proxied (`{owner}--{disc}.{proxy}.usr.{domain}/`), and desktop loopback -- the same bundle per-surface installed, with three surfaces (desktop / devserver / readonly) derived from that meta, and owner-vs-grantee mutation over the gateway enforced by the proxy's signed assertion. Its serving and auth contract is documented in the launcher design doc.
 
 The two are complementary: the launcher is the cross-workspace registry (pick / add / toggle a workspace, mint a window), and opening a workspace window lands the user in the main SPA. Both honor the theme axes + canonical palette below, so a launcher served over a tunnel and the workspace UI on loopback read identically.
 
@@ -17,7 +17,7 @@ flowchart TB
         WAPP["workspace app · editor · file browser · graph · terminals · dashboard<br/>over /api/* (files · drafts · index · contacts · config · fs/transfer · /ws)<br/>reads &lt;meta chan-prefix&gt; + &lt;meta chan-settings-disabled&gt;"]
     end
     subgraph launcher["launcher SPA (the registry)"]
-        LAPP["TopBar · WorkspaceList · WindowFeed · NewWorkspaceDialog<br/>pure /api/library/* client (workspaces · windows · devservers)<br/>reads &lt;meta chan-launcher-surface&gt; → gates capabilities"]
+        LAPP["TopBar · ScreenFlip (Library | Gateways) · SelectionBar · NewWorkspaceDialog<br/>pure /api/library/* client (workspaces · windows · devservers · gateways)<br/>reads &lt;meta chan-launcher-surface&gt; -> gates capabilities"]
     end
     subgraph cs["chan-server -- two embedded bundles"]
         WEBA["workspace bundle<br/>static fallback + injected boot metadata (workspace tenant)"]
@@ -27,8 +27,8 @@ flowchart TB
     LAPP -->|served by| LAUNA
     subgraph surfaces["the launcher is served on all 3 surfaces (same bundle)"]
         direction LR
-        DEV["devserver / tunnel<br/>auth None (tunnel-trust) · workspaces read-only"]
-        GW["gateway-proxied<br/>{owner}.devserver.chan.app/ via devserver-proxy · read-only"]
+        DEV["devserver loopback<br/>auth Some(devserver token) · full mutation; tunnel non-owners read-only"]
+        GW["gateway-proxied<br/>{owner}--{disc}.{proxy}.usr.{domain}/ via devserver-proxy · read-only for non-owners"]
         LOOP["desktop loopback<br/>auth Some(window token) · full mutation"]
     end
     LAUNA --- DEV
@@ -40,7 +40,7 @@ flowchart TB
 
 Both SPAs also run with **no backend** on the public marketing site (`@chan/marketing`), so `chan.app` visitors get a live, interactive product tour instead of screenshots. This is a third serving path: not chan-server, but the static site embedding the *same* Svelte apps against in-memory mocks. Nothing is extracted or forked -- the terminal, editor, graph, and file browser stay in this package and are reused whole.
 
-The launcher demo came first: `@chan/launcher/demo` renders the real launcher `App` with `setBackend(createLauncherDemoApi())`, a backend-interface swap. The workspace app has no single backend interface (it hits `fetch` and WebSocket across ~65 endpoints and three sockets), so its demo swaps one level lower, at the **transport seam**: `api/transport.ts` routes every HTTP call through `chanFetch` and every socket through `createSocket`, both defaulting to the real `fetch` / `WebSocket`. A demo installs replacements before mount (`setFetchImpl` / `setSocketFactory`); the in-memory mock lives in `src/demo/` (store, router, graph, search, fake PTY) and is seeded from `demo-workspace.json`, a build-time snapshot of a git repo. The default path is unchanged, so the two chan-server-embedded bundles above are byte-identical; only the demo installs a mock. `src/demo/graph.ts` reproduces chan-server's `/api/graph` node/edge id schemes and directory spine so the graph view cannot tell the sources apart.
+The launcher demo came first: `@chan/launcher/demo` renders the real launcher `App` with `setBackend(createLauncherDemoApi())`, a backend-interface swap. The workspace app has no single backend interface (it hits `fetch` and WebSocket across ~70 endpoints and six sockets), so its demo swaps one level lower, at the **transport seam**: `api/transport.ts` routes every HTTP call through `chanFetch` and every socket through `createSocket`, both defaulting to the real `fetch` / `WebSocket`. A demo installs replacements before mount (`setFetchImpl` / `setSocketFactory`); the in-memory mock lives in `src/demo/` (store, router, graph, search, fake PTY) and is seeded from `demo-workspace.json`, a build-time snapshot of a git repo. The default path is unchanged, so the two chan-server-embedded bundles above are byte-identical; only the demo installs a mock. `src/demo/graph.ts` reproduces chan-server's `/api/graph` node/edge id schemes and directory spine so the graph view cannot tell the sources apart.
 
 The workspace demo bundle (plus its multi-MB snapshot) is a **lazy chunk**: the landing page ships only the launcher; clicking any window tile dynamic-imports the workspace app and opens it in `WorkspaceDemoOverlay`. So the heavy editor / graph / terminal bundle never touches the marketing page load.
 

@@ -50,7 +50,7 @@ flowchart TD
 
 ## Tunnel registration and admission
 
-The tunnel listener runs `CapturingValidator -> ThrottlingValidator -> IdentityValidator` before controller admission. Identity validation returns immutable `owner_user_id`, canonical username and devserver id, a short-lived admission lease bound to the proposed registration and proxy, the signed positive `max_connected_devservers`, and the per-tunnel assertion authority. The proxy verifies the admission lease locally under `DEVSERVER_ADMISSION_VERIFYING_KEYS` before publishing any row. The raw PAT is used only during validation and lease refresh; it is never sent to devserver-control or retained as a proxy-wide credential.
+The tunnel listener runs `ThrottlingValidator -> IdentityValidator` before controller admission. Identity validation returns immutable `owner_user_id`, canonical username and devserver id, a short-lived admission lease bound to the proposed registration and proxy, the signed positive `max_connected_devservers`, and the per-tunnel assertion authority. The proxy verifies the admission lease locally under `DEVSERVER_ADMISSION_VERIFYING_KEYS` before publishing any row. The raw PAT is used only during validation and lease refresh; it is never sent to devserver-control or retained as a proxy-wide credential.
 
 The listener generates the registration UUID. The control session sends the lease and exact registration tuple to devserver-control and waits. Only an `Admit` decision permits `HelloAck::Ok` and registry insertion. `AtCapacity` maps to `too_many_workspaces`; warming, stale, or unavailable authority maps to `control_unavailable`. There is no local admission fallback.
 

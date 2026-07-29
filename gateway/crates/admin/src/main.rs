@@ -2166,8 +2166,7 @@ async fn proxy_cmd(c: &WorkspaceClient, json: bool, cmd: ProxyCmd) -> anyhow::Re
 /// `parse` decodes one event payload into the row set plus its
 /// renderer, returning `None` to skip a malformed event. Plain text
 /// mode clears the screen between renders so the output looks like
-/// `top`; --json mode emits one JSON line per event so it pipes into
-/// jq cleanly.
+/// `top`; --json mode emits one prettified JSON document per event.
 async fn watch_loop<T: serde::Serialize>(
     res: reqwest::Response,
     json: bool,

@@ -1,4 +1,4 @@
-//! identity-service: OAuth2 sign-in and session for id.chan.app.
+//! identity-service: OAuth2 sign-in and session for the gateway identity origin (gw.{domain}).
 //!
 //! Owns the auth-artifact tables in Postgres directly
 //! (`tower_sessions`, `api_tokens` and their audit log). User /

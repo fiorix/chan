@@ -12,7 +12,7 @@ In scope:
   - The `cs` clap surface (`ShellAction` / `TerminalAction` and their subcommand trees) and the `dispatch` that turns each parsed action into one control-socket round-trip.
   - The control-socket transport: connect, write one JSON request line, read one JSON response line, over a per-user Unix-domain socket on unix and a named pipe on windows.
   - The agent submit-chord map: the per-agent PTY byte sequences that make a coding agent submit its compose buffer hands-free, plus the spawn-command -> agent derivation. Compiled even without the client feature, because chan-server's team spawner applies the chord server-side.
-  - Named client exit codes (the `cs terminal survey --timeout` 124 path) and the typed error that carries one to the dispatch edge.
+  - Named client exit codes (the 124 timeout path and the 69 submit-refused path) and the typed errors that carry them to the dispatch edge.
   - The `arg0` stem checks (`invoked_as_cs` / `invoked_as_chan`) so the `cs` / `chan` alias rewrite is recognized identically by the `chan` binary and by chan-desktop, including under an AppImage `exec -a` shim.
 
 Out of scope, owned by chan-server:
@@ -38,7 +38,7 @@ sequenceDiagram
   SOCK->>SRV: decode, match on the `type` tag
   SRV->>T: act on the resolved target
   T-->>SRV: result (or a parked reply for a blocking request)
-  SRV-->>SOCK: ControlResponse JSON line (status = ok|error|timeout)
+  SRV-->>SOCK: ControlResponse JSON line (status = ok|error|submit_refused|timeout|queue_full|export)
   SOCK-->>CS: one response line
   CS->>U: formatted output + process exit code
 ```
@@ -65,7 +65,7 @@ The split exists so chan-server can share the wire contract WITHOUT linking clap
 
   - chan-shell's own `default` feature is `client`, so a standalone `cargo build -p chan-shell` and the crate's own tests get the full surface.
   - The workspace dependency pin sets `default-features = false`. Every consumer therefore starts wire-only and opts the client layer back in explicitly. chan-server depends with the bare workspace pin (`chan-shell = { workspace = true }`) and gets just the serde types; `chan` and chan-desktop add `features = ["client"]`.
-  - The `client` feature gates the only heavy deps: clap, tokio, serde_json, anyhow, and toml. Wire-only chan-server pulls serde and nothing else, which keeps clap and the tokio transport out of the server binary.
+  - The `client` feature gates the only heavy deps: clap, tokio, serde_json, anyhow, toml, and base64. Wire-only chan-server pulls serde and nothing else, which keeps clap and the tokio transport out of the server binary.
   - The submit module is deliberately NOT behind `client`: `SubmitAgent`, `ResolvedSubmit`, the input-plan builder, `apply_submit_chord`, and `submit_writes` compile unconditionally, because the wire, terminal queue, and chan-server's direct team spawner share the same map. Only the `ValueEnum` parse impl for the `--submit` flag is `client`-gated, inside the module.
 
 ## 4. The wire model
@@ -104,7 +104,7 @@ Each family resolves its target a different way -- window-id push, registry look
   - Desktop window lifecycle through the in-process Tauri bridge the embedded server installs. `cs window new` / `open` / `rm` / `hide`. A standalone `chan open` has no desktop attached and refuses them.
   - Process and tenant teardown. `chan close` sends `Close { path, remove }`; the server decides scope from the path (a standalone serve exits; a multi-tenant host unmounts just that tenant).
 
-The response side is intentionally narrow: `Ok { message }`, `Error { message }`, or `Timeout { message }`. Structured replies (the `Identity` JSON for `chan ps`, the window-list rows, the session roster rows and the `session self` whoami record, the search hits, the pane layout, the pane-exec result, the team bootstrap script) ride as JSON or raw text inside `Ok.message`, and the CLI formats them -- markdown by default, `--json [--pretty]` for machine output. `Timeout` is split out from `Error` so the client maps an elapsed reply window to its own exit code instead of inferring it from a generic failure or a dropped socket.
+The response side is intentionally narrow: `Ok { message }`, `Error { message }`, `SubmitRefused { message }` (exit 69), `Timeout { message }`, `QueueFull { message }`, and `Export { out_path }`. Structured replies (the `Identity` JSON for `chan ps`, the window-list rows, the session roster rows and the `session self` whoami record, the search hits, the pane layout, the pane-exec result, the team bootstrap script) ride as JSON or raw text inside `Ok.message`, and the CLI formats them -- markdown by default, `--json [--pretty]` for machine output. `Timeout` is split out from `Error` so the client maps an elapsed reply window to its own exit code instead of inferring it from a generic failure or a dropped socket.
 
 `Identity` includes optional `workspace_root` and `metadata_key` fields. They are present for a mounted workspace tenant and omitted for terminal-only servers; old decoders tolerate their absence. The pair is the exact tenant identity used by `chan workspace search/graph` when a single process serves several roots.
 
@@ -116,7 +116,7 @@ The client transport layer resolves the environment, makes paths absolute, and r
 
 `send_control_request` is platform-neutral over a small `transport` module -- the only `#[cfg]`-split surface. On unix it connects a `UnixStream`; on windows it opens a named-pipe client (retrying `ERROR_PIPE_BUSY` and a momentarily-absent pipe under a bounded deadline so a genuinely-missing server still fails fast). Above that split the protocol is identical: serialize the request, append a newline, write it, half-close the write side, then read one response line. The `\n` frames the request, so the half-close is belt-and-suspenders rather than load-bearing.
 
-A `ControlResponse::Timeout` is converted into a typed `ControlTimeout` error instead of a generic `anyhow` bail. The dispatch edge downcasts it, prints the elapsed-window line, and exits `SURVEY_TIMEOUT` (124, matching GNU `timeout(1)`), so a caller can tell "no answer in time" apart from a real failure (exit 1) and a delivered answer (exit 0).
+A `ControlResponse::Timeout` is converted into a typed `ControlTimeout` error instead of a generic `anyhow` bail. The dispatch edge downcasts it, prints the elapsed-window line, and exits `CONTROL_TIMEOUT` (124, matching GNU `timeout(1)`), so a caller can tell "no answer in time" apart from a real failure (exit 1) and a delivered answer (exit 0).
 
 A connect that fails because the socket file is gone or refused means the chan window or server that spawned the terminal has exited, leaving a stale `$CHAN_CONTROL_SOCKET` (common after a devserver restart). The client reports that in plain words rather than surfacing a raw connect trace for a path the user never set by hand.
 
@@ -125,7 +125,7 @@ A connect that fails because the socket file is gone or refused means the chan w
 The control socket serves two server tenants, and a command's availability follows from what it needs. The server enforces it in one chokepoint (`terminal_tenant_refusal`) so the policy is table-testable in isolation:
 
 - Standalone (runs on both a standalone terminal and a workspace window): `dashboard`, `upload`, `download`, `copy`, `paste`, pathless `terminal new`, `terminal write`/`list`/`restart`/`close`/`scrollback`/`survey`, `window list`, and `pane`. Uploads and downloads are cwd/shell-uid scoped on a standalone terminal and workspace-relative in a workspace window.
-- Workspace-only (refused on a standalone terminal, which has no workspace): `open`, `graph`, `search`, `terminal new --path`, every `session` subcommand, and every `terminal team` form including `--script`. The refusals share one message family via `workspace_only_refusal`, and `cs open` additionally points at `chan open PATH`.
+- Workspace-only (refused on a standalone terminal, which has no workspace): `open`, `graph`, `search`, `export`, `terminal new --path`, every `session` subcommand, and every `terminal team` form including `--script`. The refusals share one message family via `workspace_only_refusal`, and `cs open` additionally points at `chan open PATH`.
 - Desktop-only (a separate axis): `window new`/`open`/`rm`/`hide` need the chan desktop app.
 
 The server gate reaches old `cs` binaries immediately (it lives server-side); only the friendlier client wording for a stale socket needs the new binary.
@@ -146,8 +146,8 @@ At one safe idle opportunity, the terminal drainer selects the maximal consecuti
 
 ## 7. Interface contracts
 
-The serde wire contract is always compiled and independent of the `client` feature: request tags use `type`, responses use `status`, and the response vocabulary is intentionally only `ok`, `error`, or `timeout`. SPA-facing payloads keep their camelCase/nullability rules from section 4.
+The serde wire contract is always compiled and independent of the `client` feature: request tags use `type`, responses use `status`, and the response vocabulary is `ok`, `error`, `submit_refused`, `timeout`, `queue_full`, and `export`. SPA-facing payloads keep their camelCase/nullability rules from section 4.
 
 The submit-chord map is also wire-layer state, not client-only code. chan-server applies the same agent derivation and write splitting that the `cs` client exposes, so server-spawned teams and terminal-side `cs terminal write --submit` stay byte-compatible.
 
-The `client` feature owns the clap surface and transport. Its flag names, `infer_subcommands` behavior, `$CHAN_CONTROL_SOCKET` / `$CHAN_WINDOW_ID` environment contract, path-absolutization before send, and alias detection for `cs` / `chan` are runtime-visible behavior. All current tab openers share `--window`, `--pane`, and `--side a|b`; team `--script` conflicts with those coordinates because preview mode opens no tabs. `cs pane list` and `cs terminal list` expose side A/B placement, with terminal sessions refreshing their pane/side/tab identity over the live terminal WebSocket when a mounted tab moves. A control request returning `Timeout` maps to the dedicated survey-timeout exit code; `Ok.message` remains the carrier for formatted text or embedded JSON.
+The `client` feature owns the clap surface and transport. Its flag names, `infer_subcommands` behavior, `$CHAN_CONTROL_SOCKET` / `$CHAN_WINDOW_ID` environment contract, path-absolutization before send, and alias detection for `cs` / `chan` are runtime-visible behavior. All current tab openers share `--window`, `--pane`, and `--side a|b`; team `--script` conflicts with those coordinates because preview mode opens no tabs. `cs pane list` and `cs terminal list` expose side A/B placement, with terminal sessions refreshing their pane/side/tab identity over the live terminal WebSocket when a mounted tab moves. A control request returning `Timeout` maps to the dedicated control-timeout exit code (124); `Ok.message` remains the carrier for formatted text or embedded JSON.

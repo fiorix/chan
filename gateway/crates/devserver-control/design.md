@@ -51,7 +51,7 @@ The first frame must be `ClientHello { protocol_version, package_version, proxy_
 
 On pass the controller answers `ServerHello { protocol_version, package_version, heartbeat_seconds: 5, dead_seconds: 15, grace_seconds: 30 }`. Server-to-proxy frames include snapshot/fleet readiness, admission decisions, registration kills, browser-session revocations, resync, heartbeat, and shutdown. Proxy-to-server frames include combined tunnel and browser-session snapshots, contiguous deltas, admission request/cancel, signed lease refresh, command and revocation results, and pong. Tunnel snapshots are capped at 128 rows per chunk, 2,048 rows and 2 MiB per proxy. Browser-session snapshots share the chunk bound and are capped at 100,000 rows and 32 MiB per proxy; aggregate browser state is capped at 500,000 rows and 128 MiB.
 
-Connection hygiene: the h2 handshake, first stream, and `ClientHello` each have a 10s deadline; the initial or resync snapshot has an absolute 30s deadline; at most 128 connections are in flight; a connection that opens extra streams gets 409 per stream and is shut down after 16 of them. One framed-reader task owns the inbound side because a length-prefixed read is not cancellation-safe mid-frame. Its queue is 64 frames and the established session accepts at most 32 frames in any one-second sliding window. A full maximum snapshot needs only 18 frames, so a compromised authenticated proxy is disconnected before it can continuously monopolize the shared actor queue.
+Connection hygiene: the h2 handshake, first stream, and `ClientHello` each have a 10s deadline; the initial or resync snapshot has an absolute 30s deadline; at most 128 connections are in flight; a connection that opens extra streams gets 409 per stream and is shut down after 16 of them. One framed-reader task owns the inbound side because a length-prefixed read is not cancellation-safe mid-frame. Its queue is 64 frames and the established session accepts at most 32 frames in any one-second sliding window. A full maximum tunnel snapshot needs only 18 frames, so a compromised authenticated proxy is disconnected before it can continuously monopolize the shared actor queue.
 
 ## Session lifecycle
 
@@ -181,19 +181,27 @@ Admin reads and SSE watches are served from republished `watch` snapshots rather
 
 ## Error model
 
-`StateError` is session-scoped. Only `NotReady` has an HTTP mapping; the rest reject the offending frame and close or resync the control session.
+`StateError` is session-scoped. Only `NotReady` and `AuthorityTemporarilyUnavailable` reach HTTP; the rest reject the offending frame and close or resync the control session.
 
-| Variant                    | Surface | Effect                                |
-|----------------------------|---------|---------------------------------------|
-| `NotReady`                 | admin   | 503 on reads, watches, kills          |
-| `StaleSession`             | session | frame rejected; superseded session    |
-| `ProxyNotJoining`          | session | snapshot on a non-joining session     |
-| `SnapshotTooLarge`         | session | snapshot exceeds 2,048 rows or 2 MiB  |
-| `DuplicateRegistration`    | session | duplicate registration id in snapshot |
-| `BrowserSessionSnapshotTooLarge` | session | tenant-session snapshot exceeds its bound |
-| `DuplicateBrowserSession`  | session | duplicate admin session id |
-| `ReconciliationInProgress` | session | snapshot refused; proxy retries       |
-| `InvalidPong`              | session | pong nonce not outstanding            |
+| Variant                           | Surface | Effect                                     |
+|-----------------------------------|---------|--------------------------------------------|
+| `NotReady`                        | admin   | 503 on reads, watches, kills               |
+| `AuthorityTemporarilyUnavailable` | admin   | 503 while an authoritative proxy reconnects |
+| `StaleSession`                    | session | frame rejected; superseded session         |
+| `ProxyNotJoining`                 | session | snapshot on a non-joining session          |
+| `DuplicateProxyId`                | session | second live connection for a proxy id      |
+| `SessionLimit`                    | session | live-session cap reached                   |
+| `FleetCapacity`                   | session | fleet row/byte cap reached                 |
+| `BootIdMismatch`                  | session | non-empty snapshot from a changed boot     |
+| `BootHistoryCapacity`             | session | remembered-boot cap reached                |
+| `SnapshotTooLarge`                | session | snapshot exceeds 2,048 rows or 2 MiB       |
+| `DuplicateRegistration`           | session | duplicate registration id in snapshot      |
+| `BrowserSessionSnapshotTooLarge`  | session | tenant-session snapshot exceeds its bound  |
+| `DuplicateBrowserSession`         | session | duplicate admin session id                 |
+| `ExpiredAdmissionLease`           | session | lease expired before mutation              |
+| `ExpiredBrowserSession`           | session | row expired before mutation                |
+| `ReconciliationInProgress`        | session | snapshot refused; proxy retries            |
+| `InvalidPong`                     | session | pong nonce not outstanding                 |
 
 `ActorError::Stopped` (the actor is gone) and any admin-side read failure map to 503 and are logged at warn level. While the controller warms, the entire admin tree fails closed at 503; there is no partial view. Kill outcomes map as above: `Confirmed` to 204 or 200, every shortfall to a 502 partial kill with the confirmed count, no match to 404. On the proxy listener, handshake failures answer plain HTTP statuses before the stream is established (405 wrong method, 404 wrong path, 401 bad bearer, 415 wrong content type); everything after that is a `Shutdown` frame with a reason string.
 

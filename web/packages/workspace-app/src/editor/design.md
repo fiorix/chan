@@ -12,7 +12,7 @@ Because the source is the single source of truth, the editor sidesteps a class o
 
 1. **Doc invariant.** `view.state.doc.toString()` is the markdown source. Always. No transform layer. Autosave writes it directly.
 
-2. **Token detection.** `syntaxTree(state).iterate({from, to, enter})` from `@codemirror/lang-markdown` + GFM, extended with two custom lezer parsers: `[[wikilink]]` (inline) and YAML frontmatter (block-start, so headings inside `---...---` are not promoted). Fenced code bodies parse with lazy-loaded per-language packs. Tokens that are not lezer nodes - `#tag`, `@@mention`, dates - are matched by regex in their own ViewPlugins, skipping code ranges.
+2. **Token detection.** `syntaxTree(state).iterate({from, to, enter})` from `@codemirror/lang-markdown` + GFM, extended with three custom lezer extensions: `[[wikilink]]` (inline), YAML frontmatter (block-start, so headings inside `---...---` are not promoted), and a ref-aware link interceptor so `[label with [inner]](path)` still forms the outer link. Fenced code bodies parse with lazy-loaded per-language packs. Tokens that are not lezer nodes - `#tag`, `@@mention`, dates - are matched by regex in their own ViewPlugins, skipping code ranges.
 
 3. **Decoration taxonomy.**
    - **Hide markers**: `Decoration.replace({})` over `*`, `**`, `~~`, `` ` ``, `[`, `](`, `)`, and `# ` heading prefixes. Blockquote `>`, list markers, `---` rules, and ```` ``` ```` fences are NOT hidden: the marker is the visual cue (Obsidian convention) and hiding `---` / fences makes the block structure harder to edit.
@@ -42,7 +42,7 @@ Because the source is the single source of truth, the editor sidesteps a class o
 
 9. **Fold** uses `@codemirror/language` `foldService` with a heading-aware computer. Heading detection has one source of truth: the lezer syntax tree. A line is a heading iff the tree resolves it to a non-empty `ATXHeading1..6` node, so a `#` inside a fenced block, a tilde fence, an indented fence, an inline code span, or frontmatter is never a heading; the gutter marker, the fold service, and the gutter click all read the same `headingLevelAt` / `headingFoldRange` helpers. A heading folds end-of-line -> start of the next `ATXHeading{<=n}` line (or doc end); the forward scan runs to doc end so it forces the parse past the lazy viewport (`ensureSyntaxTree`). Three recorded decisions: indented ATX headings (up to three leading spaces, CommonMark) fold, matching the tree; an empty heading (a bare `#` with no text, which lezer still parses as `ATXHeading1`) does not fold, since it has no section under it; and Setext headings (`===` / `---` underlines) are out of the fold gutter. The chevron gutter is custom (headings only): `foldGutter()` would chevron every foldable block because lang-markdown marks paragraphs, quotes, and fences foldable too. The same tree-based code-node guard stops the block-formatting chords (`setBlockKind`, `toggleLinePrefix` in `commands/format.ts`) from rewriting a fenced `#` comment.
 
-10. **Autosave** writes `view.state.doc.toString()` on `update.docChanged` to the bindable `value` prop. The echo guard prevents prop write-back from clobbering the caret, and the debounced autosave pipeline owns the server write. No serialize step. The write contract on `PUT /api/files/<path>` is server-authority per path: a read of the path returns `authority_version` + `disk_conflicted`, and a changed-content write echoes the `authority_version` it last saw (alongside `expected_mtime_ns`). The server answers `428 PRECONDITION_REQUIRED` when that authority precondition is required but missing, and `409` on a version mismatch, carrying `current_authority_version` + `current_mtime_ns`. A watcher event for a non-self write flags a "changed on disk" banner instead of auto-reloading; once a session goes dirty/conflicted, the divergence is resolved explicitly via `POST /api/session-conflicts/resolve` with `{action: reload | overwrite}`. A debounced localStorage mirror keyed by path is kept for hang-recovery.
+10. **Autosave** writes `view.state.doc.toString()` on `update.docChanged` to the bindable `value` prop. The echo guard prevents prop write-back from clobbering the caret, and the debounced autosave pipeline owns the server write. No serialize step. While a tab is attached to its doc session (`/api/doc/ws`), edits ride `@codemirror/collab` update logs (remote peers paint as cursors) and saves are flush confirmations; the debounced autosave + CAS `PUT` below is the fallback when the channel is unavailable. The write contract on `PUT /api/files/<path>` is server-authority per path: a read of the path returns `authority_version` + `disk_conflicted`, and a changed-content write echoes the `authority_version` it last saw (alongside `expected_mtime_ns`). The server answers `428 PRECONDITION_REQUIRED` when that authority precondition is required but missing, and `409` on a version mismatch, carrying `current_authority_version` + `current_mtime_ns`. A watcher event for a non-self write flags a "changed on disk" banner instead of auto-reloading; once a session goes dirty/conflicted, the divergence is resolved explicitly via `POST /api/session-conflicts/resolve` with `{action: reload | overwrite}`. A debounced localStorage mirror keyed by path is kept for hang-recovery.
 
 ## Decoration pipeline
 
@@ -81,7 +81,7 @@ flowchart TD
 
 ## Modes
 
-The file editor host owns a per-tab mode: `wysiwyg` | `source` | `pretty` | `table`. Markdown-class files (.md/.txt) pair WYSIWYG with source; JSON opens as a collapsible tree and CSV/TSV as an editable grid, each with source as the toggle. Any other text-kind file is source-only - source IS the sensible surface for a .py / .toml / Makefile. Source mode highlights by extension via the same lazy language packs.
+The file editor host owns a per-tab mode: `wysiwyg` | `source` | `pretty` | `table` | `canvas`. Markdown (.md) pairs WYSIWYG with source; Excalidraw scenes open as the interactive canvas board; JSON opens as a collapsible tree and CSV/TSV as an editable grid, each with source as the toggle. Any other text-kind file (.txt included) is source-only - source IS the sensible surface for a .py / .toml / Makefile. Source mode highlights by extension via the same lazy language packs.
 
 `FileEditorTab` picks the initial mode by file class, then toggles source against the single rendered surface each class pairs with; plain text is source-only.
 
@@ -89,9 +89,10 @@ The file editor host owns a per-tab mode: `wysiwyg` | `source` | `pretty` | `tab
 stateDiagram-v2
     [*] --> pick
     pick: open via defaultModeForPath(path, fileKind)
-    pick --> Markdown: md / txt
+    pick --> Markdown: md
     pick --> Json: json
     pick --> Csv: csv / tsv
+    pick --> Canvas: excalidraw
     pick --> Text: other text
 
     state "Markdown class" as Markdown {
@@ -116,6 +117,14 @@ stateDiagram-v2
         csvsrc: source surface
         table --> csvsrc: Show Source
         csvsrc --> table: Show Table
+    }
+
+    state "Excalidraw class" as Canvas {
+        [*] --> canvas
+        canvas: canvas board surface
+        canvassrc: source surface
+        canvas --> canvassrc: Show Source
+        canvassrc --> canvas: Show Canvas
     }
 
     Text: source only - no rendered toggle
@@ -160,7 +169,7 @@ The editor relies on three server contracts: file reads/writes with optimistic C
 
 ## Autosave and conflicts
 
-A keystroke flows through the echo guard and debounced autosave to `PUT /api/files/<path>`, carrying `expected_mtime_ns` + the last-read `authority_version`; a missing authority precondition returns 428, a version mismatch returns 409 and opens the conflict dialog, and a non-self `/ws` event only raises the changed-on-disk banner. A dirty/conflicted session is resolved explicitly through `POST /api/session-conflicts/resolve` (`reload` | `overwrite`).
+This is the detached/fallback path; an attached doc session replaces the PUT with collab pushes and flush confirmations. A keystroke flows through the echo guard and debounced autosave to `PUT /api/files/<path>`, carrying `expected_mtime_ns` + the last-read `authority_version`; a missing authority precondition returns 428, a version mismatch returns 409 and opens the conflict dialog, and a non-self `/ws` event only raises the changed-on-disk banner. A dirty/conflicted session is resolved explicitly through `POST /api/session-conflicts/resolve` (`reload` | `overwrite`).
 
 ```mermaid
 sequenceDiagram
@@ -206,4 +215,3 @@ sequenceDiagram
 
 - In-cell table editing: the grid atom is read-only; edits happen in the revealed pipe/dash source.
 - YAML highlighting inside frontmatter: the block is isolated and dimmed, the body is unstyled.
-- Collaborative editing is not implemented.

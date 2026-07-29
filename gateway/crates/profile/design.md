@@ -2,7 +2,7 @@
 
 ## Problem
 
-Other gateway services need a single, authoritative store for user identity. Two writers must not race when a user signs in for the first time on two providers concurrently; an admin block must revoke every live PAT in one operation and tear down the user's live yamux registrations fleet-wide via devserver-control; renames must be capped so the public `chan.app/{username}` namespace doesn't churn.
+Other gateway services need a single, authoritative store for user identity. Two writers must not race when a user signs in for the first time on two providers concurrently; an admin block must revoke every live PAT in one operation and tear down the user's live yamux registrations fleet-wide via devserver-control; renames must be capped so the public username namespace (`gw.{domain}/s/{username}`, the `{owner}--{disc}` host labels) doesn't churn.
 
 ## Architecture
 
@@ -13,8 +13,8 @@ Small axum service in front of Postgres. Schema:
 - `api_tokens (id, user_id, label, token_hash, expires_at, created_at, revoked_at, last_used_at, scopes)`
 - `api_token_audit (id, ts, token_id, action, ip, user_agent)`
 - `auth_audit (id, ts, user_id, action, ip, user_agent, note)`
-- `devservers (id, owner_user_id, devserver_id, label, created_at)` with `UNIQUE (owner_user_id, devserver_id)`. First-class entity for an owner's shareable devserver: lets the dashboard list a devserver that has no grants and no live tunnel yet, and acts as the FK target for grants. `devserver_id` is the lowercase hex SHA-256 of the owner's PAT (produced by identity); `label` mirrors the PAT label.
-- `devserver_grants (id, owner_user_id, devserver_id, grantee_email, grantee_user_id, role, created_at, accepted_at)` with `UNIQUE (owner_user_id, devserver_id, lower(grantee_email))` and an FK on `(owner_user_id, devserver_id)` -> `devservers` (cascade delete).
+- `devservers (id, owner_user_id, devserver_id, label, created_at, last_seen_at)` with `UNIQUE (owner_user_id, devserver_id)`. First-class entity for an owner's shareable devserver: lets the dashboard list a devserver that has no grants and no live tunnel yet, and acts as the FK target for grants. `devserver_id` is the lowercase hex SHA-256 of the owner's PAT (produced by identity); `label` mirrors the PAT label. A registry sweeper marks rows from the controller's live-tunnel snapshot and deletes rows offline longer than `DEVSERVER_RETENTION_MINUTES` (default 15m; 0 disables).
+- `devserver_grants (id, owner_user_id, devserver_id, grantee_email, grantee_user_id, created_at, accepted_at)` with `UNIQUE (owner_user_id, devserver_id, lower(grantee_email))` and an FK on `(owner_user_id, devserver_id)` -> `devservers` (cascade delete). A grant is one binary, shell-equivalent authority; there is no role column.
 - `feature_flags (key PK, description, default_enabled, created_at, updated_at)`: registry of named flags.
 - `feature_flag_overrides (flag_key, user_id, enabled, set_at, PRIMARY KEY (flag_key, user_id))`: per-user explicit enable/disable rows. The effective value for `(flag, user)` is the override row when present, else `default_enabled`.
 - `devserver_user_policies (user_id, enabled, max_connected_devservers, updated_at)`: durable, product-agnostic per-user tunnel policy. No row is the compatibility default; identity can require a row at deployment time.
@@ -65,7 +65,6 @@ erDiagram
         text devserver_id FK "UK part"
         text grantee_email "UK lower(email)"
         uuid grantee_user_id FK "nullable until claim"
-        text role "viewer or editor"
     }
     FEATURE_FLAGS {
         text key PK
@@ -119,7 +118,7 @@ Routes split into "service" and "admin" tiers, each gated by a distinct env var.
 3. If not, look up `users` by email (case-insensitive). If found, insert a new `identities` row pointing at the existing user.
 4. If still nothing, insert the user (with placeholder username) and the identity row in the same transaction.
 
-The single transaction is what closes the orphan window when two browser tabs race a first-time login. Concurrent calls can still collide on the unique indexes; a caller that retries on `23505` hits step 1 or step 2 on the retry and converges.
+The single transaction is what closes the orphan window when two browser tabs race a first-time login. Concurrent calls can still collide on the unique indexes; the handler retries internally (up to 3 attempts) on `23505` and converges on step 1 or 2.
 
 ### Deterministic placeholder usernames
 
@@ -166,15 +165,15 @@ A devserver is a row in `devservers` keyed on `(owner_user_id, devserver_id)`, w
 
 A grant gives a collaborator the WHOLE devserver (the whole library), not a single workspace: under ADR-0001 the path `{workspace}` segment is tenant routing only and never gates. A user shares their devserver with another user by email. Grants live in `devserver_grants` keyed on `(owner_user_id, devserver_id, lower(grantee_email))`:
 
-- The owner pre-seeds grants from id.chan.app's SPA *before* (or alongside) running `chan devserver --tunnel-token <pat>`. The grant row exists independently of any live tunnel.
+- The owner pre-seeds grants from the gateway dashboard SPA on `gw.{domain}` *before* (or alongside) running `chan devserver --tunnel-token <pat>`. The grant row exists independently of any live tunnel.
 - `grantee_user_id` is `NULL` until a sign-in is observed with a verified email matching `grantee_email`. Two resolution paths: (a) at grant-create time, if `users` already has a row for the email; (b) at OAuth-callback time, via `POST /v1/users/{id}/grants/claim` which identity-service calls with the union of the user's verified emails.
-- `role` is one of `viewer`, `editor`. Re-adding the same email on the same `(owner, devserver)` is idempotent: the SQL is `INSERT ... ON CONFLICT DO UPDATE SET role = EXCLUDED.role`, with `grantee_user_id` and `accepted_at` preserved via `COALESCE` so a role change does not re-pend an already-claimed grant.
+- Re-adding the same email on the same `(owner, devserver)` is idempotent: `INSERT ... ON CONFLICT DO UPDATE` preserves `grantee_user_id` and `accepted_at` via `COALESCE`, so a re-add never re-pends a claimed grant. There are no roles.
 
-Access decisions: identity-service calls `GET /v1/users/{owner}/devservers/{devserver_id}/access?as=<caller_user_id>` before minting a devserver-gate entry JWT, passing the devserver_id of the owner's live registration. The response is `{role: "owner"|"editor"|"viewer"}` on access, 404 otherwise. The 404 shape is shared with "unknown devserver": neither the access endpoint nor the share landing page leaks which devservers an owner is sharing. One `devserver_access` call is the single authorization assertion the gate needs.
+Access decisions: identity-service calls `GET /v1/users/{owner}/devservers/{devserver_id}/access?as=<caller_user_id>` before minting a devserver-gate entry JWT, passing the devserver_id of the owner's live registration. The response is `{access: true}` on access, 404 otherwise. The 404 shape is shared with "unknown devserver": neither the access endpoint nor the share landing page leaks which devservers an owner is sharing. One `devserver_access` call is the single authorization assertion the gate needs.
 
 devserver_id normalization: handler lowercases + trims and rejects anything that is not exactly 64 hex chars, the canonical SHA-256(PAT) shape. Email uniqueness is case-insensitive via a functional `lower(grantee_email)` index; display preserves the as-typed casing. Token rotation mints a new PAT and thus a new devserver_id, so existing grants do not survive rotation (re-share required); this is the settled trade-off in ADR-0001.
 
-Listings: `GET /v1/users/{id}/grants/owned` returns `(devserver_id, label, grant_count)` per devserver the user has configured shares on; `GET /v1/users/{id}/grants/incoming` returns devservers shared *with* the user (claimed grants only). FK cascades on `users(id)` drop grants when either the owner or the grantee is deleted.
+Listings: `GET /v1/users/{id}/grants/owned` returns `(owner_user_id, devserver_id, label, grant_count)` for every devserver the user owns (zero-grant rows included); `GET /v1/users/{id}/grants/incoming` returns devservers shared *with* the user (claimed grants only). FK cascades on `users(id)` drop grants when either the owner or the grantee is deleted.
 
 ### Feature flags
 
@@ -192,13 +191,13 @@ Column lists are constants `format!`'d into queries; user input always rides thr
 - `identities` has `UNIQUE (provider, provider_subject)`.
 - `users.username_edits` only increases; never reset.
 - `users.blocked_at` is `NULL` or a timestamp; `NULL` means active.
-- `api_token_audit.action` is one of `created`, `created_via_desktop`, `used`, `revoked`.
+- `api_token_audit.action` is one of `created`, `created_via_desktop`, `created_via_admin`, `desktop.redeem`, `used`, `revoked`.
 - Block always: revokes every active PAT, appends one `auth_audit` row, and reserves durable fleet revocation in the same transaction.
 - User-policy writes serialize with PAT mint and block on the canonical user row.
 - The fleet policy singleton always exists after migration; an unreadable row is never interpreted as enabled.
 - Access revoke and pending delete establish durable denial before any live-data-plane acknowledgement.
 - Bearer comparisons run at constant time.
-- `devserver_grants.role` is one of `viewer`, `editor` (CHECK constraint). `accepted_at` is `NULL` iff `grantee_user_id` is `NULL`; both flip together at claim time.
+- `accepted_at` is `NULL` iff `grantee_user_id` is `NULL`; both flip together at claim time.
 
 ## Error model
 
@@ -210,8 +209,8 @@ Column lists are constants `format!`'d into queries; user input always rides thr
 | NotFound      | 404  | user / token id missing            |
 | BadRequest    | 400  | input validation                   |
 | Conflict      | 409  | unique violation, rename cap       |
-| Db (sqlx)     | 500  | logged at error level              |
-| Anyhow        | 500  | startup / unexpected               |
+| Db (sqlx)     | 500  | logged at error level; 23505 answers 409 `{"error":"conflict"}` |
+| Unavailable   | 503  | fleet policy unreadable            |
 
 Database errors are logged with `tracing::error!(error = ?e, ...)`; clients see a generic `internal error` message.
 

@@ -56,7 +56,7 @@ pub struct GatewayEntry {
     /// and as the gateway segment of synthesized devserver row ids.
     pub id: String,
     /// The gateway's public identity origin as the user entered it
-    /// (e.g. `https://id.chan.app`).
+    /// (e.g. `https://gw.chan.app`).
     pub url: String,
     /// Optional user label for the badge; empty means derive the label from
     /// the URL host.

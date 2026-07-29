@@ -1163,9 +1163,10 @@ pub fn install_local_workspace_overlay(host: &WorkspaceHost) {
 /// through the existing transparent proxy.
 ///
 /// `bearer` gates `/api/library/*`: the desktop loopback passes its per-window
-/// token, the devserver passes `None` (tunnel-trust; the gateway proxy gates at
-/// its edge). The static SPA shell is always public regardless, so it loads
-/// before it holds the token.
+/// token and the devserver passes its rotatable devserver token. Tunnel-origin
+/// requests bypass the local bearer only after the gateway proxy authenticates
+/// the browser (the request carries a signed gateway assertion). The static SPA
+/// shell is always public regardless, so it loads before it holds the token.
 ///
 /// `serve_addr` is the read-only/full discriminator AND the mount enabler for
 /// workspace mutation (which is loopback-only):

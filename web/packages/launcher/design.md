@@ -7,13 +7,13 @@ How the launcher is built and reached. The [`README`](README.md) covers the stac
 ```mermaid
 flowchart TB
     subgraph spa["web-launcher SPA (one bundle, ~29 KB)"]
-        LIB["launcher API client -- pure /api/library/* HTTP<br/>workspaces · windows · devservers (deferred)<br/>bearer via ?t= (Authorization header; ?t= query for the watch WS)"]
-        UI["TopBar · WorkspaceList · WindowFeed · NewWorkspaceDialog<br/>reads &lt;meta chan-launcher-surface&gt; → gates capabilities"]
+        LIB["launcher API client -- pure /api/library/* HTTP<br/>workspaces · windows · devservers · gateways<br/>bearer via ?t= (Authorization header; ?t= query for the watch WS)"]
+        UI["TopBar · ScreenFlip (Library | Gateways) · SelectionBar · NewWorkspaceDialog<br/>reads &lt;meta chan-launcher-surface&gt; -> gates capabilities"]
     end
 
     subgraph cs["chan-server"]
-        SL["static asset layer<br/>embedded launcher bundle<br/>serve_launcher(uri, read_only)"]
-        LR["library router<br/>windows: list/mint/watch/discard (both surfaces)<br/>workspaces: list (both) · add/on/off/rm (loopback only → 403 on read-only)"]
+        SL["static asset layer<br/>embedded launcher bundle<br/>serve_launcher(uri, surface)"]
+        LR["library router<br/>windows: list/mint/watch/discard (both surfaces)<br/>workspaces: list (all) · add/on/off/rm (mutable surfaces; 403 for readonly + tunnel non-owners)"]
         IRF["install_launcher_root_fallback(host, bearer, serve_addr)"]
     end
 
@@ -31,8 +31,8 @@ flowchart TB
 
     subgraph surfaces["3 serving surfaces -- same bundle, per-surface install"]
         direction LR
-        DEV["devserver (build_devserver_app)<br/>bearer=None tunnel-trust · serve_addr=None read-only"]
-        GW["gateway-proxied = the devserver reached via<br/>devserver-proxy at {owner}.devserver.chan.app/<br/>(proxy strips browser credentials and gates at edge)"]
+        DEV["devserver (build_devserver_app)<br/>bearer=Some(devserver token) · serve_addr=Some(addr) full mutation<br/>tunnel requests carry TunnelOrigin: owner=full, else read-only"]
+        GW["gateway-proxied = the devserver reached via<br/>devserver-proxy at {owner}--{disc}.{proxy}.usr.{domain}/<br/>(proxy strips browser credentials and gates at edge)"]
         LOOP["desktop loopback<br/>bearer=Some(per-launch token) · serve_addr=Some(addr) full mutation"]
     end
     DEV --- GW
@@ -42,13 +42,14 @@ flowchart TB
 
 ## What the launcher is
 
-The launcher is a pure `/api/library/*` HTTP client: it never opens native windows, never dials a devserver, and never parses an opaque window or workspace id. Every type mirrors a struct the library serializes -- the field names *are* the wire, pinned by server byte-tests. It is served at the devserver/library root `/`, and the bundle uses a relative asset base so assets resolve under any mount. It renders three registries: workspaces, windows, and devservers (deferred -- see below).
+The launcher is a pure `/api/library/*` HTTP client: it never opens native windows, never dials a devserver, and never parses an opaque window or workspace id. Every type mirrors a struct the library serializes -- the field names *are* the wire, pinned by server byte-tests. It is served at the devserver/library root `/`, and the bundle uses a relative asset base so assets resolve under any mount. It renders four registries: workspaces, windows, devservers, and gateways.
 
 ## The `/api/library/*` surface
 
-- **workspaces** -- `GET` list (`{workspace_id, path, label, on}`, where `workspace_id` is the route prefix without its leading slash: a single legible segment the client treats as opaque), `POST {path}` add, `POST /{id}/{on|off}` toggle, `DELETE /{id}` remove.
-- **windows** -- `GET` list, `POST {kind, workspace_path?}` mint, `GET …/windows/watch` (a WebSocket that pushes the full window set on every change), `DELETE /{id}` discard.
-- **devservers** -- CRUD, deferred. The registry is desktop-side config; a devserver-served launcher correctly shows an empty list.
+- **workspaces** -- `GET` list (`{workspace_id, path, label, on, status, error?, library_id, devserver_id, prefix}`; a local row's `prefix` equals its `workspace_id`, a devserver row carries its remote mount prefix), `POST {path}` add, `POST /{id}/{on|off}` toggle, `DELETE /{id}` remove.
+- **windows** -- `GET` list, `POST {kind, workspace_path?, origin?, acting_window_id?}` mint, `GET .../windows/watch` (a WebSocket that pushes the full window set plus per-tenant leaders on every change), `DELETE /{id}` discard, `POST /{id}/{open|hide}` (desktop-bridge ops), `POST /{id}/visibility`.
+- **devservers** -- full CRUD plus desktop-bridge ops (connect/disconnect, native-trust, terminal, workspace open/on/off/forget); a registry-less surface returns an empty list, and bridge ops answer `NO_DESKTOP`/409 with no desktop attached.
+- **gateways** -- CRUD plus connect/disconnect; roster rows synthesize read-only devserver entries.
 
 The SPA reads its bearer from `?t=` in its own URL and presents it as `Authorization: Bearer` on fetch and as `?t=` on the watch WebSocket (a browser WebSocket cannot set headers).
 
@@ -58,7 +59,7 @@ The SPA reads its bearer from `?t=` in its own URL and presents it as `Authoriza
 
 1. **devserver** (`build_devserver_app`) -- served over the tunnel to the gateway proxy and on the box's `127.0.0.1` bind;
 2. **desktop loopback** through the embedded `WorkspaceHost`;
-3. **gateway-proxied** -- the devserver reached through `devserver-proxy` at `{owner}.devserver.chan.app/`.
+3. **gateway-proxied** -- the devserver reached through `devserver-proxy` at `{owner}--{disc}.{proxy}.usr.{domain}/` (ex `{owner}--{disc}.{region}.usr.chan.app/`).
 
 ## Per-surface auth and the read-only / mutation split
 
@@ -87,7 +88,7 @@ flowchart TB
 
     subgraph surfx["serving surfaces (same bundle)"]
         LOOP["desktop loopback<br/>bearer=Some · serve_addr=Some"]
-        DEV["devserver / gateway (build_devserver_app)<br/>bearer=None · serve_addr=None"]
+        DEV["gateway tunnel (TunnelOrigin non-owner)<br/>read-only; owner assertion keeps the full surface"]
     end
 
     BTOK --> LOOP
@@ -101,17 +102,17 @@ flowchart TB
 `launcher_router(host, bearer, serve_addr)` is auth-agnostic in its handlers; the installer sets the policy per surface:
 
 - **`bearer`** gates `/api/library/*`. `Some(token)` requires `Authorization: Bearer` (the watch WebSocket also accepts `?t=`), constant-time compared; `None` is tunnel-trust. The static SPA shell is always public so it loads before it holds the token.
-- **`serve_addr`** (`Option<Arc<OnceLock<SocketAddr>>>`) is both the read-only/full discriminator and the mount enabler. `Some(cell)` is the loopback: workspace mutation is served, and the mount path reads the listen address from the cell, which the embedder fills *after* it binds, so it is read at request time rather than install time. `None` is the tunnel-trust surface: workspaces are read-only -- the mutation handlers answer `403`, and the shell is served with `<meta name="chan-launcher-surface" content="readonly">` so the SPA hides those controls (the New-workspace button, the row checkboxes and bulk bar, and the on/off toggle, which becomes a static state badge) and shows a "manage from the desktop app or the CLI" hint instead of buttons that fail.
+- **`serve_addr`** (`Option<Arc<OnceLock<SocketAddr>>>`) is both the read-only/full discriminator and the mount enabler. `Some(cell)` is the loopback: workspace mutation is served, and the mount path reads the listen address from the cell, which the embedder fills *after* it binds, so it is read at request time rather than install time. `None` is the tunnel-trust surface: workspaces are read-only -- the mutation handlers answer `403`, and the shell carries `<meta name="chan-launcher-surface" content="desktop|devserver|readonly">`; tunnel non-owners are downgraded to `readonly` per request, and on readonly the SPA hides the mutation controls (the New-workspace button, the row checkboxes and bulk bar, and the on/off toggle, which becomes a static state badge) and shows a "manage from the desktop app or the CLI" hint instead of buttons that fail.
 
-Mutation is loopback-only because on the gateway surface the proxy strips browser `Cookie` and `Authorization` credentials and is the sole gate, so `bearer=None` cannot distinguish a grantee from the owner. Query parameters are ordinary tenant application data; proxy entry credentials are accepted only at the fixed body-only exchange endpoint. A collaborator holding a `__Host-devserver_gate` cookie must not unmount or remove the owner's workspaces. Window mint/discard stay on both surfaces (per-view state, low-risk). Owners manage a headless devserver's workspaces over the bearer-gated `/api/devserver/*` management API and `cs`/CLI.
+On the gateway surface the proxy strips browser `Cookie` and `Authorization` credentials and forwards a signed gateway assertion; owner assertions mutate over the tunnel, missing/non-owner assertions may read but not mutate (403). Query parameters are ordinary tenant application data; proxy entry credentials are accepted only at the fixed body-only exchange endpoint. A collaborator holding a `__Host-devserver_gate` cookie must not unmount or remove the owner's workspaces. Window mint/discard follow the same split (per-view state, low-risk): owners on every surface, 403 for tunnel non-owners. Owners manage a headless devserver's workspaces over the bearer-gated `/api/devserver/*` management API and `cs`/CLI.
 
-Off is a plain unmount: the launcher's `setWorkspaceOn` sends no `force`, so the devserver's confirm-before-off (a `409` carrying the live-terminal count) stays a `/api/devserver/*` and UI concern rather than a wire status on this surface.
+An unforced off answers `409 {error:"live_terminals", active_terminals:N}` on this surface; the launcher confirms and retries the same route with `force: true`.
 
 ## Build integration
 
 The launcher bundle is embedded beside the main workspace bundle and follows the same rebuild contract: fresh checkouts and isolated gate worktrees compile before the frontend artifact exists, while a rebuilt launcher forces the embedding server crate to relink. The top-level web targets build the launcher before any CLI, desktop, packaging, or release consumer embeds the server bundle, so every distribution path ships the same launcher without per-consumer wiring.
 
-## Deferred
+## Devserver registry and gateway assertion
 
-- **Devservers CRUD bridge** (`/api/library/devservers*`). The devserver registry is desktop-side config, so the mutating surface pairs with the desktop bridge; a devserver-served launcher shows an empty devservers list until then.
-- **Proxy-injected signed role header.** The path to owner-only mutation over the gateway (and to gating the devserver's `127.0.0.1` bind) is a signed caller/role header the proxy injects after its gate, which the devserver validates -- a new gateway↔devserver shared secret, not yet built.
+- **Devservers registry bridge** (`/api/library/devservers*`). The registry is desktop-side config, CRUD-able over HTTP; the desktop-bridge ops (connect/disconnect, native-trust, terminal, workspace open/on/off/forget) dispatch to the attached desktop, and a registry-less surface lists empty.
+- **Proxy-injected signed role assertion.** devserver-proxy signs a gateway assertion (`chan_tunnel_proto::gateway_assertion`) with a per-tunnel key after its gate; the devserver verifies it, marks the request `TunnelOrigin`, and grants owner assertions the full launcher over the tunnel.

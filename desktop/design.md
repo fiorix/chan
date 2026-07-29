@@ -29,26 +29,28 @@ flowchart TD
         Launcher -->|"toggle On"| Host
         Host --> Listener
     end
-    Listener --> WS1["Tenant /notes-ab12cd34 (AppState, watcher, indexer, token)"]
-    Listener --> WS2["Tenant /foo-9988ef00 (AppState, watcher, indexer, token)"]
-    WS1 -->|"http://127.0.0.1:PORT/notes-ab12cd34/?t=TOKEN"| View1["Tauri webview window"]
-    WS2 -->|"http://127.0.0.1:PORT/foo-9988ef00/?t=TOKEN"| View2["Tauri webview window"]
+    Listener --> WS1["Tenant /workspace-a1b2c3d4e5f60718 (AppState, watcher, indexer, token)"]
+    Listener --> WS2["Tenant /workspace-9f8e7d6c5b4a3921 (AppState, watcher, indexer, token)"]
+    WS1 -->|"http://127.0.0.1:PORT/workspace-a1b2c3d4e5f60718/?t=TOKEN"| View1["Tauri webview window"]
+    WS2 -->|"http://127.0.0.1:PORT/workspace-9f8e7d6c5b4a3921/?t=TOKEN"| View2["Tauri webview window"]
 ```
 
 *One supervisor embeds a WorkspaceHost that serves many local workspaces on a single 127.0.0.1 listener under per-path-hash prefixes, each opened in a Tauri webview via a tokened URL.*
 
-There are two workspace attachment modes:
+There are four workspace attachment modes:
 
 - **Local embedded**: a local registry entry opened by chan-desktop. The desktop mounts the workspace into its embedded `WorkspaceHost` and owns the runtime.
-- **Remote outbound**: an already-running chan server that chan-desktop opens by URL. Example: the user runs `chan open /tmp/foo`, then adds that token-bearing URL as an outbound attachment. The desktop owns only the window, not the server.
+- **Devserver**: a headless `chan devserver` the desktop dials by URL (often over an `ssh -L` forward). The devserver owns the per-workspace runtimes and tokens; the desktop persists only the connection recipe and owns the windows.
+- **Gateway roster**: an account-level gateway connection whose authenticated devserver roster the desktop projects into the launcher (section 6.7).
+- **Outbound URL**: an already-running chan server opened by URL. A backend-only path (config, commands, connecting screen) with no launcher surface.
 
-There is no fallback serve mode. If a user wants to run `chan open` directly, that is a remote attachment, even when the server is on the same machine.
+There is no fallback serve mode. A terminal `chan open <path>` hands the workspace to a running desktop over the CLI handoff socket instead of racing it for the workspace lock.
 
 ## 3. Workspace lifecycle
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Off : CLI chan add registers, On=off
+    [*] --> Off : CLI chan workspace add registers, On=off
     [*] --> Serving : Desktop New add registers + auto-start
 
     Off : Registered, Off
@@ -68,41 +70,36 @@ stateDiagram-v2
     end note
 ```
 
-*Local-workspace lifecycle: desktop New auto-starts while CLI `chan add` stays Off; Toggle On mounts an isolated runtime, Toggle Off unmounts and destroys windows, Forget unregisters and leaves the filesystem untouched.*
+*Local-workspace lifecycle: desktop New auto-starts while CLI `chan workspace add` stays Off; Toggle On mounts an isolated runtime, Toggle Off unmounts and destroys windows, Forget unregisters and leaves the filesystem untouched.*
 
 ### 3.0 Source of truth
 
 The `chan` registry at `~/.chan/config.toml` is the single source of truth for the set of known workspaces. Desktop-driven mutations (add, remove) run in-process against the embedded host's shared `chan_workspace::Library` -- the same code path the CLI uses, without spawning it. Routing everything through the one shared `Library` is what keeps a freshly-added workspace openable immediately: mutating only the on-disk registry would leave the host's in-memory snapshot stale.
 
-The desktop owns a small config of its own at `~/.chan/desktop/config.json` -- the same `~/.chan` home as the CLI registry, not a separate OS app-data directory. It holds desktop-only state: outbound URL attachments, gateway connection recipes, exact shared-devserver native-trust records `(gateway id, owner, full devserver id)`, the set of workspaces that were *on* (`workspaces`, the shared `{path, on}` overlay the devserver persists too), and the closed-window restore stack (section 6.3). Gateway rosters remain volatile and authenticated; persisted trust cannot manufacture a row that is absent from the current roster. The On column is still derived live from the in-memory map of active local runtimes, but that on-set is persisted on every toggle and on clean shutdown, so a restart re-serves the workspaces the user left running (the §3.2 boot matrix). Accepted trade-off: a crash with an entry persisted re-serves it next boot; a re-serve failure there surfaces a notice and is left off (it drops from the set on the next clean shutdown).
+The desktop owns a small config of its own at `~/.chan/desktop/config.json` -- the same `~/.chan` home as the CLI registry, not a separate OS app-data directory. It holds desktop-only state: outbound URL attachments, devserver and gateway connection recipes, exact shared-devserver native-trust records `(gateway id, owner user id (UUID), full devserver id)` -- the username rides along for config legibility only and never authorizes -- and the closed-window restore stack (section 6.3). Gateway rosters remain volatile and authenticated; persisted trust cannot manufacture a row that is absent from the current roster. The On column is derived live from the in-memory map of active local runtimes; the on-set persists to the library-owned overlay at `~/.chan/workspaces.json` (`{path, on}` rows, shared with the devserver) on every toggle and on clean shutdown, so a restart re-serves the workspaces the user left running (the section 3.2 boot matrix). Accepted trade-off: a crash with an entry persisted re-serves it next boot; a re-serve failure there surfaces a notice and is left off (it drops from the set on the next clean shutdown).
 
-A filesystem watcher (`notify` + debounce) runs over `~/.chan/` for the lifetime of the process and emits a `registry-changed` Tauri event when the registry file itself changes (events are filtered to that file: `preferences.toml` churn from pane drags must not storm the launcher). The frontend reacts by re-fetching `list_workspaces` and re-rendering. Concrete consequence: if the user runs `chan add ~/notes` from a terminal, the row appears in the desktop window without any explicit refresh.
+A filesystem watcher (`notify` + debounce) runs over `~/.chan/` for the lifetime of the process and emits a `registry-changed` Tauri event when the registry file itself changes (events are filtered to that file: `preferences.toml` churn from pane drags must not storm the launcher). On a registry change it also reloads the embedded library registry and signals the library change feed, so the launcher's `/api/library` watch re-renders. Concrete consequence: if the user runs `chan workspace add ~/notes` from a terminal, the row appears in the desktop window without any explicit refresh.
 
 ### 3.1 The launcher
 
-The launcher (Tauri label `main`, title "Chan Desktop") is a singleton: it is never multiplied, its close button hides rather than destroys it, and reopening is instant. It renders one table with three columns:
+The launcher (Tauri label `main`, title "Chan Desktop") is a singleton: it is never multiplied, its close button hides rather than destroys it, and reopening is instant. It renders collapsible machine cards: one local card plus one card per devserver, with gateway-rostered devservers listed beside the persisted rows. Each card lists its workspaces as expandable rows carrying an on/off toggle (a connection dot for remote rows), an Open action, and select-mode checkboxes for bulk actions; gateways are managed on their own launcher screen.
 
-| column  | meaning                                                  |
-|---------|----------------------------------------------------------|
-| On      | local rows: runtime toggle; remote rows: connection dot  |
-| Where   | kind glyph + locator: house glyph + path (local), outbound glyph + URL/label (remote) |
-| actions | Open split button (primary: in-app webview; caret menu: Open in Browser, Forget) |
-
-Clicking a local row's Where cell reveals the folder in the OS file manager. Workspace names are read-only in the desktop; renames happen through the CLI and the watcher reflects them.
+A local workspace can be named when it is added (the label rides the library add route); the watcher reflects registry changes made from a terminal.
 
 ### 3.2 First launch and the [New] modal
 
-A workspace is opt-in: chan-desktop never creates one on your behalf. There is no default workspace, no `~/Documents/Chan`, and no embedded manual seeded anywhere. Boot opens the launcher and then follows the matrix:
+A workspace is opt-in: chan-desktop never creates one on your behalf. There is no default workspace, no `~/Documents/Chan`, and no embedded manual seeded anywhere. Boot opens the launcher, mounts the shared `/terminal` tenant, and then follows the matrix:
 
-- **Nothing was on** (a fresh profile, or a registry whose workspaces are all off) -- the launcher shows its (possibly empty) list and a **standalone terminal window** opens. That terminal is the workspace-less `kind=terminal` window you also get from Cmd+T / Cmd+Shift+N (section 6.5) -- the "you always have a shell" floor.
-- **Workspaces were on at the last clean shutdown** (`workspaces`, section 3.0) -- each is re-served and its window reopened; no standalone terminal opens (you already have windows). A workspace that fails to re-serve surfaces a system notice and is left off.
+- **Fresh library** (empty registry, first-open marker unset) -- the library's first-open rule mints one boot terminal, the workspace-less `kind=terminal` window of section 6.5, and persists the marker. With the marker set, an emptied registry never re-mints: a user who closes their only terminal reopens to none.
+- **Workspaces were on at the last clean shutdown** (the `~/.chan/workspaces.json` overlay, section 3.0) -- each is re-served without minting new windows; the window watcher restores that workspace's persisted window records at their stable window ids (hidden stays hidden). A workspace that fails to re-serve surfaces a system notice and is left off.
 
-The user creates or opens a workspace only when they want one, through the [New] modal. The [New] button opens a single modal with a segmented two-way choice:
+The user creates or opens a workspace only when they want one, through the [New] dialog. Context-anchored entry points open it pre-set to one of three forms -- Local directory, Devserver, or Gateway -- with no in-dialog chooser:
 
-- **Local directory**: native folder picker, then Open registers the folder via `add_workspace` and immediately starts + opens it. There is deliberately NO desktop-side pre-flight scan or feature toggle here: chan's SPA owns first-boot readiness through its preflight overlay and the optional Semantic / Reports layers post-boot. A desktop scan dialog would duplicate and race the SPA boot surface.
-- **Remote**: URL + optional name form (`add_outbound_workspace`); we dial out.
+- **Local directory**: native folder picker (a plain path input in a browser) plus an optional name, POSTed to the library add route (`POST /api/library/workspaces`), which registers the folder and immediately starts + opens it. There is deliberately NO desktop-side pre-flight scan or feature toggle here: chan's SPA owns first-boot readiness through its preflight overlay and the optional Semantic / Reports layers post-boot. A desktop scan dialog would duplicate and race the SPA boot surface.
+- **Devserver**: an Address field (bare `host:port` or a full URL) plus optional label, connect script, and token; the control terminal runs the script and the desktop dials out.
+- **Gateway**: identity origin URL plus optional label; sign-in runs at connect (section 6.7).
 
-The auto-start on add is specific to the desktop UI: the user's intent there is "make this workspace usable now". `chan add` from a terminal only registers; the desktop shows the new row with On = off.
+The auto-start on add is specific to the desktop UI: the user's intent there is "make this workspace usable now". `chan workspace add` from a terminal only registers; the desktop shows the new row with On = off.
 
 ### 3.3 Toggle On (serve)
 
@@ -125,28 +122,28 @@ Toggle Off closes the mounted workspace in WorkspaceHost and destroys its worksp
 
 ### 3.5 Forget (remove)
 
-Stops the serve (if running), then unregisters the workspace through `chan-workspace` in-process. The filesystem is untouched. The watcher fires and the row disappears. For outbound rows, Forget URL drops the attachment and closes its windows. There is no "delete workspace" action in the desktop UI.
+Stops the serve (if running), then unregisters the workspace through `chan-workspace` in-process. The filesystem is untouched. The watcher fires and the row disappears. For a devserver's served workspace, Forget unmounts it on the devserver and drops the row. There is no "delete workspace" action in the desktop UI.
 
 ### 3.6 External changes
 
-Anything that mutates `~/.chan/config.toml` shows up in the UI: `chan add` / `chan remove` / `chan rename` from a terminal, a second chan-desktop process, or hand-editing the TOML.
+Anything that mutates `~/.chan/config.toml` shows up in the UI: `chan workspace add` / `chan workspace rm` from a terminal, a second chan-desktop process, or hand-editing the TOML.
 
-For an external `chan open` the registry only records that the workspace exists, not that a serve is running: the local On toggle stays off and no URL appears. A user who wants that server in the desktop adds it as a remote outbound attachment.
+For an external `chan open` the registry only records that the workspace exists, not that a serve is running: the local On toggle stays off and no URL appears. The desktop does not adopt that server; outbound URL attach is a backend-only path with no launcher surface (section 11.1).
 
 ## 4. Validation
 
 The desktop avoids inventing durable validation rules. It defers to chan-workspace where that surface already owns a contract, so anything the desktop accepts is also accepted by every other chan surface.
 
-- **Workspace name**: not validated by the desktop at all. Names are read-only in the UI; the only writer is `chan rename`, which enforces `chan_tunnel_proto::is_valid_workspace_name` itself.
+- **Workspace name**: not validated by the desktop at all. Names are written at add time through the library add route; chan-server enforces `chan_tunnel_proto::is_valid_workspace_name`.
 - **Path**: canonicalised via `std::fs::canonicalize` before being registered or opened, so the registry key the desktop uses matches what the user sees. When canonicalisation fails (broken symlink, asleep network mount), the literal path is used.
 
 ## 5. Self-contained runtime
 
-chan-desktop is self-contained. It links `chan-workspace` and `chan-server` directly and embeds the web bundle at build time. No `chan` binary is shipped in the app bundle, and none is required at runtime.
+chan-desktop is self-contained. It links `chan-workspace` and `chan-server` directly and embeds the web bundle at build time. On macOS and Linux no `chan` binary is shipped in the app bundle, and none is required at runtime; the Windows NSIS installer carries a separate signed `chan.exe` CLI as a resource.
 
 Local workspaces open through the embedded chan-server `WorkspaceHost`, which owns a single `chan_workspace::Library`. Every registry mutation runs in-process against that `Library`.
 
-The single codesigned and notarised artifact is the chan-desktop app itself; there is no second binary to sign. External `chan open` processes are supported as explicit remote attachments (section 11), not as a local serving dependency.
+The macOS artifact is a single codesigned and notarised app; Windows signs the desktop exe, the bundled CLI, and the installer. External `chan open` processes are supported as explicit remote attachments (section 11), not as a local serving dependency.
 
 ## 6. Window model
 
@@ -155,14 +152,16 @@ The single codesigned and notarised artifact is the chan-desktop app itself; the
 Every window is a Tauri webview with a label prefix that encodes its kind, and Tauri capabilities are granted by label glob:
 
 - `main` -- the singleton launcher (section 3.1). The `main-*` glob is also covered by the launcher capability so any launcher-class window inherits the same permission set.
-- `workspace-<hash>-<seq>` -- local workspace windows. The hash identifies the workspace (it is also the embedded route prefix), the per-process `seq` makes every label unique so multi-window works; the stable prefix is what teardown and capability matching key on.
-- `outbound-<hash>-<seq>` -- remote workspace windows, hashed from the attachment identity, namespaced apart from local labels.
+- `local::<window_id>` -- watcher-opened local workspace windows, labeled by the library-minted window record. The workspace's embedded route prefix stays `workspace-<hash>` (hash of the canonical path), which capability globs and teardown matching key on.
+- `lib-<hex>::<window_id>` -- watcher-opened devserver windows, the same composite `{library_id}::{window_id}` label scheme with the SPA served by the remote devserver.
+- `control-terminal-<devserver id>` -- the embedded terminal-only window that runs a devserver's connect script.
+- `outbound-<hash>-<seq>` -- remote workspace windows, hashed from the attachment identity, namespaced apart from local labels; the per-process `seq` makes every label unique so multi-window works.
 - `terminal-win-<seq>` -- standalone terminal windows (section 6.5).
 - `about` -- the bundled About window: singleton, same content on every platform (mirrors the SPA Dashboard About slide), and the target the macOS system About item is redirected to.
 
-All embedded-SPA windows (workspace / outbound / terminal) load the SPA with `?w=<label>` so per-window session state (`session.json` panes/tabs) is keyed by the window, and get a " Window N" title suffix where N is the lowest free number among live windows sharing a base title, so the OS window switcher disambiguates.
+All embedded-SPA windows load the SPA with a `?w=` session key -- the bare `window_id` for watcher-opened windows (decoupled from the OS-window label), the label for outbound windows -- so per-window session state (`session.json` panes/tabs) is keyed by the window, and get a " Window N" title suffix where N is the lowest free number among live windows sharing a base title, so the OS window switcher disambiguates.
 
-Capability grants are origin-aware as well as label-globbed: a capability reaches remotely-served content only when its `remote.urls` covers the loading origin, and every chan window is remotely served (the embedded server is loopback HTTP). Broad capabilities are loopback-scoped. The loopback-served launcher (`main`, `main-*`) gets the event-listen and update-restart grants (launcher-events.json, launcher-update.json). Gateway-backed `lib-*` windows have no static or wildcard capability. After an authenticated entry response passes the full identity, exact-child namespace, scheme/port, same-origin entry URL, and refresh-origin checks, the desktop mints one runtime capability for that canonical exact origin. The grant carries the workspace-window command set plus the native transfer commands, fullscreen, webview zoom, and opener. Official and custom gateways use this same entry-derived path. Each transfer command has its own permission entry, and the static local-transfer capability is limited to locally served workspace and terminal window classes. `read_dropped_paths` is the standing exception on every origin: the macOS drag pasteboard is system-wide, so local-drop.json grants it only to locally-supervised window kinds, never to `lib-*` or `outbound-*`. `outbound-*` webviews (arbitrary remote URLs) match no remote pattern and get no IPC at all on their remote content. Runtime Tauri grants are additive: revocation closes managed windows and blocks reconnect immediately, while purging an already-minted origin from the process authority requires quitting and restarting Chan Desktop. serve.rs's origin-aware ACL tests pin the SPA invoke vocabulary and prove that no static or runtime grant contains a gateway wildcard.
+Capability grants are origin-aware as well as label-globbed: a capability reaches remotely-served content only when its `remote.urls` covers the loading origin, and every chan window is remotely served (the embedded server is loopback HTTP). Broad capabilities are loopback-scoped. The loopback-served launcher (`main`, `main-*`) gets the event-listen and update-restart grants (launcher-events.json, launcher-update.json). Gateway-backed `lib-*` windows have no static or wildcard capability. After an authenticated entry response passes the full identity, exact-child namespace, scheme/port, same-origin entry URL, and refresh-origin checks, the desktop mints one runtime capability for that canonical exact origin. The grant carries the workspace-window command set plus the native transfer commands, fullscreen, webview zoom, and opener. Official and custom gateways use this same entry-derived path. Each transfer command has its own permission entry, and the static local-transfer capability covers locally served and loopback-devserver window classes; gateway-served `lib-*` content is excluded by its loopback-only remote scope. `read_dropped_paths` is the standing exception on every origin: the macOS drag pasteboard is system-wide, so local-drop.json grants it only to locally-supervised window kinds, never to `lib-*` or `outbound-*`. `outbound-*` webviews (arbitrary remote URLs) match no remote pattern and get no IPC at all on their remote content. Runtime Tauri grants are additive: revocation closes managed windows and blocks reconnect immediately, while purging an already-minted origin from the process authority requires quitting and restarting Chan Desktop. serve.rs's origin-aware ACL tests pin the SPA invoke vocabulary and prove that no static or runtime grant contains a gateway wildcard.
 
 ### 6.2 Menus and the chord bridge
 
@@ -170,10 +169,10 @@ Workspace webviews get a native key bridge injected before any page script. It t
 
 The native menus route by the focused window's kind:
 
-- File ▸ New Terminal (Cmd+T): SPA window focused → dispatch `app.terminal.toggle`; launcher or nothing focused → open a standalone terminal window.
-- File ▸ Close Window (Cmd+W): SPA window focused → `app.tab.close` (the connecting screen is the exception: Cmd+W cancels and really closes); other windows close natively.
-- Window ▸ New Window (Cmd+Shift+N): opens another window of the workspace owning the focused window (unburying the family's most recent hidden window first). A focused standalone terminal opens another terminal window; the launcher (or nothing) focused opens a standalone terminal. Plain Cmd+N is deliberately left to the SPA's New Draft.
-- Window ▸ Workspaces: shows the launcher.
+- File > New Terminal (Cmd+T): SPA window focused -> dispatch `app.terminal.toggle`; launcher or nothing focused -> open a standalone terminal window.
+- File > Close Window (Cmd+W): SPA window focused -> `app.tab.close` (the connecting screen is the exception: Cmd+W cancels and really closes); other windows close natively.
+- Window > New Window (Cmd+Shift+N): opens another window of the workspace owning the focused window (unburying the family's most recent hidden window first). A focused standalone terminal opens another terminal window; the launcher (or nothing) focused opens a standalone terminal. Plain Cmd+N is deliberately left to the SPA's New Draft.
+- Window > Workspaces: shows the launcher.
 
 Quitting prompts for confirmation once (running terminals and workspace runtimes die with the process); a confirmed quit tears down every runtime and listener.
 
@@ -181,33 +180,31 @@ Quitting prompts for confirmation once (running terminals and workspace runtimes
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Live: open pops compatible LRU entry
+    [*] --> Live: open restores record or pops LRU entry
     Live: Live SPA window, terminals and layout warm
-    Buried: Buried hidden window, snapshot on LRU
+    Buried: Buried hidden window, record kept
     Destroyed: Destroyed, gone
 
     Live --> CloseGate: OS close button
     state CloseGate <<choice>>
-    CloseGate --> CaptureBury: normal SPA window
-    CloseGate --> Destroyed: empty terminal or connecting screen
+    CloseGate --> Prompt: live SPA window
+    CloseGate --> Destroyed: empty terminal, connecting screen, connecting control terminal
+    Prompt: Hide / Close / Cancel overlay
+    Prompt --> Buried: Hide, persist hidden
+    Prompt --> Destroyed: Close
+    Prompt --> Live: Cancel
     Live --> Destroyed: programmatic close cascade
 
-    CaptureBury: Snapshot label, URL hash, zoom to LRU
-    CaptureBury --> Buried: hide webview, persist hidden
-
     Buried --> Live: unbury via Window menu or Cmd+Shift+N
-    Buried --> Reopen: next open pops compatible entry
-    Reopen: Reuse ?w= to re-hydrate session.json
-    Reopen --> Live: re-apply hash and zoom
-    Buried --> [*]: app quit, LRU survives restart
+    Buried --> [*]: app quit, records survive restart
     Destroyed --> [*]
 ```
 
-*OS close buries an SPA window (snapshotting label, URL hash, and zoom onto the restore LRU); empty terminals, connecting screens, and programmatic closes destroy outright; the next open unburies or pops a compatible entry to re-hydrate `session.json`, hash, and zoom.*
+*OS close prompts Hide / Close / Cancel on a live SPA window; Hide buries with a persisted record, Close destroys; empty terminals, connecting screens, connecting control terminals, and programmatic closes destroy outright; the next open restores the persisted record (watcher windows) or pops a compatible LRU entry (outbound windows).*
 
-The OS close button on an SPA window *buries* it instead of destroying it: the webview hides, live terminals and layout stay warm, and a notice dialog teaches the behaviour. Buried windows are listed in the Window menu and unburied from there or by Cmd+Shift+N on their family. Two cases really close: a standalone terminal window with no live shells, and a window still on the connecting screen (burying it would leave an unkillable hidden retry loop). Programmatic closes (the SPA's empty-window cascade, workspace-off teardown) destroy outright and never bury.
+The OS close button on a live SPA window holds the close and evals a confirm into the webview: the SPA shows a Hide / Close / Cancel overlay. Hide *buries* the window -- live terminals and layout stay warm -- and Close destroys it. Buried windows are listed in the Window menu and unburied from there or by Cmd+Shift+N on their family. Three cases really close with no prompt: a standalone terminal window with no live shells, a window still on the connecting screen (burying it would leave an unkillable hidden retry loop), and a control terminal still connecting. Programmatic closes (the SPA's empty-window cascade, workspace-off teardown) destroy outright and never bury.
 
-At bury time the desktop captures a restore snapshot -- window label, URL hash, zoom level -- onto a small LRU stack in the desktop config, keyed by workspace identity. The next open of that workspace pops a compatible entry and reuses the label (so `?w=` re-hydrates the panes/tabs from `session.json`), re-applies the URL hash (overlay state: file-browser path, search query, graph scope), and restores the zoom. The stack survives restarts, so "the window I had open" comes back across a quit, and entries whose label is still alive are skipped rather than popped (a buried window must keep its entry for the quit-while-buried case).
+Bury and restore route by window class. `local::` and `lib-` windows bury through their library's window watcher: the window record persists `hidden`, the reconcile closes the native window, and the next open (or relaunch) restores the record at its stable `window_id` so `?w=` re-hydrates the panes/tabs from `session.json`. Outbound windows bury in place and capture a restore snapshot -- window label, URL hash, zoom level -- onto a small LRU stack in the desktop config, keyed by attachment identity; the next open pops a compatible entry, reuses the label, re-applies the URL hash (overlay state: file-browser path, search query, graph scope), and restores the zoom. OS window geometry restores for every window class from a per-window, per-monitor-signature LRU in the desktop config. Both stores survive restarts, so "the window I had open" comes back across a quit, and LRU entries whose label is still alive are skipped rather than popped (a buried window must keep its entry for the quit-while-buried case).
 
 ### 6.4 The connecting screen (outbound)
 
@@ -223,11 +220,11 @@ Remote-backed connections (outbound attachments) own their window state server-s
 
 ### 6.7 Gateway roster devservers
 
-A gateway is signed in once at the account level. Its authenticated roster is projected into the launcher as volatile devserver rows keyed by `(gateway id, owner, full devserver id)`. Owned rows may connect directly. Shared rows render a native-access warning and cannot connect until the user persists trust for that exact tuple. The launcher orders the consent operation strictly: `PUT native-trust`, authoritative re-list, then ordinary connect. Revocation uses `DELETE native-trust`; the response waits for the connection and its managed windows to be torn down.
+A gateway is signed in once at the account level. Its authenticated roster is projected into the launcher as volatile devserver rows keyed by `(gateway id, owner, full devserver id)`. Owned rows may connect directly. Shared rows render a native-access warning and cannot connect until the user persists trust for that devserver's exact gateway identity `(gateway id, owner user id (UUID), full devserver id)`. The launcher orders the consent operation strictly: `PUT native-trust`, authoritative re-list, then ordinary connect. Revocation uses `DELETE native-trust`; the response waits for the connection and its managed windows to be torn down.
 
 The desktop enforces the same rule behind the UI. It refuses an absent roster row or an untrusted shared row before requesting an entry, serializes trust changes and connects per row, and rechecks a policy generation before registration and watcher startup. Roster removal prunes trust and tears the row down. An owned-to-shared role flip tears down unless exact trust already exists. This prevents an in-flight connect from surviving a removal, revocation, or policy downgrade.
 
-For an allowed row, the desktop asks the gateway entry endpoint for that explicit owner and full id. It validates the response before making any request to `entry_url`, pins the first exact proxy origin for refreshes, and mints the exact-origin Tauri capability before starting the window watcher. Entry or capability-mint failure is fatal only to that row connection; the account gateway and roster poll remain live.
+For an allowed row, the desktop asks the gateway entry endpoint for that explicit owner and full id. It validates the response before making any request to `entry_exchange_url`, pins the first exact proxy origin for refreshes, and mints the exact-origin Tauri capability before starting the window watcher. Entry or capability-mint failure is fatal only to that row connection; the account gateway and roster poll remain live.
 
 ## 7. Power users and the CLI tool
 
@@ -243,8 +240,7 @@ The download entry point is https://chan.app/install. Desktop artifacts are buil
 
 - macOS arm64: notarised DMG containing `Chan.app`. Drag to /Applications. Signed and notarised in CI with the Developer ID identity imported from secrets.
 - Linux: `.AppImage` plus distro packages (`.deb`, `.rpm`), unsigned.
-
-Windows desktop builds are deferred. The bundler config still carries a Windows target, but no Windows artifact is built or published, and the Authenticode signing lane is not open; Windows returns as a distribution channel when that lane lands.
+- Windows x64: signed NSIS installer built from `tauri.windows.conf.json`, which bundles the signed `chan.exe` CLI as a resource, plus a signed CLI zip (`chan-x86_64-pc-windows-msvc.zip`). Signing runs through the SSL.com CodeSignTool lane in CI.
 
 Cargo install (`cargo install chan-desktop`) builds the self-contained desktop from source, for contributors and packagers rather than end users. The README points end users at chan.app.
 
@@ -268,11 +264,11 @@ The `CHAN_LINUX_SYSTEM_GUI` env knob selects the policy:
 
 ## 9. Self-upgrade
 
-chan-desktop updates itself through `tauri-plugin-updater`, gated by the `updater:*` capabilities. A fire-and-forget check runs once per launcher process launch.
+chan-desktop updates itself through `tauri-plugin-updater`, gated by the `updater:*` capabilities. Self-update is macOS-only: only macOS has a signed updater payload and feed, so the Linux AppImage and the Windows NSIS install do not self-update (the on-launch check is a no-op there, and a hand `chan upgrade` answers a clear not-supported error). On macOS a fire-and-forget check runs once per launcher process launch.
 
 - Update bundles are verified with a minisign signature. The production public key is embedded in `src-tauri/tauri.conf.json` under `plugins.updater.pubkey`; the matching private key lives outside the repo in the release owner's secret store.
 - The client probes a single static manifest at `https://chan.app/dl/desktop/latest.json`, generated at release time and deployed to GitHub Pages with the rest of chan.app; there is no dynamic `/dl` server. The manifest carries a top-level `version` plus a `platforms` map keyed by `{os}-{arch}` (e.g. `darwin-aarch64`); Tauri picks the running target's entry and compares `version`.
-- One executable to upgrade. The desktop binary IS `chan` (section 1), so there is no second CLI to update -- the `~/.local/bin/{chan,cs}` shims point at the one binary. `chan upgrade` from the desktop-dispatched binary (`Personality::Desktop`) does NOT replace a tarball: it delegates over the well-known handoff socket to the running desktop, which drives this same `tauri-plugin-updater` (check → download → install → `restart()`). If no desktop is running the CLI launches one first; after a successful install the desktop re-affirms the shims (so they keep pointing at the upgraded binary). `chan upgrade --check` reports availability synchronously without installing. The standalone `chan` (install.sh) is the only path that still self-upgrades by replacing its CLI tarball in place.
+- One executable to upgrade. The desktop binary IS `chan` (section 1), so there is no second CLI to update -- the `~/.local/bin/{chan,cs}` shims point at the one binary. `chan upgrade` from the desktop-dispatched binary (`Personality::Desktop`) does NOT replace a tarball: it delegates over the well-known handoff socket to the running desktop, which drives this same `tauri-plugin-updater` (check -> download -> install -> `restart()`) on macOS; elsewhere the desktop answers the handoff with the not-supported error. If no desktop is running the CLI launches one first; after a successful install the desktop re-affirms the shims (so they keep pointing at the upgraded binary). `chan upgrade --check` reports availability synchronously without installing. The standalone `chan` (install.sh) is the only path that still self-upgrades by replacing its CLI tarball in place.
 
 Key rotation and updater-payload signing/verification are documented in `.agents/desktop.md` ("Auto-upgrade signing") and the [`updater-bridge.md`](./updater-bridge.md) runbook.
 
@@ -296,7 +292,7 @@ Remote workspaces are explicit attachments. They are not a fallback for failed e
 
 Outbound attach means the server already exists and chan-desktop opens it by URL.
 
-The user copies the printed URL, including the bearer token, into the [New] modal's Remote form. The desktop opens that URL in a workspace webview (through the connecting screen, section 6.4) and does not try to start, stop, reclaim, or inspect the server process. This works whether the URL points at another machine or at `127.0.0.1` on the same machine.
+The path is backend-only (the persisted config attachment plus the connecting screen, section 6.4); no launcher form collects the URL. An attached URL opens in a workspace webview and the desktop does not try to start, stop, reclaim, or inspect the server process. This works whether the URL points at another machine or at `127.0.0.1` on the same machine.
 
 ## 12. Native file integrations
 
@@ -304,4 +300,4 @@ The user copies the printed URL, including the bearer token, into the [New] moda
 - **Upload / replace**: the native file picker and selected paths remain in Rust. Each regular, non-symlink file is streamed as a multipart body in 64 KiB chunks after the workspace-relative destination, invoking origin, cookies, and CSRF mirror are revalidated. The webview receives only final relative paths and progress snapshots, never file paths or file bytes.
 - **Generated downloads**: bytes already produced by the SPA, such as a rendered PDF, cross IPC through an explicit 64 KiB chunk sink and use the same temp-file/atomic-rename commit discipline.
 - **Scheduling**: each window runs at most two downloads and one upload. Extra transfers remain visible in a FIFO queue; queued and active operations are cancellable, and page teardown cancels both.
-- **Export to PDF** (macOS): `window.print()` is a no-op in WKWebView, so the desktop drives the real macOS print pipeline (`printOperationWithPrintInfo:`) silently to a file, which honours `@page`, auto-pagination, and explicit page breaks exactly like the browser's print-to-PDF path. The frontend gates the call to macOS desktop.
+- **Export to PDF**: the SPA renders the PDF itself (the `pdf_export` engine: paginated A4 composition, each page rasterized and embedded through pdf-lib) on every surface. On desktop the bytes cross IPC through the generated-download sink into Downloads; in a browser they save as a normal download.
