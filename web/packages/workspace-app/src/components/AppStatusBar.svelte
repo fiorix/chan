@@ -25,9 +25,11 @@
   // layout and clear of the terminal prompt + rich-prompt that sit at
   // the bottom of a terminal pane.
   import {
+    browserSidePanes,
     indexStatus,
     importStatus,
     openWorkspaceWarningsDialog,
+    paneWidths,
     dismissStatus,
     ui,
   } from "../state/store.svelte";
@@ -36,6 +38,14 @@
   import { selfParticipant, sessionState } from "../state/session.svelte";
 
   let collapsed = $state(false);
+
+  // Keep the window-level pill attached to the workspace edge when the
+  // right-side file browser is docked. The dock width is live while its
+  // resize handle moves, so the pill follows the split instead of covering
+  // the file browser. Terminal-only windows never render either dock.
+  const rightInset = $derived(
+    !ui.terminalOnly && browserSidePanes.right ? paneWidths.browser + 12 : 12,
+  );
 
   // Status-bar sections are ambient state. Only statuses that carry
   // an explicit typed action become buttons; generic status text
@@ -99,7 +109,7 @@
 </script>
 
 {#if anyVisible}
-  <div class="app-statusbar" class:collapsed>
+  <div class="app-statusbar" class:collapsed style:right={`${rightInset}px`}>
     {#if !collapsed}
       <div class="row">
         {#if indexVisible}
@@ -242,8 +252,9 @@
 {/if}
 
 <style>
-  /* Window-level pill anchored top-right. position:fixed
-     so it floats above whatever layout the workspace settled on.
+  /* Window-level pill anchored to the workspace's top-right edge.
+     position:fixed keeps it above the pane layout; the inline right
+     inset tracks a visible right-side file-browser dock.
      z-index sits above every stacked overlay (modals at 26000,
      OverlayShell stack starts at 25002) but below the disconnect
      overlay (30000), which preempts everything when the watcher
@@ -252,7 +263,6 @@
      or file browser is open. */
   .app-statusbar {
     position: fixed;
-    right: 12px;
     /* Sits below the pane tab-strip (the tab pills + the top-right
        hamburger button, ~33px tall) so the pill never covers it. */
     top: 48px;
