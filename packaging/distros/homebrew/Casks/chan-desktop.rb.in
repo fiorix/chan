@@ -1,0 +1,60 @@
+# Rendered by packaging/distros/homebrew/make-homebrew-package.sh, which
+# fills the version and DMG checksum from a GA release; CI pushes the result
+# to the fiorix/homebrew-chan tap at this relative path. The DMG asset name
+# must match web/packages/marketing/scripts/release-assets.mjs (desktopAssets).
+cask "chan-desktop" do
+  version "@PKGVER@"
+  sha256 "@SHA256_DMG@"
+
+  url "https://github.com/fiorix/chan/releases/download/v#{version}/Chan_#{version}.dmg",
+      verified: "github.com/fiorix/chan/"
+  name "Chan"
+  desc "Modern engineer's IDE"
+  homepage "https://chan.app/"
+
+  livecheck do
+    url :url
+    strategy :github_latest
+  end
+
+  # The app's Tauri updater owns upgrades via the darwin-aarch64 manifest at
+  # https://chan.app/dl/desktop/latest.json; `brew upgrade` skips this cask
+  # unless --greedy. Every GA still rewrites version and sha256 here, so a
+  # fresh install or `brew reinstall` always gets the current DMG.
+  auto_updates true
+
+  # Distro parity: the AUR/deb/rpm chan-desktop packages conflict with the
+  # headless chan package. There is no file-level clash (this cask installs
+  # no bin shims), so this documents the one-or-the-other contract.
+  conflicts_with formula: "fiorix/chan/chan"
+
+  # Only darwin-aarch64 artifacts are published; 11.0 is the bundle's
+  # minimumSystemVersion (desktop/src-tauri/tauri.conf.json).
+  depends_on arch: :arm64
+  depends_on macos: ">= :big_sur"
+
+  app "Chan.app"
+
+  # No `binary` stanzas: the app installs self-healing ~/.local/bin/{chan,cs}
+  # symlinks on every launch (desktop/src-tauri/src/cs_install.rs) and never
+  # clobbers foreign files; a brew-managed shim would double-manage the same
+  # two names.
+
+  # ~/.local/bin/{chan,cs} are not zapped: the same paths may hold a real
+  # binary from the standalone install.sh. ~/.chan is all Chan state, shared
+  # with any CLI install.
+  zap trash: [
+    "~/.chan",
+    "~/Library/Caches/app.chan.desktop",
+    "~/Library/HTTPStorages/app.chan.desktop",
+    "~/Library/Preferences/app.chan.desktop.plist",
+    "~/Library/Saved Application State/app.chan.desktop.savedState",
+    "~/Library/WebKit/app.chan.desktop",
+  ]
+
+  caveats <<~EOS
+    Chan installs `chan` and `cs` shims into ~/.local/bin on first launch.
+    The headless CLI formula (fiorix/chan/chan) provides the same commands;
+    install one or the other, not both.
+  EOS
+end

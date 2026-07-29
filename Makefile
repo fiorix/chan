@@ -161,6 +161,11 @@ aur-check: ## Build and smoke both AUR packages in a disposable sdme Arch contai
 	AUR_ROOTFS="$(AUR_ROOTFS)" REV="$(AUR_REV)" SDME="$(SDME)" \
 		packaging/distros/arch/build-with-sdme.sh
 
+.PHONY: homebrew-check
+homebrew-check: ## Render and syntax-check both Homebrew tap definitions from released assets.
+	packaging/distros/homebrew/make-homebrew-package.sh chan-desktop $(HOMEBREW_VERSION)
+	packaging/distros/homebrew/make-homebrew-package.sh chan $(HOMEBREW_VERSION)
+
 .PHONY: macos-chan-app
 macos-chan-app: ## Build and sign the macOS .app bundle.
 	$(MAKE) -C desktop app-signed
