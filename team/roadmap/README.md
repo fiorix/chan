@@ -25,8 +25,17 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | --- | --- | --- |
 | [chan-desktop-reverse-tunnel](v0.80.0/chan-desktop-reverse-tunnel.md) | registered, not specced | route reverse TCP/UDP tunnels and desktop window commands from a devserver terminal to its connected desktop |
 | [terminal-submit-suffix](v0.80.0/terminal-submit-suffix.md) | validated, ready to spec | spec and land the one-newline submit suffix and the 4096-byte all-writes cap, probe-validated on all four agents |
-| [video-preview-and-range-serving](v0.80.0/video-preview-and-range-serving.md) | registered, grounded but not specced | spec first; the real chunk is HTTP range/206 in the file route, mirroring the image path on the frontend |
-| [web-marketing-onboarding](v0.80.0/web-marketing-onboarding.md) | registered, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
+| [video-preview-and-range-serving](v0.80.0/video-preview-and-range-serving.md) | implemented on main (e0987974) | close at GA; riders carried forward: audio preview UI, viewer prev/next across mixed media, resumable downloads |
+
+### v0.81.0
+
+| item | state | what needs to happen |
+| --- | --- | --- |
+| [editor-media-copy-and-view-parity](v0.81.0/editor-media-copy-and-view-parity.md) | registered, grounded, ready to spec | add Copy PNG (and Copy SVG for `.svg`) to image previews, and build the View/copy chrome onto the slide overlay's rendered media |
+| [extensions-v1](v0.81.0/extensions-v1.md) | registered, grounded, needs rulings | rule the open decisions (spawn policy, handshake shape, desktop CSP scope), then spec the TOML discovery, subprocess supervision, and iframe tab |
+| [file-browser-media-double-click](v0.81.0/file-browser-media-double-click.md) | registered, grounded, ready to spec | route media-row double-click and Enter to the existing image/video/PDF viewers |
+| [survey-focus-on-tab-return](v0.81.0/survey-focus-on-tab-return.md) | registered, grounded statically | reproduce the tab-return focus loss live, then guard the terminal refocus against surveys and make the card grab deterministic |
+| [web-marketing-onboarding](v0.81.0/web-marketing-onboarding.md) | registered, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
 
 ## Completed
 
