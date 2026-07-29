@@ -6,8 +6,10 @@
   // (see Pane.svelte), so it needs no terminal-window branch.
 
   import type { Component } from "svelte";
+  import ChaoticHalo from "./ChaoticHalo.svelte";
   import ConcentricPulse from "./ConcentricPulse.svelte";
   import DottedSurface from "./DottedSurface.svelte";
+  import ExponentialEcho from "./ExponentialEcho.svelte";
   import ExponentialThread from "./ExponentialThread.svelte";
   import {
     emptyPaneAnimationName,
@@ -17,12 +19,15 @@
     stepEmptyPaneAnimation,
     type EmptyPaneAnimationId,
   } from "./emptyPaneAnimations";
+  import MutualForceStarburst from "./MutualForceStarburst.svelte";
   import OrbitalRosette from "./OrbitalRosette.svelte";
   import PenguinGrid from "./PenguinGrid.svelte";
   import PolarDrift from "./PolarDrift.svelte";
   import QuadraticBloom from "./QuadraticBloom.svelte";
   import RadialRibbons from "./RadialRibbons.svelte";
+  import RecursiveArcBloom from "./RecursiveArcBloom.svelte";
   import SixfoldVortex from "./SixfoldVortex.svelte";
+  import SpiralSpokes from "./SpiralSpokes.svelte";
 
   const ANIMATION_COMPONENTS = {
     "sixfold-vortex": SixfoldVortex,
@@ -31,9 +36,14 @@
     "concentric-pulse": ConcentricPulse,
     "penguin-grid": PenguinGrid,
     "exponential-thread": ExponentialThread,
+    "exponential-echo": ExponentialEcho,
     "quadratic-bloom": QuadraticBloom,
     "orbital-rosette": OrbitalRosette,
     "dotted-waves": DottedSurface,
+    "spiral-spokes": SpiralSpokes,
+    "mutual-force-starburst": MutualForceStarburst,
+    "recursive-arc-bloom": RecursiveArcBloom,
+    "chaotic-halo": ChaoticHalo,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {

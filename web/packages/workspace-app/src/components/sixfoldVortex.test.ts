@@ -25,6 +25,23 @@ describe("Sixfold Vortex", () => {
     );
   });
 
+  test("preserves simulation state across resize bursts", async () => {
+    const renderer = (await import("./SixfoldVortex.svelte?raw"))
+      .default as string;
+    const resizeBody = renderer.match(
+      /resize\(nextWidth, nextHeight, reducedMotion, timeMs\) \{([\s\S]*?)\n\s*\},/,
+    )?.[1];
+
+    expect(resizeBody).toBeDefined();
+    expect(resizeBody).not.toContain(
+      "particles = createSixfoldVortexParticles()",
+    );
+    expect(resizeBody).not.toContain("sourceTime = 0");
+    expect(renderer).toContain(
+      ": Math.max(0, timeMs - lastSimulationMs);",
+    );
+  });
+
   test("creates the source sketch's 30,000 Gaussian particles", () => {
     const particles = createSixfoldVortexParticles(
       SIXFOLD_VORTEX_PARTICLE_COUNT,

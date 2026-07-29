@@ -12,6 +12,15 @@ describe("Concentric Pulse", () => {
       .default as string;
 
     expect(renderer).toMatch(/const PHASE_SPEED = 0\.1885;/);
+    expect(renderer).toContain(
+      "--concentric-pulse-line-rgb: 218, 218, 218;",
+    );
+    expect(renderer).toContain(
+      "--concentric-pulse-alpha-base: 0.096;",
+    );
+    expect(renderer).toContain(
+      "--concentric-pulse-alpha-range: 0.084;",
+    );
     expect(geometry).toContain(
       "https://x.com/hisadan/status/2003482480490520895",
     );

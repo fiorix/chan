@@ -20,9 +20,14 @@ describe("empty pane animation catalog", () => {
       "concentric-pulse",
       "penguin-grid",
       "exponential-thread",
+      "exponential-echo",
       "quadratic-bloom",
       "orbital-rosette",
       "dotted-waves",
+      "spiral-spokes",
+      "mutual-force-starburst",
+      "recursive-arc-bloom",
+      "chaotic-halo",
     ]);
     expect(new Set(ids).size).toBe(ids.length);
     expect(new Set(names).size).toBe(names.length);
@@ -33,6 +38,12 @@ describe("empty pane animation catalog", () => {
       "Orbital Rosette",
     );
     expect(emptyPaneAnimationName("dotted-waves")).toBe("Dotted Waves");
+    expect(emptyPaneAnimationName("mutual-force-starburst")).toBe(
+      "Mutual Force Starburst",
+    );
+    expect(emptyPaneAnimationName("exponential-echo")).toBe(
+      "Exponential Echo",
+    );
   });
 
   test("steps forward and backward with wraparound", () => {
@@ -40,9 +51,12 @@ describe("empty pane animation catalog", () => {
       "radial-ribbons",
     );
     expect(stepEmptyPaneAnimation("sixfold-vortex", -1)).toBe(
-      "dotted-waves",
+      "chaotic-halo",
     );
     expect(stepEmptyPaneAnimation("dotted-waves", 1)).toBe(
+      "spiral-spokes",
+    );
+    expect(stepEmptyPaneAnimation("chaotic-halo", 1)).toBe(
       "sixfold-vortex",
     );
   });
@@ -53,7 +67,7 @@ describe("empty pane animation catalog", () => {
     );
     expect(
       randomEmptyPaneAnimation("sixfold-vortex", () => 0.999),
-    ).toBe("dotted-waves");
+    ).toBe("chaotic-halo");
   });
 
   test("picks the initial animation from the full catalog", () => {
@@ -61,7 +75,7 @@ describe("empty pane animation catalog", () => {
       "sixfold-vortex",
     );
     expect(randomEmptyPaneAnimation(undefined, () => 0.999)).toBe(
-      "dotted-waves",
+      "chaotic-halo",
     );
   });
 
@@ -73,10 +87,10 @@ describe("empty pane animation catalog", () => {
     };
 
     expect(initialEmptyPaneAnimation(storage, () => 0.999)).toBe(
-      "dotted-waves",
+      "chaotic-halo",
     );
     expect(initialEmptyPaneAnimation(storage, () => 0)).toBe(
-      "dotted-waves",
+      "chaotic-halo",
     );
 
     persistEmptyPaneAnimation("polar-drift", storage);

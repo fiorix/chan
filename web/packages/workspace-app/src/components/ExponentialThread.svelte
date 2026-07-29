@@ -26,21 +26,47 @@
       function draw(phase: number): void {
         if (width <= 0 || height <= 0) return;
 
-        const lineColor = canvasCssValue(
+        const centerColor = canvasCssValue(
           host,
-          "--exponential-thread-line-rgb",
-          "200, 200, 200",
+          "--exponential-thread-center-rgb",
+          "112, 112, 112",
+        );
+        const edgeColor = canvasCssValue(
+          host,
+          "--exponential-thread-edge-rgb",
+          "218, 218, 218",
         );
         const lineAlpha = canvasCssNumber(
           host,
           "--exponential-thread-line-alpha",
-          0.045,
+          0.075,
         );
         const points = buildExponentialThreadPoints(phase);
         const transform = fitExponentialThread(width, height);
+        let outerRadius = 1;
+
+        for (let index = 0; index < points.length; index += 2) {
+          outerRadius = Math.max(
+            outerRadius,
+            Math.hypot(
+              points[index] * transform.scaleX,
+              points[index + 1] * transform.scaleY,
+            ),
+          );
+        }
+        const lineGradient = ctx.createRadialGradient(
+          transform.centerX,
+          transform.centerY,
+          0,
+          transform.centerX,
+          transform.centerY,
+          outerRadius,
+        );
+        lineGradient.addColorStop(0, `rgb(${centerColor})`);
+        lineGradient.addColorStop(1, `rgb(${edgeColor})`);
 
         ctx.clearRect(0, 0, width, height);
-        ctx.strokeStyle = `rgb(${lineColor})`;
+        ctx.strokeStyle = lineGradient;
         ctx.globalAlpha = lineAlpha;
         ctx.lineWidth = Math.max(0.8, 3 * transform.scaleY);
         ctx.lineJoin = "round";
@@ -88,8 +114,9 @@
     position: absolute;
     inset: 0;
     z-index: 0;
-    --exponential-thread-line-rgb: 200, 200, 200;
-    --exponential-thread-line-alpha: 0.045;
+    --exponential-thread-center-rgb: 112, 112, 112;
+    --exponential-thread-edge-rgb: 218, 218, 218;
+    --exponential-thread-line-alpha: 0.075;
     pointer-events: none;
     overflow: hidden;
   }
@@ -99,12 +126,14 @@
     display: block;
   }
   :global([data-theme="light"]) .exponential-thread {
-    --exponential-thread-line-rgb: 0, 0, 0;
-    --exponential-thread-line-alpha: 0.035;
+    --exponential-thread-center-rgb: 0, 0, 0;
+    --exponential-thread-edge-rgb: 150, 150, 150;
+    --exponential-thread-line-alpha: 0.06;
   }
   :global([data-theme="dark"]) .exponential-thread {
-    --exponential-thread-line-rgb: 218, 218, 218;
-    --exponential-thread-line-alpha: 0.045;
+    --exponential-thread-center-rgb: 112, 112, 112;
+    --exponential-thread-edge-rgb: 218, 218, 218;
+    --exponential-thread-line-alpha: 0.075;
   }
   @media (prefers-reduced-motion: reduce) {
     .exponential-thread {

@@ -30,6 +30,11 @@ export const EMPTY_PANE_ANIMATIONS = [
     description: "A dim, slowly morphing exponential curve.",
   },
   {
+    id: "exponential-echo",
+    name: "Exponential Echo",
+    description: "A growing-frequency curve leaving a tunnel of fading echoes.",
+  },
+  {
     id: "quadratic-bloom",
     name: "Quadratic Bloom",
     description: "A shifting quadratic attractor drawn as a field of points.",
@@ -43,6 +48,26 @@ export const EMPTY_PANE_ANIMATIONS = [
     id: "dotted-waves",
     name: "Dotted Waves",
     description: "A perspective field of dots moving in shallow waves.",
+  },
+  {
+    id: "spiral-spokes",
+    name: "Spiral Spokes",
+    description: "An expanding fan of lines twisting out from the center.",
+  },
+  {
+    id: "mutual-force-starburst",
+    name: "Mutual Force Starburst",
+    description: "Three hundred particles pulling into a traced starburst.",
+  },
+  {
+    id: "recursive-arc-bloom",
+    name: "Recursive Arc Bloom",
+    description: "Sixteen chains of alternating arcs breathing in radial symmetry.",
+  },
+  {
+    id: "chaotic-halo",
+    name: "Chaotic Halo",
+    description: "A dense field of coupled orbits forming a shifting halo.",
   },
 ] as const;
 

@@ -29,17 +29,17 @@
         const lineColor = canvasCssValue(
           host,
           "--concentric-pulse-line-rgb",
-          "86, 96, 220",
+          "218, 218, 218",
         );
         const alphaBase = canvasCssNumber(
           host,
           "--concentric-pulse-alpha-base",
-          0.08,
+          0.096,
         );
         const alphaRange = canvasCssNumber(
           host,
           "--concentric-pulse-alpha-range",
-          0.07,
+          0.084,
         );
         const scale =
           Math.min(width, height) / CONCENTRIC_PULSE_REFERENCE_SIZE;
@@ -101,9 +101,9 @@
     position: absolute;
     inset: 0;
     z-index: 0;
-    --concentric-pulse-line-rgb: 86, 96, 220;
-    --concentric-pulse-alpha-base: 0.08;
-    --concentric-pulse-alpha-range: 0.07;
+    --concentric-pulse-line-rgb: 218, 218, 218;
+    --concentric-pulse-alpha-base: 0.096;
+    --concentric-pulse-alpha-range: 0.084;
     pointer-events: none;
     overflow: hidden;
   }
@@ -113,14 +113,14 @@
     display: block;
   }
   :global([data-theme="light"]) .concentric-pulse {
-    --concentric-pulse-line-rgb: 0, 0, 210;
-    --concentric-pulse-alpha-base: 0.055;
-    --concentric-pulse-alpha-range: 0.06;
+    --concentric-pulse-line-rgb: 0, 0, 0;
+    --concentric-pulse-alpha-base: 0.066;
+    --concentric-pulse-alpha-range: 0.072;
   }
   :global([data-theme="dark"]) .concentric-pulse {
-    --concentric-pulse-line-rgb: 86, 96, 220;
-    --concentric-pulse-alpha-base: 0.08;
-    --concentric-pulse-alpha-range: 0.07;
+    --concentric-pulse-line-rgb: 218, 218, 218;
+    --concentric-pulse-alpha-base: 0.096;
+    --concentric-pulse-alpha-range: 0.084;
   }
   @media (prefers-reduced-motion: reduce) {
     .concentric-pulse {

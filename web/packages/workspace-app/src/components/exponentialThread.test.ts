@@ -14,7 +14,16 @@ describe("buildExponentialThreadPoints", () => {
       .default as string;
 
     expect(renderer).toMatch(/const PHASE_SPEED = 0\.018;/);
-    expect(renderer).toMatch(/--exponential-thread-line-alpha: 0\.045;/);
+    expect(renderer).toMatch(
+      /--exponential-thread-line-alpha: 0\.075;/,
+    );
+    expect(renderer).toContain("ctx.createRadialGradient(");
+    expect(renderer).toContain(
+      "--exponential-thread-center-rgb: 112, 112, 112;",
+    );
+    expect(renderer).toContain(
+      "--exponential-thread-edge-rgb: 218, 218, 218;",
+    );
     expect(geometry).toContain(
       "https://x.com/hisadan/status/2039716286528450634",
     );

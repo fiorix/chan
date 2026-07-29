@@ -102,7 +102,7 @@
         const elapsedMs =
           lastSimulationMs === 0
             ? 1000 / SOURCE_TIME_SPEED
-            : timeMs - lastSimulationMs;
+            : Math.max(0, timeMs - lastSimulationMs);
         const frameScale = Math.min(
           MAX_FRAME_SCALE,
           (elapsedMs * SOURCE_TIME_SPEED) / 1000,
@@ -115,8 +115,6 @@
         resize(nextWidth, nextHeight, reducedMotion, timeMs) {
           width = nextWidth;
           height = nextHeight;
-          particles = createSixfoldVortexParticles();
-          sourceTime = 0;
           lastSimulationMs = 0;
           resetSurface();
           if (reducedMotion) drawStatic();
