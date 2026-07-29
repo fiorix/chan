@@ -77,7 +77,7 @@ The configured pubkey was rotated from the original DEV updater key to the produ
 1. Ship one bridge release that embeds the NEW production pubkey but signs the update bundle with the OLD DEV private key, so existing installs accept it.
 2. Sign every release after the bridge with the NEW production private key.
 3. If the OLD DEV private key is unavailable, existing installs cannot auto-update across this key rotation. Users need a manual DMG install for the first production-key release.
-4. Old installs that never picked up the bridge release will fail to verify NEW-key-signed bundles and stall on their last good version until the user manually reinstalls. Plan the bridge window for how long you're willing to support that tail.
+4. Old installs that never picked up the bridge release will fail to verify NEW-key-signed bundles and stall on their last good version until the user manually reinstalls. Plan the bridge window for how long you're willing to support that tail. A Homebrew cask install recovers with `brew reinstall --cask fiorix/chan/chan-desktop`: the cask is `auto_updates` so brew never refreshes it on its own, but every GA rewrites it to the current DMG.
 5. The signing identity used at build time is selected via `TAURI_SIGNING_PRIVATE_KEY` (key contents) or `TAURI_SIGNING_PRIVATE_KEY_PATH` (file path), with optional `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. CI should pull these from a secrets store, never from the repo.
 
 ### Manifest endpoint
