@@ -407,7 +407,10 @@ fn watch_ws_url(host: &str, port: u16) -> String {
 type GatewayWs =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-fn gateway_ws_origin(conn: &DevserverConn) -> Result<&str, String> {
+/// The exact canonical external origin the gateway requires on every
+/// cookie-authenticated upgrade. Shared with the reverse-tunnel sockets, which
+/// ride the same hop.
+pub(crate) fn gateway_ws_origin(conn: &DevserverConn) -> Result<&str, String> {
     conn.gateway
         .as_ref()
         .map(|gateway| gateway.proxy_origin.as_str())

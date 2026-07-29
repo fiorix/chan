@@ -8,7 +8,6 @@
 //! server, which is where this code has to be verified.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};

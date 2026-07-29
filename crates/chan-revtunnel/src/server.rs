@@ -25,7 +25,22 @@
 //!   process: the devserver's PTY and watcher work, and the desktop's window
 //!   feeds and IPC.
 //!
-//! A cap belongs here, on the registry, where a tunnel is admitted.
+//! TODO: cap live tunnels and per-tunnel connections here, where a tunnel is
+//! admitted, and account the bytes a tunnel moves.
+//!
+//! ## A dropped control socket is fatal, which the gateway path outgrows
+//!
+//! Losing the control socket fails the blocked `cs tunnel` immediately. That
+//! matches a directly attached desktop, where the socket drops only if the
+//! desktop really went away. It does not match a gateway-attached one: those
+//! browser sessions expire absolutely (an hour at most) and are revocable, and
+//! the proxy force-closes bridged WebSockets on both, so a long-lived gateway
+//! tunnel dies mid-flight through no fault of either end.
+//!
+//! TODO: hold a registration through a grace window instead of failing at
+//! once, and let the desktop redial by tunnel id to resume it. That makes the
+//! tunnel id a resumable credential, so it lands with the authority question
+//! on the routes (see `require_tunnel_owner` in chan-server), not before it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

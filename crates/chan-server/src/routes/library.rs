@@ -192,17 +192,7 @@ pub fn launcher_router(
         // Native folder picker -- another desktop-bridge dispatch (the launcher's
         // New-Workspace "Browse…"), so it sits with the other bridge ops.
         .route("/api/library/fs/pick-folder", post(handle_pick_folder))
-        // The desktop-dialed reverse-tunnel legs (`cs tunnel`). They live under
-        // `/api/library/*` because `/api/devserver/*` is 404'd on the gateway's
-        // public wildcard; handlers + rationale in `routes::tunnel`.
-        .route(
-            chan_revtunnel::wire::CONTROL_PATH,
-            get(super::tunnel::handle_tunnel_control),
-        )
-        .route(
-            chan_revtunnel::wire::CONN_PATH,
-            get(super::tunnel::handle_tunnel_conn),
-        )
+        .merge(tunnel_legs())
         .route_layer(middleware::from_fn(require_local_mutation))
         .with_state(host.clone());
     // Workspaces: list always; the mutation routes are always present but
@@ -448,6 +438,52 @@ async fn require_surface_bearer(
 /// forwards a verified gateway assertion; owner assertions get the full launcher,
 /// while missing/non-owner assertions may read but not mutate. Non-tunnel
 /// requests keep the existing local bearer/bridge behavior.
+/// The desktop-dialed reverse-tunnel legs (`cs tunnel`), behind their own
+/// owner gate. They live under `/api/library/*` because `/api/devserver/*` is
+/// 404'd on the gateway's public wildcard; handlers and the three-leg contract
+/// are documented in `routes::tunnel`.
+fn tunnel_legs() -> Router<Arc<WorkspaceHost>> {
+    Router::new()
+        .route(
+            chan_revtunnel::wire::CONTROL_PATH,
+            get(super::tunnel::handle_tunnel_control),
+        )
+        .route(
+            chan_revtunnel::wire::CONN_PATH,
+            get(super::tunnel::handle_tunnel_conn),
+        )
+        .route_layer(middleware::from_fn(require_tunnel_owner))
+}
+
+/// Restrict the tunnel legs to the devserver's owner.
+///
+/// Both legs are GET, so neither [`require_local_mutation`] nor the launcher
+/// bearer covers them over the gateway: a tunnel-origin request bypasses the
+/// bearer entirely, which would leave the unguessable tunnel id as the only
+/// thing standing between any session holder and a listener on the owner's
+/// desktop. A grantee holds a valid session, so "valid session" is not the
+/// authority to open sockets on someone else's machine. Local (non-tunnel)
+/// requests are unaffected: the launcher bearer already gates those.
+///
+/// TODO: tighten this from owner to the owner's DESKTOP. Gateway assertion
+/// claims carry only sub / owner_user_id / aud / drv / iat / exp, so the
+/// owner's desktop app and the owner's browser tab are indistinguishable here;
+/// the desktop authenticates through the same entry exchange a browser does.
+/// Carrying a client-type claim (and the desktop version, so a devserver can
+/// refuse a build too old to speak this protocol) means threading it from the
+/// identity service through the gateway session into the assertion.
+async fn require_tunnel_owner(req: Request<Body>, next: Next) -> Response {
+    let tunnel_origin = req.extensions().get::<crate::TunnelOrigin>();
+    if tunnel_origin.is_some_and(|origin| !origin.owner()) {
+        return (
+            StatusCode::FORBIDDEN,
+            "reverse tunnels are not available for this gateway role",
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
 async fn require_local_mutation(req: Request<Body>, next: Next) -> Response {
     let is_mutation = matches!(*req.method(), Method::POST | Method::PUT | Method::DELETE);
     if is_mutation
@@ -3066,6 +3102,50 @@ mod window_op_route_tests {
                 "launcher mutation is not available for this gateway role",
                 "{method}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn tunnel_legs_are_refused_for_a_non_owner_gateway_role() {
+        // Both legs are GET, so the mutation gate does not cover them and a
+        // tunnel-origin request bypasses the launcher bearer. Without the owner
+        // gate a grantee who learned a tunnel id could open a listener on the
+        // owner's desktop.
+        let host = Arc::new(WorkspaceHost::new(library(), crate::route_builder()));
+        let router = launcher_router(host, None, None);
+
+        for uri in [
+            "/api/library/tunnel/control?tunnel=tun-1",
+            "/api/library/tunnel/conn?tunnel=tun-1&conn=c0",
+        ] {
+            let request = Request::builder()
+                .method("GET")
+                .uri(uri)
+                .extension(crate::TunnelOrigin { caller: None })
+                .body(Body::empty())
+                .unwrap();
+            let response = router.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&body),
+                "reverse tunnels are not available for this gateway role",
+                "{uri}"
+            );
+
+            // A local request carries no tunnel origin, so the gate must pass
+            // it through. It lands on the `WebSocketUpgrade` extractor, which
+            // rejects this plain GET as a bad request: not the gate's 403, and
+            // proof the gate does not over-block the loopback surface.
+            let request = Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let response = router.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
         }
     }
 
