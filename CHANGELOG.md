@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.81.0] - 2026-07-30
+
+v0.81.0 makes systemd devserver terminals survive every restart flavor, brings copy and View parity to images, diagrams, and slides, routes file-browser media gestures to the real viewers, keeps survey cards focused across tab switches, and adds Nix flake and Homebrew tap install paths.
+
+### Added
+
+- **Linux systemd devserver terminals survive restarts.** Terminal PTYs park continuously in systemd's fd store once they belong to a window, so `chan devserver --restart`, bare `systemctl --user restart`, watchdog recovery, and crash recovery all rebuild the same sessions with their ids and window placement intact. Explicit stop and `--restart --force` still terminate sessions through the authenticated drain endpoint before the unit transition.
+- **Images, diagrams, and slides share one copy and View surface.** Image previews add pixel Copy PNG and source Copy SVG where applicable, Excalidraw embeds gain Copy SVG, and slide preview/play add hover View plus SVG/PNG copy chrome on the live overlay without changing document rendering or PDF export.
+- **File-browser media gestures open the matching viewer.** Double-click or Enter routes images and SVG through the image viewer with same-directory navigation, video through the video viewer, and PDF through the PDF viewer; selection, inspector, and text-file behavior are unchanged.
+- **Nix and Homebrew are first-class install paths.** The root flake exposes `chan-desktop` as the default package for x86_64-linux and aarch64-linux with `chan`/`cs` aliases and Nix-owned update behavior, and the `fiorix/homebrew-chan` tap serves a Chan Desktop cask plus a headless `chan` formula.
+
+### Changed
+
+- **The launcher window is named Computers.** Menus, titles, and docs use the one name consistently.
+- **Empty-pane animations are more controllable and cheaper.** Arrow-key selection, a speed ladder, enso transitions, off-screen frame-loop suspension, and transient WebKit context recovery land across the catalog.
+
+### Fixed
+
+- **Survey cards keep the keyboard across tab switches.** Returning to a terminal tab with a pending survey focuses the card, not the PTY; option, follow-up, and dismissal keys never leak to the shell, and resolving the card restores terminal focus.
+- **Browser dashboard entry passes the exact-Origin gate.** The gateway identity handoff sends `strict-origin` referrer policy so a browser's cross-origin form POST carries the Origin the devserver proxy requires; the CSRF validation itself is unchanged.
+- **Closed, persisted devserver windows reopen from the desktop Window menu.** The desktop polls the authoritative library window feed; the legacy `GET /api/devserver/windows` endpoint stays as a one-release compatibility adapter for pre-0.81.0 desktops.
+
 ## [v0.80.0] - 2026-07-29
 
 v0.80.0 adds owner-gated reverse TCP tunnels through a connected desktop, seekable video preview over bounded HTTP ranges, and safer terminal-agent delivery; it also brings Ghostty behavior closer to xterm.js and extends the empty-pane animation catalog.
