@@ -21,12 +21,12 @@ cask "chan-desktop" do
   # https://chan.app/dl/desktop/latest.json; `brew upgrade` skips this cask
   # unless --greedy. Every GA still rewrites version and sha256 here, so a
   # fresh install or `brew reinstall` always gets the current DMG. The
-  # conflict declares the one-or-the-other contract shared with the distro
-  # packages; there is no file-level clash because this cask installs no
+  # one-or-the-other contract with the headless formula lives in caveats
+  # only: cask conflicts_with cannot name a formula (the DSL accepts only
+  # :cask), and there is no file-level clash because this cask installs no
   # bin shims. Only darwin-aarch64 artifacts are published, and Big Sur is
   # the bundle's minimumSystemVersion (desktop/src-tauri/tauri.conf.json).
   auto_updates true
-  conflicts_with formula: "fiorix/chan/chan"
   depends_on arch: :arm64
   depends_on macos: :big_sur
 
