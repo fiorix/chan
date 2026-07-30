@@ -117,7 +117,14 @@ export function openImageZoom(
       step(-1);
     }
   };
-  backdrop.addEventListener("click", () => dismiss());
+  // Stop at the viewer boundary: under the slide player's web
+  // fullscreen this backdrop is a CHILD of the slide backdrop, whose
+  // own click handler dismisses the presentation - a click meant for
+  // this viewer must not fall through and close both.
+  backdrop.addEventListener("click", (e) => {
+    e.stopPropagation();
+    dismiss();
+  });
   document.addEventListener("keydown", onKey, true);
 }
 

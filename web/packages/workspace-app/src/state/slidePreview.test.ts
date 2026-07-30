@@ -418,8 +418,13 @@ chan:
       | null;
     expect(img?.style.width).toBe("120px");
     expect(img?.classList.contains("chan-slide-align-right")).toBe(true);
-    // The media-chrome wrap sits between the img and its aligned
-    // paragraph; the paragraph still carries the flex alignment classes.
+    expect(img?.parentElement?.classList.contains("chan-slide-media")).toBe(true);
+    expect(
+      img?.parentElement?.classList.contains("chan-slide-align-right"),
+    ).toBe(true);
+    // Once the image loads, the media-chrome wrap slots between the img
+    // and its aligned paragraph; the paragraph keeps the flex classes.
+    img?.dispatchEvent(new Event("load"));
     expect(img?.parentElement?.classList.contains("md-slide-media-wrap")).toBe(
       true,
     );

@@ -6,6 +6,7 @@ import { EditorView } from "@codemirror/view";
 import { chanMarkdown } from "../markdown/grammar";
 import { writeClipboardPayload } from "../../api/clipboard";
 import { imageDecorations } from "./image";
+import { copyImagePixels } from "./image_copy";
 
 vi.mock("../../api/clipboard", () => ({
   writeClipboardPayload: vi.fn(async () => {}),
@@ -110,6 +111,20 @@ describe("image widget pixel copy", () => {
     const { view, cleanup } = mount("![a](pic.svg#w=200)");
     expect(view.dom.querySelector(".cm-md-image-copy-svg")).toBeTruthy();
     cleanup();
+  });
+
+  test("unknown bytes with an unusable Content-Type never reach the clipboard", async () => {
+    // No image/* Content-Type and no recognizable extension: labelling
+    // these bytes image/png would put a corrupt PNG on the clipboard,
+    // so the copy must fail through the button's failure surface.
+    stubFetch({
+      bytes: new Uint8Array([1, 2, 3]),
+      mime: "application/octet-stream",
+    });
+    await expect(
+      copyImagePixels("/api/files/mystery.bin", false),
+    ).rejects.toThrow("unrecognized image type");
+    expect(writeClipboardPayload).not.toHaveBeenCalled();
   });
 
   test("the markdown copy button survives unchanged beside the pixel buttons", () => {

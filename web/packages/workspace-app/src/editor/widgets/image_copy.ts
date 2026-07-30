@@ -11,9 +11,11 @@ import { parseImageSrc } from "../extensions/image";
 import { svgToPngBytes } from "./diagram_copy";
 
 /// MIME by extension, for servers that answer without a usable
-/// Content-Type. Only types the clipboard path can normalize matter;
-/// anything unknown falls back to PNG, which `toPngBlob` passes through
-/// byte-identical (a wrong label there beats dropping the copy).
+/// Content-Type. There is deliberately NO catch-all fallback:
+/// `writeClipboardPayload` passes a declared PNG through undecoded, so
+/// labelling unknown bytes `image/png` would put a corrupt PNG on the
+/// clipboard. Unknown types fail the copy instead, which the buttons
+/// surface through their existing failure feedback.
 const EXT_MIME: Record<string, string> = {
   png: "image/png",
   jpg: "image/jpeg",
@@ -34,11 +36,11 @@ export function isSvgImageSrc(src: string): boolean {
   return /\.svg$/i.test(path);
 }
 
-function mimeForUrl(url: string, contentType: string | null): string {
+function mimeForUrl(url: string, contentType: string | null): string | null {
   const declared = contentType?.split(";")[0]?.trim().toLowerCase();
   if (declared?.startsWith("image/")) return declared;
   const ext = url.split("?")[0]?.split("#")[0]?.split(".").pop()?.toLowerCase();
-  return (ext && EXT_MIME[ext]) || "image/png";
+  return (ext && EXT_MIME[ext]) || null;
 }
 
 async function fetchImageResponse(url: string): Promise<Response> {
@@ -61,11 +63,10 @@ export async function copyImagePixels(
     return;
   }
   const res = await fetchImageResponse(url);
+  const mime = mimeForUrl(url, res.headers.get("content-type"));
+  if (!mime) throw new Error("unrecognized image type");
   const bytes = new Uint8Array(await res.arrayBuffer());
-  await writeClipboardPayload(
-    mimeForUrl(url, res.headers.get("content-type")),
-    bytes,
-  );
+  await writeClipboardPayload(mime, bytes);
 }
 
 /// Copy an `.svg` file's markup to the clipboard as text - the lossless

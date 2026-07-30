@@ -164,8 +164,9 @@ export function openSlidePreview(opts: OpenSlidePreviewOptions): SlidePreviewHan
         ),
       );
       for (const btn of copies) {
-        // The hook only fires for a resolved src, so the buttons start
-        // revealed (the factory's hidden default gates async renders).
+        // The hook only fires after the image loaded, so the buttons
+        // start revealed (the factory's hidden default gates async
+        // renders).
         btn.style.display = "";
         row.appendChild(btn);
       }
@@ -177,7 +178,12 @@ export function openSlidePreview(opts: OpenSlidePreviewOptions): SlidePreviewHan
       row.appendChild(
         slideActionButton("View", "view fullscreen", () => {
           void renderLight().then((light) => {
-            if (light) openDiagramZoom(light);
+            if (!light) return;
+            // The light re-render is async; if the slide stepped or the
+            // preview closed meanwhile, the originating shell left the
+            // DOM - do not open a stale viewer over whatever replaced it.
+            if (!shell.isConnected) return;
+            openDiagramZoom(light);
           });
         }),
       );

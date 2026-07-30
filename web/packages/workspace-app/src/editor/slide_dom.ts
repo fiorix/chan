@@ -36,8 +36,10 @@ const BLANK_LINE_SPACER =
 /// survived the `isCurrent` guard; failed and stale renders never offer
 /// chrome.
 export type SlideMediaChrome = {
-  /// A plain image whose src resolved. `raw` is the authored markdown
-  /// src (fragment grammar included) so a viewer can re-resolve it.
+  /// A plain image that actually LOADED (a resolvable URL can still
+  /// 404; error, stale, and disconnected images never fire). `raw` is
+  /// the authored markdown src (fragment grammar included) so a viewer
+  /// can re-resolve it.
   image?: (img: HTMLImageElement, raw: string) => void;
   /// A rendered fenced diagram or Excalidraw embed. `shell` is the
   /// media's container; `renderLight` resolves a light-themed render
@@ -402,15 +404,38 @@ export function prepareSlideImages(
     if (resolved) img.setAttribute("src", resolved);
     if (width != null) img.style.width = `${width}px`;
     applySlideMediaAlignment(img, align ?? "center");
-    // "Success" for a plain image is a resolvable src; there is no
-    // error shell on this path, so an unresolvable ref stays chrome-free.
-    if (resolved) chrome?.image?.(img, raw);
+    if (resolved && chrome?.image) {
+      imageChromeOnLoad(img, raw, isCurrent, chrome.image);
+    }
   }
   for (const link of Array.from(root.querySelectorAll("a"))) {
     link.setAttribute("target", "_blank");
     link.setAttribute("rel", "noreferrer");
   }
   return Promise.all(renders).then(() => undefined);
+}
+
+/// Fire the image hook only for a load that actually succeeded. A
+/// resolvable URL can still 404, and there is no error shell on the
+/// plain-image path, so the load event is the success signal. Stale
+/// (`isCurrent` false) and disconnected images stay chrome-free. A
+/// cached-complete image never fires `load` again; that branch defers a
+/// microtask so the caller finishes mounting the overlay first.
+function imageChromeOnLoad(
+  img: HTMLImageElement,
+  raw: string,
+  isCurrent: () => boolean,
+  hook: (img: HTMLImageElement, raw: string) => void,
+): void {
+  const fire = (): void => {
+    if (!isCurrent() || !img.isConnected) return;
+    hook(img, raw);
+  };
+  if (img.complete && img.naturalWidth > 0) {
+    queueMicrotask(fire);
+    return;
+  }
+  img.addEventListener("load", fire, { once: true });
 }
 
 function renderSlideExcalidraw(

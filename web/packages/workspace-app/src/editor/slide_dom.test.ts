@@ -315,14 +315,59 @@ describe("slide media chrome hook", () => {
     expect(diagram).not.toHaveBeenCalled();
   });
 
-  test("prepareSlideImages invokes the image hook only for resolvable srcs", async () => {
+  test("the image hook fires only after a successful load", async () => {
     const root = mount('<p><img src="shot.png"></p><p><img src=""></p>');
     const image = vi.fn();
     await prepareSlideImages(root, "deck.md", "light", () => true, { image });
+    // Resolvable is not loaded: nothing fires until the load event.
+    expect(image).not.toHaveBeenCalled();
+    const imgs = Array.from(root.querySelectorAll("img"));
+    for (const img of imgs) img.dispatchEvent(new Event("load"));
+    // Only the resolvable src had a listener; the empty one stays dark.
     expect(image).toHaveBeenCalledTimes(1);
     const [img, raw] = image.mock.calls[0]!;
-    expect(img).toBe(root.querySelector("img"));
+    expect(img).toBe(imgs[0]);
     expect(raw).toBe("shot.png");
+  });
+
+  test("an image load error never fires the hook", async () => {
+    const root = mount('<p><img src="shot.png"></p>');
+    const image = vi.fn();
+    await prepareSlideImages(root, "deck.md", "light", () => true, { image });
+    root.querySelector("img")!.dispatchEvent(new Event("error"));
+    expect(image).not.toHaveBeenCalled();
+  });
+
+  test("a stale isCurrent guard keeps a loaded image chrome-free", async () => {
+    const root = mount('<p><img src="shot.png"></p>');
+    const image = vi.fn();
+    await prepareSlideImages(root, "deck.md", "light", () => false, { image });
+    root.querySelector("img")!.dispatchEvent(new Event("load"));
+    expect(image).not.toHaveBeenCalled();
+  });
+
+  test("a disconnected image never fires the hook", async () => {
+    const root = mount('<p><img src="shot.png"></p>');
+    const image = vi.fn();
+    await prepareSlideImages(root, "deck.md", "light", () => true, { image });
+    const img = root.querySelector("img")!;
+    img.remove();
+    img.dispatchEvent(new Event("load"));
+    expect(image).not.toHaveBeenCalled();
+  });
+
+  test("a cached-complete image fires the hook on a microtask", async () => {
+    const root = mount('<p><img src="shot.png"></p>');
+    const img = root.querySelector("img") as HTMLImageElement;
+    // jsdom never loads images; emulate a browser cache hit where the
+    // load event already fired before the listener could attach.
+    Object.defineProperty(img, "complete", { get: () => true });
+    Object.defineProperty(img, "naturalWidth", { get: () => 64 });
+    const image = vi.fn();
+    await prepareSlideImages(root, "deck.md", "light", () => true, { image });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(image).toHaveBeenCalledTimes(1);
+    expect(image.mock.calls[0]![0]).toBe(img);
   });
 
   test("an excalidraw image embed routes through the diagram hook", async () => {

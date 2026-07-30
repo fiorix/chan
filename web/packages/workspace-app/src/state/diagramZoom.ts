@@ -234,8 +234,13 @@ export function openDiagramZoom(svg: string): void {
     }
   };
   // A click on the empty backdrop dismisses; a release that ended a
-  // pan-drag does not.
+  // pan-drag does not. Every click stops at the viewer boundary: under
+  // the slide player's web fullscreen this backdrop is a CHILD of the
+  // slide backdrop, whose own click handler dismisses the presentation
+  // - a click meant for this viewer (dismissing or not) must not fall
+  // through and close the slides.
   backdrop.addEventListener("click", (e) => {
+    e.stopPropagation();
     if (moved) {
       moved = false;
       return;
