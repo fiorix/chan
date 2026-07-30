@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { TreeEntry } from "../api/types";
 import { dirImageSet, openMediaViewer } from "./mediaOpen";
 import { tree } from "./store.svelte";
@@ -15,7 +15,44 @@ function imageViewer(): HTMLElement | null {
   return document.querySelector(".md-image-zoom");
 }
 
+function anyViewer(): HTMLElement | null {
+  return document.querySelector(
+    ".md-image-zoom, .md-video-viewer, .md-pdf-viewer",
+  );
+}
+
+function pressEscape(): KeyboardEvent {
+  const ev = new KeyboardEvent("keydown", {
+    key: "Escape",
+    cancelable: true,
+  });
+  document.dispatchEvent(ev);
+  return ev;
+}
+
+// jsdom leaves HTMLMediaElement.pause/load unimplemented; the video
+// viewer's dismissal calls both, so stub exactly those two (they also
+// serve as the stream-teardown probes below).
+let pauseSpy: ReturnType<typeof vi.fn<() => void>>;
+let loadSpy: ReturnType<typeof vi.fn<() => void>>;
+
+beforeEach(() => {
+  pauseSpy = vi.fn<() => void>();
+  loadSpy = vi.fn<() => void>();
+  vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(pauseSpy);
+  vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(loadSpy);
+});
+
 afterEach(() => {
+  // Close mounted viewers through their own Escape path so each one
+  // runs its dismiss closure (document-capture keydown removal, video
+  // stream teardown); a bare innerHTML wipe would leak them.
+  if (anyViewer()) pressEscape();
+  expect(anyViewer()).toBeNull();
+  // Observable proof the listeners are gone, not silently leaked: a
+  // probe Escape after cleanup must reach no viewer handler.
+  expect(pressEscape().defaultPrevented).toBe(false);
+  vi.restoreAllMocks();
   tree.entries = [];
   document.body.innerHTML = "";
 });
@@ -71,6 +108,40 @@ describe("openMediaViewer routing", () => {
     expect(imageViewer()).toBeNull();
     expect(document.querySelector(".md-video-viewer")).toBeNull();
     expect(document.querySelector(".md-pdf-viewer")).toBeNull();
+  });
+});
+
+describe("viewer dismissal lifecycle", () => {
+  test("Escape dismissal runs each viewer's own teardown", () => {
+    seed("a/pic.png", "media/clip.mp4", "docs/spec.pdf");
+
+    // Image: the live viewer consumes Escape (capture listener armed)...
+    openMediaViewer("a/pic.png");
+    expect(pressEscape().defaultPrevented).toBe(true);
+    expect(imageViewer()).toBeNull();
+    // ...and a follow-up Escape reaches no handler: the listener was
+    // removed with the viewer, not leaked.
+    expect(pressEscape().defaultPrevented).toBe(false);
+
+    // Video: dismissal also tears the stream down - pause, src detach,
+    // and the reload that drops the buffer.
+    openMediaViewer("media/clip.mp4");
+    const video = document.querySelector<HTMLVideoElement>(
+      ".md-video-viewer video",
+    )!;
+    expect(video.getAttribute("src")).toContain("/api/files/media/clip.mp4");
+    expect(pressEscape().defaultPrevented).toBe(true);
+    expect(document.querySelector(".md-video-viewer")).toBeNull();
+    expect(pauseSpy).toHaveBeenCalledTimes(1);
+    expect(loadSpy).toHaveBeenCalledTimes(1);
+    expect(video.getAttribute("src")).toBeNull();
+    expect(pressEscape().defaultPrevented).toBe(false);
+
+    // PDF: same listener discipline.
+    openMediaViewer("docs/spec.pdf");
+    expect(pressEscape().defaultPrevented).toBe(true);
+    expect(document.querySelector(".md-pdf-viewer")).toBeNull();
+    expect(pressEscape().defaultPrevented).toBe(false);
   });
 });
 
