@@ -1540,6 +1540,16 @@ mod tests {
     }
 
     #[test]
+    fn exact_identity_origin_passes_entry_gate() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://gw.chan.app"),
+        );
+        assert!(exact_origin_matches(&headers, "https://gw.chan.app"));
+    }
+
+    #[test]
     fn exact_origin_requires_one_exact_non_null_value() {
         let mut headers = HeaderMap::new();
         assert!(!exact_origin_matches(&headers, "https://id.chan.app"));
