@@ -374,14 +374,24 @@ describe("TerminalTab Team Work revamp (source contract)", () => {
 
   test("mounts a PER-TERMINAL survey overlay, keyed by tab.id", () => {
     // Surveys are per-terminal, not window-wide. Each visible
-    // terminal mounts its own <BubbleOverlay tabId={tab.id} />, anchored over
-    // it; the App-root mount (tabId null) is the window-wide fallback.
+    // terminal owns an always-mounted BubbleOverlay, anchored over it. Keeping
+    // the component mounted preserves its return-focus target while `shown`
+    // makes a hidden survey inert; restoreFocus covers a survey first revealed
+    // from a hidden tab. The App-root mount (tabId null) is the window-wide
+    // fallback.
     expect(terminalSource).toMatch(
       /import BubbleOverlay from "\.\/BubbleOverlay\.svelte"/,
     );
     expect(terminalSource).toMatch(
-      /\{#if active\}[\s\S]{1,80}<BubbleOverlay tabId=\{tab\.id\} \/>/,
+      /<BubbleOverlay[\s\S]{1,120}tabId=\{tab\.id\}[\s\S]{1,120}shown=\{active\}[\s\S]{1,120}restoreFocus=\{focusTerminal\}/,
     );
+  });
+
+  test("all xterm focus paths share the active-survey guard", () => {
+    expect(terminalSource).toMatch(
+      /function focusTerminal\(\): void \{[\s\S]*?if \(surveyFor\(tab\.id\)\) return;[\s\S]*?term\?\.focus\(\);/,
+    );
+    expect(terminalSource.match(/term\?\.focus\(\)/g)).toHaveLength(1);
   });
 
   test("the deleted watcher + team-work-workspace plumbing is gone", () => {

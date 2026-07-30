@@ -23,42 +23,67 @@
     dismissSurvey,
     type SurveySlot,
   } from "../state/survey.svelte";
+  import { tabFocusPulse } from "../state/tabs.svelte";
 
-  let { tabId = null }: { tabId?: SurveySlot } = $props();
+  let {
+    tabId = null,
+    shown = true,
+    restoreFocus,
+  }: {
+    tabId?: SurveySlot;
+    shown?: boolean;
+    restoreFocus?: () => void;
+  } = $props();
 
   const slot = $derived(tabId);
   const active = $derived(surveyFor(slot));
   const busy = $derived(surveyBusy(slot));
 
-  // Steal focus to the card when this slot's survey appears so option/F keys
-  // land here and not in the terminal/editor underneath. Blur immediately,
-  // then focus after the current flush so a terminal's already-queued refocus
-  // cannot take the keyboard back. Keyed on surveyId so a replacing survey
-  // re-focuses.
+  // Steal focus when this slot's survey appears or its terminal becomes the
+  // visible tab. Per-terminal overlays stay mounted while hidden so a return
+  // to the same survey preserves the original focus target. The tab-focus
+  // pulse makes the re-grab explicit after every click/chord switch; the
+  // terminal's own focus paths independently refuse to run while this survey
+  // exists.
   let card = $state<HTMLDivElement | null>(null);
   let returnFocus: HTMLElement | null = null;
   let focusedSurveyId: string | null = null;
   $effect(() => {
     const id = active?.surveyId ?? null;
+    // Window-wide surveys are unrelated to terminal-tab rotation. Avoid
+    // making their focus behavior depend on terminal pulses.
+    if (slot !== null) tabFocusPulse.value;
     if (!id) {
       if (!focusedSurveyId) return;
       focusedSurveyId = null;
       const target = returnFocus;
       returnFocus = null;
       queueMicrotask(() => {
-        if (!active && target?.isConnected) target.focus({ preventScroll: true });
+        if (!active && shown) {
+          if (target?.isConnected) target.focus({ preventScroll: true });
+          else restoreFocus?.();
+        }
       });
       return;
     }
+    // A survey on a hidden terminal must not touch the visible tab's focus.
+    // Keep the tracked survey + return target intact for the later tab return.
+    if (!shown) return;
     if (!focusedSurveyId) {
       const current = document.activeElement;
-      returnFocus =
-        current instanceof HTMLElement && current !== document.body ? current : null;
+      if (current instanceof HTMLElement && current !== document.body) {
+        // A per-terminal survey first shown from a hidden tab can observe the
+        // previous tab or the clicked tab header. Only remember a target from
+        // inside the owning terminal; TerminalTab restores xterm itself when
+        // no eligible target exists.
+        const owner = card?.closest(".terminal-tab");
+        returnFocus = slot === null || owner?.contains(current) ? current : null;
+      }
     }
     focusedSurveyId = id;
     (document.activeElement as HTMLElement | null)?.blur();
     queueMicrotask(() => {
-      if (active?.surveyId === id) card?.focus({ preventScroll: true });
+      if (shown && active?.surveyId === id) card?.focus({ preventScroll: true });
     });
   });
 
@@ -93,7 +118,7 @@
   }
 </script>
 
-{#if active}
+{#if active && shown}
   <div
     class="survey-overlay"
     class:per-terminal={slot !== null}
