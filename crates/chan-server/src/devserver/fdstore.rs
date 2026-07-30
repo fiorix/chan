@@ -65,6 +65,11 @@ mod linux {
     /// Coalescing window for deferred (unpark/metadata) manifest rewrites.
     /// Additive commits never wait on this: a park writes synchronously.
     const MANIFEST_DEBOUNCE: Duration = Duration::from_millis(250);
+    /// Bound on the post-FDSTORE manager sync in a park's additive commit.
+    const BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
+    /// The canonical unit's FileDescriptorStoreMax, the cap fallback where
+    /// the manager does not export `$FDSTORE`.
+    const UNIT_FDSTORE_MAX: usize = 512;
 
     #[derive(Debug, Serialize, Deserialize)]
     struct RestartManifest {
@@ -93,10 +98,51 @@ mod linux {
         Sealed,
     }
 
+    /// Injectable systemd store boundary, so phase/cap/barrier failure
+    /// arms are unit-testable without a manager.
+    trait StoreOps: Send + Sync {
+        fn store(&self, name: &str, fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<()>;
+        /// Synchronize with the manager: returning Ok proves it processed
+        /// everything sent so far, `store` included. `sd_notify(3)` is
+        /// fire-and-forget on its own -- an FDSTORE datagram that was SENT
+        /// may still be dropped or rejected (e.g. over
+        /// FileDescriptorStoreMax), which only the barrier can exclude.
+        fn barrier(&self) -> std::io::Result<()>;
+        fn remove(&self, name: &str);
+    }
+
+    struct SystemdStoreOps;
+
+    impl StoreOps for SystemdStoreOps {
+        fn store(&self, name: &str, fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<()> {
+            chan_systemd::fdstore(name, fd)
+        }
+
+        fn barrier(&self) -> std::io::Result<()> {
+            chan_systemd::notify_barrier(BARRIER_TIMEOUT)
+        }
+
+        fn remove(&self, name: &str) {
+            chan_systemd::fdstore_remove_many([name]);
+        }
+    }
+
+    /// Whether a park may proceed: `parked` counts the manifest snapshot
+    /// INCLUDING the candidate's provisional entry, so a store already at
+    /// its maximum refuses the candidate instead of manifesting an fd the
+    /// manager would reject.
+    fn park_within_cap(parked_including_candidate: usize, store_max: usize) -> bool {
+        parked_including_candidate <= store_max
+    }
+
     struct ParkerShared {
         host: Arc<WorkspaceHost>,
         library_id: String,
         manifest_path: PathBuf,
+        store: Box<dyn StoreOps>,
+        /// The service's fd-store ceiling: systemd's exported `$FDSTORE`
+        /// when present, else the canonical unit's FileDescriptorStoreMax.
+        store_max: usize,
         /// Serializes every manifest write with phase transitions: a
         /// debounced rewrite can never land after the sealed final write,
         /// and a park's synchronous commit cannot interleave with a seal.
@@ -106,14 +152,19 @@ mod linux {
 
     impl ParkerShared {
         /// Rewrite the manifest from the live parked set. Caller holds the
-        /// phase lock (the guard parameter enforces it). An empty parked set
-        /// removes the file: no manifest is the truthful description of an
-        /// empty store.
-        fn write_manifest_locked(
+        /// phase lock (the guard parameter enforces it).
+        fn write_manifest_locked(&self, phase: &MutexGuard<'_, ParkerPhase>) -> Result<(), String> {
+            let entries = self.host.fdstore_manifest_sessions();
+            self.write_entries_locked(phase, entries)
+        }
+
+        /// Serialize `entries` as the manifest. An empty set removes the
+        /// file: no manifest is the truthful description of an empty store.
+        fn write_entries_locked(
             &self,
             _phase: &MutexGuard<'_, ParkerPhase>,
+            entries: Vec<chan_library::terminal_sessions::FdStoreManifestEntry>,
         ) -> Result<(), String> {
-            let entries = self.host.fdstore_manifest_sessions();
             if entries.is_empty() {
                 let _ = std::fs::remove_file(&self.manifest_path);
                 return Ok(());
@@ -153,23 +204,46 @@ mod linux {
             if *phase != ParkerPhase::Active {
                 return false;
             }
-            if let Err(error) = chan_systemd::fdstore(fd_name, fd) {
+            // One snapshot serves the cap check AND the commit content; the
+            // caller's provisional reservation is already in it.
+            let entries = self.0.host.fdstore_manifest_sessions();
+            if !park_within_cap(entries.len(), self.0.store_max) {
+                tracing::warn!(
+                    fd_name,
+                    parked = entries.len(),
+                    store_max = self.0.store_max,
+                    "refusing park: the systemd fd store is at capacity"
+                );
+                return false;
+            }
+            if let Err(error) = self.0.store.store(fd_name, fd) {
                 tracing::warn!(fd_name, error = %error, "storing PTY in systemd fdstore failed");
+                return false;
+            }
+            // A sent FDSTORE datagram is not an accepted one: barrier so a
+            // spawn followed immediately by process death cannot outrun
+            // manager attribution, and an over-cap rejection surfaces here.
+            if let Err(error) = self.0.store.barrier() {
+                tracing::warn!(
+                    fd_name, error = %error,
+                    "systemd did not confirm the stored PTY (notify barrier failed); unparking"
+                );
+                self.0.store.remove(fd_name);
                 return false;
             }
             // The additive commit: the fd name must be durable before the
             // spawn/restart reports success. On failure, roll the store
             // back so no stored fd is ever absent from the manifest.
-            if let Err(error) = self.0.write_manifest_locked(&phase) {
+            if let Err(error) = self.0.write_entries_locked(&phase, entries) {
                 tracing::warn!(fd_name, error = %error, "committing fdstore manifest failed; unparking");
-                chan_systemd::fdstore_remove_many([fd_name]);
+                self.0.store.remove(fd_name);
                 return false;
             }
             true
         }
 
         fn unpark(&self, fd_name: &str) {
-            chan_systemd::fdstore_remove_many([fd_name]);
+            self.0.store.remove(fd_name);
             // Removal staleness is safe (a manifest entry without a stored
             // fd is skipped and cleaned at boot), so the rewrite coalesces.
             self.0.dirty.notify_one();
@@ -199,14 +273,36 @@ mod linux {
         /// mount (the hook reaches registries at mount wiring) and only
         /// under systemd notify (`NOTIFY_SOCKET` present).
         pub(crate) fn install(host: &Arc<WorkspaceHost>, library_id: String) -> Self {
-            Self::install_at(host, library_id, manifest_path())
+            // Systemd exports the service's actual store ceiling as
+            // `$FDSTORE`; older managers do not, so fall back to the value
+            // the canonical unit renderer configures.
+            let store_max = std::env::var("FDSTORE")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|max| *max > 0)
+                .unwrap_or(UNIT_FDSTORE_MAX);
+            Self::install_at(
+                host,
+                library_id,
+                manifest_path(),
+                Box::new(SystemdStoreOps),
+                store_max,
+            )
         }
 
-        fn install_at(host: &Arc<WorkspaceHost>, library_id: String, path: PathBuf) -> Self {
+        fn install_at(
+            host: &Arc<WorkspaceHost>,
+            library_id: String,
+            path: PathBuf,
+            store: Box<dyn StoreOps>,
+            store_max: usize,
+        ) -> Self {
             let shared = Arc::new(ParkerShared {
                 host: host.clone(),
                 library_id,
                 manifest_path: path,
+                store,
+                store_max,
                 phase: Mutex::new(ParkerPhase::Disabled),
                 dirty: tokio::sync::Notify::new(),
             });
@@ -365,6 +461,22 @@ mod linux {
                         &mut skipped_sessions,
                         &meta,
                         format!("fd name {fd_name} is outside chan fdstore namespace"),
+                    );
+                    continue;
+                }
+                // The name IS the session identity in the store: a corrupt or
+                // reassigned mapping must never restore an fd under another
+                // session's metadata. Clean the fd by its ACTUAL name here,
+                // because apply()'s meta-derived cleanup could not reach it.
+                if fd_name != fdstore_fd_name(&meta.session_id, meta.child_pid) {
+                    if fd_by_name.remove(&fd_name).is_some() {
+                        cleanup_invalid_fds(&[fd_name.clone()]);
+                    }
+                    push_skipped_session(
+                        &mut skipped,
+                        &mut skipped_sessions,
+                        &meta,
+                        format!("fd name {fd_name} does not match its session metadata"),
                     );
                     continue;
                 }
@@ -651,19 +763,67 @@ mod linux {
     #[cfg(test)]
     mod parker_tests {
         use super::*;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
-        /// Phase gating without systemd: `chan_systemd::fdstore` no-ops
-        /// (Ok) when NOTIFY_SOCKET is unset -- cargo test runs outside any
-        /// notify scope -- so a park's success here isolates exactly the
-        /// phase and manifest logic.
-        #[tokio::test]
-        async fn parker_phases_gate_park_adopt_and_writes() {
+        #[derive(Default)]
+        struct FakeStoreState {
+            calls: Mutex<Vec<String>>,
+            fail_store: AtomicBool,
+            fail_barrier: AtomicBool,
+        }
+
+        #[derive(Clone, Default)]
+        struct FakeStoreOps(Arc<FakeStoreState>);
+
+        impl FakeStoreOps {
+            fn calls(&self) -> Vec<String> {
+                self.0.calls.lock().unwrap().clone()
+            }
+        }
+
+        impl StoreOps for FakeStoreOps {
+            fn store(&self, name: &str, _fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<()> {
+                self.0.calls.lock().unwrap().push(format!("store:{name}"));
+                if self.0.fail_store.load(Ordering::Relaxed) {
+                    return Err(std::io::Error::other("injected store failure"));
+                }
+                Ok(())
+            }
+
+            fn barrier(&self) -> std::io::Result<()> {
+                self.0.calls.lock().unwrap().push("barrier".to_string());
+                if self.0.fail_barrier.load(Ordering::Relaxed) {
+                    return Err(std::io::Error::other("injected barrier failure"));
+                }
+                Ok(())
+            }
+
+            fn remove(&self, name: &str) {
+                self.0.calls.lock().unwrap().push(format!("remove:{name}"));
+            }
+        }
+
+        fn test_parker(store: FakeStoreOps) -> (DevserverParker, ParkerHook, std::path::PathBuf) {
             let tmp = tempfile::tempdir().unwrap();
             let library = chan_workspace::Library::open_at(tmp.path().join("config.toml")).unwrap();
             let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
             let manifest = tmp.path().join("fdstore-restart.json");
-            let parker = DevserverParker::install_at(&host, "lib-test".into(), manifest.clone());
+            std::mem::forget(tmp);
+            let parker = DevserverParker::install_at(
+                &host,
+                "lib-test".into(),
+                manifest.clone(),
+                Box::new(store),
+                UNIT_FDSTORE_MAX,
+            );
             let hook = ParkerHook(parker.shared.clone());
+            (parker, hook, manifest)
+        }
+
+        #[tokio::test]
+        async fn parker_phases_gate_park_adopt_and_writes() {
+            let store = FakeStoreOps::default();
+            let (parker, hook, manifest) = test_parker(store.clone());
             let devnull = std::fs::File::open("/dev/null").unwrap();
 
             assert!(
@@ -674,11 +834,20 @@ mod linux {
                 hook.adopt("chan.pty.a.1"),
                 "Disabled accepts adoption (boot)"
             );
+            assert!(
+                store.calls().is_empty(),
+                "a refused park must not touch the store"
+            );
 
             parker.activate();
             assert!(
                 hook.park("chan.pty.a.1", devnull.as_fd()),
                 "Active parks and commits"
+            );
+            assert_eq!(
+                store.calls(),
+                vec!["store:chan.pty.a.1".to_string(), "barrier".to_string()],
+                "park is store then barrier then commit"
             );
             assert!(
                 !manifest.exists(),
@@ -691,6 +860,60 @@ mod linux {
                 "Sealed must refuse park"
             );
             assert!(!hook.adopt("chan.pty.a.3"), "Sealed must refuse adoption");
+            parker.stop().await;
+        }
+
+        #[test]
+        fn cap_refuses_exactly_beyond_the_store_maximum() {
+            // `parked` includes the candidate's provisional entry.
+            assert!(park_within_cap(1, 1));
+            assert!(park_within_cap(512, 512));
+            assert!(!park_within_cap(513, 512));
+            assert!(!park_within_cap(2, 1));
+        }
+
+        #[tokio::test]
+        async fn barrier_failure_removes_the_submitted_name_and_refuses() {
+            let store = FakeStoreOps::default();
+            store.0.fail_barrier.store(true, Ordering::Relaxed);
+            let (parker, hook, manifest) = test_parker(store.clone());
+            parker.activate();
+            let devnull = std::fs::File::open("/dev/null").unwrap();
+
+            assert!(
+                !hook.park("chan.pty.b.7", devnull.as_fd()),
+                "an unconfirmed store must refuse the park"
+            );
+            assert_eq!(
+                store.calls(),
+                vec![
+                    "store:chan.pty.b.7".to_string(),
+                    "barrier".to_string(),
+                    "remove:chan.pty.b.7".to_string(),
+                ],
+                "the submitted name must be removed best-effort"
+            );
+            assert!(
+                !manifest.exists(),
+                "no manifest may describe the refused fd"
+            );
+            parker.stop().await;
+        }
+
+        #[tokio::test]
+        async fn store_failure_refuses_without_a_remove() {
+            let store = FakeStoreOps::default();
+            store.0.fail_store.store(true, Ordering::Relaxed);
+            let (parker, hook, _manifest) = test_parker(store.clone());
+            parker.activate();
+            let devnull = std::fs::File::open("/dev/null").unwrap();
+
+            assert!(!hook.park("chan.pty.c.9", devnull.as_fd()));
+            assert_eq!(
+                store.calls(),
+                vec!["store:chan.pty.c.9".to_string()],
+                "nothing was stored, so nothing is removed"
+            );
             parker.stop().await;
         }
 
