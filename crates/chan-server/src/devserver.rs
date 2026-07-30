@@ -2551,8 +2551,18 @@ mod tests {
     /// READ side, so a rewrite can never interleave with a mount.
     static CHAN_HOME_ENV: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
-    fn chan_home_env_read() -> std::sync::RwLockReadGuard<'static, ()> {
-        CHAN_HOME_ENV.read().unwrap_or_else(|e| e.into_inner())
+    /// Read-side hold on [`CHAN_HOME_ENV`] for a full test body, awaits
+    /// included. Holding across awaits is deliberate and deadlock-free
+    /// here: readers never nest locks, and the write side is taken only
+    /// by the fdstore boot tests' env guard.
+    struct ChanHomeEnvRead {
+        _guard: std::sync::RwLockReadGuard<'static, ()>,
+    }
+
+    fn chan_home_env_read() -> ChanHomeEnvRead {
+        ChanHomeEnvRead {
+            _guard: CHAN_HOME_ENV.read().unwrap_or_else(|e| e.into_inner()),
+        }
     }
 
     struct ShutdownProbeBuilder {
