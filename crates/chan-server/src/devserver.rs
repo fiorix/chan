@@ -5543,7 +5543,16 @@ mod tests {
 
         impl FdstoreEnvGuard {
             fn set(home: &Path) -> Self {
-                let lock = CHAN_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                Self::capture(
+                    CHAN_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner()),
+                    home,
+                )
+            }
+
+            /// Lock-passing body of [`set`](Self::set), so the round-trip
+            /// regression can seed sentinel values under the SAME lock
+            /// acquisition the guard then owns.
+            fn capture(lock: std::sync::MutexGuard<'static, ()>, home: &Path) -> Self {
                 let prev = ["CHAN_HOME", "NOTIFY_SOCKET", "FDSTORE"]
                     .into_iter()
                     .map(|key| (key, std::env::var_os(key)))
@@ -5638,6 +5647,59 @@ mod tests {
                     if let Some(pid) = rustix::process::Pid::from_raw(pid) {
                         let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
                     }
+                }
+            }
+        }
+
+        /// The guard must leave the process env EXACTLY as it found it:
+        /// present sentinels restored to their values, an absent variable
+        /// restored to absence, with the in-scope state overridden/cleared.
+        #[test]
+        fn env_guard_round_trips_every_touched_variable() {
+            let lock = CHAN_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let home = tempfile::tempdir().expect("home");
+            let originals: Vec<(&str, Option<std::ffi::OsString>)> =
+                ["CHAN_HOME", "NOTIFY_SOCKET", "FDSTORE"]
+                    .into_iter()
+                    .map(|key| (key, std::env::var_os(key)))
+                    .collect();
+
+            // Seed: two PRESENT sentinels and one ABSENT variable, under
+            // the same lock acquisition the guard takes over.
+            std::env::set_var("CHAN_HOME", "sentinel-chan-home");
+            std::env::set_var("NOTIFY_SOCKET", "sentinel-notify");
+            std::env::remove_var("FDSTORE");
+
+            let guard = FdstoreEnvGuard::capture(lock, home.path());
+            assert_eq!(
+                std::env::var_os("CHAN_HOME").as_deref(),
+                Some(home.path().as_os_str()),
+                "the guard scope must point CHAN_HOME at the test home"
+            );
+            assert_eq!(std::env::var_os("NOTIFY_SOCKET"), None);
+            assert_eq!(std::env::var_os("FDSTORE"), None);
+            drop(guard);
+
+            let _lock = CHAN_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(
+                std::env::var_os("CHAN_HOME").as_deref(),
+                Some(std::ffi::OsStr::new("sentinel-chan-home")),
+                "a present variable must restore to its exact prior value"
+            );
+            assert_eq!(
+                std::env::var_os("NOTIFY_SOCKET").as_deref(),
+                Some(std::ffi::OsStr::new("sentinel-notify"))
+            );
+            assert_eq!(
+                std::env::var_os("FDSTORE"),
+                None,
+                "an absent variable must restore to absence"
+            );
+            // Put back whatever the harness had before the sentinels.
+            for (key, value) in originals {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
                 }
             }
         }
