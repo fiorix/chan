@@ -47,8 +47,14 @@ import { writeClipboardText } from "../../api/desktop";
 import {
   CHECK_ICON_SVG,
   COPY_ICON_SVG,
+  copyActionButton,
   diagramCopyButton,
 } from "./diagram_copy";
+import {
+  copyImagePixels,
+  copySvgFileMarkup,
+  isSvgImageSrc,
+} from "./image_copy";
 import {
   clearImageDragIndicator,
   startImageDragIndicator,
@@ -386,17 +392,25 @@ class ImageWidget extends WidgetType {
       let viewBtn: HTMLButtonElement | null = null;
       const resolved = resolveImageSrc(this.src, this.fromPath);
       const revealSource = () => placeCaretInImageUrl(view, this.nodePos);
-      // Copy: rasterize the rendered scene to a PNG clipboard payload,
-      // re-rendering the light face from a dark editor (View's
-      // discipline). Hidden until a render succeeds, like View.
+      // Copy: PNG rasterizes the rendered scene to a clipboard payload;
+      // SVG copies the vector markup as text. Both re-render the light
+      // face from a dark editor (View's discipline) and hide until a
+      // render succeeds, like View.
+      const copyLightSvg = async () => {
+        if (!renderedSvg || !resolved) return null;
+        if (!this.dark) return renderedSvg;
+        const res = await renderExcalidrawFile(resolved, false);
+        return res.ok && res.svg ? res.svg : null;
+      };
+      const copySvgBtn = diagramCopyButton(
+        "cm-md-image-action cm-md-image-copy-format cm-md-image-copy-svg",
+        copyLightSvg,
+        "svg",
+        true,
+      );
       const copyBtn = diagramCopyButton(
         "cm-md-image-action cm-md-image-copy",
-        async () => {
-          if (!renderedSvg || !resolved) return null;
-          if (!this.dark) return renderedSvg;
-          const res = await renderExcalidrawFile(resolved, false);
-          return res.ok && res.svg ? res.svg : null;
-        },
+        copyLightSvg,
       );
       if (!resolved) {
         renderExcalidrawEmbedError(
@@ -414,6 +428,7 @@ class ImageWidget extends WidgetType {
             body.innerHTML = res.svg;
             renderedSvg = res.svg;
             if (viewBtn) viewBtn.style.display = "";
+            copySvgBtn.style.display = "";
             copyBtn.style.display = "";
           } else {
             renderExcalidrawEmbedError(
@@ -480,6 +495,7 @@ class ImageWidget extends WidgetType {
         });
         actions.appendChild(viewBtn);
       }
+      actions.appendChild(copySvgBtn);
       actions.appendChild(copyBtn);
       wrap.appendChild(actions);
 
@@ -707,6 +723,43 @@ class ImageWidget extends WidgetType {
       }
     });
     actions.appendChild(zoomBtn);
+    // Pixel copy: PNG for every image, plus the vector markup when the
+    // source file is an .svg. Hidden until the <img> load succeeds - the
+    // same never-offer-a-broken-face gating the diagram row uses. The
+    // markdown Copy button below is untouched: it round-trips the
+    // `![alt](src)` source text.
+    if (resolved) {
+      const svgSource = isSvgImageSrc(this.src);
+      const pixelBtns: HTMLButtonElement[] = [];
+      if (svgSource) {
+        pixelBtns.push(
+          copyActionButton(
+            "cm-md-image-action cm-md-image-copy-format cm-md-image-copy-svg",
+            "SVG",
+            "copy SVG markup to clipboard",
+            () => copySvgFileMarkup(resolved),
+            true,
+          ),
+        );
+      }
+      pixelBtns.push(
+        copyActionButton(
+          "cm-md-image-action cm-md-image-copy-format cm-md-image-copy-png",
+          "PNG",
+          "copy PNG image to clipboard",
+          () => copyImagePixels(resolved, svgSource),
+          true,
+        ),
+      );
+      img.addEventListener(
+        "load",
+        () => {
+          for (const b of pixelBtns) b.style.display = "";
+        },
+        { once: true },
+      );
+      for (const b of pixelBtns) actions.appendChild(b);
+    }
     actions.appendChild(copyBtn);
     wrap.appendChild(actions);
 
