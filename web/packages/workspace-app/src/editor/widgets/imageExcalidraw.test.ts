@@ -316,6 +316,33 @@ describe("excalidraw embed copy", () => {
       parent.remove();
     }
   });
+
+  test("the embed row offers Copy SVG beside the PNG copy", async () => {
+    const { parent, view } = mount("![](board.excalidraw)", false);
+    try {
+      const svgBtn = parent.querySelector<HTMLButtonElement>(
+        ".cm-md-image-copy-svg",
+      );
+      expect(svgBtn).toBeTruthy();
+      // Same render-success gating as View and the PNG copy.
+      expect(svgBtn!.style.display).toBe("none");
+      await vi.waitFor(() => {
+        expect(svgBtn!.style.display).toBe("");
+      });
+      svgBtn!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await vi.waitFor(() => {
+        expect(writeClipboardPayload).toHaveBeenCalledWith(
+          "text/plain;charset=utf-8",
+          new TextEncoder().encode(
+            '<svg viewBox="0 0 80 40" data-excalidraw-theme="light"></svg>',
+          ),
+        );
+      });
+    } finally {
+      view.destroy();
+      parent.remove();
+    }
+  });
 });
 
 describe("excalidraw edit reveals source with no raster image bubble", () => {

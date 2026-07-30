@@ -1844,6 +1844,14 @@
     justify-content: center;
     padding: 3px 7px;
   }
+  /* Format-labelled pixel-copy buttons (SVG / PNG) briefly show the
+     same 12px Check after copying; flex centering keeps the icon from
+     sitting lower than the text label did. */
+  :global(.md-wysiwyg-cm6 .cm-md-image-action.cm-md-image-copy-format) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
 
   /* ---- table widget ---- */
   :global(.md-wysiwyg-cm6 .cm-md-table-wrap) {

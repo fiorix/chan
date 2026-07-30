@@ -104,31 +104,26 @@ export async function copyDiagramSvg(svg: string): Promise<void> {
   );
 }
 
-/// One format-labelled copy button for a rendered diagram face. Starts hidden;
-/// the caller reveals it (`style.display = ""`) once a render succeeds -
-/// the same gating as the View button, so an errored diagram is never
-/// offered. `svg` resolves the markup to rasterize at click time (a dark
-/// editor re-renders the light face there, matching View's discipline:
-/// the dark render's pale strokes are illegible on most paste targets).
-/// Transient Check feedback on success; failure surfaces briefly via the
-/// title attr - there is no toast surface to land it in.
-export function diagramCopyButton(
+/// One copy button running an arbitrary async copy `action`. Starts
+/// hidden; the caller reveals it (`style.display = ""`) once its payload
+/// is known to exist - the same gating as the View button, so a broken
+/// face is never offered. Transient Check feedback on success; failure
+/// surfaces briefly via the title attr - there is no toast surface to
+/// land it in.
+export function copyActionButton(
   className: string,
-  svg: () => Promise<string | null> | string | null,
-  format: DiagramCopyFormat = "png",
-  showFormat = false,
+  label: string,
+  title: string,
+  action: () => Promise<void>,
+  showLabel = false,
 ): HTMLButtonElement {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = className;
-  const label = format.toUpperCase();
-  btn.title =
-    format === "svg"
-      ? "copy SVG markup to clipboard"
-      : "copy PNG image to clipboard";
-  btn.setAttribute("aria-label", btn.title);
+  btn.title = title;
+  btn.setAttribute("aria-label", title);
   const showIdle = () => {
-    if (showFormat) btn.textContent = label;
+    if (showLabel) btn.textContent = label;
     else btn.innerHTML = COPY_ICON_SVG;
   };
   showIdle();
@@ -143,28 +138,47 @@ export function diagramCopyButton(
   btn.addEventListener("click", (e) => {
     e.preventDefault();
     e.stopPropagation();
-    void Promise.resolve(svg())
-      .then((markup) => {
-        if (!markup) throw new Error("no rendered diagram");
-        return format === "svg"
-          ? copyDiagramSvg(markup)
-          : copyDiagramPng(markup);
-      })
-      .then(
-        () => {
-          btn.innerHTML = CHECK_ICON_SVG;
-          setTimeout(() => {
-            showIdle();
-          }, 1200);
-        },
-        () => {
-          const prev = btn.title;
-          btn.title = "copy failed";
-          setTimeout(() => {
-            btn.title = prev;
-          }, 1200);
-        },
-      );
+    action().then(
+      () => {
+        btn.innerHTML = CHECK_ICON_SVG;
+        setTimeout(() => {
+          showIdle();
+        }, 1200);
+      },
+      () => {
+        const prev = btn.title;
+        btn.title = "copy failed";
+        setTimeout(() => {
+          btn.title = prev;
+        }, 1200);
+      },
+    );
   });
   return btn;
+}
+
+/// One format-labelled copy button for a rendered diagram face. `svg`
+/// resolves the markup to rasterize at click time (a dark editor
+/// re-renders the light face there, matching View's discipline: the dark
+/// render's pale strokes are illegible on most paste targets).
+export function diagramCopyButton(
+  className: string,
+  svg: () => Promise<string | null> | string | null,
+  format: DiagramCopyFormat = "png",
+  showFormat = false,
+): HTMLButtonElement {
+  return copyActionButton(
+    className,
+    format.toUpperCase(),
+    format === "svg"
+      ? "copy SVG markup to clipboard"
+      : "copy PNG image to clipboard",
+    async () => {
+      const markup = await Promise.resolve(svg());
+      if (!markup) throw new Error("no rendered diagram");
+      if (format === "svg") await copyDiagramSvg(markup);
+      else await copyDiagramPng(markup);
+    },
+    showFormat,
+  );
 }
