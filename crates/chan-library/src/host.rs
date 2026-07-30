@@ -29,7 +29,8 @@ use crate::tenant::{HostControl, TenantArtifacts, TenantBuilder, UnserveMode};
 use crate::terminal_sessions::{CloseReason, TerminalExit};
 #[cfg(target_os = "linux")]
 use crate::terminal_sessions::{
-    FdStoreRestoreReport, FdStoreSessionImport, FdStoreSessionSnapshot, FdStoreSkippedSession,
+    FdStoreManifestEntry, FdStoreParker, FdStoreRestoreReport, FdStoreSessionImport,
+    FdStoreSkippedSession,
 };
 use crate::windows::{PersistedWindow, WindowKind, WindowOrigin, WindowRecord, WindowRegistry};
 use crate::{
@@ -99,6 +100,49 @@ pub enum WorkspaceLifecycleOutcome {
     Completed,
     NotFound,
     Refused { active_terminals: usize },
+}
+
+/// Result of [`WorkspaceHost::drain_terminal_sessions`]. `lingering` pids
+/// were still observably running when the bounded wait expired; the
+/// response is honest about them rather than claiming completion.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TerminalDrainOutcome {
+    /// Sessions drained from the registries.
+    pub closed: usize,
+    /// Child processes confirmed dead (ESRCH or zombie) within the wait.
+    pub dead: usize,
+    /// Child pids still running at the deadline.
+    pub lingering: Vec<u32>,
+}
+
+/// Whether `pid` is still RUNNING: a zombie (dead awaiting reap, holding no
+/// fds and executing nothing) counts as gone. The session Kill path returns
+/// its controller thread before reaping, so SIGKILLed children sit briefly
+/// in Z state.
+#[cfg(target_os = "linux")]
+fn child_process_running(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // The state field follows the comm, which may itself contain spaces or
+    // parens: parse after the LAST ')'.
+    let Some(after_comm) = stat.rsplit_once(')').map(|(_, rest)| rest) else {
+        return false;
+    };
+    !matches!(after_comm.trim_start().chars().next(), Some('Z') | None)
+}
+
+/// Non-Linux best effort: signal-0 liveness (no /proc; zombies are not
+/// distinguishable, and the systemd drain path never runs here).
+#[cfg(not(target_os = "linux"))]
+fn child_process_running(pid: u32) -> bool {
+    let Ok(raw_pid) = i32::try_from(pid) else {
+        return false;
+    };
+    let Some(pid) = rustix::process::Pid::from_raw(raw_pid) else {
+        return false;
+    };
+    rustix::process::test_kill_process(pid).is_ok()
 }
 
 impl WorkspaceLifecycleOutcome {
@@ -331,6 +375,13 @@ pub struct WorkspaceHost {
     /// restart. Unset on window-spawned servers (desktop, `chan open`),
     /// whose sockets SHOULD die with the process.
     control_identity: OnceLock<String>,
+    /// Systemd fd-store parking hook, handed to every tenant terminal
+    /// registry at mount (see
+    /// [`install_terminal_fd_parker`](Self::install_terminal_fd_parker)).
+    /// Set only by a devserver running under systemd notify, BEFORE its
+    /// first mount; absent everywhere else.
+    #[cfg(target_os = "linux")]
+    terminal_fd_parker: OnceLock<FdStoreParker>,
     /// Route prefix of this library's shared terminal tenant -- the one
     /// standalone-terminal tenant mounted via [`open_terminal_session`](
     /// Self::open_terminal_session) that every terminal window attaches to.
@@ -475,6 +526,8 @@ impl WorkspaceHost {
             collapsed_machines: OnceLock::new(),
             library_id: OnceLock::new(),
             control_identity: OnceLock::new(),
+            #[cfg(target_os = "linux")]
+            terminal_fd_parker: OnceLock::new(),
             terminal_tenant_prefix: OnceLock::new(),
             control_tenants: RwLock::new(HashMap::new()),
             library_change_notify: Arc::new(Notify::new()),
@@ -533,6 +586,14 @@ impl WorkspaceHost {
     /// stale on process death is the truth, not a bug.
     pub fn install_control_identity(&self, identity: String) {
         let _ = self.control_identity.set(identity);
+    }
+
+    /// Install the systemd fd-store parking hook. Must run before the first
+    /// mount: the hook reaches tenant registries only at their mount wiring,
+    /// so an earlier-mounted tenant would never park.
+    #[cfg(target_os = "linux")]
+    pub fn install_terminal_fd_parker(&self, parker: FdStoreParker) {
+        let _ = self.terminal_fd_parker.set(parker);
     }
 
     /// The installed stable control-socket identity, cloned per mount for the
@@ -909,6 +970,14 @@ impl WorkspaceHost {
         artifacts
             .session_registry
             .install_change_notify(self.library_change_notify.clone());
+        // Continuous fd parking spans every tenant's registry (workspace
+        // panes park exactly like standalone terminals).
+        #[cfg(target_os = "linux")]
+        if let Some(parker) = self.terminal_fd_parker.get() {
+            artifacts
+                .terminal_sessions
+                .install_fd_parker(parker.clone());
+        }
         let handle = ServeHandle {
             addr: config.addr,
             prefix: prefix.clone(),
@@ -1062,6 +1131,12 @@ impl WorkspaceHost {
         artifacts
             .session_registry
             .install_change_notify(self.library_change_notify.clone());
+        #[cfg(target_os = "linux")]
+        if let Some(parker) = self.terminal_fd_parker.get() {
+            artifacts
+                .terminal_sessions
+                .install_fd_parker(parker.clone());
+        }
         // A standalone terminal window IS its PTY. When the shell exits and
         // no client is attached, the registry's `reap_exited` closes the session;
         // hook it so the window-feed row leaves with it instead of lingering as a
@@ -1192,13 +1267,12 @@ impl WorkspaceHost {
             .unwrap_or(0)
     }
 
-    /// Snapshots every live terminal PTY fd for a systemd fdstore restart.
-    ///
-    /// This is intentionally host-wide: individual terminal or workspace teardown
-    /// never stores fds. The caller is the devserver restart handshake, which
-    /// preserves all tenants as one process-level operation.
+    /// Manifest entries for every PARKED session across every mounted
+    /// tenant: the restart manifest's content. Host-wide because the store
+    /// is process-level; the bound is the number of parked fds (ceilinged by
+    /// the unit's FileDescriptorStoreMax), never one tenant's session cap.
     #[cfg(target_os = "linux")]
-    pub fn fdstore_terminal_sessions(&self) -> Vec<FdStoreSessionSnapshot> {
+    pub fn fdstore_manifest_sessions(&self) -> Vec<FdStoreManifestEntry> {
         let Ok(workspaces) = self.workspaces.read() else {
             return Vec::new();
         };
@@ -1208,43 +1282,63 @@ impl WorkspaceHost {
                 runtime
                     .artifacts
                     .terminal_sessions
-                    .fdstore_sessions(&runtime.handle.prefix)
+                    .fdstore_manifest_sessions(&runtime.handle.prefix)
             })
             .collect()
     }
 
-    /// Marks exact sessions as preserved for an imminent systemd fdstore
-    /// restart. A later process-wide shutdown detaches only these sessions
-    /// without killing their PTYs; unrelated sessions still close normally.
+    /// Removes and detaches every parked session in every tenant (no kill,
+    /// no unpark). The devserver's graceful-shutdown sweep: runs AFTER the
+    /// final manifest write and BEFORE `shutdown_all`, so tenant teardown
+    /// finds the preserved sessions already gone and kills only the rest.
     #[cfg(target_os = "linux")]
-    pub fn preserve_fdstore_terminal_sessions(&self, sessions: &[(String, String)]) {
+    pub fn detach_parked_terminal_sessions(&self) -> usize {
         let Ok(workspaces) = self.workspaces.read() else {
-            return;
+            return 0;
         };
-        for (prefix, session_id) in sessions {
-            if let Some(runtime) = workspaces.get(prefix) {
-                runtime
-                    .artifacts
-                    .terminal_sessions
-                    .preserve_fdstore_session(session_id);
-            }
-        }
+        workspaces
+            .values()
+            .map(|runtime| runtime.artifacts.terminal_sessions.detach_parked_sessions())
+            .sum()
     }
 
-    /// Clears fdstore restart preservation marks when the lease expires before
-    /// systemd restarts the devserver.
-    #[cfg(target_os = "linux")]
-    pub fn clear_fdstore_terminal_session_preservation(&self, sessions: &[(String, String)]) {
-        let Ok(workspaces) = self.workspaces.read() else {
-            return;
+    /// Explicitly end every terminal session in every tenant and wait,
+    /// bounded, until each child process is observably dead. Backs the
+    /// devserver drain endpoint (`chan devserver --stop` / `--restart
+    /// --force`): the response must not claim completion before the
+    /// children are gone, HUP-immune ones included.
+    pub async fn drain_terminal_sessions(&self) -> TerminalDrainOutcome {
+        let (registries, mut pids) = {
+            let Ok(workspaces) = self.workspaces.read() else {
+                return TerminalDrainOutcome::default();
+            };
+            let registries: Vec<_> = workspaces
+                .values()
+                .map(|runtime| runtime.artifacts.terminal_sessions.clone())
+                .collect();
+            let pids: Vec<u32> = registries
+                .iter()
+                .flat_map(|registry| registry.live_child_pids())
+                .collect();
+            (registries, pids)
         };
-        for (prefix, session_id) in sessions {
-            if let Some(runtime) = workspaces.get(prefix) {
-                runtime
-                    .artifacts
-                    .terminal_sessions
-                    .clear_fdstore_session_preservation(session_id);
+        let mut closed = 0;
+        for registry in registries {
+            closed += registry.close_all(CloseReason::Shutdown);
+        }
+        let total = pids.len();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            pids.retain(|pid| child_process_running(*pid));
+            if pids.is_empty() || std::time::Instant::now() >= deadline {
+                break;
             }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        TerminalDrainOutcome {
+            closed,
+            dead: total - pids.len(),
+            lingering: pids,
         }
     }
 
