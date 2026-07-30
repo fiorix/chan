@@ -155,6 +155,7 @@
     toggleRichPromptForTab,
     hideRichPromptForTab,
   } from "../state/richPrompt.svelte";
+  import { surveyFor } from "../state/survey.svelte";
 
   let {
     tab,
@@ -169,6 +170,14 @@
     active: boolean;
     focused: boolean;
   } = $props();
+
+  // A survey is modal over this terminal. Centralizing the guard keeps every
+  // xterm refocus path from stealing keyboard ownership while the card is up;
+  // once the survey clears, the same calls legitimately restore the terminal.
+  function focusTerminal(): void {
+    if (surveyFor(tab.id)) return;
+    term?.focus();
+  }
 
   type ServerFrame =
     | { type: "ready"; cols: number; rows: number; cwd?: string | null; cwd_rel?: string | null }
@@ -429,7 +438,7 @@
       // (active) terminal; don't yank focus back to xterm or it would steal the
       // caret from the bubble's editor.
       if (active && isRichPromptVisible(tab.id)) return;
-      term?.focus();
+      focusTerminal();
     });
   });
 
@@ -447,7 +456,7 @@
   $effect(() => {
     const visible = isRichPromptVisible(tab.id);
     if (richPromptWasVisible && !visible && active && focused) {
-      queueMicrotask(() => term?.focus());
+      queueMicrotask(focusTerminal);
     }
     richPromptWasVisible = visible;
   });
@@ -1005,7 +1014,7 @@
     // the previous xterm's buffer was disposed too. Echo dedupe (lastAgentEchoSeq)
     // is independent of screen content and survives the remount.
     void connect();
-    if (focused) queueMicrotask(() => term?.focus());
+    if (focused) queueMicrotask(focusTerminal);
   }
 
   function clearLiveness(): void {
@@ -1435,7 +1444,7 @@
     tab.seedInput = undefined;
     setTimeout(() => {
       sendInput(seed);
-      term?.focus();
+      focusTerminal();
       scheduleTerminalSessionSave();
     }, 150);
   }
@@ -1890,7 +1899,7 @@
     const text = scrollbackText();
     if (!text) return;
     await navigator.clipboard?.writeText(text);
-    term?.focus();
+    focusTerminal();
   }
 
   async function copySelectionOrScrollback(): Promise<void> {
@@ -1898,7 +1907,7 @@
     const text = term?.getSelection() || scrollbackText();
     if (!text) return;
     await navigator.clipboard?.writeText(text);
-    term?.focus();
+    focusTerminal();
   }
 
   // The right-click menu's "Paste" entry. A menu click is NOT an OS paste
@@ -1911,7 +1920,7 @@
     closeTabMenu();
     const text = await readClipboardText();
     if (text) term?.paste(text);
-    term?.focus();
+    focusTerminal();
   }
 
   // Keyboard copy (Cmd+C / Ctrl+Shift+C) copies the CURRENT SELECTION only.
@@ -1923,7 +1932,7 @@
     const text = term?.getSelection() ?? "";
     if (!text) return;
     await navigator.clipboard?.writeText(text);
-    term?.focus();
+    focusTerminal();
   }
 
   // Terminal clipboard chords are OS-divergent and CANNOT use the registry's
@@ -2023,7 +2032,7 @@
     // Persistent so the pill gets a dismiss control; a null statusKind
     // is neither dismissable nor auto-cleared and would stick forever.
     ui.statusKind = "persistent";
-    term?.focus();
+    focusTerminal();
   }
 
   /// The path "Copy path to $CWD" puts on the clipboard: the shell's real
@@ -2046,7 +2055,7 @@
     // `void`. writeClipboardText writes natively on desktop (no gesture),
     // and focusing the terminal first gives the web fallback a focused
     // document.
-    term?.focus();
+    focusTerminal();
     await writeClipboardText(cwd);
   }
 
@@ -2104,7 +2113,7 @@
       e.preventDefault();
       findOpen = false;
       search?.clearDecorations();
-      term?.focus();
+      focusTerminal();
       return;
     }
     if (e.key === "Enter") {
@@ -2484,13 +2493,12 @@
   {/if}
   <!-- Per-terminal survey overlay: a survey raised on THIS terminal
        (`cs terminal survey --tab-name`) renders anchored over it, keyed by
-       tab.id, independent of other terminals. Self-gates on an active survey
-       for this tab; only over the visible (active) tab so a background survey
-       waits until its tab is shown. The window-wide fallback lives at the App
-       root (App.svelte <BubbleOverlay />). -->
-  {#if active}
-    <BubbleOverlay tabId={tab.id} />
-  {/if}
+       tab.id, independent of other terminals. It stays mounted across tab
+       switches to preserve the original return-focus target, while `shown`
+       keeps a background survey inert until its tab is selected. The
+       window-wide fallback lives at the App root (App.svelte
+       <BubbleOverlay />). -->
+  <BubbleOverlay tabId={tab.id} shown={active} restoreFocus={focusTerminal} />
 </div>
 
 <style>

@@ -11,31 +11,34 @@ The systemd boundary crate: chan's only fd-adoption seam and the single owner of
 - **Supervision hygiene**: `scrub_child_supervision_env` strips `WATCHDOG_PID`, `WATCHDOG_USEC`, and `NOTIFY_SOCKET` from spawned children; `pty_master_has_live_slave` checks via /proc that a restored master still has a live slave before it is re-served.
 - **Unit text**: `DevserverUnit` renders the canonical user unit (`Type=notify`, `NotifyAccess=main`, `FileDescriptorStoreMax=512`, `KillMode=process`, `TimeoutStartSec=10min`, `Restart=on-failure`, `WatchdogSec=30`, `WantedBy=default.target`); callers own only ExecStart and Environment. `classify_installed` compares an installed unit against the renderer's profiles: `Current` is left untouched, `KnownLegacy` (a prior chan-owned shape) is migrated, `Foreign` is refused. Whitespace and comments are inert; ExecStart must be a chan devserver invocation and Environment keys are limited to `CHAN_HOME` / `CHAN_TUNNEL_TOKEN` / `CHAN_TUNNEL_DEVSERVER_NAME`.
 
-The PTY-preserving restart is the flow the crate exists for:
+Continuous PTY parking is the flow the crate exists for: every windowed terminal parks at spawn, so ANY restart flavor preserves it and only stop ends it.
 
 ```mermaid
 flowchart LR
-  Prep["prepare: snapshot live PTY masters"] --> Up["fdstore chan.pty.* (FDPOLL=0)"]
-  Up --> Man["restart manifest (nonce + TTL, 0600)"]
-  Man --> Bar["notify_barrier (5s)"]
-  Bar --> Restart["systemctl --user restart"]
-  Restart --> Take["take_listen_fds: adopt LISTEN_*, clear env"]
-  Take --> Restore["StartupRestore: manifest match + live-slave check"]
+  Spawn["session spawn (windowed)"] --> Up["fdstore chan.pty.<session>.<pid> (FDPOLL=0)"]
+  Up --> Bar["notify_barrier (5s): manager picked the submission up"]
+  Bar --> Man["maintained restart manifest (0600, committed before the spawn reports success)"]
+  Man --> AnyRestart["ANY restart: systemctl, --restart, watchdog kill, crash"]
+  AnyRestart --> Take["take_listen_fds: adopt LISTEN_*, clear env"]
+  Take --> Restore["StartupRestore: name-consistency + manifest match + live-slave check, adopt (no re-store)"]
   Restore --> Serve["READY=1, then WATCHDOG=1 every WatchdogSec/2"]
+  Man --> Stop["systemctl stop: store released, masters close, shells HUP"]
 ```
+
+Session end (exit, close, restart-in-place, reap) sends `FDSTOREREMOVE` immediately; graceful shutdown seals the manifest with one final replay-fresh write and detaches the parked set without killing children. The stop/restart asymmetry lives entirely in systemd's default `FileDescriptorStorePreserve=restart` semantics -- the devserver never guesses stop-vs-restart at SIGTERM.
 
 ## Platform split
 
-`linux.rs` implements everything; `unsupported.rs` keeps other targets honest: the notify helpers are silent Ok no-ops, `watchdog_interval` is `None`, and `scrub_child_supervision_env` still strips the vars. `NamedFd`, `take_listen_fds`, `fdstore*`, and `pty_master_has_live_slave` do not exist off Linux, so a consumer cannot compile a fake restore path; chan-server's non-Linux prepare route answers an explicit 400 instead. The crate depends only on rustix; `unsafe_op_in_unsafe_fn` is denied and the single unsafe block is the `OwnedFd::from_raw_fd` adoption inside `take_listen_fds`.
+`linux.rs` implements everything; `unsupported.rs` keeps other targets honest: the notify helpers are silent Ok no-ops, `watchdog_interval` is `None`, and `scrub_child_supervision_env` still strips the vars. `NamedFd`, `take_listen_fds`, `fdstore*`, and `pty_master_has_live_slave` do not exist off Linux, so a consumer cannot compile a fake restore path; chan-server's non-Linux parker shim never engages and no session is ever parked. The crate depends only on rustix; `unsafe_op_in_unsafe_fn` is denied and the single unsafe block is the `OwnedFd::from_raw_fd` adoption inside `take_listen_fds`.
 
 ## Consumers
 
-- `crates/chan-server/src/devserver/fdstore.rs`: the restart flow above. `POST /api/devserver/systemd-fdstore/prepare` (bearer-gated) uploads each master as `chan.pty.{nonce}.{idx}.{child_pid}`, writes the manifest under the chan config dir, waits the barrier, and schedules a 30s nonce-guarded cleanup for a restart that never happens. On the next boot `StartupRestore` adopts inherited fds before any route is exposed, pairs them with the manifest, skips dead sessions, and removes every consumed fdstore entry; each failure path removes fds and manifest rather than leaving systemd holding orphans. READY and the watchdog ping loop ride the same module.
-- `crates/chan/src/lib.rs`: writes `~/.config/systemd/user/chan-devserver.service` via `DevserverUnit`, classifies before overwriting (Foreign refused with an actionable error, KnownLegacy migrated with rollback on failure), and `--service=systemd --restart` calls the prepare route first, downgrading to a destructive restart only with `--force`.
-- `crates/chan-library/src/terminal_sessions.rs`: scrubs the supervision env from every spawned terminal child so PTY children cannot feed the watchdog or touch the fdstore.
+- `crates/chan-server/src/devserver/fdstore.rs`: the parking flow above. The devserver installs a store parker (only under `NOTIFY_SOCKET`) whose phases are one-way Disabled -> Active -> Sealed: a park checks the `$FDSTORE` cap (fallback 512; the over-cap rejection guard), stores the fd, barriers so the manager provably picked the submission up, and durably commits the v2 manifest (`version`, `library_id`, `sessions`; no nonce, no TTL) before the spawn reports success; removals and placement changes coalesce through a debounced rewrite whose staleness is safe in exactly one direction (manifest entry without a stored fd). On the next boot `StartupRestore` adopts inherited fds before any route is exposed -- validating each `fd_name` against its session metadata, the library id, and slave liveness -- keeps their retained store entries instead of re-storing, cleans orphan and skipped fds plus a bare-stop manifest's recorded children and window rows, and the activation rewrite republishes the live adopted set. READY and the watchdog ping loop ride the same module.
+- `crates/chan/src/lib.rs`: writes `~/.config/systemd/user/chan-devserver.service` via `DevserverUnit`, classifies before overwriting (Foreign refused with an actionable error, KnownLegacy migrated with rollback on failure). `--service=systemd --restart` is a plain preserved bounce; `--restart --force` drains every session through `POST /api/devserver/terminal-sessions/drain` and falls back to stop-then-start when the drain cannot be confirmed, so it stays destructive; `--stop` drains best-effort and always stops (the released store HUPs whatever a drain could not reach).
+- `crates/chan-library/src/terminal_sessions.rs`: drives parking from session lifecycle (park at windowed spawn/adopt at restore, take-once unpark on every close/exit path, detach sweep for graceful shutdown) through the installed `FdStoreParker` hook, and scrubs the supervision env from every spawned terminal child so PTY children cannot feed the watchdog or touch the fdstore.
 
 ## Boundaries
 
 - No `STOPPING=1` is sent; stop semantics ride `KillMode=process` + `Restart=on-failure`.
-- Real-systemd coverage is env-gated: `CHAN_SYSTEMD_FDSTORE_E2E=1` runs the fdstore and watchdog e2es against transient `systemd-run --user` units that re-invoke the test binary.
+- Real-systemd coverage has two layers: `CHAN_SYSTEMD_FDSTORE_E2E=1` runs the in-crate fdstore and watchdog e2es against transient `systemd-run --user` units that re-invoke the test binary, and `scripts/e2e/devserver-fdstore.sh` drives a real `chan-devserver.service` through the full terminal-survival matrix (restart flavors, watchdog kill, crash restore, drain/stop teardown, store-count invariants).
 - The user-visible restart story (what survives a devserver bounce, what resets) lives in the root [design.md](../../design.md) devserver section; this crate is only the mechanism.

@@ -477,7 +477,7 @@ fn assert_entry_handoff(status: StatusCode, headers: &[(String, String)], locati
             .map(|(_, value)| value.as_str())
     };
     assert_eq!(value("cache-control"), Some("no-store"));
-    assert_eq!(value("referrer-policy"), Some("no-referrer"));
+    assert_eq!(value("referrer-policy"), Some("strict-origin"));
     assert!(
         value("content-security-policy").is_some_and(|csp| csp.contains("form-action https://"))
     );

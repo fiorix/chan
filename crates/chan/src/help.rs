@@ -268,9 +268,11 @@ CAUTIONS:
   `loginctl enable-linger` and fails loudly (with the sudo hint)
   when it is denied. A launchd agent outlives the launching shell
   and the GUI login session but NOT a full logout.
-  --service=systemd --restart preserves live PTYs via the systemd
-  fdstore and ABORTS if that handoff fails; --force restarts
-  destructively, killing them.
+  Under --service=systemd, live PTYs ride the systemd fd store
+  through EVERY restart: --restart, a bare `systemctl --user
+  restart`, a watchdog kill, or a crash. --restart --force tears
+  the sessions down first and restarts without them; --stop and
+  `systemctl --user stop` end the terminals.
   --join exits 0 when you detach with Ctrl-C, and non-zero when
   the backing service dies or stops answering /api/health.
   --tunnel-token is visible in `ps`; prefer CHAN_TUNNEL_TOKEN.

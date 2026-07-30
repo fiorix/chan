@@ -20,9 +20,10 @@
 //! devserver bearer token persist in `~/.chan/devserver/config.json` (0600).
 //! Per-window pane/tab layout is NOT persisted here; each tenant is a full
 //! workspace mount that already stores its own SPA session per window, so a
-//! reconnecting client re-hydrates its panes from the tenant. Terminal PTY
-//! contents reset except for an explicit Linux systemd fdstore restart, which
-//! re-associates inherited PTY masters with freshly built session objects.
+//! reconnecting client re-hydrates its panes from the tenant. Under the Linux
+//! systemd unit, terminal PTYs survive EVERY restart flavor: each windowed
+//! session parks its master fd in the systemd fd store continuously, and boot
+//! re-associates the inherited masters with freshly built session objects.
 //! Per-tenant control sockets bind at paths derived from the persisted
 //! library id (not the pid), so the `$CHAN_CONTROL_SOCKET` baked into
 //! already-open shells reaches the restarted instance and `cs` keeps working.
@@ -1584,6 +1585,14 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     // restarts and systemd unit restarts alike). Installed before the first
     // mount so the shared terminal tenant gets it too.
     host.install_control_identity(library_id.clone());
+    // Continuous fd parking, only under systemd notify: every windowed PTY
+    // parks at spawn so ANY unit restart preserves it. Installed before the
+    // first mount (the hook reaches registries at mount wiring); it starts
+    // Disabled and activates after the inherited-fd restore applies, so no
+    // early spawn or manifest write can race the taken restore state.
+    let fd_parker = std::env::var_os("NOTIFY_SOCKET")
+        .is_some_and(|value| !value.is_empty())
+        .then(|| fdstore::DevserverParker::install(&host, library_id.clone()));
     // Install the library-owned workspace on/off overlay beside the window
     // registry, so the restore below re-mounts what was on. Same shape + store
     // the desktop-local library uses (`~/.chan/workspaces.json`).
@@ -1691,6 +1700,12 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     // Inherited terminals are adopted exactly once before any local, discovery,
     // or tunnel route can reconnect to them.
     fdstore_restore.apply(&state);
+    // Adopted sessions and any boot-time spawn become parked + manifested
+    // before routes expose: nothing can observe a session whose fd name is
+    // not yet durable.
+    if let Some(parker) = &fd_parker {
+        parker.activate();
+    }
     state
         .startup
         .advance(StartupPhase::FdstoreApplied)
@@ -1784,6 +1799,19 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
                 Some(task) => Some(task.await),
                 None => None,
             };
+            // Graceful shutdown: seal parking (no further parks, one final
+            // manifest write), then detach the parked sessions so tenant
+            // teardown kills only the rest. Systemd decides what the store does
+            // next: restart re-feeds the fds, stop releases them.
+            if let Some(parker) = fd_parker {
+                let detached = parker.seal_flush_detach();
+                if detached > 0 {
+                    eprintln!(
+                    "chan devserver: systemd fdstore: detached {detached} parked terminal(s) for handover"
+                );
+                }
+                parker.stop().await;
+            }
             let hosted_shutdown = host.shutdown_all().await;
             state.startup.stop();
             state.startup.stopped();
@@ -1838,6 +1866,19 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
                 Some(task) => Some(task.await),
                 None => None,
             };
+            // Graceful shutdown: seal parking (no further parks, one final
+            // manifest write), then detach the parked sessions so tenant
+            // teardown kills only the rest. Systemd decides what the store does
+            // next: restart re-feeds the fds, stop releases them.
+            if let Some(parker) = fd_parker {
+                let detached = parker.seal_flush_detach();
+                if detached > 0 {
+                    eprintln!(
+                    "chan devserver: systemd fdstore: detached {detached} parked terminal(s) for handover"
+                );
+                }
+                parker.stop().await;
+            }
             let hosted_shutdown = host.shutdown_all().await;
             state.startup.stop();
             state.startup.stopped();
@@ -2020,8 +2061,8 @@ fn build_devserver_app(
         .route("/api/devserver/windows", get(handle_list_windows))
         .route("/api/devserver/rotate-token", post(handle_rotate_token))
         .route(
-            "/api/devserver/systemd-fdstore/prepare",
-            post(handle_fdstore_prepare),
+            "/api/devserver/terminal-sessions/drain",
+            post(handle_terminal_sessions_drain),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -2387,11 +2428,19 @@ async fn handle_list_windows(
     Json(Vec::new())
 }
 
-async fn handle_fdstore_prepare(State(state): State<Arc<DevserverState>>) -> Response {
-    match fdstore::prepare_restart(&state) {
-        Ok(response) => Json(response).into_response(),
-        Err(e) => (e.status, e.message).into_response(),
-    }
+/// Explicitly end every terminal session and wait, bounded, until the child
+/// processes are observably dead. `chan devserver --stop` drains through
+/// here before `systemctl stop`, and `--restart --force` before its
+/// destructive bounce; the response never claims completion for a child
+/// that is still running (`lingering`).
+async fn handle_terminal_sessions_drain(State(state): State<Arc<DevserverState>>) -> Response {
+    let outcome = state.host.drain_terminal_sessions().await;
+    Json(crate::devserver_api::DrainedTerminals {
+        closed: outcome.closed,
+        dead: outcome.dead,
+        lingering: outcome.lingering,
+    })
+    .into_response()
 }
 
 /// Gate every `/api/devserver/*` management route except `info` on the devserver
@@ -2495,6 +2544,27 @@ mod tests {
     use chan_library::workspace_slug;
     use std::sync::atomic::AtomicBool;
 
+    /// Coordinates process-env access across this test binary: the fdstore
+    /// boot tests rewrite `CHAN_HOME` under the WRITE side, and every test
+    /// whose product path re-resolves `config_dir()` mid-test (mounting a
+    /// workspace persists and re-reads its tenant token there) holds the
+    /// READ side, so a rewrite can never interleave with a mount.
+    static CHAN_HOME_ENV: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+    /// Read-side hold on [`CHAN_HOME_ENV`] for a full test body, awaits
+    /// included. Holding across awaits is deliberate and deadlock-free
+    /// here: readers never nest locks, and the write side is taken only
+    /// by the fdstore boot tests' env guard.
+    struct ChanHomeEnvRead {
+        _guard: std::sync::RwLockReadGuard<'static, ()>,
+    }
+
+    fn chan_home_env_read() -> ChanHomeEnvRead {
+        ChanHomeEnvRead {
+            _guard: CHAN_HOME_ENV.read().unwrap_or_else(|e| e.into_inner()),
+        }
+    }
+
     struct ShutdownProbeBuilder {
         state_tx: Mutex<Option<tokio::sync::oneshot::Sender<Arc<crate::state::AppState>>>>,
     }
@@ -2548,6 +2618,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn hosted_shutdown_joins_doc_close_all_before_clearing_workspace_cell() {
+        let _env = chan_home_env_read();
         let config = tempfile::tempdir().expect("config");
         let root = tempfile::tempdir().expect("workspace");
         std::fs::write(root.path().join("note.md"), "previous bytes").expect("seed note");
@@ -2932,6 +3003,7 @@ mod tests {
 
     #[tokio::test]
     async fn chan_close_during_startup_stays_off_preserves_metadata_and_reopens() {
+        let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let workspace = tempfile::tempdir().expect("workspace");
         let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
@@ -3065,6 +3137,7 @@ mod tests {
     #[tokio::test]
     async fn chan_close_remove_during_startup_forgets_metadata_preserves_source_and_reopens_fresh()
     {
+        let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let workspace = tempfile::tempdir().expect("workspace");
         let source_sentinel = workspace.path().join("source-sentinel.md");
@@ -3285,13 +3358,14 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn fdstore_child_pid_is_parsed_from_chan_fd_name() {
+        // Continuous-parking names: chan.pty.<session_id>.<child_pid>.
         assert_eq!(
-            fdstore::child_pid_from_name("chan.pty.nonce.0.4242"),
+            fdstore::child_pid_from_name("chan.pty.0f3a9c.4242"),
             Some(4242)
         );
-        assert_eq!(fdstore::child_pid_from_name("chan.pty.nonce.0.0"), None);
-        assert_eq!(fdstore::child_pid_from_name("other.pty.nonce.0.4242"), None);
-        assert_eq!(fdstore::child_pid_from_name("chan.pty.nonce.0.nope"), None);
+        assert_eq!(fdstore::child_pid_from_name("chan.pty.0f3a9c.0"), None);
+        assert_eq!(fdstore::child_pid_from_name("other.pty.0f3a9c.4242"), None);
+        assert_eq!(fdstore::child_pid_from_name("chan.pty.0f3a9c.nope"), None);
     }
 
     #[tokio::test]
@@ -3347,6 +3421,7 @@ mod tests {
 
     #[tokio::test]
     async fn mount_uses_keyed_pathspec_same_basename_coexist_and_reserved_guarded() {
+        let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let state = test_state(home.path(), addr);
@@ -3549,6 +3624,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_sessions_drain_is_bearer_gated_and_reports_counts() {
+        use tower::ServiceExt;
+
+        let home = tempfile::tempdir().expect("home");
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let state = test_state(home.path(), addr);
+        let host = state.host.clone();
+        let (app, _serve_addr) = build_devserver_app(state, host);
+        let drain = |bearer: &str| {
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/api/devserver/terminal-sessions/drain")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let res = app.clone().oneshot(drain("wrong")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        let res = app.clone().oneshot(drain("test-token")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let drained: crate::devserver_api::DrainedTerminals =
+            serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            drained,
+            crate::devserver_api::DrainedTerminals {
+                closed: 0,
+                dead: 0,
+                lingering: Vec::new(),
+            },
+            "an empty host drains nothing and lingers nothing"
+        );
+    }
+
+    #[tokio::test]
     async fn rotate_token_route_swaps_the_live_bearer() {
         use tower::ServiceExt;
 
@@ -3600,6 +3714,7 @@ mod tests {
 
     #[tokio::test]
     async fn off_without_live_terminals_is_not_blocked() {
+        let _env = chan_home_env_read();
         use tower::ServiceExt;
 
         let home = tempfile::tempdir().expect("home");
@@ -4003,6 +4118,7 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_on_off_toggle_round_trip() {
+        let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let ws = tempfile::tempdir().expect("workspace");
         std::fs::write(ws.path().join("a.md"), "# A\n").expect("seed");
@@ -4071,6 +4187,7 @@ mod tests {
 
     #[tokio::test]
     async fn lists_full_host_library_and_toggles_unserved_workspaces_on() {
+        let _env = chan_home_env_read();
         // GET /workspaces lists ONE row per HOST-LIBRARY workspace (what
         // `chan list` shows), not just the devserver's served subset -- so a
         // fresh devserver is not empty. An unserved library workspace is off at
@@ -4147,6 +4264,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn workspace_entries_report_foreign_locked_library_rows() {
+        let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let ws = tempfile::tempdir().expect("workspace");
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -4166,6 +4284,7 @@ mod tests {
 
     #[tokio::test]
     async fn forget_is_destructive_and_removes_from_the_host_library() {
+        let _env = chan_home_env_read();
         // Devserver Forget is destructive: it is `chan workspace rm`
         // (unmount-if-on + unregister from the host library
         // + bin the trash). The host library is the single registry, so the
@@ -4210,6 +4329,7 @@ mod tests {
 
     #[tokio::test]
     async fn off_state_persists_to_overlay() {
+        let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let ws = tempfile::tempdir().expect("workspace");
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -4344,6 +4464,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_remove_is_not_resurrected_by_a_later_persist() {
+        let _env = chan_home_env_read();
         // `chan close --remove` routes through the HOST (remove_workspace_for_root),
         // which the devserver in-memory map never sees. A later persist_state (here,
         // a new registration) must NOT re-grow the removed workspace into the
@@ -4403,6 +4524,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_close_persists_off_through_a_later_persist() {
+        let _env = chan_home_env_read();
         // A plain `chan close` (host-level close_workspace_for_root) records the
         // workspace OFF, and a later persist_state must keep it off (derive `on`
         // from what is mounted) rather than flip it back on from the stale map --
@@ -4449,6 +4571,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_close_reports_off_empty_token_immediately() {
+        let _env = chan_home_env_read();
         // `chan close` reaches the host directly, bypassing DevserverState's
         // workspace map. The management list must still report the real state
         // immediately, not the stale record's old `on` flag and tenant token.
@@ -4486,6 +4609,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_remove_drops_row_from_listing_immediately() {
+        let _env = chan_home_env_read();
         // `chan close --remove` reaches the host directly too. The host removes
         // the library row and unmounts the tenant, while DevserverState still
         // has its old map record. The management list must not surface that
@@ -4526,6 +4650,7 @@ mod tests {
         // A stale map record with `on:true` but no live host tenant used to make
         // `set_workspace_on(..., true)` a no-op. The toggle must use the host's
         // real mount state so a stale-off row remounts cleanly.
+        let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let ws = tempfile::tempdir().expect("workspace");
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -4671,6 +4796,7 @@ mod tests {
 
     #[tokio::test]
     async fn library_workspaces_lists_registered_with_on_state() {
+        let _env = chan_home_env_read();
         use axum::body::to_bytes;
         use tower::ServiceExt;
 
@@ -5278,6 +5404,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_color_gate_accepts_a_tenant_token_but_windows_stay_launcher_only() {
+        let _env = chan_home_env_read();
         use tower::ServiceExt;
 
         // A window is served with its per-TENANT token, NOT the
@@ -5431,5 +5558,432 @@ mod tests {
                 .is_err(),
             "a waiter armed after the change blocks until the next one"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    mod fdstore_boot {
+        use super::*;
+        use chan_library::terminal_sessions::{fdstore_fd_name, FdStoreSessionMeta, StoredPtySize};
+        use chan_library::windows::WindowKind;
+
+        /// Serializes and scopes the env the fdstore paths read: CHAN_HOME
+        /// (manifest location) set to the test home, NOTIFY_SOCKET and
+        /// FDSTORE cleared so no real manager is ever addressed. EVERY
+        /// touched variable's prior value or absence is restored on drop,
+        /// so later tests and the invoking harness see the process env
+        /// exactly as it was. Holds the WRITE side of
+        /// [`super::CHAN_HOME_ENV`], so no reader resolving `config_dir()`
+        /// can observe the rewritten env.
+        struct FdstoreEnvGuard {
+            _lock: std::sync::RwLockWriteGuard<'static, ()>,
+            prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        }
+
+        impl FdstoreEnvGuard {
+            fn set(home: &Path) -> Self {
+                Self::capture(
+                    super::CHAN_HOME_ENV
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner()),
+                    home,
+                )
+            }
+
+            /// Lock-passing body of [`set`](Self::set), so the round-trip
+            /// regression can seed sentinel values under the SAME lock
+            /// acquisition the guard then owns.
+            fn capture(lock: std::sync::RwLockWriteGuard<'static, ()>, home: &Path) -> Self {
+                let prev = ["CHAN_HOME", "NOTIFY_SOCKET", "FDSTORE"]
+                    .into_iter()
+                    .map(|key| (key, std::env::var_os(key)))
+                    .collect();
+                std::env::set_var("CHAN_HOME", home);
+                std::env::remove_var("NOTIFY_SOCKET");
+                std::env::remove_var("FDSTORE");
+                Self { _lock: lock, prev }
+            }
+        }
+
+        impl Drop for FdstoreEnvGuard {
+            fn drop(&mut self) {
+                for (key, value) in self.prev.drain(..) {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+
+        fn meta(session_id: &str, window_id: &str, child_pid: Option<u32>) -> FdStoreSessionMeta {
+            FdStoreSessionMeta {
+                tenant_prefix: "/t/terminals".into(),
+                session_id: session_id.into(),
+                tab_name: None,
+                tab_group: None,
+                window_id: Some(window_id.into()),
+                pane_id: None,
+                side: None,
+                tab_id: None,
+                cwd: None,
+                command: None,
+                env: Default::default(),
+                mcp_env: false,
+                child_pid,
+                size: StoredPtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+                seq: 0,
+                generation: 0,
+                alt_screen: false,
+                private_modes: Vec::new(),
+            }
+        }
+
+        fn write_manifest_file(home: &Path, manifest: &serde_json::Value) {
+            let dir = home.join("devserver");
+            std::fs::create_dir_all(&dir).expect("devserver dir");
+            std::fs::write(
+                dir.join("fdstore-restart.json"),
+                serde_json::to_vec_pretty(manifest).expect("manifest json"),
+            )
+            .expect("write manifest");
+        }
+
+        fn manifest_file(home: &Path) -> PathBuf {
+            home.join("devserver").join("fdstore-restart.json")
+        }
+
+        async fn wait_child_dead(child: &mut std::process::Child) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if child.try_wait().expect("try_wait").is_some() {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "recorded child survived the boot cleanup"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+
+        fn kill_by_cmdline_fragment(fragment: &str) {
+            let Ok(entries) = std::fs::read_dir("/proc") else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
+                    continue;
+                };
+                let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
+                    continue;
+                };
+                if String::from_utf8_lossy(&cmdline).contains(fragment) {
+                    if let Some(pid) = rustix::process::Pid::from_raw(pid) {
+                        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+                    }
+                }
+            }
+        }
+
+        /// The guard must leave the process env EXACTLY as it found it:
+        /// present sentinels restored to their values, an absent variable
+        /// restored to absence, with the in-scope state overridden/cleared.
+        #[test]
+        fn env_guard_round_trips_every_touched_variable() {
+            let lock = super::CHAN_HOME_ENV
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let home = tempfile::tempdir().expect("home");
+            let originals: Vec<(&str, Option<std::ffi::OsString>)> =
+                ["CHAN_HOME", "NOTIFY_SOCKET", "FDSTORE"]
+                    .into_iter()
+                    .map(|key| (key, std::env::var_os(key)))
+                    .collect();
+
+            // Seed: two PRESENT sentinels and one ABSENT variable, under
+            // the same lock acquisition the guard takes over.
+            std::env::set_var("CHAN_HOME", "sentinel-chan-home");
+            std::env::set_var("NOTIFY_SOCKET", "sentinel-notify");
+            std::env::remove_var("FDSTORE");
+
+            let guard = FdstoreEnvGuard::capture(lock, home.path());
+            assert_eq!(
+                std::env::var_os("CHAN_HOME").as_deref(),
+                Some(home.path().as_os_str()),
+                "the guard scope must point CHAN_HOME at the test home"
+            );
+            assert_eq!(std::env::var_os("NOTIFY_SOCKET"), None);
+            assert_eq!(std::env::var_os("FDSTORE"), None);
+            drop(guard);
+
+            let _lock = super::CHAN_HOME_ENV
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            assert_eq!(
+                std::env::var_os("CHAN_HOME").as_deref(),
+                Some(std::ffi::OsStr::new("sentinel-chan-home")),
+                "a present variable must restore to its exact prior value"
+            );
+            assert_eq!(
+                std::env::var_os("NOTIFY_SOCKET").as_deref(),
+                Some(std::ffi::OsStr::new("sentinel-notify"))
+            );
+            assert_eq!(
+                std::env::var_os("FDSTORE"),
+                None,
+                "an absent variable must restore to absence"
+            );
+            // Put back whatever the harness had before the sentinels.
+            for (key, value) in originals {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+
+        /// The bare-stop case: a live v2 manifest, ZERO inherited chan fds.
+        /// Every session classifies missing, recorded children get signaled
+        /// (the HUP-immune stragglers), terminal window rows are reaped, and
+        /// the manifest is removed. A corrupt fd_name entry is skipped by
+        /// the name-consistency gate, never restored under foreign metadata.
+        #[tokio::test]
+        async fn startup_restore_cleans_a_bare_stop_manifest() {
+            let home = tempfile::tempdir().expect("home");
+            let _env = FdstoreEnvGuard::set(home.path());
+            let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+            let state = test_state(home.path(), addr);
+            state.host.install_window_registry(
+                Arc::new(WindowRegistry::open(home.path().join("windows.json"))),
+                "lib-test".into(),
+            );
+            let row1 = state
+                .host
+                .mint_window(WindowKind::Terminal, None)
+                .expect("window 1");
+            let row2 = state
+                .host
+                .mint_window(WindowKind::Terminal, None)
+                .expect("window 2");
+            let mut child = std::process::Command::new("sleep")
+                .arg("300")
+                .spawn()
+                .expect("recorded child");
+            let pid = child.id();
+
+            let good = meta("sess1", &row1.window_id, Some(pid));
+            let mismatched = meta("sess2", &row2.window_id, None);
+            write_manifest_file(
+                home.path(),
+                &serde_json::json!({
+                    "version": 2,
+                    "library_id": "lib-test",
+                    "sessions": [
+                        {
+                            "fd_name": fdstore_fd_name("sess1", Some(pid)),
+                            "meta": serde_json::to_value(&good).unwrap(),
+                            "replay_b64": "",
+                        },
+                        {
+                            // Corrupt mapping: the name disagrees with the
+                            // session metadata.
+                            "fd_name": "chan.pty.someone-else.777",
+                            "meta": serde_json::to_value(&mismatched).unwrap(),
+                            "replay_b64": "",
+                        },
+                    ],
+                }),
+            );
+
+            let restore = fdstore::StartupRestore::take();
+            restore.apply(&state);
+
+            wait_child_dead(&mut child).await;
+            let remaining: Vec<String> = state
+                .host
+                .assemble_window_records()
+                .into_iter()
+                .map(|r| r.window_id)
+                .collect();
+            assert!(
+                !remaining.contains(&row1.window_id) && !remaining.contains(&row2.window_id),
+                "terminal rows must be reaped after the bare-stop cleanup: {remaining:?}"
+            );
+            assert!(
+                !manifest_file(home.path()).exists(),
+                "a manifest with nothing restored must be removed"
+            );
+        }
+
+        /// A v1 (prepare-era) manifest takes the full cleanup path: its
+        /// recorded child is signaled, its terminal row reaped, the file
+        /// removed. Hard swap, no shim.
+        #[tokio::test]
+        async fn startup_restore_rejects_a_v1_manifest_via_cleanup() {
+            let home = tempfile::tempdir().expect("home");
+            let _env = FdstoreEnvGuard::set(home.path());
+            let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+            let state = test_state(home.path(), addr);
+            state.host.install_window_registry(
+                Arc::new(WindowRegistry::open(home.path().join("windows.json"))),
+                "lib-test".into(),
+            );
+            let row = state
+                .host
+                .mint_window(WindowKind::Terminal, None)
+                .expect("window");
+            let mut child = std::process::Command::new("sleep")
+                .arg("300")
+                .spawn()
+                .expect("recorded child");
+            let pid = child.id();
+            let session = meta("old-sess", &row.window_id, Some(pid));
+            write_manifest_file(
+                home.path(),
+                &serde_json::json!({
+                    "version": 1,
+                    "nonce": "deadbeef",
+                    "library_id": "lib-test",
+                    "created_unix_secs": 1,
+                    "sessions": [{
+                        "fd_name": "chan.pty.deadbeef.0.1234",
+                        "meta": serde_json::to_value(&session).unwrap(),
+                        "replay_b64": "",
+                    }],
+                }),
+            );
+
+            let restore = fdstore::StartupRestore::take();
+            restore.apply(&state);
+
+            wait_child_dead(&mut child).await;
+            assert!(
+                !state
+                    .host
+                    .assemble_window_records()
+                    .iter()
+                    .any(|r| r.window_id == row.window_id),
+                "the v1 session's terminal row must be reaped"
+            );
+            assert!(
+                !manifest_file(home.path()).exists(),
+                "an unsupported manifest must be removed"
+            );
+        }
+
+        /// Full parked lifecycle over a REAL mounted tenant: a windowed
+        /// spawn parks and commits synchronously; the seal's final write
+        /// serializes exactly the set selected for detach; a post-seal
+        /// spawn is refused parking and cannot touch the sealed manifest.
+        #[tokio::test]
+        async fn seal_finalizes_the_manifest_and_detaches_the_parked_set() {
+            use tower::ServiceExt;
+
+            let home = tempfile::tempdir().expect("home");
+            let _env = FdstoreEnvGuard::set(home.path());
+            let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+            let state = test_state(home.path(), addr);
+            state.host.install_window_registry(
+                Arc::new(WindowRegistry::open(home.path().join("windows.json"))),
+                "lib-test".into(),
+            );
+            let parker = fdstore::DevserverParker::install(&state.host, "lib-test".into());
+            state
+                .mount_shared_terminal_tenant()
+                .await
+                .expect("mount shared terminal tenant");
+            parker.activate();
+
+            let term = state
+                .host
+                .ensure_first_open_terminal()
+                .expect("first open")
+                .expect("terminal window");
+            let row = state
+                .host
+                .assemble_window_records()
+                .into_iter()
+                .find(|r| r.window_id == term.window_id)
+                .expect("terminal row");
+            let host = state.host.clone();
+            let (app, _serve_addr) = build_devserver_app(state, host);
+
+            let spawn = |name: &str, command: &str| {
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri(format!("{}/api/terminals", row.prefix))
+                    .header(header::AUTHORIZATION, format!("Bearer {}", row.token))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": name,
+                            "command": command,
+                            "window_id": row.window_id,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap()
+            };
+            let res = app
+                .clone()
+                .oneshot(spawn("parked", "exec sleep 86397"))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::CREATED);
+
+            let manifest: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(manifest_file(home.path())).expect("manifest after park"),
+            )
+            .expect("manifest json");
+            let sessions = manifest["sessions"].as_array().expect("sessions");
+            assert_eq!(sessions.len(), 1, "the windowed spawn must be manifested");
+            let fd_name = sessions[0]["fd_name"]
+                .as_str()
+                .expect("fd_name")
+                .to_string();
+
+            let detached = parker.seal_flush_detach();
+            assert_eq!(detached, 1, "the parked session is selected for detach");
+            let sealed: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(manifest_file(home.path())).expect("sealed manifest"),
+            )
+            .expect("sealed json");
+            let sealed_sessions = sealed["sessions"].as_array().expect("sessions");
+            assert_eq!(
+                sealed_sessions.len(),
+                1,
+                "every fd selected for detach must be in the final manifest"
+            );
+            assert_eq!(
+                sealed_sessions[0]["fd_name"].as_str(),
+                Some(fd_name.as_str())
+            );
+
+            // A post-seal spawn is REFUSED parking; the sealed manifest
+            // cannot change underneath the handover.
+            let res = app.clone().oneshot(spawn("late", "true")).await.unwrap();
+            assert_eq!(res.status(), StatusCode::CREATED);
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            let after: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(manifest_file(home.path())).expect("post-seal manifest"),
+            )
+            .expect("post-seal json");
+            assert_eq!(
+                after["sessions"].as_array().map(|s| s.len()),
+                Some(1),
+                "no post-seal write may alter the sealed manifest"
+            );
+
+            parker.stop().await;
+            // The detached child deliberately outlives the registries; the
+            // test owns it now.
+            kill_by_cmdline_fragment("sleep 86397");
+        }
     }
 }

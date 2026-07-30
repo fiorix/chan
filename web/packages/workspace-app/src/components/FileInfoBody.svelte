@@ -37,8 +37,8 @@
     graphData,
     selectionEdgesFor,
   } from "../state/graphData.svelte";
-  import { openImageZoom, type ZoomImage } from "../state/imageZoom";
-  import { openPdfViewer } from "../state/pdfViewer";
+  import { openImageZoom } from "../state/imageZoom";
+  import { dirImageSet, openMediaViewer } from "../state/mediaOpen";
   import { openVideoViewer } from "../state/videoViewer";
   import {
     copyTextToClipboard,
@@ -148,20 +148,6 @@
   const entryByPath = $derived(
     new Map(tree.entries.map((e) => [e.path, e])),
   );
-
-  function parentDir(p: string): string {
-    return p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
-  }
-
-  /// Images that sit in the SAME directory as `p`, in the file tree's
-  /// display order. Backs the fullscreen viewer's prev/next when the
-  /// view is opened from the file browser (flat directory, no recursion).
-  function dirImageSet(p: string): ZoomImage[] {
-    const dir = parentDir(p);
-    return tree.entries
-      .filter((e) => !e.is_dir && isImage(e.path) && parentDir(e.path) === dir)
-      .map((e) => ({ src: e.path, fromPath: null }));
-  }
 
   const entry = $derived.by(() => {
     if (path === null || path === undefined) return null;
@@ -643,14 +629,13 @@
       secondary.push(download, newTerminal);
       if (graph) secondary.push(graph);
     } else if (media) {
-      main = image
-        ? {
-            label: "View / Zoom",
-            onClick: () => openImageZoom(p, null, dirImageSet(p)),
-          }
-        : video
-          ? { label: "View Video", onClick: () => openVideoViewer(p) }
-          : { label: "View PDF", onClick: () => openPdfViewer(p) };
+      // Same routing as the file tree's double-click / Enter: image ->
+      // zoom with the directory sibling set, video/PDF -> their
+      // setless viewers.
+      main = {
+        label: image ? "View / Zoom" : video ? "View Video" : "View PDF",
+        onClick: () => void openMediaViewer(p),
+      };
       secondary.push(download, newTerminal);
       if (graph) secondary.push(graph);
     } else if (editable) {

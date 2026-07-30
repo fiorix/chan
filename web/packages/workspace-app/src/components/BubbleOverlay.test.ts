@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import BubbleOverlay from "./BubbleOverlay.svelte";
 import { surveyState } from "../state/survey.svelte";
+import { tabFocusPulse } from "../state/tabs.svelte";
 import type { SurveySpec } from "../api/client";
 
 // The survey overlay renders ONE slot's survey (per-terminal): a markdown
@@ -31,6 +32,7 @@ afterEach(() => {
   document.body.innerHTML = "";
   surveyState.byTab = {};
   surveyState.windowWide = null;
+  tabFocusPulse.value = 0;
 });
 
 describe("survey overlay", () => {
@@ -93,6 +95,96 @@ describe("survey overlay", () => {
     await tick();
     await new Promise<void>((resolve) => queueMicrotask(resolve));
 
+    expect(document.activeElement).toBe(terminal);
+  });
+
+  test("a hidden terminal survey leaves the visible tab's focus alone", async () => {
+    const visibleTerminal = document.createElement("textarea");
+    const hiddenTerminal = document.createElement("div");
+    hiddenTerminal.className = "terminal-tab";
+    const target = document.createElement("div");
+    hiddenTerminal.append(target);
+    document.body.append(visibleTerminal, hiddenTerminal);
+    visibleTerminal.focus();
+    surveyState.byTab = { t1: { spec: spec(), busy: false } };
+
+    mounted.push(
+      mount(BubbleOverlay, {
+        target,
+        props: { tabId: "t1", shown: false },
+      }),
+    );
+    await tick();
+    tabFocusPulse.value += 1;
+    await tick();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(target.querySelector(".survey-card")).toBeNull();
+    expect(document.activeElement).toBe(visibleTerminal);
+  });
+
+  test("a tab-focus pulse re-grabs the card without replacing its return target", async () => {
+    const owner = document.createElement("div");
+    owner.className = "terminal-tab";
+    const terminal = document.createElement("textarea");
+    const target = document.createElement("div");
+    owner.append(terminal, target);
+    const other = document.createElement("textarea");
+    document.body.append(owner, other);
+    terminal.focus();
+    surveyState.byTab = { t1: { spec: spec(), busy: false } };
+
+    mounted.push(
+      mount(BubbleOverlay, {
+        target,
+        props: { tabId: "t1", shown: true },
+      }),
+    );
+    await tick();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    const card = target.querySelector(".survey-card");
+    expect(document.activeElement).toBe(card);
+
+    other.focus();
+    tabFocusPulse.value += 1;
+    await tick();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(document.activeElement).toBe(card);
+
+    surveyState.byTab = {};
+    await tick();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(document.activeElement).toBe(terminal);
+  });
+
+  test("a survey first shown from a hidden tab restores its owning terminal", async () => {
+    const owner = document.createElement("div");
+    owner.className = "terminal-tab";
+    const terminal = document.createElement("textarea");
+    const target = document.createElement("div");
+    owner.append(terminal, target);
+    const previousTab = document.createElement("textarea");
+    document.body.append(owner, previousTab);
+    previousTab.focus();
+    surveyState.byTab = { t1: { spec: spec(), busy: false } };
+
+    mounted.push(
+      mount(BubbleOverlay, {
+        target,
+        props: {
+          tabId: "t1",
+          shown: true,
+          restoreFocus: () => terminal.focus(),
+        },
+      }),
+    );
+    await tick();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(document.activeElement).toBe(target.querySelector(".survey-card"));
+
+    surveyState.byTab = {};
+    await tick();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
     expect(document.activeElement).toBe(terminal);
   });
 

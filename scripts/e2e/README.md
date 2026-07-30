@@ -11,6 +11,7 @@ A scenario graduates into the gate only after it has proven stable across severa
 - **`terminal-queue-drain.sh`** validates chronological `cs terminal write` batching against a live agent. Run it from a chan terminal whose `CHAN_CONTROL_SOCKET` targets the server under test, over a workspace that agent already trusts.
 - **`gateway-zone.sh`** exercises the full gateway control plane: one controller, three proxy nodes, real identity and profile services, real `chan devserver` processes, tunnel reconnect, and failure scenarios. Its `ctrlplane` scenario covers signed user limits, policy transitions, account cuts, persistent fleet pause, OAuth and tenant-session revocation, and bounded aggregate reports. `gateway-zone-browser.mjs` and `stub-oauth.mjs` support it.
 - **`lp-skip-test.sh`** with `lp-mock.py` covers the PPA publish retry-idempotence offline.
+- **`devserver-fdstore.sh`** proves the terminal-survival contract against a real `systemctl --user` unit: a live PTY survives a bare restart, `chan devserver --restart`, a watchdog kill, and a `kill -9` crash restart; session close, `--stop`, `--restart --force`, and a bare stop end the shells and empty the fd store, with the store count asserted after every phase. It snapshots and restores any pre-existing `chan-devserver.service` state and REFUSES an active unit unless `CHAN_FDSTORE_E2E_ALLOW_TAKEOVER=1`, because taking over a live devserver kills its terminals.
 
 ## Scenario packs
 
