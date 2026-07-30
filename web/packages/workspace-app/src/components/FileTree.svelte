@@ -26,7 +26,8 @@
   import { clampMenu } from "./menuClamp";
   import { portal } from "./portal";
   import type { TreeEntry } from "../api/types";
-  import { classifyPath, isEditableText } from "../state/fileTypes";
+  import { isEditableText } from "../state/fileTypes";
+  import { openMediaViewer } from "../state/mediaOpen";
   import { classifyFile, iconFor } from "../state/kinds";
   import {
     dirtyPaths,
@@ -511,6 +512,15 @@
     void openInActivePane(path, { landAtTop: true });
   }
 
+  /// The double-click / Enter funnel for file rows. Media (image, svg,
+  /// video, PDF) opens its viewer overlay - the same routing the
+  /// inspector's main action uses; everything else attempts the editor
+  /// open, which peeks the content and refuses a binary file.
+  function openFileRow(path: string): void {
+    if (openMediaViewer(path)) return;
+    void onOpen(path);
+  }
+
   /// Single-click selects an entry; the FileBrowserTab side panel
   /// then renders its details. Files no longer auto-open on click;
   /// double-click (or the Open button in the panel) is the path
@@ -853,11 +863,10 @@
         e.preventDefault();
         if (curRow.isDir) {
           toggle(curRow.path);
-        } else if (classifyPath(curRow.path) !== "media") {
-          // Same flow as a double-click on the row: attempt the open (the open
-          // path peeks the content and refuses a binary file). Media stays
-          // view-only in the inspector, so Enter does not attempt it.
-          void onOpen(curRow.path);
+        } else {
+          // Same flow as a double-click on the row: media opens its
+          // viewer overlay, everything else attempts the editor open.
+          openFileRow(curRow.path);
         }
         break;
       }
@@ -1299,7 +1308,6 @@
       {/if}
     {:else}
       {@const editable = isEditableText(node.path)}
-      {@const openable = classifyPath(node.path) !== "media"}
       {@const contact = contactPaths.has(node.path)}
       {@const kind = classifyFile(node.path, contact ? "contact" : undefined)}
       {@const Icon = iconFor(kind)}
@@ -1338,13 +1346,13 @@
         <!-- Single click selects (mirrors graph tab semantics);
              double click opens. Both stop propagation so the row's
              implicit focus / drag handlers don't double-fire. Media
-             (images/PDFs) stay view-only in the inspector and never
-             bind dblclick; every other file attempts the open, which
-             peeks the content and refuses a binary one. -->
+             (image/svg/video/PDF) opens its fullscreen viewer; every
+             other file attempts the editor open, which peeks the
+             content and refuses a binary one. -->
         <button
           class="name"
           onclick={(e) => selectPath(node.path, e)}
-          ondblclick={openable ? () => void onOpen(node.path) : undefined}
+          ondblclick={() => openFileRow(node.path)}
         >{node.name}</button>
         {#if editorDirty.has(node.path)}
           <span class="dirty-dot unsaved" title="unsaved changes" aria-label="unsaved">●</span>

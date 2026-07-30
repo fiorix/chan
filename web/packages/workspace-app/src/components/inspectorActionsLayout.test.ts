@@ -60,12 +60,9 @@ describe("shared actions section under the filename", () => {
     );
   });
 
-  test("media pill is View / Zoom (image) or View PDF", () => {
+  test("media pill keeps per-kind labels over the shared media router", () => {
     expect(fileInfo).toMatch(
-      /label: "View \/ Zoom",[\s\S]{1,80}onClick: \(\) => openImageZoom\(p, null, dirImageSet\(p\)\)/,
-    );
-    expect(fileInfo).toMatch(
-      /label: "View PDF", onClick: \(\) => openPdfViewer\(p\)/,
+      /label: image \? "View \/ Zoom" : video \? "View Video" : "View PDF",[\s\S]{1,80}onClick: \(\) => void openMediaViewer\(p\)/,
     );
   });
 
