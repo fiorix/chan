@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   contentStyle,
   prepareSlideImages,
@@ -10,6 +10,7 @@ import {
   slidePageBoxStyle,
   slidePreviewCss,
 } from "./slide_dom";
+import { renderMermaid } from "./mermaid_render";
 
 const deferred = vi.hoisted(() => ({
   resolveMermaid: undefined as
@@ -243,5 +244,109 @@ describe("slide page css", () => {
         expect(part.trim().startsWith(".x-scope ")).toBe(true);
       }
     }
+  });
+});
+
+describe("slide media chrome hook", () => {
+  const MERMAID_MD = "```mermaid\ngraph TD;\n```";
+  const MERMAID_HTML =
+    '<pre><code class="language-mermaid">graph TD;</code></pre>';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  test("a successful diagram render invokes the hook at its shell", async () => {
+    const root = mount(MERMAID_HTML);
+    const diagram = vi.fn();
+    const done = renderSlideDiagrams(root, MERMAID_MD, "light", () => true, {
+      diagram,
+    });
+    deferred.resolveMermaid!({ ok: true, svg: "<svg data-face></svg>" });
+    await done;
+    expect(diagram).toHaveBeenCalledTimes(1);
+    const [shell, svg, renderLight] = diagram.mock.calls[0]!;
+    expect(shell).toBe(root.querySelector(".md-slide-diagram"));
+    expect(svg).toBe("<svg data-face></svg>");
+    // Light theme: renderLight hands back the rendered face, no re-render.
+    await expect(renderLight()).resolves.toBe("<svg data-face></svg>");
+    expect(vi.mocked(renderMermaid)).toHaveBeenCalledTimes(1);
+  });
+
+  test("a dark slide re-renders the light face for renderLight", async () => {
+    const root = mount(MERMAID_HTML);
+    const diagram = vi.fn();
+    const done = renderSlideDiagrams(root, MERMAID_MD, "dark", () => true, {
+      diagram,
+    });
+    deferred.resolveMermaid!({ ok: true, svg: "<svg data-dark></svg>" });
+    await done;
+    const renderLight = diagram.mock.calls[0]![2] as () => Promise<
+      string | null
+    >;
+    const light = renderLight();
+    deferred.resolveMermaid!({ ok: true, svg: "<svg data-light></svg>" });
+    await expect(light).resolves.toBe("<svg data-light></svg>");
+    expect(vi.mocked(renderMermaid)).toHaveBeenLastCalledWith(
+      "graph TD;",
+      false,
+    );
+  });
+
+  test("a failed diagram render does not invoke the hook", async () => {
+    const root = mount(MERMAID_HTML);
+    const diagram = vi.fn();
+    const done = renderSlideDiagrams(root, MERMAID_MD, "light", () => true, {
+      diagram,
+    });
+    deferred.resolveMermaid!({ ok: false, error: "boom" });
+    await done;
+    expect(diagram).not.toHaveBeenCalled();
+  });
+
+  test("a stale isCurrent guard does not invoke the hook", async () => {
+    const root = mount(MERMAID_HTML);
+    const diagram = vi.fn();
+    const done = renderSlideDiagrams(root, MERMAID_MD, "light", () => false, {
+      diagram,
+    });
+    deferred.resolveMermaid!({ ok: true, svg: "<svg></svg>" });
+    await done;
+    expect(diagram).not.toHaveBeenCalled();
+  });
+
+  test("prepareSlideImages invokes the image hook only for resolvable srcs", async () => {
+    const root = mount('<p><img src="shot.png"></p><p><img src=""></p>');
+    const image = vi.fn();
+    await prepareSlideImages(root, "deck.md", "light", () => true, { image });
+    expect(image).toHaveBeenCalledTimes(1);
+    const [img, raw] = image.mock.calls[0]!;
+    expect(img).toBe(root.querySelector("img"));
+    expect(raw).toBe("shot.png");
+  });
+
+  test("an excalidraw image embed routes through the diagram hook", async () => {
+    const root = mount('<p><img src="board.excalidraw"></p>');
+    const diagram = vi.fn();
+    const done = prepareSlideImages(root, "deck.md", "light", () => true, {
+      diagram,
+    });
+    deferred.resolveExcalidrawFile!({ ok: true, svg: "<svg data-x></svg>" });
+    await done;
+    expect(diagram).toHaveBeenCalledTimes(1);
+    expect(diagram.mock.calls[0]![0]).toBe(
+      root.querySelector(".md-slide-excalidraw"),
+    );
+    expect(diagram.mock.calls[0]![1]).toBe("<svg data-x></svg>");
+  });
+
+  test("an omitted hook leaves the static render chrome-free", async () => {
+    const root = mount(`<p><img src="shot.png"></p>${MERMAID_HTML}`);
+    const images = prepareSlideImages(root, "deck.md", "light", () => true);
+    const diagrams = renderSlideDiagrams(root, MERMAID_MD, "light", () => true);
+    deferred.resolveMermaid!({ ok: true, svg: "<svg></svg>" });
+    await Promise.all([images, diagrams]);
+    expect(root.querySelector(".md-slide-media-actions")).toBeNull();
+    expect(root.querySelector(".md-slide-media-wrap")).toBeNull();
   });
 });

@@ -29,6 +29,26 @@ type SlideDiagramSpec = {
 const BLANK_LINE_SPACER =
   '<div class="chan-slide-blank-line" aria-hidden="true"></div>';
 
+/// Opt-in per-media action chrome for the LIVE slide overlay. The other
+/// consumers of these builders (the document renderer and the PDF
+/// export engine) produce static DOM and pass no hook, so their output
+/// stays chrome-free. Callbacks fire only for a successful render that
+/// survived the `isCurrent` guard; failed and stale renders never offer
+/// chrome.
+export type SlideMediaChrome = {
+  /// A plain image whose src resolved. `raw` is the authored markdown
+  /// src (fragment grammar included) so a viewer can re-resolve it.
+  image?: (img: HTMLImageElement, raw: string) => void;
+  /// A rendered fenced diagram or Excalidraw embed. `shell` is the
+  /// media's container; `renderLight` resolves a light-themed render
+  /// for the viewer/copy surfaces regardless of the slide theme.
+  diagram?: (
+    shell: HTMLElement,
+    svg: string,
+    renderLight: () => Promise<string | null>,
+  ) => void;
+};
+
 const EDITOR_VARS = [
   "--chan-editor-heading-family",
   "--chan-editor-heading-color",
@@ -179,6 +199,7 @@ export function renderSlideDiagrams(
   markdown: string,
   theme: SlideDomTheme,
   isCurrent: () => boolean,
+  chrome?: SlideMediaChrome,
 ): Promise<void> {
   const specs = slideDiagramSpecs(markdown);
   const renders: Promise<void>[] = [];
@@ -209,8 +230,14 @@ export function renderSlideDiagrams(
         if (!isCurrent()) return;
         if (res.ok && res.svg) {
           body.classList.remove("md-slide-diagram-error");
-          body.innerHTML = res.svg;
+          const svg = res.svg;
+          body.innerHTML = svg;
           normalizeDiagramSvgSizing(body);
+          chrome?.diagram?.(shell, svg, async () => {
+            if (theme !== "dark") return svg;
+            const light = await render(source, false);
+            return light.ok && light.svg ? light.svg : null;
+          });
         } else {
           renderSlideDiagramError(body, source, res, label);
         }
@@ -350,6 +377,7 @@ export function prepareSlideImages(
   fromPath: string | null,
   theme: SlideDomTheme,
   isCurrent: () => boolean,
+  chrome?: SlideMediaChrome,
 ): Promise<void> {
   const renders: Promise<void>[] = [];
   for (const img of Array.from(root.querySelectorAll("img"))) {
@@ -357,7 +385,16 @@ export function prepareSlideImages(
     const { width, align } = parseImageSrc(raw);
     if (isExcalidrawImageSrc(raw)) {
       renders.push(
-        renderSlideExcalidraw(img, raw, width, align, fromPath, theme, isCurrent),
+        renderSlideExcalidraw(
+          img,
+          raw,
+          width,
+          align,
+          fromPath,
+          theme,
+          isCurrent,
+          chrome,
+        ),
       );
       continue;
     }
@@ -365,6 +402,9 @@ export function prepareSlideImages(
     if (resolved) img.setAttribute("src", resolved);
     if (width != null) img.style.width = `${width}px`;
     applySlideMediaAlignment(img, align ?? "center");
+    // "Success" for a plain image is a resolvable src; there is no
+    // error shell on this path, so an unresolvable ref stays chrome-free.
+    if (resolved) chrome?.image?.(img, raw);
   }
   for (const link of Array.from(root.querySelectorAll("a"))) {
     link.setAttribute("target", "_blank");
@@ -381,6 +421,7 @@ function renderSlideExcalidraw(
   fromPath: string | null,
   theme: SlideDomTheme,
   isCurrent: () => boolean,
+  chrome?: SlideMediaChrome,
 ): Promise<void> {
   const shell = document.createElement("div");
   shell.className = "md-slide-excalidraw";
@@ -402,8 +443,14 @@ function renderSlideExcalidraw(
     if (!isCurrent()) return;
     if (res.ok && res.svg) {
       body.classList.remove("md-slide-excalidraw-error");
-      body.innerHTML = res.svg;
+      const svg = res.svg;
+      body.innerHTML = svg;
       normalizeDiagramSvgSizing(body);
+      chrome?.diagram?.(shell, svg, async () => {
+        if (theme !== "dark") return svg;
+        const light = await renderExcalidrawFile(resolved, false);
+        return light.ok && light.svg ? light.svg : null;
+      });
     } else {
       renderSlideExcalidrawError(body, res.error ?? "render failed");
     }
@@ -657,5 +704,50 @@ export function slidePreviewCss(): string {
   border: 1px solid var(--chan-editor-table-border, rgba(127,127,127,0.35));
   padding: 0.35em 0.5em;
 }
+/* Live-overlay media action chrome. The wrapper takes over the img's
+   block/margin role so the hover row can anchor to the image box; the
+   row stays hidden until hover or focus in BOTH preview and play, so a
+   presented slide shows no chrome until the presenter reaches for it. */
+.md-slide-preview-page .md-slide-media-wrap {
+  display: block;
+  position: relative;
+  margin: 0.7em auto;
+  width: fit-content;
+  max-width: 100%;
+}
+.md-slide-preview-page .md-slide-media-wrap > img { margin: 0; }
+.md-slide-preview-page .chan-slide-media > .md-slide-media-wrap { margin: 0.7em 0; }
+.md-slide-preview-page .md-slide-diagram,
+.md-slide-preview-page .md-slide-excalidraw { position: relative; }
+.md-slide-preview-page .md-slide-media-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  z-index: 1;
+}
+.md-slide-preview-page .md-slide-media-wrap:hover .md-slide-media-actions,
+.md-slide-preview-page .md-slide-diagram:hover .md-slide-media-actions,
+.md-slide-preview-page .md-slide-excalidraw:hover .md-slide-media-actions,
+.md-slide-preview-page .md-slide-media-actions:focus-within {
+  opacity: 1;
+}
+.md-slide-preview-page .md-slide-media-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 10px;
+  border: 1px solid rgba(31, 41, 55, 0.2);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #1f2937;
+  font: 12px/1.4 var(--chan-editor-body-family, inherit);
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(31, 41, 55, 0.18);
+}
+.md-slide-preview-page .md-slide-media-action:hover { background: #fff; }
 ${slideMediaCss(".md-slide-preview-page")}`;
 }

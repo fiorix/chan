@@ -243,7 +243,11 @@ export function openDiagramZoom(svg: string): void {
     if (e.target === backdrop || e.target === layer) dismiss();
   });
 
-  document.body.appendChild(backdrop);
+  // Mount inside the fullscreen element when one is active: the slide
+  // player element-fullscreens its backdrop on the web, and the browser
+  // top layer hides body-appended siblings, so a body mount would open
+  // this viewer invisibly behind the presentation.
+  (document.fullscreenElement ?? document.body).appendChild(backdrop);
   // With the overlay laid out, capture the SVG's fitted width and pin the
   // SVG to explicit pixels: zoom then re-rasterizes the vector at each size
   // rather than GPU-stretching a cached texture. Dropping the fit caps lets

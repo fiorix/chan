@@ -14,8 +14,20 @@ import {
   prepareSlideImages,
   renderSlideDiagrams,
   renderSlideMarkdown,
+  type SlideMediaChrome,
   slidePreviewCss,
 } from "../editor/slide_dom";
+import {
+  copyActionButton,
+  diagramCopyButton,
+} from "../editor/widgets/diagram_copy";
+import {
+  copyImagePixels,
+  copySvgFileMarkup,
+  isSvgImageSrc,
+} from "../editor/widgets/image_copy";
+import { openDiagramZoom } from "./diagramZoom";
+import { openImageZoom } from "./imageZoom";
 import {
   parseSlidesSpec,
   slideIndexForLine,
@@ -110,6 +122,79 @@ export function openSlidePreview(opts: OpenSlidePreviewOptions): SlidePreviewHan
   backdrop.append(prev, next, counter);
   let diagramRenderRun = 0;
 
+  // Per-media View/copy chrome, mounted only on this live overlay (the
+  // document render and PDF export paths pass no hook, so their DOM
+  // stays chrome-free). Reveal is hover/focus-only via slidePreviewCss
+  // in both preview and play. The viewers open above the play-mode
+  // fullscreen backdrop; see the append-target note in imageZoom /
+  // diagramZoom.
+  const mediaChrome: SlideMediaChrome = {
+    image: (img, raw) => {
+      const wrap = document.createElement("span");
+      wrap.className = "md-slide-media-wrap";
+      img.replaceWith(wrap);
+      wrap.appendChild(img);
+      const row = document.createElement("span");
+      row.className = "md-slide-media-actions";
+      const svgSource = isSvgImageSrc(raw);
+      row.appendChild(
+        slideActionButton("View", "view fullscreen", () =>
+          openImageZoom(raw, state.fromPath),
+        ),
+      );
+      const copies: HTMLButtonElement[] = [];
+      if (svgSource) {
+        copies.push(
+          copyActionButton(
+            "md-slide-media-action",
+            "SVG",
+            "copy SVG markup to clipboard",
+            () => copySvgFileMarkup(img.src),
+            true,
+          ),
+        );
+      }
+      copies.push(
+        copyActionButton(
+          "md-slide-media-action",
+          "PNG",
+          "copy PNG image to clipboard",
+          () => copyImagePixels(img.src, svgSource),
+          true,
+        ),
+      );
+      for (const btn of copies) {
+        // The hook only fires for a resolved src, so the buttons start
+        // revealed (the factory's hidden default gates async renders).
+        btn.style.display = "";
+        row.appendChild(btn);
+      }
+      wrap.appendChild(row);
+    },
+    diagram: (shell, _svg, renderLight) => {
+      const row = document.createElement("span");
+      row.className = "md-slide-media-actions";
+      row.appendChild(
+        slideActionButton("View", "view fullscreen", () => {
+          void renderLight().then((light) => {
+            if (light) openDiagramZoom(light);
+          });
+        }),
+      );
+      for (const format of ["svg", "png"] as const) {
+        const btn = diagramCopyButton(
+          "md-slide-media-action",
+          renderLight,
+          format,
+          true,
+        );
+        btn.style.display = "";
+        row.appendChild(btn);
+      }
+      shell.appendChild(row);
+    },
+  };
+
   function applyTheme(): void {
     backdrop.dataset.theme = state.theme;
     backdrop.dataset.mode = state.mode;
@@ -136,12 +221,24 @@ export function openSlidePreview(opts: OpenSlidePreviewOptions): SlidePreviewHan
     const current = state.pages[state.index]!;
     const renderRun = ++diagramRenderRun;
     content.innerHTML = renderSlideMarkdown(current.markdown);
-    void prepareSlideImages(content, state.fromPath, state.theme, () => {
-      return !closed && renderRun === diagramRenderRun;
-    });
-    void renderSlideDiagrams(content, current.markdown, state.theme, () => {
-      return !closed && renderRun === diagramRenderRun;
-    });
+    void prepareSlideImages(
+      content,
+      state.fromPath,
+      state.theme,
+      () => {
+        return !closed && renderRun === diagramRenderRun;
+      },
+      mediaChrome,
+    );
+    void renderSlideDiagrams(
+      content,
+      current.markdown,
+      state.theme,
+      () => {
+        return !closed && renderRun === diagramRenderRun;
+      },
+      mediaChrome,
+    );
     page.setAttribute("aria-label", `Slide ${current.number}`);
     counter.textContent =
       state.mode === "preview" ? `${state.index + 1} / ${state.pages.length}` : "";
@@ -207,6 +304,12 @@ export function openSlidePreview(opts: OpenSlidePreviewOptions): SlidePreviewHan
   };
 
   const onKey = (event: KeyboardEvent): void => {
+    // A media viewer opened from the slide chrome sits above this
+    // overlay with its own document-capture keymap. Both listeners
+    // share the document node, so stopPropagation alone cannot keep
+    // this one from stepping slides (or closing) underneath the
+    // viewer; yield while one is up.
+    if (viewerAboveSlides()) return;
     switch (event.key) {
       case "Escape":
         consume(event);
@@ -242,6 +345,43 @@ export function openSlidePreview(opts: OpenSlidePreviewOptions): SlidePreviewHan
 function consume(event: KeyboardEvent): void {
   event.preventDefault();
   event.stopPropagation();
+}
+
+/// Whether an image/diagram viewer overlay is open above the slide
+/// overlay. The slide backdrop itself carries `md-image-zoom` (for the
+/// shared backdrop styling), hence the `:not` filter.
+function viewerAboveSlides(): boolean {
+  return !!document.querySelector(
+    ".md-diagram-zoom, .md-image-zoom:not(.md-slide-preview)",
+  );
+}
+
+/// Plain action button for the slide media chrome (View). The copy
+/// buttons come from the shared copy factory instead, for the Check
+/// feedback and title-flash failure surface.
+function slideActionButton(
+  label: string,
+  title: string,
+  onClick: () => void,
+): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "md-slide-media-action";
+  btn.textContent = label;
+  btn.title = title;
+  btn.setAttribute("aria-label", title);
+  // Swallow the press so it neither dismisses the overlay nor starts a
+  // selection; the action runs on click, like the widget action rows.
+  btn.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onClick();
+  });
+  return btn;
 }
 
 function navButton(
