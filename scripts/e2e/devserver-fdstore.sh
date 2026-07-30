@@ -66,11 +66,13 @@ if systemctl --user is-active --quiet "$UNIT_NAME" 2>/dev/null; then
 fi
 if [ "$HAD_UNIT" = 1 ] && [ ! -r "$SNAP/unit" ]; then
     log "REFUSE: cannot snapshot $UNIT_FILE; restoration would be unprovable"
+    rm -rf "$WORK"
     exit 1
 fi
 if [ "$WAS_ACTIVE" = 1 ] && [ "${CHAN_FDSTORE_E2E_ALLOW_TAKEOVER:-0}" != 1 ]; then
     log "REFUSE: $UNIT_NAME is ACTIVE; stopping it kills its live terminals."
     log "Re-run with CHAN_FDSTORE_E2E_ALLOW_TAKEOVER=1 to take the unit over."
+    rm -rf "$WORK"
     exit 1
 fi
 
