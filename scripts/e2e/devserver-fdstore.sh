@@ -32,11 +32,6 @@ fail() {
     exit 1
 }
 
-command -v systemctl >/dev/null || { log "SKIP: no systemctl"; exit 0; }
-systemctl --user show-environment >/dev/null 2>&1 \
-    || { log "SKIP: no systemd user session"; exit 0; }
-command -v python3 >/dev/null || { log "SKIP: python3 required"; exit 0; }
-
 # Cleanup ordering, shared by success and the EXIT trap. The unit
 # restoration reads $SNAP inside $WORK, so success must run the
 # restoration FIRST and delete the throwaway work dir only afterwards;
@@ -83,6 +78,11 @@ if [ "${CHAN_FDSTORE_E2E_SELFTEST:-}" = "cleanup-order" ]; then
     trap - EXIT INT TERM
     exit 0
 fi
+
+command -v systemctl >/dev/null || { log "SKIP: no systemctl"; exit 0; }
+systemctl --user show-environment >/dev/null 2>&1 \
+    || { log "SKIP: no systemd user session"; exit 0; }
+command -v python3 >/dev/null || { log "SKIP: python3 required"; exit 0; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/chan-fdstore-e2e.XXXXXX")"
 export CHAN_HOME="$WORK/home"
