@@ -5532,31 +5532,36 @@ mod tests {
 
         /// Serializes and scopes the env the fdstore paths read: CHAN_HOME
         /// (manifest location) set to the test home, NOTIFY_SOCKET and
-        /// FDSTORE cleared so no real manager is ever addressed.
+        /// FDSTORE cleared so no real manager is ever addressed. EVERY
+        /// touched variable's prior value or absence is restored on drop,
+        /// so later tests and the invoking harness see the process env
+        /// exactly as it was.
         struct FdstoreEnvGuard {
             _lock: std::sync::MutexGuard<'static, ()>,
-            prev_home: Option<std::ffi::OsString>,
+            prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
         }
 
         impl FdstoreEnvGuard {
             fn set(home: &Path) -> Self {
                 let lock = CHAN_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-                let prev_home = std::env::var_os("CHAN_HOME");
+                let prev = ["CHAN_HOME", "NOTIFY_SOCKET", "FDSTORE"]
+                    .into_iter()
+                    .map(|key| (key, std::env::var_os(key)))
+                    .collect();
                 std::env::set_var("CHAN_HOME", home);
                 std::env::remove_var("NOTIFY_SOCKET");
                 std::env::remove_var("FDSTORE");
-                Self {
-                    _lock: lock,
-                    prev_home,
-                }
+                Self { _lock: lock, prev }
             }
         }
 
         impl Drop for FdstoreEnvGuard {
             fn drop(&mut self) {
-                match self.prev_home.take() {
-                    Some(home) => std::env::set_var("CHAN_HOME", home),
-                    None => std::env::remove_var("CHAN_HOME"),
+                for (key, value) in self.prev.drain(..) {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
                 }
             }
         }

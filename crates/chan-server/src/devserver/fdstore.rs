@@ -102,11 +102,13 @@ mod linux {
     /// arms are unit-testable without a manager.
     trait StoreOps: Send + Sync {
         fn store(&self, name: &str, fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<()>;
-        /// Synchronize with the manager: returning Ok proves it processed
-        /// everything sent so far, `store` included. `sd_notify(3)` is
-        /// fire-and-forget on its own -- an FDSTORE datagram that was SENT
-        /// may still be dropped or rejected (e.g. over
-        /// FileDescriptorStoreMax), which only the barrier can exclude.
+        /// Synchronize with the manager: returning Ok proves it PICKED UP
+        /// everything sent so far, `store` included, ordering manager
+        /// attribution ahead of whatever follows. `sd_notify(3)` is
+        /// fire-and-forget on its own, so without the barrier a datagram
+        /// may still sit undelivered when the sender dies. The barrier does
+        /// NOT report semantic acceptance -- an over-cap rejection is what
+        /// the cap precheck guards against.
         fn barrier(&self) -> std::io::Result<()>;
         fn remove(&self, name: &str);
     }
@@ -220,13 +222,15 @@ mod linux {
                 tracing::warn!(fd_name, error = %error, "storing PTY in systemd fdstore failed");
                 return false;
             }
-            // A sent FDSTORE datagram is not an accepted one: barrier so a
+            // Order: cap check, FDSTORE, barrier, durable manifest commit.
+            // The barrier proves the manager picked the submission up, so a
             // spawn followed immediately by process death cannot outrun
-            // manager attribution, and an over-cap rejection surfaces here.
+            // manager attribution; over-cap rejection is excluded by the
+            // precheck above, not here.
             if let Err(error) = self.0.store.barrier() {
                 tracing::warn!(
                     fd_name, error = %error,
-                    "systemd did not confirm the stored PTY (notify barrier failed); unparking"
+                    "the manager did not pick up the stored PTY (notify barrier failed); unparking"
                 );
                 self.0.store.remove(fd_name);
                 return false;
