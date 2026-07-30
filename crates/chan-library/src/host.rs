@@ -132,9 +132,9 @@ fn child_process_running(pid: u32) -> bool {
     !matches!(after_comm.trim_start().chars().next(), Some('Z') | None)
 }
 
-/// Non-Linux best effort: signal-0 liveness (no /proc; zombies are not
-/// distinguishable, and the systemd drain path never runs here).
-#[cfg(not(target_os = "linux"))]
+/// Non-Linux Unix best effort: signal-0 liveness (no /proc; zombies are
+/// not distinguishable, and the systemd drain path never runs here).
+#[cfg(all(unix, not(target_os = "linux")))]
 fn child_process_running(pid: u32) -> bool {
     let Ok(raw_pid) = i32::try_from(pid) else {
         return false;
@@ -143,6 +143,17 @@ fn child_process_running(pid: u32) -> bool {
         return false;
     };
     rustix::process::test_kill_process(pid).is_ok()
+}
+
+/// Non-Unix: no `/proc` and no `rustix::process`, and the systemd-only
+/// drain path that consumes this can never run here. Rather than fabricate
+/// a death confirmation (or pull in a platform subsystem for an unreachable
+/// verification), report the pid as still running: a hypothetical direct
+/// drain call sees its children as `lingering` -- unconfirmed -- which is
+/// the honest answer on a target with no probe.
+#[cfg(not(unix))]
+fn child_process_running(_pid: u32) -> bool {
+    true
 }
 
 impl WorkspaceLifecycleOutcome {
