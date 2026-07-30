@@ -2411,21 +2411,28 @@ async fn handle_set_workspace_on(
     }
 }
 
-/// `GET /api/devserver/windows` (L10): every PERSISTED window across all
-/// tenants, for the desktop's menu-reopen of closed devserver windows. Folds
-/// the host's per-tenant window enumeration into `DevserverWindow` rows,
-/// stamping each with its tenant's per-mount token; the desktop filters
-/// `saved && !connected`. Persisted-only: a discard reaped the blob + PTYs, so
-/// only windows with a live blob (`saved`) surface.
+/// Compatibility adapter from the live library window feed to the frozen
+/// `GET /api/devserver/windows` wire. This endpoint remains available for
+/// pre-0.81.0 desktops until the compatibility route is retired.
 async fn handle_list_windows(
-    State(_state): State<Arc<DevserverState>>,
+    State(state): State<Arc<DevserverState>>,
 ) -> Json<Vec<DevserverWindow>> {
-    // Superseded by the library window feed `GET /api/library/windows`,
-    // which the desktop watcher and `cs window list` reconcile to. The
-    // per-tenant enumeration that backed this endpoint is gone with the host
-    // move; this returns empty during the transition until the feed lands and
-    // this endpoint is retired.
-    Json(Vec::new())
+    Json(
+        state
+            .host
+            .assemble_window_records()
+            .into_iter()
+            .filter(|row| !row.control)
+            .map(|row| DevserverWindow {
+                label: row.window_id,
+                prefix: row.prefix,
+                token: row.token,
+                title: Some(row.title),
+                connected: row.connected,
+                saved: row.persisted,
+            })
+            .collect(),
+    )
 }
 
 /// Explicitly end every terminal session and wait, bounded, until the child
@@ -4053,6 +4060,68 @@ mod tests {
             1,
             "no re-mint on a second open",
         );
+    }
+
+    #[tokio::test]
+    async fn devserver_windows_adapts_library_feed_and_excludes_control_rows() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let state = test_state(home.path(), addr);
+        state.host.install_window_registry(
+            Arc::new(WindowRegistry::open(home.path().join("windows.json"))),
+            "lib-test".into(),
+        );
+        state
+            .mount_shared_terminal_tenant()
+            .await
+            .expect("mount shared terminal tenant");
+
+        let window = state
+            .host
+            .mint_window(chan_library::windows::WindowKind::Terminal, None)
+            .expect("mint terminal window");
+        assert!(window.persisted);
+        assert!(!window.connected);
+        assert!(!window.token.is_empty());
+
+        let control = state
+            .host
+            .mint_control_window(
+                "control-test".into(),
+                "lib-test".into(),
+                "/api/control-test".into(),
+            )
+            .expect("mint control window");
+        assert!(control.control);
+        assert_eq!(state.host.assemble_window_records().len(), 2);
+
+        let host = state.host.clone();
+        let (app, _serve_addr) = build_devserver_app(state, host);
+        let response = tower::ServiceExt::oneshot(
+            app,
+            HttpRequest::builder()
+                .uri("/api/devserver/windows")
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let rows: Vec<DevserverWindow> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rows.len(), 1, "control rows must stay off the frozen wire");
+        let row = &rows[0];
+        assert_eq!(row.label, window.window_id);
+        assert_eq!(row.prefix, window.prefix);
+        assert_eq!(row.token, window.token);
+        assert_eq!(row.title.as_deref(), Some(window.title.as_str()));
+        assert!(row.saved);
+        assert!(!row.connected);
     }
 
     #[tokio::test]
