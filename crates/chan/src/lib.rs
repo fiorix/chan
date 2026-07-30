@@ -3737,8 +3737,8 @@ fn resolve_devserver_addr(
 }
 
 /// The address the RUNNING systemd devserver serves its management API on,
-/// for the verbs that dial it (the `--restart` fdstore prepare, `--join`'s
-/// health watch) and the bind= report lines. Unit-persisted `--bind`/`--port`
+/// for the verbs that dial it (the `--stop` / `--force` terminal drain,
+/// `--join`'s health watch) and the bind= report lines. Unit-persisted `--bind`/`--port`
 /// flags are the truth when present; a tunnel unit with no pinned port binds
 /// an OS-assigned one, which the service records in the devserver config at
 /// bind time (before READY=1, so an `is-active` unit has already written it).
@@ -3836,7 +3836,9 @@ fn unescape_plist_xml(s: &str) -> String {
 /// Whether the foreground devserver binds a local TCP listener. Non-tunnel always
 /// binds. Tunnel mode defaults to no-bind (the gateway is the surface) EXCEPT
 /// under systemd notify, where the loopback management API is needed so
-/// `chan devserver --restart` can drive the fdstore handoff. `CHAN_DEVSERVER_LISTEN`
+/// `chan devserver --stop` / `--restart --force` can drain the terminals
+/// explicitly (restart itself needs no call: the fd store preserves PTYs).
+/// `CHAN_DEVSERVER_LISTEN`
 /// forces either way. Tunnel-off + LISTEN=0 leaves nothing reachable (no local
 /// listener, no tunnel -- only the `chan open` discovery socket), so it is a
 /// hard error rather than a silently-unreachable devserver.
@@ -4277,7 +4279,6 @@ async fn activate_devserver_unit(
     control: &mut impl DevserverSystemdControl,
 ) -> Result<()> {
     let mut restart_attempted = false;
-    let mut restart_completed = false;
     let activation = async {
         if update.changed {
             control.command(&["daemon-reload"]).await?;
@@ -4290,7 +4291,6 @@ async fn activate_devserver_unit(
             control
                 .command(&["restart", DEVSERVER_SYSTEMD_UNIT])
                 .await?;
-            restart_completed = true;
         } else {
             control
                 .command(&["enable", "--now", DEVSERVER_SYSTEMD_UNIT])
@@ -4323,12 +4323,12 @@ async fn activate_devserver_unit(
             rollback_errors.push(format!("previous-unit restart failed: {rollback_error:#}"));
         }
     }
-    let terminal_impact = if restore_active && restart_completed {
-        "; rollback required a second restart without another fdstore handoff; \
-         live terminal PTYs were dropped"
-    } else if restore_active && restart_attempted {
-        "; systemd may have begun the migration restart before reporting failure, and rollback \
-         cannot repeat the fdstore handoff; live terminal PTYs may have been dropped"
+    // Continuous fdstore parking preserves live PTYs across ANY number of
+    // restarts, the rollback's second one included, so a rollback needs no
+    // terminal-impact caveat: the store re-feeds the parked masters to
+    // whichever unit definition comes up.
+    let terminal_impact = if restore_active && restart_attempted {
+        "; live terminal PTYs restore from the systemd fd store"
     } else {
         ""
     };
@@ -4382,25 +4382,38 @@ async fn bootstrap_systemd_unit(
 
 /// `chan devserver --service=systemd --restart`: rewrite the unit (current
 /// binary + `addr`), bounce it (or start it if stopped), then return. Linger is
-/// ensured first, mirroring the start path. Preserves live PTYs across the bounce
-/// via the systemd fdstore unless `--force`. Use `--join` to stay attached.
+/// ensured first, mirroring the start path. Continuous fdstore parking makes
+/// the bounce preserve live PTYs by itself; `--force` is the destructive
+/// variant, draining every session through the management API first (and
+/// falling back to stop-then-start when the drain cannot complete, so a
+/// wedged devserver still restarts WITHOUT resurrecting its terminals).
+/// Use `--join` to stay attached.
 async fn restart_devserver_under_systemd(
     addr: SocketAddr,
     force: bool,
     tunnel: Option<SystemdTunnel>,
 ) -> Result<()> {
     ensure_systemd_linger().await?;
-    let was_running = unit_is_active().await;
+    let mut was_running = unit_is_active().await;
     if was_running && force {
         eprintln!(
             "chan devserver: WARNING: restarting systemd service destructively because --force was supplied"
         );
-    } else if was_running {
-        // Dial the RUNNING service's management API for the prepare: a tunnel
+        // Dial the RUNNING service's management API for the drain: a tunnel
         // unit with no pinned port serves on an OS-assigned port, not the
         // requested/default `addr`.
         let dial = running_systemd_devserver_addr().unwrap_or(addr);
-        prepare_systemd_fdstore_restart(dial, force).await?;
+        if let Err(reason) = drain_devserver_terminals(dial).await {
+            // A plain restart would preserve the parked sessions -- exactly
+            // what --force must not do. Stop releases the fd store (masters
+            // close, shells HUP) before the fresh activation.
+            eprintln!(
+                "chan devserver: WARNING: terminal drain failed ({reason}); \
+                 stopping the unit first so --force stays destructive"
+            );
+            systemctl_user(&["stop", DEVSERVER_SYSTEMD_UNIT]).await?;
+            was_running = false;
+        }
     }
     bootstrap_systemd_unit(addr, true, was_running, tunnel).await?;
     eprintln!(
@@ -4411,88 +4424,65 @@ async fn restart_devserver_under_systemd(
     Ok(())
 }
 
-async fn prepare_systemd_fdstore_restart(addr: SocketAddr, force: bool) -> Result<()> {
+/// POST the drain endpoint: every terminal session is closed and the child
+/// processes waited on before this returns Ok. Err carries the reason the
+/// drain could not be confirmed (no token, connect failure, timeout, or
+/// lingering children); callers decide how destructive to be about it.
+async fn drain_devserver_terminals(addr: SocketAddr) -> std::result::Result<(), String> {
     let Some(token) = chan_server::persisted_devserver_token() else {
-        if force {
-            eprintln!(
-                "chan devserver: WARNING: could not read the devserver token;                  restarting systemd service without fd preservation (--force)"
-            );
-            return Ok(());
-        }
-        anyhow::bail!(
-            "chan devserver --service=systemd --restart: could not read the devserver              token needed to prepare fd preservation. Re-run with --force to              restart destructively."
-        );
+        return Err("could not read the devserver token".to_string());
     };
-
-    let url = format!("http://{addr}/api/devserver/systemd-fdstore/prepare");
+    let url = format!("http://{addr}/api/devserver/terminal-sessions/drain");
     let client = reqwest::Client::new();
     let request = client.post(&url).bearer_auth(token).send();
-    let response = match tokio::time::timeout(Duration::from_secs(5), request).await {
+    // The server-side child wait is bounded at 5s; leave headroom.
+    let response = match tokio::time::timeout(Duration::from_secs(10), request).await {
         Ok(Ok(response)) => response,
-        Ok(Err(e)) => {
-            return fdstore_prepare_failed(force, format!("request failed: {e}"));
-        }
-        Err(_) => {
-            return fdstore_prepare_failed(force, "request timed out".to_string());
-        }
+        Ok(Err(e)) => return Err(format!("request failed: {e}")),
+        Err(_) => return Err("request timed out".to_string()),
     };
-
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return fdstore_prepare_failed(force, format!("HTTP {status}: {body}"));
+        return Err(format!("HTTP {status}: {body}"));
     }
-
-    let body: serde_json::Value = response
+    let drained: chan_server::devserver_api::DrainedTerminals = response
         .json()
         .await
-        .with_context(|| format!("parsing systemd fdstore prepare response from {url}"))?;
-    let preserved = body
-        .get("preserved")
-        .and_then(|value| value.as_u64())
-        .unwrap_or(0);
-    let skipped: Vec<&str> = body
-        .get("skipped")
-        .and_then(|value| value.as_array())
-        .map(|values| values.iter().filter_map(|value| value.as_str()).collect())
-        .unwrap_or_default();
+        .map_err(|e| format!("parsing drain response: {e}"))?;
     eprintln!(
-        "chan devserver: prepared systemd fdstore restart ({preserved} PTY fd(s) preserved, {} skipped)",
-        skipped.len()
+        "chan devserver: drained {} terminal session(s) ({} child process(es) confirmed dead)",
+        drained.closed, drained.dead
     );
-    for reason in skipped.iter().take(8) {
-        eprintln!("chan devserver: systemd fdstore prepare skipped: {reason}");
-    }
-    if skipped.len() > 8 {
-        eprintln!(
-            "chan devserver: systemd fdstore prepare skipped: {} more",
-            skipped.len() - 8
-        );
+    if !drained.lingering.is_empty() {
+        return Err(format!(
+            "{} child process(es) still running: {:?}",
+            drained.lingering.len(),
+            drained.lingering
+        ));
     }
     Ok(())
 }
 
-fn fdstore_prepare_failed(force: bool, reason: String) -> Result<()> {
-    if force {
-        eprintln!(
-            "chan devserver: WARNING: systemd fdstore prepare failed ({reason});              restarting destructively because --force was supplied"
-        );
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "chan devserver --service=systemd --restart: systemd fdstore prepare failed              ({reason}). Re-run with --force to restart destructively."
-        )
-    }
-}
-
 /// `chan devserver --service=systemd --stop`: stop the running unit AND disable
-/// it, so it does not come back on the next login or boot. Idempotent: stop is
+/// it, so it does not come back on the next login or boot. Sessions are drained
+/// through the management API first (explicit kill, today's forcefulness for
+/// HUP-immune children); the stop itself then releases the fd store, so even a
+/// failed drain still ends every terminal a HUP can reach. Idempotent: stop is
 /// a no-op when the unit is not active, and disable is skipped when no unit file
 /// is installed. The unit file itself stays on disk (disable only drops the
 /// `WantedBy` symlink), so `--status` can still show its last command.
 async fn stop_devserver_under_systemd() -> Result<()> {
     let was_active = unit_is_active().await;
     if was_active {
+        if let Some(dial) = running_systemd_devserver_addr() {
+            if let Err(reason) = drain_devserver_terminals(dial).await {
+                eprintln!(
+                    "chan devserver: WARNING: terminal drain failed ({reason}); \
+                     stopping anyway (the released fd store HUPs the shells)"
+                );
+            }
+        }
         systemctl_user(&["stop", DEVSERVER_SYSTEMD_UNIT]).await?;
     }
     // Disable only when a unit is installed, so a stop with nothing there does
@@ -4975,8 +4965,8 @@ fn devserver_systemd_unit_spec(
     }
     // Tunnel mode: carry the PAT in the unit (written 0600) and dial the gateway
     // via --tunnel-url. Under systemd the devserver still binds the loopback
-    // management API (see resolve_devserver_listen) so `--restart` can drive the
-    // fdstore handoff. Only PINNED (explicit or preserved-explicit) address
+    // management API (see resolve_devserver_listen) so `--stop` / `--restart
+    // --force` can drain the terminals. Only PINNED (explicit or preserved-explicit) address
     // flags ride in the ExecStart; an omitted field leaves the service to
     // resolve its tunnel-mode default (loopback bind, OS-assigned port), and
     // the assigned port is never written back here -- persisting it would pin
@@ -8577,8 +8567,8 @@ mod tests {
         assert!(!resolve_devserver_listen(true, false, Some(false)).unwrap());
         assert!(resolve_devserver_listen(true, false, Some(true)).unwrap());
         // Tunnel on, UNDER systemd notify: default binds the loopback management
-        // API so `--restart` fdstore parking can reach it; explicit 0 still opts
-        // out.
+        // API so the `--stop` / `--force` terminal drain can reach it; explicit
+        // 0 still opts out.
         assert!(resolve_devserver_listen(true, true, None).unwrap());
         assert!(!resolve_devserver_listen(true, true, Some(false)).unwrap());
     }
@@ -9100,7 +9090,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("live terminal PTYs may have been dropped"),
+                .contains("live terminal PTYs restore from the systemd fd store"),
             "{error:#}"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
@@ -9117,7 +9107,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_devserver_systemd_migration_after_restart_reports_dropped_terminals() {
+    async fn failed_devserver_systemd_migration_after_restart_reports_preserved_terminals() {
         let dir = tempfile::tempdir().expect("unit dir");
         let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
         let desired = chan_systemd::DevserverUnit::new(
@@ -9137,7 +9127,7 @@ mod tests {
             .expect_err("readiness failure rolls back");
         let message = format!("{error:#}");
         assert!(
-            message.contains("live terminal PTYs were dropped"),
+            message.contains("live terminal PTYs restore from the systemd fd store"),
             "{message}"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
