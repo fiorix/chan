@@ -1,6 +1,6 @@
 # Publish every secondary release target after the core release lands:
-# Docker Hub images, Cachix paths, COPR packages, the Launchpad PPA, and AUR
-# recipes.
+# Docker Hub images, Cachix paths, COPR packages, the Launchpad PPA, AUR
+# recipes, and the Homebrew tap.
 # This workflow is deliberately separate from release.yml and triggered
 # by its completion, so an external publisher can fail plainly without
 # failing the GitHub Release, /dl metadata, or Pages deploy. Each target
@@ -26,6 +26,12 @@
 #   AUR_SSH_PRIVATE_KEY           private half of the key registered
 #                                 on the maintainer's AUR account
 #   CACHIX_AUTH_TOKEN             write token for the public `chan` cache
+#   HOMEBREW_TAP_DEPLOY_KEY_BASE64  base64 (single line) of the private
+#                                 half of the write deploy key on
+#                                 fiorix/homebrew-chan; base64 because a
+#                                 multiline key does not survive every
+#                                 paste path (the APPLE_CERTIFICATE_BASE64
+#                                 precedent)
 #   DOCKERHUB_USERNAME            Docker Hub account name
 #   DOCKERHUB_TOKEN               scoped Docker Hub access token
 # Variable:
@@ -57,8 +63,9 @@ on:
           - copr
           - launchpad
           - aur
+          - homebrew
       publish:
-        description: Push to Docker Hub, Cachix, COPR, the PPA, and the AUR
+        description: Push to Docker Hub, Cachix, COPR, the PPA, the AUR, and the Homebrew tap
         required: true
         default: false
         type: boolean
@@ -732,6 +739,245 @@ jobs:
             exit 1
           }
           scripts/smoke-nix-package.sh "$out"
+
+  # The Homebrew tap is a git host for rendered definitions: a push
+  # publishes immediately and is only as good as the key behind it. Probe
+  # the deploy key in its own short job so a key that is not registered as
+  # a write deploy key on fiorix/homebrew-chan fails here, in a dry run,
+  # instead of at publication time when the release is already out.
+  homebrew-auth:
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+       (inputs.targets == 'all' || inputs.targets == 'homebrew') &&
+       !contains(inputs.tag, '-')) ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'v') &&
+       !contains(github.event.workflow_run.head_branch, '-'))
+    runs-on: ubuntu-latest
+    outputs:
+      credential: ${{ steps.probe.outputs.credential }}
+    steps:
+      - name: Probe the tap deploy key
+        id: probe
+        env:
+          TAP_SSH_KEY_B64: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAP_SSH_KEY_B64" ]; then
+            echo "::warning::HOMEBREW_TAP_DEPLOY_KEY_BASE64 not set; the tap push will be skipped."
+            echo "credential=absent" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          install -d -m 700 ~/.ssh
+          printf '%s' "$TAP_SSH_KEY_B64" | base64 -d > ~/.ssh/tap
+          chmod 600 ~/.ssh/tap
+          printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > ~/.ssh/tap_known_hosts
+          # A deploy key's ssh -T greeting names the repository it is bound
+          # to ("Hi fiorix/homebrew-chan!"); a user key names the account.
+          # Match the repository so the probe proves the key is the tap's
+          # own deploy key, not merely some valid GitHub credential. ssh
+          # never echoes key material and -v stays off so it cannot.
+          set +e
+          greeting="$(ssh -T -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/tap_known_hosts" \
+            -o StrictHostKeyChecking=yes -i ~/.ssh/tap \
+            git@github.com 2>&1)"
+          set -e
+          case "$greeting" in
+            *"Hi fiorix/homebrew-chan!"*)
+              echo "GitHub accepted the tap deploy key: $greeting"
+              echo "credential=ok" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "$greeting"
+              echo "::error::github.com did not accept HOMEBREW_TAP_DEPLOY_KEY_BASE64 as the fiorix/homebrew-chan deploy key; register its public half as a write deploy key on that repository and store the private half base64-encoded"
+              exit 1
+              ;;
+          esac
+
+  # Homebrew serves recipes for prebuilt release assets. Prove the rendered
+  # cask and formula on a real arm64 macOS runner (brew style, brew audit,
+  # and a real install of both packages) before the tap is updated. This is
+  # the Homebrew analogue of the aur-validate publication gate.
+  homebrew-validate:
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+       (inputs.targets == 'all' || inputs.targets == 'homebrew') &&
+       !contains(inputs.tag, '-')) ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'v') &&
+       !contains(github.event.workflow_run.head_branch, '-'))
+    runs-on: macos-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Deliberately NOT the release tag (aur-validate checks out
+          # inputs.tag): the rendered definitions depend only on the tag
+          # string plus the published release assets, never on the tagged
+          # tree, so the homebrew jobs run the dispatching ref's templates.
+          # That is what lets a template-only repair or a tap backfill for
+          # an existing GA publish without cutting a new chan release.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.workflow_run.head_sha }}
+
+      - name: Render both tap definitions
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          packaging/distros/homebrew/make-homebrew-package.sh chan-desktop "$version"
+          packaging/distros/homebrew/make-homebrew-package.sh chan "$version"
+
+      - name: Stage as a local tap, style, and audit
+        run: |
+          set -euo pipefail
+          tap="$(brew --repository)/Library/Taps/fiorix/homebrew-chan"
+          mkdir -p "$tap"
+          cp -R target/homebrew-out/Casks target/homebrew-out/Formula "$tap/"
+          git -C "$tap" init --quiet
+          git -C "$tap" add -A
+          git -C "$tap" -c user.name=ci -c user.email=ci@localhost commit --quiet -m render
+          brew style fiorix/chan
+          brew audit --cask fiorix/chan/chan-desktop
+          brew audit --formula fiorix/chan/chan
+
+      - name: Install and smoke both packages
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          brew install --cask fiorix/chan/chan-desktop
+          [ -d /Applications/Chan.app ]
+          brew install fiorix/chan/chan
+          "$(brew --prefix)/bin/chan" --version | grep -F "$version"
+          [ -x "$(brew --prefix)/bin/cs" ]
+          brew test fiorix/chan/chan
+
+      - name: Retain publishable tap definitions
+        uses: actions/upload-artifact@v7
+        with:
+          name: homebrew-metadata
+          path: target/homebrew-out/**
+          if-no-files-found: error
+
+  homebrew-publish:
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+       (inputs.targets == 'all' || inputs.targets == 'homebrew') &&
+       !contains(inputs.tag, '-')) ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'v') &&
+       !contains(github.event.workflow_run.head_branch, '-'))
+    needs: [homebrew-auth, homebrew-validate]
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
+      PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
+      PUSHABLE: ${{ needs.homebrew-auth.outputs.credential == 'ok' }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: homebrew-metadata
+          path: /tmp/generated
+
+      # homebrew-auth fails the whole chain on a rejected key, so an
+      # unusable credential here means the secret is absent. That is the
+      # fork contract, but on the canonical repository a publish=false
+      # dispatch exists to prove the credential before the tag, and one
+      # that proves nothing must not end green.
+      - name: Report the Homebrew dry run
+        if: env.PUBLISH != 'true' || env.PUSHABLE != 'true'
+        env:
+          CANONICAL: ${{ github.repository == 'fiorix/chan' }}
+        run: |
+          echo "Validated the rendered tap definitions for $RELEASE_TAG and pushed nothing."
+          echo "publish=$PUBLISH credential-usable=$PUSHABLE"
+          cat /tmp/generated/Casks/chan-desktop.rb /tmp/generated/Formula/chan.rb
+          if [ "$PUBLISH" != "true" ] && [ "$PUSHABLE" != "true" ] && [ "$CANONICAL" = "true" ]; then
+            echo "::error::HOMEBREW_TAP_DEPLOY_KEY_BASE64 is absent on the canonical repository; the definitions validated but the tap credential is unproven."
+            exit 1
+          fi
+
+      - name: Push to the tap
+        if: env.PUBLISH == 'true' && env.PUSHABLE == 'true'
+        env:
+          TAP_SSH_KEY_B64: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$TAP_SSH_KEY_B64" | base64 -d > /tmp/tap-key
+          chmod 600 /tmp/tap-key
+          cat > /tmp/tap-known-hosts <<'EOF'
+          github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          EOF
+          export GIT_SSH_COMMAND="ssh -i /tmp/tap-key -o IdentitiesOnly=yes -o UserKnownHostsFile=/tmp/tap-known-hosts -o StrictHostKeyChecking=yes"
+          version=${RELEASE_TAG#v}
+          git config --global user.name "Alexandre Fiori"
+          git config --global user.email "fiorix@gmail.com"
+          git clone git@github.com:fiorix/homebrew-chan.git /tmp/tap
+          install -D /tmp/generated/Casks/chan-desktop.rb /tmp/tap/Casks/chan-desktop.rb
+          install -D /tmp/generated/Formula/chan.rb /tmp/tap/Formula/chan.rb
+          cd /tmp/tap
+          git add Casks/chan-desktop.rb Formula/chan.rb
+          if git diff --cached --quiet; then
+            echo "the tap is already at $version; nothing to push."
+            exit 0
+          fi
+          git commit -m "chan-desktop $version, chan $version"
+          git push origin HEAD:main
+
+      - name: Verify the tap content
+        if: env.PUBLISH == 'true' && env.PUSHABLE == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version=${RELEASE_TAG#v}
+          # The push step is the publication: a zero exit from `git push`
+          # means GitHub accepted the ref. Unlike the AUR's RPC index, the
+          # contents API serves the git data itself, so a response that
+          # affirmatively lacks the released version is a real red. An
+          # unreadable API inside the budget stays a warning: the push is
+          # authoritative. The token read fails on some scoping edges, so
+          # an empty authenticated read retries unauthenticated.
+          budget="${HOMEBREW_VERIFY_BUDGET:-120}"
+          # The formula has no version stanza (brew scans the URL path), so
+          # each file gets its own version needle.
+          verify_file() {
+            path="$1"
+            needle="$2"
+            url="https://api.github.com/repos/fiorix/homebrew-chan/contents/$path"
+            deadline=$((SECONDS + budget))
+            served=""
+            while :; do
+              served="$(curl -fsSL --retry 3 \
+                -H "Accept: application/vnd.github.raw+json" \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                "$url" || true)"
+              if [ -z "$served" ]; then
+                served="$(curl -fsSL --retry 3 \
+                  -H "Accept: application/vnd.github.raw+json" \
+                  "$url" || true)"
+              fi
+              if printf '%s' "$served" | grep -qF "$needle"; then
+                echo "$path serves version $version"
+                return 0
+              fi
+              if [ "$SECONDS" -ge "$deadline" ]; then
+                break
+              fi
+              sleep 5
+            done
+            if [ -n "$served" ]; then
+              echo "::error::the tap serves $path without version $version after the push; the tap content does not match this release"
+              return 1
+            fi
+            echo "::warning::could not read $path from the contents API within ${budget}s; the push is authoritative, check the tap by hand"
+            return 0
+          }
+          verify_file Casks/chan-desktop.rb "version \"$version\""
+          verify_file Formula/chan.rb "download/v$version/"
 
   # ---- container images (Docker Hub) ----------------------------------------
   # Publishes chan + the three chan-gateway service images to Docker Hub under
