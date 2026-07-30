@@ -35,6 +35,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | item | state | what needs to happen |
 | --- | --- | --- |
 | [extensions-v1](v0.82.0/extensions-v1.md) | registered, grounded, needs rulings | rule the open decisions (spawn policy, handshake shape, desktop CSP scope), then spec the TOML discovery, subprocess supervision, and iframe tab |
+| [retire-devserver-windows-endpoint](v0.82.0/retire-devserver-windows-endpoint.md) | registered, one-release compatibility hold | remove the legacy devserver window adapter, route, response type, and wire tests once pre-0.81.0 desktops are out of circulation |
 | [web-marketing-onboarding](v0.82.0/web-marketing-onboarding.md) | registered, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
 
 ## Completed
