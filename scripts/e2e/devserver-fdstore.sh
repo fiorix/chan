@@ -37,6 +37,53 @@ systemctl --user show-environment >/dev/null 2>&1 \
     || { log "SKIP: no systemd user session"; exit 0; }
 command -v python3 >/dev/null || { log "SKIP: python3 required"; exit 0; }
 
+# Cleanup ordering, shared by success and the EXIT trap. The unit
+# restoration reads $SNAP inside $WORK, so success must run the
+# restoration FIRST and delete the throwaway work dir only afterwards;
+# every non-success exit keeps $WORK for diagnosis. restore_unit_state
+# is defined (or stubbed by the self-test) before any path can call this.
+CLEANUP_RAN=0
+on_exit() {
+    [ "$CLEANUP_RAN" = 1 ] && return
+    CLEANUP_RAN=1
+    restore_unit_state
+}
+finish_success() {
+    on_exit
+    rm -rf "$WORK"
+}
+
+# Self-test seam for the ordering above (systemd is never touched):
+#   CHAN_FDSTORE_E2E_SELFTEST=cleanup-order scripts/e2e/devserver-fdstore.sh
+if [ "${CHAN_FDSTORE_E2E_SELFTEST:-}" = "cleanup-order" ]; then
+    WORK="$(mktemp -d "${TMPDIR:-/tmp}/chan-fdstore-selftest.XXXXXX")"
+    SNAP="$WORK/unit-snapshot"
+    mkdir -p "$SNAP"
+    printf 'unit\n' > "$SNAP/unit"
+    RESTORED_SAW_SNAPSHOT=0
+    restore_unit_state() {
+        if [ -f "$SNAP/unit" ]; then
+            RESTORED_SAW_SNAPSHOT=1
+        fi
+    }
+    finish_success
+    if [ "$RESTORED_SAW_SNAPSHOT" != 1 ]; then
+        log "SELFTEST FAIL: restoration ran after its snapshot was deleted"
+        exit 1
+    fi
+    if [ -d "$WORK" ]; then
+        log "SELFTEST FAIL: success must remove the work dir after restoring"
+        exit 1
+    fi
+    if [ "$CLEANUP_RAN" != 1 ]; then
+        log "SELFTEST FAIL: the EXIT guard must observe the success cleanup"
+        exit 1
+    fi
+    log "selftest cleanup-order OK"
+    trap - EXIT INT TERM
+    exit 0
+fi
+
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/chan-fdstore-e2e.XXXXXX")"
 export CHAN_HOME="$WORK/home"
 mkdir -p "$CHAN_HOME"
@@ -99,15 +146,9 @@ restore_unit_state() {
     pkill -f 'sleep 8631[0-9]' >/dev/null 2>&1
     set -e
 }
-# Restore EXACTLY once, always through the EXIT trap. INT/TERM must
-# terminate (preserving a nonzero status), never resume the script after
-# a restoration already ran.
-CLEANUP_RAN=0
-on_exit() {
-    [ "$CLEANUP_RAN" = 1 ] && return
-    CLEANUP_RAN=1
-    restore_unit_state
-}
+# Restore EXACTLY once, always through on_exit (defined with
+# finish_success above). INT/TERM must terminate (preserving a nonzero
+# status), never resume the script after a restoration already ran.
 trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -342,4 +383,6 @@ wait_until 30 "session4 child death via store release HUP" \
 assert_store 0 "bare stop released the store"
 
 log "PASS: all 8 cases at $SHA"
-rm -rf "$WORK"
+# Restore the pre-existing unit state (the snapshot lives inside $WORK)
+# BEFORE the throwaway work dir goes away.
+finish_success
