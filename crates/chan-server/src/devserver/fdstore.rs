@@ -470,7 +470,7 @@ mod linux {
                 // because apply()'s meta-derived cleanup could not reach it.
                 if fd_name != fdstore_fd_name(&meta.session_id, meta.child_pid) {
                     if fd_by_name.remove(&fd_name).is_some() {
-                        cleanup_invalid_fds(&[fd_name.clone()]);
+                        cleanup_invalid_fds(std::slice::from_ref(&fd_name));
                     }
                     push_skipped_session(
                         &mut skipped,

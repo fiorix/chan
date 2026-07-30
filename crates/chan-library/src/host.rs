@@ -5460,10 +5460,7 @@ mod tests {
                     pixel_height: 0,
                 })
                 .expect("openpty");
-            let raw = {
-                use portable_pty::MasterPty as _;
-                pty.master.as_raw_fd().expect("master raw fd")
-            };
+            let raw = pty.master.as_raw_fd().expect("master raw fd");
             let master_fd = crate::terminal_sessions::clone_master_fd(raw).expect("dup master");
             let meta = crate::terminal_sessions::FdStoreSessionMeta {
                 tenant_prefix: "/terminal".into(),
