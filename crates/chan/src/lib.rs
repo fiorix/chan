@@ -4403,17 +4403,9 @@ async fn restart_devserver_under_systemd(
         // unit with no pinned port serves on an OS-assigned port, not the
         // requested/default `addr`.
         let dial = running_systemd_devserver_addr().unwrap_or(addr);
-        if let Err(reason) = drain_devserver_terminals(dial).await {
-            // A plain restart would preserve the parked sessions -- exactly
-            // what --force must not do. Stop releases the fd store (masters
-            // close, shells HUP) before the fresh activation.
-            eprintln!(
-                "chan devserver: WARNING: terminal drain failed ({reason}); \
-                 stopping the unit first so --force stays destructive"
-            );
-            systemctl_user(&["stop", DEVSERVER_SYSTEMD_UNIT]).await?;
-            was_running = false;
-        }
+        let drain = drain_devserver_terminals(dial).await;
+        was_running =
+            force_teardown_before_restart(drain, &mut LiveDevserverSystemdControl).await?;
     }
     bootstrap_systemd_unit(addr, true, was_running, tunnel).await?;
     eprintln!(
@@ -4422,6 +4414,29 @@ async fn restart_devserver_under_systemd(
         running_systemd_devserver_addr().unwrap_or(addr)
     );
     Ok(())
+}
+
+/// The `--force` teardown decision: a confirmed drain keeps the normal
+/// preserved-restart path (the sessions are already dead), while ANY drain
+/// failure must stop the unit first -- a plain restart re-feeds the parked
+/// fds and would resurrect the sessions `--force` promised to kill. Stop
+/// releases the fd store (masters close, shells HUP) before the fresh
+/// activation. Returns whether the unit is still running afterwards.
+async fn force_teardown_before_restart(
+    drain: std::result::Result<(), String>,
+    control: &mut impl DevserverSystemdControl,
+) -> Result<bool> {
+    match drain {
+        Ok(()) => Ok(true),
+        Err(reason) => {
+            eprintln!(
+                "chan devserver: WARNING: terminal drain failed ({reason}); \
+                 stopping the unit first so --force stays destructive"
+            );
+            control.command(&["stop", DEVSERVER_SYSTEMD_UNIT]).await?;
+            Ok(false)
+        }
+    }
 }
 
 /// POST the drain endpoint: every terminal session is closed and the child
@@ -4472,19 +4487,34 @@ async fn drain_devserver_terminals(addr: SocketAddr) -> std::result::Result<(), 
 /// a no-op when the unit is not active, and disable is skipped when no unit file
 /// is installed. The unit file itself stays on disk (disable only drops the
 /// `WantedBy` symlink), so `--status` can still show its last command.
+/// The `--stop` drain decision: a failed drain WARNS and still stops -- the
+/// released fd store closes every master and HUPs the shells, so stop is
+/// never blocked on a wedged devserver. `drain` is None when nothing was
+/// running or no address was discoverable.
+async fn stop_unit_after_drain(
+    drain: Option<std::result::Result<(), String>>,
+    was_active: bool,
+    control: &mut impl DevserverSystemdControl,
+) -> Result<()> {
+    if !was_active {
+        return Ok(());
+    }
+    if let Some(Err(reason)) = drain {
+        eprintln!(
+            "chan devserver: WARNING: terminal drain failed ({reason}); \
+             stopping anyway (the released fd store HUPs the shells)"
+        );
+    }
+    control.command(&["stop", DEVSERVER_SYSTEMD_UNIT]).await
+}
+
 async fn stop_devserver_under_systemd() -> Result<()> {
     let was_active = unit_is_active().await;
-    if was_active {
-        if let Some(dial) = running_systemd_devserver_addr() {
-            if let Err(reason) = drain_devserver_terminals(dial).await {
-                eprintln!(
-                    "chan devserver: WARNING: terminal drain failed ({reason}); \
-                     stopping anyway (the released fd store HUPs the shells)"
-                );
-            }
-        }
-        systemctl_user(&["stop", DEVSERVER_SYSTEMD_UNIT]).await?;
-    }
+    let drain = match (was_active, running_systemd_devserver_addr()) {
+        (true, Some(dial)) => Some(drain_devserver_terminals(dial).await),
+        _ => None,
+    };
+    stop_unit_after_drain(drain, was_active, &mut LiveDevserverSystemdControl).await?;
     // Disable only when a unit is installed, so a stop with nothing there does
     // not surface a spurious "No such file" from systemctl.
     if read_systemd_unit().is_some() {
@@ -9013,6 +9043,56 @@ mod tests {
 
     fn systemd_commands(control: &FakeDevserverSystemdControl) -> Vec<String> {
         control.commands.iter().map(|args| args.join(" ")).collect()
+    }
+
+    #[tokio::test]
+    async fn force_teardown_stops_the_unit_when_the_drain_fails() {
+        let mut control = FakeDevserverSystemdControl {
+            active: true,
+            ..Default::default()
+        };
+        let still_running = force_teardown_before_restart(Err("timed out".into()), &mut control)
+            .await
+            .expect("teardown");
+        assert!(!still_running, "a failed drain must leave the unit stopped");
+        assert_eq!(
+            systemd_commands(&control),
+            ["stop chan-devserver.service"],
+            "stop must precede the fresh activation so the released store \
+             cannot resurrect the sessions"
+        );
+    }
+
+    #[tokio::test]
+    async fn force_teardown_keeps_the_preserved_path_on_a_confirmed_drain() {
+        let mut control = FakeDevserverSystemdControl {
+            active: true,
+            ..Default::default()
+        };
+        let still_running = force_teardown_before_restart(Ok(()), &mut control)
+            .await
+            .expect("teardown");
+        assert!(still_running);
+        assert!(
+            systemd_commands(&control).is_empty(),
+            "a confirmed drain needs no extra stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_proceeds_past_a_failed_drain() {
+        let mut control = FakeDevserverSystemdControl {
+            active: true,
+            ..Default::default()
+        };
+        stop_unit_after_drain(Some(Err("connect refused".into())), true, &mut control)
+            .await
+            .expect("stop");
+        assert_eq!(
+            systemd_commands(&control),
+            ["stop chan-devserver.service"],
+            "a failed drain must not block the stop"
+        );
     }
 
     #[tokio::test]
