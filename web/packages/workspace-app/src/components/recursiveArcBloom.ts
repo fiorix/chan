@@ -88,8 +88,12 @@ export function fitRecursiveArcBloom(
   };
 }
 
+// innerRadius starts every chain that far from the origin, leaving a
+// central void: each recursive step walks outward (its radial component
+// stays positive while the discs shrink), so no leaf reaches back in.
 export function buildRecursiveArcBloom(
   noisePhase: number,
+  innerRadius = 0,
 ): RecursiveArcSegment[] {
   const arcs: RecursiveArcSegment[] = [];
 
@@ -99,8 +103,8 @@ export function buildRecursiveArcBloom(
     arm += 1
   ) {
     const baseAngle = arm * RECURSIVE_ARC_BLOOM_ANGLE_STEP;
-    let x = 0;
-    let y = 0;
+    let x = Math.cos(baseAngle) * innerRadius;
+    let y = Math.sin(baseAngle) * innerRadius;
     let direction: -1 | 1 = 1;
 
     for (

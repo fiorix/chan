@@ -52,6 +52,18 @@ describe("Recursive Arc Bloom", () => {
     expect(chain[1].y - chain[0].y).toBeCloseTo(Math.sin(1) * 54);
   });
 
+  test("keeps a central void when an inner radius is supplied", () => {
+    const arcs = buildRecursiveArcBloom(0, 100);
+
+    expect(arcs[0].x).toBeCloseTo(100 + Math.cos(-1) * 57);
+    expect(arcs[0].y).toBeCloseTo(Math.sin(-1) * 57);
+    for (const arc of arcs) {
+      expect(
+        Math.hypot(arc.x, arc.y) - arc.diameter / 2,
+      ).toBeGreaterThan(100);
+    }
+  });
+
   test("rotates the same chain through each radial arm", () => {
     const arcs = buildRecursiveArcBloom(1.25);
     const first = arcs[0];

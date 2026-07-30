@@ -74,6 +74,31 @@ export const EMPTY_PANE_ANIMATIONS = [
 export type EmptyPaneAnimationId =
   (typeof EMPTY_PANE_ANIMATIONS)[number]["id"];
 
+// The speed ladder ArrowUp/ArrowDown walk; 1 is the resting cadence.
+// Values feed the --canvas-animation-speed variable the shared canvas
+// clock scales by.
+export const EMPTY_PANE_ANIMATION_SPEEDS = [
+  0.25, 0.35, 0.5, 0.7, 1, 1.4, 2, 2.8, 4,
+] as const;
+
+export function stepEmptyPaneAnimationSpeed(
+  current: number,
+  direction: -1 | 1,
+): number {
+  const speeds = EMPTY_PANE_ANIMATION_SPEEDS;
+  const currentIndex = speeds.findIndex((speed) => speed === current);
+  const baseIndex = currentIndex === -1 ? speeds.indexOf(1) : currentIndex;
+  const nextIndex = Math.min(
+    speeds.length - 1,
+    Math.max(0, baseIndex + direction),
+  );
+  return speeds[nextIndex];
+}
+
+export function emptyPaneAnimationSpeedLabel(speed: number): string {
+  return `Speed ${speed}x`;
+}
+
 const EMPTY_PANE_ANIMATION_SESSION_KEY = "chan.empty-pane-animation";
 
 type AnimationStorage = Pick<Storage, "getItem" | "setItem">;

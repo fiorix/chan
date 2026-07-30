@@ -12,6 +12,9 @@
 
   const NOISE_PHASE_SPEED = 1 / 18;
   const STATIC_PHASE = 2.5;
+  // The bloom's central void must contain the 160px welcome enso with
+  // breathing room; screen px convert to sketch units by the live scale.
+  const MARK_CLEARANCE_PX = 104;
 
   let canvas = $state<HTMLCanvasElement | undefined>();
 
@@ -37,7 +40,10 @@
           0.12,
         );
         const transform = fitRecursiveArcBloom(width, height);
-        const arcs = buildRecursiveArcBloom(noisePhase);
+        const arcs = buildRecursiveArcBloom(
+          noisePhase,
+          MARK_CLEARANCE_PX / transform.scale,
+        );
 
         ctx.clearRect(0, 0, width, height);
         ctx.save();

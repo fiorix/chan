@@ -49,12 +49,13 @@ describe("Exponential Echo", () => {
     );
   });
 
-  test("fits the source square uniformly inside rectangular panes", () => {
+  test("fits the source square to the pane's long axis", () => {
     expect(fitExponentialEcho(1400, 800)).toEqual({
       centerX: 700,
       centerY: 400,
-      scale: 1,
+      scale: 1.75,
     });
+    expect(fitExponentialEcho(600, 900).scale).toBeCloseTo(1.125);
   });
 
   test("wraps only at the curve's exact sampled phase period", () => {

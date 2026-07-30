@@ -79,4 +79,184 @@ describe("canvas animation lifecycle", () => {
     expect(cancelFrame).toHaveBeenCalledWith(17);
     expect(disconnect).toHaveBeenCalledOnce();
   });
+
+  test("scales the frame clock by the host speed variable", () => {
+    const host = document.createElement("div");
+    host.style.setProperty("--canvas-animation-speed", "4");
+    const canvas = document.createElement("canvas");
+    host.append(canvas);
+    document.body.append(host);
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      value: false,
+    });
+    vi.spyOn(canvas, "getContext").mockReturnValue({
+      clearRect: vi.fn(),
+      setTransform: vi.fn(),
+    } as unknown as CanvasRenderingContext2D);
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe = vi.fn();
+        disconnect = vi.fn();
+      },
+    );
+    const rafQueue: FrameRequestCallback[] = [];
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) => rafQueue.push(callback)),
+    );
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    const frame = vi.fn();
+    const cleanup = runCanvasAnimation(canvas, () => ({
+      resize: vi.fn(),
+      frame,
+      reducedMotion: vi.fn(),
+    }));
+
+    rafQueue.shift()?.(1000);
+    expect(frame).toHaveBeenLastCalledWith(expect.closeTo((1000 / 24) * 4, 3));
+    rafQueue.shift()?.(1100);
+    expect(frame).toHaveBeenLastCalledWith(
+      expect.closeTo((1000 / 24) * 4 + 400, 3),
+    );
+
+    cleanup?.();
+  });
+
+  test("retries a transiently null 2d context instead of staying blank", () => {
+    const canvas = document.createElement("canvas");
+    document.body.append(canvas);
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      value: false,
+    });
+    const realContext = {
+      clearRect: vi.fn(),
+      setTransform: vi.fn(),
+    } as unknown as CanvasRenderingContext2D;
+    const getContext = vi
+      .spyOn(canvas, "getContext")
+      .mockReturnValueOnce(null)
+      .mockReturnValueOnce(null)
+      .mockReturnValue(realContext);
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe = vi.fn();
+        disconnect = vi.fn();
+      },
+    );
+    const rafQueue: FrameRequestCallback[] = [];
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) => rafQueue.push(callback)),
+    );
+    const cancelFrame = vi.fn();
+    vi.stubGlobal("cancelAnimationFrame", cancelFrame);
+
+    const resize = vi.fn();
+    const cleanup = runCanvasAnimation(canvas, () => ({
+      resize,
+      frame: vi.fn(),
+      reducedMotion: vi.fn(),
+    }));
+
+    expect(getContext).toHaveBeenCalledTimes(1);
+    expect(resize).not.toHaveBeenCalled();
+
+    rafQueue.shift()?.(0);
+    expect(resize).not.toHaveBeenCalled();
+
+    rafQueue.shift()?.(0);
+    expect(getContext).toHaveBeenCalledTimes(3);
+    expect(resize).toHaveBeenCalledOnce();
+
+    cleanup?.();
+  });
+
+  test("gives up a pending context retry on cleanup", () => {
+    const canvas = document.createElement("canvas");
+    document.body.append(canvas);
+    vi.spyOn(canvas, "getContext").mockReturnValue(null);
+    const rafIds: number[] = [];
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn(() => {
+        rafIds.push(rafIds.length + 1);
+        return rafIds.length;
+      }),
+    );
+    const cancelFrame = vi.fn();
+    vi.stubGlobal("cancelAnimationFrame", cancelFrame);
+
+    const cleanup = runCanvasAnimation(canvas, () => ({
+      resize: vi.fn(),
+      frame: vi.fn(),
+      reducedMotion: vi.fn(),
+    }));
+    cleanup?.();
+
+    expect(cancelFrame).toHaveBeenCalledWith(1);
+  });
+
+  test("stops frames while the canvas is off screen and resumes in view", () => {
+    const canvas = document.createElement("canvas");
+    document.body.append(canvas);
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      value: false,
+    });
+    vi.spyOn(canvas, "getContext").mockReturnValue({
+      clearRect: vi.fn(),
+      setTransform: vi.fn(),
+    } as unknown as CanvasRenderingContext2D);
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe = vi.fn();
+        disconnect = vi.fn();
+      },
+    );
+    let intersect: (entries: { isIntersecting: boolean }[]) => void = () => {};
+    const ioObserve = vi.fn();
+    const ioDisconnect = vi.fn();
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        constructor(callback: typeof intersect) {
+          intersect = callback;
+        }
+        observe = ioObserve;
+        disconnect = ioDisconnect;
+      },
+    );
+    let frameId = 0;
+    const requestFrame = vi.fn(() => ++frameId);
+    const cancelFrame = vi.fn();
+    vi.stubGlobal("requestAnimationFrame", requestFrame);
+    vi.stubGlobal("cancelAnimationFrame", cancelFrame);
+
+    const start = vi.fn();
+    const cleanup = runCanvasAnimation(canvas, () => ({
+      resize: vi.fn(),
+      frame: vi.fn(),
+      reducedMotion: vi.fn(),
+      start,
+    }));
+
+    expect(ioObserve).toHaveBeenCalledWith(canvas);
+    expect(requestFrame).toHaveBeenCalledTimes(1);
+
+    intersect([{ isIntersecting: false }]);
+    expect(cancelFrame).toHaveBeenCalledWith(1);
+
+    intersect([{ isIntersecting: true }]);
+    expect(requestFrame).toHaveBeenCalledTimes(2);
+    expect(start).toHaveBeenCalledTimes(2);
+
+    cleanup?.();
+    expect(ioDisconnect).toHaveBeenCalledOnce();
+  });
 });

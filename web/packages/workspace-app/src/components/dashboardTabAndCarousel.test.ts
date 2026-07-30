@@ -414,7 +414,9 @@ describe("EmptyPaneWelcome empty-pane surface", () => {
       .default as string;
     // The surface is the mark over one decorative field and its transient
     // catalog name, with no actions of its own.
-    expect(welcome).toMatch(/<div class="welcome-mark"><\/div>/);
+    expect(welcome).toMatch(
+      /\{#key markCycle\}[\s\S]{1,120}class="welcome-mark"[\s\S]{1,80}welcome-mark-cycle=\{markCycle > 0\}/,
+    );
     expect(welcome).toMatch(/animation = initialEmptyPaneAnimation\(\)/);
     expect(welcome).toMatch(/persistEmptyPaneAnimation\(next\)/);
     expect(welcome).toMatch(
@@ -431,10 +433,16 @@ describe("EmptyPaneWelcome empty-pane surface", () => {
       /class="welcome"[\s\S]{1,180}onkeydown=\{onAnimationKeyDown\}/,
     );
     expect(welcome).toMatch(
-      /key === ">"[\s\S]{1,180}stepEmptyPaneAnimation\(animation, 1\)/,
+      /key === "ArrowRight"[\s\S]{1,180}stepEmptyPaneAnimation\(animation, 1\)/,
     );
     expect(welcome).toMatch(
-      /key === "<"[\s\S]{1,180}stepEmptyPaneAnimation\(animation, -1\)/,
+      /key === "ArrowLeft"[\s\S]{1,180}stepEmptyPaneAnimation\(animation, -1\)/,
+    );
+    expect(welcome).toMatch(
+      /key === "ArrowUp"[\s\S]{1,80}selectSpeed\(1\)/,
+    );
+    expect(welcome).toMatch(
+      /key === "ArrowDown"[\s\S]{1,80}selectSpeed\(-1\)/,
     );
     expect(welcome).toMatch(
       /else[\s\S]{1,180}randomEmptyPaneAnimation\(animation\)/,

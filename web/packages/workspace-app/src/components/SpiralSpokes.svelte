@@ -11,7 +11,8 @@
     runCanvasAnimation,
   } from "./canvasAnimation";
 
-  const SOURCE_STEPS_PER_SECOND = 1;
+  // Four times the source sketch's one-step-per-second cadence.
+  const STEPS_PER_SECOND = 4;
   const STATIC_STEP = 18;
 
   let canvas = $state<HTMLCanvasElement | undefined>();
@@ -65,8 +66,7 @@
       function drawAt(timeMs: number): void {
         if (lastFrameMs !== 0) {
           sourceStep +=
-            ((timeMs - lastFrameMs) / 1000) *
-            SOURCE_STEPS_PER_SECOND;
+            ((timeMs - lastFrameMs) / 1000) * STEPS_PER_SECOND;
         }
         lastFrameMs = timeMs;
         draw(sourceStep);

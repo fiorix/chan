@@ -2,10 +2,12 @@ import { describe, expect, test } from "vitest";
 import {
   EMPTY_PANE_ANIMATIONS,
   emptyPaneAnimationName,
+  emptyPaneAnimationSpeedLabel,
   initialEmptyPaneAnimation,
   persistEmptyPaneAnimation,
   randomEmptyPaneAnimation,
   stepEmptyPaneAnimation,
+  stepEmptyPaneAnimationSpeed,
 } from "./emptyPaneAnimations";
 
 describe("empty pane animation catalog", () => {
@@ -59,6 +61,16 @@ describe("empty pane animation catalog", () => {
     expect(stepEmptyPaneAnimation("chaotic-halo", 1)).toBe(
       "sixfold-vortex",
     );
+  });
+
+  test("steps the speed ladder with clamped ends", () => {
+    expect(stepEmptyPaneAnimationSpeed(1, 1)).toBe(1.4);
+    expect(stepEmptyPaneAnimationSpeed(1, -1)).toBe(0.7);
+    expect(stepEmptyPaneAnimationSpeed(4, 1)).toBe(4);
+    expect(stepEmptyPaneAnimationSpeed(0.25, -1)).toBe(0.25);
+    expect(stepEmptyPaneAnimationSpeed(7, 1)).toBe(1.4);
+    expect(emptyPaneAnimationSpeedLabel(1.4)).toBe("Speed 1.4x");
+    expect(emptyPaneAnimationSpeedLabel(1)).toBe("Speed 1x");
   });
 
   test("picks a random animation other than the current one", () => {

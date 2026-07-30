@@ -92,7 +92,13 @@
         ctx.fillRect(0, 0, width, height);
         ctx.globalAlpha = 1;
 
-        advanceMutualForceParticles(particles);
+        // Reflect at the pane's own edges so the web reaches the sides.
+        const transform = fitMutualForceStarburst(width, height);
+        advanceMutualForceParticles(
+          particles,
+          width / 2 / transform.scale,
+          height / 2 / transform.scale,
+        );
         drawParticles(particles);
       }
 

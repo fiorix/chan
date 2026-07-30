@@ -54,8 +54,12 @@ export function createMutualForceParticles(
   return particles;
 }
 
+// The reflecting walls default to the source sketch's square but take
+// per-axis bounds so the field can fill a rectangular pane completely.
 export function advanceMutualForceParticles(
   particles: Float32Array,
+  halfWidth = MUTUAL_FORCE_HALF_SIZE,
+  halfHeight = MUTUAL_FORCE_HALF_SIZE,
 ): void {
   const count = Math.floor(particles.length / PARTICLE_STRIDE);
 
@@ -89,11 +93,11 @@ export function advanceMutualForceParticles(
 
     let velocityX = particles[offset + 2];
     let velocityY = particles[offset + 3];
-    if (Math.abs(x + velocityX) > MUTUAL_FORCE_HALF_SIZE) {
+    if (Math.abs(x + velocityX) > halfWidth) {
       velocityX *= -1;
       particles[offset + 2] = velocityX;
     }
-    if (Math.abs(y + velocityY) > MUTUAL_FORCE_HALF_SIZE) {
+    if (Math.abs(y + velocityY) > halfHeight) {
       velocityY *= -1;
       particles[offset + 3] = velocityY;
     }

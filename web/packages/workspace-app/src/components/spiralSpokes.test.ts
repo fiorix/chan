@@ -7,13 +7,13 @@ import {
 } from "./spiralSpokes";
 
 describe("Spiral Spokes", () => {
-  test("keeps the source timing and attribution", async () => {
+  test("keeps the quadrupled cadence and attribution", async () => {
     const renderer = (await import("./SpiralSpokes.svelte?raw"))
       .default as string;
     const geometry = (await import("./spiralSpokes.ts?raw"))
       .default as string;
 
-    expect(renderer).toMatch(/const SOURCE_STEPS_PER_SECOND = 1;/);
+    expect(renderer).toMatch(/const STEPS_PER_SECOND = 4;/);
     expect(geometry).toContain(
       "https://x.com/hisadan/status/1945386079974301805",
     );

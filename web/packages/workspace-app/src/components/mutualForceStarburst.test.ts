@@ -75,6 +75,16 @@ describe("Mutual Force Starburst", () => {
     expect([...particles]).toEqual([397, -397, -2, 2]);
   });
 
+  test("reflects at supplied rectangular pane bounds", () => {
+    const particles = new Float32Array([
+      500, -299, 2, -2,
+    ]);
+
+    advanceMutualForceParticles(particles, 600, 300);
+
+    expect([...particles]).toEqual([502, -297, 2, 2]);
+  });
+
   test("builds a quiet starburst snapshot without mutating motion", () => {
     const particles = new Float32Array([
       12, -8, 0.5, -0.25,

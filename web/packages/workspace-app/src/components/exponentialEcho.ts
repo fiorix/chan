@@ -39,11 +39,13 @@ export function fitExponentialEcho(
   width: number,
   height: number,
 ): ExponentialEchoTransform {
+  // Long-axis fit: the echo tunnel must reach the pane's side edges,
+  // so the short axis overflows and clips instead of leaving margins.
   return {
     centerX: width / 2,
     centerY: height / 2,
     scale:
-      Math.min(width, height) / EXPONENTIAL_ECHO_REFERENCE_SIZE,
+      Math.max(width, height) / EXPONENTIAL_ECHO_REFERENCE_SIZE,
   };
 }
 

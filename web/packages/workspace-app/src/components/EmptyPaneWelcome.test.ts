@@ -31,7 +31,7 @@ describe("EmptyPaneWelcome animation names", () => {
 
     window.dispatchEvent(
       new KeyboardEvent("keydown", {
-        key: ">",
+        key: "ArrowRight",
         cancelable: true,
       }),
     );
@@ -53,7 +53,7 @@ describe("EmptyPaneWelcome animation names", () => {
 
     welcome?.dispatchEvent(
       new KeyboardEvent("keydown", {
-        key: ">",
+        key: "ArrowRight",
         bubbles: true,
         cancelable: true,
       }),
@@ -64,6 +64,31 @@ describe("EmptyPaneWelcome animation names", () => {
       ".animation-name-flash",
     );
     expect(flash?.textContent?.trim()).toBe("Radial Ribbons");
+    expect(window.sessionStorage.getItem("chan.empty-pane-animation")).toBe(
+      "radial-ribbons",
+    );
+    expect(
+      target
+        .querySelector(".welcome-mark")
+        ?.classList.contains("welcome-mark-cycle"),
+    ).toBe(true);
+
+    welcome?.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowUp",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await tick();
+    expect(
+      target
+        .querySelector<HTMLElement>(".animation-name-flash")
+        ?.textContent?.trim(),
+    ).toBe("Speed 1.4x");
+    expect(welcome?.getAttribute("style")).toContain(
+      "--canvas-animation-speed: 1.4",
+    );
     expect(window.sessionStorage.getItem("chan.empty-pane-animation")).toBe(
       "radial-ribbons",
     );
