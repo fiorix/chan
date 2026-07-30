@@ -942,8 +942,11 @@ jobs:
           # authoritative. The token read fails on some scoping edges, so
           # an empty authenticated read retries unauthenticated.
           budget="${HOMEBREW_VERIFY_BUDGET:-120}"
+          # The formula has no version stanza (brew scans the URL path), so
+          # each file gets its own version needle.
           verify_file() {
             path="$1"
+            needle="$2"
             url="https://api.github.com/repos/fiorix/homebrew-chan/contents/$path"
             deadline=$((SECONDS + budget))
             served=""
@@ -957,7 +960,7 @@ jobs:
                   -H "Accept: application/vnd.github.raw+json" \
                   "$url" || true)"
               fi
-              if printf '%s' "$served" | grep -qF "version \"$version\""; then
+              if printf '%s' "$served" | grep -qF "$needle"; then
                 echo "$path serves version $version"
                 return 0
               fi
@@ -973,8 +976,8 @@ jobs:
             echo "::warning::could not read $path from the contents API within ${budget}s; the push is authoritative, check the tap by hand"
             return 0
           }
-          verify_file Casks/chan-desktop.rb
-          verify_file Formula/chan.rb
+          verify_file Casks/chan-desktop.rb "version \"$version\""
+          verify_file Formula/chan.rb "download/v$version/"
 
   # ---- container images (Docker Hub) ----------------------------------------
   # Publishes chan + the three chan-gateway service images to Docker Hub under

@@ -27,12 +27,17 @@ case "$pkg" in
         relpath="Formula/chan.rb"
         asset_pattern='chan-aarch64-apple-darwin.tar.gz'
         sha_placeholder='@SHA256_TARBALL@'
+        # The formula carries no version stanza (brew scans the URL path;
+        # audit rejects an explicit duplicate), so the pin to assert is the
+        # rendered URL itself.
+        version_needle_tpl='download/v@PKGVER@/'
         ;;
     chan-desktop)
         tpl="$here/Casks/chan-desktop.rb.in"
         relpath="Casks/chan-desktop.rb"
         asset_pattern='Chan_@PKGVER@.dmg'
         sha_placeholder='@SHA256_DMG@'
+        version_needle_tpl='version "@PKGVER@"'
         ;;
     *) echo "error: unknown package '$pkg' (expected chan or chan-desktop)" >&2; exit 1 ;;
 esac
@@ -74,7 +79,8 @@ if grep -q '@[A-Z0-9_]\+@' "$dest"; then
     exit 1
 fi
 ruby -c "$dest" >/dev/null
-grep -q "version \"$version\"" "$dest" || {
+version_needle="${version_needle_tpl//@PKGVER@/$version}"
+grep -qF "$version_needle" "$dest" || {
     echo "error: rendered $dest does not pin version $version" >&2
     exit 1
 }
