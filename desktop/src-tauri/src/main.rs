@@ -6080,13 +6080,16 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle) {
     });
 }
 
-/// Re-poll every remote connection's `GET /api/windows` and replace the
-/// reopenable-remote-windows snapshot (then rebuild the menu). Spawned
-/// async: each remote gets a short timeout and a failed poll just
-/// leaves that connection out this round. Triggers: an outbound
-/// window opening or being destroyed, and a `remote:` menu click.
-/// Tauri 2 exposes no menu-will-open hook, so event-driven refresh
-/// with tolerable staleness is the design.
+fn devserver_window_is_reopenable(row: &chan_server::WindowRecord) -> bool {
+    row.persisted && !row.connected && !row.control && !row.token.is_empty()
+}
+
+/// Re-poll every remote connection's window feed and replace the
+/// reopenable-remote-windows snapshot (then rebuild the menu). Spawned async:
+/// each remote gets a short timeout and a failed poll just leaves that
+/// connection out this round. Triggers: an outbound window opening or being
+/// destroyed, and a `remote:` menu click. Tauri 2 exposes no menu-will-open
+/// hook, so event-driven refresh with tolerable staleness is the design.
 pub fn refresh_remote_windows_menu(app: &tauri::AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -6167,23 +6170,22 @@ pub fn refresh_remote_windows_menu(app: &tauri::AppHandle) {
                 );
             }
         }
-        // L10: a connected devserver's CLOSED-but-persisted windows
-        // (`saved && !connected`) are reopenable from the Window menu. The URL
-        // is re-minted with the devserver's CURRENT per-mount token
-        // (`assemble_tenant_url`); an OFF tenant (empty token) is not
-        // menu-reopenable here -- its launcher row turns it back on. The reopen
-        // (`open_remote_window_from_menu`) re-creates AND re-tracks the window so
-        // a later disconnect tears it down.
+        // A connected devserver's persisted, disconnected, non-control windows
+        // are reopenable from the Window menu. The URL uses the live feed's
+        // current per-mount token; an off tenant (empty token) is not
+        // menu-reopenable here because its launcher row turns it back on. The
+        // reopen re-creates and re-tracks the window so a later disconnect tears
+        // it down.
         for (id, display, conn) in devserver_targets {
-            let rows = match devserver::fetch_devserver_windows(&conn).await {
+            let rows = match devserver::fetch_library_windows(&conn).await {
                 Ok(rows) => rows,
                 Err(e) => {
-                    tracing::warn!(devserver = %id, error = %e, "remote windows poll: listing devserver windows failed");
+                    tracing::warn!(devserver = %id, error = %e, "remote windows poll: listing library windows failed");
                     continue;
                 }
             };
             for row in rows {
-                if !(row.saved && !row.connected && !row.token.is_empty()) {
+                if !devserver_window_is_reopenable(&row) {
                     continue;
                 }
                 let url = match devserver::assemble_tenant_url(
@@ -6194,19 +6196,23 @@ pub fn refresh_remote_windows_menu(app: &tauri::AppHandle) {
                 ) {
                     Ok(url) => url,
                     Err(e) => {
-                        tracing::warn!(devserver = %id, label = %row.label, error = %e, "assembling a devserver reopen url failed");
+                        tracing::warn!(devserver = %id, label = %row.window_id, error = %e, "assembling a devserver reopen url failed");
                         continue;
                     }
                 };
-                let tail = row
-                    .title
+                let title = if row.title.is_empty() {
+                    None
+                } else {
+                    Some(row.title.clone())
+                };
+                let tail = title
                     .clone()
-                    .unwrap_or_else(|| remote_window_tail(&row.label));
+                    .unwrap_or_else(|| remote_window_tail(&row.window_id));
                 map.insert(
-                    row.label.clone(),
+                    row.window_id.clone(),
                     RemoteReopen {
                         url,
-                        base_title: row.title.unwrap_or_else(|| display.clone()),
+                        base_title: title.unwrap_or_else(|| display.clone()),
                         menu_title: format!("{display} - {tail}"),
                         config_key: config::remote_window_key(&row.prefix),
                         // Workspace reopen routes through the connecting screen,
@@ -7508,6 +7514,42 @@ mod tests {
         // workspace + window rows immediately); a successful poll clears it.
         assert!(poll.contains("set_down(&id, true)"));
         assert!(poll.contains("set_down(&id, false)"));
+    }
+
+    #[test]
+    fn devserver_reopen_filter_requires_a_live_reopen_target() {
+        let mut row = chan_server::WindowRecord {
+            window_id: "w-test".into(),
+            library_id: "lib-test".into(),
+            kind: chan_server::WindowKind::Terminal,
+            title: "Terminal Window 1".into(),
+            ordinal: 1,
+            workspace_path: None,
+            prefix: "/api/terminal".into(),
+            token: "tok-test".into(),
+            persisted: true,
+            connected: false,
+            active_transfer: false,
+            control: false,
+            hidden: true,
+            origin: chan_server::WindowOrigin::Native,
+        };
+        assert!(
+            devserver_window_is_reopenable(&row),
+            "hidden rows remain menu-reopenable"
+        );
+
+        row.persisted = false;
+        assert!(!devserver_window_is_reopenable(&row));
+        row.persisted = true;
+        row.connected = true;
+        assert!(!devserver_window_is_reopenable(&row));
+        row.connected = false;
+        row.control = true;
+        assert!(!devserver_window_is_reopenable(&row));
+        row.control = false;
+        row.token.clear();
+        assert!(!devserver_window_is_reopenable(&row));
     }
 
     #[test]
