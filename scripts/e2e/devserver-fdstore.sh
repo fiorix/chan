@@ -227,7 +227,7 @@ child_alive() { kill -0 "$1" 2>/dev/null; }
 assert_session_listed() { # sid
     local sid="$1" token rows
     token="$(devserver_token)"
-    rows="$(api GET /api/devserver/windows "$token")"
+    rows="$(api GET /api/library/windows "$token")"
     local prefix ttoken
     prefix="$(printf '%s' "$rows" | python3 -c '
 import json, sys
@@ -340,7 +340,7 @@ assert_store 2 "crash adoption must not grow the store"
 # ---- case 5: closing a session removes its store entry ----
 log "case 5: session close removes the store entry"
 TOKEN="$(devserver_token)"
-ROWS="$(api GET /api/devserver/windows "$TOKEN")"
+ROWS="$(api GET /api/library/windows "$TOKEN")"
 TPREFIX="$(printf '%s' "$ROWS" | python3 -c '
 import json, sys
 rows = json.load(sys.stdin)
