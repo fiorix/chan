@@ -11,7 +11,7 @@ import terminalTab from "./TerminalTab.svelte?raw";
 describe("terminal copy-cwd clipboard write", () => {
   test("focuses the terminal before the clipboard write", () => {
     expect(terminalTab).toMatch(
-      /async function copyTerminalCwd[\s\S]*?term\?\.focus\(\);[\s\S]*?await writeClipboardText\(cwd\)/,
+      /async function copyTerminalCwd[\s\S]*?focusTerminal\(\);[\s\S]*?await writeClipboardText\(cwd\)/,
     );
   });
 

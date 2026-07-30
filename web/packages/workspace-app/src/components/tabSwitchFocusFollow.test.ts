@@ -119,8 +119,15 @@ describe("TerminalTab reacts to pulse", () => {
 
   test("focus effect reads tabFocusPulse.value so chord switches re-focus xterm", () => {
     expect(terminalTab).toMatch(
-      /\$effect\(\(\) => \{[\s\S]*?if \(!focused\) return;[\s\S]*?tabFocusPulse\.value;[\s\S]*?term\?\.focus\(\);/,
+      /\$effect\(\(\) => \{[\s\S]*?if \(!focused\) return;[\s\S]*?tabFocusPulse\.value;[\s\S]*?focusTerminal\(\);/,
     );
+  });
+
+  test("TerminalTab suppresses every xterm focus while its survey is active", () => {
+    expect(terminalTab).toMatch(
+      /function focusTerminal\(\): void \{[\s\S]*?if \(surveyFor\(tab\.id\)\) return;[\s\S]*?term\?\.focus\(\);/,
+    );
+    expect(terminalTab.match(/term\?\.focus\(\)/g)).toHaveLength(1);
   });
 });
 
