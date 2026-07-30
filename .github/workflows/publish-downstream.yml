@@ -25,8 +25,12 @@
 #                                 FTP flakiness); absent keeps ftp
 #   AUR_SSH_PRIVATE_KEY           private half of the key registered
 #                                 on the maintainer's AUR account
-#   HOMEBREW_TAP_DEPLOY_KEY       private half of the write deploy key
-#                                 on fiorix/homebrew-chan
+#   HOMEBREW_TAP_DEPLOY_KEY_BASE64  base64 (single line) of the private
+#                                 half of the write deploy key on
+#                                 fiorix/homebrew-chan; base64 because a
+#                                 multiline key does not survive every
+#                                 paste path (the APPLE_CERTIFICATE_BASE64
+#                                 precedent)
 #   DOCKERHUB_USERNAME            Docker Hub account name
 #   DOCKERHUB_TOKEN               scoped Docker Hub access token
 # Variable:
@@ -624,16 +628,16 @@ jobs:
       - name: Probe the tap deploy key
         id: probe
         env:
-          TAP_SSH_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          TAP_SSH_KEY_B64: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY_BASE64 }}
         run: |
           set -euo pipefail
-          if [ -z "$TAP_SSH_KEY" ]; then
-            echo "::warning::HOMEBREW_TAP_DEPLOY_KEY not set; the tap push will be skipped."
+          if [ -z "$TAP_SSH_KEY_B64" ]; then
+            echo "::warning::HOMEBREW_TAP_DEPLOY_KEY_BASE64 not set; the tap push will be skipped."
             echo "credential=absent" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           install -d -m 700 ~/.ssh
-          printf '%s\n' "$TAP_SSH_KEY" > ~/.ssh/tap
+          printf '%s' "$TAP_SSH_KEY_B64" | base64 -d > ~/.ssh/tap
           chmod 600 ~/.ssh/tap
           printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > ~/.ssh/tap_known_hosts
           # A deploy key's ssh -T greeting names the repository it is bound
@@ -654,7 +658,7 @@ jobs:
               ;;
             *)
               echo "$greeting"
-              echo "::error::github.com did not accept HOMEBREW_TAP_DEPLOY_KEY as the fiorix/homebrew-chan deploy key; register its public half as a write deploy key on that repository"
+              echo "::error::github.com did not accept HOMEBREW_TAP_DEPLOY_KEY_BASE64 as the fiorix/homebrew-chan deploy key; register its public half as a write deploy key on that repository and store the private half base64-encoded"
               exit 1
               ;;
           esac
@@ -759,17 +763,17 @@ jobs:
           echo "publish=$PUBLISH credential-usable=$PUSHABLE"
           cat /tmp/generated/Casks/chan-desktop.rb /tmp/generated/Formula/chan.rb
           if [ "$PUBLISH" != "true" ] && [ "$PUSHABLE" != "true" ] && [ "$CANONICAL" = "true" ]; then
-            echo "::error::HOMEBREW_TAP_DEPLOY_KEY is absent on the canonical repository; the definitions validated but the tap credential is unproven."
+            echo "::error::HOMEBREW_TAP_DEPLOY_KEY_BASE64 is absent on the canonical repository; the definitions validated but the tap credential is unproven."
             exit 1
           fi
 
       - name: Push to the tap
         if: env.PUBLISH == 'true' && env.PUSHABLE == 'true'
         env:
-          TAP_SSH_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          TAP_SSH_KEY_B64: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY_BASE64 }}
         run: |
           set -euo pipefail
-          printf '%s\n' "$TAP_SSH_KEY" > /tmp/tap-key
+          printf '%s' "$TAP_SSH_KEY_B64" | base64 -d > /tmp/tap-key
           chmod 600 /tmp/tap-key
           cat > /tmp/tap-known-hosts <<'EOF'
           github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
