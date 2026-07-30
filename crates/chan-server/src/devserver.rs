@@ -2544,6 +2544,17 @@ mod tests {
     use chan_library::workspace_slug;
     use std::sync::atomic::AtomicBool;
 
+    /// Coordinates process-env access across this test binary: the fdstore
+    /// boot tests rewrite `CHAN_HOME` under the WRITE side, and every test
+    /// whose product path re-resolves `config_dir()` mid-test (mounting a
+    /// workspace persists and re-reads its tenant token there) holds the
+    /// READ side, so a rewrite can never interleave with a mount.
+    static CHAN_HOME_ENV: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+    fn chan_home_env_read() -> std::sync::RwLockReadGuard<'static, ()> {
+        CHAN_HOME_ENV.read().unwrap_or_else(|e| e.into_inner())
+    }
+
     struct ShutdownProbeBuilder {
         state_tx: Mutex<Option<tokio::sync::oneshot::Sender<Arc<crate::state::AppState>>>>,
     }
@@ -2981,6 +2992,7 @@ mod tests {
 
     #[tokio::test]
     async fn chan_close_during_startup_stays_off_preserves_metadata_and_reopens() {
+        let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let workspace = tempfile::tempdir().expect("workspace");
         let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
@@ -3114,6 +3126,7 @@ mod tests {
     #[tokio::test]
     async fn chan_close_remove_during_startup_forgets_metadata_preserves_source_and_reopens_fresh()
     {
+        let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let workspace = tempfile::tempdir().expect("workspace");
         let source_sentinel = workspace.path().join("source-sentinel.md");
@@ -4092,6 +4105,7 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_on_off_toggle_round_trip() {
+        let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let ws = tempfile::tempdir().expect("workspace");
         std::fs::write(ws.path().join("a.md"), "# A\n").expect("seed");
@@ -4615,6 +4629,7 @@ mod tests {
         // A stale map record with `on:true` but no live host tenant used to make
         // `set_workspace_on(..., true)` a no-op. The toggle must use the host's
         // real mount state so a stale-off row remounts cleanly.
+        let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let ws = tempfile::tempdir().expect("workspace");
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -5528,23 +5543,25 @@ mod tests {
         use chan_library::terminal_sessions::{fdstore_fd_name, FdStoreSessionMeta, StoredPtySize};
         use chan_library::windows::WindowKind;
 
-        static CHAN_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
         /// Serializes and scopes the env the fdstore paths read: CHAN_HOME
         /// (manifest location) set to the test home, NOTIFY_SOCKET and
         /// FDSTORE cleared so no real manager is ever addressed. EVERY
         /// touched variable's prior value or absence is restored on drop,
         /// so later tests and the invoking harness see the process env
-        /// exactly as it was.
+        /// exactly as it was. Holds the WRITE side of
+        /// [`super::CHAN_HOME_ENV`], so no reader resolving `config_dir()`
+        /// can observe the rewritten env.
         struct FdstoreEnvGuard {
-            _lock: std::sync::MutexGuard<'static, ()>,
+            _lock: std::sync::RwLockWriteGuard<'static, ()>,
             prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
         }
 
         impl FdstoreEnvGuard {
             fn set(home: &Path) -> Self {
                 Self::capture(
-                    CHAN_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner()),
+                    super::CHAN_HOME_ENV
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner()),
                     home,
                 )
             }
@@ -5552,7 +5569,7 @@ mod tests {
             /// Lock-passing body of [`set`](Self::set), so the round-trip
             /// regression can seed sentinel values under the SAME lock
             /// acquisition the guard then owns.
-            fn capture(lock: std::sync::MutexGuard<'static, ()>, home: &Path) -> Self {
+            fn capture(lock: std::sync::RwLockWriteGuard<'static, ()>, home: &Path) -> Self {
                 let prev = ["CHAN_HOME", "NOTIFY_SOCKET", "FDSTORE"]
                     .into_iter()
                     .map(|key| (key, std::env::var_os(key)))
@@ -5656,7 +5673,9 @@ mod tests {
         /// restored to absence, with the in-scope state overridden/cleared.
         #[test]
         fn env_guard_round_trips_every_touched_variable() {
-            let lock = CHAN_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let lock = super::CHAN_HOME_ENV
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             let home = tempfile::tempdir().expect("home");
             let originals: Vec<(&str, Option<std::ffi::OsString>)> =
                 ["CHAN_HOME", "NOTIFY_SOCKET", "FDSTORE"]
@@ -5680,7 +5699,9 @@ mod tests {
             assert_eq!(std::env::var_os("FDSTORE"), None);
             drop(guard);
 
-            let _lock = CHAN_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _lock = super::CHAN_HOME_ENV
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             assert_eq!(
                 std::env::var_os("CHAN_HOME").as_deref(),
                 Some(std::ffi::OsStr::new("sentinel-chan-home")),
