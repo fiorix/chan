@@ -1,6 +1,6 @@
 # Extensions v1: TOML-declared subprocess behind an iframe tab
 
-Status: REGISTERED for v0.81.0, grounded 2026-07-29, needs design rulings before spec.
+Status: REGISTERED for v0.82.0, grounded 2026-07-29, needs design rulings before spec.
 
 ## What
 

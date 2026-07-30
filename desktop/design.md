@@ -172,7 +172,7 @@ The native menus route by the focused window's kind:
 - File > New Terminal (Cmd+T): SPA window focused -> dispatch `app.terminal.toggle`; launcher or nothing focused -> open a standalone terminal window.
 - File > Close Window (Cmd+W): SPA window focused -> `app.tab.close` (the connecting screen is the exception: Cmd+W cancels and really closes); other windows close natively.
 - Window > New Window (Cmd+Shift+N): opens another window of the workspace owning the focused window (unburying the family's most recent hidden window first). A focused standalone terminal opens another terminal window; the launcher (or nothing) focused opens a standalone terminal. Plain Cmd+N is deliberately left to the SPA's New Draft.
-- Window > Workspaces: shows the launcher.
+- Window > Computers: shows the launcher.
 
 Quitting prompts for confirmation once (running terminals and workspace runtimes die with the process); a confirmed quit tears down every runtime and listener.
 

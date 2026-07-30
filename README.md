@@ -20,6 +20,13 @@ Core:
 - [crates/chan-report](crates/chan-report/design.md) - repository reports: the walker, the JSONL schema, the COCOMO model.
 - [crates/fetch-models](crates/fetch-models/design.md) - build-only helper that produces the embedded-model tarball.
 
+Desktop and web:
+
+- [desktop](desktop/design.md) - the Tauri shell: windows, exact-origin trust, native IPC.
+- [web/packages/workspace-app/src](web/packages/workspace-app/src/design.md) - the web frontend: the two SPAs, serving topology, the color system.
+- [web/packages/workspace-app/src/editor](web/packages/workspace-app/src/editor/design.md) - the CM6 editor surface.
+- [web/packages/launcher](web/packages/launcher/design.md) - the launcher SPA and its three-surface serving.
+
 Tunnel:
 
 - [crates/chan-tunnel-proto](crates/chan-tunnel-proto/design.md) - the shared wire contracts.
@@ -35,10 +42,3 @@ Gateway (separate Cargo workspace; the chan.app account, sign-in, and proxy surf
 - [gateway/crates/devserver-control](gateway/crates/devserver-control/design.md) - the fleet control plane: proxy directory, admission, kill routing.
 - [gateway/crates/gateway-common](gateway/crates/gateway-common/design.md) - the contracts the gateway services share.
 - [gateway/crates/admin](gateway/crates/admin/design.md) - the operator CLI.
-
-Desktop and web:
-
-- [desktop](desktop/design.md) - the Tauri shell: windows, exact-origin trust, native IPC.
-- [web/packages/workspace-app/src](web/packages/workspace-app/src/design.md) - the web frontend: the two SPAs, serving topology, the color system.
-- [web/packages/workspace-app/src/editor](web/packages/workspace-app/src/editor/design.md) - the CM6 editor surface.
-- [web/packages/launcher](web/packages/launcher/design.md) - the launcher SPA and its three-surface serving.

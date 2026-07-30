@@ -4057,7 +4057,7 @@ async fn write_clipboard_html(html: String, alt_text: String) -> Result<(), Stri
     run_clipboard_op(move || clipboard_write_html(html, alt_text)).await
 }
 
-/// User's home directory as a plain string, for the Workspaces window
+/// User's home directory as a plain string, for the Computers window
 /// to abbreviate paths to `~/...`. Returns an empty string when the
 /// platform can't resolve it.
 #[tauri::command]
@@ -4069,7 +4069,7 @@ fn home_dir() -> String {
 
 /// Open the given folder in the OS file manager. macOS: Finder,
 /// Linux: default file manager, Windows: Explorer. Used by the
-/// Workspaces window's path cell so users can jump to the workspace folder
+/// Computers window's path cell so users can jump to the workspace folder
 /// from the row. Trusts the caller to pass a path the user just saw
 /// in the list -- paths come from `list_workspaces`, which sources from
 /// the chan registry; no shell interpolation, args are passed as
@@ -5068,7 +5068,7 @@ fn main() {
             //
             // Closing it via the red traffic light or Cmd+W hides, not destroys:
             // hidden serve children keep the process alive, and reopening via Dock
-            // click or the Window > Workspaces menu item is instant.
+            // click or the Window > Computers menu item is instant.
             if let Some(embedded) = state_for_setup.embedded.get() {
                 let launcher_url =
                     format!("http://{}/?t={}", embedded.addr(), embedded.launcher_token());
@@ -5466,7 +5466,7 @@ fn main() {
 
 /// Build and install the application menu.
 ///
-/// The Window submenu carries Workspaces / New Window so a closed main
+/// The Window submenu carries Computers / New Window so a closed main
 /// window stays reachable by name. There is no Settings menu item: the
 /// Settings chord is owned by the SPA keymap so user assignments can replace
 /// the built-in Comma chord. No native menu accelerator may claim Comma or the
@@ -5487,11 +5487,11 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     // About / Exit are macOS-implicit.
     #[cfg(target_os = "macos")]
     let menu = {
-        // Workspaces keeps no accelerator: Cmd+1..9 is reserved for
+        // Computers keeps no accelerator: Cmd+1..9 is reserved for
         // jump-to-tab in workspace windows (handled by the per-workspace key
         // bridge script in serve.rs). The menu entry still surfaces the
         // window by name.
-        let workspace_manager = MenuItemBuilder::with_id("win-main", "Workspaces").build(app)?;
+        let workspace_manager = MenuItemBuilder::with_id("win-main", "Computers").build(app)?;
         // New Window opens another window of the FOCUSED window's
         // connection (open_new_window_for_focused_workspace): local
         // workspace or outbound remote, or another standalone
@@ -5735,7 +5735,7 @@ const LINUX_WINDOW_SUBMENU_ID: &str = "chan-window-submenu";
 
 /// Launcher menubar (off-mac): File (New Standalone Terminal,
 /// Close Window, About, Quit), Edit (the four clipboard items muda
-/// implements on GTK), Window (Workspaces, New Window, Open in Browser
+/// implements on GTK), Window (Computers, New Window, Open in Browser
 /// plus the dynamic tail `rebuild_window_menu` appends). The launcher is
 /// the ONLY window with a bar: attached per-window with
 /// `Window::set_menu` when the launcher window is built (there is no
@@ -5794,11 +5794,11 @@ fn build_launcher_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>
         .paste()
         .select_all()
         .build()?;
-    // Workspaces keeps no accelerator: Cmd+1..9 is reserved for
+    // Computers keeps no accelerator: Cmd+1..9 is reserved for
     // jump-to-tab in workspace windows (handled by the per-workspace key
     // bridge script in serve.rs). The menu entry still surfaces the
     // window by name.
-    let workspace_manager = MenuItemBuilder::with_id("win-main", "Workspaces").build(app)?;
+    let workspace_manager = MenuItemBuilder::with_id("win-main", "Computers").build(app)?;
     // New Window opens another window of the FOCUSED window's connection
     // (open_new_window_for_focused_workspace): a standalone terminal
     // from the launcher (or nothing) focused -- the launcher itself is a
@@ -6445,7 +6445,7 @@ fn open_about_window(app: &tauri::AppHandle) -> Result<(), String> {
 /// prefix against the outbound attachments). With the
 /// launcher (or nothing) focused, Cmd/Ctrl+Shift+N opens a standalone
 /// terminal window instead -- the launcher is a singleton, never
-/// multiplied. The "Workspaces" picker stays reachable via the
+/// multiplied. The "Computers" picker stays reachable via the
 /// `win-main` menu item, which is also the fallback surface when a
 /// focused window's backing connection can't be resolved (stale
 /// window for a forgotten attachment).

@@ -2,7 +2,7 @@
 //! loopback redirect with PKCE.
 //!
 //! Flow:
-//!   1. The Workspaces window calls `open_signin` (or a gateway connect
+//!   1. The Computers window calls `open_signin` (or a gateway connect
 //!      calls `open_gateway_signin`). We generate a random state nonce
 //!      and a PKCE `code_verifier` (kept in-process), bind an ephemeral
 //!      `http://127.0.0.1:<port>/auth/callback` listener in THIS
@@ -67,7 +67,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
 
 /// Event emitted whenever the local sign-in state changes (after a
-/// successful callback or a sign-out). The Workspaces window listens
+/// successful callback or a sign-out). The Computers window listens
 /// and re-renders the toolbar button.
 pub const AUTH_CHANGED: &str = "auth-changed";
 
