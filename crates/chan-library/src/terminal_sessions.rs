@@ -1398,16 +1398,22 @@ impl Registry {
         if pane_id.is_none() && side.is_none() && tab_id.is_none() {
             return;
         }
-        if let Some(session) = self
+        let session = self
             .sessions
             .lock()
             .expect("terminal registry poisoned")
             .get(id)
-        {
-            session.set_pane_id(pane_id);
-            session.set_side(side);
-            session.set_tab_id(tab_id);
-        }
+            .cloned();
+        let Some(session) = session else {
+            return;
+        };
+        session.set_pane_id(pane_id);
+        session.set_side(side);
+        session.set_tab_id(tab_id);
+        // Placement rides the restart manifest; republish so a crash restore
+        // does not resurrect an arbitrarily old pane placement.
+        #[cfg(target_os = "linux")]
+        session.parked_changed();
     }
 
     /// Refresh browser-reported layout coordinates without reconnecting the
@@ -1432,6 +1438,10 @@ impl Registry {
         session.set_pane_id(pane_id);
         session.set_side(side);
         session.set_tab_id(tab_id);
+        // Same manifest republish as `bind_session_layout`: a Hybrid-side
+        // move without a reconnect still changes the restored placement.
+        #[cfg(target_os = "linux")]
+        session.parked_changed();
         true
     }
 
@@ -3948,7 +3958,7 @@ impl Read for ImportedPtyFd {
 }
 
 #[cfg(target_os = "linux")]
-fn clone_master_fd(raw_fd: RawFd) -> io::Result<OwnedFd> {
+pub(crate) fn clone_master_fd(raw_fd: RawFd) -> io::Result<OwnedFd> {
     // PTY masters must be duplicated, not reopened through /proc/self/fd:
     // reopening can allocate a different PTY master, so fdstore preserves a
     // handle that is not keeping the live slave-side process attached.

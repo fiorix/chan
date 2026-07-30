@@ -1292,14 +1292,21 @@ impl WorkspaceHost {
     /// disabled during boot.
     #[cfg(target_os = "linux")]
     pub fn park_unparked_windowed_terminal_sessions(&self) {
-        let Ok(workspaces) = self.workspaces.read() else {
-            return;
+        // Clone the registry handles and RELEASE the workspaces lock before
+        // parking: each park's synchronous manifest commit re-enters
+        // `fdstore_manifest_sessions`, and a recursive read on the std
+        // RwLock can deadlock once a writer queues between the two reads.
+        let registries: Vec<Arc<crate::terminal_sessions::Registry>> = {
+            let Ok(workspaces) = self.workspaces.read() else {
+                return;
+            };
+            workspaces
+                .values()
+                .map(|runtime| runtime.artifacts.terminal_sessions.clone())
+                .collect()
         };
-        for runtime in workspaces.values() {
-            runtime
-                .artifacts
-                .terminal_sessions
-                .park_unparked_windowed_sessions();
+        for registry in registries {
+            registry.park_unparked_windowed_sessions();
         }
     }
 
@@ -1324,6 +1331,18 @@ impl WorkspaceHost {
     /// --force`): the response must not claim completion before the
     /// children are gone, HUP-immune ones included.
     pub async fn drain_terminal_sessions(&self) -> TerminalDrainOutcome {
+        self.drain_terminal_sessions_with(child_process_running, Duration::from_secs(5))
+            .await
+    }
+
+    /// Liveness- and deadline-injectable body of
+    /// [`drain_terminal_sessions`](Self::drain_terminal_sessions), so tests
+    /// can force the lingering arm without an unkillable process.
+    async fn drain_terminal_sessions_with(
+        &self,
+        alive: impl Fn(u32) -> bool,
+        wait: Duration,
+    ) -> TerminalDrainOutcome {
         let (registries, mut pids) = {
             let Ok(workspaces) = self.workspaces.read() else {
                 return TerminalDrainOutcome::default();
@@ -1343,9 +1362,9 @@ impl WorkspaceHost {
             closed += registry.close_all(CloseReason::Shutdown);
         }
         let total = pids.len();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + wait;
         loop {
-            pids.retain(|pid| child_process_running(*pid));
+            pids.retain(|pid| alive(*pid));
             if pids.is_empty() || std::time::Instant::now() >= deadline {
                 break;
             }
@@ -5217,5 +5236,305 @@ mod tests {
         assert_eq!(host.pane_color("lib-abc"), Some("#abc".into()));
         // An unknown devserver library id falls back to the default accent.
         assert_eq!(host.pane_color("lib-missing"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    mod fdstore_host {
+        use super::*;
+        use crate::terminal_sessions::{
+            CreateOptions, FdStorePark, FdStoreParker, Registry as TerminalRegistry,
+        };
+        use portable_pty::PtySize;
+
+        #[derive(Default)]
+        struct HostProbeState {
+            host: std::sync::Mutex<Option<Arc<WorkspaceHost>>>,
+            calls: std::sync::Mutex<Vec<String>>,
+            snapshot_seen: std::sync::Mutex<Vec<String>>,
+        }
+
+        #[derive(Clone, Default)]
+        struct HostProbePark(Arc<HostProbeState>);
+
+        impl HostProbePark {
+            fn parker(&self) -> FdStoreParker {
+                FdStoreParker::new(self.clone())
+            }
+
+            fn calls(&self) -> Vec<String> {
+                self.0.calls.lock().unwrap().clone()
+            }
+        }
+
+        impl FdStorePark for HostProbePark {
+            fn park(&self, fd_name: &str, _fd: std::os::fd::BorrowedFd<'_>) -> bool {
+                // The devserver commit path: snapshot HOST-wide from inside
+                // the hook. This re-enters both the workspaces RwLock and
+                // the registry sessions mutex, so completing at all proves
+                // the caller holds neither.
+                if let Some(host) = self.0.host.lock().unwrap().clone() {
+                    let seen: Vec<String> = host
+                        .fdstore_manifest_sessions()
+                        .into_iter()
+                        .map(|entry| entry.fd_name)
+                        .collect();
+                    self.0.snapshot_seen.lock().unwrap().extend(seen);
+                }
+                self.0.calls.lock().unwrap().push(format!("park:{fd_name}"));
+                true
+            }
+
+            fn unpark(&self, fd_name: &str) {
+                self.0
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("unpark:{fd_name}"));
+            }
+
+            fn adopt(&self, _fd_name: &str) -> bool {
+                true
+            }
+
+            fn changed(&self) {
+                self.0.calls.lock().unwrap().push("changed".to_string());
+            }
+        }
+
+        fn host_with_terminal_runtime() -> (Arc<WorkspaceHost>, Arc<TerminalRegistry>) {
+            let cfg = tempfile::tempdir().expect("config dir");
+            let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
+            std::mem::forget(cfg);
+            let host = Arc::new(WorkspaceHost::new(library, fake_builder()));
+            let artifacts = fake_artifacts(Router::new(), Arc::new(FakeTerminalCell));
+            let registry = artifacts.terminal_sessions.clone();
+            host.workspaces.write().expect("host map").insert(
+                "/terminal".to_string(),
+                HostedWorkspaceRuntime {
+                    root: PathBuf::from("/"),
+                    handle: ServeHandle {
+                        addr: ([127, 0, 0, 1], 0).into(),
+                        prefix: "/terminal".to_string(),
+                        token: None,
+                    },
+                    artifacts,
+                },
+            );
+            (host, registry)
+        }
+
+        fn windowed_opts(window_id: &str, command: Option<&str>) -> CreateOptions {
+            CreateOptions {
+                size: PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+                tab_name: None,
+                tab_group: None,
+                window_id: Some(window_id.to_string()),
+                mcp_env: false,
+                cwd: Some(std::env::temp_dir()),
+                command: command.map(str::to_string),
+                env: Default::default(),
+            }
+        }
+
+        /// The activation reconcile must not hold the workspaces lock (nor
+        /// any registry lock) across the park callback: the callback
+        /// re-enters both for its manifest snapshot, and the snapshot must
+        /// already see the session being parked.
+        #[tokio::test]
+        async fn activation_reconcile_parks_without_lock_recursion() {
+            let hook = HostProbePark::default();
+            let (host, registry) = host_with_terminal_runtime();
+            *hook.0.host.lock().unwrap() = Some(host.clone());
+
+            // Spawn BEFORE the parker exists (the pre-activation boot
+            // window), so the reconcile below is what parks it.
+            let windowed = registry
+                .create(windowed_opts("w1", None))
+                .expect("windowed create");
+            registry.install_fd_parker(hook.parker());
+            assert!(hook.calls().is_empty(), "nothing may park before reconcile");
+
+            host.park_unparked_windowed_terminal_sessions();
+
+            let parks: Vec<String> = hook
+                .calls()
+                .into_iter()
+                .filter(|c| c.starts_with("park:"))
+                .collect();
+            assert_eq!(parks.len(), 1, "reconcile must park the boot spawn once");
+            let name = parks[0].strip_prefix("park:").unwrap().to_string();
+            let seen = hook.0.snapshot_seen.lock().unwrap().clone();
+            assert!(
+                seen.contains(&name),
+                "the in-callback host-wide snapshot must see the session \
+                 being parked (and completing at all proves no host or \
+                 registry lock was held across the callback): {seen:?}"
+            );
+
+            // A second reconcile is a no-op: everything is parked already.
+            host.park_unparked_windowed_terminal_sessions();
+            assert_eq!(
+                hook.calls()
+                    .iter()
+                    .filter(|c| c.starts_with("park:"))
+                    .count(),
+                1,
+                "reconcile re-parked an already-parked session"
+            );
+            drop(windowed);
+            registry.close_all(crate::terminal_sessions::CloseReason::Shutdown);
+        }
+
+        /// Placement updates republish the manifest: crash restore must not
+        /// resurrect an arbitrarily old pane placement.
+        #[tokio::test]
+        async fn placement_updates_notify_the_parker() {
+            let hook = HostProbePark::default();
+            let (_host, registry) = host_with_terminal_runtime();
+            registry.install_fd_parker(hook.parker());
+
+            let handle = registry
+                .create(windowed_opts("w1", None))
+                .expect("windowed create");
+            let id = handle.id().to_string();
+            let before = hook.calls().iter().filter(|c| *c == "changed").count();
+
+            assert!(registry.update_session_layout(
+                &id,
+                Some("pane-1".into()),
+                None,
+                Some("tab-1".into()),
+            ));
+            let after = hook.calls().iter().filter(|c| *c == "changed").count();
+            assert!(
+                after > before,
+                "placement update did not republish the manifest"
+            );
+            registry.close_all(crate::terminal_sessions::CloseReason::Shutdown);
+        }
+
+        /// Drain kills a REAL child and only reports it dead once it is
+        /// observably gone (ESRCH or zombie).
+        #[tokio::test]
+        async fn drain_confirms_a_real_child_death() {
+            let (host, registry) = host_with_terminal_runtime();
+            let _handle = registry
+                .create(windowed_opts("w1", Some("exec sleep 600")))
+                .expect("windowed create");
+            let pid = registry.live_child_pids();
+            assert_eq!(pid.len(), 1, "expected one live child");
+
+            let outcome = host.drain_terminal_sessions().await;
+            assert_eq!(outcome.closed, 1);
+            assert_eq!(outcome.dead, 1, "lingering: {:?}", outcome.lingering);
+            assert!(outcome.lingering.is_empty());
+        }
+
+        /// A successful restore ADOPTS its retained store entry (no second
+        /// store call) and lands in the manifest snapshot -- the exact set
+        /// the activation rewrite serializes after apply.
+        #[tokio::test]
+        async fn restore_adopts_into_the_activation_manifest_set() {
+            let hook = HostProbePark::default();
+            let (host, registry) = host_with_terminal_runtime();
+            registry.install_fd_parker(hook.parker());
+            let windows = tempfile::tempdir().expect("windows dir");
+            host.install_window_registry(
+                Arc::new(WindowRegistry::open(windows.path().join("windows.json"))),
+                "lib-test".into(),
+            );
+            let row = host
+                .mint_window(WindowKind::Terminal, None)
+                .expect("terminal window");
+
+            let pty = portable_pty::native_pty_system()
+                .openpty(PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .expect("openpty");
+            let raw = {
+                use portable_pty::MasterPty as _;
+                pty.master.as_raw_fd().expect("master raw fd")
+            };
+            let master_fd = crate::terminal_sessions::clone_master_fd(raw).expect("dup master");
+            let meta = crate::terminal_sessions::FdStoreSessionMeta {
+                tenant_prefix: "/terminal".into(),
+                session_id: "restored1".into(),
+                tab_name: None,
+                tab_group: None,
+                window_id: Some(row.window_id.clone()),
+                pane_id: None,
+                side: None,
+                tab_id: None,
+                cwd: None,
+                command: None,
+                env: Default::default(),
+                mcp_env: false,
+                child_pid: Some(4242),
+                size: crate::terminal_sessions::StoredPtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+                seq: 3,
+                generation: 1,
+                alt_screen: false,
+                private_modes: Vec::new(),
+            };
+            let expected_name = crate::terminal_sessions::fdstore_fd_name("restored1", Some(4242));
+            let report = host.restore_fdstore_terminal_sessions(vec![
+                crate::terminal_sessions::FdStoreSessionImport {
+                    meta,
+                    master_fd,
+                    replay: b"replay".to_vec(),
+                },
+            ]);
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+
+            let calls = hook.calls();
+            assert!(
+                !calls.iter().any(|c| c.starts_with("park:")),
+                "adoption must not re-store a retained fd: {calls:?}"
+            );
+            let manifested: Vec<String> = host
+                .fdstore_manifest_sessions()
+                .into_iter()
+                .map(|entry| entry.fd_name)
+                .collect();
+            assert_eq!(
+                manifested,
+                vec![expected_name],
+                "the adopted session must be in the activation write set"
+            );
+            registry.close_all(crate::terminal_sessions::CloseReason::Shutdown);
+        }
+
+        /// A child the liveness probe never sees die is reported lingering,
+        /// not silently claimed dead.
+        #[tokio::test]
+        async fn drain_reports_forced_lingering_honestly() {
+            let (host, registry) = host_with_terminal_runtime();
+            let _handle = registry
+                .create(windowed_opts("w1", Some("exec sleep 600")))
+                .expect("windowed create");
+            let pids = registry.live_child_pids();
+            assert_eq!(pids.len(), 1);
+
+            let outcome = host
+                .drain_terminal_sessions_with(|_| true, Duration::from_millis(300))
+                .await;
+            assert_eq!(outcome.closed, 1);
+            assert_eq!(outcome.dead, 0);
+            assert_eq!(outcome.lingering, pids);
+        }
     }
 }
