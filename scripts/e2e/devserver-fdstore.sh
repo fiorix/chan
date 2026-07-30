@@ -99,7 +99,18 @@ restore_unit_state() {
     pkill -f 'sleep 8631[0-9]' >/dev/null 2>&1
     set -e
 }
-trap restore_unit_state EXIT INT TERM
+# Restore EXACTLY once, always through the EXIT trap. INT/TERM must
+# terminate (preserving a nonzero status), never resume the script after
+# a restoration already ran.
+CLEANUP_RAN=0
+on_exit() {
+    [ "$CLEANUP_RAN" = 1 ] && return
+    CLEANUP_RAN=1
+    restore_unit_state
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ---- helpers ----
 wait_until() { # seconds description cmd...
@@ -199,11 +210,18 @@ main_pid() {
     printf '%s' "$pid"
 }
 
-wait_restarted() { # old-nrestarts why
-    local old="$1" why="$2"
-    wait_until 90 "restart after $why" \
-        sh -c "[ \"\$(systemctl --user show $UNIT_NAME --property=NRestarts --value)\" != \"$old\" ] \
-            || systemctl --user is-active --quiet $UNIT_NAME"
+wait_restarted() { # old-nrestarts old-mainpid why
+    # Positive evidence of the AUTOMATIC restart first -- a changed restart
+    # count or a replaced main pid -- and only then readiness. An unchanged
+    # count with the old unit still active must keep waiting.
+    local old_restarts="$1" old_pid="$2" why="$3"
+    wait_until 90 "restart evidence after $why" sh -c "
+        n=\$(systemctl --user show $UNIT_NAME --property=NRestarts --value)
+        p=\$(systemctl --user show $UNIT_NAME --property=MainPID --value)
+        [ \"\$n\" != \"$old_restarts\" ] || { [ \"\$p\" != \"$old_pid\" ] && [ \"\$p\" != 0 ]; }
+    "
+    wait_until 90 "active unit after $why" \
+        systemctl --user is-active --quiet "$UNIT_NAME"
     wait_until 90 "readiness after $why" ready
 }
 
@@ -269,8 +287,9 @@ read -r SID2 PID2 WID2 <<<"$(spawn_windowed_sleep 86312)"
 log "session2 $SID2 child $PID2 window $WID2"
 assert_store 2 "second parked session"
 OLD_RESTARTS="$(unit_prop NRestarts)"
-kill -9 "$(main_pid)"
-wait_restarted "$OLD_RESTARTS" "crash"
+OLD_MAIN="$(main_pid)"
+kill -9 "$OLD_MAIN"
+wait_restarted "$OLD_RESTARTS" "$OLD_MAIN" "crash"
 child_alive "$PID1" || fail "session1 child died across crash restart"
 child_alive "$PID2" || fail "session2 child died across crash restart"
 assert_session_listed "$SID1"
