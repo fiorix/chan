@@ -2618,6 +2618,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn hosted_shutdown_joins_doc_close_all_before_clearing_workspace_cell() {
+        let _env = chan_home_env_read();
         let config = tempfile::tempdir().expect("config");
         let root = tempfile::tempdir().expect("workspace");
         std::fs::write(root.path().join("note.md"), "previous bytes").expect("seed note");
@@ -3420,6 +3421,7 @@ mod tests {
 
     #[tokio::test]
     async fn mount_uses_keyed_pathspec_same_basename_coexist_and_reserved_guarded() {
+        let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let state = test_state(home.path(), addr);
@@ -3712,6 +3714,7 @@ mod tests {
 
     #[tokio::test]
     async fn off_without_live_terminals_is_not_blocked() {
+        let _env = chan_home_env_read();
         use tower::ServiceExt;
 
         let home = tempfile::tempdir().expect("home");
@@ -4184,6 +4187,7 @@ mod tests {
 
     #[tokio::test]
     async fn lists_full_host_library_and_toggles_unserved_workspaces_on() {
+        let _env = chan_home_env_read();
         // GET /workspaces lists ONE row per HOST-LIBRARY workspace (what
         // `chan list` shows), not just the devserver's served subset -- so a
         // fresh devserver is not empty. An unserved library workspace is off at
@@ -4260,6 +4264,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn workspace_entries_report_foreign_locked_library_rows() {
+        let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let ws = tempfile::tempdir().expect("workspace");
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -4279,6 +4284,7 @@ mod tests {
 
     #[tokio::test]
     async fn forget_is_destructive_and_removes_from_the_host_library() {
+        let _env = chan_home_env_read();
         // Devserver Forget is destructive: it is `chan workspace rm`
         // (unmount-if-on + unregister from the host library
         // + bin the trash). The host library is the single registry, so the
@@ -4323,6 +4329,7 @@ mod tests {
 
     #[tokio::test]
     async fn off_state_persists_to_overlay() {
+        let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let ws = tempfile::tempdir().expect("workspace");
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -4457,6 +4464,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_remove_is_not_resurrected_by_a_later_persist() {
+        let _env = chan_home_env_read();
         // `chan close --remove` routes through the HOST (remove_workspace_for_root),
         // which the devserver in-memory map never sees. A later persist_state (here,
         // a new registration) must NOT re-grow the removed workspace into the
@@ -4516,6 +4524,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_close_persists_off_through_a_later_persist() {
+        let _env = chan_home_env_read();
         // A plain `chan close` (host-level close_workspace_for_root) records the
         // workspace OFF, and a later persist_state must keep it off (derive `on`
         // from what is mounted) rather than flip it back on from the stale map --
@@ -4562,6 +4571,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_close_reports_off_empty_token_immediately() {
+        let _env = chan_home_env_read();
         // `chan close` reaches the host directly, bypassing DevserverState's
         // workspace map. The management list must still report the real state
         // immediately, not the stale record's old `on` flag and tenant token.
@@ -4599,6 +4609,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_remove_drops_row_from_listing_immediately() {
+        let _env = chan_home_env_read();
         // `chan close --remove` reaches the host directly too. The host removes
         // the library row and unmounts the tenant, while DevserverState still
         // has its old map record. The management list must not surface that
@@ -4785,6 +4796,7 @@ mod tests {
 
     #[tokio::test]
     async fn library_workspaces_lists_registered_with_on_state() {
+        let _env = chan_home_env_read();
         use axum::body::to_bytes;
         use tower::ServiceExt;
 
@@ -5392,6 +5404,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_color_gate_accepts_a_tenant_token_but_windows_stay_launcher_only() {
+        let _env = chan_home_env_read();
         use tower::ServiceExt;
 
         // A window is served with its per-TENANT token, NOT the
