@@ -3558,9 +3558,25 @@ impl Session {
                 .take();
             return;
         }
-        // Exit/close may have raced the reservation: their take-once unpark
-        // found nothing to remove, so converge here or the dead fd would sit
-        // parked until the reap.
+        // Did the reservation survive the in-flight park? A concurrent
+        // close/exit may have CONSUMED it while `park` ran: its take-once
+        // unpark then sent FDSTOREREMOVE before our FDSTORE landed, so the
+        // just-stored fd is ownerless and no later take can ever remove it.
+        let survived = self
+            .fdstore_parked
+            .lock()
+            .expect("terminal fdstore parked poisoned")
+            .as_ref()
+            .is_some_and(|parked| parked.name == name);
+        if !survived {
+            // Compensate directly: the reservation is gone, so this is the
+            // only remover left for the stored name.
+            parker.unpark(&name);
+            return;
+        }
+        // Exit/close may have LANDED without consuming the reservation yet
+        // (between the closed swap and its take): converge through the
+        // take-once unpark, which exactly one of the two sides wins.
         if self.closed.load(Ordering::Relaxed)
             || self.exit.lock().expect("session exit poisoned").is_some()
         {
@@ -7177,6 +7193,94 @@ mod tests {
 
             assert_eq!(registry.close_all(CloseReason::Shutdown), 2);
             assert_eq!(hook.unpark_calls().len(), 1);
+        }
+
+        /// A close that runs WHILE `park` is in flight consumes the
+        /// provisional reservation and fires its FDSTOREREMOVE before the
+        /// FDSTORE lands; the successful park must then compensate with its
+        /// own removal of the same name, because no take-once path is left.
+        /// Deterministic via re-entrancy: the hook closes the session
+        /// through the registry from INSIDE `park`, with enter/exit markers
+        /// distinguishing the early provisional remove (between them) from
+        /// the required compensating remove (after them).
+        #[derive(Default)]
+        struct ReentrantCloseState {
+            calls: Mutex<Vec<String>>,
+            registry: Mutex<Option<Arc<Registry>>>,
+        }
+
+        #[derive(Clone, Default)]
+        struct ReentrantClosePark(Arc<ReentrantCloseState>);
+
+        impl FdStorePark for ReentrantClosePark {
+            fn park(&self, fd_name: &str, _fd: std::os::fd::BorrowedFd<'_>) -> bool {
+                self.0
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("park-enter:{fd_name}"));
+                // The session id is the middle of the fd name:
+                // chan.pty.<session_id>.<child_pid>.
+                let sid = fd_name
+                    .strip_prefix(FDSTORE_FD_PREFIX)
+                    .and_then(|rest| rest.rsplit_once('.'))
+                    .map(|(sid, _)| sid.to_string())
+                    .expect("chan fd name");
+                if let Some(registry) = self.0.registry.lock().unwrap().clone() {
+                    // The mid-flight close: consumes the provisional
+                    // reservation and sends the early remove.
+                    assert!(registry.close(&sid, CloseReason::Explicit));
+                }
+                self.0
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("park-exit:{fd_name}"));
+                true
+            }
+
+            fn unpark(&self, fd_name: &str) {
+                self.0
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("unpark:{fd_name}"));
+            }
+
+            fn adopt(&self, _fd_name: &str) -> bool {
+                true
+            }
+
+            fn changed(&self) {}
+        }
+
+        #[test]
+        fn close_during_park_gets_a_compensating_remove() {
+            let hook = ReentrantClosePark::default();
+            let registry = Arc::new(Registry::new(test_config(4096, 8, 600)));
+            registry.install_fd_parker(FdStoreParker::new(hook.clone()));
+            *hook.0.registry.lock().unwrap() = Some(registry.clone());
+
+            let _handle = registry.create(opts(Some("w1"), None)).unwrap();
+
+            let calls = hook.0.calls.lock().unwrap().clone();
+            assert_eq!(calls.len(), 4, "calls: {calls:?}");
+            let name = calls[0]
+                .strip_prefix("park-enter:")
+                .expect("first call is park entry");
+            assert_eq!(
+                calls,
+                vec![
+                    format!("park-enter:{name}"),
+                    // The consumed reservation's EARLY remove, racing ahead
+                    // of the store.
+                    format!("unpark:{name}"),
+                    format!("park-exit:{name}"),
+                    // The COMPENSATING remove for the now-ownerless fd.
+                    format!("unpark:{name}"),
+                ],
+                "the successful park must compensate for the consumed reservation"
+            );
         }
 
         #[test]
