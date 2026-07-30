@@ -196,6 +196,10 @@ pub struct Registry {
     /// keeps its blob so the window resurrects on reconnect; only an explicit
     /// discard drops it.
     blob_reaper: Mutex<Option<BlobReaper>>,
+    /// Systemd fd-store parking hook (see [`Registry::install_fd_parker`]).
+    /// `None` on every non-systemd serving path.
+    #[cfg(target_os = "linux")]
+    fd_parker: Mutex<Option<FdStoreParker>>,
     /// Per-PTY-life epoch source. Each spawn (create OR restart) takes the next
     /// value and stamps it on the session, so a reattach can prove its cached
     /// scrollback belongs to the SAME incarnation: a restart reuses the session
@@ -250,6 +254,90 @@ impl std::fmt::Debug for BlobReaper {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("BlobReaper(..)")
     }
+}
+
+/// Namespace prefix for chan PTY entries in the systemd fd store.
+#[cfg(target_os = "linux")]
+pub const FDSTORE_FD_PREFIX: &str = "chan.pty.";
+
+/// The fd-store entry name for a session incarnation:
+/// `chan.pty.<session_id>.<child_pid>`. Session ids are 32 hex chars and the
+/// pid is the last dot-separated segment (0 when the spawn reported no pid),
+/// so consumers can parse the pid without knowing the id shape. A restart
+/// mints a new name because the child pid changes.
+#[cfg(target_os = "linux")]
+pub fn fdstore_fd_name(session_id: &str, child_pid: Option<u32>) -> String {
+    format!("{FDSTORE_FD_PREFIX}{session_id}.{}", child_pid.unwrap_or(0))
+}
+
+/// Store-side half of continuous PTY parking. The devserver implements this
+/// against the systemd fd store; the registry drives it from session
+/// lifecycle events. Absent (never installed) on every non-systemd serving
+/// path, which keeps those paths byte-identical.
+#[cfg(target_os = "linux")]
+pub trait FdStorePark: Send + Sync {
+    /// Store `fd` under `fd_name` AND durably commit the restart manifest
+    /// before returning. The caller has already made the session's
+    /// provisional parked state visible, so the commit's snapshot includes
+    /// it. `false` means the fd is NOT stored (the implementation rolled
+    /// back) and the caller must clear the provisional state.
+    fn park(&self, fd_name: &str, fd: std::os::fd::BorrowedFd<'_>) -> bool;
+    /// Remove `fd_name` from the store. Manifest republication may be
+    /// deferred: a manifest entry without a stored fd is skipped and cleaned
+    /// at the next boot, so staleness in this direction is safe.
+    fn unpark(&self, fd_name: &str);
+    /// Accept an inherited fd that the store already retains under
+    /// `fd_name` (boot restore). No store call; `false` refuses adoption
+    /// and the caller clears the provisional state.
+    fn adopt(&self, fd_name: &str) -> bool;
+    /// Manifest-relevant metadata of a parked session changed (e.g. a
+    /// cross-window move rebound `window_id`).
+    fn changed(&self);
+}
+
+/// Cloneable handle to the installed [`FdStorePark`] hook. A newtype so
+/// [`Registry`] and [`Session`] keep deriving `Debug`.
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub struct FdStoreParker(Arc<dyn FdStorePark>);
+
+#[cfg(target_os = "linux")]
+impl FdStoreParker {
+    pub fn new(hook: impl FdStorePark + 'static) -> Self {
+        Self(Arc::new(hook))
+    }
+
+    fn park(&self, fd_name: &str, fd: std::os::fd::BorrowedFd<'_>) -> bool {
+        self.0.park(fd_name, fd)
+    }
+
+    fn unpark(&self, fd_name: &str) {
+        self.0.unpark(fd_name)
+    }
+
+    fn adopt(&self, fd_name: &str) -> bool {
+        self.0.adopt(fd_name)
+    }
+
+    fn changed(&self) {
+        self.0.changed()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl std::fmt::Debug for FdStoreParker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FdStoreParker(..)")
+    }
+}
+
+/// A session's live fd-store reservation: the entry name plus the hook that
+/// manages it, taken exactly once on the first close/exit path to reach it.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct ParkedFd {
+    name: String,
+    parker: FdStoreParker,
 }
 
 /// Parse the ordinal from a default `Terminal-N` name for lowest-free
@@ -408,9 +496,10 @@ pub struct FdStoreSessionMeta {
 
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
-pub struct FdStoreSessionSnapshot {
+pub struct FdStoreManifestEntry {
+    /// The fd-store entry name this session is parked under.
+    pub fd_name: String,
     pub meta: FdStoreSessionMeta,
-    pub master_fd: OwnedFd,
     /// Bounded tail of the server replay ring, carried through the restart
     /// manifest so a fresh browser attach can repaint the imported PTY.
     pub replay: Vec<u8>,
@@ -812,8 +901,65 @@ impl Registry {
             persisted_windows: Mutex::new(HashSet::new()),
             window_reaper: Mutex::new(None),
             blob_reaper: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            fd_parker: Mutex::new(None),
             generation_counter: AtomicU64::new(0),
         }
+    }
+
+    /// Install the systemd fd-store parking hook. Installed by the devserver
+    /// (via the host, at tenant mount) only when it runs under systemd
+    /// notify; every other serving path leaves it unset and no session is
+    /// ever parked. A later install replaces the prior hook.
+    #[cfg(target_os = "linux")]
+    pub fn install_fd_parker(&self, parker: FdStoreParker) {
+        *self.fd_parker.lock().expect("terminal registry poisoned") = Some(parker);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fd_parker(&self) -> Option<FdStoreParker> {
+        self.fd_parker
+            .lock()
+            .expect("terminal registry poisoned")
+            .clone()
+    }
+
+    /// Park every live windowed session that is not parked yet: the
+    /// activation reconcile for sessions that spawned while parking was
+    /// still disabled (boot, before the inherited-fd restore applied).
+    #[cfg(target_os = "linux")]
+    pub fn park_unparked_windowed_sessions(&self) {
+        let Some(parker) = self.fd_parker() else {
+            return;
+        };
+        let candidates: Vec<Arc<Session>> = {
+            let sessions = self.sessions.lock().expect("terminal registry poisoned");
+            sessions
+                .values()
+                .filter(|session| !session.closed.load(Ordering::Relaxed))
+                .filter(|session| session.window_id().is_some())
+                .filter(|session| !session.is_fdstore_parked())
+                .cloned()
+                .collect()
+        };
+        for session in candidates {
+            session.park_fdstore(&parker);
+        }
+    }
+
+    /// Park `session` if parking is enabled and it belongs to a window.
+    /// Windowless sessions are not restorable (boot restore requires a
+    /// persisted window row), so they are never parked. Must be called with
+    /// no registry lock held: the park commit snapshots every registry.
+    #[cfg(target_os = "linux")]
+    fn park_if_windowed(&self, session: &Arc<Session>) {
+        let Some(parker) = self.fd_parker() else {
+            return;
+        };
+        if session.window_id().is_none() {
+            return;
+        }
+        session.park_fdstore(&parker);
     }
 
     /// Install the hook that reaps a standalone terminal's WINDOW row when its
@@ -1039,6 +1185,11 @@ impl Registry {
         }
         sessions.insert(id.clone(), session.clone());
         drop(sessions);
+        // Park after the insert so the park commit's host snapshot sees the
+        // session; a windowed create only reports success once its fd name
+        // is durably in the restart manifest.
+        #[cfg(target_os = "linux")]
+        self.park_if_windowed(&session);
         self.notify_roster_change();
         Ok(session.attach(Some(0)))
     }
@@ -1097,8 +1248,16 @@ impl Registry {
         let mut sessions = self.sessions.lock().expect("terminal registry poisoned");
         match sessions.get(id) {
             Some(current) if Arc::ptr_eq(current, &old) => {
-                sessions.insert(id.to_string(), session);
+                sessions.insert(id.to_string(), session.clone());
                 drop(sessions);
+                // Restart transaction order: park the NEW incarnation (store +
+                // durable manifest commit) BEFORE the old entry is removed and
+                // its child killed, so no crash instant leaves the terminal
+                // absent from both the store and the manifest. The names never
+                // collide (the child pid differs). `close_for_restart` unparks
+                // the old incarnation on its way to the kill.
+                #[cfg(target_os = "linux")]
+                self.park_if_windowed(&session);
                 // Signal an in-place restart (not a close) on the old channel so
                 // an attached `/ws` reader re-attaches to the relaunched session
                 // under the same id instead of dropping the tab.
@@ -1196,13 +1355,31 @@ impl Registry {
         if window_id.is_none() {
             return;
         }
-        if let Some(session) = self
+        // Clone the Arc out and release the map lock before touching parking:
+        // the park commit snapshots every registry and would deadlock under
+        // this sessions mutex.
+        let session = self
             .sessions
             .lock()
             .expect("terminal registry poisoned")
             .get(id)
-        {
-            session.set_window_id(window_id);
+            .cloned();
+        let Some(session) = session else {
+            return;
+        };
+        #[cfg(target_os = "linux")]
+        let previous = session.window_id();
+        session.set_window_id(window_id.clone());
+        #[cfg(target_os = "linux")]
+        if session.is_fdstore_parked() {
+            // A cross-window move must republish the manifest: restore skips
+            // a session whose recorded window row no longer exists.
+            if previous != window_id {
+                session.parked_changed();
+            }
+        } else {
+            // A windowless session gaining its first window becomes parkable.
+            self.park_if_windowed(&session);
         }
     }
 
@@ -1221,16 +1398,22 @@ impl Registry {
         if pane_id.is_none() && side.is_none() && tab_id.is_none() {
             return;
         }
-        if let Some(session) = self
+        let session = self
             .sessions
             .lock()
             .expect("terminal registry poisoned")
             .get(id)
-        {
-            session.set_pane_id(pane_id);
-            session.set_side(side);
-            session.set_tab_id(tab_id);
-        }
+            .cloned();
+        let Some(session) = session else {
+            return;
+        };
+        session.set_pane_id(pane_id);
+        session.set_side(side);
+        session.set_tab_id(tab_id);
+        // Placement rides the restart manifest; republish so a crash restore
+        // does not resurrect an arbitrarily old pane placement.
+        #[cfg(target_os = "linux")]
+        session.parked_changed();
     }
 
     /// Refresh browser-reported layout coordinates without reconnecting the
@@ -1255,35 +1438,11 @@ impl Registry {
         session.set_pane_id(pane_id);
         session.set_side(side);
         session.set_tab_id(tab_id);
+        // Same manifest republish as `bind_session_layout`: a Hybrid-side
+        // move without a reconnect still changes the restored placement.
+        #[cfg(target_os = "linux")]
+        session.parked_changed();
         true
-    }
-
-    #[cfg(target_os = "linux")]
-    pub fn preserve_fdstore_session(&self, id: &str) -> bool {
-        let session = self
-            .sessions
-            .lock()
-            .expect("terminal registry poisoned")
-            .get(id)
-            .cloned();
-        if let Some(session) = session {
-            session.preserve_for_fdstore_restart();
-            true
-        } else {
-            false
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    pub fn clear_fdstore_session_preservation(&self, id: &str) {
-        if let Some(session) = self
-            .sessions
-            .lock()
-            .expect("terminal registry poisoned")
-            .get(id)
-        {
-            session.clear_fdstore_restart_preservation();
-        }
     }
 
     pub fn close(&self, id: &str, reason: CloseReason) -> bool {
@@ -1306,12 +1465,17 @@ impl Registry {
             .sessions
             .lock()
             .expect("terminal registry poisoned")
-            .remove(id)
-            .is_some();
-        if removed {
+            .remove(id);
+        if let Some(session) = removed {
+            // A removal without a close still ends the session's store
+            // membership; unpark is take-once, so a prior exit/close already
+            // having done it is fine.
+            session.unpark_fdstore();
             self.notify_roster_change();
+            true
+        } else {
+            false
         }
-        removed
     }
 
     /// Record that window `window_id` has a durable saved layout blob, so its
@@ -1748,7 +1912,12 @@ impl Registry {
         out
     }
 
-    pub fn close_all(&self, reason: CloseReason) {
+    /// Close every session (kill + unpark), returning how many were drained.
+    /// Tenant teardown and process shutdown both land here; parked sessions
+    /// that must SURVIVE a shutdown are removed beforehand by
+    /// [`detach_parked_sessions`](Self::detach_parked_sessions), which only
+    /// the devserver's pre-shutdown sweep calls.
+    pub fn close_all(&self, reason: CloseReason) -> usize {
         let sessions: Vec<Arc<Session>> = self
             .sessions
             .lock()
@@ -1756,10 +1925,48 @@ impl Registry {
             .drain()
             .map(|(_, session)| session)
             .collect();
+        let drained = sessions.len();
         for session in sessions {
-            close_or_preserve_for_shutdown(&session, reason);
+            session.close(reason);
         }
         self.notify_roster_change();
+        drained
+    }
+
+    /// Remove and DETACH every parked session: no kill, no unpark, so the
+    /// children keep running against masters the systemd fd store retains.
+    /// Only the devserver's graceful-shutdown sweep calls this, after the
+    /// final manifest write and before tenant teardown. Unparked sessions
+    /// are untouched and die normally in the following `close_all`.
+    #[cfg(target_os = "linux")]
+    pub fn detach_parked_sessions(&self) -> usize {
+        let parked: Vec<Arc<Session>> = {
+            let mut sessions = self.sessions.lock().expect("terminal registry poisoned");
+            let ids: Vec<String> = sessions
+                .iter()
+                .filter(|(_, session)| session.is_fdstore_parked())
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.iter().filter_map(|id| sessions.remove(id)).collect()
+        };
+        for session in &parked {
+            session.detach_for_fdstore_restart();
+        }
+        if !parked.is_empty() {
+            self.notify_roster_change();
+        }
+        parked.len()
+    }
+
+    /// Child pids of every not-yet-closed session, for the drain endpoint's
+    /// bounded child-death wait.
+    pub fn live_child_pids(&self) -> Vec<u32> {
+        let sessions = self.sessions.lock().expect("terminal registry poisoned");
+        sessions
+            .values()
+            .filter(|session| !session.closed.load(Ordering::Relaxed))
+            .filter_map(|session| session.child_pid)
+            .collect()
     }
 
     /// Reap sessions whose child PROCESS has exited and that have no client
@@ -1935,11 +2142,14 @@ impl Registry {
     }
 
     #[cfg(target_os = "linux")]
-    pub fn fdstore_sessions(&self, tenant_prefix: &str) -> Vec<FdStoreSessionSnapshot> {
+    /// Manifest entries for every PARKED live session: fd name, restore
+    /// metadata, and the bounded replay tail. No fd duplication: the store
+    /// already holds the fds; the manifest only describes them.
+    pub fn fdstore_manifest_sessions(&self, tenant_prefix: &str) -> Vec<FdStoreManifestEntry> {
         let sessions = self.sessions.lock().expect("terminal registry poisoned");
         sessions
             .values()
-            .filter_map(|session| session.fdstore_snapshot(tenant_prefix))
+            .filter_map(|session| session.fdstore_manifest_entry(tenant_prefix))
             .collect()
     }
 
@@ -1985,8 +2195,14 @@ impl Registry {
                 session.close(CloseReason::Shutdown);
                 continue;
             }
-            sessions.insert(id, session);
+            sessions.insert(id, session.clone());
             drop(sessions);
+            // ADOPT, not park: the store retained this fd across the restart,
+            // so a second FDSTORE would duplicate the entry. Adoption only
+            // records the name for the later unpark and manifest membership.
+            if let Some(parker) = self.fd_parker() {
+                session.adopt_fdstore(&parker);
+            }
             if let Some(window_id) = window_id {
                 self.mark_window_persisted(&window_id);
             }
@@ -2021,19 +2237,15 @@ impl Registry {
     }
 }
 
-fn close_or_preserve_for_shutdown(session: &Session, reason: CloseReason) {
-    if matches!(reason, CloseReason::Shutdown) && session.take_fdstore_restart_preservation() {
-        session.detach_for_fdstore_restart();
-    } else {
-        session.close(reason);
-    }
-}
-
 impl Drop for Registry {
     fn drop(&mut self) {
+        // An unexpected tenant drop is NOT a restart: kill and unpark
+        // everything so no child leaks. The devserver's explicit detach
+        // sweep is the only preservation path, and it empties the map
+        // before any orderly drop gets here.
         if let Ok(mut sessions) = self.sessions.lock() {
             for (_, session) in sessions.drain() {
-                close_or_preserve_for_shutdown(&session, CloseReason::Shutdown);
+                session.close(CloseReason::Shutdown);
             }
         }
     }
@@ -2411,11 +2623,14 @@ struct Session {
     /// state of members they do not host.
     broadcast: AtomicBool,
     closed: AtomicBool,
-    /// Set only after a successful systemd fdstore prepare. A process-wide
-    /// shutdown drains this session without killing its child, so the inherited
-    /// PTY can be restored by the replacement devserver. Explicit terminal
-    /// close/restart paths ignore this flag and still tear the PTY down.
-    fdstore_preserve_on_shutdown: AtomicBool,
+    /// The systemd fd-store reservation this session's PTY master is parked
+    /// under, when continuous parking is enabled. Taken exactly once by
+    /// [`Session::unpark_fdstore`] on the first close/exit path to reach it,
+    /// so store removal is idempotent across converging paths. Lock order: a
+    /// registry sessions lock may be held while this is READ (manifest
+    /// snapshot); never invoke the parker while holding this lock.
+    #[cfg(target_os = "linux")]
+    fdstore_parked: Mutex<Option<ParkedFd>>,
     /// The PTY's exit state, set once its child process exits (the same value
     /// broadcast as [`SessionEvent::Exit`]). `None` while the process runs.
     /// Stored -- not only broadcast -- so a poller (the desktop's control-script
@@ -2600,7 +2815,8 @@ impl Session {
             private_mode_tail: Mutex::new(Vec::new()),
             broadcast: AtomicBool::new(false),
             closed: AtomicBool::new(false),
-            fdstore_preserve_on_shutdown: AtomicBool::new(false),
+            #[cfg(target_os = "linux")]
+            fdstore_parked: Mutex::new(None),
             exit: Mutex::new(None),
         });
 
@@ -2710,6 +2926,10 @@ impl Session {
                     match child.try_wait() {
                         Ok(Some(status)) => {
                             let exit = TerminalExit::from_status(&status);
+                            // The PTY is dead: its store entry leaves NOW, not
+                            // at the eventual reap, so a restart in between
+                            // never inherits a dead master.
+                            session.unpark_fdstore();
                             // Record before broadcasting so a poller that reads
                             // the registry right after the event still sees it.
                             *session.exit.lock().expect("session exit poisoned") =
@@ -2722,6 +2942,7 @@ impl Session {
                         }
                         Ok(None) => std::thread::sleep(Duration::from_millis(25)),
                         Err(e) => {
+                            session.unpark_fdstore();
                             session.broadcast(SessionEvent::Error(format!(
                                 "terminal wait failed: {e}"
                             )));
@@ -2735,11 +2956,17 @@ impl Session {
     }
 
     #[cfg(target_os = "linux")]
-    fn fdstore_snapshot(&self, tenant_prefix: &str) -> Option<FdStoreSessionSnapshot> {
+    fn fdstore_manifest_entry(&self, tenant_prefix: &str) -> Option<FdStoreManifestEntry> {
         if self.closed.load(Ordering::Relaxed) {
             return None;
         }
-        let master_fd = self.master_fd.as_ref()?.as_fd().try_clone_to_owned().ok()?;
+        let fd_name = self
+            .fdstore_parked
+            .lock()
+            .expect("terminal fdstore parked poisoned")
+            .as_ref()?
+            .name
+            .clone();
         let size = *self.winsize.lock().expect("terminal winsize poisoned");
         let private_modes = self
             .private_modes
@@ -2768,9 +2995,9 @@ impl Session {
             alt_screen: self.in_alt_screen.load(Ordering::Relaxed),
             private_modes,
         };
-        Some(FdStoreSessionSnapshot {
+        Some(FdStoreManifestEntry {
+            fd_name,
             meta,
-            master_fd,
             replay: self.fdstore_replay_tail(),
         })
     }
@@ -2844,7 +3071,8 @@ impl Session {
             private_mode_tail: Mutex::new(Vec::new()),
             broadcast: AtomicBool::new(false),
             closed: AtomicBool::new(false),
-            fdstore_preserve_on_shutdown: AtomicBool::new(false),
+            #[cfg(target_os = "linux")]
+            fdstore_parked: Mutex::new(None),
             exit: Mutex::new(None),
         });
 
@@ -3289,27 +3517,156 @@ impl Session {
         if self.closed.swap(true, Ordering::Relaxed) {
             return;
         }
+        // After the swap guard: a DETACHED session (closed=true, still
+        // parked) must keep its store entry through process exit, so a late
+        // close() on it returns above without unparking.
+        self.unpark_fdstore();
         self.broadcast(SessionEvent::Closed(reason));
         let _ = self.command_tx.send(PtyCommand::Kill);
     }
 
+    /// Reserve the parked state, then store the fd and durably commit the
+    /// manifest. The reservation is made visible BEFORE the park call so the
+    /// commit's host snapshot includes this session, and rolled back if the
+    /// hook reports failure. Never called under a registry sessions lock.
     #[cfg(target_os = "linux")]
-    fn preserve_for_fdstore_restart(&self) {
-        self.fdstore_preserve_on_shutdown
-            .store(true, Ordering::Relaxed);
+    fn park_fdstore(&self, parker: &FdStoreParker) {
+        if self.closed.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(master_fd) = self.master_fd.as_ref() else {
+            return;
+        };
+        let name = fdstore_fd_name(&self.id, self.child_pid);
+        {
+            let mut parked = self
+                .fdstore_parked
+                .lock()
+                .expect("terminal fdstore parked poisoned");
+            if parked.is_some() {
+                return;
+            }
+            *parked = Some(ParkedFd {
+                name: name.clone(),
+                parker: parker.clone(),
+            });
+        }
+        if !parker.park(&name, master_fd.as_fd()) {
+            self.fdstore_parked
+                .lock()
+                .expect("terminal fdstore parked poisoned")
+                .take();
+            return;
+        }
+        // Did the reservation survive the in-flight park? A concurrent
+        // close/exit may have CONSUMED it while `park` ran: its take-once
+        // unpark then sent FDSTOREREMOVE before our FDSTORE landed, so the
+        // just-stored fd is ownerless and no later take can ever remove it.
+        let survived = self
+            .fdstore_parked
+            .lock()
+            .expect("terminal fdstore parked poisoned")
+            .as_ref()
+            .is_some_and(|parked| parked.name == name);
+        if !survived {
+            // Compensate directly: the reservation is gone, so this is the
+            // only remover left for the stored name.
+            parker.unpark(&name);
+            return;
+        }
+        // Exit/close may have LANDED without consuming the reservation yet
+        // (between the closed swap and its take): converge through the
+        // take-once unpark, which exactly one of the two sides wins.
+        if self.closed.load(Ordering::Relaxed)
+            || self.exit.lock().expect("session exit poisoned").is_some()
+        {
+            self.unpark_fdstore();
+        }
     }
+
+    /// Record an inherited fd the store already retains (boot restore).
+    /// Same reservation/rollback shape as [`Session::park_fdstore`], without
+    /// a store call.
+    #[cfg(target_os = "linux")]
+    fn adopt_fdstore(&self, parker: &FdStoreParker) {
+        if self.closed.load(Ordering::Relaxed) {
+            return;
+        }
+        let name = fdstore_fd_name(&self.id, self.child_pid);
+        {
+            let mut parked = self
+                .fdstore_parked
+                .lock()
+                .expect("terminal fdstore parked poisoned");
+            if parked.is_some() {
+                return;
+            }
+            *parked = Some(ParkedFd {
+                name: name.clone(),
+                parker: parker.clone(),
+            });
+        }
+        if !parker.adopt(&name) {
+            self.fdstore_parked
+                .lock()
+                .expect("terminal fdstore parked poisoned")
+                .take();
+            return;
+        }
+        // Same exit/close race convergence as `park_fdstore`: the imported
+        // reader may observe an instant EOF before the adoption lands.
+        if self.closed.load(Ordering::Relaxed)
+            || self.exit.lock().expect("session exit poisoned").is_some()
+        {
+            self.unpark_fdstore();
+        }
+    }
+
+    /// Remove this session's fd-store entry, exactly once. Every close/exit
+    /// path converges here: explicit close, in-place restart, child exit,
+    /// read failure, registry removal. Safe to call repeatedly and from any
+    /// state; a never-parked or already-unparked session is a no-op.
+    #[cfg(target_os = "linux")]
+    fn unpark_fdstore(&self) {
+        let taken = self
+            .fdstore_parked
+            .lock()
+            .expect("terminal fdstore parked poisoned")
+            .take();
+        if let Some(parked) = taken {
+            parked.parker.unpark(&parked.name);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn unpark_fdstore(&self) {}
 
     #[cfg(target_os = "linux")]
-    fn clear_fdstore_restart_preservation(&self) {
-        self.fdstore_preserve_on_shutdown
-            .store(false, Ordering::Relaxed);
+    fn is_fdstore_parked(&self) -> bool {
+        self.fdstore_parked
+            .lock()
+            .expect("terminal fdstore parked poisoned")
+            .is_some()
     }
 
-    fn take_fdstore_restart_preservation(&self) -> bool {
-        self.fdstore_preserve_on_shutdown
-            .swap(false, Ordering::Relaxed)
+    /// Republish parked metadata after a manifest-relevant change.
+    #[cfg(target_os = "linux")]
+    fn parked_changed(&self) {
+        let parker = self
+            .fdstore_parked
+            .lock()
+            .expect("terminal fdstore parked poisoned")
+            .as_ref()
+            .map(|parked| parked.parker.clone());
+        if let Some(parker) = parker {
+            parker.changed();
+        }
     }
 
+    /// Mark closed WITHOUT killing the child or unparking: the master stays
+    /// in the systemd fd store and the child keeps running for the next
+    /// devserver instance to re-import. Only the graceful-shutdown detach
+    /// sweep calls this.
     fn detach_for_fdstore_restart(&self) {
         if self.closed.swap(true, Ordering::Relaxed) {
             return;
@@ -3328,6 +3685,9 @@ impl Session {
         if self.closed.swap(true, Ordering::Relaxed) {
             return;
         }
+        // The replacement incarnation is already parked under its own name
+        // (the pid differs), so removing this one's entry cannot touch it.
+        self.unpark_fdstore();
         self.broadcast(SessionEvent::Restarted);
         let _ = self.command_tx.send(PtyCommand::Kill);
     }
@@ -3417,6 +3777,9 @@ impl Session {
         }
         *stored = Some(exit.clone());
         drop(stored);
+        // Imported-session exit/EOF/read-failure convergence: the dead PTY
+        // leaves the store immediately (idempotent take).
+        self.unpark_fdstore();
         *registry_last_exit
             .lock()
             .expect("terminal registry poisoned") = Some(exit.clone());
@@ -3611,7 +3974,7 @@ impl Read for ImportedPtyFd {
 }
 
 #[cfg(target_os = "linux")]
-fn clone_master_fd(raw_fd: RawFd) -> io::Result<OwnedFd> {
+pub(crate) fn clone_master_fd(raw_fd: RawFd) -> io::Result<OwnedFd> {
     // PTY masters must be duplicated, not reopened through /proc/self/fd:
     // reopening can allocate a different PTY master, so fdstore preserves a
     // handle that is not keeping the live slave-side process attached.
@@ -3858,7 +4221,8 @@ mod tests {
             private_mode_tail: Mutex::new(Vec::new()),
             broadcast: AtomicBool::new(false),
             closed: AtomicBool::new(false),
-            fdstore_preserve_on_shutdown: AtomicBool::new(false),
+            #[cfg(target_os = "linux")]
+            fdstore_parked: Mutex::new(None),
             exit: Mutex::new(None),
         });
         (session, command_rx)
@@ -6530,5 +6894,440 @@ mod tests {
         // No explicit group resolves to the default, matching the SPA.
         assert_eq!(roster[1].tab_group, DEFAULT_TERMINAL_GROUP);
         assert!(!roster[1].broadcast);
+    }
+
+    #[cfg(target_os = "linux")]
+    mod fdstore_parking {
+        use super::*;
+
+        #[derive(Default)]
+        struct RecordingParkState {
+            calls: Mutex<Vec<String>>,
+            refuse_park: AtomicBool,
+            snapshot_registry: Mutex<Option<Arc<Registry>>>,
+            snapshot_seen: Mutex<Vec<String>>,
+        }
+
+        #[derive(Clone, Default)]
+        struct RecordingPark(Arc<RecordingParkState>);
+
+        impl RecordingPark {
+            fn parker(&self) -> FdStoreParker {
+                FdStoreParker::new(self.clone())
+            }
+
+            fn calls(&self) -> Vec<String> {
+                self.0.calls.lock().unwrap().clone()
+            }
+
+            fn unpark_calls(&self) -> Vec<String> {
+                self.calls()
+                    .into_iter()
+                    .filter(|call| call.starts_with("unpark:"))
+                    .collect()
+            }
+
+            fn wait_for_call(&self, prefix: &str) -> String {
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                loop {
+                    if let Some(call) = self
+                        .calls()
+                        .into_iter()
+                        .find(|call| call.starts_with(prefix))
+                    {
+                        return call;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "no {prefix} call within deadline; calls: {:?}",
+                        self.calls()
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+
+        impl FdStorePark for RecordingPark {
+            fn park(&self, fd_name: &str, _fd: std::os::fd::BorrowedFd<'_>) -> bool {
+                // Simulate the devserver commit: snapshot the registry from
+                // inside the hook. Deadlock-free only if the caller holds no
+                // registry lock, and the provisional parked state must
+                // already be visible here.
+                if let Some(registry) = self.0.snapshot_registry.lock().unwrap().clone() {
+                    let seen: Vec<String> = registry
+                        .fdstore_manifest_sessions("t")
+                        .into_iter()
+                        .map(|entry| entry.fd_name)
+                        .collect();
+                    self.0.snapshot_seen.lock().unwrap().extend(seen);
+                }
+                self.0.calls.lock().unwrap().push(format!("park:{fd_name}"));
+                !self.0.refuse_park.load(Ordering::Relaxed)
+            }
+
+            fn unpark(&self, fd_name: &str) {
+                self.0
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("unpark:{fd_name}"));
+            }
+
+            fn adopt(&self, fd_name: &str) -> bool {
+                self.0
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("adopt:{fd_name}"));
+                true
+            }
+
+            fn changed(&self) {
+                self.0.calls.lock().unwrap().push("changed".to_string());
+            }
+        }
+
+        fn opts(window_id: Option<&str>, command: Option<&str>) -> CreateOptions {
+            CreateOptions {
+                size: test_size(),
+                tab_name: None,
+                tab_group: None,
+                window_id: window_id.map(str::to_string),
+                mcp_env: false,
+                cwd: None,
+                command: command.map(str::to_string),
+                env: Default::default(),
+            }
+        }
+
+        fn parked_registry(hook: &RecordingPark) -> Registry {
+            let registry = Registry::new(test_config(4096, 8, 600));
+            registry.install_fd_parker(hook.parker());
+            registry
+        }
+
+        #[test]
+        fn windowed_create_parks_and_close_unparks_same_name() {
+            let hook = RecordingPark::default();
+            let registry = parked_registry(&hook);
+            let handle = registry.create(opts(Some("w1"), None)).unwrap();
+            let id = handle.id().to_string();
+
+            let park = hook.wait_for_call("park:");
+            let name = park.strip_prefix("park:").unwrap().to_string();
+            assert!(name.starts_with(FDSTORE_FD_PREFIX));
+            assert!(name.contains(&id));
+
+            assert!(registry.close(&id, CloseReason::Explicit));
+            assert_eq!(hook.unpark_calls(), vec![format!("unpark:{name}")]);
+        }
+
+        #[test]
+        fn windowless_create_parks_only_on_first_window_rebind() {
+            let hook = RecordingPark::default();
+            let registry = parked_registry(&hook);
+            let handle = registry.create(opts(None, None)).unwrap();
+            let id = handle.id().to_string();
+            assert!(hook.calls().is_empty(), "windowless session parked");
+
+            drop(handle);
+            let handle = registry
+                .get_or_create_for_ws(
+                    Some(&id),
+                    None,
+                    opts(Some("w1"), None),
+                    TerminalPlacement::default(),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(handle.id(), id);
+            hook.wait_for_call("park:");
+            registry.close_all(CloseReason::Shutdown);
+        }
+
+        #[test]
+        fn child_exit_unparks_immediately_and_keeps_attached_session() {
+            let hook = RecordingPark::default();
+            let registry = parked_registry(&hook);
+            // `true` exits at once; the attached handle keeps the dead
+            // session viewable while its store entry must already be gone.
+            let handle = registry.create(opts(Some("w1"), Some("true"))).unwrap();
+            let id = handle.id().to_string();
+            hook.wait_for_call("park:");
+            hook.wait_for_call("unpark:");
+            assert!(
+                registry.session_window_id(&id).is_some(),
+                "attached dead session was removed from the registry"
+            );
+
+            // A later close converges on the same take-once state: no second
+            // store removal.
+            registry.close(&id, CloseReason::Explicit);
+            assert_eq!(hook.unpark_calls().len(), 1);
+        }
+
+        #[test]
+        fn restart_parks_new_incarnation_before_unparking_old() {
+            let hook = RecordingPark::default();
+            let registry = parked_registry(&hook);
+            let handle = registry.create(opts(Some("w1"), None)).unwrap();
+            let id = handle.id().to_string();
+            let old_park = hook.wait_for_call("park:");
+            let old_name = old_park.strip_prefix("park:").unwrap().to_string();
+
+            assert!(registry
+                .restart(
+                    &id,
+                    RestartOverrides {
+                        tab_name: None,
+                        tab_group: None,
+                        window_id: None,
+                        command: None,
+                        env: None,
+                    },
+                )
+                .unwrap());
+            hook.wait_for_call("unpark:");
+
+            let calls = hook.calls();
+            let parks: Vec<&String> = calls.iter().filter(|c| c.starts_with("park:")).collect();
+            assert_eq!(parks.len(), 2, "calls: {calls:?}");
+            let new_name = parks[1].strip_prefix("park:").unwrap().to_string();
+            assert_ne!(new_name, old_name, "incarnations must not share a name");
+            let new_park_at = calls.iter().position(|c| *c == *parks[1]).unwrap();
+            let old_unpark_at = calls
+                .iter()
+                .position(|c| *c == format!("unpark:{old_name}"))
+                .expect("old incarnation unparked");
+            assert!(
+                new_park_at < old_unpark_at,
+                "new must be stored before old is removed: {calls:?}"
+            );
+            registry.close_all(CloseReason::Shutdown);
+        }
+
+        #[test]
+        fn park_refusal_leaves_session_alive_and_unparked() {
+            let hook = RecordingPark::default();
+            hook.0.refuse_park.store(true, Ordering::Relaxed);
+            let registry = parked_registry(&hook);
+            let handle = registry.create(opts(Some("w1"), None)).unwrap();
+            let id = handle.id().to_string();
+            hook.wait_for_call("park:");
+
+            assert!(registry.close(&id, CloseReason::Explicit));
+            assert!(
+                hook.unpark_calls().is_empty(),
+                "refused park must roll back the reservation"
+            );
+        }
+
+        #[test]
+        fn park_commit_snapshot_sees_provisional_state_without_deadlock() {
+            let hook = RecordingPark::default();
+            let registry = Arc::new(Registry::new(test_config(4096, 8, 600)));
+            registry.install_fd_parker(hook.parker());
+            *hook.0.snapshot_registry.lock().unwrap() = Some(registry.clone());
+
+            let handle = registry.create(opts(Some("w1"), None)).unwrap();
+            let park = hook.wait_for_call("park:");
+            let name = park.strip_prefix("park:").unwrap();
+            let seen = hook.0.snapshot_seen.lock().unwrap().clone();
+            assert!(
+                seen.iter().any(|entry| entry == name),
+                "commit snapshot missed the provisional parked session: {seen:?}"
+            );
+            drop(handle);
+            registry.close_all(CloseReason::Shutdown);
+        }
+
+        #[test]
+        fn detach_parked_sessions_preserves_children_and_skips_unparked() {
+            let hook = RecordingPark::default();
+            let registry = parked_registry(&hook);
+            let parked = registry.create(opts(Some("w1"), None)).unwrap();
+            let parked_id = parked.id().to_string();
+            let windowless = registry.create(opts(None, None)).unwrap();
+            let windowless_id = windowless.id().to_string();
+            hook.wait_for_call("park:");
+            let child_pid = {
+                let sessions = registry.sessions.lock().unwrap();
+                sessions.get(&parked_id).unwrap().child_pid.unwrap()
+            };
+
+            assert_eq!(registry.detach_parked_sessions(), 1);
+            assert!(registry.session_window_id(&parked_id).is_none());
+            assert!(registry.session_window_id(&windowless_id).is_some());
+            assert!(
+                hook.unpark_calls().is_empty(),
+                "detach must keep the store entry"
+            );
+            assert!(
+                std::fs::metadata(format!("/proc/{child_pid}")).is_ok(),
+                "detached child was killed"
+            );
+
+            // The preserved shell is this test's responsibility now.
+            let pid = rustix::process::Pid::from_raw(child_pid as i32).unwrap();
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+            registry.close_all(CloseReason::Shutdown);
+        }
+
+        #[test]
+        fn registry_drop_unparks_and_kills_leftovers() {
+            let hook = RecordingPark::default();
+            let registry = parked_registry(&hook);
+            let _handle = registry.create(opts(Some("w1"), None)).unwrap();
+            hook.wait_for_call("park:");
+            drop(registry);
+            assert_eq!(hook.unpark_calls().len(), 1, "drop must not preserve");
+        }
+
+        #[test]
+        fn close_all_reports_count_and_unparks() {
+            let hook = RecordingPark::default();
+            let registry = parked_registry(&hook);
+            let _windowed = registry.create(opts(Some("w1"), None)).unwrap();
+            let _windowless = registry.create(opts(None, None)).unwrap();
+            hook.wait_for_call("park:");
+
+            assert_eq!(registry.close_all(CloseReason::Shutdown), 2);
+            assert_eq!(hook.unpark_calls().len(), 1);
+        }
+
+        /// A close that runs WHILE `park` is in flight consumes the
+        /// provisional reservation and fires its FDSTOREREMOVE before the
+        /// FDSTORE lands; the successful park must then compensate with its
+        /// own removal of the same name, because no take-once path is left.
+        /// Deterministic via re-entrancy: the hook closes the session
+        /// through the registry from INSIDE `park`, with enter/exit markers
+        /// distinguishing the early provisional remove (between them) from
+        /// the required compensating remove (after them).
+        #[derive(Default)]
+        struct ReentrantCloseState {
+            calls: Mutex<Vec<String>>,
+            registry: Mutex<Option<Arc<Registry>>>,
+        }
+
+        #[derive(Clone, Default)]
+        struct ReentrantClosePark(Arc<ReentrantCloseState>);
+
+        impl FdStorePark for ReentrantClosePark {
+            fn park(&self, fd_name: &str, _fd: std::os::fd::BorrowedFd<'_>) -> bool {
+                self.0
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("park-enter:{fd_name}"));
+                // The session id is the middle of the fd name:
+                // chan.pty.<session_id>.<child_pid>.
+                let sid = fd_name
+                    .strip_prefix(FDSTORE_FD_PREFIX)
+                    .and_then(|rest| rest.rsplit_once('.'))
+                    .map(|(sid, _)| sid.to_string())
+                    .expect("chan fd name");
+                if let Some(registry) = self.0.registry.lock().unwrap().clone() {
+                    // The mid-flight close: consumes the provisional
+                    // reservation and sends the early remove.
+                    assert!(registry.close(&sid, CloseReason::Explicit));
+                }
+                self.0
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("park-exit:{fd_name}"));
+                true
+            }
+
+            fn unpark(&self, fd_name: &str) {
+                self.0
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("unpark:{fd_name}"));
+            }
+
+            fn adopt(&self, _fd_name: &str) -> bool {
+                true
+            }
+
+            fn changed(&self) {}
+        }
+
+        #[test]
+        fn close_during_park_gets_a_compensating_remove() {
+            let hook = ReentrantClosePark::default();
+            let registry = Arc::new(Registry::new(test_config(4096, 8, 600)));
+            registry.install_fd_parker(FdStoreParker::new(hook.clone()));
+            *hook.0.registry.lock().unwrap() = Some(registry.clone());
+
+            let _handle = registry.create(opts(Some("w1"), None)).unwrap();
+
+            let calls = hook.0.calls.lock().unwrap().clone();
+            assert_eq!(calls.len(), 4, "calls: {calls:?}");
+            let name = calls[0]
+                .strip_prefix("park-enter:")
+                .expect("first call is park entry");
+            assert_eq!(
+                calls,
+                vec![
+                    format!("park-enter:{name}"),
+                    // The consumed reservation's EARLY remove, racing ahead
+                    // of the store.
+                    format!("unpark:{name}"),
+                    format!("park-exit:{name}"),
+                    // The COMPENSATING remove for the now-ownerless fd.
+                    format!("unpark:{name}"),
+                ],
+                "the successful park must compensate for the consumed reservation"
+            );
+        }
+
+        #[test]
+        fn restore_adopts_without_a_store_call_and_unparks_on_close() {
+            let hook = RecordingPark::default();
+            let registry = parked_registry(&hook);
+
+            let pty = native_pty_system().openpty(test_size()).unwrap();
+            let raw_fd = pty.master.as_raw_fd().unwrap();
+            let master_fd = clone_master_fd(raw_fd).unwrap();
+            let meta = FdStoreSessionMeta {
+                tenant_prefix: "t".into(),
+                session_id: "imported-session".into(),
+                tab_name: None,
+                tab_group: None,
+                window_id: Some("w1".into()),
+                pane_id: None,
+                side: None,
+                tab_id: None,
+                cwd: None,
+                command: None,
+                env: Default::default(),
+                mcp_env: false,
+                child_pid: Some(4242),
+                size: test_size().into(),
+                seq: 7,
+                generation: 3,
+                alt_screen: false,
+                private_modes: Vec::new(),
+            };
+            let report = registry.restore_fdstore_sessions(vec![FdStoreSessionImport {
+                meta,
+                master_fd,
+                replay: b"tail".to_vec(),
+            }]);
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+
+            let adopt = hook.wait_for_call("adopt:");
+            let name = adopt.strip_prefix("adopt:").unwrap().to_string();
+            assert_eq!(name, fdstore_fd_name("imported-session", Some(4242)));
+            assert!(
+                !hook.calls().iter().any(|c| c.starts_with("park:")),
+                "adoption must not re-store an inherited fd"
+            );
+
+            assert!(registry.close("imported-session", CloseReason::Explicit));
+            assert_eq!(hook.unpark_calls(), vec![format!("unpark:{name}")]);
+        }
     }
 }

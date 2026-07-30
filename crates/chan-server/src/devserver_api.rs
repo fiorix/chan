@@ -122,6 +122,17 @@ impl std::fmt::Debug for RotatedToken {
     }
 }
 
+/// Response of `POST /api/devserver/terminal-sessions/drain`: every terminal
+/// session was closed and each child pid waited on, bounded. `lingering`
+/// pids were still running at the deadline -- the drain is honest about
+/// partial teardown instead of claiming completion.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DrainedTerminals {
+    pub closed: usize,
+    pub dead: usize,
+    pub lingering: Vec<u32>,
+}
+
 /// One element of `GET /api/devserver/windows`: a persisted window on the box,
 /// aggregated across ALL tenants (workspace + standalone-terminal) for the
 /// desktop's Window menu (menu-reopen of closed devserver windows). A row
