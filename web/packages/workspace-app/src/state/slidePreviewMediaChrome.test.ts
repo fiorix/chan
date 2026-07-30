@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { renderMermaid } from "../editor/mermaid_render";
+import { slidePreviewCss } from "../editor/slide_dom";
 import { openSlidePreview } from "./slidePreview";
 
 vi.mock("../editor/mermaid_render", () => ({
@@ -260,6 +261,51 @@ describe("slide overlay media chrome", () => {
     viewer.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(document.querySelector(".md-diagram-zoom")).toBeNull();
     expect(slideBackdrop()).toBeTruthy();
+    handle.close();
+  });
+
+  test("a mixed-content paragraph image keeps its alignment after load", async () => {
+    // `before ![](...) after` is mixed content: the paragraph never
+    // receives the standalone flex classes, so post-load alignment
+    // rides entirely on the wrapper's own margins.
+    const source = [
+      "---",
+      "chan:",
+      "  kind: slides",
+      '  slides:',
+      '    aspect_ratio: "16:9"',
+      "---",
+      "",
+      "# Slide 1",
+      "",
+      "before ![shot](photo.png#right) after",
+      "",
+    ].join("\n");
+    const handle = openSlidePreview({
+      source,
+      currentLine: 0,
+      fromPath: "deck.md",
+      theme: "light",
+    })!;
+    loadSlideImage();
+    const wrap = document.querySelector<HTMLElement>(".md-slide-media-wrap")!;
+    const img = wrap.querySelector("img")!;
+    expect(img.classList.contains("chan-slide-align-right")).toBe(true);
+    // The wrap mirrors the authored alignment class...
+    expect(wrap.classList.contains("chan-slide-align-right")).toBe(true);
+    // ...because the paragraph carries no flex alignment to lean on.
+    expect(wrap.closest("p")?.classList.contains("chan-slide-media")).toBe(
+      false,
+    );
+    // And the overlay CSS holds the wrapper-level margin rules that
+    // implement left/right for exactly this case.
+    const css = slidePreviewCss();
+    expect(css).toMatch(
+      /\.md-slide-media-wrap\.chan-slide-align-right\s*\{[^}]*margin-left:\s*auto/,
+    );
+    expect(css).toMatch(
+      /\.md-slide-media-wrap\.chan-slide-align-left\s*\{[^}]*margin-right:\s*auto/,
+    );
     handle.close();
   });
 

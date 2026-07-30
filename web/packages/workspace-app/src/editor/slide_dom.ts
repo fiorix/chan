@@ -742,6 +742,19 @@ export function slidePreviewCss(): string {
 }
 .md-slide-preview-page .md-slide-media-wrap > img { margin: 0; }
 .md-slide-preview-page .chan-slide-media > .md-slide-media-wrap { margin: 0.7em 0; }
+/* The wrap carries the img's authored alignment (mirrored classes):
+   in a mixed-content paragraph there is no flex parent, so these
+   horizontal margins are what hold a left/right image off center. In
+   the standalone flex path an auto margin pushes the same way as the
+   parent's justify-content, so the rules stay harmless there. */
+.md-slide-preview-page .md-slide-media-wrap.chan-slide-align-left {
+  margin-left: 0;
+  margin-right: auto;
+}
+.md-slide-preview-page .md-slide-media-wrap.chan-slide-align-right {
+  margin-left: auto;
+  margin-right: 0;
+}
 .md-slide-preview-page .md-slide-diagram,
 .md-slide-preview-page .md-slide-excalidraw { position: relative; }
 .md-slide-preview-page .md-slide-media-actions {

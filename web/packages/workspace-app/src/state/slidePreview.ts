@@ -132,6 +132,15 @@ export function openSlidePreview(opts: OpenSlidePreviewOptions): SlidePreviewHan
     image: (img, raw) => {
       const wrap = document.createElement("span");
       wrap.className = "md-slide-media-wrap";
+      // The wrap takes over the img's block/margin role, so it must
+      // also take over the authored alignment: in a mixed-content
+      // paragraph the img's own align-class margins are what push it
+      // left/right (there is no flex parent there), and the wrap's
+      // margin reset would otherwise recenter the image on load.
+      for (const align of ["left", "center", "right"]) {
+        const cls = `chan-slide-align-${align}`;
+        if (img.classList.contains(cls)) wrap.classList.add(cls);
+      }
       img.replaceWith(wrap);
       wrap.appendChild(img);
       const row = document.createElement("span");
