@@ -1,6 +1,6 @@
 <section class="page-head">
   <h1>Install Chan</h1>
-  <p><strong>Chan Desktop</strong>, the native app, sets up the <code>chan</code> and <code>cs</code> symlinks in <code>~/.local/bin</code> so you can drive Chan from the command line.</p>
+  <p><strong>Chan Desktop</strong>, the native app, includes the <code>chan</code> and <code>cs</code> command entry points so you can drive Chan from the command line.</p>
 </section>
 
 <section class="install-block">
@@ -87,8 +87,17 @@
 
 <section class="install-block">
   <div class="section-heading">
-    <h2>Ubuntu, Fedora &amp; Arch repositories</h2>
-    <p>Prefer distro packages? Chan ships from a Launchpad PPA, a Fedora COPR, and the Arch User Repository, so installs and updates ride <code>apt</code>, <code>dnf</code>, and your AUR helper instead of the AppImage or static binaries. <code>chan-desktop</code> is the app and also provides the <code>chan</code> and <code>cs</code> commands; install plain <code>chan</code> for headless machines: one or the other, not both.</p>
+    <h2>Linux package managers</h2>
+    <p>Prefer managed packages? Chan ships as a Nix flake, from a Launchpad PPA, a Fedora COPR, and the Arch User Repository, so installs and updates stay with your package manager instead of the AppImage or static binaries. <code>chan-desktop</code> is the app and also provides the <code>chan</code> and <code>cs</code> commands. The apt, dnf, and AUR repositories also offer plain <code>chan</code> for headless machines: install one or the other, not both.</p>
+  </div>
+
+  <div class="download-group">
+    <h3>Nix <span class="group-note">Linux x86_64 + aarch64</span></h3>
+    <div class="command-copy" data-copy-block>
+      <code><span>$</span><b data-copy-value>nix profile install github:fiorix/chan</b></code>
+      <button type="button">Copy</button>
+    </div>
+    <p class="minor">The default flake package is <code>chan-desktop</code>, including the <code>chan</code> and <code>cs</code> commands. It has no systemd user unit.</p>
   </div>
 
   <div class="download-group">

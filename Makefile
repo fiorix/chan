@@ -7,6 +7,7 @@
 
 PREFIX ?= $(if $(XDG_BIN_HOME),$(XDG_BIN_HOME:/bin=),$(HOME)/.local)
 CARGO ?= cargo
+NIX ?= nix
 NPM ?= npm
 PYTHON ?= python3
 # The AUR recipes populate web/node_modules with `npm ci` in prepare() and then
@@ -191,6 +192,16 @@ workflow-check: ## Run actionlint (and shellcheck on run: blocks) over the workf
 .PHONY: build-matrix-check
 build-matrix-check: ## Verify every shipped build surface remains gated.
 	$(PYTHON) scripts/check-build-matrix.py
+
+.PHONY: nix-check
+nix-check: ## Evaluate, build, and smoke the default Nix package.
+	$(NIX) flake check --all-systems --no-build
+	@out="$$($(NIX) build --no-link --print-out-paths .#chan-desktop)"; \
+		[ -n "$$out" ] && [ "$$(printf '%s\n' "$$out" | wc -l)" -eq 1 ] || { \
+			echo "error: expected one Nix output path, got: $$out" >&2; \
+			exit 1; \
+		}; \
+		scripts/smoke-nix-package.sh "$$out"
 
 .PHONY: pre-push
 pre-push: ## Run the local pre-push gate.

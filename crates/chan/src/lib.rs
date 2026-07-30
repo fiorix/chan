@@ -7315,16 +7315,18 @@ mod tests {
         // The marker is a build-time option_env!, so both cases are
         // exercised by passing it in. The route is resolved before
         // --check is read, so a packaged build refuses that too.
-        for personality in [Personality::Standalone, Personality::Desktop] {
-            let route = decide_upgrade_route(personality, Some("aur"));
-            let UpgradeRoute::Refuse(message) = route else {
-                panic!("{personality:?} must refuse on a packaged build, got {route:?}");
-            };
-            assert!(message.contains("(aur)"), "{message}");
-            assert!(message.contains("self-upgrade is disabled"), "{message}");
-            // The refusal points at the package manager, never back at a
-            // chan command that would fail the same way.
-            assert!(!message.contains("chan upgrade"), "{message}");
+        for manager in ["aur", "nix"] {
+            for personality in [Personality::Standalone, Personality::Desktop] {
+                let route = decide_upgrade_route(personality, Some(manager));
+                let UpgradeRoute::Refuse(message) = route else {
+                    panic!("{personality:?} must refuse on a {manager} build, got {route:?}");
+                };
+                assert!(message.contains(&format!("({manager})")), "{message}");
+                assert!(message.contains("self-upgrade is disabled"), "{message}");
+                // The refusal points at the package manager, never back at a
+                // chan command that would fail the same way.
+                assert!(!message.contains("chan upgrade"), "{message}");
+            }
         }
     }
 

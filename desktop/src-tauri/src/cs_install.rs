@@ -17,8 +17,9 @@
 //!   ephemeral `/tmp/.mount_*` squashfs that vanishes on exit, and the `AppRun`
 //!   shim can reset argv[0]; `exec -a <name> "$APPIMAGE"` pins both the stable
 //!   path and the argv[0] the detection keys on.
-//! - **dev build / `cargo run` / anything else**: no-op (never pollute
-//!   `~/.local/bin` from an un-packaged build).
+//! - **Nix store / dev build / `cargo run` / anything else**: no-op. Nix
+//!   installs the `chan` and `cs` output symlinks itself; unrecognized builds
+//!   never pollute `~/.local/bin`.
 //!
 //! Posture: best-effort + idempotent + self-healing. A failure is logged, never
 //! fatal. A shim WE wrote self-heals on the next launch when it goes stale (the
@@ -953,6 +954,21 @@ mod tests {
             InstallKind::None
         );
         assert_eq!(classify_install(None, None), InstallKind::None);
+    }
+
+    #[test]
+    fn classify_nix_store_install_is_none() {
+        // The package output already contains chan/cs symlinks. Never create
+        // mutable ~/.local/bin shims pointing into a particular store path.
+        assert_eq!(
+            classify_install(
+                None,
+                Some(PathBuf::from(
+                    "/nix/store/abc123-chan-desktop-0.81.0/bin/chan-desktop"
+                ))
+            ),
+            InstallKind::None
+        );
     }
 
     #[test]

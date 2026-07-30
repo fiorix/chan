@@ -121,6 +121,8 @@ While `github.com/fiorix/chan` is still private during pre-release work, use `--
 
 Desktop packages are downloaded directly as release artifacts. They are not installed by `install.sh`.
 
+Linux users can also install the root Nix flake. Its default package is `chan-desktop` on x86_64 and aarch64, with `chan` and `cs` entry points in the same output; it does not add a systemd user unit.
+
 `install.sh` defaults to `https://chan.app/dl/cli/latest.json`. Download links on the site read `/dl/releases.json` at runtime and fall back to the GitHub Releases page if metadata is unavailable.
 
 ## Workspace boundary

@@ -117,6 +117,15 @@ def check_make_contract() -> None:
     )
     require_target(
         makefile,
+        "nix-check",
+        (
+            "flake check --all-systems --no-build",
+            "build --no-link --print-out-paths .#chan-desktop",
+            "scripts/smoke-nix-package.sh",
+        ),
+    )
+    require_target(
+        makefile,
         "docker-gateway-build",
         ("packaging/docker/build.sh --gateway-only",),
     )
@@ -213,6 +222,11 @@ def check_workflow_contract() -> None:
             "packaging/distros/arch/build-in-ci.sh",
             "AUR_LOCAL_SOURCE=$archive",
         ),
+        "nix": (
+            "cachix/install-nix-action@v31",
+            "cachix/cachix-action@v17",
+            "run: make nix-check",
+        ),
         "docker-chan": (
             "docker/setup-buildx-action@v4",
             "run: make docker-chan-build",
@@ -257,7 +271,26 @@ def check_workflow_contract() -> None:
     )
 
     downstream = read(".github/workflows/publish-downstream.yml")
-    for needle in ("copr:", "launchpad:", "aur-validate:", "docker-build:"):
+    for workflow_path, workflow in (
+        (".github/workflows/ci.yml", core),
+        (".github/workflows/publish-downstream.yml", downstream),
+    ):
+        if "accept-flake-config" in workflow:
+            raise ContractError(
+                f"{workflow_path}: must not trust cache settings from the checked-out flake"
+            )
+    for needle in (
+        "copr:",
+        "launchpad:",
+        "aur-validate:",
+        "cachix-build:",
+        "cachix-substitute:",
+        "docker-build:",
+        "ubuntu-24.04-arm",
+        "cachix/cachix-action@v17",
+        "cachix push chan",
+        "build --no-link --max-jobs 0 --print-out-paths .#chan-desktop",
+    ):
         require(
             downstream,
             needle,
@@ -283,12 +316,43 @@ def check_docker_contract() -> None:
         )
 
 
+def check_nix_contract() -> None:
+    flake = read("flake.nix")
+    for needle in (
+        '"x86_64-linux"',
+        '"aarch64-linux"',
+        "chan-desktop = pkgs.callPackage ./packaging/nix/chan-desktop.nix",
+        "default = chan-desktop;",
+    ):
+        require(flake, needle, "flake.nix")
+
+    package = read("packaging/nix/chan-desktop.nix")
+    for needle in (
+        'CHAN_PACKAGED = "nix";',
+        'cargoBuildFlags = [',
+        '"chan-desktop"',
+        'ln -s chan-desktop "$out/bin/chan"',
+        'ln -s chan-desktop "$out/bin/cs"',
+        'test ! -e "$out/lib/systemd/user/chan-devserver.service"',
+    ):
+        require(package, needle, "packaging/nix/chan-desktop.nix")
+
+    smoke = read("scripts/smoke-nix-package.sh")
+    for needle in (
+        '"$BIN/chan" upgrade --check',
+        '"self-upgrade is disabled"',
+        'scripts/smoke-built-devserver.sh "$BIN/chan"',
+    ):
+        require(smoke, needle, "scripts/smoke-nix-package.sh")
+
+
 def main() -> int:
     try:
         check_make_contract()
         check_desktop_contract()
         check_workflow_contract()
         check_docker_contract()
+        check_nix_contract()
     except (ContractError, KeyError, json.JSONDecodeError) as error:
         print(f"build-matrix contract: FAIL: {error}", file=sys.stderr)
         return 1

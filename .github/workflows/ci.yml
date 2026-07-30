@@ -222,6 +222,24 @@ jobs:
           PKGBASE: ${{ matrix.pkgbase }}
         run: packaging/distros/arch/build-in-ci.sh docker.io/archlinux/archlinux:base-devel
 
+  nix:
+    name: Nix chan-desktop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: chan
+
+      - uses: cachix/install-nix-action@v31
+
+      - uses: cachix/cachix-action@v17
+        with:
+          name: chan
+          skipPush: true
+
+      - run: make nix-check
+        working-directory: chan
+
   docker-chan:
     name: chan container
     runs-on: ubuntu-latest

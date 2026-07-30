@@ -27,6 +27,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [editor-media-copy-and-view-parity](v0.81.0/editor-media-copy-and-view-parity.md) | registered, grounded, ready to spec | add Copy PNG (and Copy SVG for `.svg`) to image previews, and build the View/copy chrome onto the slide overlay's rendered media |
 | [extensions-v1](v0.81.0/extensions-v1.md) | registered, grounded, needs rulings | rule the open decisions (spawn policy, handshake shape, desktop CSP scope), then spec the TOML discovery, subprocess supervision, and iframe tab |
 | [file-browser-media-double-click](v0.81.0/file-browser-media-double-click.md) | registered, grounded, ready to spec | route media-row double-click and Enter to the existing image/video/PDF viewers |
+| [nix-chan-desktop-cachix](v0.81.0/nix-chan-desktop-cachix.md) | implemented locally, cache bootstrap pending | ship the default Linux chan-desktop flake on x86_64/aarch64, disable self-update for Nix builds, and publish verified closures to Cachix |
 | [survey-focus-on-tab-return](v0.81.0/survey-focus-on-tab-return.md) | registered, grounded statically | reproduce the tab-return focus loss live, then guard the terminal refocus against surveys and make the card grab deterministic |
 | [web-marketing-onboarding](v0.81.0/web-marketing-onboarding.md) | registered, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
 

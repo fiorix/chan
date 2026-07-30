@@ -1,5 +1,6 @@
 # Publish every secondary release target after the core release lands:
-# Docker Hub images, COPR packages, the Launchpad PPA, and AUR recipes.
+# Docker Hub images, Cachix paths, COPR packages, the Launchpad PPA, and AUR
+# recipes.
 # This workflow is deliberately separate from release.yml and triggered
 # by its completion, so an external publisher can fail plainly without
 # failing the GitHub Release, /dl metadata, or Pages deploy. Each target
@@ -9,10 +10,10 @@
 #
 # Manual dispatch mirrors release.yml: `publish` defaults to false,
 # which builds and validates without pushing (and probes the PPA/AUR
-# credentials; Docker intentionally skips registry auth), while `targets`
-# scopes the run to one publisher so retrying a
-# transient Launchpad ftp 550 costs one job instead of Docker and the
-# Arch builds too. The tag-triggered path runs every secondary target.
+# credentials; Docker and Cachix intentionally skip publisher auth), while
+# `targets` scopes the run to one publisher so retrying a transient Launchpad
+# ftp 550 costs one job instead of Docker, Nix, and the Arch builds too. The
+# tag-triggered path runs every secondary target.
 #
 # Secrets:
 #   COPR_WEBHOOK                  custom-webhook base URL (trailing /)
@@ -24,6 +25,7 @@
 #                                 FTP flakiness); absent keeps ftp
 #   AUR_SSH_PRIVATE_KEY           private half of the key registered
 #                                 on the maintainer's AUR account
+#   CACHIX_AUTH_TOKEN             write token for the public `chan` cache
 #   DOCKERHUB_USERNAME            Docker Hub account name
 #   DOCKERHUB_TOKEN               scoped Docker Hub access token
 # Variable:
@@ -41,7 +43,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing vX.Y.Z[-rcN] tag; planned only for targets=docker with publish=false
+        description: Existing vX.Y.Z[-rcN] tag; may be planned for Docker/Cachix publish=false
         required: true
       targets:
         description: Which downstream target to run
@@ -51,11 +53,12 @@ on:
         options:
           - all
           - docker
+          - cachix
           - copr
           - launchpad
           - aur
       publish:
-        description: Push to Docker Hub, COPR, the PPA, and the AUR
+        description: Push to Docker Hub, Cachix, COPR, the PPA, and the AUR
         required: true
         default: false
         type: boolean
@@ -82,15 +85,16 @@ concurrency:
 # the AUR, none of which carries a prerelease channel. Docker preserves
 # its existing immutable prerelease tag support but never moves `latest`.
 jobs:
-  # Docker used release.yml's context outputs for these four values. Derive
-  # the same contract from this workflow's two event shapes. This job is a
-  # Docker prerequisite only: a Docker context/build failure cannot suppress
-  # any distro job.
+  # Docker and Cachix use release.yml's context contract. Derive the same four
+  # values from this workflow's two event shapes. A context/build failure in
+  # either publisher cannot suppress a distro job.
   context:
-    name: docker publication context
+    name: publication context
     if: >-
       (github.event_name == 'workflow_dispatch' &&
-       (inputs.targets == 'all' || inputs.targets == 'docker')) ||
+       (inputs.targets == 'all' ||
+        inputs.targets == 'docker' ||
+        inputs.targets == 'cachix')) ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
        startsWith(github.event.workflow_run.head_branch, 'v'))
@@ -598,6 +602,136 @@ jobs:
             echo
             echo "The recipe was pushed. The RPC index did not report $expected within ${SECONDS}s (last seen: ${reported:-no result}). Manual check: $rpc_url"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---- Nix binary cache (Cachix) -------------------------------------------
+  # The flake's default output is chan-desktop. Build it natively on both Linux
+  # architectures, smoke the exact output, then publish its closure and a
+  # versioned pin. Dry runs execute the full build and smoke without requiring
+  # a write token. GA publication is followed by a new-runner build with local
+  # builds disabled, proving the closure can actually substitute from caches.
+  cachix-build:
+    name: Cachix build (${{ matrix.system }})
+    needs: context
+    if: >-
+      needs.context.result == 'success' &&
+      (needs.context.outputs.publish != 'true' ||
+       needs.context.outputs.prerelease == 'false') &&
+      ((github.event_name == 'workflow_dispatch' &&
+        (inputs.targets == 'all' || inputs.targets == 'cachix')) ||
+       github.event_name == 'workflow_run')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            system: x86_64-linux
+          - os: ubuntu-24.04-arm
+            system: aarch64-linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Publishing pins the released commit/tag. A dry run may validate
+          # the selected workflow ref before the tag exists.
+          ref: ${{ github.event_name != 'workflow_dispatch' && github.event.workflow_run.head_sha || (inputs.publish && inputs.tag || github.sha) }}
+
+      - uses: cachix/install-nix-action@v31
+
+      - uses: cachix/cachix-action@v17
+        with:
+          name: chan
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
+
+      - name: Verify Cachix publication credential
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          CANONICAL: ${{ github.repository == 'fiorix/chan' }}
+          PUBLISH: ${{ needs.context.outputs.publish }}
+        run: |
+          set -euo pipefail
+          if [ "$PUBLISH" != "true" ]; then
+            echo "CACHIX_PUSHABLE=0" >> "$GITHUB_ENV"
+            echo "publish=false; the Nix package will build and smoke without a push."
+          elif [ -n "$CACHIX_AUTH_TOKEN" ]; then
+            echo "CACHIX_PUSHABLE=1" >> "$GITHUB_ENV"
+          elif [ "$CANONICAL" = "true" ]; then
+            echo "::error::CACHIX_AUTH_TOKEN is absent on the canonical repository."
+            exit 1
+          else
+            echo "CACHIX_PUSHABLE=0" >> "$GITHUB_ENV"
+            echo "CACHIX_AUTH_TOKEN is absent on a fork; the package will build but not push."
+          fi
+
+      - name: Build and smoke chan-desktop
+        id: build
+        run: |
+          set -euo pipefail
+          nix flake check --all-systems --no-build
+          out="$(nix build --no-link --print-out-paths .#chan-desktop)"
+          [ -n "$out" ] && [ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ] || {
+            echo "::error::expected one Nix output path, got: $out"
+            exit 1
+          }
+          scripts/smoke-nix-package.sh "$out"
+          echo "out=$out" >> "$GITHUB_OUTPUT"
+
+      - name: Push closure to Cachix
+        if: needs.context.outputs.publish == 'true' && env.CACHIX_PUSHABLE == '1'
+        env:
+          OUT: ${{ steps.build.outputs.out }}
+        run: cachix push chan "$OUT"
+
+      - name: Pin released closure
+        if: needs.context.outputs.publish == 'true' && env.CACHIX_PUSHABLE == '1'
+        env:
+          OUT: ${{ steps.build.outputs.out }}
+          PIN: v${{ needs.context.outputs.version }}-chan-desktop-${{ matrix.system }}
+        run: cachix pin chan "$PIN" "$OUT"
+
+  cachix-substitute:
+    name: Cachix substitute (${{ matrix.system }})
+    needs: [context, cachix-build]
+    if: >-
+      always() &&
+      github.repository == 'fiorix/chan' &&
+      needs.context.result == 'success' &&
+      needs.cachix-build.result == 'success' &&
+      needs.context.outputs.publish == 'true' &&
+      needs.context.outputs.prerelease == 'false' &&
+      ((github.event_name == 'workflow_dispatch' &&
+        (inputs.targets == 'all' || inputs.targets == 'cachix')) ||
+       github.event_name == 'workflow_run')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            system: x86_64-linux
+          - os: ubuntu-24.04-arm
+            system: aarch64-linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name != 'workflow_dispatch' && github.event.workflow_run.head_sha || inputs.tag }}
+
+      - uses: cachix/install-nix-action@v31
+
+      - uses: cachix/cachix-action@v17
+        with:
+          name: chan
+          skipPush: true
+
+      - name: Substitute and smoke chan-desktop
+        run: |
+          set -euo pipefail
+          out="$(nix build --no-link --max-jobs 0 --print-out-paths .#chan-desktop)"
+          [ -n "$out" ] && [ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ] || {
+            echo "::error::expected one substituted Nix output path, got: $out"
+            exit 1
+          }
+          scripts/smoke-nix-package.sh "$out"
 
   # ---- container images (Docker Hub) ----------------------------------------
   # Publishes chan + the three chan-gateway service images to Docker Hub under

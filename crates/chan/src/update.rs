@@ -95,11 +95,12 @@ fn env_disabled() -> bool {
 }
 
 /// Build-time marker for builds a package manager owns: the distro source
-/// packages export `CHAN_PACKAGED` around `cargo build` (`rpm`, `deb`, `aur`),
-/// as does the local Arch QA package (`pacman`). When set, the probe and
-/// banner stay silent and `chan upgrade` refuses instead of renaming over a
-/// root-owned binary. The `.deb`/`.rpm` release downloads are unstamped: no
-/// repository serves them, so self-upgrade stays their update path.
+/// packages export `CHAN_PACKAGED` around `cargo build` (`rpm`, `deb`, `aur`,
+/// `nix`), as does the local Arch QA package (`pacman`). When set, the probe
+/// and banner stay silent and `chan upgrade` refuses instead of renaming over
+/// a package-manager-owned binary. The `.deb`/`.rpm` release downloads are
+/// unstamped: no repository serves them, so self-upgrade stays their update
+/// path.
 pub fn packaged_via() -> Option<&'static str> {
     option_env!("CHAN_PACKAGED")
 }
@@ -117,6 +118,7 @@ fn upgrade_blocked_message(pm: &str) -> String {
         "rpm" => "sudo dnf upgrade",
         "deb" => "sudo apt upgrade",
         "aur" => "your AUR helper (for example, paru -Syu or yay -Syu)",
+        "nix" => "nix profile upgrade chan-desktop (or update the flake input that provides chan)",
         _ => "your system package manager",
     };
     format!(
@@ -1357,9 +1359,10 @@ mod tests {
         assert!(aur.contains("(aur)"));
         assert!(aur.contains("AUR helper"));
         assert!(aur.contains("paru -Syu"));
-        let other = upgrade_blocked_message("nix");
-        assert!(other.contains("(nix)"));
-        assert!(other.contains("package manager"));
+        let nix = upgrade_blocked_message("nix");
+        assert!(nix.contains("(nix)"));
+        assert!(nix.contains("nix profile upgrade chan-desktop"));
+        assert!(nix.contains("flake input"));
     }
 
     #[test]
@@ -1376,6 +1379,10 @@ mod tests {
         let aur = packaged_upgrade_refusal(Some("aur")).expect("packaged build refuses");
         assert!(aur.contains("(aur)"), "{aur}");
         assert!(aur.contains("self-upgrade is disabled"), "{aur}");
+
+        let nix = packaged_upgrade_refusal(Some("nix")).expect("packaged build refuses");
+        assert!(nix.contains("(nix)"), "{nix}");
+        assert!(nix.contains("nix profile upgrade chan-desktop"), "{nix}");
     }
 
     #[test]
