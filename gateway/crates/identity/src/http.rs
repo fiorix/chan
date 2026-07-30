@@ -1743,7 +1743,7 @@ fn entry_handoff_response(proxy_origin: &str, credential: &str) -> Result<Respon
         gateway_common::devserver_gate::ENTRY_EXCHANGE_PATH,
     );
     let body = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"referrer\" content=\"no-referrer\"></head>\
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"referrer\" content=\"strict-origin\"></head>\
          <body><form method=\"post\" action=\"{}\"><input type=\"hidden\" name=\"credential\" value=\"{}\"></form>\
          <script nonce=\"{}\">document.forms[0].submit()</script></body></html>",
         crate::pages::html_escape(&action),
@@ -1757,7 +1757,7 @@ fn entry_handoff_response(proxy_origin: &str, credential: &str) -> Result<Respon
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, "no-store")
-        .header(header::REFERRER_POLICY, "no-referrer")
+        .header(header::REFERRER_POLICY, "strict-origin")
         .header(header::CONTENT_SECURITY_POLICY, csp)
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .body(axum::body::Body::from(body))
@@ -2919,6 +2919,22 @@ pub(crate) fn user_agent(headers: &HeaderMap) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn entry_handoff_preserves_origin_in_header_and_meta_policy() {
+        let response =
+            entry_handoff_response("https://alice--aaaaaaaaaaaa.p1.usr.chan.app", "entry").unwrap();
+        assert_eq!(
+            response.headers().get(header::REFERRER_POLICY),
+            Some(&HeaderValue::from_static("strict-origin"))
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(std::str::from_utf8(&body)
+            .unwrap()
+            .contains("<meta name=\"referrer\" content=\"strict-origin\">"));
+    }
 
     #[test]
     fn reserved_usernames_are_strictly_sorted() {
