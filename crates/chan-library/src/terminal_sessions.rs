@@ -3667,6 +3667,7 @@ impl Session {
     /// in the systemd fd store and the child keeps running for the next
     /// devserver instance to re-import. Only the graceful-shutdown detach
     /// sweep calls this.
+    #[cfg(target_os = "linux")]
     fn detach_for_fdstore_restart(&self) {
         if self.closed.swap(true, Ordering::Relaxed) {
             return;

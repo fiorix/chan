@@ -133,13 +133,9 @@ pub struct DrainedTerminals {
     pub lingering: Vec<u32>,
 }
 
-/// One element of `GET /api/devserver/windows`: a persisted window on the box,
-/// aggregated across ALL tenants (workspace + standalone-terminal) for the
-/// desktop's Window menu (menu-reopen of closed devserver windows). A row
-/// exists only while the window is persisted (a session blob exists); a
-/// discard reaps the blob + PTYs, so discarded windows never appear. The
-/// desktop filters `saved && !connected` (closed-but-persisted = reopenable)
-/// and reopens at `prefix` with a re-minted token.
+/// One element of the frozen `GET /api/devserver/windows` compatibility wire.
+/// A row adapts a non-control record from the live library window feed for
+/// pre-0.81.0 desktops.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DevserverWindow {
     /// The `?w=` window id (== the session-blob key == the WS `window_id`).
@@ -149,11 +145,8 @@ pub struct DevserverWindow {
     pub prefix: String,
     /// Per-mount bearer token for that tenant (empty when the tenant is off).
     pub token: String,
-    /// Window flavour (`"terminal"` | `"workspace"`), when the desktop
-    /// registered it; absent in browser mode / for closed-but-saved rows.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    /// Live OS window title, when registered; absent otherwise.
+    /// Library-composed window title. The adapter always supplies it; the
+    /// optional type preserves decoding of the frozen compatibility wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// A `/ws` socket tagged with `label` is live right now.
@@ -169,7 +162,6 @@ impl std::fmt::Debug for DevserverWindow {
             .field("label", &self.label)
             .field("prefix", &self.prefix)
             .field("token", &"[REDACTED]")
-            .field("kind", &self.kind)
             .field("title", &self.title)
             .field("connected", &self.connected)
             .field("saved", &self.saved)
@@ -344,12 +336,10 @@ mod tests {
 
     #[test]
     fn devserver_window_wire() {
-        // Full row (terminal window with a title): all fields present.
         let win = DevserverWindow {
             label: "terminal-1a2b".into(),
             prefix: "/api/term-terminal-1a2b-ff".into(),
             token: "tok_t".into(),
-            kind: Some("terminal".into()),
             title: Some("Terminal Window 1".into()),
             connected: false,
             saved: true,
@@ -364,35 +354,12 @@ mod tests {
                 "label": "terminal-1a2b",
                 "prefix": "/api/term-terminal-1a2b-ff",
                 "token": "tok_t",
-                "kind": "terminal",
                 "title": "Terminal Window 1",
                 "connected": false,
                 "saved": true,
             })
         );
         assert_eq!(win, serde_json::from_value(v).unwrap());
-
-        // No desktop title/kind (browser-mode / closed-but-saved): both keys
-        // are SKIPPED, so the row is the bare label/prefix/token + flags.
-        let bare = DevserverWindow {
-            label: "workspace-aa-0".into(),
-            prefix: "/api/notes-1a2b".into(),
-            token: String::new(),
-            kind: None,
-            title: None,
-            connected: true,
-            saved: true,
-        };
-        assert_eq!(
-            serde_json::to_value(&bare).unwrap(),
-            json!({
-                "label": "workspace-aa-0",
-                "prefix": "/api/notes-1a2b",
-                "token": "",
-                "connected": true,
-                "saved": true,
-            })
-        );
     }
 
     #[test]

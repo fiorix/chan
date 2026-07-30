@@ -1628,70 +1628,10 @@ async fn row_from_launcher(
     })
 }
 
-/// One row of `GET /api/devserver/windows`: a
-/// PERSISTED workspace window the desktop enumerates to offer CLOSED-but-
-/// persisted windows for reopen in the Window menu. Deserialized 1:1 from the
-/// frozen wire; `title` is optional (mirrors `WindowInfo`). `prefix` + the
-/// CURRENT (re-minted) per-mount `token` assemble the reopen URL; `token` is
-/// empty when the tenant is off (not menu-reopenable -- use the launcher row).
-#[derive(Clone, Deserialize)]
-pub struct DevserverWindowRow {
-    pub label: String,
-    pub prefix: String,
-    pub token: String,
-    #[serde(default)]
-    pub title: Option<String>,
-    pub connected: bool,
-    pub saved: bool,
-}
-
-impl std::fmt::Debug for DevserverWindowRow {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DevserverWindowRow")
-            .field("label", &self.label)
-            .field("prefix", &self.prefix)
-            .field("token", &"[REDACTED]")
-            .field("title", &self.title)
-            .field("connected", &self.connected)
-            .field("saved", &self.saved)
-            .finish()
-    }
-}
-
-/// `GET /api/devserver/windows`: every PERSISTED window across all
-/// of the devserver's tenants, with the live `connected`/`saved` flags + the
-/// current per-mount token. Authed like the rest. Persisted-only by construction
-/// (a discarded window's blob is already gone server-side), so the desktop only
-/// filters `saved && !connected` for the reopenable set.
-pub async fn fetch_devserver_windows(
-    conn: &DevserverConn,
-) -> Result<Vec<DevserverWindowRow>, String> {
-    if conn.gateway.is_some() {
-        return Ok(Vec::new());
-    }
-    let url = format!(
-        "{}/api/devserver/windows",
-        base_origin(&conn.host, conn.port)
-    );
-    let resp = http_client()?
-        .get(&url)
-        .bearer_auth(&conn.token)
-        .send()
-        .await
-        .map_err(|e| format!("listing devserver windows: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("devserver windows returned HTTP {}", resp.status()));
-    }
-    resp.json::<Vec<DevserverWindowRow>>()
-        .await
-        .map_err(|e| format!("decoding devserver windows: {e}"))
-}
-
 /// The full window set a connected devserver serves at
 /// `GET /api/library/windows` -- the watcher's initial seed (it also carries the
 /// devserver's `library_id`, stamped per row, the watcher's first read of which
-/// library it is reconciling). The WS `/watch` then pushes every change. The new
-/// library feed that supersedes the per-tenant `fetch_devserver_windows`.
+/// library it is reconciling). The WS `/watch` then pushes every change.
 pub async fn fetch_library_windows(
     conn: &DevserverConn,
 ) -> Result<Vec<chan_server::WindowRecord>, String> {
@@ -2740,31 +2680,6 @@ mod tests {
         assert_eq!(entries[0].status, chan_server::WorkspaceStatus::Stopped);
         assert_eq!(entries[0].error, None);
         assert_eq!(entries[0].token, "tok_abc");
-    }
-
-    #[test]
-    fn devserver_window_row_decodes_reopenable_window_shape() {
-        // Pins the GET /api/devserver/windows wire: title is
-        // optional; connected/saved drive the reopenable filter; token is empty
-        // when the tenant is off. An extra wire field (e.g. a legacy `kind`) is
-        // ignored. A drift here reds before the menu misbehaves.
-        let json = r#"[
-          {"label":"workspace-abc-1","prefix":"/api/notes-abc","token":"tok1","kind":"workspace","title":"🏠 /n Window 1","connected":false,"saved":true},
-          {"label":"workspace-def-2","prefix":"/api/notes-def","token":"","connected":true,"saved":true}
-        ]"#;
-        let rows: Vec<DevserverWindowRow> = serde_json::from_str(json).unwrap();
-        assert_eq!(rows.len(), 2);
-        // Row 0: reopenable (saved && !connected), title present; the unknown
-        // `kind` field is ignored.
-        assert_eq!(rows[0].label, "workspace-abc-1");
-        assert_eq!(rows[0].prefix, "/api/notes-abc");
-        assert_eq!(rows[0].token, "tok1");
-        assert_eq!(rows[0].title.as_deref(), Some("🏠 /n Window 1"));
-        assert!(rows[0].saved && !rows[0].connected);
-        // Row 1: optional title absent (defaults None); empty token = off.
-        assert_eq!(rows[1].title, None);
-        assert!(rows[1].token.is_empty());
-        assert!(rows[1].connected); // NOT reopenable (a client is attached)
     }
 
     #[test]
