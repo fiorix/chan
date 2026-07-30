@@ -20,9 +20,10 @@
 //! devserver bearer token persist in `~/.chan/devserver/config.json` (0600).
 //! Per-window pane/tab layout is NOT persisted here; each tenant is a full
 //! workspace mount that already stores its own SPA session per window, so a
-//! reconnecting client re-hydrates its panes from the tenant. Terminal PTY
-//! contents reset except for an explicit Linux systemd fdstore restart, which
-//! re-associates inherited PTY masters with freshly built session objects.
+//! reconnecting client re-hydrates its panes from the tenant. Under the Linux
+//! systemd unit, terminal PTYs survive EVERY restart flavor: each windowed
+//! session parks its master fd in the systemd fd store continuously, and boot
+//! re-associates the inherited masters with freshly built session objects.
 //! Per-tenant control sockets bind at paths derived from the persisted
 //! library id (not the pid), so the `$CHAN_CONTROL_SOCKET` baked into
 //! already-open shells reaches the restarted instance and `cs` keeps working.
@@ -1584,6 +1585,14 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     // restarts and systemd unit restarts alike). Installed before the first
     // mount so the shared terminal tenant gets it too.
     host.install_control_identity(library_id.clone());
+    // Continuous fd parking, only under systemd notify: every windowed PTY
+    // parks at spawn so ANY unit restart preserves it. Installed before the
+    // first mount (the hook reaches registries at mount wiring); it starts
+    // Disabled and activates after the inherited-fd restore applies, so no
+    // early spawn or manifest write can race the taken restore state.
+    let fd_parker = std::env::var_os("NOTIFY_SOCKET")
+        .is_some_and(|value| !value.is_empty())
+        .then(|| fdstore::DevserverParker::install(&host, library_id.clone()));
     // Install the library-owned workspace on/off overlay beside the window
     // registry, so the restore below re-mounts what was on. Same shape + store
     // the desktop-local library uses (`~/.chan/workspaces.json`).
@@ -1691,6 +1700,12 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     // Inherited terminals are adopted exactly once before any local, discovery,
     // or tunnel route can reconnect to them.
     fdstore_restore.apply(&state);
+    // Adopted sessions and any boot-time spawn become parked + manifested
+    // before routes expose: nothing can observe a session whose fd name is
+    // not yet durable.
+    if let Some(parker) = &fd_parker {
+        parker.activate();
+    }
     state
         .startup
         .advance(StartupPhase::FdstoreApplied)
@@ -1784,6 +1799,19 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
                 Some(task) => Some(task.await),
                 None => None,
             };
+            // Graceful shutdown: seal parking (no further parks, one final
+            // manifest write), then detach the parked sessions so tenant
+            // teardown kills only the rest. Systemd decides what the store does
+            // next: restart re-feeds the fds, stop releases them.
+            if let Some(parker) = fd_parker {
+                let detached = parker.seal_flush_detach();
+                if detached > 0 {
+                    eprintln!(
+                    "chan devserver: systemd fdstore: detached {detached} parked terminal(s) for handover"
+                );
+                }
+                parker.stop().await;
+            }
             let hosted_shutdown = host.shutdown_all().await;
             state.startup.stop();
             state.startup.stopped();
@@ -1838,6 +1866,19 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
                 Some(task) => Some(task.await),
                 None => None,
             };
+            // Graceful shutdown: seal parking (no further parks, one final
+            // manifest write), then detach the parked sessions so tenant
+            // teardown kills only the rest. Systemd decides what the store does
+            // next: restart re-feeds the fds, stop releases them.
+            if let Some(parker) = fd_parker {
+                let detached = parker.seal_flush_detach();
+                if detached > 0 {
+                    eprintln!(
+                    "chan devserver: systemd fdstore: detached {detached} parked terminal(s) for handover"
+                );
+                }
+                parker.stop().await;
+            }
             let hosted_shutdown = host.shutdown_all().await;
             state.startup.stop();
             state.startup.stopped();
@@ -2020,8 +2061,8 @@ fn build_devserver_app(
         .route("/api/devserver/windows", get(handle_list_windows))
         .route("/api/devserver/rotate-token", post(handle_rotate_token))
         .route(
-            "/api/devserver/systemd-fdstore/prepare",
-            post(handle_fdstore_prepare),
+            "/api/devserver/terminal-sessions/drain",
+            post(handle_terminal_sessions_drain),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -2387,11 +2428,19 @@ async fn handle_list_windows(
     Json(Vec::new())
 }
 
-async fn handle_fdstore_prepare(State(state): State<Arc<DevserverState>>) -> Response {
-    match fdstore::prepare_restart(&state) {
-        Ok(response) => Json(response).into_response(),
-        Err(e) => (e.status, e.message).into_response(),
-    }
+/// Explicitly end every terminal session and wait, bounded, until the child
+/// processes are observably dead. `chan devserver --stop` drains through
+/// here before `systemctl stop`, and `--restart --force` before its
+/// destructive bounce; the response never claims completion for a child
+/// that is still running (`lingering`).
+async fn handle_terminal_sessions_drain(State(state): State<Arc<DevserverState>>) -> Response {
+    let outcome = state.host.drain_terminal_sessions().await;
+    Json(crate::devserver_api::DrainedTerminals {
+        closed: outcome.closed,
+        dead: outcome.dead,
+        lingering: outcome.lingering,
+    })
+    .into_response()
 }
 
 /// Gate every `/api/devserver/*` management route except `info` on the devserver
@@ -3285,13 +3334,14 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn fdstore_child_pid_is_parsed_from_chan_fd_name() {
+        // Continuous-parking names: chan.pty.<session_id>.<child_pid>.
         assert_eq!(
-            fdstore::child_pid_from_name("chan.pty.nonce.0.4242"),
+            fdstore::child_pid_from_name("chan.pty.0f3a9c.4242"),
             Some(4242)
         );
-        assert_eq!(fdstore::child_pid_from_name("chan.pty.nonce.0.0"), None);
-        assert_eq!(fdstore::child_pid_from_name("other.pty.nonce.0.4242"), None);
-        assert_eq!(fdstore::child_pid_from_name("chan.pty.nonce.0.nope"), None);
+        assert_eq!(fdstore::child_pid_from_name("chan.pty.0f3a9c.0"), None);
+        assert_eq!(fdstore::child_pid_from_name("other.pty.0f3a9c.4242"), None);
+        assert_eq!(fdstore::child_pid_from_name("chan.pty.0f3a9c.nope"), None);
     }
 
     #[tokio::test]
@@ -3546,6 +3596,45 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600, "config must stay 0600 across rotation");
         }
+    }
+
+    #[tokio::test]
+    async fn terminal_sessions_drain_is_bearer_gated_and_reports_counts() {
+        use tower::ServiceExt;
+
+        let home = tempfile::tempdir().expect("home");
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let state = test_state(home.path(), addr);
+        let host = state.host.clone();
+        let (app, _serve_addr) = build_devserver_app(state, host);
+        let drain = |bearer: &str| {
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/api/devserver/terminal-sessions/drain")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let res = app.clone().oneshot(drain("wrong")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        let res = app.clone().oneshot(drain("test-token")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let drained: crate::devserver_api::DrainedTerminals =
+            serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            drained,
+            crate::devserver_api::DrainedTerminals {
+                closed: 0,
+                dead: 0,
+                lingering: Vec::new(),
+            },
+            "an empty host drains nothing and lingers nothing"
+        );
     }
 
     #[tokio::test]

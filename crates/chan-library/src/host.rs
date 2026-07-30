@@ -1287,6 +1287,22 @@ impl WorkspaceHost {
             .collect()
     }
 
+    /// Activation reconcile: park every live windowed unparked session in
+    /// every tenant. Covers sessions spawned while the parker was still
+    /// disabled during boot.
+    #[cfg(target_os = "linux")]
+    pub fn park_unparked_windowed_terminal_sessions(&self) {
+        let Ok(workspaces) = self.workspaces.read() else {
+            return;
+        };
+        for runtime in workspaces.values() {
+            runtime
+                .artifacts
+                .terminal_sessions
+                .park_unparked_windowed_sessions();
+        }
+    }
+
     /// Removes and detaches every parked session in every tenant (no kill,
     /// no unpark). The devserver's graceful-shutdown sweep: runs AFTER the
     /// final manifest write and BEFORE `shutdown_all`, so tenant teardown

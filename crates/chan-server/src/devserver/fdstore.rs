@@ -1,38 +1,14 @@
-use axum::http::StatusCode;
-use serde::Serialize;
+//! Continuous systemd fd-store parking for devserver terminals.
+//!
+//! Every windowed PTY parks its master fd in the systemd fd store at spawn
+//! and a maintained restart manifest describes the parked set, so ANY unit
+//! restart -- `systemctl --user restart`, `chan devserver --restart`, a
+//! watchdog kill, a crash under Restart=on-failure -- rebuilds the
+//! terminals on boot. `systemctl stop` releases the store instead, closing
+//! the masters and HUPping the shells: the stop/restart asymmetry lives
+//! entirely in systemd's store-release semantics, never in a SIGTERM guess.
 
 use super::DevserverState;
-
-#[derive(Debug, Serialize)]
-pub(super) struct PrepareResponse {
-    preserved: usize,
-    nonce: String,
-    skipped: Vec<String>,
-}
-
-#[derive(Debug)]
-pub(super) struct PrepareError {
-    pub(super) status: StatusCode,
-    pub(super) message: String,
-}
-
-impl PrepareError {
-    #[cfg(target_os = "linux")]
-    fn conflict(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::CONFLICT,
-            message: message.into(),
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn bad_request(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            message: message.into(),
-        }
-    }
-}
 
 #[must_use = "the watchdog task must be stopped and joined before shutdown completes"]
 pub(super) struct WatchdogPings {
@@ -67,34 +43,33 @@ impl WatchdogPings {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
+    use std::collections::HashSet;
     use std::os::fd::AsFd;
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::sync::{Arc, Mutex, MutexGuard};
+    use std::time::Duration;
 
     use anyhow::Context;
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use chan_library::terminal_sessions::{
-        FdStoreSessionImport, FdStoreSessionMeta, FdStoreSkippedSession,
+        fdstore_fd_name, FdStorePark, FdStoreParker, FdStoreSessionImport, FdStoreSessionMeta,
+        FdStoreSkippedSession, FDSTORE_FD_PREFIX,
     };
-    use rand::RngCore;
     use serde::{Deserialize, Serialize};
 
-    use super::{DevserverState, PrepareError, PrepareResponse, WatchdogPings};
+    use super::{DevserverState, WatchdogPings};
     use crate::WorkspaceHost;
 
-    const MANIFEST_VERSION: u32 = 1;
-    const FD_PREFIX: &str = "chan.pty.";
-    const MANIFEST_TTL_SECS: u64 = 30;
-    const BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
+    const MANIFEST_VERSION: u32 = 2;
+    /// Coalescing window for deferred (unpark/metadata) manifest rewrites.
+    /// Additive commits never wait on this: a park writes synchronously.
+    const MANIFEST_DEBOUNCE: Duration = Duration::from_millis(250);
 
     #[derive(Debug, Serialize, Deserialize)]
     struct RestartManifest {
         version: u32,
-        nonce: String,
         library_id: String,
-        created_unix_secs: u64,
         sessions: Vec<ManifestSession>,
     }
 
@@ -106,9 +81,190 @@ mod linux {
         replay_b64: String,
     }
 
+    /// Parking lifecycle. Transitions are one-way:
+    /// Disabled -> Active (after the boot restore applies) -> Sealed (at the
+    /// head of graceful shutdown). park() succeeds only in Active; unpark
+    /// store removals are valid in every phase; manifest writes happen in
+    /// Active plus the single sealed final write.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ParkerPhase {
+        Disabled,
+        Active,
+        Sealed,
+    }
+
+    struct ParkerShared {
+        host: Arc<WorkspaceHost>,
+        library_id: String,
+        manifest_path: PathBuf,
+        /// Serializes every manifest write with phase transitions: a
+        /// debounced rewrite can never land after the sealed final write,
+        /// and a park's synchronous commit cannot interleave with a seal.
+        phase: Mutex<ParkerPhase>,
+        dirty: tokio::sync::Notify,
+    }
+
+    impl ParkerShared {
+        /// Rewrite the manifest from the live parked set. Caller holds the
+        /// phase lock (the guard parameter enforces it). An empty parked set
+        /// removes the file: no manifest is the truthful description of an
+        /// empty store.
+        fn write_manifest_locked(
+            &self,
+            _phase: &MutexGuard<'_, ParkerPhase>,
+        ) -> Result<(), String> {
+            let entries = self.host.fdstore_manifest_sessions();
+            if entries.is_empty() {
+                let _ = std::fs::remove_file(&self.manifest_path);
+                return Ok(());
+            }
+            let manifest = RestartManifest {
+                version: MANIFEST_VERSION,
+                library_id: self.library_id.clone(),
+                sessions: entries
+                    .into_iter()
+                    .map(|entry| ManifestSession {
+                        fd_name: entry.fd_name,
+                        meta: entry.meta,
+                        replay_b64: BASE64.encode(&entry.replay),
+                    })
+                    .collect(),
+            };
+            write_manifest(&self.manifest_path, &manifest)
+        }
+
+        fn write_if_active(&self) {
+            let phase = self.phase.lock().expect("fdstore parker poisoned");
+            if *phase != ParkerPhase::Active {
+                return;
+            }
+            if let Err(error) = self.write_manifest_locked(&phase) {
+                tracing::warn!(error = %error, "systemd fdstore manifest rewrite failed");
+            }
+        }
+    }
+
+    /// The [`FdStorePark`] hook handed to every tenant registry.
+    struct ParkerHook(Arc<ParkerShared>);
+
+    impl FdStorePark for ParkerHook {
+        fn park(&self, fd_name: &str, fd: std::os::fd::BorrowedFd<'_>) -> bool {
+            let phase = self.0.phase.lock().expect("fdstore parker poisoned");
+            if *phase != ParkerPhase::Active {
+                return false;
+            }
+            if let Err(error) = chan_systemd::fdstore(fd_name, fd) {
+                tracing::warn!(fd_name, error = %error, "storing PTY in systemd fdstore failed");
+                return false;
+            }
+            // The additive commit: the fd name must be durable before the
+            // spawn/restart reports success. On failure, roll the store
+            // back so no stored fd is ever absent from the manifest.
+            if let Err(error) = self.0.write_manifest_locked(&phase) {
+                tracing::warn!(fd_name, error = %error, "committing fdstore manifest failed; unparking");
+                chan_systemd::fdstore_remove_many([fd_name]);
+                return false;
+            }
+            true
+        }
+
+        fn unpark(&self, fd_name: &str) {
+            chan_systemd::fdstore_remove_many([fd_name]);
+            // Removal staleness is safe (a manifest entry without a stored
+            // fd is skipped and cleaned at boot), so the rewrite coalesces.
+            self.0.dirty.notify_one();
+        }
+
+        fn adopt(&self, _fd_name: &str) -> bool {
+            // Adoption records an fd the store already retains: valid while
+            // booting (Disabled) and serving (Active), refused once sealed.
+            *self.0.phase.lock().expect("fdstore parker poisoned") != ParkerPhase::Sealed
+        }
+
+        fn changed(&self) {
+            self.0.dirty.notify_one();
+        }
+    }
+
+    /// Owner of continuous parking: installs the hook on the host, runs the
+    /// debounced manifest writer, and drives the phase transitions from the
+    /// devserver boot/shutdown sequence.
+    pub(crate) struct DevserverParker {
+        shared: Arc<ParkerShared>,
+        writer: tokio::task::JoinHandle<()>,
+    }
+
+    impl DevserverParker {
+        /// Install parking on `host`. Must run BEFORE the first tenant
+        /// mount (the hook reaches registries at mount wiring) and only
+        /// under systemd notify (`NOTIFY_SOCKET` present).
+        pub(crate) fn install(host: &Arc<WorkspaceHost>, library_id: String) -> Self {
+            Self::install_at(host, library_id, manifest_path())
+        }
+
+        fn install_at(host: &Arc<WorkspaceHost>, library_id: String, path: PathBuf) -> Self {
+            let shared = Arc::new(ParkerShared {
+                host: host.clone(),
+                library_id,
+                manifest_path: path,
+                phase: Mutex::new(ParkerPhase::Disabled),
+                dirty: tokio::sync::Notify::new(),
+            });
+            host.install_terminal_fd_parker(FdStoreParker::new(ParkerHook(shared.clone())));
+            let writer_shared = shared.clone();
+            let writer = tokio::spawn(async move {
+                loop {
+                    writer_shared.dirty.notified().await;
+                    tokio::time::sleep(MANIFEST_DEBOUNCE).await;
+                    writer_shared.write_if_active();
+                }
+            });
+            Self { shared, writer }
+        }
+
+        /// Disabled -> Active, after [`StartupRestore::apply`]: reconcile-park
+        /// every session that spawned while parking was disabled, then
+        /// rewrite the manifest to the full live parked set (adopted,
+        /// reconciled, minus anything that died during boot).
+        pub(crate) fn activate(&self) {
+            {
+                let mut phase = self.shared.phase.lock().expect("fdstore parker poisoned");
+                *phase = ParkerPhase::Active;
+            }
+            self.shared.host.park_unparked_windowed_terminal_sessions();
+            self.shared.write_if_active();
+        }
+
+        /// Active -> Sealed, at the head of graceful shutdown: refuse
+        /// further parks, take the final manifest write, then remove and
+        /// detach exactly the parked set. Between the write and the detach
+        /// the set can only SHRINK (exit/close unpark), so every fd left
+        /// stored for preservation is described by the final manifest.
+        pub(crate) fn seal_flush_detach(&self) -> usize {
+            {
+                let mut phase = self.shared.phase.lock().expect("fdstore parker poisoned");
+                *phase = ParkerPhase::Sealed;
+                if let Err(error) = self.shared.write_manifest_locked(&phase) {
+                    tracing::warn!(error = %error, "final fdstore manifest flush failed; crash-grade restore");
+                }
+            }
+            self.shared.host.detach_parked_terminal_sessions()
+        }
+
+        pub(crate) async fn stop(self) {
+            self.writer.abort();
+            match self.writer.await {
+                Ok(()) => {}
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => {
+                    tracing::error!(error = %error, "fdstore manifest writer task failed");
+                }
+            }
+        }
+    }
+
     pub(crate) struct StartupRestore {
         manifest_path: PathBuf,
-        fd_names: Vec<String>,
         orphan_fd_names: Vec<String>,
         cleanup_all_terminal_windows: bool,
         manifest_library_id: Option<String>,
@@ -121,56 +277,51 @@ mod linux {
         pub(crate) fn take() -> Self {
             let manifest_path = manifest_path();
             let named_fds = chan_systemd::take_listen_fds();
-            if named_fds.is_empty() {
-                return Self::empty(manifest_path);
-            }
-
             let mut fd_names = Vec::new();
             let mut fd_by_name = HashMap::new();
             for named in named_fds {
-                if named.name.starts_with(FD_PREFIX) {
+                if named.name.starts_with(FDSTORE_FD_PREFIX) {
                     fd_names.push(named.name.clone());
                     fd_by_name.insert(named.name, named.fd);
                 }
             }
-            if fd_by_name.is_empty() {
-                return Self::empty(manifest_path);
-            }
 
-            let manifest = match std::fs::read(&manifest_path)
+            let manifest = std::fs::read(&manifest_path)
                 .ok()
-                .and_then(|bytes| serde_json::from_slice::<RestartManifest>(&bytes).ok())
-            {
-                Some(manifest) => manifest,
-                None => {
-                    let skipped = fd_names
-                        .iter()
-                        .map(|name| {
-                            format!("inherited fd {name}: restart manifest missing or unreadable")
-                        })
-                        .collect();
-                    cleanup_invalid_fds(&fd_names);
-                    return Self {
-                        manifest_path,
-                        fd_names: Vec::new(),
-                        orphan_fd_names: Vec::new(),
-                        cleanup_all_terminal_windows: true,
-                        manifest_library_id: None,
-                        imports: Vec::new(),
-                        skipped,
-                        skipped_sessions: Vec::new(),
-                    };
+                .and_then(|bytes| serde_json::from_slice::<RestartManifest>(&bytes).ok());
+
+            let Some(manifest) = manifest else {
+                if fd_by_name.is_empty() {
+                    return Self::empty(manifest_path);
                 }
+                // Inherited fds without a readable manifest: no trustworthy
+                // session-to-window mapping is left.
+                let skipped = fd_names
+                    .iter()
+                    .map(|name| {
+                        format!("inherited fd {name}: restart manifest missing or unreadable")
+                    })
+                    .collect();
+                cleanup_invalid_fds(&fd_names);
+                return Self {
+                    manifest_path,
+                    orphan_fd_names: Vec::new(),
+                    cleanup_all_terminal_windows: true,
+                    manifest_library_id: None,
+                    imports: Vec::new(),
+                    skipped,
+                    skipped_sessions: Vec::new(),
+                };
             };
 
-            let now = now_unix_secs();
-            if manifest.version != MANIFEST_VERSION
-                || now.saturating_sub(manifest.created_unix_secs) > MANIFEST_TTL_SECS
-            {
+            if manifest.version != MANIFEST_VERSION {
+                // A manifest from another protocol generation (hard swap, no
+                // shim): clean up everything it might describe. Works with
+                // zero inherited fds too.
                 let mut skipped = fd_names
                     .iter()
                     .map(|name| {
-                        format!("inherited fd {name}: restart manifest version or age is invalid")
+                        format!("inherited fd {name}: restart manifest version is unsupported")
                     })
                     .collect::<Vec<_>>();
                 let mut skipped_sessions = Vec::new();
@@ -179,13 +330,12 @@ mod linux {
                         &mut skipped,
                         &mut skipped_sessions,
                         &session.meta,
-                        "restart manifest version or age is invalid",
+                        "restart manifest version is unsupported",
                     );
                 }
                 cleanup_invalid_fds(&fd_names);
                 return Self {
                     manifest_path,
-                    fd_names: Vec::new(),
                     orphan_fd_names: Vec::new(),
                     cleanup_all_terminal_windows: false,
                     manifest_library_id: Some(manifest.library_id),
@@ -195,6 +345,11 @@ mod linux {
                 };
             }
 
+            // A live manifest with ZERO inherited chan fds is the bare-stop
+            // case: systemd released the store, every session is gone. The
+            // not-inherited arm below classifies them all so apply() signals
+            // any recorded child a HUP could not kill and reaps the
+            // terminal-window rows.
             let mut imports = Vec::new();
             let mut skipped = Vec::new();
             let mut skipped_sessions = Vec::new();
@@ -204,7 +359,7 @@ mod linux {
                     meta,
                     replay_b64,
                 } = session;
-                if !fd_name.starts_with(FD_PREFIX) {
+                if !fd_name.starts_with(FDSTORE_FD_PREFIX) {
                     push_skipped_session(
                         &mut skipped,
                         &mut skipped_sessions,
@@ -259,7 +414,6 @@ mod linux {
 
             Self {
                 manifest_path,
-                fd_names,
                 orphan_fd_names,
                 cleanup_all_terminal_windows: false,
                 manifest_library_id: Some(manifest.library_id),
@@ -272,7 +426,6 @@ mod linux {
         fn empty(manifest_path: PathBuf) -> Self {
             Self {
                 manifest_path,
-                fd_names: Vec::new(),
                 orphan_fd_names: Vec::new(),
                 cleanup_all_terminal_windows: false,
                 manifest_library_id: None,
@@ -283,8 +436,7 @@ mod linux {
         }
 
         pub(crate) fn apply(self, state: &DevserverState) {
-            if self.fd_names.is_empty()
-                && self.orphan_fd_names.is_empty()
+            if self.orphan_fd_names.is_empty()
                 && !self.cleanup_all_terminal_windows
                 && self.imports.is_empty()
                 && self.skipped.is_empty()
@@ -294,7 +446,6 @@ mod linux {
             }
             let StartupRestore {
                 manifest_path,
-                fd_names,
                 orphan_fd_names,
                 cleanup_all_terminal_windows,
                 manifest_library_id,
@@ -314,6 +465,8 @@ mod linux {
                     );
                 }
             } else {
+                // Restored sessions ADOPT their store entries (the store
+                // retained them across the restart); their fds stay put.
                 let report = state.host.restore_fdstore_terminal_sessions(imports);
                 restored = report.restored;
                 skipped.extend(report.skipped);
@@ -333,10 +486,27 @@ mod linux {
                     .cleanup_skipped_fdstore_sessions(&skipped_sessions),
             );
 
-            if !fd_names.is_empty() {
-                chan_systemd::fdstore_remove_many(fd_names.iter().map(String::as_str));
+            // Remove exactly the fds that will NOT live on: orphans plus
+            // every skipped session's deterministic name. Restored sessions
+            // keep their entries. (A skipped session whose fd was already
+            // cleaned at take() gets a harmless second FDSTOREREMOVE.)
+            let mut invalid_fd_names: Vec<String> = orphan_fd_names;
+            invalid_fd_names.extend(
+                skipped_sessions
+                    .iter()
+                    .map(|session| fdstore_fd_name(&session.session_id, session.child_pid)),
+            );
+            if !invalid_fd_names.is_empty() {
+                chan_systemd::fdstore_remove_many(invalid_fd_names.iter().map(String::as_str));
             }
-            let _ = std::fs::remove_file(&manifest_path);
+            // With nothing restored there is nothing the manifest still
+            // protects: delete it so a non-parking boot (foreground with a
+            // leftover manifest) cannot re-signal recycled pids forever.
+            // With restores, the file stays until the activation rewrite --
+            // a crash before that reboots into the same restore.
+            if restored == 0 {
+                let _ = std::fs::remove_file(&manifest_path);
+            }
             if restored > 0 || !skipped.is_empty() {
                 eprintln!(
                     "chan devserver: systemd fdstore restore: restored {restored}, skipped {}",
@@ -353,100 +523,6 @@ mod linux {
                 }
             }
         }
-    }
-
-    pub(crate) fn prepare_restart(state: &DevserverState) -> Result<PrepareResponse, PrepareError> {
-        if std::env::var_os("NOTIFY_SOCKET").is_none_or(|value| value.is_empty()) {
-            return Err(PrepareError::conflict(
-                "NOTIFY_SOCKET is not set; fdstore restart is only available inside the systemd unit",
-            ));
-        }
-
-        let path = manifest_path();
-        let _ = std::fs::remove_file(&path);
-        let snapshots = state.host.fdstore_terminal_sessions();
-        let nonce = nonce();
-        let mut sessions = Vec::new();
-        let mut fd_names = Vec::new();
-        let mut skipped = Vec::new();
-
-        for (idx, snapshot) in snapshots.into_iter().enumerate() {
-            if snapshot.meta.window_id.is_none() {
-                skipped.push(format!(
-                    "session {}: missing window id",
-                    snapshot.meta.session_id
-                ));
-                continue;
-            }
-            let child_pid = snapshot.meta.child_pid.unwrap_or(0);
-            let fd_name = format!("{FD_PREFIX}{nonce}.{idx}.{child_pid}");
-            if let Err(e) = chan_systemd::fdstore(&fd_name, snapshot.master_fd.as_fd()) {
-                cleanup_prepare_failure(&path, &fd_names);
-                return Err(PrepareError::conflict(format!(
-                    "storing {fd_name} in systemd fdstore: {e}"
-                )));
-            }
-            fd_names.push(fd_name.clone());
-            sessions.push(ManifestSession {
-                fd_name,
-                meta: snapshot.meta,
-                replay_b64: BASE64.encode(&snapshot.replay),
-            });
-        }
-
-        if sessions.is_empty() {
-            return Ok(PrepareResponse {
-                preserved: 0,
-                nonce,
-                skipped,
-            });
-        }
-
-        let manifest = RestartManifest {
-            version: MANIFEST_VERSION,
-            nonce: nonce.clone(),
-            library_id: state.library_id.clone(),
-            created_unix_secs: now_unix_secs(),
-            sessions,
-        };
-        if let Err(e) = write_manifest(&path, &manifest) {
-            cleanup_prepare_failure(&path, &fd_names);
-            return Err(PrepareError::conflict(format!(
-                "writing systemd fdstore restart manifest: {e}"
-            )));
-        }
-        if let Err(e) = chan_systemd::notify_barrier(BARRIER_TIMEOUT) {
-            cleanup_prepare_failure(&path, &fd_names);
-            return Err(PrepareError::conflict(format!(
-                "waiting for systemd fdstore barrier: {e}"
-            )));
-        }
-
-        let preserved_sessions: Vec<(String, String)> = manifest
-            .sessions
-            .iter()
-            .map(|session| {
-                (
-                    session.meta.tenant_prefix.clone(),
-                    session.meta.session_id.clone(),
-                )
-            })
-            .collect();
-        state
-            .host
-            .preserve_fdstore_terminal_sessions(&preserved_sessions);
-        schedule_cleanup(
-            path,
-            nonce.clone(),
-            fd_names,
-            state.host.clone(),
-            preserved_sessions,
-        );
-        Ok(PrepareResponse {
-            preserved: manifest.sessions.len(),
-            nonce,
-            skipped,
-        })
     }
 
     pub(crate) fn notify_ready() -> anyhow::Result<()> {
@@ -489,26 +565,8 @@ mod linux {
             .join("fdstore-restart.json")
     }
 
-    fn now_unix_secs() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    }
-
-    fn nonce() -> String {
-        let mut bytes = [0u8; 16];
-        rand::thread_rng().fill_bytes(&mut bytes);
-        let mut out = String::with_capacity(bytes.len() * 2);
-        for byte in bytes {
-            use std::fmt::Write as _;
-            let _ = write!(&mut out, "{byte:02x}");
-        }
-        out
-    }
-
     pub(crate) fn child_pid_from_name(name: &str) -> Option<u32> {
-        let suffix = name.strip_prefix(FD_PREFIX)?;
+        let suffix = name.strip_prefix(FDSTORE_FD_PREFIX)?;
         let pid = suffix.rsplit('.').next()?.parse::<u32>().ok()?;
         (pid != 0).then_some(pid)
     }
@@ -578,13 +636,6 @@ mod linux {
         chan_systemd::fdstore_remove_many(fd_names.iter().map(String::as_str));
     }
 
-    fn cleanup_prepare_failure(path: &Path, fd_names: &[String]) {
-        if !fd_names.is_empty() {
-            chan_systemd::fdstore_remove_many(fd_names.iter().map(String::as_str));
-        }
-        let _ = std::fs::remove_file(path);
-    }
-
     fn write_manifest(path: &Path, manifest: &RestartManifest) -> Result<(), String> {
         use std::os::unix::fs::PermissionsExt;
 
@@ -597,38 +648,93 @@ mod linux {
         Ok(())
     }
 
-    fn schedule_cleanup(
-        path: PathBuf,
-        nonce: String,
-        fd_names: Vec<String>,
-        host: Arc<WorkspaceHost>,
-        preserved_sessions: Vec<(String, String)>,
-    ) {
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(MANIFEST_TTL_SECS)).await;
-            let same_nonce = std::fs::read(&path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<RestartManifest>(&bytes).ok())
-                .is_some_and(|manifest| manifest.nonce == nonce);
-            if same_nonce {
-                chan_systemd::fdstore_remove_many(fd_names.iter().map(String::as_str));
-                host.clear_fdstore_terminal_session_preservation(&preserved_sessions);
-                let _ = std::fs::remove_file(&path);
-            }
-        });
+    #[cfg(test)]
+    mod parker_tests {
+        use super::*;
+
+        /// Phase gating without systemd: `chan_systemd::fdstore` no-ops
+        /// (Ok) when NOTIFY_SOCKET is unset -- cargo test runs outside any
+        /// notify scope -- so a park's success here isolates exactly the
+        /// phase and manifest logic.
+        #[tokio::test]
+        async fn parker_phases_gate_park_adopt_and_writes() {
+            let tmp = tempfile::tempdir().unwrap();
+            let library = chan_workspace::Library::open_at(tmp.path().join("config.toml")).unwrap();
+            let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
+            let manifest = tmp.path().join("fdstore-restart.json");
+            let parker = DevserverParker::install_at(&host, "lib-test".into(), manifest.clone());
+            let hook = ParkerHook(parker.shared.clone());
+            let devnull = std::fs::File::open("/dev/null").unwrap();
+
+            assert!(
+                !hook.park("chan.pty.a.1", devnull.as_fd()),
+                "Disabled must refuse park"
+            );
+            assert!(
+                hook.adopt("chan.pty.a.1"),
+                "Disabled accepts adoption (boot)"
+            );
+
+            parker.activate();
+            assert!(
+                hook.park("chan.pty.a.1", devnull.as_fd()),
+                "Active parks and commits"
+            );
+            assert!(
+                !manifest.exists(),
+                "an empty parked set commits by removing the file"
+            );
+
+            assert_eq!(parker.seal_flush_detach(), 0);
+            assert!(
+                !hook.park("chan.pty.a.2", devnull.as_fd()),
+                "Sealed must refuse park"
+            );
+            assert!(!hook.adopt("chan.pty.a.3"), "Sealed must refuse adoption");
+            parker.stop().await;
+        }
+
+        #[test]
+        fn manifest_v2_shape_round_trips_and_v1_is_unsupported() {
+            let manifest = RestartManifest {
+                version: MANIFEST_VERSION,
+                library_id: "lib-test".into(),
+                sessions: Vec::new(),
+            };
+            let bytes = serde_json::to_vec(&manifest).unwrap();
+            let parsed: RestartManifest = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(parsed.version, 2);
+            assert_eq!(parsed.library_id, "lib-test");
+
+            // A v1 manifest (nonce + TTL era) still PARSES -- serde ignores
+            // the retired fields -- and is rejected by the version gate, so
+            // the old binary's leftovers route to cleanup, not restore.
+            let v1 = serde_json::json!({
+                "version": 1,
+                "nonce": "abc",
+                "library_id": "lib-test",
+                "created_unix_secs": 1,
+                "sessions": [],
+            });
+            let parsed: RestartManifest = serde_json::from_value(v1).unwrap();
+            assert_ne!(parsed.version, MANIFEST_VERSION);
+        }
     }
 }
 
 #[cfg(all(target_os = "linux", test))]
 pub(super) use linux::child_pid_from_name;
 #[cfg(target_os = "linux")]
-pub(super) use linux::{notify_ready, prepare_restart, spawn_watchdog_pings, StartupRestore};
+pub(super) use linux::{notify_ready, spawn_watchdog_pings, DevserverParker, StartupRestore};
 
 #[cfg(not(target_os = "linux"))]
 mod unsupported {
+    use std::sync::Arc;
+
     use anyhow::Context;
 
-    use super::{DevserverState, PrepareError, PrepareResponse, WatchdogPings};
+    use super::{DevserverState, WatchdogPings};
+    use crate::WorkspaceHost;
 
     pub(crate) struct StartupRestore;
 
@@ -640,12 +746,21 @@ mod unsupported {
         pub(crate) fn apply(self, _state: &DevserverState) {}
     }
 
-    pub(crate) fn prepare_restart(
-        _state: &DevserverState,
-    ) -> Result<PrepareResponse, PrepareError> {
-        Err(PrepareError::bad_request(
-            "systemd fdstore restart is Linux-only",
-        ))
+    /// Non-Linux: no systemd fd store; parking never engages.
+    pub(crate) struct DevserverParker;
+
+    impl DevserverParker {
+        pub(crate) fn install(_host: &Arc<WorkspaceHost>, _library_id: String) -> Self {
+            Self
+        }
+
+        pub(crate) fn activate(&self) {}
+
+        pub(crate) fn seal_flush_detach(&self) -> usize {
+            0
+        }
+
+        pub(crate) async fn stop(self) {}
     }
 
     pub(crate) fn notify_ready() -> anyhow::Result<()> {
@@ -661,7 +776,7 @@ mod unsupported {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(super) use unsupported::{notify_ready, prepare_restart, spawn_watchdog_pings, StartupRestore};
+pub(super) use unsupported::{notify_ready, spawn_watchdog_pings, DevserverParker, StartupRestore};
 
 #[cfg(test)]
 mod tests {

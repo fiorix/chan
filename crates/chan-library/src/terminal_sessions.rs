@@ -924,6 +924,29 @@ impl Registry {
             .clone()
     }
 
+    /// Park every live windowed session that is not parked yet: the
+    /// activation reconcile for sessions that spawned while parking was
+    /// still disabled (boot, before the inherited-fd restore applied).
+    #[cfg(target_os = "linux")]
+    pub fn park_unparked_windowed_sessions(&self) {
+        let Some(parker) = self.fd_parker() else {
+            return;
+        };
+        let candidates: Vec<Arc<Session>> = {
+            let sessions = self.sessions.lock().expect("terminal registry poisoned");
+            sessions
+                .values()
+                .filter(|session| !session.closed.load(Ordering::Relaxed))
+                .filter(|session| session.window_id().is_some())
+                .filter(|session| !session.is_fdstore_parked())
+                .cloned()
+                .collect()
+        };
+        for session in candidates {
+            session.park_fdstore(&parker);
+        }
+    }
+
     /// Park `session` if parking is enabled and it belongs to a window.
     /// Windowless sessions are not restorable (boot restore requires a
     /// persisted window row), so they are never parked. Must be called with
