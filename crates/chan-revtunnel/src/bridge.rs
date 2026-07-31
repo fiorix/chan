@@ -148,4 +148,103 @@ mod tests {
         drop(peer_tx);
         pump.await.unwrap();
     }
+
+    #[tokio::test]
+    async fn a_peer_close_does_not_cancel_an_in_flight_uplink_send() {
+        let mut failures = Vec::new();
+        for iteration in 0..10u8 {
+            let (mut client, spliced) = socket_pair().await;
+            let (to_peer, mut peer_rx) = mpsc::channel(1);
+            to_peer.send(b"occupied".to_vec()).await.unwrap();
+            let (peer_tx, from_peer) = mpsc::channel::<Vec<u8>>(8);
+            let mut pump = tokio::spawn(splice(spliced, to_peer, from_peer));
+
+            let payload = vec![iteration];
+            client.write_all(&payload).await.unwrap();
+            client.shutdown().await.unwrap();
+
+            // Local EOF cannot finish while the one-slot outbound channel is
+            // occupied: the byte read from TCP is waiting in `send`.
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(50), &mut pump)
+                    .await
+                    .is_err(),
+                "splice returned before its blocked send"
+            );
+
+            // Ending the opposite direction must let that send finish rather
+            // than cancel it. Free the slot only after the peer close races it.
+            drop(peer_tx);
+            assert_eq!(peer_rx.recv().await.unwrap(), b"occupied".to_vec());
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut pump)
+                .await
+                .expect("splice finishes after the outbound slot opens")
+                .unwrap();
+            let received = peer_rx.recv().await;
+            if received.as_deref() != Some(payload.as_slice()) {
+                failures.push((iteration, received));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "peer close cancelled in-flight uplink sends: {failures:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_local_eof_does_not_cancel_an_in_flight_socket_write() {
+        let mut failures = Vec::new();
+        for iteration in 0..10u8 {
+            let (mut client, spliced) = socket_pair().await;
+            let (to_peer, _peer_rx) = mpsc::channel(8);
+            let (peer_tx, from_peer) = mpsc::channel(8);
+            let mut pump = tokio::spawn(splice(spliced, to_peer, from_peer));
+            let payload = vec![iteration; 16 * 1024 * 1024];
+            peer_tx.send(payload.clone()).await.unwrap();
+
+            // One byte proves `write_all` started. Stop reading before local
+            // EOF races it, leaving far more than the socket buffer in flight.
+            let mut first = [0u8; 1];
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                client.read_exact(&mut first),
+            )
+            .await
+            .expect("socket write starts")
+            .unwrap();
+            client.shutdown().await.unwrap();
+
+            let finished_early =
+                match tokio::time::timeout(std::time::Duration::from_millis(50), &mut pump).await {
+                    Ok(result) => {
+                        result.unwrap();
+                        true
+                    }
+                    Err(_) => false,
+                };
+
+            let mut received = first.to_vec();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                client.read_to_end(&mut received),
+            )
+            .await
+            .expect("socket write drains")
+            .unwrap();
+            if !finished_early {
+                tokio::time::timeout(std::time::Duration::from_secs(2), &mut pump)
+                    .await
+                    .expect("splice finishes after the socket drains")
+                    .unwrap();
+            }
+
+            if received != payload {
+                failures.push((iteration, received.len()));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "local EOF cancelled in-flight socket writes: {failures:?}"
+        );
+    }
 }
