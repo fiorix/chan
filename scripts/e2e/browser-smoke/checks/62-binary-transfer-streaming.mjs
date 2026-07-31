@@ -310,8 +310,9 @@ export default {
 
       // Learn the editor/index threshold from the server response rather than
       // duplicating it in this harness, then put a multi-gigabyte Markdown
-      // file into the watcher and time a File Browser rename during the
-      // watcher's consideration window.
+      // file into the watcher and time an unrelated small File Browser rename
+      // during the watcher's consideration window. Moving the oversized file
+      // itself would instead measure its independent link-rewrite read.
       const thresholdProbe = `threshold-probe-${Date.now()}.md`;
       writeFileSync(join(ctx.workspaceDir, thresholdProbe), "# threshold\n");
       const maxEditableBytes = await page.evaluate(async (path) => {
@@ -331,6 +332,7 @@ export default {
       const indexName = `oversized-index-${Date.now()}.md`;
       const indexBytes = 3 * GiB;
       const renameDir = `renamed-index-${Date.now()}`;
+      const renameProbeBytes = statSync(join(ctx.workspaceDir, thresholdProbe)).size;
       mkdirSync(join(ctx.workspaceDir, renameDir));
       writeFileSync(join(ctx.workspaceDir, indexName), "# oversized\n");
       truncateSync(join(ctx.workspaceDir, indexName), indexBytes);
@@ -360,7 +362,7 @@ export default {
               elapsedMs: performance.now() - started,
             };
           },
-          { source: indexName, dest: renameDir },
+          { source: thresholdProbe, dest: renameDir },
         ),
       );
       if (rename.value.status !== 200) {
@@ -369,12 +371,17 @@ export default {
       if (rename.value.elapsedMs > 2000) {
         throw new Error(`rename beside oversized index took ${rename.value.elapsedMs} ms`);
       }
-      const renamedIndex = join(ctx.workspaceDir, renameDir, indexName);
-      if (!existsSync(renamedIndex) || statSync(renamedIndex).size !== indexBytes) {
-        throw new Error("rename beside oversized index did not preserve the sparse file");
+      const renamedProbe = join(ctx.workspaceDir, renameDir, thresholdProbe);
+      if (!existsSync(renamedProbe) || statSync(renamedProbe).size !== renameProbeBytes) {
+        throw new Error("rename beside oversized index did not preserve the probe file");
+      }
+      const oversizedIndex = join(ctx.workspaceDir, indexName);
+      if (!existsSync(oversizedIndex) || statSync(oversizedIndex).size !== indexBytes) {
+        throw new Error("watcher consideration did not preserve the sparse index fixture");
       }
       record("oversized-index-rename", {
         fixtureBytes: indexBytes,
+        renameProbeBytes,
         maxEditableBytes,
         status: rename.value.status,
         elapsedMs: rename.value.elapsedMs,
