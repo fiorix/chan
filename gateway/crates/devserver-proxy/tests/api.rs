@@ -1968,8 +1968,10 @@ async fn ws_bridge_survives_idle_window_on_client_frames_alone() {
     // direction failed to reset the shared window, the cut would land
     // mid-send phase and surface as a Close below.
     let send_until = tokio::time::Instant::now() + 3 * WS_TEST_IDLE;
+    let mut quiet_started = tokio::time::Instant::now();
     while tokio::time::Instant::now() < send_until {
         ws.send(WsMsg::text("ping")).await.expect("send while live");
+        quiet_started = tokio::time::Instant::now();
         match tokio::time::timeout(std::time::Duration::from_millis(150), ws.next()).await {
             Err(_) => {} // nothing inbound: the sink stays silent
             Ok(Some(Ok(WsMsg::Close(frame)))) => {
@@ -1980,9 +1982,8 @@ async fn ws_bridge_survives_idle_window_on_client_frames_alone() {
         }
     }
 
-    // Now go quiet: the cut must arrive roughly one idle window later,
-    // proving the bridge was alive until the LAST client frame.
-    let quiet_started = tokio::time::Instant::now();
+    // Measure the quiet window from the last successful client frame,
+    // proving the bridge remained alive through the send phase.
     let closed = tokio::time::timeout(4 * WS_TEST_IDLE, async {
         loop {
             match ws.next().await {
@@ -1996,8 +1997,8 @@ async fn ws_bridge_survives_idle_window_on_client_frames_alone() {
     .expect("idle cut must arrive after the client goes quiet");
     let elapsed = quiet_started.elapsed();
     assert!(
-        elapsed >= WS_TEST_IDLE.mul_f32(0.75),
-        "cut arrived before the idle window elapsed: {elapsed:?}"
+        elapsed >= WS_TEST_IDLE,
+        "cut arrived less than one idle window after the last client frame: {elapsed:?}"
     );
     let frame = closed.expect("close carries code and reason");
     assert_eq!(u16::from(frame.code), 1001, "going away");
@@ -2018,8 +2019,9 @@ async fn ws_bridge_cuts_both_idle_socket_with_a_close_frame() {
     let cookie = session_cookie(&app, uid, "blog", &host);
     let mut ws = ws_connect(addr, &host, "/blog/ws-echo", &cookie).await;
 
-    // Prove the socket is live end to end, then go silent in both
-    // directions.
+    // The reference precedes the client frame and its upstream echo, so
+    // either deadline reset can only increase the observed quiet window.
+    let quiet_started = tokio::time::Instant::now();
     ws.send(WsMsg::text("hello")).await.unwrap();
     let echoed = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
         .await
@@ -2030,7 +2032,6 @@ async fn ws_bridge_cuts_both_idle_socket_with_a_close_frame() {
 
     // The client half must observe a real Close frame (code + reason),
     // not an abrupt FIN, and not before the idle window has elapsed.
-    let quiet_started = tokio::time::Instant::now();
     let closed = tokio::time::timeout(4 * WS_TEST_IDLE, async {
         loop {
             match ws.next().await {
@@ -2044,7 +2045,7 @@ async fn ws_bridge_cuts_both_idle_socket_with_a_close_frame() {
     .expect("both-idle cut must arrive");
     let elapsed = quiet_started.elapsed();
     assert!(
-        elapsed >= WS_TEST_IDLE.mul_f32(0.75),
+        elapsed >= WS_TEST_IDLE,
         "cut arrived before the idle window elapsed: {elapsed:?}"
     );
     let frame = closed.expect("close carries code and reason");
