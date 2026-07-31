@@ -28,6 +28,7 @@ The loss window can include the queued frames plus a frame whose send was cancel
 
 - `bridge::splice` cancels only at read/receive boundaries. An in-progress `send` or `write_all` completes before the other direction's stop signal takes effect.
 - The pump still ends both directions together on TCP EOF, peer-channel close, or socket error. `to_peer` is dropped when `splice` returns.
+- Under the no-half-close policy, local TCP EOF completes only an already-running downlink `write_all`; chunks still queued in `from_peer` are intentionally outside the drain guarantee because both directions end together.
 - The server consumes the uplink concurrently with `splice`, then awaits it after `splice` returns to drain every queued frame. The downlink is aborted only after that drain.
 - The desktop joins `splice` and its WebSocket shuttle as one cancellation unit. A normal EOF lets the shuttle observe the dropped outbound sender and close itself; tunnel teardown still aborts the owning connection through `JoinSet::shutdown`.
 - No wire signal, deadline, capacity change, or total-byte limit is introduced.
