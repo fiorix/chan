@@ -3069,6 +3069,7 @@ mod tests {
         let disk_text = body(json!([edited]));
         let disk_canonical = Scene::parse(&disk_text).unwrap().serialize_file();
         fx.workspace.write_text("b.excalidraw", &disk_text).unwrap();
+        ha.session().lock_state().flushed_mtime_ns = None;
 
         reconcile_session(ha.session(), &fx.workspace).await;
 
