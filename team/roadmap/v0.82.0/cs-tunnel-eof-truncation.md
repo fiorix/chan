@@ -1,6 +1,6 @@
 # Fix `cs tunnel` EOF truncation
 
-Status: IMPLEMENTED. The connection lifecycle now drains bytes already read from either TCP endpoint before its data WebSocket closes.
+Status: COMPLETE. The connection lifecycle now drains bytes already read from either TCP endpoint before its data WebSocket closes.
 
 ## What
 
@@ -57,4 +57,4 @@ The marketing-site browser smoke is owner-only and manual. It cannot run in this
 - `cargo test -p chan-server --lib`: 935 passed.
 - `cargo test -p chan --test revtunnel_e2e`: 9 passed, 1 owner-only ignored. Five serial repetitions and five parallel repetitions are green.
 - The post-fix boundary and concurrent cases report zero failures at every size in both directions.
-- The pre-fix owner-run 2 GiB result is recorded in the tunnel journal. The same script is the post-fix proof and records hashes, byte counts, iteration counts, wall clock, and disk checkpoints.
+- The pre-fix and post-fix owner-run 2 GiB results are recorded side by side in the tunnel journal. The post-fix run transferred all 3 iterations byte-identically with curl exit 0.
