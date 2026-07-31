@@ -739,7 +739,9 @@ impl DocSession {
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, DocState> {
-        self.state.lock().expect("doc session state poisoned")
+        // Session state remains memory-safe after a panicking writer; recover
+        // so cleanup and later requests continue from the state it left.
+        self.state.lock().unwrap_or_else(|error| error.into_inner())
     }
 
     // Test-surface accessor; production code reads the atomic directly.
@@ -749,11 +751,16 @@ impl DocSession {
     }
 
     /// Swap the echo ring for one with a short TTL so tests can
-    /// observe expiry without sleeping through the production window.
+    /// observe expiry without waiting through the production window.
     /// Discards existing entries; call before the writes under test.
     #[cfg(test)]
     fn test_set_disk_echo_ttl(&self, ttl: Duration) {
         self.lock_state().disk_echo = DiskEchoRing::with_ttls(ttl, ttl);
+    }
+
+    #[cfg(test)]
+    fn test_age_disk_echo(&self, age: Duration) {
+        self.lock_state().disk_echo.test_age_by(age);
     }
 
     /// Age the pending absence past CORROBORATE_AFTER so the next
@@ -1366,7 +1373,11 @@ impl DocRegistry {
     }
 
     fn lock_sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<DocSession>>> {
-        self.sessions.lock().expect("doc registry poisoned")
+        // A poisoned registry still contains memory-safe session entries;
+        // recover so cleanup and later requests continue from that state.
+        self.sessions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
     }
 
     /// The live session for a path, if any (the GET/PUT diverts and
@@ -3777,7 +3788,7 @@ mod tests {
             "the restore observation remains scheduled"
         );
 
-        tokio::time::sleep(Duration::from_millis(600)).await;
+        ha.session().test_age_disk_echo(Duration::from_millis(600));
         fx.registry.reconcile_pending(&fx.workspace).await;
         assert_eq!(ha.session().authority_view().0, "v1");
         let frames = drain(&mut rxa);
@@ -3811,7 +3822,7 @@ mod tests {
         assert_eq!(ha.session().authority_view().0, "# Hello world");
         drain(&mut rxa);
 
-        tokio::time::sleep(Duration::from_millis(40)).await;
+        ha.session().test_age_disk_echo(Duration::from_millis(40));
         std::fs::write(fx.root.path().join("a.md"), "# Hello").unwrap();
         reconcile_session(ha.session(), &fx.workspace).await;
         assert_eq!(

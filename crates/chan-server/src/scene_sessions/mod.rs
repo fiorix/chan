@@ -593,7 +593,9 @@ impl SceneSession {
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, SceneState> {
-        self.state.lock().expect("scene session state poisoned")
+        // Session state remains memory-safe after a panicking writer; recover
+        // so cleanup and later requests continue from the state it left.
+        self.state.lock().unwrap_or_else(|error| error.into_inner())
     }
 
     // Test-surface accessor; production code reads the atomic directly.
@@ -603,11 +605,16 @@ impl SceneSession {
     }
 
     /// Swap the echo ring for one with a short TTL so tests can
-    /// observe expiry without sleeping through the production window.
+    /// observe expiry without waiting through the production window.
     /// Discards existing entries; call before the writes under test.
     #[cfg(test)]
     fn test_set_disk_echo_ttl(&self, ttl: Duration) {
         self.lock_state().disk_echo = DiskEchoRing::with_ttls(ttl, ttl);
+    }
+
+    #[cfg(test)]
+    fn test_age_disk_echo(&self, age: Duration) {
+        self.lock_state().disk_echo.test_age_by(age);
     }
 
     /// Age the pending absence past CORROBORATE_AFTER so the next
@@ -1209,7 +1216,11 @@ impl SceneRegistry {
     }
 
     fn lock_sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<SceneSession>>> {
-        self.sessions.lock().expect("scene registry poisoned")
+        // A poisoned registry still contains memory-safe session entries;
+        // recover so cleanup and later requests continue from that state.
+        self.sessions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
     }
 
     /// The live session for a path, if any (the GET/PUT diverts and
@@ -3063,6 +3074,7 @@ mod tests {
         let disk_text = body(json!([edited]));
         let disk_canonical = Scene::parse(&disk_text).unwrap().serialize_file();
         fx.workspace.write_text("b.excalidraw", &disk_text).unwrap();
+        ha.session().lock_state().flushed_mtime_ns = None;
 
         reconcile_session(ha.session(), &fx.workspace).await;
 
@@ -3601,7 +3613,7 @@ mod tests {
             "the restore observation remains scheduled"
         );
 
-        tokio::time::sleep(Duration::from_millis(600)).await;
+        ha.session().test_age_disk_echo(Duration::from_millis(600));
         fx.registry.reconcile_pending(&fx.workspace).await;
         let (text, _) = ha.session().authority_view();
         assert!(!text.contains("\"y\""), "the expired restore folds");

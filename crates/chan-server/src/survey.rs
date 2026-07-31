@@ -182,7 +182,12 @@ impl SurveyBus {
     /// waiter timed out concurrently) is ignored: the waiter's own guard drop
     /// lands here next and promotes its successor, so the queue never stalls.
     fn finish_turn(&self, key: &SurveyQueueKey, ticket: u64) {
-        let mut queues = self.queues.lock().expect("survey queues poisoned");
+        // Guard drop keeps queue cleanup available after a panicking writer;
+        // recover and continue from the queue state it left.
+        let mut queues = self
+            .queues
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let Some(queue) = queues.get_mut(key) else {
             return;
         };
