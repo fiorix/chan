@@ -1,8 +1,8 @@
 // Binary transfer acceptance over a real server + headless Chrome:
-// bounded server RSS and early first-byte delivery on a large download,
-// bounded multipart upload, cancelled-upload temp cleanup, and the SPA's
-// visible one-upload FIFO queue with progress rendering coalesced far
-// below the upload chunk rate.
+// bounded RSS, threads, and FDs for large plain reads, downloads, directory
+// archives, and copies; byte ranges and validators; bounded multipart upload;
+// cancelled-upload cleanup; and the SPA's visible one-upload FIFO queue with
+// progress rendering coalesced far below the upload chunk rate.
 
 import {
   existsSync,
@@ -13,15 +13,24 @@ import {
   truncateSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 const MiB = 1024 * 1024;
+const GiB = 1024 * MiB;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function rssBytes(pid) {
-  const match = readFileSync(`/proc/${pid}/status`, "utf8").match(/^VmRSS:\s+(\d+)\s+kB$/m);
-  if (!match) throw new Error(`could not read VmRSS for server pid ${pid}`);
-  return Number(match[1]) * 1024;
+function processResources(pid) {
+  const status = readFileSync(`/proc/${pid}/status`, "utf8");
+  const rss = status.match(/^VmRSS:\s+(\d+)\s+kB$/m);
+  const threads = status.match(/^Threads:\s+(\d+)$/m);
+  if (!rss || !threads) {
+    throw new Error(`could not read process resources for server pid ${pid}`);
+  }
+  return {
+    rssBytes: Number(rss[1]) * 1024,
+    threads: Number(threads[1]),
+    openFds: readdirSync(`/proc/${pid}/fd`).length,
+  };
 }
 
 function workspaceNames(dir) {
@@ -40,20 +49,88 @@ async function waitFor(probe, description, timeoutMs = 30_000, intervalMs = 50) 
   }
 }
 
-async function monitorRss(pid, promise) {
-  const baseline = rssBytes(pid);
-  let peak = baseline;
+async function monitorResources(pid, promise) {
+  const baseline = processResources(pid);
+  const peak = { ...baseline };
   const timer = setInterval(() => {
-    peak = Math.max(peak, rssBytes(pid));
+    const sample = processResources(pid);
+    peak.rssBytes = Math.max(peak.rssBytes, sample.rssBytes);
+    peak.threads = Math.max(peak.threads, sample.threads);
+    peak.openFds = Math.max(peak.openFds, sample.openFds);
   }, 25);
   let value;
   try {
     value = await promise;
   } finally {
     clearInterval(timer);
-    peak = Math.max(peak, rssBytes(pid));
+    const sample = processResources(pid);
+    peak.rssBytes = Math.max(peak.rssBytes, sample.rssBytes);
+    peak.threads = Math.max(peak.threads, sample.threads);
+    peak.openFds = Math.max(peak.openFds, sample.openFds);
   }
   return { value, baseline, peak };
+}
+
+function assertResourceBudget(label, measurement, limits) {
+  const growth = {
+    rssBytes: measurement.peak.rssBytes - measurement.baseline.rssBytes,
+    threads: measurement.peak.threads - measurement.baseline.threads,
+    openFds: measurement.peak.openFds - measurement.baseline.openFds,
+  };
+  if (
+    growth.rssBytes > limits.rssBytes ||
+    growth.threads > limits.threads ||
+    growth.openFds > limits.openFds
+  ) {
+    throw new Error(
+      `${label} exceeded process resource budget: growth=${JSON.stringify(growth)} limits=${JSON.stringify(limits)}`,
+    );
+  }
+  return {
+    resourceBaseline: measurement.baseline,
+    resourcePeak: measurement.peak,
+    resourceGrowth: growth,
+    resourceLimits: limits,
+  };
+}
+
+async function fetchPrefix(page, path, query, stopAfterBytes) {
+  return await page.evaluate(
+    async ({ path, query, stopAfterBytes }) => {
+      const token =
+        sessionStorage.getItem("chan.token") ??
+        new URLSearchParams(location.search).get("t") ??
+        "";
+      const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+      const params = new URLSearchParams(query);
+      if (token) params.set("t", token);
+      const started = performance.now();
+      const response = await fetch(`/api/files/${encodedPath}?${params}`);
+      if (!response.ok || !response.body) {
+        throw new Error(`stream prefix ${path}: ${response.status} ${await response.text()}`);
+      }
+      const reader = response.body.getReader();
+      let bytes = 0;
+      let firstByteMs = null;
+      while (bytes < stopAfterBytes) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (firstByteMs === null) firstByteMs = performance.now() - started;
+        bytes += value.byteLength;
+      }
+      await reader.cancel();
+      return {
+        status: response.status,
+        bytes,
+        firstByteMs,
+        contentLength: response.headers.get("content-length"),
+        contentRange: response.headers.get("content-range"),
+        acceptRanges: response.headers.get("accept-ranges"),
+        etag: response.headers.get("etag"),
+      };
+    },
+    { path, query, stopAfterBytes },
+  );
 }
 
 export default {
@@ -75,16 +152,336 @@ export default {
       evidence.steps.push({ step, ...data });
       console.log(`[smoke:62] ${step}: ${JSON.stringify(data)}`);
     };
-    const memoryLimit = 24 * MiB;
+    const resourceLimits = {
+      rssBytes: 24 * MiB,
+      threads: 8,
+      openFds: 12,
+    };
+    const prefixBytes = 8 * MiB;
+
+    const home = process.env.HOME ? resolve(process.env.HOME) : null;
+    const workspace = resolve(ctx.workspaceDir);
+    if (!home || (workspace !== home && !workspace.startsWith(`${home}/`))) {
+      throw new Error(`large sparse fixtures must live under HOME: ${workspace}`);
+    }
+
+    const measurePrefix = async (step, path, query, fixtureBytes) => {
+      const measurement = await monitorResources(
+        serverPid,
+        fetchPrefix(page, path, query, prefixBytes),
+      );
+      if (measurement.value.bytes < prefixBytes) {
+        throw new Error(`${step} ended after only ${measurement.value.bytes} bytes`);
+      }
+      if (measurement.value.firstByteMs === null || measurement.value.firstByteMs > 3000) {
+        throw new Error(`${step} first byte took ${measurement.value.firstByteMs} ms`);
+      }
+      const resources = assertResourceBudget(step, measurement, resourceLimits);
+      record(step, {
+        fixtureBytes,
+        consumedBytes: measurement.value.bytes,
+        firstByteMs: measurement.value.firstByteMs,
+        status: measurement.value.status,
+        contentLength: measurement.value.contentLength,
+        ...resources,
+      });
+      await sleep(250);
+    };
+    const streamingSuiteBaseline = processResources(serverPid);
 
     try {
-      // A sparse 32 MiB file makes whole-file server buffering obvious without
-      // allocating the same payload in the Node harness.
+      // All-zero sparse files carry NUL bytes in the sniff prefix. The odd
+      // suffix therefore takes the binary fallback used for ISOs, archives,
+      // and unknown formats instead of being accepted as editable text.
+      const unknownName = `bounded-unknown-${Date.now()}.opaque`;
+      const unknownBytes = 3 * GiB;
+      writeFileSync(join(ctx.workspaceDir, unknownName), "");
+      truncateSync(join(ctx.workspaceDir, unknownName), unknownBytes);
+      await measurePrefix("plain-unknown", unknownName, {}, unknownBytes);
+
+      // Image and PDF are explicit classifier arms. Keep both on the same
+      // bounded path and make either whole-file allocation exceed the budget
+      // by a wide margin.
+      for (const extension of ["png", "pdf"]) {
+        const name = `bounded-${extension}-${Date.now()}.${extension}`;
+        const fixtureBytes = 512 * MiB;
+        writeFileSync(join(ctx.workspaceDir, name), "");
+        truncateSync(join(ctx.workspaceDir, name), fixtureBytes);
+        await measurePrefix(`plain-${extension}`, name, {}, fixtureBytes);
+      }
+
+      // A directory response streams tar headers and each member directly.
+      // Cancelling after a prefix keeps the browser-side cost fixed while a
+      // regression that materializes the sparse member remains observable in
+      // the server process.
+      const archiveDir = `bounded-directory-${Date.now()}`;
+      const archiveMemberBytes = 3 * GiB;
+      mkdirSync(join(ctx.workspaceDir, archiveDir));
+      writeFileSync(join(ctx.workspaceDir, archiveDir, "huge-member.bin"), "");
+      truncateSync(join(ctx.workspaceDir, archiveDir, "huge-member.bin"), archiveMemberBytes);
+      await measurePrefix(
+        "directory-download",
+        archiveDir,
+        { download: "1" },
+        archiveMemberBytes,
+      );
+
+      // The File Browser copy API must reject above its existing binary sink
+      // budget before creating a destination or leaving an atomic temp file.
+      const copySource = `copy-source-${Date.now()}.bin`;
+      const copySourceBytes = 64 * MiB;
+      const copyDest = `copy-dest-${Date.now()}`;
+      writeFileSync(join(ctx.workspaceDir, copySource), "");
+      truncateSync(join(ctx.workspaceDir, copySource), copySourceBytes);
+      mkdirSync(join(ctx.workspaceDir, copyDest));
+      const beforeCopy = workspaceNames(join(ctx.workspaceDir, copyDest));
+      const copy = await monitorResources(
+        serverPid,
+        page.evaluate(
+          async ({ source, dest }) => {
+            const token =
+              sessionStorage.getItem("chan.token") ??
+              new URLSearchParams(location.search).get("t") ??
+              "";
+            const headers = { "content-type": "application/json" };
+            if (token) headers.authorization = `Bearer ${token}`;
+            const started = performance.now();
+            const response = await fetch("/api/fs/transfer", {
+              method: "POST",
+              headers,
+              body: JSON.stringify({ op: "copy", sources: [source], dest_dir: dest }),
+            });
+            return {
+              status: response.status,
+              body: await response.text(),
+              elapsedMs: performance.now() - started,
+            };
+          },
+          { source: copySource, dest: copyDest },
+        ),
+      );
+      const afterCopy = workspaceNames(join(ctx.workspaceDir, copyDest));
+      if (copy.value.status !== 413) {
+        throw new Error(`oversized copy returned ${copy.value.status}: ${copy.value.body}`);
+      }
+      if (JSON.stringify(afterCopy) !== JSON.stringify(beforeCopy)) {
+        throw new Error(
+          `oversized copy left destination state: before=${beforeCopy} after=${afterCopy}`,
+        );
+      }
+      const smallCopySource = `copy-follow-up-${Date.now()}.bin`;
+      writeFileSync(join(ctx.workspaceDir, smallCopySource), Buffer.from([1, 2, 3, 4]));
+      const followUpCopy = await page.evaluate(
+        async ({ source, dest }) => {
+          const token =
+            sessionStorage.getItem("chan.token") ??
+            new URLSearchParams(location.search).get("t") ??
+            "";
+          const headers = { "content-type": "application/json" };
+          if (token) headers.authorization = `Bearer ${token}`;
+          const response = await fetch("/api/fs/transfer", {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ op: "copy", sources: [source], dest_dir: dest }),
+          });
+          return { status: response.status, body: await response.text() };
+        },
+        { source: smallCopySource, dest: copyDest },
+      );
+      const followUpTarget = join(ctx.workspaceDir, copyDest, smallCopySource);
+      if (
+        followUpCopy.status !== 200 ||
+        !existsSync(followUpTarget) ||
+        statSync(followUpTarget).size !== 4
+      ) {
+        throw new Error(
+          `copy did not recover after refusal: ${followUpCopy.status} ${followUpCopy.body}`,
+        );
+      }
+      record("copy-refusal", {
+        fixtureBytes: copySourceBytes,
+        status: copy.value.status,
+        elapsedMs: copy.value.elapsedMs,
+        destinationEntriesAfterRefusal: afterCopy,
+        followUpStatus: followUpCopy.status,
+        followUpBytes: statSync(followUpTarget).size,
+        ...assertResourceBudget("copy-refusal", copy, resourceLimits),
+      });
+
+      // Learn the editor/index threshold from the server response rather than
+      // duplicating it in this harness, then put a multi-gigabyte Markdown
+      // file into the watcher and time an unrelated small File Browser rename
+      // during the watcher's consideration window. Moving the oversized file
+      // itself would instead measure its independent link-rewrite read.
+      const thresholdProbe = `threshold-probe-${Date.now()}.md`;
+      writeFileSync(join(ctx.workspaceDir, thresholdProbe), "# threshold\n");
+      const maxEditableBytes = await page.evaluate(async (path) => {
+        const token =
+          sessionStorage.getItem("chan.token") ??
+          new URLSearchParams(location.search).get("t") ??
+          "";
+        const params = new URLSearchParams();
+        if (token) params.set("t", token);
+        const response = await fetch(`/api/files/${encodeURIComponent(path)}?${params}`);
+        if (!response.ok) throw new Error(`threshold probe: ${response.status}`);
+        return (await response.json()).max_editable_bytes;
+      }, thresholdProbe);
+      if (!Number.isSafeInteger(maxEditableBytes) || maxEditableBytes <= 0) {
+        throw new Error(`invalid server-reported editable threshold: ${maxEditableBytes}`);
+      }
+      const indexName = `oversized-index-${Date.now()}.md`;
+      const indexBytes = 3 * GiB;
+      const renameDir = `renamed-index-${Date.now()}`;
+      const renameProbeBytes = statSync(join(ctx.workspaceDir, thresholdProbe)).size;
+      mkdirSync(join(ctx.workspaceDir, renameDir));
+      writeFileSync(join(ctx.workspaceDir, indexName), "# oversized\n");
+      truncateSync(join(ctx.workspaceDir, indexName), indexBytes);
+      if (indexBytes <= maxEditableBytes) {
+        throw new Error(`index fixture ${indexBytes} does not exceed threshold ${maxEditableBytes}`);
+      }
+      await sleep(350);
+      const rename = await monitorResources(
+        serverPid,
+        page.evaluate(
+          async ({ source, dest }) => {
+            const token =
+              sessionStorage.getItem("chan.token") ??
+              new URLSearchParams(location.search).get("t") ??
+              "";
+            const headers = { "content-type": "application/json" };
+            if (token) headers.authorization = `Bearer ${token}`;
+            const started = performance.now();
+            const response = await fetch("/api/fs/transfer", {
+              method: "POST",
+              headers,
+              body: JSON.stringify({ op: "move", sources: [source], dest_dir: dest }),
+            });
+            return {
+              status: response.status,
+              body: await response.text(),
+              elapsedMs: performance.now() - started,
+            };
+          },
+          { source: thresholdProbe, dest: renameDir },
+        ),
+      );
+      if (rename.value.status !== 200) {
+        throw new Error(`rename beside oversized index returned ${rename.value.status}`);
+      }
+      if (rename.value.elapsedMs > 2000) {
+        throw new Error(`rename beside oversized index took ${rename.value.elapsedMs} ms`);
+      }
+      const renamedProbe = join(ctx.workspaceDir, renameDir, thresholdProbe);
+      if (!existsSync(renamedProbe) || statSync(renamedProbe).size !== renameProbeBytes) {
+        throw new Error("rename beside oversized index did not preserve the probe file");
+      }
+      const oversizedIndex = join(ctx.workspaceDir, indexName);
+      if (!existsSync(oversizedIndex) || statSync(oversizedIndex).size !== indexBytes) {
+        throw new Error("watcher consideration did not preserve the sparse index fixture");
+      }
+      record("oversized-index-rename", {
+        fixtureBytes: indexBytes,
+        renameProbeBytes,
+        maxEditableBytes,
+        status: rename.value.status,
+        elapsedMs: rename.value.elapsedMs,
+        ...assertResourceBudget("oversized-index-rename", rename, resourceLimits),
+      });
+
+      // One small byte-exact fixture pins resumable download behavior at the
+      // first byte, last byte, and a requested end past EOF. A size-changing
+      // rewrite must also produce a different non-weak validator.
+      const rangeName = `range-download-${Date.now()}.bin`;
+      writeFileSync(join(ctx.workspaceDir, rangeName), Buffer.from([...Array(16).keys()]));
+      const fetchRange = async (range) =>
+        await page.evaluate(
+          async ({ path, range }) => {
+            const token =
+              sessionStorage.getItem("chan.token") ??
+              new URLSearchParams(location.search).get("t") ??
+              "";
+            const params = new URLSearchParams({ download: "1" });
+            if (token) params.set("t", token);
+            const response = await fetch(`/api/files/${encodeURIComponent(path)}?${params}`, {
+              headers: { range },
+            });
+            return {
+              status: response.status,
+              bytes: [...new Uint8Array(await response.arrayBuffer())],
+              contentRange: response.headers.get("content-range"),
+              contentLength: response.headers.get("content-length"),
+              acceptRanges: response.headers.get("accept-ranges"),
+              etag: response.headers.get("etag"),
+            };
+          },
+          { path: rangeName, range },
+        );
+      const firstRange = await fetchRange("bytes=0-0");
+      const lastRange = await fetchRange("bytes=-1");
+      const spanningRange = await fetchRange("bytes=12-99");
+      const expectedRanges = [
+        [firstRange, [0], "bytes 0-0/16"],
+        [lastRange, [15], "bytes 15-15/16"],
+        [spanningRange, [12, 13, 14, 15], "bytes 12-15/16"],
+      ];
+      for (const [actual, bytes, contentRange] of expectedRanges) {
+        if (
+          actual.status !== 206 ||
+          actual.acceptRanges !== "bytes" ||
+          actual.contentRange !== contentRange ||
+          actual.contentLength !== String(bytes.length) ||
+          JSON.stringify(actual.bytes) !== JSON.stringify(bytes)
+        ) {
+          throw new Error(`bad download range: ${JSON.stringify(actual)}`);
+        }
+      }
+      if (!firstRange.etag || firstRange.etag.startsWith("W/")) {
+        throw new Error(`download validator is not strong: ${firstRange.etag}`);
+      }
+      writeFileSync(join(ctx.workspaceDir, rangeName), Buffer.from([...Array(17).keys()]));
+      const changedRange = await fetchRange("bytes=0-0");
+      if (!changedRange.etag || changedRange.etag === firstRange.etag) {
+        throw new Error(
+          `download validator did not change: before=${firstRange.etag} after=${changedRange.etag}`,
+        );
+      }
+      record("download-ranges-validator", {
+        first: firstRange,
+        last: lastRange,
+        spanningEnd: spanningRange,
+        changedEtag: changedRange.etag,
+      });
+
+      await sleep(500);
+      const streamingSuiteFinal = processResources(serverPid);
+      const streamingSuiteGrowth = {
+        rssBytes: streamingSuiteFinal.rssBytes - streamingSuiteBaseline.rssBytes,
+        threads: streamingSuiteFinal.threads - streamingSuiteBaseline.threads,
+        openFds: streamingSuiteFinal.openFds - streamingSuiteBaseline.openFds,
+      };
+      if (
+        streamingSuiteGrowth.rssBytes > resourceLimits.rssBytes ||
+        streamingSuiteGrowth.threads > resourceLimits.threads ||
+        streamingSuiteGrowth.openFds > resourceLimits.openFds
+      ) {
+        throw new Error(
+          `streaming suite leaked process resources: growth=${JSON.stringify(streamingSuiteGrowth)}`,
+        );
+      }
+      record("streaming-suite-cleanup", {
+        resourceBaseline: streamingSuiteBaseline,
+        resourceFinal: streamingSuiteFinal,
+        resourceGrowth: streamingSuiteGrowth,
+        resourceLimits,
+      });
+
+      // Complete one moderate download to pin exact byte count in addition to
+      // the cancelled multi-gigabyte probes above.
       const downloadName = `bounded-download-${Date.now()}.bin`;
       const downloadPath = join(ctx.workspaceDir, downloadName);
       writeFileSync(downloadPath, "");
       truncateSync(downloadPath, 32 * MiB);
-      const download = monitorRss(
+      const download = monitorResources(
         serverPid,
         page.evaluate(async (path) => {
           const token =
@@ -111,26 +508,22 @@ export default {
         }, downloadName),
       );
       const downloadResult = await download;
-      const downloadGrowth = downloadResult.peak - downloadResult.baseline;
       if (downloadResult.value.bytes !== 32 * MiB) {
         throw new Error(`binary download truncated at ${downloadResult.value.bytes} bytes`);
       }
       if (downloadResult.value.firstByteMs === null || downloadResult.value.firstByteMs > 3000) {
         throw new Error(`binary download first byte took ${downloadResult.value.firstByteMs} ms`);
       }
-      if (downloadGrowth > memoryLimit) {
-        throw new Error(`binary download grew server RSS by ${downloadGrowth} bytes`);
-      }
       record("download", {
         ...downloadResult.value,
-        rssGrowthBytes: downloadGrowth,
-        rssLimitBytes: memoryLimit,
+        fixtureBytes: 32 * MiB,
+        ...assertResourceBudget("download", downloadResult, resourceLimits),
       });
 
       // Multipart upload through XHR: the browser may own a Blob, but the
       // measured server process must remain bounded while E7 consumes it.
       const fullUploadName = `bounded-upload-${Date.now()}.bin`;
-      const fullUpload = await monitorRss(
+      const fullUpload = await monitorResources(
         serverPid,
         page.evaluate(
           async ({ name, size }) => {
@@ -172,10 +565,6 @@ export default {
           { name: fullUploadName, size: 16 * MiB },
         ),
       );
-      const uploadGrowth = fullUpload.peak - fullUpload.baseline;
-      if (uploadGrowth > memoryLimit) {
-        throw new Error(`binary upload grew server RSS by ${uploadGrowth} bytes`);
-      }
       if (
         !existsSync(join(ctx.workspaceDir, fullUploadName)) ||
         statSync(join(ctx.workspaceDir, fullUploadName)).size !== 16 * MiB
@@ -186,8 +575,7 @@ export default {
         bytes: statSync(join(ctx.workspaceDir, fullUploadName)).size,
         progressEvents: fullUpload.value.progress.length,
         firstProgressMs: fullUpload.value.progress.find((event) => event.loaded > 0)?.atMs ?? null,
-        rssGrowthBytes: uploadGrowth,
-        rssLimitBytes: memoryLimit,
+        ...assertResourceBudget("upload", fullUpload, resourceLimits),
       });
 
       // Abort a multipart stream after progress begins. The semantic atomic

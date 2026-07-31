@@ -30,12 +30,15 @@ use crate::{Report, ReportScope};
 
 pub use crate::fs_ops::{AtomicWriteKind, AtomicWriteSink};
 
-/// Hard cap on `write_text` content size. Markdown / txt notes are
-/// human-authored; 2 MiB is roughly 2M characters of dense English,
-/// far past any realistic note. Anything larger is almost certainly
-/// either a bug, a binary file mislabelled with `.md`, or an LLM tool
-/// running away. We stop it at the boundary so a misbehaving caller
-/// cannot fill the user's workspace without an explicit code change.
+/// Canonical editable-content threshold. It caps new `write_text` content,
+/// buffered editor opens, and incremental indexing; the server reports this
+/// same value as `max_editable_bytes` so those paths cannot disagree.
+/// Markdown / txt notes are human-authored; 2 MiB is roughly 2M characters
+/// of dense English, far past any realistic note. Anything larger is almost
+/// certainly either a bug, a binary file mislabelled with `.md`, or an LLM
+/// tool running away. Legacy files above the threshold remain editable only
+/// within their existing semantic write budget and stay available through
+/// chunked reads, but are not buffered or incrementally indexed.
 pub const TEXT_WRITE_LIMIT: u64 = 2 * 1024 * 1024;
 
 /// Hard cap on `write_bytes` (binary attachments / media). 50 MiB
@@ -1511,48 +1514,7 @@ impl Workspace {
 
     /// Open one regular file and stream it through a fixed-size bounded queue.
     pub fn read_bytes_bounded(&self, rel: &str) -> Result<BoundedFileReader> {
-        use std::io::Read;
-
-        let (dir, rel_path) = self.resolve_io(rel)?;
-        ensure_regular_file_in(dir, &rel_path)?;
-        let mut file = dir
-            .open(&rel_path)
-            .map_err(|error| map_cap_err(error, &rel_path))?;
-        let stat = file_stat_from_cap(&file.metadata()?);
-        let slice = (0, stat.size);
-        let (sender, receiver) =
-            std::sync::mpsc::sync_channel::<Result<Vec<u8>>>(BINARY_STREAM_QUEUE_DEPTH);
-        let worker = std::thread::Builder::new()
-            .name("chan-byte-reader".to_string())
-            .spawn(move || {
-                #[cfg(test)]
-                ACTIVE_BOUNDED_FILE_READERS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                #[cfg(test)]
-                let _active_guard = ActiveBoundedFileReaderGuard;
-
-                loop {
-                    let mut chunk = vec![0u8; BINARY_STREAM_CHUNK_SIZE];
-                    let count = match file.read(&mut chunk) {
-                        Ok(0) => return,
-                        Ok(count) => count,
-                        Err(error) => {
-                            let _ = sender.send(Err(ChanError::Io(error.to_string())));
-                            return;
-                        }
-                    };
-                    chunk.truncate(count);
-                    if sender.send(Ok(chunk)).is_err() {
-                        return;
-                    }
-                }
-            })
-            .map_err(|error| ChanError::Io(format!("spawn bounded file reader: {error}")))?;
-        Ok(BoundedFileReader {
-            stat,
-            slice,
-            receiver: Some(receiver),
-            worker: Some(worker),
-        })
+        self.read_bytes_bounded_slice(rel, 0, u64::MAX)
     }
 
     /// Open one regular file and stream the byte window `[start, start+len)`
@@ -1595,13 +1557,20 @@ impl Workspace {
                 }
                 let mut remaining = len;
                 while remaining > 0 {
-                    let want = BINARY_STREAM_CHUNK_SIZE.min(remaining as usize);
+                    let want = remaining.min(BINARY_STREAM_CHUNK_SIZE as u64) as usize;
                     let mut chunk = vec![0u8; want];
                     let count = match file.read(&mut chunk) {
-                        // EOF before the clamped window is exhausted means the
-                        // file shrank after open; end the stream rather than
-                        // spinning on zero-byte reads.
-                        Ok(0) => return,
+                        // Framing comes from the open handle's stat so callers
+                        // can declare one stable representation. Growth is
+                        // ignored after `remaining` reaches zero; shrinkage
+                        // must fail the consumer instead of silently producing
+                        // fewer bytes than its declared response or tar entry.
+                        Ok(0) => {
+                            let _ = sender.send(Err(ChanError::Io(format!(
+                                "file shortened during bounded read with {remaining} bytes remaining"
+                            ))));
+                            return;
+                        }
                         Ok(count) => count,
                         Err(error) => {
                             let _ = sender.send(Err(ChanError::Io(error.to_string())));
@@ -2566,32 +2535,25 @@ impl Workspace {
         dst_canon: &str,
         created: &mut Vec<String>,
     ) -> Result<()> {
-        let bytes = {
-            use std::io::Read;
-            let mut f = self
-                .dir
-                .open(src_rel)
-                .map_err(|e| ChanError::Io(e.to_string()))?;
-            let mut buf = Vec::new();
-            f.read_to_end(&mut buf)?;
-            buf
-        };
-        // Mirror write_bytes' editable-text UTF-8 gate so a copy can
-        // never land non-UTF-8 bytes in an editable-text path.
+        let src_str = src_rel.to_string_lossy();
         let dst_str = dst_rel.to_string_lossy();
-        if fs_ops::is_editable_text(&dst_str) && std::str::from_utf8(&bytes).is_err() {
-            return Err(ChanError::Io(format!(
-                "refusing to copy non-UTF-8 bytes to editable text file: {dst_str}"
-            )));
-        }
-        if let Some(parent) = dst_rel.parent() {
-            if !parent.as_os_str().is_empty() {
-                self.dir
-                    .create_dir_all(parent)
-                    .map_err(|e| ChanError::Io(e.to_string()))?;
+        let mut reader = self.read_bytes_bounded(&src_str)?;
+        // The semantic sink supplies the real binary budget, incremental UTF-8
+        // validation for editable destinations, same-directory atomic commit,
+        // and temp cleanup for every source-read or sink failure.
+        self.write_atomic_stream(&dst_str, AtomicWriteKind::Bytes, |sink| {
+            if reader.stat().size > sink.limit() {
+                return Err(ChanError::WriteTooLarge {
+                    kind: "bytes",
+                    size: reader.stat().size,
+                    limit: sink.limit(),
+                });
             }
-        }
-        fs_ops::atomic_write_in(&self.dir, dst_rel, &bytes)?;
+            for chunk in reader.by_ref() {
+                sink.write_chunk(&chunk?)?;
+            }
+            Ok(())
+        })?;
         created.push(dst_canon.to_string());
         Ok(())
     }
@@ -3703,6 +3665,19 @@ impl Workspace {
     /// disk; the next `Workspace::open` schedules replay and exposes
     /// `needs_replay_writes()` while it remains outstanding.
     pub fn index_file(&self, rel: &str) -> Result<()> {
+        // Watcher-driven indexing sees ordinary saves through this public
+        // entry point. Decline oversized included text before taking the
+        // workspace mutation lock so it cannot stall unrelated derived-state
+        // work. `index_file_serial` repeats the gate for lock-owning callers
+        // and for growth between this stat and lock acquisition.
+        if fs_ops::is_indexable_text(rel)
+            && self.scope_policy().includes(rel, false)
+            && self
+                .stat(rel)
+                .is_ok_and(|stat| !stat.is_dir && stat.size > TEXT_WRITE_LIMIT)
+        {
+            return Ok(());
+        }
         let _serial = self.write_serial.lock().unwrap();
         self.index_file_serial(rel)
     }
@@ -3714,15 +3689,22 @@ impl Workspace {
         if !self.scope_policy().includes(rel, false) {
             return self.forget_file_serial(rel);
         }
+        let stat = self.stat(rel).ok();
+        if stat
+            .as_ref()
+            .is_some_and(|stat| !stat.is_dir && stat.size > TEXT_WRITE_LIMIT)
+        {
+            return Ok(());
+        }
         self.journal_record(rel, PendingOp::Index)?;
-        let result = self.index_file_inner(rel);
+        let result = self.index_file_inner(rel, stat);
         if result.is_ok() {
             self.journal_clear_one(rel)?;
         }
         result
     }
 
-    fn index_file_inner(&self, rel: &str) -> Result<()> {
+    fn index_file_inner(&self, rel: &str, stat: Option<FileStat>) -> Result<()> {
         // Stat BEFORE read. If a concurrent writer lands between the
         // two calls, the graph then holds the older (mtime, size)
         // tuple alongside the newer content; reconcile compares the
@@ -3731,7 +3713,6 @@ impl Workspace {
         // would stamp the post-write (mtime, size) onto the pre-write
         // content, leaving graph.stat == disk.stat and the drift
         // invisible to reconcile.
-        let stat = self.stat(rel).ok();
         let mtime = stat.as_ref().and_then(|s| s.mtime);
         let size = stat.as_ref().map(|s| size_to_i64(s.size));
         #[cfg(test)]
@@ -5441,6 +5422,37 @@ mod tests {
         });
     }
 
+    #[test]
+    fn oversized_incremental_index_declines_before_write_serial() {
+        let (_cfg, root, workspace) = fixture();
+        let path = root.path().join("oversized.md");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(TEXT_WRITE_LIMIT + 1)
+            .unwrap();
+
+        let guard = workspace.write_serial.lock().unwrap();
+        let worker_workspace = Arc::clone(&workspace);
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = worker_workspace.index_file("oversized.md");
+            completed_tx.send(result).unwrap();
+        });
+
+        let result = completed_rx.recv_timeout(std::time::Duration::from_millis(250));
+        drop(guard);
+        worker.join().unwrap();
+        result
+            .expect("oversized stat gate waited for write_serial")
+            .unwrap();
+        assert!(!workspace
+            .graph()
+            .unwrap()
+            .files()
+            .unwrap()
+            .contains(&"oversized.md".to_string()));
+    }
+
     struct ChannelWatchCallback(std::sync::Mutex<std::sync::mpsc::Sender<crate::WatchEvent>>);
 
     impl crate::WatchCallback for ChannelWatchCallback {
@@ -5547,6 +5559,34 @@ mod tests {
         let (_cfg, _root, workspace) = fixture();
         workspace.write_text("notes/a.md", "hello").unwrap();
         assert_eq!(workspace.read_text("notes/a.md").unwrap(), "hello");
+    }
+
+    #[test]
+    fn bounded_reader_reports_shrink_instead_of_short_success() {
+        let (_cfg, root, workspace) = fixture();
+        let path = root.path().join("shrinking.bin");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len((BINARY_STREAM_CHUNK_SIZE * (BINARY_STREAM_QUEUE_DEPTH + 16)) as u64)
+            .unwrap();
+        let mut reader = workspace.read_bytes_bounded("shrinking.bin").unwrap();
+        assert_eq!(
+            reader.next().unwrap().unwrap().len(),
+            BINARY_STREAM_CHUNK_SIZE
+        );
+
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(0)
+            .unwrap();
+
+        let remainder: Vec<_> = reader.collect();
+        assert!(
+            remainder.iter().any(Result::is_err),
+            "a short body would disagree with the declared open-time size"
+        );
     }
 
     #[test]
@@ -9398,6 +9438,37 @@ mod tests {
         assert!(matches!(err, ChanError::Io(_)));
         // b.md was not clobbered.
         assert_eq!(workspace.read_text("b.md").unwrap(), "y");
+    }
+
+    #[test]
+    fn copy_refuses_above_binary_budget_without_partial_destination() {
+        let (_cfg, root, workspace) = fixture();
+        std::fs::File::create(root.path().join("huge.bin"))
+            .unwrap()
+            .set_len(BYTES_WRITE_LIMIT + 1)
+            .unwrap();
+
+        let error = workspace.copy("huge.bin", "copy.bin").unwrap_err();
+
+        assert!(matches!(
+            error,
+            ChanError::WriteTooLarge {
+                kind: "bytes",
+                size,
+                limit: BYTES_WRITE_LIMIT,
+            } if size == BYTES_WRITE_LIMIT + 1
+        ));
+        assert!(!workspace.exists("copy.bin"));
+        assert_eq!(
+            workspace
+                .list("")
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect::<Vec<_>>(),
+            vec!["huge.bin".to_string()],
+            "a rejected copy must remove its same-directory temp"
+        );
     }
 
     #[test]
