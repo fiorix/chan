@@ -21,12 +21,23 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ### v0.82.0
 
+Safety and correctness. Every item here removes a defect that exists at today's limits; the capability work that raises those limits is v0.83.0 and depends on this shipping first.
+
 | item | state | what needs to happen |
 | --- | --- | --- |
-| [extensions-v1](v0.82.0/extensions-v1.md) | registered, grounded, needs rulings | rule the open decisions (spawn policy, handshake shape, desktop CSP scope), then spec the TOML discovery, subprocess supervision, and iframe tab |
-| [parallel-suite-flake-hygiene](v0.82.0/parallel-suite-flake-hygiene.md) | registered, both flakes observed once | explain the scene adopt/echo baseline loss, make cleanup paths poison-safe, and give wall-clock assertions real margins |
-| [retire-devserver-windows-endpoint](v0.82.0/retire-devserver-windows-endpoint.md) | registered, one-release compatibility hold | remove the legacy devserver window adapter, route, response type, and wire tests once pre-0.81.0 desktops are out of circulation |
-| [web-marketing-onboarding](v0.82.0/web-marketing-onboarding.md) | registered, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
+| [whole-file-read-elimination](v0.82.0/whole-file-read-elimination.md) | registered, grounded | route the four whole-file read paths through the bounded reader, size-gate the indexer before it takes the write lock, and add range support to the download path |
+| [cs-tunnel-eof-truncation](v0.82.0/cs-tunnel-eof-truncation.md) | registered, reproduced | drain already-read bytes before the data WebSocket closes, on all three cancellation paths, with looped boundary regressions |
+| [parallel-suite-flake-hygiene](v0.82.0/parallel-suite-flake-hygiene.md) | registered, both flakes observed once | stop a failing assertion under a held guard from aborting the test binary, and fix the idle-window assertion by moving its reference instant rather than padding it |
+| [retire-devserver-windows-endpoint](v0.82.0/retire-devserver-windows-endpoint.md) | registered, unblocked by the no-back-compat rule | remove the legacy devserver window adapter, route, response type, and wire tests, scoped to chan-server |
+| [terminal-backend-visibility](v0.82.0/terminal-backend-visibility.md) | registered, grounded | export the configured backend, name the running engine in the terminal context menu, and add the launcher toggle |
+
+### v0.83.0
+
+| item | state | what needs to happen |
+| --- | --- | --- |
+| [large-transfer-capability](v0.83.0/large-transfer-capability.md) | registered, grounded, sequenced after v0.82.0 | tune the tunnel transport, build the bulk-transfer lane and its admission control, then raise the write ceiling last |
+| [extensions-v1](v0.83.0/extensions-v1.md) | registered, grounded, needs rulings | rule the open decisions (spawn policy, handshake shape, desktop CSP scope), then spec the TOML discovery, subprocess supervision, and iframe tab |
+| [web-marketing-onboarding](v0.83.0/web-marketing-onboarding.md) | registered, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
 
 ## Completed
 

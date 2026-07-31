@@ -1,3 +1,3 @@
-- Font size config
-- Terminal background colour
-- cs notify from devserver to chan-launcher
+- Font size config for terminal
+- Terminal background colour configuration
+- cs notify from local machine or devserver to chan-launcher, to send a text notification to browser or chan-desktop
