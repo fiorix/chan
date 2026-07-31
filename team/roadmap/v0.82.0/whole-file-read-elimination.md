@@ -1,59 +1,61 @@
 # Eliminate the whole-file read class
 
-Status: REGISTERED for v0.82.0; grounded 2026-07-31 while scoping large-transfer support.
+Status: SHIPPED in v0.82.0.
 
-## What
+## Outcome
 
-Most of the server streams. Four paths do not, and each of them loads an entire file into one allocation before answering. Peak resident memory on those paths is the size of the file, so the ceiling is whatever the machine has, and the failure is an OOM rather than a refusal.
+The uncapped whole-file allocations in plain binary reads, workspace directory archives, and File Browser copy are gone. These paths now stream through fixed-size queues with bounded memory. Incremental indexing declines oversized Markdown and text files before taking the workspace derived-state lock, and buffered editor opens use the same size threshold reported to clients.
 
-`Workspace::read` is the primitive: `Vec::new()` followed by `read_to_end`, with no size cap and no chunking. Because cap-std forwards `read_to_end` straight to `std::fs::File`, the standard library takes the size-hint path and reserves the whole file in a single allocation.
+Download responses now support byte ranges and strong validators. Response framing is fixed against the size of the open file handle, so a successful body cannot disagree with its declared `Content-Length`.
 
-Four callers reach it:
+No write limit changed. Transfer concurrency, scheduling, and admission control remain capability work in `team/roadmap/v0.83.0/large-transfer-capability.md`.
 
-- The `Image | Pdf` arm of the file read, so a large PNG or PDF is read whole.
-- The `NotEditableText` fallback, which catches every binary that is not `mp4`, `webm`, `mov`, or `mp3`. A zip, iso, tar, or unknown extension is read whole on a plain GET.
-- Every member of a workspace directory download, where the bytes are held in a cursor for the whole tar member. A folder holding one very large file is a single allocation of that size.
-- `Workspace::copy`, which reads the source whole and then writes it with a sink limit of `u64::MAX`. This path has no size gate of any kind.
+## Shipped contract
 
-The plain text read has the same shape: `read_text` loads the file into a `String`, so a large `.md` or `.txt` is read whole. The chunked variant already exists and is used by the streaming read.
+- `Workspace::read_bytes_bounded` and `read_bytes_bounded_slice` stream from one open regular-file handle through a fixed-depth queue. The slice is clamped to the size observed on that handle.
+- Plain GETs for Image, PDF, and `NotEditableText` all use the same bounded response path. An unknown suffix no longer falls back to `Workspace::read`.
+- Workspace directory downloads stream each tar member from a bounded reader and set the member size from the reader's open-handle stat. No member is first materialized in a `Vec<u8>`.
+- `Workspace::copy` preflights the open source size against the existing `BYTES_WRITE_LIMIT`, then streams into the atomic sink. Refusal leaves neither a destination nor an orphan temp file, and a later small copy succeeds.
+- Incremental `Workspace::index_file` stats included `.md` and `.txt` files before `write_serial` and returns successfully above `TEXT_WRITE_LIMIT`. Lock-owning callers repeat the same check. `TEXT_WRITE_LIMIT` is also the buffered editor-open ceiling and the server-reported `max_editable_bytes`; there is no second threshold.
+- Full and partial binary responses advertise `Accept-Ranges: bytes`. Satisfiable ranges return 206 with clamped `Content-Range` and `Content-Length`; unsatisfiable ranges return 416. A strong size/mtime-nanosecond ETag changes when the representation changes.
 
-None of this requires an unusual request. Clicking a file in the inspector reaches the first two.
+## Response framing decision
 
-## The indexer holds the write lock while it does it
+The open file handle defines one stable representation. Its stat fixes the response length before headers are sent. Growth after that stat is excluded by stopping at the declared length. Shrinkage before the declared bytes are read fails the body instead of completing short.
 
-`Workspace::index_file` takes the per-workspace write serialization lock and then calls `read_text`, with no size check. Indexing is gated to `.md` and `.txt`, so a single large text file landing in a watched workspace both allocates its full size and holds the lock that reconcile and rename need. The result is not only memory pressure: it is a workspace-wide stall on a path unrelated to the file being indexed.
+This preserves useful `Content-Length` and range semantics without allowing an unbounded changing file to extend a response. A successful response always contains exactly the declared bytes. Unit coverage forces both races: growth is truncated to the original representation, and shrinkage surfaces a stream error.
 
-This is the same defect class and it is a prerequisite for raising any write ceiling, so it belongs here rather than with the capability work.
+## Verification
+
+Baseline regressions demonstrated the original behavior before implementation: an oversized incremental index waited while `write_serial` was held, a bounded stream completed silently after truncation, a `BYTES_WRITE_LIMIT + 1` copy succeeded, and source guards found whole-file reads in the plain binary and tar-member paths.
+
+The crate gate passed after the final production edit:
+
+- `cargo fmt -p chan-workspace -p chan-server --check`
+- `cargo clippy -p chan-workspace -p chan-server --all-targets -- -D warnings`
+- `cargo test -p chan-workspace -p chan-server`: chan-server 940 passed; chan-workspace library 646 passed and 2 ignored; integration and documentation tests passed
+
+Extended browser smoke 62 passed against exact source commit `378908cb` in 54,241 ms. The worktree was clean. No cargo, rustc, Chrome, Vitest, or browser-smoke Node process was live before launch. Although the trailing load average was `2.20 2.58 4.38`, two one-second samples showed no runnable or blocked work and 94% CPU idle. Fixtures were sparse files under the user's home directory, not `/tmp`.
+
+All resource values below are from the real server PID at 25 ms intervals. RSS is bytes; thread and FD columns are `baseline -> peak (growth)`. The enforced growth ceilings were 25,165,824 RSS bytes, 8 threads, and 12 FDs.
+
+| Case | Fixture | Result | RSS baseline -> peak (growth) | Threads | FDs |
+| --- | ---: | --- | ---: | ---: | ---: |
+| Plain unknown-suffix GET | 3,221,225,472 bytes | 200; first byte 41.600 ms | 81,244,160 -> 83,062,784 (1,818,624) | 26 -> 27 (1) | 37 -> 38 (1) |
+| Plain PNG GET | 536,870,912 bytes | 200; first byte 45.100 ms | 83,103,744 -> 83,103,744 (0) | 26 -> 27 (1) | 36 -> 37 (1) |
+| Plain PDF GET | 536,870,912 bytes | 200; first byte 46.600 ms | 83,103,744 -> 83,107,840 (4,096) | 26 -> 27 (1) | 35 -> 36 (1) |
+| Directory tar GET | 3,221,225,472-byte member | 200; first byte 41.700 ms | 83,128,320 -> 83,337,216 (208,896) | 26 -> 27 (1) | 34 -> 36 (2) |
+| File Browser copy refusal | 67,108,864 bytes | 413 in 41.300 ms; no destination; 4-byte follow-up succeeded | 83,341,312 -> 83,472,384 (131,072) | 26 -> 26 (0) | 34 -> 34 (0) |
+| Incremental-index isolation | 3,221,225,472-byte Markdown considered; separate 12-byte probe moved | 200 in 46.300 ms; threshold 2,097,152 bytes | 83,488,768 -> 83,488,768 (0) | 26 -> 26 (0) | 37 -> 37 (0) |
+
+The 16-byte range fixture returned byte 0 for `bytes=0-0`, byte 15 for `bytes=-1`, and bytes 12 through 15 for `bytes=12-99`, with correct 206 framing. Its strong ETag changed after a size-changing rewrite. After all sparse streaming cases, the process retained 2,351,104 RSS bytes, zero threads, and zero FDs relative to the suite baseline.
+
+## Follow-up: moved Markdown link rewriting remains unbounded
+
+`Workspace::rename_with_link_rewrite` rewrites outgoing links inside the moved Markdown file itself. That path calls `read_text_with_stat` on the moved body and therefore still reads the whole file into one `String`.
+
+An otherwise idle-box measurement of a sparse 3 GiB Markdown rename took 52,644.6 ms. This is the same whole-file-read defect class fixed above, on a rename/link-rewrite path outside the four shipped callers. It is deliberately left unfixed here to hold the item boundary, not because the behavior is benign. Follow-up work must bound or decline that body read without silently corrupting relative-link rewrite semantics.
 
 ## Boundary
 
-This item removes a memory hazard that exists today at today's limits. It does not raise any write limit, add concurrency control, or change how transfers are scheduled. Those are the capability half and are tracked separately for v0.83.0, sequenced after an admission mechanism exists. Nothing here depends on that work, and shipping it first is what makes the machine safe at the sizes users already reach.
-
-## Contract
-
-- No HTTP read path holds a whole file in memory. Reads are bounded and chunked regardless of file class or extension.
-- Binaries that are not currently range-served are served through the same bounded reader that already backs the download path, so byte-range support is uniform across binary types rather than limited to four media extensions.
-- Directory download writes each member from a bounded reader with the size taken from its stat, rather than materializing the member first.
-- `Workspace::copy` streams through the atomic sink and carries a real budget instead of `u64::MAX`.
-- The indexer stats a file and declines to index it above a threshold, before reading it and before taking the write lock. Declining to index is not an error; the file remains readable and editable.
-- The size at which a file becomes too large to index and the size at which it becomes too large to open in the editor are one server-reported value, so the SPA renders one consistent explanation rather than two thresholds that disagree.
-- `?download=1` advertises `Accept-Ranges` and a strong validator, so a client that loses a large download can resume it rather than restart. This rides here because it reuses the bounded slice reader that already clamps correctly; upload resume is not in scope.
-
-## Known adjacent defect
-
-`Content-Length` on the download path is stamped from the stat taken when the file is opened, while the producer loops to EOF. A file whose size changes mid-transfer therefore sends a body that disagrees with its declared length. The window is milliseconds today and grows with file size. Fix it here while the path is open.
-
-## Acceptance
-
-- A plain GET of a multi-gigabyte binary with no recognized extension holds resident memory flat rather than proportional to the file.
-- A plain GET of a large PNG or PDF holds resident memory flat.
-- A directory download containing one very large member holds resident memory flat.
-- A file-browser copy of a very large file holds resident memory flat and refuses above its budget rather than proceeding unbounded.
-- Indexing declines above the threshold without taking the write lock, and a rename or reconcile issued while a large file is being considered for indexing is not delayed by it.
-- `?download=1` answers a range request correctly at the first byte, the last byte, and across the end of the file, and its validator changes when the file changes.
-- A transfer whose file is truncated mid-flight does not send a body that disagrees with its declared `Content-Length`.
-- The existing binary-transfer browser smoke is extended from its current fixture to a multi-gigabyte file, and asserts process thread count and open file descriptors alongside resident memory. Thread exhaustion is the ceiling that arrives before memory does, and nothing pins it today.
-
-## Rough size
-
-Medium. Each change is local and the bounded reader already exists, so most of the work is routing existing callers through it. The indexer gate and the range support on the download path are the two pieces that are genuinely new.
+`BYTES_WRITE_LIMIT` remains 50 MiB and `TEXT_WRITE_LIMIT` remains 2 MiB. This item adds no transfer semaphore, scheduler, resumable upload, free-space preflight, or `/api/attachments` change. Those limits remain safety barriers until the v0.83.0 admission mechanism exists.
