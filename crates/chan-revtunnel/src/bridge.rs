@@ -10,7 +10,7 @@
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::wire::MAX_DATA_FRAME_BYTES;
 
@@ -27,11 +27,20 @@ pub async fn splice(
     mut from_peer: mpsc::Receiver<Vec<u8>>,
 ) {
     let (mut read, mut write) = tcp.into_split();
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let downlink_stop_rx = stop_rx.clone();
+    let downlink_stop_tx = stop_tx.clone();
 
     let uplink = async move {
         let mut buf = vec![0u8; MAX_DATA_FRAME_BYTES];
+        let mut stop_rx = stop_rx;
         loop {
-            match read.read(&mut buf).await {
+            let result = tokio::select! {
+                biased;
+                _ = stop_rx.changed() => break,
+                result = read.read(&mut buf) => result,
+            };
+            match result {
                 // Clean EOF from the local peer.
                 Ok(0) => break,
                 Ok(n) => {
@@ -45,10 +54,18 @@ pub async fn splice(
                 }
             }
         }
+        let _ = stop_tx.send(true);
     };
 
     let downlink = async move {
-        while let Some(chunk) = from_peer.recv().await {
+        let mut stop_rx = downlink_stop_rx;
+        loop {
+            let chunk = tokio::select! {
+                biased;
+                _ = stop_rx.changed() => break,
+                chunk = from_peer.recv() => chunk,
+            };
+            let Some(chunk) = chunk else { break };
             if chunk.is_empty() {
                 continue;
             }
@@ -57,15 +74,13 @@ pub async fn splice(
                 break;
             }
         }
-        // Best effort: the far end already stopped, so a failure here says
-        // only that this side was also gone.
+        // Best effort: both directions are ending, so a failure here only
+        // means this side was already gone too.
         let _ = write.shutdown().await;
+        let _ = downlink_stop_tx.send(true);
     };
 
-    tokio::select! {
-        _ = uplink => {}
-        _ = downlink => {}
-    }
+    tokio::join!(uplink, downlink);
 }
 
 #[cfg(test)]

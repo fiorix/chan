@@ -231,9 +231,10 @@ async fn serve_conn(
 
     let (to_peer_tx, to_peer_rx) = mpsc::channel::<Vec<u8>>(16);
     let (from_peer_tx, from_peer_rx) = mpsc::channel::<Vec<u8>>(16);
-    let shuttle = tokio::spawn(shuttle(ws, to_peer_rx, from_peer_tx));
-    splice(sock, to_peer_tx, from_peer_rx).await;
-    shuttle.abort();
+    tokio::join!(
+        splice(sock, to_peer_tx, from_peer_rx),
+        shuttle(ws, to_peer_rx, from_peer_tx),
+    );
     Ok(())
 }
 
