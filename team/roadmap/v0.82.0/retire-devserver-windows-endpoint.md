@@ -18,8 +18,9 @@ Once pre-0.81.0 desktops are out of circulation, the compatibility surface has n
 
 ## Acceptance
 
-- No shipped code references `/api/devserver/windows`, `handle_list_windows`, or `DevserverWindow`.
-- The server route answers 404.
+- No shipped code in `crates/chan-server` references `/api/devserver/windows`, `handle_list_windows`, or the `DevserverWindow` wire type. The unrelated desktop type of the same name is untouched.
+- The server route answers 404, asserted against a running devserver rather than only in a unit test, so the retirement is proven on the real surface a client would reach.
+- `GET /api/library/windows` continues to answer on the same running devserver, proving the retirement removed only the compatibility adapter.
 - `cargo test -p chan-server --lib` and the chan-desktop test target stay green.
 - The roadmap item closes with the v0.82.0 release report after the endpoint is removed.
 

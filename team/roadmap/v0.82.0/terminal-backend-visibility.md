@@ -39,6 +39,7 @@ The two can disagree in one case: the ghostty kit fails to load and the SPA fall
 - The context menu names the engine in use, and names xterm when a forced kit-load failure has fallen the session back.
 - The launcher command appears in the Terminal category, is discoverable by searching for the engine name, and flipping it changes the stored preference.
 - A test pins the variable name, since it becomes a public discovery surface the moment it ships.
+- The existing terminal-backend browser smoke is extended rather than duplicated. It already flips the preference, opens a terminal, asserts the backend actually loaded, and verifies the stored value on disk; it gains an assertion that a real terminal reports the matching `CHAN_TERMINAL`, and that the context menu names the running engine. The value is read from inside the terminal, not from configuration, so the check cannot pass by reading back what it just wrote.
 
 ## Rough size
 
