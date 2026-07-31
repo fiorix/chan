@@ -133,42 +133,6 @@ pub struct DrainedTerminals {
     pub lingering: Vec<u32>,
 }
 
-/// One element of the frozen `GET /api/devserver/windows` compatibility wire.
-/// A row adapts a non-control record from the live library window feed for
-/// pre-0.81.0 desktops.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DevserverWindow {
-    /// The `?w=` window id (== the session-blob key == the WS `window_id`).
-    pub label: String,
-    /// Route prefix of the tenant that owns the window; the desktop reopens
-    /// under it.
-    pub prefix: String,
-    /// Per-mount bearer token for that tenant (empty when the tenant is off).
-    pub token: String,
-    /// Library-composed window title. The adapter always supplies it; the
-    /// optional type preserves decoding of the frozen compatibility wire.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    /// A `/ws` socket tagged with `label` is live right now.
-    pub connected: bool,
-    /// A durable session blob exists for `label`.
-    pub saved: bool,
-}
-
-impl std::fmt::Debug for DevserverWindow {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("DevserverWindow")
-            .field("label", &self.label)
-            .field("prefix", &self.prefix)
-            .field("token", &"[REDACTED]")
-            .field("title", &self.title)
-            .field("connected", &self.connected)
-            .field("saved", &self.saved)
-            .finish()
-    }
-}
-
 /// Body of `POST /api/devserver/workspaces`: mount the workspace rooted at
 /// `path`. The call is idempotent, so an already-mounted root returns its
 /// existing prefix with 200 rather than an error.
@@ -332,34 +296,6 @@ mod tests {
                 "token": "",
             }])
         );
-    }
-
-    #[test]
-    fn devserver_window_wire() {
-        let win = DevserverWindow {
-            label: "terminal-1a2b".into(),
-            prefix: "/api/term-terminal-1a2b-ff".into(),
-            token: "tok_t".into(),
-            title: Some("Terminal Window 1".into()),
-            connected: false,
-            saved: true,
-        };
-        let debug = format!("{win:?}");
-        assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains(&win.token));
-        let v = serde_json::to_value(&win).unwrap();
-        assert_eq!(
-            v,
-            json!({
-                "label": "terminal-1a2b",
-                "prefix": "/api/term-terminal-1a2b-ff",
-                "token": "tok_t",
-                "title": "Terminal Window 1",
-                "connected": false,
-                "saved": true,
-            })
-        );
-        assert_eq!(win, serde_json::from_value(v).unwrap());
     }
 
     #[test]
