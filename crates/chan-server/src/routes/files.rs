@@ -1,7 +1,7 @@
 //! Per-file CRUD: list, read (text or binary), write (with optional
 //! CAS), create (file or dir), delete, move.
 
-use std::{convert::Infallible, io::Cursor, sync::Arc};
+use std::{convert::Infallible, sync::Arc};
 
 use axum::body::{Body, Bytes};
 use axum::extract::{multipart::Field, Multipart, Path as AxumPath, Query, State};
@@ -33,7 +33,11 @@ enum ReadFileResult {
         writable: bool,
         path_class: Option<chan_workspace::PathClass>,
     },
-    Binary(Vec<u8>),
+    Binary,
+    TooLarge {
+        size: u64,
+        limit: u64,
+    },
 }
 
 /// Tree entry shape on the wire. Adds a `kind` discriminator on top
@@ -254,6 +258,10 @@ struct FileResponse {
     /// workspace-internal path so symlink escapes are still refused
     /// upstream by chan-workspace.
     writable: bool,
+    /// One server-owned threshold shared by buffered editor reads and the
+    /// incremental indexer. The chunked read still reports it so clients can
+    /// explain why an oversized file remains streamable but is not indexed.
+    max_editable_bytes: u64,
 }
 
 #[derive(Serialize)]
@@ -270,6 +278,7 @@ enum FileStreamEvent<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         path_class: Option<chan_workspace::PathClass>,
         writable: bool,
+        max_editable_bytes: u64,
     },
     Chunk {
         content: &'a str,
@@ -319,9 +328,19 @@ fn read_file_sync(
     // own contract is read-only via `read` / `write_bytes`.
     match chan_workspace::fs_ops::classify(path) {
         chan_workspace::fs_ops::FileClass::Image | chan_workspace::fs_ops::FileClass::Pdf => {
-            return workspace.read(path).map(ReadFileResult::Binary);
+            return Ok(ReadFileResult::Binary);
+        }
+        chan_workspace::fs_ops::FileClass::Other if !workspace.sniff_is_text(path) => {
+            return Ok(ReadFileResult::Binary);
         }
         _ => {}
+    }
+    let stat = workspace.stat(path)?;
+    if stat.size > chan_workspace::TEXT_WRITE_LIMIT {
+        return Ok(ReadFileResult::TooLarge {
+            size: stat.size,
+            limit: chan_workspace::TEXT_WRITE_LIMIT,
+        });
     }
     // `read_text_with_stat` applies the content-aware editable gate, so
     // an extensionless / odd-suffix text file (`.zshrc`, `*.service`)
@@ -337,9 +356,7 @@ fn read_file_sync(
             writable: workspace_path_writable(workspace, path),
             path_class: path_class_for_wire(workspace, path),
         }),
-        Err(chan_workspace::ChanError::NotEditableText(_)) => {
-            workspace.read(path).map(ReadFileResult::Binary)
-        }
+        Err(chan_workspace::ChanError::NotEditableText(_)) => Ok(ReadFileResult::Binary),
         Err(e) => Err(e),
     }
 }
@@ -382,6 +399,7 @@ where
                     disk_conflicted: false,
                     path_class: path_class_for_wire(workspace, path),
                     writable: workspace_path_writable(workspace, path),
+                    max_editable_bytes: chan_workspace::TEXT_WRITE_LIMIT,
                 },
                 chan_workspace::TextReadEvent::Chunk(content) => FileStreamEvent::Chunk {
                     content,
@@ -408,16 +426,23 @@ where
     }
 }
 
-/// What a workspace download resolves to: a bounded open-file reader, or a
-/// directory whose tree has been pre-flighted readable and is ready to stream.
+enum BinaryPlan {
+    Full(BoundedFileReader),
+    Partial(BoundedFileReader),
+    Unsatisfiable(FileStat),
+}
+
+/// What a workspace download resolves to: a bounded file plan, or a directory
+/// whose tree has been pre-flighted readable and is ready to stream.
 enum DownloadPayload {
-    File(BoundedFileReader),
+    File(BinaryPlan),
     Directory,
 }
 
 fn download_path_sync(
     workspace: &chan_workspace::Workspace,
     path: &str,
+    range_header: Option<&str>,
 ) -> chan_workspace::Result<DownloadPayload> {
     let stat = workspace.stat(path)?;
     if stat.is_dir {
@@ -427,16 +452,12 @@ fn download_path_sync(
         verify_readable_workspace_tree(workspace, path).map_err(chan_workspace::ChanError::Io)?;
         Ok(DownloadPayload::Directory)
     } else {
-        // Opening happens before headers are sent, while the returned reader
-        // keeps the exact handle/stat pair and bounded producer alive.
-        workspace
-            .read_bytes_bounded(path)
-            .map(DownloadPayload::File)
+        binary_plan_sync(workspace, path, range_header).map(DownloadPayload::File)
     }
 }
 
-fn stream_binary_download(path: &str, reader: BoundedFileReader) -> Response {
-    stream_binary_download_inner(path, reader, None)
+fn stream_binary_download(path: &str, plan: BinaryPlan) -> Response {
+    stream_binary_plan(path, plan, true, None)
 }
 
 #[cfg(test)]
@@ -446,30 +467,106 @@ fn stream_binary_download_with_completion(
 ) -> (Response, tokio::sync::oneshot::Receiver<()>) {
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     (
-        stream_binary_download_inner(path, reader, Some(done_tx)),
+        stream_binary_plan(path, BinaryPlan::Full(reader), true, Some(done_tx)),
         done_rx,
     )
 }
 
-fn stream_binary_download_inner(
+fn stream_binary_plan(
     path: &str,
-    reader: BoundedFileReader,
+    plan: BinaryPlan,
+    attachment: bool,
     completion: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> Response {
-    let size = reader.stat().size;
-    let body = bounded_reader_body(reader, completion);
-    (
-        [
-            (header::CONTENT_TYPE, content_type_for(path).to_string()),
-            (
-                header::CONTENT_DISPOSITION,
-                content_disposition_attachment(path),
-            ),
-            (header::CONTENT_LENGTH, size.to_string()),
-        ],
-        body,
-    )
-        .into_response()
+    let mut response = match plan {
+        BinaryPlan::Full(reader) => {
+            let len = reader.slice().1;
+            let etag = strong_file_etag(reader.stat());
+            let mut response = Response::new(bounded_reader_body(reader, completion));
+            response.headers_mut().insert(
+                header::CONTENT_LENGTH,
+                len.to_string()
+                    .parse()
+                    .expect("file size is a valid header"),
+            );
+            response
+                .headers_mut()
+                .insert(header::ETAG, etag.parse().expect("etag is header-safe"));
+            response
+        }
+        BinaryPlan::Partial(reader) => {
+            let total = reader.stat().size;
+            let etag = strong_file_etag(reader.stat());
+            let (start, len) = reader.slice();
+            let mut response = Response::new(bounded_reader_body(reader, completion));
+            *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+            response.headers_mut().insert(
+                header::CONTENT_RANGE,
+                format!("bytes {start}-{}/{total}", start + len - 1)
+                    .parse()
+                    .expect("content range is header-safe"),
+            );
+            response.headers_mut().insert(
+                header::CONTENT_LENGTH,
+                len.to_string()
+                    .parse()
+                    .expect("file size is a valid header"),
+            );
+            response
+                .headers_mut()
+                .insert(header::ETAG, etag.parse().expect("etag is header-safe"));
+            response
+        }
+        BinaryPlan::Unsatisfiable(stat) => {
+            let etag = strong_file_etag(&stat);
+            let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+            response.headers_mut().insert(
+                header::CONTENT_RANGE,
+                format!("bytes */{}", stat.size)
+                    .parse()
+                    .expect("content range is header-safe"),
+            );
+            response
+                .headers_mut()
+                .insert(header::ETAG, etag.parse().expect("etag is header-safe"));
+            response
+        }
+    };
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        content_type_for(path)
+            .parse()
+            .expect("known content type is header-safe"),
+    );
+    response
+        .headers_mut()
+        .insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    if attachment || is_active_content_path(path) {
+        response.headers_mut().insert(
+            header::CONTENT_DISPOSITION,
+            content_disposition_attachment(path)
+                .parse()
+                .expect("download filename is header-safe"),
+        );
+    }
+    if is_active_content_path(path) {
+        response.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            "sandbox".parse().expect("static header value"),
+        );
+        response.headers_mut().insert(
+            "x-content-type-options",
+            "nosniff".parse().expect("static header value"),
+        );
+    }
+    response
+}
+
+fn strong_file_etag(stat: &FileStat) -> String {
+    let modified = stat
+        .mtime_ns
+        .or_else(|| stat.mtime.map(|secs| secs.saturating_mul(1_000_000_000)));
+    format!("\"{:x}-{}\"", stat.size, modified.unwrap_or_default())
 }
 
 /// Bridge a bounded reader onto a response body through a small async
@@ -585,8 +682,8 @@ pub(crate) fn append_dir_to_archive<W: std::io::Write>(
         if child.is_dir {
             append_dir_to_archive(builder, workspace, &child_source, &child_archive)?;
         } else {
-            let bytes = workspace.read(&child_source)?;
-            append_archive_file(builder, &child_archive, bytes)?;
+            let reader = workspace.read_bytes_bounded(&child_source)?;
+            append_archive_file(builder, &child_archive, reader)?;
         }
     }
     Ok(())
@@ -608,34 +705,58 @@ fn append_archive_dir<W: std::io::Write>(
 fn append_archive_file<W: std::io::Write>(
     builder: &mut tar::Builder<W>,
     archive_rel: &str,
-    bytes: Vec<u8>,
+    reader: BoundedFileReader,
 ) -> chan_workspace::Result<()> {
+    let size = reader.stat().size;
     let mut header = tar::Header::new_gnu();
-    header.set_size(bytes.len() as u64);
+    header.set_size(size);
     header.set_mode(0o644);
     header.set_cksum();
-    builder.append_data(&mut header, archive_rel, Cursor::new(bytes))?;
+    builder.append_data(&mut header, archive_rel, BoundedReaderIo::new(reader))?;
     Ok(())
 }
 
-/// Media formats the plain GET serves through the range-aware stream
-/// instead of the whole-file binary read. Browser-native containers
-/// only (no transcode): `<video>` / `<audio>` need `Accept-Ranges` +
-/// 206 to seek, and buffering a full video into server RAM is exactly
-/// what the bounded reader exists to avoid. Images and PDFs stay on
-/// the buffered path: their consumers fetch the whole body once.
-fn is_streamable_media(path: &str) -> bool {
-    let Some((_, ext)) = path.rsplit_once('.') else {
-        return false;
-    };
-    matches!(
-        ext.to_ascii_lowercase().as_str(),
-        "mp4" | "webm" | "mov" | "mp3"
-    )
+struct BoundedReaderIo {
+    reader: BoundedFileReader,
+    chunk: Vec<u8>,
+    offset: usize,
 }
 
-/// Outcome of resolving a request's `Range` header against a media
-/// file's current size.
+impl BoundedReaderIo {
+    fn new(reader: BoundedFileReader) -> Self {
+        Self {
+            reader,
+            chunk: Vec::new(),
+            offset: 0,
+        }
+    }
+}
+
+impl std::io::Read for BoundedReaderIo {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if self.offset < self.chunk.len() {
+                let count = buf.len().min(self.chunk.len() - self.offset);
+                buf[..count].copy_from_slice(&self.chunk[self.offset..self.offset + count]);
+                self.offset += count;
+                return Ok(count);
+            }
+            match self.reader.next() {
+                Some(Ok(chunk)) => {
+                    self.chunk = chunk;
+                    self.offset = 0;
+                }
+                Some(Err(error)) => return Err(std::io::Error::other(error.to_string())),
+                None => return Ok(0),
+            }
+        }
+    }
+}
+
+/// Outcome of resolving a request's `Range` header against a file's size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RangeOutcome {
     /// No header, a non-`bytes` unit, a syntactically invalid value, or
@@ -707,54 +828,54 @@ fn resolve_range(header: Option<&str>, size: u64) -> RangeOutcome {
     }
 }
 
-/// Serve one media file with HTTP range semantics over the bounded
-/// reader: 200 + `Accept-Ranges` for a range-less GET, 206 +
-/// `Content-Range` for a satisfiable range, 416 otherwise. Framing
-/// headers derive from the open handle's own stat and window
-/// (`BoundedFileReader::slice`), so the advertised byte counts always
-/// match the bytes streamed even when the file changes between the
-/// planning stat and the open.
-async fn media_stream_response(
+/// Resolve one file into a bounded whole/slice reader. A second stat from the
+/// opened handle remains authoritative for response framing when the file
+/// changes between range planning and open.
+fn binary_plan_sync(
+    workspace: &chan_workspace::Workspace,
+    path: &str,
+    range_header: Option<&str>,
+) -> chan_workspace::Result<BinaryPlan> {
+    let stat = workspace.stat(path)?;
+    // A directory reaches the whole-file open so it fails with the canonical
+    // not-a-regular-file error instead of resolving a range against a
+    // directory size.
+    let outcome = if stat.is_dir {
+        RangeOutcome::Full
+    } else {
+        resolve_range(range_header, stat.size)
+    };
+    match outcome {
+        RangeOutcome::Full => workspace.read_bytes_bounded(path).map(BinaryPlan::Full),
+        RangeOutcome::Slice { start, len } => workspace
+            .read_bytes_bounded_slice(path, start, len)
+            .map(|reader| {
+                // The handle's own window is authoritative; a file truncated
+                // between stat and open can empty it, and an empty 206 is a lie.
+                if reader.slice().1 == 0 {
+                    BinaryPlan::Unsatisfiable(reader.stat().clone())
+                } else {
+                    BinaryPlan::Partial(reader)
+                }
+            }),
+        RangeOutcome::Unsatisfiable => Ok(BinaryPlan::Unsatisfiable(stat)),
+    }
+}
+
+/// Serve any binary file with uniform bounded range semantics. The response
+/// advertises a strong validator derived from the opened representation's size
+/// and nanosecond mtime. Fixed-length readers ignore later growth and turn
+/// shrinkage into a body error, so a successful transfer always matches its
+/// declared framing.
+async fn binary_stream_response(
     workspace: Arc<chan_workspace::Workspace>,
     path: String,
     range_header: Option<String>,
+    attachment: bool,
 ) -> Response {
-    enum MediaPlan {
-        Full(BoundedFileReader),
-        Partial(BoundedFileReader),
-        Unsatisfiable { size: u64 },
-    }
     let plan_path = path.clone();
     let plan = tokio::task::spawn_blocking(move || {
-        let stat = workspace.stat(&plan_path)?;
-        // A directory with a media extension takes the whole-file open
-        // below so it fails with the canonical not-a-regular-file error
-        // instead of resolving a range against a directory size.
-        let outcome = if stat.is_dir {
-            RangeOutcome::Full
-        } else {
-            resolve_range(range_header.as_deref(), stat.size)
-        };
-        match outcome {
-            RangeOutcome::Full => workspace
-                .read_bytes_bounded(&plan_path)
-                .map(MediaPlan::Full),
-            RangeOutcome::Slice { start, len } => workspace
-                .read_bytes_bounded_slice(&plan_path, start, len)
-                .map(|reader| {
-                    // The handle's own window is authoritative; a file
-                    // truncated between stat and open can empty it, and
-                    // an empty 206 is a lie (416 carries the real size).
-                    if reader.slice().1 == 0 {
-                        MediaPlan::Unsatisfiable {
-                            size: reader.stat().size,
-                        }
-                    } else {
-                        MediaPlan::Partial(reader)
-                    }
-                }),
-            RangeOutcome::Unsatisfiable => Ok(MediaPlan::Unsatisfiable { size: stat.size }),
-        }
+        binary_plan_sync(&workspace, &plan_path, range_header.as_deref())
     })
     .await;
     let plan = match plan {
@@ -762,47 +883,16 @@ async fn media_stream_response(
         Ok(Err(e)) => return err_from(&e),
         Err(join) => return err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
     };
-    let content_type = content_type_for(&path).to_string();
-    match plan {
-        MediaPlan::Full(reader) => {
-            let size = reader.stat().size;
-            (
-                [
-                    (header::CONTENT_TYPE, content_type),
-                    (header::ACCEPT_RANGES, "bytes".to_string()),
-                    (header::CONTENT_LENGTH, size.to_string()),
-                ],
-                bounded_reader_body(reader, None),
-            )
-                .into_response()
-        }
-        MediaPlan::Partial(reader) => {
-            let total = reader.stat().size;
-            let (start, len) = reader.slice();
-            (
-                StatusCode::PARTIAL_CONTENT,
-                [
-                    (header::CONTENT_TYPE, content_type),
-                    (header::ACCEPT_RANGES, "bytes".to_string()),
-                    (
-                        header::CONTENT_RANGE,
-                        format!("bytes {start}-{}/{total}", start + len - 1),
-                    ),
-                    (header::CONTENT_LENGTH, len.to_string()),
-                ],
-                bounded_reader_body(reader, None),
-            )
-                .into_response()
-        }
-        MediaPlan::Unsatisfiable { size } => (
-            StatusCode::RANGE_NOT_SATISFIABLE,
-            [
-                (header::ACCEPT_RANGES, "bytes".to_string()),
-                (header::CONTENT_RANGE, format!("bytes */{size}")),
-            ],
-        )
-            .into_response(),
-    }
+    stream_binary_plan(&path, plan, attachment, None)
+}
+
+#[cfg(test)]
+async fn media_stream_response(
+    workspace: Arc<chan_workspace::Workspace>,
+    path: String,
+    range_header: Option<String>,
+) -> Response {
+    binary_stream_response(workspace, path, range_header, false).await
 }
 
 #[derive(Default, Deserialize)]
@@ -869,13 +959,20 @@ pub async fn api_read_file(
         )
         .await;
     }
+    let range_header = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     if query_flag(&query.download) {
         let plan_ws = workspace.clone();
         let plan_path = path.clone();
-        let result =
-            tokio::task::spawn_blocking(move || download_path_sync(&plan_ws, &plan_path)).await;
+        let plan_range = range_header.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            download_path_sync(&plan_ws, &plan_path, plan_range.as_deref())
+        })
+        .await;
         return match result {
-            Ok(Ok(DownloadPayload::File(reader))) => stream_binary_download(&path, reader),
+            Ok(Ok(DownloadPayload::File(plan))) => stream_binary_download(&path, plan),
             // The tree was pre-flighted readable in the plan; stream the tar on
             // the fly so a cancel is trace-free by construction (no staged temp).
             Ok(Ok(DownloadPayload::Directory)) => {
@@ -897,21 +994,10 @@ pub async fn api_read_file(
         return stream_read_file_response(workspace, path).await;
     }
 
-    // Plain GET on a media file: range-aware bounded streaming so
-    // `<video>` / `<audio>` can seek and a large file never buffers
-    // whole into server memory. Explicit `?download=1` above keeps its
-    // attachment semantics for these paths.
-    if is_streamable_media(&path) {
-        let range_header = headers
-            .get(header::RANGE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        return media_stream_response(workspace, path, range_header).await;
-    }
-
+    let read_workspace = workspace.clone();
     let path_for_read = path.clone();
     let result =
-        tokio::task::spawn_blocking(move || read_file_sync(&workspace, &path_for_read)).await;
+        tokio::task::spawn_blocking(move || read_file_sync(&read_workspace, &path_for_read)).await;
 
     match result {
         Ok(Ok(ReadFileResult::Text {
@@ -929,9 +1015,18 @@ pub async fn api_read_file(
             authority_version: None,
             disk_conflicted: false,
             writable,
+            max_editable_bytes: chan_workspace::TEXT_WRITE_LIMIT,
         })
         .into_response(),
-        Ok(Ok(ReadFileResult::Binary(bytes))) => binary_file_response(&path, bytes),
+        Ok(Ok(ReadFileResult::Binary)) => {
+            binary_stream_response(workspace, path, range_header, false).await
+        }
+        Ok(Ok(ReadFileResult::TooLarge { size, limit })) => err(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "file is {size} bytes; buffered editor reads are limited to {limit} bytes; use ?stream=1"
+            ),
+        ),
         Ok(Err(e)) => err_from(&e),
         Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
     }
@@ -1026,27 +1121,6 @@ pub async fn api_resolve_session_conflict(
     )
 }
 
-fn binary_file_response(path: &str, bytes: Vec<u8>) -> Response {
-    let mut response = ([(header::CONTENT_TYPE, content_type_for(path))], bytes).into_response();
-    if is_active_content_path(path) {
-        response.headers_mut().insert(
-            header::CONTENT_DISPOSITION,
-            content_disposition_attachment(path)
-                .parse()
-                .expect("download filename is header-safe"),
-        );
-        response.headers_mut().insert(
-            header::CONTENT_SECURITY_POLICY,
-            "sandbox".parse().expect("static header value"),
-        );
-        response.headers_mut().insert(
-            "x-content-type-options",
-            "nosniff".parse().expect("static header value"),
-        );
-    }
-    response
-}
-
 fn is_active_content_path(path: &str) -> bool {
     matches!(
         path.rsplit('.')
@@ -1115,6 +1189,7 @@ async fn read_via_session(
                 disk_conflicted,
                 path_class,
                 writable,
+                max_editable_bytes: chan_workspace::TEXT_WRITE_LIMIT,
             }),
             ndjson_bytes(&FileStreamEvent::Chunk {
                 content: &content,
@@ -1140,6 +1215,7 @@ async fn read_via_session(
         authority_version: Some(authority_version),
         disk_conflicted,
         writable,
+        max_editable_bytes: chan_workspace::TEXT_WRITE_LIMIT,
     })
     .into_response()
 }
@@ -2189,7 +2265,7 @@ mod file_browser_listing_tests {
 
         // The readability pre-flight passes for an ordinary tree; the stream
         // then builds the tar via the same append_dir_to_archive walk.
-        let payload = download_path_sync(&workspace, "docs").unwrap();
+        let payload = download_path_sync(&workspace, "docs", None).unwrap();
         assert!(matches!(payload, DownloadPayload::Directory));
         let mut bytes = Vec::new();
         {
@@ -2217,7 +2293,7 @@ mod file_browser_listing_tests {
         if std::fs::File::open(&secret).is_ok() {
             return;
         }
-        let message = match download_path_sync(&workspace, "docs") {
+        let message = match download_path_sync(&workspace, "docs", None) {
             Ok(_) => panic!("expected an unreadable-file error"),
             Err(e) => e.to_string(),
         };
@@ -2368,7 +2444,9 @@ mod write_tests {
                     Some(chan_workspace::PathKind::RegularFile)
                 );
             }
-            ReadFileResult::Binary(_) => panic!("expected editable text result"),
+            ReadFileResult::Binary | ReadFileResult::TooLarge { .. } => {
+                panic!("expected editable text result")
+            }
         }
     }
 
@@ -2383,10 +2461,7 @@ mod write_tests {
 
         let result = read_file_sync(&workspace, "image.bin").unwrap();
 
-        match result {
-            ReadFileResult::Binary(bytes) => assert_eq!(bytes, vec![0, 1, 2, 3]),
-            ReadFileResult::Text { .. } => panic!("expected binary result"),
-        }
+        assert!(matches!(result, ReadFileResult::Binary));
     }
 
     #[test]
@@ -2407,10 +2482,10 @@ mod write_tests {
         let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\"/>\n";
         std::fs::write(root.path().join("logo.svg"), svg).unwrap();
 
-        match read_file_sync(&workspace, "logo.svg").unwrap() {
-            ReadFileResult::Binary(bytes) => assert_eq!(bytes, svg.as_bytes()),
-            ReadFileResult::Text { .. } => panic!("svg must serve as raw bytes, not editor JSON"),
-        }
+        assert!(matches!(
+            read_file_sync(&workspace, "logo.svg").unwrap(),
+            ReadFileResult::Binary
+        ));
     }
 
     #[test]
@@ -2433,8 +2508,31 @@ mod write_tests {
             ReadFileResult::Text { content, .. } => {
                 assert_eq!(content, "[Unit]\nDescription=demo\n");
             }
-            ReadFileResult::Binary(_) => panic!("expected sniffed text result"),
+            ReadFileResult::Binary | ReadFileResult::TooLarge { .. } => {
+                panic!("expected sniffed text result")
+            }
         }
+    }
+
+    #[test]
+    fn buffered_text_read_reports_the_shared_editable_limit() {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        std::fs::File::create(root.path().join("oversized.md"))
+            .unwrap()
+            .set_len(chan_workspace::TEXT_WRITE_LIMIT + 1)
+            .unwrap();
+
+        assert!(matches!(
+            read_file_sync(&workspace, "oversized.md").unwrap(),
+            ReadFileResult::TooLarge {
+                size,
+                limit: chan_workspace::TEXT_WRITE_LIMIT,
+            } if size == chan_workspace::TEXT_WRITE_LIMIT + 1
+        ));
     }
 
     #[test]
@@ -2559,13 +2657,14 @@ mod write_tests {
         let workspace = lib.open_workspace(root.path()).unwrap();
         workspace.write_text("notes/readme.md", "hello\n").unwrap();
 
-        let payload = download_path_sync(&workspace, "notes/readme.md").unwrap();
+        let payload = download_path_sync(&workspace, "notes/readme.md", None).unwrap();
 
         match payload {
-            DownloadPayload::File(reader) => {
+            DownloadPayload::File(BinaryPlan::Full(reader)) => {
                 let chunks: chan_workspace::Result<Vec<Vec<u8>>> = reader.collect();
                 assert_eq!(chunks.unwrap().concat(), b"hello\n");
             }
+            DownloadPayload::File(_) => panic!("expected a full-file download"),
             DownloadPayload::Directory => panic!("expected file download"),
         }
     }
@@ -2576,6 +2675,31 @@ mod write_tests {
         assert!(
             !source.contains("enum DownloadPayload {\n    File(Vec<u8>)"),
             "single-file downloads must carry the workspace's bounded reader, not a whole-file Vec"
+        );
+    }
+
+    #[test]
+    fn plain_binary_read_plan_never_owns_a_whole_file_vec() {
+        let source = include_str!("files.rs");
+        let binary_vec = concat!("Binary(Vec", "<u8>)");
+        let unbounded_fallback = concat!("workspace.read(path).map(", "ReadFileResult::Binary)");
+        assert!(
+            !source.contains(binary_vec),
+            "plain binary reads must carry a bounded plan, not whole-file bytes"
+        );
+        assert!(
+            !source.contains(unbounded_fallback),
+            "plain binary fallbacks must not call the unbounded read primitive"
+        );
+    }
+
+    #[test]
+    fn workspace_archive_walk_never_owns_a_whole_member_vec() {
+        let source = include_str!("files.rs");
+        let unbounded_member = concat!("let bytes = workspace.", "read(&child_source)?");
+        assert!(
+            !source.contains(unbounded_member),
+            "workspace tar members must stream from a bounded reader"
         );
     }
 
@@ -2692,12 +2816,12 @@ mod write_tests {
             .map(|index| (index % 251) as u8)
             .collect();
         workspace.write_bytes("large.bin", &expected).unwrap();
-        let reader = match download_path_sync(&workspace, "large.bin").unwrap() {
-            DownloadPayload::File(reader) => reader,
+        let plan = match download_path_sync(&workspace, "large.bin", None).unwrap() {
+            DownloadPayload::File(plan) => plan,
             DownloadPayload::Directory => panic!("expected file download"),
         };
 
-        let response = stream_binary_download("large.bin", reader);
+        let response = stream_binary_download("large.bin", plan);
 
         assert_eq!(
             response.headers()[header::CONTENT_TYPE],
@@ -2711,10 +2835,72 @@ mod write_tests {
             response.headers()[header::CONTENT_LENGTH],
             expected.len().to_string()
         );
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+        assert!(response.headers().contains_key(header::ETAG));
         let actual = to_bytes(response.into_body(), expected.len() + 1)
             .await
             .unwrap();
         assert_eq!(actual.as_ref(), expected);
+    }
+
+    #[tokio::test]
+    async fn download_ranges_cover_first_last_and_clamped_end() {
+        use axum::body::to_bytes;
+
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        let source = b"0123456789";
+        workspace.write_bytes("resume.bin", source).unwrap();
+
+        for (range, expected_range, expected) in [
+            ("bytes=0-0", "bytes 0-0/10", &source[0..1]),
+            ("bytes=9-", "bytes 9-9/10", &source[9..10]),
+            ("bytes=7-99", "bytes 7-9/10", &source[7..10]),
+        ] {
+            let plan = match download_path_sync(&workspace, "resume.bin", Some(range)).unwrap() {
+                DownloadPayload::File(plan) => plan,
+                DownloadPayload::Directory => panic!("expected file download"),
+            };
+            let response = stream_binary_download("resume.bin", plan);
+            assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(response.headers()[header::CONTENT_RANGE], expected_range);
+            assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+            assert!(response.headers().contains_key(header::ETAG));
+            let body = to_bytes(response.into_body(), expected.len() + 1)
+                .await
+                .unwrap();
+            assert_eq!(body.as_ref(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn download_strong_validator_changes_with_the_file() {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        workspace.write_bytes("resume.bin", b"before").unwrap();
+
+        let first = match download_path_sync(&workspace, "resume.bin", None).unwrap() {
+            DownloadPayload::File(plan) => stream_binary_download("resume.bin", plan),
+            DownloadPayload::Directory => panic!("expected file download"),
+        };
+        let first_etag = first.headers()[header::ETAG].clone();
+        assert!(!first_etag.to_str().unwrap().starts_with("W/"));
+        drop(first);
+
+        workspace
+            .write_bytes("resume.bin", b"after-change")
+            .unwrap();
+        let second = match download_path_sync(&workspace, "resume.bin", None).unwrap() {
+            DownloadPayload::File(plan) => stream_binary_download("resume.bin", plan),
+            DownloadPayload::Directory => panic!("expected file download"),
+        };
+        assert_ne!(second.headers()[header::ETAG], first_etag);
     }
 
     #[test]
@@ -2774,18 +2960,6 @@ mod write_tests {
         assert_eq!(resolve_range(Some("bytes=12"), 1000), Full);
         assert_eq!(resolve_range(Some("bytes=500-100"), 1000), Full);
         assert_eq!(resolve_range(Some("bytes=0-1,5-9"), 1000), Full);
-    }
-
-    #[test]
-    fn streamable_media_gate_is_extension_scoped() {
-        assert!(is_streamable_media("clips/demo.mp4"));
-        assert!(is_streamable_media("demo.MOV"));
-        assert!(is_streamable_media("a.webm"));
-        assert!(is_streamable_media("song.mp3"));
-        assert!(!is_streamable_media("poster.png"));
-        assert!(!is_streamable_media("paper.pdf"));
-        assert!(!is_streamable_media("notes.md"));
-        assert!(!is_streamable_media("mp4"));
     }
 
     fn media_workspace(
@@ -2951,8 +3125,9 @@ mod write_tests {
         workspace
             .write_bytes("disconnect.bin", &vec![0x5a; size])
             .unwrap();
-        let reader = match download_path_sync(&workspace, "disconnect.bin").unwrap() {
-            DownloadPayload::File(reader) => reader,
+        let reader = match download_path_sync(&workspace, "disconnect.bin", None).unwrap() {
+            DownloadPayload::File(BinaryPlan::Full(reader)) => reader,
+            DownloadPayload::File(_) => panic!("expected a full-file download"),
             DownloadPayload::Directory => panic!("expected file download"),
         };
         let (response, completed) =
@@ -2964,6 +3139,44 @@ mod write_tests {
             .await
             .expect("disconnect must stop the bridge and join the bounded reader")
             .expect("download bridge completion sender dropped");
+    }
+
+    #[tokio::test]
+    async fn shrinking_download_fails_instead_of_completing_short() {
+        use axum::body::to_bytes;
+
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        let declared = chan_workspace::BINARY_STREAM_CHUNK_SIZE * 256;
+        let path = root.path().join("shrinking.bin");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(declared as u64)
+            .unwrap();
+        let plan = match download_path_sync(&workspace, "shrinking.bin", None).unwrap() {
+            DownloadPayload::File(plan) => plan,
+            DownloadPayload::Directory => panic!("expected file download"),
+        };
+        let response = stream_binary_download("shrinking.bin", plan);
+        assert_eq!(
+            response.headers()[header::CONTENT_LENGTH],
+            declared.to_string()
+        );
+
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(0)
+            .unwrap();
+
+        assert!(
+            to_bytes(response.into_body(), declared + 1).await.is_err(),
+            "a source shrink must fail the framed transfer"
+        );
     }
 
     #[cfg(unix)]
@@ -2981,10 +3194,10 @@ mod write_tests {
         symlink("target.bin", root.path().join("link.bin")).unwrap();
 
         assert!(matches!(
-            download_path_sync(&workspace, "dir").unwrap(),
+            download_path_sync(&workspace, "dir", None).unwrap(),
             DownloadPayload::Directory
         ));
-        assert!(download_path_sync(&workspace, "link.bin").is_err());
+        assert!(download_path_sync(&workspace, "link.bin", None).is_err());
     }
 
     #[test]
@@ -3004,7 +3217,7 @@ mod write_tests {
             .write_text("notes/deep/todo.txt", "todo\n")
             .unwrap();
 
-        let payload = download_path_sync(&workspace, "notes").unwrap();
+        let payload = download_path_sync(&workspace, "notes", None).unwrap();
         assert!(matches!(payload, DownloadPayload::Directory));
 
         // The stream builds the archive via append_dir_to_archive; assert its
@@ -3058,12 +3271,8 @@ mod write_tests {
     fn api_read_file_wraps_sync_workspace_reads_in_spawn_blocking() {
         let source = include_str!("files.rs");
 
-        assert!(source.contains(
-            "tokio::task::spawn_blocking(move || read_file_sync(&workspace, &path_for_read))"
-        ));
-        assert!(source.contains(
-            "tokio::task::spawn_blocking(move || download_path_sync(&plan_ws, &plan_path))"
-        ));
+        assert!(source.contains("read_file_sync(&read_workspace, &path_for_read)"));
+        assert!(source.contains("download_path_sync(&plan_ws, &plan_path, plan_range.as_deref())"));
     }
 
     #[test]
@@ -3444,12 +3653,17 @@ mod tests {
                 target_escapes_workspace: false,
             }),
             writable: true,
+            max_editable_bytes: chan_workspace::TEXT_WRITE_LIMIT,
         };
 
         let value = serde_json::to_value(response).unwrap();
         assert_eq!(value["path_class"]["kind"], "regular_file");
         assert_eq!(value["path_class"]["permission"], "read_write");
         assert_eq!(value["path_class"]["link_count"], 2);
+        assert_eq!(
+            value["max_editable_bytes"],
+            chan_workspace::TEXT_WRITE_LIMIT
+        );
     }
 
     #[test]
