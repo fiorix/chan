@@ -1,6 +1,14 @@
 {
   description = "Chan Desktop";
 
+  # The public release cache. Consumers who accept this flake configuration
+  # substitute published closures from chan.cachix.org; the signing key is
+  # public by design.
+  nixConfig = {
+    extra-substituters = [ "https://chan.cachix.org" ];
+    extra-trusted-public-keys = [ "chan.cachix.org-1:HyczzIqJQpKs85VnILY/Kt0dKjlL6CfK69mbAgZPlCk=" ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
