@@ -593,7 +593,9 @@ impl SceneSession {
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, SceneState> {
-        self.state.lock().expect("scene session state poisoned")
+        // Session state remains memory-safe after a panicking writer; recover
+        // so cleanup and later requests continue from the state it left.
+        self.state.lock().unwrap_or_else(|error| error.into_inner())
     }
 
     // Test-surface accessor; production code reads the atomic directly.
@@ -1209,7 +1211,11 @@ impl SceneRegistry {
     }
 
     fn lock_sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<SceneSession>>> {
-        self.sessions.lock().expect("scene registry poisoned")
+        // A poisoned registry still contains memory-safe session entries;
+        // recover so cleanup and later requests continue from that state.
+        self.sessions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
     }
 
     /// The live session for a path, if any (the GET/PUT diverts and
