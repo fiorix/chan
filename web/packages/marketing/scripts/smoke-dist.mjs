@@ -11,8 +11,9 @@ const distRoot = path.join(siteRoot, "dist");
 
 const checks = [
   { path: "/", status: 200, includes: "data-carousel" },
-  { path: "/", status: 200, includes: 'src="/assets/home/team-spawn.png"' },
-  { path: "/", status: 200, includes: 'src="/assets/manual/terminal-panes.png"' },
+  { path: "/", status: 200, includes: 'src="/assets/home/videos/workspace-animation.mp4"' },
+  { path: "/", status: 200, includes: 'src="/assets/home/videos/terminal-commands.mp4"' },
+  { path: "/", status: 200, excludes: 'src="/assets/home/team-spawn.png"' },
   { path: "/", status: 200, includes: "A new kind of" },
   { path: "/", status: 200, excludes: "launcher-demo.js" },
   { path: "/", status: 200, includes: 'href="/install/">Install' },
@@ -31,6 +32,7 @@ const checks = [
     includes: 'DEFAULT_METADATA_BASE="https://chan.app/dl/cli"',
   },
   { path: "/assets/demo-workspace.json", status: 404 },
+  { path: "/assets/home/videos/terminal-commands.mp4", status: 200 },
   { path: "/install.ps1", status: 404 },
 ];
 
@@ -93,6 +95,7 @@ function contentType(file) {
   if (file.endsWith(".html")) return "text/html; charset=utf-8";
   if (file.endsWith(".css")) return "text/css; charset=utf-8";
   if (file.endsWith(".js")) return "text/javascript; charset=utf-8";
+  if (file.endsWith(".mp4")) return "video/mp4";
   if (file.endsWith(".sh")) return "text/x-shellscript; charset=utf-8";
   if (file.endsWith(".png")) return "image/png";
   if (file.endsWith(".ico")) return "image/x-icon";

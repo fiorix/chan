@@ -19,7 +19,7 @@ web/packages/marketing/
 |   +-- WorkspaceDemoOverlay.svelte  hosts @chan/workspace-app/demo
 |   `-- templates/
 |       `-- base.html
-+-- assets/                     public image assets copied to dist/assets/
++-- assets/                     public media assets copied to dist/assets/
 +-- chan-favicon.png
 `-- chan-mark.png
 ```

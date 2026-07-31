@@ -97,9 +97,7 @@
 (function () {
   // Click (or Enter/Space) a product screenshot to view it larger in a
   // lightbox; click the backdrop or press Escape to close.
-  const shots = Array.from(
-    document.querySelectorAll(".hero-shot img, .inline-shot img, .carousel-frame img"),
-  );
+  const shots = Array.from(document.querySelectorAll(".hero-shot img, .inline-shot img"));
   if (shots.length === 0) return;
 
   let overlay = null;
@@ -149,12 +147,11 @@
 })();
 
 (function () {
-  // The home hero carousel: crossfade through the stacked screenshots.
-  // Auto-advances every 5s unless the visitor prefers reduced motion; the
-  // arrows, dots, and Left/Right keys drive it manually. Hover or focus
-  // pauses auto-play so a slide can be read (or zoomed) in peace.
+  // The home hero carousel: play one silent product video at a time, advancing
+  // after it finishes. Reduced-motion visitors opt in with the native controls;
+  // arrows and dots remain available to everyone.
   document.querySelectorAll("[data-carousel]").forEach((carousel) => {
-    const slides = Array.from(carousel.querySelectorAll(".carousel-frame img"));
+    const slides = Array.from(carousel.querySelectorAll("[data-carousel-slide]"));
     const caption = carousel.querySelector(".carousel-caption");
     const dotsHost = carousel.querySelector(".carousel-dots");
     if (slides.length < 2 || !dotsHost) return;
@@ -163,11 +160,8 @@
       const dot = document.createElement("button");
       dot.type = "button";
       dot.className = "carousel-dot";
-      dot.setAttribute("aria-label", `Screenshot ${i + 1} of ${slides.length}`);
-      dot.addEventListener("click", () => {
-        show(i);
-        restart();
-      });
+      dot.setAttribute("aria-label", `Video ${i + 1} of ${slides.length}`);
+      dot.addEventListener("click", () => show(i));
       dotsHost.appendChild(dot);
       return dot;
     });
@@ -178,73 +172,52 @@
     );
 
     function show(i) {
-      index = (i + slides.length) % slides.length;
-      slides.forEach((slide, n) => slide.classList.toggle("active", n === index));
+      const next = (i + slides.length) % slides.length;
+      const changed = next !== index;
+      index = next;
+      slides.forEach((slide, n) => {
+        const active = n === index;
+        slide.classList.toggle("active", active);
+        if (!(slide instanceof HTMLVideoElement)) return;
+        if (!active) {
+          slide.pause();
+          if (slide.currentTime !== 0) slide.currentTime = 0;
+        } else if (changed && slide.currentTime !== 0) {
+          slide.currentTime = 0;
+        }
+      });
       dots.forEach((dot, n) => {
         if (n === index) dot.setAttribute("aria-current", "true");
         else dot.removeAttribute("aria-current");
       });
       if (caption) caption.textContent = slides[index].dataset.caption || "";
+      const active = slides[index];
+      if (autoPlay && active instanceof HTMLVideoElement) {
+        void active.play().catch(() => {});
+      }
     }
 
     const autoPlay = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    let paused = false;
-    let timer = 0;
-
-    function start() {
-      if (!autoPlay || paused || timer) return;
-      timer = window.setInterval(() => show(index + 1), 5000);
-    }
-
-    function stop() {
-      window.clearInterval(timer);
-      timer = 0;
-    }
-
-    function restart() {
-      stop();
-      start();
-    }
-
-    carousel.querySelector(".carousel-prev")?.addEventListener("click", () => {
-      show(index - 1);
-      restart();
+    slides.forEach((slide, i) => {
+      if (!(slide instanceof HTMLVideoElement)) return;
+      slide.addEventListener("ended", () => {
+        if (autoPlay && i === index) show(index + 1);
+      });
     });
-    carousel.querySelector(".carousel-next")?.addEventListener("click", () => {
-      show(index + 1);
-      restart();
-    });
+
+    carousel.querySelector(".carousel-prev")?.addEventListener("click", () => show(index - 1));
+    carousel.querySelector(".carousel-next")?.addEventListener("click", () => show(index + 1));
     carousel.addEventListener("keydown", (event) => {
+      if (event.target instanceof HTMLVideoElement) return;
       if (event.key === "ArrowLeft") {
         event.preventDefault();
         show(index - 1);
-        restart();
       } else if (event.key === "ArrowRight") {
         event.preventDefault();
         show(index + 1);
-        restart();
-      }
-    });
-    carousel.addEventListener("pointerenter", () => {
-      paused = true;
-      stop();
-    });
-    carousel.addEventListener("pointerleave", () => {
-      paused = false;
-      start();
-    });
-    carousel.addEventListener("focusin", () => {
-      paused = true;
-      stop();
-    });
-    carousel.addEventListener("focusout", (event) => {
-      if (!carousel.contains(event.relatedTarget)) {
-        paused = false;
-        start();
       }
     });
 
     show(index);
-    start();
   });
 })();

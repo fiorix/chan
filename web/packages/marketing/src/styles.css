@@ -335,18 +335,16 @@ code {
   padding: 10px 12px;
 }
 
-/* The home carousel: the manual's screenshots crossfading in a fixed-ratio
-   frame, with the active slide's caption and dot/arrow controls below.
-   site.js drives it. */
+/* The home carousel: silent product videos crossfade in a fixed-ratio frame,
+   with the active video's caption and dot/arrow controls below. */
 .hero-carousel {
   margin: 0 auto;
   max-width: 980px;
 }
 
 .carousel-frame {
-  /* All manual screenshots are 2624x1824; one ratio fits every slide. */
-  aspect-ratio: 2624 / 1824;
-  background: var(--panel);
+  aspect-ratio: 16 / 9;
+  background: #000;
   border: 1px solid var(--rule);
   border-radius: 8px;
   box-shadow: var(--shadow);
@@ -354,11 +352,13 @@ code {
   position: relative;
 }
 
-/* visibility rides along with opacity so inactive slides drop out of the
-   tab order (the lightbox makes every slide focusable). */
-.carousel-frame img {
+/* Visibility rides along with opacity so inactive video controls drop out of
+   the tab order. */
+.carousel-frame [data-carousel-slide] {
   display: block;
+  height: 100%;
   inset: 0;
+  object-fit: contain;
   opacity: 0;
   pointer-events: none;
   position: absolute;
@@ -367,7 +367,7 @@ code {
   width: 100%;
 }
 
-.carousel-frame img.active {
+.carousel-frame [data-carousel-slide].active {
   opacity: 1;
   pointer-events: auto;
   visibility: visible;
@@ -437,7 +437,7 @@ code {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .carousel-frame img {
+  .carousel-frame [data-carousel-slide] {
     transition: none;
   }
 }
@@ -922,8 +922,7 @@ code {
 
 /* Clickable screenshots open enlarged in a full-screen lightbox (site.js). */
 .hero-shot img.zoomable,
-.inline-shot img.zoomable,
-.carousel-frame img.zoomable {
+.inline-shot img.zoomable {
   cursor: zoom-in;
 }
 
