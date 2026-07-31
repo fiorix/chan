@@ -99,8 +99,8 @@ impl DiskEchoRing {
         Self::default()
     }
 
-    /// Construct with custom TTLs. Tests use short ones so expiry can
-    /// be observed without sleeping through the production windows.
+    /// Construct with custom TTLs. Tests use short ones and explicit
+    /// instants to exercise expiry without wall-clock waits.
     pub fn with_ttls(write_ttl: Duration, adopt_ttl: Duration) -> Self {
         Self {
             inner: VecDeque::new(),
@@ -111,16 +111,15 @@ impl DiskEchoRing {
 
     /// Record content this session just wrote to disk.
     pub fn note_written(&mut self, hash: u64) {
-        self.note(hash, EchoOrigin::Written);
+        self.note_at(hash, EchoOrigin::Written, Instant::now());
     }
 
     /// Record content this session just adopted from disk.
     pub fn note_adopted(&mut self, hash: u64) {
-        self.note(hash, EchoOrigin::Adopted);
+        self.note_at(hash, EchoOrigin::Adopted, Instant::now());
     }
 
-    fn note(&mut self, hash: u64, origin: EchoOrigin) {
-        let now = Instant::now();
+    fn note_at(&mut self, hash: u64, origin: EchoOrigin, now: Instant) {
         self.evict(now);
         while self.inner.len() >= DISK_ECHO_CAP {
             self.inner.pop_front();
@@ -133,7 +132,11 @@ impl DiskEchoRing {
     /// the entry: refreshing on match would let a repeating echo extend
     /// its own window indefinitely.
     pub fn contains(&mut self, hash: u64) -> bool {
-        self.evict(Instant::now());
+        self.contains_at(hash, Instant::now())
+    }
+
+    fn contains_at(&mut self, hash: u64, now: Instant) -> bool {
+        self.evict(now);
         self.inner.iter().any(|(h, _, _)| *h == hash)
     }
 
@@ -143,10 +146,19 @@ impl DiskEchoRing {
     /// not count: reading bytes never put an upload queue in flight, so
     /// they are no reason to distrust a truncation.
     pub fn any_recent_write(&mut self) -> bool {
-        self.evict(Instant::now());
+        self.any_recent_write_at(Instant::now())
+    }
+
+    fn any_recent_write_at(&mut self, now: Instant) -> bool {
+        self.evict(now);
         self.inner
             .iter()
             .any(|(_, origin, _)| *origin == EchoOrigin::Written)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_age_by(&mut self, age: Duration) {
+        self.evict(Instant::now() + age);
     }
 
     fn evict(&mut self, now: Instant) {
@@ -166,7 +178,6 @@ impl DiskEchoRing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread::sleep;
 
     #[test]
     fn unknown_hash_does_not_match() {
@@ -205,10 +216,11 @@ mod tests {
     fn entries_expire_after_ttl() {
         let mut ring =
             DiskEchoRing::with_ttls(Duration::from_millis(20), Duration::from_millis(20));
-        ring.note_written(content_hash("v1"));
-        sleep(Duration::from_millis(40));
-        assert!(!ring.contains(content_hash("v1")));
-        assert!(!ring.any_recent_write());
+        let now = Instant::now();
+        ring.note_at(content_hash("v1"), EchoOrigin::Written, now);
+        let after_ttl = now + Duration::from_millis(40);
+        assert!(!ring.contains_at(content_hash("v1"), after_ttl));
+        assert!(!ring.any_recent_write_at(after_ttl));
     }
 
     #[test]
@@ -228,15 +240,16 @@ mod tests {
         // `# Hello world` -> `# Hello` never converged in the editor.
         let mut ring =
             DiskEchoRing::with_ttls(Duration::from_millis(400), Duration::from_millis(20));
-        ring.note_written(content_hash("flushed"));
-        ring.note_adopted(content_hash("restored"));
-        sleep(Duration::from_millis(60));
+        let now = Instant::now();
+        ring.note_at(content_hash("flushed"), EchoOrigin::Written, now);
+        ring.note_at(content_hash("restored"), EchoOrigin::Adopted, now);
+        let after_adopt_ttl = now + Duration::from_millis(60);
         assert!(
-            !ring.contains(content_hash("restored")),
+            !ring.contains_at(content_hash("restored"), after_adopt_ttl),
             "an adopted entry stops protecting quickly so restores converge"
         );
         assert!(
-            ring.contains(content_hash("flushed")),
+            ring.contains_at(content_hash("flushed"), after_adopt_ttl),
             "our own written bytes keep the wide replay window"
         );
     }
@@ -256,15 +269,20 @@ mod tests {
 
     #[test]
     fn eviction_handles_mixed_windows_out_of_age_order() {
-        // Adopted-then-written insertion order means the older entry
+        // Written-then-adopted insertion order means the older entry
         // outlives the newer one; a front-popping evictor would stop at
-        // the live adopted entry and leak the expired one.
+        // the live written entry and leak the expired adopted one.
         let mut ring =
             DiskEchoRing::with_ttls(Duration::from_millis(400), Duration::from_millis(20));
-        ring.note_adopted(content_hash("early adopted"));
-        ring.note_written(content_hash("late written"));
-        sleep(Duration::from_millis(60));
-        assert!(!ring.contains(content_hash("early adopted")));
-        assert!(ring.contains(content_hash("late written")));
+        let now = Instant::now();
+        ring.note_at(content_hash("early written"), EchoOrigin::Written, now);
+        ring.note_at(
+            content_hash("late adopted"),
+            EchoOrigin::Adopted,
+            now + Duration::from_millis(1),
+        );
+        let after_adopt_ttl = now + Duration::from_millis(60);
+        assert!(!ring.contains_at(content_hash("late adopted"), after_adopt_ttl));
+        assert!(ring.contains_at(content_hash("early written"), after_adopt_ttl));
     }
 }
