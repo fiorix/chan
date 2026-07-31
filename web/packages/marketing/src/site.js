@@ -21,17 +21,11 @@
     const button = block.querySelector("button");
     const value = block.querySelector("[data-copy-value]");
     if (!button || !value) return;
-    // Icon copy buttons (an inline <svg>) keep their markup; text buttons swap
-    // the label to "Copied". The .copied class drives the visual flash either way.
-    const iconButton = !!button.querySelector("svg");
     button.addEventListener("click", async () => {
       try {
         await navigator.clipboard.writeText(value.textContent || "");
-        const previous = iconButton ? null : button.textContent;
-        if (!iconButton) button.textContent = "Copied";
         block.classList.add("copied");
         window.setTimeout(() => {
-          if (!iconButton) button.textContent = previous;
           block.classList.remove("copied");
         }, 1400);
       } catch (_err) {

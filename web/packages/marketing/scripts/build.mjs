@@ -62,7 +62,8 @@ async function main() {
   await copyInstaller();
   await fs.writeFile(path.join(distRoot, "CNAME"), "chan.app\n");
 
-  const releaseTemplateValues = {
+  const sharedTemplateValues = {
+    copyButton: renderCopyButton(),
     githubReleasesUrl: githubRepoUrl + "/releases",
   };
   const launcherDemoHead =
@@ -75,7 +76,7 @@ async function main() {
       title: "chan - a new kind of IDE",
       description:
         "Chan is a new kind of IDE: drive AI agents to ship faster. Local and remote, on macOS, Windows, and Linux, on x86 and arm64.",
-      content: fillTemplate(homeTemplate, { version, ...releaseTemplateValues }),
+      content: fillTemplate(homeTemplate, { version, ...sharedTemplateValues }),
     }),
   );
 
@@ -86,7 +87,7 @@ async function main() {
       bodyClass: "install-page",
       title: "Install chan",
       description: "Install Chan Desktop or the standalone chan CLI.",
-      content: fillTemplate(installTemplate, { version, ...releaseTemplateValues }),
+      content: fillTemplate(installTemplate, { version, ...sharedTemplateValues }),
     }),
   );
 
@@ -97,7 +98,7 @@ async function main() {
       bodyClass: "manual-page",
       title: "Chan manual",
       description: "What chan is and how to get productive with it: terminals, workspaces, the command launcher, devservers, and the editor.",
-      content: fillTemplate(manualTemplate, { version, ...releaseTemplateValues }),
+      content: fillTemplate(manualTemplate, { version, ...sharedTemplateValues }),
       headExtra: launcherDemoHead,
     }),
   );
@@ -251,6 +252,10 @@ function renderSiteNav(active) {
       return `<a${attrs} href="${href}">${label}</a>`;
     })
     .join("\n        ");
+}
+
+function renderCopyButton() {
+  return `<button type="button" aria-label="Copy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg></button>`;
 }
 
 function fillTemplate(template, values) {

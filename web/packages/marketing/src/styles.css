@@ -934,6 +934,7 @@ code {
   display: flex;
   margin-bottom: 12px;
   overflow: hidden;
+  position: relative;
 }
 
 /* The static variant lists several commands and has no copy button, so
@@ -954,7 +955,7 @@ code {
 .command-copy.multiline code {
   display: block;
   line-height: 1.6;
-  padding-right: 48px;
+  padding-right: 54px;
   white-space: pre;
 }
 
@@ -962,10 +963,14 @@ code {
   margin-right: 0.6ch;
 }
 
-.command-copy.multiline button {
+.command-copy button {
   align-items: center;
+  background: var(--code-bg);
   border: 1px solid var(--rule);
   border-radius: 6px;
+  box-shadow: -8px 0 0 var(--code-bg), 8px 0 0 var(--code-bg);
+  color: var(--muted);
+  cursor: pointer;
   display: inline-flex;
   height: 30px;
   justify-content: center;
@@ -977,7 +982,7 @@ code {
   width: 30px;
 }
 
-.command-copy.multiline button svg {
+.command-copy button svg {
   height: 15px;
   width: 15px;
 }
@@ -991,7 +996,7 @@ code {
   gap: 10px;
   min-width: 0;
   overflow-x: auto;
-  padding: 14px 16px;
+  padding: 14px 54px 14px 16px;
   white-space: nowrap;
 }
 
@@ -1002,17 +1007,6 @@ code {
 
 .command-copy code b {
   font-weight: 600;
-}
-
-.command-copy button {
-  background: transparent;
-  border: 0;
-  border-left: 1px solid var(--rule);
-  color: var(--muted);
-  cursor: pointer;
-  font: 700 0.72rem var(--mono);
-  min-width: 78px;
-  text-transform: uppercase;
 }
 
 .command-copy button:hover,
@@ -1094,17 +1088,5 @@ body.lightbox-open {
   .install-paths,
   .package-grid {
     grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 520px) {
-  .command-copy {
-    display: grid;
-  }
-
-  .command-copy button {
-    border-left: 0;
-    border-top: 1px solid var(--rule);
-    min-height: 42px;
   }
 }

@@ -46,7 +46,7 @@
   <p>Inside every chan terminal, the <code>chan</code> and <code>cs</code> (chan shell) commands drive the UI. Try:</p>
   <div class="command-copy" data-copy-block>
     <code><span>$</span><b data-copy-value>cs terminal new</b></code>
-    <button type="button">Copy</button>
+    {{copyButton}}
   </div>
   <p>This opens a new terminal tab in the current window. A few things to know about tabs and panes:</p>
   <ul>
@@ -103,11 +103,11 @@
   <p>Any directory can become a workspace. For a first try, start from an existing git repo. In a chan terminal:</p>
   <div class="command-copy" data-copy-block>
     <code><span>$</span><b data-copy-value>git clone https://github.com/you/your-project</b></code>
-    <button type="button">Copy</button>
+    {{copyButton}}
   </div>
   <div class="command-copy" data-copy-block>
     <code><span>$</span><b data-copy-value>chan open ./your-project</b></code>
-    <button type="button">Copy</button>
+    {{copyButton}}
   </div>
   <p class="minor"><code>chan open</code> expects the root of a repository. To open a subdirectory inside one, add <code>--here</code>.</p>
   <p><code>chan open {path}</code> works anywhere chan runs: in a local terminal it registers the workspace on this machine (the same thing the New workspace button does), and in a devserver terminal it registers the workspace on that devserver, which then shows up under the devserver's card on the Computers screen.</p>
@@ -146,12 +146,12 @@
   <p>On the target system, install chan:</p>
   <div class="command-copy" data-copy-block>
     <code><span>$</span><b data-copy-value>curl -fsSL https://chan.app/install.sh | sh</b></code>
-    <button type="button">Copy</button>
+    {{copyButton}}
   </div>
   <p>This installs <code>~/.local/bin/chan</code> and the symlink <code>cs -&gt; chan</code> in the same directory. Start the devserver:</p>
   <div class="command-copy" data-copy-block>
     <code><span>$</span><b data-copy-value>~/.local/bin/chan devserver --start</b></code>
-    <button type="button">Copy</button>
+    {{copyButton}}
   </div>
   <p>This installs the devserver as a background service listening on <code>localhost:8787</code>, using the default service manager for your platform:</p>
   <ul>

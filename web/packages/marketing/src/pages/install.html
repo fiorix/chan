@@ -23,7 +23,7 @@
     <h3>macOS <span class="group-note">Apple Silicon</span></h3>
     <div class="command-copy" data-copy-block>
       <code><span>$</span><b data-copy-value>brew install --cask fiorix/chan/chan-desktop</b></code>
-      <button type="button">Copy</button>
+      {{copyButton}}
     </div>
     <p class="minor">Or the disk image (the app keeps itself updated either way):</p>
     <div class="download-matrix">
@@ -61,7 +61,7 @@
         <p class="package-note">Linux x86_64 + aarch64</p>
         <div class="command-copy" data-copy-block>
           <code><span>$</span><b data-copy-value>nix profile install github:fiorix/chan</b></code>
-          <button type="button">Copy</button>
+          {{copyButton}}
         </div>
         <p class="minor">The default flake output is <code>chan-desktop</code>.</p>
       </article>
@@ -71,12 +71,7 @@
         <div class="command-copy multiline" data-copy-block>
           <code><span>$</span><b data-copy-value>sudo add-apt-repository ppa:fiorix/chan
 sudo apt install chan-desktop</b></code>
-          <button type="button" aria-label="Copy">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <rect x="9" y="9" width="13" height="13" rx="2" />
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-            </svg>
-          </button>
+          {{copyButton}}
         </div>
       </article>
       <article class="package-card">
@@ -85,12 +80,7 @@ sudo apt install chan-desktop</b></code>
         <div class="command-copy multiline" data-copy-block>
           <code><span>$</span><b data-copy-value>sudo dnf copr enable fiorix/chan
 sudo dnf install chan-desktop</b></code>
-          <button type="button" aria-label="Copy">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <rect x="9" y="9" width="13" height="13" rx="2" />
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-            </svg>
-          </button>
+          {{copyButton}}
         </div>
       </article>
       <article class="package-card">
@@ -98,7 +88,7 @@ sudo dnf install chan-desktop</b></code>
         <p class="package-note">x86_64, built from source</p>
         <div class="command-copy" data-copy-block>
           <code><span>$</span><b data-copy-value>paru -S chan-desktop</b></code>
-          <button type="button">Copy</button>
+          {{copyButton}}
         </div>
       </article>
     </div>
@@ -115,7 +105,7 @@ sudo dnf install chan-desktop</b></code>
     <h3>Quick install <span class="group-note">macOS + Linux</span></h3>
     <div class="command-copy" data-copy-block>
       <code><span>$</span><b data-copy-value>curl -fsSL https://chan.app/install.sh | sh</b></code>
-      <button type="button">Copy</button>
+      {{copyButton}}
     </div>
     <p class="minor">Installs the latest standalone <code>chan</code> binary and its <code>cs</code> command.</p>
   </div>
@@ -129,7 +119,7 @@ sudo dnf install chan-desktop</b></code>
         <p class="package-note">Homebrew, Apple Silicon</p>
         <div class="command-copy" data-copy-block>
           <code><span>$</span><b data-copy-value>brew install fiorix/chan/chan</b></code>
-          <button type="button">Copy</button>
+          {{copyButton}}
         </div>
       </article>
       <article class="package-card">
@@ -138,12 +128,7 @@ sudo dnf install chan-desktop</b></code>
         <div class="command-copy multiline" data-copy-block>
           <code><span>$</span><b data-copy-value>sudo add-apt-repository ppa:fiorix/chan
 sudo apt install chan</b></code>
-          <button type="button" aria-label="Copy">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <rect x="9" y="9" width="13" height="13" rx="2" />
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-            </svg>
-          </button>
+          {{copyButton}}
         </div>
       </article>
       <article class="package-card">
@@ -152,12 +137,7 @@ sudo apt install chan</b></code>
         <div class="command-copy multiline" data-copy-block>
           <code><span>$</span><b data-copy-value>sudo dnf copr enable fiorix/chan
 sudo dnf install chan</b></code>
-          <button type="button" aria-label="Copy">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <rect x="9" y="9" width="13" height="13" rx="2" />
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-            </svg>
-          </button>
+          {{copyButton}}
         </div>
       </article>
       <article class="package-card">
@@ -165,7 +145,7 @@ sudo dnf install chan</b></code>
         <p class="package-note">x86_64, built from source</p>
         <div class="command-copy" data-copy-block>
           <code><span>$</span><b data-copy-value>paru -S chan</b></code>
-          <button type="button">Copy</button>
+          {{copyButton}}
         </div>
       </article>
     </div>
@@ -180,12 +160,7 @@ sudo dnf install chan</b></code>
   -v ~/.chan-docker:/data/chan \
   -v ~/projects:/workspaces \
   fiorix/chan devserver --bind 0.0.0.0 --port 8787</b></code>
-      <button type="button" aria-label="Copy">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <rect x="9" y="9" width="13" height="13" rx="2" />
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-        </svg>
-      </button>
+      {{copyButton}}
     </div>
   </div>
 
