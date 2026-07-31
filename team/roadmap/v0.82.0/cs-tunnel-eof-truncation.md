@@ -1,52 +1,61 @@
 # Fix `cs tunnel` EOF truncation
 
-Status: REGISTERED for v0.82.0; reproduced and grounded 2026-07-31.
+Status: COMPLETE. The connection lifecycle now drains bytes already read from either TCP endpoint before its data WebSocket closes.
 
 ## What
 
-`cs tunnel` can close a forwarded TCP connection before bytes already read from the source socket have crossed the data WebSocket. HTTP responses then arrive shorter than their declared `Content-Length`; Chromium reports `net::ERR_CONTENT_LENGTH_MISMATCH` despite the response status being `200 OK`.
+`cs tunnel` previously closed a forwarded TCP connection before bytes already read from the source socket crossed the data WebSocket. HTTP responses then arrived shorter than their declared `Content-Length`; Chromium reported `net::ERR_CONTENT_LENGTH_MISMATCH` despite a `200 OK` response.
 
-This is a transport data-loss bug, not an intentional response-size cap. The reverse-tunnel design explicitly leaves transferred bytes unmetered, and there is no CLI, environment, or config setting for a total-byte limit.
+This is a transport data-loss race, not a response-size limit. The reverse-tunnel contract leaves total transferred bytes unmetered. `MAX_DATA_FRAME_BYTES` remains a per-frame limit of 64 KiB, and the channel capacities remain implementation backpressure rather than body-size limits.
 
-## Reproduction
+## Observed failure
 
-A generated `@chan/marketing` site was served by `python3 -m http.server` on the devserver at `127.0.0.1:37845` and opened from the desktop through `cs tunnel`.
+The unfixed code failed below the eight-frame channel capacity. A 131,072-byte response failed 10/10 with zero bytes received, and a 65,537-byte response failed 1/10 with zero bytes received on one sequential run. The 512 KiB minus one byte case failed 5/10, with a worst result of 65,536 bytes. The race can discard a body wholesale; 512 KiB is only the point where the channel cannot hold the entire body, not a reliable failure threshold.
 
-- HTML, CSS, and JavaScript loaded.
-- PNG requests reached the origin and were logged as `200`, but Chromium rejected them with `net::ERR_CONTENT_LENGTH_MISMATCH`.
-- The origin files were valid PNGs, and direct HTTP fetches returned byte-identical copies.
-- The same site and files loaded correctly through an SSH tunnel, isolating the failure to the `cs tunnel` path.
-- The smallest large failing image was 524,405 bytes, 117 bytes above 512 KiB. A 168,868-byte favicon also failed during a concurrent page load, so 512 KiB is the reliable pressure point rather than a clean configured cutoff.
+The owner-run 2 GiB proof failed all 3/3 unfixed iterations at commit `c7257443`: curl exited 18 with 131,072, 458,752, and 524,288 bytes missing. The missing counts are whole 64 KiB frames, consistent with queued-frame cancellation.
 
 ## Root cause
 
-The devserver-to-desktop path combines a hard-coded 64 KiB data-frame size with a hard-coded eight-entry server-side channel:
+Three cancellation sites could discard bytes:
 
-- `MAX_DATA_FRAME_BYTES` is `64 * 1024` in `crates/chan-revtunnel/src/wire.rs`.
-- `serve_tunnel_conn` creates `mpsc::channel::<Vec<u8>>(8)` in `crates/chan-server/src/routes/tunnel.rs`, giving the WebSocket uplink 512 KiB of queued frame capacity.
-- `bridge::splice` returns as soon as either the local TCP reader reaches EOF or the opposite direction ends.
-- `serve_tunnel_conn` selects between `splice`, the WebSocket uplink, and the WebSocket downlink. When `splice` wins on source EOF, the other futures are cancelled and the WebSocket is closed without first draining `uplink_rx`.
+- `crates/chan-revtunnel/src/bridge.rs`: the inner `select!` canceled an in-flight `Sender::send` or `write_all` when the opposite direction ended.
+- `crates/chan-server/src/routes/tunnel.rs`: `serve_tunnel_conn` selected among the splice, the uplink adapter, and the downlink adapter. Source EOF or a downlink close canceled the uplink before its queued frames drained. Both channels have capacity eight.
+- `crates/chan-revtunnel/src/client.rs`: `serve_conn` aborted the WebSocket shuttle as soon as `splice` returned. Both channels have capacity sixteen.
 
-An HTTP/1.0-style origin writes the complete response and closes. Once the TCP reader observes that close, up to eight already-read frames can still be queued for the WebSocket. The outer `select!` may discard that tail. Responses above 512 KiB reliably put pressure on this queue, while scheduling can expose the same race on smaller responses.
+The loss window can include the queued frames plus a frame whose send was canceled, so it is larger than eight frames. The measured 4 MiB loss was 469,081 bytes in the unfixed path.
 
-The desktop client has the symmetric lifecycle hazard in `crates/chan-revtunnel/src/client.rs`: it uses a 16-entry channel, awaits `splice`, and then aborts the WebSocket shuttle. Both directions need an explicit drain contract rather than relying on task cancellation at EOF.
+## Fix contract
 
-## Contract
+- `bridge::splice` cancels only at read/receive boundaries. An in-progress `send` or `write_all` completes before the other direction's stop signal takes effect.
+- The pump still ends both directions together on TCP EOF, peer-channel close, or socket error. `to_peer` is dropped when `splice` returns.
+- Under the no-half-close policy, local TCP EOF completes only an already-running downlink `write_all`; chunks still queued in `from_peer` are intentionally outside the drain guarantee because both directions end together.
+- The server consumes the uplink concurrently with `splice`, then awaits it after `splice` returns to drain every queued frame. The downlink is aborted only after that drain.
+- The desktop joins `splice` and its WebSocket shuttle as one cancellation unit. A normal EOF lets the shuttle observe the dropped outbound sender and close itself; tunnel teardown still aborts the owning connection through `JoinSet::shutdown`.
+- No wire signal, deadline, capacity change, or total-byte limit is introduced.
 
-- Every byte successfully read from one TCP endpoint must be written to the peer before the data WebSocket closes.
-- TCP EOF may end both directions, preserving the current no-half-close policy, but only after the already-read outbound queue drains.
-- A WebSocket error, peer disappearance, tunnel teardown, or failed devserver dial may still terminate immediately.
-- `MAX_DATA_FRAME_BYTES` remains a per-frame protocol bound, not a total connection or response limit.
-- Channel capacity remains a backpressure implementation detail and must not affect the maximum transferable body size.
+## Coverage and placement
 
-## Acceptance
+The always-on `crates/chan/tests/revtunnel_e2e.rs` suite uses a close-after-write origin and deterministic index-derived bytes. Every case runs at least 10 iterations and checks both length and content:
 
-- Add a full reverse-tunnel regression in which the devserver endpoint writes a payload and immediately closes; the desktop endpoint must receive byte-identical bodies at 512 KiB minus one byte, exactly 512 KiB, 512 KiB plus one byte, and several MiB.
-- Exercise the opposite direction with the same close-after-write shape so the desktop-side `shuttle.abort()` path cannot discard queued frames.
-- Include multiple concurrent connections to cover the page-load pattern that exposed the bug.
-- Keep the existing refused-dial, Ctrl-C teardown, desktop-disconnect, and tunnel-lifetime tests green.
-- Re-run the marketing-site browser smoke through `cs tunnel`; Chromium must load every image without `ERR_CONTENT_LENGTH_MISMATCH`.
+| size | sequential directions | concurrent connections |
+| --- | --- | --- |
+| 65,537 | devserver to desktop, desktop to devserver | six connections |
+| 131,072 | devserver to desktop, desktop to devserver | six connections |
+| 524,287 | devserver to desktop, desktop to devserver | six connections |
+| 524,288 | devserver to desktop, desktop to devserver | six connections |
+| 524,289 | devserver to desktop, desktop to devserver | six connections |
+| 4,194,304 | devserver to desktop, desktop to devserver | six connections |
 
-## Rough size
+The pump unit tests pin both in-flight cancellation invariants. The always-on suite is run in serial and parallel modes. Anything at or above 1 GiB belongs in `scripts/e2e/`, never in `make pre-push` or CI, because the suite has a 12-second await bound and multi-GiB debug transfers take materially longer.
 
-Small to medium. The code change is a focused connection-lifecycle fix on both WebSocket adapters; the important weight is the exact-boundary and concurrent end-to-end regression coverage.
+`scripts/e2e/revtunnel-large-transfer.sh` is the owner-run proof. It creates a sparse 2 GiB fixture outside `/tmp`, starts `python3 -m http.server` on origin port 18501, opens `cs tunnel` on desktop port 18500, pulls with curl for 3 iterations by default, and records curl status, byte count, SHA-256 values, and elapsed time. It preserves logs and artifacts on failure and tears down only the process it started.
+
+The marketing-site browser smoke is owner-only and manual. It cannot run in this environment because the SPA refuses the tunnel-open call off Tauri and there is no display server. It is not automated or counted as coverage here.
+
+## Verification
+
+- `cargo test -p chan-revtunnel --all-targets`: 32 passed.
+- `cargo test -p chan-server --lib`: 935 passed.
+- `cargo test -p chan --test revtunnel_e2e`: 9 passed, 1 owner-only ignored. Five serial repetitions and five parallel repetitions are green.
+- The post-fix boundary and concurrent cases report zero failures at every size in both directions.
+- The pre-fix and post-fix owner-run 2 GiB results are recorded side by side in the tunnel journal. The post-fix run transferred all 3 iterations byte-identically with curl exit 0.

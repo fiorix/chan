@@ -10,7 +10,7 @@
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::wire::MAX_DATA_FRAME_BYTES;
 
@@ -27,11 +27,20 @@ pub async fn splice(
     mut from_peer: mpsc::Receiver<Vec<u8>>,
 ) {
     let (mut read, mut write) = tcp.into_split();
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let downlink_stop_rx = stop_rx.clone();
+    let downlink_stop_tx = stop_tx.clone();
 
     let uplink = async move {
         let mut buf = vec![0u8; MAX_DATA_FRAME_BYTES];
+        let mut stop_rx = stop_rx;
         loop {
-            match read.read(&mut buf).await {
+            let result = tokio::select! {
+                biased;
+                _ = stop_rx.changed() => break,
+                result = read.read(&mut buf) => result,
+            };
+            match result {
                 // Clean EOF from the local peer.
                 Ok(0) => break,
                 Ok(n) => {
@@ -45,10 +54,18 @@ pub async fn splice(
                 }
             }
         }
+        let _ = stop_tx.send(true);
     };
 
     let downlink = async move {
-        while let Some(chunk) = from_peer.recv().await {
+        let mut stop_rx = downlink_stop_rx;
+        loop {
+            let chunk = tokio::select! {
+                biased;
+                _ = stop_rx.changed() => break,
+                chunk = from_peer.recv() => chunk,
+            };
+            let Some(chunk) = chunk else { break };
             if chunk.is_empty() {
                 continue;
             }
@@ -57,15 +74,13 @@ pub async fn splice(
                 break;
             }
         }
-        // Best effort: the far end already stopped, so a failure here says
-        // only that this side was also gone.
+        // Best effort: both directions are ending, so a failure here only
+        // means this side was already gone too.
         let _ = write.shutdown().await;
+        let _ = downlink_stop_tx.send(true);
     };
 
-    tokio::select! {
-        _ = uplink => {}
-        _ = downlink => {}
-    }
+    tokio::join!(uplink, downlink);
 }
 
 #[cfg(test)]
@@ -147,5 +162,104 @@ mod tests {
         drop(client);
         drop(peer_tx);
         pump.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_peer_close_does_not_cancel_an_in_flight_uplink_send() {
+        let mut failures = Vec::new();
+        for iteration in 0..10u8 {
+            let (mut client, spliced) = socket_pair().await;
+            let (to_peer, mut peer_rx) = mpsc::channel(1);
+            to_peer.send(b"occupied".to_vec()).await.unwrap();
+            let (peer_tx, from_peer) = mpsc::channel::<Vec<u8>>(8);
+            let mut pump = tokio::spawn(splice(spliced, to_peer, from_peer));
+
+            let payload = vec![iteration];
+            client.write_all(&payload).await.unwrap();
+            client.shutdown().await.unwrap();
+
+            // Local EOF cannot finish while the one-slot outbound channel is
+            // occupied: the byte read from TCP is waiting in `send`.
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(50), &mut pump)
+                    .await
+                    .is_err(),
+                "splice returned before its blocked send"
+            );
+
+            // Ending the opposite direction must let that send finish rather
+            // than cancel it. Free the slot only after the peer close races it.
+            drop(peer_tx);
+            assert_eq!(peer_rx.recv().await.unwrap(), b"occupied".to_vec());
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut pump)
+                .await
+                .expect("splice finishes after the outbound slot opens")
+                .unwrap();
+            let received = peer_rx.recv().await;
+            if received.as_deref() != Some(payload.as_slice()) {
+                failures.push((iteration, received));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "peer close cancelled in-flight uplink sends: {failures:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_local_eof_does_not_cancel_an_in_flight_socket_write() {
+        let mut failures = Vec::new();
+        for iteration in 0..10u8 {
+            let (mut client, spliced) = socket_pair().await;
+            let (to_peer, _peer_rx) = mpsc::channel(8);
+            let (peer_tx, from_peer) = mpsc::channel(8);
+            let mut pump = tokio::spawn(splice(spliced, to_peer, from_peer));
+            let payload = vec![iteration; 16 * 1024 * 1024];
+            peer_tx.send(payload.clone()).await.unwrap();
+
+            // One byte proves `write_all` started. Stop reading before local
+            // EOF races it, leaving far more than the socket buffer in flight.
+            let mut first = [0u8; 1];
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                client.read_exact(&mut first),
+            )
+            .await
+            .expect("socket write starts")
+            .unwrap();
+            client.shutdown().await.unwrap();
+
+            let finished_early =
+                match tokio::time::timeout(std::time::Duration::from_millis(50), &mut pump).await {
+                    Ok(result) => {
+                        result.unwrap();
+                        true
+                    }
+                    Err(_) => false,
+                };
+
+            let mut received = first.to_vec();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                client.read_to_end(&mut received),
+            )
+            .await
+            .expect("socket write drains")
+            .unwrap();
+            if !finished_early {
+                tokio::time::timeout(std::time::Duration::from_secs(2), &mut pump)
+                    .await
+                    .expect("splice finishes after the socket drains")
+                    .unwrap();
+            }
+
+            if received != payload {
+                failures.push((iteration, received.len()));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "local EOF cancelled in-flight socket writes: {failures:?}"
+        );
     }
 }

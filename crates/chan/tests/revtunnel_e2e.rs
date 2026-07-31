@@ -716,6 +716,184 @@ impl Drop for EchoServer {
     }
 }
 
+const TRANSFER_ITERATIONS: usize = 10;
+const TRANSFER_CASES: &[(usize, &str)] = &[
+    (65_537, "64 KiB + 1"),
+    (131_072, "128 KiB"),
+    (524_287, "512 KiB - 1"),
+    (524_288, "512 KiB"),
+    (524_289, "512 KiB + 1"),
+    (4_194_304, "4 MiB"),
+];
+
+fn patterned_payload(size: usize, salt: u64) -> Vec<u8> {
+    (0..size)
+        .map(|index| {
+            let mixed = (index as u64)
+                .wrapping_mul(31)
+                .wrapping_add(salt.wrapping_mul(17));
+            (mixed % 251) as u8
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct TransferStats {
+    attempts: usize,
+    failures: usize,
+    shortest_received: Option<usize>,
+    errors: Vec<String>,
+}
+
+impl TransferStats {
+    fn record(&mut self, expected: &[u8], received: Result<Vec<u8>, String>) {
+        self.attempts += 1;
+        match received {
+            Ok(received) if received == expected => {}
+            Ok(received) => {
+                self.failures += 1;
+                self.shortest_received = Some(
+                    self.shortest_received
+                        .map_or(received.len(), |old| old.min(received.len())),
+                );
+            }
+            Err(error) => {
+                self.failures += 1;
+                self.errors.push(error);
+            }
+        }
+    }
+
+    fn summary(&self, direction: &str, label: &str, size: usize) -> String {
+        format!(
+            "{direction} {label} ({size} bytes): short_or_corrupt={}/{} \
+             shortest_received={:?} errors={:?}",
+            self.failures, self.attempts, self.shortest_received, self.errors
+        )
+    }
+}
+
+/// An origin that reads a 16-byte `(size, salt)` request, writes the requested
+/// deterministic payload, and closes immediately after the write completes.
+struct CloseAfterWriteServer {
+    port: u16,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl CloseAfterWriteServer {
+    async fn bind() -> std::io::Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut request = [0u8; 16];
+                    if sock.read_exact(&mut request).await.is_err() {
+                        return;
+                    }
+                    let size = u64::from_be_bytes(request[..8].try_into().unwrap()) as usize;
+                    let salt = u64::from_be_bytes(request[8..].try_into().unwrap());
+                    let payload = patterned_payload(size, salt);
+                    let _ = sock.write_all(&payload).await;
+                });
+            }
+        });
+        Ok(Self { port, task })
+    }
+}
+
+impl Drop for CloseAfterWriteServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn read_close_after_write(
+    bound: SocketAddr,
+    size: usize,
+    salt: u64,
+) -> Result<Vec<u8>, String> {
+    let mut sock = tokio::time::timeout(WAIT, TcpStream::connect(bound))
+        .await
+        .map_err(|_| format!("connect timed out after {WAIT:?}"))?
+        .map_err(|error| format!("connect {bound}: {error}"))?;
+    let mut request = [0u8; 16];
+    request[..8].copy_from_slice(&(size as u64).to_be_bytes());
+    request[8..].copy_from_slice(&salt.to_be_bytes());
+    tokio::time::timeout(WAIT, sock.write_all(&request))
+        .await
+        .map_err(|_| format!("request write timed out after {WAIT:?}"))?
+        .map_err(|error| format!("request write: {error}"))?;
+    let mut received = Vec::with_capacity(size);
+    tokio::time::timeout(WAIT, sock.read_to_end(&mut received))
+        .await
+        .map_err(|_| format!("response read timed out after {WAIT:?}"))?
+        .map_err(|error| format!("response read: {error}"))?;
+    Ok(received)
+}
+
+/// A devserver-side sink that reports every connection's bytes after EOF.
+struct CloseAfterReadServer {
+    port: u16,
+    received: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl CloseAfterReadServer {
+    async fn bind() -> std::io::Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let (received_tx, received) = tokio::sync::mpsc::channel(16);
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let received_tx = received_tx.clone();
+                tokio::spawn(async move {
+                    let mut bytes = Vec::new();
+                    let _ = sock.read_to_end(&mut bytes).await;
+                    let _ = received_tx.send(bytes).await;
+                });
+            }
+        });
+        Ok(Self {
+            port,
+            received,
+            task,
+        })
+    }
+
+    async fn next(&mut self) -> Result<Vec<u8>, String> {
+        tokio::time::timeout(WAIT, self.received.recv())
+            .await
+            .map_err(|_| format!("devserver sink timed out after {WAIT:?}"))?
+            .ok_or_else(|| "devserver sink closed before reporting bytes".to_string())
+    }
+}
+
+impl Drop for CloseAfterReadServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn write_then_close(bound: SocketAddr, payload: &[u8]) -> Result<(), String> {
+    let mut sock = tokio::time::timeout(WAIT, TcpStream::connect(bound))
+        .await
+        .map_err(|_| format!("connect timed out after {WAIT:?}"))?
+        .map_err(|error| format!("connect {bound}: {error}"))?;
+    tokio::time::timeout(WAIT, sock.write_all(payload))
+        .await
+        .map_err(|_| format!("payload write timed out after {WAIT:?}"))?
+        .map_err(|error| format!("payload write: {error}"))?;
+    drop(sock);
+    Ok(())
+}
+
 /// Dial the DESKTOP-side listener and prove the full splice: banner first
 /// (devserver -> desktop with no client byte sent), then a payload echo.
 /// Returns the open connection so callers can interleave several.
@@ -804,6 +982,271 @@ async fn tunnel_round_trips_tcp_both_ways_for_concurrent_connections() {
     // client task winds down without being told anything else.
     drop(cs);
     within("desktop client teardown on cs exit", handle.wait()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn devserver_close_after_write_drains_every_boundary_payload() {
+    let rig = TunnelRig::new().await;
+    let mut spa = rig.connect_window_ws().await;
+    let origin = CloseAfterWriteServer::bind()
+        .await
+        .expect("bind close-after-write origin");
+    let mut cs = rig
+        .open_cs_tunnel(Proto::Tcp, "127.0.0.1", 0, origin.port)
+        .await;
+    let trigger = next_tunnel_open(&mut spa).await;
+    let handle = rig.open_desktop(&trigger).await;
+    cs.expect_ok("tunnel ready ack").await;
+
+    let mut failures = Vec::new();
+    for &(size, label) in TRANSFER_CASES {
+        let mut stats = TransferStats::default();
+        for iteration in 0..TRANSFER_ITERATIONS {
+            let salt = ((size as u64) << 8) ^ iteration as u64;
+            let expected = patterned_payload(size, salt);
+            let received = read_close_after_write(handle.bound, size, salt).await;
+            stats.record(&expected, received);
+        }
+        let summary = stats.summary("devserver->desktop", label, size);
+        eprintln!("{summary}");
+        if stats.failures > 0 {
+            failures.push(summary);
+        }
+    }
+
+    drop(cs);
+    within(
+        "desktop client teardown after boundary reads",
+        handle.wait(),
+    )
+    .await;
+    assert!(
+        failures.is_empty(),
+        "close-after-write responses lost bytes:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn desktop_close_after_write_drains_every_boundary_payload() {
+    let rig = TunnelRig::new().await;
+    let mut spa = rig.connect_window_ws().await;
+    let mut sink = CloseAfterReadServer::bind()
+        .await
+        .expect("bind close-after-read sink");
+    let mut cs = rig
+        .open_cs_tunnel(Proto::Tcp, "127.0.0.1", 0, sink.port)
+        .await;
+    let trigger = next_tunnel_open(&mut spa).await;
+    let handle = rig.open_desktop(&trigger).await;
+    cs.expect_ok("tunnel ready ack").await;
+
+    let mut failures = Vec::new();
+    for &(size, label) in TRANSFER_CASES {
+        let mut stats = TransferStats::default();
+        for iteration in 0..TRANSFER_ITERATIONS {
+            let salt = ((size as u64) << 8) ^ iteration as u64;
+            let expected = patterned_payload(size, salt);
+            let received = match write_then_close(handle.bound, &expected).await {
+                Ok(()) => sink.next().await,
+                Err(error) => Err(error),
+            };
+            stats.record(&expected, received);
+        }
+        let summary = stats.summary("desktop->devserver", label, size);
+        eprintln!("{summary}");
+        if stats.failures > 0 {
+            failures.push(summary);
+        }
+    }
+
+    drop(cs);
+    within(
+        "desktop client teardown after boundary writes",
+        handle.wait(),
+    )
+    .await;
+    assert!(
+        failures.is_empty(),
+        "close-after-write requests lost bytes:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_close_after_write_responses_drain_independently() {
+    let rig = TunnelRig::new().await;
+    let mut spa = rig.connect_window_ws().await;
+    let origin = CloseAfterWriteServer::bind()
+        .await
+        .expect("bind close-after-write origin");
+    let mut cs = rig
+        .open_cs_tunnel(Proto::Tcp, "127.0.0.1", 0, origin.port)
+        .await;
+    let trigger = next_tunnel_open(&mut spa).await;
+    let handle = rig.open_desktop(&trigger).await;
+    cs.expect_ok("tunnel ready ack").await;
+
+    let mut stats: Vec<_> = TRANSFER_CASES
+        .iter()
+        .map(|_| TransferStats::default())
+        .collect();
+    for iteration in 0..TRANSFER_ITERATIONS {
+        let mut transfers = tokio::task::JoinSet::new();
+        for (case_index, &(size, _)) in TRANSFER_CASES.iter().enumerate() {
+            let bound = handle.bound;
+            let salt = 0xc0_0000 ^ ((iteration as u64) << 16) ^ case_index as u64;
+            transfers.spawn(async move {
+                let expected = patterned_payload(size, salt);
+                let received = read_close_after_write(bound, size, salt).await;
+                (case_index, expected, received)
+            });
+        }
+        while let Some(result) = transfers.join_next().await {
+            let (case_index, expected, received) = result.expect("concurrent transfer task");
+            stats[case_index].record(&expected, received);
+        }
+    }
+
+    let mut failures = Vec::new();
+    for ((size, label), stats) in TRANSFER_CASES.iter().copied().zip(&stats) {
+        let summary = stats.summary("concurrent devserver->desktop", label, size);
+        eprintln!("{summary}");
+        if stats.failures > 0 {
+            failures.push(summary);
+        }
+    }
+
+    drop(cs);
+    within(
+        "desktop client teardown after concurrent reads",
+        handle.wait(),
+    )
+    .await;
+    assert!(
+        failures.is_empty(),
+        "concurrent close-after-write responses lost bytes:\n{}",
+        failures.join("\n")
+    );
+}
+
+fn sha256sum(path: &Path) -> Result<String, String> {
+    let output = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .map_err(|error| format!("run sha256sum for {}: {error}", path.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "sha256sum {} exited {:?}: {}",
+            path.display(),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| format!("sha256sum output is not UTF-8: {error}"))?
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
+        .ok_or_else(|| format!("sha256sum {} returned no digest", path.display()))
+}
+
+/// Owner-run multi-GiB proof. The wrapper creates and serves the fixture,
+/// records the commit and logs, and supplies these environment variables.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "owner-run via scripts/e2e/revtunnel-large-transfer.sh"]
+async fn tunnel_preserves_two_gib_close_after_write() {
+    const DESKTOP_PORT: u16 = 18_500;
+    const ORIGIN_PORT: u16 = 18_501;
+    const EXPECTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+    const CURL_TIMEOUT_SECS: &str = "180";
+
+    let fixture = PathBuf::from(
+        std::env::var_os("CHAN_REVTUNNEL_LARGE_FIXTURE")
+            .expect("wrapper must set CHAN_REVTUNNEL_LARGE_FIXTURE"),
+    );
+    let output_dir = PathBuf::from(
+        std::env::var_os("CHAN_REVTUNNEL_LARGE_OUTPUT")
+            .expect("wrapper must set CHAN_REVTUNNEL_LARGE_OUTPUT"),
+    );
+    let iterations = std::env::var("CHAN_REVTUNNEL_LARGE_ITERATIONS")
+        .unwrap_or_else(|_| "3".to_string())
+        .parse::<usize>()
+        .expect("CHAN_REVTUNNEL_LARGE_ITERATIONS must be a positive integer");
+    assert!(iterations > 0, "large transfer iterations must be positive");
+    assert_eq!(
+        fixture.file_name().and_then(|name| name.to_str()),
+        Some("payload.bin"),
+        "the wrapper serves the stable /payload.bin URL"
+    );
+    assert_eq!(
+        std::fs::metadata(&fixture)
+            .expect("2 GiB fixture metadata")
+            .len(),
+        EXPECTED_BYTES,
+        "large-transfer fixture must be exactly 2 GiB"
+    );
+    std::fs::create_dir_all(&output_dir).expect("create large-transfer output directory");
+    let source_hash = sha256sum(&fixture).expect("hash large-transfer source");
+
+    let rig = TunnelRig::new().await;
+    let mut spa = rig.connect_window_ws().await;
+    let mut cs = rig
+        .open_cs_tunnel(Proto::Tcp, "127.0.0.1", DESKTOP_PORT, ORIGIN_PORT)
+        .await;
+    let trigger = next_tunnel_open(&mut spa).await;
+    let handle = rig.open_desktop(&trigger).await;
+    assert_eq!(handle.bound, "127.0.0.1:18500".parse().unwrap());
+    cs.expect_ok("large-transfer tunnel ready ack").await;
+
+    let output_path = output_dir.join("download.bin");
+    let mut failures = Vec::new();
+    for iteration in 1..=iterations {
+        let started = Instant::now();
+        let output = Command::new("timeout")
+            .args(["--signal=TERM", "--kill-after=5s", CURL_TIMEOUT_SECS])
+            .arg("curl")
+            .args(["--fail", "--silent", "--show-error"])
+            .args(["--output", output_path.to_str().expect("UTF-8 output path")])
+            .arg("http://127.0.0.1:18500/payload.bin")
+            .output()
+            .expect("run bounded curl");
+        let elapsed = started.elapsed();
+        let received_bytes = std::fs::metadata(&output_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let received_hash = sha256sum(&output_path).unwrap_or_else(|error| error);
+        let valid = output.status.success()
+            && received_bytes == EXPECTED_BYTES
+            && received_hash == source_hash;
+        eprintln!(
+            "large transfer iteration={iteration}/{iterations} curl_status={:?} \
+             bytes={received_bytes}/{EXPECTED_BYTES} sha256={received_hash} \
+             source_sha256={source_hash} elapsed_ms={} stderr={:?}",
+            output.status.code(),
+            elapsed.as_millis(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if !valid {
+            failures.push(format!(
+                "iteration {iteration}: curl_status={:?}, bytes={received_bytes}, \
+                 sha256={received_hash}, elapsed={elapsed:?}",
+                output.status.code()
+            ));
+        }
+    }
+
+    drop(cs);
+    within(
+        "desktop client teardown after large transfer",
+        handle.wait(),
+    )
+    .await;
+    assert!(
+        failures.is_empty(),
+        "2 GiB tunnel transfer failed:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// Scenario 3: nothing listening on the devserver port. Each connection is

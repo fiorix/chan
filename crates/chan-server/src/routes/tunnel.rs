@@ -151,14 +151,15 @@ async fn serve_tunnel_conn(socket: WebSocket, port: u16, conn_id: String) {
     let (downlink_tx, from_peer) = mpsc::channel::<Vec<u8>>(8);
     // The two WebSocket adapter halves around the shared byte pump: raw bytes
     // ride binary frames, nothing else is data.
-    let uplink = async {
+    let uplink = tokio::spawn(async move {
         while let Some(chunk) = uplink_rx.recv().await {
             if ws_tx.send(Message::Binary(chunk.into())).await.is_err() {
                 break;
             }
         }
-    };
-    let downlink = async {
+        let _ = ws_tx.close().await;
+    });
+    let downlink = async move {
         while let Some(msg) = ws_rx.next().await {
             match msg {
                 Ok(Message::Binary(bytes)) => {
@@ -177,14 +178,14 @@ async fn serve_tunnel_conn(socket: WebSocket, port: u16, conn_id: String) {
             }
         }
     };
-    // Any leg ending ends them all: the channels carry no half-close signal,
-    // so both directions drop together (mirroring the pump's own contract).
-    tokio::select! {
-        _ = chan_revtunnel::bridge::splice(tcp, to_peer, from_peer) => {}
-        _ = uplink => {}
-        _ = downlink => {}
-    }
-    let _ = ws_tx.close().await;
+    // The downlink adapter may end first, which closes `from_peer` and ends
+    // the splice. Keep the uplink alive until its channel closes so every
+    // frame read before EOF reaches the WebSocket.
+    let downlink = tokio::spawn(downlink);
+    chan_revtunnel::bridge::splice(tcp, to_peer, from_peer).await;
+    let _ = uplink.await;
+    downlink.abort();
+    let _ = downlink.await;
 }
 
 #[cfg(test)]
