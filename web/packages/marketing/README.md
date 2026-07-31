@@ -113,13 +113,18 @@ While `github.com/fiorix/chan` is still private during pre-release work, use `--
 
 ## Install surface
 
-`/install/` is desktop-first. The shell installer is CLI-only and supports only the active standalone CLI release targets:
+`/install/` separates two installation paths:
+
+- Desktop: Homebrew or DMG on macOS, the Windows installer, then the Linux AppImage and managed `chan-desktop` packages.
+- Server: the shell installer first, managed `chan` packages second, then Docker and the optional self-hosted gateway.
+
+The shell installer is CLI-only and supports the active standalone CLI release targets:
 
 - Linux x86_64
 - Linux aarch64
 - macOS aarch64
 
-Desktop packages are downloaded directly as release artifacts. They are not installed by `install.sh`.
+Desktop packages are downloaded directly as release artifacts. They are not installed by `install.sh`. Raw CLI archives remain in release metadata and on GitHub Releases, but are not presented as primary install-page choices.
 
 Linux users can also install the root Nix flake. Its default package is `chan-desktop` on x86_64 and aarch64, with `chan` and `cs` entry points in the same output; it does not add a systemd user unit.
 

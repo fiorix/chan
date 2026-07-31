@@ -136,7 +136,7 @@
   <div class="section-heading">
     <h2><a class="heading-anchor" href="#devserver">Chan Devserver</a></h2>
   </div>
-  <p>The devserver runs chan on another machine, or in an isolated environment on this one, and lets Chan Desktop connect to it. Sessions live on the server, so you can disconnect and reconnect while terminals and agents keep running.</p>
+  <p>The devserver runs <code>chan</code> on another machine for remote development. It can also run locally with a separate <code>CHAN_HOME</code> to isolate its state. Chan Desktop connects to the devserver as the client shell; sessions, window layouts, and terminals all live on the devserver.</p>
   <p>Pick where to run it:</p>
   <ul>
     <li>On macOS: a lima-vm, or a remote machine via ssh.</li>

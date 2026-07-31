@@ -18,12 +18,19 @@ const checks = [
   { path: "/", status: 200, excludes: "launcher-demo.js" },
   { path: "/", status: 200, includes: 'href="/install/">Install' },
   { path: "/install/", status: 200, includes: "Install Chan" },
-  { path: "/install/", status: 200, includes: 'data-release-download="cli-linux-x64"' },
+  { path: "/install/", status: 200, before: ['id="desktop"', 'id="server"'] },
+  { path: "/install/", status: 200, includes: "curl -fsSL https://chan.app/install.sh | sh" },
   { path: "/install/", status: 200, includes: 'data-release-download="desktop-linux-appimage"' },
   { path: "/install/", status: 200, includes: 'data-release-download="gateway-profile-deb-amd64"' },
   { path: "/install/", status: 200, includes: "ppa:fiorix/chan" },
   { path: "/install/", status: 200, includes: "dnf copr enable fiorix/chan" },
   { path: "/install/", status: 200, includes: "paru -S chan-desktop" },
+  { path: "/install/", status: 200, includes: "sudo apt install chan</b>" },
+  { path: "/install/", status: 200, includes: "sudo dnf install chan</b>" },
+  { path: "/install/", status: 200, includes: "paru -S chan</b>" },
+  { path: "/install/", status: 200, excludes: 'data-release-download="cli-macos-arm64"' },
+  { path: "/install/", status: 200, excludes: 'data-release-download="cli-windows-x64"' },
+  { path: "/install/", status: 200, excludes: 'data-release-download="cli-linux-x64"' },
   { path: "/install/", status: 200, excludes: 'data-release-download="desktop-linux-rpm-amd64"' },
   { path: "/install/", status: 200, excludes: 'data-release-download="cli-linux-deb-amd64"' },
   {
@@ -124,13 +131,23 @@ async function runCheck(port, check) {
   if (response.status !== check.status) {
     throw new Error(`${check.path} returned HTTP ${response.status}, expected ${check.status}`);
   }
-  if (check.includes || check.excludes) {
+  if (check.includes || check.excludes || check.before) {
     const body = await response.text();
     if (check.includes && !body.includes(check.includes)) {
       throw new Error(`${check.path} did not contain ${JSON.stringify(check.includes)}`);
     }
     if (check.excludes && body.includes(check.excludes)) {
       throw new Error(`${check.path} must not contain ${JSON.stringify(check.excludes)}`);
+    }
+    if (check.before) {
+      const [first, second] = check.before;
+      const firstOffset = body.indexOf(first);
+      const secondOffset = body.indexOf(second);
+      if (firstOffset < 0 || secondOffset < 0 || firstOffset >= secondOffset) {
+        throw new Error(
+          `${check.path} must contain ${JSON.stringify(first)} before ${JSON.stringify(second)}`,
+        );
+      }
     }
   }
 }

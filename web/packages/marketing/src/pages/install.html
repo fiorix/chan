@@ -1,12 +1,22 @@
 <section class="page-head">
   <h1>Install Chan</h1>
-  <p><strong>Chan Desktop</strong>, the native app, includes the <code>chan</code> and <code>cs</code> command entry points so you can drive Chan from the command line.</p>
+  <p>Start with the desktop app, or install the headless server on a machine you do remote development.</p>
+  <nav class="install-paths" aria-label="Installation paths">
+    <a href="#desktop">
+      <strong>Desktop</strong>
+      <span>Native app for macOS, Windows, and Linux</span>
+    </a>
+    <a href="#server">
+      <strong>Server</strong>
+      <span>Headless devserver, containers, and self-hosting</span>
+    </a>
+  </nav>
 </section>
 
-<section class="install-block">
+<section class="install-block" id="desktop">
   <div class="section-heading">
-    <h2>Chan Desktop <span class="group-note">recommended</span></h2>
-    <p>The native app for macOS, Windows, and Linux.</p>
+    <h2>Desktop <span class="group-note">recommended</span></h2>
+    <p>The native app includes the <code>chan</code> and <code>cs</code> command entry points.</p>
   </div>
 
   <div class="download-group">
@@ -43,181 +53,176 @@
         <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="desktop-linux-appimage-arm64">aarch64</a>
       </div>
     </div>
+    <h4 class="package-heading">Distribution packages</h4>
+    <p class="minor">Install <code>chan-desktop</code>. It includes the desktop app and the <code>chan</code> and <code>cs</code> commands.</p>
+    <div class="package-grid">
+      <article class="package-card">
+        <h4>Nix</h4>
+        <p class="package-note">Linux x86_64 + aarch64</p>
+        <div class="command-copy" data-copy-block>
+          <code><span>$</span><b data-copy-value>nix profile install github:fiorix/chan</b></code>
+          <button type="button">Copy</button>
+        </div>
+        <p class="minor">The default flake output is <code>chan-desktop</code>.</p>
+      </article>
+      <article class="package-card">
+        <h4>Ubuntu</h4>
+        <p class="package-note">24.04 LTS + 26.04 LTS, amd64 + aarch64</p>
+        <div class="command-copy multiline" data-copy-block>
+          <code><span>$</span><b data-copy-value>sudo add-apt-repository ppa:fiorix/chan
+sudo apt install chan-desktop</b></code>
+          <button type="button" aria-label="Copy">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="9" y="9" width="13" height="13" rx="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+          </button>
+        </div>
+      </article>
+      <article class="package-card">
+        <h4>Fedora</h4>
+        <p class="package-note">Current releases + rawhide, amd64 + aarch64</p>
+        <div class="command-copy multiline" data-copy-block>
+          <code><span>$</span><b data-copy-value>sudo dnf copr enable fiorix/chan
+sudo dnf install chan-desktop</b></code>
+          <button type="button" aria-label="Copy">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="9" y="9" width="13" height="13" rx="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+          </button>
+        </div>
+      </article>
+      <article class="package-card">
+        <h4>Arch + CachyOS</h4>
+        <p class="package-note">x86_64, built from source</p>
+        <div class="command-copy" data-copy-block>
+          <code><span>$</span><b data-copy-value>paru -S chan-desktop</b></code>
+          <button type="button">Copy</button>
+        </div>
+      </article>
+    </div>
   </div>
 </section>
 
-<section class="install-block">
+<section class="install-block" id="server">
   <div class="section-heading">
-    <h2>Standalone CLI (headless)</h2>
-    <p>Install the headless version for running devservers. Use the shell installer:</p>
+    <h2>Server</h2>
+    <p>The headless <code>chan</code> package runs devservers without desktop dependencies.</p>
   </div>
-
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>curl -fsSL https://chan.app/install.sh | sh</b></code>
-    <button type="button">Copy</button>
-  </div>
-  <p class="minor">Or use packages and archives:</p>
 
   <div class="download-group">
-    <h3>macOS <span class="group-note">Apple Silicon</span></h3>
+    <h3>Quick install <span class="group-note">macOS + Linux</span></h3>
     <div class="command-copy" data-copy-block>
-      <code><span>$</span><b data-copy-value>brew install fiorix/chan/chan</b></code>
+      <code><span>$</span><b data-copy-value>curl -fsSL https://chan.app/install.sh | sh</b></code>
       <button type="button">Copy</button>
     </div>
-    <div class="download-matrix">
-      <div class="download-row">
-        <span class="download-label">Archive</span>
-        <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="cli-macos-arm64">.tar.gz</a>
-      </div>
+    <p class="minor">Installs the latest standalone <code>chan</code> binary and its <code>cs</code> command.</p>
+  </div>
+
+  <div class="download-group">
+    <h3>Packages</h3>
+    <p class="minor">Install <code>chan</code>, not <code>chan-desktop</code>, on a headless machine. The current Nix flake is desktop-only.</p>
+    <div class="package-grid">
+      <article class="package-card">
+        <h4>macOS</h4>
+        <p class="package-note">Homebrew, Apple Silicon</p>
+        <div class="command-copy" data-copy-block>
+          <code><span>$</span><b data-copy-value>brew install fiorix/chan/chan</b></code>
+          <button type="button">Copy</button>
+        </div>
+      </article>
+      <article class="package-card">
+        <h4>Ubuntu</h4>
+        <p class="package-note">24.04 LTS + 26.04 LTS, amd64 + aarch64</p>
+        <div class="command-copy multiline" data-copy-block>
+          <code><span>$</span><b data-copy-value>sudo add-apt-repository ppa:fiorix/chan
+sudo apt install chan</b></code>
+          <button type="button" aria-label="Copy">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="9" y="9" width="13" height="13" rx="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+          </button>
+        </div>
+      </article>
+      <article class="package-card">
+        <h4>Fedora</h4>
+        <p class="package-note">Current releases + rawhide, amd64 + aarch64</p>
+        <div class="command-copy multiline" data-copy-block>
+          <code><span>$</span><b data-copy-value>sudo dnf copr enable fiorix/chan
+sudo dnf install chan</b></code>
+          <button type="button" aria-label="Copy">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="9" y="9" width="13" height="13" rx="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+          </button>
+        </div>
+      </article>
+      <article class="package-card">
+        <h4>Arch + CachyOS</h4>
+        <p class="package-note">x86_64, built from source</p>
+        <div class="command-copy" data-copy-block>
+          <code><span>$</span><b data-copy-value>paru -S chan</b></code>
+          <button type="button">Copy</button>
+        </div>
+      </article>
     </div>
   </div>
 
   <div class="download-group">
-    <h3>Windows <span class="group-note">x64</span></h3>
-    <div class="download-matrix">
-      <div class="download-row">
-        <span class="download-label">Archive</span>
-        <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="cli-windows-x64">.zip</a>
-      </div>
-    </div>
-  </div>
-
-  <div class="download-group">
-    <h3>Linux <span class="group-note">amd64 + aarch64</span></h3>
-    <div class="download-matrix">
-      <div class="download-row">
-        <span class="download-label">Static binary</span>
-        <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="cli-linux-x64">amd64</a>
-        <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="cli-linux-arm64">aarch64</a>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section class="install-block">
-  <div class="section-heading">
-    <h2>Linux package managers</h2>
-    <p>Prefer managed packages? Chan ships as a Nix flake, from a Launchpad PPA, a Fedora COPR, and the Arch User Repository, so installs and updates stay with your package manager instead of the AppImage or static binaries. <code>chan-desktop</code> is the app and also provides the <code>chan</code> and <code>cs</code> commands. The apt, dnf, and AUR repositories also offer plain <code>chan</code> for headless machines: install one or the other, not both.</p>
-  </div>
-
-  <div class="download-group">
-    <h3>Nix <span class="group-note">Linux x86_64 + aarch64</span></h3>
-    <div class="command-copy" data-copy-block>
-      <code><span>$</span><b data-copy-value>nix profile install github:fiorix/chan</b></code>
-      <button type="button">Copy</button>
-    </div>
-    <p class="minor">The default flake package is <code>chan-desktop</code>, including the <code>chan</code> and <code>cs</code> commands. It has no systemd user unit.</p>
-  </div>
-
-  <div class="download-group">
-    <h3>Ubuntu <span class="group-note">24.04 LTS &amp; 26.04 LTS, amd64 + aarch64</span></h3>
+    <h3>Docker</h3>
+    <p class="minor">Run the headless devserver from the <code>fiorix/chan</code> image:</p>
     <div class="command-copy multiline" data-copy-block>
-      <code><span>$</span><b data-copy-value>sudo add-apt-repository ppa:fiorix/chan
-sudo apt install chan-desktop   # or: chan</b></code>
-      <button type="button" aria-label="Copy">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <rect x="9" y="9" width="13" height="13" rx="2" />
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-        </svg>
-      </button>
-    </div>
-  </div>
-
-  <div class="download-group">
-    <h3>Fedora <span class="group-note">current releases + rawhide, amd64 + aarch64</span></h3>
-    <div class="command-copy multiline" data-copy-block>
-      <code><span>$</span><b data-copy-value>sudo dnf copr enable fiorix/chan
-sudo dnf install chan-desktop   # or: chan</b></code>
-      <button type="button" aria-label="Copy">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <rect x="9" y="9" width="13" height="13" rx="2" />
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-        </svg>
-      </button>
-    </div>
-  </div>
-
-  <div class="download-group">
-    <h3>Arch <span class="group-note">and CachyOS, x86_64, built from source</span></h3>
-    <div class="command-copy" data-copy-block>
-      <code><span>$</span><b data-copy-value>paru -S chan-desktop</b></code>
-      <button type="button">Copy</button>
-    </div>
-    <p class="minor">Or <code>chan</code> for headless machines. The AUR ships recipes, so your helper compiles Chan against the packages already on your system.</p>
-  </div>
-</section>
-
-<section class="install-section">
-  <div class="section-heading">
-    <h2>After install</h2>
-  </div>
-  <div class="command-copy static">
-    <code><span>$</span><b>chan open ~/my-project</b></code>
-  </div>
-</section>
-
-<section class="install-block">
-  <div class="section-heading">
-    <h2>Chan Gateway <span class="group-note">self-hosting</span></h2>
-    <p>You don't need this to use Chan. The gateway is the self-hosted tunnel that fronts remote workspaces; install it only if you run your own.</p>
-  </div>
-
-  <div class="download-group">
-    <h3>Linux <span class="group-note">Debian packages</span></h3>
-    <div class="download-matrix">
-      <div class="download-row">
-        <span class="download-label">admin</span>
-        <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-admin-deb-amd64">amd64</a>
-        <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-admin-deb-arm64">arm64</a>
-      </div>
-      <div class="download-row">
-        <span class="download-label">identity</span>
-        <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-identity-deb-amd64">amd64</a>
-        <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-identity-deb-arm64">arm64</a>
-      </div>
-      <div class="download-row">
-        <span class="download-label">profile</span>
-        <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-profile-deb-amd64">amd64</a>
-        <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-profile-deb-arm64">arm64</a>
-      </div>
-      <div class="download-row">
-        <span class="download-label">devserver-proxy</span>
-        <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-devserver-proxy-deb-amd64">amd64</a>
-        <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-devserver-proxy-deb-arm64">arm64</a>
-      </div>
-      <div class="download-row">
-        <span class="download-label">devserver-control</span>
-        <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-devserver-control-deb-amd64">amd64</a>
-        <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-devserver-control-deb-arm64">arm64</a>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section class="install-section">
-  <div class="section-heading">
-    <h2>Docker images</h2>
-    <p>You can use the <code>fiorix/chan</code> image for the headless devserver:</p>
-  </div>
-  <div class="command-copy multiline" data-copy-block>
-    <code><span>$</span><b data-copy-value>docker run -p 127.0.0.1:8787:8787 \
+      <code><span>$</span><b data-copy-value>docker run -p 127.0.0.1:8787:8787 \
   -e CHAN_HOME=/data/chan \
   -v ~/.chan-docker:/data/chan \
   -v ~/projects:/workspaces \
   fiorix/chan devserver --bind 0.0.0.0 --port 8787</b></code>
-    <button type="button" aria-label="Copy">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <rect x="9" y="9" width="13" height="13" rx="2" />
-        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-      </svg>
-    </button>
+      <button type="button" aria-label="Copy">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="9" y="9" width="13" height="13" rx="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+      </button>
+    </div>
   </div>
-  <p class="minor">All other <code>chan-gateway</code> images can also be found here: <a href="https://hub.docker.com/u/fiorix">Docker Hub / fiorix</a>.</p>
-</section>
 
-<section class="install-block">
-  <div class="section-heading">
-    <h2>All packages</h2>
-    <p>Every desktop, CLI, and gateway artifact for each release is published on the <a href="{{githubReleasesUrl}}">GitHub releases page</a>, with checksums and release notes.</p>
+  <div class="download-group">
+    <h3>Chan Gateway <span class="group-note">self-hosting</span></h3>
+    <p>You don't need this to use Chan. The gateway is the self-hosted tunnel that fronts remote workspaces; install it only if you run your own.</p>
+    <p class="minor"><a href="https://hub.docker.com/u/fiorix">Browse Chan and gateway images on Docker Hub</a>.</p>
+    <details class="package-disclosure">
+      <summary>Debian service packages <span class="group-note">amd64 + arm64</span></summary>
+      <div class="download-matrix">
+        <div class="download-row">
+          <span class="download-label">admin</span>
+          <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-admin-deb-amd64">amd64</a>
+          <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-admin-deb-arm64">arm64</a>
+        </div>
+        <div class="download-row">
+          <span class="download-label">identity</span>
+          <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-identity-deb-amd64">amd64</a>
+          <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-identity-deb-arm64">arm64</a>
+        </div>
+        <div class="download-row">
+          <span class="download-label">profile</span>
+          <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-profile-deb-amd64">amd64</a>
+          <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-profile-deb-arm64">arm64</a>
+        </div>
+        <div class="download-row">
+          <span class="download-label">devserver-proxy</span>
+          <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-devserver-proxy-deb-amd64">amd64</a>
+          <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-devserver-proxy-deb-arm64">arm64</a>
+        </div>
+        <div class="download-row">
+          <span class="download-label">devserver-control</span>
+          <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-devserver-control-deb-amd64">amd64</a>
+          <a class="arch-button" href="{{githubReleasesUrl}}" data-release-download="gateway-devserver-control-deb-arm64">arm64</a>
+        </div>
+      </div>
+    </details>
+    <p class="minor all-artifacts">Raw archives and every release artifact remain available on the <a href="{{githubReleasesUrl}}">GitHub releases page</a>.</p>
   </div>
 </section>

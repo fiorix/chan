@@ -15,18 +15,14 @@ const distRoot = path.join(siteRoot, "dist");
 const githubRepoUrl = "https://github.com/fiorix/chan";
 const cliMetadataBase = "https://chan.app/dl/cli";
 const releasesMetadataPath = "/dl/releases.json";
-// The .deb/.rpm ids still ship as release assets and in the /dl metadata,
-// but the install page points distro users at the PPA/COPR repositories
-// instead of linking them, so they are not required page hooks.
+// Raw CLI archives and the desktop .deb/.rpm assets still ship in /dl metadata,
+// but the install page presents the shell installer and managed repositories
+// instead of direct links, so they are not required page hooks.
 const requiredDownloadIds = [
   // chan-desktop
   "desktop-macos-dmg",
   "desktop-linux-appimage",
   "desktop-linux-appimage-arm64",
-  // chan CLI
-  "cli-macos-arm64",
-  "cli-linux-x64",
-  "cli-linux-arm64",
   // chan-gateway: one .deb per service per arch, single-sourced from the
   // Makefile's GATEWAY_RELEASE_CRATES (see ./gateway-services.mjs). These ids
   // must match the install.html download buttons (validated below) and the ids

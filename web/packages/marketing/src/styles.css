@@ -512,6 +512,37 @@ code {
   font-size: clamp(3rem, 8vw, 6.5rem);
 }
 
+.install-paths {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 28px;
+}
+
+.install-paths a {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  color: var(--fg);
+  display: grid;
+  gap: 4px;
+  padding: 16px 18px;
+  text-decoration: none;
+}
+
+.install-paths a:hover {
+  border-color: var(--accent);
+}
+
+.install-paths strong {
+  font-size: 1.05rem;
+}
+
+.install-paths span {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 .download-cards {
   display: grid;
   gap: 12px;
@@ -550,6 +581,10 @@ code {
   padding: 42px 0;
 }
 
+.install-block[id] {
+  scroll-margin-top: 24px;
+}
+
 .install-block > .section-heading {
   margin-bottom: 24px;
 }
@@ -571,7 +606,7 @@ code {
   margin: 0 0 12px;
 }
 
-.download-group .group-note {
+.install-block .group-note {
   color: var(--muted);
   font: 600 0.74rem var(--mono);
   letter-spacing: 0;
@@ -582,6 +617,72 @@ code {
 
 .download-group .minor {
   margin: -2px 0 14px;
+}
+
+.package-heading {
+  font-size: 0.95rem;
+  margin: 24px 0 10px;
+}
+
+.package-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 16px;
+}
+
+.package-card {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.package-card h4 {
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+.package-card .package-note {
+  color: var(--muted);
+  font: 600 0.72rem var(--mono);
+  margin: 4px 0 12px;
+  text-transform: uppercase;
+}
+
+.package-card .command-copy {
+  margin-bottom: 0;
+}
+
+.package-card .minor {
+  margin: 10px 2px 0;
+}
+
+.package-disclosure {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  margin-top: 16px;
+  padding: 0 14px;
+}
+
+.package-disclosure summary {
+  cursor: pointer;
+  font-weight: 700;
+  padding: 14px 0;
+}
+
+.package-disclosure[open] summary {
+  border-bottom: 1px solid var(--rule);
+}
+
+.package-disclosure .download-matrix {
+  padding: 14px 0;
+}
+
+.download-group .all-artifacts {
+  margin-top: 16px;
 }
 
 .download-matrix {
@@ -987,6 +1088,11 @@ body.lightbox-open {
 
   .feature-grid,
   .download-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .install-paths,
+  .package-grid {
     grid-template-columns: 1fr;
   }
 }
