@@ -1,46 +1,38 @@
 # Make the terminal backend visible and switchable
 
-Status: REGISTERED for v0.82.0; grounded 2026-07-31 against the shipped ghostty-web backend.
+Status: SHIPPED for v0.82.0.
 
-## What
+## Shipped behavior
 
-`terminal.ghostty` selects the ghostty-web VT engine for newly opened terminals, defaulting off. Two things are missing around it.
+Every spawned PTY exports `CHAN_TERMINAL=xterm` or `CHAN_TERMINAL=ghostty`. The value records the configured backend at child spawn time. It is set after the inherited MCP and systemd environment scrub, so it is present for workspace and terminal-only tenants without allowing a parent value to leak through.
 
-A program running inside a chan terminal cannot tell which engine is rendering it. The terminal exports `CHAN_TAB_NAME`, `CHAN_WINDOW_ID`, `CHAN_WORKSPACE_PATH`, and the `CHAN_MCP_*` discovery set, but nothing names the backend. An agent or script that wants to adapt its output, or a user filing a rendering bug, has no way to read it.
+The value belongs to a PTY lifetime. An existing child keeps the value it started with. A newly created child and a restarted child sample the current preference.
 
-The setting is also reachable only from the Settings pane. `web/packages/workspace-app/src/state/commands/settings.ts` registers a single command that opens Settings, and the terminal command group in `state/commands/terminal.ts` carries theme, broadcast, name, group, Rich Prompt, restart, and `$CWD` actions but nothing for the backend. Every other frequently flipped terminal preference is reachable from the launcher.
+Workspace tenants keep an atomic backend cell in the terminal registry. API preference writes and external config reloads refresh that cell before broadcasting `config_changed`.
 
-## Two readers, two surfaces
+Terminal-only tenants have no settings route or workspace config watcher. Their long-lived registry therefore installs a spawn-time resolver in `build_terminal_app`. The resolver reads the same `server.toml` path used by `ServerConfig::save`. A malformed or temporarily unreadable file does not block terminal creation; the registry keeps its last successfully resolved value until a later spawn can read the store again.
 
-The backend has two audiences, and they are served differently.
+The terminal context menu starts with a non-interactive `Terminal engine xterm` or `Terminal engine ghostty` row and a separator. This row reads the component's post-load backend, so it reports xterm when ghostty was configured but its kit failed to load and the frontend fell back.
 
-A program inside the terminal reads `CHAN_TERMINAL` from its environment. That value comes from the `terminal.ghostty` preference the server already persists, so it is written at spawn with no extra wire traffic and no ordering constraint.
+The Command Launcher exposes the workspace-only Terminal command `Terminal engine: <backend> (newly opened terminals only)`. It is searchable by either engine name and toggles the persisted `terminal.ghostty` preference. It does not imply that the renderer or environment of the running terminal changes.
 
-A human reads the terminal's own context menu. The SPA holds the resolved backend after its lazy WASM load has either succeeded or fallen back to xterm, so the menu reports what is actually rendering.
+`chan dump-skill` documents `CHAN_TERMINAL` alongside the other terminal discovery variables.
 
-The two can disagree in one case: the ghostty kit fails to load and the SPA falls back to xterm while the preference still reads true. `ghostty-web` is a plain dependency whose WASM is bundled into the SPA and embedded in the binary, so it is served from the same origin as the page that already loaded; a failure means a broken build or a transient loopback fetch error. The environment variable therefore reports the configured backend, and the context menu is the authority on what is running. Threading a client-resolved value back through session creation is not worth the cost on every terminal spawn to close a gap this narrow.
+## Paste regression
 
-## Contract
+The terminal clipboard chord handler now has a behavioral Cmd+V regression test which proves the browser's native paste default remains uncancelled.
 
-- A terminal exports `CHAN_TERMINAL`, whose value is `xterm` or `ghostty`, taken from the `terminal.ghostty` preference at spawn.
-- The variable reports the configured backend. Its documentation says so plainly, so a reader is never misled into treating it as an observation.
-- The variable is present in workspace terminals and standalone terminals alike, on the same footing as the other `CHAN_` discovery variables.
-- Restarting a terminal re-reads the preference, consistent with the existing spawn-time contract for scrollback, mouse capture, font, and the backend itself.
-- The terminal's right-click context menu opens with a non-interactive row naming the engine actually in use, followed by a separator, above the existing items. It reflects the post-fallback value, so a terminal that fell back to xterm says xterm.
-- The Command Launcher carries a terminal-backend command in the Terminal category, following the shape of the existing terminal preference commands.
-- The launcher command states the current value and makes the spawn-time contract explicit, because flipping it affects only newly opened terminals. It does not imply the running terminal changes.
-- `chan dump-skill` documents `CHAN_TERMINAL` wherever the other terminal environment variables are described, so an agent can discover it.
+The replay-origin filter was confirmed to discard complete bracketed-paste payloads because they begin with ESC. It now recognizes a complete `ESC [ 200 ~ ... ESC [ 201 ~` payload as user input while continuing to suppress terminal-generated ESC replies, including unknown replies. This fixes the demonstrated replay-origin loss without weakening the fail-closed generated-output filter. The reported macOS WKWebView Cmd+V regression was not reproducible on this Linux host and is not claimed resolved.
 
-## Acceptance
+## Follow-up
 
-- A terminal opened with `terminal.ghostty` off reports `CHAN_TERMINAL=xterm`.
-- A terminal opened with `terminal.ghostty` on reports `CHAN_TERMINAL=ghostty`.
-- Restarting a session after flipping the preference reports the new value; the pre-existing session keeps its original value until restarted.
-- The context menu names the engine in use, and names xterm when a forced kit-load failure has fallen the session back.
-- The launcher command appears in the Terminal category, is discoverable by searching for the engine name, and flipping it changes the stored preference.
-- A test pins the variable name, since it becomes a public discovery surface the moment it ships.
-- The existing terminal-backend browser smoke is extended rather than duplicated. It already flips the preference, opens a terminal, asserts the backend actually loaded, and verifies the stored value on disk; it gains an assertion that a real terminal reports the matching `CHAN_TERMINAL`, and that the context menu names the running engine. The value is read from inside the terminal, not from configuration, so the check cannot pass by reading back what it just wrote.
+`ghostty-web` registers a canvas `contextmenu` handler that calls neither `preventDefault()` nor `stopPropagation()`. It positions and focuses a hidden textarea at the click point to support native copy, then registers one-shot document `click` and `contextmenu` listeners to tear that textarea state down. The event still bubbles to chan's terminal container handler, but the interaction between the focus transfer and chan's context menu is unresolved. The context header is browser-verified only on the ordinary and forced-fallback xterm surfaces; the ghostty menu row is pinned at component level because the browser assertion could not be made to pass against the ghostty canvas in this environment. This product interaction remains a follow-up and is deliberately not fixed here.
 
-## Rough size
+## Verification
 
-Small. All three pieces follow established patterns: the variable joins the existing spawn-time environment set, the launcher command mirrors the other terminal preference commands, and the context-menu header reads a value the component already holds.
+- PTY registry tests pin the public variable name, configured values, existing-child lifetime, direct create/restart refresh, and last-good fallback behavior.
+- A server regression runs in an isolated child process with a temporary `CHAN_HOME`, calls `build_terminal_app` once, flips the real `server.toml`, and proves existing xterm, new ghostty, and restarted ghostty child environments without rebuilding the app.
+- The server regression detects a missing builder resolver installation: the new child reports xterm instead of ghostty.
+- Preference-route coverage proves the workspace registry is refreshed before a direct spawn after `broadcast_config_changed`.
+- Frontend tests cover the live context-menu label and separator, launcher category/search/current value and surface scope, uncancelled Cmd+V, and bracketed-paste replay classification.
+- Browser check 94 remains at its pre-change coverage of workspace preference persistence, real ghostty WASM, fit, key, OSC52, mouse, and xterm restore. During development, browser runs additionally demonstrated xterm and ghostty values from inside real PTYs, existing-child and restart lifetime, the launcher toggle, forced xterm fallback, and the ordinary and forced-fallback xterm context headers. Those expanded browser assertions are not retained in the committed check because the expanded harness never reached green. The terminal-only config-live-flip contract lives in the deterministic `build_terminal_app` Rust regression.

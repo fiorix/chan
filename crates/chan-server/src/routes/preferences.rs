@@ -399,14 +399,18 @@ fn patch_config_with_saves(
     Ok(global_config_from_snapshot(state, snapshot))
 }
 
-/// Broadcast a `config_changed` frame on the per-tenant `/ws` bus so every open
-/// window re-fetches preferences and reflects the change without a reload. The
-/// SPA's event store handles the `config_changed` kind by scheduling a
-/// workspace refresh. This rides the same broadcast channel as filesystem
-/// events but bypasses the self-write dedupe (it is a synthetic frame, not a
-/// file event), so sibling windows reliably see config flips. A no-subscriber
-/// `send` is the only `Err` a broadcast yields, so it is ignored.
+/// Apply spawn-time terminal preferences, then broadcast a `config_changed`
+/// frame on the per-tenant `/ws` bus so every open window re-fetches preferences
+/// and reflects the change without a reload. This is shared by API writes and
+/// external config reloads, keeping direct registry/control-socket spawns in
+/// sync too. The synthetic frame bypasses filesystem self-write dedupe; a
+/// no-subscriber `send` is the only `Err` a broadcast yields, so it is ignored.
 pub(crate) fn broadcast_config_changed(state: &AppState) {
+    if let Ok(config) = state.server_config.lock() {
+        state
+            .terminal_sessions
+            .set_terminal_backend(config.terminal.ghostty);
+    }
     let _ = state
         .events_tx
         .send(r#"{"kind":"config_changed"}"#.to_string());
@@ -451,10 +455,13 @@ fn sanitize_terminal_config(mut cfg: TerminalConfig) -> TerminalConfig {
 mod tests {
     use super::*;
     use crate::state::test_support::make_test_state;
+    use crate::terminal_sessions::{CloseReason, CreateOptions, SessionEvent};
     use axum::body::to_bytes;
+    use portable_pty::PtySize;
     use serde_json::json;
     use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc;
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     fn to_json(view: &GlobalConfigView) -> serde_json::Value {
@@ -542,6 +549,51 @@ mod tests {
         let frame = rx.try_recv().expect("a frame on the /ws bus");
         let json: serde_json::Value = serde_json::from_str(&frame).expect("valid json frame");
         assert_eq!(json["kind"], "config_changed");
+    }
+
+    #[tokio::test]
+    async fn broadcast_config_changed_refreshes_direct_terminal_spawns() {
+        let state = make_test_state(false);
+        state.server_config.lock().unwrap().terminal.ghostty = true;
+        broadcast_config_changed(&state);
+
+        let mut handle = state
+            .terminal_sessions
+            .create(CreateOptions {
+                size: PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+                tab_name: None,
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: Some("printf 'CHAN_TERMINAL=<%s>\\n' \"$CHAN_TERMINAL\"".into()),
+                env: Default::default(),
+            })
+            .expect("spawn terminal after preference refresh");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut out = String::new();
+        while !out.contains("CHAN_TERMINAL=<ghostty>") && Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match tokio::time::timeout(remaining, handle.rx.recv()).await {
+                Ok(Ok(SessionEvent::Output(data))) => {
+                    out.push_str(&String::from_utf8_lossy(&data));
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) | Err(_) => break,
+            }
+        }
+        assert!(
+            out.contains("CHAN_TERMINAL=<ghostty>"),
+            "config broadcast did not refresh direct spawn preference: {out:?}"
+        );
+        state
+            .terminal_sessions
+            .close(handle.id(), CloseReason::Explicit);
     }
 
     #[test]

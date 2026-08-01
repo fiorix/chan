@@ -9,8 +9,9 @@ import terminal from "./TerminalTab.svelte?raw";
 // * Name, Group, status, and broadcast controls.
 // * Close after a separator.
 //
-// The body menu carries Find / Copy / Paste / Copy Scrollback, while
-// command-discovery rows live in the command launcher.
+// The body menu starts with the live terminal engine, then carries
+// Find / Copy / Paste / Copy Scrollback, while command-discovery rows
+// live in the command launcher.
 // * No Reload Window / Open Inspector entries.
 // * MCP info-button opens a modal dialog.
 
@@ -67,6 +68,12 @@ describe("terminal body-context vs tab-context split", () => {
     expect(terminal).toContain('{#if tabMenu.source === "body"}');
     expect(terminal).toMatch(
       /tabMenu\.source === "body"[\s\S]{1,1200}onclick=\{openFind\}[\s\S]{1,400}onclick=\{copySelectionOrScrollback\}[\s\S]{1,400}onclick=\{pasteClipboard\}[\s\S]{1,400}onclick=\{copyScrollback\}/,
+    );
+  });
+
+  test("body menu starts with the live post-fallback backend", () => {
+    expect(terminal).toMatch(
+      /tabMenu\.source === "body"[\s\S]{1,500}class="terminal-backend-label" data-terminal-backend=\{backend\}[\s\S]{1,200}\{backend\}[\s\S]{1,120}<div class="msep" role="separator"><\/div>/,
     );
   });
 });

@@ -100,6 +100,30 @@ describe("terminal connection invariants", () => {
     expect(shouldForwardGeneratedTerminalInput(tracker)).toBe(true);
   });
 
+  test("forwards a bracketed paste while a replay write is draining", () => {
+    const tracker = new PtyWriteTracker();
+    const direct: string[] = [];
+    const user: string[] = [];
+    let drain: (() => void) | undefined;
+    const paste = "\x1b[200~pasted text\x1b[201~";
+
+    tracker.write(
+      {
+        write(_bytes, callback) {
+          drain = callback;
+        },
+      },
+      new Uint8Array([27, 91, 54, 110]),
+      "replay",
+    );
+
+    routeXtermData(paste, tracker, (data) => direct.push(data), (data) => user.push(data));
+    drain?.();
+
+    expect(direct).toEqual([]);
+    expect(user).toEqual([paste]);
+  });
+
   test("recognizes common terminal-generated report replies", () => {
     expect(isTerminalGeneratedReply("\x1b[1;2R")).toBe(true);
     expect(isTerminalGeneratedReply("\x1b[?1;2c\x1b[>0;276;0c")).toBe(true);
