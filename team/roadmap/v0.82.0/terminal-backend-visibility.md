@@ -24,6 +24,10 @@ The terminal clipboard chord handler now has a behavioral Cmd+V regression test 
 
 The replay-origin filter was confirmed to discard complete bracketed-paste payloads because they begin with ESC. It now recognizes a complete `ESC [ 200 ~ ... ESC [ 201 ~` payload as user input while continuing to suppress terminal-generated ESC replies, including unknown replies. This fixes the demonstrated replay-origin loss without weakening the fail-closed generated-output filter. The reported macOS WKWebView Cmd+V regression was not reproducible on this Linux host and is not claimed resolved.
 
+## Follow-up
+
+`ghostty-web` registers a canvas `contextmenu` handler that calls neither `preventDefault()` nor `stopPropagation()`. It positions and focuses a hidden textarea at the click point to support native copy, then registers one-shot document `click` and `contextmenu` listeners to tear that textarea state down. The event still bubbles to chan's terminal container handler, but the interaction between the focus transfer and chan's context menu is unresolved. The context header is browser-verified only on the ordinary and forced-fallback xterm surfaces; the ghostty menu row is pinned at component level because the browser assertion could not be made to pass against the ghostty canvas in this environment. This product interaction remains a follow-up and is deliberately not fixed here.
+
 ## Verification
 
 - PTY registry tests pin the public variable name, configured values, existing-child lifetime, direct create/restart refresh, and last-good fallback behavior.
@@ -31,4 +35,4 @@ The replay-origin filter was confirmed to discard complete bracketed-paste paylo
 - The server regression detects a missing builder resolver installation: the new child reports xterm instead of ghostty.
 - Preference-route coverage proves the workspace registry is refreshed before a direct spawn after `broadcast_config_changed`.
 - Frontend tests cover the live context-menu label and separator, launcher category/search/current value and surface scope, uncancelled Cmd+V, and bracketed-paste replay classification.
-- Browser check 94 retains the workspace preference, in-terminal child environment, restart lifetime, launcher, ordinary and forced-fallback xterm context menus, real ghostty WASM, fit, key, OSC52, mouse, and xterm-restore assertions. The ghostty canvas context menu was not verified on this host; its menu-row binding is pinned at component level, and no cause is claimed. The terminal-only config-live-flip contract lives in the deterministic `build_terminal_app` Rust regression rather than a duplicate headless UI flow.
+- Browser check 94 retains the workspace preference, in-terminal child environment, restart lifetime, launcher, ordinary and forced-fallback xterm context menus, real ghostty WASM, fit, key, OSC52, mouse, and xterm-restore assertions. The ghostty menu row is pinned at component level because the browser assertion could not be made to pass against the ghostty canvas in this environment. The terminal-only config-live-flip contract lives in the deterministic `build_terminal_app` Rust regression rather than a duplicate headless UI flow.

@@ -949,8 +949,8 @@ impl Registry {
     /// Install the backend preference pull used by a long-lived terminal-only
     /// tenant. A later install replaces the prior resolver.
     pub fn install_terminal_backend_resolver(&self, resolver: TerminalBackendResolver) {
-        // A poisoned cell remains memory-safe and may still hold its resolver;
-        // recover so installing a replacement cannot turn one panic into an abort.
+        // A poisoned cell still holds a callable resolver, so recovering keeps
+        // spawns working instead of turning one panic into a process abort.
         *self
             .terminal_backend_resolver
             .lock()
@@ -962,8 +962,6 @@ impl Registry {
     /// unreadable: terminal creation stays fail-open and uses the LAST good
     /// value, which may remain stale until a later spawn can read the store.
     fn resolve_terminal_backend(&self) -> bool {
-        // A poisoned cell may still hold a callable resolver; recover so later
-        // PTY spawns keep working instead of turning one panic into an abort.
         let resolver = self
             .terminal_backend_resolver
             .lock()
