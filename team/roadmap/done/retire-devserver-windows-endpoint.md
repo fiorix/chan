@@ -1,5 +1,6 @@
 # Retire the legacy devserver window endpoint
 
+> Status: shipped in [v0.82.0](../../release/release-v0.82.0.md): the route, adapter, frozen wire type, and its two tests are removed, scoped to chan-server. Removal proceeded on the no-back-compat rule because the stated precondition cannot be satisfied off macOS.
 Status: DONE.
 
 ## Ruling

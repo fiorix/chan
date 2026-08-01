@@ -1,5 +1,6 @@
 # Parallel-suite flake hygiene
 
+> Status: shipped in [v0.82.0](../../release/release-v0.82.0.md): session and survey locks recover a poisoned guard instead of aborting the process, the scene adopt test no longer takes filesystem mtime as an input, and the gateway idle assertion is anchored to the last successful send at zero added runtime. Two baseline flakes on unmodified code are characterized, not fixed.
 Status: IMPLEMENTED and VERIFIED for v0.82.0.
 
 ## Recovery contract

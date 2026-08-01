@@ -1,5 +1,6 @@
 # Eliminate the whole-file read class
 
+> Status: shipped in [v0.82.0](../../release/release-v0.82.0.md): the four whole-file HTTP read paths and the in-workspace copy stream through the bounded reader, incremental indexing declines oversized files before taking the workspace lock, and downloads advertise byte ranges with a strong validator. The moved-Markdown link rewrite still reads a whole body and carries forward.
 Status: SHIPPED in v0.82.0.
 
 ## Outcome

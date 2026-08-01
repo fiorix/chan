@@ -1,5 +1,6 @@
 # Fix `cs tunnel` EOF truncation
 
+> Status: shipped in [v0.82.0](../../release/release-v0.82.0.md): bytes already read from either endpoint reach the peer before the data WebSocket closes, on all three cancellation paths. The item's 512 KiB threshold model was disproved: bodies below the channel capacity were discarded whole. The frame-cap enforcement asymmetry carries forward.
 Status: COMPLETE. The connection lifecycle now drains bytes already read from either TCP endpoint before its data WebSocket closes.
 
 ## What

@@ -19,18 +19,6 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-### v0.82.0
-
-Safety and correctness. Every item here removes a defect that exists at today's limits; the capability work that raises those limits is v0.83.0 and depends on this shipping first.
-
-| item | state | what needs to happen |
-| --- | --- | --- |
-| [whole-file-read-elimination](v0.82.0/whole-file-read-elimination.md) | registered, grounded | route the four whole-file read paths through the bounded reader, size-gate the indexer before it takes the write lock, and add range support to the download path |
-| [cs-tunnel-eof-truncation](v0.82.0/cs-tunnel-eof-truncation.md) | registered, reproduced | drain already-read bytes before the data WebSocket closes, on all three cancellation paths, with looped boundary regressions |
-| [parallel-suite-flake-hygiene](v0.82.0/parallel-suite-flake-hygiene.md) | registered, both flakes observed once | stop a failing assertion under a held guard from aborting the test binary, and fix the idle-window assertion by moving its reference instant rather than padding it |
-| [retire-devserver-windows-endpoint](v0.82.0/retire-devserver-windows-endpoint.md) | registered, unblocked by the no-back-compat rule | remove the legacy devserver window adapter, route, response type, and wire tests, scoped to chan-server |
-| [terminal-backend-visibility](v0.82.0/terminal-backend-visibility.md) | registered, grounded | export the configured backend, name the running engine in the terminal context menu, and add the launcher toggle |
-
 ### v0.83.0
 
 | item | state | what needs to happen |
@@ -40,6 +28,16 @@ Safety and correctness. Every item here removes a defect that exists at today's 
 | [web-marketing-onboarding](v0.83.0/web-marketing-onboarding.md) | registered, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
 
 ## Completed
+
+### v0.82.0
+
+Shipped 2026-08-01; see [release-v0.82.0](../release/release-v0.82.0.md). Closed items in [`done/`](done/):
+
+- [whole-file-read-elimination](done/whole-file-read-elimination.md) - every HTTP read path bounded, the indexer off the workspace lock, and range support on downloads.
+- [cs-tunnel-eof-truncation](done/cs-tunnel-eof-truncation.md) - forwarded connections drain already-read bytes before closing; the item's size-threshold model was disproved by measurement.
+- [parallel-suite-flake-hygiene](done/parallel-suite-flake-hygiene.md) - a poisoned lock no longer aborts the process, and the gateway idle assertion is anchored rather than padded.
+- [retire-devserver-windows-endpoint](done/retire-devserver-windows-endpoint.md) - the legacy window adapter, route, wire type, and its tests are gone.
+- [terminal-backend-visibility](done/terminal-backend-visibility.md) - terminals export their engine, the context menu names the live renderer, and the launcher toggles it.
 
 ### v0.80.0
 

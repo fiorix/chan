@@ -1,5 +1,6 @@
 # Make the terminal backend visible and switchable
 
+> Status: shipped in [v0.82.0](../../release/release-v0.82.0.md): terminals export the configured engine, the context menu names the live renderer, and a launcher command toggles the preference. A real replay-origin paste defect was fixed; the reported macOS WKWebView Cmd+V symptom was not reproduced and is not claimed resolved.
 Status: SHIPPED for v0.82.0.
 
 ## Shipped behavior
