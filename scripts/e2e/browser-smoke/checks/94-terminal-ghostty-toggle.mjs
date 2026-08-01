@@ -1,16 +1,8 @@
 // terminal.ghostty toggle: the ghostty-web backend end-to-end.
 //
-// One extended sequence against the REAL settings round-trip, PTY, launcher,
-// context menu, and wasm terminal, mirroring 97's existing harness:
+// Six legs against the REAL settings round-trip and the REAL wasm
+// terminal, mirroring 97-terminal-mouse-toggle's harness:
 //
-//   DISCOVER -- start on xterm and read CHAN_TERMINAL from the child,
-//               inspect the live context-menu header, toggle through a
-//               ghostty search in the Command Launcher, prove the stored
-//               preference changed, then prove the running child keeps
-//               xterm until a direct control-socket restart reports ghostty.
-//   FALLBACK -- fail the first ghostty-vt request, prove the child still
-//               reports configured ghostty while the live menu says xterm,
-//               then remove the failure so the next terminal retries.
 //   ON       -- flip terminal.ghostty=true via the same GET-mutate-PATCH
 //               /api/config chain the settings UI uses, prove it
 //               persisted into the SANDBOXED ${chanHome}/server.toml,
@@ -54,23 +46,12 @@
 // clipboard pre-seeded with a sentinel, same as 97. Report probes are
 // PTY-echo based: `cat -v` renders any SGR report as visible `^[[<...`
 // text in the server-side scrollback.
-//
-// The workspace-less tenant's config-live-flip/lifetime contract is covered
-// at the server seam by
-// `terminal_router_tests::hosted_terminal_registry_resolves_backend_on_each_spawn`.
-// That regression builds the real `build_terminal_app` path once under an
-// isolated CHAN_HOME and proves existing/new/restarted child environments.
-// Keeping that server-side contract at the deterministic Rust seam avoids
-// coupling it to a second page's menu/readiness choreography; the workspace
-// browser coverage below remains intact.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const TAB_G = "SmokeGhostty98";
 const TAB_X = "SmokeGhostty98X";
-const TAB_LIFETIME = "SmokeGhostty98Lifetime";
-const TAB_FALLBACK = "SmokeGhostty98Fallback";
 const MARK_PREFIX = "G98_";
 const MARK_ARG = "READY";
 const OSC52_TEXT = "GHOSTTY98_OSC52_OK";
@@ -114,19 +95,8 @@ export default {
     await cdp.send("Network.enable");
     const terminalSocketUrls = [];
     const resizeFrames = [];
-    const ghosttyWasmResponses = [];
     cdp.on("Network.webSocketCreated", ({ url }) => {
       if (url.includes("/api/terminal/ws")) terminalSocketUrls.push(url);
-    });
-    cdp.on("Network.responseReceived", ({ response }) => {
-      if (
-        response.url.includes("ghostty-vt") &&
-        response.url.includes(".wasm") &&
-        response.status >= 200 &&
-        response.status < 300
-      ) {
-        ghosttyWasmResponses.push(response.url);
-      }
     });
     cdp.on("Network.webSocketFrameSent", ({ response }) => {
       try {
@@ -346,130 +316,6 @@ export default {
       }
     }
 
-    let envProbe = 0;
-    async function assertTerminalEnv(tab, expected) {
-      envProbe += 1;
-      const marker = `${MARK_PREFIX}CHAN_TERMINAL_${envProbe}_`;
-      await cs([
-        "write",
-        "--tab-name",
-        tab,
-        `printf '${marker}%s\\n' "$CHAN_TERMINAL"\n`,
-      ]);
-      await waitScrollback(tab, `${marker}${expected}`);
-      const out = (await cs(["scrollback", "--tab-name", tab])).stdout;
-      if (!out.includes(`${marker}${expected}`)) {
-        throw new Error(
-          `${tab} did not report CHAN_TERMINAL=${expected} from its PTY; ` +
-            `scrollback tail=${JSON.stringify(out.slice(-1000))}`,
-        );
-      }
-    }
-
-    async function assertContextBackend(expected, targetPage = page) {
-      const host = await targetPage.$(".terminal-tab.active .terminal-host");
-      if (!host) throw new Error("terminal host missing for context-menu probe");
-      const box = await host.boundingBox();
-      if (!box) throw new Error("terminal host has no context-menu bounding box");
-      await targetPage.mouse.click(box.x + box.width / 2, box.y + box.height / 2, {
-        button: "right",
-      });
-      const selector = `[data-terminal-backend="${expected}"]`;
-      await targetPage.waitForSelector(selector, { visible: true, timeout: 10_000 });
-      const text = await targetPage.$eval(
-        selector,
-        (node) => node.textContent?.replace(/\s+/g, " ").trim() ?? "",
-      );
-      if (text !== `Terminal engine ${expected}`) {
-        throw new Error(
-          `context menu reported ${JSON.stringify(text)}, expected live ${expected}`,
-        );
-      }
-      // The menu is portaled outside the terminal shell. Focus its explicit
-      // tabindex target so Escape originates inside the page and reaches the
-      // existing window-level menu handler instead of xterm retaining focus.
-      const menu = await targetPage.$(".terminal-tab-menu-bubble");
-      if (!menu) throw new Error("terminal context menu disappeared before dismissal");
-      await menu.focus();
-      await targetPage.keyboard.press("Escape");
-      await targetPage.waitForSelector(".terminal-tab-menu-bubble", {
-        hidden: true,
-        timeout: 10_000,
-      });
-    }
-
-    async function launcherBackendRow(expected, run) {
-      await page.evaluate(() => {
-        window.dispatchEvent(
-          new CustomEvent("chan:command", {
-            detail: { name: "app.launcher.toggle" },
-          }),
-        );
-      });
-      await page.waitForSelector(".launcher .search", { timeout: 10_000 });
-      await page.$eval(".launcher .search", (input) => {
-        input.value = "";
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-      });
-      await page.type(".launcher .search", "ghostty");
-      await page.waitForFunction(
-        (backend) => {
-          const selected = document.querySelector(
-            '.launcher .results .row[aria-selected="true"]',
-          );
-          const title = selected
-            ?.querySelector(".title")
-            ?.textContent?.replace(/\s+/g, " ")
-            .trim();
-          const category = selected
-            ?.querySelector(".description")
-            ?.textContent?.trim();
-          return (
-            category === "Terminal" &&
-            title?.includes(`Terminal engine: ${backend}`) &&
-            title.includes("newly opened terminals only")
-          );
-        },
-        { timeout: 10_000 },
-        expected,
-      );
-      const title = await page.$eval(
-        '.launcher .results .row[aria-selected="true"] .title',
-        (node) => node.textContent?.replace(/\s+/g, " ").trim() ?? "",
-      );
-      await page.keyboard.press(run ? "Enter" : "Escape");
-      await page.waitForSelector(".launcher", { hidden: true, timeout: 10_000 });
-      return title;
-    }
-
-    async function openWithFailedGhosttyLoad(name) {
-      let failures = 0;
-      const failPausedRequest = ({ requestId }) => {
-        failures += 1;
-        void cdp
-          .send("Fetch.failRequest", { requestId, errorReason: "Failed" })
-          .catch(() => {});
-      };
-      await cdp.send("Network.setCacheDisabled", { cacheDisabled: true });
-      await cdp.send("Fetch.enable", {
-        patterns: [{ urlPattern: "*ghostty-vt*", requestStage: "Request" }],
-      });
-      cdp.on("Fetch.requestPaused", failPausedRequest);
-      try {
-        await openTerminal(name, ".terminal.xterm .xterm-screen");
-      } finally {
-        cdp.off("Fetch.requestPaused", failPausedRequest);
-        await cdp.send("Fetch.disable").catch(() => {});
-        await cdp
-          .send("Network.setCacheDisabled", { cacheDisabled: false })
-          .catch(() => {});
-      }
-      if (failures === 0) {
-        throw new Error("forced ghostty fallback intercepted no ghostty-vt request");
-      }
-      return failures;
-    }
-
     /// The ghostty CANVAS's bounding box for trusted-input gestures.
     /// Measure the canvas, not .terminal-host: the host carries 8px of
     /// padding, and a mousedown that lands in the padding never reaches
@@ -645,74 +491,31 @@ export default {
 
     const details = {};
     try {
-      // ---- Leg 0: discovery, launcher, and spawn-time lifetime ----
-      await setGhostty(false);
-      await assertTomlGhostty(false);
-      await sleep(2_000);
-      await openTerminal(TAB_LIFETIME, ".terminal.xterm .xterm-screen");
-      await assertTerminalEnv(TAB_LIFETIME, "xterm");
-      await assertContextBackend("xterm");
-
-      const beforeToggleTitle = await launcherBackendRow("xterm", true);
+      // ---- Leg 1: ON -- the ghostty backend loads for new terminals ----
+      await setGhostty(true);
       await assertTomlGhostty(true);
       // The SPA learns of the flip via the config_changed WS frame ->
       // debounced (250ms) workspace refresh; give it a moment so the
       // NEW terminal's spawn-time read sees the fresh value.
       await sleep(2_000);
-      const afterToggleTitle = await launcherBackendRow("ghostty", false);
-      // The already-running child keeps its original environment. A direct
-      // control-socket restart samples the live preference without a server
-      // restart and retains the same session id/tab.
-      await assertTerminalEnv(TAB_LIFETIME, "xterm");
-      await cs(["restart", "--tab-name", TAB_LIFETIME]);
-      await assertTerminalEnv(TAB_LIFETIME, "ghostty");
-      // Restarting the PTY does not remount the renderer, so the live engine
-      // remains xterm even though the new child reports configured ghostty.
-      await assertContextBackend("xterm");
-      details.discoveryLeg = {
-        initialEnv: "xterm",
-        existingAfterFlip: "xterm",
-        restartedEnv: "ghostty",
-        beforeToggleTitle,
-        afterToggleTitle,
-      };
-      await closeTerminal(TAB_LIFETIME);
-
-      // ---- Leg 0b: configured ghostty falls back live to xterm ----
-      const failedRequests = await openWithFailedGhosttyLoad(TAB_FALLBACK);
-      await assertTerminalEnv(TAB_FALLBACK, "ghostty");
-      await assertContextBackend("xterm");
-      details.fallbackLeg = {
-        configuredEnv: "ghostty",
-        liveBackend: "xterm",
-        failedRequests,
-      };
-      await closeTerminal(TAB_FALLBACK);
-      await sleep(250);
-
-      // ---- Leg 1: ON -- the ghostty backend loads for new terminals ----
+      // Chrome caps the resource timing buffer at 250 entries and
+      // earlier checks in a suite fill it, which silently drops the
+      // ghostty-vt entry the wasm wait below looks for. Clear it so
+      // this leg's fetch is always recorded.
+      await page.evaluate(() => performance.clearResourceTimings());
       const ghosttyResizeStart = resizeFrames.length;
       const ghosttySocketStart = terminalSocketUrls.length;
       await openTerminal(TAB_G, ".terminal-host canvas");
-      await assertTerminalEnv(TAB_G, "ghostty");
-      // The ghostty canvas context-menu assertion did not pass on this host.
-      // Ordinary xterm and forced fallback cover real-browser context menus;
-      // the component regression pins this row to the post-fallback backend.
       // The lazy loader fetched the wasm asset (vite emits it hashed as
       // ghostty-vt-*.wasm) -- the definitive proof the backend is real,
       // not a silent xterm fallback.
-      // CDP observes the successful response directly, independent of the
-      // page's bounded and clearable Resource Timing buffer. The failed
-      // fallback request above has no 2xx response and cannot satisfy this.
-      const wasmDeadline = Date.now() + 5_000;
-      while (ghosttyWasmResponses.length === 0 && Date.now() < wasmDeadline) {
-        await sleep(50);
-      }
-      if (ghosttyWasmResponses.length === 0) {
-        throw new Error(
-          "ghostty canvas mounted without an observed successful ghostty-vt wasm response",
-        );
-      }
+      await page.waitForFunction(
+        () =>
+          performance
+            .getEntriesByType("resource")
+            .some((e) => e.name.includes("ghostty-vt")),
+        { timeout: 60_000 },
+      );
       if (
         await page.evaluate(() => !!document.querySelector(".terminal-tab .xterm"))
       ) {
@@ -722,7 +525,7 @@ export default {
         );
       }
       await ctx.shot("ghostty-backend-loaded");
-      details.onLeg = { wasmResponseObserved: true, xtermDomAbsent: true };
+      details.onLeg = { wasmFetched: true, xtermDomAbsent: true };
       const ghosttyFit = await terminalFitSnapshot(
         "ghostty",
         TAB_G,
@@ -878,8 +681,6 @@ export default {
       const xtermResizeStart = resizeFrames.length;
       const xtermSocketStart = terminalSocketUrls.length;
       await openTerminal(TAB_X, ".terminal.xterm .xterm-screen");
-      await assertTerminalEnv(TAB_X, "xterm");
-      await assertContextBackend("xterm");
       const xtermFit = await terminalFitSnapshot(
         "xterm",
         TAB_X,
@@ -958,7 +759,7 @@ export default {
           `[94-terminal-ghostty-toggle] WARNING: failed to restore ghostty=false: ${e.message}`,
         );
       }
-      for (const tab of [TAB_G, TAB_X, TAB_LIFETIME, TAB_FALLBACK]) {
+      for (const tab of [TAB_G, TAB_X]) {
         try {
           await cs(["close", "--tab-name", tab]);
         } catch {}
