@@ -689,7 +689,10 @@ export default {
       const ghosttySocketStart = terminalSocketUrls.length;
       await openTerminal(TAB_G, ".terminal-host canvas");
       await assertTerminalEnv(TAB_G, "ghostty");
-      await assertContextBackend("ghostty");
+      // ghostty-web owns its canvas contextmenu for native copy selection.
+      // Browser context coverage therefore uses the ordinary xterm and forced
+      // ghostty-load fallback surfaces above; the component regression pins
+      // this same menu row directly to the post-fallback backend state.
       // The lazy loader fetched the wasm asset (vite emits it hashed as
       // ghostty-vt-*.wasm) -- the definitive proof the backend is real,
       // not a silent xterm fallback.

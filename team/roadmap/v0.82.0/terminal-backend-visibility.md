@@ -22,7 +22,7 @@ The Command Launcher exposes the workspace-only Terminal command `Terminal engin
 
 The terminal clipboard chord handler now has a behavioral Cmd+V regression test which proves the browser's native paste default remains uncancelled.
 
-The replay-origin filter was confirmed to discard complete bracketed-paste payloads because they begin with ESC. It now recognizes a complete `ESC [ 200 ~ ... ESC [ 201 ~` payload as user input while continuing to suppress terminal-generated ESC replies, including unknown replies. This restores bracketed paste without weakening the fail-closed generated-output filter.
+The replay-origin filter was confirmed to discard complete bracketed-paste payloads because they begin with ESC. It now recognizes a complete `ESC [ 200 ~ ... ESC [ 201 ~` payload as user input while continuing to suppress terminal-generated ESC replies, including unknown replies. This fixes the demonstrated replay-origin loss without weakening the fail-closed generated-output filter. The reported macOS WKWebView Cmd+V regression was not reproducible on this Linux host and is not claimed resolved.
 
 ## Verification
 
@@ -31,4 +31,4 @@ The replay-origin filter was confirmed to discard complete bracketed-paste paylo
 - The server regression detects a missing builder resolver installation: the new child reports xterm instead of ghostty.
 - Preference-route coverage proves the workspace registry is refreshed before a direct spawn after `broadcast_config_changed`.
 - Frontend tests cover the live context-menu label and separator, launcher category/search/current value and surface scope, uncancelled Cmd+V, and bracketed-paste replay classification.
-- Browser check 94 retains the workspace preference, child environment, restart lifetime, launcher, context-menu fallback, real ghostty WASM, fit, key, OSC52, mouse, and xterm-restore assertions. The terminal-only config-live-flip contract lives in the deterministic `build_terminal_app` Rust regression rather than a duplicate headless UI flow.
+- Browser check 94 retains the workspace preference, in-terminal child environment, restart lifetime, launcher, ordinary and forced-fallback xterm context menus, real ghostty WASM, fit, key, OSC52, mouse, and xterm-restore assertions. The ghostty menu binding is pinned at component level because ghostty-web owns the canvas context-menu interaction. The terminal-only config-live-flip contract lives in the deterministic `build_terminal_app` Rust regression rather than a duplicate headless UI flow.
