@@ -17,6 +17,7 @@
     markLocalTabDrop,
     markTerminalMovingOut,
     moveTab,
+    openExtensionInPane,
     openInPane,
     openTerminalInPane,
     reattachTerminalInPane,
@@ -47,6 +48,7 @@
 
   import {
     BarChart2,
+    Blocks,
     Bug,
     Check,
     FileText,
@@ -66,6 +68,7 @@
   } from "lucide-svelte";
 
   import EmptyPaneWelcome from "./EmptyPaneWelcome.svelte";
+  import ExtensionTab from "./ExtensionTab.svelte";
   import FileEditorTab from "./FileEditorTab.svelte";
   import DashboardTab from "./DashboardTab.svelte";
   import FileBrowserSurface from "./FileBrowserSurface.svelte";
@@ -743,6 +746,13 @@
           : {}),
       };
     }
+    if (t.kind === "extension") {
+      return {
+        kind: "extension",
+        extensionId: t.extensionId,
+        title: t.title,
+      };
+    }
     return { kind: "terminal", title: t.title };
   }
 
@@ -784,6 +794,7 @@
       path?: string;
       title?: string;
       terminalSessionId?: string;
+      extensionId?: string;
       terminalEnvTabName?: string;
       lastAgentEchoSeq?: number;
       group?: string;
@@ -811,6 +822,14 @@
         return true;
       }
       openTerminalInPane(pane.id);
+      return true;
+    }
+    if (parsed.kind === "extension" && parsed.extensionId) {
+      openExtensionInPane(
+        pane.id,
+        parsed.extensionId,
+        parsed.title?.trim() || parsed.extensionId,
+      );
       return true;
     }
     if (!parsed.path) return false;
@@ -1272,6 +1291,10 @@
           <span class="tab-icon" aria-hidden="true">
             <Folder size={14} strokeWidth={1.75} />
           </span>
+        {:else if t.kind === "extension"}
+          <span class="tab-icon" aria-hidden="true">
+            <Blocks size={14} strokeWidth={1.75} />
+          </span>
         {/if}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <span
@@ -1498,6 +1521,8 @@
                       ? "file browser"
                       : active?.kind === "dashboard"
                         ? "dashboard"
+                        : active?.kind === "extension"
+                          ? `extension: ${active.extensionId}`
                         : "no active tab"}
             </div>
           </div>
@@ -1617,6 +1642,16 @@
         -->
     {#each everyTab.filter((t) => t.kind === "dashboard") as t (t.id)}
       <DashboardTab
+        tab={t}
+        active={isLiveActive(t)}
+      />
+    {/each}
+        <!-- Extension iframes stay mounted so switching tabs does not reload
+             the subprocess-owned page or discard its in-page state. The
+             component resolves its credentialed URL from the memory-only
+             catalog; the tab itself carries only a stable id. -->
+    {#each everyTab.filter((t) => t.kind === "extension") as t (t.id)}
+      <ExtensionTab
         tab={t}
         active={isLiveActive(t)}
       />

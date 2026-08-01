@@ -34,15 +34,18 @@ export function seedWorkspace() {
 /// Launch `chan open <dir>` and resolve with the tokenized URL. The
 /// child is the server (no daemonize); its pid scopes the teardown and
 /// the control-socket glob.
-export function launchServer(chanBin, workspaceDir, log) {
+export function launchServer(chanBin, workspaceDir, log, options = {}) {
   // CHAN_HOME REPLACES ~/.chan wholesale (config, preferences,
   // workspace registry); the control socket routes through
   // $XDG_RUNTIME_DIR and stays discoverable by pid glob.
   const chanHome = mkdtempSync(join(tmpdir(), "chan-smoke-home-"));
+  options.prepareChanHome?.(chanHome);
   // --port 0 binds an ephemeral port (the tokenized URL below carries
   // it), so a busy default 8787 -- another chan on the box -- never
   // fails the run.
-  const child = spawn(chanBin, ["open", "--port", "0", workspaceDir], {
+  // The smoke fixture is deliberately the workspace boundary even when the
+  // host's temporary directory sits below a synthetic or real VCS root.
+  const child = spawn(chanBin, ["open", "--here", "--port", "0", workspaceDir], {
     env: {
       ...process.env,
       CHAN_NO_DEVSERVER_HANDOFF: "1",

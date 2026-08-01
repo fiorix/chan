@@ -45,7 +45,8 @@ export type CommandSurface =
   | "terminal"
   | "graph"
   | "browser"
-  | "dashboard";
+  | "dashboard"
+  | "extension";
 
 /// The runtime context an availability predicate sees: the window-mode
 /// gates (from the `?kind=` URL) plus the active surface.

@@ -146,6 +146,7 @@
   import { activeTransferCount } from "./state/transfers.svelte";
   import { chordFromEvent, currentOS } from "./state/shortcuts";
   import { allCommands, commandContext } from "./state/commands";
+  import { loadExtensions } from "./state/extensions.svelte";
   import { createDiagramAndOpen } from "./state/commands/diagram";
   import { createSlidesAndOpen } from "./state/commands/slides";
   import {
@@ -405,6 +406,7 @@
     // initial load still flushes any in-flight session changes.
     installSessionFlushHook();
     await bootstrap();
+    if (!ui.terminalOnly) await loadExtensions();
     // The docked FB default lives in chan-server's
     // `BrowserSidePanes::default()`: a new preferences.toml ships with
     // both docks OFF (`left: false`), so a new workspace opens with just

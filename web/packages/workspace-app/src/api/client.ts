@@ -11,6 +11,7 @@ import type {
   DraftInspectResponse,
   DraftPromoteResponse,
   ExcludedDirsView,
+  ExtensionInfo,
   FileResponse,
   FileWriteResponse,
   FsGraphResponse,
@@ -1058,6 +1059,9 @@ export const api = {
   /// Compile-time identity (chan version + cargo features). Used by
   /// the Settings "About" footer.
   buildInfo: () => req<BuildInfo>("GET", "/api/build-info"),
+  /// Ready local extensions for this process. Tunnel requests receive an empty
+  /// list because their browser cannot reach the owner's loopback endpoints.
+  extensions: () => req<ExtensionInfo[]>("GET", "/api/extensions"),
   /// Reset the workspace at one of three escalating levels. After a
   /// successful reset the caller should reload the window so cached
   /// workspace info, file tree, and tabs resync; the server has done

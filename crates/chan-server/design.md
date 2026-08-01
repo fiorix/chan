@@ -13,6 +13,7 @@ The serving layer: turns a workspace (or a terminal) into a web app, hosts the M
 - **Workspace readiness envelope**: `/api/index/status`, `/api/indexing/state`, `/api/preflight`, and `/api/search/content` each carry a `WorkspaceReadiness` ready/recovering envelope. A content query issued during recovery returns an explicit not-ready/recovering result rather than a fresh-looking empty one.
 - **Live editor authority**: document and Excalidraw WebSockets share one server-side authority per path. Clean external edits fold into that authority; overlapping dirty edits retain a three-way conflict until an explicit reload or overwrite via `POST /api/session-conflicts/resolve`. Each authority writes a bounded recovery record under `.chan/editor-sessions/v1/` through the workspace atomic stream writer. On restart, dirty/conflicted authority, durable baseline, versions, and the current disk side rehydrate before any flush can run, so stale authority cannot silently replace a newer disk file.
 - **Devserver builder**: `build_devserver_app` composes the `WorkspaceHost` + per-tenant apps into one merged router for `run_devserver`; `chan devserver` and the desktop loopback run the same app.
+- **Local extension runtime**: one process-owned `ExtensionRuntime` scans `CHAN_HOME/extensions`, starts valid subprocess declarations, supervises their process groups, and injects one immutable ready catalog into every workspace tenant. `GET /api/extensions` exposes only capability-scoped tenant paths; `/_chan/extensions/<id>/<capability>/*` reverse-proxies HTTP to the process-private loopback URL with the extension token added upstream. The same path works through standalone, desktop, devserver, and gateway-tunnel serving modes without exposing a second port.
 - **Reverse-tunnel legs**: two GET WebSocket routes on the launcher router (`/api/library/tunnel/{control,conn}`, bearer-gated with `?t=` accepted, and `require_tunnel_owner` 403s non-owner gateway assertions since a grantee session is not authority to open sockets on the owner's desktop). The control socket carries the long-lived `cs tunnel` conversation: validate the spec server-side, mint an unguessable tunnel id, register in the host's `chan_revtunnel::TunnelRegistry`, trigger the addressed window over `/ws` (`window_command: tunnel_open`), race the 10s ready report against client EOF, then hold until either side ends. A refused devserver-side dial closes one data socket without ending the tunnel. See [`crates/chan-revtunnel/design.md`](../chan-revtunnel/design.md).
 
 ```mermaid
@@ -23,12 +24,15 @@ flowchart TB
     Launcher["serve_launcher -- web-launcher SPA + /api/library/*"]
     MCPsvc["MCP host (chan-llm over UDS)"]
   end
+  Extensions["ExtensionRuntime -- process-wide discovery + supervision"] --> Child["local extension subprocess"]
+  Extensions --> API
   API --> WS["chan-workspace"]
   Launcher --> Host["chan-library WorkspaceHost (root_fallback)"]
   MCPsvc --> WS
   Static --> Bundle["workspace SPA bundle"]
   Launcher --> LBundle["launcher SPA bundle"]
   Client["browser / webview"] -->|HTTP/WS| API
+  Client -->|"sandboxed loopback iframe"| Child
   Client -->|GET /| Static
   Client -->|"GET / (library root)"| Launcher
 ```
@@ -39,3 +43,4 @@ flowchart TB
 - Launcher builds are wired into the root web build so clean CI/release builds embed a real launcher, not an empty bundle.
 - Search ranking, selector resolution, traversal, normalization, limits, and structured partial errors stay in `chan-workspace`; HTTP and control-socket handlers only deserialize, choose the active tenant, and serialize.
 - `Identify` reports `workspace_root` and `metadata_key` for a workspace tenant and omits both for terminal-only processes. Multi-workspace CLI routing must match both fields (plus pid) and never fall back to another same-pid tenant.
+- Extension discovery and child ownership stay above per-tenant `build_app`: standalone serve, devserver, and desktop each create exactly one runtime and pass only its immutable catalog into tenant route builders. Extension endpoints are independent loopback trust domains, never workspace filesystem authorities.

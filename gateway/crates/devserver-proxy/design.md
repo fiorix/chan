@@ -112,7 +112,7 @@ All methods except `GET`, `HEAD`, and `OPTIONS` require `X-Chan-CSRF` to match t
 
 A cookie-authenticated WebSocket additionally requires exactly one `Origin` equal to the canonical externally visible origin. Missing, multiple, opaque, wrong-scheme, wrong-port, and sibling origins are rejected before a substream opens. The bridge closes on session cancellation, absolute session expiry, or 300 seconds with no frame in either direction. Revocation waits for the bridge task to stop before command acknowledgement.
 
-Every credentialed response receives `Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and a CSP `frame-ancestors 'none'` directive. Upstream cookies with a `Domain` attribute, or names reserved for the gateway session and CSRF cookies, are dropped.
+Every credentialed response receives `Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and a CSP `frame-ancestors 'none'` directive. The sole framing exception is Chan's capability-scoped `/_chan/extensions/` proxy namespace, which receives `frame-ancestors 'self'` so the owning tenant can host it in an opaque sandboxed iframe; no other tenant content becomes frameable. Upstream cookies with a `Domain` attribute, or names reserved for the gateway session and CSRF cookies, are dropped.
 
 ## Reverse-proxy hygiene
 

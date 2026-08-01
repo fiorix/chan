@@ -28,6 +28,40 @@ Source: `crates/chan-server/src/config.rs`.
 
 `GET /api/config` returns the editor and server preference aggregate with a revision. `PATCH /api/config` accepts one owner-specific partial preferences object plus `expected_revision`; stale revisions return `409 config_conflict` with the current aggregate.
 
+### `~/.chan/extensions/<id>.toml` -- local extensions
+
+Source: `crates/chan-server/src/extensions.rs`.
+
+Each regular `.toml` file declares one local subprocess. The lowercase file stem is its stable extension ID and must match `[a-z0-9][a-z0-9_-]{0,63}`. Files are read in lexical order. Malformed files, unknown fields, invalid IDs, oversized configs, spawn failures, and failed handshakes warn and are ignored without failing Chan startup. Display-name collisions are allowed because command and tab identity use the file-stem ID.
+
+| Field | Type | Default | Meaning |
+|-------|------|---------|---------|
+| `name` | `String` | required | Launcher row and tab title, 1 to 128 characters after trimming |
+| `command` | `String` | required | Executable to spawn; bare names use `PATH`, while `./name` resolves from the extension config directory |
+| `args` | `String[]` | `[]` | Arguments passed verbatim after `command` |
+
+```toml
+name = "Echo test"
+command = "/absolute/path/to/chan/target/debug/examples/echo-extension"
+args = []
+```
+
+Chan discovers and starts extensions once per serving process, not once per workspace tenant. The subprocess inherits Chan's environment, starts with the config directory as its working directory, receives null stdin, and owns its stderr. It must print a newline-terminated handshake within five seconds and 32 bounded stdout lines:
+
+```text
+CHAN_EXTENSION_V1={"url":"http://127.0.0.1:49152/","token":"unguessable-secret"}
+```
+
+The URL must use plain HTTP on exact host `127.0.0.1` or `localhost`; IPv6, remote hosts, userinfo, port zero, HTTPS, and a pre-existing `t` query parameter are rejected. Chan keeps that upstream URL and token process-private. Each ready entry gets a random 256-bit path capability under `/_chan/extensions/<id>/<capability>/...`; the authenticated catalog gives the SPA only that tenant-relative path. Chan reverse-proxies the iframe, assets, and HTTP API calls through the workspace's existing IP and port, adding the extension token only on the private upstream leg. Standalone servers, chan-desktop, local devservers, SSH port forwards, and gateway tunnels therefore use the same one-port route. Persisted and cross-window tab state contains the extension ID and title only, never the capability, upstream address, or token.
+
+The iframe omits `allow-same-origin`, so extension scripts have an opaque browser origin even though their network requests share Chan's port. The proxy drops Chan/gateway credentials and upstream cookies, adds no-store and no-referrer response policy, and permits the opaque iframe to call its own capability-scoped HTTP routes. Extension HTML must use relative asset/API URLs; an origin-rooted `/asset.js` targets Chan's tenant root, not the extension capability path. WebSocket proxying is not part of v1.
+
+Browser key events inside an iframe do not bubble to Chan. An extension that wants shell shortcuts while focused implements the v1 keyboard relay used by the in-tree fixture: accept `chan:extension-host-keymap:v1` from `window.parent`, match only the supplied physical-key descriptors, call `preventDefault()` for a match, and post `chan:extension-keydown:v1` with `key`, `code`, the four modifier booleans, and `repeat`. Chan accepts the relay only from that tab's exact `contentWindow`. There is no privileged workspace or native-capability bridge in v1.
+
+Successful children live until Chan shuts down. On Unix each child gets its own process group so descendants receive TERM and then KILL during shutdown. A child that exits is not respawned; restart Chan after fixing it. There is no marketplace, installer, remote fetch, lazy start, or `cs` opener in v1. Treat every file in this directory as an explicit local-code-execution grant.
+
+Chan releases install no extension declarations or extension binaries. The in-tree `echo-extension` is test source only: no echo binary is built into or installed by the `chan` and `chan-desktop` release artifacts, and it is compiled only when a developer explicitly builds the example. To exercise the contract, run `cargo build -p chan-server --example echo-extension`, put its absolute binary path in a config like the example above, and restart Chan. Its launcher command appears under Apps as `Echo test` and opens the extension iframe tab.
+
 ### `~/.chan/submit.toml` -- agent submit templates
 
 Source: `crates/chan-server/src/submit_config.rs` and `crates/chan-shell/src/submit.rs`.

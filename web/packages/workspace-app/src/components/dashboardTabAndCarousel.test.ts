@@ -21,12 +21,12 @@ import inspector from "./InspectorBody.svelte?raw";
 // and command routing from the launcher/pane-menu surfaces.
 
 describe("DashboardTab type + helpers", () => {
-  test("Tab union includes DashboardTab", () => {
+  test("Tab union includes DashboardTab and ExtensionTab", () => {
     expect(tabs).toMatch(
       /export type DashboardTab = \{[\s\S]{1,400}kind: "dashboard";[\s\S]{1,200}id: string;[\s\S]{1,200}title: string;/,
     );
     expect(tabs).toMatch(
-      /export type Tab =\s*\n\s*\| FileTab[\s\S]{1,400}\| DashboardTab;/,
+      /export type Tab =\s*\n\s*\| FileTab[\s\S]{1,400}\| DashboardTab\s*\n\s*\| ExtensionTab;/,
     );
   });
 
@@ -63,9 +63,9 @@ describe("DashboardTab type + helpers", () => {
     );
   });
 
-  test("SerTab kind discriminator includes \"d\"", () => {
+  test("SerTab kind discriminator includes dashboard and extension", () => {
     expect(tabs).toMatch(
-      /k\?: "f" \| "b" \| "s" \| "g" \| "h" \| "t" \| "d";/,
+      /k\?: "f" \| "b" \| "s" \| "g" \| "h" \| "t" \| "d" \| "x";/,
     );
   });
 });

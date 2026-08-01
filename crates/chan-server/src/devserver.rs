@@ -1564,7 +1564,11 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     }
     let library_id = persisted.library_id.clone();
 
-    let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
+    let extension_runtime = crate::ExtensionRuntime::start().await;
+    let host = Arc::new(WorkspaceHost::new(
+        library,
+        crate::route_builder_with_extensions(&extension_runtime),
+    ));
     // Opt in to control-socket `chan close`: a hosted workspace's tenant can
     // then be unmounted by path (it does not kill the multi-tenant process).
     host.install_self();
@@ -1892,6 +1896,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
             serve_join?;
         }
     }
+    extension_runtime.shutdown().await;
     Ok(())
 }
 

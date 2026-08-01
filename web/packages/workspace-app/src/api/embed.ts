@@ -10,7 +10,8 @@
 // iframe src. The markdown sanitizer enforces this with a DOMPurify
 // hook (defense in depth against a raw <iframe> in user markdown), and
 // the Tauri WebView CSP `frame-src` lists the same hosts. Keep the list
-// minimal -- every entry is an origin the app will frame.
+// minimal -- every entry is an origin the app will frame. Local extensions
+// stay on Chan's own origin and do not widen this media allowlist.
 
 export type EmbedKind = "youtube" | "maps";
 
@@ -33,8 +34,9 @@ export interface EmbedRender extends EmbedInfo {
   allow: string;
 }
 
-/// Hosts permitted as an iframe src. Mirrors the CSP `frame-src`
-/// (desktop `tauri.conf.json` `app.security.csp`). Keep minimal.
+/// Hosts permitted as a markdown iframe src. Mirrors the external-host subset
+/// of the desktop CSP `frame-src`; extension iframes use same-origin proxy paths
+/// and never pass through markdown.
 export const EMBED_IFRAME_HOSTS: readonly string[] = [
   "www.youtube-nocookie.com",
   "www.google.com",

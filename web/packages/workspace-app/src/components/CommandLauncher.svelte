@@ -155,6 +155,8 @@
         return "Dashboard";
       case "graph":
         return "Graph";
+      case "extension":
+        return "Apps";
       default:
         return null;
     }

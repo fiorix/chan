@@ -34,6 +34,7 @@ mod disk_echo;
 mod doc_sessions;
 mod embed_seed;
 mod error;
+mod extensions;
 /// macOS CLI-to-desktop workspace handoff over a well-known per-user UDS.
 /// Public so both the `chan` CLI (client) and `chan-desktop`
 /// (listener) consume it; both already depend on chan-server.
@@ -88,6 +89,7 @@ pub use devserver::{
     DEVSERVER_TOKEN_MAX_AGE_SECS,
 };
 pub use error::Error;
+pub use extensions::{ExtensionRuntime, EXTENSION_HANDSHAKE_MARKER};
 pub use mcp_bridge::run_stdio_proxy as run_mcp_stdio_proxy;
 pub use preferences::{
     BrowserSidePanes, EditorPrefs, EditorTheme, HybridSurfaceThemes, LineSpacing, PaneWidths,
@@ -104,22 +106,22 @@ use routes::{
     api_backlinks, api_build_info, api_cloud_workspaces, api_create_diagram, api_create_draft,
     api_create_file, api_create_terminal, api_cs_link_create, api_delete_file, api_delete_session,
     api_delete_terminal, api_discard_draft, api_doc_ws, api_excluded_dirs_get,
-    api_excluded_dirs_put, api_fonts_source_code_pro_download, api_fs_graph, api_fs_transfer,
-    api_get_config, api_get_contacts, api_get_mentions, api_get_session, api_get_workspace,
-    api_graph, api_headings, api_health, api_index_rebuild, api_index_status, api_indexing_state,
-    api_inspect_draft, api_inspector, api_language_graph, api_link_targets, api_links,
-    api_list_files, api_list_sessions, api_list_windows, api_metadata_export, api_metadata_import,
-    api_move, api_open, api_patch_config, api_post_attachment, api_post_contacts_import,
-    api_preflight, api_preflight_decision, api_promote_draft, api_put_session, api_read_file,
-    api_report_dir, api_report_file, api_report_prefix, api_reports_disable, api_reports_enable,
-    api_reports_state, api_resolve_link, api_resolve_session_conflict, api_restart_terminal,
-    api_scene_ws, api_screensaver_clear_pin, api_screensaver_patch, api_screensaver_set_pin,
-    api_screensaver_state, api_screensaver_verify, api_search_content, api_search_files,
-    api_search_workspace, api_session_handover_reply, api_set_terminal_broadcast,
-    api_storage_reset, api_survey_reply, api_team_config_read, api_team_config_write,
-    api_terminal_next_name, api_terminal_ws, api_terminals_roster, api_upload_file,
-    api_window_reply, api_workspace_bootstrap, api_write_file, spawn_roster_broadcaster,
-    ws_upgrade,
+    api_excluded_dirs_put, api_extensions, api_fonts_source_code_pro_download, api_fs_graph,
+    api_fs_transfer, api_get_config, api_get_contacts, api_get_mentions, api_get_session,
+    api_get_workspace, api_graph, api_headings, api_health, api_index_rebuild, api_index_status,
+    api_indexing_state, api_inspect_draft, api_inspector, api_language_graph, api_link_targets,
+    api_links, api_list_files, api_list_sessions, api_list_windows, api_metadata_export,
+    api_metadata_import, api_move, api_open, api_patch_config, api_post_attachment,
+    api_post_contacts_import, api_preflight, api_preflight_decision, api_promote_draft,
+    api_put_session, api_read_file, api_report_dir, api_report_file, api_report_prefix,
+    api_reports_disable, api_reports_enable, api_reports_state, api_resolve_link,
+    api_resolve_session_conflict, api_restart_terminal, api_scene_ws, api_screensaver_clear_pin,
+    api_screensaver_patch, api_screensaver_set_pin, api_screensaver_state, api_screensaver_verify,
+    api_search_content, api_search_files, api_search_workspace, api_session_handover_reply,
+    api_set_terminal_broadcast, api_storage_reset, api_survey_reply, api_team_config_read,
+    api_team_config_write, api_terminal_next_name, api_terminal_ws, api_terminals_roster,
+    api_upload_file, api_window_reply, api_workspace_bootstrap, api_write_file, proxy_extension,
+    proxy_extension_root, spawn_roster_broadcaster, ws_upgrade,
 };
 #[cfg(feature = "embeddings")]
 use routes::{
@@ -151,7 +153,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::DefaultBodyLimit;
 use axum::middleware;
-use axum::routing::{delete, get, patch, post, put};
+use axum::routing::{any, delete, get, patch, post, put};
 use axum::Router;
 use chan_workspace::{
     Library, ProgressCallback, ProgressEvent, ProgressStage, WatchEvent, Workspace,
@@ -381,10 +383,32 @@ fn start_control_socket(
     }
 }
 
+#[cfg(test)]
 async fn build_app(
     library: Library,
     workspace: Arc<Workspace>,
     config: &ServeConfig,
+    desktop: crate::desktop_window_ops::DesktopBridge,
+    unserve: chan_library::UnserveMode,
+    control_identity: Option<String>,
+) -> Result<AppArtifacts, Error> {
+    build_app_with_extensions(
+        library,
+        workspace,
+        config,
+        extensions::empty_catalog(),
+        desktop,
+        unserve,
+        control_identity,
+    )
+    .await
+}
+
+async fn build_app_with_extensions(
+    library: Library,
+    workspace: Arc<Workspace>,
+    config: &ServeConfig,
+    extension_catalog: Arc<extensions::ExtensionCatalog>,
     desktop: crate::desktop_window_ops::DesktopBridge,
     unserve: chan_library::UnserveMode,
     control_identity: Option<String>,
@@ -746,7 +770,7 @@ async fn build_app(
     // route reachable at `/foo<route>` without changing any handler.
     // axum strips the prefix from the inner URI, so handlers continue
     // to see paths starting with `/api`, `/ws`, etc.
-    let inner = router(state.clone());
+    let inner = router_with_extensions(state.clone(), extension_catalog);
     let app = if config.prefix.is_empty() {
         inner
     } else {
@@ -1135,14 +1159,29 @@ fn terminal_router(state: Arc<AppState>) -> Router {
 /// `WorkspaceHost` holds an `Arc<dyn TenantBuilder>` and calls these to mount a
 /// tenant; they wrap [`build_app`]/[`build_terminal_app`] and adapt the
 /// route-layer `AppArtifacts` to the host-facing `TenantArtifacts`.
-pub(crate) struct RouteLayer;
+pub(crate) struct RouteLayer {
+    extension_catalog: Arc<extensions::ExtensionCatalog>,
+}
 
 /// The route layer's tenant constructor, as an `Arc<dyn TenantBuilder>` for a
 /// `WorkspaceHost`. Embedders (the devserver, chan-desktop) pass this to
 /// `WorkspaceHost::new`/`with_desktop_bridge` so the host builds tenants over
 /// chan-server's routes without naming `RouteLayer`.
 pub fn route_builder() -> Arc<dyn chan_library::TenantBuilder> {
-    Arc::new(RouteLayer)
+    Arc::new(RouteLayer {
+        extension_catalog: extensions::empty_catalog(),
+    })
+}
+
+/// Build workspace tenants over one process-owned extension runtime. The
+/// devserver and chan-desktop use this form so every mounted workspace sees
+/// the same catalog without spawning duplicate subprocesses.
+pub fn route_builder_with_extensions(
+    runtime: &ExtensionRuntime,
+) -> Arc<dyn chan_library::TenantBuilder> {
+    Arc::new(RouteLayer {
+        extension_catalog: runtime.catalog(),
+    })
 }
 
 /// Install the local-disk library's window registry on chan-desktop's embedded
@@ -1227,10 +1266,11 @@ impl chan_library::TenantBuilder for RouteLayer {
         unserve: chan_library::UnserveMode,
         control_identity: Option<String>,
     ) -> Result<chan_library::TenantArtifacts, Error> {
-        let artifacts = build_app(
+        let artifacts = build_app_with_extensions(
             library,
             workspace,
             config,
+            self.extension_catalog.clone(),
             desktop,
             unserve,
             control_identity,
@@ -1373,14 +1413,16 @@ pub async fn serve(
         t_listener_ms = boot_t0.elapsed().as_millis() as u64,
         "boot: listener bound"
     );
+    let extension_runtime = ExtensionRuntime::start().await;
     // Standalone `chan open`: no desktop attached, so no window-ops
     // bridge and an empty (unwritten) title map. No stable control
     // identity either -- a window-spawned serve's control socket dies
     // with the process by design.
-    let mut artifacts = build_app(
+    let mut artifacts = build_app_with_extensions(
         library,
         workspace,
         &config,
+        extension_runtime.catalog(),
         crate::desktop_window_ops::DesktopBridge::default(),
         chan_library::UnserveMode::Standalone,
         None,
@@ -1456,11 +1498,20 @@ pub async fn serve(
     // a lingering WebSocket can't hang the process.
     let serve_result = graceful_serve(listener, app, signal_tx).await;
     artifacts.tasks.shutdown().await;
+    extension_runtime.shutdown().await;
     serve_result.map_err(Error::Io)?;
     Ok(())
 }
 
+#[cfg(test)]
 fn router(state: Arc<AppState>) -> Router {
+    router_with_extensions(state, extensions::empty_catalog())
+}
+
+fn router_with_extensions(
+    state: Arc<AppState>,
+    extension_catalog: Arc<extensions::ExtensionCatalog>,
+) -> Router {
     // ---- Settings-write gate ----------------------------------------
     //
     // Refused with 403 by `tunnel_guard::settings_guard` on a
@@ -1624,6 +1675,15 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/api/report/dir", get(api_report_dir))
         .route("/api/config", get(api_get_config))
         .route("/api/build-info", get(api_build_info))
+        .route("/api/extensions", get(api_extensions))
+        .route(
+            "/_chan/extensions/{id}/{capability}/",
+            any(proxy_extension_root),
+        )
+        .route(
+            "/_chan/extensions/{id}/{capability}/{*path}",
+            any(proxy_extension),
+        )
         // Session blob keyed by window id (?w=<id>). The frontend
         // sends the window id as a query string (path-segment encode
         // would force special-character escaping for free-form ids);
@@ -1712,6 +1772,7 @@ fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .merge(api)
         .fallback(serve_static)
+        .layer(axum::Extension(extension_catalog))
         .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn_with_state(
             state.clone(),

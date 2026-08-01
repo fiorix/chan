@@ -936,6 +936,14 @@ export type BuildInfo = {
   };
 };
 
+/// One process-ready local extension. `entry_path` is a capability-scoped path
+/// under the current workspace tenant; callers must never persist or log it.
+export type ExtensionInfo = {
+  id: string;
+  name: string;
+  entry_path: string;
+};
+
 /// Semantic-search state surface. Consumed by the Settings UI to
 /// render the opt-in toggle and status row. `mode` is derived
 /// server-side as `"hybrid"` iff `semantic_enabled AND

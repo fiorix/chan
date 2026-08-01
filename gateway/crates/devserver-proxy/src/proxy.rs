@@ -348,6 +348,7 @@ pub async fn handle(state: AppState, user: String, disc: Option<String>, req: Re
     // fixed body-only exchange endpoint, so tenant query parameters remain
     // ordinary upstream application data.
     let upstream_path_and_query = forward_path(req.uri());
+    let extension_frame = is_extension_proxy_path(&upstream_path_and_query);
 
     if is_ws {
         let (mut parts, body) = req.into_parts();
@@ -417,7 +418,7 @@ pub async fn handle(state: AppState, user: String, disc: Option<String>, req: Re
     .await;
     match res {
         Ok(mut response) => {
-            apply_credentialed_response_policy(&mut response);
+            apply_credentialed_response_policy(&mut response, extension_frame);
             response
         }
         Err(e) => e.into_response(),
@@ -484,7 +485,7 @@ async fn exchange_entry(
             aud,
             &claims.next_path,
         );
-        apply_credentialed_response_policy(&mut response);
+        apply_credentialed_response_policy(&mut response, false);
         return response;
     }
     not_found_response(&HeaderMap::new())
@@ -685,13 +686,27 @@ fn exact_origin_matches(headers: &HeaderMap, expected: &str) -> bool {
     origin == expected
 }
 
-fn apply_credentialed_response_policy(response: &mut Response) {
+fn is_extension_proxy_path(path_and_query: &str) -> bool {
+    path_and_query
+        .split_once('?')
+        .map_or(path_and_query, |(path, _)| path)
+        .contains("/_chan/extensions/")
+}
+
+fn apply_credentialed_response_policy(response: &mut Response, extension_frame: bool) {
     let headers = response.headers_mut();
     // A second CSP is intersected with any upstream policy, so framing is
-    // denied without discarding stricter application directives.
+    // denied without discarding stricter application directives. The sole
+    // exception is Chan's capability-scoped extension proxy: those responses
+    // are designed to live in the owning tenant's sandboxed iframe and may be
+    // framed only by this exact gateway origin.
     headers.append(
         HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static("frame-ancestors 'none'"),
+        HeaderValue::from_static(if extension_frame {
+            "frame-ancestors 'self'"
+        } else {
+            "frame-ancestors 'none'"
+        }),
     );
     headers.insert(
         HeaderName::from_static("x-content-type-options"),
@@ -1537,6 +1552,37 @@ mod tests {
         // No upgrade headers.
         let h = HeaderMap::new();
         assert!(!is_websocket_upgrade(&h));
+    }
+
+    #[test]
+    fn only_extension_proxy_responses_are_same_origin_frameable() {
+        assert!(is_extension_proxy_path(
+            "/notes/_chan/extensions/echo/capability/index.html?v=1"
+        ));
+        assert!(!is_extension_proxy_path("/notes/api/extensions"));
+        assert!(!is_extension_proxy_path(
+            "/notes/_chan/extension/echo/index.html"
+        ));
+
+        let mut extension = StatusCode::OK.into_response();
+        apply_credentialed_response_policy(&mut extension, true);
+        assert_eq!(
+            extension
+                .headers()
+                .get("content-security-policy")
+                .unwrap(),
+            "frame-ancestors 'self'"
+        );
+
+        let mut ordinary = StatusCode::OK.into_response();
+        apply_credentialed_response_policy(&mut ordinary, false);
+        assert_eq!(
+            ordinary
+                .headers()
+                .get("content-security-policy")
+                .unwrap(),
+            "frame-ancestors 'none'"
+        );
     }
 
     #[test]

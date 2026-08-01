@@ -3659,6 +3659,10 @@ export function resolveSpawnContext(): SpawnContext {
       // Dashboard carries no path context; spawn from here lands at
       // workspace root.
       return { dir: "" };
+    case "extension":
+      // Extensions are external surfaces and carry no workspace path
+      // context. Spawn from the workspace root.
+      return { dir: "" };
   }
 }
 
