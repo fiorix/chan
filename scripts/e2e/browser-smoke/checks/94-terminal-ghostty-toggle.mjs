@@ -114,8 +114,19 @@ export default {
     await cdp.send("Network.enable");
     const terminalSocketUrls = [];
     const resizeFrames = [];
+    const ghosttyWasmResponses = [];
     cdp.on("Network.webSocketCreated", ({ url }) => {
       if (url.includes("/api/terminal/ws")) terminalSocketUrls.push(url);
+    });
+    cdp.on("Network.responseReceived", ({ response }) => {
+      if (
+        response.url.includes("ghostty-vt") &&
+        response.url.includes(".wasm") &&
+        response.status >= 200 &&
+        response.status < 300
+      ) {
+        ghosttyWasmResponses.push(response.url);
+      }
     });
     cdp.on("Network.webSocketFrameSent", ({ response }) => {
       try {
@@ -680,11 +691,6 @@ export default {
       await sleep(250);
 
       // ---- Leg 1: ON -- the ghostty backend loads for new terminals ----
-      // Chrome caps the resource timing buffer at 250 entries and
-      // earlier checks in a suite fill it, which silently drops the
-      // ghostty-vt entry the wasm wait below looks for. Clear it so
-      // this leg's fetch is always recorded.
-      await page.evaluate(() => performance.clearResourceTimings());
       const ghosttyResizeStart = resizeFrames.length;
       const ghosttySocketStart = terminalSocketUrls.length;
       await openTerminal(TAB_G, ".terminal-host canvas");
@@ -695,13 +701,18 @@ export default {
       // The lazy loader fetched the wasm asset (vite emits it hashed as
       // ghostty-vt-*.wasm) -- the definitive proof the backend is real,
       // not a silent xterm fallback.
-      await page.waitForFunction(
-        () =>
-          performance
-            .getEntriesByType("resource")
-            .some((e) => e.name.includes("ghostty-vt")),
-        { timeout: 60_000 },
-      );
+      // CDP observes the successful response directly, independent of the
+      // page's bounded and clearable Resource Timing buffer. The failed
+      // fallback request above has no 2xx response and cannot satisfy this.
+      const wasmDeadline = Date.now() + 5_000;
+      while (ghosttyWasmResponses.length === 0 && Date.now() < wasmDeadline) {
+        await sleep(50);
+      }
+      if (ghosttyWasmResponses.length === 0) {
+        throw new Error(
+          "ghostty canvas mounted without an observed successful ghostty-vt wasm response",
+        );
+      }
       if (
         await page.evaluate(() => !!document.querySelector(".terminal-tab .xterm"))
       ) {
@@ -711,7 +722,7 @@ export default {
         );
       }
       await ctx.shot("ghostty-backend-loaded");
-      details.onLeg = { wasmFetched: true, xtermDomAbsent: true };
+      details.onLeg = { wasmResponseObserved: true, xtermDomAbsent: true };
       const ghosttyFit = await terminalFitSnapshot(
         "ghostty",
         TAB_G,
