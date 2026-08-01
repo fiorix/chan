@@ -60,7 +60,7 @@
         <h4>Nix</h4>
         <p class="package-note">Linux x86_64 + aarch64</p>
         <div class="command-copy" data-copy-block>
-          <code><span>$</span><b data-copy-value>nix profile install github:fiorix/chan</b></code>
+          <code><span>$</span><b data-copy-value>nix profile install github:fiorix/chan#chan-desktop</b></code>
           {{copyButton}}
         </div>
         <p class="minor">The default flake output is <code>chan-desktop</code>.</p>
@@ -112,8 +112,16 @@ sudo dnf install chan-desktop</b></code>
 
   <div class="download-group">
     <h3>Packages</h3>
-    <p class="minor">Install <code>chan</code>, not <code>chan-desktop</code>, on a headless machine. The current Nix flake is desktop-only.</p>
+    <p class="minor">Install <code>chan</code>, not <code>chan-desktop</code>, on a headless machine.</p>
     <div class="package-grid">
+      <article class="package-card">
+        <h4>Nix</h4>
+        <p class="package-note">Linux x86_64 + aarch64</p>
+        <div class="command-copy" data-copy-block>
+          <code><span>$</span><b data-copy-value>nix profile install github:fiorix/chan#chan</b></code>
+          {{copyButton}}
+        </div>
+      </article>
       <article class="package-card">
         <h4>macOS</h4>
         <p class="package-note">Homebrew, Apple Silicon</p>
