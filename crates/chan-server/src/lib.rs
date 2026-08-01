@@ -96,7 +96,7 @@ pub use preferences::{
 pub use routes::{build_fs_graph, FsGraphResponse, FsGraphScope};
 
 use crate::terminal_sessions::{
-    Registry as TerminalRegistry, RegistryConfig as TerminalRegistryConfig,
+    Registry as TerminalRegistry, RegistryConfig as TerminalRegistryConfig, TerminalBackendResolver,
 };
 use auth::{auth_middleware, load_or_create_token, random_token};
 use bus::{make_progress_broadcast, make_watch_bridge};
@@ -921,6 +921,20 @@ async fn build_terminal_app(
         control_socket_path,
         terminal: server_config.terminal.clone(),
     }));
+    // A terminal-only tenant is long-lived but has neither the workspace
+    // settings route nor its config-change push path. Pull the preference at
+    // each PTY spawn instead. `ServerConfig::load` reads the same
+    // `config::default_path()` that the workspace PATCH persists through
+    // `ServerConfig::save`; that path has one authority,
+    // `chan_workspace::paths::config_dir()`, including its CHAN_HOME override.
+    // A malformed or unreadable store returns None, so the registry keeps its
+    // last good value and creation stays available (possibly stale until the
+    // store becomes readable again).
+    terminal_sessions.install_terminal_backend_resolver(TerminalBackendResolver::new(|| {
+        ServerConfig::load()
+            .ok()
+            .map(|config| config.terminal.ghostty)
+    }));
     // Hand the live registry to the control socket so cs term
     // write / list can resolve sessions (mirrors build_app).
     let _ = terminal_registry_cell.set(terminal_sessions.clone());
@@ -1712,6 +1726,185 @@ fn router(state: Arc<AppState>) -> Router {
 #[cfg(test)]
 mod terminal_router_tests {
     use super::*;
+    use crate::terminal_sessions::{
+        AttachHandle, CloseReason, CreateOptions, RestartOverrides, SessionEvent,
+    };
+    use portable_pty::PtySize;
+
+    const HOSTED_BACKEND_CHILD: &str = "CHAN_TEST_HOSTED_TERMINAL_BACKEND_CHILD";
+    const HOSTED_BACKEND_TEST: &str =
+        "terminal_router_tests::hosted_terminal_registry_resolves_backend_on_each_spawn";
+
+    fn terminal_create_options(command: Option<&str>) -> CreateOptions {
+        CreateOptions {
+            size: PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            tab_name: None,
+            tab_group: None,
+            window_id: None,
+            mcp_env: false,
+            cwd: None,
+            command: command.map(str::to_owned),
+            env: Default::default(),
+        }
+    }
+
+    async fn collect_terminal_output(
+        handle: &mut AttachHandle,
+        needle: &str,
+        timeout: Duration,
+    ) -> String {
+        let deadline = Instant::now() + timeout;
+        let mut out = String::new();
+        while !out.contains(needle) && Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match tokio::time::timeout(remaining, handle.rx.recv()).await {
+                Ok(Ok(SessionEvent::Output(data))) => {
+                    out.push_str(&String::from_utf8_lossy(&data));
+                }
+                Ok(Ok(SessionEvent::Error(message))) => {
+                    out.push_str(&format!("\n__ERROR__{message}\n"));
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) | Err(_) => break,
+            }
+        }
+        out
+    }
+
+    async fn run_hosted_backend_child() {
+        // Match the repository-wide real-PTY/FS timing gate used by the route
+        // and workspace tests. This child is its own process, so an in-process
+        // mutex would not keep the shell probe out of their critical sections.
+        let gate = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(std::env::temp_dir().join("chan-fs-timing-test.gate"))
+            .expect("open PTY timing gate");
+        gate.lock().expect("acquire PTY timing gate");
+
+        let chan_home = std::env::var_os("CHAN_HOME").expect("isolated CHAN_HOME");
+        let chan_home = std::path::PathBuf::from(chan_home);
+        let mut stored = ServerConfig::default();
+        stored.terminal.ghostty = false;
+        stored.save().expect("save initial xterm preference");
+        assert_eq!(
+            crate::config::default_path(),
+            chan_home.join("server.toml"),
+            "the hosted resolver test must use its isolated config store"
+        );
+
+        let library = Library::open_at(chan_home.join("library.toml")).expect("open library");
+        let config = ServeConfig {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            no_token: true,
+            prefix: "/terminal-hosted-proof".into(),
+            idle_timeout: None,
+            open_browser: false,
+            search_aggression: None,
+            settings_disabled: false,
+            verbose: false,
+        };
+        let mut artifacts = build_terminal_app(
+            library,
+            &config,
+            DesktopBridge::default(),
+            chan_library::UnserveMode::Unsupported,
+            None,
+            None,
+        )
+        .await
+        .expect("build terminal app");
+        let registry = artifacts.terminal_sessions.clone();
+        let mut original = registry
+            .create(terminal_create_options(None))
+            .expect("create original hosted terminal");
+        let original_id = original.id().to_owned();
+
+        stored.terminal.ghostty = true;
+        stored.save().expect("flip stored preference to ghostty");
+
+        original.send_input(b"printf 'EXISTING=<%s>\\n' \"$CHAN_TERMINAL\"\n");
+        let existing =
+            collect_terminal_output(&mut original, "EXISTING=<xterm>", Duration::from_secs(30))
+                .await;
+        assert!(
+            existing.contains("EXISTING=<xterm>"),
+            "config flip changed an already-running hosted child: {existing:?}"
+        );
+
+        let mut created = registry
+            .create(terminal_create_options(Some(
+                "printf 'CREATED=<%s>\\n' \"$CHAN_TERMINAL\"",
+            )))
+            .expect("create hosted terminal after config flip");
+        let created_out =
+            collect_terminal_output(&mut created, "CREATED=<ghostty>", Duration::from_secs(30))
+                .await;
+        assert!(
+            created_out.contains("CREATED=<ghostty>"),
+            "new hosted child did not resolve the stored preference: {created_out:?}"
+        );
+
+        assert!(
+            registry
+                .restart(&original_id, RestartOverrides::default())
+                .expect("restart hosted terminal"),
+            "original hosted terminal disappeared before restart"
+        );
+        let mut restarted = registry
+            .attach(&original_id, None)
+            .expect("attach restarted hosted terminal");
+        restarted.send_input(b"printf 'RESTARTED=<%s>\\n' \"$CHAN_TERMINAL\"\n");
+        let restarted_out = collect_terminal_output(
+            &mut restarted,
+            "RESTARTED=<ghostty>",
+            Duration::from_secs(30),
+        )
+        .await;
+        assert!(
+            restarted_out.contains("RESTARTED=<ghostty>"),
+            "hosted restart did not resolve the stored preference: {restarted_out:?}"
+        );
+
+        registry.close(created.id(), CloseReason::Explicit);
+        registry.close(&original_id, CloseReason::Explicit);
+        artifacts.tasks.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn hosted_terminal_registry_resolves_backend_on_each_spawn() {
+        if std::env::var_os(HOSTED_BACKEND_CHILD).is_some() {
+            run_hosted_backend_child().await;
+            return;
+        }
+
+        // CHAN_HOME is process-global. Run the behavioral body in an exact-
+        // filtered child test process so the real default-path load/save pair
+        // is isolated without racing unrelated tests in this binary.
+        let home = tempfile::tempdir().expect("isolated chan home");
+        let output = tokio::process::Command::new(std::env::current_exe().expect("test binary"))
+            .arg("--exact")
+            .arg(HOSTED_BACKEND_TEST)
+            .arg("--nocapture")
+            .env(HOSTED_BACKEND_CHILD, "1")
+            .env("CHAN_HOME", home.path())
+            .output()
+            .await
+            .expect("run isolated hosted terminal test");
+        assert!(
+            output.status.success(),
+            "isolated hosted terminal proof failed (status={}):\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
 
     // Constructing the slim terminal router asserts its routes assemble without
     // an axum conflict -- in particular the standalone-transfer pair

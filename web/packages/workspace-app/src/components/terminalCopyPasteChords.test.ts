@@ -1,5 +1,6 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import shortcuts from "../state/shortcuts.ts?raw";
+import { handleTerminalClipboardChord } from "../terminal/clipboardChord";
 import terminalTab from "./TerminalTab.svelte?raw";
 
 // Terminal copy / paste chords. macOS binds Cmd+C / Cmd+V (Cmd never
@@ -47,12 +48,55 @@ describe("TerminalTab wiring", () => {
   test("clipboard chord detection branches per-OS (Cmd vs Ctrl+Shift)", () => {
     // macOS: bare Cmd. Non-macOS: Ctrl+Shift (so bare Ctrl+C/V stays SIGINT).
     expect(terminalTab).toMatch(
-      /currentOS\(\) === "mac"[\s\S]*?e\.metaKey[\s\S]*?e\.ctrlKey && e\.shiftKey/,
+      /handleTerminalClipboardChord\(e, \{[\s\S]*?os: currentOS\(\)/,
     );
   });
 
   test("context-menu Copy/Paste hints read the chord from the registry", () => {
     expect(terminalTab).toMatch(/chordFor\("terminal\.copy"\)/);
     expect(terminalTab).toMatch(/chordFor\("terminal\.paste"\)/);
+  });
+});
+
+describe("terminal clipboard keydown behavior", () => {
+  function dispatchClipboardChord(
+    init: KeyboardEventInit,
+    os: string,
+    copySelection = vi.fn(),
+  ): { event: KeyboardEvent; handled: boolean; copySelection: ReturnType<typeof vi.fn> } {
+    const target = document.createElement("div");
+    let handled = false;
+    target.addEventListener("keydown", (event) => {
+      handled = handleTerminalClipboardChord(event, { os, copySelection });
+    });
+    const event = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      ...init,
+    });
+    target.dispatchEvent(event);
+    return { event, handled, copySelection };
+  }
+
+  test("Cmd+V stays native and does not suppress WKWebView paste", () => {
+    const { event, handled, copySelection } = dispatchClipboardChord(
+      { key: "v", code: "KeyV", metaKey: true },
+      "mac",
+    );
+
+    expect(handled).toBe(true);
+    expect(event.defaultPrevented).toBe(false);
+    expect(copySelection).not.toHaveBeenCalled();
+  });
+
+  test("copy is handled directly and suppresses the browser default", () => {
+    const { event, handled, copySelection } = dispatchClipboardChord(
+      { key: "c", code: "KeyC", ctrlKey: true, shiftKey: true },
+      "linux",
+    );
+
+    expect(handled).toBe(true);
+    expect(event.defaultPrevented).toBe(true);
+    expect(copySelection).toHaveBeenCalledOnce();
   });
 });

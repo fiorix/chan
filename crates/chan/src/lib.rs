@@ -286,6 +286,7 @@ TELLING WHERE YOU ARE:
   $CHAN_WINDOW_ID       also required by window-targeting commands
   $CHAN_TAB_NAME        this tab's name, when it has one
   $CHAN_TAB_GROUP       this tab's broadcast group, default "default"
+  $CHAN_TERMINAL        configured engine at PTY spawn: xterm or ghostty
   $CHAN_WORKSPACE_PATH  the served root, or $HOME in a standalone
                         terminal, so it does NOT identify the mode
 

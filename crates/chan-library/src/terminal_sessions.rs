@@ -152,6 +152,15 @@ pub struct RegistryConfig {
 #[derive(Debug)]
 pub struct Registry {
     config: RegistryConfig,
+    /// Last known terminal-engine preference, sampled once for each PTY spawn.
+    /// Workspace servers push config changes into this cell. A long-lived
+    /// terminal-only tenant can additionally install `terminal_backend_resolver`
+    /// because it has no settings route or config-change push channel.
+    terminal_ghostty: AtomicBool,
+    /// Optional spawn-time preference pull for a terminal-only tenant. Kept
+    /// absent on workspace registries, whose config-change path updates the
+    /// atomic cell directly.
+    terminal_backend_resolver: Mutex<Option<TerminalBackendResolver>>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     /// Last PTY process exit observed in this registry. This is sticky at the
     /// tenant/registry level so a control-terminal poller can still see the
@@ -253,6 +262,28 @@ impl BlobReaper {
 impl std::fmt::Debug for BlobReaper {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("BlobReaper(..)")
+    }
+}
+
+/// Spawn-time terminal-engine preference pull for registries that cannot
+/// receive a config-change push. `Some(bool)` is a successful read;
+/// `None` asks the registry to retain its last known value.
+#[derive(Clone)]
+pub struct TerminalBackendResolver(Arc<dyn Fn() -> Option<bool> + Send + Sync>);
+
+impl TerminalBackendResolver {
+    pub fn new(f: impl Fn() -> Option<bool> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+
+    fn resolve(&self) -> Option<bool> {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for TerminalBackendResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TerminalBackendResolver(..)")
     }
 }
 
@@ -892,8 +923,11 @@ impl Drop for AttachHandle {
 
 impl Registry {
     pub fn new(config: RegistryConfig) -> Self {
+        let terminal_ghostty = config.terminal.ghostty;
         Self {
             config,
+            terminal_ghostty: AtomicBool::new(terminal_ghostty),
+            terminal_backend_resolver: Mutex::new(None),
             sessions: Mutex::new(HashMap::new()),
             last_exit: Arc::new(Mutex::new(None)),
             roster_notify: Arc::new(Notify::new()),
@@ -904,6 +938,38 @@ impl Registry {
             #[cfg(target_os = "linux")]
             fd_parker: Mutex::new(None),
             generation_counter: AtomicU64::new(0),
+        }
+    }
+
+    /// Refresh the backend preference sampled by subsequent PTY spawns.
+    pub fn set_terminal_backend(&self, ghostty: bool) {
+        self.terminal_ghostty.store(ghostty, Ordering::Relaxed);
+    }
+
+    /// Install the backend preference pull used by a long-lived terminal-only
+    /// tenant. A later install replaces the prior resolver.
+    pub fn install_terminal_backend_resolver(&self, resolver: TerminalBackendResolver) {
+        *self
+            .terminal_backend_resolver
+            .lock()
+            .expect("terminal registry poisoned") = Some(resolver);
+    }
+
+    /// Sample the configured backend for one PTY spawn. A successful pull also
+    /// refreshes the live cell. `None` means the backing store is malformed or
+    /// unreadable: terminal creation stays fail-open and uses the LAST good
+    /// value, which may remain stale until a later spawn can read the store.
+    fn resolve_terminal_backend(&self) -> bool {
+        let resolver = self
+            .terminal_backend_resolver
+            .lock()
+            .expect("terminal registry poisoned")
+            .clone();
+        if let Some(ghostty) = resolver.and_then(|resolver| resolver.resolve()) {
+            self.terminal_ghostty.store(ghostty, Ordering::Relaxed);
+            ghostty
+        } else {
+            self.terminal_ghostty.load(Ordering::Relaxed)
         }
     }
 
@@ -1165,9 +1231,11 @@ impl Registry {
             };
             (self.unused_id(&sessions), announce_command)
         };
+        let mut config = self.config.clone();
+        config.terminal.ghostty = self.resolve_terminal_backend();
         let session = Session::spawn(
             id.clone(),
-            self.config.clone(),
+            config,
             opts,
             announce_command,
             self.generation_counter.fetch_add(1, Ordering::Relaxed),
@@ -1236,9 +1304,11 @@ impl Registry {
         // the banner names a tenant's launch command (control connect), while a
         // restart override (e.g. the team-bootstrap flip from a host shell to
         // the lead's `claude`) is not a single-purpose-tenant launch.
+        let mut config = self.config.clone();
+        config.terminal.ghostty = self.resolve_terminal_backend();
         let session = Session::spawn(
             id.to_string(),
-            self.config.clone(),
+            config,
             opts,
             false,
             self.generation_counter.fetch_add(1, Ordering::Relaxed),
@@ -2713,6 +2783,14 @@ impl Session {
         }
         cmd.env("CHAN", "1");
         clear_mcp_env(&mut cmd);
+        cmd.env(
+            "CHAN_TERMINAL",
+            if config.terminal.ghostty {
+                "ghostty"
+            } else {
+                "xterm"
+            },
+        );
         if opts.mcp_env {
             if let Some(socket_path) = config.mcp_socket_path.as_deref() {
                 set_mcp_env(&mut cmd, socket_path);
@@ -6410,6 +6488,197 @@ mod tests {
             "PTY did not echo configured TERM: {out:?}"
         );
         registry.close(handle.id(), CloseReason::Explicit);
+    }
+
+    #[tokio::test]
+    async fn standalone_spawn_exports_configured_terminal_backend() {
+        // No workspace window, control socket, or MCP environment participates
+        // in this spawn. Reading from the child proves CHAN_TERMINAL survives
+        // the shared environment scrub and reaches a standalone PTY.
+        for (ghostty, expected) in [(false, "xterm"), (true, "ghostty")] {
+            let mut config = test_config(4096, 4, 60);
+            config.terminal.ghostty = ghostty;
+            let registry = Arc::new(Registry::new(config));
+            let mut handle = registry
+                .create(CreateOptions {
+                    size: test_size(),
+                    tab_name: None,
+                    tab_group: None,
+                    window_id: None,
+                    mcp_env: false,
+                    cwd: None,
+                    command: Some("printf 'CHAN_TERMINAL=<%s>\\n' \"$CHAN_TERMINAL\"".into()),
+                    env: Default::default(),
+                })
+                .unwrap();
+
+            let needle = format!("CHAN_TERMINAL=<{expected}>");
+            let out = collect_until(&mut handle, &needle, Duration::from_secs(5)).await;
+            assert!(
+                out.contains(&needle),
+                "standalone PTY did not export configured backend {expected}: {out:?}"
+            );
+            registry.close(handle.id(), CloseReason::Explicit);
+        }
+    }
+
+    #[tokio::test]
+    async fn backend_preference_flip_applies_to_direct_create_and_restart_only() {
+        let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
+        let mut original = registry
+            .create(CreateOptions {
+                size: test_size(),
+                tab_name: None,
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: None,
+                env: Default::default(),
+            })
+            .unwrap();
+        let original_id = original.id().to_string();
+
+        registry.set_terminal_backend(true);
+        original.send_input(b"printf 'ORIGINAL=<%s>\\n' \"$CHAN_TERMINAL\"\n");
+        let old_out =
+            collect_until(&mut original, "ORIGINAL=<xterm>", Duration::from_secs(5)).await;
+        assert!(
+            old_out.contains("ORIGINAL=<xterm>"),
+            "live preference change reached an already-running PTY: {old_out:?}"
+        );
+
+        let mut created = registry
+            .create(CreateOptions {
+                size: test_size(),
+                tab_name: None,
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: Some("printf 'CREATED=<%s>\\n' \"$CHAN_TERMINAL\"".into()),
+                env: Default::default(),
+            })
+            .unwrap();
+        let created_out =
+            collect_until(&mut created, "CREATED=<ghostty>", Duration::from_secs(5)).await;
+        assert!(
+            created_out.contains("CREATED=<ghostty>"),
+            "direct create did not sample the live preference: {created_out:?}"
+        );
+
+        assert!(registry
+            .restart(&original_id, RestartOverrides::default())
+            .unwrap());
+        let mut restarted = registry.attach(&original_id, None).unwrap();
+        restarted.send_input(b"printf 'RESTARTED=<%s>\\n' \"$CHAN_TERMINAL\"\n");
+        let restarted_out = collect_until(
+            &mut restarted,
+            "RESTARTED=<ghostty>",
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            restarted_out.contains("RESTARTED=<ghostty>"),
+            "direct restart did not sample the live preference: {restarted_out:?}"
+        );
+
+        registry.close(created.id(), CloseReason::Explicit);
+        registry.close(&original_id, CloseReason::Explicit);
+    }
+
+    #[tokio::test]
+    async fn spawn_time_backend_resolver_updates_new_children_and_keeps_last_good_value() {
+        let resolved = Arc::new(Mutex::new(Some(false)));
+        let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
+        registry.install_terminal_backend_resolver(TerminalBackendResolver::new({
+            let resolved = resolved.clone();
+            move || *resolved.lock().unwrap()
+        }));
+        let mut original = registry
+            .create(CreateOptions {
+                size: test_size(),
+                tab_name: None,
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: None,
+                env: Default::default(),
+            })
+            .unwrap();
+        let original_id = original.id().to_string();
+
+        *resolved.lock().unwrap() = Some(true);
+        original.send_input(b"printf 'ORIGINAL=<%s>\\n' \"$CHAN_TERMINAL\"\n");
+        let original_out =
+            collect_until(&mut original, "ORIGINAL=<xterm>", Duration::from_secs(5)).await;
+        assert!(
+            original_out.contains("ORIGINAL=<xterm>"),
+            "resolver changed an already-running child: {original_out:?}"
+        );
+
+        let mut created = registry
+            .create(CreateOptions {
+                size: test_size(),
+                tab_name: None,
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: Some("printf 'CREATED=<%s>\\n' \"$CHAN_TERMINAL\"".into()),
+                env: Default::default(),
+            })
+            .unwrap();
+        let created_out =
+            collect_until(&mut created, "CREATED=<ghostty>", Duration::from_secs(5)).await;
+        assert!(
+            created_out.contains("CREATED=<ghostty>"),
+            "new child did not sample the resolver: {created_out:?}"
+        );
+
+        assert!(registry
+            .restart(&original_id, RestartOverrides::default())
+            .unwrap());
+        let mut restarted = registry.attach(&original_id, None).unwrap();
+        restarted.send_input(b"printf 'RESTARTED=<%s>\\n' \"$CHAN_TERMINAL\"\n");
+        let restarted_out = collect_until(
+            &mut restarted,
+            "RESTARTED=<ghostty>",
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            restarted_out.contains("RESTARTED=<ghostty>"),
+            "restart did not sample the resolver: {restarted_out:?}"
+        );
+
+        // A malformed/unreadable store resolves to None. Spawning remains
+        // fail-open and keeps the last successful value (ghostty), rather than
+        // falling all the way back to the registry's startup xterm value.
+        *resolved.lock().unwrap() = None;
+        let mut fallback = registry
+            .create(CreateOptions {
+                size: test_size(),
+                tab_name: None,
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: Some("printf 'FALLBACK=<%s>\\n' \"$CHAN_TERMINAL\"".into()),
+                env: Default::default(),
+            })
+            .unwrap();
+        let fallback_out =
+            collect_until(&mut fallback, "FALLBACK=<ghostty>", Duration::from_secs(5)).await;
+        assert!(
+            fallback_out.contains("FALLBACK=<ghostty>"),
+            "resolver failure did not keep the last good value: {fallback_out:?}"
+        );
+
+        registry.close(created.id(), CloseReason::Explicit);
+        registry.close(fallback.id(), CloseReason::Explicit);
+        registry.close(&original_id, CloseReason::Explicit);
     }
 
     #[test]

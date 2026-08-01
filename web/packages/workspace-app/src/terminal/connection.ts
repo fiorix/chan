@@ -74,6 +74,11 @@ export function isReplayGeneratedTerminalInput(data: string): boolean {
   // replies have no live reader anymore; forwarding them leaks raw CPR/DA/DCS
   // bytes into the shell prompt after refresh or reattach.
   if (isTerminalGeneratedReply(data)) return true;
+  // xterm emits a native paste as one bracketed-paste payload. It can race an
+  // asynchronous replay write, but it is user input, not a terminal answer.
+  // Let it reach the PTY while retaining the fail-closed rule for unknown
+  // escape-prefixed replies replay may generate.
+  if (data.startsWith("\x1b[200~") && data.endsWith("\x1b[201~")) return false;
   return data.startsWith("\x1b");
 }
 

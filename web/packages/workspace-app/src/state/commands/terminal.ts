@@ -14,12 +14,14 @@ import {
   type CommandContext,
 } from "../commands";
 import { setHybridSurfaceTheme, setTransientStatus, uiPrompt } from "../store.svelte";
+import { updateGlobalConfigSerial } from "../configWrite";
 import {
   activeTerminalTab,
   renameTerminalTab,
   terminalTabName,
   setTerminalGroup,
 } from "../tabs.svelte";
+import { workspace } from "../workspace.svelte";
 
 function onTerminal(ctx: CommandContext): boolean {
   return onSurface(ctx, "terminal") && !ctx.terminalControl;
@@ -47,6 +49,42 @@ async function setActiveTerminalGroup(): Promise<void> {
   setTransientStatus("Group set; applies on next restart");
 }
 
+function configuredTerminalBackend(): "xterm" | "ghostty" {
+  return workspace.info?.preferences.terminal.ghostty ? "ghostty" : "xterm";
+}
+
+async function toggleTerminalBackend(): Promise<void> {
+  let nextGhostty = false;
+  try {
+    await updateGlobalConfigSerial((prefs) => {
+      nextGhostty = !(prefs.terminal.ghostty ?? false);
+      return {
+        terminal: { ...prefs.terminal, ghostty: nextGhostty },
+      };
+    });
+    // The config_changed refresh makes this authoritative across windows.
+    // Mirror the accepted value now so reopening the launcher immediately
+    // reports the new preference instead of waiting for that round-trip.
+    if (workspace.info) {
+      workspace.info = {
+        ...workspace.info,
+        preferences: {
+          ...workspace.info.preferences,
+          terminal: {
+            ...workspace.info.preferences.terminal,
+            ghostty: nextGhostty,
+          },
+        },
+      };
+    }
+    setTransientStatus(
+      `Terminal engine set to ${nextGhostty ? "ghostty" : "xterm"}; newly opened terminals only`,
+    );
+  } catch (error) {
+    setTransientStatus(`Could not change terminal engine: ${(error as Error).message}`);
+  }
+}
+
 registerCommands([
   {
     id: "app.terminal.surfaceTheme.light",
@@ -63,6 +101,18 @@ registerCommands([
     keywords: ["theme", "appearance", "dark"],
     available: onTerminal,
     run: () => setHybridSurfaceTheme("terminal", "dark"),
+  },
+  {
+    id: "app.terminal.backend.toggle",
+    get title() {
+      return `Terminal engine: ${configuredTerminalBackend()} (toggle; newly opened terminals only)`;
+    },
+    category: "Terminal",
+    keywords: ["backend", "engine", "ghostty", "xterm", "new terminal"],
+    // The workspace tenant owns /api/config. Standalone terminal tenants are
+    // intentionally slim and cannot persist global preferences themselves.
+    available: onWorkspaceTerminal,
+    run: () => void toggleTerminalBackend(),
   },
   {
     id: "app.terminal.broadcastToggle",

@@ -106,6 +106,11 @@
     handleTerminalMetaKey,
     installKeyboardProtocolHandlers,
   } from "../terminal/keymap";
+  import {
+    handleTerminalClipboardChord,
+    isTerminalCopyChord,
+    isTerminalPasteChord,
+  } from "../terminal/clipboardChord";
   import { isHostOwnedChord } from "../terminal/hostChord";
   import { installTerminalReportGuards } from "../terminal/xtermReports";
   import { MouseModeFilter } from "../terminal/mouseModeFilter";
@@ -1677,8 +1682,8 @@
   function onGhosttyHostChord(e: KeyboardEvent): void {
     const claimedByChan =
       shouldEscapeTerminal(e) ||
-      isTerminalCopyChord(e) ||
-      isTerminalPasteChord(e);
+      isTerminalCopyChord(e, currentOS()) ||
+      isTerminalPasteChord(e, currentOS());
     if (
       isHostOwnedChord(e, {
         os: currentOS(),
@@ -1935,52 +1940,6 @@
     focusTerminal();
   }
 
-  // Terminal clipboard chords are OS-divergent and CANNOT use the registry's
-  // `Mod` token: `Mod+C` becomes Ctrl+C on Linux/Windows, which is the
-  // shell's SIGINT. So macOS copies/pastes with Cmd+C / Cmd+V (Cmd never
-  // collides with a control code) and every other platform uses the standard
-  // Ctrl+Shift+C / Ctrl+Shift+V, leaving bare Ctrl+C/V for the shell.
-  function isTerminalCopyChord(e: KeyboardEvent): boolean {
-    if (e.key.toLowerCase() !== "c") return false;
-    if (currentOS() === "mac") {
-      return e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
-    }
-    return e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey;
-  }
-  function isTerminalPasteChord(e: KeyboardEvent): boolean {
-    if (e.key.toLowerCase() !== "v") return false;
-    if (currentOS() === "mac") {
-      return e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
-    }
-    return e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey;
-  }
-
-  // Resolve a clipboard chord on keydown. Returns true when the event was a
-  // copy/paste chord so `handleTerminalKeyEvent` can tell xterm to skip the
-  // keystroke (no stray bytes, no SIGINT on Ctrl+Shift+C).
-  //
-  // Copy preventDefaults + reads the selection itself. Paste does NEITHER: it
-  // lets the browser's native paste action fire so xterm's own `paste` listener
-  // receives the gesture-delivered clipboardData. Reading it ourselves with
-  // navigator.clipboard.readText() pops WKWebView's DOM-paste "Paste" button
-  // (no JS opt-out); the native path has no button and does bracketed paste.
-  function handleTerminalClipboardChord(e: KeyboardEvent): boolean {
-    if (e.type !== "keydown") return false;
-    if (isTerminalCopyChord(e)) {
-      e.preventDefault();
-      void copySelectionToClipboard();
-      return true;
-    }
-    if (isTerminalPasteChord(e)) {
-      // Do NOT preventDefault and do NOT read the clipboard here: the browser
-      // then performs its native paste -> xterm's `paste` listener -> bracketed
-      // paste -> onData -> handleXtermData. Returning true still makes
-      // handleTerminalKeyEvent return false so xterm skips the KEY (no ^V byte).
-      return true;
-    }
-    return false;
-  }
-
   function openFind(): void {
     closeTabMenu();
     // The find bar runs on xterm's SearchAddon; there is no ghostty-web
@@ -2149,7 +2108,14 @@
     // deliberately leaves the browser's native paste to fire so xterm's own
     // `paste` listener handles it (see handleTerminalClipboardChord) - that is
     // the buttonless, bracketed path, not a double-paste.
-    if (handleTerminalClipboardChord(e)) return false;
+    if (
+      handleTerminalClipboardChord(e, {
+        os: currentOS(),
+        copySelection: () => void copySelectionToClipboard(),
+      })
+    ) {
+      return false;
+    }
     // Chord-escape registry. When the incoming event matches a shortcut
     // flagged `escapeTerminal: true` in shortcuts.ts, return false so xterm
     // does not consume the keystroke.
@@ -2246,6 +2212,11 @@
              Scrollback. Name / Group / broadcast / MCP / spawn config
              lives on the tab-name menu. -->
         <div class="action-list">
+          <div class="terminal-backend-label" data-terminal-backend={backend}>
+            <span>Terminal engine</span>
+            <span class="terminal-backend-value">{backend}</span>
+          </div>
+          <div class="msep" role="separator"></div>
           {#if backend === "xterm"}
             <!-- Find rides xterm's SearchAddon; no ghostty-web equivalent. -->
             <button class="mbtn" onclick={openFind}>
@@ -2760,6 +2731,19 @@
   }
   .broadcast-section-label .mbtn-icon {
     color: var(--text-secondary);
+  }
+  .terminal-backend-label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 4px 8px 6px;
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
+  .terminal-backend-value {
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   .target-self {
     margin-left: 4px;

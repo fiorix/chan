@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from "vitest";
 import { availableCommands, type CommandContext } from "../commands";
+import { workspace } from "../workspace.svelte";
 
 import "./editor";
 import "./browser";
@@ -115,6 +116,7 @@ describe("terminal surface commands", () => {
       "app.terminal.broadcastToggle",
       "app.terminal.copyCwd",
       "app.terminal.newFsEntry",
+      "app.terminal.backend.toggle",
       "terminal.richPrompt",
     ]) {
       expect(onTerminal.has(id)).toBe(true);
@@ -122,8 +124,9 @@ describe("terminal surface commands", () => {
     expect(idsIn(ctx({ activeSurface: "file" })).has("terminal.richPrompt")).toBe(
       false,
     );
-    // The cwd-resolving commands and Rich Prompt only work against a
-    // workspace root, so a standalone (terminalOnly) window drops them.
+    // The cwd-resolving commands and Rich Prompt need a workspace root; the
+    // global backend toggle needs the workspace tenant's /api/config route.
+    // A standalone terminal tenant deliberately serves neither surface.
     const inStandalone = idsIn(
       ctx({ terminalOnly: true, activeSurface: "terminal" }),
     );
@@ -131,8 +134,32 @@ describe("terminal surface commands", () => {
       "terminal.richPrompt",
       "app.terminal.copyCwd",
       "app.terminal.newFsEntry",
+      "app.terminal.backend.toggle",
     ]) {
       expect(inStandalone.has(id)).toBe(false);
+    }
+  });
+
+  it("names the current engine and the new-terminal-only contract", () => {
+    const original = workspace.info;
+    try {
+      workspace.info = {
+        preferences: { terminal: { ghostty: false } },
+      } as NonNullable<typeof workspace.info>;
+      const command = availableCommands(ctx({ activeSurface: "terminal" })).find(
+        (candidate) => candidate.id === "app.terminal.backend.toggle",
+      );
+      expect(command?.category).toBe("Terminal");
+      expect(command?.keywords).toEqual(
+        expect.arrayContaining(["ghostty", "xterm"]),
+      );
+      expect(command?.title).toContain("xterm");
+      expect(command?.title).toContain("newly opened terminals only");
+
+      workspace.info.preferences.terminal.ghostty = true;
+      expect(command?.title).toContain("ghostty");
+    } finally {
+      workspace.info = original;
     }
   });
 });
