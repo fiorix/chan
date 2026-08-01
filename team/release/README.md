@@ -101,6 +101,7 @@ New agents should also read [`.agents/playbook.md`](../../.agents/playbook.md), 
 - [release-v0.79.2](release-v0.79.2.md) - nine selectable, reduced-motion-aware empty-pane animations; focus and physical-key routing fixes across surveys, terminal shortcuts, and decorative controls; and explicit SVG/PNG diagram copying with WebKit-safe Mermaid clipboard rendering and gentler zoom.
 - [release-v0.80.0](release-v0.80.0.md) - owner-gated reverse TCP tunnels from a connected desktop to its devserver, seekable inline/fullscreen video preview over bounded HTTP ranges, exact-one-newline terminal submissions with a 4,096-byte write cap, Ghostty/xterm behavior parity, five more empty-pane animations, and gateway/status-bar fixes.
 - [release-v0.81.0](release-v0.81.0.md) - systemd devserver terminals survive every restart flavor; media copy, viewer, survey-focus, browser-entry, and desktop Window-menu gaps close; and Nix plus Homebrew packaging join the release paths.
+- [release-v0.82.0](release-v0.82.0.md) - the safety release: every HTTP read path bounded and the indexer off the workspace lock, `cs tunnel` delivering the bytes it already read, a poisoned session lock no longer aborting the process, the terminal engine made visible and switchable, the legacy devserver window endpoint retired, plus seven empty-pane animations and a headless Nix package.
 
 ## Conventions
 
