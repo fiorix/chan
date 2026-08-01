@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.82.0] - 2026-08-01
+
+v0.82.0 removes the whole-file read class from every HTTP read path, makes `cs tunnel` deliver every byte it read before closing, stops one failed assertion from aborting the chan-server test binary, makes the terminal engine visible and switchable, and retires the legacy devserver window endpoint.
+
+### Added
+
+- **Terminals report their engine, and the launcher switches it.** Every spawned PTY exports `CHAN_TERMINAL=xterm` or `CHAN_TERMINAL=ghostty`, recording the configured backend at spawn time, in workspace and terminal-only tenants alike; `chan dump-skill` documents it beside the other discovery variables. An existing child keeps the value it started with, while a newly created or restarted child samples the current preference. The terminal context menu opens with a non-interactive `Terminal engine` row that reads the post-load backend, so a session whose ghostty kit failed to load and fell back reports xterm. A Command Launcher entry in the Terminal category states the current value, is searchable by either engine name, and toggles the stored preference for newly opened terminals only.
+- **`?download=1` supports range requests.** Binary responses advertise `Accept-Ranges` and a strong size and mtime validator, and answer first-byte, last-byte, and end-clamped ranges with correct 206 framing, so an interrupted large download resumes instead of restarting.
+
+### Changed
+
+- **A panic while holding a session or registry mutex no longer aborts the process.** The scene and document session state and registry locks, and the survey turn guard's queue lock, recover a poisoned guard instead of expecting it, so the server continues from whatever state the panicking writer left mid-update. This matches the recovery policy already used across the rest of chan-server. In the test binary it means one failed assertion reports itself as a single failing test rather than killing the run and hiding every other result.
+
+### Fixed
+
+- **Every HTTP read path is bounded.** Plain GETs of images, PDFs, and binaries with no recognized extension now stream through the same fixed-size reader that already backed `?download=1`, so peak resident memory no longer tracks file size: a 3 GiB file with an unrecognized extension serves with 1.7 MiB of resident growth, one extra thread, and one extra file descriptor. Directory downloads write each archive member from a bounded reader sized by its stat, file-browser copies stream into the atomic sink and refuse above their budget without leaving a partial destination or temp file, and incremental indexing stats a file and declines above the threshold before taking the workspace mutation lock, so a large file landing in a watched workspace no longer stalls unrelated renames. The editor's open limit and the indexing threshold are one server-reported value.
+- **A transfer can no longer disagree with its declared length.** The representation is frozen from the open-handle stat: a file that grows mid-transfer is truncated to the declared length, and one that shrinks fails the body rather than completing short.
+- **`cs tunnel` no longer truncates responses at EOF.** Bytes already read from either TCP endpoint now reach the peer before the data WebSocket closes. The byte pump completes an in-flight send or write instead of cancelling it mid-operation, the devserver drains its queued uplink frames after the splice ends, and the desktop joins its splice and WebSocket shuttle as one cancellation unit. Teardown, refused dials, and desktop disconnect still terminate immediately. The loss was never a size threshold: a 131,072-byte response failed 10 out of 10 attempts with zero bytes received, far below the channel's queued capacity, and a 2 GiB pull that lost up to 524,288 bytes per attempt now completes byte-identical.
+- **A bracketed paste is no longer discarded during terminal replay.** The replay-origin filter dropped anything beginning with ESC, which silently included a complete bracketed-paste payload while leaving typed characters unaffected. It now recognizes a complete payload as user input and still suppresses terminal-generated replies, including unknown ones. A separate report of Cmd+V failing in the macOS desktop was not reproducible on Linux and is not addressed by this change.
+
+### Removed
+
+- **The legacy `GET /api/devserver/windows` endpoint is removed.** `GET /api/library/windows` is the only window feed. This supersedes the v0.81.0 note that the endpoint would stay one release as a compatibility adapter; a pre-0.81.0 desktop on Linux or Windows silently loses its Window-menu reopen entries.
+
 ## [v0.81.0] - 2026-07-30
 
 v0.81.0 makes systemd devserver terminals survive every restart flavor, brings copy and View parity to images, diagrams, and slides, routes file-browser media gestures to the real viewers, keeps survey cards focused across tab switches, and adds Nix flake and Homebrew tap install paths.
