@@ -3,10 +3,13 @@
 import { describe, expect, test, vi } from "vitest";
 
 import { api } from "../api/client";
+import appRaw from "../App.svelte?raw";
 import { allCommands } from "./commands";
 import {
   isValidExtensionInfo,
   loadExtensions,
+  markExtensionFrameReady,
+  registerExtensionFrame,
 } from "./extensions.svelte";
 import { activePane, layout, type LeafNode } from "./tabs.svelte";
 
@@ -36,9 +39,25 @@ describe("local extensions", () => {
     }
     expect(isValidExtensionInfo(null)).toBe(false);
     expect(isValidExtensionInfo({ id: "echo", name: "Echo" })).toBe(false);
+    expect(
+      isValidExtensionInfo({
+        id: "echo",
+        name: "Echo",
+        entry_path: `/_chan/extensions/echo/${capability}/`,
+        capabilities: ["workspace-files"],
+      }),
+    ).toBe(false);
+    expect(
+      isValidExtensionInfo({
+        id: "echo",
+        name: "Echo",
+        entry_path: `/_chan/extensions/echo/${capability}/`,
+        commands: [{ id: "Bad.Id", title: "Bad" }],
+      }),
+    ).toBe(false);
   });
 
-  test("registers a launcher command that opens an id-only tab", async () => {
+  test("registers singleton commands and queues dispatch until frame readiness", async () => {
     const pane: LeafNode = {
       kind: "leaf",
       id: "extension-pane",
@@ -53,6 +72,10 @@ describe("local extensions", () => {
         id: "echo",
         name: "Echo test",
         entry_path: `/_chan/extensions/echo/${capability}/`,
+        singleton: true,
+        commands: [
+          { id: "say-hello", title: "Say hello", keywords: ["greet"] },
+        ],
       },
     ]);
 
@@ -66,5 +89,24 @@ describe("local extensions", () => {
     expect(tab.extensionId).toBe("echo");
     expect(tab.title).toBe("Echo test");
     expect(JSON.stringify(tab)).not.toContain("secret");
+
+    const declared = allCommands().find(
+      (entry) => entry.id === "extension.echo.say-hello",
+    );
+    expect(declared?.keywords).toContain("greet");
+    declared?.run();
+    expect(activePane().tabs).toHaveLength(1);
+
+    const posted: { id: string; requestId: string }[] = [];
+    const unregister = registerExtensionFrame(tab.id, (message) => posted.push(message));
+    expect(posted).toEqual([]);
+    markExtensionFrameReady(tab.id);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.id).toBe("say-hello");
+    unregister();
+
+    expect(appRaw).toMatch(
+      /commandName\.startsWith\("extension\."\)[\s\S]{0,300}allCommands\(\)[\s\S]{0,300}command\.run\(\)/,
+    );
   });
 });

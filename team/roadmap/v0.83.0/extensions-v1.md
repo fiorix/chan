@@ -66,6 +66,18 @@ Moderate, with most weight in the backend: TOML discovery, subprocess supervisio
 - Extension access to workspace APIs, native desktop capabilities, cross-extension messaging, or a privileged host bridge.
 - A `cs open_extension` command and TOML-declared shortcut field.
 
+## Host capabilities and extension commands
+
+An extension declaration may grant a small set of host capabilities with a `capabilities` string array. The initial grants are `session-context` and `presentation`; unknown grants reject that declaration. Grants authorize host services, while the process handshake describes the extension's static functionality. Keeping those contracts separate prevents a command title from implying privilege.
+
+The optional handshake fields are `singleton: bool` and `commands: Command[]`, where each command has a local `id`, `title`, and optional `keywords`. Chan keeps the existing `extension.<extension-id>` Open command and registers declared commands as `extension.<extension-id>.<command-id>` under Apps. Declared commands have no default chords, but the keymap override layer may assign them. Launcher clicks, keymap overrides, and native dispatch all resolve through the same command registry.
+
+A singleton command focuses or creates the extension tab, waits for an exact-source `chan:extension-ready:v1`, then sends `chan:extension-command:v1`. A bounded queue covers commands issued during iframe startup. Results are advisory notifications; command availability remains static for the process lifetime.
+
+The `session-context` bridge publishes reactive participant snapshots containing an opaque window id, display name, Chan role, connection status, and the receiving window's id. The data is presentation identity, not authentication. The `presentation` bridge promotes the existing iframe wrapper into the browser top layer without reparenting it, preserving its browsing context. Chan owns Restore and Close controls and does not capture Escape while presentation is active.
+
+Every proxied HTTP or WebSocket request carries a process-private `X-Chan-Extension-Scope` derived from the tenant session instance. Browser-provided `X-Chan-*` headers are stripped before Chan supplies the scope. The scope never reaches iframe JavaScript and lets one process-wide extension isolate state for multiple tenants. WebSocket upgrades use the existing capability path and public Chan origin, preserving the single-port contract through local serving, devserver, desktop, and gateway tunnels.
+
 ## Acceptance gate
 
 - Build both embedded SPAs fresh before compiling Rust, then build `chan` and `echo-extension` from the same worktree.

@@ -1653,6 +1653,7 @@
     {#each everyTab.filter((t) => t.kind === "extension") as t (t.id)}
       <ExtensionTab
         tab={t}
+        paneId={pane.id}
         active={isLiveActive(t)}
       />
     {/each}

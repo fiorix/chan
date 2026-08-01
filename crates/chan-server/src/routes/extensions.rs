@@ -1,17 +1,28 @@
-//! Process-ready extension catalog and capability-scoped HTTP reverse proxy.
+//! Process-ready extension catalog and capability-scoped reverse proxy.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{OriginalUri, Path as AxumPath};
+use axum::extract::ws::{Message as ClientMessage, WebSocket, WebSocketUpgrade};
+use axum::extract::{FromRequestParts, OriginalUri, Path as AxumPath};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
+use futures::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
 
-use crate::extensions::{ExtensionCatalog, ExtensionEntry, ExtensionView, EXTENSION_PROXY_PREFIX};
+use crate::extensions::{
+    ExtensionCatalog, ExtensionEntry, ExtensionTenantContext, ExtensionView, EXTENSION_PROXY_PREFIX,
+};
 
 const EXTENSION_FRAME_POLICY: &str = "frame-ancestors 'self'";
+const EXTENSION_SCOPE_HEADER: &str = "x-chan-extension-scope";
+const EXTENSION_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_WS_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_WS_FRAME_BYTES: usize = 1024 * 1024;
 
 pub async fn api_extensions(Extension(catalog): Extension<Arc<ExtensionCatalog>>) -> Response {
     let entries: Vec<ExtensionView> = catalog.views();
@@ -31,11 +42,12 @@ pub async fn api_extensions(Extension(catalog): Extension<Arc<ExtensionCatalog>>
 /// into browser memory.
 pub async fn proxy_extension(
     Extension(catalog): Extension<Arc<ExtensionCatalog>>,
+    Extension(tenant): Extension<ExtensionTenantContext>,
     AxumPath((id, capability, path)): AxumPath<(String, String, String)>,
     OriginalUri(original_uri): OriginalUri,
     request: Request<Body>,
 ) -> Response {
-    proxy_extension_request(catalog, id, capability, path, original_uri, request).await
+    proxy_extension_request(catalog, tenant, id, capability, path, original_uri, request).await
 }
 
 /// Axum catch-all parameters require a non-empty suffix, while an extension
@@ -43,12 +55,14 @@ pub async fn proxy_extension(
 /// so it cannot fall through to Chan's SPA fallback.
 pub async fn proxy_extension_root(
     Extension(catalog): Extension<Arc<ExtensionCatalog>>,
+    Extension(tenant): Extension<ExtensionTenantContext>,
     AxumPath((id, capability)): AxumPath<(String, String)>,
     OriginalUri(original_uri): OriginalUri,
     request: Request<Body>,
 ) -> Response {
     proxy_extension_request(
         catalog,
+        tenant,
         id,
         capability,
         "/".to_string(),
@@ -60,6 +74,7 @@ pub async fn proxy_extension_root(
 
 async fn proxy_extension_request(
     catalog: Arc<ExtensionCatalog>,
+    tenant: ExtensionTenantContext,
     id: String,
     capability: String,
     path: String,
@@ -75,7 +90,14 @@ async fn proxy_extension_request(
     }
 
     let upstream = entry.upstream_url(&path, request.uri().query());
-    let (parts, body) = request.into_parts();
+    let (mut parts, body) = request.into_parts();
+    if parts.headers.contains_key(header::UPGRADE) {
+        let websocket = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+            Ok(websocket) => websocket,
+            Err(rejection) => return rejection.into_response(),
+        };
+        return proxy_extension_websocket(websocket, upstream, tenant, id).await;
+    }
     let mut headers = parts.headers;
     let had_origin = headers.contains_key(header::ORIGIN);
     strip_request_headers(&mut headers);
@@ -83,6 +105,7 @@ async fn proxy_extension_request(
     let mut outgoing = extension_proxy_client()
         .request(parts.method, upstream.clone())
         .headers(headers)
+        .header(EXTENSION_SCOPE_HEADER, &tenant.scope)
         .body(reqwest::Body::wrap_stream(body.into_data_stream()));
     if had_origin {
         outgoing = outgoing.header(header::ORIGIN, upstream.origin().ascii_serialization());
@@ -112,12 +135,145 @@ async fn proxy_extension_request(
     response
 }
 
+async fn proxy_extension_websocket(
+    websocket: WebSocketUpgrade,
+    mut upstream: url::Url,
+    tenant: ExtensionTenantContext,
+    id: String,
+) -> Response {
+    let origin = upstream.origin().ascii_serialization();
+    if upstream.set_scheme("ws").is_err() {
+        return (StatusCode::BAD_GATEWAY, "invalid extension websocket URL").into_response();
+    }
+    let mut upstream_request = match upstream.as_str().into_client_request() {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::warn!(extension_id = %id, %error, "extension websocket request invalid");
+            return (StatusCode::BAD_GATEWAY, "extension unavailable").into_response();
+        }
+    };
+    let headers = upstream_request.headers_mut();
+    let Ok(scope) = HeaderValue::from_str(&tenant.scope) else {
+        return (StatusCode::BAD_GATEWAY, "extension scope invalid").into_response();
+    };
+    let Ok(origin) = HeaderValue::from_str(&origin) else {
+        return (StatusCode::BAD_GATEWAY, "extension origin invalid").into_response();
+    };
+    headers.insert(HeaderName::from_static(EXTENSION_SCOPE_HEADER), scope);
+    headers.insert(header::ORIGIN, origin);
+
+    let connection = tokio::time::timeout(
+        EXTENSION_CONNECT_TIMEOUT,
+        tokio_tungstenite::connect_async_with_config(
+            upstream_request,
+            Some(extension_websocket_config()),
+            false,
+        ),
+    )
+    .await;
+    let (upstream_socket, _) = match connection {
+        Ok(Ok(connection)) => connection,
+        Ok(Err(error)) => {
+            tracing::warn!(extension_id = %id, %error, "extension websocket connect failed");
+            return (StatusCode::BAD_GATEWAY, "extension unavailable").into_response();
+        }
+        Err(_) => {
+            tracing::warn!(extension_id = %id, "extension websocket connect timed out");
+            return (StatusCode::BAD_GATEWAY, "extension unavailable").into_response();
+        }
+    };
+    websocket
+        .max_message_size(MAX_WS_MESSAGE_BYTES)
+        .max_frame_size(MAX_WS_FRAME_BYTES)
+        .on_upgrade(move |client| relay_extension_websocket(client, upstream_socket, tenant, id))
+}
+
+fn extension_websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_WS_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_WS_FRAME_BYTES))
+}
+
+async fn relay_extension_websocket<S>(
+    client: WebSocket,
+    upstream: tokio_tungstenite::WebSocketStream<S>,
+    mut tenant: ExtensionTenantContext,
+    id: String,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut client_tx, mut client_rx) = client.split();
+    let (mut upstream_tx, mut upstream_rx) = upstream.split();
+    loop {
+        tokio::select! {
+            client_message = client_rx.next() => {
+                let Some(client_message) = client_message else { break };
+                let client_message = match client_message {
+                    Ok(message) => message,
+                    Err(error) => {
+                        tracing::debug!(extension_id = %id, %error, "extension client websocket closed");
+                        break;
+                    }
+                };
+                let close = matches!(client_message, ClientMessage::Close(_));
+                if upstream_tx.send(client_to_upstream(client_message)).await.is_err() || close {
+                    break;
+                }
+            }
+            upstream_message = upstream_rx.next() => {
+                let Some(upstream_message) = upstream_message else { break };
+                let upstream_message = match upstream_message {
+                    Ok(message) => message,
+                    Err(error) => {
+                        tracing::debug!(extension_id = %id, %error, "extension upstream websocket closed");
+                        break;
+                    }
+                };
+                let close = matches!(upstream_message, UpstreamMessage::Close(_));
+                if let Some(message) = upstream_to_client(upstream_message) {
+                    if client_tx.send(message).await.is_err() || close {
+                        break;
+                    }
+                }
+            }
+            changed = tenant.shutdown_rx.changed() => {
+                if changed.is_err() || *tenant.shutdown_rx.borrow() {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = upstream_tx.send(UpstreamMessage::Close(None)).await;
+    let _ = client_tx.send(ClientMessage::Close(None)).await;
+}
+
+fn client_to_upstream(message: ClientMessage) -> UpstreamMessage {
+    match message {
+        ClientMessage::Text(text) => UpstreamMessage::Text(text.to_string().into()),
+        ClientMessage::Binary(bytes) => UpstreamMessage::Binary(bytes.to_vec().into()),
+        ClientMessage::Ping(bytes) => UpstreamMessage::Ping(bytes.to_vec().into()),
+        ClientMessage::Pong(bytes) => UpstreamMessage::Pong(bytes.to_vec().into()),
+        ClientMessage::Close(_) => UpstreamMessage::Close(None),
+    }
+}
+
+fn upstream_to_client(message: UpstreamMessage) -> Option<ClientMessage> {
+    match message {
+        UpstreamMessage::Text(text) => Some(ClientMessage::Text(text.to_string().into())),
+        UpstreamMessage::Binary(bytes) => Some(ClientMessage::Binary(bytes.to_vec().into())),
+        UpstreamMessage::Ping(bytes) => Some(ClientMessage::Ping(bytes.to_vec().into())),
+        UpstreamMessage::Pong(bytes) => Some(ClientMessage::Pong(bytes.to_vec().into())),
+        UpstreamMessage::Close(_) => Some(ClientMessage::Close(None)),
+        UpstreamMessage::Frame(_) => None,
+    }
+}
+
 fn extension_proxy_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(2))
+            .connect_timeout(EXTENSION_CONNECT_TIMEOUT)
             .build()
             .expect("build extension proxy client")
     })
@@ -267,6 +423,7 @@ fn apply_extension_response_policy(headers: &mut HeaderMap) {
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+    use axum::extract::ws::{Message, WebSocketUpgrade};
     use axum::extract::Query;
     use axum::routing::{any, get};
     use axum::Router;
@@ -285,6 +442,17 @@ mod tests {
         )])
     }
 
+    fn tenant() -> (ExtensionTenantContext, tokio::sync::watch::Sender<bool>) {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        (
+            ExtensionTenantContext {
+                scope: "tenant-scope".to_string(),
+                shutdown_rx,
+            },
+            shutdown_tx,
+        )
+    }
+
     async fn upstream_probe(
         Query(query): Query<HashMap<String, String>>,
         headers: HeaderMap,
@@ -298,6 +466,13 @@ mod tests {
         if headers.contains_key(header::COOKIE) {
             return (StatusCode::BAD_REQUEST, "cookie leaked").into_response();
         }
+        if headers
+            .get(EXTENSION_SCOPE_HEADER)
+            .and_then(|value| value.to_str().ok())
+            != Some("tenant-scope")
+        {
+            return (StatusCode::BAD_REQUEST, "scope missing").into_response();
+        }
         let origin = headers
             .get(header::ORIGIN)
             .and_then(|value| value.to_str().ok())
@@ -310,6 +485,26 @@ mod tests {
             .headers_mut()
             .insert(header::SET_COOKIE, HeaderValue::from_static("unsafe=1"));
         response
+    }
+
+    async fn upstream_websocket_probe(
+        websocket: WebSocketUpgrade,
+        Query(query): Query<HashMap<String, String>>,
+        headers: HeaderMap,
+    ) -> Result<Response, StatusCode> {
+        if query.get("t").map(String::as_str) != Some("upstream-secret")
+            || headers
+                .get(EXTENSION_SCOPE_HEADER)
+                .and_then(|value| value.to_str().ok())
+                != Some("tenant-scope")
+        {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        Ok(websocket.on_upgrade(|mut socket| async move {
+            if let Some(Ok(Message::Binary(bytes))) = socket.recv().await {
+                let _ = socket.send(Message::Binary(bytes)).await;
+            }
+        }))
     }
 
     #[tokio::test]
@@ -366,6 +561,7 @@ mod tests {
             "upstream-secret",
             CAPABILITY,
         )]);
+        let (tenant, _shutdown_tx) = tenant();
         let app = Router::new()
             .route(
                 "/_chan/extensions/{id}/{capability}/",
@@ -375,6 +571,7 @@ mod tests {
                 "/_chan/extensions/{id}/{capability}/{*path}",
                 any(proxy_extension),
             )
+            .layer(Extension(tenant))
             .layer(Extension(catalog));
         let request = Request::builder()
             .uri(format!(
@@ -401,6 +598,70 @@ mod tests {
         let _ = upstream_task.await;
     }
 
+    #[tokio::test]
+    async fn websocket_proxy_uses_the_same_capability_path_and_private_scope() {
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as ClientMessage;
+
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upstream");
+        let upstream_address = upstream_listener.local_addr().expect("upstream address");
+        let upstream = Router::new().route("/socket", get(upstream_websocket_probe));
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(upstream_listener, upstream)
+                .await
+                .expect("serve upstream")
+        });
+
+        let catalog = ExtensionCatalog::for_test(vec![ExtensionEntry::for_test(
+            "echo",
+            "Echo",
+            &format!("http://{upstream_address}/"),
+            "upstream-secret",
+            CAPABILITY,
+        )]);
+        let (tenant, _shutdown_tx) = tenant();
+        let proxy = Router::new()
+            .route(
+                "/_chan/extensions/{id}/{capability}/{*path}",
+                any(proxy_extension),
+            )
+            .layer(Extension(tenant))
+            .layer(Extension(catalog));
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind proxy");
+        let proxy_address = proxy_listener.local_addr().expect("proxy address");
+        let proxy_task = tokio::spawn(async move {
+            axum::serve(proxy_listener, proxy)
+                .await
+                .expect("serve proxy")
+        });
+
+        let url = format!(
+            "ws://{proxy_address}/_chan/extensions/echo/{CAPABILITY}/socket?t=browser-secret"
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("connect through proxy");
+        socket
+            .send(ClientMessage::Binary(b"doom".to_vec().into()))
+            .await
+            .expect("send binary frame");
+        let echoed = socket
+            .next()
+            .await
+            .expect("echo frame")
+            .expect("valid echo");
+        assert_eq!(echoed.into_data().as_ref(), b"doom");
+
+        proxy_task.abort();
+        upstream_task.abort();
+        let _ = proxy_task.await;
+        let _ = upstream_task.await;
+    }
+
     #[test]
     fn gateway_frame_policy_marker_is_narrow() {
         let mut headers = HeaderMap::new();
@@ -418,6 +679,13 @@ mod tests {
             "null"
         );
         assert!(headers.get(header::SET_COOKIE).is_none());
+    }
+
+    #[test]
+    fn websocket_proxy_bounds_both_sides_of_the_relay() {
+        let config = extension_websocket_config();
+        assert_eq!(config.max_message_size, Some(MAX_WS_MESSAGE_BYTES));
+        assert_eq!(config.max_frame_size, Some(MAX_WS_FRAME_BYTES));
     }
 
     #[test]

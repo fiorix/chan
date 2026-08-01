@@ -9,6 +9,11 @@ import { currentOS, SHORTCUTS, type OS } from "./shortcuts";
 
 export const EXTENSION_KEYMAP_MESSAGE = "chan:extension-host-keymap:v1";
 export const EXTENSION_KEYDOWN_MESSAGE = "chan:extension-keydown:v1";
+export const EXTENSION_SESSION_CONTEXT_MESSAGE = "chan:extension-session-context:v1";
+export const EXTENSION_VIEW_STATE_MESSAGE = "chan:extension-view-state:v1";
+export const EXTENSION_PRESENTATION_REQUEST = "chan:extension-presentation:v1";
+
+export type ExtensionPresentationAction = "enter" | "exit" | "toggle";
 
 export type ExtensionHostKey = {
   code: string;
@@ -60,6 +65,19 @@ export function isExtensionKeydownMessage(value: unknown): value is ExtensionKey
     typeof message.shiftKey === "boolean" &&
     typeof message.repeat === "boolean"
   );
+}
+
+export function extensionPresentationAction(
+  value: unknown,
+): ExtensionPresentationAction | null {
+  if (!value || typeof value !== "object") return null;
+  const message = value as Record<string, unknown>;
+  if (message.type !== EXTENSION_PRESENTATION_REQUEST) return null;
+  return message.action === "enter" ||
+    message.action === "exit" ||
+    message.action === "toggle"
+    ? message.action
+    : null;
 }
 
 export function keyboardEventFromExtension(message: ExtensionKeydownMessage): KeyboardEvent {

@@ -39,24 +39,30 @@ Each regular `.toml` file declares one local subprocess. The lowercase file stem
 | `name` | `String` | required | Launcher row and tab title, 1 to 128 characters after trimming |
 | `command` | `String` | required | Executable to spawn; bare names use `PATH`, while `./name` resolves from the extension config directory |
 | `args` | `String[]` | `[]` | Arguments passed verbatim after `command` |
+| `capabilities` | `String[]` | `[]` | Explicit host grants: `session-context` and/or `presentation`; unknown values reject the declaration |
 
 ```toml
 name = "Echo test"
 command = "/absolute/path/to/chan/target/debug/examples/echo-extension"
 args = []
+capabilities = []
 ```
 
 Chan discovers and starts extensions once per serving process, not once per workspace tenant. The subprocess inherits Chan's environment, starts with the config directory as its working directory, receives null stdin, and owns its stderr. It must print a newline-terminated handshake within five seconds and 32 bounded stdout lines:
 
 ```text
-CHAN_EXTENSION_V1={"url":"http://127.0.0.1:49152/","token":"unguessable-secret"}
+CHAN_EXTENSION_V1={"url":"http://127.0.0.1:49152/","token":"unguessable-secret","singleton":true,"commands":[{"id":"run","title":"Run"}]}
 ```
 
 The URL must use plain HTTP on exact host `127.0.0.1` or `localhost`; IPv6, remote hosts, userinfo, port zero, HTTPS, and a pre-existing `t` query parameter are rejected. Chan keeps that upstream URL and token process-private. Each ready entry gets a random 256-bit path capability under `/_chan/extensions/<id>/<capability>/...`; the authenticated catalog gives the SPA only that tenant-relative path. Chan reverse-proxies the iframe, assets, and HTTP API calls through the workspace's existing IP and port, adding the extension token only on the private upstream leg. Standalone servers, chan-desktop, local devservers, SSH port forwards, and gateway tunnels therefore use the same one-port route. Persisted and cross-window tab state contains the extension ID and title only, never the capability, upstream address, or token.
 
-The iframe omits `allow-same-origin`, so extension scripts have an opaque browser origin even though their network requests share Chan's port. The proxy drops Chan/gateway credentials and upstream cookies, adds no-store and no-referrer response policy, and permits the opaque iframe to call its own capability-scoped HTTP routes. Extension HTML must use relative asset/API URLs; an origin-rooted `/asset.js` targets Chan's tenant root, not the extension capability path. WebSocket proxying is not part of v1.
+The optional handshake fields are `singleton: bool` and a bounded static `commands` array. Each command declares a lowercase-hyphen local `id`, a title, and up to eight keywords. Chan retains the base `extension.<id>` Open command and registers declared commands as `extension.<id>.<command-id>` under Apps. They have no default chords but are assignable through the existing shortcut settings. Singleton commands focus or create one tab and queue delivery until that exact iframe sends `chan:extension-ready:v1`.
 
-Browser key events inside an iframe do not bubble to Chan. An extension that wants shell shortcuts while focused implements the v1 keyboard relay used by the in-tree fixture: accept `chan:extension-host-keymap:v1` from `window.parent`, match only the supplied physical-key descriptors, call `preventDefault()` for a match, and post `chan:extension-keydown:v1` with `key`, `code`, the four modifier booleans, and `repeat`. Chan accepts the relay only from that tab's exact `contentWindow`. There is no privileged workspace or native-capability bridge in v1.
+The iframe omits `allow-same-origin`, so extension scripts have an opaque browser origin even though their network requests share Chan's port. The proxy drops Chan/gateway credentials and upstream cookies, adds no-store and no-referrer response policy, and permits the opaque iframe to call its own capability-scoped HTTP and WebSocket routes. Every upstream request receives a private per-tenant `X-Chan-Extension-Scope` after browser-provided `X-Chan-*` headers are stripped. Extension HTML must use relative asset/API URLs; an origin-rooted `/asset.js` targets Chan's tenant root, not the extension capability path.
+
+Browser key events inside an iframe do not bubble to Chan. An extension that wants shell shortcuts while focused implements the v1 keyboard relay used by the in-tree fixture: accept `chan:extension-host-keymap:v1` from `window.parent`, match only the supplied physical-key descriptors, call `preventDefault()` for a match, and post `chan:extension-keydown:v1` with `key`, `code`, the four modifier booleans, and `repeat`. Chan accepts every bridge message only from that tab's exact `contentWindow`.
+
+The `session-context` grant sends reactive participant snapshots with opaque IDs, display names, Chan roles, statuses, and the receiving window ID. These labels are not authenticated extension identities. The `presentation` grant accepts enter, exit, and toggle requests and promotes the same iframe wrapper into the browser top layer without reparenting it, preserving its browsing context. Chan supplies Restore and Close controls and leaves Escape to the extension. No grant exposes workspace files, native APIs, or a general host message bus.
 
 Successful children live until Chan shuts down. On Unix each child gets its own process group so descendants receive TERM and then KILL during shutdown. A child that exits is not respawned; restart Chan after fixing it. There is no marketplace, installer, remote fetch, lazy start, or `cs` opener in v1. Treat every file in this directory as an explicit local-code-execution grant.
 

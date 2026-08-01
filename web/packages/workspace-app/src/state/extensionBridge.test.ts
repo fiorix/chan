@@ -5,6 +5,8 @@ import { describe, expect, test } from "vitest";
 import { allCommands } from "./commands";
 import {
   EXTENSION_KEYDOWN_MESSAGE,
+  EXTENSION_PRESENTATION_REQUEST,
+  extensionPresentationAction,
   extensionHostKeys,
   isExtensionKeydownMessage,
   keyboardEventFromExtension,
@@ -62,5 +64,20 @@ describe("extension host keyboard bridge", () => {
         repeat: false,
       }),
     ).toBe(false);
+  });
+
+  test("accepts only bounded presentation actions", () => {
+    expect(
+      extensionPresentationAction({
+        type: EXTENSION_PRESENTATION_REQUEST,
+        action: "toggle",
+      }),
+    ).toBe("toggle");
+    expect(
+      extensionPresentationAction({
+        type: EXTENSION_PRESENTATION_REQUEST,
+        action: "fullscreen",
+      }),
+    ).toBeNull();
   });
 });

@@ -942,6 +942,15 @@ export type ExtensionInfo = {
   id: string;
   name: string;
   entry_path: string;
+  capabilities?: ("session-context" | "presentation")[];
+  singleton?: boolean;
+  commands?: ExtensionCommandInfo[];
+};
+
+export type ExtensionCommandInfo = {
+  id: string;
+  title: string;
+  keywords?: string[];
 };
 
 /// Semantic-search state surface. Consumed by the Settings UI to

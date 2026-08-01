@@ -4107,6 +4107,33 @@ export function openExtensionInActivePane(
   return openExtensionInPane(layout.activePaneId, extensionId, title);
 }
 
+/// Focus the existing singleton extension tab wherever it lives in this
+/// window, or create it in the active pane. The extension catalog decides
+/// singleton policy; persisted tabs remain credential-free either way.
+export function openOrFocusExtension(
+  extensionId: string,
+  title: string,
+  singleton: boolean,
+): ExtensionTab | null {
+  if (singleton) {
+    for (const node of Object.values(layout.nodes)) {
+      if (node.kind !== "leaf") continue;
+      for (const side of ["a", "b"] as const) {
+        const existing = paneTabs(node, side).find(
+          (tab): tab is ExtensionTab =>
+            tab.kind === "extension" && tab.extensionId === extensionId,
+        );
+        if (!existing) continue;
+        setPaneActiveTabId(node, existing.id, side);
+        node.side = side;
+        layout.activePaneId = node.id;
+        return existing;
+      }
+    }
+  }
+  return openExtensionInActivePane(extensionId, title);
+}
+
 /// Open a Dashboard tab focused on the Indexing (Search) slide with
 /// auto-rotation paused. Target of clicking the indexing status pill: a user
 /// watching the index build lands straight on the live graph, and it stays

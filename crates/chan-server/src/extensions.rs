@@ -39,6 +39,12 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const CHILD_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const SUPERVISOR_SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
+#[derive(Clone)]
+pub(crate) struct ExtensionTenantContext {
+    pub scope: String,
+    pub shutdown_rx: watch::Receiver<bool>,
+}
+
 #[cfg(unix)]
 type ExtensionProcessGroup = rustix::process::Pid;
 #[cfg(not(unix))]
@@ -49,6 +55,25 @@ pub(crate) struct ExtensionView {
     pub id: String,
     pub name: String,
     pub entry_path: String,
+    pub capabilities: Vec<ExtensionCapability>,
+    pub singleton: bool,
+    pub commands: Vec<ExtensionCommand>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ExtensionCapability {
+    SessionContext,
+    Presentation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExtensionCommand {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -58,6 +83,9 @@ pub(crate) struct ExtensionEntry {
     upstream: Url,
     token: String,
     capability: String,
+    capabilities: Vec<ExtensionCapability>,
+    singleton: bool,
+    commands: Vec<ExtensionCommand>,
 }
 
 impl ExtensionEntry {
@@ -68,6 +96,9 @@ impl ExtensionEntry {
             entry_path: self
                 .public_path_for(&self.upstream)
                 .expect("an extension entry always shares its own upstream origin"),
+            capabilities: self.capabilities.clone(),
+            singleton: self.singleton,
+            commands: self.commands.clone(),
         }
     }
 
@@ -133,6 +164,9 @@ impl ExtensionEntry {
             upstream: Url::parse(upstream).expect("test upstream URL"),
             token: token.to_string(),
             capability: capability.to_string(),
+            capabilities: Vec::new(),
+            singleton: false,
+            commands: Vec::new(),
         }
     }
 }
@@ -253,6 +287,8 @@ struct ExtensionFile {
     command: String,
     #[serde(default)]
     args: Vec<String>,
+    #[serde(default)]
+    capabilities: Vec<ExtensionCapability>,
 }
 
 #[derive(Debug)]
@@ -261,6 +297,7 @@ struct ExtensionDeclaration {
     name: String,
     command: String,
     args: Vec<String>,
+    capabilities: Vec<ExtensionCapability>,
     config_path: PathBuf,
 }
 
@@ -269,6 +306,10 @@ struct ExtensionDeclaration {
 struct ExtensionHandshake {
     url: String,
     token: String,
+    #[serde(default)]
+    singleton: bool,
+    #[serde(default)]
+    commands: Vec<ExtensionCommand>,
 }
 
 struct StartedExtension {
@@ -356,6 +397,7 @@ fn load_declarations(dir: &Path) -> Vec<ExtensionDeclaration> {
             name: name.to_string(),
             command: file.command,
             args: file.args,
+            capabilities: file.capabilities,
             config_path: path,
         });
     }
@@ -385,6 +427,7 @@ async fn start_extension(declaration: ExtensionDeclaration) -> anyhow::Result<St
         name,
         command,
         args,
+        capabilities,
         config_path,
     } = declaration;
     let mut command_builder = Command::new(&command);
@@ -434,7 +477,7 @@ async fn start_extension(declaration: ExtensionDeclaration) -> anyhow::Result<St
             );
         }
     };
-    let entry = match extension_entry(&id, &name, &handshake) {
+    let entry = match extension_entry(&id, &name, capabilities, &handshake) {
         Ok(entry) => entry,
         Err(error) => {
             // `kill_on_drop` covers the direct child, but only the explicit
@@ -508,6 +551,7 @@ where
 fn extension_entry(
     id: &str,
     name: &str,
+    capabilities: Vec<ExtensionCapability>,
     handshake: &ExtensionHandshake,
 ) -> anyhow::Result<ExtensionEntry> {
     if handshake.token.trim().is_empty() {
@@ -546,13 +590,64 @@ fn extension_entry(
     upstream
         .set_host(Some("127.0.0.1"))
         .map_err(|_| anyhow::anyhow!("handshake URL host is invalid"))?;
+    let commands = validate_commands(&handshake.commands)?;
     Ok(ExtensionEntry {
         id: id.to_string(),
         name: name.to_string(),
         upstream,
         token: handshake.token.clone(),
         capability: random_proxy_capability(),
+        capabilities,
+        singleton: handshake.singleton,
+        commands,
     })
+}
+
+fn validate_commands(commands: &[ExtensionCommand]) -> anyhow::Result<Vec<ExtensionCommand>> {
+    if commands.len() > 32 {
+        bail!("handshake declares more than 32 commands");
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut validated = Vec::with_capacity(commands.len());
+    for command in commands {
+        if !extension_command_id(&command.id) {
+            bail!("extension command id is invalid: {}", command.id);
+        }
+        if !seen.insert(command.id.clone()) {
+            bail!("extension command id is duplicated: {}", command.id);
+        }
+        let title = command.title.trim();
+        if title.is_empty() || title.chars().count() > 128 {
+            bail!("extension command title must contain 1 to 128 characters");
+        }
+        if command.keywords.len() > 8 {
+            bail!("extension command declares more than 8 keywords");
+        }
+        let mut keywords = Vec::with_capacity(command.keywords.len());
+        for keyword in &command.keywords {
+            let keyword = keyword.trim();
+            if keyword.is_empty() || keyword.chars().count() > 64 {
+                bail!("extension command keyword must contain 1 to 64 characters");
+            }
+            keywords.push(keyword.to_string());
+        }
+        validated.push(ExtensionCommand {
+            id: command.id.clone(),
+            title: title.to_string(),
+            keywords,
+        });
+    }
+    Ok(validated)
+}
+
+fn extension_command_id(id: &str) -> bool {
+    let mut bytes = id.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first.is_ascii_lowercase() || first.is_ascii_digit())
+        && id.len() <= 64
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 fn random_proxy_capability() -> String {
@@ -666,7 +761,7 @@ mod tests {
         .expect("write valid config");
         std::fs::write(
             dir.path().join("a-first.toml"),
-            "name = \"First\"\ncommand = \"first\"\nargs = [\"one\"]\n",
+            "name = \"First\"\ncommand = \"first\"\nargs = [\"one\"]\ncapabilities = [\"session-context\"]\n",
         )
         .expect("write valid config");
         std::fs::write(
@@ -679,12 +774,21 @@ mod tests {
             "name = \"Unknown field\"\ncommand = \"bad\"\nextra = true\n",
         )
         .expect("write unknown-field config");
+        std::fs::write(
+            dir.path().join("unknown-capability.toml"),
+            "name = \"Unknown capability\"\ncommand = \"bad\"\ncapabilities = [\"workspace-files\"]\n",
+        )
+        .expect("write unknown-capability config");
         std::fs::write(dir.path().join("ignored.txt"), "not TOML").expect("write ignored file");
 
         let declarations = load_declarations(dir.path());
         let ids: Vec<_> = declarations.iter().map(|entry| entry.id.as_str()).collect();
         assert_eq!(ids, ["a-first", "z-last"]);
         assert_eq!(declarations[0].args, ["one"]);
+        assert_eq!(
+            declarations[0].capabilities,
+            [ExtensionCapability::SessionContext]
+        );
     }
 
     #[test]
@@ -706,9 +810,16 @@ mod tests {
         let entry = extension_entry(
             "echo",
             "Echo",
+            vec![ExtensionCapability::Presentation],
             &ExtensionHandshake {
                 url: "http://127.0.0.1:4567/echo?mode=test#app".to_string(),
                 token: "a token/+".to_string(),
+                singleton: true,
+                commands: vec![ExtensionCommand {
+                    id: "say-hello".to_string(),
+                    title: "Say hello".to_string(),
+                    keywords: vec!["greet".to_string()],
+                }],
             },
         )
         .expect("valid handshake");
@@ -719,6 +830,9 @@ mod tests {
         assert!(view.entry_path.ends_with("/echo?mode=test#app"));
         assert!(!view.entry_path.contains("a%20token"));
         assert!(!view.entry_path.contains("4567"));
+        assert_eq!(view.capabilities, [ExtensionCapability::Presentation]);
+        assert!(view.singleton);
+        assert_eq!(view.commands[0].id, "say-hello");
 
         let upstream = entry.upstream_url("/echo", Some("mode=test"));
         assert_eq!(upstream.host_str(), Some("127.0.0.1"));
@@ -741,9 +855,12 @@ mod tests {
                 extension_entry(
                     "echo",
                     "Echo",
+                    Vec::new(),
                     &ExtensionHandshake {
                         url: url.to_string(),
                         token: "secret".to_string(),
+                        singleton: false,
+                        commands: Vec::new(),
                     }
                 )
                 .is_err(),
@@ -754,9 +871,12 @@ mod tests {
             assert!(extension_entry(
                 "echo",
                 "Echo",
+                Vec::new(),
                 &ExtensionHandshake {
                     url: "http://127.0.0.1:4567/".to_string(),
                     token: token.to_string(),
+                    singleton: false,
+                    commands: Vec::new(),
                 }
             )
             .is_err());
@@ -772,10 +892,37 @@ mod tests {
         let handshake = read_handshake(&mut input).await.expect("handshake");
         assert_eq!(handshake.url, "http://localhost:9/");
         assert_eq!(handshake.token, "x");
+        assert!(!handshake.singleton);
+        assert!(handshake.commands.is_empty());
 
         let oversized = vec![b'x'; HANDSHAKE_LINE_LIMIT_BYTES + 1];
         let mut oversized = BufReader::new(oversized.as_slice());
         assert!(read_handshake(&mut oversized).await.is_err());
+    }
+
+    #[test]
+    fn command_manifest_is_bounded_and_slugged() {
+        let valid = ExtensionCommand {
+            id: "play-solo".to_string(),
+            title: " Play Solo ".to_string(),
+            keywords: vec![" doom ".to_string()],
+        };
+        assert_eq!(validate_commands(&[valid]).unwrap()[0].title, "Play Solo");
+
+        for id in ["Play", "-play", "play_solo", "play.solo", ""] {
+            let command = ExtensionCommand {
+                id: id.to_string(),
+                title: "Play".to_string(),
+                keywords: Vec::new(),
+            };
+            assert!(validate_commands(&[command]).is_err(), "accepted {id:?}");
+        }
+        let duplicate = ExtensionCommand {
+            id: "play".to_string(),
+            title: "Play".to_string(),
+            keywords: Vec::new(),
+        };
+        assert!(validate_commands(&[duplicate.clone(), duplicate]).is_err());
     }
 
     #[cfg(unix)]

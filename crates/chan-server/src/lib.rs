@@ -1512,6 +1512,10 @@ fn router_with_extensions(
     state: Arc<AppState>,
     extension_catalog: Arc<extensions::ExtensionCatalog>,
 ) -> Router {
+    let extension_tenant = extensions::ExtensionTenantContext {
+        scope: state.instance_id.clone(),
+        shutdown_rx: state.shutdown_rx.clone(),
+    };
     // ---- Settings-write gate ----------------------------------------
     //
     // Refused with 403 by `tunnel_guard::settings_guard` on a
@@ -1772,6 +1776,7 @@ fn router_with_extensions(
     Router::new()
         .merge(api)
         .fallback(serve_static)
+        .layer(axum::Extension(extension_tenant))
         .layer(axum::Extension(extension_catalog))
         .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn_with_state(

@@ -1380,6 +1380,14 @@
         return;
       }
     }
+    // Extension commands register after the process catalog loads, so they
+    // cannot have compile-time switch cases. Resolve them through the same
+    // registry used by the launcher; this is also the path user-assigned
+    // extension shortcuts and native command dispatch take.
+    if (commandName.startsWith("extension.")) {
+      const command = allCommands().find((candidate) => candidate.id === commandName);
+      if (command?.available(commandContext())) command.run();
+    }
   }
   function onChanCommand(e: Event): void {
     const detail = (e as CustomEvent).detail ?? {};
