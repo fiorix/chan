@@ -47,8 +47,13 @@ mkdir -p "$OUTDIR"
 # mkdist runs on the host: a bind-mounted git worktree is unreadable in a
 # container (its .git is a pointer into the main repo), and the container
 # then needs nothing beyond rpm-build.
+# Capture every line rather than piping into head: mkdist prints three
+# paths under `set -o pipefail`, so a reader that closes the pipe after
+# the first one kills it with EPIPE once the tarball write is slow
+# enough for the reader to exit first.
 TARBALL="$("$REPO/packaging/distros/mkdist" --repo "$REPO" \
-    --outdir "$REPO/target/distros" | head -1)"
+    --outdir "$REPO/target/distros")"
+TARBALL="${TARBALL%%$'\n'*}"
 
 for pkg in "${PKGS[@]}"; do
     echo "==> building SRPM: $pkg"

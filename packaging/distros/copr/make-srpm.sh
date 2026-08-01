@@ -39,8 +39,11 @@ OUTDIR="${OUTDIR:-$REPO/target/distros/srpm}"
 SOURCEDIR="$REPO/target/distros"
 
 if [ -z "$TARBALL" ]; then
+    # Same EPIPE hazard as build-srpm.sh: read all of mkdist's output,
+    # then take its first line.
     TARBALL="$("$REPO/packaging/distros/mkdist" --repo "$REPO" \
-        --outdir "$SOURCEDIR" | head -1)"
+        --outdir "$SOURCEDIR")"
+    TARBALL="${TARBALL%%$'\n'*}"
 elif [ ! -f "$TARBALL" ]; then
     echo "error: $TARBALL not found" >&2
     exit 1
