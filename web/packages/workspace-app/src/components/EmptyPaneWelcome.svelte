@@ -11,6 +11,7 @@
   import DottedSurface from "./DottedSurface.svelte";
   import ExponentialEcho from "./ExponentialEcho.svelte";
   import ExponentialThread from "./ExponentialThread.svelte";
+  import FourteenfoldBloom from "./FourteenfoldBloom.svelte";
   import {
     emptyPaneAnimationName,
     emptyPaneAnimationSpeedLabel,
@@ -21,6 +22,8 @@
     stepEmptyPaneAnimationSpeed,
     type EmptyPaneAnimationId,
   } from "./emptyPaneAnimations";
+  import HexagonalBloom from "./HexagonalBloom.svelte";
+  import LorenzConstellation from "./LorenzConstellation.svelte";
   import MutualForceStarburst from "./MutualForceStarburst.svelte";
   import OrbitalRosette from "./OrbitalRosette.svelte";
   import PenguinGrid from "./PenguinGrid.svelte";
@@ -28,8 +31,12 @@
   import QuadraticBloom from "./QuadraticBloom.svelte";
   import RadialRibbons from "./RadialRibbons.svelte";
   import RecursiveArcBloom from "./RecursiveArcBloom.svelte";
+  import RippledDuet from "./RippledDuet.svelte";
   import SixfoldVortex from "./SixfoldVortex.svelte";
   import SpiralSpokes from "./SpiralSpokes.svelte";
+  import StriatedCurrent from "./StriatedCurrent.svelte";
+  import ThreefoldVeil from "./ThreefoldVeil.svelte";
+  import TwinVeilDance from "./TwinVeilDance.svelte";
 
   const ANIMATION_COMPONENTS = {
     "sixfold-vortex": SixfoldVortex,
@@ -46,6 +53,13 @@
     "mutual-force-starburst": MutualForceStarburst,
     "recursive-arc-bloom": RecursiveArcBloom,
     "chaotic-halo": ChaoticHalo,
+    "threefold-veil": ThreefoldVeil,
+    "striated-current": StriatedCurrent,
+    "lorenz-constellation": LorenzConstellation,
+    "twin-veil-dance": TwinVeilDance,
+    "rippled-duet": RippledDuet,
+    "fourteenfold-bloom": FourteenfoldBloom,
+    "hexagonal-bloom": HexagonalBloom,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {

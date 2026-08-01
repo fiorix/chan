@@ -1,10 +1,25 @@
-import { describe, expect, test } from "vitest";
+// @vitest-environment jsdom
+
+import { mount, tick, unmount } from "svelte";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import SixfoldVortex from "./SixfoldVortex.svelte";
 import {
   advanceSixfoldVortexParticles,
   createSixfoldVortexParticles,
   fitSixfoldVortex,
+  isSixfoldVortexPointDrawable,
   SIXFOLD_VORTEX_PARTICLE_COUNT,
 } from "./sixfoldVortex";
+
+let mounted: Record<string, unknown> | null = null;
+
+afterEach(() => {
+  if (mounted) unmount(mounted);
+  mounted = null;
+  document.body.innerHTML = "";
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe("Sixfold Vortex", () => {
   test("keeps the source simulation rate and attribution", async () => {
@@ -60,6 +75,79 @@ describe("Sixfold Vortex", () => {
 
     expect([...particles].every(Number.isFinite)).toBe(true);
     expect([...particles]).not.toEqual([100, 50, -80, 120]);
+  });
+
+  test("keeps escaped startup particles out of the canvas path", async () => {
+    const renderer = (await import("./SixfoldVortex.svelte?raw"))
+      .default as string;
+    const particles = new Float32Array([0.01, 0.01]);
+
+    advanceSixfoldVortexParticles(particles, 0);
+
+    expect(Math.max(...particles.map(Math.abs))).toBeGreaterThan(1_000_000);
+    expect(
+      isSixfoldVortexPointDrawable(particles[0], particles[1], 800, 800),
+    ).toBe(false);
+    expect(isSixfoldVortexPointDrawable(400, 400, 800, 800)).toBe(true);
+    expect(isSixfoldVortexPointDrawable(Number.NaN, 400, 800, 800)).toBe(
+      false,
+    );
+    expect(renderer).toMatch(
+      /if \([\s\S]{0,80}!isSixfoldVortexPointDrawable\(pointX, pointY, width, height\)[\s\S]{0,80}continue;/,
+    );
+  });
+
+  test("never traces escaped startup particles into the canvas path", async () => {
+    const rect = vi.fn();
+    const context = {
+      beginPath: vi.fn(),
+      clearRect: vi.fn(),
+      fill: vi.fn(),
+      fillRect: vi.fn(),
+      fillStyle: "",
+      globalAlpha: 1,
+      rect,
+      restore: vi.fn(),
+      save: vi.fn(),
+      setTransform: vi.fn(),
+    } as unknown as CanvasRenderingContext2D;
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      context,
+    );
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      value: false,
+    });
+
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) => {
+        frames.push(callback);
+        return frames.length;
+      }),
+    );
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    const randomValues = [0.5, 0.2499863, 0.25];
+    let randomIndex = 0;
+    vi.spyOn(Math, "random").mockImplementation(() => {
+      const value = randomValues[randomIndex % randomValues.length];
+      randomIndex += 1;
+      return value;
+    });
+
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted = mount(SixfoldVortex, { target });
+    await tick();
+
+    expect(rect).toHaveBeenCalledTimes(SIXFOLD_VORTEX_PARTICLE_COUNT);
+    rect.mockClear();
+    expect(frames).toHaveLength(1);
+    frames.shift()?.(performance.now() + 100);
+
+    expect(rect).not.toHaveBeenCalled();
   });
 
   test("fits rectangular panes without distorting the center", () => {

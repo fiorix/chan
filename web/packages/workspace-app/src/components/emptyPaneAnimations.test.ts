@@ -30,6 +30,13 @@ describe("empty pane animation catalog", () => {
       "mutual-force-starburst",
       "recursive-arc-bloom",
       "chaotic-halo",
+      "threefold-veil",
+      "striated-current",
+      "lorenz-constellation",
+      "twin-veil-dance",
+      "rippled-duet",
+      "fourteenfold-bloom",
+      "hexagonal-bloom",
     ]);
     expect(new Set(ids).size).toBe(ids.length);
     expect(new Set(names).size).toBe(names.length);
@@ -46,6 +53,15 @@ describe("empty pane animation catalog", () => {
     expect(emptyPaneAnimationName("exponential-echo")).toBe(
       "Exponential Echo",
     );
+    expect(emptyPaneAnimationName("threefold-veil")).toBe(
+      "Threefold Veil",
+    );
+    expect(emptyPaneAnimationName("lorenz-constellation")).toBe(
+      "Lorenz Constellation",
+    );
+    expect(emptyPaneAnimationName("fourteenfold-bloom")).toBe(
+      "Fourteenfold Bloom",
+    );
   });
 
   test("steps forward and backward with wraparound", () => {
@@ -53,12 +69,21 @@ describe("empty pane animation catalog", () => {
       "radial-ribbons",
     );
     expect(stepEmptyPaneAnimation("sixfold-vortex", -1)).toBe(
-      "chaotic-halo",
+      "hexagonal-bloom",
     );
     expect(stepEmptyPaneAnimation("dotted-waves", 1)).toBe(
       "spiral-spokes",
     );
     expect(stepEmptyPaneAnimation("chaotic-halo", 1)).toBe(
+      "threefold-veil",
+    );
+    expect(stepEmptyPaneAnimation("threefold-veil", 1)).toBe(
+      "striated-current",
+    );
+    expect(stepEmptyPaneAnimation("fourteenfold-bloom", 1)).toBe(
+      "hexagonal-bloom",
+    );
+    expect(stepEmptyPaneAnimation("hexagonal-bloom", 1)).toBe(
       "sixfold-vortex",
     );
   });
@@ -79,7 +104,7 @@ describe("empty pane animation catalog", () => {
     );
     expect(
       randomEmptyPaneAnimation("sixfold-vortex", () => 0.999),
-    ).toBe("chaotic-halo");
+    ).toBe("hexagonal-bloom");
   });
 
   test("picks the initial animation from the full catalog", () => {
@@ -87,7 +112,7 @@ describe("empty pane animation catalog", () => {
       "sixfold-vortex",
     );
     expect(randomEmptyPaneAnimation(undefined, () => 0.999)).toBe(
-      "chaotic-halo",
+      "hexagonal-bloom",
     );
   });
 
@@ -99,10 +124,10 @@ describe("empty pane animation catalog", () => {
     };
 
     expect(initialEmptyPaneAnimation(storage, () => 0.999)).toBe(
-      "chaotic-halo",
+      "hexagonal-bloom",
     );
     expect(initialEmptyPaneAnimation(storage, () => 0)).toBe(
-      "chaotic-halo",
+      "hexagonal-bloom",
     );
 
     persistEmptyPaneAnimation("polar-drift", storage);
