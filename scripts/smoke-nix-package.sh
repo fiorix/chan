@@ -2,34 +2,62 @@
 # Prove the Nix output shape, packaged-update posture, and embedded devserver.
 set -euo pipefail
 
-OUT="${1:?usage: smoke-nix-package.sh <nix-output-path>}"
+OUT="${1:?usage: smoke-nix-package.sh <nix-output-path> <chan|chan-desktop>}"
+PACKAGE="${2:?usage: smoke-nix-package.sh <nix-output-path> <chan|chan-desktop>}"
 BIN="$OUT/bin"
 
-[ -x "$BIN/chan-desktop" ] || {
-    echo "error: chan-desktop is not executable in $OUT" >&2
+case "$PACKAGE" in
+chan)
+    [ -x "$BIN/chan" ] && [ ! -L "$BIN/chan" ] || {
+        echo "error: chan is not a standalone executable in $OUT" >&2
+        exit 1
+    }
+    [ -L "$BIN/cs" ] && [ "$(readlink "$BIN/cs")" = "chan" ] || {
+        echo "error: $BIN/cs does not point to chan" >&2
+        exit 1
+    }
+    for path in \
+        "$BIN/chan-desktop" \
+        "$OUT/share/applications/chan-desktop.desktop" \
+        "$OUT/share/icons/hicolor"; do
+        [ ! -e "$path" ] && [ ! -L "$path" ] || {
+            echo "error: headless package contains desktop path: $path" >&2
+            exit 1
+        }
+    done
+    ;;
+chan-desktop)
+    [ -x "$BIN/chan-desktop" ] || {
+        echo "error: chan-desktop is not executable in $OUT" >&2
+        exit 1
+    }
+    for name in chan cs; do
+        [ -L "$BIN/$name" ] || {
+            echo "error: $BIN/$name is not a symlink" >&2
+            exit 1
+        }
+        [ "$(readlink "$BIN/$name")" = "chan-desktop" ] || {
+            echo "error: $BIN/$name does not point to chan-desktop" >&2
+            exit 1
+        }
+    done
+    [ -f "$OUT/share/applications/chan-desktop.desktop" ] || {
+        echo "error: desktop entry missing from $OUT" >&2
+        exit 1
+    }
+    for size in 32x32 64x64 128x128 256x256 512x512; do
+        [ -f "$OUT/share/icons/hicolor/$size/apps/chan-desktop.png" ] || {
+            echo "error: $size desktop icon missing from $OUT" >&2
+            exit 1
+        }
+    done
+    ;;
+*)
+    echo "error: unknown Nix package: $PACKAGE" >&2
     exit 1
-}
-for name in chan cs; do
-    [ -L "$BIN/$name" ] || {
-        echo "error: $BIN/$name is not a symlink" >&2
-        exit 1
-    }
-    [ "$(readlink "$BIN/$name")" = "chan-desktop" ] || {
-        echo "error: $BIN/$name does not point to chan-desktop" >&2
-        exit 1
-    }
-done
+    ;;
+esac
 
-[ -f "$OUT/share/applications/chan-desktop.desktop" ] || {
-    echo "error: desktop entry missing from $OUT" >&2
-    exit 1
-}
-for size in 32x32 64x64 128x128 256x256 512x512; do
-    [ -f "$OUT/share/icons/hicolor/$size/apps/chan-desktop.png" ] || {
-        echo "error: $size desktop icon missing from $OUT" >&2
-        exit 1
-    }
-done
 [ ! -e "$OUT/lib/systemd/user/chan-devserver.service" ] || {
     echo "error: Nix package must not ship the user devserver unit" >&2
     exit 1
@@ -57,4 +85,4 @@ set -e
 }
 
 scripts/smoke-built-devserver.sh "$BIN/chan"
-echo "Nix package smoke: PASS ($OUT)"
+echo "Nix package smoke: PASS ($PACKAGE at $OUT)"

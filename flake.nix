@@ -1,5 +1,5 @@
 {
-  description = "Chan Desktop";
+  description = "Chan";
 
   # The public release cache. Consumers who accept this flake configuration
   # substitute published closures from chan.cachix.org; the signing key is
@@ -40,13 +40,17 @@
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
           };
+          chan = pkgs.callPackage ./packaging/nix/chan.nix {
+            src = self;
+            version = manifest.workspace.package.version;
+          };
           chan-desktop = pkgs.callPackage ./packaging/nix/chan-desktop.nix {
             src = self;
             version = manifest.workspace.package.version;
           };
         in
         {
-          inherit chan-desktop;
+          inherit chan chan-desktop;
           default = chan-desktop;
         }
       );

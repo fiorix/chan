@@ -120,8 +120,9 @@ def check_make_contract() -> None:
         "nix-check",
         (
             "flake check --all-systems --no-build",
-            "build --no-link --print-out-paths .#chan-desktop",
-            "scripts/smoke-nix-package.sh",
+            "for package in chan chan-desktop",
+            'build --no-link --print-out-paths ".#$$package"',
+            'scripts/smoke-nix-package.sh "$$out" "$$package"',
         ),
     )
     require_target(
@@ -289,12 +290,47 @@ def check_workflow_contract() -> None:
         "ubuntu-24.04-arm",
         "cachix/cachix-action@v17",
         "cachix push chan",
-        "build --no-link --max-jobs 0 --print-out-paths .#chan-desktop",
     ):
         require(
             downstream,
             needle,
             ".github/workflows/publish-downstream.yml",
+        )
+
+    cachix_build = workflow_job(
+        downstream,
+        "cachix-build",
+        ".github/workflows/publish-downstream.yml",
+    )
+    for needle in (
+        "for package in chan chan-desktop",
+        'nix build --no-link --print-out-paths ".#$package"',
+        'scripts/smoke-nix-package.sh "$out" "$package"',
+        'cachix push chan "$CHAN_OUT"',
+        'cachix push chan "$CHAN_DESKTOP_OUT"',
+        "-chan-${{ matrix.system }}",
+        "-chan-desktop-${{ matrix.system }}",
+    ):
+        require(
+            cachix_build,
+            needle,
+            ".github/workflows/publish-downstream.yml job cachix-build",
+        )
+
+    cachix_substitute = workflow_job(
+        downstream,
+        "cachix-substitute",
+        ".github/workflows/publish-downstream.yml",
+    )
+    for needle in (
+        "for package in chan chan-desktop",
+        'nix build --no-link --max-jobs 0 --print-out-paths ".#$package"',
+        'scripts/smoke-nix-package.sh "$out" "$package"',
+    ):
+        require(
+            cachix_substitute,
+            needle,
+            ".github/workflows/publish-downstream.yml job cachix-substitute",
         )
 
 
@@ -321,12 +357,40 @@ def check_nix_contract() -> None:
     for needle in (
         '"x86_64-linux"',
         '"aarch64-linux"',
+        "chan = pkgs.callPackage ./packaging/nix/chan.nix",
         "chan-desktop = pkgs.callPackage ./packaging/nix/chan-desktop.nix",
+        "inherit chan chan-desktop;",
         "default = chan-desktop;",
     ):
         require(flake, needle, "flake.nix")
 
-    package = read("packaging/nix/chan-desktop.nix")
+    headless = read("packaging/nix/chan.nix")
+    for needle in (
+        'pname = "chan";',
+        "# Harvest the replacement from the first build's hash mismatch.",
+        "cargoHash = lib.fakeHash;",
+        'src = "${finalAttrs.src}/web";',
+        'CHAN_PACKAGED = "nix";',
+        'cargoBuildFlags = [\n    "-p"\n    "chan"\n  ];',
+        'ln -s chan "$out/bin/cs"',
+        'test ! -e "$out/lib/systemd/user/chan-devserver.service"',
+    ):
+        require(headless, needle, "packaging/nix/chan.nix")
+    for forbidden in (
+        "webkitgtk_4_1",
+        "wrapGAppsHook4",
+        "desktop-file-utils",
+        "libappindicator-gtk3",
+        "glib-networking",
+        "chan-desktop.desktop",
+        "share/icons",
+    ):
+        if forbidden in headless:
+            raise ContractError(
+                f"packaging/nix/chan.nix: headless package contains {forbidden!r}"
+            )
+
+    desktop = read("packaging/nix/chan-desktop.nix")
     for needle in (
         'CHAN_PACKAGED = "nix";',
         'cargoBuildFlags = [',
@@ -335,10 +399,30 @@ def check_nix_contract() -> None:
         'ln -s chan-desktop "$out/bin/cs"',
         'test ! -e "$out/lib/systemd/user/chan-devserver.service"',
     ):
-        require(package, needle, "packaging/nix/chan-desktop.nix")
+        require(desktop, needle, "packaging/nix/chan-desktop.nix")
+
+    npm_hash_pattern = re.compile(
+        r'npmDeps = fetchNpmDeps \{.*?hash = "([^"]+)";',
+        re.DOTALL,
+    )
+    headless_npm_hash = npm_hash_pattern.search(headless)
+    desktop_npm_hash = npm_hash_pattern.search(desktop)
+    if headless_npm_hash is None or desktop_npm_hash is None:
+        raise ContractError("Nix derivations must both declare npmDeps.hash")
+    if headless_npm_hash.group(1) != desktop_npm_hash.group(1):
+        raise ContractError("Nix derivations must share the web npmDeps.hash")
+    require(
+        desktop,
+        'src = "${finalAttrs.src}/web";',
+        "packaging/nix/chan-desktop.nix",
+    )
 
     smoke = read("scripts/smoke-nix-package.sh")
     for needle in (
+        'case "$PACKAGE" in',
+        "chan)",
+        "chan-desktop)",
+        "headless package contains desktop path",
         '"$BIN/chan" upgrade --check',
         '"self-upgrade is disabled"',
         'scripts/smoke-built-devserver.sh "$BIN/chan"',

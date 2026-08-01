@@ -199,14 +199,17 @@ build-matrix-check: ## Verify every shipped build surface remains gated.
 	$(PYTHON) scripts/check-build-matrix.py
 
 .PHONY: nix-check
-nix-check: ## Evaluate, build, and smoke the default Nix package.
+nix-check: ## Evaluate, build, and smoke both Nix packages.
 	$(NIX) flake check --all-systems --no-build
-	@out="$$($(NIX) build --no-link --print-out-paths .#chan-desktop)"; \
+	@set -e; \
+	for package in chan chan-desktop; do \
+		out="$$($(NIX) build --no-link --print-out-paths ".#$$package")"; \
 		[ -n "$$out" ] && [ "$$(printf '%s\n' "$$out" | wc -l)" -eq 1 ] || { \
-			echo "error: expected one Nix output path, got: $$out" >&2; \
+			echo "error: expected one Nix output path for $$package, got: $$out" >&2; \
 			exit 1; \
 		}; \
-		scripts/smoke-nix-package.sh "$$out"
+		scripts/smoke-nix-package.sh "$$out" "$$package"; \
+	done
 
 .PHONY: pre-push
 pre-push: ## Run the local pre-push gate.

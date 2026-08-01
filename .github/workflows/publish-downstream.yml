@@ -611,11 +611,12 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---- Nix binary cache (Cachix) -------------------------------------------
-  # The flake's default output is chan-desktop. Build it natively on both Linux
-  # architectures, smoke the exact output, then publish its closure and a
-  # versioned pin. Dry runs execute the full build and smoke without requiring
-  # a write token. GA publication is followed by a new-runner build with local
-  # builds disabled, proving the closure can actually substitute from caches.
+  # The flake's default output is chan-desktop. Build both Nix packages natively
+  # on each Linux architecture, smoke the exact outputs, then publish both
+  # closures and versioned pins to the shared cache. Dry runs execute the full
+  # builds and smokes without requiring a write token. GA publication is
+  # followed by a new-runner build with local builds disabled, proving both
+  # closures can actually substitute from caches.
   cachix-build:
     name: Cachix build (${{ matrix.system }})
     needs: context
@@ -659,7 +660,7 @@ jobs:
           set -euo pipefail
           if [ "$PUBLISH" != "true" ]; then
             echo "CACHIX_PUSHABLE=0" >> "$GITHUB_ENV"
-            echo "publish=false; the Nix package will build and smoke without a push."
+            echo "publish=false; the Nix packages will build and smoke without a push."
           elif [ -n "$CACHIX_AUTH_TOKEN" ]; then
             echo "CACHIX_PUSHABLE=1" >> "$GITHUB_ENV"
           elif [ "$CANONICAL" = "true" ]; then
@@ -667,34 +668,44 @@ jobs:
             exit 1
           else
             echo "CACHIX_PUSHABLE=0" >> "$GITHUB_ENV"
-            echo "CACHIX_AUTH_TOKEN is absent on a fork; the package will build but not push."
+            echo "CACHIX_AUTH_TOKEN is absent on a fork; the packages will build but not push."
           fi
 
-      - name: Build and smoke chan-desktop
+      - name: Build and smoke Nix packages
         id: build
         run: |
           set -euo pipefail
           nix flake check --all-systems --no-build
-          out="$(nix build --no-link --print-out-paths .#chan-desktop)"
-          [ -n "$out" ] && [ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ] || {
-            echo "::error::expected one Nix output path, got: $out"
-            exit 1
-          }
-          scripts/smoke-nix-package.sh "$out"
-          echo "out=$out" >> "$GITHUB_OUTPUT"
+          for package in chan chan-desktop; do
+            out="$(nix build --no-link --print-out-paths ".#$package")"
+            [ -n "$out" ] && [ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ] || {
+              echo "::error::expected one Nix output path for $package, got: $out"
+              exit 1
+            }
+            scripts/smoke-nix-package.sh "$out" "$package"
+            output_name="${package//-/_}_out"
+            echo "$output_name=$out" >> "$GITHUB_OUTPUT"
+          done
 
-      - name: Push closure to Cachix
+      - name: Push closures to Cachix
         if: needs.context.outputs.publish == 'true' && env.CACHIX_PUSHABLE == '1'
         env:
-          OUT: ${{ steps.build.outputs.out }}
-        run: cachix push chan "$OUT"
+          CHAN_OUT: ${{ steps.build.outputs.chan_out }}
+          CHAN_DESKTOP_OUT: ${{ steps.build.outputs.chan_desktop_out }}
+        run: |
+          cachix push chan "$CHAN_OUT"
+          cachix push chan "$CHAN_DESKTOP_OUT"
 
-      - name: Pin released closure
+      - name: Pin released closures
         if: needs.context.outputs.publish == 'true' && env.CACHIX_PUSHABLE == '1'
         env:
-          OUT: ${{ steps.build.outputs.out }}
-          PIN: v${{ needs.context.outputs.version }}-chan-desktop-${{ matrix.system }}
-        run: cachix pin chan "$PIN" "$OUT"
+          CHAN_OUT: ${{ steps.build.outputs.chan_out }}
+          CHAN_DESKTOP_OUT: ${{ steps.build.outputs.chan_desktop_out }}
+          CHAN_PIN: v${{ needs.context.outputs.version }}-chan-${{ matrix.system }}
+          CHAN_DESKTOP_PIN: v${{ needs.context.outputs.version }}-chan-desktop-${{ matrix.system }}
+        run: |
+          cachix pin chan "$CHAN_PIN" "$CHAN_OUT"
+          cachix pin chan "$CHAN_DESKTOP_PIN" "$CHAN_DESKTOP_OUT"
 
   cachix-substitute:
     name: Cachix substitute (${{ matrix.system }})
@@ -730,15 +741,17 @@ jobs:
           name: chan
           skipPush: true
 
-      - name: Substitute and smoke chan-desktop
+      - name: Substitute and smoke Nix packages
         run: |
           set -euo pipefail
-          out="$(nix build --no-link --max-jobs 0 --print-out-paths .#chan-desktop)"
-          [ -n "$out" ] && [ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ] || {
-            echo "::error::expected one substituted Nix output path, got: $out"
-            exit 1
-          }
-          scripts/smoke-nix-package.sh "$out"
+          for package in chan chan-desktop; do
+            out="$(nix build --no-link --max-jobs 0 --print-out-paths ".#$package")"
+            [ -n "$out" ] && [ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ] || {
+              echo "::error::expected one substituted Nix output path for $package, got: $out"
+              exit 1
+            }
+            scripts/smoke-nix-package.sh "$out" "$package"
+          done
 
   # The Homebrew tap is a git host for rendered definitions: a push
   # publishes immediately and is only as good as the key behind it. Probe
