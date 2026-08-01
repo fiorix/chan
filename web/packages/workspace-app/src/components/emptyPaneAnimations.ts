@@ -69,6 +69,41 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Chaotic Halo",
     description: "A dense field of coupled orbits forming a shifting halo.",
   },
+  {
+    id: "threefold-veil",
+    name: "Threefold Veil",
+    description: "Three point-cloud veils folding around the center.",
+  },
+  {
+    id: "striated-current",
+    name: "Striated Current",
+    description: "A layered filament current flowing across the pane.",
+  },
+  {
+    id: "lorenz-constellation",
+    name: "Lorenz Constellation",
+    description: "Nine projected Lorenz traces orbiting as a constellation.",
+  },
+  {
+    id: "twin-veil-dance",
+    name: "Twin Veil Dance",
+    description: "Two filament veils unfurling around one another.",
+  },
+  {
+    id: "rippled-duet",
+    name: "Rippled Duet",
+    description: "Paired rippling forms turning through the pane.",
+  },
+  {
+    id: "fourteenfold-bloom",
+    name: "Fourteenfold Bloom",
+    description: "A fourteenfold rotational lace bloom with a quiet center.",
+  },
+  {
+    id: "hexagonal-bloom",
+    name: "Hexagonal Bloom",
+    description: "A sixfold rotational lattice breathing around a quiet center.",
+  },
 ] as const;
 
 export type EmptyPaneAnimationId =

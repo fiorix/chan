@@ -448,11 +448,13 @@ describe("EmptyPaneWelcome empty-pane surface", () => {
       /else[\s\S]{1,180}randomEmptyPaneAnimation\(animation\)/,
     );
     expect(welcome).toMatch(
-      /const ANIMATION_COMPONENTS = \{[\s\S]{1,1000}satisfies Record<EmptyPaneAnimationId, Component>;/,
+      /const ANIMATION_COMPONENTS = \{[\s\S]{1,1800}satisfies Record<EmptyPaneAnimationId, Component>;/,
     );
     expect(welcome).toMatch(/"dotted-waves": DottedSurface/);
     expect(welcome).toMatch(/"exponential-echo": ExponentialEcho/);
     expect(welcome).toMatch(/"chaotic-halo": ChaoticHalo/);
+    expect(welcome).toMatch(/"lorenz-constellation": LorenzConstellation/);
+    expect(welcome).toMatch(/"hexagonal-bloom": HexagonalBloom/);
     expect(welcome).toMatch(/<ActiveAnimation \/>/);
     expect(welcome).not.toMatch(/workspace\.info/);
     expect(welcome).not.toMatch(/welcome-name/);

@@ -29,6 +29,22 @@ export function fitSixfoldVortex(
   };
 }
 
+export function isSixfoldVortexPointDrawable(
+  pointX: number,
+  pointY: number,
+  width: number,
+  height: number,
+): boolean {
+  return (
+    Number.isFinite(pointX) &&
+    Number.isFinite(pointY) &&
+    pointX >= -1 &&
+    pointX <= width &&
+    pointY >= -1 &&
+    pointY <= height
+  );
+}
+
 export function randomGaussian(
   random: RandomSource = Math.random,
 ): number {

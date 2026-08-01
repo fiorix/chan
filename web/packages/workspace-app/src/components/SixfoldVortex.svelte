@@ -4,6 +4,7 @@
     advanceSixfoldVortexParticles,
     createSixfoldVortexParticles,
     fitSixfoldVortex,
+    isSixfoldVortexPointDrawable,
   } from "./sixfoldVortex";
   import {
     canvasCssNumber,
@@ -61,12 +62,18 @@
 
         ctx.beginPath();
         for (let index = 0; index < particles.length; index += 2) {
-          ctx.rect(
-            transform.centerX + particles[index] * transform.scale,
-            transform.centerY + particles[index + 1] * transform.scale,
-            1,
-            1,
-          );
+          const pointX =
+            transform.centerX + particles[index] * transform.scale;
+          const pointY =
+            transform.centerY + particles[index + 1] * transform.scale;
+          // All particles share one path. Excluding escaped particles keeps
+          // vortex singularities from inflating its bounds beyond the canvas.
+          if (
+            !isSixfoldVortexPointDrawable(pointX, pointY, width, height)
+          ) {
+            continue;
+          }
+          ctx.rect(pointX, pointY, 1, 1);
         }
         ctx.globalAlpha = pointAlpha;
         ctx.fillStyle = `rgb(${pointColor})`;
