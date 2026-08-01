@@ -22,8 +22,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
   pname = "chan";
   inherit version src;
 
-  # Harvest the replacement from the first build's hash mismatch.
-  cargoHash = lib.fakeHash;
+  cargoHash = "sha256-ZmSlNsul9gznx7urrU9Pu4xgRLZx2GfAFPZGArSCzjY=";
 
   npmDeps = fetchNpmDeps {
     name = "${finalAttrs.pname}-${finalAttrs.version}-npm-deps";

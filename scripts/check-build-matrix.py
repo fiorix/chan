@@ -367,8 +367,6 @@ def check_nix_contract() -> None:
     headless = read("packaging/nix/chan.nix")
     for needle in (
         'pname = "chan";',
-        "# Harvest the replacement from the first build's hash mismatch.",
-        "cargoHash = lib.fakeHash;",
         'src = "${finalAttrs.src}/web";',
         'CHAN_PACKAGED = "nix";',
         'cargoBuildFlags = [\n    "-p"\n    "chan"\n  ];',
@@ -376,6 +374,12 @@ def check_nix_contract() -> None:
         'test ! -e "$out/lib/systemd/user/chan-devserver.service"',
     ):
         require(headless, needle, "packaging/nix/chan.nix")
+    if not re.search(r'cargoHash = "sha256-[A-Za-z0-9+/=]{44}";', headless):
+        raise ContractError(
+            "packaging/nix/chan.nix: cargoHash must be a pinned sha256. "
+            "A placeholder builds nowhere, and the install page advertises "
+            "this output."
+        )
     for forbidden in (
         "webkitgtk_4_1",
         "wrapGAppsHook4",
