@@ -289,7 +289,7 @@ async fn missing_base_scope_returns_401() {
 }
 
 #[tokio::test]
-async fn invalid_and_scopeless_tokens_are_wire_indistinguishable() {
+async fn stub_validator_auth_failures_match_status_and_body() {
     let validator = StubValidator::new("alice", vec![], &[("scopeless", "ds-1")]);
     let h = spawn_listener(validator, 0).await;
 
