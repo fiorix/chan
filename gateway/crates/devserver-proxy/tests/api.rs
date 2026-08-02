@@ -865,8 +865,37 @@ async fn entry_preflight_is_independent_of_live_devserver_count() {
                 &[
                     ("origin", "https://id.chan.app"),
                     ("content-type", "application/x-www-form-urlencoded"),
+                    ("accept", "text/html"),
                 ],
                 "credential=junk",
+            )
+            .await,
+        );
+        responses.push(
+            send_host_body(
+                &app.router,
+                Method::POST,
+                &host,
+                path,
+                &[
+                    ("origin", "https://id.chan.app"),
+                    ("content-type", "application/x-www-form-urlencoded"),
+                ],
+                "other=junk",
+            )
+            .await,
+        );
+        responses.push(
+            send_host_body(
+                &app.router,
+                Method::POST,
+                &host,
+                path,
+                &[
+                    ("origin", "https://id.chan.app"),
+                    ("content-type", "application/x-www-form-urlencoded"),
+                ],
+                format!("credential={}", "x".repeat(8193)),
             )
             .await,
         );
@@ -881,8 +910,14 @@ async fn entry_preflight_is_independent_of_live_devserver_count() {
                 StatusCode::FORBIDDEN,
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 StatusCode::NOT_FOUND,
+                StatusCode::BAD_REQUEST,
+                StatusCode::PAYLOAD_TOO_LARGE,
             ],
             "live devservers: {live_count}",
+        );
+        assert_eq!(
+            &responses[0], &responses[3],
+            "entry-path 404 response shapes differ"
         );
         if let Some(expected) = &baseline {
             assert_eq!(
