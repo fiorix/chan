@@ -19,7 +19,7 @@ Terminal font size is a hard-coded literal in three coupled places:
 - `fontSize: 14` in the ghostty branch (`web/packages/workspace-app/src/components/TerminalTab.svelte:833`) and in the xterm branch (`:900`, alongside `lineHeight: 1.2`).
 - `measureXtermCellDimensions(host, fontFamily, 14, 1.2)` (`:934-938`), which computes the xterm cell box that `alignGhosttyRendererToXterm` snaps ghostty's renderer to. This third `14` is not decorative: if the two disagree, the ghostty grid misaligns. Any pref must reach all three.
 
-Terminal font FAMILY is already a preference and already spawn-time-only, by an explicit in-code contract ("existing terminals keep their current font until session restart", `TerminalTab.svelte:800-812`, reading `preferences.terminal.font`). It sits in `ServerConfig.terminal` (`crates/chan-server/src/config.rs:42`, the type re-exported from chan-library) with `scrollback_mb`, `default_term`, `mcp_env`, `mouse_capture`, and `ghostty`, and is surfaced in `components/settings/TerminalSection.svelte`, whose every hint already says "New terminals only".
+Terminal font FAMILY is already a preference and already spawn-time-only, by an explicit in-code contract ("existing terminals keep their current font until session restart", `TerminalTab.svelte:800-812`, reading `preferences.terminal.font`). It sits in `ServerConfig.terminal` (`crates/chan-server/src/config.rs:42`, the type re-exported from chan-library) with `scrollback_mb`, `default_term`, `mcp_env`, `mouse_capture`, and `ghostty`, and is surfaced in `components/settings/TerminalSection.svelte`, where every hint scopes its control to new terminals, three of the six with the exact phrase "New terminals only".
 
 Editor sizes are theme-owned CSS variables, and the units are not uniform:
 
@@ -29,7 +29,7 @@ Editor sizes are theme-owned CSS variables, and the units are not uniform:
 | `--chan-editor-source-size` | 14px | inherits | 13px | 13px |
 | `--chan-editor-code-size` | 0.92em | 0.85em | 0.9em | 0.9em |
 
-Consumers: the WYSIWYG body (`editor/Wysiwyg.svelte:926`), the source view (`editor/Source.svelte:501`), and code spans and blocks, which are `em` and therefore follow the body for free. `editor/doc_dom.ts:25,54` and `editor/slide_dom.ts:79,121` copy these vars into the standalone document and slide DOM, so both follow whatever the vars resolve to.
+Consumers: the WYSIWYG body (`editor/Wysiwyg.svelte:926`), the source view (`editor/Source.svelte:501`), and code spans and blocks, which are `em` and therefore follow the body for free. `editor/doc_dom.ts:25,54` and `editor/slide_dom.ts:79,121` copy the body and code sizes into the standalone document and slide DOM, so both follow whatever those two resolve to. `--chan-editor-source-size` is not copied there; only the source view consumes it.
 
 Terminal colours are already derived, already shared across backends, and already live:
 
@@ -44,7 +44,7 @@ Preference ownership is not free-form: `PATCH /api/config` resolves exactly one 
 
 Terminal font size
 
-- Hoist the three `14`s to one module constant, then feed it from a new `ServerConfig.terminal` field beside `terminal.font`. Same owner, same section, same spawn-time hint. `measureXtermCellDimensions` takes the same value, so ghostty stays aligned to the xterm cell box.
+- Hoist the three `14`s to one module constant, then feed it from a new `ServerConfig.terminal` field beside `terminal.font`. Same owner, same section, same spawn-time hint. `measureXtermCellDimensions` takes the same value, so ghostty stays aligned to the xterm cell box. The hoist is not invisible to tests: `web/packages/workspace-app/src/components/TerminalTab.font.test.ts` source-pins `TerminalTab.svelte` via `?raw` and matches the literal `fontSize: 14`, so the pin moves to the constant in the same commit.
 - New terminals only. Deliberate: it matches the neighbouring settings, and it keeps live refit, PTY cols/rows renegotiation, and ghostty re-alignment out of this item.
 
 Editor font size
@@ -57,7 +57,7 @@ Editor font size
 Terminal colours
 
 - A mode plus three colours: `standard` (default, exactly today's derivation) or `custom` with background, foreground, and cursor.
-- Foreground is in the set even though the original note named only cursor and background. Without it, a custom dark background under app light mode renders `--text` dark-grey on dark, because `foreground` is derived from the surface theme.
+- Foreground is in the set, not only cursor and background. Without it, a custom dark background under app light mode renders `--text` dark-grey on dark, because `foreground` is derived from the surface theme.
 - The 16-colour ANSI palette is selected by the relative luminance of the chosen background, not by the app theme. A dark background gets the dark palette, a light one the light palette. That keeps ANSI output readable without asking for sixteen more colours, and it is what "light/dark is ignored for the terminal part" has to mean for a palette that has no other source.
 - Custom paints the whole terminal surface, not just the canvas. The host's resolved `data-theme` comes from the same background luminance, so padding, scrollbar, and find bar match the canvas instead of framing it in the opposite theme. While custom is on it therefore supersedes `hybrid_surface_themes.terminal`. One luminance derivation drives both the palette and the surface theme.
 - The pane tab strip is out of scope: it is Pane-level and shared with editor, browser, graph, and dashboard tabs, so it cannot follow one tab's colours.
