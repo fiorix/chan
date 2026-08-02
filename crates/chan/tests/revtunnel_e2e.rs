@@ -1424,7 +1424,7 @@ async fn udp_bad_specs_and_a_windowless_tunnel_are_refused_with_one_line() {
 fn invalid_specs_fail_at_the_cli_edge_without_a_server() {
     // The parser both ends share.
     assert_eq!(
-        parse_spec("8080", Proto::Tcp).unwrap_err(),
+        parse_spec("8080:", Proto::Tcp).unwrap_err(),
         SpecError::MissingPorts
     );
     assert_eq!(
@@ -1459,7 +1459,7 @@ fn invalid_specs_fail_at_the_cli_edge_without_a_server() {
         stderr
     };
 
-    let stderr = run(&["tunnel", "8080"]);
+    let stderr = run(&["tunnel", "8080:"]);
     assert!(
         stderr.contains("desktop-port:devserver-port"),
         "a missing port names the spec shape: {stderr}"
