@@ -987,6 +987,14 @@
         secretMaskSuffixes,
         terminalSecretMaskColor(),
         secretMaskingEnabled,
+        () => {
+          // The masker logged and disabled itself; sync the toggle state so
+          // the menu label stays truthful, and tell the user visibly.
+          secretMaskingEnabled = false;
+          setTransientStatus(
+            "Secret masking stopped working in this terminal",
+          );
+        },
       );
       // Hold Shift to force a native selection while a TUI holds mouse
       // tracking, on every platform (xterm.js ignores Shift on macOS).

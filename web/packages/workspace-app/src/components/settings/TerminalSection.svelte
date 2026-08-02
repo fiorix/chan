@@ -5,11 +5,21 @@
 
   import { api } from "../../api/client";
   import type { Preferences, TerminalFontChoice } from "../../api/types";
+  import { DEFAULT_SECRET_MASK_SUFFIXES } from "../../terminal/secretMasking";
   import type { CommitFn } from "./commit";
   import SettingField from "./SettingField.svelte";
   import PillToggle from "./PillToggle.svelte";
 
   let { prefs, commit }: { prefs: Preferences; commit: CommitFn } = $props();
+
+  // Secret masking is display-only here (hand-edited TOML / PATCH persist
+  // it; the roadmap scopes Settings to visibility). Absent fields on a
+  // pre-field server display the SPA fallback, which is also what the
+  // terminal masks with, so the shown values are the effective ones.
+  const secretMaskingOn = $derived(prefs.terminal.secret_masking ?? true);
+  const secretMaskSuffixes = $derived(
+    prefs.terminal.secret_mask_suffixes ?? DEFAULT_SECRET_MASK_SUFFIXES,
+  );
 
   const SCROLLBACK_MIN = 10;
   const SCROLLBACK_MAX = 500;
@@ -156,6 +166,21 @@
 </SettingField>
 
 <SettingField
+  label="Secret masking"
+  hint="Masks secret-looking NAME=value values in xterm.js terminals; the buffer stays copyable. Configured in server.toml (terminal.secret_masking, terminal.secret_mask_suffixes); new terminals only. The terminal menu has an ephemeral per-tab toggle."
+>
+  <span class="value">{secretMaskingOn ? "Enabled" : "Disabled"}</span>
+  <details class="suffixes">
+    <summary>Suffixes ({secretMaskSuffixes.length})</summary>
+    <ul class="chips readonly" aria-label="Secret mask suffixes">
+      {#each secretMaskSuffixes as suffix (suffix)}
+        <li class="chip"><span class="chip-name">{suffix}</span></li>
+      {/each}
+    </ul>
+  </details>
+</SettingField>
+
+<SettingField
   label="Terminal font"
   hint="Font for new terminals. Source Code Pro downloads ~80 KB into your config dir on first enable; existing terminals keep their font until they restart."
 >
@@ -184,5 +209,36 @@
   .font-status {
     color: var(--text-secondary);
     font-size: 12px;
+  }
+  /* Read-only value chips, same vocabulary as the workspace settings'
+     excluded-directories baseline list. */
+  .suffixes summary {
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+  .chips {
+    list-style: none;
+    margin: 6px 0 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    background: var(--bg-card, rgba(0, 0, 0, 0.04));
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 2px 10px;
+    font-size: 13px;
+    color: var(--text);
+  }
+  .chips.readonly .chip {
+    color: var(--text-secondary);
+  }
+  .chip-name {
+    font-family: var(--chan-editor-code-family, monospace);
   }
 </style>

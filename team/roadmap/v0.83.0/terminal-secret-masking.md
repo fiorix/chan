@@ -24,7 +24,7 @@ The threat model is **visual exposure only**: screen sharing, screenshots, recor
 
 **Configuration.** Two fields in `[terminal]` in `~/.chan/server.toml`, shipped to the SPA through the existing `GET /api/config` aggregate, documented in `docs/config-reference.md` in the same commit (its lockstep rule):
 
-- `terminal.secret_masking` -- bool, default `true`. Hand-edited; no Settings UI.
+- `terminal.secret_masking` -- bool, default `true`. Hand-edited TOML or `PATCH /api/config` (the field rides the preferences aggregate, so the API accepts it like every other terminal pref). No Settings editing; Terminal settings shows a display-only row (effective Enabled/Disabled plus the collapsed suffix list) so the state is discoverable without opening the TOML.
 - `terminal.secret_mask_suffixes` -- `Vec<String>`, literal suffixes, capped at 100 entries with clamp-and-warn (the `scrollback_mb` clamping precedent), stock default seeded from the CI corpus: `TOKEN`, `SECRET`, `PASSWORD`, `PASSPHRASE`, `API_KEY`, `ACCESS_KEY`, `SECRET_KEY`, `PRIVATE_KEY`, `SSH_KEY`, `SIGNING_KEY`, `KEY_BASE64`, `CREDENTIALS`. Bare `KEY`, `AUTH`, and `CERT` are deliberately absent: `MONKEY`, `AUTHOR`, and public certificates are not secrets, and noisy over-masking trains users to switch the feature off.
 
 **Control.** A per-tab, session-scoped toggle in the Command Launcher and the right-click context menu, modeled on the backend toggle (`web/packages/workspace-app/src/state/commands/terminal.ts:105-116`) and the context-menu engine row (`TerminalTab.svelte:2215-2218`). The toggle is ephemeral -- never persisted, so there is no sticky global off state to forget; toggling re-scans or clears decorations in place with no respawn. When the active backend is ghostty, the toggle reports "masking unavailable on ghostty backend" instead of failing silently (the `onWorkspaceTerminal` gating pattern).
@@ -43,7 +43,8 @@ The threat model is **visual exposure only**: screen sharing, screenshots, recor
 - Masking is visual only. The PTY byte stream, the server ring, the xterm buffer, selection, all copy paths, and serialized snapshots carry cleartext at all times. Server-side masking is not offered on any path.
 - A matched line renders as `NAME=<opaque cells>` with the name fully readable; the overlay is opaque and cannot be read through in either renderer (WebGL or DOM).
 - Copy of a masked region yields the real value. This is a requirement, not a leak.
-- The feature ships enabled by default; the only off switches are the hand-edited TOML flag and the ephemeral per-tab toggle.
+- The feature ships enabled by default; the only off switches are the persisted config flag (hand-edited TOML or `PATCH /api/config`) and the ephemeral per-tab toggle.
+- If decoration registration fails, the masker disables itself and surfaces a visible status instead of throwing into the write callback; a mask that silently stops masking must be loud to the user, not just the console.
 - A second attached window masks independently; an unattached or non-SPA consumer of the stream is unaffected.
 - Ghostty terminals show no masking and say so when the toggle is used.
 
@@ -56,6 +57,7 @@ The threat model is **visual exposure only**: screen sharing, screenshots, recor
 - Toggle off reveals values in place; toggle on re-masks; closing or re-creating the tab returns to the config default. Reattach (snapshot prime plus ring replay) displays masked values without double decorations.
 - Config: a missing field uses the stock default; an entry with regex metacharacters is refused; 101 entries clamp to 100 with one warning.
 - `GET /api/config` carries both fields; `docs/config-reference.md` lists them in the same commit.
+- Terminal settings shows the effective masking state and suffix list read-only, with the hint pointing at `server.toml` and the per-tab toggle.
 - On a ghostty terminal the toggle surfaces the unavailable message and no decoration code runs.
 
 ## Deferred

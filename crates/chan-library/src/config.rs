@@ -15,6 +15,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// assignment matcher.
 pub const TERMINAL_SECRET_MASK_SUFFIX_MAX: usize = 100;
 
+// Mirrored in web/packages/workspace-app/src/terminal/secretMasking.ts
+// (DEFAULT_SECRET_MASK_SUFFIXES), the SPA fallback for servers that predate
+// the field; keep in lockstep. This list is authoritative for current servers.
 const DEFAULT_TERMINAL_SECRET_MASK_SUFFIXES: &[&str] = &[
     "TOKEN",
     "SECRET",

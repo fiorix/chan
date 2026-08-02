@@ -34,4 +34,12 @@ describe("SettingsOverlay config writes (source pins)", () => {
     // after the woff2 lands (matching the terminal card invariant).
     expect(terminalSource).toMatch(/api\.fontsSourceCodeProDownload\(\)/);
   });
+
+  test("secret masking is display-only in terminal settings", () => {
+    // The row renders the effective state and suffixes but owns no commit
+    // path; the values persist via hand-edited TOML or PATCH only.
+    expect(terminalSource).toMatch(/label="Secret masking"/);
+    expect(terminalSource).not.toMatch(/secret_masking:\s/);
+    expect(terminalSource).not.toMatch(/secret_mask_suffixes:\s/);
+  });
 });

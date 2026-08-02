@@ -7,7 +7,7 @@ import type {
   IMarker,
   Terminal,
 } from "@xterm/xterm";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   DEFAULT_SECRET_MASK_SUFFIXES,
   SecretAssignmentMatcher,
@@ -152,7 +152,10 @@ class FakeTerminal {
     ) as unknown as IMarker;
   }
 
+  failDecorations = false;
+
   registerDecoration(options: IDecorationOptions): IDecoration {
+    if (this.failDecorations) return undefined as unknown as IDecoration;
     const decoration = new FakeDecoration(options.marker, options);
     this.decorations.push(decoration);
     return decoration as unknown as IDecoration;
@@ -251,5 +254,37 @@ describe("terminal secret decoration lifecycle", () => {
     masker.setEnabled(true);
     expect(terminal.liveDecorations()).toHaveLength(1);
     expect(line.text).toBe("TOKEN=cleartext");
+  });
+
+  test("a decoration registration failure disables masking, notifies, and recovers via the toggle", () => {
+    const line = new FakeLine("TOKEN=cleartext", 20);
+    const terminal = new FakeTerminal(20, [line]);
+    let notified = 0;
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const masker = new TerminalSecretMasker(
+      terminal as unknown as Terminal,
+      ["TOKEN"],
+      "#6c6c70",
+      true,
+      () => {
+        notified += 1;
+      },
+    );
+
+    terminal.failDecorations = true;
+    masker.scanAll();
+    expect(terminal.liveDecorations()).toHaveLength(0);
+    expect(masker.enabled).toBe(false);
+    expect(notified).toBe(1);
+    expect(consoleError).toHaveBeenCalledOnce();
+
+    // Re-enabling retries from a clean scan once the renderer cooperates.
+    terminal.failDecorations = false;
+    masker.setEnabled(true);
+    expect(terminal.liveDecorations()).toHaveLength(1);
+    expect(notified).toBe(1);
+    consoleError.mockRestore();
   });
 });

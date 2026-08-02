@@ -1,5 +1,9 @@
 import type { IBufferLine, IDecoration, IMarker, Terminal } from "@xterm/xterm";
 
+// Mirrored in crates/chan-library/src/config.rs
+// (DEFAULT_TERMINAL_SECRET_MASK_SUFFIXES), which is authoritative for
+// current servers; this copy is the SPA fallback for servers that predate
+// the field. Keep in lockstep.
 export const DEFAULT_SECRET_MASK_SUFFIXES = [
   "TOKEN",
   "SECRET",
@@ -161,6 +165,7 @@ export class TerminalSecretMasker {
   readonly #term: Terminal;
   readonly #matcher: SecretAssignmentMatcher;
   readonly #decorations = new Set<DecorationEntry>();
+  readonly #onError: (() => void) | null;
   #enabled: boolean;
   #color: string;
   #disposed = false;
@@ -170,11 +175,13 @@ export class TerminalSecretMasker {
     suffixes: readonly string[],
     color: string,
     enabled: boolean,
+    onError?: () => void,
   ) {
     this.#term = term;
     this.#matcher = new SecretAssignmentMatcher(suffixes);
     this.#color = color;
     this.#enabled = enabled;
+    this.#onError = onError ?? null;
   }
 
   get enabled(): boolean {
@@ -321,7 +328,7 @@ export class TerminalSecretMasker {
 
   #registerSpan(span: SecretMaskSpan): void {
     const buffer = this.#activeBuffer();
-    if (!buffer || span.width <= 0) return;
+    if (!buffer || span.width <= 0 || !this.#enabled) return;
     const marker = this.#term.registerMarker(
       span.row - (buffer.baseY + buffer.cursorY),
     );
@@ -336,7 +343,8 @@ export class TerminalSecretMasker {
     });
     if (!decoration) {
       marker.dispose();
-      throw new Error("xterm secret masking decoration registration failed");
+      this.#fail("xterm secret masking decoration registration failed");
+      return;
     }
     const entry = { decoration, marker };
     this.#decorations.add(entry);
@@ -347,6 +355,18 @@ export class TerminalSecretMasker {
     decoration.onRender((element) => {
       element.classList.add("terminal-secret-mask");
     });
+  }
+
+  /// A decoration that cannot register means masking has silently stopped,
+  /// the worst failure mode for a visual feature. Fail loud to the user,
+  /// not just the console: drop every decoration, switch the masker off,
+  /// and notify so the UI can surface a visible status. Re-enabling (the
+  /// per-tab toggle) retries from a clean scan.
+  #fail(message: string): void {
+    console.error(message);
+    this.clear();
+    this.#enabled = false;
+    this.#onError?.();
   }
 
   #disposeEntry(entry: DecorationEntry): void {
