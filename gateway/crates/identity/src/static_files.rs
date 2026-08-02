@@ -21,7 +21,7 @@ code{background:#2a2a2c;padding:.1em .35em;border-radius:3px}</style>\
 <pre><code>cd web &amp;&amp; npm install &amp;&amp; npm run build</code></pre>\
 <p>Then re-run this binary; the SPA will be embedded.";
 
-const SPA_CSP: &str = "default-src 'self'; img-src 'self' data:; \
+const SPA_CSP: &str = "default-src 'self'; img-src 'self' data: https:; \
                        style-src 'self' 'unsafe-inline'; connect-src 'self'; \
                        form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
@@ -57,8 +57,15 @@ mod tests {
             let response = handler(path.parse().unwrap()).await;
             assert_eq!(response.status(), StatusCode::OK, "{path}");
             assert_eq!(
-                response.headers().get(header::CONTENT_SECURITY_POLICY),
-                Some(&HeaderValue::from_static(SPA_CSP)),
+                response
+                    .headers()
+                    .get(header::CONTENT_SECURITY_POLICY)
+                    .expect("HTML response carries CSP")
+                    .to_str()
+                    .unwrap(),
+                "default-src 'self'; img-src 'self' data: https:; \
+                 style-src 'self' 'unsafe-inline'; connect-src 'self'; \
+                 form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
                 "{path}"
             );
             assert_eq!(
