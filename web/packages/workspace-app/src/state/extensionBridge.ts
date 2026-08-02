@@ -136,10 +136,25 @@ function codeForKey(key: string): string | null {
   return punctuation[key] ?? (/^[A-Za-z][A-Za-z0-9]+$/.test(key) ? key : null);
 }
 
+/// Stable identity of one host chord. Used to dedupe the advertised set and
+/// to allowlist relayed keydowns against it.
+export function hostKeyId(key: ExtensionHostKey): string {
+  return `${key.ctrlKey}:${key.altKey}:${key.metaKey}:${key.shiftKey}:${key.code}`;
+}
+
+/// A relayed keydown is honored only when its chord identity was advertised
+/// to the frame; the empty set (before the first keymap post) rejects all.
+export function isAdvertisedHostKey(
+  advertisedKeys: ReadonlySet<string>,
+  key: ExtensionHostKey,
+): boolean {
+  return advertisedKeys.has(hostKeyId(key));
+}
+
 function dedupeHostKeys(keys: ExtensionHostKey[]): ExtensionHostKey[] {
   const seen = new Set<string>();
   return keys.filter((key) => {
-    const id = `${key.ctrlKey}:${key.altKey}:${key.metaKey}:${key.shiftKey}:${key.code}`;
+    const id = hostKeyId(key);
     if (seen.has(id)) return false;
     seen.add(id);
     return true;

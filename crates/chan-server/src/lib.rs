@@ -121,7 +121,7 @@ use routes::{
     api_set_terminal_broadcast, api_storage_reset, api_survey_reply, api_team_config_read,
     api_team_config_write, api_terminal_next_name, api_terminal_ws, api_terminals_roster,
     api_upload_file, api_window_reply, api_workspace_bootstrap, api_write_file, proxy_extension,
-    proxy_extension_root, spawn_roster_broadcaster, ws_upgrade,
+    proxy_extension_root, require_local_mutation, spawn_roster_broadcaster, ws_upgrade,
 };
 #[cfg(feature = "embeddings")]
 use routes::{
@@ -1680,14 +1680,6 @@ fn router_with_extensions(
         .route("/api/config", get(api_get_config))
         .route("/api/build-info", get(api_build_info))
         .route("/api/extensions", get(api_extensions))
-        .route(
-            "/_chan/extensions/{id}/{capability}/",
-            any(proxy_extension_root),
-        )
-        .route(
-            "/_chan/extensions/{id}/{capability}/{*path}",
-            any(proxy_extension),
-        )
         // Session blob keyed by window id (?w=<id>). The frontend
         // sends the window id as a query string (path-segment encode
         // would force special-character escaping for free-form ids);
@@ -1773,6 +1765,22 @@ fn router_with_extensions(
         .route("/api/screensaver/state", get(api_screensaver_state))
         .route("/api/screensaver/verify", post(api_screensaver_verify));
     let api = api.merge(settings_writes);
+    // Extension capability proxy. Non-owner tunnel guests are read-only
+    // here: the shared `require_local_mutation` lane 403s their
+    // POST/PUT/DELETE, mirroring the launcher routes. GETs — including
+    // WebSocket upgrades — still pass for guests (accepted v1 caveat:
+    // the extension document itself loads via GET).
+    let extension_proxy = Router::new()
+        .route(
+            "/_chan/extensions/{id}/{capability}/",
+            any(proxy_extension_root),
+        )
+        .route(
+            "/_chan/extensions/{id}/{capability}/{*path}",
+            any(proxy_extension),
+        )
+        .route_layer(middleware::from_fn(require_local_mutation));
+    let api = api.merge(extension_proxy);
     Router::new()
         .merge(api)
         .fallback(serve_static)

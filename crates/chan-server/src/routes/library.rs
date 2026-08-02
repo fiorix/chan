@@ -987,7 +987,10 @@ async fn require_tunnel_owner(req: Request<Body>, next: Next) -> Response {
     next.run(req).await
 }
 
-async fn require_local_mutation(req: Request<Body>, next: Next) -> Response {
+/// Tunnel guests (a `TunnelOrigin` whose `owner()` is false) may read but
+/// not mutate. Mounted on the launcher mutation lanes here and on the
+/// extension capability proxy routes in `lib.rs`.
+pub(crate) async fn require_local_mutation(req: Request<Body>, next: Next) -> Response {
     let is_mutation = matches!(*req.method(), Method::POST | Method::PUT | Method::DELETE);
     if is_mutation
         && req

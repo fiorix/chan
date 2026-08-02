@@ -10,6 +10,8 @@
     EXTENSION_VIEW_STATE_MESSAGE,
     extensionPresentationAction,
     extensionHostKeys,
+    hostKeyId,
+    isAdvertisedHostKey,
     isExtensionKeydownMessage,
     keyboardEventFromExtension,
   } from "../state/extensionBridge";
@@ -47,6 +49,9 @@
   let menuOpen = $state(false);
   let presenting = $state(false);
   let unregisterFrame: (() => void) | undefined;
+  // Fail-closed until the first postHostKeys: only a relayed chord whose
+  // identity matches an advertised host key is dispatched locally.
+  let advertisedKeys = new Set<string>();
 
   function reload(): void {
     menu?.close();
@@ -75,10 +80,12 @@
   }
 
   function postHostKeys(): void {
+    const keys = extensionHostKeys(allCommands());
+    advertisedKeys = new Set(keys.map(hostKeyId));
     frame?.contentWindow?.postMessage(
       {
         type: EXTENSION_KEYMAP_MESSAGE,
-        keys: extensionHostKeys(allCommands()),
+        keys,
       },
       "*",
     );
@@ -139,6 +146,7 @@
       return;
     }
     if (isExtensionKeydownMessage(event.data)) {
+      if (!isAdvertisedHostKey(advertisedKeys, event.data)) return;
       document.dispatchEvent(keyboardEventFromExtension(event.data));
       return;
     }

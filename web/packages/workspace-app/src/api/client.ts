@@ -1059,8 +1059,10 @@ export const api = {
   /// Compile-time identity (chan version + cargo features). Used by
   /// the Settings "About" footer.
   buildInfo: () => req<BuildInfo>("GET", "/api/build-info"),
-  /// Ready local extensions for this process. Tunnel requests receive an empty
-  /// list because their browser cannot reach the owner's loopback endpoints.
+  /// Ready local extensions for this process. The catalog is served to any
+  /// authenticated client; over the gateway tunnel, non-owner participants
+  /// get read-only proxy access (mutations 403) via the server-side
+  /// require_local_mutation layer.
   extensions: () => req<ExtensionInfo[]>("GET", "/api/extensions"),
   /// Reset the workspace at one of three escalating levels. After a
   /// successful reset the caller should reload the window so cached

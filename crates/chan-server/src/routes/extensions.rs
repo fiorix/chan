@@ -1,5 +1,6 @@
 //! Process-ready extension catalog and capability-scoped reverse proxy.
 
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -9,7 +10,7 @@ use axum::extract::{FromRequestParts, OriginalUri, Path as AxumPath};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
-use futures::{SinkExt, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
@@ -21,6 +22,11 @@ use crate::extensions::{
 const EXTENSION_FRAME_POLICY: &str = "frame-ancestors 'self'";
 const EXTENSION_SCOPE_HEADER: &str = "x-chan-extension-scope";
 const EXTENSION_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+// Per-item idle bound on both proxied body directions. There is deliberately
+// no total request deadline and no body size cap — long-lived streaming and
+// multi-MB downloads are legitimate — but a stalled upstream (or stalled
+// client body) must not pin the relay task forever.
+const UPSTREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_WS_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_WS_FRAME_BYTES: usize = 1024 * 1024;
 
@@ -106,7 +112,11 @@ async fn proxy_extension_request(
         .request(parts.method, upstream.clone())
         .headers(headers)
         .header(EXTENSION_SCOPE_HEADER, &tenant.scope)
-        .body(reqwest::Body::wrap_stream(body.into_data_stream()));
+        .body(reqwest::Body::wrap_stream(idle_timeout_stream(
+            body.into_data_stream(),
+            &id,
+            "request",
+        )));
     if had_origin {
         outgoing = outgoing.header(header::ORIGIN, upstream.origin().ascii_serialization());
     }
@@ -128,7 +138,11 @@ async fn proxy_extension_request(
         original_uri.path(),
     );
     apply_extension_response_policy(&mut response_headers);
-    let body = Body::from_stream(upstream_response.bytes_stream());
+    let body = Body::from_stream(idle_timeout_stream(
+        upstream_response.bytes_stream(),
+        &id,
+        "response",
+    ));
     let mut response = Response::new(body);
     *response.status_mut() = status;
     *response.headers_mut() = response_headers;
@@ -279,6 +293,68 @@ fn extension_proxy_client() -> &'static reqwest::Client {
     })
 }
 
+/// Bound the idle gap between items on one proxied body stream. A stalled
+/// upstream — or a stalled client body — ends the stream cleanly after
+/// [`UPSTREAM_IDLE_TIMEOUT`] rather than pinning the relay task forever.
+struct IdleTimeoutStream<S> {
+    stream: Pin<Box<S>>,
+    sleep: Pin<Box<tokio::time::Sleep>>,
+    id: String,
+    direction: &'static str,
+    expired: bool,
+}
+
+fn idle_timeout_stream<S>(stream: S, id: &str, direction: &'static str) -> IdleTimeoutStream<S>
+where
+    S: futures::Stream,
+{
+    IdleTimeoutStream {
+        stream: Box::pin(stream),
+        sleep: Box::pin(tokio::time::sleep(UPSTREAM_IDLE_TIMEOUT)),
+        id: id.to_string(),
+        direction,
+        expired: false,
+    }
+}
+
+impl<S> futures::Stream for IdleTimeoutStream<S>
+where
+    S: futures::Stream,
+{
+    type Item = S::Item;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.expired {
+            return std::task::Poll::Ready(None);
+        }
+        match this.stream.as_mut().poll_next(cx) {
+            std::task::Poll::Ready(Some(item)) => {
+                this.sleep
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + UPSTREAM_IDLE_TIMEOUT);
+                std::task::Poll::Ready(Some(item))
+            }
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Pending => match this.sleep.poll_unpin(cx) {
+                std::task::Poll::Ready(()) => {
+                    this.expired = true;
+                    tracing::warn!(
+                        extension_id = %this.id,
+                        direction = this.direction,
+                        "extension proxy stream idle, closing"
+                    );
+                    std::task::Poll::Ready(None)
+                }
+                std::task::Poll::Pending => std::task::Poll::Pending,
+            },
+        }
+    }
+}
+
 fn cors_preflight(method: &Method, headers: &HeaderMap) -> Option<Response> {
     if method != Method::OPTIONS {
         return None;
@@ -320,7 +396,8 @@ fn strip_request_headers(headers: &mut HeaderMap) {
         .keys()
         .filter(|name| {
             let name = name.as_str();
-            name == "host"
+            name == "authorization"
+                || name == "host"
                 || name == "cookie"
                 || name == "origin"
                 || name == "referer"
@@ -381,6 +458,13 @@ fn rewrite_location(
         return;
     };
     let Some(public_path) = entry.public_path_for(&upstream_location) else {
+        // Off-origin redirect. A foreign loopback target is never reflected
+        // to the browser: the sandboxed page could otherwise hand the
+        // parent's browsing context a raw loopback address. Genuinely
+        // external targets pass through unchanged.
+        if targets_loopback(&upstream_location) {
+            headers.remove(header::LOCATION);
+        }
         return;
     };
     let tenant_prefix = original_path
@@ -391,6 +475,18 @@ fn rewrite_location(
         return;
     };
     headers.insert(header::LOCATION, value);
+}
+
+/// Exact loopback hosts an off-origin redirect may target. The URL parser
+/// canonicalizes non-standard IPv4 forms (`127.1`, `0x7f...`), so matching
+/// the parsed host covers them.
+fn targets_loopback(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(address)) => address == std::net::Ipv4Addr::LOCALHOST,
+        Some(url::Host::Ipv6(address)) => address == std::net::Ipv6Addr::LOCALHOST,
+        Some(url::Host::Domain(domain)) => domain == "localhost",
+        None => false,
+    }
 }
 
 fn apply_extension_response_policy(headers: &mut HeaderMap) {
@@ -465,6 +561,9 @@ mod tests {
         }
         if headers.contains_key(header::COOKIE) {
             return (StatusCode::BAD_REQUEST, "cookie leaked").into_response();
+        }
+        if headers.contains_key(header::AUTHORIZATION) {
+            return (StatusCode::BAD_REQUEST, "authorization leaked").into_response();
         }
         if headers
             .get(EXTENSION_SCOPE_HEADER)
@@ -579,6 +678,7 @@ mod tests {
             ))
             .header(header::ORIGIN, "null")
             .header(header::COOKIE, "chan=secret")
+            .header(header::AUTHORIZATION, "Bearer whatever")
             .body(Body::empty())
             .unwrap();
         let response = app.oneshot(request).await.expect("proxy response");
@@ -708,5 +808,139 @@ mod tests {
                 .unwrap(),
             "null"
         );
+    }
+
+    #[test]
+    fn strip_request_headers_drops_the_chan_authorization_bearer() {
+        let mut headers = HeaderMap::from_iter([
+            (
+                header::AUTHORIZATION,
+                HeaderValue::from_static("Bearer whatever"),
+            ),
+            (header::COOKIE, HeaderValue::from_static("chan=secret")),
+            (
+                header::REFERER,
+                HeaderValue::from_static("https://attacker.example/"),
+            ),
+        ]);
+        strip_request_headers(&mut headers);
+        assert!(headers.get(header::AUTHORIZATION).is_none());
+        assert!(headers.get(header::COOKIE).is_none());
+        assert!(headers.get(header::REFERER).is_none());
+    }
+
+    #[test]
+    fn same_origin_redirect_rewrites_to_the_proxy_path() {
+        let catalog = catalog();
+        let entry = catalog.find("echo", CAPABILITY).expect("entry").clone();
+        let upstream = entry.upstream_url("/app/", None);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::LOCATION, HeaderValue::from_static("/app/next?x=1"));
+        rewrite_location(
+            &mut headers,
+            &entry,
+            &upstream,
+            &format!("{EXTENSION_PROXY_PREFIX}/echo/{CAPABILITY}/app/"),
+        );
+        assert_eq!(
+            headers.get(header::LOCATION).unwrap(),
+            &format!("{EXTENSION_PROXY_PREFIX}/echo/{CAPABILITY}/app/next?x=1"),
+        );
+    }
+
+    #[test]
+    fn external_redirect_passes_through_unchanged() {
+        let catalog = catalog();
+        let entry = catalog.find("echo", CAPABILITY).expect("entry").clone();
+        let upstream = entry.upstream_url("/app/", None);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::LOCATION,
+            HeaderValue::from_static("https://example.com/elsewhere"),
+        );
+        rewrite_location(
+            &mut headers,
+            &entry,
+            &upstream,
+            &format!("{EXTENSION_PROXY_PREFIX}/echo/{CAPABILITY}/app/"),
+        );
+        assert_eq!(
+            headers.get(header::LOCATION).unwrap(),
+            "https://example.com/elsewhere"
+        );
+    }
+
+    #[test]
+    fn foreign_loopback_redirect_is_stripped() {
+        let catalog = catalog();
+        let entry = catalog.find("echo", CAPABILITY).expect("entry").clone();
+        let upstream = entry.upstream_url("/app/", None);
+        let original_path = format!("{EXTENSION_PROXY_PREFIX}/echo/{CAPABILITY}/app/");
+        for location in [
+            "http://127.0.0.1:3000/admin",
+            "http://localhost:8080/",
+            "http://[::1]:9000/",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::LOCATION, HeaderValue::from_str(location).unwrap());
+            rewrite_location(&mut headers, &entry, &upstream, &original_path);
+            assert!(headers.get(header::LOCATION).is_none(), "{location}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tunnel_guests_are_read_only_on_the_proxy_routes() {
+        let (tenant, _shutdown_tx) = tenant();
+        // Mirror the lib.rs mounting: both proxy routes in one sub-router
+        // behind the shared guest read-only lane.
+        let extension_proxy = Router::new()
+            .route(
+                "/_chan/extensions/{id}/{capability}/",
+                any(proxy_extension_root),
+            )
+            .route(
+                "/_chan/extensions/{id}/{capability}/{*path}",
+                any(proxy_extension),
+            )
+            .route_layer(axum::middleware::from_fn(
+                crate::routes::require_local_mutation,
+            ));
+        let app = Router::new()
+            .merge(extension_proxy)
+            .layer(Extension(tenant))
+            .layer(Extension(catalog()));
+
+        // A non-owner TunnelOrigin: mutations 403 before any proxying.
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/_chan/extensions/echo/{CAPABILITY}/state"))
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(crate::TunnelOrigin { caller: None });
+        let response = app.clone().oneshot(request).await.expect("guest POST");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // GETs — the WebSocket upgrade included — still pass for guests: the
+        // refused upstream connect proves the guard did not fire.
+        let mut request = Request::builder()
+            .uri(format!("/_chan/extensions/echo/{CAPABILITY}/state"))
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(crate::TunnelOrigin { caller: None });
+        let response = app.clone().oneshot(request).await.expect("guest GET");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+        // Local callers carry no TunnelOrigin and are unaffected.
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/_chan/extensions/echo/{CAPABILITY}/state"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.expect("local POST");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     }
 }
