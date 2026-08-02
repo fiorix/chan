@@ -35,7 +35,7 @@ Small to moderate. The item touches three request boundaries, focused tests, and
 
 ## Acceptance
 
-- Add `Accept: text/html` to the invalid-credential entry case and observe `entry_preflight_is_independent_of_live_devserver_count` fail on the uncorrected handler at exactly one live devserver, then pass after the fix. The same test must pin 400 and 413 across live counts.
+- `entry_preflight_is_independent_of_live_devserver_count` sends `Accept: text/html` with an invalid credential and pins identical complete responses across zero, one, and two live devservers; malformed and oversized forms likewise pin 400 and 413 across every count.
 - `stub_validator_auth_failures_match_status_and_body`, `invalid_token_returns_401`, and `missing_base_scope_returns_401` pass; no server tunnel path emits 403 for missing scope.
 - `html_responses_carry_spa_security_headers` asserts the literal CSP containing `img-src 'self' data: https:` and passes against a built identity SPA bundle.
 - `client_ip_accepts_only_a_well_formed_leftmost_address` passes for canonical IPv4 and IPv6 and rejects non-address prose.
