@@ -24,7 +24,6 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | item | state | what needs to happen |
 | --- | --- | --- |
 | [large-transfer-capability](v0.83.0/large-transfer-capability.md) | registered, grounded, sequenced after v0.82.0 | tune the tunnel transport, build the bulk-transfer lane and its admission control, then raise the write ceiling last |
-| [extensions-v1](v0.83.0/extensions-v1.md) | validated, release unpinned | single-port proxied echo tab, iframe shortcuts, and lifecycle gate are ready for review; marketplace and privileged host APIs remain deferred |
 | [web-marketing-onboarding](v0.83.0/web-marketing-onboarding.md) | registered, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
 | [cs-open-non-text-reveal](v0.83.0/cs-open-non-text-reveal.md) | registered, grounded, ruled, ready to spec | drop `open_path`'s binary refusal so any non-text file reveals in the browser, and view it when the SPA can |
 | [hybrid-nav-staged-editor-bubble](v0.83.0/hybrid-nav-staged-editor-bubble.md) | registered, grounded, ruled, ready to spec | render the queued new-draft / new-diagram intents as removable staged chips in the pane's tab strip |
@@ -36,6 +35,12 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | item | state | what needs to happen |
 | --- | --- | --- |
 | [notifications](v0.84.0/notifications.md) | registered, not specced | ground `cs notify` and decide how a local session or a devserver reaches chan-launcher to raise a text notification in the browser or chan-desktop |
+
+### v0.84.0
+
+| item | state | what needs to happen |
+| --- | --- | --- |
+| [extensions-v1](v0.84.0/extensions-v1.md) | validated, release unpinned | single-port proxied echo tab, iframe shortcuts, and lifecycle gate are ready for review; marketplace and privileged host APIs remain deferred |
 
 ## Completed
 
