@@ -2888,8 +2888,8 @@ pub(crate) fn client_ip(headers: &HeaderMap) -> Option<String> {
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.split(',').next())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_string())
 }
 
 pub(crate) fn user_agent(headers: &HeaderMap) -> Option<String> {
@@ -2919,6 +2919,25 @@ pub(crate) fn user_agent(headers: &HeaderMap) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_ip_accepts_only_a_well_formed_leftmost_address() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("192.0.2.10, 198.51.100.20"),
+        );
+        assert_eq!(client_ip(&headers).as_deref(), Some("192.0.2.10"));
+
+        headers.insert("x-forwarded-for", HeaderValue::from_static("2001:0db8::1"));
+        assert_eq!(client_ip(&headers).as_deref(), Some("2001:db8::1"));
+
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("attacker prose, 192.0.2.10"),
+        );
+        assert_eq!(client_ip(&headers), None);
+    }
 
     #[tokio::test]
     async fn entry_handoff_preserves_origin_in_header_and_meta_policy() {

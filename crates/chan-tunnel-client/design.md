@@ -40,7 +40,7 @@ flowchart TD
     Tcp --> Conn["TLS h2-ALPN (or h2c) + h2 client"]
     Conn --> Post["POST /v1/tunnel, Authorization: Bearer"]
     Post --> Status{"response status"}
-    Status -->|"401 / 403 / other"| Failed["emit DialFailed"]
+    Status -->|"401 / other"| Failed["emit DialFailed"]
     Status -->|200| Hs["H2Duplex + handshake: Hello / HelloAck"]
     Hs -->|refused| Failed
     Hs -->|ok| Reg["emit Connected, reset backoff"]
@@ -117,8 +117,7 @@ Client-specific notes:
 - Request: `POST {tunnel_url}` with `Authorization: Bearer <token>`, empty body. The "body" is the bidirectional h2 stream the handshake then runs over.
 - Response codes that `dial` recognises:
   - `200 OK`: handshake proceeds.
-  - `401 UNAUTHORIZED`: bad token. Mapped to `ClientError::Handshake("unauthorized (bad token)")`.
-  - `403 FORBIDDEN`: token missing tunnel scope. Mapped to `ClientError::Handshake("forbidden (token missing tunnel scope)")`.
+  - `401 UNAUTHORIZED`: invalid token or missing tunnel scope. Mapped to `ClientError::Handshake("unauthorized (bad token or missing tunnel scope)")`.
   - anything else: `ClientError::Handshake("unexpected status ...")`.
 - After the response headers arrive, `H2Duplex::new(send, recv)` becomes the duplex; `handshake` writes the `Hello` and reads the `HelloAck`. A `HelloAck::Refused` becomes `ClientError::RemoteRefusal { code, message }`; the codes are the `chan_tunnel_proto::error_code` strings, so callers can match known refusals and fall back to the message for unknown codes. A non-V1 ack protocol is a `Handshake` error.
 - yamux client mode (`Mode::Client`) over the duplex. Data substreams are inbound; the only outbound stream is the admission-lease refresh protocol.

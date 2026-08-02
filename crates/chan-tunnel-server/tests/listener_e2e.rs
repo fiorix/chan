@@ -17,7 +17,7 @@ use chan_tunnel_server::{
     serve_tunnel_listener, serve_tunnel_listener_with_admission, RegistrationAdmission,
     RegistrationPermit, Registry, ServerError, Validated, Validator, TUNNEL_SCOPE,
 };
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use url::Url;
 use uuid::Uuid;
 
@@ -162,6 +162,33 @@ fn cfg(port: u16, token: &str, workspace: &str) -> ClientConfig {
     }
 }
 
+async fn auth_response(port: u16, token: &str) -> (http::StatusCode, Vec<u8>) {
+    let tcp = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect listener");
+    let (mut h2, conn) = h2::client::handshake(tcp).await.expect("h2 handshake");
+    let _driver = tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    let request = http::Request::builder()
+        .method(http::Method::POST)
+        .uri(format!(
+            "https://chan-tunnel{}",
+            chan_tunnel_proto::TUNNEL_PATH
+        ))
+        .header(http::header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(())
+        .expect("constant request");
+    let (response, _send) = h2.send_request(request, true).expect("send auth request");
+    let mut response = response.await.expect("auth response");
+    let status = response.status();
+    let mut body = Vec::new();
+    while let Some(chunk) = response.body_mut().data().await {
+        body.extend_from_slice(&chunk.expect("response body chunk"));
+    }
+    (status, body)
+}
+
 /// Spin-wait briefly for the listener to insert the registration.
 /// The client's `dial` returns the moment it reads HelloAck, but
 /// the server side does `register_with_cap` a few statements later;
@@ -237,14 +264,15 @@ async fn invalid_token_returns_401() {
         .map(|_| ())
         .expect_err("bad token should fail");
     let msg = err.to_string();
-    // Client's dial layer translates 401 into "unauthorized (bad
-    // token)" before the substream handshake even starts.
-    assert!(msg.to_lowercase().contains("unauthorized"), "got: {msg}");
+    assert!(
+        msg.contains("unauthorized (bad token or missing tunnel scope)"),
+        "got: {msg}"
+    );
     assert!(h.registry.list_workspaces_for("alice").is_empty());
 }
 
 #[tokio::test]
-async fn missing_base_scope_returns_403() {
+async fn missing_base_scope_returns_401() {
     // Token authenticates but lacks `TUNNEL_SCOPE` entirely.
     let validator = StubValidator::new("alice", vec![], &[("good", "ds-1")]);
     let h = spawn_listener(validator, 0).await;
@@ -253,8 +281,23 @@ async fn missing_base_scope_returns_403() {
         .map(|_| ())
         .expect_err("missing tunnel scope should fail");
     let msg = err.to_string();
-    assert!(msg.to_lowercase().contains("forbidden"), "got: {msg}");
+    assert!(
+        msg.contains("unauthorized (bad token or missing tunnel scope)"),
+        "got: {msg}"
+    );
     assert!(h.registry.list_workspaces_for("alice").is_empty());
+}
+
+#[tokio::test]
+async fn stub_validator_auth_failures_match_status_and_body() {
+    let validator = StubValidator::new("alice", vec![], &[("scopeless", "ds-1")]);
+    let h = spawn_listener(validator, 0).await;
+
+    let invalid = auth_response(h.port, "unknown").await;
+    let scopeless = auth_response(h.port, "scopeless").await;
+
+    assert_eq!(invalid, (http::StatusCode::UNAUTHORIZED, Vec::new()));
+    assert_eq!(scopeless, invalid);
 }
 
 #[tokio::test]

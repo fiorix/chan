@@ -43,6 +43,8 @@ use devserver_proxy::session_store::SessionStore;
 
 const APEX_HOST: &str = "devserver.chan.app";
 const WILDCARD_SUFFIX: &str = ".devserver.chan.app";
+const TEST_IDENTITY_ORIGIN: &str = "https://gw.chan.app";
+const TEST_DASHBOARD_URL: &str = "https://gw.chan.app/workspaces";
 
 fn test_entry_signer() -> devserver_gate::EntrySigner {
     devserver_gate::EntrySigner::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap()
@@ -146,8 +148,8 @@ impl TestApp {
             wildcard_suffix: WILDCARD_SUFFIX.into(),
             identity_url: "http://127.0.0.1:7000/".parse().unwrap(),
             identity_auth_token: "unused-in-tests".into(),
-            dashboard_url: "https://id.chan.app/workspaces".into(),
-            identity_origin: CanonicalOrigin::parse("https://id.chan.app").unwrap(),
+            dashboard_url: TEST_DASHBOARD_URL.into(),
+            identity_origin: CanonicalOrigin::parse(TEST_IDENTITY_ORIGIN).unwrap(),
             entry_verifiers: test_entry_verifiers(),
             admission_lease_verifier: test_admission_verifier(),
             control_url: "http://127.0.0.1:7101/".parse().unwrap(),
@@ -372,7 +374,7 @@ async fn exchange_entry(
         host,
         devserver_gate::ENTRY_EXCHANGE_PATH,
         &[
-            ("origin", "https://id.chan.app"),
+            ("origin", TEST_IDENTITY_ORIGIN),
             ("content-type", "application/x-www-form-urlencoded"),
         ],
         body,
@@ -504,8 +506,8 @@ async fn apex_readyz_reflects_control_readiness() {
         wildcard_suffix: WILDCARD_SUFFIX.into(),
         identity_url: "http://127.0.0.1:7000/".parse().unwrap(),
         identity_auth_token: "unused-in-tests".into(),
-        dashboard_url: "https://id.chan.app/workspaces".into(),
-        identity_origin: CanonicalOrigin::parse("https://id.chan.app").unwrap(),
+        dashboard_url: TEST_DASHBOARD_URL.into(),
+        identity_origin: CanonicalOrigin::parse(TEST_IDENTITY_ORIGIN).unwrap(),
         entry_verifiers: test_entry_verifiers(),
         admission_lease_verifier: test_admission_verifier(),
         control_url: "http://127.0.0.1:7101/".parse().unwrap(),
@@ -566,7 +568,7 @@ async fn wildcard_root_redirects_to_dashboard() {
     .await;
     assert!(s.is_redirection(), "got {s}");
     let loc = hdrs.get(header::LOCATION).unwrap().to_str().unwrap();
-    assert_eq!(loc, "https://id.chan.app/workspaces");
+    assert_eq!(loc, TEST_DASHBOARD_URL);
     app.cleanup().await;
 }
 
@@ -722,19 +724,19 @@ async fn entry_exchange_rejects_origin_content_type_and_form_ambiguity() {
         ),
         (
             vec![
-                ("origin", "https://id.chan.app"),
-                ("origin", "https://id.chan.app"),
+                ("origin", TEST_IDENTITY_ORIGIN),
+                ("origin", TEST_IDENTITY_ORIGIN),
                 ("content-type", "application/x-www-form-urlencoded"),
             ],
             StatusCode::FORBIDDEN,
         ),
         (
-            vec![("origin", "https://id.chan.app")],
+            vec![("origin", TEST_IDENTITY_ORIGIN)],
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
         ),
         (
             vec![
-                ("origin", "https://id.chan.app"),
+                ("origin", TEST_IDENTITY_ORIGIN),
                 (
                     "content-type",
                     "application/x-www-form-urlencoded; charset=utf-8",
@@ -744,7 +746,7 @@ async fn entry_exchange_rejects_origin_content_type_and_form_ambiguity() {
         ),
         (
             vec![
-                ("origin", "https://id.chan.app"),
+                ("origin", TEST_IDENTITY_ORIGIN),
                 ("content-type", "application/x-www-form-urlencoded"),
                 ("content-type", "application/x-www-form-urlencoded"),
             ],
@@ -776,7 +778,7 @@ async fn entry_exchange_rejects_origin_content_type_and_form_ambiguity() {
             &host,
             devserver_gate::ENTRY_EXCHANGE_PATH,
             &[
-                ("origin", "https://id.chan.app"),
+                ("origin", TEST_IDENTITY_ORIGIN),
                 ("content-type", "application/x-www-form-urlencoded"),
             ],
             malformed,
@@ -792,7 +794,7 @@ async fn entry_exchange_rejects_origin_content_type_and_form_ambiguity() {
         &host,
         devserver_gate::ENTRY_EXCHANGE_PATH,
         &[
-            ("origin", "https://id.chan.app"),
+            ("origin", TEST_IDENTITY_ORIGIN),
             ("content-type", "application/x-www-form-urlencoded"),
         ],
         oversized,
@@ -800,6 +802,135 @@ async fn entry_exchange_rejects_origin_content_type_and_form_ambiguity() {
     .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     app.cleanup().await;
+}
+
+#[tokio::test]
+async fn entry_preflight_is_independent_of_live_devserver_count() {
+    let mut baseline = None;
+
+    for live_count in 0..=2 {
+        let app = TestApp::new().await;
+        for devserver_id in ["one", "two"].into_iter().take(live_count) {
+            app.register_tunnel("alice", devserver_id, Uuid::new_v4(), Router::new())
+                .await;
+        }
+        let host = host_for("alice");
+        let path = devserver_gate::ENTRY_EXCHANGE_PATH;
+        let mut responses = Vec::new();
+        responses.push(
+            send_host(
+                &app.router,
+                Method::GET,
+                &host,
+                path,
+                &[
+                    ("origin", TEST_IDENTITY_ORIGIN),
+                    ("content-type", "application/x-www-form-urlencoded"),
+                ],
+            )
+            .await,
+        );
+        responses.push(
+            send_host_body(
+                &app.router,
+                Method::POST,
+                &host,
+                path,
+                &[
+                    ("origin", "https://evil.example"),
+                    ("content-type", "application/x-www-form-urlencoded"),
+                ],
+                "credential=junk",
+            )
+            .await,
+        );
+        responses.push(
+            send_host_body(
+                &app.router,
+                Method::POST,
+                &host,
+                path,
+                &[
+                    ("origin", TEST_IDENTITY_ORIGIN),
+                    ("content-type", "text/plain"),
+                ],
+                "credential=junk",
+            )
+            .await,
+        );
+        responses.push(
+            send_host_body(
+                &app.router,
+                Method::POST,
+                &host,
+                path,
+                &[
+                    ("origin", TEST_IDENTITY_ORIGIN),
+                    ("content-type", "application/x-www-form-urlencoded"),
+                    ("accept", "text/html"),
+                ],
+                "credential=junk",
+            )
+            .await,
+        );
+        responses.push(
+            send_host_body(
+                &app.router,
+                Method::POST,
+                &host,
+                path,
+                &[
+                    ("origin", TEST_IDENTITY_ORIGIN),
+                    ("content-type", "application/x-www-form-urlencoded"),
+                ],
+                "other=junk",
+            )
+            .await,
+        );
+        responses.push(
+            send_host_body(
+                &app.router,
+                Method::POST,
+                &host,
+                path,
+                &[
+                    ("origin", TEST_IDENTITY_ORIGIN),
+                    ("content-type", "application/x-www-form-urlencoded"),
+                ],
+                format!("credential={}", "x".repeat(8193)),
+            )
+            .await,
+        );
+
+        assert_eq!(
+            responses
+                .iter()
+                .map(|(status, _, _)| *status)
+                .collect::<Vec<_>>(),
+            vec![
+                StatusCode::NOT_FOUND,
+                StatusCode::FORBIDDEN,
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                StatusCode::NOT_FOUND,
+                StatusCode::BAD_REQUEST,
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ],
+            "live devservers: {live_count}",
+        );
+        assert_eq!(
+            &responses[0], &responses[3],
+            "entry-path 404 response shapes differ"
+        );
+        if let Some(expected) = &baseline {
+            assert_eq!(
+                &responses, expected,
+                "response changed with {live_count} live devservers"
+            );
+        } else {
+            baseline = Some(responses);
+        }
+        app.cleanup().await;
+    }
 }
 
 #[tokio::test]
@@ -1813,7 +1944,7 @@ async fn disc_wildcard_root_redirects_to_dashboard() {
     .await;
     assert!(s.is_redirection(), "got {s}");
     let loc = hdrs.get(header::LOCATION).unwrap().to_str().unwrap();
-    assert_eq!(loc, "https://id.chan.app/workspaces");
+    assert_eq!(loc, TEST_DASHBOARD_URL);
     app.cleanup().await;
 }
 

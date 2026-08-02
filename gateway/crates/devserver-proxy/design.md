@@ -22,7 +22,7 @@ The wildcard host is `{owner}--{disc}.<node-base>`, where `disc` is the first 12
 
 Public wildcard routing is deliberately small:
 
-- `POST /_chan/entry` exchanges a body-only entry credential;
+- `/_chan/entry` validates method, exact Origin, exact Content-Type, and a form no larger than 8 KiB containing exactly one nonempty `credential` field before consulting the live registry;
 - `/api/devserver/*` is always 404 because that management API is local-only;
 - an ordinary path requires a valid opaque `__Host-devserver_gate` cookie;
 - unauthenticated bare `/` redirects to the identity dashboard; and
@@ -37,13 +37,19 @@ flowchart TD
     H -->|apex| A{health/readiness or tunnel ingress?}
     A -->|yes| S[serve listener contract]
     A -->|no| N
-    H -->|wildcard| L{matching live devserver?}
+    H -->|wildcard| E{/_chan/entry path?}
+    E -->|yes| Q{method, Origin, and Content-Type valid?}
+    Q -->|no| F[404 / 403 / 415 from request shape]
+    Q -->|yes| V{bounded one-field form?}
+    V -->|no| R[400 / 413 from request shape]
+    V -->|yes| L{matching live devserver?}
+    E -->|no| L
     L -->|no| N
     L -->|yes| M{/api/devserver path?}
     M -->|yes| N
-    M -->|no| E{POST /_chan/entry?}
-    E -->|yes| X[verify Ed25519 and bindings; consume jti; issue opaque session]
-    E -->|no| C{valid opaque session?}
+    M -->|no| B{entry exchange?}
+    B -->|yes| X[verify Ed25519 and bindings; consume jti; issue opaque session]
+    B -->|no| C{valid opaque session?}
     C -->|no| N
     C -->|yes| P[authorize operation; sign request assertion; forward full path]
 ```
@@ -69,7 +75,7 @@ Identity performs the binary owner-or-grantee access check and signs a 30-second
 - the relative clean navigation path; and
 - exact 30-second lifetime with five seconds of clock skew.
 
-The browser or Desktop posts one URL-encoded `credential` field to the fixed exchange path. The proxy requires exactly one canonical content type, a body of at most 8 KiB, and exactly one `Origin` equal to identity's configured public origin. Credentials in query strings are not accepted.
+The browser or Desktop posts one URL-encoded `credential` field to the fixed exchange path. Before reading registry state, the proxy requires POST, exactly one canonical content type, exactly one `Origin` equal to identity's configured public origin, a body no larger than 8 KiB, and exactly one nonempty form field named `credential`. The resulting 404, 403, 415, 400, and 413 response tuples therefore depend only on request shape, not whether zero, one, or several devservers are live. Every entry-specific 404 is the same JSON response regardless of `Accept`. The later candidate-count guard still rejects ambiguous bare hosts before signature verification. Credentials in query strings are not accepted.
 
 The proxy verifies the signature under a one-or-two-key rotation ring and checks every binding against the live tunnel and inbound host. It atomically retains the `jti` through `exp + skew`; replay or replay-cache pressure fails closed. Replay state is bounded globally and to 64 unexpired entries per subject. It is process-local, so restart clears it, but the credential's maximum acceptance window remains 40 seconds.
 
@@ -144,6 +150,7 @@ The replay cache, opaque sessions, registry, and controller fleet view are memor
 
 - No tunnel enters the registry before identity validation and synchronous controller admission of its signed immutable tuple.
 - Entry credentials are body-only, single-use, short-lived, and bound to the exact proxy, audience, owner, devserver, caller, and clean path.
+- Entry method, Origin, Content-Type, body-limit, and form-shape failures are answered before registry lookup, and every entry-specific 404 has one shape, so their response tuples reveal no live-devserver state.
 - Browser sessions are opaque, bounded, revocable, lookup-checked on every request, and expire absolutely within one hour.
 - Browser-session publication never contains the cookie id, replay id, audience, assertion, peer address, or cancellation internals.
 - Revocation acknowledgement means every registered matching transport has stopped; timeouts remain visible to retries.

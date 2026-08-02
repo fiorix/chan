@@ -23,6 +23,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 | item | state | what needs to happen |
 | --- | --- | --- |
+| [gateway-security-review](v0.83.0/gateway-security-review.md) | implemented, awaiting merge | land uniform tunnel and entry failure responses, the truthful identity SPA policy, strict audit-IP parsing, and regression coverage with both workspace gates green |
 | [large-transfer-capability](v0.83.0/large-transfer-capability.md) | registered, grounded, sequenced after v0.82.0 | tune the tunnel transport, build the bulk-transfer lane and its admission control, then raise the write ceiling last |
 | [extensions-v1](v0.83.0/extensions-v1.md) | registered, grounded, needs rulings | rule the open decisions (spawn policy, handshake shape, desktop CSP scope), then spec the TOML discovery, subprocess supervision, and iframe tab |
 | [web-marketing-onboarding](v0.83.0/web-marketing-onboarding.md) | registered, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |

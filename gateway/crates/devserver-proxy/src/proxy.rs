@@ -14,6 +14,8 @@
 //!
 //! Auth gate, in this order:
 //!
+//!   * an entry-exchange path with the wrong method, Origin, or Content-Type
+//!     -> 404 / 403 / 415 before consulting live registry state
 //!   * no live devserver registration matching the host (`{user}`,
 //!     and the `{disc}` prefix when present) -> 404
 //!   * `/api/devserver/*` (the local-only management API) -> 404
@@ -235,7 +237,25 @@ fn connection_listed_headers(headers: &HeaderMap) -> Vec<HeaderName> {
 ///     for (the signed `drv` claim), bounded by the user's live set.
 ///     A single live devserver keeps the pre-disc behavior; no
 ///     verifying credential -> 404.
-pub async fn handle(state: AppState, user: String, disc: Option<String>, req: Request) -> Response {
+pub async fn handle(
+    state: AppState,
+    user: String,
+    disc: Option<String>,
+    mut req: Request,
+) -> Response {
+    let is_entry_exchange = req.uri().path() == devserver_gate::ENTRY_EXCHANGE_PATH;
+    let entry_credential = if is_entry_exchange {
+        if let Some(response) = entry_preflight(&req, &state.cfg) {
+            return response;
+        }
+        match read_entry_credential(&mut req).await {
+            Ok(credential) => Some(credential),
+            Err(response) => return response,
+        }
+    } else {
+        None
+    };
+
     let candidates: Vec<(String, Entry)> = match &disc {
         Some(d) => state
             .registry
@@ -250,16 +270,19 @@ pub async fn handle(state: AppState, user: String, disc: Option<String>, req: Re
             .collect(),
     };
     if candidates.is_empty() {
-        return not_found_response(req.headers());
+        return if is_entry_exchange {
+            entry_not_found_response()
+        } else {
+            not_found_response(req.headers())
+        };
     }
 
-    let is_entry_exchange = req.uri().path() == devserver_gate::ENTRY_EXCHANGE_PATH;
     // A bare host with many live devservers must not turn one invalid entry
     // POST into an Ed25519 verification loop over the whole per-user fleet.
     // Production entry URLs carry a discriminator; retaining the one-route
     // legacy case keeps that path bounded to exactly one verification.
     if is_entry_exchange && disc.is_none() && candidates.len() != 1 {
-        return not_found_response(req.headers());
+        return entry_not_found_response();
     }
 
     // The management API is local-only; the proxy carries tenant content
@@ -277,8 +300,8 @@ pub async fn handle(state: AppState, user: String, disc: Option<String>, req: Re
         &host_header(req.headers()).unwrap_or_default(),
     );
 
-    if is_entry_exchange {
-        return exchange_entry(&state, candidates, req, &aud).await;
+    if let Some(credential) = entry_credential {
+        return exchange_entry(&state, candidates, &credential, &aud);
     }
 
     let is_ws = is_websocket_upgrade(req.headers());
@@ -424,31 +447,12 @@ pub async fn handle(state: AppState, user: String, disc: Option<String>, req: Re
     }
 }
 
-async fn exchange_entry(
+fn exchange_entry(
     state: &AppState,
     candidates: Vec<(String, Entry)>,
-    req: Request,
+    token: &str,
     aud: &str,
 ) -> Response {
-    if req.method() != axum::http::Method::POST {
-        return not_found_response(req.headers());
-    }
-    if !exact_origin_matches(req.headers(), state.cfg.identity_origin.as_str()) {
-        return (StatusCode::FORBIDDEN, "forbidden").into_response();
-    }
-    if !exact_entry_content_type(req.headers()) {
-        return (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported media type").into_response();
-    }
-    let body = match axum::body::to_bytes(req.into_body(), MAX_ENTRY_FORM_BYTES).await {
-        Ok(body) => body,
-        Err(_) => return (StatusCode::PAYLOAD_TOO_LARGE, "payload too large").into_response(),
-    };
-    let fields: Vec<_> = url::form_urlencoded::parse(&body).collect();
-    let token = match fields.as_slice() {
-        [(name, value)] if name == "credential" && !value.is_empty() => value.as_ref(),
-        _ => return (StatusCode::BAD_REQUEST, "malformed entry exchange").into_response(),
-    };
-
     for (devserver_id, entry) in candidates {
         let Ok(claims) = devserver_gate::decode_entry(
             &state.cfg.entry_verifiers,
@@ -469,9 +473,7 @@ async fn exchange_entry(
             chrono::Utc::now().timestamp(),
         ) {
             Ok(()) => {}
-            Err(crate::entry_replay::ConsumeError::Replay) => {
-                return not_found_response(&HeaderMap::new())
-            }
+            Err(crate::entry_replay::ConsumeError::Replay) => return entry_not_found_response(),
             Err(crate::entry_replay::ConsumeError::AtCapacity) => {
                 return (StatusCode::SERVICE_UNAVAILABLE, "entry capacity reached").into_response()
             }
@@ -487,7 +489,33 @@ async fn exchange_entry(
         apply_credentialed_response_policy(&mut response);
         return response;
     }
-    not_found_response(&HeaderMap::new())
+    entry_not_found_response()
+}
+
+fn entry_preflight(req: &Request, cfg: &crate::config::Config) -> Option<Response> {
+    if req.method() != axum::http::Method::POST {
+        return Some(entry_not_found_response());
+    }
+    if !exact_origin_matches(req.headers(), cfg.identity_origin.as_str()) {
+        return Some((StatusCode::FORBIDDEN, "forbidden").into_response());
+    }
+    if !exact_entry_content_type(req.headers()) {
+        return Some(
+            (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported media type").into_response(),
+        );
+    }
+    None
+}
+
+async fn read_entry_credential(req: &mut Request) -> std::result::Result<String, Response> {
+    let body = axum::body::to_bytes(std::mem::take(req.body_mut()), MAX_ENTRY_FORM_BYTES)
+        .await
+        .map_err(|_| (StatusCode::PAYLOAD_TOO_LARGE, "payload too large").into_response())?;
+    let fields: Vec<_> = url::form_urlencoded::parse(&body).collect();
+    match fields.as_slice() {
+        [(name, value)] if name == "credential" && !value.is_empty() => Ok(value.to_string()),
+        _ => Err((StatusCode::BAD_REQUEST, "malformed entry exchange").into_response()),
+    }
 }
 
 fn exact_entry_content_type(headers: &HeaderMap) -> bool {
@@ -1245,6 +1273,10 @@ fn not_found_response(headers: &HeaderMap) -> Response {
     }
 }
 
+fn entry_not_found_response() -> Response {
+    Error::NotFound.into_response()
+}
+
 fn accepts_html(headers: &HeaderMap) -> bool {
     headers
         .get(header::ACCEPT)
@@ -1346,6 +1378,8 @@ fn upstream_to_client(msg: TgMessage) -> Option<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_IDENTITY_ORIGIN: &str = "https://gw.chan.app";
 
     #[test]
     fn entry_content_type_requires_one_exact_raw_value() {
@@ -1544,34 +1578,34 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::ORIGIN,
-            HeaderValue::from_static("https://gw.chan.app"),
+            HeaderValue::from_static(TEST_IDENTITY_ORIGIN),
         );
-        assert!(exact_origin_matches(&headers, "https://gw.chan.app"));
+        assert!(exact_origin_matches(&headers, TEST_IDENTITY_ORIGIN));
     }
 
     #[test]
     fn exact_origin_requires_one_exact_non_null_value() {
         let mut headers = HeaderMap::new();
-        assert!(!exact_origin_matches(&headers, "https://id.chan.app"));
+        assert!(!exact_origin_matches(&headers, TEST_IDENTITY_ORIGIN));
         headers.append(header::ORIGIN, HeaderValue::from_static("null"));
-        assert!(!exact_origin_matches(&headers, "https://id.chan.app"));
+        assert!(!exact_origin_matches(&headers, TEST_IDENTITY_ORIGIN));
         headers.clear();
         headers.append(
             header::ORIGIN,
-            HeaderValue::from_static("https://id.chan.app"),
+            HeaderValue::from_static(TEST_IDENTITY_ORIGIN),
         );
-        assert!(exact_origin_matches(&headers, "https://id.chan.app"));
+        assert!(exact_origin_matches(&headers, TEST_IDENTITY_ORIGIN));
         headers.append(
             header::ORIGIN,
-            HeaderValue::from_static("https://id.chan.app"),
+            HeaderValue::from_static(TEST_IDENTITY_ORIGIN),
         );
-        assert!(!exact_origin_matches(&headers, "https://id.chan.app"));
+        assert!(!exact_origin_matches(&headers, TEST_IDENTITY_ORIGIN));
         headers.clear();
         headers.append(
             header::ORIGIN,
-            HeaderValue::from_static("https://ID.chan.app"),
+            HeaderValue::from_static("https://GW.chan.app"),
         );
-        assert!(!exact_origin_matches(&headers, "https://id.chan.app"));
+        assert!(!exact_origin_matches(&headers, TEST_IDENTITY_ORIGIN));
     }
 
     #[test]

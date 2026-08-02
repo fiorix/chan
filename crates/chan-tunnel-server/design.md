@@ -19,7 +19,7 @@ This document covers terminator-side design. The wire format is in chan-tunnel-p
 The terminator side of chan-tunnel needs to:
 
 - Accept long-lived h2c POSTs from arbitrary `chan devserver` clients.
-- Authenticate the bearer token before committing to the body, so bad-token failures return 401 / 403 distinctly (not as a generic handshake error after a 200).
+- Authenticate the bearer token before committing to the body, returning the same empty 401 for an invalid token and a valid token without tunnel scope.
 - Run the Hello / HelloAck round-trip and bind the registration to `(validated_user, token-resolved devserver_id)` (the requested workspace name is validated but ignored), emitting structured `HelloAck::Refused` frames for policy failures.
 - Multiplex per-public-request substreams over the resulting yamux session.
 - Expose live tunnels to a public-facing axum router so the host can route public requests at the registered peer.
@@ -41,7 +41,7 @@ flowchart TD
     listener["serve_tunnel_listener: TCP accept + Semaphore permit"]
     h2["h2 handshake, first stream POST /v1/tunnel"]
     validate{"validator.validate_registration() BEFORE 200"}
-    reject["reply 401 / 403 / 504"]
+    reject["reply uniform auth 401 or upstream 5xx"]
     ack["200, handshake_validated_with_admission Hello/HelloAck + admission"]
     register["register_authorized_with_id_and_cap()"]
     driver["workspace_tunnel: per-tunnel task owns yamux Connection"]
@@ -100,7 +100,7 @@ sequenceDiagram
         else Identity error
             H-->>C: 502 Bad Gateway
         else Validated but no tunnel scope
-            H-->>C: 403 Forbidden
+            H-->>C: 401 Unauthorized
         else Validated with tunnel scope
             V-->>H: Validated (user, devserver_id, scopes)
             Note over H,C: validate-before-200 invariant: 200 only AFTER auth passes
@@ -130,8 +130,8 @@ sequenceDiagram
 4. Reject `(method != POST) || (path != TUNNEL_PATH)` with 404.
 5. Parse `Authorization: Bearer ...` (case-insensitive scheme, SP/HTAB separator, trimmed token); reject missing / empty with 401.
 6. Spawn an h2 frame driver task BEFORE awaiting the validator: the validator may be a network round-trip and h2 only progresses while polled. The task rejects any subsequent stream on the same connection with 409 (clients must only ever open one) and `abrupt_shutdown(ENHANCE_YOUR_CALM)` after `MAX_DRAINER_REJECTIONS` (16) rejections.
-7. Call `validator.validate_registration(token, registration_id).await` under `VALIDATE_TIMEOUT` (10s, independent of any timeout the `Validator` impl enforces internally). On timeout, reply 504. On error: 401 (`InvalidToken`), 502 (`Identity`), or 500. Bare 401 / 403 responses arrive at the client as distinct errors; the validator runs before the 200 precisely so auth failures are not collapsed into generic transport failures.
-8. Verify the validated token's `scopes` contains `"tunnel"`; 403 otherwise.
+7. Call `validator.validate_registration(token, registration_id).await` under `VALIDATE_TIMEOUT` (10s, independent of any timeout the `Validator` impl enforces internally). On timeout, reply 504. On error: 401 (`InvalidToken`), 502 (`Identity`), or 500. Validation runs before the 200 so authentication failures are not collapsed into generic transport failures.
+8. Verify the validated token's `scopes` contains `"tunnel"`; otherwise send an empty 401 and return `ServerError::MissingScope` to the listener.
 9. Send 200 (response headers, body open). Wrap `(SendStream, recv_body)` in `H2Duplex`.
 10. `handshake_validated_with_admission(duplex, validated, admission, registration_id)` (`handshake_validated` + `pre_ack` remain the embedder-facing free functions):
    - Defense-in-depth username check (`is_valid_username`).
@@ -205,7 +205,7 @@ The wire format is owned by chan-tunnel-proto. See [`chan-tunnel-proto/design.md
 
 Server-specific notes:
 
-- The 200 response is sent BEFORE the framed `Hello` is read but AFTER the validator runs. This split is the reason `handshake_validated` exists alongside `handshake`: the listener needs to fail with 401 / 403 prior to committing to the body.
+- The 200 response is sent BEFORE the framed `Hello` is read but AFTER the validator and tunnel-scope gate run. This split is the reason `handshake_validated` exists alongside `handshake`: the listener needs to return a uniform 401 for authentication failures prior to committing to the body.
 - Failures after the 200 (bad protocol, bad workspace name, `pre_ack` policy) are reported in-band as `HelloAck::Refused` with a stable code, written best-effort before the stream is dropped. `refusal_for` maps `TooManyWorkspaces` and `AdmissionAtCapacity` to `too_many_workspaces` and `ControlUnavailable` to `control_unavailable`; anything else surfaces as `internal` with the error's `Display` as message.
 - `HELLO_READ_TIMEOUT = 15s` bounds slow-loris-style peers that connect, get the 200, and never frame a `Hello`. 15s is plenty for trans-pacific; tighter would risk false positives on slow mobile uplinks.
 - The yamux config overrides the upstream default of 8192 max concurrent streams down to 256. Per-tunnel cap; a visitor opening many slow requests is bounded.
@@ -213,10 +213,10 @@ Server-specific notes:
 
 ## 6. Trust boundaries / validation
 
-- **Token authentication**: the consumer's `Validator` impl is the identity authority. This crate calls it; on success it gets a redacted `Validated` carrying immutable ids, scopes, the per-tunnel assertion key, and (in controller deployments) a registration-bound admission lease with expiry. Order is fixed: validator runs *before* the 200 response so 401 / 403 propagate distinctly. After 200, policy failures are reported via `HelloAck::Refused`. The validator contract forbids logging, echoing, or persisting the token; listener error values are safe to log only because this seam honors that contract.
+- **Token authentication**: the consumer's `Validator` impl is the identity authority. This crate calls it; on success it gets a redacted `Validated` carrying immutable ids, scopes, the per-tunnel assertion key, and (in controller deployments) a registration-bound admission lease with expiry. Order is fixed: validator and tunnel-scope checks run *before* the 200 response. Invalid and scopeless tokens receive the same empty 401, while the listener receives `ServerError::InvalidToken` or `ServerError::MissingScope`. After 200, policy failures are reported via `HelloAck::Refused`. The validator contract forbids logging, echoing, or persisting the token; listener error values are safe to log only because this seam honors that contract.
 - **Control-plane admission**: `RegistrationAdmission` is the fleet-capacity and liveness authority. The proxy must obtain a current permit before acknowledging or inserting a tunnel. Control loss invalidates permits and refuses new admissions; there is no local fallback in the production embedding.
 - **Residual assigned-node trust**: an honest proxy does not retain the PAT beyond validation and redacts all related debug surfaces, but the proxy process necessarily sees the raw PAT during initial validation and refresh. A fully compromised assigned node can capture and reuse it until identity revokes it or it expires. Admission leases are not a TEE boundary; node isolation and PAT rotation/revocation remain required incident response.
-- **Tunnel scope**: the validator returns scopes; the listener refuses tokens missing `TUNNEL_SCOPE` (`"tunnel"`) with 403.
+- **Tunnel scope**: the validator returns scopes; the listener refuses tokens missing `TUNNEL_SCOPE` (`"tunnel"`) with the same empty 401 used for an invalid token, while logging `ServerError::MissingScope` internally.
 - **Public scope**: REMOVED. The tunnel is always authenticated -- there is no anonymous-readable path -- so `TUNNEL_PUBLIC_SCOPE` / `Hello.public` / `MissingPublicScope` are gone. The gateway authorizes a viewer with one `devserver_access(owner, devserver, caller)` check (a grant is the whole library); see the gateway's `devserver-proxy/design.md` and ADR-0001.
 - **Username validation** (`is_valid_username`): defense-in-depth. The username flows into public routing; if the upstream identity service ever emits `..`, slashes, or whitespace, the public side would mis-route. The handshake refuses any username that wouldn't be URL-safe.
 - **Workspace name validation** (`is_valid_workspace_name`): every Hello's `workspace` field is checked; clients pre-check too but we don't trust them.

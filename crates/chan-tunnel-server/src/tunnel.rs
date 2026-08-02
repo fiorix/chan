@@ -248,12 +248,12 @@ async fn handle_tunnel_conn(
         }
     });
 
-    // Validate the token BEFORE sending 200. This lets us return
-    // 401/403 for bad tokens or missing scope, which the dial path
-    // (chan-tunnel-client::dial) special-cases. Sending 200 first
-    // and then closing the stream collapses every auth failure into
-    // a generic "handshake error" on the client, which made auth
-    // problems indistinguishable from transport ones.
+    // Validate the token BEFORE sending 200. Every authentication
+    // failure returns the same 401 on the wire so a candidate token
+    // exposes neither validity nor scope; the internal error keeps the
+    // exact cause available to server logs. Sending 200 first and then
+    // closing the stream would instead collapse authentication and
+    // transport failures into the same generic handshake error.
     //
     // Server-side timeout independent of any timeout the `Validator`
     // impl might enforce internally: a hung identity service cannot
@@ -292,7 +292,7 @@ async fn handle_tunnel_conn(
     };
     if !validated.scopes.iter().any(|s| s == TUNNEL_SCOPE) {
         let resp = Response::builder()
-            .status(StatusCode::FORBIDDEN)
+            .status(StatusCode::UNAUTHORIZED)
             .body(())
             .expect("constant response");
         let _ = respond.send_response(resp, true);
