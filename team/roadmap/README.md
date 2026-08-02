@@ -26,6 +26,10 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [large-transfer-capability](v0.83.0/large-transfer-capability.md) | registered, grounded, sequenced after v0.82.0 | tune the tunnel transport, build the bulk-transfer lane and its admission control, then raise the write ceiling last |
 | [extensions-v1](v0.83.0/extensions-v1.md) | registered, grounded, needs rulings | rule the open decisions (spawn policy, handshake shape, desktop CSP scope), then spec the TOML discovery, subprocess supervision, and iframe tab |
 | [web-marketing-onboarding](v0.83.0/web-marketing-onboarding.md) | registered, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
+| [cs-open-non-text-reveal](v0.83.0/cs-open-non-text-reveal.md) | registered, grounded, ruled, ready to spec | drop `open_path`'s binary refusal so any non-text file reveals in the browser, and view it when the SPA can |
+| [hybrid-nav-staged-editor-bubble](v0.83.0/hybrid-nav-staged-editor-bubble.md) | registered, grounded, ruled, ready to spec | render the queued new-draft / new-diagram intents as removable staged chips in the pane's tab strip |
+| [terminal-tab-rename-reaches-inventory](v0.83.0/terminal-tab-rename-reaches-inventory.md) | registered, grounded, ruled, ready to spec | make a live terminal's name and group mutable over a `rename` WS frame so `cs terminal list` and by-name targeting follow the tab |
+| [terminal-editor-appearance-settings](v0.83.0/terminal-editor-appearance-settings.md) | registered, grounded, ruled, ready to spec | terminal and editor font size as settings, plus a standard/custom terminal colour mode driven off background luminance |
 
 ## Completed
 
