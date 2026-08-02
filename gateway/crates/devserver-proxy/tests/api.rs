@@ -43,6 +43,8 @@ use devserver_proxy::session_store::SessionStore;
 
 const APEX_HOST: &str = "devserver.chan.app";
 const WILDCARD_SUFFIX: &str = ".devserver.chan.app";
+const TEST_IDENTITY_ORIGIN: &str = "https://gw.chan.app";
+const TEST_DASHBOARD_URL: &str = "https://gw.chan.app/workspaces";
 
 fn test_entry_signer() -> devserver_gate::EntrySigner {
     devserver_gate::EntrySigner::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap()
@@ -146,8 +148,8 @@ impl TestApp {
             wildcard_suffix: WILDCARD_SUFFIX.into(),
             identity_url: "http://127.0.0.1:7000/".parse().unwrap(),
             identity_auth_token: "unused-in-tests".into(),
-            dashboard_url: "https://id.chan.app/workspaces".into(),
-            identity_origin: CanonicalOrigin::parse("https://id.chan.app").unwrap(),
+            dashboard_url: TEST_DASHBOARD_URL.into(),
+            identity_origin: CanonicalOrigin::parse(TEST_IDENTITY_ORIGIN).unwrap(),
             entry_verifiers: test_entry_verifiers(),
             admission_lease_verifier: test_admission_verifier(),
             control_url: "http://127.0.0.1:7101/".parse().unwrap(),
@@ -372,7 +374,7 @@ async fn exchange_entry(
         host,
         devserver_gate::ENTRY_EXCHANGE_PATH,
         &[
-            ("origin", "https://id.chan.app"),
+            ("origin", TEST_IDENTITY_ORIGIN),
             ("content-type", "application/x-www-form-urlencoded"),
         ],
         body,
@@ -504,8 +506,8 @@ async fn apex_readyz_reflects_control_readiness() {
         wildcard_suffix: WILDCARD_SUFFIX.into(),
         identity_url: "http://127.0.0.1:7000/".parse().unwrap(),
         identity_auth_token: "unused-in-tests".into(),
-        dashboard_url: "https://id.chan.app/workspaces".into(),
-        identity_origin: CanonicalOrigin::parse("https://id.chan.app").unwrap(),
+        dashboard_url: TEST_DASHBOARD_URL.into(),
+        identity_origin: CanonicalOrigin::parse(TEST_IDENTITY_ORIGIN).unwrap(),
         entry_verifiers: test_entry_verifiers(),
         admission_lease_verifier: test_admission_verifier(),
         control_url: "http://127.0.0.1:7101/".parse().unwrap(),
@@ -566,7 +568,7 @@ async fn wildcard_root_redirects_to_dashboard() {
     .await;
     assert!(s.is_redirection(), "got {s}");
     let loc = hdrs.get(header::LOCATION).unwrap().to_str().unwrap();
-    assert_eq!(loc, "https://id.chan.app/workspaces");
+    assert_eq!(loc, TEST_DASHBOARD_URL);
     app.cleanup().await;
 }
 
@@ -722,19 +724,19 @@ async fn entry_exchange_rejects_origin_content_type_and_form_ambiguity() {
         ),
         (
             vec![
-                ("origin", "https://id.chan.app"),
-                ("origin", "https://id.chan.app"),
+                ("origin", TEST_IDENTITY_ORIGIN),
+                ("origin", TEST_IDENTITY_ORIGIN),
                 ("content-type", "application/x-www-form-urlencoded"),
             ],
             StatusCode::FORBIDDEN,
         ),
         (
-            vec![("origin", "https://id.chan.app")],
+            vec![("origin", TEST_IDENTITY_ORIGIN)],
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
         ),
         (
             vec![
-                ("origin", "https://id.chan.app"),
+                ("origin", TEST_IDENTITY_ORIGIN),
                 (
                     "content-type",
                     "application/x-www-form-urlencoded; charset=utf-8",
@@ -744,7 +746,7 @@ async fn entry_exchange_rejects_origin_content_type_and_form_ambiguity() {
         ),
         (
             vec![
-                ("origin", "https://id.chan.app"),
+                ("origin", TEST_IDENTITY_ORIGIN),
                 ("content-type", "application/x-www-form-urlencoded"),
                 ("content-type", "application/x-www-form-urlencoded"),
             ],
@@ -776,7 +778,7 @@ async fn entry_exchange_rejects_origin_content_type_and_form_ambiguity() {
             &host,
             devserver_gate::ENTRY_EXCHANGE_PATH,
             &[
-                ("origin", "https://id.chan.app"),
+                ("origin", TEST_IDENTITY_ORIGIN),
                 ("content-type", "application/x-www-form-urlencoded"),
             ],
             malformed,
@@ -792,7 +794,7 @@ async fn entry_exchange_rejects_origin_content_type_and_form_ambiguity() {
         &host,
         devserver_gate::ENTRY_EXCHANGE_PATH,
         &[
-            ("origin", "https://id.chan.app"),
+            ("origin", TEST_IDENTITY_ORIGIN),
             ("content-type", "application/x-www-form-urlencoded"),
         ],
         oversized,
@@ -822,7 +824,7 @@ async fn entry_preflight_is_independent_of_live_devserver_count() {
                 &host,
                 path,
                 &[
-                    ("origin", "https://id.chan.app"),
+                    ("origin", TEST_IDENTITY_ORIGIN),
                     ("content-type", "application/x-www-form-urlencoded"),
                 ],
             )
@@ -849,7 +851,7 @@ async fn entry_preflight_is_independent_of_live_devserver_count() {
                 &host,
                 path,
                 &[
-                    ("origin", "https://id.chan.app"),
+                    ("origin", TEST_IDENTITY_ORIGIN),
                     ("content-type", "text/plain"),
                 ],
                 "credential=junk",
@@ -863,7 +865,7 @@ async fn entry_preflight_is_independent_of_live_devserver_count() {
                 &host,
                 path,
                 &[
-                    ("origin", "https://id.chan.app"),
+                    ("origin", TEST_IDENTITY_ORIGIN),
                     ("content-type", "application/x-www-form-urlencoded"),
                     ("accept", "text/html"),
                 ],
@@ -878,7 +880,7 @@ async fn entry_preflight_is_independent_of_live_devserver_count() {
                 &host,
                 path,
                 &[
-                    ("origin", "https://id.chan.app"),
+                    ("origin", TEST_IDENTITY_ORIGIN),
                     ("content-type", "application/x-www-form-urlencoded"),
                 ],
                 "other=junk",
@@ -892,7 +894,7 @@ async fn entry_preflight_is_independent_of_live_devserver_count() {
                 &host,
                 path,
                 &[
-                    ("origin", "https://id.chan.app"),
+                    ("origin", TEST_IDENTITY_ORIGIN),
                     ("content-type", "application/x-www-form-urlencoded"),
                 ],
                 format!("credential={}", "x".repeat(8193)),
@@ -1942,7 +1944,7 @@ async fn disc_wildcard_root_redirects_to_dashboard() {
     .await;
     assert!(s.is_redirection(), "got {s}");
     let loc = hdrs.get(header::LOCATION).unwrap().to_str().unwrap();
-    assert_eq!(loc, "https://id.chan.app/workspaces");
+    assert_eq!(loc, TEST_DASHBOARD_URL);
     app.cleanup().await;
 }
 

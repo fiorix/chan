@@ -1379,6 +1379,8 @@ fn upstream_to_client(msg: TgMessage) -> Option<Message> {
 mod tests {
     use super::*;
 
+    const TEST_IDENTITY_ORIGIN: &str = "https://gw.chan.app";
+
     #[test]
     fn entry_content_type_requires_one_exact_raw_value() {
         let mut headers = HeaderMap::new();
@@ -1576,34 +1578,34 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::ORIGIN,
-            HeaderValue::from_static("https://gw.chan.app"),
+            HeaderValue::from_static(TEST_IDENTITY_ORIGIN),
         );
-        assert!(exact_origin_matches(&headers, "https://gw.chan.app"));
+        assert!(exact_origin_matches(&headers, TEST_IDENTITY_ORIGIN));
     }
 
     #[test]
     fn exact_origin_requires_one_exact_non_null_value() {
         let mut headers = HeaderMap::new();
-        assert!(!exact_origin_matches(&headers, "https://id.chan.app"));
+        assert!(!exact_origin_matches(&headers, TEST_IDENTITY_ORIGIN));
         headers.append(header::ORIGIN, HeaderValue::from_static("null"));
-        assert!(!exact_origin_matches(&headers, "https://id.chan.app"));
+        assert!(!exact_origin_matches(&headers, TEST_IDENTITY_ORIGIN));
         headers.clear();
         headers.append(
             header::ORIGIN,
-            HeaderValue::from_static("https://id.chan.app"),
+            HeaderValue::from_static(TEST_IDENTITY_ORIGIN),
         );
-        assert!(exact_origin_matches(&headers, "https://id.chan.app"));
+        assert!(exact_origin_matches(&headers, TEST_IDENTITY_ORIGIN));
         headers.append(
             header::ORIGIN,
-            HeaderValue::from_static("https://id.chan.app"),
+            HeaderValue::from_static(TEST_IDENTITY_ORIGIN),
         );
-        assert!(!exact_origin_matches(&headers, "https://id.chan.app"));
+        assert!(!exact_origin_matches(&headers, TEST_IDENTITY_ORIGIN));
         headers.clear();
         headers.append(
             header::ORIGIN,
-            HeaderValue::from_static("https://ID.chan.app"),
+            HeaderValue::from_static("https://GW.chan.app"),
         );
-        assert!(!exact_origin_matches(&headers, "https://id.chan.app"));
+        assert!(!exact_origin_matches(&headers, TEST_IDENTITY_ORIGIN));
     }
 
     #[test]
