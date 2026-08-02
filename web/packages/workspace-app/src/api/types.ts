@@ -174,6 +174,13 @@ export type TerminalPreferences = {
   /// older servers (no field) deserialize cleanly; the SPA treats
   /// `undefined` as false. Applies to newly opened terminals.
   ghostty?: boolean;
+  /// Whether xterm.js terminals visually obscure values whose assignment
+  /// names end in a configured secret suffix. Optional for older servers;
+  /// absent means enabled. Per-tab toggles do not persist this field.
+  secret_masking?: boolean;
+  /// Literal, case-insensitive assignment-name suffixes for visual masking.
+  /// The server validates `[A-Za-z0-9_]+` entries and caps the list at 100.
+  secret_mask_suffixes?: string[];
 };
 
 export type TerminalFontChoice = "os-default" | "source-code-pro";

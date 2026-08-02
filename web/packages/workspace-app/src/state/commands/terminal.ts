@@ -115,6 +115,14 @@ registerCommands([
     run: () => void toggleTerminalBackend(),
   },
   {
+    id: "app.terminal.secretMasking.toggle",
+    title: "Toggle secret masking for this terminal",
+    category: "Terminal",
+    keywords: ["secret", "mask", "credential", "screen share", "demo"],
+    available: onTerminal,
+    run: () => dispatchChanCommand("app.terminal.secretMasking.toggle"),
+  },
+  {
     id: "app.terminal.broadcastToggle",
     title: "Toggle group broadcast",
     category: "Terminal",

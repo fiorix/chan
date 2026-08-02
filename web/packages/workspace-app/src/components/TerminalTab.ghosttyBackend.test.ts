@@ -11,7 +11,7 @@ import tab from "./TerminalTab.svelte?raw";
 describe("TerminalTab ghostty backend wiring", () => {
   test("backend reads from Preferences at spawn time with the lazy kit loader", () => {
     expect(tab).toMatch(
-      /backend = terminalBackendFromPrefs\(workspace\.info\?\.preferences\?\.terminal\);/,
+      /const terminalPrefs = workspace\.info\?\.preferences\?\.terminal;[\s\S]*?backend = terminalBackendFromPrefs\(terminalPrefs\);/,
     );
     expect(tab).toMatch(/await loadGhosttyKit\(\)/);
     // A failed wasm load falls back to xterm.js, never breaks the spawn.
@@ -80,7 +80,12 @@ describe("TerminalTab ghostty backend wiring", () => {
     // wrapper is load-bearing; do not "simplify" it back to term.
     expect(tab).toMatch(/termWriter = \{\s*write: \(bytes, done\) => \{/);
     expect(tab).toMatch(/writeGhosttyPreservingScroll\(ghosttyTerm, bytes\)/);
-    expect(tab).toMatch(/ptyWrites\.write\(termWriter, bytes, origin\);/);
+    expect(tab).toMatch(/ptyWrites\.write\(termWriter, bytes, origin,/);
+  });
+
+  test("secret masking reports unavailable without running xterm decorations", () => {
+    expect(tab).toContain("Secret masking unavailable on ghostty backend");
+    expect(tab).toMatch(/if \(backend !== "xterm"\)/);
   });
 
   test("Shift+Enter uses chan's LF fallback before Ghostty encodes it as Enter", () => {

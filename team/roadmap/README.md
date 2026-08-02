@@ -40,6 +40,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | item | state | what needs to happen |
 | --- | --- | --- |
 | [notifications](v0.84.0/notifications.md) | registered, not specced | ground `cs notify` and decide how a local session or a devserver reaches chan-launcher to raise a text notification in the browser or chan-desktop |
+| [terminal-secret-masking](v0.83.0/terminal-secret-masking.md) | implemented, validated in worktree | merge the two config fields, corpus-tested matcher, decoration overlay, and per-tab toggle |
 
 ## Completed
 

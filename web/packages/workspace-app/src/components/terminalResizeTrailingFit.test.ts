@@ -54,7 +54,7 @@ describe("trailing-edge fit converges after resize", () => {
 describe("PTY resize propagation preserved", () => {
   test("xterm onResize still sends `{ type: 'resize', cols, rows }` to chan-server", () => {
     expect(terminal).toMatch(
-      /term\.onResize\(\(\{ cols, rows \}\) => send\(\{ type: "resize", cols, rows \}\)\);/,
+      /term\.onResize\(\(\{ cols, rows \}\) => \{[\s\S]{1,200}send\(\{ type: "resize", cols, rows \}\);[\s\S]{1,40}\}\);/,
     );
   });
 

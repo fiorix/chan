@@ -177,13 +177,13 @@ describe("MouseModeFilter: throughput sanity", () => {
 describe("TerminalTab mouse-capture wiring", () => {
   test("setting read is spawn-time with the ?? true fallback; on means no filter", () => {
     expect(tab).toMatch(
-      /mouseFilter = \(workspace\.info\?\.preferences\?\.terminal\?\.mouse_capture \?\? true\)\s*\? null\s*: new MouseModeFilter\(\)/,
+      /const terminalPrefs = workspace\.info\?\.preferences\?\.terminal;[\s\S]*?mouseFilter = \(terminalPrefs\?\.mouse_capture \?\? true\)\s*\? null\s*: new MouseModeFilter\(\)/,
     );
   });
 
   test("filter applies inside writePtyOutput, before ptyWrites.write", () => {
     expect(tab).toMatch(
-      /if \(mouseFilter\) \{\s*bytes = mouseFilter\.push\(bytes\);\s*if \(bytes\.length === 0\) return;\s*\}[\s\S]*?osc52Bridge\?\.push\(bytes\);\s*ptyWrites\.write\(termWriter, bytes, origin\);/,
+      /if \(mouseFilter\) \{\s*bytes = mouseFilter\.push\(bytes\);\s*if \(bytes\.length === 0\) return;\s*\}\s*writeParsedPtyOutput\(bytes, origin\);[\s\S]*?osc52Bridge\?\.push\(bytes\);[\s\S]*?ptyWrites\.write\(termWriter, bytes, origin,/,
     );
   });
 
@@ -197,5 +197,7 @@ describe("TerminalTab mouse-capture wiring", () => {
     expect(tab).toMatch(
       /mouseFilter\.push\(\s*new TextEncoder\(\)\.encode\(pendingSnapshot\.ansi\),?\s*\)/,
     );
+    expect(tab).toMatch(/writeParsedPtyOutput\(filtered, "replay"\)/);
+    expect(tab).not.toMatch(/term\?\.write\(pendingSnapshot\.ansi\)/);
   });
 });

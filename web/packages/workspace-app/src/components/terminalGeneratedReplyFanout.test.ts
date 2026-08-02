@@ -25,7 +25,10 @@ describe("TerminalTab generated reply routing", () => {
     expect(terminal).toContain("PtyWriteTracker");
     expect(terminal).toContain("const ptyWrites = new PtyWriteTracker();");
     expect(terminal).toMatch(
-      /function writePtyOutput\(bytes: Uint8Array, origin: PtyWriteOrigin = "live"\): void \{[\s\S]*?ptyWrites\.write\(termWriter, bytes, origin\);/,
+      /function writePtyOutput\(bytes: Uint8Array, origin: PtyWriteOrigin = "live"\): void \{[\s\S]*?writeParsedPtyOutput\(bytes, origin\);/,
+    );
+    expect(terminal).toMatch(
+      /function writeParsedPtyOutput\([\s\S]*?ptyWrites\.write\(termWriter, bytes, origin,/,
     );
     expect(terminal).toMatch(/const bytes = await terminalMessageBytes\(event\.data\);[\s\S]*?writePtyOutput\(bytes, attachPtyWriteOrigin\(\)\);/);
   });

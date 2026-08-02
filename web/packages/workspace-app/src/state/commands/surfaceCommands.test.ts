@@ -117,6 +117,7 @@ describe("terminal surface commands", () => {
       "app.terminal.copyCwd",
       "app.terminal.newFsEntry",
       "app.terminal.backend.toggle",
+      "app.terminal.secretMasking.toggle",
       "terminal.richPrompt",
     ]) {
       expect(onTerminal.has(id)).toBe(true);
@@ -138,6 +139,7 @@ describe("terminal surface commands", () => {
     ]) {
       expect(inStandalone.has(id)).toBe(false);
     }
+    expect(inStandalone.has("app.terminal.secretMasking.toggle")).toBe(true);
   });
 
   it("names the current engine and the new-terminal-only contract", () => {

@@ -42,6 +42,26 @@ describe("terminal connection invariants", () => {
     expect(tracker.active).toBe(false);
   });
 
+  test("reports each completed write origin exactly once", () => {
+    const tracker = new PtyWriteTracker();
+    const completed: string[] = [];
+    let drain: (() => void) | undefined;
+    tracker.write(
+      {
+        write(_bytes, callback) {
+          drain = callback;
+        },
+      },
+      new Uint8Array([1]),
+      "replay",
+      (origin) => completed.push(origin),
+    );
+
+    drain?.();
+    drain?.();
+    expect(completed).toEqual(["replay"]);
+  });
+
   test("decodes websocket binary payloads without string coercion", async () => {
     const bytes = await terminalMessageBytes(new Uint8Array([0, 159, 146, 169]).buffer);
     expect(Array.from(bytes ?? [])).toEqual([0, 159, 146, 169]);

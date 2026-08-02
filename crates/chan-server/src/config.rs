@@ -138,6 +138,8 @@ mod tests {
                 mcp_env: true,
                 mouse_capture: false,
                 ghostty: true,
+                secret_masking: false,
+                secret_mask_suffixes: vec!["TOKEN".into(), "PRIVATE_KEY".into()],
             },
         };
         cfg.save_to(&p).unwrap();
@@ -187,6 +189,8 @@ mod tests {
         assert_eq!(cfg.scrollback_mb, 10);
         assert_eq!(cfg.default_term, "xterm-256color");
         assert!(cfg.mouse_capture);
+        assert!(cfg.secret_masking);
+        assert!(cfg.secret_mask_suffixes.contains(&"TOKEN".to_string()));
     }
 
     #[test]
@@ -208,6 +212,24 @@ mod tests {
         assert_eq!(cfg.terminal.scrollback_mb, 10);
         assert_eq!(cfg.terminal.default_term, "xterm-256color");
         assert!(cfg.terminal.mouse_capture);
+        assert!(cfg.terminal.secret_masking);
+        assert!(cfg
+            .terminal
+            .secret_mask_suffixes
+            .contains(&"KEY_BASE64".to_string()));
+    }
+
+    #[test]
+    fn terminal_config_rejects_non_literal_secret_suffixes() {
+        let tmp = TempDir::new().unwrap();
+        let p = tmp.path().join("server.toml");
+        std::fs::write(
+            &p,
+            "[terminal]\nsecret_mask_suffixes = [\"TOKEN\", \"SECRET.*\"]\n",
+        )
+        .unwrap();
+        let err = ServerConfig::load_from(&p).unwrap_err();
+        assert!(err.to_string().contains("[A-Za-z0-9_]+"));
     }
 
     #[test]

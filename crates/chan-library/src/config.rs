@@ -8,7 +8,27 @@
 //! `/api/config`; the wire shape lives here so the registry and the route
 //! layer agree on one definition.
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Maximum number of literal suffixes compiled into the terminal secret
+/// assignment matcher.
+pub const TERMINAL_SECRET_MASK_SUFFIX_MAX: usize = 100;
+
+const DEFAULT_TERMINAL_SECRET_MASK_SUFFIXES: &[&str] = &[
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSPHRASE",
+    "API_KEY",
+    "ACCESS_KEY",
+    "SECRET_KEY",
+    "PRIVATE_KEY",
+    "SSH_KEY",
+    "SIGNING_KEY",
+    "KEY_BASE64",
+    "CREDENTIALS",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalConfig {
@@ -64,6 +84,20 @@ pub struct TerminalConfig {
     /// to newly opened terminals.
     #[serde(default)]
     pub ghostty: bool,
+    /// Whether xterm.js terminals visually obscure the values of
+    /// secret-looking `NAME=value` assignments. The buffer remains
+    /// cleartext so selection, copy, replay, and snapshots are unchanged.
+    /// Ghostty terminals do not support xterm decorations and ignore this.
+    #[serde(default = "default_terminal_secret_masking")]
+    pub secret_masking: bool,
+    /// Literal, case-insensitive variable-name suffixes that trigger visual
+    /// secret masking. Deserialization rejects regex syntax and caps the list
+    /// before the SPA compiles it into one alternation.
+    #[serde(
+        default = "default_terminal_secret_mask_suffixes",
+        deserialize_with = "deserialize_terminal_secret_mask_suffixes"
+    )]
+    pub secret_mask_suffixes: Vec<String>,
 }
 
 /// Terminal-font preference. Wire shape kept narrow (string enum)
@@ -93,6 +127,8 @@ impl Default for TerminalConfig {
             mcp_env: false,
             mouse_capture: default_terminal_mouse_capture(),
             ghostty: false,
+            secret_masking: default_terminal_secret_masking(),
+            secret_mask_suffixes: default_terminal_secret_mask_suffixes(),
         }
     }
 }
@@ -121,7 +157,97 @@ fn default_terminal_mouse_capture() -> bool {
     true
 }
 
+fn default_terminal_secret_masking() -> bool {
+    true
+}
+
+fn default_terminal_secret_mask_suffixes() -> Vec<String> {
+    DEFAULT_TERMINAL_SECRET_MASK_SUFFIXES
+        .iter()
+        .map(|suffix| (*suffix).to_string())
+        .collect()
+}
+
+fn deserialize_terminal_secret_mask_suffixes<'de, D>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let suffixes = Vec::<String>::deserialize(deserializer)?;
+    normalize_terminal_secret_mask_suffixes(suffixes, |entries| {
+        tracing::warn!(
+            entries,
+            limit = TERMINAL_SECRET_MASK_SUFFIX_MAX,
+            "terminal.secret_mask_suffixes exceeds its limit; ignoring trailing entries"
+        );
+    })
+    .map_err(D::Error::custom)
+}
+
+fn normalize_terminal_secret_mask_suffixes(
+    mut suffixes: Vec<String>,
+    warn: impl FnOnce(usize),
+) -> Result<Vec<String>, String> {
+    if let Some(invalid) = suffixes.iter().find(|suffix| {
+        suffix.is_empty()
+            || !suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    }) {
+        return Err(format!(
+            "terminal.secret_mask_suffixes entry {invalid:?} must match [A-Za-z0-9_]+"
+        ));
+    }
+    if suffixes.len() > TERMINAL_SECRET_MASK_SUFFIX_MAX {
+        warn(suffixes.len());
+        suffixes.truncate(TERMINAL_SECRET_MASK_SUFFIX_MAX);
+    }
+    Ok(suffixes)
+}
+
 /// Inclusive bounds the Settings UI exposes for the scrollback slider.
 /// Mirrored in `web/packages/workspace-app/src/terminal/scrollback.ts`; keep in lockstep.
 pub const TERMINAL_SCROLLBACK_MB_MIN: u32 = 10;
 pub const TERMINAL_SCROLLBACK_MB_MAX: u32 = 50;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::cell::Cell;
+
+    #[test]
+    fn secret_masking_defaults_to_the_stock_literal_suffixes() {
+        let config = TerminalConfig::default();
+        assert!(config.secret_masking);
+        assert_eq!(
+            config.secret_mask_suffixes,
+            DEFAULT_TERMINAL_SECRET_MASK_SUFFIXES
+        );
+    }
+
+    #[test]
+    fn secret_mask_suffixes_reject_regex_syntax() {
+        let err = serde_json::from_value::<TerminalConfig>(json!({
+            "secret_mask_suffixes": ["TOKEN", "SECRET.*"]
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("[A-Za-z0-9_]+"));
+    }
+
+    #[test]
+    fn secret_mask_suffixes_clamp_and_warn_once() {
+        let suffixes = (0..=TERMINAL_SECRET_MASK_SUFFIX_MAX)
+            .map(|index| format!("TOKEN_{index}"))
+            .collect::<Vec<_>>();
+        let warning_count = Cell::new(0);
+        let suffixes = normalize_terminal_secret_mask_suffixes(suffixes, |_| {
+            warning_count.set(warning_count.get() + 1);
+        })
+        .unwrap();
+        assert_eq!(suffixes.len(), TERMINAL_SECRET_MASK_SUFFIX_MAX);
+        assert_eq!(suffixes.last().unwrap(), "TOKEN_99");
+        assert_eq!(warning_count.get(), 1);
+    }
+}

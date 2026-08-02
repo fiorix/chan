@@ -4,6 +4,7 @@
     Check,
     Clipboard,
     ClipboardPaste,
+    EyeOff,
     MessageSquare,
     Pencil,
     Radio,
@@ -80,6 +81,7 @@
     effectiveHybridSurfaceTheme,
     fileOps,
     scheduleSessionSave,
+    setTransientStatus,
     surfaceThemeOverride,
     ui,
   } from "../state/store.svelte";
@@ -128,6 +130,10 @@
     writeGhosttyPreservingScroll,
   } from "../terminal/ghosttyCompat";
   import { Osc52Bridge } from "../terminal/osc52Bridge";
+  import {
+    DEFAULT_SECRET_MASK_SUFFIXES,
+    TerminalSecretMasker,
+  } from "../terminal/secretMasking";
   import type { Terminal as GhosttyTerminal } from "ghostty-web";
   import {
     refreshTerminalRows as refreshTerminalRowsImpl,
@@ -256,6 +262,10 @@
   let fit: FitAddon | FitLike | null = null;
   let search: SearchAddon | null = null;
   let serialize: SerializeAddon | null = null;
+  // Visual-only masking owner for this xterm instance. Null on ghostty and
+  // disposed with the terminal; the enabled bit is session-scoped per tab.
+  let secretMasker: TerminalSecretMasker | null = null;
+  let secretMaskingEnabled = $state(true);
   // Scrollback line cap captured at construction time from the
   // persisted MB budget so xterm.js gets a stable number. Held on
   // the component so the "copy scrollback" actions serialize the same
@@ -574,9 +584,14 @@
     };
   }
 
+  function terminalSecretMaskColor(): string {
+    return effectiveTerminalTheme() === "light" ? "#57606a" : "#6c6c70";
+  }
+
   function applyTerminalTheme(): void {
     if (!term) return;
     term.options.theme = terminalTheme();
+    secretMasker?.setColor(terminalSecretMaskColor());
   }
 
   function refreshTerminalRows(): void {
@@ -747,27 +762,33 @@
 
   async function start(): Promise<void> {
     if (!host || term) return;
+    const terminalPrefs = workspace.info?.preferences?.terminal;
     // Scrollback honors the Settings MB budget. Read once here so a
     // settings change after spawn doesn't reach through and resize
     // the existing xterm.js buffer; the hint copy under the slider
     // names this spawn-time-only contract.
     scrollbackLines = scrollbackLinesFromMb(
-      clampScrollbackMb(workspace.info?.preferences?.terminal?.scrollback_mb),
+      clampScrollbackMb(terminalPrefs?.scrollback_mb),
     );
     // Mouse capture honors the Settings toggle under the same spawn-time
     // contract: read once here, so flipping the setting later affects only
     // newly opened terminals (the hint copy says so). Absent field (older
     // server) means true, today's behavior.
-    mouseFilter = (workspace.info?.preferences?.terminal?.mouse_capture ?? true)
+    mouseFilter = (terminalPrefs?.mouse_capture ?? true)
       ? null
       : new MouseModeFilter();
+    // The persisted flag seeds each fresh tab. The menu/launcher toggle only
+    // changes this component instance, so a respawn returns to the config.
+    secretMaskingEnabled = terminalPrefs?.secret_masking ?? true;
+    const secretMaskSuffixes =
+      terminalPrefs?.secret_mask_suffixes ?? DEFAULT_SECRET_MASK_SUFFIXES;
     // Backend honors the Settings toggle under the same spawn-time
     // contract (read once here; flipping it affects only newly opened
     // terminals). Absent field (older server) means xterm.js. The
     // ghostty kit lazy-loads ~420KB of WASM + JS only on this branch;
     // a failed load falls back to xterm.js rather than breaking the
     // spawn (fail-open, matching the mouse filter's philosophy).
-    backend = terminalBackendFromPrefs(workspace.info?.preferences?.terminal);
+    backend = terminalBackendFromPrefs(terminalPrefs);
     let ghosttyKit: GhosttyKit | null = null;
     if (backend === "ghostty") {
       try {
@@ -961,6 +982,12 @@
       host.addEventListener("keydown", onGhosttyHostChord, true);
     }
     if (backend === "xterm") {
+      secretMasker = new TerminalSecretMasker(
+        term as Terminal,
+        secretMaskSuffixes,
+        terminalSecretMaskColor(),
+        secretMaskingEnabled,
+      );
       // Hold Shift to force a native selection while a TUI holds mouse
       // tracking, on every platform (xterm.js ignores Shift on macOS).
       // Must run after open(): the SelectionService it wraps is created
@@ -1003,7 +1030,10 @@
       term.attachCustomKeyEventHandler(handleTerminalKeyEvent);
     }
     term.onData(handleXtermData);
-    term.onResize(({ cols, rows }) => send({ type: "resize", cols, rows }));
+    term.onResize(({ cols, rows }) => {
+      secretMasker?.scanAll();
+      send({ type: "resize", cols, rows });
+    });
     resizeObserver = new ResizeObserver(queueFit);
     resizeObserver.observe(host);
     // Measure before dialing so a fresh PTY starts at the renderer's real
@@ -1236,7 +1266,12 @@
         // program's modes untouched (mirrors the keyboard-protocol reset above,
         // which fires only on a fresh spawn).
         if (frame.id !== priorId) {
-          term?.write("\x1b[?1000;1002;1003;1004;1006;1015l\x1b[?1049l");
+          writeParsedPtyOutput(
+            new TextEncoder().encode(
+              "\x1b[?1000;1002;1003;1004;1006;1015l\x1b[?1049l",
+            ),
+            "replay",
+          );
         }
         if (
           pendingSnapshot &&
@@ -1250,9 +1285,12 @@
             const filtered = mouseFilter.push(
               new TextEncoder().encode(pendingSnapshot.ansi),
             );
-            if (filtered.length) term?.write(filtered);
+            if (filtered.length) writeParsedPtyOutput(filtered, "replay");
           } else {
-            term?.write(pendingSnapshot.ansi);
+            writeParsedPtyOutput(
+              new TextEncoder().encode(pendingSnapshot.ansi),
+              "replay",
+            );
           }
         }
         pendingSnapshot = null;
@@ -1619,10 +1657,25 @@
       bytes = mouseFilter.push(bytes);
       if (bytes.length === 0) return;
     }
+    writeParsedPtyOutput(bytes, origin);
+  }
+
+  function writeParsedPtyOutput(
+    bytes: Uint8Array,
+    origin: PtyWriteOrigin,
+  ): void {
+    if (!term || !termWriter) return;
     // Ghostty backend only: observe (never alter) the stream for OSC 52
     // clipboard copies -- the WASM parser swallows them with no JS hook.
     osc52Bridge?.push(bytes);
-    ptyWrites.write(termWriter, bytes, origin);
+    const masker = secretMasker;
+    const maskSnapshot = masker?.captureWrite() ?? null;
+    ptyWrites.write(termWriter, bytes, origin, (completedOrigin) => {
+      // The origin tracker completes once per parsed xterm write. Matching the
+      // captured origin keeps snapshot prime and ring replay on that same
+      // exactly-once path instead of layering a second replay scan.
+      if (completedOrigin === origin) masker?.scanWrite(maskSnapshot);
+    });
   }
 
   /// Decode a base64 agent-event payload into the string
@@ -1790,6 +1843,8 @@
     resizeObserver?.disconnect();
     resizeObserver = null;
     host?.removeEventListener("keydown", onGhosttyHostChord, true);
+    secretMasker?.dispose();
+    secretMasker = null;
     term?.dispose();
     term = null;
     termWriter = null;
@@ -1915,6 +1970,21 @@
     focusTerminal();
   }
 
+  function toggleSecretMasking(): void {
+    closeTabMenu();
+    if (backend !== "xterm") {
+      setTransientStatus("Secret masking unavailable on ghostty backend");
+      focusTerminal();
+      return;
+    }
+    secretMaskingEnabled = !secretMaskingEnabled;
+    secretMasker?.setEnabled(secretMaskingEnabled);
+    setTransientStatus(
+      `Secret masking ${secretMaskingEnabled ? "enabled" : "disabled"} for this terminal`,
+    );
+    focusTerminal();
+  }
+
   // The right-click menu's "Paste" entry. A menu click is NOT an OS paste
   // gesture, so unlike Cmd+V (which rides xterm's native `paste` event) it must
   // read the clipboard programmatically. `readClipboardText` does that natively
@@ -2036,6 +2106,7 @@
       if (name === "app.terminal.restart") void restart();
       else if (name === "app.terminal.copyCwd") void copyTerminalCwd();
       else if (name === "app.terminal.newFsEntry") openNewFsEntry();
+      else if (name === "app.terminal.secretMasking.toggle") toggleSecretMasking();
       else if (name === "app.find.open") openFind();
       else if (name === "app.find.next" && findOpen) runFind(true);
       else if (name === "app.find.prev" && findOpen) runFind(false);
@@ -2216,6 +2287,17 @@
             <span>Terminal engine</span>
             <span class="terminal-backend-value">{backend}</span>
           </div>
+          <button class="mbtn" onclick={toggleSecretMasking}>
+            <span class="mbtn-icon">
+              <EyeOff size={16} strokeWidth={1.75} aria-hidden="true" />
+            </span>
+            <span class="mbtn-label">
+              {backend === "xterm"
+                ? `Secret masking: ${secretMaskingEnabled ? "on" : "off"}`
+                : "Secret masking unavailable"}
+            </span>
+            <span class="mbtn-chord"></span>
+          </button>
           <div class="msep" role="separator"></div>
           {#if backend === "xterm"}
             <!-- Find rides xterm's SearchAddon; no ghostty-web equivalent. -->
@@ -2488,6 +2570,10 @@
   .terminal-tab.active {
     visibility: visible;
     pointer-events: auto;
+  }
+  :global(.terminal-secret-mask) {
+    border-radius: 2px;
+    pointer-events: none;
   }
   .terminal-find {
     position: absolute;

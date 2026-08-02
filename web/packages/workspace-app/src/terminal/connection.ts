@@ -23,6 +23,7 @@ export class PtyWriteTracker {
     writer: TerminalByteWriter,
     bytes: Uint8Array,
     origin: PtyWriteOrigin = "live",
+    onComplete?: (origin: PtyWriteOrigin) => void,
   ): void {
     this.#pending.push(origin);
     let pending = true;
@@ -30,6 +31,7 @@ export class PtyWriteTracker {
       if (!pending) return;
       pending = false;
       this.#pending.shift();
+      onComplete?.(origin);
     };
     try {
       writer.write(bytes, done);
