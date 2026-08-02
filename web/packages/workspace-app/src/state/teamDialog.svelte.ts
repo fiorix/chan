@@ -21,11 +21,18 @@ import { TEAM_DIR_DEFAULT } from "./teamConfigPath";
 /// that agent's submit chord. Mirrors
 /// the picker type in TeamWork.svelte; the wire form drops `"none"` and
 /// omits the field entirely (`TeamMemberWire.agent?`).
-export type AgentTarget = "none" | "claude" | "codex" | "gemini" | "opencode";
+export type AgentTarget =
+  | "none"
+  | "claude"
+  | "codex"
+  | "gemini"
+  | "kimi"
+  | "opencode";
 
 /// Derive a member's submit-encoding agent from its spawn command. The match
-/// is intentionally LOOSE: it recognizes claude/codex/gemini/opencode anywhere in the
-/// command as a whole word, not just the first token, so wrappers like
+/// is intentionally LOOSE: it recognizes claude/codex/gemini/kimi/opencode
+/// anywhere in the command as a whole word, not just the first token, so
+/// wrappers like
 /// `my-claude.sh`, `/usr/local/bin/codex-cli`, or `claude --resume` still
 /// resolve (the `\b` boundaries keep `claudette` from matching). Anything
 /// unrecognized falls back to `"none"` (a shell member, plain Enter); set
@@ -35,12 +42,14 @@ export function agentForCommand(command: string): AgentTarget {
   if (/\bclaude\b/.test(c)) return "claude";
   if (/\bcodex\b/.test(c)) return "codex";
   if (/\bgemini\b/.test(c)) return "gemini";
+  if (/\bkimi\b/.test(c)) return "kimi";
   if (/\bopencode\b/.test(c)) return "opencode";
   return "none";
 }
 
 /// A member's submit-encoding agent, replacing the old manual dropdown. An
-/// explicit `CHAN_AGENT=<claude|codex|gemini|opencode|none|shell>` in the member's env
+/// explicit `CHAN_AGENT=<claude|codex|gemini|kimi|opencode|none|shell>` in
+/// the member's env
 /// WINS - the escape hatch for unorthodox setups (custom launcher scripts a
 /// command sniff can't recognize). Otherwise derive loosely from the command.
 /// An unrecognized CHAN_AGENT value is ignored (falls through to the command).
@@ -48,7 +57,15 @@ export function agentForMember(command: string, envText: string): AgentTarget {
   const m = envText.match(/^[ \t]*CHAN_AGENT[ \t]*=[ \t]*(\S+)/m);
   if (m) {
     const v = m[1].toLowerCase();
-    if (v === "claude" || v === "codex" || v === "gemini" || v === "opencode") return v;
+    if (
+      v === "claude" ||
+      v === "codex" ||
+      v === "gemini" ||
+      v === "kimi" ||
+      v === "opencode"
+    ) {
+      return v;
+    }
     if (v === "none" || v === "shell") return "none";
   }
   return agentForCommand(command);

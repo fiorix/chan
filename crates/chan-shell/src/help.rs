@@ -817,7 +817,7 @@ group.
 The markdown table carries one row per session: name, agent,
 session id, window, pane, side, tab, window kind, window status and
 cwd. `agent` is the server-derived submit agent (claude / codex /
-gemini / opencode, `-` for a shell session), derived from the
+gemini / kimi / opencode, `-` for a shell session), derived from the
 session's spawn command and CHAN_AGENT spawn env; it is what a
 `cs terminal write --submit` delivery will actually encode for,
 so read it here instead of guessing a target's chord. The window
@@ -1090,7 +1090,7 @@ The config carries team_name, host_name, host_handle, tab_group and 1
 to 9 [[members]], exactly one of them is_lead. Each member has a handle
 (it becomes the tab's $CHAN_TAB_NAME), a command and optional env. The
 submit-encoding agent is DERIVED from the command by loose whole-word
-match (claude / codex / gemini / opencode); set CHAN_AGENT in a
+match (claude / codex / gemini / kimi / opencode); set CHAN_AGENT in a
 member's env to force it for an unorthodox launcher. A command matching
 none is a plain shell member: it spawns, but gets no submit chord and
 no identity poke.
@@ -1120,12 +1120,12 @@ graphed like any other workspace content.
 pub(crate) const CS_TERMINAL_TEAM_AFTER: &str = r#"EXAMPLES:
 A team is one config.toml (the on-disk `{dir}/config.toml` shape).
 Members are 1..=9, exactly one `is_lead = true`. The submit-encoding
-agent (claude / codex / gemini / opencode) is DERIVED from each member's
-`command`: a loose whole-word match, so `claude --resume` or
+agent (claude / codex / gemini / kimi / opencode) is DERIVED from each
+member's `command`: a loose whole-word match, so `claude --resume` or
 `/usr/local/bin/codex-cli` resolve. A command that matches none is a
 plain shell member (no submit chord). To force the agent for an
 unorthodox launcher, set `CHAN_AGENT` in the member's env (claude /
-codex / gemini / opencode, or none / shell to force a shell).
+codex / gemini / kimi / opencode, or none / shell to force a shell).
 `created_at` is optional: the server stamps the current time when it is
 omitted.
 
@@ -1412,7 +1412,7 @@ that derives to no agent (a shell) receives the raw bytes
 untouched with no chord, and the command exits 69. Spawn the
 session with CHAN_AGENT set, or spawn the agent as the session's
 command instead of typing it into a shell. The applied encodings:
-claude appends a chord, codex and opencode wrap the text in
+claude appends a chord, codex, kimi, and opencode wrap the text in
 bracketed paste plus a CR, gemini takes the CR as its own later
 queue entry, one idle gate after the body. Omit --submit and the
 text parks in the agent's compose box unsubmitted, since a bare

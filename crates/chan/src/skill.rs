@@ -563,6 +563,16 @@ pub(crate) fn render_skill() -> Result<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn dumped_terminal_help_names_kimi_as_a_submit_agent() {
+        let list = render_topic("cs-terminal-list").expect("terminal list help");
+        let team = render_topic("cs-terminal-team").expect("terminal team help");
+        let write = render_topic("cs-terminal-write").expect("terminal write help");
+        for (name, help) in [("list", list), ("team", team), ("write", write)] {
+            assert!(help.contains("kimi"), "{name} help omits kimi");
+        }
+    }
+
     /// Column budget for hand-wrapped help text. Leaves room inside an
     /// 80-column terminal for the two-space indent clap puts in front of
     /// nested help.

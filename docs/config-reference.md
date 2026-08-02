@@ -44,11 +44,14 @@ template = '\e[200~{}\e[201~\r'
 [gemini]
 template = '{}\r'
 
+[kimi]
+template = '\e[200~{}\e[201~\r'
+
 [opencode]
 template = '\e[200~{}\e[201~\r'
 ```
 
-The environment equivalents are `CHAN_SUBMIT_CLAUDE`, `CHAN_SUBMIT_CODEX`, `CHAN_SUBMIT_GEMINI`, and `CHAN_SUBMIT_OPENCODE`. Gemini alone splits its normalized body and submit chord into two ordered PTY writes; overriding its template does not change that write-splitting contract.
+The environment equivalents are `CHAN_SUBMIT_CLAUDE`, `CHAN_SUBMIT_CODEX`, `CHAN_SUBMIT_GEMINI`, `CHAN_SUBMIT_KIMI`, and `CHAN_SUBMIT_OPENCODE`. Gemini alone splits its normalized body and submit chord into two ordered PTY writes; overriding its template does not change that write-splitting contract.
 
 ### `~/.chan/preferences.toml` -- `EditorPrefs`
 
@@ -141,7 +144,7 @@ Source: `crates/chan-workspace/src/teams.rs`.
 | `created_at` | `String` (ISO 8601) | required | (set at create time) | sort + display |
 | `members[]` | `Vec<Member>` | empty | (future Settings) | team roster + position grid |
 
-`Member`: `handle: String`, `command: String`, `env: BTreeMap<String, String>`, `is_lead: bool`, `position: Option<Position>`. The submit agent is derived from a case-insensitive whole-word `claude`, `codex`, `gemini`, or `opencode` in `command`; `env.CHAN_AGENT` overrides it and `none` / `shell` forces shell behavior.
+`Member`: `handle: String`, `command: String`, `env: BTreeMap<String, String>`, `is_lead: bool`, `position: Option<Position>`. The submit agent is derived from a case-insensitive whole-word `claude`, `codex`, `gemini`, `kimi`, or `opencode` in `command`; `env.CHAN_AGENT` overrides it and `none` / `shell` forces shell behavior.
 
 `Position`: `row: u32`, `col: u32` (airplane-grid coordinate).
 

@@ -1,8 +1,9 @@
 //! Runtime overrides for the per-agent submit chords. The DEFAULT chord
 //! bytes live in chan-shell (`SubmitAgent::default_template`); this module
 //! lets a user override them without a rebuild by editing
-//! `<config>/chan/submit.toml`, so a client (claude/codex/gemini/opencode) changing
-//! its submit behavior is a config edit, not a release. Env
+//! `<config>/chan/submit.toml`, so a client
+//! (claude/codex/gemini/kimi/opencode) changing its submit behavior is a
+//! config edit, not a release. Env
 //! `CHAN_SUBMIT_<AGENT>` still takes precedence over the file (resolved in
 //! chan-shell at chord-application time).
 //!
@@ -15,6 +16,8 @@
 //! template = '\e[200~{}\e[201~\r'
 //! [gemini]
 //! template = '{}\r'
+//! [kimi]
+//! template = '\e[200~{}\e[201~\r'
 //! [opencode]
 //! template = '\e[200~{}\e[201~\r'
 //! ```
@@ -31,6 +34,7 @@ struct SubmitOverridesFile {
     claude: Option<AgentChord>,
     codex: Option<AgentChord>,
     gemini: Option<AgentChord>,
+    kimi: Option<AgentChord>,
     opencode: Option<AgentChord>,
 }
 
@@ -46,6 +50,7 @@ impl SubmitOverridesFile {
             ("claude", self.claude),
             ("codex", self.codex),
             ("gemini", self.gemini),
+            ("kimi", self.kimi),
             ("opencode", self.opencode),
         ] {
             if let Some(chord) = chord {
@@ -90,6 +95,21 @@ template = "\\e[200~{}\\e[201~\\r"
         .expect("valid submit config");
         assert_eq!(
             file.into_map().get("opencode").map(String::as_str),
+            Some("\\e[200~{}\\e[201~\\r")
+        );
+    }
+
+    #[test]
+    fn kimi_table_deserializes() {
+        let file: SubmitOverridesFile = toml::from_str(
+            r#"
+[kimi]
+template = "\\e[200~{}\\e[201~\\r"
+"#,
+        )
+        .expect("valid submit config");
+        assert_eq!(
+            file.into_map().get("kimi").map(String::as_str),
             Some("\\e[200~{}\\e[201~\\r")
         );
     }
