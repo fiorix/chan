@@ -5634,6 +5634,7 @@ mod tests {
             kind,
             title: String::new(),
             ordinal: 1,
+            label: String::new(),
             workspace_path: None,
             prefix: String::new(),
             token: String::new(),

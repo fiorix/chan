@@ -67,6 +67,14 @@ pub enum DesktopWindowOp {
         id: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Persist user text appended to one non-control window's generated label.
+    /// The library route handles local rows directly; this bridge arm forwards
+    /// rows owned by a connected devserver to that server's registry.
+    SetWindowLabel {
+        id: String,
+        label: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Destroy a window (and let the server drop its saved layout). With
     /// live terminal shells and `force` unset, the desktop raises a
     /// confirmation dialog and this op BLOCKS until the user answers; the

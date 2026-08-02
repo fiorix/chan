@@ -23,6 +23,7 @@ export interface ScopedLibraryWindow {
   kind: ScopedWindowKind;
   title: string;
   ordinal: number;
+  label: string;
   workspace_path: string | null;
   connected: boolean;
   hidden: boolean;
@@ -45,12 +46,9 @@ export interface ScopedLibraryWorkspace {
   can_act: boolean;
 }
 
-export type ScopedLibraryWindowMode = "browser" | "desktop" | "native_watcher";
-
 export interface ScopedLibrarySnapshot {
   library_id: string;
   role: LibraryCommandRole;
-  window_mode: ScopedLibraryWindowMode;
   windows: ScopedLibraryWindow[];
   workspaces: ScopedLibraryWorkspace[];
 }
@@ -58,8 +56,9 @@ export interface ScopedLibrarySnapshot {
 export type ScopedLibraryAction =
   | { action: "new_terminal" }
   | { action: "new_workspace_window"; workspace_id: string }
-  | { action: "focus_window"; window_id: string }
-  | { action: "set_window_visibility"; window_id: string; hidden: boolean };
+  | { action: "set_window_visibility"; window_id: string; hidden: boolean }
+  | { action: "close_window"; window_id: string };
+
 interface MintedLibraryCommandCapability {
   token: string;
   role: LibraryCommandRole;

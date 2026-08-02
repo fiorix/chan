@@ -15,6 +15,7 @@ import { createReadStream } from "node:fs";
 import { cp } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, normalize, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 
@@ -79,6 +80,12 @@ function excalidrawFonts(): Plugin {
 export default defineConfig({
   base: "./",
   plugins: [svelte(), excalidrawFonts()],
+  resolve: {
+    alias: {
+      "@chan/web-shared/command-deck": join(dirname(fileURLToPath(import.meta.url)), "../web-shared/src/command-deck/model.ts"),
+      "@chan/web-shared/CommandDeck.svelte": join(dirname(fileURLToPath(import.meta.url)), "../web-shared/src/components/CommandDeck.svelte"),
+    },
+  },
   server: {
     port: 5173,
     // Allow vite to serve files from the chan repo root + the

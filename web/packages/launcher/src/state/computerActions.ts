@@ -1,10 +1,11 @@
-// Computers action adapter for the inline command launcher. It delegates to the
-// same state/backend owners as the machine cards, preserving browser-vs-native
-// ownership, leader claims, native trust, and live-terminal confirmation.
+// Shared Computers actions. The machine cards and command launcher both call
+// these wrappers so browser-vs-native window ownership, leader claims, native
+// trust, and live-terminal confirmation cannot drift between entry points.
 
 import type { DevserverEntry, WindowRecord, WorkspaceEntry } from "../api/library";
 import { liveTerminalsCount } from "../api/library";
 import {
+  closeWindow,
   connectDevserver,
   focusWindow,
   grantNativeTrustAndConnect,
@@ -20,7 +21,11 @@ import {
 import { requestConfirm } from "./confirm.svelte";
 import { hasDesktopBridge, selfManagedWindows } from "./capabilities";
 import { canActOnTenant, ownsTenantLeader, tenantLeader } from "./leadership.svelte";
-import { mintWindow, openWindowRecord, toggleWindowVisibility } from "./windowManager.svelte";
+import {
+  mintWindow,
+  openWindowRecord,
+  toggleWindowVisibility,
+} from "./windowManager.svelte";
 
 const NATIVE_TRUST_MESSAGE =
   "This shared devserver controls the web content in its Chan windows. Native access can read and write your clipboard, read files you select, save downloads, control Chan windows, and open links in your system browser. Grant access only if you trust its owner.";
@@ -114,7 +119,10 @@ export function canManageWindow(window: WindowRecord): boolean {
   return hasDesktopBridge || (selfManagedWindows && canActOnTenant(window.prefix));
 }
 
-/** Bring a window to the foreground on either owning SPA surface. */
+/** Bring a window to the foreground on either owning surface. Native
+ * `openWindow` focuses a visible window and un-hides a buried one. A
+ * self-managed launcher must synchronously open/focus its named browser window
+ * (to preserve the click's popup permission), then clear persisted hidden state. */
 export async function focusComputerWindow(window: WindowRecord): Promise<void> {
   if (hasDesktopBridge) {
     await focusWindow(window);
@@ -133,4 +141,8 @@ export async function setWindowShown(window: WindowRecord, shown: boolean): Prom
     return;
   }
   await toggleWindowVisibility(window, actingFor(window.prefix));
+}
+
+export async function closeComputerWindow(window: WindowRecord): Promise<void> {
+  await closeWindow(window, actingFor(window.prefix));
 }

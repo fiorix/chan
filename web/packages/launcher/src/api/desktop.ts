@@ -10,6 +10,40 @@
 
 type UnlistenFn = () => void;
 
+export type NativeLauncherEntryMode = "contextual" | "computers";
+
+export interface NativeLauncherCommandDescriptor {
+  id: string;
+  title: string;
+  category: string;
+  keywords: string[];
+  icon?: string;
+  shortcut?: string;
+  acceptsArg: boolean;
+  confirm?: {
+    title: string;
+    message: string;
+    actionLabel: string;
+    danger?: boolean;
+  };
+  scope: "tab" | "pane" | "window";
+}
+
+export interface NativeLauncherContext {
+  commands: NativeLauncherCommandDescriptor[];
+  theme: "light" | "dark";
+  accent?: string;
+  sourceTitle: string;
+}
+
+export interface NativeLauncherSnapshot {
+  entryMode: NativeLauncherEntryMode;
+  draft: unknown;
+  draftRevision: number;
+  context: NativeLauncherContext | null;
+  sourceAlive: boolean;
+}
+
 interface TauriEvent<T> {
   payload: T;
 }
@@ -59,8 +93,52 @@ async function tauriInvoke<T>(cmd: string, args?: unknown): Promise<T> {
   return (await invoke(cmd, args)) as T;
 }
 
+export function isNativeCommandOverlay(): boolean {
+  return new URLSearchParams(location.search).get("command") === "1";
+}
+
+export async function openNativeCommandLauncher(
+  entryMode: NativeLauncherEntryMode,
+): Promise<void> {
+  await tauriInvoke("open_command_launcher", { entryMode });
+}
+
+export async function nativeCommandLauncherSnapshot(): Promise<NativeLauncherSnapshot> {
+  return await tauriInvoke("command_launcher_snapshot");
+}
+
+export async function saveNativeCommandLauncherDraft(
+  revision: number,
+  draft: unknown,
+): Promise<void> {
+  await tauriInvoke("save_command_launcher_draft", { revision, draft });
+}
+
+export async function hideNativeCommandLauncher(): Promise<void> {
+  await tauriInvoke("hide_command_launcher");
+}
+
+export async function executeNativeCommandLauncherItem(
+  commandId: string,
+  arg?: string,
+  itemId = commandId,
+): Promise<void> {
+  await tauriInvoke("execute_command_launcher_item", {
+    commandId,
+    arg: arg ?? null,
+    itemId,
+  });
+}
+
 /// Restart chan-desktop after an updater install. The narrow app command is
 /// granted through `launcher-update.json`, not through the broad process plugin.
 export async function restartDesktopAfterUpdate(): Promise<void> {
   await tauriInvoke("restart_desktop_after_update");
+}
+
+/// Ask chan-desktop to run its normal confirm-then-quit path. Exposed only to
+/// the loopback launcher and trusted-overlay capabilities, never to an
+/// untrusted browser origin.
+export async function requestDesktopQuit(): Promise<void> {
+  await tauriInvoke("request_app_quit");
 }

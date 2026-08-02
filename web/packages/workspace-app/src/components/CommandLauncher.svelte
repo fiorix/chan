@@ -2,9 +2,9 @@
   // Context provider for the shared command deck. Commands remain owned by the
   // workspace app and execute through their existing run thunks; the shared deck
   // owns presentation, keyboard zones, motion, and persisted draft semantics.
+  import { onMount } from "svelte";
   import CommandDeck from "@chan/web-shared/CommandDeck.svelte";
   import {
-    clearClonedSessionDeckDrafts,
     fuzzyDeckScore,
     rankDeckItems,
     type DeckItem,
@@ -31,6 +31,7 @@
     Shapes,
     SquareStack,
     Terminal,
+    X,
   } from "lucide-svelte";
   import {
     clearLauncherDraft,
@@ -38,6 +39,7 @@
     launcherDraft,
     launcherReturnFocus,
     persistLauncherDraft,
+    ui,
   } from "../state/store.svelte";
   import {
     availableCommands,
@@ -47,7 +49,17 @@
     type CommandSurface,
   } from "../state/commands";
   import { chordFor } from "../state/shortcuts";
-  import { sessionWindowId, withTokenQuery } from "../api/client";
+  import {
+    commandLauncherSourceReady,
+    finishNativeCommandLauncherExecution,
+    isTauriDesktop,
+    submitNativeCommandLauncherContext,
+    type NativeLauncherCommandDescriptor,
+    type NativeLauncherScope,
+  } from "../api/desktop";
+  import { NAMED_PANE_HEX } from "../state/paneColor";
+  import { focusColorForWindow } from "../state/tabs.svelte";
+  import { sessionWindowId } from "../api/client";
   import { ApiError } from "../api/errors";
   import {
     loadScopedLibrarySnapshot,
@@ -58,7 +70,7 @@
   } from "../api/libraryCommand";
   import "../state/commands/install";
 
-  type ComputerCommandId = "new-terminal" | "new-window" | "focus" | "hide" | "show";
+  type ComputerCommandId = "new-terminal" | "new-window" | "focus" | "hide" | "show" | "close";
 
   interface Entry extends DeckItem {
     next?: ComputerCommandId;
@@ -105,15 +117,12 @@
   let ranCommand = false;
   let restoreTarget: HTMLElement | null = null;
   let contextNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+  let nativeRequestId: string | null = $state(null);
   let scopedLibrary: ScopedLibrarySnapshot | null = $state(null);
   let scopedLibraryLoading = $state(false);
   let scopedLibrarySettled = $state(false);
   let scopedLibraryError: string | null = $state(null);
   let scopedLibraryLoad: Promise<void> | null = null;
-  // Direct `chan open` serves one tenant without a WorkspaceHost root launcher
-  // API. Its safe fallback is same-tenant navigation only, never a fabricated
-  // aggregate library snapshot.
-  let standaloneTenantMode = $state(false);
   // Local assignable alias for Svelte's ownership contract. Both names point
   // at the same imported state proxy; CommandDeck mutates fields, never swaps
   // the draft object.
@@ -129,8 +138,7 @@
       id: "computers",
       label: "Computers",
       icon: MonitorCog,
-      available:
-        scopedLibrary?.role === "owner" || scopedLibraryLoading || standaloneTenantMode,
+      available: isTauriDesktop() || scopedLibrary !== null || scopedLibraryLoading,
     },
   ]);
 
@@ -166,30 +174,90 @@
     return `${command.id}\u001f${command.category}\u001f${command.title}`;
   }
 
+  function nativeScopeFor(command: Command): NativeLauncherScope {
+    const scope = scopeFor(command);
+    return scope === "computers" ? "window" : scope;
+  }
+
+  function nativeDescriptor(command: Command): NativeLauncherCommandDescriptor {
+    return {
+      // Command ids are unique in the catalog and are re-looked-up below at
+      // execution time. No run thunk or live app state crosses into Desktop.
+      id: command.id,
+      title: command.title,
+      category: command.category,
+      keywords: [...(command.keywords ?? [])],
+      icon: command.icon,
+      shortcut: chordFor(command.id) ?? undefined,
+      acceptsArg: command.acceptsArg === true,
+      confirm: command.confirm,
+      scope: nativeScopeFor(command),
+    };
+  }
+
+  function executionError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  async function executeNative(detail: {
+    requestId: string;
+    executionId: string;
+    commandId: string;
+    arg?: string | null;
+  }): Promise<void> {
+    if (detail.requestId !== nativeRequestId) {
+      await finishNativeCommandLauncherExecution(
+        detail.executionId,
+        "The invoking window context changed",
+      );
+      return;
+    }
+    const liveContext = commandContext();
+    const command = availableCommands(liveContext).find(
+      (candidate) => candidate.id === detail.commandId,
+    );
+    if (!command) {
+      await finishNativeCommandLauncherExecution(
+        detail.executionId,
+        "That command is no longer available",
+      );
+      return;
+    }
+    if (detail.arg != null && !command.acceptsArg) {
+      await finishNativeCommandLauncherExecution(
+        detail.executionId,
+        "That command does not accept an argument",
+      );
+      return;
+    }
+    try {
+      await command.run(detail.arg ?? undefined);
+      await finishNativeCommandLauncherExecution(detail.executionId);
+    } catch (error) {
+      await finishNativeCommandLauncherExecution(detail.executionId, executionError(error));
+    }
+  }
+
   function errorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
   }
 
   function refreshScopedLibrary(): Promise<void> {
-    if (standaloneTenantMode) return Promise.resolve();
+    if (isTauriDesktop()) return Promise.resolve();
     if (scopedLibraryLoad) return scopedLibraryLoad;
     scopedLibraryLoading = true;
     scopedLibraryLoad = loadScopedLibrarySnapshot()
       .then((snapshot) => {
         scopedLibrary = snapshot;
-        standaloneTenantMode = false;
         scopedLibraryError = null;
       })
       .catch((error) => {
-        // Direct `chan open` intentionally has no root library router. It may
-        // still open another view of this exact tenant in the browser. Other
-        // failures stay recoverable: the next poll remints after /ws reconnects.
+        // A server without the scoped route simply leaves the fourth orb quiet.
+        // Other failures stay recoverable: the next open/poll remints after the
+        // source /ws reconnects.
+        scopedLibraryError = errorMessage(error);
         if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
           scopedLibrary = null;
-          standaloneTenantMode = true;
-          scopedLibraryError = null;
-        } else {
-          scopedLibraryError = errorMessage(error);
         }
       })
       .finally(() => {
@@ -200,18 +268,71 @@
     return scopedLibraryLoad;
   }
 
+  onMount(() => {
+    if (!isTauriDesktop()) return;
+    const onRequest = (event: Event): void => {
+      const requestId = (event as CustomEvent<{ requestId?: unknown }>).detail?.requestId;
+      if (typeof requestId === "string" && requestId.length <= 128) {
+        nativeRequestId = requestId;
+      }
+    };
+    const onExecute = (event: Event): void => {
+      const detail = (event as CustomEvent<Record<string, unknown>>).detail;
+      if (
+        typeof detail?.requestId !== "string" ||
+        typeof detail.executionId !== "string" ||
+        typeof detail.commandId !== "string" ||
+        !(detail.arg == null || typeof detail.arg === "string")
+      ) {
+        return;
+      }
+      void executeNative({
+        requestId: detail.requestId,
+        executionId: detail.executionId,
+        commandId: detail.commandId,
+        arg: detail.arg as string | null | undefined,
+      });
+    };
+    window.addEventListener("chan:launcher-request", onRequest);
+    window.addEventListener("chan:launcher-execute", onExecute);
+    // Installed listeners come first, then readiness, so a host re-request
+    // cannot race past this reloaded webview.
+    void commandLauncherSourceReady().catch(() => {});
+    return () => {
+      window.removeEventListener("chan:launcher-request", onRequest);
+      window.removeEventListener("chan:launcher-execute", onExecute);
+    };
+  });
+
   // Capability minting waits until the deck is requested, avoiding startup
   // work and the ordinary race before this window's main /ws is live. While the
   // deck remains open, a light poll keeps window targets current without ever
   // granting access outside the invoking library.
   $effect(() => {
-    if (!launcherDraft.visible) return;
+    if (!launcherDraft.visible || isTauriDesktop()) return;
     const first = setTimeout(() => void refreshScopedLibrary(), 0);
     const poll = setInterval(() => void refreshScopedLibrary(), 2500);
     return () => {
       clearTimeout(first);
       clearInterval(poll);
     };
+  });
+
+  // Publish only a bounded catalog snapshot while this window owns an active
+  // request. Query text and Computers inventory remain in the Desktop host.
+  $effect(() => {
+    const requestId = nativeRequestId;
+    if (!requestId || !isTauriDesktop()) return;
+    const commands = availableCommands(ctx).map(nativeDescriptor);
+    const theme = ui.theme;
+    const accent = NAMED_PANE_HEX[focusColorForWindow()];
+    void submitNativeCommandLauncherContext(requestId, {
+      commands,
+      theme,
+      accent,
+    }).catch(() => {
+      // A stale request is expected after another window takes ownership.
+    });
   });
 
   function breadcrumbFor(command: Command, scope: DeckScopeId): string {
@@ -233,6 +354,7 @@
       scope,
       icon: iconFor(command),
       shortcut: chordFor(command.id),
+      confirm: command.confirm,
     };
   }
 
@@ -273,7 +395,7 @@
   });
 
   function scopedWindowTitle(window: ScopedLibraryWindow): string {
-    return window.title;
+    return window.label ? `${window.title} — ${window.label}` : window.title;
   }
 
   function scopedWindowContext(window: ScopedLibraryWindow): string {
@@ -298,16 +420,6 @@
   }
 
   async function focusScopedWindow(window: ScopedLibraryWindow): Promise<void> {
-    const mode = scopedLibrary?.window_mode;
-    if (mode === "desktop") {
-      await runScopedLibraryAction({ action: "focus_window", window_id: window.window_id });
-      await refreshScopedLibrary();
-      return;
-    }
-    if (mode === "native_watcher") {
-      throw new Error("This Chan window cannot focus another native window");
-    }
-
     const popup = popupFor(window);
     if (window.hidden && window.can_act) {
       await runScopedLibraryAction({
@@ -328,62 +440,35 @@
       | { action: "new_terminal" }
       | { action: "new_workspace_window"; workspace_id: string },
   ): Promise<void> {
-    const browserOwned = scopedLibrary?.window_mode === "browser";
-    // Browser-owned launches must reserve a popup before the first await so
-    // keyboard activation retains the browser's popup grant. Native records
-    // are opened by the desktop bridge or the invoking window's watcher.
-    const popup = browserOwned ? globalThis.window.open("", "_blank") : null;
-    if (browserOwned && !popup) throw new Error("The browser blocked the new Chan window");
-    if (popup) clearClonedSessionDeckDrafts(popup);
+    // Must happen before the first await so keyboard activation retains the
+    // browser's popup grant.
+    const popup = globalThis.window.open("", "_blank");
+    if (!popup) throw new Error("The browser blocked the new Chan window");
     try {
       const result = await runScopedLibraryAction(action);
-      if (popup) {
-        if (!result?.window) throw new Error("Chan did not return the new window");
-        popup.name = result.window.window_id;
-        popup.location.href = result.window.launch_path;
-        popup.focus();
-      }
+      if (!result?.window) throw new Error("Chan did not return the new window");
+      popup.name = result.window.window_id;
+      popup.location.href = result.window.launch_path;
+      popup.focus();
       await refreshScopedLibrary();
     } catch (error) {
-      popup?.close();
+      popup.close();
       throw error;
     }
   }
 
-  function standaloneWindowId(): string {
-    const suffix =
-      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-        ? crypto.randomUUID()
-        : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-    return `standalone-${suffix}`;
-  }
-
-  function createStandaloneTenantWindow(kind: "terminal" | "workspace"): void {
-    const popup = globalThis.window.open("", "_blank");
-    if (!popup) throw new Error("The browser blocked the new Chan window");
-    clearClonedSessionDeckDrafts(popup);
-    const windowId = standaloneWindowId();
-    const params = new URLSearchParams({ w: windowId });
-    if (kind === "terminal") params.set("kind", "terminal");
-    popup.name = windowId;
-    popup.location.href = withTokenQuery(`/index.html?${params.toString()}`);
-    popup.focus();
-  }
-
-  async function setScopedWindowShown(window: ScopedLibraryWindow, shown: boolean): Promise<void> {
-    if (shown && scopedLibrary?.window_mode === "browser") {
-      await focusScopedWindow(window);
-      return;
-    }
-
-    const popup = scopedLibrary?.window_mode === "browser" ? popupFor(window) : null;
-    await runScopedLibraryAction({
-      action: "set_window_visibility",
-      window_id: window.window_id,
-      hidden: !shown,
-    });
-    if (!shown) popup?.close();
-    await refreshScopedLibrary();
+  async function buryScopedWindow(window: ScopedLibraryWindow, close: boolean): Promise<void> {
+    // Acquiring the named context is also synchronous for keyboard popup rules.
+    // If no such window exists the browser creates a blank one, which is closed
+    // after the server mutation.
+    const popup = popupFor(window);
+    await runScopedLibraryAction(
+      close
+        ? { action: "close_window", window_id: window.window_id }
+        : { action: "set_window_visibility", window_id: window.window_id, hidden: true },
+    );
+    popup.close();
+    if (popup !== globalThis.window) await refreshScopedLibrary();
   }
 
   function computerCommandEntry(
@@ -406,25 +491,33 @@
   }
 
   function scopedWindowEntry(
-    command: "focus" | "hide" | "show",
+    command: "focus" | "hide" | "show" | "close",
     window: ScopedLibraryWindow,
   ): Entry {
-    const verb = command === "focus" ? "Focus" : command === "hide" ? "Hide" : "Show";
+    const verb = command === "focus" ? "Focus" : command === "hide" ? "Hide" : command === "show" ? "Show" : "Close";
     const title = scopedWindowTitle(window);
     const context = scopedWindowContext(window);
     return {
       id: `computers:${command}:${window.window_id}`,
       title,
       breadcrumb: `Computers › ${verb} › ${context}`,
-      searchText: [title, window.workspace_path ?? "", context, verb].join(" "),
+      searchText: [title, window.title, window.label, window.workspace_path ?? "", context, verb].join(" "),
       scope: "computers",
-      icon: command === "focus" ? Focus : command === "hide" ? EyeOff : Eye,
+      icon: command === "focus" ? Focus : command === "hide" ? EyeOff : command === "show" ? Eye : X,
       awaitResult: true,
-      dismissImmediatelyOnSuccess: command === "focus" || command === "show",
+      confirm:
+        command === "close"
+          ? {
+              title: `Close ${title}?`,
+              message: "Open sessions in this window may stop.",
+              actionLabel: "Close",
+              danger: true,
+            }
+          : undefined,
       run:
-        command === "focus"
+        command === "focus" || command === "show"
           ? () => focusScopedWindow(window)
-          : () => setScopedWindowShown(window, command === "show"),
+          : () => buryScopedWindow(window, command === "close"),
     };
   }
 
@@ -438,7 +531,6 @@
       scope: "computers",
       icon: AppWindow,
       awaitResult: true,
-      dismissImmediatelyOnSuccess: true,
       run: () =>
         createScopedWindow({
           action: "new_workspace_window",
@@ -448,39 +540,6 @@
   }
 
   function computerTargetEntries(command: ComputerCommandId): Entry[] {
-    if (standaloneTenantMode) {
-      if (command === "new-terminal") {
-        return [
-          {
-            id: "computers:new-terminal:standalone",
-            title: "This server",
-            breadcrumb: "Computers › New terminal › Local standalone",
-            searchText: "this server local standalone shell terminal",
-            scope: "computers",
-            icon: Terminal,
-            awaitResult: true,
-            dismissImmediatelyOnSuccess: true,
-            run: () => createStandaloneTenantWindow("terminal"),
-          },
-        ];
-      }
-      if (command === "new-window") {
-        return [
-          {
-            id: "computers:new-window:standalone",
-            title: "This workspace",
-            breadcrumb: "Computers › New window › Local standalone",
-            searchText: "this workspace local standalone window",
-            scope: "computers",
-            icon: AppWindow,
-            awaitResult: true,
-            dismissImmediatelyOnSuccess: true,
-            run: () => createStandaloneTenantWindow("workspace"),
-          },
-        ];
-      }
-      return [];
-    }
     const snapshot = scopedLibrary;
     if (!snapshot) return [];
     const owner = snapshot.role === "owner";
@@ -496,7 +555,6 @@
                 scope: "computers",
                 icon: Terminal,
                 awaitResult: true,
-                dismissImmediatelyOnSuccess: true,
                 run: () => createScopedWindow({ action: "new_terminal" }),
               },
             ]
@@ -508,11 +566,7 @@
               .map(scopedWorkspaceEntry)
           : [];
       case "focus":
-        return !owner || snapshot.window_mode === "native_watcher"
-          ? []
-          : snapshot.windows
-              .filter((window) => window.can_act)
-              .map((window) => scopedWindowEntry(command, window));
+        return snapshot.windows.map((window) => scopedWindowEntry(command, window));
       case "hide":
         return owner
           ? snapshot.windows
@@ -525,16 +579,16 @@
               .filter((window) => window.can_act && !window.control && window.hidden)
               .map((window) => scopedWindowEntry(command, window))
           : [];
+      case "close":
+        return owner
+          ? snapshot.windows
+              .filter((window) => window.can_act && !window.control)
+              .map((window) => scopedWindowEntry(command, window))
+          : [];
     }
   }
 
   const computerRootEntries = $derived.by<Entry[]>(() => {
-    if (standaloneTenantMode) {
-      return [
-        computerCommandEntry("new-terminal", "New terminal", "This server", Terminal, "shell local standalone"),
-        computerCommandEntry("new-window", "New window", "This workspace", AppWindow, "workspace local standalone"),
-      ];
-    }
     if (!scopedLibrary) {
       return [
         {
@@ -558,22 +612,21 @@
         computerCommandEntry("new-window", "New window", "Choose a workspace", AppWindow, "workspace"),
       );
     }
-    if (owner && scopedLibrary.window_mode !== "native_watcher") {
-      entries.push(
-        computerCommandEntry("focus", "Focus", "Choose a window", Focus, "open activate control terminal"),
-      );
-    }
+    entries.push(computerCommandEntry("focus", "Focus", "Choose a window", Focus, "open activate control terminal"));
     if (owner) {
       entries.push(
         computerCommandEntry("hide", "Hide", "Choose a visible window", EyeOff, "bury"),
         computerCommandEntry("show", "Show", "Choose a hidden window", Eye, "unhide"),
+        computerCommandEntry("close", "Close", "Choose a window", X, "remove quit"),
       );
     }
     return entries;
   });
 
   const computerDeepEntries = $derived.by<Entry[]>(() =>
-    (["new-terminal", "new-window", "focus", "hide", "show"] as const).flatMap(computerTargetEntries),
+    (["new-terminal", "new-window", "focus", "hide", "show", "close"] as const).flatMap(
+      computerTargetEntries,
+    ),
   );
 
   const computerEntries = $derived(
@@ -592,7 +645,9 @@
     // Typed search crosses menu levels and includes this invoking library's
     // leaves. An empty contextual deck remains focused and uncluttered; the
     // always-visible Computers orb is one arrow away.
-    return launcherDraft.query.trim() ? [...contextualEntries, ...computerDeepEntries] : [];
+    return launcherDraft.query.trim()
+      ? [...contextualEntries, ...computerDeepEntries]
+      : contextualEntries;
   });
 
   const visibleEntries = $derived(
@@ -600,10 +655,10 @@
   );
 
   const placeholder = $derived(
-    computerMode
-      ? computerRootEntries.find((entry) => entry.next === computerMode)?.title ?? "Computers"
-      : launcherDraft.scope
-        ? scopes.find((scope) => scope.id === launcherDraft.scope)?.label ?? "Search"
+    launcherDraft.scope
+      ? scopes.find((scope) => scope.id === launcherDraft.scope)?.label ?? "Search"
+      : computerMode
+        ? computerRootEntries.find((entry) => entry.next === computerMode)?.title ?? "Computers"
         : "Search",
   );
 
@@ -707,7 +762,7 @@
 </script>
 
 <CommandDeck
-  open={launcherDraft.visible}
+  open={launcherDraft.visible && !isTauriDesktop()}
   bind:draft={deckDraft}
   items={visibleEntries}
   {scopes}

@@ -14,23 +14,67 @@
   //
   // `icon` adds a leading kind glyph (accent for the control terminal); the
   // machine tree passes it for every row. The textual "connection lost" cue is
-  // the devserver identity row's status dot turned red (Library.svelte), not a
+  // the devserver identity row's machine icon turned red (Library.svelte), not a
   // pill on this row.
+  import { tick } from "svelte";
   import { AppWindow, ExternalLink, Eye, EyeOff, Focus, SquareTerminal } from "lucide-svelte";
-  import { focusWindow, toggleWindow, reportError, clearError } from "../state/library.svelte";
-  import { windowRowLabel } from "../lib/windowLabel";
+  import {
+    focusWindow,
+    toggleWindow,
+    saveWindowLabel,
+    reportError,
+    clearError,
+  } from "../state/library.svelte";
+  import { rowLabel, windowRowLabel } from "../lib/windowLabel";
   import { hasControlAttention, clearControlAttention } from "../state/controlAttention.svelte";
   import { hasWindowAttention } from "../state/windowAttention.svelte";
-  import { hasDesktopBridge, selfManagedWindows } from "../state/capabilities";
+  import { hasDesktopBridge, readOnly, selfManagedWindows } from "../state/capabilities";
   import { openWindowRecord, toggleWindowVisibility } from "../state/windowManager.svelte";
   import { actingFor, canActOnTenant } from "../state/leadership.svelte";
-  import type { WindowRecord } from "../api/library";
+  import { MAX_WINDOW_LABEL_CHARS, type WindowRecord } from "../api/library";
 
   interface Props {
     w: WindowRecord;
     icon?: boolean;
   }
   let { w, icon = false }: Props = $props();
+  let editingLabel = $state(false);
+  let labelDraft = $state("");
+  let labelInput: HTMLInputElement | undefined = $state();
+
+  async function beginLabelEdit(): Promise<void> {
+    labelDraft = w.label ?? "";
+    editingLabel = true;
+    await tick();
+    labelInput?.focus();
+    labelInput?.select();
+  }
+
+  function cancelLabelEdit(): void {
+    editingLabel = false;
+    labelDraft = w.label ?? "";
+  }
+
+  function canEditWindowLabel(rec: WindowRecord): boolean {
+    return (
+      !readOnly &&
+      !rec.control &&
+      (!selfManagedWindows || canActOnTenant(rec.prefix))
+    );
+  }
+
+  async function commitLabelEdit(): Promise<void> {
+    if (!editingLabel) return;
+    editingLabel = false;
+    const label = labelDraft.trim();
+    if (label === (w.label ?? "").trim()) return;
+    clearError();
+    try {
+      await saveWindowLabel(w, label, actingFor(w.prefix));
+    } catch (e) {
+      reportError(e);
+    }
+  }
 
   // A control terminal whose devserver needs attention slow-flashes its eye
   // yellow until the user acts on the window or the desktop reports recovery.
@@ -61,6 +105,41 @@
   }
 </script>
 
+{#snippet windowName()}
+  <div class="row-main">
+    {#if editingLabel}
+      <span class="label-editor">
+        <span>{rowLabel(w.kind, w.ordinal)} [</span>
+        <input
+          bind:this={labelInput}
+          bind:value={labelDraft}
+          maxlength={MAX_WINDOW_LABEL_CHARS}
+          aria-label={`Text for ${rowLabel(w.kind, w.ordinal)}`}
+          placeholder="label"
+          onblur={() => void commitLabelEdit()}
+          onkeydown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void commitLabelEdit();
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              cancelLabelEdit();
+            }
+          }} />
+        <span>]</span>
+      </span>
+    {:else if canEditWindowLabel(w)}
+      <button
+        class="row-name editable-label"
+        type="button"
+        title="Add or edit window text"
+        onclick={() => void beginLabelEdit()}>{windowRowLabel(w)}</button>
+    {:else}
+      <span class="row-name">{windowRowLabel(w)}</span>
+    {/if}
+  </div>
+{/snippet}
+
 {#if hasDesktopBridge}
   <div class="row">
     {#if icon}
@@ -68,9 +147,7 @@
         {#if w.kind === "workspace"}<AppWindow size={15} />{:else}<SquareTerminal size={15} />{/if}
       </span>
     {/if}
-    <div class="row-main">
-      <span class="row-name">{windowRowLabel(w)}</span>
-    </div>
+    {@render windowName()}
     <div class="row-actions">
       <button
         class="icon-btn"
@@ -114,9 +191,7 @@
         {#if w.kind === "workspace"}<AppWindow size={15} />{:else}<SquareTerminal size={15} />{/if}
       </span>
     {/if}
-    <div class="row-main">
-      <span class="row-name">{windowRowLabel(w)}</span>
-    </div>
+    {@render windowName()}
     <div class="row-actions">
       <!-- Bridgeless SHOW/HIDE: flips the shared, server-persisted visibility
            (the `/visibility` web op), leader-gated like the create controls, so a
@@ -158,9 +233,7 @@
         {#if w.kind === "workspace"}<AppWindow size={15} />{:else}<SquareTerminal size={15} />{/if}
       </span>
     {/if}
-    <div class="row-main">
-      <span class="row-name">{windowRowLabel(w)}</span>
-    </div>
+    {@render windowName()}
     <!-- Readonly can't drive a window, but it mirrors the EYE state: a hidden
          window shows a static EyeOff beside the connection dot. -->
     {#if w.hidden}
@@ -171,6 +244,44 @@
 {/if}
 
 <style>
+  .editable-label {
+    display: inline;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: text;
+  }
+
+  .editable-label:hover {
+    color: var(--brand);
+  }
+
+  .label-editor {
+    display: inline-flex;
+    align-items: baseline;
+    min-width: 0;
+    color: var(--text);
+    font-size: 0.88rem;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .label-editor input {
+    width: min(14rem, 35vw);
+    min-width: 4rem;
+    margin: 0 0.18rem;
+    padding: 0.08rem 0.25rem;
+    border: 1px solid var(--brand);
+    border-radius: 4px;
+    outline: none;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+  }
+
   /* The leading kind glyph (nested tree); the control terminal reads accent. */
   .row-glyph {
     display: inline-flex;

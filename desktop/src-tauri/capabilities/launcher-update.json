@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "launcher-update",
-  "description": "Grants the loopback-served launcher only the app command needed by its update-ready dialog. The dialog listens for desktop-update-ready through launcher-events, then invokes restart_desktop_after_update. This replaces broad process restart permissions on remote content.",
+  "description": "Grants the loopback-served launcher only the narrow restart-after-update app command. This replaces broad process permissions on remote content.",
   "remote": {
     "urls": ["http://127.0.0.1:*", "http://localhost:*"]
   },

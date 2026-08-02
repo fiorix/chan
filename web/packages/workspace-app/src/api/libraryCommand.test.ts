@@ -17,7 +17,6 @@ import {
 const snapshot = {
   library_id: "lib-test",
   role: "owner",
-  window_mode: "browser",
   windows: [],
   workspaces: [],
 };

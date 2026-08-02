@@ -52,6 +52,7 @@ describe("launcher root", () => {
     expect(topbar.textContent).toContain("Computers");
     expect(topbar.textContent).toContain("This machine & devservers");
     expect(target.querySelector('[aria-label="Toggle theme"]')).not.toBeNull();
+    expect(target.querySelector('[aria-label="Open command launcher"]')).not.toBeNull();
     // The Gmail-style Select-mode toggle (reveals the row checkboxes).
     expect(topbar.querySelector("button.select")).not.toBeNull();
     // The add-workspace / add-devserver / open-terminal entry points all moved

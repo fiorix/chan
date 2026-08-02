@@ -530,9 +530,9 @@ async fn run_devserver_window_feed(
                 } else {
                     consecutive_failures = consecutive_failures.saturating_add(1);
                     // Persistent feed failure while the connection record still
-                    // exists: a green dot would lie (the 5s workspace poll heals
+                    // exists: a green machine icon would lie (the 5s workspace poll heals
                     // on fresh TCP). Mark Unreachable + raise attention on the
-                    // real flip; entry_from_devserver renders the red dot off the
+                    // real flip; entry_from_devserver renders the red icon off the
                     // flag, and it clears on the next frame inside the stream.
                     if consecutive_failures >= FEED_UNREACHABLE_AFTER
                         && state.devservers.is_connected(&id)
@@ -662,7 +662,7 @@ async fn stream_window_feed(
     };
     keepalive_pump(&mut ws, FEED_PING_INTERVAL, FEED_MAX_MISSED, |text| {
         // Any inbound data frame means the feed is live. Mark it, and on the FIRST
-        // such frame clear any Unreachable state so the launcher's red dot clears
+        // such frame clear any Unreachable state so the launcher's red icon clears
         // the instant the feed reconnects, not at the next drop.
         if !saw_frame.swap(true, Ordering::Relaxed)
             && state.devserver_feed.set_unreachable(id, false)
@@ -886,6 +886,7 @@ mod tests {
             kind: chan_server::WindowKind::Terminal,
             title: "Terminal".into(),
             ordinal: 1,
+            label: String::new(),
             workspace_path: None,
             prefix: "/terminal".into(),
             token: "tok-1".into(),

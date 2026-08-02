@@ -6,14 +6,14 @@ How the launcher is built and reached. The [`README`](README.md) covers the stac
 
 ```mermaid
 flowchart TB
-    subgraph spa["web-launcher SPA (one bundle, ~46 KiB gzip)"]
+    subgraph spa["web-launcher SPA (one bundle)"]
         LIB["launcher API client -- pure /api/library/* HTTP<br/>workspaces · windows · devservers · gateways<br/>bearer via ?t= (Authorization header; ?t= query for the watch WS)"]
-        UI["TopBar · ScreenFlip (Library | Gateways) · SelectionBar · NewWorkspaceDialog<br/>reads &lt;meta chan-launcher-surface&gt; -> gates capabilities"]
+        UI["TopBar · ScreenFlip (Library | Gateways) · shared Command deck · SelectionBar · NewWorkspaceDialog<br/>reads &lt;meta chan-launcher-surface&gt; -> gates capabilities"]
     end
 
     subgraph cs["chan-server"]
         SL["static asset layer<br/>embedded launcher bundle<br/>serve_launcher(uri, surface)"]
-        LR["library router<br/>windows: list/mint/watch/discard (both surfaces)<br/>workspaces: list (all) · add/on/off/rm (mutable surfaces; 403 for readonly + tunnel non-owners)"]
+        LR["library router<br/>windows: list/mint/watch/discard/label + desktop open/hide/close<br/>workspaces: list (all) · add/on/off/rm<br/>live-window-bound command capabilities"]
         IRF["install_launcher_root_fallback(host, bearer, serve_addr)"]
     end
 
@@ -42,27 +42,84 @@ flowchart TB
 
 ## What the launcher is
 
-The launcher is a pure `/api/library/*` HTTP client: it never opens native windows, never dials a devserver, and never parses an opaque window or workspace id. Every type mirrors a struct the library serializes -- the field names *are* the wire, pinned by server byte-tests. It is served at the devserver/library root `/`, and the bundle uses a relative asset base so assets resolve under any mount. It renders four registries: workspaces, windows, devservers, and gateways.
+In its ordinary launcher-window role, the SPA is a pure `/api/library/*` HTTP client: it never opens native windows, never dials a devserver, and never parses an opaque window or workspace id. Every type mirrors a struct the library serializes -- the field names *are* the wire, pinned by server byte-tests. It is served at the devserver/library root `/`, and the bundle uses a relative asset base so assets resolve under any mount. It renders four registries: workspaces, windows, devservers, and gateways.
 
-## Unified command launcher authority
+The same bundle has one additional trusted role in Chan Desktop: `?command=1`
+renders only the shared command deck inside Desktop's `command-launcher` Tauri
+overlay. That overlay may use its narrowly granted Tauri commands; ordinary
+launcher and tenant webviews cannot invoke the overlay-only snapshot, draft, or
+execution commands.
 
-The **command launcher** is the searchable command deck rendered inside a SPA. The **launcher SPA** is this package's Computers/library application. They are distinct concepts even though the launcher SPA hosts one command launcher.
+## One command launcher, two authority hosts
 
-There is no native command-launcher window. `@chan/web-shared` owns one `CommandDeck` presentation and interaction model, while each SPA adapts commands it already has authority to execute:
+```mermaid
+flowchart LR
+    KEY["keyboard shortcut"] --> HOST{"Chan Desktop?"}
+    HOST -->|yes| NATIVE["Desktop-owned command-launcher overlay<br/>aggregate Computers authority"]
+    HOST -->|no| INLINE["inline shared deck<br/>invoking-library capability"]
+    SOURCE["invoking workspace/terminal<br/>live tab · pane · window context"] -->|"bounded descriptors + theme/accent"| NATIVE
+    NATIVE -->|"stable id + optional argument"| SOURCE
+    NATIVE --> DESKTOP["local + connected Computers catalog"]
+    INLINE -->|"tenant token mints capability<br/>bound to this live window"| LOCAL["this host's local library only"]
+    REMOTE["remote webview"] -. "never receives Desktop inventory,<br/>root bearer, or global query" .-> NATIVE
+```
 
-- The launcher SPA supplies the full library snapshot already authorized by its `/api/library/*` bearer. On the desktop loopback that is Chan Desktop's aggregate Computers inventory, including connected devservers and gateways.
-- A workspace or terminal SPA supplies its contextual command registry plus a scoped snapshot of only the library serving that window. It mints a short-lived command capability with its tenant bearer and live `window_id`; the capability expires with that window's `/ws` presence and never includes another library.
-- A direct `chan open --standalone` tenant has no `WorkspaceHost` root launcher API. Its workspace adapter degrades to two same-tenant browser navigations, `New terminal` and `New window`, and exposes no roster or window-management actions.
-- A remotely served workspace therefore cannot enumerate or control Chan Desktop's other libraries. Desktop-wide commands remain in the trusted launcher SPA.
+The command launcher is one product and one shared Svelte component. Its empty
+query is the **contextual deck**: focused tab actions first, then pane, window,
+and Computers. The four scope orbs stay visible for direct keyboard navigation.
+Typed deep search may jump directly to a permitted nested target while retaining
+the trusted breadcrumb and any confirmation step.
 
-Window affinity follows the invoking record. A browser-origin window creates browser-origin records and opens them with `window.open`; a native-origin window creates native-origin records and lets the existing desktop watcher reconcile them into Tauri windows. The command deck itself owns no native geometry, focus handoff, transparent surface, or cross-window draft state.
+Desktop owns one reusable transparent, borderless overlay positioned over the
+invoking native window. The source receives only a request id and submits at
+most 256 sanitized command descriptors; no callback crosses the boundary. A
+selected contextual id returns to the same source, which resolves it again from
+its live command catalog before running it. Desktop keeps the aggregate
+Computers catalog, root launcher bearer, and query local.
+
+Outside Desktop, `POST /api/library/command-capabilities` accepts a tenant token
+only when the claimed `window_id` has live `/ws` presence in that exact tenant.
+The opaque capability has a five-minute sliding expiry and dies immediately
+when that window disappears. Its snapshot omits tenant tokens, route prefixes,
+and aggregate remote-feed rows. Owner capabilities may create/focus/hide/show/
+close browser windows in that library; readonly tunnel capabilities may inspect
+and focus only. Launch redirects revalidate liveness, are `no-store`, and send
+`Referrer-Policy: no-referrer`.
+
+### Keyboard and draft contract
+
+- macOS Desktop: `Cmd+K` contextual, `Cmd+Shift+K` Computers.
+- Web and non-macOS: `Ctrl+Alt+K` contextual; Desktop also exposes
+  `Ctrl+Alt+Shift+K` for Computers.
+- `Up`/`Down` move through results and into the scope rail; `Left`/`Right` move
+  between scopes or back/forward through levels; `Enter` enters or executes;
+  empty-query `Backspace` goes back; `Escape` hides.
+- Each invoking window has separate contextual and Computers drafts containing
+  visibility, query, path, selection, and recoverable operation state. Hiding,
+  switching windows, and reload preserve the draft. Successful execution, true
+  source-window close, or app exit clears it.
+- Theme and pane accent are live inputs. An open overlay changes immediately
+  when its invoking source changes light/dark theme or focus colour.
 
 ## The `/api/library/*` surface
 
 - **workspaces** -- `GET` list (`{workspace_id, path, label, on, status, error?, library_id, devserver_id, prefix}`; a local row's `prefix` equals its `workspace_id`, a devserver row carries its remote mount prefix), `POST {path}` add, `POST /{id}/{on|off}` toggle, `DELETE /{id}` remove.
-- **windows** -- `GET` list, `POST {kind, workspace_path?, origin?, acting_window_id?}` mint, `GET .../windows/watch` (a WebSocket that pushes the full window set plus per-tenant leaders on every change), `DELETE /{id}` discard, `POST /{id}/{open|hide}` (desktop-bridge ops), `POST /{id}/visibility`.
+- **windows** -- `GET` list, `POST {kind, workspace_path?, origin?, acting_window_id?}` mint, `GET .../windows/watch` (a WebSocket that pushes the full window set plus per-tenant leaders on every change), `DELETE /{id}` discard, `POST /{id}/{open|hide|close}` (desktop-bridge ops), `POST /{id}/visibility`, and `PUT /{id}/label {label, acting_window_id?}`. `label` is separately persisted optional user text (at most 64 characters) for any non-control terminal or workspace window; it never mutates or gets parsed from the library-owned title/ordinal.
+- **command capabilities** -- `POST /command-capabilities` mints from the invoking tenant token and live window; capability-authenticated `GET /{capability}` returns a token-redacted local snapshot, `POST /{capability}/actions` executes the approved owner subset, and `GET /{capability}/windows/{id}/launch` revalidates then redirects into the target tenant.
 - **devservers** -- full CRUD plus desktop-bridge ops (connect/disconnect, native-trust, terminal, workspace open/on/off/forget); a registry-less surface returns an empty list, and bridge ops answer `NO_DESKTOP`/409 with no desktop attached.
 - **gateways** -- CRUD plus connect/disconnect; roster rows synthesize read-only devserver entries.
+
+The Computers tree carries machine health on the machine glyph itself: green is
+connected/local, orange is a pending connection, red is lost/unreachable, and
+muted is disconnected. There is no sibling machine-status dot (the Gateways
+registry keeps its own independent dots). Ordinary terminal and workspace rows
+render their generated ordinal plus optional caption as
+`Terminal Window N [caption]` / `Window N [caption]`; clicking that label edits
+only the caption. The command launcher's Computers scope uses the same shared action
+wrappers as the card controls and completes over live computers, workspaces,
+and windows for New terminal/window, Focus, Hide, Show, Close, Connect,
+Disconnect, Turn on/off, Quit, and New devserver. Window completion search
+includes the optional caption.
 
 The SPA reads its bearer from `?t=` in its own URL and presents it as `Authorization: Bearer` on fetch and as `?t=` on the watch WebSocket (a browser WebSocket cannot set headers).
 

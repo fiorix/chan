@@ -75,7 +75,6 @@
     const ids = items.map((item) => item.id).join("\u001f");
     void ids;
     if (!open) return;
-    pointerIndex = null;
     reconcileSelection();
   });
 
@@ -157,31 +156,16 @@
     draft.operation = { kind: "pending", itemId: item.id, title: item.title };
     try {
       await onChoose(item);
-      // A dismissed pending command can finish after the deck has been reused
-      // for another operation. Never paint that result into the newer state.
-      if (
-        draft !== executionDraft ||
-        executionDraft.operation?.kind !== "pending" ||
-        executionDraft.operation.itemId !== item.id
-      ) return;
-      if (item.dismissImmediatelyOnSuccess) {
-        onSuccess?.(item);
-        return;
-      }
+      // A hidden pending command can finish after another native window takes
+      // ownership of the reusable overlay. Never paint that result into the
+      // new source's draft.
+      if (draft !== executionDraft) return;
       executionDraft.operation = { kind: "success", itemId: item.id, title: item.title };
       await new Promise((resolve) => setTimeout(resolve, 260));
-      if (
-        draft !== executionDraft ||
-        executionDraft.operation?.kind !== "success" ||
-        executionDraft.operation.itemId !== item.id
-      ) return;
+      if (draft !== executionDraft) return;
       onSuccess?.(item);
     } catch (error) {
-      if (
-        draft !== executionDraft ||
-        executionDraft.operation?.kind !== "pending" ||
-        executionDraft.operation.itemId !== item.id
-      ) return;
+      if (draft !== executionDraft) return;
       executionDraft.operation = {
         kind: "error",
         itemId: item.id,
@@ -244,13 +228,6 @@
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
-      // `pending` is the one operation kind with no button of its own, so
-      // Escape has to release it here or the deck has no way out. This drops
-      // the blocking view; the command it was waiting on keeps running.
-      if (draft.operation?.kind === "pending") {
-        draft.operation = null;
-        return;
-      }
       onClose();
       return;
     }
@@ -441,9 +418,6 @@
             {:else if operation.kind === "pending"}
               <span class="deck-spinner" aria-hidden="true"></span>
               <div class="deck-operation-copy"><strong>{operation.title}</strong><span>Working…</span></div>
-              <div class="deck-decisions">
-                <button type="button" onclick={() => { draft.operation = null; }}>Dismiss</button>
-              </div>
             {:else if operation.kind === "success"}
               <div class="deck-operation-icon success">✓</div>
               <div class="deck-operation-copy"><strong>{operation.title}</strong><span>Done</span></div>
@@ -520,18 +494,16 @@
 
 <style>
   .deck-overlay {
-    --deck-scrim: rgba(0, 0, 0, 0.56);
     position: fixed;
     inset: 0;
     z-index: 32000;
     display: flex;
     align-items: flex-start;
     justify-content: center;
-    padding: min(17vh, 136px) 16px 16px;
+    padding: min(12vh, 92px) 16px 16px;
     box-sizing: border-box;
     color: var(--text);
   }
-  :global([data-theme="light"]) .deck-overlay { --deck-scrim: rgba(0, 0, 0, 0.32); }
   .deck-backdrop {
     position: absolute;
     inset: 0;
@@ -540,9 +512,8 @@
     padding: 0;
     border: 0;
     border-radius: 0;
-    background: var(--deck-scrim);
+    background: transparent;
     cursor: default;
-    animation: scrim-in 180ms ease-out;
   }
   .deck-shell {
     position: relative;
@@ -758,7 +729,6 @@
   }
   .deck-decisions button.chosen { color: var(--text); background: color-mix(in srgb, var(--text) 7%, transparent); border-color: color-mix(in srgb, var(--text) 12%, transparent); }
   .deck-decisions button.danger.chosen { color: var(--danger, #d1242f); }
-  @keyframes scrim-in { from { opacity: 0; } }
   @keyframes deck-arrive { from { opacity: 0; transform: translateY(-10px) scaleX(1.08) scaleY(.96); filter: blur(13px); } to { opacity: 1; transform: none; filter: blur(0); } }
   @keyframes panel-unfold { from { opacity: 0; transform: translateY(-8px) scaleY(.92); filter: blur(7px); } to { opacity: 1; transform: none; filter: blur(0); } }
   @keyframes orb-arrive { from { opacity: 0; transform: translateX(-28px) scale(.72); } }
@@ -775,7 +745,7 @@
     .deck-panel { margin-top: 9px; }
   }
   @media (prefers-reduced-motion: reduce) {
-    .deck-backdrop, .deck-shell, .deck-panel, .deck-scope, .deck-placeholder, .deck-results, .deck-operation, .deck-spinner { animation-duration: 1ms; animation-delay: 0ms; }
+    .deck-shell, .deck-panel, .deck-scope, .deck-placeholder, .deck-results, .deck-operation, .deck-spinner { animation-duration: 1ms; animation-delay: 0ms; }
     .deck-result, .deck-scope { transition-duration: 1ms; }
   }
 </style>

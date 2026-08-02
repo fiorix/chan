@@ -723,6 +723,7 @@ mod tests {
             kind: chan_server::WindowKind::Workspace,
             title: String::new(),
             ordinal: 1,
+            label: String::new(),
             workspace_path: Some("/tmp/notes".into()),
             prefix: prefix.into(),
             token: "tok".into(),

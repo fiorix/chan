@@ -1875,6 +1875,47 @@ pub async fn set_window_visibility(
     Ok(())
 }
 
+/// `PUT /api/library/windows/{window_id}/label` `{label}`: persist the user
+/// caption on the devserver that owns a remote non-control window.
+pub async fn set_window_label(
+    conn: &DevserverConn,
+    window_id: &str,
+    label: &str,
+) -> Result<(), String> {
+    let path = format!("/api/library/windows/{window_id}/label");
+    if let Some(gw) = &conn.gateway {
+        let resp = gateway_request_json(
+            gw,
+            reqwest::Method::PUT,
+            &path,
+            &serde_json::json!({ "label": label }),
+        )
+        .await?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "gateway window label returned HTTP {}",
+                resp.status()
+            ));
+        }
+        return Ok(());
+    }
+    let url = format!("{}{}", base_origin(&conn.host, conn.port), path);
+    let resp = http_client()?
+        .put(&url)
+        .bearer_auth(&conn.token)
+        .json(&serde_json::json!({ "label": label }))
+        .send()
+        .await
+        .map_err(|e| format!("setting devserver window label: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "devserver window label returned HTTP {}",
+            resp.status()
+        ));
+    }
+    Ok(())
+}
+
 /// The on/off-toggle URL for a registered workspace: the collection path + the
 /// prefix (an absolute route path) + `/on`. Distinct from the DELETE URL
 /// (= Forget); on/off keeps the registration.
@@ -2853,6 +2894,7 @@ mod tests {
             kind: chan_server::WindowKind::Terminal,
             title: "Terminal Window 1".into(),
             ordinal: 1,
+            label: String::new(),
             workspace_path: None,
             prefix: prefix.into(),
             token: token.into(),

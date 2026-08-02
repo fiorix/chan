@@ -45,6 +45,15 @@ body {
   font-size: 15px;
 }
 
+:root.chan-command-overlay,
+:root.chan-command-overlay body,
+:root.chan-command-overlay #app {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+
 /* ---- Buttons ---------------------------------------------------------- */
 
 .btn {

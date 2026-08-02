@@ -26,7 +26,7 @@ const LINUX_LIBRARY_ID = "lib-linux";
 // The control terminal that slow-flashes for attention belongs to a
 // disconnected remote whose control script died: the dead control row stays
 // mounted so the user can open it and read the death reason, and the shared
-// attention state turns the devserver's status dot red.
+// attention state turns the devserver's machine icon red.
 const ATTENTION_DEVSERVER_ID = "ds-linux";
 
 interface Seed {
@@ -606,6 +606,11 @@ export function createLauncherDemoApi(opts: LauncherDemoOptions = {}): LauncherD
       notify();
       return tick(undefined);
     },
+    closeWindow: (id) => {
+      windows = windows.filter((w) => w.window_id !== id);
+      notify();
+      return tick(undefined);
+    },
     // Web-op close/visibility for the widened LibraryApi. The demo embed's
     // window manager is inert (see state/demo guard), so these are called only
     // via the interface; discard drops the record, visibility mirrors open/hide.
@@ -620,6 +625,12 @@ export function createLauncherDemoApi(opts: LauncherDemoOptions = {}): LauncherD
         w.hidden = hidden;
         w.connected = !hidden;
       }
+      notify();
+      return tick(undefined);
+    },
+    setWindowLabel: (id, label) => {
+      const w = windows.find((x) => x.window_id === id);
+      if (w) w.label = label.trim();
       notify();
       return tick(undefined);
     },

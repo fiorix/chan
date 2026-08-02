@@ -540,7 +540,7 @@ pub fn control_terminal_label(devserver_id: &str) -> String {
 /// workspace is still running. Errors when the id names nothing the
 /// desktop can act on.
 /// Resolve the id an open/hide op carries to a native window label. The
-/// launcher's status-dot affordance sends a BARE library-minted `window_id`
+/// launcher's window affordance sends a BARE library-minted `window_id`
 /// (e.g. `w-1a2b`), but a watched window's native label is the composite
 /// `{library_id}::{window_id}` ([`crate::window_watcher::native_label`]) -- so a
 /// bare id never matches `get_webview_window` directly. `cs window` callers
@@ -1149,7 +1149,7 @@ fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), S
                     // and never reach this branch.
                     WindowEvent::CloseRequested { api, .. } => {
                         let state = app_for_close.state::<Arc<AppState>>();
-                        // A launcher status-dot hide (or `cs window hide`) routes
+                        // A launcher Hide action (or `cs window hide`) routes
                         // through this same close path but is an explicit hide
                         // gesture, not a red-dot: consume its one-shot flag here
                         // and, once the transfer guards below clear, bury directly,
@@ -1343,6 +1343,12 @@ fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), S
                         if !watcher_buried && state.remove_buried(&label_for_close) {
                             crate::rebuild_window_menu(&app_for_close);
                         }
+                        if !watcher_buried {
+                            crate::command_launcher::source_destroyed(
+                                &app_for_close,
+                                &label_for_close,
+                            );
+                        }
                         // A destroyed remote-backed window may now be a
                         // reopenable `saved && !connected` row on the
                         // remote -- re-poll so the menu offers it.
@@ -1469,7 +1475,7 @@ const CONFIRM_CLOSE_DISPATCH_JS: &str = "window.dispatchEvent(new CustomEvent('c
 /// `config_key` is the LRU restore key `capture_window_config` pushes for a
 /// buried non-terminal window; it is empty for the watcher windows (which own
 /// their own persistence). Two callers reach here: an explicit hide gesture
-/// (`cs window hide` / the launcher status dot, via the drained `silent_hide`
+/// (`cs window hide` / the launcher Hide action, via the drained `silent_hide`
 /// flag, passing the window's exact `config_key`) and the SPA's Hide choice from
 /// the close-confirm overlay (`hide_window_from_close_confirm`, which recovers
 /// the key from the label via `restore_key_for_label`). Close is the sibling
@@ -2074,14 +2080,14 @@ const KEY_BRIDGE_JS: &str = r#"
   // bubble to the SPA's own handler (Cmd+R -> location.reload()) so the chord
   // degrades to a working fallback instead of dying. Swallowing first then
   // finding no bridge killed Cmd+R/devtools/zoom outright (no IPC, no fallback).
-  function invokeIpc(e, cmd) {
+  function invokeIpc(e, cmd, args) {
     const tauri = window.__TAURI__;
     if (!(tauri && tauri.core && typeof tauri.core.invoke === 'function')) {
       return;
     }
     e.preventDefault();
     e.stopImmediatePropagation();
-    tauri.core.invoke(cmd).catch((err) => {
+    tauri.core.invoke(cmd, args).catch((err) => {
       console.error('[chan] IPC ' + cmd + ' failed:', err);
     });
   }
@@ -2092,6 +2098,11 @@ const KEY_BRIDGE_JS: &str = r#"
     return isMac()
       ? e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.code === 'KeyK'
       : e.ctrlKey && !e.metaKey && e.altKey && !e.shiftKey && e.code === 'KeyK';
+  }
+  function computersLauncherChord(e) {
+    return isMac()
+      ? e.metaKey && !e.ctrlKey && !e.altKey && e.shiftKey && e.code === 'KeyK'
+      : e.ctrlKey && !e.metaKey && e.altKey && e.shiftKey && e.code === 'KeyK';
   }
   // Chord policy: actions reachable through Hybrid Nav (Cmd+.) stay
   // unbound here so the native layer claims as little as possible.
@@ -2112,8 +2123,12 @@ const KEY_BRIDGE_JS: &str = r#"
     const shift = e.shiftKey;
     const alt = e.altKey;
     const code = e.code;
+    if (computersLauncherChord(e)) {
+      invokeIpc(e, 'open_command_launcher', { entryMode: 'computers' });
+      return;
+    }
     if (commandLauncherChord(e)) {
-      fire(e, 'app.launcher.toggle');
+      invokeIpc(e, 'open_command_launcher', { entryMode: 'contextual' });
       return;
     }
     if (alt) {
@@ -2334,7 +2349,7 @@ mod tests {
 
     #[test]
     fn resolve_label_matches_a_bare_window_id_to_its_composite_native_label() {
-        // The launcher's status-dot open/hide sends the BARE library-minted
+        // The launcher's window open/hide actions send the BARE library-minted
         // `window_id`; the desktop must resolve it to the composite native label
         // the watcher actually opened (`{library_id}::{window_id}`).
         let open = vec!["local::w-1".to_string(), "lib-abc::w-2".to_string()];
@@ -2788,7 +2803,10 @@ mod tests {
         // opens the command launcher; New terminal is the context-aware
         // spawn chord (Cmd+T on macOS, Ctrl+Shift+T off-mac).
         assert!(KEY_BRIDGE_JS.contains("function commandLauncherChord"));
-        assert!(KEY_BRIDGE_JS.contains("app.launcher.toggle"));
+        assert!(KEY_BRIDGE_JS
+            .contains("invokeIpc(e, 'open_command_launcher', { entryMode: 'contextual' })"));
+        assert!(KEY_BRIDGE_JS
+            .contains("invokeIpc(e, 'open_command_launcher', { entryMode: 'computers' })"));
         assert!(KEY_BRIDGE_JS.contains("e.ctrlKey && !e.metaKey && e.altKey"));
         assert!(KEY_BRIDGE_JS.contains("app.terminal.toggle"));
         assert!(KEY_BRIDGE_JS.contains("app.pane.prev"));
@@ -2839,6 +2857,10 @@ mod tests {
         include_str!("../capabilities/launcher-events.json");
     const LAUNCHER_UPDATE_CAPABILITY_JSON: &str =
         include_str!("../capabilities/launcher-update.json");
+    const LAUNCHER_CONTROL_CAPABILITY_JSON: &str =
+        include_str!("../capabilities/launcher-control.json");
+    const COMMAND_LAUNCHER_CAPABILITY_JSON: &str =
+        include_str!("../capabilities/command-launcher.json");
     const ABOUT_CAPABILITY_JSON: &str = include_str!("../capabilities/about.json");
     const LOCAL_UPLOAD_CAPABILITY_JSON: &str = include_str!("../capabilities/local-upload.json");
     const APP_PERMISSIONS_TOML: &str = include_str!("../permissions/app.toml");
@@ -3193,33 +3215,14 @@ mod tests {
 
     #[test]
     fn app_acl_grants_every_registered_command() {
-        // Complete coverage: every command in generate_handler! must be
-        // grantable somewhere the SPA can reach it. App-command grants come
-        // from the two sets plus the window-scoped local capabilities --
-        // local-drop (read_dropped_paths) and local-upload (the native transfer
-        // command family),
-        // both scoped to locally-served windows. Catches a command the
-        // workspace SPA invokes (e.g. platform_os, read_clipboard_text) that no
-        // set grants.
+        // Complete coverage: every command in generate_handler! must have an
+        // explicit app permission block. Capability-set and origin parity are
+        // checked separately below. This catches an overlay-only command just
+        // as reliably as a workspace command without pretending both belong in
+        // the broad main-window/workspace-window sets.
         const MAIN_RS: &str = include_str!("main.rs");
-        let mut granted: std::collections::HashSet<String> =
-            app_permission_set_commands("main-window")
-                .into_iter()
-                .chain(app_permission_set_commands("workspace-window"))
-                .collect();
-        granted.insert("read_dropped_paths".to_string());
-        for command in [
-            "download_file_native",
-            "upload_files_native",
-            "native_transfer_status",
-            "cancel_native_transfer",
-            "begin_generated_download",
-            "append_generated_download",
-            "finish_generated_download",
-            "cancel_generated_download",
-        ] {
-            granted.insert(command.to_string());
-        }
+        let granted: std::collections::HashSet<String> =
+            all_granted_app_commands().into_iter().collect();
         for command in invoke_handler_commands(MAIN_RS) {
             assert!(
                 granted.contains(&command),
@@ -3456,6 +3459,43 @@ mod tests {
         assert!(permissions.contains("commands.allow = [\"restart_desktop_after_update\"]"));
     }
 
+    #[test]
+    fn launcher_control_capability_is_narrow_and_does_not_match_the_overlay() {
+        let windows = capability_windows(LAUNCHER_CONTROL_CAPABILITY_JSON);
+        assert_eq!(windows, vec!["main".to_string(), "main-*".to_string()]);
+        assert!(
+            !label_glob_matches("main-*", "command-launcher"),
+            "the trusted overlay label must stay outside the launcher family"
+        );
+        let remote_urls = capability_remote_urls(LAUNCHER_CONTROL_CAPABILITY_JSON);
+        assert!(remote_urls.iter().any(|url| url == "http://127.0.0.1:*"));
+        assert_eq!(
+            capability_permissions(LAUNCHER_CONTROL_CAPABILITY_JSON),
+            vec![
+                "allow-request-app-quit".to_string(),
+                "allow-open-command-launcher".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn command_launcher_capability_is_exactly_scoped_to_the_trusted_overlay() {
+        assert_eq!(
+            capability_windows(COMMAND_LAUNCHER_CAPABILITY_JSON),
+            vec!["command-launcher".to_string()],
+        );
+        let remote_urls = capability_remote_urls(COMMAND_LAUNCHER_CAPABILITY_JSON);
+        assert!(remote_urls.iter().any(|url| url == "http://127.0.0.1:*"));
+        assert_eq!(
+            capability_permissions(COMMAND_LAUNCHER_CAPABILITY_JSON),
+            vec![
+                "allow-command-launcher-overlay".to_string(),
+                "allow-request-app-quit".to_string(),
+                "core:event:default".to_string(),
+            ],
+        );
+    }
+
     // ---- origin-aware ACL parity ------------------------------------
     //
     // Tauri resolves a window's effective grants from BOTH its label
@@ -3472,10 +3512,12 @@ mod tests {
     /// Every capability file, by name. `capability_walk_covers_every_capability_file`
     /// pins this table against the directory listing so a new capability
     /// cannot land without joining the origin-aware walk.
-    const CAPABILITY_FILES: [(&str, &str); 7] = [
+    const CAPABILITY_FILES: [(&str, &str); 9] = [
         ("about.json", ABOUT_CAPABILITY_JSON),
+        ("command-launcher.json", COMMAND_LAUNCHER_CAPABILITY_JSON),
         ("default.json", DEFAULT_CAPABILITY_JSON),
         ("launcher-events.json", LAUNCHER_EVENTS_CAPABILITY_JSON),
+        ("launcher-control.json", LAUNCHER_CONTROL_CAPABILITY_JSON),
         ("launcher-update.json", LAUNCHER_UPDATE_CAPABILITY_JSON),
         ("local-drop.json", LOCAL_DROP_CAPABILITY_JSON),
         ("local-upload.json", LOCAL_UPLOAD_CAPABILITY_JSON),

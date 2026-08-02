@@ -40,6 +40,7 @@ describe("TopBar screen toggle (desktop surface)", () => {
     expect(target!.textContent).toContain("This machine & devservers");
     expect(toggle()).not.toBeNull();
     expect(toggle().getAttribute("aria-label")).toBe("Show gateways");
+    expect(target!.querySelector('[aria-label="Open command launcher"]')).not.toBeNull();
   });
 
   it("clicking the title flips to Gateways and back", () => {
@@ -51,6 +52,7 @@ describe("TopBar screen toggle (desktop surface)", () => {
     expect(target!.textContent).toContain("Gateways");
     expect(target!.textContent).toContain("Connection to remote gateways");
     expect(toggle().getAttribute("aria-label")).toBe("Show computers");
+    expect(target!.querySelector('[aria-label="Open command launcher"]')).toBeNull();
 
     toggle().click();
     flushSync();

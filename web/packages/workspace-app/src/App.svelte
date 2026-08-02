@@ -139,6 +139,7 @@
   import {
     hideWindowFromCloseConfirm,
     isTauriDesktop,
+    openNativeCommandLauncher,
     reloadWindow,
     requestCloseWindow,
   } from "./api/desktop";
@@ -186,6 +187,14 @@
   // in-mode binding. The flag lives in App.svelte because Hybrid Nav is
   // global (one transaction per Cmd+. press), no per-pane scoping needed.
   let paneModeHelpVisible = $state(false);
+
+  function showCommandLauncher(mode: "contextual" | "computers" = "contextual"): void {
+    if (isTauriDesktop()) {
+      void openNativeCommandLauncher(mode);
+    } else if (mode === "contextual") {
+      toggleCommandLauncher();
+    }
+  }
   $effect(() => {
     // Touch enough of the layout to trip reactivity on common
     // mutations (URL persistence) AND watch every file tab's content
@@ -587,6 +596,16 @@
         ? commandIdForChord(overrideChord, commands)
         : undefined;
       if (overrideId) {
+        if (overrideId === "app.launcher.toggle") {
+          e.preventDefault();
+          showCommandLauncher("contextual");
+          return;
+        }
+        if (overrideId === "app.launcher.computers" && isTauriDesktop()) {
+          e.preventDefault();
+          showCommandLauncher("computers");
+          return;
+        }
         const cmd = commands.find((c) => c.id === overrideId);
         if (cmd && cmd.available(commandContext())) {
           e.preventDefault();
@@ -602,7 +621,7 @@
         : e.ctrlKey && !e.metaKey && e.altKey && !e.shiftKey && e.code === "KeyK";
     if (commandLauncherChord) {
       e.preventDefault();
-      toggleCommandLauncher();
+      showCommandLauncher("contextual");
       return;
     }
     const settingsChord =
@@ -1198,7 +1217,10 @@
         searchPanel.open = !searchPanel.open;
         return;
       case "app.launcher.toggle":
-        toggleCommandLauncher();
+        showCommandLauncher("contextual");
+        return;
+      case "app.launcher.computers":
+        if (isTauriDesktop()) showCommandLauncher("computers");
         return;
       case "app.graph.toggle":
         spawnGraphFromContext();

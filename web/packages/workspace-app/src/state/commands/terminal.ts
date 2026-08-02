@@ -151,6 +151,12 @@ registerCommands([
     title: "Restart terminal",
     category: "Terminal",
     keywords: ["restart", "respawn", "reload"],
+    confirm: {
+      title: "Restart this terminal?",
+      message: "The current shell process will stop and a new shell will start.",
+      actionLabel: "Restart",
+      danger: true,
+    },
     available: onTerminal,
     run: () => dispatchChanCommand("app.terminal.restart"),
   },

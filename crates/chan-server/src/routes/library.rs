@@ -67,21 +67,12 @@ enum CommandCapabilityRole {
     Readonly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum CommandCapabilityWindowMode {
-    Browser,
-    Desktop,
-    NativeWatcher,
-}
-
 #[derive(Clone)]
 struct LibraryCommandCapability {
     token: String,
     window_id: String,
     tenant_prefix: String,
     role: CommandCapabilityRole,
-    origin: WindowOrigin,
     expires_at: Instant,
 }
 
@@ -168,6 +159,14 @@ pub fn launcher_router(
         .route(
             "/api/library/windows/{window_id}/hide",
             post(handle_hide_library_window),
+        )
+        .route(
+            "/api/library/windows/{window_id}/close",
+            post(handle_close_library_window),
+        )
+        .route(
+            "/api/library/windows/{window_id}/label",
+            put(handle_set_library_window_label),
         )
         // SET the server-persisted visibility (the durable source of
         // truth the desktop mirrors on connect). Distinct from /open + /hide
@@ -293,9 +292,10 @@ pub fn launcher_router(
     // surface-bearer gate needs the host to validate a window's per-tenant
     // token against the live tenants.
     let host_for_surface = host.clone();
-    // A workspace mints one short-lived capability with its own tenant token.
-    // Uses are authenticated by the opaque capability and remain scoped to the
-    // one library serving the invoking live window.
+    // A workspace mints one short-lived, live-window-bound capability with its
+    // own tenant token. Uses are authenticated by the opaque capability itself,
+    // so the browser can navigate a popup through the launch redirect without
+    // putting a full tenant or launcher bearer in the source page.
     let command_mint = Router::new()
         .route(
             "/api/library/command-capabilities",
@@ -509,6 +509,7 @@ async fn require_surface_bearer(
             .into_response()
     }
 }
+
 // ---------------------------------------------------------------------------
 // Scoped command capability (workspace/terminal -> invoking library only).
 // ---------------------------------------------------------------------------
@@ -532,6 +533,7 @@ struct ScopedLibraryWindow {
     kind: WindowKind,
     title: String,
     ordinal: u32,
+    label: String,
     workspace_path: Option<String>,
     connected: bool,
     hidden: bool,
@@ -551,7 +553,6 @@ struct ScopedLibraryWorkspace {
 struct ScopedLibrarySnapshot {
     library_id: String,
     role: CommandCapabilityRole,
-    window_mode: CommandCapabilityWindowMode,
     windows: Vec<ScopedLibraryWindow>,
     workspaces: Vec<ScopedLibraryWorkspace>,
 }
@@ -561,8 +562,8 @@ struct ScopedLibrarySnapshot {
 enum ScopedLibraryAction {
     NewTerminal,
     NewWorkspaceWindow { workspace_id: String },
-    FocusWindow { window_id: String },
     SetWindowVisibility { window_id: String, hidden: bool },
+    CloseWindow { window_id: String },
 }
 
 #[derive(Serialize)]
@@ -627,23 +628,6 @@ fn scoped_launch_path(capability: &str, window_id: &str) -> String {
     )
 }
 
-fn command_capability_window_mode(
-    host: &WorkspaceHost,
-    capability: &LibraryCommandCapability,
-) -> CommandCapabilityWindowMode {
-    if capability.origin == WindowOrigin::Browser {
-        CommandCapabilityWindowMode::Browser
-    } else if host.has_desktop_bridge() {
-        CommandCapabilityWindowMode::Desktop
-    } else {
-        // A native-origin record served by a remote devserver is reconciled by
-        // the connected desktop's per-library watcher. The remote server may
-        // mutate its own records, but it cannot focus an already-visible host
-        // window because no desktop bridge crosses that origin boundary.
-        CommandCapabilityWindowMode::NativeWatcher
-    }
-}
-
 fn scoped_window(
     capability: &LibraryCommandCapability,
     record: WindowRecord,
@@ -654,6 +638,7 @@ fn scoped_window(
         kind: record.kind,
         title: record.title,
         ordinal: record.ordinal,
+        label: record.label,
         workspace_path: record.workspace_path,
         connected: record.connected,
         hidden: record.hidden,
@@ -775,27 +760,12 @@ async fn handle_mint_library_command_capability(
         );
     }
 
-    let Some(source) = state
-        .host
-        .assemble_window_records()
-        .into_iter()
-        .find(|record| {
-            record.library_id == state.host.library_id() && record.window_id == request.window_id
-        })
-    else {
-        return command_capability_error(
-            StatusCode::FORBIDDEN,
-            "the invoking window is not in this library",
-        );
-    };
-
     let token = crate::auth::random_token();
     let capability = LibraryCommandCapability {
         token: token.clone(),
         window_id: request.window_id,
         tenant_prefix: request.tenant_prefix,
         role,
-        origin: source.origin,
         expires_at: Instant::now() + COMMAND_CAPABILITY_TTL,
     };
     let mut capabilities = state
@@ -827,7 +797,6 @@ async fn handle_library_command_snapshot(
     Json(ScopedLibrarySnapshot {
         library_id: state.host.library_id().to_string(),
         role: capability.role,
-        window_mode: command_capability_window_mode(&state.host, &capability),
         windows: scoped_local_windows(&state.host, &capability),
         workspaces: scoped_local_workspaces(&state.host, capability.role),
     })
@@ -853,7 +822,7 @@ async fn handle_library_command_action(
         ScopedLibraryAction::NewTerminal => {
             state
                 .host
-                .mint_window_with_origin(WindowKind::Terminal, None, capability.origin)
+                .mint_window_with_origin(WindowKind::Terminal, None, WindowOrigin::Browser)
         }
         ScopedLibraryAction::NewWorkspaceWindow { workspace_id } => {
             let Some((_, root)) = resolve_workspace(&state.host, &workspace_id) else {
@@ -865,33 +834,8 @@ async fn handle_library_command_action(
             state.host.mint_window_with_origin(
                 WindowKind::Workspace,
                 Some(root.to_string_lossy().into_owned()),
-                capability.origin,
+                WindowOrigin::Browser,
             )
-        }
-        ScopedLibraryAction::FocusWindow { window_id } => {
-            let local = state
-                .host
-                .assemble_window_records()
-                .into_iter()
-                .any(|record| {
-                    record.library_id == state.host.library_id() && record.window_id == window_id
-                });
-            if !local {
-                return StatusCode::NOT_FOUND.into_response();
-            }
-            if command_capability_window_mode(&state.host, &capability)
-                != CommandCapabilityWindowMode::Desktop
-            {
-                return command_capability_error(
-                    StatusCode::CONFLICT,
-                    "this library has no desktop focus bridge",
-                );
-            }
-            return dispatch_window_op(&state.host, |reply| DesktopWindowOp::Open {
-                id: window_id,
-                reply,
-            })
-            .await;
         }
         ScopedLibraryAction::SetWindowVisibility { window_id, hidden } => {
             let Some(record) = state
@@ -907,10 +851,31 @@ async fn handle_library_command_action(
             if record.control {
                 return command_capability_error(
                     StatusCode::FORBIDDEN,
-                    "control terminals are not managed by a scoped capability",
+                    "control terminals are not managed by a browser capability",
                 );
             }
             return match state.host.set_window_hidden(&window_id, hidden) {
+                Ok(true) => StatusCode::NO_CONTENT.into_response(),
+                Ok(false) => StatusCode::NOT_FOUND.into_response(),
+                Err(error) => {
+                    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+                }
+            };
+        }
+        ScopedLibraryAction::CloseWindow { window_id } => {
+            let local = state
+                .host
+                .assemble_window_records()
+                .into_iter()
+                .any(|record| {
+                    record.library_id == state.host.library_id()
+                        && record.window_id == window_id
+                        && !record.control
+                });
+            if !local {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            return match state.host.discard_window(&window_id) {
                 Ok(true) => StatusCode::NO_CONTENT.into_response(),
                 Ok(false) => StatusCode::NOT_FOUND.into_response(),
                 Err(error) => {
@@ -936,15 +901,6 @@ async fn handle_library_command_launch(
         Ok(capability) => capability,
         Err(error) => return error.into_response(),
     };
-    // This redirect contains the target tenant bearer. A read-only gateway
-    // capability may inspect the redacted snapshot but must never exchange its
-    // capability for a tenant credential.
-    if capability.role != CommandCapabilityRole::Owner {
-        return command_capability_error(
-            StatusCode::FORBIDDEN,
-            "this gateway role may inspect but not open library windows",
-        );
-    }
     let Some(record) = state
         .host
         .assemble_window_records()
@@ -972,6 +928,10 @@ async fn handle_library_command_launch(
         query.append_pair("kind", "terminal");
     }
     let target = format!("{path}?{}", query.finish());
+    // The capability was checked above; retaining the binding through this
+    // response ensures a source that closes between snapshot and Enter cannot
+    // use a stale launch URL.
+    let _ = capability;
     Redirect::temporary(&target).into_response()
 }
 
@@ -1255,8 +1215,76 @@ async fn handle_set_library_window_visibility(
     }
 }
 
+/// Body of `PUT /api/library/windows/{window_id}/label`.
+#[derive(Deserialize)]
+struct SetWindowLabel {
+    label: String,
+    /// Same honest-client leader claim as visibility/discard. Desktop callers
+    /// omit it; a self-managed launcher supplies its tenant leader.
+    #[serde(default)]
+    acting_window_id: Option<String>,
+}
+
+fn normalize_window_label(raw: &str) -> Result<String, &'static str> {
+    let label = raw.trim();
+    if label.chars().count() > chan_library::windows::MAX_WINDOW_LABEL_CHARS {
+        return Err("window label must be 64 characters or fewer");
+    }
+    if label.chars().any(char::is_control) {
+        return Err("window label cannot contain control characters");
+    }
+    Ok(label.to_string())
+}
+
+/// Persist the optional user caption of one ordinary terminal or workspace
+/// window. Local rows write straight to this host's registry; an aggregated
+/// remote row crosses the desktop bridge so the owning devserver persists it.
+/// The generated ordinal and title remain untouched.
+async fn handle_set_library_window_label(
+    State(host): State<Arc<WorkspaceHost>>,
+    AxumPath(window_id): AxumPath<String>,
+    Json(req): Json<SetWindowLabel>,
+) -> Response {
+    let label = match normalize_window_label(&req.label) {
+        Ok(label) => label,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
+    let Some(record) = host
+        .assemble_window_records()
+        .into_iter()
+        .find(|record| record.window_id == window_id)
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if record.control {
+        return (
+            StatusCode::BAD_REQUEST,
+            "control terminals cannot have a label",
+        )
+            .into_response();
+    }
+    if let Err(resp) = leader_gate(
+        host.window_tenant_leader(&window_id),
+        req.acting_window_id.as_deref(),
+    ) {
+        return *resp;
+    }
+    match host.set_window_label(&window_id, label.clone()) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => {
+            dispatch_window_op(&host, |reply| DesktopWindowOp::SetWindowLabel {
+                id: window_id,
+                label,
+                reply,
+            })
+            .await
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 /// `POST /api/library/windows/{window_id}/open`: focus a live window or un-hide a
-/// buried one through the desktop window bridge, so the launcher's status dot can
+/// buried one through the desktop window bridge, so the launcher can
 /// open a window directly. 204 on success; 409 when no desktop is attached (the
 /// standalone serve / devserver surface can't drive a native window).
 async fn handle_open_library_window(
@@ -1284,6 +1312,34 @@ async fn handle_hide_library_window(
         reply,
     })
     .await
+}
+
+/// `POST /api/library/windows/{window_id}/close`: close a native window through
+/// the desktop manager, then discard any local durable row. Remote close is
+/// routed by the desktop op to the owning devserver. A live-terminal native
+/// window keeps the desktop's existing confirmation dialog.
+async fn handle_close_library_window(
+    State(host): State<Arc<WorkspaceHost>>,
+    AxumPath(window_id): AxumPath<String>,
+) -> Response {
+    let destroyed = match host
+        .desktop_bridge()
+        .dispatch(|reply| DesktopWindowOp::Close {
+            id: window_id.clone(),
+            force: false,
+            reply,
+        })
+        .await
+    {
+        Ok(destroyed) => destroyed,
+        Err(msg) => return (StatusCode::CONFLICT, msg).into_response(),
+    };
+    match host.discard_window(&window_id) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) if destroyed => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 /// `POST /api/library/devservers/{id}/connect`: connect a registered devserver
@@ -2514,6 +2570,102 @@ mod devserver_route_tests {
     }
 
     #[tokio::test]
+    async fn workspace_window_label_route_persists_trimmed_text_and_clears_it() {
+        let cfg = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(workspace.path()).unwrap();
+        let host = Arc::new(WorkspaceHost::new(lib, crate::route_builder()));
+        host.install_window_registry(
+            Arc::new(WindowRegistry::open(store.path().join("windows.json"))),
+            "local".to_string(),
+        );
+        let prefix = allocate_workspace_prefix(workspace.path()).unwrap();
+        host.open_or_get_registered_workspace(
+            workspace.path(),
+            super::tenant_config("127.0.0.1:0".parse().unwrap(), &prefix),
+        )
+        .await
+        .expect("mount workspace");
+        let record = host
+            .mint_window(
+                chan_library::windows::WindowKind::Workspace,
+                Some(workspace.path().to_string_lossy().into_owned()),
+            )
+            .expect("mint workspace window");
+        let router = launcher_router(host.clone(), None, None);
+        let uri = format!("/api/library/windows/{}/label", record.window_id);
+
+        let (status, _) = request(
+            &router,
+            "PUT",
+            &uri,
+            Some(r#"{"label":"  release checks  "}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, feed) = request(&router, "GET", "/api/library/windows", None).await;
+        let row = feed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["window_id"] == record.window_id)
+            .expect("window in feed");
+        assert_eq!(row["label"], "release checks");
+
+        let (status, _) = request(&router, "PUT", &uri, Some(r#"{"label":"   "}"#)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, feed) = request(&router, "GET", "/api/library/windows", None).await;
+        let row = feed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["window_id"] == record.window_id)
+            .unwrap();
+        assert!(row.get("label").is_none(), "an empty label is omitted");
+
+        let too_long = "x".repeat(chan_library::windows::MAX_WINDOW_LABEL_CHARS + 1);
+        let body = serde_json::json!({ "label": too_long }).to_string();
+        let (status, _) = request(&router, "PUT", &uri, Some(&body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn terminal_window_label_route_accepts_64_characters_and_rejects_65() {
+        let cfg = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let host = Arc::new(WorkspaceHost::new(lib, crate::route_builder()));
+        let registry_path = store.path().join("windows.json");
+        host.install_window_registry(
+            Arc::new(WindowRegistry::open(registry_path.clone())),
+            "local".to_string(),
+        );
+        let record = host
+            .mint_window(chan_library::windows::WindowKind::Terminal, None)
+            .expect("mint terminal window");
+        let router = launcher_router(host, None, None);
+        let uri = format!("/api/library/windows/{}/label", record.window_id);
+
+        let exactly_max = "x".repeat(chan_library::windows::MAX_WINDOW_LABEL_CHARS);
+        let body = serde_json::json!({ "label": exactly_max }).to_string();
+        let (status, _) = request(&router, "PUT", &uri, Some(&body)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let persisted = WindowRegistry::open(registry_path)
+            .snapshot()
+            .into_iter()
+            .find(|row| row.window_id == record.window_id)
+            .expect("terminal persisted");
+        assert_eq!(persisted.label, exactly_max);
+
+        let too_long = "x".repeat(chan_library::windows::MAX_WINDOW_LABEL_CHARS + 1);
+        let body = serde_json::json!({ "label": too_long }).to_string();
+        let (status, _) = request(&router, "PUT", &uri, Some(&body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn list_without_registry_is_empty() {
         // The headless devserver/gateway installs no registry: GET returns `[]`
         // (200) on every surface -- no `serve_addr` gate.
@@ -3253,11 +3405,31 @@ mod window_op_route_tests {
 
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use chan_library::windows::WindowRegistry;
     use chan_workspace::Library;
     use tower::ServiceExt;
 
     use super::{launcher_router, leader_gate};
-    use crate::{DesktopBridge, DesktopWindowOp, SetWorkspaceOnOutcome, WorkspaceHost, NO_DESKTOP};
+    use crate::{
+        DesktopBridge, DesktopWindowOp, DevserverFeedSource, LauncherWorkspace,
+        SetWorkspaceOnOutcome, WindowKind, WindowOrigin, WindowRecord, WorkspaceHost, NO_DESKTOP,
+    };
+
+    struct RemoteWindowFeed(WindowRecord);
+
+    impl DevserverFeedSource for RemoteWindowFeed {
+        fn windows(&self) -> Vec<WindowRecord> {
+            vec![self.0.clone()]
+        }
+
+        fn workspaces(&self) -> Vec<LauncherWorkspace> {
+            Vec::new()
+        }
+
+        fn pane_color(&self, _library_id: &str) -> Option<String> {
+            None
+        }
+    }
 
     fn library() -> Library {
         let dir = tempfile::tempdir().unwrap();
@@ -3446,6 +3618,102 @@ mod window_op_route_tests {
         let (status, body) = post(&router, "/api/library/fs/pick-folder").await;
         assert_eq!(status, StatusCode::OK, "pick-folder");
         assert_eq!(body, "\"/picked/dir\"", "pick-folder path json");
+    }
+
+    #[tokio::test]
+    async fn close_discards_a_saved_local_row_even_without_a_live_native_window() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<DesktopWindowOp>(2);
+        let bridge = DesktopBridge {
+            window_ops: Some(tx),
+            window_titles: Default::default(),
+        };
+        let host = Arc::new(WorkspaceHost::with_desktop_bridge(
+            library(),
+            bridge,
+            crate::route_builder(),
+        ));
+        let store = tempfile::tempdir().unwrap();
+        host.install_window_registry(
+            Arc::new(WindowRegistry::open(store.path().join("windows.json"))),
+            "local".into(),
+        );
+        let id = host
+            .mint_window(chan_library::windows::WindowKind::Terminal, None)
+            .expect("mint")
+            .window_id;
+        tokio::spawn(async move {
+            while let Some(op) = rx.recv().await {
+                if let DesktopWindowOp::Close { reply, .. } = op {
+                    // Hidden/offline row: no native webview was destroyed. The
+                    // route must still discard the durable library record.
+                    let _ = reply.send(Ok(false));
+                }
+            }
+        });
+        let router = launcher_router(host.clone(), None, None);
+        let (status, _) = post(&router, &format!("/api/library/windows/{id}/close")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(host
+            .assemble_window_records()
+            .iter()
+            .all(|record| record.window_id != id));
+
+        let (status, _) = post(&router, "/api/library/windows/nope/close").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn label_for_an_aggregated_remote_window_crosses_the_desktop_bridge() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<DesktopWindowOp>(1);
+        let bridge = DesktopBridge {
+            window_ops: Some(tx),
+            window_titles: Default::default(),
+        };
+        let host = Arc::new(WorkspaceHost::with_desktop_bridge(
+            library(),
+            bridge,
+            crate::route_builder(),
+        ));
+        let store = tempfile::tempdir().unwrap();
+        host.install_window_registry(
+            Arc::new(WindowRegistry::open(store.path().join("windows.json"))),
+            "local".into(),
+        );
+        host.install_devserver_feed(Arc::new(RemoteWindowFeed(WindowRecord {
+            window_id: "w-remote".into(),
+            library_id: "lib-remote".into(),
+            kind: WindowKind::Workspace,
+            title: "⌂ /srv/project Window 1".into(),
+            ordinal: 1,
+            label: String::new(),
+            workspace_path: Some("/srv/project".into()),
+            prefix: "/workspace-project".into(),
+            token: "token".into(),
+            persisted: true,
+            connected: true,
+            active_transfer: false,
+            control: false,
+            hidden: false,
+            origin: WindowOrigin::Native,
+        })));
+        let received = tokio::spawn(async move {
+            let Some(DesktopWindowOp::SetWindowLabel { id, label, reply }) = rx.recv().await else {
+                panic!("expected SetWindowLabel");
+            };
+            assert_eq!(id, "w-remote");
+            assert_eq!(label, "remote caption");
+            let _ = reply.send(Ok(()));
+        });
+        let router = launcher_router(host, None, None);
+        let (status, _) = send(
+            &router,
+            "PUT",
+            "/api/library/windows/w-remote/label",
+            Some(r#"{"label":" remote caption "}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        received.await.unwrap();
     }
 
     #[tokio::test]

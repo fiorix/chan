@@ -5,7 +5,12 @@
 // payload to the handler, returning the unlisten handle.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { hasTauriEvents, onTauriEvent, restartDesktopAfterUpdate } from "./desktop";
+import {
+  hasTauriEvents,
+  onTauriEvent,
+  requestDesktopQuit,
+  restartDesktopAfterUpdate,
+} from "./desktop";
 
 type W = Window & typeof globalThis & { __TAURI__?: unknown };
 
@@ -88,5 +93,19 @@ describe("restartDesktopAfterUpdate", () => {
     await restartDesktopAfterUpdate();
 
     expect(invoke).toHaveBeenCalledWith("restart_desktop_after_update", undefined);
+  });
+});
+
+describe("requestDesktopQuit", () => {
+  it("invokes the narrow confirm-then-quit app command", async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, "__TAURI__", {
+      value: { core: { invoke } },
+      configurable: true,
+    });
+
+    await requestDesktopQuit();
+
+    expect(invoke).toHaveBeenCalledWith("request_app_quit", undefined);
   });
 });

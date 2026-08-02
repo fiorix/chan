@@ -5,12 +5,22 @@
   // add-devserver entry points live in the library tree (the LOCAL header's
   // [new workspace] and the bottom "Add devserver" dashed button), and
   // open-terminal lives in each machine header, so the top bar stays the
-  // global chrome: title + select + theme.
-  import { Moon, SquareCheckBig, Sun } from "lucide-svelte";
+  // global chrome: title + Computers command launcher + select + theme.
+  import { Command, Moon, SquareCheckBig, Sun } from "lucide-svelte";
   import { themeState, toggleTheme } from "../state/theme.svelte";
   import { selection, toggleSelectMode } from "../state/selection.svelte";
   import { readOnly, hasDesktopBridge } from "../state/capabilities";
   import { screen, toggleScreen } from "../state/screen.svelte";
+  import {
+    activeCommandLauncherDraft,
+    toggleCommandLauncher,
+  } from "../state/commandLauncher.svelte";
+  import { openNativeCommandLauncher } from "../api/desktop";
+
+  function showCommandLauncher(): void {
+    if (hasDesktopBridge) void openNativeCommandLauncher("contextual");
+    else toggleCommandLauncher();
+  }
 
   const title = $derived(screen.current === "computers" ? "Computers" : "Gateways");
   const subtitle = $derived(
@@ -41,6 +51,17 @@
     {/if}
   </div>
   <div class="actions">
+    {#if !readOnly && screen.current === "computers"}
+      <button
+        class="icon-btn command"
+        class:active={activeCommandLauncherDraft().visible}
+        type="button"
+        aria-label="Open command launcher"
+        title="Command launcher"
+        onclick={showCommandLauncher}>
+        <Command size={16} />
+      </button>
+    {/if}
     {#if !readOnly}
       <button
         class="icon-btn select"
@@ -153,6 +174,12 @@
     border-color: var(--accent);
     color: var(--accent);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+
+  .icon-btn.command.active {
+    border-color: var(--brand);
+    color: var(--brand);
+    background: color-mix(in srgb, var(--brand) 12%, transparent);
   }
 
 </style>

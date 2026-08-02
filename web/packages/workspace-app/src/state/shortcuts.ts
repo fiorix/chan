@@ -91,6 +91,14 @@ export const SHORTCUTS: readonly Shortcut[] = [
     escapeTerminal: true,
   },
   {
+    id: "app.launcher.computers",
+    label: "Computers command launcher",
+    native: "Mod+Shift+K",
+    group: "App",
+    note: "Desktop only",
+    escapeTerminal: true,
+  },
+  {
     id: "app.settings.open",
     label: "Settings",
     web: "Mod+,",
@@ -469,6 +477,7 @@ const TAB_CLOSE_ID = "app.tab.close";
 const TERMINAL_TOGGLE_ID = "app.terminal.toggle";
 const TAB_REOPEN_ID = "app.tab.reopenClosed";
 const SEARCH_TOGGLE_ID = "app.search.toggle";
+const COMPUTERS_LAUNCHER_ID = "app.launcher.computers";
 
 /// Resolve a shortcut's chord for a platform with chan's OS-level chord
 /// overrides applied. Most chords differ only by LABEL (`Mod` -> Cmd/Ctrl);
@@ -503,6 +512,9 @@ export function osChord(
   if (s.id === RELOAD_SHORTCUT_ID && os !== "mac") return "Mod+Shift+R";
   if (s.id === LAUNCHER_SHORTCUT_ID && platform === "native" && os !== "mac") {
     return "Ctrl+Alt+K";
+  }
+  if (s.id === COMPUTERS_LAUNCHER_ID && platform === "native" && os !== "mac") {
+    return "Ctrl+Alt+Shift+K";
   }
   if (s.id === TERMINAL_COPY_ID && os !== "mac") return "Mod+Shift+C";
   if (s.id === TERMINAL_PASTE_ID && os !== "mac") return "Mod+Shift+V";

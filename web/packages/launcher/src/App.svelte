@@ -11,6 +11,7 @@
   import Gateways from "./components/Gateways.svelte";
   import NewWorkspaceDialog from "./components/NewWorkspaceDialog.svelte";
   import ConfirmDialog from "./components/ConfirmDialog.svelte";
+  import CommandLauncher from "./components/CommandLauncher.svelte";
   import Modal from "./components/Modal.svelte";
   import NoticeBubbles from "./components/NoticeBubbles.svelte";
   import CommandLauncher from "./components/CommandLauncher.svelte";
@@ -26,7 +27,11 @@
     pruneControlAttention,
     resolvePendingControlAttention,
   } from "./state/controlAttention.svelte";
-  import { onTauriEvent, restartDesktopAfterUpdate } from "./api/desktop";
+  import {
+    isNativeCommandOverlay,
+    onTauriEvent,
+    restartDesktopAfterUpdate,
+  } from "./api/desktop";
   import { applyTheme, reconcileLocalTheme } from "./state/theme.svelte";
   import { reconcileCollapsedMachines } from "./state/machineCollapse.svelte";
   import { readOnly } from "./state/capabilities";
@@ -34,6 +39,7 @@
   let updateReadyVersion: string | null = $state(null);
   let updateRestarting = $state(false);
   let updateError: string | null = $state(null);
+  const commandOverlay = isNativeCommandOverlay();
 
   type DesktopUpdateReadyPayload = {
     version: string;
@@ -57,6 +63,7 @@
   }
 
   onMount(() => {
+    document.documentElement.classList.toggle("chan-command-overlay", commandOverlay);
     applyTheme();
     // Reconcile the first-paint localStorage theme with the authoritative
     // desktop-config value, so a cleared WebView store or a second writer can
@@ -106,6 +113,7 @@
       unlistenNotice = un;
     });
     return () => {
+      document.documentElement.classList.remove("chan-command-overlay");
       unlistenAttention?.();
       unlistenRestored?.();
       unlistenUpdate?.();
@@ -138,6 +146,9 @@
   });
 </script>
 
+{#if commandOverlay}
+  <CommandLauncher nativeOverlay />
+{:else}
 <TopBar />
 
 <main class="content" class:with-bulk-bar={!readOnly && checksVisible()}>
@@ -158,6 +169,10 @@
 {/if}
 
 <NoticeBubbles />
+
+{#if !readOnly}
+  <CommandLauncher />
+{/if}
 
 {#if dialog.open}
   <NewWorkspaceDialog />
@@ -195,6 +210,7 @@
       </button>
     </div>
   </Modal>
+{/if}
 {/if}
 
 <style>

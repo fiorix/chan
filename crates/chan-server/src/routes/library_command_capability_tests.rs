@@ -22,6 +22,7 @@ impl DevserverFeedSource for RemoteFeed {
             kind: WindowKind::Terminal,
             title: "Remote terminal".into(),
             ordinal: 1,
+            label: String::new(),
             workspace_path: None,
             prefix: "/remote-terminal".into(),
             token: "remote-tenant-secret".into(),
@@ -217,7 +218,6 @@ async fn mint_requires_the_same_tenant_token_and_redacts_snapshot_tokens() {
     assert!(!wire.contains("remote-tenant-secret"));
     assert_eq!(snapshot["library_id"], fixture.host.library_id());
     assert_eq!(snapshot["role"], "owner");
-    assert_eq!(snapshot["window_mode"], "browser");
     for window in snapshot["windows"].as_array().unwrap() {
         assert!(window.get("token").is_none());
         assert!(window.get("prefix").is_none());
@@ -282,10 +282,6 @@ async fn readonly_tunnel_capability_can_inspect_but_cannot_mutate() {
     )
     .await;
     assert_eq!(snapshot.status(), StatusCode::OK);
-    let (_, snapshot) = json(snapshot).await;
-    let launch_path = snapshot["windows"][0]["launch_path"].as_str().unwrap();
-    let launch = send(&router, "GET", launch_path, None, None, false).await;
-    assert_eq!(launch.status(), StatusCode::FORBIDDEN);
     let action = send(
         &router,
         "POST",

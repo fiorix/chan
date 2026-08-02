@@ -1540,9 +1540,10 @@ impl WorkspaceHost {
             .any(accept)
     }
 
-    /// True when one tenant currently has a `/ws` presence for `window_id`.
-    /// Scoped command capabilities bind to this presence so authority ends
-    /// with the invoking browser/webview window.
+    /// True when the named tenant currently has a `/ws` presence for
+    /// `window_id`. This is the liveness half of the browser command-launcher
+    /// capability binding: a scoped capability dies with its invoking window
+    /// instead of becoming a reusable library credential.
     pub fn tenant_has_live_window(&self, prefix: &str, window_id: &str) -> bool {
         let Ok(prefix) = sanitize_prefix(prefix) else {
             return false;
@@ -1561,9 +1562,10 @@ impl WorkspaceHost {
     }
 
     /// Token-authenticated form of [`tenant_has_live_window`](Self::tenant_has_live_window).
-    /// The token never leaves the host. Requiring the same tenant to satisfy
-    /// both token and presence prevents a bearer for one workspace from minting
-    /// authority for a live window in another.
+    /// The token never leaves the host; chan-server supplies its constant-time
+    /// comparator. Requiring the same tenant to satisfy BOTH token and presence
+    /// prevents a valid token for workspace A from minting a capability bound
+    /// to a live window in workspace B.
     pub fn tenant_token_has_live_window(
         &self,
         prefix: &str,
@@ -1587,7 +1589,9 @@ impl WorkspaceHost {
         })
     }
 
-    /// Test-only stand-in for the tenant `/ws` guard.
+    /// Test-only stand-in for the tenant `/ws` guard. Route tests use this to
+    /// prove that scoped browser authority is born and revoked with one live
+    /// invoking window without opening a real network listener.
     #[cfg(any(test, feature = "test-util"))]
     pub fn test_connect_window_presence(
         &self,
@@ -1814,6 +1818,18 @@ impl WorkspaceHost {
             self.emit_window_teardown(window_id, "window_hidden");
         }
         Ok(matched)
+    }
+
+    /// Set the separately persisted user caption for one local window. The
+    /// route validates that the row is a workspace window and normalizes the
+    /// text before this storage operation. Returns false when this host does not
+    /// own the row (the desktop route then forwards it to a connected
+    /// devserver).
+    pub fn set_window_label(&self, window_id: &str, label: String) -> Result<bool, Error> {
+        let registry = self
+            .window_registry()
+            .ok_or_else(|| Error::Config("window registry not installed".into()))?;
+        Ok(registry.set_label(window_id, label))
     }
 
     /// Reap a control terminal: drop its registry row, forget its tenant

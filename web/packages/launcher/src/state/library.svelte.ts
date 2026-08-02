@@ -15,7 +15,7 @@ import type {
 import { selfManagedWindows } from "./capabilities";
 import { pushLocalError } from "./notices.svelte";
 import { beginPending, clearPending, dsKey, reconcile, servedKey, wsKey } from "./pending.svelte";
-import { reconcileWindows } from "./windowManager.svelte";
+import { closeWindowRecord, reconcileWindows } from "./windowManager.svelte";
 
 interface LibraryState {
   workspaces: WorkspaceEntry[];
@@ -497,4 +497,25 @@ export async function toggleWindow(w: WindowRecord): Promise<void> {
  * there is nothing to refresh here. */
 export async function focusWindow(w: WindowRecord): Promise<void> {
   await backend.openWindow(w.window_id);
+}
+
+/** Persist the optional user caption shown after a non-control window's
+ * generated label. The watch feed supplies the canonical trimmed value. */
+export async function saveWindowLabel(
+  w: WindowRecord,
+  label: string,
+  actingWindowId?: string,
+): Promise<void> {
+  await backend.setWindowLabel(w.window_id, label, actingWindowId);
+}
+
+/** Permanently close one window from the Computers command launcher. Desktop
+ * surfaces retain the native live-terminal confirmation; self-managed surfaces
+ * discard through the leader-gated web operation. */
+export async function closeWindow(w: WindowRecord, actingWindowId?: string): Promise<void> {
+  if (selfManagedWindows) {
+    await closeWindowRecord(w, { actingWindowId });
+    return;
+  }
+  await backend.closeWindow(w.window_id);
 }

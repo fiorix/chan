@@ -37,5 +37,6 @@ describe("TopBar without a desktop bridge", () => {
     expect(target.textContent).toContain("This machine & devservers");
     // The select toggle is a mutation-surface control, not a bridge one.
     expect(target.querySelector("button.select")).not.toBeNull();
+    expect(target.querySelector('[aria-label="Open command launcher"]')).not.toBeNull();
   });
 });

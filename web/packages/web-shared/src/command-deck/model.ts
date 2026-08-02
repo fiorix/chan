@@ -1,8 +1,6 @@
 export type DeckScopeId = "tab" | "pane" | "window" | "computers";
 export type DeckEntryMode = "contextual" | "computers";
 
-const SESSION_DECK_DRAFT_PREFIX = "chan.command-launcher.v1:";
-
 // Svelte libraries may publish icons as either Svelte 5 Components or the
 // backwards-compatible class-shaped component type. The deck only invokes the
 // shared size/stroke props; keeping this boundary opaque accepts both forms.
@@ -23,12 +21,6 @@ export interface DeckItem {
   disabled?: boolean;
   /** Keep the deck open while the returned promise settles. */
   awaitResult?: boolean;
-  /**
-   * Dismiss in the same microtask as a successful result instead of showing the
-   * brief success card. Use for actions that move focus to another window: once
-   * this document is backgrounded, browsers may throttle the success timer.
-   */
-  dismissImmediatelyOnSuccess?: boolean;
   confirm?: {
     title: string;
     message: string;
@@ -96,12 +88,9 @@ function parseOperation(value: unknown): DeckOperation | null {
   const itemId = boundedString(raw.itemId, 512);
   const title = boundedString(raw.title, 256);
   if (!itemId || !title) return null;
-  // `pending` and `success` describe an execution that is in flight or has
-  // just landed. The promise behind them does not survive a hide, a reload, or
-  // a handover to another source, so restoring either paints a state nothing
-  // will ever clear. A background execution that really did fail is persisted
-  // by the host as `error`, which does restore.
-  if (raw.kind === "pending" || raw.kind === "success") return null;
+  if (raw.kind === "pending" || raw.kind === "success") {
+    return { kind: raw.kind, itemId, title };
+  }
   if (raw.kind === "confirm") {
     const message = boundedString(raw.message, 1024);
     const actionLabel = boundedString(raw.actionLabel, 128);
@@ -167,24 +156,6 @@ export function saveSessionDeckDraft(key: string, draft: DeckDraft): void {
     sessionStorage.setItem(key, JSON.stringify(draft));
   } catch {
     // Storage denial degrades to an in-memory draft for this page lifetime.
-  }
-}
-
-/**
- * Remove launcher drafts copied into a new browsing context by window.open.
- * Call this only for a freshly created blank window, before navigating it. The
- * opener keeps its draft and unrelated child session state remains available.
- */
-export function clearClonedSessionDeckDrafts(target: Window | null): void {
-  if (!target) return;
-  try {
-    const storage = target.sessionStorage;
-    for (let index = storage.length - 1; index >= 0; index -= 1) {
-      const key = storage.key(index);
-      if (key?.startsWith(SESSION_DECK_DRAFT_PREFIX)) storage.removeItem(key);
-    }
-  } catch {
-    // A storage-denied child still navigates; it cannot restore a cloned draft.
   }
 }
 

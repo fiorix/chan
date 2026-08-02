@@ -30,5 +30,7 @@ export function rowLabel(kind: WindowKind, ordinal: number): string {
  * reads as "Control terminal" rather than the recomposed "Terminal Window 0". */
 export function windowRowLabel(w: WindowRecord): string {
   if (w.control) return "Control terminal";
-  return rowLabel(w.kind, w.ordinal);
+  const generated = rowLabel(w.kind, w.ordinal);
+  const label = w.label?.trim();
+  return label ? `${generated} [${label}]` : generated;
 }
