@@ -582,7 +582,8 @@ pub(crate) fn generate_bootstrap_script(
         out.push('\n');
     }
 
-    out.push_str("# Give the agents a moment to come up before poking their compose boxes.\n");
+    out.push_str("# Approximate the server path's per-agent bracketed-paste readiness gate.\n");
+    out.push_str("# This standalone script cannot observe server-owned PTY output.\n");
     out.push_str("sleep 3\n\n");
 
     out.push_str("# 5. Poke each agent its identity + the team process pointer. A shell\n");
@@ -1197,6 +1198,14 @@ mod tests {
         );
         assert!(script.contains("--submit=claude"), "claude submit chord");
         assert!(script.contains("--submit=codex"), "codex submit chord");
+        assert!(
+            script.contains(
+                "# Approximate the server path's per-agent bracketed-paste readiness gate.\n\
+# This standalone script cannot observe server-owned PTY output.\n\
+sleep 3"
+            ),
+            "script labels its fixed wait as an approximation: {script}"
+        );
     }
 
     #[test]
