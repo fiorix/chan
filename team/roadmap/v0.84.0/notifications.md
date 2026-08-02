@@ -1,0 +1,1 @@
+- cs notify from local machine or devserver to chan-launcher, to send a text notification to browser or chan-desktop from a local session or from a devserver

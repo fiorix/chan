@@ -31,6 +31,12 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [terminal-tab-rename-reaches-inventory](v0.83.0/terminal-tab-rename-reaches-inventory.md) | registered, grounded, ruled, ready to spec | make a live terminal's name and group mutable over a `rename` WS frame so `cs terminal list` and by-name targeting follow the tab |
 | [terminal-editor-appearance-settings](v0.83.0/terminal-editor-appearance-settings.md) | registered, grounded, ruled, ready to spec | terminal and editor font size as settings, plus a standard/custom terminal colour mode driven off background luminance |
 
+### v0.84.0
+
+| item | state | what needs to happen |
+| --- | --- | --- |
+| [notifications](v0.84.0/notifications.md) | registered, not specced | ground `cs notify` and decide how a local session or a devserver reaches chan-launcher to raise a text notification in the browser or chan-desktop |
+
 ## Completed
 
 ### v0.82.0
