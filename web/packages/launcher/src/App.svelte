@@ -32,9 +32,9 @@
     onTauriEvent,
     restartDesktopAfterUpdate,
   } from "./api/desktop";
-  import { applyTheme, reconcileLocalTheme } from "./state/theme.svelte";
+  import { applyTheme, reconcileLocalTheme, watchLocalTheme } from "./state/theme.svelte";
   import { reconcileCollapsedMachines } from "./state/machineCollapse.svelte";
-  import { readOnly } from "./state/capabilities";
+  import { hasDesktopBridge, readOnly } from "./state/capabilities";
 
   let updateReadyVersion: string | null = $state(null);
   let updateRestarting = $state(false);
@@ -69,6 +69,9 @@
     // desktop-config value, so a cleared WebView store or a second writer can
     // never leave the launcher and the local terminals on different themes.
     void reconcileLocalTheme();
+    // The native command deck is its own webview. Follow the desktop theme
+    // feed so a switch made there updates this Computers window immediately.
+    const unwatchLocalTheme = hasDesktopBridge && !commandOverlay ? watchLocalTheme() : null;
     // Same reconcile for the per-machine collapse set: localStorage is a
     // first-paint cache, the desktop config is authoritative (a desktop restart
     // gets a fresh loopback origin, so localStorage alone cannot survive it).
@@ -120,6 +123,7 @@
       unlistenAuthError?.();
       unlistenAuthChanged?.();
       unlistenNotice?.();
+      unwatchLocalTheme?.();
     };
   });
 

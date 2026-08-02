@@ -23,6 +23,7 @@
     LogOut,
     Monitor,
     MonitorCog,
+    Moon,
     PanelTop,
     PanelsTopLeft,
     Plug,
@@ -30,6 +31,7 @@
     Power,
     Server,
     SquareTerminal,
+    Sun,
     Unplug,
     X,
   } from "lucide-svelte";
@@ -71,6 +73,7 @@
   import { hasDesktopBridge, hostOs, readOnly } from "../state/capabilities";
   import { dsKey, isPending, servedKey, wsKey } from "../state/pending.svelte";
   import { screen } from "../state/screen.svelte";
+  import { themeState, toggleTheme } from "../state/theme.svelte";
 
   type CommandId =
     | "new-terminal"
@@ -488,6 +491,15 @@
     );
     if (hasDesktopBridge) {
       entries.push(
+        {
+          id: "computers:theme",
+          title: themeState.theme === "dark" ? "Switch to light theme" : "Switch to dark theme",
+          breadcrumb: "Computers › Chan Desktop",
+          searchText: "theme appearance light dark switch toggle",
+          scope: "computers",
+          icon: themeState.theme === "dark" ? Sun : Moon,
+          run: toggleTheme,
+        },
         {
           id: "computers:quit",
           title: "Quit",

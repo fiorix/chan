@@ -1,13 +1,12 @@
 <script lang="ts">
   // The launcher's top bar: the screen title block (on the desktop surface a
   // toggle that flips the main area between Computers and Gateways), a
-  // Gmail-style Select-mode toggle, and the theme toggle. The add-workspace and
+  // Gmail-style Select-mode toggle. The add-workspace and
   // add-devserver entry points live in the library tree (the LOCAL header's
   // [new workspace] and the bottom "Add devserver" dashed button), and
   // open-terminal lives in each machine header, so the top bar stays the
-  // global chrome: title + Computers command launcher + select + theme.
-  import { Command, Moon, SquareCheckBig, Sun } from "lucide-svelte";
-  import { themeState, toggleTheme } from "../state/theme.svelte";
+  // global chrome: title + Computers command launcher + select.
+  import { Command, SquareCheckBig } from "lucide-svelte";
   import { selection, toggleSelectMode } from "../state/selection.svelte";
   import { readOnly, hasDesktopBridge } from "../state/capabilities";
   import { screen, toggleScreen } from "../state/screen.svelte";
@@ -59,7 +58,7 @@
         aria-label="Open command launcher"
         title="Command launcher"
         onclick={showCommandLauncher}>
-        <Command size={16} />
+        <Command size={16} strokeWidth={1.75} aria-hidden="true" />
       </button>
     {/if}
     {#if !readOnly}
@@ -73,18 +72,6 @@
         <SquareCheckBig size={16} />
       </button>
     {/if}
-    <button
-      class="icon-btn"
-      type="button"
-      aria-label="Toggle theme"
-      title="Toggle theme"
-      onclick={toggleTheme}>
-      {#if themeState.theme === "dark"}
-        <Sun size={16} />
-      {:else}
-        <Moon size={16} />
-      {/if}
-    </button>
   </div>
 </header>
 

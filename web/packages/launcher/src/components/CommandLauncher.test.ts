@@ -176,6 +176,17 @@ describe("Computers command deck", () => {
     expect(target.querySelectorAll(".deck-scope")).toHaveLength(4);
   });
 
+  it("does not expose the Desktop theme command on a devserver", async () => {
+    openCommandLauncher("computers");
+    flushSync();
+    await query("theme");
+    const titles = [...target.querySelectorAll(".deck-result-title")].map(
+      (node) => node.textContent,
+    );
+    expect(titles).not.toContain("Switch to light theme");
+    expect(titles).not.toContain("Switch to dark theme");
+  });
+
   it("deep-searches a control terminal note and focuses that exact record", async () => {
     openCommandLauncher("computers");
     flushSync();

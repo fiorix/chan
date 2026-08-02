@@ -37,6 +37,13 @@ function cacheTheme(theme: Theme): void {
   }
 }
 
+function adoptLocalTheme(theme: string | null): void {
+  if ((theme !== "dark" && theme !== "light") || theme === themeState.theme) return;
+  themeState.theme = theme;
+  cacheTheme(theme);
+  applyTheme();
+}
+
 // The bearer the launcher is served with (loopback `?t=<token>`), mirroring
 // library.ts. Empty means same-origin with no bearer. Guarded for non-browser
 // (test) contexts where `location` may be absent.
@@ -76,6 +83,56 @@ export function toggleTheme(): void {
   void putLocalTheme(themeState.theme);
 }
 
+/**
+ * Follow changes written by another launcher webview. The native command deck
+ * is a separate transparent webview, so its optimistic DOM update cannot
+ * recolor the underlying Computers window by itself. The desktop-owned theme
+ * feed pushes the authoritative value on connect and after every write.
+ */
+export function watchLocalTheme(): () => void {
+  if (typeof WebSocket === "undefined" || typeof location === "undefined") return () => {};
+
+  let socket: WebSocket | null = null;
+  let stopped = false;
+  let attempt = 0;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const scheduleReconnect = (): void => {
+    if (stopped || timer !== null) return;
+    const delay = Math.min(500 * 2 ** attempt, 15000);
+    attempt += 1;
+    timer = setTimeout(() => {
+      timer = null;
+      if (!stopped) open();
+    }, delay);
+  };
+
+  const open = (): void => {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    const token = authToken();
+    const query = token ? `?t=${encodeURIComponent(token)}` : "";
+    socket = new WebSocket(`${proto}//${location.host}/api/library/local-theme/watch${query}`);
+    socket.onmessage = (event) => {
+      attempt = 0;
+      try {
+        const frame = JSON.parse(event.data) as { theme?: string | null };
+        adoptLocalTheme(frame?.theme ?? null);
+      } catch {
+        // Drop malformed frames; the next full value self-heals.
+      }
+    };
+    socket.onclose = scheduleReconnect;
+    socket.onerror = () => socket?.close();
+  };
+
+  open();
+  return () => {
+    stopped = true;
+    if (timer !== null) clearTimeout(timer);
+    socket?.close();
+  };
+}
+
 /// After first paint, reconcile the launcher's theme with the authoritative
 /// desktop-config value (`GET /api/library/local-theme`). localStorage is only
 /// a first-paint cache; a cleared WebView store or a future second writer would
@@ -96,9 +153,5 @@ export async function reconcileLocalTheme(): Promise<void> {
   } catch {
     return;
   }
-  if ((theme === "dark" || theme === "light") && theme !== themeState.theme) {
-    themeState.theme = theme;
-    cacheTheme(theme);
-    applyTheme();
-  }
+  adoptLocalTheme(theme);
 }
