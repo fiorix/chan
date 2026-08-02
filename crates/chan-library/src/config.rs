@@ -8,7 +8,6 @@
 //! `/api/config`; the wire shape lives here so the registry and the route
 //! layer agree on one definition.
 
-use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Maximum number of literal suffixes compiled into the terminal secret
@@ -94,8 +93,10 @@ pub struct TerminalConfig {
     #[serde(default = "default_terminal_secret_masking")]
     pub secret_masking: bool,
     /// Literal, case-insensitive variable-name suffixes that trigger visual
-    /// secret masking. Deserialization rejects regex syntax and caps the list
-    /// before the SPA compiles it into one alternation.
+    /// secret masking. Deserialization drops entries outside `[A-Za-z0-9_]+`
+    /// with a warning rather than failing the whole config load, dedupes
+    /// repeats, and caps the list before the SPA compiles it into its
+    /// matcher.
     #[serde(
         default = "default_terminal_secret_mask_suffixes",
         deserialize_with = "deserialize_terminal_secret_mask_suffixes"
@@ -178,35 +179,47 @@ where
     D: Deserializer<'de>,
 {
     let suffixes = Vec::<String>::deserialize(deserializer)?;
-    normalize_terminal_secret_mask_suffixes(suffixes, |entries| {
-        tracing::warn!(
-            entries,
-            limit = TERMINAL_SECRET_MASK_SUFFIX_MAX,
-            "terminal.secret_mask_suffixes exceeds its limit; ignoring trailing entries"
-        );
-    })
-    .map_err(D::Error::custom)
+    Ok(normalize_terminal_secret_mask_suffixes(
+        suffixes,
+        |entries| {
+            tracing::warn!(
+                entries,
+                limit = TERMINAL_SECRET_MASK_SUFFIX_MAX,
+                "terminal.secret_mask_suffixes exceeds its limit; ignoring trailing entries"
+            );
+        },
+    ))
 }
 
 fn normalize_terminal_secret_mask_suffixes(
-    mut suffixes: Vec<String>,
+    suffixes: Vec<String>,
     warn: impl FnOnce(usize),
-) -> Result<Vec<String>, String> {
-    if let Some(invalid) = suffixes.iter().find(|suffix| {
-        suffix.is_empty()
-            || !suffix
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    }) {
-        return Err(format!(
-            "terminal.secret_mask_suffixes entry {invalid:?} must match [A-Za-z0-9_]+"
-        ));
+) -> Vec<String> {
+    // Invalid entries are dropped with a warning, not rejected: an Err here
+    // fails the whole ServerConfig load, the server then runs on defaults in
+    // memory, and the next /api/config PATCH writes those defaults over
+    // every other setting in the user's server.toml. Duplicates are dropped
+    // because the Settings pane keys its chip list on the suffix string.
+    let (mut valid, invalid): (Vec<String>, Vec<String>) =
+        suffixes.into_iter().partition(|suffix| {
+            !suffix.is_empty()
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        });
+    if !invalid.is_empty() {
+        tracing::warn!(
+            entries = ?invalid,
+            "terminal.secret_mask_suffixes: dropping entries outside [A-Za-z0-9_]+"
+        );
     }
-    if suffixes.len() > TERMINAL_SECRET_MASK_SUFFIX_MAX {
-        warn(suffixes.len());
-        suffixes.truncate(TERMINAL_SECRET_MASK_SUFFIX_MAX);
+    let mut seen = std::collections::HashSet::new();
+    valid.retain(|suffix| seen.insert(suffix.clone()));
+    if valid.len() > TERMINAL_SECRET_MASK_SUFFIX_MAX {
+        warn(valid.len());
+        valid.truncate(TERMINAL_SECRET_MASK_SUFFIX_MAX);
     }
-    Ok(suffixes)
+    valid
 }
 
 /// Inclusive bounds the Settings UI exposes for the scrollback slider.
@@ -231,12 +244,32 @@ mod tests {
     }
 
     #[test]
-    fn secret_mask_suffixes_reject_regex_syntax() {
-        let err = serde_json::from_value::<TerminalConfig>(json!({
-            "secret_mask_suffixes": ["TOKEN", "SECRET.*"]
+    fn secret_mask_suffixes_drop_invalid_entries_and_keep_the_rest() {
+        // A bad entry must not fail deserialization: an Err here fails the
+        // whole ServerConfig load, the server runs on defaults in memory,
+        // and the next /api/config PATCH persists those defaults over every
+        // other setting in the file.
+        let config: TerminalConfig = serde_json::from_value(json!({
+            "idle_timeout_secs": 5,
+            "secret_mask_suffixes": ["TOKEN", "SECRET.*", "API-KEY", ""]
         }))
-        .unwrap_err();
-        assert!(err.to_string().contains("[A-Za-z0-9_]+"));
+        .expect("one bad suffix entry must not fail deserialization");
+        assert_eq!(config.idle_timeout_secs, 5);
+        assert_eq!(config.secret_mask_suffixes, vec!["TOKEN".to_string()]);
+    }
+
+    #[test]
+    fn secret_mask_suffixes_dedupe_repeated_entries() {
+        // The Settings pane keys its chip list on the suffix string, so a
+        // repeated entry would throw a duplicate-key render error there.
+        let config: TerminalConfig = serde_json::from_value(json!({
+            "secret_mask_suffixes": ["TOKEN", "SECRET", "TOKEN"]
+        }))
+        .expect("deserialize");
+        assert_eq!(
+            config.secret_mask_suffixes,
+            vec!["TOKEN".to_string(), "SECRET".to_string()]
+        );
     }
 
     #[test]
@@ -247,8 +280,7 @@ mod tests {
         let warning_count = Cell::new(0);
         let suffixes = normalize_terminal_secret_mask_suffixes(suffixes, |_| {
             warning_count.set(warning_count.get() + 1);
-        })
-        .unwrap();
+        });
         assert_eq!(suffixes.len(), TERMINAL_SECRET_MASK_SUFFIX_MAX);
         assert_eq!(suffixes.last().unwrap(), "TOKEN_99");
         assert_eq!(warning_count.get(), 1);

@@ -220,16 +220,21 @@ mod tests {
     }
 
     #[test]
-    fn terminal_config_rejects_non_literal_secret_suffixes() {
+    fn terminal_config_drops_non_literal_secret_suffixes_and_keeps_the_file() {
+        // A malformed suffix entry must not take the rest of server.toml
+        // down with it: a load Err here would fall the whole config back to
+        // in-memory defaults, and the next /api/config PATCH would persist
+        // those defaults over every other setting.
         let tmp = TempDir::new().unwrap();
         let p = tmp.path().join("server.toml");
         std::fs::write(
             &p,
-            "[terminal]\nsecret_mask_suffixes = [\"TOKEN\", \"SECRET.*\"]\n",
+            "[terminal]\nidle_timeout_secs = 600\nsecret_mask_suffixes = [\"TOKEN\", \"SECRET.*\", \"API-KEY\", \"TOKEN\"]\n",
         )
         .unwrap();
-        let err = ServerConfig::load_from(&p).unwrap_err();
-        assert!(err.to_string().contains("[A-Za-z0-9_]+"));
+        let cfg = ServerConfig::load_from(&p).unwrap();
+        assert_eq!(cfg.terminal.idle_timeout_secs, 600);
+        assert_eq!(cfg.terminal.secret_mask_suffixes, vec!["TOKEN".to_string()]);
     }
 
     #[test]

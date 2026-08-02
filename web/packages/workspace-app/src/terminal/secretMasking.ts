@@ -43,43 +43,70 @@ type TextCell = SecretMaskSpan & {
   end: number;
 };
 
+const NAME_RUN = /[A-Za-z_][A-Za-z0-9_]*/g;
+const WORD_CHAR = /[A-Za-z0-9_]/;
+const WHITESPACE = /\s/;
+
+/// End of the value starting at `start` (the char after `=`), or -1 when
+/// there is no value to mask. A quoted value runs to its closing quote, or
+/// to end of text when unterminated; a CR/LF before the closing quote means
+/// the quote was not a value opener, so the assignment masks nothing. An
+/// unquoted value runs to the next whitespace. Quote-aware parsing lives in
+/// code, not in a regex: a backtracking alternation over the name and value
+/// shapes goes quadratic on a long run of word characters, and the scan is
+/// on the live PTY path.
+function valueEnd(text: string, start: number): number {
+  const first = text[start];
+  if (first === undefined) return -1;
+  if (first === '"' || first === "'") {
+    for (let i = start + 1; i < text.length; i += 1) {
+      const ch = text[i];
+      if (ch === first) return i + 1;
+      if (ch === "\r" || ch === "\n") return -1;
+    }
+    return text.length;
+  }
+  if (WHITESPACE.test(first)) return -1;
+  let end = start + 1;
+  while (end < text.length && !WHITESPACE.test(text[end])) end += 1;
+  return end;
+}
+
 export class SecretAssignmentMatcher {
-  readonly #pattern: RegExp | null;
+  readonly #suffixes: readonly string[];
 
   constructor(suffixes: readonly string[]) {
-    const literals = Array.from(
+    this.#suffixes = Array.from(
       new Set(
         suffixes
           .slice(0, SECRET_MASK_SUFFIX_MAX)
           .filter((suffix) => LITERAL_SUFFIX.test(suffix))
           .map((suffix) => suffix.toUpperCase()),
       ),
-    ).sort((left, right) => right.length - left.length);
-    if (literals.length === 0) {
-      this.#pattern = null;
-      return;
-    }
-
-    // The suffixes have already passed the literal-only gate. Keeping them as
-    // one alternation means config changes compile once per terminal start,
-    // never once per line or PTY write.
-    const suffix = `(?:${literals.join("|")})`;
-    const name = `(?:${suffix}|[A-Za-z_][A-Za-z0-9_]*${suffix})`;
-    const value = `(?:"[^"\\r\\n]*(?:"|$)|'[^'\\r\\n]*(?:'|$)|[^\\s'"][^\\s]*)`;
-    this.#pattern = new RegExp(`(${name})=(${value})`, "gi");
+    );
   }
 
   find(text: string): SecretValueRange[] {
-    if (!this.#pattern) return [];
-    this.#pattern.lastIndex = 0;
+    if (this.#suffixes.length === 0) return [];
     const ranges: SecretValueRange[] = [];
-    for (let match = this.#pattern.exec(text); match; match = this.#pattern.exec(text)) {
+    NAME_RUN.lastIndex = 0;
+    for (let match = NAME_RUN.exec(text); match; match = NAME_RUN.exec(text)) {
+      // A word character immediately before the candidate means the name is
+      // digit-led or mid-word, neither of which is an assignment name.
       const previous = text[match.index - 1];
-      if (previous && /[A-Za-z0-9_]/.test(previous)) continue;
-      const name = match[1] ?? "";
-      const value = match[2] ?? "";
-      const start = match.index + name.length + 1;
-      ranges.push({ start, end: start + value.length });
+      if (previous && WORD_CHAR.test(previous)) continue;
+      const name = match[0].toUpperCase();
+      if (!this.#suffixes.some((suffix) => name.endsWith(suffix))) continue;
+      const eq = match.index + match[0].length;
+      if (text[eq] !== "=") continue;
+      const end = valueEnd(text, eq + 1);
+      if (end < 0) continue;
+      ranges.push({ start: eq + 1, end });
+      // An accepted assignment owns its value, so the scan resumes past it
+      // and names inside it stay value text. A rejected candidate owns
+      // nothing and the name-run scan simply moves on, so secret-looking
+      // text inside e.g. a digit-led `1TOKEN="..."` still masks.
+      NAME_RUN.lastIndex = end;
     }
     return ranges;
   }
@@ -206,19 +233,24 @@ export class TerminalSecretMasker {
   }
 
   captureWrite(): SecretMaskWriteSnapshot | null {
-    const buffer = this.#activeBuffer();
-    if (this.#disposed || !this.#enabled || !buffer) {
+    try {
+      const buffer = this.#activeBuffer();
+      if (this.#disposed || !this.#enabled || !buffer) {
+        return null;
+      }
+      const startRow = buffer.baseY;
+      const rows = new Map<number, string>();
+      for (let row = startRow; row < buffer.length; row += 1) {
+        const line = buffer.getLine(row);
+        if (line) rows.set(row, this.#lineSignature(line));
+      }
+      const markerLine = buffer.baseY + buffer.cursorY;
+      const marker = this.#term.registerMarker();
+      return { bufferType: buffer.type, startRow, markerLine, marker, rows };
+    } catch (error) {
+      this.#fail("xterm secret masking snapshot failed", error);
       return null;
     }
-    const startRow = buffer.baseY;
-    const rows = new Map<number, string>();
-    for (let row = startRow; row < buffer.length; row += 1) {
-      const line = buffer.getLine(row);
-      if (line) rows.set(row, this.#lineSignature(line));
-    }
-    const markerLine = buffer.baseY + buffer.cursorY;
-    const marker = this.#term.registerMarker();
-    return { bufferType: buffer.type, startRow, markerLine, marker, rows };
   }
 
   scanWrite(snapshot: SecretMaskWriteSnapshot | null): void {
@@ -235,24 +267,36 @@ export class TerminalSecretMasker {
         this.scanAll();
         return;
       }
-
-      // A marker moving backwards means scrollback hit its cap and xterm
-      // trimmed rows while parsing this batch. Absolute indices then changed,
-      // so the whole surviving buffer is dirty. In the common case only the
-      // prior active screen plus newly appended rows are compared.
-      const trimmed =
-        snapshot.marker?.isDisposed === true ||
-        (snapshot.marker !== null && snapshot.marker.line < snapshot.markerLine);
-      const startRow = trimmed ? 0 : Math.min(snapshot.startRow, buffer.baseY);
+      const marker = snapshot.marker;
+      if (!marker || marker.isDisposed) {
+        // Without a live marker the trim amount cannot be measured (a huge
+        // batch can scroll the captured cursor line itself out of the
+        // buffer), so the snapshot's row keys cannot be re-based. Rebuild
+        // from the current buffer.
+        this.scanAll();
+        return;
+      }
+      // A trim while parsing the batch shifts absolute row indices up by the
+      // trim count. The marker was registered on the pre-write cursor line
+      // and tracks that shift, so its drift re-bases the snapshot's row keys
+      // onto post-write indices: a row whose content only moved compares
+      // equal and keeps its decoration (decoration markers shift with their
+      // content), and only genuinely changed or newly appended rows rescan.
+      // Decorations on rows the trim scrolled away are disposed by xterm
+      // with their markers.
+      const shift = snapshot.markerLine - marker.line;
+      const startRow = Math.max(0, snapshot.startRow - shift);
       const dirtyRows: number[] = [];
       for (let row = startRow; row < buffer.length; row += 1) {
         const line = buffer.getLine(row);
         if (!line) continue;
-        if (trimmed || snapshot.rows.get(row) !== this.#lineSignature(line)) {
+        if (snapshot.rows.get(row + shift) !== this.#lineSignature(line)) {
           dirtyRows.push(row);
         }
       }
       this.#scanDirtyRows(dirtyRows);
+    } catch (error) {
+      this.#fail("xterm secret masking scan failed", error);
     } finally {
       snapshot.marker?.dispose();
     }
@@ -260,11 +304,15 @@ export class TerminalSecretMasker {
 
   scanAll(): void {
     if (this.#disposed || !this.#enabled) return;
-    const buffer = this.#activeBuffer();
-    if (!buffer) return;
-    this.clear();
-    const rows = Array.from({ length: buffer.length }, (_, row) => row);
-    this.#scanDirtyRows(rows);
+    try {
+      const buffer = this.#activeBuffer();
+      if (!buffer) return;
+      this.clear();
+      const rows = Array.from({ length: buffer.length }, (_, row) => row);
+      this.#scanDirtyRows(rows);
+    } catch (error) {
+      this.#fail("xterm secret masking scan failed", error);
+    }
   }
 
   clear(): void {
@@ -354,16 +402,21 @@ export class TerminalSecretMasker {
     });
     decoration.onRender((element) => {
       element.classList.add("terminal-secret-mask");
+      // The cell fg/bg recolor is the primary mask; paint the decoration
+      // element itself too, or a renderer that drops decoration cell colors
+      // would show the value through a styled but transparent chip.
+      element.style.backgroundColor = this.#color;
     });
   }
 
-  /// A decoration that cannot register means masking has silently stopped,
-  /// the worst failure mode for a visual feature. Fail loud to the user,
-  /// not just the console: drop every decoration, switch the masker off,
-  /// and notify so the UI can surface a visible status. Re-enabling (the
-  /// per-tab toggle) retries from a clean scan.
-  #fail(message: string): void {
-    console.error(message);
+  /// Masking that stops silently is the worst failure mode for a visual
+  /// feature, whether the cause is a decoration that cannot register or an
+  /// exception thrown out of a scan. Fail loud to the user, not just the
+  /// console: drop every decoration, switch the masker off, and notify so
+  /// the UI can surface a visible status. Re-enabling (the per-tab toggle)
+  /// retries from a clean scan.
+  #fail(message: string, error?: unknown): void {
+    console.error(message, error ?? "");
     this.clear();
     this.#enabled = false;
     this.#onError?.();

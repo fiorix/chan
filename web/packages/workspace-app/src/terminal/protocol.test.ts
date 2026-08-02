@@ -50,7 +50,7 @@ describe("terminal protocol invariants", () => {
   test("client sends initial and resize-observed PtySize frames", () => {
     expect(tab).toMatch(/ws\.onopen = \(\) => \{[\s\S]*?send\(\{ type: "resize", cols: term\.cols, rows: term\.rows \}\)/);
     expect(tab).toMatch(
-      /term\.onResize\(\(\{ cols, rows \}\) => \{[\s\S]{1,200}send\(\{ type: "resize", cols, rows \}\);[\s\S]{1,40}\}\)/,
+      /term\.onResize\(\(\{ cols, rows \}\) => \{\s*send\(\{ type: "resize", cols, rows \}\);[\s\S]{1,500}secretMasker\?\.scanAll\(\);[\s\S]{1,40}\}\)/,
     );
     expect(route).toMatch(/ClientFrame::Resize \{ cols, rows \}[\s\S]*?session\.resize\(pty_size\(Some\(cols\), Some\(rows\)\)\)/);
   });

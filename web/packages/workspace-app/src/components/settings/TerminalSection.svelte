@@ -14,8 +14,9 @@
 
   // Secret masking is display-only here (hand-edited TOML / PATCH persist
   // it; the roadmap scopes Settings to visibility). Absent fields on a
-  // pre-field server display the SPA fallback, which is also what the
-  // terminal masks with, so the shown values are the effective ones.
+  // pre-field server display the SPA fallback. These are the configured
+  // values, read by terminals at spawn: already-open terminals keep the
+  // flag and suffixes they started with.
   const secretMaskingOn = $derived(prefs.terminal.secret_masking ?? true);
   const secretMaskSuffixes = $derived(
     prefs.terminal.secret_mask_suffixes ?? DEFAULT_SECRET_MASK_SUFFIXES,

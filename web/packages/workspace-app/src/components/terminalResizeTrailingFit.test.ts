@@ -53,8 +53,10 @@ describe("trailing-edge fit converges after resize", () => {
 
 describe("PTY resize propagation preserved", () => {
   test("xterm onResize still sends `{ type: 'resize', cols, rows }` to chan-server", () => {
+    // The resize frame is the handler's FIRST statement: the secret-mask
+    // rescan (cols-change only) must not delay the notification.
     expect(terminal).toMatch(
-      /term\.onResize\(\(\{ cols, rows \}\) => \{[\s\S]{1,200}send\(\{ type: "resize", cols, rows \}\);[\s\S]{1,40}\}\);/,
+      /term\.onResize\(\(\{ cols, rows \}\) => \{\s*send\(\{ type: "resize", cols, rows \}\);[\s\S]{1,500}secretMasker\?\.scanAll\(\);[\s\S]{1,40}\}\);/,
     );
   });
 

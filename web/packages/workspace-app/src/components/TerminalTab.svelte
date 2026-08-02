@@ -266,6 +266,9 @@
   // disposed with the terminal; the enabled bit is session-scoped per tab.
   let secretMasker: TerminalSecretMasker | null = null;
   let secretMaskingEnabled = $state(true);
+  // Last cols value the masker scanned at; the resize handler rescans only
+  // when cols actually changed.
+  let resizeScanCols = 0;
   // Scrollback line cap captured at construction time from the
   // persisted MB budget so xterm.js gets a stable number. Held on
   // the component so the "copy scrollback" actions serialize the same
@@ -1038,9 +1041,17 @@
       term.attachCustomKeyEventHandler(handleTerminalKeyEvent);
     }
     term.onData(handleXtermData);
+    resizeScanCols = term.cols;
     term.onResize(({ cols, rows }) => {
-      secretMasker?.scanAll();
       send({ type: "resize", cols, rows });
+      // The PTY notification goes first: a whole-buffer rescan must not
+      // delay the resize reaching the shell. Only a cols change reflows
+      // wrapped groups; a rows-only resize leaves every decoration correct
+      // by marker tracking.
+      if (cols !== resizeScanCols) {
+        resizeScanCols = cols;
+        secretMasker?.scanAll();
+      }
     });
     resizeObserver = new ResizeObserver(queueFit);
     resizeObserver.observe(host);
@@ -1678,11 +1689,10 @@
     osc52Bridge?.push(bytes);
     const masker = secretMasker;
     const maskSnapshot = masker?.captureWrite() ?? null;
-    ptyWrites.write(termWriter, bytes, origin, (completedOrigin) => {
-      // The origin tracker completes once per parsed xterm write. Matching the
-      // captured origin keeps snapshot prime and ring replay on that same
-      // exactly-once path instead of layering a second replay scan.
-      if (completedOrigin === origin) masker?.scanWrite(maskSnapshot);
+    ptyWrites.write(termWriter, bytes, origin, () => {
+      // The tracker completes a write exactly once, so live output,
+      // snapshot prime, and ring replay are each scanned once on this path.
+      masker?.scanWrite(maskSnapshot);
     });
   }
 

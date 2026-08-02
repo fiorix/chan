@@ -26,7 +26,7 @@ Source: `crates/chan-server/src/config.rs`.
 | `terminal.mouse_capture` | `bool` | `true` | `PATCH /api/config` + Settings | whether full-screen TUIs may capture the mouse; off strips the DECSET mouse-enable sequences in the SPA so click-drag selection keeps working (new terminals only) |
 | `terminal.ghostty` | `bool` | `false` | `PATCH /api/config` + Settings | experimental: new terminals use the ghostty-web backend (Ghostty's WASM VT parser, ~420 KB fetched on first enable) instead of xterm.js |
 | `terminal.secret_masking` | `bool` | `true` | hand-edited TOML + `PATCH /api/config` | xterm.js visually obscures secret-looking assignment values; the per-tab launcher/context-menu toggle is ephemeral |
-| `terminal.secret_mask_suffixes` | `Vec<String>` | stock literal suffix list (max 100) | hand-edited TOML + `PATCH /api/config` | case-insensitive suffix matcher for terminal `NAME=value` output; entries must match `[A-Za-z0-9_]+` |
+| `terminal.secret_mask_suffixes` | `Vec<String>` | stock literal suffix list (max 100) | hand-edited TOML + `PATCH /api/config` | case-insensitive suffix matcher for terminal `NAME=value` output; entries outside `[A-Za-z0-9_]+` are dropped with a warning and duplicates removed, never a load failure |
 
 `GET /api/config` returns the editor and server preference aggregate with a revision. `PATCH /api/config` accepts one owner-specific partial preferences object plus `expected_revision`; stale revisions return `409 config_conflict` with the current aggregate.
 
