@@ -1,6 +1,8 @@
 export type DeckScopeId = "tab" | "pane" | "window" | "computers";
 export type DeckEntryMode = "contextual" | "computers";
 
+const SESSION_DECK_DRAFT_PREFIX = "chan.command-launcher.v1:";
+
 // Svelte libraries may publish icons as either Svelte 5 Components or the
 // backwards-compatible class-shaped component type. The deck only invokes the
 // shared size/stroke props; keeping this boundary opaque accepts both forms.
@@ -162,6 +164,24 @@ export function saveSessionDeckDraft(key: string, draft: DeckDraft): void {
     sessionStorage.setItem(key, JSON.stringify(draft));
   } catch {
     // Storage denial degrades to an in-memory draft for this page lifetime.
+  }
+}
+
+/**
+ * Remove launcher drafts copied into a new browsing context by window.open.
+ * Call this only for a freshly created blank window, before navigating it. The
+ * opener keeps its draft and unrelated child session state remains available.
+ */
+export function clearClonedSessionDeckDrafts(target: Window | null): void {
+  if (!target) return;
+  try {
+    const storage = target.sessionStorage;
+    for (let index = storage.length - 1; index >= 0; index -= 1) {
+      const key = storage.key(index);
+      if (key?.startsWith(SESSION_DECK_DRAFT_PREFIX)) storage.removeItem(key);
+    }
+  } catch {
+    // A storage-denied child still navigates; it cannot restore a cloned draft.
   }
 }
 

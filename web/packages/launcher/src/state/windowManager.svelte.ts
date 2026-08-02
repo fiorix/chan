@@ -15,6 +15,7 @@
 //
 // Inert under demoState.enabled: a marketing embed never spawns windows.
 
+import { clearClonedSessionDeckDrafts } from "@chan/web-shared/command-deck";
 import { backend } from "../api/backend";
 import type { WindowKind, WindowRecord, WindowSet } from "../api/library";
 import { windowUrl } from "../lib/windowUrl";
@@ -74,6 +75,7 @@ export async function mintWindow(
 ): Promise<WindowRecord | null> {
   if (demoState.enabled) return null;
   const blank = servingOrigin() ? window.open("", "_blank") : null;
+  clearClonedSessionDeckDrafts(blank);
   try {
     const rec = await backend.createWindow(kind, {
       workspacePath: opts.workspacePath,

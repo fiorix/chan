@@ -170,6 +170,24 @@ function titles(target: HTMLElement): string[] {
   return [...target.querySelectorAll(".deck-result-title")].map((node) => node.textContent ?? "");
 }
 
+function clonedSessionStorage(source: Storage): Storage {
+  const values = new Map<string, string>();
+  for (let index = 0; index < source.length; index += 1) {
+    const key = source.key(index);
+    if (key !== null) values.set(key, source.getItem(key) ?? "");
+  }
+  return {
+    get length() {
+      return values.size;
+    },
+    clear: () => values.clear(),
+    getItem: (key) => values.get(key) ?? null,
+    key: (index) => [...values.keys()][index] ?? null,
+    removeItem: (key) => values.delete(key),
+    setItem: (key, value) => values.set(key, value),
+  };
+}
+
 async function typeQuery(target: HTMLElement, query: string): Promise<void> {
   const field = input(target);
   field.value = query;
@@ -202,6 +220,7 @@ afterEach(() => {
   searchPanel.open = false;
   overlayStack.ids = [];
   vi.clearAllMocks();
+  vi.restoreAllMocks();
 });
 
 describe("contextual command deck", () => {
@@ -236,6 +255,47 @@ describe("contextual command deck", () => {
     await typeQuery(target, "control terminal");
     expect(titles(target)[0]).toBe("Control terminal — devserver");
     expect(target.querySelector(".deck-result-path")?.textContent).toContain("Computers › Focus");
+  });
+
+  test("a new terminal does not inherit the invoking window's open launcher draft", async () => {
+    sessionStorage.setItem("chan.auth.token", "keep-me");
+    let popup:
+      | {
+          name: string;
+          location: { href: string };
+          focus: ReturnType<typeof vi.fn>;
+          close: ReturnType<typeof vi.fn>;
+          sessionStorage: Storage;
+        }
+      | undefined;
+    vi.spyOn(window, "open").mockImplementation(() => {
+      popup = {
+        name: "",
+        location: { href: "" },
+        focus: vi.fn(),
+        close: vi.fn(),
+        sessionStorage: clonedSessionStorage(sessionStorage),
+      };
+      return popup as unknown as Window;
+    });
+    scopedLibrary.run.mockResolvedValue({
+      window: {
+        window_id: "terminal-2",
+        launch_path: "/api/library/command-capabilities/cap/windows/terminal-2/launch",
+      },
+    });
+    const target = openLauncher();
+    await flush();
+    await typeQuery(target, "shell");
+    expect(titles(target)[0]).toBe("This library");
+    await key(target, "ArrowDown");
+    await key(target, "Enter");
+    await flush();
+
+    expect(scopedLibrary.run).toHaveBeenCalledWith({ action: "new_terminal" });
+    expect(popup?.sessionStorage.getItem("chan.command-launcher.v1:contextual")).toBeNull();
+    expect(popup?.sessionStorage.getItem("chan.auth.token")).toBe("keep-me");
+    expect(sessionStorage.getItem("chan.command-launcher.v1:contextual")).not.toBeNull();
   });
 
   test("the Computers orb exposes branches and ArrowLeft returns from level two", async () => {

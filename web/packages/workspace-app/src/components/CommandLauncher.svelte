@@ -5,6 +5,7 @@
   import { onMount } from "svelte";
   import CommandDeck from "@chan/web-shared/CommandDeck.svelte";
   import {
+    clearClonedSessionDeckDrafts,
     fuzzyDeckScore,
     rankDeckItems,
     type DeckItem,
@@ -444,6 +445,7 @@
     // browser's popup grant.
     const popup = globalThis.window.open("", "_blank");
     if (!popup) throw new Error("The browser blocked the new Chan window");
+    clearClonedSessionDeckDrafts(popup);
     try {
       const result = await runScopedLibraryAction(action);
       if (!result?.window) throw new Error("Chan did not return the new window");
