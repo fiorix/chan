@@ -853,7 +853,7 @@ pub enum TerminalAction {
         /// newline before its chord; an empty body stays chord-only. Spawn
         /// such a session with CHAN_AGENT set or the agent as its command
         /// instead of typing the agent into a shell. Values: claude | codex
-        /// | gemini | opencode.
+        /// | gemini | kimi | opencode.
         /// Omit the flag to write pure bytes: the input parks in the agent's
         /// compose box unsubmitted (a bare newline is a newline to an agent,
         /// not a submit).
@@ -3595,7 +3595,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_write_accepts_opencode_submit_and_rejects_unknown_agents() {
+    fn terminal_write_accepts_named_submit_agents_and_rejects_unknown_agents() {
         let cli = CsCli::parse_from([
             "cs",
             "terminal",
@@ -3608,6 +3608,20 @@ mod tests {
             ShellAction::Terminal {
                 action: TerminalAction::Write { submit, .. },
             } => assert_eq!(submit, Some(SubmitAgent::OpenCode)),
+            other => panic!("unexpected parse: {other:?}"),
+        }
+        let cli = CsCli::parse_from([
+            "cs",
+            "terminal",
+            "write",
+            "hello",
+            "--submit=kimi",
+            "--tab-name=@@Lead",
+        ]);
+        match cli.action {
+            ShellAction::Terminal {
+                action: TerminalAction::Write { submit, .. },
+            } => assert_eq!(submit.map(SubmitAgent::name), Some("kimi")),
             other => panic!("unexpected parse: {other:?}"),
         }
         assert!(CsCli::try_parse_from([

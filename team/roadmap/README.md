@@ -30,6 +30,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [hybrid-nav-staged-editor-bubble](v0.83.0/hybrid-nav-staged-editor-bubble.md) | registered, grounded, ruled, ready to spec | render the queued new-draft / new-diagram intents as removable staged chips in the pane's tab strip |
 | [terminal-tab-rename-reaches-inventory](v0.83.0/terminal-tab-rename-reaches-inventory.md) | registered, grounded, ruled, ready to spec | make a live terminal's name and group mutable over a `rename` WS frame so `cs terminal list` and by-name targeting follow the tab |
 | [terminal-editor-appearance-settings](v0.83.0/terminal-editor-appearance-settings.md) | registered, grounded, ruled, ready to spec | terminal and editor font size as settings, plus a standard/custom terminal colour mode driven off background luminance |
+| [kimi-submit-agent](v0.83.0/kimi-submit-agent.md) | implemented and verified | recognize Kimi as a named submit agent with its own measured chord, command derivation, batching, CLI help, and SPA mirror |
 
 ### v0.84.0
 

@@ -4150,8 +4150,10 @@ mod tests {
     fn built_in_submit(agent: SubmitAgent) -> ResolvedSubmit {
         let template = match agent {
             SubmitAgent::Claude => "{}\x1b[27;9;13~",
-            SubmitAgent::Codex | SubmitAgent::OpenCode => "\x1b[200~{}\x1b[201~\r",
+            SubmitAgent::Codex => "\x1b[200~{}\x1b[201~\r",
             SubmitAgent::Gemini => "{}\r",
+            SubmitAgent::Kimi => "\x1b[200~{}\x1b[201~\r",
+            SubmitAgent::OpenCode => "\x1b[200~{}\x1b[201~\r",
         };
         ResolvedSubmit {
             agent,
@@ -4401,6 +4403,41 @@ mod tests {
             b"\x1b[200~poke\n\x1b[201~\r".to_vec(),
             "the target's codex chord must win over the sender's claude"
         );
+    }
+
+    #[test]
+    fn server_corrects_a_wrong_sender_chord_for_a_kimi_target() {
+        let registry = Registry::new(test_config(1024, 4, 10));
+        let (kimi, rx) = test_agent_session(
+            1024,
+            "s-kimi",
+            Some("@@Kimi"),
+            None,
+            Some("/home/fiorix/.kimi-code/bin/kimi"),
+            &[],
+        );
+        register_session(&registry, &kimi);
+        assert_eq!(
+            registry.session_summaries()[0].agent.map(SubmitAgent::name),
+            Some("kimi"),
+            "terminal list summaries expose the derived Kimi identity"
+        );
+
+        let outcome = registry.enqueue_write_matching(
+            Some("@@Kimi"),
+            None,
+            "poke\n",
+            Some(SubmitAgent::Claude),
+        );
+        assert_eq!(outcome.queued, 1);
+        assert_eq!(outcome.diverged.len(), 1);
+        assert_eq!(
+            outcome.diverged[0].applied.map(SubmitAgent::name),
+            Some("kimi")
+        );
+
+        drain_now(&kimi);
+        assert_eq!(delivered_input(&rx), b"\x1b[200~poke\n\x1b[201~\r".to_vec());
     }
 
     #[test]
