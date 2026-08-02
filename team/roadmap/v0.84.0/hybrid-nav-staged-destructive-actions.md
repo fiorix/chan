@@ -1,0 +1,1 @@
+- Hybrid Nav should stage a delete as a pending intent the user can review and drop, instead of executing it on the keystroke; other Hybrid Nav actions take effect immediately for the same reason and likely need the same treatment, so the first job is enumerating which ones.

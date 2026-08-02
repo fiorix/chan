@@ -1,6 +1,6 @@
 # Extensions v1: TOML-declared subprocess behind an iframe tab
 
-Status: REGISTERED for v0.82.0, grounded 2026-07-29, needs design rulings before spec.
+Status: REGISTERED for v0.84.0, grounded 2026-07-29, needs design rulings before spec. An implementation exists on the `extensions-v1` branch; it has never run the gate, and its browser-smoke check 122 fails deterministically on a host where the harness is otherwise green, so it is a candidate to review, not a finished piece.
 
 ## What
 

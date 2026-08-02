@@ -23,25 +23,30 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 | item | state | what needs to happen |
 | --- | --- | --- |
-| [gateway-security-review](v0.83.0/gateway-security-review.md) | implemented, awaiting merge | land uniform tunnel and entry failure responses, the truthful identity SPA policy, strict audit-IP parsing, and regression coverage with both workspace gates green |
-| [large-transfer-capability](v0.83.0/large-transfer-capability.md) | registered, grounded, sequenced after v0.82.0 | tune the tunnel transport, build the bulk-transfer lane and its admission control, then raise the write ceiling last |
-| [extensions-v1](v0.83.0/extensions-v1.md) | registered, grounded, needs rulings | rule the open decisions (spawn policy, handshake shape, desktop CSP scope), then spec the TOML discovery, subprocess supervision, and iframe tab |
-| [web-marketing-onboarding](v0.83.0/web-marketing-onboarding.md) | registered, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
-| [cs-open-non-text-reveal](v0.83.0/cs-open-non-text-reveal.md) | registered, grounded, ruled, ready to spec | drop `open_path`'s binary refusal so any non-text file reveals in the browser, and view it when the SPA can |
-| [hybrid-nav-staged-editor-bubble](v0.83.0/hybrid-nav-staged-editor-bubble.md) | registered, grounded, ruled, ready to spec | render the queued new-draft / new-diagram intents as removable staged chips in the pane's tab strip |
-| [terminal-tab-rename-reaches-inventory](v0.83.0/terminal-tab-rename-reaches-inventory.md) | registered, grounded, ruled, ready to spec | make a live terminal's name and group mutable over a `rename` WS frame so `cs terminal list` and by-name targeting follow the tab |
-| [terminal-editor-appearance-settings](v0.83.0/terminal-editor-appearance-settings.md) | registered, grounded, ruled, ready to spec | terminal and editor font size as settings, plus a standard/custom terminal colour mode driven off background luminance |
-| [cs-tunnel-single-port-shorthand](v0.83.0/cs-tunnel-single-port-shorthand.md) | registered, grounded, ruled, ready to implement | accept `cs tunnel <port>` as shorthand for `<port>:<port>` in the one spec parser, and move the help, long help, and their tests with it |
-| [kimi-submit-agent](v0.83.0/kimi-submit-agent.md) | implemented and verified | recognize Kimi as a named submit agent with its own measured chord, command derivation, batching, CLI help, and SPA mirror |
-| [team-spawn-poke-tui-readiness](v0.83.0/team-spawn-poke-tui-readiness.md) | implemented and verified | gate each agent identity poke on DECSET 2004 with a concurrent 15-second named failure bound |
-| [terminal-secret-masking](v0.83.0/terminal-secret-masking.md) | registered, implemented, validated | merge the two config fields, corpus-tested matcher, decoration overlay, and per-tab toggle |
+| [gateway-security-review](v0.83.0/gateway-security-review.md) | implemented, validated | uniform tunnel and entry failure responses, a truthful identity SPA policy, strict audit-IP parsing |
+| [terminal-secret-masking](v0.83.0/terminal-secret-masking.md) | implemented, validated | mask secret-shaped values in the terminal, two config fields, Settings surface |
+| [kimi-submit-agent](v0.83.0/kimi-submit-agent.md) | implemented, validated | Kimi as a named submit agent with its own measured chord, command derivation, and SPA mirror |
+| [team-spawn-poke-tui-readiness](v0.83.0/team-spawn-poke-tui-readiness.md) | implemented, validated | gate each agent identity poke on DECSET 2004 with a bounded, named failure |
+| [cs-tunnel-single-port-shorthand](v0.83.0/cs-tunnel-single-port-shorthand.md) | implemented, validated | accept `cs tunnel <port>` as shorthand for `<port>:<port>` in the one spec parser |
 
 ### v0.84.0
 
 | item | state | what needs to happen |
 | --- | --- | --- |
-| [notifications](v0.84.0/notifications.md) | registered, not specced | ground `cs notify` and decide how a local session or a devserver reaches chan-launcher to raise a text notification in the browser or chan-desktop |
-| [terminal-secret-masking](v0.83.0/terminal-secret-masking.md) | implemented, validated in worktree | merge the two config fields, corpus-tested matcher, decoration overlay, and per-tab toggle |
+| [unified-command-launcher](v0.84.0/unified-command-launcher.md) | registered, overlay approach withdrawn | rule whether aggregate Computers scope must reach a remote window, then build the deck at the SPA layer |
+| [extensions-v1](v0.84.0/extensions-v1.md) | registered, grounded, needs rulings | rule the open decisions, then review the existing implementation branch, whose browser-smoke check currently fails |
+| [large-transfer-capability](v0.84.0/large-transfer-capability.md) | registered, grounded, needs a spec | tune the tunnel transport, build the bulk-transfer lane and its admission control, then raise the write ceiling last |
+| [web-marketing-onboarding](v0.84.0/web-marketing-onboarding.md) | registered, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
+| [cs-open-non-text-reveal](v0.84.0/cs-open-non-text-reveal.md) | registered, grounded, ruled, ready to spec | drop `open_path`'s binary refusal so any non-text file reveals in the browser, and view it when the SPA can |
+| [hybrid-nav-staged-editor-bubble](v0.84.0/hybrid-nav-staged-editor-bubble.md) | registered, grounded, ruled, ready to spec | render the queued new-draft and new-diagram intents as removable staged chips in the pane's tab strip |
+| [terminal-tab-rename-reaches-inventory](v0.84.0/terminal-tab-rename-reaches-inventory.md) | registered, grounded, ruled, ready to spec | make a live terminal's name and group mutable over a `rename` WS frame so `cs terminal list` follows the tab |
+| [terminal-editor-appearance-settings](v0.84.0/terminal-editor-appearance-settings.md) | registered, grounded, ruled, ready to spec | terminal and editor font size as settings, plus a standard/custom terminal colour mode |
+| [notifications](v0.84.0/notifications.md) | registered, not specced | ground `cs notify` and decide how a local session or a devserver reaches chan-launcher to raise a text notification |
+| [hybrid-nav-staged-destructive-actions](v0.84.0/hybrid-nav-staged-destructive-actions.md) | registered, not specced | enumerate the Hybrid Nav actions that execute on the keystroke, then stage delete as a droppable pending intent |
+| [hybrid-nav-mouse-split-affordances](v0.84.0/hybrid-nav-mouse-split-affordances.md) | registered, not specced | suggest horizontal and vertical splits on mouse hover once a pane drag enters Hybrid Nav |
+| [graph-inspector-language-node-detail](v0.84.0/graph-inspector-language-node-detail.md) | registered, not specced | add COCOMO and the top directories for a selected language node, sourced from chan-report's existing roll-up |
+| [file-browser-context-menu-inspector-actions](v0.84.0/file-browser-context-menu-inspector-actions.md) | registered, not specced | give the file browser's right-click menu the inspector's per-type actions |
+| [rich-prompt-submit-button](v0.84.0/rich-prompt-submit-button.md) | registered, grounded, not specced | turn the Rich Prompt's submit hint into a real button so a mobile user can submit by tapping |
 
 ## Completed
 
