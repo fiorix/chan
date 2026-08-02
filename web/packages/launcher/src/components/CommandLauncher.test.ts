@@ -236,6 +236,46 @@ describe("Computers command deck", () => {
     expect(actions.newWorkspace).toHaveBeenCalledWith(expect.objectContaining({ path: "/work/project" }));
   });
 
+  it("dismisses a typed keyboard launch as soon as the new terminal succeeds", async () => {
+    let finishLaunch!: () => void;
+    actions.newTerminal.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishLaunch = resolve;
+        }),
+    );
+    openCommandLauncher("computers");
+    flushSync();
+    await query("ter");
+
+    const rootTitles = [...target.querySelectorAll(".deck-result-title")].map(
+      (node) => node.textContent,
+    );
+    const branchIndex = rootTitles.indexOf("New terminal");
+    expect(branchIndex).toBeGreaterThanOrEqual(0);
+    for (let index = 0; index <= branchIndex; index += 1) await key("ArrowDown");
+    expect(target.querySelector(".deck-result.active .deck-result-title")?.textContent).toBe(
+      "New terminal",
+    );
+    await key("Enter");
+    expect(activeCommandLauncherDraft().path).toEqual(["new-terminal"]);
+    expect(result("This machine")).toBeTruthy();
+
+    await key("ArrowDown");
+    await key("Enter");
+    expect(actions.newTerminal).toHaveBeenCalledOnce();
+    expect(activeCommandLauncherDraft().visible).toBe(true);
+    finishLaunch();
+    // Flush the nested action -> provider -> shared-deck promise chain without
+    // advancing the 260 ms success timer this regression is guarding against.
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+    await tick();
+
+    expect(activeCommandLauncherDraft().visible).toBe(false);
+    expect(activeCommandLauncherDraft().query).toBe("");
+    expect(target.querySelector('[role="dialog"]')).toBeNull();
+  });
+
   it("Escape hides and preserves the current submenu until explicitly cleared", async () => {
     openCommandLauncher("computers");
     flushSync();

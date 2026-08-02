@@ -21,6 +21,12 @@ export interface DeckItem {
   disabled?: boolean;
   /** Keep the deck open while the returned promise settles. */
   awaitResult?: boolean;
+  /**
+   * Dismiss in the same microtask as a successful result instead of showing the
+   * brief success card. Use for actions that move focus to another window: once
+   * this document is backgrounded, browsers may throttle the success timer.
+   */
+  dismissImmediatelyOnSuccess?: boolean;
   confirm?: {
     title: string;
     message: string;

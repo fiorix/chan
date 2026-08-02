@@ -202,6 +202,7 @@
       scope: "computers",
       icon: command === "focus" ? Focus : command === "hide" ? EyeOff : command === "show" ? Eye : X,
       awaitResult: true,
+      dismissImmediatelyOnSuccess: command === "focus",
       confirm:
         command === "close"
           ? {
@@ -247,6 +248,7 @@
       scope: "computers",
       icon: command === "new-window" ? AppWindow : Power,
       awaitResult: true,
+      dismissImmediatelyOnSuccess: command === "new-window",
       confirm:
         command === "turn-off"
           ? {
@@ -274,6 +276,7 @@
           scope: "computers",
           icon: Monitor,
           awaitResult: true,
+          dismissImmediatelyOnSuccess: true,
           run: () => newTerminal(),
         };
         const remote = hasDesktopBridge
@@ -288,6 +291,7 @@
                   scope: "computers",
                   icon: Server,
                   awaitResult: true,
+                  dismissImmediatelyOnSuccess: true,
                   run: () => newTerminal(devserver),
                 }),
               )
@@ -334,6 +338,7 @@
               scope: "computers",
               icon: Plug,
               awaitResult: true,
+              dismissImmediatelyOnSuccess: true,
               run: () => connectComputer(devserver),
             }),
           );
@@ -433,6 +438,7 @@
       shortcut: command.shortcut,
       confirm: command.confirm,
       awaitResult: true,
+      dismissImmediatelyOnSuccess: true,
       disabled: !nativeSourceAlive,
       sourceCommandId: command.id,
       arg,

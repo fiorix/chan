@@ -505,6 +505,7 @@
       scope: "computers",
       icon: command === "focus" ? Focus : command === "hide" ? EyeOff : command === "show" ? Eye : X,
       awaitResult: true,
+      dismissImmediatelyOnSuccess: command === "focus" || command === "show",
       confirm:
         command === "close"
           ? {
@@ -531,6 +532,7 @@
       scope: "computers",
       icon: AppWindow,
       awaitResult: true,
+      dismissImmediatelyOnSuccess: true,
       run: () =>
         createScopedWindow({
           action: "new_workspace_window",
@@ -555,6 +557,7 @@
                 scope: "computers",
                 icon: Terminal,
                 awaitResult: true,
+                dismissImmediatelyOnSuccess: true,
                 run: () => createScopedWindow({ action: "new_terminal" }),
               },
             ]

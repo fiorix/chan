@@ -160,6 +160,10 @@
       // ownership of the reusable overlay. Never paint that result into the
       // new source's draft.
       if (draft !== executionDraft) return;
+      if (item.dismissImmediatelyOnSuccess) {
+        onSuccess?.(item);
+        return;
+      }
       executionDraft.operation = { kind: "success", itemId: item.id, title: item.title };
       await new Promise((resolve) => setTimeout(resolve, 260));
       if (draft !== executionDraft) return;
