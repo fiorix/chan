@@ -498,16 +498,18 @@
 
 <style>
   .deck-overlay {
+    --deck-scrim: rgba(0, 0, 0, 0.56);
     position: fixed;
     inset: 0;
     z-index: 32000;
     display: flex;
     align-items: flex-start;
     justify-content: center;
-    padding: min(12vh, 92px) 16px 16px;
+    padding: min(17vh, 136px) 16px 16px;
     box-sizing: border-box;
     color: var(--text);
   }
+  :global([data-theme="light"]) .deck-overlay { --deck-scrim: rgba(0, 0, 0, 0.32); }
   .deck-backdrop {
     position: absolute;
     inset: 0;
@@ -516,8 +518,9 @@
     padding: 0;
     border: 0;
     border-radius: 0;
-    background: transparent;
+    background: var(--deck-scrim);
     cursor: default;
+    animation: scrim-in 180ms ease-out;
   }
   .deck-shell {
     position: relative;
@@ -733,6 +736,7 @@
   }
   .deck-decisions button.chosen { color: var(--text); background: color-mix(in srgb, var(--text) 7%, transparent); border-color: color-mix(in srgb, var(--text) 12%, transparent); }
   .deck-decisions button.danger.chosen { color: var(--danger, #d1242f); }
+  @keyframes scrim-in { from { opacity: 0; } }
   @keyframes deck-arrive { from { opacity: 0; transform: translateY(-10px) scaleX(1.08) scaleY(.96); filter: blur(13px); } to { opacity: 1; transform: none; filter: blur(0); } }
   @keyframes panel-unfold { from { opacity: 0; transform: translateY(-8px) scaleY(.92); filter: blur(7px); } to { opacity: 1; transform: none; filter: blur(0); } }
   @keyframes orb-arrive { from { opacity: 0; transform: translateX(-28px) scale(.72); } }
@@ -749,7 +753,7 @@
     .deck-panel { margin-top: 9px; }
   }
   @media (prefers-reduced-motion: reduce) {
-    .deck-shell, .deck-panel, .deck-scope, .deck-placeholder, .deck-results, .deck-operation, .deck-spinner { animation-duration: 1ms; animation-delay: 0ms; }
+    .deck-backdrop, .deck-shell, .deck-panel, .deck-scope, .deck-placeholder, .deck-results, .deck-operation, .deck-spinner { animation-duration: 1ms; animation-delay: 0ms; }
     .deck-result, .deck-scope { transition-duration: 1ms; }
   }
 </style>

@@ -363,8 +363,12 @@ describe("contextual command deck", () => {
     expect(runFlip).toHaveBeenCalledTimes(1);
   });
 
-  test("uses a transparent backdrop and smooth capsule/orb motion", () => {
-    expect(deckRaw).toMatch(/\.deck-backdrop \{[\s\S]{1,220}background: transparent/);
+  test("uses a theme-aware dimming scrim, optical centering, and smooth capsule motion", () => {
+    expect(deckRaw).toContain("padding: min(17vh, 136px) 16px 16px;");
+    expect(deckRaw).toContain("--deck-scrim: rgba(0, 0, 0, 0.56);");
+    expect(deckRaw).toContain(':global([data-theme="light"]) .deck-overlay');
+    expect(deckRaw).toMatch(/\.deck-backdrop \{[\s\S]{1,300}background: var\(--deck-scrim\)/);
+    expect(deckRaw).toMatch(/\.deck-backdrop \{[\s\S]{1,360}animation: scrim-in/);
     expect(deckRaw).toContain('filter id="chan-command-orb-blob"');
     expect(deckRaw).toMatch(/\.deck-shell \{[\s\S]{1,360}animation: deck-arrive/);
     expect(deckRaw).toMatch(/\.deck-scope \{[\s\S]{1,500}animation: orb-arrive/);
