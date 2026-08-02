@@ -132,8 +132,9 @@ const TRACKED_PRIVATE_MODES: &[u16] = &[
     1003, // mouse: any-event (motion) tracking
     1004, // focus in/out reporting
     1006, // mouse: SGR extended coordinate encoding
-    2004, // bracketed paste
+    BRACKETED_PASTE_MODE,
 ];
+const BRACKETED_PASTE_MODE: u16 = 2004;
 /// Upper bound on a carried partial private-mode CSI (`\e[?<params>(h|l)`) split
 /// across PTY reads: a handful of `;`-joined mode numbers. Past this, a dangling
 /// `\e[?…` is not a real mode toggle and is dropped rather than buffered.
@@ -822,6 +823,41 @@ impl AttachHandle {
 
     pub fn send_input(&self, data: &[u8]) {
         self.session.send_input(data);
+    }
+
+    /// Wait until this PTY enables bracketed-paste mode, the readiness signal
+    /// that an interactive agent's TUI owns the terminal input. Returns false
+    /// when the PTY ends or is replaced before reaching that state. The caller
+    /// owns any deadline appropriate to its operation.
+    pub async fn wait_for_bracketed_paste(&mut self) -> bool {
+        loop {
+            if self.session.closed.load(Ordering::Relaxed)
+                || self
+                    .session
+                    .exit
+                    .lock()
+                    .expect("session exit poisoned")
+                    .is_some()
+            {
+                return false;
+            }
+            if self
+                .session
+                .private_modes
+                .lock()
+                .expect("terminal private modes poisoned")
+                .contains(&BRACKETED_PASTE_MODE)
+            {
+                return true;
+            }
+            match self.rx.recv().await {
+                Ok(SessionEvent::Exit(_) | SessionEvent::Closed(_) | SessionEvent::Restarted) => {
+                    return false
+                }
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => return false,
+            }
+        }
     }
 
     /// Enqueue a Rich Prompt message onto this session's `cs terminal write`
@@ -5663,6 +5699,50 @@ mod tests {
         assert_eq!(modes_on(&session), vec![1000, 1006]);
         session.record_output(b"004h");
         assert_eq!(modes_on(&session), vec![1000, 1006, 2004]);
+    }
+
+    #[tokio::test]
+    async fn bracketed_paste_readiness_waits_for_a_complete_split_decset() {
+        let session = test_session_with_ring(1024);
+        let mut handle = session.clone().attach(Some(0));
+        let completed = Arc::new(AtomicBool::new(false));
+        let waiter_completed = completed.clone();
+
+        let wait = async {
+            let ready = handle.wait_for_bracketed_paste().await;
+            waiter_completed.store(true, Ordering::Relaxed);
+            ready
+        };
+        let emit = async {
+            tokio::task::yield_now().await;
+            session.record_output(b"\x1b[?2");
+            tokio::task::yield_now().await;
+            assert!(
+                !completed.load(Ordering::Relaxed),
+                "a partial DECSET must not signal readiness"
+            );
+            session.record_output(b"004h");
+        };
+
+        let (ready, ()) = tokio::join!(wait, emit);
+        assert!(ready, "DECSET 2004 signals bracketed-paste readiness");
+    }
+
+    #[tokio::test]
+    async fn bracketed_paste_readiness_stops_when_the_session_closes() {
+        let session = test_session_with_ring(1024);
+        let mut handle = session.clone().attach(Some(0));
+        let wait = handle.wait_for_bracketed_paste();
+        let close = async {
+            tokio::task::yield_now().await;
+            session.close(CloseReason::Explicit);
+        };
+
+        let (ready, ()) =
+            tokio::time::timeout(Duration::from_secs(1), async { tokio::join!(wait, close) })
+                .await
+                .expect("closed readiness wait returns");
+        assert!(!ready, "a closed PTY cannot become ready");
     }
 
     #[test]

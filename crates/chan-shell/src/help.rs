@@ -1080,11 +1080,14 @@ pub(crate) const CS_TERMINAL_TEAM: &str = r"Create, load and bring up a team of 
 A team is one workspace-relative directory. `new` validates the config
 you hand it, writes {dir}/config.toml, regenerates {dir}/bootstrap.md,
 creates the tasks/ journals/ followups/ tree, then spawns the members
-lead-first and pokes each agent its identity prompt. `load` re-reads an
+lead-first. Each agent is poked when its own PTY enables bracketed-paste
+mode; the per-agent waits run concurrently and stop after 15 seconds
+with every unready member named in a non-zero result. `load` re-reads an
 existing {dir}/config.toml and spawns the same team again. `--script` on
 either prints the whole bootstrap as a runnable shell script instead of
-mutating anything. This is the CLI equivalent of the Cmd+P Team Work
-dialog.
+mutating anything; its fixed `sleep 3` is an approximation because the
+script cannot observe server-owned PTY state. This is the CLI equivalent
+of the Cmd+P Team Work dialog.
 
 The config carries team_name, host_name, host_handle, tab_group and 1
 to 9 [[members]], exactly one of them is_lead. Each member has a handle
@@ -1207,9 +1210,9 @@ SIDE EFFECTS:
     (`tab_group`, else the team name; a live collision resolves to
     <group>-2, -3, ...). Sessions bind to the calling window and
     surface as tabs in it.
-  - After a boot grace, each AGENT member is poked its identity prompt
-    with that agent's submit chord, pointing it at bootstrap.md. Shell
-    members are spawned but never poked.
+  - Each AGENT member is poked as soon as its PTY enables
+    bracketed-paste mode, with all member waits running concurrently.
+    Shell members are spawned but never poked and do not wait.
   - `--script` mutates nothing and prints the script to stdout;
     otherwise the one-line spawn summary goes to stderr.
 
@@ -1220,8 +1223,12 @@ CAUTIONS:
   - Running `new` or `load` again spawns ANOTHER live copy of the team
     (in the next free group). Close the old one first with
     `cs terminal close --tab-group <group>`.
-  - The call blocks through the boot grace so the identity pokes land
-    before it returns.
+  - The call blocks until each agent is poked, its terminal ends, or its
+    15-second readiness bound ends. An unready member is named, is not
+    poked, and makes the command exit non-zero; ready peers are still
+    poked.
+  - `--script` uses a fixed `sleep 3` approximation because its shell
+    path cannot observe the server's per-agent PTY readiness state.
   - A member whose command fails to start is reported and skipped; the
     rest of the team still comes up. Only a total failure is an error.
 
@@ -1247,13 +1254,16 @@ pub(crate) const CS_TERMINAL_TEAM_LOAD: &str = r"Bring a team that already exist
 
 Reads and revalidates {dir}/config.toml, then spawns the members exactly
 the way `new` does after its write: lead first, one tab per handle in
-the team's group, an identity poke to each agent member after the boot
-grace. Nothing is written -- config.toml is not rewritten and
+the team's group. Each agent's identity poke waits for its own PTY to
+enable bracketed-paste mode; the waits run concurrently with a
+15-second bound that names every unready member and returns non-zero.
+Nothing is written -- config.toml is not rewritten and
 bootstrap.md is not regenerated, so a config.toml you hand-edited is
 picked up as-is while the existing bootstrap.md stays untouched.
 
 With `--script` it writes nothing and spawns nothing: the paste-and-run
-bootstrap script for the saved team goes to stdout.
+bootstrap script for the saved team goes to stdout. Its fixed `sleep 3`
+is an approximation of the server path's PTY readiness gate.
 
 Without `--script`, `--window`, `--pane`, and `--side a|b` place every
 surfaced member tab at one exact live destination.
@@ -1277,7 +1287,12 @@ SIDE EFFECTS:
 CAUTIONS:
   - Loading a team that is already running spawns a SECOND copy in the
     next free tab group. Close the old one first.
-  - Blocks through the boot grace before the pokes are delivered.
+  - Blocks until every agent is poked, its terminal ends, or its
+    15-second readiness bound ends. An unready member is named, is not
+    poked, and makes the command exit non-zero; ready peers are still
+    poked.
+  - `--script` uses a fixed `sleep 3` approximation and cannot observe
+    the server's per-agent PTY readiness state.
   - A hand-edited config.toml that fails validation is refused here,
     with the first failure as the message.
 
@@ -1302,14 +1317,16 @@ Reads the config from `--config FILE` or `--stdin` (exactly one),
 stamps `created_at` when the config omits it, validates it, then writes
 {dir}/config.toml, the regenerated {dir}/bootstrap.md and the tasks/
 journals/ followups/ tree inside the workspace. It then spawns one
-terminal per member, lead first, and after a boot grace pokes each agent
-its identity prompt so it reads bootstrap.md and takes its role.
+terminal per member, lead first. Each agent is poked when its own PTY
+enables bracketed-paste mode; the waits run concurrently and have a
+15-second bound that names every unready member and returns non-zero.
 
 `--brief FILE` folds that file's text verbatim into bootstrap.md after
 the Roster, which is how a round's operating instructions reach every
 member and survive a later regenerate. `--script` turns the whole thing
 into a preview: the paste-and-run bootstrap script goes to stdout and
-nothing is written or spawned.
+nothing is written or spawned. The script's fixed `sleep 3` is an
+approximation because it cannot observe server-owned PTY state.
 
 Without `--script`, `--window`, `--pane`, and `--side a|b` place every
 surfaced member tab at one exact live destination.
@@ -1343,7 +1360,12 @@ SIDE EFFECTS:
   - Spawn summary to stderr; `--script` output to stdout.
 
 CAUTIONS:
-  - Blocks through the boot grace before the pokes are delivered.
+  - Blocks until every agent is poked, its terminal ends, or its
+    15-second readiness bound ends. An unready member is named, is not
+    poked, and makes the command exit non-zero; ready peers are still
+    poked.
+  - `--script` uses a fixed `sleep 3` approximation and cannot observe
+    the server's per-agent PTY readiness state.
   - Overwrites an existing team at {dir}: config.toml is replaced and
     bootstrap.md is regenerated from the config plus `--brief`.
   - Passing both `--config` and `--stdin`, or neither, is an error.

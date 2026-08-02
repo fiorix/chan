@@ -20,8 +20,8 @@ use crate::desktop_window_ops::DesktopWindowOp;
 use crate::handover_bus::{HandoverBus, HandoverReply};
 use crate::session_presence::{HandoverError, ParticipantState, RenameError, SessionRegistry};
 use crate::state::WorkspaceCell;
-use crate::terminal_sessions::CreateOptions;
 use crate::terminal_sessions::Registry as TerminalRegistry;
+use crate::terminal_sessions::{AttachHandle, CreateOptions};
 use crate::{WindowKind, WindowRecord};
 
 /// Settable handle to the terminal registry. The registry is built after
@@ -1621,9 +1621,8 @@ struct TeamRequest {
 /// path and the HTTP route share one source of truth (the bootstrap is
 /// never regenerated client-side).
 ///
-/// async because the non-`--script` `new` spawns the team then blocks a
-/// boot grace before poking each agent's identity prompt (the same
-/// sequence the `--script` form runs inline with `sleep 3`).
+/// async because the non-`--script` path waits for each spawned agent's
+/// terminal readiness before poking its identity prompt.
 async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlResponse {
     use crate::routes::team_config::{
         ensure_created_at, generate_bootstrap_script, read_team_config, validate_team_config,
@@ -1772,12 +1771,9 @@ async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlRespons
     }
 }
 
-/// Boot grace between spawning the team's agents and poking their compose
-/// boxes. Matches the `--script` form's inline `sleep 3`: a freshly-spawned
-/// agent needs a moment before its compose box accepts input, else the
-/// identity poke lands mid-startup and is lost. This is the one magic number
-/// in the spawn path; live smoke runs validated it.
-const TEAM_SPAWN_POKE_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+/// Maximum time an agent member gets to enable bracketed-paste mode. Every
+/// supported agent emits DECSET 2004 when its TUI takes control of the PTY.
+const TEAM_SPAWN_POKE_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Gap between the body write and the submit-chord write of a multi-write
 /// poke (gemini: the prompt, then the bare CR as a distinct keypress). The
@@ -1788,19 +1784,30 @@ const TEAM_SPAWN_POKE_GRACE: std::time::Duration = std::time::Duration::from_sec
 /// explicit gap.
 const SUBMIT_SPLIT_GAP: std::time::Duration = std::time::Duration::from_millis(400);
 
-/// What a server-side team spawn produced: the resolved group, the handles
-/// that came up, the ones that failed (with the spawn error), and the
-/// per-agent identity pokes to deliver after the boot grace.
+#[derive(Debug)]
+struct TeamPoke {
+    member: String,
+    terminal: AttachHandle,
+    writes: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct TeamPokeResult {
+    poked: usize,
+    failed: Vec<(String, String)>,
+}
+
+/// What a server-side team spawn produced: the resolved group, the members
+/// that came up, the ones that failed (with the spawn error), and the exact
+/// session handles carrying each agent's pending identity poke.
 struct TeamSpawn {
     group: String,
     spawned: Vec<String>,
     failed: Vec<(String, String)>,
-    /// `(handle, writes)` for each AGENT member. `writes` is the ordered list
-    /// of PTY writes that deliver the identity prompt + submit it: one element
-    /// for most agents (prompt + chord), but TWO for gemini (the prompt, then
-    /// the bare submit chord as a distinct write, since an immediate Return
-    /// becomes Shift+Return). The delivery loop writes them with a gap between.
-    pokes: Vec<(String, Vec<String>)>,
+    /// One exact session handle per AGENT member plus the ordered PTY writes
+    /// that deliver and submit its identity prompt. Most agents use one write;
+    /// gemini uses two with a gap so its CR remains a distinct keypress.
+    pokes: Vec<TeamPoke>,
     /// Each spawned member's tab name + live `session_id`, for the
     /// SPA-surfacing push (`WindowCommand::TeamSpawned`).
     members: Vec<SpawnedMember>,
@@ -1836,7 +1843,7 @@ fn resolve_team_group(registry: &TerminalRegistry, base: &str) -> String {
 /// spawn but get no poke. A member whose command fails to start is recorded
 /// in `failed` and does not abort the rest of the team (mirrors
 /// runTeamBootstrap's per-worker try/catch). This step is synchronous (the
-/// boot-grace wait + poke delivery happen in `spawn_and_poke_team`).
+/// readiness wait + poke delivery happen in `spawn_and_poke_team`).
 fn spawn_team(
     registry: &TerminalRegistry,
     dir: &str,
@@ -1885,9 +1892,9 @@ fn spawn_team(
         };
         match registry.create(opts) {
             Ok(handle) => {
-                // Capture the session id for the surfacing push, then drop
-                // the attach handle: the session stays in the registry map,
-                // and the boot-grace poke re-resolves it by tab-name + group.
+                // Capture the session id for the surfacing push. Agent members
+                // retain this exact handle through readiness and poke delivery;
+                // shell members drop it after the spawn record is complete.
                 spawned.push(m.handle.clone());
                 members.push(SpawnedMember {
                     tab_name: m.handle.clone(),
@@ -1900,7 +1907,16 @@ fn spawn_team(
                     SubmitAgent::derive(&m.command, m.env.get("CHAN_AGENT").map(String::as_str))
                 {
                     let writes = submit_writes(identity_prompt(config, dir, m), Some(agent));
-                    pokes.push((m.handle.clone(), writes));
+                    pokes.push(TeamPoke {
+                        member: m.handle.clone(),
+                        // `opts.command` created this PTY with the member's
+                        // command. The server path never creates an interactive
+                        // shell session and later types the command into it, so
+                        // this handle cannot observe readiness from a preceding
+                        // shell life.
+                        terminal: handle,
+                        writes,
+                    });
                 }
             }
             Err(e) => failed.push((m.handle.clone(), e.to_string())),
@@ -1915,11 +1931,10 @@ fn spawn_team(
     }
 }
 
-/// The non-`--script` `new` spawn path: bring the team up, wait the boot
-/// grace, then deliver each agent's identity poke. Blocks for the grace so
-/// the CLI returns only once the pokes are delivered (the same inline
-/// ordering the `--script` form runs: spawn -> sleep 3 -> poke). Returns a
-/// summary, or an error when nothing came up.
+/// The non-`--script` team spawn path: bring the team up, then deliver each
+/// identity poke as soon as that agent enables bracketed-paste mode. Members
+/// wait concurrently, so one slow client does not delay a ready peer. Returns
+/// only after every agent was poked or reached the readiness bound.
 async fn spawn_and_poke_team(
     registry: &Arc<TerminalRegistry>,
     dir: &str,
@@ -1929,16 +1944,16 @@ async fn spawn_and_poke_team(
     session_registry: &SessionRegistry,
     events_tx: &broadcast::Sender<String>,
 ) -> ControlResponse {
-    let spawn = spawn_team(registry, dir, config, window_id);
+    let mut spawn = spawn_team(registry, dir, config, window_id);
     let mut surface_error = None;
 
     // Surface the spawned team in the window that owns it (each agent
     // is bound to `window_id`). The same window opens a terminal tab per
     // member ATTACHED to the live session, so a CLI `cs terminal team new`
     // shows up in the running SPA instead of only on the SPA's next attach.
-    // A windowless spawn has no window to surface into. Sent before the boot
-    // grace so the tabs appear while the agents start; the poke reaches the
-    // PTYs independently of any SPA attach.
+    // A windowless spawn has no window to surface into. Sent before the
+    // readiness wait so the tabs appear while the agents start; the poke
+    // reaches the PTYs independently of any SPA attach.
     if let Some(window_id) = window_id {
         if !spawn.members.is_empty() {
             surface_error = send_window_command_if_live(
@@ -1955,42 +1970,80 @@ async fn spawn_and_poke_team(
         }
     }
 
-    // Let the agents come up before poking their compose boxes, then deliver
-    // each agent its identity prompt + submit chord. A shell member has no
-    // compose box, so it has no poke entry; an all-shell team (or a fully
-    // failed spawn) skips the wait entirely.
-    if !spawn.spawned.is_empty() && !spawn.pokes.is_empty() {
-        tokio::time::sleep(TEAM_SPAWN_POKE_GRACE).await;
-        for (handle, writes) in &spawn.pokes {
-            // Most agents have a single write; gemini has two (prompt, then
-            // the bare CR), which must arrive as distinct keypresses, so we
-            // gap between writes.
-            for (i, write) in writes.iter().enumerate() {
-                if i > 0 {
-                    tokio::time::sleep(SUBMIT_SPLIT_GAP).await;
-                }
-                registry.write_input_matching(Some(handle), Some(&spawn.group), write.as_bytes());
-            }
-        }
-    }
+    // Shell members have no compose box and therefore no poke entry. Joining
+    // an empty set returns immediately, preserving the all-shell fast path.
+    let poke_result = deliver_team_pokes(&mut spawn.pokes).await;
+
+    let summary = team_spawn_summary(&config.team_name, &spawn, &poke_result);
 
     if let Some(error) = surface_error {
+        let summary = match summary {
+            ControlResponse::Ok { message } | ControlResponse::Error { message } => message,
+            _ => unreachable!("team spawn summaries use ok or error responses"),
+        };
         ControlResponse::Error {
             message: format!(
-                "team {:?} spawned but could not be surfaced: {error}",
+                "{summary}; team {:?} spawned but could not be surfaced: {error}",
                 config.team_name
             ),
         }
     } else {
-        team_spawn_summary(&config.team_name, &spawn)
+        summary
     }
+}
+
+async fn deliver_team_pokes(pokes: &mut [TeamPoke]) -> TeamPokeResult {
+    let results = futures::future::join_all(pokes.iter_mut().map(|poke| async move {
+        match tokio::time::timeout(
+            TEAM_SPAWN_POKE_READY_TIMEOUT,
+            poke.terminal.wait_for_bracketed_paste(),
+        )
+        .await
+        {
+            Ok(true) => {
+                // Most agents have a single write; gemini has two (prompt,
+                // then the bare CR), which must arrive as distinct keypresses.
+                for (index, write) in poke.writes.iter().enumerate() {
+                    if index > 0 {
+                        tokio::time::sleep(SUBMIT_SPLIT_GAP).await;
+                    }
+                    poke.terminal.send_input(write.as_bytes());
+                }
+                Ok(())
+            }
+            Ok(false) => Err((
+                poke.member.clone(),
+                "terminal ended before enabling bracketed-paste mode".to_string(),
+            )),
+            Err(_) => Err((
+                poke.member.clone(),
+                format!(
+                    "did not enable bracketed-paste mode within {}s",
+                    TEAM_SPAWN_POKE_READY_TIMEOUT.as_secs()
+                ),
+            )),
+        }
+    }))
+    .await;
+
+    let mut outcome = TeamPokeResult::default();
+    for result in results {
+        match result {
+            Ok(()) => outcome.poked += 1,
+            Err(failure) => outcome.failed.push(failure),
+        }
+    }
+    outcome
 }
 
 /// Render the CLI-facing response for a completed `spawn_team`: an error when
 /// nothing came up, else a one-line summary of the spawned + poked + failed
-/// counts. Pure (no I/O) so the wording is unit-tested without the boot-grace
-/// wait.
-fn team_spawn_summary(team_name: &str, spawn: &TeamSpawn) -> ControlResponse {
+/// counts. Pure (no I/O) so the wording is unit-tested without a PTY wait.
+fn team_spawn_summary(
+    team_name: &str,
+    spawn: &TeamSpawn,
+    poke_result: &TeamPokeResult,
+) -> ControlResponse {
     if spawn.spawned.is_empty() {
         return ControlResponse::Error {
             message: format!(
@@ -2003,7 +2056,7 @@ fn team_spawn_summary(team_name: &str, spawn: &TeamSpawn) -> ControlResponse {
         "team {team_name:?} spawned in group {:?}: {} member(s) up, poked {} agent(s)",
         spawn.group,
         spawn.spawned.len(),
-        spawn.pokes.len(),
+        poke_result.poked,
     );
     if !spawn.failed.is_empty() {
         message.push_str(&format!(
@@ -2012,7 +2065,16 @@ fn team_spawn_summary(team_name: &str, spawn: &TeamSpawn) -> ControlResponse {
             fmt_spawn_failures(&spawn.failed)
         ));
     }
-    ControlResponse::Ok { message }
+    if !poke_result.failed.is_empty() {
+        message.push_str(&format!(
+            "; {} agent(s) not poked: {}",
+            poke_result.failed.len(),
+            fmt_spawn_failures(&poke_result.failed)
+        ));
+        ControlResponse::Error { message }
+    } else {
+        ControlResponse::Ok { message }
+    }
 }
 
 fn fmt_spawn_failures(failed: &[(String, String)]) -> String {
@@ -6249,6 +6311,18 @@ is_lead = false
         toml::from_str(SPAWNABLE_TEAM_TOML).expect("valid spawnable team config")
     }
 
+    #[cfg(unix)]
+    fn single_probe_agent(command: &str) -> TeamConfig {
+        let mut config = spawnable_config();
+        config.team_name = "readiness-probe".into();
+        config.tab_group = "readiness-probe".into();
+        config.members.retain(|member| member.is_lead);
+        let lead = config.members.first_mut().expect("lead member");
+        lead.command = command.into();
+        lead.env.insert("CHAN_AGENT".into(), "codex".into());
+        config
+    }
+
     #[test]
     fn resolve_team_group_appends_suffix_on_collision() {
         let (_root, registry) = empty_registry();
@@ -6297,27 +6371,27 @@ is_lead = false
         // (no agent) does not. Lead's poke carries claude's chord, the
         // worker's carries codex's CR.
         assert_eq!(spawn.pokes.len(), 2, "agents only: {:?}", spawn.pokes);
-        assert_eq!(spawn.pokes[0].0, "@@Lead");
+        assert_eq!(spawn.pokes[0].member, "@@Lead");
         // claude is a SINGLE write ending in its modifyOtherKeys chord.
-        assert_eq!(spawn.pokes[0].1.len(), 1, "claude poke is one write");
+        assert_eq!(spawn.pokes[0].writes.len(), 1, "claude poke is one write");
         assert!(
-            spawn.pokes[0].1[0].ends_with("\n\x1b[27;9;13~"),
+            spawn.pokes[0].writes[0].ends_with("\n\x1b[27;9;13~"),
             "lead poke ends with claude chord: {:?}",
-            spawn.pokes[0].1
+            spawn.pokes[0].writes
         );
         assert!(
-            spawn.pokes[0].1[0].contains("You are @@Lead"),
+            spawn.pokes[0].writes[0].contains("You are @@Lead"),
             "lead poke names the lead: {:?}",
-            spawn.pokes[0].1
+            spawn.pokes[0].writes
         );
-        assert_eq!(spawn.pokes[1].0, "@@Alice");
+        assert_eq!(spawn.pokes[1].member, "@@Alice");
         // codex is a SINGLE write (bracketed-paste wrap) ending in CR.
-        assert_eq!(spawn.pokes[1].1.len(), 1, "codex poke is one write");
+        assert_eq!(spawn.pokes[1].writes.len(), 1, "codex poke is one write");
         assert!(
-            spawn.pokes[1].1[0].ends_with("\n\x1b[201~\r")
-                && !spawn.pokes[1].1[0].ends_with("\x1b[27;9;13~"),
+            spawn.pokes[1].writes[0].ends_with("\n\x1b[201~\r")
+                && !spawn.pokes[1].writes[0].ends_with("\x1b[27;9;13~"),
             "worker poke ends with codex CR: {:?}",
-            spawn.pokes[1].1
+            spawn.pokes[1].writes
         );
 
         // All three sessions live in the resolved group.
@@ -6347,11 +6421,12 @@ is_lead = false
         lead.env.insert("CHAN_AGENT".into(), "opencode".into());
 
         let spawn = spawn_team(&registry, "new-team-1", &config, None);
-        let (_, writes) = spawn
+        let poke = spawn
             .pokes
             .iter()
-            .find(|(handle, _)| handle == "@@Lead")
+            .find(|poke| poke.member == "@@Lead")
             .expect("lead identity poke");
+        let writes = &poke.writes;
         assert_eq!(writes.len(), 1, "opencode has raw-write cost one");
         assert!(
             writes[0].starts_with("\x1b[200~# Team work") && writes[0].contains("You are @@Lead"),
@@ -6923,9 +6998,9 @@ is_lead = false
     }
 
     // A team of two shell members (one lead, neither an agent). spawn_and_
-    // poke_team brings them up but pokes nobody, so it skips the boot-grace
+    // poke_team brings them up but pokes nobody, so it skips the readiness
     // wait and returns immediately - exercises the spawn path end-to-end
-    // without a 3s sleep in the test.
+    // without awaiting terminal output in the test.
     const SHELL_TEAM_TOML: &str = r#"
 team_name = "shellsquad"
 host_name = "Neo"
@@ -6968,6 +7043,118 @@ is_lead = false
             other => panic!("unexpected non-ok response: {other:?}"),
         }
         assert_eq!(registry.session_summaries().len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_and_poke_team_waits_for_bracketed_paste_after_a_slow_start() {
+        let (_root, registry) = empty_registry();
+        let registry = Arc::new(registry);
+        let config = single_probe_agent("sleep 3.25; printf '<<READY>>\\033[?2004h'; sleep 1");
+
+        let response = spawn_and_poke_team(
+            &registry,
+            "new-team-1",
+            &config,
+            None,
+            None,
+            &SessionRegistry::new(),
+            &test_events(),
+        )
+        .await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let scrollback = loop {
+            let output = term_scrollback(&registry, "@@Lead").expect("probe scrollback");
+            if output.contains("# Team work") || std::time::Instant::now() >= deadline {
+                break output;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        registry.close_matching(Some("@@Lead"), None);
+
+        match response {
+            ControlResponse::Ok { message } => {
+                assert!(message.contains("poked 1 agent(s)"), "{message}");
+                let ready = scrollback
+                    .find("<<READY>>")
+                    .expect("readiness marker in scrollback");
+                let poke = scrollback
+                    .find("# Team work")
+                    .expect("identity poke echoed by the test PTY");
+                assert!(
+                    ready < poke,
+                    "identity poke must follow readiness: {scrollback:?}"
+                );
+            }
+            other => panic!("unexpected non-ok response: {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn spawn_and_poke_team_names_an_agent_that_never_becomes_ready() {
+        let (_root, registry) = empty_registry();
+        let registry = Arc::new(registry);
+        let config = single_probe_agent("sleep 60");
+
+        let response = spawn_and_poke_team(
+            &registry,
+            "new-team-1",
+            &config,
+            None,
+            None,
+            &SessionRegistry::new(),
+            &test_events(),
+        )
+        .await;
+        let scrollback = term_scrollback(&registry, "@@Lead").expect("probe scrollback");
+        registry.close_matching(Some("@@Lead"), None);
+
+        match response {
+            ControlResponse::Error { message } => {
+                assert!(message.contains("@@Lead"), "{message}");
+                assert!(message.contains("15s"), "{message}");
+                assert!(message.contains("bracketed-paste"), "{message}");
+                assert!(
+                    !scrollback.contains("# Team work"),
+                    "an unready agent must not be poked: {scrollback:?}"
+                );
+            }
+            other => panic!("unexpected non-error response: {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_and_poke_team_names_an_agent_that_exits_before_readiness() {
+        let (_root, registry) = empty_registry();
+        let registry = Arc::new(registry);
+        let config = single_probe_agent("exit 9");
+
+        let response = spawn_and_poke_team(
+            &registry,
+            "new-team-1",
+            &config,
+            None,
+            None,
+            &SessionRegistry::new(),
+            &test_events(),
+        )
+        .await;
+        let scrollback = term_scrollback(&registry, "@@Lead").expect("probe scrollback");
+        registry.close_matching(Some("@@Lead"), None);
+
+        match response {
+            ControlResponse::Error { message } => {
+                assert!(message.contains("@@Lead"), "{message}");
+                assert!(message.contains("terminal ended"), "{message}");
+                assert!(
+                    !scrollback.contains("# Team work"),
+                    "an exited agent must not be poked: {scrollback:?}"
+                );
+            }
+            other => panic!("unexpected non-error response: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -7192,10 +7379,14 @@ is_lead = false
             group: "alpha".into(),
             spawned: vec!["@@Lead".into(), "@@A".into()],
             failed: vec![("@@B".into(), "no such file".into())],
-            pokes: vec![("@@Lead".into(), vec!["hi\n\x1b[27;9;13~".into()])],
+            pokes: vec![],
             members: vec![],
         };
-        match team_spawn_summary("alpha", &spawn) {
+        let poke_result = TeamPokeResult {
+            poked: 1,
+            failed: vec![],
+        };
+        match team_spawn_summary("alpha", &spawn, &poke_result) {
             ControlResponse::Ok { message } => {
                 assert!(message.contains("2 member(s) up"), "{message}");
                 assert!(message.contains("poked 1 agent(s)"), "{message}");
@@ -7217,7 +7408,7 @@ is_lead = false
             pokes: vec![],
             members: vec![],
         };
-        match team_spawn_summary("alpha", &spawn) {
+        match team_spawn_summary("alpha", &spawn, &TeamPokeResult::default()) {
             ControlResponse::Error { message } => {
                 assert!(message.contains("no member could be spawned"), "{message}");
                 assert!(message.contains("@@Lead (boom)"), "{message}");

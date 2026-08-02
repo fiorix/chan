@@ -33,6 +33,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [terminal-editor-appearance-settings](v0.83.0/terminal-editor-appearance-settings.md) | registered, grounded, ruled, ready to spec | terminal and editor font size as settings, plus a standard/custom terminal colour mode driven off background luminance |
 | [cs-tunnel-single-port-shorthand](v0.83.0/cs-tunnel-single-port-shorthand.md) | registered, grounded, ruled, ready to implement | accept `cs tunnel <port>` as shorthand for `<port>:<port>` in the one spec parser, and move the help, long help, and their tests with it |
 | [kimi-submit-agent](v0.83.0/kimi-submit-agent.md) | implemented and verified | recognize Kimi as a named submit agent with its own measured chord, command derivation, batching, CLI help, and SPA mirror |
+| [team-spawn-poke-tui-readiness](v0.83.0/team-spawn-poke-tui-readiness.md) | implemented and verified | gate each agent identity poke on DECSET 2004 with a concurrent 15-second named failure bound |
 
 ### v0.84.0
 
