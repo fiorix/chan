@@ -14,6 +14,8 @@
 //!
 //! Auth gate, in this order:
 //!
+//!   * an entry-exchange path with the wrong method, Origin, or Content-Type
+//!     -> 404 / 403 / 415 before consulting live registry state
 //!   * no live devserver registration matching the host (`{user}`,
 //!     and the `{disc}` prefix when present) -> 404
 //!   * `/api/devserver/*` (the local-only management API) -> 404
@@ -236,6 +238,16 @@ fn connection_listed_headers(headers: &HeaderMap) -> Vec<HeaderName> {
 ///     A single live devserver keeps the pre-disc behavior; no
 ///     verifying credential -> 404.
 pub async fn handle(state: AppState, user: String, disc: Option<String>, req: Request) -> Response {
+    let is_entry_exchange = req.uri().path() == devserver_gate::ENTRY_EXCHANGE_PATH;
+    let preflight_response = if is_entry_exchange {
+        entry_preflight(&req, &state.cfg)
+    } else {
+        None
+    };
+    if let Some(response) = preflight_response {
+        return response;
+    }
+
     let candidates: Vec<(String, Entry)> = match &disc {
         Some(d) => state
             .registry
@@ -253,7 +265,6 @@ pub async fn handle(state: AppState, user: String, disc: Option<String>, req: Re
         return not_found_response(req.headers());
     }
 
-    let is_entry_exchange = req.uri().path() == devserver_gate::ENTRY_EXCHANGE_PATH;
     // A bare host with many live devservers must not turn one invalid entry
     // POST into an Ed25519 verification loop over the whole per-user fleet.
     // Production entry URLs carry a discriminator; retaining the one-route
@@ -430,14 +441,8 @@ async fn exchange_entry(
     req: Request,
     aud: &str,
 ) -> Response {
-    if req.method() != axum::http::Method::POST {
-        return not_found_response(req.headers());
-    }
-    if !exact_origin_matches(req.headers(), state.cfg.identity_origin.as_str()) {
-        return (StatusCode::FORBIDDEN, "forbidden").into_response();
-    }
-    if !exact_entry_content_type(req.headers()) {
-        return (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported media type").into_response();
+    if let Some(response) = entry_preflight(&req, &state.cfg) {
+        return response;
     }
     let body = match axum::body::to_bytes(req.into_body(), MAX_ENTRY_FORM_BYTES).await {
         Ok(body) => body,
@@ -488,6 +493,21 @@ async fn exchange_entry(
         return response;
     }
     not_found_response(&HeaderMap::new())
+}
+
+fn entry_preflight(req: &Request, cfg: &crate::config::Config) -> Option<Response> {
+    if req.method() != axum::http::Method::POST {
+        return Some(not_found_response(req.headers()));
+    }
+    if !exact_origin_matches(req.headers(), cfg.identity_origin.as_str()) {
+        return Some((StatusCode::FORBIDDEN, "forbidden").into_response());
+    }
+    if !exact_entry_content_type(req.headers()) {
+        return Some(
+            (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported media type").into_response(),
+        );
+    }
+    None
 }
 
 fn exact_entry_content_type(headers: &HeaderMap) -> bool {

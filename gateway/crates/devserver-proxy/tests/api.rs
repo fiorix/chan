@@ -803,6 +803,100 @@ async fn entry_exchange_rejects_origin_content_type_and_form_ambiguity() {
 }
 
 #[tokio::test]
+async fn entry_preflight_is_independent_of_live_devserver_count() {
+    let mut baseline = None;
+
+    for live_count in 0..=2 {
+        let app = TestApp::new().await;
+        for devserver_id in ["one", "two"].into_iter().take(live_count) {
+            app.register_tunnel("alice", devserver_id, Uuid::new_v4(), Router::new())
+                .await;
+        }
+        let host = host_for("alice");
+        let path = devserver_gate::ENTRY_EXCHANGE_PATH;
+        let mut responses = Vec::new();
+        responses.push(
+            send_host(
+                &app.router,
+                Method::GET,
+                &host,
+                path,
+                &[
+                    ("origin", "https://id.chan.app"),
+                    ("content-type", "application/x-www-form-urlencoded"),
+                ],
+            )
+            .await,
+        );
+        responses.push(
+            send_host_body(
+                &app.router,
+                Method::POST,
+                &host,
+                path,
+                &[
+                    ("origin", "https://evil.example"),
+                    ("content-type", "application/x-www-form-urlencoded"),
+                ],
+                "credential=junk",
+            )
+            .await,
+        );
+        responses.push(
+            send_host_body(
+                &app.router,
+                Method::POST,
+                &host,
+                path,
+                &[
+                    ("origin", "https://id.chan.app"),
+                    ("content-type", "text/plain"),
+                ],
+                "credential=junk",
+            )
+            .await,
+        );
+        responses.push(
+            send_host_body(
+                &app.router,
+                Method::POST,
+                &host,
+                path,
+                &[
+                    ("origin", "https://id.chan.app"),
+                    ("content-type", "application/x-www-form-urlencoded"),
+                ],
+                "credential=junk",
+            )
+            .await,
+        );
+
+        assert_eq!(
+            responses
+                .iter()
+                .map(|(status, _, _)| *status)
+                .collect::<Vec<_>>(),
+            vec![
+                StatusCode::NOT_FOUND,
+                StatusCode::FORBIDDEN,
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                StatusCode::NOT_FOUND,
+            ],
+            "live devservers: {live_count}",
+        );
+        if let Some(expected) = &baseline {
+            assert_eq!(
+                &responses, expected,
+                "response changed with {live_count} live devservers"
+            );
+        } else {
+            baseline = Some(responses);
+        }
+        app.cleanup().await;
+    }
+}
+
+#[tokio::test]
 async fn entry_token_redirects_only_to_signed_clean_path() {
     let app = TestApp::new().await;
     let uid = Uuid::new_v4();

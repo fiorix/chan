@@ -139,12 +139,11 @@ pub async fn dial_with_tls(
 
     match resp.status() {
         StatusCode::OK => {}
-        StatusCode::UNAUTHORIZED => {
-            return Err(ClientError::Handshake("unauthorized (bad token)".into()))
-        }
-        StatusCode::FORBIDDEN => {
+        // FORBIDDEN is accepted for version-skew robustness; both statuses
+        // deliberately use one diagnostic.
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
             return Err(ClientError::Handshake(
-                "forbidden (token missing tunnel scope)".into(),
+                "unauthorized (bad token or missing tunnel scope)".into(),
             ));
         }
         other => return Err(ClientError::Handshake(format!("unexpected status {other}"))),
