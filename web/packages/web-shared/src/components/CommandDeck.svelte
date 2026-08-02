@@ -235,6 +235,13 @@
     event.stopPropagation();
     if (event.key === "Escape") {
       event.preventDefault();
+      // `pending` is the one operation kind with no button of its own, so
+      // Escape has to release it here or the deck has no way out. This drops
+      // the blocking view; the command it was waiting on keeps running.
+      if (draft.operation?.kind === "pending") {
+        draft.operation = null;
+        return;
+      }
       onClose();
       return;
     }
@@ -425,6 +432,9 @@
             {:else if operation.kind === "pending"}
               <span class="deck-spinner" aria-hidden="true"></span>
               <div class="deck-operation-copy"><strong>{operation.title}</strong><span>Working…</span></div>
+              <div class="deck-decisions">
+                <button type="button" onclick={() => { draft.operation = null; }}>Dismiss</button>
+              </div>
             {:else if operation.kind === "success"}
               <div class="deck-operation-icon success">✓</div>
               <div class="deck-operation-copy"><strong>{operation.title}</strong><span>Done</span></div>

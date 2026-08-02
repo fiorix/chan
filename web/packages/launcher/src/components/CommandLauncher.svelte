@@ -133,10 +133,21 @@
     applyNativeTheme(snapshot.context);
     if (snapshot.draftRevision >= nativeRevision) {
       const parsed = parseDeckDraft(snapshot.draft, createDeckDraft(snapshot.entryMode));
-      commandLauncher.entryMode = snapshot.entryMode;
-      commandLauncher.drafts[snapshot.entryMode] = parsed;
-      nativeRevision = snapshot.draftRevision;
-      lastNativeDraft = JSON.stringify(parsed);
+      const serialized = JSON.stringify(parsed);
+      // The host echoes back the draft this overlay just saved. Adopting that
+      // echo would swap the draft object for an equal one, and an execution
+      // in flight holds the object it started with: it would see a different
+      // object, take its "another source owns the overlay" exit, and leave the
+      // operation pending forever. Keep the live object when the echo is our
+      // own; adopt anything the host actually changed.
+      if (snapshot.entryMode === commandLauncher.entryMode && serialized === lastNativeDraft) {
+        nativeRevision = snapshot.draftRevision;
+      } else {
+        commandLauncher.entryMode = snapshot.entryMode;
+        commandLauncher.drafts[snapshot.entryMode] = parsed;
+        nativeRevision = snapshot.draftRevision;
+        lastNativeDraft = serialized;
+      }
     }
     nativeReady = true;
   }
