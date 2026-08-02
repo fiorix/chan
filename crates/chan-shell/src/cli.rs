@@ -404,7 +404,8 @@ pub enum ShellAction {
         #[arg(long, value_name = "PROTO", default_value = "tcp")]
         #[arg(value_parser = parse_tunnel_proto)]
         proto: Proto,
-        /// [bind-address:]desktop-port:devserver-port, e.g. 8080:3000.
+        /// [bind-address:]desktop-port:devserver-port, or one port for both
+        /// ends, e.g. 8080:3000 or 3000.
         #[arg(value_name = "SPEC", value_parser = parse_tunnel_spec_arg)]
         spec: TunnelSpec,
     },
@@ -3368,7 +3369,7 @@ mod tests {
         // SPEC is required, and each spec_error surfaces at the clap edge.
         assert!(CsCli::try_parse_from(["cs", "tunnel"]).is_err());
         // Missing devserver port.
-        assert!(CsCli::try_parse_from(["cs", "tunnel", "8080"]).is_err());
+        assert!(CsCli::try_parse_from(["cs", "tunnel", "8080:"]).is_err());
         // Out-of-range port.
         assert!(CsCli::try_parse_from(["cs", "tunnel", "70000:3000"]).is_err());
         // Devserver port 0 has nothing to dial.
@@ -3377,6 +3378,20 @@ mod tests {
         assert!(CsCli::try_parse_from(["cs", "tunnel", "--proto", "icmp", "8080:3000"]).is_err());
         // One spec per invocation.
         assert!(CsCli::try_parse_from(["cs", "tunnel", "8080:3000", "8081:3001"]).is_err());
+    }
+
+    #[test]
+    fn tunnel_lone_port_expands_to_both_ends_at_the_clap_edge() {
+        match CsCli::try_parse_from(["cs", "tunnel", "3000"])
+            .unwrap()
+            .action
+        {
+            ShellAction::Tunnel { spec, .. } => {
+                assert_eq!(spec.desktop_port, 3000);
+                assert_eq!(spec.devserver_port, 3000);
+            }
+            other => panic!("unexpected parse for `cs tunnel 3000`: {other:?}"),
+        }
     }
 
     #[test]

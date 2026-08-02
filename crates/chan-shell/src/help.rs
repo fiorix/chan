@@ -1490,9 +1490,10 @@ with the window standing in for the SSH connection. A dev web server
 running next to this terminal becomes reachable in the desktop
 machine's own browser.
 
-SPEC is [bind-address:]desktop-port:devserver-port. The bind address
-defaults to loopback; an explicit non-loopback address is accepted
-with a warning, because it exposes the forwarded port to the desktop
+SPEC is [bind-address:]desktop-port:devserver-port, or one port for
+both ends: 3000 reads as 3000:3000. The bind address defaults to
+loopback; an explicit non-loopback address is accepted with a
+warning, because it exposes the forwarded port to the desktop
 machine's network. Desktop port 0 asks the OS there for a free port;
 the acknowledgement names the port that was bound.
 
@@ -1505,6 +1506,10 @@ recognized but refused as not implemented yet.
 
 /// `cs tunnel` examples, side effects, and caveats.
 pub(crate) const CS_TUNNEL_AFTER: &str = r#"EXAMPLES:
+  cs tunnel 3000
+    Shorthand for 3000:3000: the desktop machine's 127.0.0.1:3000
+    reaches port 3000 on this host.
+
   cs tunnel 8080:3000
     The desktop machine's 127.0.0.1:8080 now reaches port 3000 on
     this host; open http://127.0.0.1:8080 in a browser there.

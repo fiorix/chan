@@ -1,4 +1,5 @@
-//! The `cs tunnel` address spec: `[bind-address:]desktop-port:devserver-port`.
+//! The `cs tunnel` address spec: `[bind-address:]desktop-port:devserver-port`,
+//! or one port for both ends (`3000` reads as `3000:3000`).
 //!
 //! Read it the way `ssh -R` is read from the machine the command runs on: the
 //! LISTENER end comes first (it lives on the desktop), the DESTINATION end
@@ -92,8 +93,8 @@ impl fmt::Display for SpecError {
         match self {
             SpecError::Empty => f.write_str("empty tunnel spec"),
             SpecError::MissingPorts => f.write_str(
-                "expected [bind-address:]desktop-port:devserver-port, \
-                 for example 8080:3000",
+                "expected [bind-address:]desktop-port:devserver-port or one \
+                 port for both ends, for example 8080:3000 or 3000",
             ),
             SpecError::BadDesktopPort(v) => {
                 write!(f, "invalid desktop port {v:?}: expected 0-65535")
@@ -115,7 +116,8 @@ impl fmt::Display for SpecError {
 
 impl std::error::Error for SpecError {}
 
-/// Parse `[bind-address:]desktop-port:devserver-port`.
+/// Parse `[bind-address:]desktop-port:devserver-port`, or a lone port used
+/// for both ends.
 ///
 /// The two trailing colon-separated fields are always the ports, so an IPv6
 /// bind address is split off by its brackets first and everything before the
@@ -145,7 +147,13 @@ pub fn parse_spec(input: &str, proto: Proto) -> Result<TunnelSpec, SpecError> {
         }
     };
 
-    let (desktop_raw, devserver_raw) = rest.split_once(':').ok_or(SpecError::MissingPorts)?;
+    // A colon-free rest is the lone-port shorthand for both ends. The
+    // shorthand never fires on a rest that still holds a colon, so
+    // 1.2.3.4:8080 keeps failing as a bad desktop port.
+    let (desktop_raw, devserver_raw) = match rest.split_once(':') {
+        Some(pair) => pair,
+        None => (rest, rest),
+    };
     if desktop_raw.is_empty() || devserver_raw.is_empty() {
         return Err(SpecError::MissingPorts);
     }
@@ -218,8 +226,35 @@ mod tests {
     }
 
     #[test]
+    fn lone_port_expands_to_both_ends() {
+        let spec = tcp("3000").unwrap();
+        assert_eq!(spec.bind_addr, IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(spec.desktop_port, 3000);
+        assert_eq!(spec.devserver_port, 3000);
+        assert_eq!(
+            spec.to_string(),
+            "desktop 127.0.0.1:3000 -> devserver 127.0.0.1:3000 (tcp)"
+        );
+
+        // The shorthand composes with a bracketed bind address.
+        let v6 = tcp("[::1]:3000").unwrap();
+        assert_eq!(v6.bind_addr, IpAddr::V6(Ipv6Addr::LOCALHOST));
+        assert_eq!(v6.desktop_port, 3000);
+        assert_eq!(v6.devserver_port, 3000);
+
+        // A lone zero expands to devserver port 0, which has nothing to dial.
+        assert_eq!(tcp("0").unwrap_err(), SpecError::ZeroDevserverPort);
+
+        // The shorthand never fires on a rest that still holds a colon, so
+        // an IPv4 literal with one port stays a bad desktop port.
+        assert_eq!(
+            tcp("1.2.3.4:8080").unwrap_err(),
+            SpecError::BadDesktopPort("1.2.3.4".into())
+        );
+    }
+
+    #[test]
     fn missing_or_partial_port_pairs_are_rejected() {
-        assert_eq!(tcp("8080").unwrap_err(), SpecError::MissingPorts);
         assert_eq!(tcp("8080:").unwrap_err(), SpecError::MissingPorts);
         assert_eq!(tcp(":3000").unwrap_err(), SpecError::MissingPorts);
         assert_eq!(tcp("").unwrap_err(), SpecError::Empty);
