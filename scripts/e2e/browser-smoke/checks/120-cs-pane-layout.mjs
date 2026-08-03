@@ -13,6 +13,9 @@ const OFFLINE_WINDOW_ID = "cs-pane-layout-offline";
 const TEAM_DIR = "cs-pane-layout-team";
 const TEAM_GROUP = "cs-pane-layout-team";
 const TEAM_HANDLES = ["@@LayoutLead", "@@LayoutHand"];
+const LAUNCHER_SELECTOR = '[role="dialog"][aria-label="Command launcher"]';
+const LAUNCHER_INPUT_SELECTOR = `${LAUNCHER_SELECTOR} input[role="combobox"]`;
+const SELECTED_TITLE_SELECTOR = `${LAUNCHER_SELECTOR} [role="option"][aria-selected="true"] .deck-result-title`;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -302,12 +305,12 @@ async function waitForFlipSettle(page, paneId) {
 
 async function selectedLauncherTitle(page) {
   return page.$eval(
-    '.launcher .results .row[aria-selected="true"] .title',
+    SELECTED_TITLE_SELECTOR,
     (entry) => entry.textContent?.replace(/\s+/g, " ").trim() ?? "",
   );
 }
 
-async function launcherRun(page, query, expectedTitle = query) {
+async function launcherRun(page, query, expectedTitle = query, confirm = false) {
   await page.evaluate(() => {
     window.dispatchEvent(
       new CustomEvent("chan:command", {
@@ -315,26 +318,31 @@ async function launcherRun(page, query, expectedTitle = query) {
       }),
     );
   });
-  await page.waitForSelector(".launcher .search", { timeout: 10_000 });
-  await page.$eval(".launcher .search", (input) => {
+  await page.waitForSelector(LAUNCHER_INPUT_SELECTOR, { timeout: 10_000 });
+  await page.$eval(LAUNCHER_INPUT_SELECTOR, (input) => {
     input.value = "";
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
-  await page.type(".launcher .search", query);
+  await page.type(LAUNCHER_INPUT_SELECTOR, query);
   await page.waitForFunction(
-    (title) => {
-      const text = document
-        .querySelector('.launcher .results .row[aria-selected="true"] .title')
-        ?.textContent?.replace(/\s+/g, " ")
-        .trim();
+    (selector, title) => {
+      const text = document.querySelector(selector)?.textContent?.replace(/\s+/g, " ").trim();
       return text === title || text?.startsWith(`${title} `);
     },
     { timeout: 10_000 },
+    SELECTED_TITLE_SELECTOR,
     expectedTitle,
   );
   const selected = await selectedLauncherTitle(page);
   await page.keyboard.press("Enter");
-  await page.waitForSelector(".launcher", { hidden: true, timeout: 10_000 });
+  if (confirm) {
+    await page.waitForSelector(`${LAUNCHER_SELECTOR} .deck-operation`, {
+      timeout: 10_000,
+    });
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("Enter");
+  }
+  await page.waitForSelector(LAUNCHER_SELECTOR, { hidden: true, timeout: 10_000 });
   return selected;
 }
 
@@ -1103,7 +1111,7 @@ is_lead = false
         "launcher split bottom",
       );
       const launcherBottomId = launcherSplit.activePaneId;
-      await launcherRun(page, "Close pane");
+      await launcherRun(page, "Close pane", "Close pane", true);
       await pollLayout(
         ctx,
         WINDOW_ID,
@@ -1123,7 +1131,7 @@ is_lead = false
         "--window",
         WINDOW_ID,
       ]);
-      await launcherRun(page, "Close pane");
+      await launcherRun(page, "Close pane", "Close pane", true);
       await pollLayout(
         ctx,
         WINDOW_ID,

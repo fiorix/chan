@@ -22,6 +22,8 @@ import {
 
 const TAB = "SmokeSurvey96";
 const AWAY_TAB = "SmokeSurvey96Away";
+const LAUNCHER_SELECTOR = '[role="dialog"][aria-label="Command launcher"]';
+const LAUNCHER_INPUT_SELECTOR = `${LAUNCHER_SELECTOR} input[role="combobox"]`;
 
 async function settle(page) {
   await page.evaluate(
@@ -246,9 +248,9 @@ export default {
           }),
         );
       });
-      await page.waitForSelector(".launcher .search", { timeout: 5_000 });
+      await page.waitForSelector(LAUNCHER_INPUT_SELECTOR, { timeout: 5_000 });
       await page.keyboard.press("Escape");
-      await page.waitForSelector(".launcher", { hidden: true, timeout: 5_000 });
+      await page.waitForSelector(LAUNCHER_SELECTOR, { hidden: true, timeout: 5_000 });
 
       // Keep one trusted Linux/Windows-shaped chord in the same path too.
       await page.keyboard.down("Control");
@@ -256,9 +258,9 @@ export default {
       await page.keyboard.press("KeyK");
       await page.keyboard.up("Alt");
       await page.keyboard.up("Control");
-      await page.waitForSelector(".launcher .search", { timeout: 5_000 });
+      await page.waitForSelector(LAUNCHER_INPUT_SELECTOR, { timeout: 5_000 });
       await page.keyboard.press("Escape");
-      await page.waitForSelector(".launcher", { hidden: true, timeout: 5_000 });
+      await page.waitForSelector(LAUNCHER_SELECTOR, { hidden: true, timeout: 5_000 });
       await page.waitForFunction(
         () => {
           const host = document.querySelector(".terminal-tab.active .terminal-host");

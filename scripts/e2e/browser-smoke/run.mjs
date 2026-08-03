@@ -123,7 +123,9 @@ try {
     }
   });
 
-  await page.goto(serverUrl, { waitUntil: "networkidle2", timeout: 60_000 });
+  // The app keeps background transports and capability polling alive. DOM
+  // load plus the shell selector below is the explicit readiness barrier.
+  await page.goto(serverUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForSelector(".pane", { timeout: 30_000 });
 
   // Shared check context (see README.md).

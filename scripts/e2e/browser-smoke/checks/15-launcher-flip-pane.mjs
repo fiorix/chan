@@ -2,6 +2,10 @@
 // pane command refuses to run while another overlay is on top, so stale
 // launcher stack state leaves the visible Hybrid side unchanged.
 
+const LAUNCHER_SELECTOR = '[role="dialog"][aria-label="Command launcher"]';
+const LAUNCHER_INPUT_SELECTOR = `${LAUNCHER_SELECTOR} input[role="combobox"]`;
+const SELECTED_TITLE_SELECTOR = `${LAUNCHER_SELECTOR} [role="option"][aria-selected="true"] .deck-result-title`;
+
 async function dispatchCommand(page, name) {
   await page.evaluate((commandName) => {
     window.dispatchEvent(
@@ -99,14 +103,12 @@ export default {
     // exact command title, and prove that the selected row is Flip pane before
     // Enter dispatches it.
     await dispatchCommand(page, "app.launcher.toggle");
-    await page.waitForSelector(".launcher .search", { timeout: 10_000 });
-    await page.type(".launcher .search", "Flip pane");
+    await page.waitForSelector(LAUNCHER_INPUT_SELECTOR, { timeout: 10_000 });
+    await page.type(LAUNCHER_INPUT_SELECTOR, "Flip pane");
     await page.waitForFunction(
-      () =>
-        document
-          .querySelector('.launcher .results .row[aria-selected="true"] .title')
-          ?.textContent?.trim() === "Flip pane",
+      (selector) => document.querySelector(selector)?.textContent?.trim() === "Flip pane",
       { timeout: 10_000 },
+      SELECTED_TITLE_SELECTOR,
     );
     await ctx.shot("launcher-selected");
     await page.keyboard.press("Enter");

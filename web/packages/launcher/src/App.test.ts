@@ -89,6 +89,9 @@ describe("launcher root", () => {
 
     openCommandLauncher("computers");
     flushSync();
+    expect(
+      target.querySelectorAll('[role="dialog"][aria-label="Command launcher"]'),
+    ).toHaveLength(1);
     const input = target.querySelector(".deck-input") as HTMLInputElement;
     input.value = "theme";
     input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "theme" }));

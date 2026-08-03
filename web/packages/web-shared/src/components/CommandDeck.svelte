@@ -229,9 +229,12 @@
   }
 
   function onKeydown(event: KeyboardEvent): void {
+    // The deck owns keyboard input while open. A command can synchronously
+    // activate an app-level key mode, so letting the execution key bubble
+    // would immediately drive that new mode with the same event.
+    event.stopPropagation();
     if (event.key === "Escape") {
       event.preventDefault();
-      event.stopPropagation();
       onClose();
       return;
     }

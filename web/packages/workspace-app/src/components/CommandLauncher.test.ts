@@ -339,6 +339,21 @@ describe("contextual command deck", () => {
     expect(launcherDraft.query).toBe("");
   });
 
+  test("does not leak an execution key into the window keymap", async () => {
+    const target = openLauncher();
+    await flush();
+    await typeQuery(target, "Search");
+    const leaked = vi.fn();
+    window.addEventListener("keydown", leaked);
+    try {
+      await key(target, "Enter");
+    } finally {
+      window.removeEventListener("keydown", leaked);
+    }
+    expect(runSearch).toHaveBeenCalledTimes(1);
+    expect(leaked).not.toHaveBeenCalled();
+  });
+
   test("Escape hides but preserves the draft for the next invocation", async () => {
     const target = openLauncher();
     await flush();

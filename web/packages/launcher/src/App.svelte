@@ -14,7 +14,6 @@
   import CommandLauncher from "./components/CommandLauncher.svelte";
   import Modal from "./components/Modal.svelte";
   import NoticeBubbles from "./components/NoticeBubbles.svelte";
-  import CommandLauncher from "./components/CommandLauncher.svelte";
   import { library, loadLibrary, reportError, resync } from "./state/library.svelte";
   import { pushNotice, type Notice } from "./state/notices.svelte";
   import { dialog } from "./state/dialog.svelte";
@@ -169,7 +168,6 @@
 
 {#if !readOnly}
   <SelectionBar />
-  <CommandLauncher />
 {/if}
 
 <NoticeBubbles />

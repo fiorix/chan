@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { launchServer, seedWorkspace, teardownServer } from "../lib/server.mjs";
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const LAUNCHER_SELECTOR = '[role="dialog"][aria-label="Command launcher"]';
+const LAUNCHER_INPUT_SELECTOR = `${LAUNCHER_SELECTOR} input[role="combobox"]`;
 
 async function waitForFile(path, timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs;
@@ -41,19 +43,19 @@ async function runLauncherCommand(page, title) {
     return true;
   });
   if (!opened) throw new Error("pane menu has no Commands row");
-  const input = await page.waitForSelector(".launcher .search", { visible: true });
+  const input = await page.waitForSelector(LAUNCHER_INPUT_SELECTOR, { visible: true });
   await input.click({ clickCount: 3 });
   await page.keyboard.type(title);
   await page.waitForFunction(
     (wanted) =>
-      [...document.querySelectorAll('[role="option"] .title')].some(
+      [...document.querySelectorAll('[role="option"] .deck-result-title')].some(
         (node) => node.textContent?.trim() === wanted,
       ),
     {},
     title,
   );
   await page.evaluate((wanted) => {
-    const titleNode = [...document.querySelectorAll('[role="option"] .title')].find(
+    const titleNode = [...document.querySelectorAll('[role="option"] .deck-result-title')].find(
       (node) => node.textContent?.trim() === wanted,
     );
     titleNode?.closest('[role="option"]')?.click();
@@ -158,9 +160,9 @@ export default {
       // the child before relaying.
       await frame.click("#echo-input");
       await pressChord(page, ["Control", "Alt"], "KeyK");
-      await page.waitForSelector(".launcher .search", { visible: true, timeout: 10_000 });
+      await page.waitForSelector(LAUNCHER_INPUT_SELECTOR, { visible: true, timeout: 10_000 });
       await page.keyboard.press("Escape");
-      await page.waitForSelector(".launcher", { hidden: true, timeout: 10_000 });
+      await page.waitForSelector(LAUNCHER_SELECTOR, { hidden: true, timeout: 10_000 });
 
       await frame.click("#echo-input");
       await pressChord(page, ["Control", "Shift"], "KeyT");
