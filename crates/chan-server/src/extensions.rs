@@ -36,6 +36,9 @@ const CONFIG_LIMIT_BYTES: u64 = 64 * 1024;
 const HANDSHAKE_LINE_LIMIT_BYTES: usize = 8 * 1024;
 const HANDSHAKE_LINE_LIMIT: usize = 32;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Only the unix `terminate_child` waits out a grace period; the windows
+/// path kills outright.
+#[cfg(unix)]
 const CHILD_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const SUPERVISOR_SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
