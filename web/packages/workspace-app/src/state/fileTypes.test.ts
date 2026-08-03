@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 
 import {
   classifyPath,
+  isAudio,
   isEditableText,
   isExcalidraw,
   isMarkdown,
@@ -31,6 +32,25 @@ describe("classifyPath: only .md is a document", () => {
     expect(isMarkdown("notes/plain.txt")).toBe(true);
     expect(isMarkdown("notes/a.md")).toBe(true);
     expect(isMarkdown("src/main.rs")).toBe(false);
+  });
+});
+
+describe("audio is a standalone predicate, not a classifyPath kind", () => {
+  test("all supported audio extensions are case-insensitive", () => {
+    for (const path of [
+      "audio/track.mp3",
+      "audio/track.WAV",
+      "audio/track.aif",
+      "audio/track.AIFF",
+      "audio/track.OGG",
+    ]) {
+      expect(isAudio(path)).toBe(true);
+      expect(isVideo(path)).toBe(false);
+      expect(classifyPath(path)).toBe("binary");
+      expect(isEditableText(path)).toBe(false);
+    }
+    expect(isAudio("audio/track.flac")).toBe(false);
+    expect(isAudio("wav")).toBe(false);
   });
 });
 

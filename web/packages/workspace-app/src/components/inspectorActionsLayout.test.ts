@@ -62,7 +62,7 @@ describe("shared actions section under the filename", () => {
 
   test("media pill keeps per-kind labels over the shared media router", () => {
     expect(fileInfo).toMatch(
-      /label: image \? "View \/ Zoom" : video \? "View Video" : "View PDF",[\s\S]{1,80}onClick: \(\) => void openMediaViewer\(p\)/,
+      /label: image[\s\S]{1,220}"View \/ Zoom"[\s\S]{1,220}"View Video"[\s\S]{1,220}"View Audio"[\s\S]{1,220}"View PDF"[\s\S]{1,100}onClick: \(\) => void openMediaViewer\(p\)/,
     );
   });
 

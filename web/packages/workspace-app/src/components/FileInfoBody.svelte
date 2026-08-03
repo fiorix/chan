@@ -30,7 +30,14 @@
     ReportPrefix,
     TreeEntry,
   } from "../api/types";
-  import { isImage, isMarkdown, isPdf, isVideo } from "../state/fileTypes";
+  import { AUDIO_UNSUPPORTED_MESSAGE } from "../state/audioViewer";
+  import {
+    isAudio,
+    isImage,
+    isMarkdown,
+    isPdf,
+    isVideo,
+  } from "../state/fileTypes";
   import { basename, formatMtime, formatSize } from "../state/format";
   import {
     ensureGraphLoaded,
@@ -469,6 +476,12 @@
     showFullPath = false;
   });
 
+  let audioError = $state(false);
+  $effect(() => {
+    void path;
+    audioError = false;
+  });
+
   /// Absolute filesystem path for the selected entry. Joins
   /// `workspace.info.root` (the on-disk root chan-server reports) with
   /// the entry's workspace-relative path, normalizing trailing slashes so
@@ -588,13 +601,14 @@
     const image = !isDir && isImage(p);
     const pdf = !isDir && isPdf(p);
     const video = !isDir && isVideo(p);
+    const audio = !isDir && isAudio(p);
     // Editability follows the server-provided content kind, not the path
     // extension: the file browser's per-directory listing content-sniffs
     // an odd-suffix file to `text` / `binary`, so a plaintext file with an
     // unknown extension gets "Open" (matching the tree's double-click,
     // which peeks the content) instead of the extension-gated "Download".
     const editable = !isDir && isOpenableTextKind(classifyEntry(entry));
-    const media = image || pdf || video;
+    const media = image || pdf || video || audio;
 
     const download: InspectorAction = {
       label: isDir ? "Download tarball" : "Download file",
@@ -630,10 +644,16 @@
       if (graph) secondary.push(graph);
     } else if (media) {
       // Same routing as the file tree's double-click / Enter: image ->
-      // zoom with the directory sibling set, video/PDF -> their
+      // zoom with the directory sibling set, audio/video/PDF -> their
       // setless viewers.
       main = {
-        label: image ? "View / Zoom" : video ? "View Video" : "View PDF",
+        label: image
+          ? "View / Zoom"
+          : video
+            ? "View Video"
+            : audio
+              ? "View Audio"
+              : "View PDF",
         onClick: () => void openMediaViewer(p),
       };
       secondary.push(download, newTerminal);
@@ -805,7 +825,7 @@
      body placement. The contextual actions differ by entry kind:
        - editable file: Open (gated on the server content kind, so an
          odd-suffix plaintext file opens like the tree double-click);
-       - media (image): View/Zoom; (pdf): View PDF;
+       - media: View/Zoom (image), View Audio, View Video, or View PDF;
        - every entry: Upload + Download (+ progress indicator);
        - host-provided: Show File/Directory (onReveal), Graph from here
          (onSetAsScope).
@@ -1020,6 +1040,7 @@
   {@const image = isImage(entry.path)}
   {@const pdf = isPdf(entry.path)}
   {@const video = isVideo(entry.path)}
+  {@const audio = isAudio(entry.path)}
   {@const fileKind = classifyEntry(entry)}
   <div class="info">
     <header class="head">
@@ -1069,6 +1090,19 @@
           preload="metadata"
         ></video>
       </div>
+    {:else if audio}
+      <div class="audio-preview">
+        <audio
+          src={withTokenQuery(`/api/files/${encodeURIComponent(entry.path).replace(/%2F/g, "/")}`)}
+          controls
+          preload="metadata"
+          onerror={() => (audioError = true)}
+          onloadedmetadata={() => (audioError = false)}
+        ></audio>
+        {#if audioError}
+          <div class="media-error" role="status">{AUDIO_UNSUPPORTED_MESSAGE}</div>
+        {/if}
+      </div>
     {/if}
     {@render actionsSection()}
     <div class="meta-grid">
@@ -1080,7 +1114,7 @@
         <span class="k">target</span>
         <span class="v mono" title={pathClass.target}>{pathClass.target}</span>
       {/if}
-      {#if showRefs && !image && !pdf && !video}
+      {#if showRefs && !image && !pdf && !video && !audio}
         <span class="k">tags</span>
         <span class="v">{refs ? refs.tags.length : "..."}</span>
         <span class="k">contacts</span>
@@ -1091,8 +1125,8 @@
         <span class="v">{refs ? nonContactLinks.length : "..."}</span>
         <span class="k">backlinks</span>
         <span class="v">{backlinksLoading ? `${backlinks.length}...` : backlinks.length}</span>
-      {:else if showRefs && (image || pdf || video)}
-        <!-- Media files (images, PDFs, videos) can be link targets
+      {:else if showRefs && (image || pdf || video || audio)}
+        <!-- Media files can be link targets
              but carry no outgoing references of their own. Show just
              the "linked from" count; tags / contacts / dates would
              always be zero. -->
@@ -1376,9 +1410,10 @@
     display: block;
     pointer-events: none;
   }
-  /* Image-preview frame minus the zoom affordance: the inline video
-     keeps its native controls, so the frame is not a button. */
-  .video-preview {
+  /* Image-preview frame minus the zoom affordance: inline audio and video
+     keep their native controls, so the frame is not a button. */
+  .video-preview,
+  .audio-preview {
     margin: 0 0 0.6rem 0;
     padding: 4px;
     background: var(--bg-elev);
@@ -1396,6 +1431,19 @@
     max-height: 210px;
     display: block;
     background: #000;
+  }
+  .audio-preview {
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .audio-preview audio {
+    width: 100%;
+    max-width: 100%;
+  }
+  .media-error {
+    color: var(--warn-text);
+    font-size: 12px;
+    text-align: center;
   }
   .title {
     margin: 0 0 0.5rem 0;
