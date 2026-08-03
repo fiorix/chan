@@ -9,7 +9,7 @@
 
   import { onDestroy, onMount } from "svelte";
   import { Compartment, EditorState, Prec, type Extension } from "@codemirror/state";
-  import { EditorView, keymap } from "@codemirror/view";
+  import { EditorView, ViewPlugin, keymap } from "@codemirror/view";
   import { indentLess, indentMore } from "@codemirror/commands";
   import Wysiwyg from "../editor/Wysiwyg.svelte";
   import { indentListItem, outdentListItem } from "../editor/commands/list";
@@ -76,16 +76,30 @@
     return phase === "sent" || phase === "queued";
   });
 
-  let lastQueued: { id: string; text: string } | null = null;
+  // Reactive because the strip's recall control is only offered when this
+  // client actually holds a message to pull back: `queuedCount` alone can be a
+  // teammate's `cs terminal write`, which nothing here can recall.
+  let lastQueued = $state<{ id: string; text: string } | null>(null);
 
   const lockCompartment = new Compartment();
   function lockExtensions(locked: boolean): Extension[] {
     return [EditorState.readOnly.of(locked), EditorView.editable.of(true)];
   }
 
+  // The strip's buttons run the same actions the keymap runs, and those take
+  // the live view. Wysiwyg keeps its view private, so a plugin self-registers
+  // it here the way docSync's does. This bundle is reconfigured rather than
+  // remounted when the lock flips, so the plugin is rebuilt against the same
+  // view and the ref never goes stale while the composer is alive.
+  let promptView: EditorView | undefined;
+
   function richPromptExtensions(locked: boolean): Extension[] {
     return [
       lockCompartment.of(lockExtensions(locked)),
+      ViewPlugin.define((view) => {
+        promptView = view;
+        return {};
+      }),
       EditorView.domEventHandlers({
         beforeinput: (event, view) => {
           if (!isPending) return false;
@@ -140,12 +154,25 @@
   const queuedCount = $derived(
     Math.max(tab.queueDepth ?? 0, isPending && pendingChipVisible ? 1 : 0),
   );
-  const labelText = $derived.by(() => {
-    if (transientNote) return transientNote;
-    if (isPending) return `${queuedCount} queued · ↑ edit · esc cancel`;
-    if (queuedCount > 0) return `${queuedCount} queued · ↑ recall · ${submitLabel}`;
-    return submitLabel;
+  // The strip renders independent slots rather than one composite string: the
+  // text slot is advisory, and each affordance it used to merely name is a
+  // real control, so a pointer-only user can reach every one of them.
+  const textSlot = $derived(
+    transientNote ?? (queuedCount > 0 ? `${queuedCount} queued` : null),
+  );
+  const secondaryAction = $derived.by(() => {
+    if (isPending) return { label: "↑ edit", disabled: false };
+    if (queuedCount > 0 && lastQueued)
+      return { label: "↑ recall", disabled: content.length > 0 };
+    return null;
   });
+  // Pending is the only cancel state, so one control carries both: submitting
+  // turns it into cancel, and cancelling turns it back into submit.
+  const primaryAction = $derived.by(() =>
+    isPending
+      ? { label: "esc cancel", disabled: false }
+      : { label: submitLabel, disabled: content.trim().length === 0 },
+  );
 
   function clearPendingTimers(): void {
     if (graceTimer !== null) clearTimeout(graceTimer);
@@ -411,6 +438,44 @@
     return true;
   }
 
+  // The strip's cancel drops the queued message and nothing else. It is not
+  // `dropOrAbandonFromView`: that handler falls through to `abandonDraft()`,
+  // hiding the whole bubble, whenever `lastQueued` is null, and a pending
+  // prompt restored from a blank draft leaves it exactly that way (onMount
+  // only remembers a message whose text survived). Pressing a cancel button
+  // must never make the composer disappear.
+  function cancelPending(view: EditorView): void {
+    if (lastQueued) {
+      sendCancelToTerminal(tab.id, lastQueued.id);
+      lastQueued = null;
+    }
+    enterLocalEdit();
+    content = "";
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: "" },
+      effects: lockCompartment.reconfigure(lockExtensions(false)),
+    });
+    void flushWrite();
+    view.focus();
+  }
+
+  function onPrimaryClick(): void {
+    if (!promptView) return;
+    if (isPending) cancelPending(promptView);
+    else submitFromView(promptView);
+  }
+
+  function onSecondaryClick(): void {
+    if (!promptView) return;
+    recallFromView(promptView);
+  }
+
+  // Keep the caret where it is: a button that took focus would blur the
+  // composer, and every action below returns focus to the editor itself.
+  function keepComposerFocus(e: PointerEvent): void {
+    e.preventDefault();
+  }
+
   function onKeydown(e: KeyboardEvent): void {
     if (e.key !== "Escape") return;
     // The composer's CM6 keymap owns Escape: an open inline picker dismisses
@@ -478,8 +543,30 @@
       />
     {/if}
   </div>
-  <div class="rp-label" class:queued={queuedCount > 0} aria-hidden="true">
-    {labelText}
+  <div class="rp-strip" class:queued={queuedCount > 0}>
+    {#if textSlot}
+      <span class="rp-text" aria-live="polite">{textSlot}</span>
+    {/if}
+    {#if secondaryAction}
+      <button
+        type="button"
+        class="rp-action"
+        disabled={secondaryAction.disabled}
+        onpointerdown={keepComposerFocus}
+        onclick={onSecondaryClick}
+      >
+        {secondaryAction.label}
+      </button>
+    {/if}
+    <button
+      type="button"
+      class="rp-action rp-primary"
+      disabled={primaryAction.disabled}
+      onpointerdown={keepComposerFocus}
+      onclick={onPrimaryClick}
+    >
+      {primaryAction.label}
+    </button>
   </div>
 </div>
 
@@ -552,15 +639,43 @@
     padding-left: 0 !important;
     padding-right: 0 !important;
   }
-  .rp-label {
+  .rp-strip {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
     padding: 4px 10px 6px;
     font-size: 11px;
     color: var(--text-secondary);
-    text-align: right;
     border-top: 1px solid var(--border);
     user-select: none;
   }
-  .rp-label.queued {
+  .rp-strip.queued {
+    color: var(--text-primary);
+  }
+  /* The tap target is the button's own box, not an absolutely positioned
+     overlay. An overlay tall enough to matter would reach past the strip and
+     swallow taps aimed at the composer's last line, which sits directly
+     above with only its 8px padding in between. */
+  .rp-action {
+    margin: 0;
+    padding-block: 0;
+    padding-inline: 2px;
+    min-height: 24px;
+    border: 0;
+    background: none;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+  }
+  .rp-action:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .rp-action:not(:disabled):hover {
+    color: var(--text-primary);
+  }
+  .rp-primary:not(:disabled) {
     color: var(--text-primary);
   }
   .rich-prompt.pending .rp-editor {

@@ -164,8 +164,20 @@ describe("RichPrompt.svelte component", () => {
     );
     expect(richPromptSrc).toMatch(/function abandonDraft\(\): void/);
     expect(richPromptSrc).toMatch(/hideRichPromptForTab\(tab\.id\)/);
-    // The card's label IS its chrome: ↑ edit · esc cancel.
-    expect(richPromptSrc).toMatch(/queued · ↑ edit · esc cancel/);
+    // The strip's cancel is its own action, never the Esc handler: that one
+    // falls through to abandonDraft() when `lastQueued` is null, which a
+    // pending prompt restored from a blank draft genuinely is, and a cancel
+    // button must not make the composer disappear.
+    expect(richPromptSrc).toMatch(
+      /function cancelPending\(view: EditorView\): void/,
+    );
+    const cancelBody = richPromptSrc.match(
+      /function cancelPending\(view: EditorView\): void \{[\s\S]*?\n  \}/,
+    )?.[0];
+    expect(cancelBody).toContain("sendCancelToTerminal(tab.id, lastQueued.id)");
+    expect(cancelBody).toContain("enterLocalEdit();");
+    expect(cancelBody).not.toContain("abandonDraft");
+    expect(cancelBody).not.toContain("hideRichPromptForTab");
   });
 
   test("fast-path grace + ack timeout constants gate the chip and the dead-socket fail", () => {
@@ -176,17 +188,31 @@ describe("RichPrompt.svelte component", () => {
     expect(richPromptSrc).toMatch(/failPendingPrompt\(tab\);/);
   });
 
-  test("label surfaces the queue depth (server + the local just-submitted) with the right affordance", () => {
+  test("strip surfaces the queue depth (server + the local just-submitted) beside its controls", () => {
     // queuedCount = max(server queueDepth, the local just-submitted message
     // after the grace window) -- so a teammate `cs terminal write` and the
     // user's own queued messages both show.
     expect(richPromptSrc).toMatch(
       /Math\.max\(tab\.queueDepth \?\? 0, isPending && pendingChipVisible \? 1 : 0\)/,
     );
-    // Card up (isPending): edit/cancel affordances ARE the chrome. Moved-on but
-    // messages still queued: the recall hint + the submit hint.
-    expect(richPromptSrc).toMatch(/isPending\) return `\$\{queuedCount\} queued · ↑ edit · esc cancel`/);
-    expect(richPromptSrc).toMatch(/\$\{queuedCount\} queued · ↑ recall · \$\{submitLabel\}/);
+    // The count and a transient note share one advisory text slot; a note
+    // takes the slot without disturbing either control.
+    expect(richPromptSrc).toMatch(
+      /transientNote \?\? \(queuedCount > 0 \? `\$\{queuedCount\} queued` : null\)/,
+    );
+    // The affordances are controls, not label text. The primary carries the
+    // pending state: submit becomes cancel and back again. The secondary
+    // carries edit while pending, recall once the composer is free.
+    expect(richPromptSrc).toMatch(/\{ label: "↑ edit", disabled: false \}/);
+    expect(richPromptSrc).toMatch(
+      /\{ label: "↑ recall", disabled: content\.length > 0 \}/,
+    );
+    expect(richPromptSrc).toMatch(
+      /\{ label: "esc cancel", disabled: false \}/,
+    );
+    expect(richPromptSrc).toMatch(
+      /\{ label: submitLabel, disabled: content\.trim\(\)\.length === 0 \}/,
+    );
   });
 
   test("submitAgent prefers server identity and delegates protocol fallback", () => {
