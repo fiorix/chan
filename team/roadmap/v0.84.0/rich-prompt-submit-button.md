@@ -1,6 +1,6 @@
 # Rich Prompt control strip
 
-Status: REGISTERED for v0.84.0, grounded 2026-08-02, ruled 2026-08-03, specified 2026-08-03, ready to implement.
+Status: REGISTERED for v0.84.0, grounded 2026-08-02, ruled 2026-08-03, specified 2026-08-03, implemented 2026-08-03.
 
 ## What
 
@@ -93,3 +93,21 @@ Add one focused real-browser smoke: type into the composer, press the submit but
 - The transient note stays advisory text and does not become a control.
 - No change to the prompt queue protocol, the pending state machine, or its timings.
 - The bubble's abandon path stays on Escape and is not promoted to a button.
+
+## Implementation evidence
+
+- `6febee90` replaces the composite `labelText` with derived slots and renders them as one advisory text span plus two buttons. The primary carries the pending state, so submitting turns it into cancel and cancelling turns it back into submit. The buttons reach the live view through a `ViewPlugin.define` capture inside the composer's own extension bundle, so nothing imperative reaches into `Wysiwyg`'s private view, and all three action signatures and bodies are unchanged.
+- The same commit adds `cancelPending` and binds the primary button to it instead of `dropOrAbandonFromView`, whose fallthrough hides the whole bubble when `lastQueued` is null. A pending prompt restored from a blank draft is exactly that state.
+- `lastQueued` becomes reactive state so the secondary control can depend on it, and the recall control is absent rather than present and inert when the queue depth came from another client that this one cannot reach.
+- The tap target is the button's own 24px box rather than an absolute overlay, which would have reached past the strip and swallowed taps aimed at the composer's last line.
+
+## Validation evidence
+
+- The full `workspace-app` suite passed 3237 tests across 342 files, and `svelte-check` reported 0 errors and 0 warnings over 4865 files. The five Rich Prompt files pass 37 tests together.
+- The blank-draft cancel check was verified adversarially: pointing the primary button back at `dropOrAbandonFromView` makes it fail with the bubble hidden, and restoring `cancelPending` makes it pass. The check observes the behavior rather than the wiring, and it also demonstrates that the underlying defect is reachable.
+- The keymap and handler-body pins in `richPromptComponent.test.ts` were not edited and stayed green, which is the evidence that the three actions were not rewritten.
+- The behavioral checks run against a real mount with real clicks, extending the existing pending-machine harness rather than adding a second rig.
+
+## Open items
+
+- The Escape path still carries the defect the button avoids: on a pending bubble restored from a blank draft, `dropOrAbandonFromView` hides the composer instead of cancelling the queued message. Fixing the keyboard path is deliberately outside this item, and it is one symptom of a wider split in how the bubble reconstructs itself from a persisted draft.
