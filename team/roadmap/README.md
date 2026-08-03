@@ -23,6 +23,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 | item | state | what needs to happen |
 | --- | --- | --- |
+| [unified-command-launcher](v0.83.0/unified-command-launcher.md) | implemented, validated | one searchable command deck rendered inline by the SPA that owns the focused window, with authority following the rendering SPA |
 | [gateway-security-review](v0.83.0/gateway-security-review.md) | implemented, validated | uniform tunnel and entry failure responses, a truthful identity SPA policy, strict audit-IP parsing |
 | [terminal-secret-masking](v0.83.0/terminal-secret-masking.md) | implemented, validated | mask secret-shaped values in the terminal, two config fields, Settings surface |
 | [kimi-submit-agent](v0.83.0/kimi-submit-agent.md) | implemented, validated | Kimi as a named submit agent with its own measured chord, command derivation, and SPA mirror |
@@ -33,7 +34,6 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 | item | state | what needs to happen |
 | --- | --- | --- |
-| [unified-command-launcher](v0.84.0/unified-command-launcher.md) | registered, overlay approach withdrawn | rule whether aggregate Computers scope must reach a remote window, then build the deck at the SPA layer |
 | [extensions-v1](v0.84.0/extensions-v1.md) | registered, grounded, needs rulings | rule the open decisions, then review the existing implementation branch, whose browser-smoke check currently fails |
 | [large-transfer-capability](v0.84.0/large-transfer-capability.md) | registered, grounded, needs a spec | tune the tunnel transport, build the bulk-transfer lane and its admission control, then raise the write ceiling last |
 | [web-marketing-onboarding](v0.84.0/web-marketing-onboarding.md) | registered, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
