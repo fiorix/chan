@@ -396,13 +396,32 @@ mod tests {
         drop(restored);
         drop(external);
 
-        let success = api_storage_reset(
+        // Restoring the busy cell planted a fresh indexer, and its detached
+        // tokio tasks hold workspace clones until they wind down. A retry
+        // that lands inside that window drains out and answers Busy again,
+        // which is the documented contract the `Retry-After` above states.
+        // Retry like a client instead of assuming one attempt is enough.
+        let mut success = api_storage_reset(
             State(state.clone()),
             Json(ResetBody {
                 mode: ResetModeView::Workspace,
             }),
         )
         .await;
+        for _ in 0..10 {
+            if success.status() == StatusCode::OK {
+                break;
+            }
+            assert_eq!(success.status(), StatusCode::CONFLICT);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            success = api_storage_reset(
+                State(state.clone()),
+                Json(ResetBody {
+                    mode: ResetModeView::Workspace,
+                }),
+            )
+            .await;
+        }
 
         assert_eq!(success.status(), StatusCode::OK);
         assert!(
