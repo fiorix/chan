@@ -139,7 +139,6 @@
   import {
     hideWindowFromCloseConfirm,
     isTauriDesktop,
-    openNativeCommandLauncher,
     reloadWindow,
     requestCloseWindow,
   } from "./api/desktop";
@@ -189,12 +188,11 @@
   // global (one transaction per Cmd+. press), no per-pane scoping needed.
   let paneModeHelpVisible = $state(false);
 
-  function showCommandLauncher(mode: "contextual" | "computers" = "contextual"): void {
-    if (isTauriDesktop()) {
-      void openNativeCommandLauncher(mode);
-    } else if (mode === "contextual") {
-      toggleCommandLauncher();
-    }
+  // Every surface renders the deck inline, desktop included. The scope the
+  // caller names is a starting hint only: the deck carries all four scopes,
+  // so Computers is reached inside it rather than through a separate window.
+  function showCommandLauncher(_mode: "contextual" | "computers" = "contextual"): void {
+    toggleCommandLauncher();
   }
   $effect(() => {
     // Touch enough of the layout to trip reactivity on common

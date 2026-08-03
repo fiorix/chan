@@ -139,7 +139,7 @@
       id: "computers",
       label: "Computers",
       icon: MonitorCog,
-      available: isTauriDesktop() || scopedLibrary !== null || scopedLibraryLoading,
+      available: scopedLibrary !== null || scopedLibraryLoading,
     },
   ]);
 
@@ -246,7 +246,6 @@
   }
 
   function refreshScopedLibrary(): Promise<void> {
-    if (isTauriDesktop()) return Promise.resolve();
     if (scopedLibraryLoad) return scopedLibraryLoad;
     scopedLibraryLoading = true;
     scopedLibraryLoad = loadScopedLibrarySnapshot()
@@ -312,7 +311,7 @@
   // deck remains open, a light poll keeps window targets current without ever
   // granting access outside the invoking library.
   $effect(() => {
-    if (!launcherDraft.visible || isTauriDesktop()) return;
+    if (!launcherDraft.visible) return;
     const first = setTimeout(() => void refreshScopedLibrary(), 0);
     const poll = setInterval(() => void refreshScopedLibrary(), 2500);
     return () => {
