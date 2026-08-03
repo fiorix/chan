@@ -383,7 +383,11 @@ mod tests {
         assert!(owner.handles.is_empty());
     }
 
-    #[tokio::test]
+    // The paused clock makes the grace bound exact on any host: the
+    // deadline below fires at precisely `grace` of virtual time, so a
+    // loaded CI box cannot stretch `elapsed` into a red. tokio's
+    // Instant rides the same paused clock; std's would not.
+    #[tokio::test(start_paused = true)]
     async fn one_deadline_aborts_and_joins_every_stuck_task() {
         let (shutdown_tx, _) = watch::channel(false);
         let shutdown_tx = Arc::new(shutdown_tx);
@@ -401,7 +405,7 @@ mod tests {
             }));
         }
         let mut owner = TenantTaskOwner::new(shutdown_tx, handles);
-        let start = std::time::Instant::now();
+        let start = tokio::time::Instant::now();
         let grace = Duration::from_millis(100);
 
         owner.shutdown_with_grace(grace).await;
