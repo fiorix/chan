@@ -260,3 +260,66 @@ Add two focused real-browser smokes:
 - No custom selection colour or 16-colour ANSI editor.
 - No pane tab-strip recolouring.
 - No change to desktop webview zoom.
+
+## Implementation evidence
+
+- `d0794b9e` adds one captured terminal renderer size for xterm, ghostty, and
+  ghostty's xterm-compatible cell measurement. It also adds shared hex,
+  luminance, and custom-colour resolution, while leaving the existing standard
+  themes, selection colour, and exact light/dark ANSI constants intact.
+- `518682b2` persists terminal font size in `server.toml` and optional editor
+  size plus the atomic terminal-colour owner in `preferences.toml`. Server-side
+  sanitization clamps both sizes, distinguishes an absent editor field from an
+  explicit null reset, normalizes complete custom payloads to lowercase
+  six-digit hex, and rejects an invalid owner before save, revision, or
+  broadcast.
+- `428e2f16` adds the Terminal, Editor, and Appearance controls. Editor sizing
+  applies and clears the body/source token pair live; existing document and
+  slide token-copy paths consume the resolved tokens. Custom activation,
+  dormant payload reuse, synchronized swatch/text fields, contrast selection,
+  and Reset all commit the complete owner rather than individual colours.
+- `6f2bf19a` makes the terminal theme effect subscribe to custom-colour changes
+  before its unconstructed-renderer guard can return. Browser validation found
+  this initialization-order gap: renderer construction was correct, but a
+  mounted renderer did not otherwise observe the later preference update.
+- `3a5c3329` adds browser checks 105 and 106. The terminal check keeps one PTY
+  alive across xterm and ghostty reconstruction, reads resize frames and
+  rendered pixels, and restores its sandboxed preferences. The editor check
+  drives the real Settings UI and observes mounted WYSIWYG, source, print, and
+  slide DOM before and after `Use theme`.
+
+## Validation evidence
+
+- `cargo test -p chan-library font_size_defaults_to_fourteen_and_round_trips`
+  passed. `cargo test -p chan-server preferences::tests` passed 34 tests.
+  All-target Clippy with warnings denied passed independently for both
+  `chan-library` and `chan-server`; `cargo fmt --all` passed.
+- The focused appearance frontend run passed 135 tests across 10 files, and the
+  follow-up Settings pair passed 18 tests. After the mounted-renderer fix, the
+  final nine-file appearance run passed 123 tests, including all three
+  editor-theme helper cases and the mounted-terminal dependency assertion.
+  Final `npm run check` passed every web workspace; workspace-app Svelte
+  diagnostics reported 0 errors and 0 warnings.
+- `npm run build` passed for every web workspace. Bundle provenance located the
+  appearance controls in the generated workspace asset, and the embedded
+  `cargo build -p chan` passed.
+- With an isolated binary and both `TMPDIR` and output under `$HOME`, the final
+  combined `SMOKE_SKIP_BUILD=1 SMOKE_ONLY=105,106` run passed in 17.957 and
+  6.895 seconds. Results are at
+  `/home/fiorix/.cache/chan-v084-appearance-smoke-final/results.json`. Xterm
+  stayed at 8x19 cells after the live 14-to-20 preference change, then rebuilt
+  at 12x28 on the same PTY. Ghostty matched 12x28, stayed there after a live
+  change to 18, then rebuilt at 10x25. The custom screenshot contained
+  1,445,443 background, 822 foreground, and 336 cursor pixels with the exact
+  requested colours; Standard restored the prior renderer background and
+  chrome while retaining the payload. Editor body/source/slide/print sizes
+  moved from 20/18/20/20 back to the active theme's 16/14/16/16 without reload.
+- The full pre-push gate was not run in the shared worktree; the lead owns the
+  final isolated integration gate. A broad workspace-app Vitest run passed
+  `editorTheme.test.ts` but was stopped after unrelated parallel failures in
+  team-bootstrap and rich-prompt wiring tests, so it is not reported green.
+- The real-browser checks did not separately inject invalid colour payloads,
+  cross the automatic luminance threshold, select manual Dark, press Reset, or
+  inspect every ANSI constant; focused unit/source tests own those cases. No
+  native desktop webview, macOS, Windows, or browser-specific zoom behavior was
+  exercised, and no behavior outside this item's stated boundaries was added.
