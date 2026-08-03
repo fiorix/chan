@@ -2,12 +2,8 @@
   // Computers provider for the shared command deck. The shared component owns
   // interaction and motion; this adapter owns only live library targets and the
   // approved actions that operate on them.
-  import { onMount } from "svelte";
   import CommandDeck from "@chan/web-shared/CommandDeck.svelte";
   import {
-    createDeckDraft,
-    fuzzyDeckScore,
-    parseDeckDraft,
     rankDeckItems,
     type DeckItem,
     type DeckScope,
@@ -15,17 +11,13 @@
   } from "@chan/web-shared/command-deck";
   import {
     AppWindow,
-    Command,
     Eye,
     EyeOff,
     Focus,
-    Layers3,
     LogOut,
     Monitor,
     MonitorCog,
     Moon,
-    PanelTop,
-    PanelsTopLeft,
     Plug,
     Plus,
     Power,
@@ -36,18 +28,7 @@
     X,
   } from "lucide-svelte";
   import type { DevserverEntry, WindowRecord, WorkspaceEntry } from "../api/library";
-  import {
-    executeNativeCommandLauncherItem,
-    hideNativeCommandLauncher,
-    nativeCommandLauncherSnapshot,
-    onTauriEvent,
-    openNativeCommandLauncher,
-    saveNativeCommandLauncherDraft,
-    type NativeLauncherCommandDescriptor,
-    type NativeLauncherContext,
-    type NativeLauncherSnapshot,
-    requestDesktopQuit,
-  } from "../api/desktop";
+  import { requestDesktopQuit } from "../api/desktop";
   import { basename, LOCAL_LIBRARY_ID, windowRowLabel } from "../lib/windowLabel";
   import { library, clearError, disconnectDevserver } from "../state/library.svelte";
   import {
@@ -90,80 +71,13 @@
   interface Entry extends DeckItem {
     next?: CommandId;
     run?: () => void | Promise<void>;
-    sourceCommandId?: string;
-    arg?: string;
   }
 
-  let { nativeOverlay = false }: { nativeOverlay?: boolean } = $props();
-
   let direction: "forward" | "back" | "still" = $state("still");
-  let nativeContext: NativeLauncherContext | null = $state(null);
-  let nativeSourceAlive = $state(true);
-  let nativeRevision = 0;
-  let nativeReady = $state(false);
-  let lastNativeDraft = "";
   const draft = $derived(activeCommandLauncherDraft());
   const mode = $derived((draft.path[0] as CommandId | undefined) ?? null);
 
-  const scopes = $derived.by<DeckScope[]>(() => {
-    const available = new Set(nativeContext?.commands.map((command) => command.scope) ?? []);
-    return [
-      { id: "tab", label: "Tab", icon: PanelTop, available: nativeOverlay && available.has("tab") },
-      { id: "pane", label: "Pane", icon: PanelsTopLeft, available: nativeOverlay && available.has("pane") },
-      { id: "window", label: "Window", icon: Layers3, available: nativeOverlay && available.has("window") },
-      { id: "computers", label: "Computers", icon: MonitorCog },
-    ];
-  });
-
-  function applyNativeTheme(context: NativeLauncherContext | null): void {
-    if (!context) return;
-    document.documentElement.setAttribute("data-theme", context.theme);
-    if (context.accent) {
-      document.documentElement.style.setProperty("--pane-highlight-color", context.accent);
-      document.documentElement.style.setProperty("--deck-accent", context.accent);
-    } else {
-      document.documentElement.style.removeProperty("--pane-highlight-color");
-      document.documentElement.style.removeProperty("--deck-accent");
-    }
-  }
-
-  function applyNativeSnapshot(snapshot: NativeLauncherSnapshot): void {
-    nativeContext = snapshot.context;
-    nativeSourceAlive = snapshot.sourceAlive;
-    applyNativeTheme(snapshot.context);
-    if (snapshot.draftRevision >= nativeRevision) {
-      const parsed = parseDeckDraft(snapshot.draft, createDeckDraft(snapshot.entryMode));
-      const serialized = JSON.stringify(parsed);
-      // The host echoes back the draft this overlay just saved. Adopting that
-      // echo would swap the draft object for an equal one, and an execution
-      // in flight holds the object it started with: it would see a different
-      // object, take its "another source owns the overlay" exit, and leave the
-      // operation pending forever. Keep the live object when the echo is our
-      // own; adopt anything the host actually changed.
-      if (snapshot.entryMode === commandLauncher.entryMode && serialized === lastNativeDraft) {
-        nativeRevision = snapshot.draftRevision;
-      } else {
-        commandLauncher.entryMode = snapshot.entryMode;
-        commandLauncher.drafts[snapshot.entryMode] = parsed;
-        nativeRevision = snapshot.draftRevision;
-        lastNativeDraft = serialized;
-      }
-    }
-    nativeReady = true;
-  }
-
-  onMount(() => {
-    if (!nativeOverlay) return;
-    let unlisten: (() => void) | null = null;
-    void onTauriEvent<NativeLauncherSnapshot>(
-      "command-launcher-updated",
-      applyNativeSnapshot,
-    ).then((stop) => {
-      unlisten = stop;
-    });
-    void nativeCommandLauncherSnapshot().then(applyNativeSnapshot);
-    return () => unlisten?.();
-  });
+  const scopes: DeckScope[] = [{ id: "computers", label: "Computers", icon: MonitorCog }];
 
   function workspaceName(workspace: WorkspaceEntry): string {
     return workspace.label || basename(workspace.path) || workspace.path;
@@ -417,66 +331,6 @@
     };
   }
 
-  function sourceIcon(command: NativeLauncherCommandDescriptor): Entry["icon"] {
-    switch (command.icon) {
-      case "terminal":
-        return SquareTerminal;
-      case "folder":
-      case "file":
-        return AppWindow;
-      case "tabs":
-        return PanelTop;
-      case "panes":
-        return PanelsTopLeft;
-      case "settings":
-        return MonitorCog;
-      default:
-        return Command;
-    }
-  }
-
-  function sourceBreadcrumb(command: NativeLauncherCommandDescriptor): string {
-    const scope = command.scope === "tab" ? "Tab" : command.scope === "pane" ? "Pane" : "Window";
-    return `${scope} › ${command.category}`;
-  }
-
-  function sourceEntry(command: NativeLauncherCommandDescriptor, arg?: string): Entry {
-    const itemId = `context:${command.id}${arg === undefined ? "" : ":argument"}`;
-    return {
-      id: itemId,
-      title: arg === undefined ? command.title : `${command.title} ${arg}`,
-      breadcrumb: sourceBreadcrumb(command),
-      searchText: [command.title, command.category, ...command.keywords, arg ?? ""].join(" "),
-      scope: command.scope,
-      icon: sourceIcon(command),
-      shortcut: command.shortcut,
-      confirm: command.confirm,
-      awaitResult: true,
-      dismissImmediatelyOnSuccess: true,
-      disabled: !nativeSourceAlive,
-      sourceCommandId: command.id,
-      arg,
-      run: () => executeNativeCommandLauncherItem(command.id, arg, itemId),
-    };
-  }
-
-  const sourceEntries = $derived.by<Entry[]>(() => {
-    const commands = nativeContext?.commands ?? [];
-    const base = commands.map((command) => sourceEntry(command));
-    const split = /^(\S+)\s+(.+)$/.exec(draft.query.trim());
-    if (!split) return base;
-    const head = split[1];
-    const arg = split[2];
-    const withArguments = commands
-      .filter(
-        (command) =>
-          command.acceptsArg &&
-          fuzzyDeckScore(head, `${command.title} ${command.keywords.join(" ")}`) !== null,
-      )
-      .map((command) => sourceEntry(command, arg));
-    return [...withArguments, ...base];
-  });
-
   const rootEntries = $derived.by<Entry[]>(() => {
     const entries: Entry[] = [
       commandEntry("new-terminal", "New terminal", "Choose a computer", SquareTerminal, "shell"),
@@ -563,62 +417,27 @@
   const computerEntries = $derived(
     mode ? targetEntries(mode) : draft.query.trim() ? deepEntries : rootEntries,
   );
-  const rawEntries = $derived.by<Entry[]>(() => {
-    if (!nativeOverlay) return computerEntries;
-    if (draft.scope === "computers" || commandLauncher.entryMode === "computers") {
-      return computerEntries;
-    }
-    if (draft.scope) {
-      return sourceEntries.filter((entry) => entry.scope === draft.scope);
-    }
-    if (draft.query.trim()) return [...sourceEntries, ...deepEntries];
-    // The source supplies contextual order (focused tab, pane, then window).
-    // Computers remains one arrow-key away in the always-visible scope rail.
-    return sourceEntries.length ? [...sourceEntries, ...rootEntries] : rootEntries;
-  });
   const visibleEntries = $derived(
-    rankDeckItems(rawEntries, draft.query).slice(0, draft.query.trim() ? 9 : 5) as Entry[],
+    rankDeckItems(computerEntries, draft.query).slice(0, draft.query.trim() ? 9 : 5) as Entry[],
   );
   const modeTitle = $derived(
     mode ? rootEntries.find((entry) => entry.next === mode)?.title ?? "Computers" : "Computers",
   );
   const placeholder = $derived(
-    draft.scope
-      ? scopes.find((scope) => scope.id === draft.scope)?.label ?? modeTitle
-      : nativeOverlay && commandLauncher.entryMode === "contextual"
-        ? "Search"
-        : modeTitle,
+    draft.scope ? scopes.find((scope) => scope.id === draft.scope)?.label ?? modeTitle : modeTitle,
   );
 
   $effect(() => {
-    const serialized = JSON.stringify(draft);
-    if (nativeOverlay) {
-      if (!nativeReady || serialized === lastNativeDraft) return;
-      lastNativeDraft = serialized;
-      nativeRevision += 1;
-      void saveNativeCommandLauncherDraft(nativeRevision, JSON.parse(serialized));
-    } else {
-      persistCommandLauncherDraft();
-    }
+    JSON.stringify(draft);
+    persistCommandLauncherDraft();
   });
 
   function closeDeck(): void {
-    if (nativeOverlay) {
-      draft.visible = false;
-      void hideNativeCommandLauncher();
-    } else {
-      closeCommandLauncher();
-    }
+    closeCommandLauncher();
   }
 
   function clearDeck(): void {
-    if (!nativeOverlay) {
-      clearCommandLauncherDraft();
-      return;
-    }
-    const replacement = createDeckDraft(commandLauncher.entryMode);
-    replacement.visible = draft.visible;
-    commandLauncher.drafts[commandLauncher.entryMode] = replacement;
+    clearCommandLauncherDraft();
   }
 
   function back(): void {
@@ -671,7 +490,6 @@
   }
 
   function onWindowKey(event: KeyboardEvent): void {
-    if (nativeOverlay) return;
     const macDesktop = hasDesktopBridge && hostOs === "macos";
     const contextual =
       event.code === "KeyK" &&
@@ -687,11 +505,7 @@
     if ((contextual || computers) && !readOnly && screen.current === "computers") {
       event.preventDefault();
       event.stopImmediatePropagation();
-      if (hasDesktopBridge) {
-        void openNativeCommandLauncher(computers ? "computers" : "contextual");
-      } else {
-        toggleCommandLauncher(computers ? "computers" : "contextual");
-      }
+      toggleCommandLauncher(computers ? "computers" : "contextual");
     }
   }
 </script>

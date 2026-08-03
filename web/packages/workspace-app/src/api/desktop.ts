@@ -53,61 +53,6 @@ export async function tauriInvoke<T = unknown>(
   return (await invoke(cmd, args)) as T;
 }
 
-export type NativeLauncherEntryMode = "contextual" | "computers";
-export type NativeLauncherScope = "tab" | "pane" | "window";
-
-export interface NativeLauncherCommandDescriptor {
-  id: string;
-  title: string;
-  category: string;
-  keywords: string[];
-  icon?: string;
-  shortcut?: string;
-  acceptsArg: boolean;
-  confirm?: {
-    title: string;
-    message: string;
-    actionLabel: string;
-    danger?: boolean;
-  };
-  scope: NativeLauncherScope;
-}
-
-export interface NativeLauncherContext {
-  commands: NativeLauncherCommandDescriptor[];
-  theme: "light" | "dark";
-  accent?: string;
-}
-
-/** Show the Desktop-owned overlay above this app window. No aggregate
- * Computers data or launcher bearer crosses back into this webview. */
-export async function openNativeCommandLauncher(
-  entryMode: NativeLauncherEntryMode,
-): Promise<void> {
-  await tauriInvoke("open_command_launcher", { entryMode });
-}
-
-/** Tell the host a reloaded source has installed its request/execution
- * listeners. If this window owns a preserved draft, the host re-requests its
- * current descriptors without sending the query or Computers inventory. */
-export async function commandLauncherSourceReady(): Promise<void> {
-  await tauriInvoke("command_launcher_source_ready");
-}
-
-export async function submitNativeCommandLauncherContext(
-  requestId: string,
-  context: NativeLauncherContext,
-): Promise<void> {
-  await tauriInvoke("submit_command_launcher_context", { requestId, context });
-}
-
-export async function finishNativeCommandLauncherExecution(
-  executionId: string,
-  error: string | null = null,
-): Promise<void> {
-  await tauriInvoke("finish_command_launcher_execution", { executionId, error });
-}
-
 /// Read clipboard text without tripping WebKit's DOM-paste "Paste" button.
 ///
 /// In chan-desktop's WKWebView, any programmatic clipboard read via

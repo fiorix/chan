@@ -6,7 +6,7 @@ Same stack as `web/` (Svelte 5, Vite, svelte-check, vitest), without `web/`'s ed
 
 ## Contract
 
-The ordinary launcher window is an HTTP client of chan-library. `src/api/library.ts` is the typed form of that contract: the workspace and devserver registry surfaces under `/api/library/`, plus the window feed it renders (`GET`/watch `/api/library/windows`). In Chan Desktop, the same bundle's `?command=1` entry renders the trusted command overlay and uses only the overlay-specific Tauri permissions.
+The ordinary launcher window is an HTTP client of chan-library. `src/api/library.ts` is the typed form of that contract: the workspace and devserver registry surfaces under `/api/library/`, plus the window feed it renders (`GET`/watch `/api/library/windows`).
 
 ## Develop
 

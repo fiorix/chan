@@ -50,10 +50,6 @@ permissions = [
   "allow-read-clipboard-html",
   "allow-write-clipboard-html",
   "allow-open-reverse-tunnel",
-  "allow-open-command-launcher",
-  "allow-command-launcher-source-ready",
-  "allow-submit-command-launcher-context",
-  "allow-finish-command-launcher-execution",
 ]
 
 [[permission]]
@@ -130,36 +126,6 @@ commands.allow = ["abandon_devserver_for_window"]
 identifier = "allow-reconnect-devserver-for-window"
 description = "Enables the reconnect_devserver_for_window command (disconnect overlay Reconnect)."
 commands.allow = ["reconnect_devserver_for_window"]
-
-[[permission]]
-identifier = "allow-open-command-launcher"
-description = "Lets an app window ask the trusted desktop host to show its command launcher."
-commands.allow = ["open_command_launcher"]
-
-[[permission]]
-identifier = "allow-command-launcher-source-ready"
-description = "Lets a reloaded app window tell the desktop launcher host it can accept a sanitized context request."
-commands.allow = ["command_launcher_source_ready"]
-
-[[permission]]
-identifier = "allow-submit-command-launcher-context"
-description = "Lets an app window submit bounded command descriptors for its active launcher request."
-commands.allow = ["submit_command_launcher_context"]
-
-[[permission]]
-identifier = "allow-finish-command-launcher-execution"
-description = "Lets the invoking app window acknowledge an execution routed back by the trusted launcher."
-commands.allow = ["finish_command_launcher_execution"]
-
-[[permission]]
-identifier = "allow-command-launcher-overlay"
-description = "Lets only the trusted command-launcher overlay read and save host drafts, hide itself, and route a selected contextual command."
-commands.allow = [
-  "command_launcher_snapshot",
-  "save_command_launcher_draft",
-  "hide_command_launcher",
-  "execute_command_launcher_item",
-]
 
 [[permission]]
 identifier = "allow-zoom-in"

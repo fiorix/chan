@@ -14,11 +14,9 @@
     activeCommandLauncherDraft,
     toggleCommandLauncher,
   } from "../state/commandLauncher.svelte";
-  import { openNativeCommandLauncher } from "../api/desktop";
 
   function showCommandLauncher(): void {
-    if (hasDesktopBridge) void openNativeCommandLauncher("contextual");
-    else toggleCommandLauncher();
+    toggleCommandLauncher();
   }
 
   const title = $derived(screen.current === "computers" ? "Computers" : "Gateways");

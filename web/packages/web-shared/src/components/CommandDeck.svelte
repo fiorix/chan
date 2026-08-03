@@ -156,9 +156,9 @@
     draft.operation = { kind: "pending", itemId: item.id, title: item.title };
     try {
       await onChoose(item);
-      // A hidden pending command can finish after another native window takes
-      // ownership of the reusable overlay. Never paint that result into the
-      // new source's draft.
+      // A hidden pending command can finish after the draft it started with
+      // was cleared and swapped for a fresh one. Never paint that result into
+      // the new draft.
       if (draft !== executionDraft) return;
       if (item.dismissImmediatelyOnSuccess) {
         onSuccess?.(item);

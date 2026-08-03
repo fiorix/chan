@@ -2,7 +2,6 @@
   // Context provider for the shared command deck. Commands remain owned by the
   // workspace app and execute through their existing run thunks; the shared deck
   // owns presentation, keyboard zones, motion, and persisted draft semantics.
-  import { onMount } from "svelte";
   import CommandDeck from "@chan/web-shared/CommandDeck.svelte";
   import {
     clearClonedSessionDeckDrafts,
@@ -40,7 +39,6 @@
     launcherDraft,
     launcherReturnFocus,
     persistLauncherDraft,
-    ui,
   } from "../state/store.svelte";
   import {
     availableCommands,
@@ -50,16 +48,6 @@
     type CommandSurface,
   } from "../state/commands";
   import { chordFor } from "../state/shortcuts";
-  import {
-    commandLauncherSourceReady,
-    finishNativeCommandLauncherExecution,
-    isTauriDesktop,
-    submitNativeCommandLauncherContext,
-    type NativeLauncherCommandDescriptor,
-    type NativeLauncherScope,
-  } from "../api/desktop";
-  import { NAMED_PANE_HEX } from "../state/paneColor";
-  import { focusColorForWindow } from "../state/tabs.svelte";
   import { sessionWindowId } from "../api/client";
   import { ApiError } from "../api/errors";
   import {
@@ -118,7 +106,6 @@
   let ranCommand = false;
   let restoreTarget: HTMLElement | null = null;
   let contextNoticeTimer: ReturnType<typeof setTimeout> | null = null;
-  let nativeRequestId: string | null = $state(null);
   let scopedLibrary: ScopedLibrarySnapshot | null = $state(null);
   let scopedLibraryLoading = $state(false);
   let scopedLibrarySettled = $state(false);
@@ -177,70 +164,6 @@
     return `${command.id}\u001f${command.category}\u001f${command.title}`;
   }
 
-  function nativeScopeFor(command: Command): NativeLauncherScope {
-    const scope = scopeFor(command);
-    return scope === "computers" ? "window" : scope;
-  }
-
-  function nativeDescriptor(command: Command): NativeLauncherCommandDescriptor {
-    return {
-      // Command ids are unique in the catalog and are re-looked-up below at
-      // execution time. No run thunk or live app state crosses into Desktop.
-      id: command.id,
-      title: command.title,
-      category: command.category,
-      keywords: [...(command.keywords ?? [])],
-      icon: command.icon,
-      shortcut: chordFor(command.id) ?? undefined,
-      acceptsArg: command.acceptsArg === true,
-      confirm: command.confirm,
-      scope: nativeScopeFor(command),
-    };
-  }
-
-  function executionError(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
-  }
-
-  async function executeNative(detail: {
-    requestId: string;
-    executionId: string;
-    commandId: string;
-    arg?: string | null;
-  }): Promise<void> {
-    if (detail.requestId !== nativeRequestId) {
-      await finishNativeCommandLauncherExecution(
-        detail.executionId,
-        "The invoking window context changed",
-      );
-      return;
-    }
-    const liveContext = commandContext();
-    const command = availableCommands(liveContext).find(
-      (candidate) => candidate.id === detail.commandId,
-    );
-    if (!command) {
-      await finishNativeCommandLauncherExecution(
-        detail.executionId,
-        "That command is no longer available",
-      );
-      return;
-    }
-    if (detail.arg != null && !command.acceptsArg) {
-      await finishNativeCommandLauncherExecution(
-        detail.executionId,
-        "That command does not accept an argument",
-      );
-      return;
-    }
-    try {
-      await command.run(detail.arg ?? undefined);
-      await finishNativeCommandLauncherExecution(detail.executionId);
-    } catch (error) {
-      await finishNativeCommandLauncherExecution(detail.executionId, executionError(error));
-    }
-  }
-
   function errorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
   }
@@ -270,42 +193,6 @@
     return scopedLibraryLoad;
   }
 
-  onMount(() => {
-    if (!isTauriDesktop()) return;
-    const onRequest = (event: Event): void => {
-      const requestId = (event as CustomEvent<{ requestId?: unknown }>).detail?.requestId;
-      if (typeof requestId === "string" && requestId.length <= 128) {
-        nativeRequestId = requestId;
-      }
-    };
-    const onExecute = (event: Event): void => {
-      const detail = (event as CustomEvent<Record<string, unknown>>).detail;
-      if (
-        typeof detail?.requestId !== "string" ||
-        typeof detail.executionId !== "string" ||
-        typeof detail.commandId !== "string" ||
-        !(detail.arg == null || typeof detail.arg === "string")
-      ) {
-        return;
-      }
-      void executeNative({
-        requestId: detail.requestId,
-        executionId: detail.executionId,
-        commandId: detail.commandId,
-        arg: detail.arg as string | null | undefined,
-      });
-    };
-    window.addEventListener("chan:launcher-request", onRequest);
-    window.addEventListener("chan:launcher-execute", onExecute);
-    // Installed listeners come first, then readiness, so a host re-request
-    // cannot race past this reloaded webview.
-    void commandLauncherSourceReady().catch(() => {});
-    return () => {
-      window.removeEventListener("chan:launcher-request", onRequest);
-      window.removeEventListener("chan:launcher-execute", onExecute);
-    };
-  });
-
   // Capability minting waits until the deck is requested, avoiding startup
   // work and the ordinary race before this window's main /ws is live. While the
   // deck remains open, a light poll keeps window targets current without ever
@@ -318,23 +205,6 @@
       clearTimeout(first);
       clearInterval(poll);
     };
-  });
-
-  // Publish only a bounded catalog snapshot while this window owns an active
-  // request. Query text and Computers inventory remain in the Desktop host.
-  $effect(() => {
-    const requestId = nativeRequestId;
-    if (!requestId || !isTauriDesktop()) return;
-    const commands = availableCommands(ctx).map(nativeDescriptor);
-    const theme = ui.theme;
-    const accent = NAMED_PANE_HEX[focusColorForWindow()];
-    void submitNativeCommandLauncherContext(requestId, {
-      commands,
-      theme,
-      accent,
-    }).catch(() => {
-      // A stale request is expected after another window takes ownership.
-    });
   });
 
   function breadcrumbFor(command: Command, scope: DeckScopeId): string {
@@ -768,7 +638,7 @@
 </script>
 
 <CommandDeck
-  open={launcherDraft.visible && !isTauriDesktop()}
+  open={launcherDraft.visible}
   bind:draft={deckDraft}
   items={visibleEntries}
   {scopes}

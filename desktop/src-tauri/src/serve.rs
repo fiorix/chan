@@ -1343,12 +1343,6 @@ fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), S
                         if !watcher_buried && state.remove_buried(&label_for_close) {
                             crate::rebuild_window_menu(&app_for_close);
                         }
-                        if !watcher_buried {
-                            crate::command_launcher::source_destroyed(
-                                &app_for_close,
-                                &label_for_close,
-                            );
-                        }
                         // A destroyed remote-backed window may now be a
                         // reopenable `saved && !connected` row on the
                         // remote -- re-poll so the menu offers it.
@@ -2091,21 +2085,11 @@ const KEY_BRIDGE_JS: &str = r#"
       console.error('[chan] IPC ' + cmd + ' failed:', err);
     });
   }
-  function isMac() {
-    return /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || '');
-  }
-  function commandLauncherChord(e) {
-    return isMac()
-      ? e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.code === 'KeyK'
-      : e.ctrlKey && !e.metaKey && e.altKey && !e.shiftKey && e.code === 'KeyK';
-  }
-  function computersLauncherChord(e) {
-    return isMac()
-      ? e.metaKey && !e.ctrlKey && !e.altKey && e.shiftKey && e.code === 'KeyK'
-      : e.ctrlKey && !e.metaKey && e.altKey && e.shiftKey && e.code === 'KeyK';
-  }
   // Chord policy: actions reachable through Hybrid Nav (Cmd+.) stay
   // unbound here so the native layer claims as little as possible.
+  // The command-launcher chords (Cmd+K, Cmd+Shift+K, and the Ctrl+Alt
+  // variants off-mac) stay page-owned too: the SPA's inline command deck
+  // binds them identically on every surface, so no native claim exists.
   // Direct chords exist where Hybrid Nav is no substitute: Cmd+W (close
   // tab; pairs with the SPA's context-aware Ctrl+D), Cmd+Shift+W (close
   // window), Cmd+F/G (find on page), Cmd+1..9 (jump to tab), Cmd+[/Cmd+]
@@ -2123,14 +2107,6 @@ const KEY_BRIDGE_JS: &str = r#"
     const shift = e.shiftKey;
     const alt = e.altKey;
     const code = e.code;
-    if (computersLauncherChord(e)) {
-      invokeIpc(e, 'open_command_launcher', { entryMode: 'computers' });
-      return;
-    }
-    if (commandLauncherChord(e)) {
-      invokeIpc(e, 'open_command_launcher', { entryMode: 'contextual' });
-      return;
-    }
     if (alt) {
       // Cmd+Opt+I (macOS) / Ctrl+Alt+I (Linux/Windows) → DevTools.
       // Ctrl+Alt+Shift+T reopens the last closed tab on the Linux /
@@ -2799,15 +2775,13 @@ mod tests {
     fn key_bridge_keeps_independent_chords() {
         // Tab close + reopen + close window + Find on page + tab nav +
         // tab jump + splits are NOT duplicated by Hybrid Nav and must
-        // stay reachable through the native bridge. Cmd+K / Ctrl+Alt+K
-        // opens the command launcher; New terminal is the context-aware
-        // spawn chord (Cmd+T on macOS, Ctrl+Shift+T off-mac).
-        assert!(KEY_BRIDGE_JS.contains("function commandLauncherChord"));
-        assert!(KEY_BRIDGE_JS
-            .contains("invokeIpc(e, 'open_command_launcher', { entryMode: 'contextual' })"));
-        assert!(KEY_BRIDGE_JS
-            .contains("invokeIpc(e, 'open_command_launcher', { entryMode: 'computers' })"));
-        assert!(KEY_BRIDGE_JS.contains("e.ctrlKey && !e.metaKey && e.altKey"));
+        // stay reachable through the native bridge. The command-launcher
+        // chords stay page-owned (the SPA's inline deck binds them on
+        // every surface), so the bridge must never claim them; pin the
+        // absence. New terminal is the context-aware spawn chord
+        // (Cmd+T on macOS, Ctrl+Shift+T off-mac).
+        assert!(!KEY_BRIDGE_JS.contains("open_command_launcher"));
+        assert!(!KEY_BRIDGE_JS.contains("function commandLauncherChord"));
         assert!(KEY_BRIDGE_JS.contains("app.terminal.toggle"));
         assert!(KEY_BRIDGE_JS.contains("app.pane.prev"));
         assert!(KEY_BRIDGE_JS.contains("app.pane.next"));
@@ -2859,8 +2833,6 @@ mod tests {
         include_str!("../capabilities/launcher-update.json");
     const LAUNCHER_CONTROL_CAPABILITY_JSON: &str =
         include_str!("../capabilities/launcher-control.json");
-    const COMMAND_LAUNCHER_CAPABILITY_JSON: &str =
-        include_str!("../capabilities/command-launcher.json");
     const ABOUT_CAPABILITY_JSON: &str = include_str!("../capabilities/about.json");
     const LOCAL_UPLOAD_CAPABILITY_JSON: &str = include_str!("../capabilities/local-upload.json");
     const APP_PERMISSIONS_TOML: &str = include_str!("../permissions/app.toml");
@@ -3460,39 +3432,14 @@ mod tests {
     }
 
     #[test]
-    fn launcher_control_capability_is_narrow_and_does_not_match_the_overlay() {
+    fn launcher_control_capability_is_narrow() {
         let windows = capability_windows(LAUNCHER_CONTROL_CAPABILITY_JSON);
         assert_eq!(windows, vec!["main".to_string(), "main-*".to_string()]);
-        assert!(
-            !label_glob_matches("main-*", "command-launcher"),
-            "the trusted overlay label must stay outside the launcher family"
-        );
         let remote_urls = capability_remote_urls(LAUNCHER_CONTROL_CAPABILITY_JSON);
         assert!(remote_urls.iter().any(|url| url == "http://127.0.0.1:*"));
         assert_eq!(
             capability_permissions(LAUNCHER_CONTROL_CAPABILITY_JSON),
-            vec![
-                "allow-request-app-quit".to_string(),
-                "allow-open-command-launcher".to_string(),
-            ],
-        );
-    }
-
-    #[test]
-    fn command_launcher_capability_is_exactly_scoped_to_the_trusted_overlay() {
-        assert_eq!(
-            capability_windows(COMMAND_LAUNCHER_CAPABILITY_JSON),
-            vec!["command-launcher".to_string()],
-        );
-        let remote_urls = capability_remote_urls(COMMAND_LAUNCHER_CAPABILITY_JSON);
-        assert!(remote_urls.iter().any(|url| url == "http://127.0.0.1:*"));
-        assert_eq!(
-            capability_permissions(COMMAND_LAUNCHER_CAPABILITY_JSON),
-            vec![
-                "allow-command-launcher-overlay".to_string(),
-                "allow-request-app-quit".to_string(),
-                "core:event:default".to_string(),
-            ],
+            vec!["allow-request-app-quit".to_string()],
         );
     }
 
@@ -3512,9 +3459,8 @@ mod tests {
     /// Every capability file, by name. `capability_walk_covers_every_capability_file`
     /// pins this table against the directory listing so a new capability
     /// cannot land without joining the origin-aware walk.
-    const CAPABILITY_FILES: [(&str, &str); 9] = [
+    const CAPABILITY_FILES: [(&str, &str); 8] = [
         ("about.json", ABOUT_CAPABILITY_JSON),
-        ("command-launcher.json", COMMAND_LAUNCHER_CAPABILITY_JSON),
         ("default.json", DEFAULT_CAPABILITY_JSON),
         ("launcher-events.json", LAUNCHER_EVENTS_CAPABILITY_JSON),
         ("launcher-control.json", LAUNCHER_CONTROL_CAPABILITY_JSON),

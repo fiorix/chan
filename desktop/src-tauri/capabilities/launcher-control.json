@@ -1,13 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "launcher-control",
-  "description": "Grants loopback-served launcher windows only the normal confirm-then-quit path and permission to ask Desktop to open its trusted command-launcher overlay.",
+  "description": "Grants loopback-served launcher windows only the normal confirm-then-quit path.",
   "remote": {
     "urls": ["http://127.0.0.1:*", "http://localhost:*"]
   },
   "windows": ["main", "main-*"],
   "permissions": [
-    "allow-request-app-quit",
-    "allow-open-command-launcher"
+    "allow-request-app-quit"
   ]
 }

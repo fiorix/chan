@@ -20,7 +20,7 @@ path = "src/main.rs"
 tauri-build = { workspace = true, features = [] }
 
 [dependencies]
-tauri = { workspace = true, features = ["devtools", "macos-private-api"] }
+tauri = { workspace = true, features = ["devtools"] }
 tauri-plugin-dialog = { workspace = true }
 tauri-plugin-opener = { workspace = true }
 tauri-plugin-updater = { workspace = true }

@@ -44,62 +44,28 @@ flowchart TB
 
 In its ordinary launcher-window role, the SPA is a pure `/api/library/*` HTTP client: it never opens native windows, never dials a devserver, and never parses an opaque window or workspace id. Every type mirrors a struct the library serializes -- the field names *are* the wire, pinned by server byte-tests. It is served at the devserver/library root `/`, and the bundle uses a relative asset base so assets resolve under any mount. It renders four registries: workspaces, windows, devservers, and gateways.
 
-The same bundle has one additional trusted role in Chan Desktop: `?command=1`
-renders only the shared command deck inside Desktop's `command-launcher` Tauri
-overlay. That overlay may use its narrowly granted Tauri commands; ordinary
-launcher and tenant webviews cannot invoke the overlay-only snapshot, draft, or
-execution commands.
-
-## One command launcher, two authority hosts
+## One command deck, two authority hosts
 
 ```mermaid
 flowchart LR
-    KEY["keyboard shortcut"] --> HOST{"Chan Desktop?"}
-    HOST -->|yes| NATIVE["Desktop-owned command-launcher overlay<br/>aggregate Computers authority"]
-    HOST -->|no| INLINE["inline shared deck<br/>invoking-library capability"]
-    SOURCE["invoking workspace/terminal<br/>live tab · pane · window context"] -->|"bounded descriptors + theme/accent"| NATIVE
-    NATIVE -->|"stable id + optional argument"| SOURCE
-    NATIVE --> DESKTOP["local + connected Computers catalog"]
+    KEY["keyboard shortcut"] --> DECK["inline shared deck<br/>inside the invoking page"]
+    DECK --> HOST{"surface?"}
+    HOST -->|"launcher window<br/>desktop or devserver"| AGG["full Computers catalog<br/>of the serving /api/library/* feed"]
+    HOST -->|"workspace / terminal window"| INLINE["invoking-library capability"]
     INLINE -->|"tenant token mints capability<br/>bound to this live window"| LOCAL["this host's local library only"]
-    REMOTE["remote webview"] -. "never receives Desktop inventory,<br/>root bearer, or global query" .-> NATIVE
 ```
 
-The command launcher is one product and one shared Svelte component. Its empty
-query is the **contextual deck**: focused tab actions first, then pane, window,
-and Computers. The four scope orbs stay visible for direct keyboard navigation.
-Typed deep search may jump directly to a permitted nested target while retaining
-the trusted breadcrumb and any confirmation step.
+The command launcher is one product and one shared Svelte component, rendered inline inside the page that invoked it on every surface; there is no native launcher window. Its empty query is the **contextual deck**: focused tab actions first, then pane, window, and Computers. Each surface exposes the scopes it has commands for (this bundle exposes Computers only), and the scope orbs stay visible for direct keyboard navigation. Typed deep search may jump directly to a permitted nested target while retaining the trusted breadcrumb and any confirmation step.
 
-Desktop owns one reusable transparent, borderless overlay positioned over the
-invoking native window. The source receives only a request id and submits at
-most 256 sanitized command descriptors; no callback crosses the boundary. A
-selected contextual id returns to the same source, which resolves it again from
-its live command catalog before running it. Desktop keeps the aggregate
-Computers catalog, root launcher bearer, and query local.
-
-Outside Desktop, `POST /api/library/command-capabilities` accepts a tenant token
-only when the claimed `window_id` has live `/ws` presence in that exact tenant.
-The opaque capability has a five-minute sliding expiry and dies immediately
-when that window disappears. Its snapshot omits tenant tokens, route prefixes,
-and aggregate remote-feed rows. Owner capabilities may create/focus/hide/show/
-close browser windows in that library; readonly tunnel capabilities may inspect
-and focus only. Launch redirects revalidate liveness, are `no-store`, and send
-`Referrer-Policy: no-referrer`.
+In this bundle the deck's Computers scope rides the same `/api/library/*` feed the screens render, so the launcher window's deck carries the full Computers catalog of the surface that serves it. Workspace and standalone-terminal windows run the workspace app's own inline deck with a narrower Computers scope: `POST /api/library/command-capabilities` accepts a tenant token only when the claimed `window_id` has live `/ws` presence in that exact tenant. The opaque capability has a five-minute sliding expiry and dies immediately when that window disappears. Its snapshot omits tenant tokens, route prefixes, and aggregate remote-feed rows. Owner capabilities may create/focus/hide/show/close browser windows in that library; readonly tunnel capabilities may inspect and focus only. Launch redirects revalidate liveness, are `no-store`, and send `Referrer-Policy: no-referrer`. The desktop-side authority split across window classes is [ADR 0001](../../../docs/adr/0001-desktop-owns-aggregate-launcher-authority.md).
 
 ### Keyboard and draft contract
 
 - macOS Desktop: `Cmd+K` contextual, `Cmd+Shift+K` Computers.
-- Web and non-macOS: `Ctrl+Alt+K` contextual; Desktop also exposes
-  `Ctrl+Alt+Shift+K` for Computers.
-- `Up`/`Down` move through results and into the scope rail; `Left`/`Right` move
-  between scopes or back/forward through levels; `Enter` enters or executes;
-  empty-query `Backspace` goes back; `Escape` hides.
-- Each invoking window has separate contextual and Computers drafts containing
-  visibility, query, path, selection, and recoverable operation state. Hiding,
-  switching windows, and reload preserve the draft. Successful execution, true
-  source-window close, or app exit clears it.
-- Theme and pane accent are live inputs. An open overlay changes immediately
-  when its invoking source changes light/dark theme or focus colour.
+- Web and non-macOS: `Ctrl+Alt+K` contextual; Desktop also exposes `Ctrl+Alt+Shift+K` for Computers.
+- `Up`/`Down` move through results and into the scope rail; `Left`/`Right` move between scopes or back/forward through levels; `Enter` enters or executes; empty-query `Backspace` goes back; `Escape` hides.
+- Each window keeps separate contextual and Computers drafts in its own session storage, holding visibility, query, path, selection, and recoverable operation state. Reload and hide preserve the draft; successful execution, window close, and app exit clear it.
+- Theme is a live input: an open deck follows the page's light/dark theme immediately.
 
 ## The `/api/library/*` surface
 

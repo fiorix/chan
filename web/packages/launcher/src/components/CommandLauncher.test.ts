@@ -173,7 +173,7 @@ describe("Computers command deck", () => {
     for (const title of ["New terminal", "New window", "Focus", "Hide", "Show"]) {
       expect(result(title)).toBeTruthy();
     }
-    expect(target.querySelectorAll(".deck-scope")).toHaveLength(4);
+    expect(target.querySelectorAll(".deck-scope")).toHaveLength(1);
   });
 
   it("does not expose the Desktop theme command on a devserver", async () => {

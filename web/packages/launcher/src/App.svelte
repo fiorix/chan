@@ -26,11 +26,7 @@
     pruneControlAttention,
     resolvePendingControlAttention,
   } from "./state/controlAttention.svelte";
-  import {
-    isNativeCommandOverlay,
-    onTauriEvent,
-    restartDesktopAfterUpdate,
-  } from "./api/desktop";
+  import { onTauriEvent, restartDesktopAfterUpdate } from "./api/desktop";
   import { applyTheme, reconcileLocalTheme, watchLocalTheme } from "./state/theme.svelte";
   import { reconcileCollapsedMachines } from "./state/machineCollapse.svelte";
   import { hasDesktopBridge, readOnly } from "./state/capabilities";
@@ -38,7 +34,6 @@
   let updateReadyVersion: string | null = $state(null);
   let updateRestarting = $state(false);
   let updateError: string | null = $state(null);
-  const commandOverlay = isNativeCommandOverlay();
 
   type DesktopUpdateReadyPayload = {
     version: string;
@@ -62,15 +57,14 @@
   }
 
   onMount(() => {
-    document.documentElement.classList.toggle("chan-command-overlay", commandOverlay);
     applyTheme();
     // Reconcile the first-paint localStorage theme with the authoritative
     // desktop-config value, so a cleared WebView store or a second writer can
     // never leave the launcher and the local terminals on different themes.
     void reconcileLocalTheme();
-    // The native command deck is its own webview. Follow the desktop theme
-    // feed so a switch made there updates this Computers window immediately.
-    const unwatchLocalTheme = hasDesktopBridge && !commandOverlay ? watchLocalTheme() : null;
+    // Follow the desktop theme feed so a switch made in another desktop
+    // window updates this Computers window immediately.
+    const unwatchLocalTheme = hasDesktopBridge ? watchLocalTheme() : null;
     // Same reconcile for the per-machine collapse set: localStorage is a
     // first-paint cache, the desktop config is authoritative (a desktop restart
     // gets a fresh loopback origin, so localStorage alone cannot survive it).
@@ -115,7 +109,6 @@
       unlistenNotice = un;
     });
     return () => {
-      document.documentElement.classList.remove("chan-command-overlay");
       unlistenAttention?.();
       unlistenRestored?.();
       unlistenUpdate?.();
@@ -149,9 +142,6 @@
   });
 </script>
 
-{#if commandOverlay}
-  <CommandLauncher nativeOverlay />
-{:else}
 <TopBar />
 
 <main class="content" class:with-bulk-bar={!readOnly && checksVisible()}>
@@ -212,7 +202,6 @@
       </button>
     </div>
   </Modal>
-{/if}
 {/if}
 
 <style>

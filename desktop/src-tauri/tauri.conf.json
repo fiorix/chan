@@ -12,7 +12,6 @@
   },
   "app": {
     "withGlobalTauri": true,
-    "macOSPrivateApi": true,
     "windows": [],
     "security": {
       "csp": "default-src 'self'; img-src 'self' data: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src 'self' https://www.youtube-nocookie.com https://www.google.com"
