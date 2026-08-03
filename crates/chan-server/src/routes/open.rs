@@ -7,9 +7,9 @@
 //! target resolves against the workspace root, an absolute one passes
 //! verbatim -- and rides [`crate::control_socket::open_path`]: directory ->
 //! file browser, editable/sniffed text -> editor tab, missing -> create empty
-//! and open, binary -> refusal. The SEMANTICS live in those two control-socket
-//! fns and are never reimplemented here, so `cs open` and the launcher command
-//! cannot drift. The resulting `open_browser` / `open_file` /
+//! and open, binary -> file browser reveal. The SEMANTICS live in those two
+//! control-socket fns and are never reimplemented here, so `cs open` and the
+//! launcher command cannot drift. The resulting `open_browser` / `open_file` /
 //! `open_graph_link` window commands ride the existing `/ws` broadcast back to
 //! the submitting window; the HTTP reply is just the queued/refused ack
 //! (Contract C: 200 `{message}` / 400 `{error}`).
@@ -47,8 +47,7 @@ pub struct OpenRequest {
 
 /// `POST /api/open` - queue an open for `target` in the submitting window.
 /// 200 `{message}` when the window command was queued, 400 `{error}` on any
-/// refusal (empty fields, binary target, workspace escape, no connected
-/// window).
+/// refusal (empty fields, workspace escape, no connected window).
 pub async fn api_open(
     State(state): State<Arc<AppState>>,
     Json(req): Json<OpenRequest>,
@@ -255,6 +254,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_dot_queues_workspace_root_browser() {
+        let (_cfg, _root, mut rx, router, _guard) = test_router();
+        let (status, body) = post_open(router, ".").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["message"], "open request queued for /");
+        let frame = next_frame(&mut rx);
+        assert_eq!(frame["command"], "open_browser");
+        assert_eq!(frame["path"], "");
+        assert_eq!(frame["enter"], true);
+        assert!(frame.get("select").is_none());
+    }
+
+    #[tokio::test]
     async fn open_text_file_queues_open_file() {
         let (_cfg, root, mut rx, router, _guard) = test_router();
         std::fs::write(root.path().join("notes.md"), "hello\n").unwrap();
@@ -280,13 +292,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_binary_file_refuses_with_400() {
+    async fn open_binary_file_queues_parent_reveal() {
         let (_cfg, root, mut rx, router, _guard) = test_router();
-        std::fs::write(root.path().join("img.png"), b"\x89PNG\r\n\x1a\n\x00\x00").unwrap();
-        let (status, body) = post_open(router, "img.png").await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "cannot open binary file img.png");
-        assert!(rx.try_recv().is_err(), "no window command may queue");
+        std::fs::create_dir(root.path().join("media")).unwrap();
+        std::fs::write(
+            root.path().join("media/img.png"),
+            b"\x89PNG\r\n\x1a\n\x00\x00",
+        )
+        .unwrap();
+        let (status, body) = post_open(router, "media/img.png").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["message"], "open request queued for media/img.png");
+        let frame = next_frame(&mut rx);
+        assert_eq!(frame["command"], "open_browser");
+        assert_eq!(frame["path"], "media");
+        assert_eq!(frame["select"], "media/img.png");
+        assert!(frame.get("enter").is_none());
     }
 
     #[tokio::test]
@@ -302,6 +323,21 @@ mod tests {
         let created = root.path().join("fresh.md");
         assert!(created.is_file(), "created empty on disk");
         assert_eq!(std::fs::read_to_string(created).unwrap(), "");
+    }
+
+    #[tokio::test]
+    async fn open_missing_binary_class_path_stays_refused() {
+        let (_cfg, root, mut rx, router, _guard) = test_router();
+        let (status, body) = post_open(router, "missing.png").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("path is not editable text: missing.png")),
+            "{body}"
+        );
+        assert!(!root.path().join("missing.png").exists());
+        assert!(rx.try_recv().is_err(), "no window command may queue");
     }
 
     #[tokio::test]
