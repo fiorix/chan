@@ -173,3 +173,19 @@ smoke does not need a codec matrix.
 - No audio playlist or mixed-media previous/next navigation.
 - No File Browser tab reuse or deduplication.
 - No change to the bounded `/api/files` transfer model.
+
+## Implementation evidence
+
+- `432a1eef` changes the shared `open_path` non-text branch to emit `OpenBrowser` with the file's parent, selected relative path, `enter: false`, and the caller's destination. The SPA reveal handler keeps the selection and inspector in place, then asks the shared media router to raise any supported viewer.
+- `5261d365` adds exact, case-insensitive `.mp3`, `.wav`, `.aif`, `.aiff`, and `.ogg` response MIME types and pins `POST /api/open` to the shared reveal behavior. No Rust media classifier, transfer path, or wire kind was added.
+- `472b3d5a` adds the standalone audio classifier, shared media routing, tokenized inline inspector player, `View Audio` action, and setless audio viewer. Both players use native controls with metadata preload and no autoplay. Viewer close, Escape, and backdrop dismissal pause playback, remove the source, call `load()`, remove the key listener, and remove the viewer. Decode failures keep the reveal and render the exact unsupported-format message locally.
+- `aabef550` adds `22-cs-open-audio.mjs`, which generates a deterministic three-second PCM WAV and drives the real control socket, File Browser, inspector, authenticated file route, and native browser audio element.
+
+## Validation evidence
+
+- `cargo test -p chan-server open_path_` passed 6 tests. `cargo test -p chan-server routes::open::tests` passed 13 tests. `cargo test -p chan-server content_type_for_maps_audio_case_insensitively` passed its case-insensitive MIME table test.
+- `npx vitest run src/state/store.test.ts` passed 56 tests. `npx vitest run src/state/audioViewer.test.ts src/state/fileTypes.test.ts src/state/mediaOpen.test.ts src/components/fileInfoAudio.test.ts src/components/inspectorActionsLayout.test.ts` passed 36 tests, including classification, routing, no-autoplay, token URL, exact error, and all three teardown paths.
+- `npm run build --workspace=@chan/workspace-app` passed, followed by `cargo build -p chan` against the fresh embedded bundle.
+- With `TMPDIR=/home/fiorix/.cache/chan-v084-open-tmp`, `SMOKE_SKIP_BUILD=1 SMOKE_ONLY=22 node scripts/e2e/browser-smoke/run.mjs` passed in 1.355 seconds. It observed the browser-tab count change from 1 to 2, a selected `audio-smoke.wav`, both paused tokenized players, a three-second duration, a `206 audio/wav` byte-range response, advancing playback, a seek to 2.1 seconds, complete viewer teardown, and the retained inline inspector player.
+- `cargo fmt` passed before every commit. `node --check scripts/e2e/browser-smoke/checks/22-cs-open-audio.mjs` and scoped `git diff --check` passed.
+- The broader shared-tree reruns remain blocked outside this item. `cargo clippy -p chan-server --all-targets -- -D warnings` currently fails on peer-owned incomplete `ServerFrame::Session` test initializers in `routes/terminal.rs:1575` and `routes/terminal.rs:1591`. `npm run check` passes launcher, marketing, and profile, then reports only active Hybrid Nav WIP diagnostics in `Pane.svelte`, `App.svelte`, and their pane-mode tests. No diagnostic names an audio-owned file; the lead owns the final integrated gate after peer lanes settle.
