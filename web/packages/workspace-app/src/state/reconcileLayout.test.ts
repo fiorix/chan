@@ -214,7 +214,9 @@ describe("reconcileLayout in-place subset", () => {
     expect(pane.theme).toBe("dark");
 
     // Absence means "follow global": the override clears, it does not stick.
-    expect(reconcileLayout({ k: "l", t: [{ p: "notes/a.md" }] })).toBe("applied");
+    expect(reconcileLayout({ k: "l", t: [{ p: "notes/a.md" }] })).toBe(
+      "applied",
+    );
     expect(pane.theme).toBeUndefined();
   });
 
@@ -226,7 +228,9 @@ describe("reconcileLayout in-place subset", () => {
     );
     expect(layout.focusColor).toBe("green");
 
-    expect(reconcileLayout({ k: "l", t: [{ p: "notes/a.md" }] })).toBe("applied");
+    expect(reconcileLayout({ k: "l", t: [{ p: "notes/a.md" }] })).toBe(
+      "applied",
+    );
     expect(layout.focusColor).toBe("blue");
   });
 
@@ -294,9 +298,9 @@ describe("reconcileLayout tab-set sync", () => {
     const pane = resetLayout([fileTab(), keep]);
     pane.activeTabId = "file-1";
 
-    expect(
-      reconcileLayout({ k: "l", t: [{ p: "notes/b.md", a: 1 }] }),
-    ).toBe("applied");
+    expect(reconcileLayout({ k: "l", t: [{ p: "notes/b.md", a: 1 }] })).toBe(
+      "applied",
+    );
     expect(pane.tabs).toHaveLength(1);
     expect(pane.tabs[0]!.id).toBe("file-keep");
     expect(pane.activeTabId).toBe("file-keep");
@@ -306,7 +310,10 @@ describe("reconcileLayout tab-set sync", () => {
     const pane = resetLayout([fileTab()]);
     const remote: SerNode = {
       k: "l",
-      t: [{ p: "notes/a.md" }, { k: "t", n: "peer term", tsid: "ts-peer", tc: 1 }],
+      t: [
+        { p: "notes/a.md" },
+        { k: "t", n: "peer term", tsid: "ts-peer", tc: 1 },
+      ],
     };
 
     expect(reconcileLayout(remote)).toBe("applied");
@@ -521,15 +528,41 @@ describe("reconcileLayout protection rules", () => {
     expect(root.activeTabId).toBe("file-b");
   });
 
-  test("an active pane-mode transaction refuses the apply", async () => {
+  test("an active pane-mode transaction applies an excluded-only update", async () => {
     const pane = resetLayout([fileTab()]);
-    const { enterPaneMode, cancelPaneMode } = await import("./tabs.svelte");
+    const { enterPaneMode, cancelPaneMode, paneMode } =
+      await import("./tabs.svelte");
     enterPaneMode();
     try {
       expect(
-        reconcileLayout({ k: "l", t: [{ p: "notes/a.md" }], wc: "g" }),
-      ).toBe("diverged");
-      expect(layout.focusColor).toBe("blue");
+        reconcileLayout({
+          k: "l",
+          t: [{ p: "notes/a.md", a: 1 }],
+          f: 1,
+          wc: "g",
+        }),
+      ).toBe("applied");
+      expect(layout.focusColor).toBe("green");
+      expect(paneMode.stale).toBe(false);
+      expect(pane.tabs).toHaveLength(1);
+    } finally {
+      cancelPaneMode();
+    }
+  });
+
+  test("an active pane-mode transaction defers a conflicting update", async () => {
+    const pane = resetLayout([fileTab()]);
+    const { enterPaneMode, cancelPaneMode, paneMode } =
+      await import("./tabs.svelte");
+    const remote: SerNode = {
+      k: "l",
+      t: [{ p: "notes/a.md" }, { p: "notes/b.md" }],
+    };
+    enterPaneMode();
+    try {
+      expect(reconcileLayout(remote)).toBe("deferred");
+      expect(paneMode.stale).toBe(true);
+      expect(paneMode.pendingRemoteLayout).toEqual(remote);
       expect(pane.tabs).toHaveLength(1);
     } finally {
       cancelPaneMode();
@@ -539,10 +572,7 @@ describe("reconcileLayout protection rules", () => {
 
 describe("reconcileLayout idempotence and echo", () => {
   test("applying the same remote twice is a no-op", () => {
-    resetSplitLayout(
-      [fileTab()],
-      [terminalTab({ terminalSessionId: "ts-1" })],
-    );
+    resetSplitLayout([fileTab()], [terminalTab({ terminalSessionId: "ts-1" })]);
     const remote: SerNode = {
       k: "s",
       d: "r",

@@ -18,7 +18,14 @@ import {
   onWatchEvent,
   scheduleSessionSave,
 } from "./store.svelte";
-import { layout, type FileTab, type LeafNode } from "./tabs.svelte";
+import {
+  cancelPaneMode,
+  enterPaneMode,
+  layout,
+  paneMode,
+  type FileTab,
+  type LeafNode,
+} from "./tabs.svelte";
 
 function fileTab(partial: Partial<FileTab> = {}): FileTab {
   return {
@@ -64,7 +71,9 @@ function resetLayout(): LeafNode {
 /// A remote payload congruent with `resetLayout()`'s tree, carrying one
 /// observable in-place change (focus color green).
 function remotePayload(): unknown {
-  return { layout: { k: "l", t: [{ p: "notes/a.md", m: "wysiwyg" }], wc: "g" } };
+  return {
+    layout: { k: "l", t: [{ p: "notes/a.md", m: "wysiwyg" }], wc: "g" },
+  };
 }
 
 function fireFrame(frame: Record<string, unknown>): void {
@@ -73,6 +82,7 @@ function fireFrame(frame: Record<string, unknown>): void {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  cancelPaneMode();
   resetLayout();
   // Normalize module state: clear any pending save timer + the dedupe
   // snapshot, then re-arm saves.
@@ -82,6 +92,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  cancelPaneMode();
   // Drain armed sync/save timers while the api mocks are still in place,
   // so no callback leaks into the next test's clock.
   await vi.runOnlyPendingTimersAsync();
@@ -91,7 +102,9 @@ afterEach(async () => {
 
 describe("session_changed frame filter", () => {
   test("a foreign-nonce frame for this window refetches and reconciles", async () => {
-    const getSession = vi.spyOn(api, "getSession").mockResolvedValue(remotePayload());
+    const getSession = vi
+      .spyOn(api, "getSession")
+      .mockResolvedValue(remotePayload());
 
     fireFrame({ w: sessionWindowId(), client: "peer-nonce" });
     expect(getSession).not.toHaveBeenCalled();
@@ -102,7 +115,9 @@ describe("session_changed frame filter", () => {
   });
 
   test("a frame without a client nonce is treated as foreign", async () => {
-    const getSession = vi.spyOn(api, "getSession").mockResolvedValue(remotePayload());
+    const getSession = vi
+      .spyOn(api, "getSession")
+      .mockResolvedValue(remotePayload());
 
     fireFrame({ w: sessionWindowId() });
     await vi.advanceTimersByTimeAsync(250);
@@ -111,7 +126,9 @@ describe("session_changed frame filter", () => {
   });
 
   test("drops own-nonce echoes", async () => {
-    const getSession = vi.spyOn(api, "getSession").mockResolvedValue(remotePayload());
+    const getSession = vi
+      .spyOn(api, "getSession")
+      .mockResolvedValue(remotePayload());
 
     fireFrame({ w: sessionWindowId(), client: clientNonce() });
     await vi.advanceTimersByTimeAsync(1000);
@@ -120,7 +137,9 @@ describe("session_changed frame filter", () => {
   });
 
   test("drops frames for another window", async () => {
-    const getSession = vi.spyOn(api, "getSession").mockResolvedValue(remotePayload());
+    const getSession = vi
+      .spyOn(api, "getSession")
+      .mockResolvedValue(remotePayload());
 
     fireFrame({ w: "someone-elses-window", client: "peer-nonce" });
     await vi.advanceTimersByTimeAsync(1000);
@@ -129,7 +148,9 @@ describe("session_changed frame filter", () => {
   });
 
   test("a deleted frame never refetches or tears down live tabs", async () => {
-    const getSession = vi.spyOn(api, "getSession").mockResolvedValue(remotePayload());
+    const getSession = vi
+      .spyOn(api, "getSession")
+      .mockResolvedValue(remotePayload());
 
     fireFrame({ w: sessionWindowId(), client: "peer-nonce", deleted: true });
     await vi.advanceTimersByTimeAsync(1000);
@@ -140,7 +161,9 @@ describe("session_changed frame filter", () => {
 
   test("drops frames before bootstrap hydration", async () => {
     __testSetBootstrapHydrated(false);
-    const getSession = vi.spyOn(api, "getSession").mockResolvedValue(remotePayload());
+    const getSession = vi
+      .spyOn(api, "getSession")
+      .mockResolvedValue(remotePayload());
 
     fireFrame({ w: sessionWindowId(), client: "peer-nonce" });
     await vi.advanceTimersByTimeAsync(1000);
@@ -150,7 +173,9 @@ describe("session_changed frame filter", () => {
   });
 
   test("a frame burst coalesces into one refetch", async () => {
-    const getSession = vi.spyOn(api, "getSession").mockResolvedValue(remotePayload());
+    const getSession = vi
+      .spyOn(api, "getSession")
+      .mockResolvedValue(remotePayload());
 
     fireFrame({ w: sessionWindowId(), client: "peer-nonce" });
     fireFrame({ w: sessionWindowId(), client: "peer-nonce" });
@@ -162,6 +187,50 @@ describe("session_changed frame filter", () => {
 });
 
 describe("session sync apply pipeline", () => {
+  test("queues only the newest Pane Mode conflict without save-back", async () => {
+    enterPaneMode();
+    const first = {
+      layout: { k: "l", t: [{ p: "notes/a.md" }], wc: "o" },
+    };
+    const newest = {
+      layout: { k: "l", t: [{ p: "notes/a.md" }], wc: "g" },
+    };
+    vi.spyOn(api, "getSession")
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(newest);
+    const putSession = vi.spyOn(api, "putSession").mockResolvedValue(undefined);
+
+    fireFrame({ w: sessionWindowId(), client: "peer-nonce" });
+    await vi.advanceTimersByTimeAsync(250);
+    expect(paneMode.stale).toBe(true);
+    expect(paneMode.pendingRemoteLayout).toEqual(first.layout);
+    expect(layout.focusColor).toBe("blue");
+
+    fireFrame({ w: sessionWindowId(), client: "peer-nonce" });
+    await vi.advanceTimersByTimeAsync(250);
+    expect(paneMode.pendingRemoteLayout).toEqual(newest.layout);
+    await vi.advanceTimersByTimeAsync(750);
+    expect(putSession).not.toHaveBeenCalled();
+
+    cancelPaneMode();
+    expect(layout.focusColor).toBe("green");
+    expect(paneMode.pendingRemoteLayout).toBeNull();
+    expect(putSession).not.toHaveBeenCalled();
+  });
+
+  test("ordinarily reconciles an excluded-only update during Pane Mode", async () => {
+    enterPaneMode();
+    vi.spyOn(api, "getSession").mockResolvedValue({
+      layout: { k: "l", t: [{ p: "notes/a.md", a: 1 }], f: 1, wc: "g" },
+    });
+
+    fireFrame({ w: sessionWindowId(), client: "peer-nonce" });
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(paneMode.stale).toBe(false);
+    expect(layout.focusColor).toBe("green");
+  });
+
   test("a clean apply pre-seeds the save dedupe so the reactive echo save no-ops", async () => {
     vi.spyOn(api, "getSession").mockResolvedValue(remotePayload());
     const putSession = vi.spyOn(api, "putSession").mockResolvedValue(undefined);
@@ -211,7 +280,9 @@ describe("session sync apply pipeline", () => {
   });
 
   test("an inbound frame racing a pending local save flushes the save and refetches after", async () => {
-    const getSession = vi.spyOn(api, "getSession").mockResolvedValue(remotePayload());
+    const getSession = vi
+      .spyOn(api, "getSession")
+      .mockResolvedValue(remotePayload());
     const putSession = vi.spyOn(api, "putSession").mockResolvedValue(undefined);
 
     // Local edit sits in the 750ms debounce...
@@ -254,7 +325,9 @@ describe("session sync apply pipeline", () => {
     // DELETE at boot; a hard suppression here would deadlock the pair
     // (neither side could ever PUT again). The deleted frame must only
     // dedupe the echo, not stop the pipeline.
-    const getSession = vi.spyOn(api, "getSession").mockResolvedValue(remotePayload());
+    const getSession = vi
+      .spyOn(api, "getSession")
+      .mockResolvedValue(remotePayload());
     const putSession = vi.spyOn(api, "putSession").mockResolvedValue(undefined);
 
     fireFrame({ w: sessionWindowId(), client: "peer-nonce", deleted: true });
@@ -274,7 +347,9 @@ describe("session sync apply pipeline", () => {
   });
 
   test("a local discard is never lifted by a peer write", async () => {
-    const getSession = vi.spyOn(api, "getSession").mockResolvedValue(remotePayload());
+    const getSession = vi
+      .spyOn(api, "getSession")
+      .mockResolvedValue(remotePayload());
 
     discardWindowSessionLocal();
     fireFrame({ w: sessionWindowId(), client: "peer-nonce" });

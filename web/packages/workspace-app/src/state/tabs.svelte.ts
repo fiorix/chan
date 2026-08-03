@@ -1120,6 +1120,12 @@ export type PaneModeSpawnIntent = {
   ctx: SpawnContext;
 };
 export type PaneModeDraftEditorKind = "draft" | "diagram";
+export interface PaneModeStagedDraftEditor {
+  id: string;
+  paneId: string;
+  side: PaneSide;
+  kind: PaneModeDraftEditorKind;
+}
 
 /// Mouse-driven variant of Hybrid Nav. Entered by drag-from-dead-zone
 /// (sets `grabPaneId` to the originating pane) or by double-click on
@@ -1134,15 +1140,14 @@ export const paneMode = $state<{
   transactionMode: boolean;
   grabPaneId: string | null;
   hoverPaneId: string | null;
+  stale: boolean;
+  entryLayout: SerNode | null;
+  pendingRemoteLayout: SerNode | null;
   /// Queue of "new draft editor" intents staged during the current
   /// pane-mode session. Materialized on Enter (commit); discarded on
   /// Esc (cancel). Each entry pins the target paneId at press time so
   /// later focus changes don't redirect materialization.
-  stagedDraftEditors: {
-    paneId: string;
-    side: PaneSide;
-    kind: PaneModeDraftEditorKind;
-  }[];
+  stagedDraftEditors: PaneModeStagedDraftEditor[];
 }>({
   active: false,
   draft: null,
@@ -1150,10 +1155,13 @@ export const paneMode = $state<{
   transactionMode: false,
   grabPaneId: null,
   hoverPaneId: null,
+  stale: false,
+  entryLayout: null,
+  pendingRemoteLayout: null,
   stagedDraftEditors: [],
 });
 
-type PaneModeSettledSink = () => void;
+type PaneModeSettledSink = (pendingRemoteLayout: SerNode | null) => void;
 const paneModeSettledSinks = new Set<PaneModeSettledSink>();
 
 /// Register work that must run only after Hybrid Nav's draft has either
@@ -1168,8 +1176,8 @@ export function registerPaneModeSettledSink(
   };
 }
 
-function notifyPaneModeSettled(): void {
-  for (const sink of paneModeSettledSinks) sink();
+function notifyPaneModeSettled(pendingRemoteLayout: SerNode | null = null): void {
+  for (const sink of paneModeSettledSinks) sink(pendingRemoteLayout);
 }
 
 /// Single-fire wobble bus. Each pane's entry holds a monotonic
@@ -1890,6 +1898,7 @@ function applyTerminalLiveMetadata(
   if (changed) {
     tab.terminalEnvNamePromptDismissed = false;
     tab.terminalEnvPromptDismissedFor = undefined;
+    paneModeMarkStaleForAuthoritativeMetadata();
   }
   return settled;
 }
@@ -3723,6 +3732,9 @@ export function enterPaneMode(): void {
   paneMode.transactionMode = false;
   paneMode.grabPaneId = null;
   paneMode.hoverPaneId = null;
+  paneMode.stale = false;
+  paneMode.entryLayout = serializeLayout({ terminalSessions: true });
+  paneMode.pendingRemoteLayout = null;
   paneMode.stagedDraftEditors = [];
   notifyPaneModeSettled();
 }
@@ -3732,10 +3744,15 @@ export function enterPaneMode(): void {
 /// double-click on the dead zone (standby until the user clicks and
 /// drags inside any pane). Idempotent if already in transaction mode.
 export function enterPaneModeTransaction(grabPaneId: string | null): void {
+  if (paneMode.stale) return;
   if (!paneMode.active) {
     paneMode.draft = cloneLayoutState(layout);
     paneMode.active = true;
     paneMode.spawnIntent = null;
+    paneMode.stale = false;
+    paneMode.entryLayout = serializeLayout({ terminalSessions: true });
+    paneMode.pendingRemoteLayout = null;
+    paneMode.stagedDraftEditors = [];
   }
   paneMode.transactionMode = true;
   paneMode.grabPaneId = grabPaneId;
@@ -3746,19 +3763,19 @@ export function enterPaneModeTransaction(grabPaneId: string | null): void {
 /// or re-grabs a different pane mid-transaction. No-op outside
 /// transaction mode.
 export function paneModeSetGrab(paneId: string | null): void {
-  if (!paneMode.transactionMode) return;
+  if (!paneMode.transactionMode || paneMode.stale) return;
   paneMode.grabPaneId = paneId;
 }
 
 /// Track the pane currently under the cursor while a grab is held.
 /// Drives the drop-target highlight. No-op outside transaction mode.
 export function paneModeSetHover(paneId: string | null): void {
-  if (!paneMode.transactionMode) return;
+  if (!paneMode.transactionMode || paneMode.stale) return;
   paneMode.hoverPaneId = paneId;
 }
 
 export function commitPaneMode(): void {
-  if (!paneMode.active || !paneMode.draft) return;
+  if (!paneMode.active || !paneMode.draft || paneMode.stale) return;
   // Apply any staged spawn intent into the draft before sealing so the
   // new tab lands as part of the same transaction. Callers that prime
   // side effects for a staged spawn (e.g. `revealAndSelect` for a
@@ -3780,20 +3797,27 @@ export function commitPaneMode(): void {
   paneMode.transactionMode = false;
   paneMode.grabPaneId = null;
   paneMode.hoverPaneId = null;
+  paneMode.stale = false;
+  paneMode.entryLayout = null;
+  paneMode.pendingRemoteLayout = null;
   paneMode.stagedDraftEditors = [];
   notifyPaneModeSettled();
 }
 
 export function cancelPaneMode(): void {
   killStagedTerminalSessions();
+  const pendingRemoteLayout = paneMode.pendingRemoteLayout;
   paneMode.active = false;
   paneMode.draft = null;
   paneMode.spawnIntent = null;
   paneMode.transactionMode = false;
   paneMode.grabPaneId = null;
   paneMode.hoverPaneId = null;
+  paneMode.stale = false;
+  paneMode.entryLayout = null;
+  paneMode.pendingRemoteLayout = null;
   paneMode.stagedDraftEditors = [];
-  notifyPaneModeSettled();
+  notifyPaneModeSettled(pendingRemoteLayout);
 }
 
 /// Kill the PTYs of terminals that exist ONLY in the draft. Staged
@@ -3828,18 +3852,19 @@ export function paneModeStageSpawn(
   kind: PaneModeSpawnKind,
   ctx: SpawnContext,
 ): void {
-  if (!paneMode.active) return;
+  if (!paneMode.active || paneMode.stale) return;
   paneMode.spawnIntent = { kind, ctx };
 }
 
 export function clearPaneModeSpawnIntent(): void {
+  if (paneMode.stale) return;
   paneMode.spawnIntent = null;
 }
 
 type Direction = "left" | "right" | "up" | "down";
 
 function draftLayout(): LayoutState | null {
-  return paneMode.active ? paneMode.draft : null;
+  return paneMode.active && !paneMode.stale ? paneMode.draft : null;
 }
 
 function parentOf(state: LayoutState, childId: string): SplitNode | null {
@@ -4316,16 +4341,12 @@ export function openIndexingDashboard(): void {
 /// multiple staged drafts, each targeting the pane focused at press
 /// time. `paneModeMaterializeStagedDrafts()` is the commit-time
 /// resolver.
-export interface StagedDraftEditor {
-  paneId: string;
-  side: PaneSide;
-  kind: PaneModeDraftEditorKind;
-}
 export function paneModeStageDraftEditor(kind: PaneModeDraftEditorKind = "draft"): void {
-  if (!paneMode.active || !paneMode.draft) return;
+  if (!paneMode.active || !paneMode.draft || paneMode.stale) return;
   const paneId = paneMode.draft.activePaneId;
   const node = leafPaneFrom(paneMode.draft, paneId);
   paneMode.stagedDraftEditors.push({
+    id: id("staged-editor"),
     paneId,
     side: node ? paneSide(node) : "a",
     kind,
@@ -4334,6 +4355,22 @@ export function paneModeStageDraftEditor(kind: PaneModeDraftEditorKind = "draft"
 
 export function paneModeStageDiagramEditor(): void {
   paneModeStageDraftEditor("diagram");
+}
+
+export function paneModeStagedDraftEditorsFor(
+  paneId: string,
+  side: PaneSide,
+): PaneModeStagedDraftEditor[] {
+  if (!paneMode.active) return [];
+  return paneMode.stagedDraftEditors.filter(
+    (intent) => intent.paneId === paneId && intent.side === side,
+  );
+}
+
+export function paneModeRemoveStagedDraftEditor(id: string): void {
+  if (!paneMode.active || paneMode.stale) return;
+  const index = paneMode.stagedDraftEditors.findIndex((intent) => intent.id === id);
+  if (index >= 0) paneMode.stagedDraftEditors.splice(index, 1);
 }
 
 /// Return the set of tab ids that exist in the draft but not in the
@@ -5403,6 +5440,213 @@ export type SerSplit = {
 };
 export type SerNode = SerLeaf | SerSplit;
 
+type PaneModeConflictFieldPartition = {
+  readonly included: readonly string[];
+  readonly excluded: readonly string[];
+};
+
+/// Closed declaration of the serialized fields that do and do not belong to
+/// Hybrid Nav's conflict domain. The comparator validates runtime keys against
+/// these partitions before reading the included fields, so an unclassified
+/// future field fails closed instead of silently acquiring semantics.
+export const paneModeConflictFieldSets = {
+  node: {
+    included: ["k", "d", "r", "a", "b", "t", "bt", "sb", "f"],
+    excluded: ["wc", "pc", "ht", "bm", "hb"],
+  },
+  tabs: {
+    f: {
+      included: ["k", "a", "p"],
+      excluded: ["m", "o", "ol", "spo", "sp", "spm", "s", "r", "c", "h", "iw", "ow"],
+    },
+    t: {
+      included: ["k", "a", "n", "tg", "tsid"],
+      excluded: ["tc", "tae", "kp", "rpd", "rpc", "rph", "pp", "rpv", "twk"],
+    },
+    s: { included: ["k", "a"], excluded: [] },
+    h: { included: ["k", "a"], excluded: [] },
+    g: {
+      included: ["k", "a"],
+      excluded: ["gm", "gs", "gd", "gi", "gf", "ge", "gp", "gn", "gnl", "iw"],
+    },
+    b: {
+      included: ["k", "a"],
+      excluded: ["bi", "bs", "bd", "be", "bsc", "iw"],
+    },
+    d: { included: ["k", "a"], excluded: ["cs", "ds", "ar"] },
+    x: { included: ["k", "a", "xi"], excluded: ["n"] },
+  },
+} as const;
+
+function paneModeFieldsAreClassified(
+  value: object,
+  partition: PaneModeConflictFieldPartition,
+): boolean {
+  const declared = new Set([...partition.included, ...partition.excluded]);
+  return Object.keys(value).every((field) => declared.has(field));
+}
+
+function paneModeTabKind(tab: SerTab): NonNullable<SerTab["k"]> {
+  return tab.k ?? "f";
+}
+
+function paneModeIncludedTabFieldEqual(
+  field: string,
+  kind: NonNullable<SerTab["k"]>,
+  baseline: SerTab,
+  incoming: SerTab,
+): boolean {
+  if (field === "k") return paneModeTabKind(baseline) === paneModeTabKind(incoming);
+  if (field === "a") return (baseline.a === 1) === (incoming.a === 1);
+  if (field === "p") return (baseline.p ?? "") === (incoming.p ?? "");
+  if (field === "xi") {
+    return (baseline.xi?.trim() ?? "") === (incoming.xi?.trim() ?? "");
+  }
+  if (field === "n" && kind === "t") {
+    return (
+      (baseline.n?.trim() || "Terminal") ===
+      (incoming.n?.trim() || "Terminal")
+    );
+  }
+  if (field === "tg" && kind === "t") {
+    return (
+      (baseline.tg?.trim() || DEFAULT_TERMINAL_GROUP) ===
+      (incoming.tg?.trim() || DEFAULT_TERMINAL_GROUP)
+    );
+  }
+  if (field === "tsid" && kind === "t") {
+    // A just-attached terminal gains its settled id without becoming a new
+    // inventory item. Once both sides have ids, identity changes are real.
+    return !baseline.tsid || !incoming.tsid || baseline.tsid === incoming.tsid;
+  }
+  return false;
+}
+
+function paneModeTabsSemanticallyEqual(
+  baseline: readonly SerTab[],
+  incoming: readonly SerTab[],
+): boolean {
+  if (baseline.length !== incoming.length) return false;
+  return baseline.every((left, index) => {
+    const right = incoming[index]!;
+    const kind = paneModeTabKind(left);
+    if (kind !== paneModeTabKind(right)) return false;
+    const partition = paneModeConflictFieldSets.tabs[kind];
+    if (
+      !paneModeFieldsAreClassified(left, partition) ||
+      !paneModeFieldsAreClassified(right, partition)
+    ) {
+      return false;
+    }
+    return partition.included.every((field) =>
+      paneModeIncludedTabFieldEqual(field, kind, left, right),
+    );
+  });
+}
+
+function paneModeNodesSemanticallyEqual(
+  baseline: SerNode,
+  incoming: SerNode,
+): boolean {
+  const partition = paneModeConflictFieldSets.node;
+  if (
+    !paneModeFieldsAreClassified(baseline, partition) ||
+    !paneModeFieldsAreClassified(incoming, partition) ||
+    baseline.k !== incoming.k
+  ) {
+    return false;
+  }
+  return partition.included.every((field) => {
+    if (field === "k") return true;
+    if (field === "d") {
+      return baseline.k !== "s" || baseline.d === (incoming as SerSplit).d;
+    }
+    if (field === "r") {
+      return (
+        baseline.k !== "s" ||
+        (baseline.r ?? 0.5) === ((incoming as SerSplit).r ?? 0.5)
+      );
+    }
+    if (field === "a") {
+      return (
+        baseline.k !== "s" ||
+        paneModeNodesSemanticallyEqual(baseline.a, (incoming as SerSplit).a)
+      );
+    }
+    if (field === "b") {
+      return (
+        baseline.k !== "s" ||
+        paneModeNodesSemanticallyEqual(baseline.b, (incoming as SerSplit).b)
+      );
+    }
+    if (field === "t") {
+      return (
+        baseline.k !== "l" ||
+        paneModeTabsSemanticallyEqual(baseline.t, (incoming as SerLeaf).t)
+      );
+    }
+    if (field === "bt") {
+      return (
+        baseline.k !== "l" ||
+        paneModeTabsSemanticallyEqual(
+          baseline.bt ?? [],
+          (incoming as SerLeaf).bt ?? [],
+        )
+      );
+    }
+    if (field === "sb") {
+      return (
+        baseline.k !== "l" ||
+        (baseline.sb === 1) === ((incoming as SerLeaf).sb === 1)
+      );
+    }
+    if (field === "f") {
+      return (
+        baseline.k !== "l" ||
+        (baseline.f === 1) === ((incoming as SerLeaf).f === 1)
+      );
+    }
+    return false;
+  });
+}
+
+export function paneModeLayoutsSemanticallyEqual(
+  baseline: SerNode | null,
+  incoming: SerNode | null,
+): boolean {
+  if (!baseline || !incoming) return baseline === incoming;
+  return paneModeNodesSemanticallyEqual(baseline, incoming);
+}
+
+function clonePaneModeRemoteLayout(layout: SerNode | null): SerNode | null {
+  return layout ? (JSON.parse(JSON.stringify(layout)) as SerNode) : null;
+}
+
+/// Screen an authoritative remote layout against the fixed entry snapshot.
+/// Once stale, every subsequent snapshot replaces the pending value, including
+/// a snapshot that happens to resemble the original baseline.
+export function paneModeDeferRemoteLayout(incoming: SerNode | null): boolean {
+  if (!paneMode.active) return false;
+  if (paneMode.stale) {
+    paneMode.pendingRemoteLayout = clonePaneModeRemoteLayout(incoming);
+    return true;
+  }
+  if (paneModeLayoutsSemanticallyEqual(paneMode.entryLayout, incoming)) {
+    return false;
+  }
+  paneMode.stale = true;
+  paneMode.pendingRemoteLayout = clonePaneModeRemoteLayout(incoming);
+  return true;
+}
+
+/// Authoritative terminal metadata callers invoke this only after detecting
+/// and applying a settled live-pair change. It never manufactures a pending
+/// session snapshot.
+export function paneModeMarkStaleForAuthoritativeMetadata(): void {
+  if (!paneMode.active) return;
+  paneMode.stale = true;
+}
+
 function serializeFocusColor(color: FocusColor | undefined): { wc?: SerFocusColor } {
   if (color === "orange") return { wc: "o" };
   if (color === "green") return { wc: "g" };
@@ -6113,8 +6357,10 @@ export async function restoreLayout(
 /// caller keys echo suppression on this: applied -> pre-seed the
 /// session-save dedupe snapshot so the trailing local save no-ops;
 /// diverged -> leave it unseeded so the next local save pushes the kept
-/// state back to the peer (self-healing).
-export type ReconcileResult = "applied" | "diverged";
+/// state back to the peer (self-healing). "deferred" means an active Pane
+/// Mode transaction retained the conflicting snapshot for Escape and neither
+/// reconciliation nor save-back may run yet.
+export type ReconcileResult = "applied" | "diverged" | "deferred";
 
 /// Non-destructive sibling of `restoreLayout` for live co-view sync:
 /// apply a peer's persisted layout snapshot onto the LIVE tree without
@@ -6142,10 +6388,7 @@ export type ReconcileResult = "applied" | "diverged";
 /// tabs and pane focus survive whenever their objects do, falling back
 /// to the remote markers only when the local target vanished.
 export function reconcileLayout(remote: SerNode): ReconcileResult {
-  // A pane-mode transaction owns the tree (draft + commit/cancel);
-  // applying under it would clobber the draft. Refuse whole; the
-  // unseeded snapshot save-back reconverges after the transaction ends.
-  if (paneMode.active) return "diverged";
+  if (paneModeDeferRemoteLayout(remote)) return "deferred";
   const ctx: ReconcileCtx = {
     diverged: false,
     remoteFocusPaneId: null,
