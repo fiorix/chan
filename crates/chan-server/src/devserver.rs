@@ -5608,6 +5608,8 @@ mod tests {
                 session_id: session_id.into(),
                 tab_name: None,
                 tab_group: None,
+                spawn_name: None,
+                spawn_group: None,
                 window_id: Some(window_id.into()),
                 pane_id: None,
                 side: None,

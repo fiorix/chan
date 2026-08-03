@@ -163,6 +163,10 @@ pub struct Registry {
     /// atomic cell directly.
     terminal_backend_resolver: Mutex<Option<TerminalBackendResolver>>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// Names settled for a create/restart whose PTY is still spawning. A
+    /// reservation prevents another caller from receiving the same name
+    /// without holding `sessions` across openpty/fork/exec.
+    name_reservations: Mutex<HashSet<String>>,
     /// Last PTY process exit observed in this registry. This is sticky at the
     /// tenant/registry level so a control-terminal poller can still see the
     /// script exit after an attached terminal websocket removes the session.
@@ -216,6 +220,10 @@ pub struct Registry {
     /// id but resets `seq` to 0, so without the bumped generation a stale client
     /// `since` cursor would desync silently (empty replay, no warning).
     generation_counter: AtomicU64,
+    /// Unit-test seam that pins multiple creators after reservation but before
+    /// PTY spawn, proving overlap without scheduler timing assumptions.
+    #[cfg(test)]
+    spawn_barrier: Mutex<Option<Arc<std::sync::Barrier>>>,
 }
 
 /// Host-installed hook to reap a terminal WINDOW row when its session is reaped.
@@ -394,6 +402,15 @@ fn parse_terminal_ordinal(name: &str) -> Option<u64> {
 /// to (mirrors the SPA's `terminalTabGroup`).
 pub const DEFAULT_TERMINAL_GROUP: &str = "default";
 
+/// The server-authoritative terminal identity used by inventory, targeting,
+/// and broadcast routing. Name and group share one mutex-backed value so no
+/// reader can observe a pair assembled across two metadata commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveTerminalMetadata {
+    pub name: Option<String>,
+    pub group: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct CreateOptions {
     pub size: PtySize,
@@ -444,6 +461,9 @@ pub struct RestartOverrides {
 pub struct TerminalSessionSummary {
     pub session_id: String,
     pub tab_name: Option<String>,
+    /// Name injected into this PTY incarnation. `None` only when provenance
+    /// is genuinely unknown (for example, an imported legacy manifest).
+    pub spawn_name: Option<String>,
     /// Resolved group (never empty; `DEFAULT_TERMINAL_GROUP` when unset).
     pub tab_group: String,
     /// The window that owns this session (the `?w=` key), or `None` for a session
@@ -509,6 +529,13 @@ pub struct FdStoreSessionMeta {
     pub session_id: String,
     pub tab_name: Option<String>,
     pub tab_group: Option<String>,
+    /// Immutable name/group injected into the current PTY incarnation.
+    /// Defaults preserve compatibility with manifests written before spawn
+    /// provenance was persisted; missing values remain unknown on import.
+    #[serde(default)]
+    pub spawn_name: Option<String>,
+    #[serde(default)]
+    pub spawn_group: Option<String>,
     pub window_id: Option<String>,
     pub pane_id: Option<String>,
     #[serde(default)]
@@ -612,6 +639,15 @@ pub struct RosterEntry {
     /// `set-broadcast` WS frame. Cross-window input is only fanned to
     /// members with this on (see [`Registry::broadcast_input_cross_window`]).
     pub broadcast: bool,
+}
+
+fn live_metadata_matches(
+    metadata: &LiveTerminalMetadata,
+    tab_name: Option<&str>,
+    tab_group: Option<&str>,
+) -> bool {
+    tab_name.is_none_or(|name| metadata.name.as_deref() == Some(name))
+        && tab_group.is_none_or(|group| metadata.group == group)
 }
 
 /// Result of enqueuing a `cs terminal write` onto the matched sessions'
@@ -821,6 +857,23 @@ impl AttachHandle {
         self.session.spawn_opts.env.get(key).map(String::as_str)
     }
 
+    /// Current server-authoritative live name/group pair.
+    pub fn live_metadata(&self) -> LiveTerminalMetadata {
+        self.session.live_metadata()
+    }
+
+    /// Immutable name injected into this PTY incarnation, or unknown after a
+    /// legacy fd-store import.
+    pub fn spawn_name(&self) -> Option<&str> {
+        self.session.spawn_name.as_deref()
+    }
+
+    /// Immutable group injected into this PTY incarnation, or unknown after a
+    /// legacy fd-store import.
+    pub fn spawn_group(&self) -> Option<&str> {
+        self.session.spawn_group.as_deref()
+    }
+
     pub fn send_input(&self, data: &[u8]) {
         self.session.send_input(data);
     }
@@ -957,6 +1010,36 @@ impl Drop for AttachHandle {
     }
 }
 
+/// A name held while one PTY incarnation is being spawned. Dropping an
+/// uncommitted reservation releases it, including every early spawn error.
+struct MetadataReservation<'a> {
+    reservations: &'a Mutex<HashSet<String>>,
+    metadata: LiveTerminalMetadata,
+    name: String,
+    active: bool,
+}
+
+impl MetadataReservation<'_> {
+    fn release_locked(&mut self, reservations: &mut HashSet<String>) {
+        if self.active {
+            let removed = reservations.remove(&self.name);
+            debug_assert!(removed, "active terminal name reservation disappeared");
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for MetadataReservation<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.reservations
+                .lock()
+                .expect("terminal name reservations poisoned")
+                .remove(&self.name);
+        }
+    }
+}
+
 impl Registry {
     pub fn new(config: RegistryConfig) -> Self {
         let terminal_ghostty = config.terminal.ghostty;
@@ -965,6 +1048,7 @@ impl Registry {
             terminal_ghostty: AtomicBool::new(terminal_ghostty),
             terminal_backend_resolver: Mutex::new(None),
             sessions: Mutex::new(HashMap::new()),
+            name_reservations: Mutex::new(HashSet::new()),
             last_exit: Arc::new(Mutex::new(None)),
             roster_notify: Arc::new(Notify::new()),
             default_command: Mutex::new(None),
@@ -974,6 +1058,8 @@ impl Registry {
             #[cfg(target_os = "linux")]
             fd_parker: Mutex::new(None),
             generation_counter: AtomicU64::new(0),
+            #[cfg(test)]
+            spawn_barrier: Mutex::new(None),
         }
     }
 
@@ -1103,6 +1189,93 @@ impl Registry {
         }
     }
 
+    /// Settle one complete live metadata value against the sessions and
+    /// in-flight spawn reservations already locked by the caller. The caller
+    /// decides whether to reserve the result for a spawn or commit it directly
+    /// to an existing session.
+    fn settle_metadata_locked(
+        sessions: &HashMap<String, Arc<Session>>,
+        reservations: &HashSet<String>,
+        proposed_name: Option<String>,
+        proposed_group: Option<String>,
+        exclude_id: Option<&str>,
+    ) -> LiveTerminalMetadata {
+        let name_taken = |candidate: &str| {
+            reservations.contains(candidate)
+                || sessions.iter().any(|(id, session)| {
+                    exclude_id != Some(id.as_str())
+                        && !session.closed.load(Ordering::Relaxed)
+                        && session.live_metadata().name.as_deref() == Some(candidate)
+                })
+        };
+
+        let proposed_name = proposed_name.filter(|name| !name.is_empty());
+        let name = match proposed_name {
+            Some(base) if !name_taken(&base) => base,
+            Some(base) => (2u64..)
+                .map(|suffix| format!("{base}-{suffix}"))
+                .find(|candidate| !name_taken(candidate))
+                .expect("the naturals always contain a free terminal suffix"),
+            None => (1u64..)
+                .map(|suffix| format!("Terminal-{suffix}"))
+                .find(|candidate| !name_taken(candidate))
+                .expect("the naturals always contain a free terminal name"),
+        };
+        LiveTerminalMetadata {
+            name: Some(name),
+            group: proposed_group
+                .filter(|group| !group.is_empty())
+                .unwrap_or_else(|| DEFAULT_TERMINAL_GROUP.to_string()),
+        }
+    }
+
+    /// Settle and reserve metadata for a PTY spawn without retaining the
+    /// registry lock across PTY creation. The returned guard releases the
+    /// reservation on every error path unless insertion consumes it.
+    fn reserve_metadata(
+        &self,
+        proposed_name: Option<String>,
+        proposed_group: Option<String>,
+        exclude_id: Option<&str>,
+    ) -> MetadataReservation<'_> {
+        let sessions = self.sessions.lock().expect("terminal registry poisoned");
+        let mut reservations = self
+            .name_reservations
+            .lock()
+            .expect("terminal name reservations poisoned");
+        let metadata = Self::settle_metadata_locked(
+            &sessions,
+            &reservations,
+            proposed_name,
+            proposed_group,
+            exclude_id,
+        );
+        let name = metadata
+            .name
+            .clone()
+            .expect("settled spawn metadata always has a name");
+        let inserted = reservations.insert(name.clone());
+        debug_assert!(inserted, "settlement returned a reserved terminal name");
+        MetadataReservation {
+            reservations: &self.name_reservations,
+            metadata,
+            name,
+            active: true,
+        }
+    }
+
+    #[cfg(test)]
+    fn wait_at_spawn_barrier(&self) {
+        let barrier = self
+            .spawn_barrier
+            .lock()
+            .expect("terminal spawn barrier poisoned")
+            .clone();
+        if let Some(barrier) = barrier {
+            barrier.wait();
+        }
+    }
+
     /// Hand out the next per-tenant default terminal name: the LOWEST-FREE
     /// `Terminal-N` (`N >= 1`) not currently in use by a live session, so a
     /// number freed by a closed terminal is reused (open Terminal-1 +
@@ -1112,16 +1285,29 @@ impl Registry {
     /// registry; each workspace has its own.
     ///
     /// This only SUGGESTS a name (the session isn't registered until the WS
-    /// spawn), so two near-simultaneous calls before either spawns can both
-    /// see the same free slot; the frontend `uniqueTerminalName` is the final
-    /// tenant-wide dedup that resolves that rare race.
+    /// spawn), so two near-simultaneous calls can receive the same suggestion.
+    /// Creation settles and reserves the final unique name server-side.
     pub fn next_terminal_name(&self) -> String {
         let taken: HashSet<u64> = {
             let sessions = self.sessions.lock().expect("terminal registry poisoned");
+            let reservations = self
+                .name_reservations
+                .lock()
+                .expect("terminal name reservations poisoned");
             sessions
                 .values()
                 .filter(|s| !s.closed.load(Ordering::Relaxed))
-                .filter_map(|s| s.tab_name.as_deref().and_then(parse_terminal_ordinal))
+                .filter_map(|s| {
+                    s.live_metadata()
+                        .name
+                        .as_deref()
+                        .and_then(parse_terminal_ordinal)
+                })
+                .chain(
+                    reservations
+                        .iter()
+                        .filter_map(|name| parse_terminal_ordinal(name)),
+                )
                 .collect()
         };
         let n = (1u64..)
@@ -1143,6 +1329,46 @@ impl Registry {
     /// session-field change the map does not see).
     pub fn notify_roster_change(&self) {
         self.roster_notify.notify_one();
+    }
+
+    /// Atomically settle and commit a complete live name/group proposal. The
+    /// current session is excluded from its own collision check, so submitting
+    /// an unchanged name is stable. Returns `None` only when the session is no
+    /// longer live.
+    pub fn update_live_metadata(
+        &self,
+        id: &str,
+        proposed_name: String,
+        proposed_group: Option<String>,
+    ) -> Option<LiveTerminalMetadata> {
+        let sessions = self.sessions.lock().expect("terminal registry poisoned");
+        let reservations = self
+            .name_reservations
+            .lock()
+            .expect("terminal name reservations poisoned");
+        let session = sessions.get(id)?.clone();
+        if session.closed.load(Ordering::Relaxed) {
+            return None;
+        }
+        let settled = Self::settle_metadata_locked(
+            &sessions,
+            &reservations,
+            Some(proposed_name),
+            proposed_group,
+            Some(id),
+        );
+        *session
+            .live_metadata
+            .lock()
+            .expect("terminal live metadata poisoned") = settled.clone();
+        // `reservations` is intentionally held through the metadata write:
+        // settlement and publication are one uniqueness critical section.
+        drop(reservations);
+        drop(sessions);
+        #[cfg(target_os = "linux")]
+        session.parked_changed();
+        self.notify_roster_change();
+        Some(settled)
     }
 
     /// The window that owns a live session, for routing a cross-window
@@ -1179,15 +1405,15 @@ impl Registry {
         sessions
             .values()
             .filter(|session| !session.closed.load(Ordering::Relaxed))
-            .map(|session| RosterEntry {
-                id: session.id.clone(),
-                tab_name: session.tab_name.clone(),
-                tab_group: session
-                    .tab_group
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_TERMINAL_GROUP.to_string()),
-                window_id: session.window_id(),
-                broadcast: session.broadcast.load(Ordering::Relaxed),
+            .map(|session| {
+                let metadata = session.live_metadata();
+                RosterEntry {
+                    id: session.id.clone(),
+                    tab_name: metadata.name,
+                    tab_group: metadata.group,
+                    window_id: session.window_id(),
+                    broadcast: session.broadcast.load(Ordering::Relaxed),
+                }
             })
             .collect()
     }
@@ -1269,6 +1495,12 @@ impl Registry {
             };
             (self.unused_id(&sessions), announce_command)
         };
+        let mut reservation =
+            self.reserve_metadata(opts.tab_name.take(), opts.tab_group.take(), None);
+        opts.tab_name = reservation.metadata.name.clone();
+        opts.tab_group = Some(reservation.metadata.group.clone());
+        #[cfg(test)]
+        self.wait_at_spawn_barrier();
         let mut config = self.config.clone();
         config.terminal.ghostty = self.resolve_terminal_backend();
         let session = Session::spawn(
@@ -1281,15 +1513,25 @@ impl Registry {
         )
         .map_err(CreateError::Spawn)?;
         let mut sessions = self.sessions.lock().expect("terminal registry poisoned");
+        let mut reservations = self
+            .name_reservations
+            .lock()
+            .expect("terminal name reservations poisoned");
         // Re-check under the re-acquired lock: a concurrent create may have
         // filled the cap (or -- astronomically -- taken the random id) while we
         // spawned. If so, reap the orphan PTY before dropping it (no Drop).
         if sessions.len() >= self.config.terminal.session_cap || sessions.contains_key(&id) {
+            reservation.release_locked(&mut reservations);
+            drop(reservations);
             drop(sessions);
             session.close(CloseReason::Shutdown);
             return Err(CreateError::Capped);
         }
         sessions.insert(id.clone(), session.clone());
+        // Convert reservation -> live session while both uniqueness stores
+        // are locked, so another settlement never sees an unowned gap.
+        reservation.release_locked(&mut reservations);
+        drop(reservations);
         drop(sessions);
         // Park after the insert so the park commit's host snapshot sees the
         // session; a windowed create only reports success once its fd name
@@ -1338,6 +1580,10 @@ impl Registry {
         if let Some(extra_env) = env {
             opts.env.extend(extra_env);
         }
+        let mut reservation =
+            self.reserve_metadata(opts.tab_name.take(), opts.tab_group.take(), Some(id));
+        opts.tab_name = reservation.metadata.name.clone();
+        opts.tab_group = Some(reservation.metadata.group.clone());
         // A restart re-runs the command but does NOT re-echo the running banner:
         // the banner names a tenant's launch command (control connect), while a
         // restart override (e.g. the team-bootstrap flip from a host shell to
@@ -1354,9 +1600,15 @@ impl Registry {
         )
         .map_err(CreateError::Spawn)?;
         let mut sessions = self.sessions.lock().expect("terminal registry poisoned");
+        let mut reservations = self
+            .name_reservations
+            .lock()
+            .expect("terminal name reservations poisoned");
         match sessions.get(id) {
             Some(current) if Arc::ptr_eq(current, &old) => {
                 sessions.insert(id.to_string(), session.clone());
+                reservation.release_locked(&mut reservations);
+                drop(reservations);
                 drop(sessions);
                 // Restart transaction order: park the NEW incarnation (store +
                 // durable manifest commit) BEFORE the old entry is removed and
@@ -1378,6 +1630,9 @@ impl Registry {
             // before dropping it (Session has no Drop) -- else the orphan child +
             // fds leak.
             Some(_) | None => {
+                reservation.release_locked(&mut reservations);
+                drop(reservations);
+                drop(sessions);
                 session.close(CloseReason::Shutdown);
                 Ok(false)
             }
@@ -1685,20 +1940,21 @@ impl Registry {
                 .collect()
         };
         live.into_iter()
-            .map(|session| TerminalSessionSummary {
-                session_id: session.id.clone(),
-                tab_name: session.tab_name.clone(),
-                tab_group: session
-                    .tab_group
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_TERMINAL_GROUP.to_string()),
-                window_id: session.window_id(),
-                pane_id: session.pane_id(),
-                side: session.side(),
-                tab_id: session.tab_id(),
-                cwd: session.cwd(),
-                queue_depth: session.queue_depth(),
-                agent: session.derived_submit_agent(),
+            .map(|session| {
+                let metadata = session.live_metadata();
+                TerminalSessionSummary {
+                    session_id: session.id.clone(),
+                    tab_name: metadata.name,
+                    spawn_name: session.spawn_name.clone(),
+                    tab_group: metadata.group,
+                    window_id: session.window_id(),
+                    pane_id: session.pane_id(),
+                    side: session.side(),
+                    tab_id: session.tab_id(),
+                    cwd: session.cwd(),
+                    queue_depth: session.queue_depth(),
+                    agent: session.derived_submit_agent(),
+                }
             })
             .collect()
     }
@@ -1720,19 +1976,9 @@ impl Registry {
             if session.closed.load(Ordering::Relaxed) {
                 continue;
             }
-            if let Some(name) = tab_name {
-                if session.tab_name.as_deref() != Some(name) {
-                    continue;
-                }
-            }
-            if let Some(group) = tab_group {
-                let resolved = session
-                    .tab_group
-                    .as_deref()
-                    .unwrap_or(DEFAULT_TERMINAL_GROUP);
-                if resolved != group {
-                    continue;
-                }
+            let metadata = session.live_metadata();
+            if !live_metadata_matches(&metadata, tab_name, tab_group) {
+                continue;
             }
             session.send_input(data);
             written += 1;
@@ -1753,20 +1999,13 @@ impl Registry {
         let Some(source) = sessions.get(source_id) else {
             return;
         };
-        let source_group = source
-            .tab_group
-            .as_deref()
-            .unwrap_or(DEFAULT_TERMINAL_GROUP)
-            .to_string();
+        let source_group = source.live_metadata().group;
         let source_window = source.window_id();
         for (id, session) in sessions.iter() {
             if id == source_id || session.closed.load(Ordering::Relaxed) {
                 continue;
             }
-            let group = session
-                .tab_group
-                .as_deref()
-                .unwrap_or(DEFAULT_TERMINAL_GROUP);
+            let group = session.live_metadata().group;
             // Same group, different window: same-window members are fanned
             // client-side, so skip them here to avoid double-delivery.
             if group != source_group || session.window_id() == source_window {
@@ -1807,27 +2046,15 @@ impl Registry {
         submit: Option<SubmitAgent>,
     ) -> EnqueueOutcome {
         let sessions = self.sessions.lock().expect("terminal registry poisoned");
-        let matched: Vec<&Arc<Session>> = sessions
+        let matched: Vec<(&Arc<Session>, LiveTerminalMetadata)> = sessions
             .values()
             .filter(|session| !session.closed.load(Ordering::Relaxed))
-            .filter(|session| match tab_name {
-                Some(name) => session.tab_name.as_deref() == Some(name),
-                None => true,
-            })
-            .filter(|session| match tab_group {
-                Some(group) => {
-                    session
-                        .tab_group
-                        .as_deref()
-                        .unwrap_or(DEFAULT_TERMINAL_GROUP)
-                        == group
-                }
-                None => true,
-            })
+            .map(|session| (session, session.live_metadata()))
+            .filter(|(_, metadata)| live_metadata_matches(metadata, tab_name, tab_group))
             .collect();
         let single = matched.len() == 1;
         let mut outcome = EnqueueOutcome::default();
-        for session in matched {
+        for (session, metadata) in matched {
             let derived = session.derived_submit_agent();
             let resolved = match submit {
                 Some(_) => derived.map(ResolvedSubmit::resolve),
@@ -1842,10 +2069,7 @@ impl Registry {
                     if let Some(requested) = submit {
                         if derived != Some(requested) {
                             outcome.diverged.push(SubmitDivergence {
-                                tab: session
-                                    .tab_name
-                                    .clone()
-                                    .unwrap_or_else(|| session.id.clone()),
+                                tab: metadata.name.unwrap_or_else(|| session.id.clone()),
                                 applied: derived,
                             });
                         }
@@ -1870,7 +2094,7 @@ impl Registry {
         sessions
             .values()
             .filter(|session| !session.closed.load(Ordering::Relaxed))
-            .filter(|session| session.tab_name.as_deref() == Some(tab_name))
+            .filter(|session| session.live_metadata().name.as_deref() == Some(tab_name))
             .map(|session| (session.id.clone(), session.scrollback()))
             .collect()
     }
@@ -1912,19 +2136,8 @@ impl Registry {
             sessions
                 .values()
                 .filter(|session| !session.closed.load(Ordering::Relaxed))
-                .filter(|session| match tab_name {
-                    Some(name) => session.tab_name.as_deref() == Some(name),
-                    None => true,
-                })
-                .filter(|session| match tab_group {
-                    Some(group) => {
-                        session
-                            .tab_group
-                            .as_deref()
-                            .unwrap_or(DEFAULT_TERMINAL_GROUP)
-                            == group
-                    }
-                    None => true,
+                .filter(|session| {
+                    live_metadata_matches(&session.live_metadata(), tab_name, tab_group)
                 })
                 .map(|session| session.id.clone())
                 .collect()
@@ -1950,19 +2163,8 @@ impl Registry {
             sessions
                 .values()
                 .filter(|session| !session.closed.load(Ordering::Relaxed))
-                .filter(|session| match tab_name {
-                    Some(name) => session.tab_name.as_deref() == Some(name),
-                    None => true,
-                })
-                .filter(|session| match tab_group {
-                    Some(group) => {
-                        session
-                            .tab_group
-                            .as_deref()
-                            .unwrap_or(DEFAULT_TERMINAL_GROUP)
-                            == group
-                    }
-                    None => true,
+                .filter(|session| {
+                    live_metadata_matches(&session.live_metadata(), tab_name, tab_group)
                 })
                 .map(|session| session.id.clone())
                 .collect()
@@ -1997,19 +2199,9 @@ impl Registry {
             if session.closed.load(Ordering::Relaxed) {
                 continue;
             }
-            if let Some(name) = tab_name {
-                if session.tab_name.as_deref() != Some(name) {
-                    continue;
-                }
-            }
-            if let Some(group) = tab_group {
-                let resolved = session
-                    .tab_group
-                    .as_deref()
-                    .unwrap_or(DEFAULT_TERMINAL_GROUP);
-                if resolved != group {
-                    continue;
-                }
+            let metadata = session.live_metadata();
+            if !live_metadata_matches(&metadata, tab_name, tab_group) {
+                continue;
             }
             if let Some(window_id) = session.window_id() {
                 if seen.insert(window_id.clone()) {
@@ -2285,6 +2477,21 @@ impl Registry {
                     continue;
                 }
             }
+            // An imported manifest is provenance, not a proposal: preserve its
+            // live name exactly. Reuse settlement only to reserve that exact
+            // name; if settlement would suffix it, skip the conflicting import
+            // instead of fabricating different restored metadata.
+            let mut name_reservation = if meta.tab_name.is_some() {
+                let reservation =
+                    self.reserve_metadata(meta.tab_name.clone(), meta.tab_group.clone(), None);
+                if reservation.metadata.name != meta.tab_name {
+                    report.skip_session(&meta, "live terminal name already exists");
+                    continue;
+                }
+                Some(reservation)
+            } else {
+                None
+            };
             let generation = meta.generation;
             let session =
                 match Session::from_imported(self.config.clone(), import, self.last_exit.clone()) {
@@ -2298,12 +2505,25 @@ impl Registry {
                 .fetch_max(generation.saturating_add(1), Ordering::Relaxed);
             let window_id = session.window_id();
             let mut sessions = self.sessions.lock().expect("terminal registry poisoned");
+            let mut reservations = self
+                .name_reservations
+                .lock()
+                .expect("terminal name reservations poisoned");
             if sessions.len() >= self.config.terminal.session_cap || sessions.contains_key(&id) {
                 report.skip_session(&meta, "raced with another restore");
+                if let Some(reservation) = name_reservation.as_mut() {
+                    reservation.release_locked(&mut reservations);
+                }
+                drop(reservations);
+                drop(sessions);
                 session.close(CloseReason::Shutdown);
                 continue;
             }
             sessions.insert(id, session.clone());
+            if let Some(reservation) = name_reservation.as_mut() {
+                reservation.release_locked(&mut reservations);
+            }
+            drop(reservations);
             drop(sessions);
             // ADOPT, not park: the store retained this fd across the restart,
             // so a second FDSTORE would duplicate the entry. Adoption only
@@ -2655,8 +2875,11 @@ fn pop_batch(
 #[derive(Debug)]
 struct Session {
     id: String,
-    tab_name: Option<String>,
-    tab_group: Option<String>,
+    live_metadata: Mutex<LiveTerminalMetadata>,
+    /// Immutable values injected into this PTY incarnation. Live metadata
+    /// edits never mutate these fields or the running shell environment.
+    spawn_name: Option<String>,
+    spawn_group: Option<String>,
     /// The window this session currently belongs to (the `?w=` label). Interior
     /// mutable because a reattach REBINDS it to the attaching window: a
     /// cross-window terminal move re-homes the session, so a later
@@ -2748,6 +2971,13 @@ struct Session {
 }
 
 impl Session {
+    fn live_metadata(&self) -> LiveTerminalMetadata {
+        self.live_metadata
+            .lock()
+            .expect("terminal live metadata poisoned")
+            .clone()
+    }
+
     fn spawn(
         id: String,
         config: RegistryConfig,
@@ -2756,6 +2986,10 @@ impl Session {
         generation: u64,
         registry_last_exit: Arc<Mutex<Option<TerminalExit>>>,
     ) -> anyhow::Result<Arc<Self>> {
+        #[cfg(test)]
+        if opts.env.contains_key("CHAN_TEST_FAIL_TERMINAL_SPAWN") {
+            anyhow::bail!("injected terminal spawn failure");
+        }
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(opts.size)?;
         let mut cmd = command_builder(opts.command.as_deref());
@@ -2834,19 +3068,25 @@ impl Session {
                 set_mcp_env(&mut cmd, socket_path);
             }
         }
-        let tab_name = opts.tab_name;
-        if let Some(tab_name) = tab_name.as_deref() {
+        let spawn_name = opts.tab_name.clone();
+        if let Some(tab_name) = spawn_name.as_deref() {
             cmd.env("CHAN_TAB_NAME", tab_name);
         }
         // Every terminal has a well-defined group, so $CHAN_TAB_GROUP is
         // always set (default when unset) -- an agent can read it
         // unconditionally to learn its broadcast group.
-        let tab_group = opts.tab_group;
+        let spawn_group = Some(
+            opts.tab_group
+                .clone()
+                .unwrap_or_else(|| DEFAULT_TERMINAL_GROUP.to_string()),
+        );
         cmd.env(
             "CHAN_TAB_GROUP",
-            tab_group.as_deref().unwrap_or(DEFAULT_TERMINAL_GROUP),
+            spawn_group
+                .as_deref()
+                .expect("new terminal spawn group is resolved"),
         );
-        let window_id = opts.window_id;
+        let window_id = opts.window_id.clone();
         if let Some(window_id) = window_id.as_deref() {
             cmd.env("CHAN_WINDOW_ID", window_id);
         }
@@ -2888,8 +3128,14 @@ impl Session {
         let (write_queue, last_deliver_at, awaiting_gen) = fresh_queue_state();
         let session = Arc::new(Self {
             id,
-            tab_name,
-            tab_group,
+            live_metadata: Mutex::new(LiveTerminalMetadata {
+                name: spawn_name.clone(),
+                group: spawn_group
+                    .clone()
+                    .expect("new terminal spawn group is resolved"),
+            }),
+            spawn_name,
+            spawn_group,
             window_id: Mutex::new(window_id),
             pane_id: Mutex::new(None),
             side: Mutex::new(None),
@@ -3091,11 +3337,14 @@ impl Session {
             .iter()
             .copied()
             .collect();
+        let live_metadata = self.live_metadata();
         let meta = FdStoreSessionMeta {
             tenant_prefix: tenant_prefix.to_string(),
             session_id: self.id.clone(),
-            tab_name: self.tab_name.clone(),
-            tab_group: self.tab_group.clone(),
+            tab_name: live_metadata.name,
+            tab_group: Some(live_metadata.group),
+            spawn_name: self.spawn_name.clone(),
+            spawn_group: self.spawn_group.clone(),
             window_id: self.window_id(),
             pane_id: self.pane_id(),
             side: self.side(),
@@ -3143,8 +3392,15 @@ impl Session {
         let (write_queue, last_deliver_at, awaiting_gen) = fresh_queue_state();
         let session = Arc::new(Self {
             id: meta.session_id.clone(),
-            tab_name: meta.tab_name.clone(),
-            tab_group: meta.tab_group.clone(),
+            live_metadata: Mutex::new(LiveTerminalMetadata {
+                name: meta.tab_name.clone(),
+                group: meta
+                    .tab_group
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_TERMINAL_GROUP.to_string()),
+            }),
+            spawn_name: meta.spawn_name.clone(),
+            spawn_group: meta.spawn_group.clone(),
             window_id: Mutex::new(meta.window_id.clone()),
             pane_id: Mutex::new(meta.pane_id.clone()),
             side: Mutex::new(meta.side),
@@ -3622,9 +3878,10 @@ impl Session {
 
     fn restart_options(&self) -> CreateOptions {
         let mut opts = self.spawn_opts.clone();
+        let metadata = self.live_metadata();
         opts.size = *self.winsize.lock().expect("terminal winsize poisoned");
-        opts.tab_name = self.tab_name.clone();
-        opts.tab_group = self.tab_group.clone();
+        opts.tab_name = metadata.name;
+        opts.tab_group = Some(metadata.group);
         opts.window_id = self.window_id();
         opts
     }
@@ -4294,10 +4551,15 @@ mod tests {
         let (command_tx, command_rx) = std::sync::mpsc::channel();
         let (output_tx, _) = broadcast::channel(BROADCAST_CAP);
         let (write_queue, last_deliver_at, awaiting_gen) = fresh_queue_state();
+        let live_metadata = LiveTerminalMetadata {
+            name: tab_name.map(str::to_string),
+            group: tab_group.unwrap_or(DEFAULT_TERMINAL_GROUP).to_string(),
+        };
         let session = Arc::new(Session {
             id: id.to_string(),
-            tab_name: tab_name.map(str::to_string),
-            tab_group: tab_group.map(str::to_string),
+            live_metadata: Mutex::new(live_metadata),
+            spawn_name: tab_name.map(str::to_string),
+            spawn_group: Some(tab_group.unwrap_or(DEFAULT_TERMINAL_GROUP).to_string()),
             window_id: Mutex::new(None),
             pane_id: Mutex::new(None),
             side: Mutex::new(None),
@@ -4306,8 +4568,8 @@ mod tests {
             workspace_root: PathBuf::from("/"),
             spawn_opts: CreateOptions {
                 size: test_size(),
-                tab_name: tab_name.map(str::to_string),
-                tab_group: tab_group.map(str::to_string),
+                tab_name: None,
+                tab_group: None,
                 window_id: None,
                 mcp_env: true,
                 cwd: None,
@@ -5943,6 +6205,8 @@ mod tests {
             session_id: "restored-1".to_string(),
             tab_name: None,
             tab_group: None,
+            spawn_name: None,
+            spawn_group: None,
             window_id: Some("win-1".to_string()),
             pane_id: None,
             side: None,
@@ -7129,7 +7393,10 @@ mod tests {
         let mut s = Arc::try_unwrap(test_session_with_ring(64)).expect("sole owner");
         s.id = id.to_string();
         s.window_id = Mutex::new(window_id.map(str::to_string));
-        s.tab_group = tab_group.map(str::to_string);
+        s.live_metadata = Mutex::new(LiveTerminalMetadata {
+            name: None,
+            group: tab_group.unwrap_or(DEFAULT_TERMINAL_GROUP).to_string(),
+        });
         // Sentinel: 0 is distinguishable from any real `now_unix_secs()`.
         s.last_activity = AtomicI64::new(0);
         s.broadcast = AtomicBool::new(broadcast);
@@ -7149,7 +7416,10 @@ mod tests {
     fn named_session(id: &str, tab_name: &str) -> Arc<Session> {
         let mut s = Arc::try_unwrap(test_session_with_ring(64)).expect("sole owner");
         s.id = id.to_string();
-        s.tab_name = Some(tab_name.to_string());
+        s.live_metadata = Mutex::new(LiveTerminalMetadata {
+            name: Some(tab_name.to_string()),
+            group: DEFAULT_TERMINAL_GROUP.to_string(),
+        });
         Arc::new(s)
     }
 
@@ -7264,6 +7534,260 @@ mod tests {
         assert_eq!(parse_terminal_ordinal("Terminal-0"), None);
     }
 
+    fn concurrent_created_names(proposed_name: Option<&str>) -> Vec<String> {
+        let registry = Arc::new(Registry::new(test_config(1024, 4, 60)));
+        *registry.spawn_barrier.lock().unwrap() = Some(Arc::new(std::sync::Barrier::new(2)));
+        let mut creators = Vec::new();
+        for window_id in ["win-a", "win-b"] {
+            let registry = registry.clone();
+            let proposed_name = proposed_name.map(str::to_string);
+            creators.push(std::thread::spawn(move || {
+                registry
+                    .create(CreateOptions {
+                        tab_name: proposed_name,
+                        ..opts_with_window(window_id)
+                    })
+                    .expect("concurrent terminal create")
+                    .live_metadata()
+                    .name
+                    .expect("new terminal has a settled name")
+            }));
+        }
+        let mut names: Vec<String> = creators
+            .into_iter()
+            .map(|creator| creator.join().expect("creator thread"))
+            .collect();
+        *registry.spawn_barrier.lock().unwrap() = None;
+        registry.close_all(CloseReason::Shutdown);
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn concurrent_default_creates_reserve_distinct_lowest_free_names() {
+        assert_eq!(
+            concurrent_created_names(None),
+            vec!["Terminal-1".to_string(), "Terminal-2".to_string()]
+        );
+    }
+
+    #[test]
+    fn concurrent_duplicate_explicit_creates_use_the_shared_suffix_policy() {
+        assert_eq!(
+            concurrent_created_names(Some("worker")),
+            vec!["worker".to_string(), "worker-2".to_string()]
+        );
+    }
+
+    #[test]
+    fn failed_spawn_releases_its_name_reservation() {
+        let registry = Registry::new(test_config(1024, 4, 60));
+        let mut failed_opts = opts_with_window("win-failed");
+        failed_opts.tab_name = Some("released".into());
+        failed_opts
+            .env
+            .insert("CHAN_TEST_FAIL_TERMINAL_SPAWN".into(), "1".into());
+        let failed = registry.create(failed_opts);
+        assert!(matches!(failed, Err(CreateError::Spawn(_))));
+        assert!(registry.name_reservations.lock().unwrap().is_empty());
+
+        let handle = registry
+            .create(CreateOptions {
+                tab_name: Some("released".into()),
+                ..opts_with_window("win-ok")
+            })
+            .unwrap();
+        assert_eq!(handle.live_metadata().name.as_deref(), Some("released"));
+        registry.close_all(CloseReason::Shutdown);
+    }
+
+    #[test]
+    fn create_restart_and_live_rename_share_suffixes_and_self_exclusion() {
+        let registry = Registry::new(test_config(1024, 8, 60));
+        let first = registry
+            .create(CreateOptions {
+                tab_name: Some("lane".into()),
+                ..opts_with_window("win-a")
+            })
+            .unwrap();
+        let second = registry
+            .create(CreateOptions {
+                tab_name: Some("lane".into()),
+                ..opts_with_window("win-b")
+            })
+            .unwrap();
+        assert_eq!(first.live_metadata().name.as_deref(), Some("lane"));
+        assert_eq!(second.live_metadata().name.as_deref(), Some("lane-2"));
+
+        let second_id = second.id().to_string();
+        assert!(registry
+            .restart(
+                &second_id,
+                RestartOverrides {
+                    tab_name: Some("lane".into()),
+                    tab_group: Some(Some("workers".into())),
+                    ..RestartOverrides::default()
+                },
+            )
+            .unwrap());
+        let restarted = registry.attach(&second_id, None).unwrap();
+        assert_eq!(
+            restarted.live_metadata(),
+            LiveTerminalMetadata {
+                name: Some("lane-2".into()),
+                group: "workers".into(),
+            }
+        );
+        assert_eq!(restarted.spawn_name(), Some("lane-2"));
+        assert_eq!(restarted.spawn_group(), Some("workers"));
+
+        let third = registry
+            .create(CreateOptions {
+                tab_name: Some("lane".into()),
+                ..opts_with_window("win-c")
+            })
+            .unwrap();
+        let third_id = third.id().to_string();
+        assert_eq!(third.live_metadata().name.as_deref(), Some("lane-3"));
+        let settled = registry
+            .update_live_metadata(&third_id, "lane".into(), Some("review".into()))
+            .unwrap();
+        assert_eq!(
+            settled,
+            LiveTerminalMetadata {
+                name: Some("lane-3".into()),
+                group: "review".into(),
+            }
+        );
+
+        let first_id = first.id().to_string();
+        registry
+            .update_live_metadata(&first_id, "renamed".into(), Some("workers".into()))
+            .unwrap();
+        assert_eq!(registry.restart_matching(Some("lane"), None).unwrap(), 0);
+        assert_eq!(registry.restart_matching(Some("renamed"), None).unwrap(), 1);
+        let renamed = registry.attach(&first_id, None).unwrap();
+        assert_eq!(renamed.live_metadata().name.as_deref(), Some("renamed"));
+        assert_eq!(renamed.spawn_name(), Some("renamed"));
+        registry.close_all(CloseReason::Shutdown);
+    }
+
+    #[test]
+    fn live_metadata_readers_never_observe_a_torn_name_group_pair() {
+        let registry = Arc::new(Registry::new(test_config(64, 4, 60)));
+        let (session, _commands) =
+            test_agent_session(64, "atomic", Some("old"), Some("old-group"), None, &[]);
+        insert_session(&registry, session.clone());
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let writer_registry = registry.clone();
+        let writer_start = start.clone();
+        let writer = std::thread::spawn(move || {
+            writer_start.wait();
+            for n in 0..10_000 {
+                let (name, group) = if n % 2 == 0 {
+                    ("new", "new-group")
+                } else {
+                    ("old", "old-group")
+                };
+                writer_registry
+                    .update_live_metadata("atomic", name.into(), Some(group.into()))
+                    .unwrap();
+                std::thread::yield_now();
+            }
+        });
+        start.wait();
+        while !writer.is_finished() {
+            let metadata = session.live_metadata();
+            assert!(
+                metadata
+                    == (LiveTerminalMetadata {
+                        name: Some("old".into()),
+                        group: "old-group".into(),
+                    })
+                    || metadata
+                        == (LiveTerminalMetadata {
+                            name: Some("new".into()),
+                            group: "new-group".into(),
+                        }),
+                "observed torn live metadata: {metadata:?}"
+            );
+        }
+        writer.join().unwrap();
+        registry.close_all(CloseReason::Shutdown);
+    }
+
+    #[test]
+    fn by_name_selectors_ignore_spawn_and_prior_live_names() {
+        let registry = Registry::new(test_config(1024, 4, 60));
+        let (mut session, commands) =
+            test_agent_session(1024, "selector", Some("spawn-name"), Some("old"), None, &[]);
+        Arc::get_mut(&mut session).unwrap().window_id = Mutex::new(Some("win-selector".into()));
+        session.record_output(b"selector tail");
+        insert_session(&registry, session);
+
+        let settled = registry
+            .update_live_metadata("selector", "live-name".into(), Some("new".into()))
+            .unwrap();
+        assert_eq!(settled.name.as_deref(), Some("live-name"));
+        let summary = registry.session_summaries().pop().unwrap();
+        assert_eq!(summary.tab_name.as_deref(), Some("live-name"));
+        assert_eq!(summary.spawn_name.as_deref(), Some("spawn-name"));
+
+        assert_eq!(
+            registry.write_input_matching(Some("spawn-name"), None, b"old"),
+            0
+        );
+        assert_eq!(
+            registry.write_input_matching(Some("live-name"), None, b"new"),
+            1
+        );
+        assert!(matches!(commands.recv().unwrap(), PtyCommand::Input(data) if data == b"new"));
+        assert_eq!(
+            registry
+                .enqueue_write_matching(Some("spawn-name"), None, "old", None)
+                .queued,
+            0
+        );
+        assert_eq!(
+            registry
+                .enqueue_write_matching(Some("live-name"), None, "new", None)
+                .queued,
+            1
+        );
+        assert!(registry.scrollback_matching("spawn-name").is_empty());
+        assert_eq!(registry.scrollback_matching("live-name").len(), 1);
+        assert!(registry
+            .window_ids_matching(Some("spawn-name"), None)
+            .is_empty());
+        assert_eq!(
+            registry.window_ids_matching(Some("live-name"), None),
+            vec!["win-selector".to_string()]
+        );
+        assert_eq!(registry.close_matching(Some("spawn-name"), None), 0);
+        assert_eq!(registry.close_matching(Some("live-name"), None), 1);
+    }
+
+    #[test]
+    fn live_group_update_changes_cross_window_broadcast_membership_immediately() {
+        let registry = Registry::new(test_config(64, 4, 60));
+        insert_session(
+            &registry,
+            dummy_session("source", Some("win-a"), Some("group-a"), true),
+        );
+        insert_session(
+            &registry,
+            dummy_session("target", Some("win-b"), Some("group-b"), true),
+        );
+        registry.broadcast_input_cross_window("source", b"before");
+        assert!(!was_delivered(&registry, "target"));
+
+        registry
+            .update_live_metadata("target", "target".into(), Some("group-a".into()))
+            .unwrap();
+        registry.broadcast_input_cross_window("source", b"after");
+        assert!(was_delivered(&registry, "target"));
+    }
+
     #[test]
     fn roster_reports_window_group_and_broadcast() {
         let registry = Registry::new(test_config(64, 16, 600));
@@ -7283,6 +7807,46 @@ mod tests {
         // No explicit group resolves to the default, matching the SPA.
         assert_eq!(roster[1].tab_group, DEFAULT_TERMINAL_GROUP);
         assert!(!roster[1].broadcast);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fdstore_metadata_round_trips_distinct_live_and_spawn_values_and_reads_legacy() {
+        let meta = FdStoreSessionMeta {
+            tenant_prefix: "tenant".into(),
+            session_id: "session".into(),
+            tab_name: Some("live-name".into()),
+            tab_group: Some("live-group".into()),
+            spawn_name: Some("spawn-name".into()),
+            spawn_group: Some("spawn-group".into()),
+            window_id: Some("window".into()),
+            pane_id: None,
+            side: None,
+            tab_id: None,
+            cwd: None,
+            command: None,
+            env: Default::default(),
+            mcp_env: false,
+            child_pid: None,
+            size: test_size().into(),
+            seq: 0,
+            generation: 1,
+            alt_screen: false,
+            private_modes: Vec::new(),
+        };
+        let encoded = serde_json::to_value(&meta).unwrap();
+        let decoded: FdStoreSessionMeta = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded, meta);
+
+        let mut legacy = encoded;
+        let object = legacy.as_object_mut().unwrap();
+        object.remove("spawn_name");
+        object.remove("spawn_group");
+        let decoded: FdStoreSessionMeta = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.tab_name.as_deref(), Some("live-name"));
+        assert_eq!(decoded.tab_group.as_deref(), Some("live-group"));
+        assert_eq!(decoded.spawn_name, None);
+        assert_eq!(decoded.spawn_group, None);
     }
 
     #[cfg(target_os = "linux")]
@@ -7683,8 +8247,10 @@ mod tests {
             let meta = FdStoreSessionMeta {
                 tenant_prefix: "t".into(),
                 session_id: "imported-session".into(),
-                tab_name: None,
-                tab_group: None,
+                tab_name: Some("live-name".into()),
+                tab_group: Some("live-group".into()),
+                spawn_name: Some("spawn-name".into()),
+                spawn_group: Some("spawn-group".into()),
                 window_id: Some("w1".into()),
                 pane_id: None,
                 side: None,
@@ -7706,6 +8272,17 @@ mod tests {
                 replay: b"tail".to_vec(),
             }]);
             assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+
+            let handle = registry.attach("imported-session", None).unwrap();
+            assert_eq!(
+                handle.live_metadata(),
+                LiveTerminalMetadata {
+                    name: Some("live-name".into()),
+                    group: "live-group".into(),
+                }
+            );
+            assert_eq!(handle.spawn_name(), Some("spawn-name"));
+            assert_eq!(handle.spawn_group(), Some("spawn-group"));
 
             let adopt = hook.wait_for_call("adopt:");
             let name = adopt.strip_prefix("adopt:").unwrap().to_string();

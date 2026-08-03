@@ -5559,6 +5559,8 @@ mod tests {
                 session_id: "restored1".into(),
                 tab_name: None,
                 tab_group: None,
+                spawn_name: None,
+                spawn_group: None,
                 window_id: Some(row.window_id.clone()),
                 pane_id: None,
                 side: None,
