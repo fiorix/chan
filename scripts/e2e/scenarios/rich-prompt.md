@@ -35,9 +35,11 @@ Look up the area you changed and run the scenarios listed against it.
 | RP-03 | A reload while sending reconstructs the pending state | mixed |
 | RP-04 | Stopping a send returns the prompt to the composer | mixed |
 | RP-05 | Pasted media renders locally and delivers as paths | automated |
-| RP-06 | Stopping a message another client queued | manual |
+| RP-06 | Stopping a message another client queued | TODO |
 | RP-07 | Abandoning a draft | mixed |
-| RP-08 | The composer matches across clients | manual |
+| RP-08 | The composer matches across clients | TODO |
+
+RP-06 and RP-08 state behavior the product does not have yet. The server side of both is already built: the terminal session frame broadcasts `queue_depth` and `queued_prompt_ids` to every attached socket, `cancel-prompt` cancels by `prompt_id`, and a removal re-broadcasts. What is missing is entirely in the SPA, which keeps a private record of the message it personally sent instead of reading those ids.
 
 The automated coverage that exists today runs from two places. The component cases run under the normal frontend test command from `web/packages/workspace-app`; the browser cases run through the smoke harness:
 
@@ -105,6 +107,8 @@ A blank draft is the one honest exception. When the message is queued but its dr
 
 ### RP-06 - stopping a message another client queued
 
+**TODO.** Not implemented in the SPA. The server already carries this: `queued_prompt_ids` reaches every attached socket in the session frame, `cancel-prompt` addresses a message by `prompt_id` regardless of which client sent it, and `prompt-cancelled` reports an honest refusal once the message has drained. The client change is to stop treating its own `lastQueued` as the only reachable message.
+
 **Expectation.** The depth a composer shows describes the terminal's queue, not this window's history, so messages queued by `cs terminal write` or by another window raise it. Any client may stop any still-queued message, including one it did not send: the stop addresses the message by its `prompt_id`, taken from the session frame's `queued_prompt_ids`, and the server's removal broadcast converges every attached client. A message that already drained to the PTY is honestly refused rather than recalled, and the client that submitted it treats the refusal as a delivery.
 
 **Why this is load-bearing.** A queued prompt is work already handed to an agent, and the window that sent it may be closed, reloaded, or on another machine. Tying the ability to stop it to one browser's memory means a message that everyone can see is one that nobody can reach.
@@ -116,6 +120,8 @@ A blank draft is the one honest exception. When the message is queued but its dr
 **Evidence.** Both windows' rendered depth before and after each stop, the `prompt-cancelled` outcome including one refusal after drain, and scrollback proving a stopped message never reached the agent.
 
 ### RP-08 - the composer matches across clients
+
+**TODO.** Not implemented. Three things are per-client today and each needs its own answer: the visibility flag in `state/richPrompt.svelte.ts`, the draft path carried as per-tab session state, and the composer's editor, which has no document-session wiring at all while `FileEditorTab` owns exactly that machinery for ordinary files. The pending state is the part the server already settles.
 
 **Expectation.** The composer is a co-viewed surface, not a per-browser overlay. Opening or closing it on one client opens or closes it on every client viewing that terminal. Its draft converges in both directions while both clients type, and its pending state matches, so a message submitted in one window shows as queued in the other with the same stop controls. Both clients resolve the one per-terminal draft file rather than each minting its own.
 
