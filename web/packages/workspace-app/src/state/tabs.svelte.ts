@@ -364,6 +364,16 @@ export type FileMissingState = {
   suggestedPath?: string | null;
 };
 
+export type TerminalMetadata = {
+  name: string;
+  group: string;
+};
+
+export type TerminalSessionMetadata = TerminalMetadata & {
+  spawnName: string | null;
+  spawnGroup: string | null;
+};
+
 export type TerminalTab = {
   kind: "terminal";
   id: string;
@@ -371,8 +381,18 @@ export type TerminalTab = {
   createdAt: number;
   broadcastEnabled: boolean;
   broadcastTargetIds: string[];
+  /// Immutable spawn provenance from the authoritative attach prelude.
+  /// Absence means the server genuinely does not know the value or this tab
+  /// has not received an attach prelude yet.
   terminalEnvTabName?: string;
+  terminalEnvTabGroup?: string;
   terminalEnvNamePromptDismissed?: boolean;
+  terminalEnvPromptDismissedFor?: string;
+  /// One local name/group draft and at most one proposal awaiting a server
+  /// acknowledgement. Neither value is authoritative and neither is persisted.
+  terminalMetadataDraft?: TerminalMetadata;
+  terminalMetadataPending?: TerminalMetadata;
+  terminalMetadataError?: string;
   terminalSessionId?: string;
   /// Spawn-derived submit identity from the server's latest `session` frame.
   /// Transient and replaced, including with `undefined`, on every attach so a
@@ -411,13 +431,9 @@ export type TerminalTab = {
   };
   cwd?: string;
   seedInput?: string;
-  /// Transient: this freshly-spawned terminal still needs its per-tenant
-  /// `Terminal-N` default name resolved from the server. The spawn helpers
-  /// set it with a local placeholder; `TerminalTab.connect()` resolves the
-  /// real name BEFORE opening the WS (so the session spawns with its final
-  /// name and the cross-window roster / `cs term list` show it, not the
-  /// placeholder), then clears the flag. Never persisted: a restored tab
-  /// keeps its saved title and skips the fetch.
+  /// Transient marker for a freshly-created unnamed terminal's provisional
+  /// `Terminal-N` label. The registry settlement returned by the attach
+  /// prelude is authoritative. Never persisted.
   pendingGlobalName?: boolean;
   /// Rich Prompt per-terminal draft path (`<draftsDir>/<name>/draft.md`) backing
   /// the bubble: the draft.md IS the prompt text and the folder holds pasted
@@ -822,10 +838,43 @@ export function terminalTabGroup(t: TerminalTab): string {
   return t.group?.trim() || DEFAULT_TERMINAL_GROUP;
 }
 
-/// Set the tab's broadcast group (context-menu field). Stored normalized;
-/// a blank value falls back to "default". The change takes effect on the
-/// next spawn, so callers gate it behind a restart prompt to keep the SPA
-/// group and the server-side `tab_group` consistent.
+export function normalizeTerminalMetadata(
+  name: string,
+  group: string | null | undefined,
+): TerminalMetadata {
+  return {
+    name: name.trim() || "Terminal",
+    group: group?.trim() || DEFAULT_TERMINAL_GROUP,
+  };
+}
+
+export function currentTerminalMetadata(tab: TerminalTab): TerminalMetadata {
+  return {
+    name: terminalTabName(tab),
+    group: terminalTabGroup(tab),
+  };
+}
+
+export function terminalMetadataDraft(tab: TerminalTab): TerminalMetadata {
+  return tab.terminalMetadataDraft ?? currentTerminalMetadata(tab);
+}
+
+export function setTerminalMetadataDraft(
+  tab: TerminalTab,
+  name: string,
+  group: string | null | undefined,
+): void {
+  tab.terminalMetadataDraft = { name, group: group ?? "" };
+  tab.terminalMetadataError = undefined;
+}
+
+export function resetTerminalMetadataDraft(tab: TerminalTab): void {
+  tab.terminalMetadataDraft = undefined;
+  tab.terminalMetadataError = undefined;
+}
+
+/// Apply an authoritative broadcast group to the tab mirror. A blank value
+/// normalizes to `default` so every local broadcast decision has a group.
 export function setTerminalGroup(t: TerminalTab, group: string): void {
   t.group = group.trim() || DEFAULT_TERMINAL_GROUP;
 }
@@ -870,68 +919,9 @@ function nextTerminalTitle(state: LayoutState = layout): string {
   return `Terminal-${max + 1}`;
 }
 
-/// Disambiguate a desired terminal name against the OTHER live terminals with a
-/// numeric `-N` suffix (the same shape as the Terminal-N default + the cs-team
-/// group `-N`). Two terminals must never share a name: `cs terminal write
-/// --tab-name` targets BY NAME, so a duplicate would double-deliver / ambiguously
-/// route the poke+queue, breaking the serialized-input model. `excludeTabId`
-/// skips the tab being renamed so it never collides with itself.
-///
-/// Uniqueness is TENANT-WIDE, not per-window: a rename in one window must avoid
-/// names already taken by terminals in OTHER windows (read from the
-/// cross-window roster), and across groups (a name unique only within a group
-/// would collide the moment a terminal is moved between groups). Comparison is
-/// case-sensitive, matching the server's by-name targeting.
-export function uniqueTerminalName(
-  desired: string,
-  excludeTabId?: string,
-  excludeSessionId?: string,
-): string {
-  const base = desired.trim() || "Terminal";
-  const taken = new Set(
-    terminalTabsIn(layout)
-      .filter((t) => t.id !== excludeTabId)
-      .map((t) => terminalTabName(t)),
-  );
-  // Fold in terminals from OTHER windows. Skip this window's own entries (the
-  // local layout above is authoritative for them, and its names can be ahead
-  // of the roster on a not-yet-restarted rename) and this tab's own session
-  // (so a no-op rename can keep its current name). An explicit
-  // `excludeSessionId` (a cross-window MOVE re-attaching its OWN live PTY,
-  // still listed under the source window's roster entry at drop time) takes
-  // precedence so the moved terminal never collides with itself.
-  const myWindow = sessionWindowId();
-  const ownSession =
-    excludeSessionId ??
-    (excludeTabId
-      ? terminalTabsIn(layout).find((t) => t.id === excludeTabId)?.terminalSessionId
-      : undefined);
-  for (const entry of terminalRoster) {
-    if (entry.window_id === myWindow) continue;
-    if (ownSession && entry.id === ownSession) continue;
-    if (entry.tab_name) taken.add(entry.tab_name);
-  }
-  if (!taken.has(base)) return base;
-  for (let n = 2; ; n += 1) {
-    const candidate = `${base}-${n}`;
-    if (!taken.has(candidate)) return candidate;
-  }
-}
-
-/// Apply the per-tenant `Terminal-N` default name to a freshly-spawned
-/// terminal, in BOTH terminal-only and workspace modes. The spawn helpers are
-/// synchronous and create the tab with the local `nextTerminalTitle()`
-/// placeholder; this fetches the next ordinal from the server and replaces the
-/// placeholder so numbering is consistent across every window of the tenant (a
-/// per-window count restarts at 1 in each new window). The counter is
-/// per-tenant: standalone terminal windows share one tenant -> one global
-/// sequence; each workspace has its own tenant -> a per-workspace sequence
-/// shared by that workspace's windows. The server counter is atomic, so two
-/// quick Cmd+T presses each resolve a DISTINCT name against a DISTINCT tab
-/// object - no collision. `uniqueTerminalName` is a defensive dedup against
-/// the still-present local placeholder; `excludeTabId` skips the target tab so
-/// it never collides with its own placeholder. A failed fetch (offline) leaves
-/// the local placeholder in place rather than throwing.
+/// Replace a local creation placeholder with a server-provided proposal. The
+/// terminal registry still settles the final name and the attach prelude
+/// replaces this value. A failed fetch leaves the placeholder in place.
 export async function applyGlobalTerminalName(tab: TerminalTab): Promise<void> {
   try {
     const name = (await api.terminalNextName()).trim();
@@ -943,7 +933,7 @@ export async function applyGlobalTerminalName(tab: TerminalTab): Promise<void> {
     // covers the tab being closed / moved out mid-fetch -> not found -> skip).
     const live = allTerminalTabs().find((t) => t.id === tab.id);
     if (!live) return;
-    live.title = uniqueTerminalName(name, tab.id);
+    live.title = name;
   } catch {
     // Keep the local placeholder name; the global counter is a nicety, not a
     // correctness requirement.
@@ -1130,6 +1120,12 @@ export type PaneModeSpawnIntent = {
   ctx: SpawnContext;
 };
 export type PaneModeDraftEditorKind = "draft" | "diagram";
+export interface PaneModeStagedDraftEditor {
+  id: string;
+  paneId: string;
+  side: PaneSide;
+  kind: PaneModeDraftEditorKind;
+}
 
 /// Mouse-driven variant of Hybrid Nav. Entered by drag-from-dead-zone
 /// (sets `grabPaneId` to the originating pane) or by double-click on
@@ -1144,15 +1140,14 @@ export const paneMode = $state<{
   transactionMode: boolean;
   grabPaneId: string | null;
   hoverPaneId: string | null;
+  stale: boolean;
+  entryLayout: SerNode | null;
+  pendingRemoteLayout: SerNode | null;
   /// Queue of "new draft editor" intents staged during the current
   /// pane-mode session. Materialized on Enter (commit); discarded on
   /// Esc (cancel). Each entry pins the target paneId at press time so
   /// later focus changes don't redirect materialization.
-  stagedDraftEditors: {
-    paneId: string;
-    side: PaneSide;
-    kind: PaneModeDraftEditorKind;
-  }[];
+  stagedDraftEditors: PaneModeStagedDraftEditor[];
 }>({
   active: false,
   draft: null,
@@ -1160,10 +1155,13 @@ export const paneMode = $state<{
   transactionMode: false,
   grabPaneId: null,
   hoverPaneId: null,
+  stale: false,
+  entryLayout: null,
+  pendingRemoteLayout: null,
   stagedDraftEditors: [],
 });
 
-type PaneModeSettledSink = () => void;
+type PaneModeSettledSink = (pendingRemoteLayout: SerNode | null) => void;
 const paneModeSettledSinks = new Set<PaneModeSettledSink>();
 
 /// Register work that must run only after Hybrid Nav's draft has either
@@ -1178,8 +1176,8 @@ export function registerPaneModeSettledSink(
   };
 }
 
-function notifyPaneModeSettled(): void {
-  for (const sink of paneModeSettledSinks) sink();
+function notifyPaneModeSettled(pendingRemoteLayout: SerNode | null = null): void {
+  for (const sink of paneModeSettledSinks) sink(pendingRemoteLayout);
 }
 
 /// Single-fire wobble bus. Each pane's entry holds a monotonic
@@ -1371,7 +1369,12 @@ function tabForReopen(src: Tab): Tab {
     tab.controlledTerminal = undefined;
     tab.lastAgentEchoSeq = undefined;
     tab.terminalEnvTabName = undefined;
+    tab.terminalEnvTabGroup = undefined;
     tab.terminalEnvNamePromptDismissed = undefined;
+    tab.terminalEnvPromptDismissedFor = undefined;
+    tab.terminalMetadataDraft = undefined;
+    tab.terminalMetadataPending = undefined;
+    tab.terminalMetadataError = undefined;
   }
   return tab;
 }
@@ -1596,9 +1599,9 @@ export function openTerminalInPane(
   const tab: TerminalTab = {
     kind: "terminal",
     id: id("term"),
-    // A passed name (cs terminal new --tab-name, reopen) is deduped so two
-    // terminals never share a name; an unnamed spawn gets the unique Terminal-N.
-    title: title ? uniqueTerminalName(title) : nextTerminalTitle(),
+    // This is a creation proposal only. The attach prelude replaces it with
+    // the registry-settled name before it becomes authoritative UI state.
+    title: title || nextTerminalTitle(),
     createdAt: Date.now(),
     broadcastEnabled: false,
     broadcastTargetIds: [],
@@ -1612,12 +1615,8 @@ export function openTerminalInPane(
   setPaneActiveTabId(p, tab.id, side);
   p.side = side;
   layout.activePaneId = p.id;
-  // Number from the per-tenant counter so Terminal-N stays consistent across
-  // every window of the tenant (all terminal windows, or all windows of one
-  // workspace). Only an UNNAMED spawn (no explicit title - e.g. `cs terminal
-  // new --tab-name` passes one) takes the server name. Flagged here; the name
-  // is resolved in `connect()` BEFORE the WS opens, so the session spawns
-  // with its final name (the placeholder never reaches the server).
+  // Mark an unnamed creation label as provisional. The server registry
+  // settles it atomically with creation and the attach prelude replaces it.
   if (!title) {
     tab.pendingGlobalName = true;
   }
@@ -1666,21 +1665,15 @@ export function reattachTerminalInPane(
   const tab: TerminalTab = {
     kind: "terminal",
     id: id("term"),
-    // Preserve the moved terminal's name. Dedup against OTHER terminals only:
-    // exclude this same session (still live in the source window's roster
-    // entry at drop time) so the terminal never collides with ITSELF, and a
-    // `-N` suffix is added ONLY on a real conflict with a different terminal.
-    title: uniqueTerminalName(payload.title?.trim() || "Terminal", undefined, sessionId),
+    // Preserve the last rendered value until the authoritative attach prelude
+    // returns the live pair for this existing session.
+    title: payload.title?.trim() || "Terminal",
     createdAt: Date.now(),
     broadcastEnabled: false,
     broadcastTargetIds: [],
     terminalSessionId: sessionId,
-    // Carry the moved shell's real CHAN_TAB_NAME. The WS re-attaches to the
-    // SAME session id, so setTerminalSession's `wasFresh` stays false and does
-    // not overwrite this. If a conflict forced a `-N` suffix above (title !=
-    // env name), terminalEnvTabNameStale is then true and the existing
-    // stale-env warning fires (restart to sync CHAN_TAB_NAME); with no suffix
-    // the names match and no warning shows.
+    // Carry immutable environment provenance until the same session's attach
+    // prelude refreshes it.
     terminalEnvTabName: payload.terminalEnvTabName,
     controlledTerminal: undefined,
     // Carry the echo-dedupe cursor so the re-attach (`connect()` sends
@@ -1872,30 +1865,189 @@ function graphScopeBasename(path: string): string {
   return i < 0 ? path : path.slice(i + 1);
 }
 
-export function renameTerminalTab(tab: TerminalTab, title: string): void {
-  // Enforce unique terminal names (auto-disambiguate, never reject). Programmatic
-  // callers (team spawn) get uniqueness here; the live rename input commits
-  // through this on blur (it sets tab.title raw while typing to avoid a
-  // per-keystroke cursor jump, then dedupes on commit).
-  tab.title = uniqueTerminalName(title, tab.id);
-  if (terminalEnvTabNameStale(tab)) tab.terminalEnvNamePromptDismissed = false;
+type TerminalMetadataSink = (metadata: TerminalMetadata) => boolean;
+const terminalMetadataSinks = new Map<string, TerminalMetadataSink>();
+
+function terminalMetadataDivergenceKey(tab: TerminalTab): string | null {
+  const stale = terminalStaleEnvironmentVariables(tab);
+  if (stale.length === 0) return null;
+  return JSON.stringify([
+    terminalTabName(tab),
+    terminalTabGroup(tab),
+    tab.terminalEnvTabName,
+    tab.terminalEnvTabGroup,
+  ]);
+}
+
+function applyTerminalLiveMetadata(
+  tab: TerminalTab,
+  name: string,
+  group: string | null | undefined,
+): TerminalMetadata {
+  const settled = normalizeTerminalMetadata(name, group);
+  const current = currentTerminalMetadata(tab);
+  const draft = tab.terminalMetadataDraft;
+  const draftIsClean =
+    !tab.terminalMetadataPending &&
+    !tab.terminalMetadataError &&
+    (!draft || (draft.name === current.name && draft.group === current.group));
+  const changed = current.name !== settled.name || current.group !== settled.group;
+  tab.title = settled.name;
+  setTerminalGroup(tab, settled.group);
+  if (draftIsClean) tab.terminalMetadataDraft = settled;
+  if (changed) {
+    tab.terminalEnvNamePromptDismissed = false;
+    tab.terminalEnvPromptDismissedFor = undefined;
+    paneModeMarkStaleForAuthoritativeMetadata();
+  }
+  return settled;
+}
+
+export function registerTerminalMetadataSink(
+  sessionId: string,
+  sink: TerminalMetadataSink,
+): () => void {
+  terminalMetadataSinks.set(sessionId, sink);
+  return () => {
+    if (terminalMetadataSinks.get(sessionId) !== sink) return;
+    terminalMetadataSinks.delete(sessionId);
+    failTerminalMetadataRename(
+      sessionId,
+      "Connection closed before the metadata update was confirmed.",
+    );
+  };
+}
+
+/// Submit one atomic name/group proposal through the mounted terminal socket.
+/// The tab and roster stay authoritative until a `renamed` frame settles it.
+export function proposeTerminalMetadata(
+  tab: TerminalTab,
+  name: string,
+  group: string | null | undefined,
+): boolean {
+  if (tab.terminalMetadataPending) return false;
+  const proposal = normalizeTerminalMetadata(name, group);
+  tab.terminalMetadataDraft = { name, group: group ?? "" };
+  tab.terminalMetadataError = undefined;
+
+  const sessionId = tab.terminalSessionId;
+  const sink = sessionId ? terminalMetadataSinks.get(sessionId) : undefined;
+  if (!sessionId || !sink) {
+    tab.terminalMetadataError = "Terminal is disconnected.";
+    return false;
+  }
+
+  tab.terminalMetadataPending = proposal;
+  let sent = false;
+  try {
+    sent = sink(proposal);
+  } catch {
+    sent = false;
+  }
+  if (!sent) {
+    tab.terminalMetadataPending = undefined;
+    tab.terminalMetadataError = "Terminal is disconnected.";
+    return false;
+  }
+  return true;
+}
+
+export function renameTerminalTab(
+  tab: TerminalTab,
+  title: string,
+  group = terminalMetadataDraft(tab).group,
+): boolean {
+  return proposeTerminalMetadata(tab, title, group);
+}
+
+/// Apply a successful `renamed` acknowledgement to every local copy of the
+/// terminal session. The server's complete settled pair replaces the draft.
+export function resolveTerminalMetadataRename(
+  sessionId: string,
+  name: string,
+  group: string | null | undefined,
+): void {
+  const settled = normalizeTerminalMetadata(name, group);
+  for (const tab of terminalTabsBySession(sessionId)) {
+    applyTerminalLiveMetadata(tab, settled.name, settled.group);
+    tab.terminalMetadataDraft = settled;
+    tab.terminalMetadataPending = undefined;
+    tab.terminalMetadataError = undefined;
+  }
+}
+
+/// Resolve a nonfatal `rename_failed` frame. The authoritative pair remains
+/// unchanged and the submitted draft stays available for correction.
+export function failTerminalMetadataRename(sessionId: string, message: string): void {
+  for (const tab of terminalTabsBySession(sessionId)) {
+    if (!tab.terminalMetadataPending) continue;
+    tab.terminalMetadataPending = undefined;
+    tab.terminalMetadataError = message.trim() || "Terminal metadata update failed.";
+  }
+}
+
+/// Apply the authoritative attach prelude. A reconnect cancels any unconfirmed
+/// proposal and never resubmits it; the server snapshot wins in full.
+export function applyTerminalSessionMetadata(
+  tab: TerminalTab,
+  metadata: TerminalSessionMetadata,
+): void {
+  const previousDivergence = terminalMetadataDivergenceKey(tab);
+  const live = applyTerminalLiveMetadata(tab, metadata.name, metadata.group);
+  tab.terminalEnvTabName = metadata.spawnName ?? undefined;
+  tab.terminalEnvTabGroup = metadata.spawnGroup ?? undefined;
+  tab.terminalMetadataDraft = live;
+  tab.terminalMetadataPending = undefined;
+  tab.terminalMetadataError = undefined;
+  if (previousDivergence !== terminalMetadataDivergenceKey(tab)) {
+    tab.terminalEnvNamePromptDismissed = false;
+    tab.terminalEnvPromptDismissedFor = undefined;
+  }
+}
+
+export type TerminalEnvironmentVariable = "$CHAN_TAB_NAME" | "$CHAN_TAB_GROUP";
+
+export function terminalStaleEnvironmentVariables(
+  tab: TerminalTab,
+): TerminalEnvironmentVariable[] {
+  if (!tab.terminalSessionId) return [];
+  const stale: TerminalEnvironmentVariable[] = [];
+  if (
+    tab.terminalEnvTabName != null &&
+    terminalTabName(tab) !== tab.terminalEnvTabName
+  ) {
+    stale.push("$CHAN_TAB_NAME");
+  }
+  if (
+    tab.terminalEnvTabGroup != null &&
+    terminalTabGroup(tab) !== (tab.terminalEnvTabGroup.trim() || DEFAULT_TERMINAL_GROUP)
+  ) {
+    stale.push("$CHAN_TAB_GROUP");
+  }
+  return stale;
 }
 
 export function terminalEnvTabNameStale(tab: TerminalTab): boolean {
-  return Boolean(
-    tab.terminalSessionId &&
-      tab.terminalEnvTabName !== undefined &&
-      terminalTabName(tab) !== tab.terminalEnvTabName,
-  );
+  return terminalStaleEnvironmentVariables(tab).includes("$CHAN_TAB_NAME");
 }
 
-export function dismissTerminalEnvNamePrompt(tab: TerminalTab): void {
+export function terminalEnvironmentPromptDismissed(tab: TerminalTab): boolean {
+  const key = terminalMetadataDivergenceKey(tab);
+  return key !== null && tab.terminalEnvPromptDismissedFor === key;
+}
+
+export function dismissTerminalEnvironmentPrompt(tab: TerminalTab): void {
+  const key = terminalMetadataDivergenceKey(tab);
+  if (!key) return;
+  tab.terminalEnvPromptDismissedFor = key;
   tab.terminalEnvNamePromptDismissed = true;
 }
 
-export function markTerminalEnvNameRestarted(tab: TerminalTab): void {
+export function markTerminalEnvironmentRestarted(tab: TerminalTab): void {
   tab.terminalEnvTabName = terminalTabName(tab);
+  tab.terminalEnvTabGroup = terminalTabGroup(tab);
   tab.terminalEnvNamePromptDismissed = false;
+  tab.terminalEnvPromptDismissedFor = undefined;
 }
 
 export function setTerminalBroadcastEnabled(tab: TerminalTab, enabled: boolean): void {
@@ -1981,28 +2133,20 @@ let terminalRoster = $state<TerminalRosterEntry[]>([]);
 /// and the reconnect seed.
 export function applyTerminalRoster(entries: TerminalRosterEntry[]): void {
   terminalRoster = entries;
-  reconcileLocalGroupsFromRoster(entries);
+  reconcileLocalMetadataFromRoster(entries);
 }
 
-/// Align each local tab's broadcast `group` with the server's roster truth.
-/// The server can move a live session's `tab_group` without the SPA driving
-/// it: a CLI / team-script bootstrap restarts the lead's pre-existing terminal
-/// out of band (a shell cannot restart the tab running its own script, so the
-/// server does it), which updates the session's server-side group but leaves
-/// this window's `tab.group` at its old value. Broadcast scoping keys on the
-/// local group, so without this the lead would sit alone in a stale group
-/// while the freshly-spawned workers share the team group.
-///
-/// Reconciling here is safe against an unsaved UI group edit: that edit lives
-/// in the component-local `groupDraft` and only reaches `tab.group` at a
-/// confirmed restart (which respawns the session, so the roster already agrees
-/// by the time it lands). A local/server mismatch therefore means the server
-/// moved an existing session, and the server is authoritative.
-function reconcileLocalGroupsFromRoster(entries: TerminalRosterEntry[]): void {
+/// Align every local copy with the server's atomic live name/group pair. A
+/// component draft remains separate, so a roster update cannot be overwritten
+/// merely by repainting the controls.
+function reconcileLocalMetadataFromRoster(entries: TerminalRosterEntry[]): void {
   for (const entry of entries) {
-    const tab = findTerminalBySession(entry.id);
-    if (tab && terminalTabGroup(tab) !== entry.tab_group) {
-      setTerminalGroup(tab, entry.tab_group);
+    for (const tab of terminalTabsBySession(entry.id)) {
+      applyTerminalLiveMetadata(
+        tab,
+        entry.tab_name ?? terminalTabName(tab),
+        entry.tab_group,
+      );
     }
   }
 }
@@ -2038,8 +2182,12 @@ export function setTerminalSession(tab: TerminalTab, sessionId: string): void {
   if (wasFresh) {
     tab.submitAgent = undefined;
     tab.lastAgentEchoSeq = undefined;
-    tab.terminalEnvTabName = terminalTabName(tab);
+    tab.terminalEnvTabName = undefined;
+    tab.terminalEnvTabGroup = undefined;
     tab.terminalEnvNamePromptDismissed = false;
+    tab.terminalEnvPromptDismissedFor = undefined;
+    tab.terminalMetadataPending = undefined;
+    tab.terminalMetadataError = undefined;
   }
 }
 
@@ -2137,13 +2285,20 @@ export function failPendingPrompt(tab: TerminalTab): void {
 }
 
 export function clearTerminalSession(tab: TerminalTab): void {
+  if (tab.terminalMetadataPending) {
+    tab.terminalMetadataPending = undefined;
+    tab.terminalMetadataError =
+      "Connection closed before the metadata update was confirmed.";
+  }
   tab.terminalSessionId = undefined;
   tab.submitAgent = undefined;
   tab.lastAgentEchoSeq = undefined;
   tab.terminalActivity = undefined;
   tab.terminalActivityPulsing = undefined;
   tab.terminalEnvTabName = undefined;
+  tab.terminalEnvTabGroup = undefined;
   tab.terminalEnvNamePromptDismissed = false;
+  tab.terminalEnvPromptDismissedFor = undefined;
 }
 
 export function allTerminalTabs(): TerminalTab[] {
@@ -2155,11 +2310,12 @@ export function allTerminalTabs(): TerminalTab[] {
 /// Returns null when no matching tab is open; the orchestrator silently
 /// skips the lead-prompt step in that case.
 export function findTerminalBySession(sessionId: string): TerminalTab | null {
-  if (!sessionId) return null;
-  for (const tab of allTerminalTabs()) {
-    if (tab.terminalSessionId === sessionId) return tab;
-  }
-  return null;
+  return terminalTabsBySession(sessionId)[0] ?? null;
+}
+
+function terminalTabsBySession(sessionId: string): TerminalTab[] {
+  if (!sessionId) return [];
+  return allTerminalTabs().filter((tab) => tab.terminalSessionId === sessionId);
 }
 
 /// True when this window holds at least one tab of any kind. A window with no
@@ -3409,13 +3565,23 @@ function cloneTab(src: Tab): Tab {
       broadcastEnabled: src.broadcastEnabled,
       broadcastTargetIds: [...src.broadcastTargetIds],
       terminalEnvTabName: src.terminalEnvTabName,
+      terminalEnvTabGroup: src.terminalEnvTabGroup,
       terminalEnvNamePromptDismissed: src.terminalEnvNamePromptDismissed,
+      terminalEnvPromptDismissedFor: src.terminalEnvPromptDismissedFor,
+      terminalMetadataDraft: src.terminalMetadataDraft
+        ? { ...src.terminalMetadataDraft }
+        : undefined,
+      terminalMetadataPending: src.terminalMetadataPending
+        ? { ...src.terminalMetadataPending }
+        : undefined,
+      terminalMetadataError: src.terminalMetadataError,
       terminalSessionId: src.terminalSessionId,
       controlledTerminal: src.controlledTerminal,
       lastAgentEchoSeq: src.lastAgentEchoSeq,
       cwd: src.cwd,
       seedInput: src.seedInput,
       pendingGlobalName: src.pendingGlobalName,
+      group: src.group,
     };
   }
   if (src.kind === "graph") {
@@ -3558,6 +3724,9 @@ export function enterPaneMode(): void {
   paneMode.transactionMode = false;
   paneMode.grabPaneId = null;
   paneMode.hoverPaneId = null;
+  paneMode.stale = false;
+  paneMode.entryLayout = serializeLayout({ terminalSessions: true });
+  paneMode.pendingRemoteLayout = null;
   paneMode.stagedDraftEditors = [];
   notifyPaneModeSettled();
 }
@@ -3567,10 +3736,15 @@ export function enterPaneMode(): void {
 /// double-click on the dead zone (standby until the user clicks and
 /// drags inside any pane). Idempotent if already in transaction mode.
 export function enterPaneModeTransaction(grabPaneId: string | null): void {
+  if (paneMode.stale) return;
   if (!paneMode.active) {
     paneMode.draft = cloneLayoutState(layout);
     paneMode.active = true;
     paneMode.spawnIntent = null;
+    paneMode.stale = false;
+    paneMode.entryLayout = serializeLayout({ terminalSessions: true });
+    paneMode.pendingRemoteLayout = null;
+    paneMode.stagedDraftEditors = [];
   }
   paneMode.transactionMode = true;
   paneMode.grabPaneId = grabPaneId;
@@ -3581,19 +3755,19 @@ export function enterPaneModeTransaction(grabPaneId: string | null): void {
 /// or re-grabs a different pane mid-transaction. No-op outside
 /// transaction mode.
 export function paneModeSetGrab(paneId: string | null): void {
-  if (!paneMode.transactionMode) return;
+  if (!paneMode.transactionMode || paneMode.stale) return;
   paneMode.grabPaneId = paneId;
 }
 
 /// Track the pane currently under the cursor while a grab is held.
 /// Drives the drop-target highlight. No-op outside transaction mode.
 export function paneModeSetHover(paneId: string | null): void {
-  if (!paneMode.transactionMode) return;
+  if (!paneMode.transactionMode || paneMode.stale) return;
   paneMode.hoverPaneId = paneId;
 }
 
 export function commitPaneMode(): void {
-  if (!paneMode.active || !paneMode.draft) return;
+  if (!paneMode.active || !paneMode.draft || paneMode.stale) return;
   // Apply any staged spawn intent into the draft before sealing so the
   // new tab lands as part of the same transaction. Callers that prime
   // side effects for a staged spawn (e.g. `revealAndSelect` for a
@@ -3615,20 +3789,27 @@ export function commitPaneMode(): void {
   paneMode.transactionMode = false;
   paneMode.grabPaneId = null;
   paneMode.hoverPaneId = null;
+  paneMode.stale = false;
+  paneMode.entryLayout = null;
+  paneMode.pendingRemoteLayout = null;
   paneMode.stagedDraftEditors = [];
   notifyPaneModeSettled();
 }
 
 export function cancelPaneMode(): void {
   killStagedTerminalSessions();
+  const pendingRemoteLayout = paneMode.pendingRemoteLayout;
   paneMode.active = false;
   paneMode.draft = null;
   paneMode.spawnIntent = null;
   paneMode.transactionMode = false;
   paneMode.grabPaneId = null;
   paneMode.hoverPaneId = null;
+  paneMode.stale = false;
+  paneMode.entryLayout = null;
+  paneMode.pendingRemoteLayout = null;
   paneMode.stagedDraftEditors = [];
-  notifyPaneModeSettled();
+  notifyPaneModeSettled(pendingRemoteLayout);
 }
 
 /// Kill the PTYs of terminals that exist ONLY in the draft. Staged
@@ -3663,18 +3844,19 @@ export function paneModeStageSpawn(
   kind: PaneModeSpawnKind,
   ctx: SpawnContext,
 ): void {
-  if (!paneMode.active) return;
+  if (!paneMode.active || paneMode.stale) return;
   paneMode.spawnIntent = { kind, ctx };
 }
 
 export function clearPaneModeSpawnIntent(): void {
+  if (paneMode.stale) return;
   paneMode.spawnIntent = null;
 }
 
 type Direction = "left" | "right" | "up" | "down";
 
 function draftLayout(): LayoutState | null {
-  return paneMode.active ? paneMode.draft : null;
+  return paneMode.active && !paneMode.stale ? paneMode.draft : null;
 }
 
 function parentOf(state: LayoutState, childId: string): SplitNode | null {
@@ -4151,16 +4333,12 @@ export function openIndexingDashboard(): void {
 /// multiple staged drafts, each targeting the pane focused at press
 /// time. `paneModeMaterializeStagedDrafts()` is the commit-time
 /// resolver.
-export interface StagedDraftEditor {
-  paneId: string;
-  side: PaneSide;
-  kind: PaneModeDraftEditorKind;
-}
 export function paneModeStageDraftEditor(kind: PaneModeDraftEditorKind = "draft"): void {
-  if (!paneMode.active || !paneMode.draft) return;
+  if (!paneMode.active || !paneMode.draft || paneMode.stale) return;
   const paneId = paneMode.draft.activePaneId;
   const node = leafPaneFrom(paneMode.draft, paneId);
   paneMode.stagedDraftEditors.push({
+    id: id("staged-editor"),
     paneId,
     side: node ? paneSide(node) : "a",
     kind,
@@ -4169,6 +4347,22 @@ export function paneModeStageDraftEditor(kind: PaneModeDraftEditorKind = "draft"
 
 export function paneModeStageDiagramEditor(): void {
   paneModeStageDraftEditor("diagram");
+}
+
+export function paneModeStagedDraftEditorsFor(
+  paneId: string,
+  side: PaneSide,
+): PaneModeStagedDraftEditor[] {
+  if (!paneMode.active) return [];
+  return paneMode.stagedDraftEditors.filter(
+    (intent) => intent.paneId === paneId && intent.side === side,
+  );
+}
+
+export function paneModeRemoveStagedDraftEditor(id: string): void {
+  if (!paneMode.active || paneMode.stale) return;
+  const index = paneMode.stagedDraftEditors.findIndex((intent) => intent.id === id);
+  if (index >= 0) paneMode.stagedDraftEditors.splice(index, 1);
 }
 
 /// Return the set of tab ids that exist in the draft but not in the
@@ -5238,6 +5432,213 @@ export type SerSplit = {
 };
 export type SerNode = SerLeaf | SerSplit;
 
+type PaneModeConflictFieldPartition = {
+  readonly included: readonly string[];
+  readonly excluded: readonly string[];
+};
+
+/// Closed declaration of the serialized fields that do and do not belong to
+/// Hybrid Nav's conflict domain. The comparator validates runtime keys against
+/// these partitions before reading the included fields, so an unclassified
+/// future field fails closed instead of silently acquiring semantics.
+export const paneModeConflictFieldSets = {
+  node: {
+    included: ["k", "d", "r", "a", "b", "t", "bt", "sb", "f"],
+    excluded: ["wc", "pc", "ht", "bm", "hb"],
+  },
+  tabs: {
+    f: {
+      included: ["k", "a", "p"],
+      excluded: ["m", "o", "ol", "spo", "sp", "spm", "s", "r", "c", "h", "iw", "ow"],
+    },
+    t: {
+      included: ["k", "a", "n", "tg", "tsid"],
+      excluded: ["tc", "tae", "kp", "rpd", "rpc", "rph", "pp", "rpv", "twk"],
+    },
+    s: { included: ["k", "a"], excluded: [] },
+    h: { included: ["k", "a"], excluded: [] },
+    g: {
+      included: ["k", "a"],
+      excluded: ["gm", "gs", "gd", "gi", "gf", "ge", "gp", "gn", "gnl", "iw"],
+    },
+    b: {
+      included: ["k", "a"],
+      excluded: ["bi", "bs", "bd", "be", "bsc", "iw"],
+    },
+    d: { included: ["k", "a"], excluded: ["cs", "ds", "ar"] },
+    x: { included: ["k", "a", "xi"], excluded: ["n"] },
+  },
+} as const;
+
+function paneModeFieldsAreClassified(
+  value: object,
+  partition: PaneModeConflictFieldPartition,
+): boolean {
+  const declared = new Set([...partition.included, ...partition.excluded]);
+  return Object.keys(value).every((field) => declared.has(field));
+}
+
+function paneModeTabKind(tab: SerTab): NonNullable<SerTab["k"]> {
+  return tab.k ?? "f";
+}
+
+function paneModeIncludedTabFieldEqual(
+  field: string,
+  kind: NonNullable<SerTab["k"]>,
+  baseline: SerTab,
+  incoming: SerTab,
+): boolean {
+  if (field === "k") return paneModeTabKind(baseline) === paneModeTabKind(incoming);
+  if (field === "a") return (baseline.a === 1) === (incoming.a === 1);
+  if (field === "p") return (baseline.p ?? "") === (incoming.p ?? "");
+  if (field === "xi") {
+    return (baseline.xi?.trim() ?? "") === (incoming.xi?.trim() ?? "");
+  }
+  if (field === "n" && kind === "t") {
+    return (
+      (baseline.n?.trim() || "Terminal") ===
+      (incoming.n?.trim() || "Terminal")
+    );
+  }
+  if (field === "tg" && kind === "t") {
+    return (
+      (baseline.tg?.trim() || DEFAULT_TERMINAL_GROUP) ===
+      (incoming.tg?.trim() || DEFAULT_TERMINAL_GROUP)
+    );
+  }
+  if (field === "tsid" && kind === "t") {
+    // A just-attached terminal gains its settled id without becoming a new
+    // inventory item. Once both sides have ids, identity changes are real.
+    return !baseline.tsid || !incoming.tsid || baseline.tsid === incoming.tsid;
+  }
+  return false;
+}
+
+function paneModeTabsSemanticallyEqual(
+  baseline: readonly SerTab[],
+  incoming: readonly SerTab[],
+): boolean {
+  if (baseline.length !== incoming.length) return false;
+  return baseline.every((left, index) => {
+    const right = incoming[index]!;
+    const kind = paneModeTabKind(left);
+    if (kind !== paneModeTabKind(right)) return false;
+    const partition = paneModeConflictFieldSets.tabs[kind];
+    if (
+      !paneModeFieldsAreClassified(left, partition) ||
+      !paneModeFieldsAreClassified(right, partition)
+    ) {
+      return false;
+    }
+    return partition.included.every((field) =>
+      paneModeIncludedTabFieldEqual(field, kind, left, right),
+    );
+  });
+}
+
+function paneModeNodesSemanticallyEqual(
+  baseline: SerNode,
+  incoming: SerNode,
+): boolean {
+  const partition = paneModeConflictFieldSets.node;
+  if (
+    !paneModeFieldsAreClassified(baseline, partition) ||
+    !paneModeFieldsAreClassified(incoming, partition) ||
+    baseline.k !== incoming.k
+  ) {
+    return false;
+  }
+  return partition.included.every((field) => {
+    if (field === "k") return true;
+    if (field === "d") {
+      return baseline.k !== "s" || baseline.d === (incoming as SerSplit).d;
+    }
+    if (field === "r") {
+      return (
+        baseline.k !== "s" ||
+        (baseline.r ?? 0.5) === ((incoming as SerSplit).r ?? 0.5)
+      );
+    }
+    if (field === "a") {
+      return (
+        baseline.k !== "s" ||
+        paneModeNodesSemanticallyEqual(baseline.a, (incoming as SerSplit).a)
+      );
+    }
+    if (field === "b") {
+      return (
+        baseline.k !== "s" ||
+        paneModeNodesSemanticallyEqual(baseline.b, (incoming as SerSplit).b)
+      );
+    }
+    if (field === "t") {
+      return (
+        baseline.k !== "l" ||
+        paneModeTabsSemanticallyEqual(baseline.t, (incoming as SerLeaf).t)
+      );
+    }
+    if (field === "bt") {
+      return (
+        baseline.k !== "l" ||
+        paneModeTabsSemanticallyEqual(
+          baseline.bt ?? [],
+          (incoming as SerLeaf).bt ?? [],
+        )
+      );
+    }
+    if (field === "sb") {
+      return (
+        baseline.k !== "l" ||
+        (baseline.sb === 1) === ((incoming as SerLeaf).sb === 1)
+      );
+    }
+    if (field === "f") {
+      return (
+        baseline.k !== "l" ||
+        (baseline.f === 1) === ((incoming as SerLeaf).f === 1)
+      );
+    }
+    return false;
+  });
+}
+
+export function paneModeLayoutsSemanticallyEqual(
+  baseline: SerNode | null,
+  incoming: SerNode | null,
+): boolean {
+  if (!baseline || !incoming) return baseline === incoming;
+  return paneModeNodesSemanticallyEqual(baseline, incoming);
+}
+
+function clonePaneModeRemoteLayout(layout: SerNode | null): SerNode | null {
+  return layout ? (JSON.parse(JSON.stringify(layout)) as SerNode) : null;
+}
+
+/// Screen an authoritative remote layout against the fixed entry snapshot.
+/// Once stale, every subsequent snapshot replaces the pending value, including
+/// a snapshot that happens to resemble the original baseline.
+export function paneModeDeferRemoteLayout(incoming: SerNode | null): boolean {
+  if (!paneMode.active) return false;
+  if (paneMode.stale) {
+    paneMode.pendingRemoteLayout = clonePaneModeRemoteLayout(incoming);
+    return true;
+  }
+  if (paneModeLayoutsSemanticallyEqual(paneMode.entryLayout, incoming)) {
+    return false;
+  }
+  paneMode.stale = true;
+  paneMode.pendingRemoteLayout = clonePaneModeRemoteLayout(incoming);
+  return true;
+}
+
+/// Authoritative terminal metadata callers invoke this only after detecting
+/// and applying a settled live-pair change. It never manufactures a pending
+/// session snapshot.
+export function paneModeMarkStaleForAuthoritativeMetadata(): void {
+  if (!paneMode.active) return;
+  paneMode.stale = true;
+}
+
 function serializeFocusColor(color: FocusColor | undefined): { wc?: SerFocusColor } {
   if (color === "orange") return { wc: "o" };
   if (color === "green") return { wc: "g" };
@@ -5381,7 +5782,7 @@ function serializeTab(
   if (t.kind === "terminal") {
     return {
       k: "t",
-      n: t.title,
+      n: terminalTabName(t),
       ...(terminalTabGroup(t) !== DEFAULT_TERMINAL_GROUP
         ? { tg: terminalTabGroup(t) }
         : {}),
@@ -5948,8 +6349,10 @@ export async function restoreLayout(
 /// caller keys echo suppression on this: applied -> pre-seed the
 /// session-save dedupe snapshot so the trailing local save no-ops;
 /// diverged -> leave it unseeded so the next local save pushes the kept
-/// state back to the peer (self-healing).
-export type ReconcileResult = "applied" | "diverged";
+/// state back to the peer (self-healing). "deferred" means an active Pane
+/// Mode transaction retained the conflicting snapshot for Escape and neither
+/// reconciliation nor save-back may run yet.
+export type ReconcileResult = "applied" | "diverged" | "deferred";
 
 /// Non-destructive sibling of `restoreLayout` for live co-view sync:
 /// apply a peer's persisted layout snapshot onto the LIVE tree without
@@ -5977,10 +6380,7 @@ export type ReconcileResult = "applied" | "diverged";
 /// tabs and pane focus survive whenever their objects do, falling back
 /// to the remote markers only when the local target vanished.
 export function reconcileLayout(remote: SerNode): ReconcileResult {
-  // A pane-mode transaction owns the tree (draft + commit/cancel);
-  // applying under it would clobber the draft. Refuse whole; the
-  // unseeded snapshot save-back reconverges after the transaction ends.
-  if (paneMode.active) return "diverged";
+  if (paneModeDeferRemoteLayout(remote)) return "deferred";
   const ctx: ReconcileCtx = {
     diverged: false,
     remoteFocusPaneId: null,

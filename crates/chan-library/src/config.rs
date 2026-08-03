@@ -62,6 +62,10 @@ pub struct TerminalConfig {
     /// download flow before the activation completes.
     #[serde(default)]
     pub font: TerminalFontChoice,
+    /// Renderer font size in pixels. The SPA captures this when it constructs
+    /// either terminal backend; existing renderers keep their captured size.
+    #[serde(default = "default_terminal_font_size")]
+    pub font_size: u32,
     /// The non-team default for whether a newly-spawned terminal
     /// gets the chan MCP discovery env vars (`CHAN_MCP_*`). Off by
     /// default for ALL agents (a stray env descriptor makes codex fail
@@ -128,6 +132,7 @@ impl Default for TerminalConfig {
             scrollback_mb: default_terminal_scrollback_mb(),
             default_term: default_terminal_default_term(),
             font: TerminalFontChoice::default(),
+            font_size: default_terminal_font_size(),
             mcp_env: false,
             mouse_capture: default_terminal_mouse_capture(),
             ghostty: false,
@@ -155,6 +160,10 @@ fn default_terminal_scrollback_mb() -> u32 {
 
 fn default_terminal_default_term() -> String {
     "xterm-256color".into()
+}
+
+fn default_terminal_font_size() -> u32 {
+    14
 }
 
 fn default_terminal_mouse_capture() -> bool {
@@ -227,6 +236,10 @@ fn normalize_terminal_secret_mask_suffixes(
 pub const TERMINAL_SCROLLBACK_MB_MIN: u32 = 10;
 pub const TERMINAL_SCROLLBACK_MB_MAX: u32 = 50;
 
+/// Inclusive terminal renderer font-size bounds mirrored by Settings.
+pub const TERMINAL_FONT_SIZE_MIN: u32 = 8;
+pub const TERMINAL_FONT_SIZE_MAX: u32 = 32;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +253,25 @@ mod tests {
         assert_eq!(
             config.secret_mask_suffixes,
             DEFAULT_TERMINAL_SECRET_MASK_SUFFIXES
+        );
+    }
+
+    #[test]
+    fn font_size_defaults_to_fourteen_and_round_trips() {
+        let default = TerminalConfig::default();
+        assert_eq!(default.font_size, 14);
+
+        let missing: TerminalConfig = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(missing.font_size, 14);
+
+        let configured: TerminalConfig = serde_json::from_value(json!({
+            "font_size": 20
+        }))
+        .unwrap();
+        assert_eq!(configured.font_size, 20);
+        assert_eq!(
+            serde_json::to_value(configured).unwrap()["font_size"],
+            json!(20)
         );
     }
 

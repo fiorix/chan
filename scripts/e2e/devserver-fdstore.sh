@@ -2,13 +2,13 @@
 # Continuous fdstore parking e2e against a REAL `systemctl --user` unit.
 #
 # Proves the devserver terminal-survival contract end to end: a live PTY
-# survives (1) a bare `systemctl --user restart`, (2) `chan devserver
-# --restart`, (3) a watchdog kill (SIGSTOP the main process), and (4) a
-# kill -9 crash restart including a session spawned after the previous
-# boot; session close, `--stop`, `--restart --force`, and a bare
-# `systemctl --user stop` all end the shells and empty the store. The fd
-# store count is asserted after every phase so restart/adoption cycles
-# can never grow it.
+# survives (1) a bare `systemctl --user restart`, including distinct live
+# and spawn metadata, (2) `chan devserver --restart`, (3) a watchdog kill
+# (SIGSTOP the main process), and (4) a kill -9 crash restart including a
+# session spawned after the previous boot; session close, `--stop`,
+# `--restart --force`, and a bare `systemctl --user stop` all end the shells
+# and empty the store. The fd store count is asserted after every phase so
+# restart/adoption cycles can never grow it.
 #
 # The fixed user unit chan-devserver.service is snapshotted (unit file,
 # drop-ins, enabled state, active state) and restored on exit, failure,
@@ -83,6 +83,7 @@ command -v systemctl >/dev/null || { log "SKIP: no systemctl"; exit 0; }
 systemctl --user show-environment >/dev/null 2>&1 \
     || { log "SKIP: no systemd user session"; exit 0; }
 command -v python3 >/dev/null || { log "SKIP: python3 required"; exit 0; }
+command -v node >/dev/null || { log "SKIP: node required"; exit 0; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/chan-fdstore-e2e.XXXXXX")"
 export CHAN_HOME="$WORK/home"
@@ -199,6 +200,103 @@ json_field() { # field  (stdin: json object)
     python3 -c 'import json,sys;print(json.load(sys.stdin)[sys.argv[1]])' "$1"
 }
 
+terminal_route() { # window-id  (prints "prefix token")
+    local wid="$1" token rows
+    token="$(devserver_token)"
+    rows="$(api GET /api/library/windows "$token")"
+    printf '%s' "$rows" | python3 -c '
+import json, sys
+wid = sys.argv[1]
+rows = json.load(sys.stdin)
+row = next(
+    r for r in rows
+    if r["kind"] == "terminal" and r["window_id"] == wid
+)
+print(row["prefix"], row["token"])' "$wid"
+}
+
+terminal_ws_url() { # sid window-id query-name query-group
+    local sid="$1" wid="$2" query_name="$3" query_group="$4"
+    local prefix ttoken
+    read -r prefix ttoken <<<"$(terminal_route "$wid")"
+    python3 -c '
+import sys
+from urllib.parse import urlencode
+
+base, prefix, token, sid, wid, name, group = sys.argv[1:]
+scheme = "wss" if base.startswith("https:") else "ws"
+host = base.split("://", 1)[1]
+query = urlencode({
+    "cols": 80,
+    "rows": 24,
+    "tab_name": name,
+    "tab_group": group,
+    "window_id": wid,
+    "session": sid,
+    "since": 0,
+    "agent_echo_since": 0,
+    "t": token,
+})
+print(f"{scheme}://{host}{prefix}/api/terminal/ws?{query}")' \
+        "$BASE" "$prefix" "$ttoken" "$sid" "$wid" "$query_name" "$query_group"
+}
+
+probe_terminal_metadata() { # sid window-id query-name query-group [name group]
+    local sid="$1" wid="$2" query_name="$3" query_group="$4" ws_url
+    shift 4
+    ws_url="$(terminal_ws_url "$sid" "$wid" "$query_name" "$query_group")"
+    NODE_NO_WARNINGS=1 node --experimental-websocket \
+        "$REPO/scripts/e2e/terminal-metadata-ws.mjs" "$ws_url" "$@"
+}
+
+assert_probe_metadata() { # why live-name live-group spawn-name spawn-group [ack-name ack-group]
+    local why="$1" live_name="$2" live_group="$3" spawn_name="$4" spawn_group="$5"
+    local ack_name="${6:-}" ack_group="${7:-}"
+    python3 -c '
+import json, sys
+
+why, live_name, live_group, spawn_name, spawn_group, ack_name, ack_group = sys.argv[1:]
+payload = json.load(sys.stdin)
+session = payload["session"]
+want = {
+    "name": live_name,
+    "group": live_group,
+    "spawn_name": spawn_name,
+    "spawn_group": spawn_group,
+}
+got = {key: session.get(key) for key in want}
+if got != want:
+    raise SystemExit(f"{why}: session metadata {got!r}, want {want!r}")
+if ack_name:
+    ack = payload.get("renamed")
+    want_ack = {"type": "renamed", "name": ack_name, "group": ack_group}
+    if ack != want_ack:
+        raise SystemExit(f"{why}: rename ack {ack!r}, want {want_ack!r}")
+' "$why" "$live_name" "$live_group" "$spawn_name" "$spawn_group" \
+        "$ack_name" "$ack_group"
+    log "terminal metadata as expected ($why)"
+}
+
+manifest_has_metadata() { # sid live-name live-group spawn-name spawn-group
+    python3 -c '
+import json, sys
+
+path, sid, live_name, live_group, spawn_name, spawn_group = sys.argv[1:]
+with open(path) as handle:
+    manifest = json.load(handle)
+entry = next(row for row in manifest["sessions"] if row["meta"]["session_id"] == sid)
+meta = entry["meta"]
+want = {
+    "tab_name": live_name,
+    "tab_group": live_group,
+    "spawn_name": spawn_name,
+    "spawn_group": spawn_group,
+}
+got = {key: meta.get(key) for key in want}
+raise SystemExit(0 if got == want else 1)
+' "$CHAN_HOME/devserver/fdstore-restart.json" "$@"
+}
+
 # Mint a terminal window, spawn `sleep 8631N` in it, echo "sid pid".
 spawn_windowed_sleep() { # magic-seconds
     local magic="$1" token window prefix ttoken wid sid pid
@@ -291,12 +389,33 @@ assert_store 1 "one windowed session parked at spawn"
 [ -f "$CHAN_HOME/devserver/fdstore-restart.json" ] \
     || fail "restart manifest missing after park"
 
+SPAWN_NAME1="e2e-86311"
+SPAWN_GROUP1="default"
+LIVE_NAME1="e2e-live-86311"
+LIVE_GROUP1="fdstore-live"
+METADATA1="$(probe_terminal_metadata \
+    "$SID1" "$WID1" "$SPAWN_NAME1" "$SPAWN_GROUP1" \
+    "$LIVE_NAME1" "$LIVE_GROUP1")"
+printf '%s' "$METADATA1" | assert_probe_metadata \
+    "live rename before bare restart" \
+    "$SPAWN_NAME1" "$SPAWN_GROUP1" "$SPAWN_NAME1" "$SPAWN_GROUP1" \
+    "$LIVE_NAME1" "$LIVE_GROUP1"
+wait_until 15 "distinct live/spawn metadata in restart manifest" \
+    manifest_has_metadata \
+    "$SID1" "$LIVE_NAME1" "$LIVE_GROUP1" "$SPAWN_NAME1" "$SPAWN_GROUP1"
+log "restart manifest records distinct live and spawn metadata"
+
 # ---- case 1: bare systemctl restart ----
 log "case 1: bare systemctl --user restart"
 systemctl --user restart "$UNIT_NAME"
 wait_until 60 "readiness after bare restart" ready
 child_alive "$PID1" || fail "child died across bare restart"
 assert_session_listed "$SID1"
+METADATA1="$(probe_terminal_metadata \
+    "$SID1" "$WID1" "stale-query-86311" "stale-query-group")"
+printf '%s' "$METADATA1" | assert_probe_metadata \
+    "fdstore adoption after bare restart" \
+    "$LIVE_NAME1" "$LIVE_GROUP1" "$SPAWN_NAME1" "$SPAWN_GROUP1"
 assert_store 1 "adoption after bare restart must not grow the store"
 
 # ---- case 2: chan devserver --restart ----

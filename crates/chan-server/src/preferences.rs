@@ -10,6 +10,8 @@
 //! `<config>/chan/preferences.toml`:
 //!
 //!   - editor_theme (github / google_docs / word)
+//!   - editor_font_size (optional absolute body size)
+//!   - terminal_colors (standard or custom terminal colour set)
 //!   - theme  (system / light / dark)
 //!   - pane_widths (inspector / graph / file-browser sidebars)
 //!   - browser_side_panes (left / right docked file-browser state)
@@ -45,6 +47,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::Error;
 
+pub const EDITOR_FONT_SIZE_MIN: u32 = 10;
+pub const EDITOR_FONT_SIZE_MAX: u32 = 32;
+
 /// Fields persisted to `<config>/chan/preferences.toml`. A fresh
 /// install defaults to the GitHub editor theme so the renderer
 /// matches what most users expect from a markdown editor without
@@ -53,6 +58,10 @@ use crate::Error;
 pub struct EditorPrefs {
     #[serde(default)]
     pub editor_theme: EditorTheme,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_font_size: Option<u32>,
+    #[serde(default)]
+    pub terminal_colors: TerminalColorPrefs,
     #[serde(default)]
     pub theme: ThemeChoice,
     #[serde(default)]
@@ -141,6 +150,8 @@ impl Default for EditorPrefs {
     fn default() -> Self {
         Self {
             editor_theme: EditorTheme::default(),
+            editor_font_size: None,
+            terminal_colors: TerminalColorPrefs::default(),
             theme: ThemeChoice::default(),
             pane_widths: PaneWidths::default(),
             browser_side_panes: BrowserSidePanes::default(),
@@ -170,6 +181,39 @@ pub enum EditorTheme {
     Github,
     GoogleDocs,
     Word,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalColorPrefs {
+    #[serde(default)]
+    pub mode: TerminalColorMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom: Option<TerminalCustomColors>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalColorMode {
+    #[default]
+    Standard,
+    Custom,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalCustomColors {
+    pub background: String,
+    pub foreground: String,
+    pub cursor: String,
+    pub contrast: TerminalContrast,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalContrast {
+    #[default]
+    Auto,
+    Dark,
+    Light,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -352,6 +396,35 @@ mod tests {
         prefs.save_to(&p).unwrap();
         let loaded = EditorPrefs::load_from(&p).unwrap();
         assert_eq!(prefs, loaded);
+        assert_eq!(loaded.editor_font_size, None);
+        assert_eq!(loaded.terminal_colors, TerminalColorPrefs::default());
+    }
+
+    #[test]
+    fn appearance_preferences_round_trip_with_dormant_custom_colours() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("preferences.toml");
+        let prefs = EditorPrefs {
+            editor_font_size: Some(20),
+            terminal_colors: TerminalColorPrefs {
+                mode: TerminalColorMode::Standard,
+                custom: Some(TerminalCustomColors {
+                    background: "#112233".into(),
+                    foreground: "#ddeeff".into(),
+                    cursor: "#abcdef".into(),
+                    contrast: TerminalContrast::Auto,
+                }),
+            },
+            ..Default::default()
+        };
+
+        prefs.save_to(&path).unwrap();
+        let loaded = EditorPrefs::load_from(&path).unwrap();
+        assert_eq!(loaded, prefs);
+        let saved = std::fs::read_to_string(path).unwrap();
+        assert!(saved.contains("editor_font_size = 20"), "got: {saved}");
+        assert!(saved.contains("mode = \"standard\""), "got: {saved}");
+        assert!(saved.contains("background = \"#112233\""), "got: {saved}");
     }
 
     #[test]

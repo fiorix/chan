@@ -1,11 +1,12 @@
 // Path-to-viewer routing for media files, shared by the file browser's
 // row gestures (double-click / Enter) and the inspector's main media
-// action so the image/video/PDF mapping cannot fork. Deliberately
+// action so the image/audio/video/PDF mapping cannot fork. Deliberately
 // narrow: non-media returns false and the CALLER decides the fallback
 // (the file tree attempts a text open); this module never imports
 // tab-opening state.
 
-import { isImage, isPdf, isVideo } from "./fileTypes";
+import { isAudio, isImage, isPdf, isVideo } from "./fileTypes";
+import { openAudioViewer } from "./audioViewer";
 import { openImageZoom, type ZoomImage } from "./imageZoom";
 import { openPdfViewer } from "./pdfViewer";
 import { openVideoViewer } from "./videoViewer";
@@ -26,13 +27,16 @@ export function dirImageSet(p: string): ZoomImage[] {
 }
 
 /// Open `path` in its media viewer: images (raster + svg) in the image
-/// zoom with the same-directory sibling set, video and PDF in their
+/// zoom with the same-directory sibling set, audio, video, and PDF in their
 /// setless viewers - the same mapping the inspector's main action uses.
-/// Returns false untouched for everything else (including audio, which
-/// stays outside the router until its preview surface lands).
+/// Returns false untouched for everything else.
 export function openMediaViewer(path: string): boolean {
   if (isImage(path)) {
     openImageZoom(path, null, dirImageSet(path));
+    return true;
+  }
+  if (isAudio(path)) {
+    openAudioViewer(path);
     return true;
   }
   if (isVideo(path)) {

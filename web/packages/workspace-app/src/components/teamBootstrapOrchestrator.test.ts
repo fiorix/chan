@@ -103,9 +103,15 @@ function mockApi(): {
     .spyOn(api, "restartTerminal")
     .mockResolvedValue(undefined as unknown as void);
   spawnCounter = 0;
-  const spawn = vi.spyOn(api, "spawnTerminal").mockImplementation(async () => {
+  const spawn = vi.spyOn(api, "spawnTerminal").mockImplementation(async (request) => {
     spawnCounter += 1;
-    return { session: `worker-session-${spawnCounter}`, tab_label: `w${spawnCounter}` };
+    return {
+      session: `worker-session-${spawnCounter}`,
+      // POST creation is the settlement point. A mounted proposal sink does
+      // not exist yet, so the mock must return the requested name the real
+      // registry would settle when there is no collision.
+      tab_label: request.name ?? `w${spawnCounter}`,
+    };
   });
   return { write, restart, spawn };
 }
@@ -159,6 +165,30 @@ describe("runTeamBootstrap: lead-first flow", () => {
     // Fresh lead tab + two worker tabs in the active pane (the Cmd+P
     // placeholder is dropped), so still three terminals.
     expect(allTerminalTabs()).toHaveLength(3);
+  });
+
+  test("adopts a POST-settled suffix without a pre-mount rename", async () => {
+    resetLayoutWithLead(leadTerminalTab());
+    const { spawn } = mockApi();
+    spawn.mockImplementation(async (request: Parameters<typeof api.spawnTerminal>[0]) => {
+      spawnCounter += 1;
+      return {
+        session: `worker-session-${spawnCounter}`,
+        tab_label: request.name === "@@Lead" ? "@@Lead-2" : request.name,
+      };
+    });
+
+    await runTeamBootstrap(tabsConfig(), {
+      leadTabId: "lead-tab",
+      leadPaneId: "pane-test",
+    });
+
+    expect(spawn.mock.calls[0][0]).toMatchObject({ name: "@@Lead" });
+    const settledLead = allTerminalTabs().find(
+      (tab) => tab.terminalSessionId === "worker-session-1",
+    );
+    expect(settledLead?.title).toBe("@@Lead-2");
+    expect(allTerminalTabs().some((tab) => tab.title === "@@Lead")).toBe(false);
   });
 
   test("auto-delivers the identity prompt to the lead through the write queue", async () => {

@@ -25,6 +25,8 @@
   const SCROLLBACK_MIN = 10;
   const SCROLLBACK_MAX = 500;
   const SCROLLBACK_STEP = 10;
+  const FONT_SIZE_MIN = 8;
+  const FONT_SIZE_MAX = 32;
   function clampScrollback(v: number | undefined): number {
     return Math.min(SCROLLBACK_MAX, Math.max(SCROLLBACK_MIN, v ?? 50));
   }
@@ -43,6 +45,33 @@
       scrollbackTimer = null;
       commit((p) => ({ ...p, terminal: { ...p.terminal, scrollback_mb: mb } }));
     }, 200);
+  }
+
+  function clampFontSize(value: number): number {
+    return Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, Math.round(value)));
+  }
+
+  let fontSizeText = $state("14");
+  $effect(() => {
+    fontSizeText = String(clampFontSize(prefs.terminal.font_size ?? 14));
+  });
+
+  function commitFontSize(): void {
+    const parsed = fontSizeText.trim() === "" ? 14 : Number(fontSizeText);
+    const next = clampFontSize(Number.isFinite(parsed) ? parsed : 14);
+    fontSizeText = String(next);
+    if ((prefs.terminal.font_size ?? 14) === next) return;
+    commit((p) => ({
+      ...p,
+      terminal: { ...p.terminal, font_size: next },
+    }));
+  }
+
+  function onFontSizeKeydown(event: KeyboardEvent & { currentTarget: HTMLInputElement }): void {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    commitFontSize();
+    event.currentTarget.blur();
   }
 
   // TERM is a controlled field (value from the buffer); the debounce
@@ -200,6 +229,25 @@
   {/if}
 </SettingField>
 
+<SettingField
+  label="Terminal font size"
+  hint="Font size for newly constructed terminal surfaces. Mounted renderers and their PTY geometry stay unchanged."
+>
+  <input
+    class="font-size"
+    type="number"
+    min={FONT_SIZE_MIN}
+    max={FONT_SIZE_MAX}
+    step="1"
+    value={fontSizeText}
+    oninput={(event) => (fontSizeText = event.currentTarget.value)}
+    onblur={commitFontSize}
+    onkeydown={onFontSizeKeydown}
+    aria-label="Terminal font size"
+  />
+  <span class="value">px</span>
+</SettingField>
+
 <style>
   .value {
     color: var(--text-secondary);
@@ -210,6 +258,10 @@
   .font-status {
     color: var(--text-secondary);
     font-size: 12px;
+  }
+  input.font-size {
+    width: 6em;
+    min-width: 6em;
   }
   /* Read-only value chips, same vocabulary as the workspace settings'
      excluded-directories baseline list. */

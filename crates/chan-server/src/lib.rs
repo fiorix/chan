@@ -93,7 +93,8 @@ pub use extensions::{ExtensionRuntime, EXTENSION_HANDSHAKE_MARKER};
 pub use mcp_bridge::run_stdio_proxy as run_mcp_stdio_proxy;
 pub use preferences::{
     BrowserSidePanes, EditorPrefs, EditorTheme, HybridSurfaceThemes, LineSpacing, PaneWidths,
-    ShortcutOverride, SurfaceThemeChoice, ThemeChoice,
+    ShortcutOverride, SurfaceThemeChoice, TerminalColorMode, TerminalColorPrefs, TerminalContrast,
+    TerminalCustomColors, ThemeChoice, EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_MIN,
 };
 pub use routes::{build_fs_graph, FsGraphResponse, FsGraphScope};
 

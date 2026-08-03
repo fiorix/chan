@@ -18,8 +18,11 @@ import {
   enterPaneModeTransaction,
   layout,
   paneMode,
+  paneModeOpenBrowser,
   paneModeSetGrab,
   paneModeSetHover,
+  paneModeStageDiagramEditor,
+  paneModeStageDraftEditor,
   paneSide,
   paneSideToggleFlash,
   requestPaneSideToggleFlash,
@@ -72,7 +75,10 @@ function terminalTab(partial: Partial<TerminalTab> = {}): TerminalTab {
   };
 }
 
-async function renderPane(pane: LeafNode, options: { paneMode?: boolean } = {}) {
+async function renderPane(
+  pane: LeafNode,
+  options: { paneMode?: boolean } = {},
+) {
   layout.rootId = pane.id;
   layout.activePaneId = pane.id;
   layout.nodes = { [pane.id]: pane };
@@ -103,10 +109,13 @@ function menuLabels(): string[] {
 
 function menuRowChords(): Record<string, string> {
   const rows: Record<string, string> = {};
-  for (const button of document.body.querySelectorAll(".hamburger-menu button")) {
+  for (const button of document.body.querySelectorAll(
+    ".hamburger-menu button",
+  )) {
     const label = button.querySelector(".menu-row-label")?.textContent?.trim();
     if (!label) continue;
-    rows[label] = button.querySelector(".menu-row-chord")?.textContent?.trim() ?? "";
+    rows[label] =
+      button.querySelector(".menu-row-chord")?.textContent?.trim() ?? "";
   }
   return rows;
 }
@@ -128,7 +137,9 @@ describe("Pane terminal tab activity marker", () => {
     expect(tabs[0]?.getAttribute("aria-selected")).toBe("true");
     expect(tabs[1]?.getAttribute("aria-selected")).toBe("false");
     expect(
-      tabs[0]?.querySelector<HTMLButtonElement>(".close")?.getAttribute("aria-label"),
+      tabs[0]
+        ?.querySelector<HTMLButtonElement>(".close")
+        ?.getAttribute("aria-label"),
     ).toBe("close Active");
   });
 
@@ -188,17 +199,22 @@ describe("Pane right-click menus", () => {
     target.querySelector<HTMLButtonElement>(".hamburger-trigger")?.click();
     await tick();
 
-    expect(document.body.querySelector(".menu-label span")?.textContent?.trim()).toBe(
-      "Focus border colour",
-    );
+    expect(
+      document.body.querySelector(".menu-label span")?.textContent?.trim(),
+    ).toBe("Focus border colour");
     expect(menuLabels()).toEqual(HAMBURGER_LABELS);
 
-    const orange = [...document.body.querySelectorAll<HTMLButtonElement>(".hamburger-menu button")]
-      .find((button) => button.textContent?.includes("orange"));
+    const orange = [
+      ...document.body.querySelectorAll<HTMLButtonElement>(
+        ".hamburger-menu button",
+      ),
+    ].find((button) => button.textContent?.includes("orange"));
     orange?.click();
     await tick();
 
-    expect(target.querySelector(".pane")?.getAttribute("data-focus-color")).toBe("orange");
+    expect(
+      target.querySelector(".pane")?.getAttribute("data-focus-color"),
+    ).toBe("orange");
   });
 
   test("pane hamburger keeps pane actions in the launcher (Apps rows aside)", async () => {
@@ -318,9 +334,7 @@ describe("Pane right-click menus", () => {
       expect(li.querySelector(".menu-row-chord")).not.toBeNull();
     }
     // The Focus border colour section follows the second separator.
-    expect(
-      items[sepIdx[1]! + 1]?.classList.contains("menu-label"),
-    ).toBe(true);
+    expect(items[sepIdx[1]! + 1]?.classList.contains("menu-label")).toBe(true);
     // The Close pane row follows the third separator and closes the menu.
     const closeRow = items[sepIdx[2]! + 1];
     expect(
@@ -347,9 +361,11 @@ describe("Pane right-click menus", () => {
     };
     window.addEventListener("chan:command", onCommand);
     try {
-      const closeRow = [...document.body.querySelectorAll<HTMLButtonElement>(
-        ".hamburger-menu button",
-      )].find(
+      const closeRow = [
+        ...document.body.querySelectorAll<HTMLButtonElement>(
+          ".hamburger-menu button",
+        ),
+      ].find(
         (button) =>
           button.querySelector(".menu-row-label")?.textContent?.trim() ===
           "Close pane",
@@ -487,7 +503,9 @@ describe("Pane side flip", () => {
     const target = await renderPane(pane, { paneMode: false });
     const sideButton = target.querySelector<HTMLButtonElement>(".side-toggle");
     expect(sideButton?.title).toBe("Flip to side B (Ctrl+`)");
-    expect(sideButton?.getAttribute("aria-label")).toBe("Flip to side B (Ctrl+`)");
+    expect(sideButton?.getAttribute("aria-label")).toBe(
+      "Flip to side B (Ctrl+`)",
+    );
 
     target.querySelector<HTMLButtonElement>(".hamburger-trigger")?.click();
     await tick();
@@ -544,7 +562,9 @@ describe("Pane side flip", () => {
     expect(button?.classList.contains("side-toggle-flash")).toBe(false);
 
     requestPaneSideToggleFlash(pane.id);
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => resolve()),
+    );
     await tick();
 
     expect(button?.classList.contains("side-toggle-flash")).toBe(true);
@@ -623,22 +643,26 @@ describe("Pane side flip", () => {
       };
       const target = await renderPane(pane, { paneMode: false });
       target.querySelector<HTMLButtonElement>(".side-toggle")?.click();
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
       await tick();
 
       const paneEl = target.querySelector<HTMLElement>(".pane");
       expect(paneEl?.classList.contains("sideFlipActive")).toBe(true);
       expect(paneEl?.classList.contains("sideFlipHorizontal")).toBe(true);
       expect(paneEl?.classList.contains("sideFlipVertical")).toBe(false);
-      expect(paneEl?.style.getPropertyValue("--pane-side-flip-start")).toContain(
-        "rotateX(-180deg)",
-      );
+      expect(
+        paneEl?.style.getPropertyValue("--pane-side-flip-start"),
+      ).toContain("rotateX(-180deg)");
 
       // A real browser reports the SCOPED keyframe name (Svelte rewrites
       // `pane-side-flip` to `svelte-<hash>-pane-side-flip`), so the cleanup
       // must substring-match; a strict-equality regression fails here and
       // leaves the class stuck until the fallback timer.
-      const end = new Event("animationend", { bubbles: true }) as AnimationEvent;
+      const end = new Event("animationend", {
+        bubbles: true,
+      }) as AnimationEvent;
       Object.defineProperty(end, "animationName", {
         configurable: true,
         value: "svelte-abc123-pane-side-flip",
@@ -652,9 +676,15 @@ describe("Pane side flip", () => {
   });
 
   test("flip cleanup tolerates scoped keyframe names and outlasts the animation", () => {
-    expect(paneSource).toMatch(/e\.animationName\.includes\("pane-side-flip"\)/);
-    expect(paneSource).toMatch(/e\.animationName\.includes\("pane-wobble-once"\)/);
-    expect(paneSource).toMatch(/e\.animationName\.includes\("pane-side-toggle-flash"\)/);
+    expect(paneSource).toMatch(
+      /e\.animationName\.includes\("pane-side-flip"\)/,
+    );
+    expect(paneSource).toMatch(
+      /e\.animationName\.includes\("pane-wobble-once"\)/,
+    );
+    expect(paneSource).toMatch(
+      /e\.animationName\.includes\("pane-side-toggle-flash"\)/,
+    );
     expect(paneSource).toMatch(/SIDE_FLIP_DURATION_MS = 520/);
     expect(paneSource).toContain("}, SIDE_FLIP_DURATION_MS + 80);");
   });
@@ -662,11 +692,17 @@ describe("Pane side flip", () => {
   test("flip axis follows pane dimensions", () => {
     expect(paneSource).toMatch(/if \(height > width\) return "vertical"/);
     expect(paneSource).toMatch(/if \(width > height\) return "horizontal"/);
-    expect(paneSource).toMatch(/return Math\.random\(\) < 0\.5 \? "vertical" : "horizontal"/);
+    expect(paneSource).toMatch(
+      /return Math\.random\(\) < 0\.5 \? "vertical" : "horizontal"/,
+    );
     expect(paneSource).toMatch(/axis === "vertical" \? "rotateY" : "rotateX"/);
     expect(paneSource).toMatch(/class:sideFlipActive=\{sideFlipActive\}/);
-    expect(paneSource).toContain('sideFlipStartTransform = `${rotate}(-180deg)`;');
-    expect(paneSource).toContain('sideFlipBackTransform = `${rotate}(-180deg)`;');
+    expect(paneSource).toContain(
+      "sideFlipStartTransform = `${rotate}(-180deg)`;",
+    );
+    expect(paneSource).toContain(
+      "sideFlipBackTransform = `${rotate}(-180deg)`;",
+    );
     expect(paneSource).not.toMatch(/from === "a" && to === "b"/);
     expect(paneSource).toContain('class="pane-card-inner"');
     expect(paneSource).toMatch(/backface-visibility: hidden/);
@@ -674,7 +710,8 @@ describe("Pane side flip", () => {
   });
 
   test("tab label fade is gated on measured overflow", () => {
-    const basePathBlock = paneSource.match(/\.path \{[\s\S]*?\n  \}/)?.[0] ?? "";
+    const basePathBlock =
+      paneSource.match(/\.path \{[\s\S]*?\n  \}/)?.[0] ?? "";
     expect(paneSource).toContain("use:tabPathOverflow={label}");
     expect(paneSource).toMatch(/scrollWidth > node\.clientWidth \+ 1/);
     expect(paneSource).toMatch(/\.path\.overflowing \{[\s\S]*?mask-image:/);
@@ -805,7 +842,9 @@ describe("Pane Hybrid NAV transaction mode", () => {
     expect(paneSource).toMatch(/DEAD_ZONE_DRAG_THRESHOLD_PX\s*=\s*5/);
     // The dead-zone element itself must NOT be draggable=true (that
     // would route through HTML5 drag and collide with per-tab DnD).
-    expect(paneSource).not.toMatch(/class="dead-zone"[\s\S]{0,200}draggable="true"/);
+    expect(paneSource).not.toMatch(
+      /class="dead-zone"[\s\S]{0,200}draggable="true"/,
+    );
   });
 });
 
@@ -816,7 +855,9 @@ describe("Pane cross-window tab DnD (pane-id collision fix)", () => {
     expect(paneSource).toMatch(
       /TAB_DRAG_MIME,[\s\S]{1,160}fromWindow: sessionWindowId\(\)/,
     );
-    expect(paneSource).toMatch(/JSON\.stringify\(\{ fromPaneId: pane\.id, fromSide, tabId, fromWindow: sessionWindowId\(\) \}\)/);
+    expect(paneSource).toMatch(
+      /JSON\.stringify\(\{ fromPaneId: pane\.id, fromSide, tabId, fromWindow: sessionWindowId\(\) \}\)/,
+    );
     expect(paneSource).toMatch(
       /import \{\s*api,\s*dragScopeMimeToken,\s*sessionWindowId,\s*windowDragScope,\s*windowLibraryId,\s*\} from "\.\.\/api\/client"/,
     );
@@ -898,5 +939,112 @@ describe("Pane cross-kind / cross-workspace tab DnD guard", () => {
       /if \(!isTabDragScopeCompatible\(e\)\) return;[\s\S]{1,120}acceptCrossWindowTab\(crossRaw\)/g,
     );
     expect(dropGates?.length).toBe(2);
+  });
+});
+
+describe("Pane staged editor chips", () => {
+  test("renders queued labels after real tabs in queue order", async () => {
+    const real = terminalTab({ id: "term-real", title: "Real terminal" });
+    const pane: LeafNode = {
+      kind: "leaf",
+      id: "pane-staged-editors",
+      tabs: [real],
+      activeTabId: real.id,
+    };
+    const target = await renderPane(pane);
+
+    paneModeStageDraftEditor();
+    paneModeStageDiagramEditor();
+    paneModeStageDraftEditor();
+    await tick();
+
+    const labels = [
+      ...target.querySelectorAll<HTMLElement>(".tabs > .tab .path"),
+    ].map((element) => element.textContent?.trim());
+    expect(labels).toEqual([
+      "Real terminal",
+      "New draft",
+      "New diagram",
+      "New draft",
+    ]);
+    expect(
+      new Set(paneMode.stagedDraftEditors.map((intent) => intent.id)).size,
+    ).toBe(3);
+  });
+
+  test("removes only the chosen keyed chip without selecting it", async () => {
+    const real = terminalTab({ id: "term-selected", title: "Selected" });
+    const pane: LeafNode = {
+      kind: "leaf",
+      id: "pane-remove-staged-editor",
+      tabs: [real],
+      activeTabId: real.id,
+    };
+    const target = await renderPane(pane);
+
+    paneModeStageDraftEditor();
+    paneModeStageDiagramEditor();
+    await tick();
+
+    const chips = target.querySelectorAll<HTMLElement>(".staged-editor");
+    const diagramChip = chips[1];
+    expect(diagramChip?.getAttribute("role")).toBeNull();
+    expect(diagramChip?.getAttribute("tabindex")).toBeNull();
+    expect(diagramChip?.getAttribute("aria-selected")).toBeNull();
+
+    chips[0]?.querySelector<HTMLButtonElement>(".close")?.click();
+    await tick();
+
+    const remaining = target.querySelectorAll<HTMLElement>(".staged-editor");
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]).toBe(diagramChip);
+    expect(remaining[0]?.querySelector(".path")?.textContent?.trim()).toBe(
+      "New diagram",
+    );
+    expect(paneMode.draft?.nodes[pane.id]).toMatchObject({
+      activeTabId: real.id,
+    });
+  });
+
+  test("dims staged tabs and disables removal while stale", async () => {
+    const pane: LeafNode = {
+      kind: "leaf",
+      id: "pane-stale-staged-editor",
+      tabs: [],
+      activeTabId: null,
+    };
+    layout.rootId = pane.id;
+    layout.activePaneId = pane.id;
+    layout.nodes = { [pane.id]: pane };
+    layout.focusColor = "blue";
+    enterPaneMode();
+    paneModeOpenBrowser();
+    paneModeStageDraftEditor();
+    paneMode.stale = true;
+
+    const draftPane = paneMode.draft?.nodes[pane.id];
+    if (!draftPane || draftPane.kind !== "leaf")
+      throw new Error("expected draft leaf");
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(Pane, { target, props: { pane: draftPane } });
+    mounted.push(component);
+    await tick();
+
+    const staged = target.querySelectorAll<HTMLElement>(".tab.staged");
+    expect(staged).toHaveLength(2);
+    expect([...staged].every((tab) => tab.classList.contains("stale"))).toBe(
+      true,
+    );
+    const close = target.querySelector<HTMLButtonElement>(
+      ".staged-editor .close",
+    );
+    expect(close?.disabled).toBe(true);
+    close?.click();
+    await tick();
+    expect(paneMode.stagedDraftEditors).toHaveLength(1);
+    expect(
+      target.querySelector(".pane-mode-preview")?.textContent?.trim(),
+    ).toBe("Layout changed. Esc to discard.");
   });
 });

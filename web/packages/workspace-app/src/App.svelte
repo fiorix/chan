@@ -129,9 +129,11 @@
     paneModeSwap,
     paneTabs,
     requestPaneSideToggleFlash,
+    resolveTabDestination,
     setWindowFocusColor,
     splitActive,
     toggleActiveFileTabMode,
+    type PaneModeStagedDraftEditor,
   } from "./state/tabs.svelte";
   import { applyEditorTheme, DEFAULT_EDITOR_THEME } from "./state/editorTheme";
   import { flushPendingBufferWrites, pruneEditorBuffers } from "./state/editorBuffer";
@@ -687,6 +689,15 @@
   }
 
   function handlePaneModeKey(e: KeyboardEvent): void {
+    if (paneMode.stale) {
+      if (e.key === "Escape") {
+        cancelPaneMode();
+        paneModeHelpVisible = false;
+      } else if (e.key === "h" || e.key === "H") {
+        paneModeHelpVisible = !paneModeHelpVisible;
+      }
+      return;
+    }
     const large = e.shiftKey ? 0.1 : 0.02;
     switch (e.key) {
       case "Enter": {
@@ -699,14 +710,11 @@
           if (intent.ctx.file) revealAndSelect(intent.ctx.file);
           else if (intent.ctx.dir) revealAndSelect(intent.ctx.dir);
         }
-        // Materialize staged draft-editor intents BEFORE commitPaneMode promotes
-        // the draft to live. Each staged entry pins the target paneId at press
-        // time; createDraft is async so round-trips run in parallel. Commit
-        // doesn't wait - new-draft files land in their panes when resolved.
-        materializeStagedDraftEditors();
+        const stagedEditors = paneMode.stagedDraftEditors.slice();
         commitPaneMode();
         scheduleSessionSave();
         paneModeHelpVisible = false;
+        materializeStagedDraftEditors(stagedEditors);
         return;
       }
       case "Escape":
@@ -1022,33 +1030,46 @@
     }
   }
 
-  /// Walk the queue of staged draft-editor intents and resolve each one.
-  /// Snapshot the queue up-front because the callsite calls commitPaneMode
-  /// immediately after this returns (which clears it). Each round-trip opens
-  /// the file in the paneId pinned at press time so a mid-Nav focus change
-  /// doesn't redirect the result. Failures log and bail per-entry.
-  function materializeStagedDraftEditors(): void {
-    const queue = paneMode.stagedDraftEditors.slice();
-    for (const entry of queue) {
-      void (async () => {
+  /// Materialize every staged editor independently after the layout commits.
+  /// `allSettled` consumes every result, so one failed request cannot cancel a
+  /// sibling or roll back a file that was already created.
+  function materializeStagedDraftEditors(
+    queue: readonly PaneModeStagedDraftEditor[],
+  ): void {
+    const creations = queue.map(async (entry) => {
+      try {
+        const { path } =
+          entry.kind === "diagram"
+            ? await api.createDiagram()
+            : await api.createDraft();
         try {
-          const { path } =
-            entry.kind === "diagram"
-              ? await api.createDiagram()
-              : await api.createDraft();
           await noteDraftCreated(path);
-          await openInPane(entry.paneId, path, {
-            side: entry.side,
-            ...(entry.kind === "draft"
-              ? { initialSelection: NEW_DRAFT_TITLE_SELECTION }
-              : {}),
-          });
         } catch (err) {
-          console.warn("[chan] paneMode stagedDraftEditor failed", err);
-          setTransientStatus(`New draft failed: ${(err as Error).message}`);
+          console.warn("[chan] staged editor workspace refresh failed", err);
         }
-      })();
-    }
+        const recorded = resolveTabDestination({
+          paneId: entry.paneId,
+          side: entry.side,
+        });
+        const destination = recorded ?? resolveTabDestination();
+        if (!destination) throw new Error("no pane available for created file");
+        await openInPane(destination.paneId, path, {
+          side: destination.side,
+          ...(entry.kind === "draft"
+            ? { initialSelection: NEW_DRAFT_TITLE_SELECTION }
+            : {}),
+        });
+        if (!recorded) {
+          setTransientStatus("Target pane disappeared; opened here.");
+        }
+      } catch (err) {
+        console.warn("[chan] paneMode stagedDraftEditor failed", err);
+        const kind = entry.kind === "diagram" ? "diagram" : "draft";
+        setTransientStatus(`New ${kind} failed: ${(err as Error).message}`);
+        throw err;
+      }
+    });
+    void Promise.allSettled(creations);
   }
   function leafPaneCount(): number {
     return Object.values(layout.nodes).filter((node) => node.kind === "leaf").length;

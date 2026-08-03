@@ -17,7 +17,7 @@ function imageViewer(): HTMLElement | null {
 
 function anyViewer(): HTMLElement | null {
   return document.querySelector(
-    ".md-image-zoom, .md-video-viewer, .md-pdf-viewer",
+    ".md-image-zoom, .md-audio-viewer, .md-video-viewer, .md-pdf-viewer",
   );
 }
 
@@ -88,6 +88,14 @@ describe("openMediaViewer routing", () => {
     expect(fallback).not.toHaveBeenCalled();
   });
 
+  test("audio routes to its setless viewer rather than video", () => {
+    seed("media/track.WAV");
+    expect(openMediaViewer("media/track.WAV")).toBe(true);
+    expect(document.querySelector(".md-audio-viewer audio")).toBeTruthy();
+    expect(document.querySelector(".md-video-viewer")).toBeNull();
+    expect(document.querySelector(".md-image-zoom-nav")).toBeNull();
+  });
+
   test("pdf opens its setless viewer", () => {
     seed("docs/spec.pdf", "docs/other.pdf");
     expect(openMediaViewer("docs/spec.pdf")).toBe(true);
@@ -96,16 +104,17 @@ describe("openMediaViewer routing", () => {
     expect(document.querySelector(".md-image-zoom-nav")).toBeNull();
   });
 
-  test("text, markdown, and audio stay outside the router", () => {
-    seed("notes/readme.md", "notes/plain.txt", "media/song.mp3");
+  test("text, markdown, and unsupported binary stay outside the router", () => {
+    seed("notes/readme.md", "notes/plain.txt", "media/archive.zip");
     const fallback = vi.fn();
-    for (const path of ["notes/readme.md", "notes/plain.txt", "media/song.mp3"]) {
+    for (const path of ["notes/readme.md", "notes/plain.txt", "media/archive.zip"]) {
       if (!openMediaViewer(path)) fallback(path);
     }
-    // All three fall through to the caller's open attempt, exactly as
-    // before; no viewer overlay mounted.
+    // All three fall through to the caller's open attempt; no viewer
+    // overlay mounts.
     expect(fallback).toHaveBeenCalledTimes(3);
     expect(imageViewer()).toBeNull();
+    expect(document.querySelector(".md-audio-viewer")).toBeNull();
     expect(document.querySelector(".md-video-viewer")).toBeNull();
     expect(document.querySelector(".md-pdf-viewer")).toBeNull();
   });

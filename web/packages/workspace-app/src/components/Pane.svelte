@@ -23,8 +23,10 @@
     reattachTerminalInPane,
     paneMode,
     paneModeSplit,
+    paneModeRemoveStagedDraftEditor,
     paneModeSetGrab,
     paneModeSetHover,
+    paneModeStagedDraftEditorsFor,
     paneModeStagedTabIds,
     paneModeSwapWith,
     paneActiveTabId,
@@ -268,6 +270,7 @@
   let deadZoneDragStart: { x: number; y: number } | null = null;
 
   function onDeadZoneMouseDown(e: MouseEvent): void {
+    if (paneMode.stale) return;
     if (e.button !== 0) return;
     deadZoneDragStart = { x: e.clientX, y: e.clientY };
     window.addEventListener("mousemove", onDeadZoneMouseMove);
@@ -276,6 +279,10 @@
 
   function onDeadZoneMouseMove(e: MouseEvent): void {
     if (!deadZoneDragStart) return;
+    if (paneMode.stale) {
+      onDeadZoneMouseUp();
+      return;
+    }
     const dx = e.clientX - deadZoneDragStart.x;
     const dy = e.clientY - deadZoneDragStart.y;
     if (Math.hypot(dx, dy) < DEAD_ZONE_DRAG_THRESHOLD_PX) return;
@@ -299,6 +306,7 @@
   });
 
   function onDeadZoneDblClick(): void {
+    if (paneMode.stale) return;
     enterPaneModeTransaction(null);
   }
 
@@ -309,18 +317,21 @@
   /// new mousedown as a re-grab (the user changed their mind).
   /// The hoverPaneId tracking on mouseenter handles the drop side.
   function onPaneBodyMouseDown(e: MouseEvent): void {
+    if (paneMode.stale) return;
     if (!paneMode.transactionMode) return;
     if (e.button !== 0) return;
     paneModeSetGrab(pane.id);
   }
 
   function onPaneBodyMouseEnter(): void {
+    if (paneMode.stale) return;
     if (!paneMode.transactionMode) return;
     if (!paneMode.grabPaneId) return;
     paneModeSetHover(pane.id);
   }
 
   function onPaneBodyMouseLeave(): void {
+    if (paneMode.stale) return;
     if (!paneMode.transactionMode) return;
     if (paneMode.hoverPaneId === pane.id) paneModeSetHover(null);
   }
@@ -330,6 +341,7 @@
   /// the grab is on a different pane, commit the swap. Transaction
   /// stays active for chained swaps until Enter / Esc.
   function onPaneBodyMouseUp(): void {
+    if (paneMode.stale) return;
     if (!paneMode.transactionMode) return;
     const grab = paneMode.grabPaneId;
     if (!grab) return;
@@ -362,6 +374,9 @@
   /// Derived so the tab strip rerenders the dimmed class as
   /// chords land and as commit / cancel clear the set.
   const paneModeStagedSet = $derived(paneModeStagedTabIds());
+  const paneModeStagedEditors = $derived(
+    paneModeStagedDraftEditorsFor(pane.id, visibleSide),
+  );
 
   /// Subscribe to the structural-wobble bus. Each splitPane /
   /// closePane / paneModeSwap bumps `paneWobble.versions[pane.id]`;
@@ -483,6 +498,10 @@
     paneMenu?.close();
     paneContextMenu?.close();
   }
+
+  $effect(() => {
+    if (paneMode.stale) closePaneMenus();
+  });
 
   function closePaneContextMenus(): void {
     paneContextMenu?.close();
@@ -690,6 +709,7 @@
   }
 
   function onDragStart(e: DragEvent, tabId: string, fromSide: PaneSide): void {
+    if (paneMode.stale) return;
     if (!e.dataTransfer) return;
     activeDragSourceSides.set(tabId, fromSide);
     e.dataTransfer.effectAllowed = "move";
@@ -766,6 +786,7 @@
   function onDragEnd(e: DragEvent, tabId: string, fallbackSide: PaneSide): void {
     const fromSide = activeDragSourceSides.get(tabId) ?? fallbackSide;
     activeDragSourceSides.delete(tabId);
+    if (paneMode.stale) return;
     if (!shouldCloseTabAfterDragEnd(pane.id, tabId, e.dataTransfer?.dropEffect, fromSide)) {
       return;
     }
@@ -1155,6 +1176,7 @@
   class:sideFlipActive={sideFlipActive}
   class:sideFlipHorizontal={sideFlipAxis === "horizontal"}
   class:sideFlipVertical={sideFlipAxis === "vertical"}
+  class:pane-mode-stale={paneMode.stale}
   class:transaction-active={paneMode.transactionMode}
   class:transaction-grab={isTransactionGrab}
   class:transaction-drop-target={isTransactionDropTarget}
@@ -1164,6 +1186,7 @@
   data-focus-color={focusColorForWindow()}
   data-pane-id={pane.id}
   onmousedown={(e) => {
+    if (paneMode.stale) return;
     setActivePane(pane.id);
     onPaneBodyMouseDown(e);
   }}
@@ -1211,7 +1234,9 @@
         class="tab"
         class:active={t.id === visibleActiveTabId}
         class:staged={paneModeStagedSet.has(t.id)}
+        class:stale={paneMode.stale && paneModeStagedSet.has(t.id)}
         onmousedown={() => {
+          if (paneMode.stale) return;
           selectTabInPane(pane.id, t.id);
           if (t.kind === "terminal") setTerminalActivity(t, false);
           if (t.kind === "terminal" || t.kind === "file") bumpTabFocusPulse();
@@ -1231,6 +1256,7 @@
           if (t.kind === "terminal" || t.kind === "file") bumpTabFocusPulse();
         }}
         oncontextmenu={(e) => {
+          if (paneMode.stale) return;
           e.preventDefault();
           e.stopPropagation();
           selectTabInPane(pane.id, t.id);
@@ -1244,10 +1270,11 @@
           });
         }}
         role="tab"
-        tabindex="0"
+        tabindex={paneMode.stale ? -1 : 0}
         aria-selected={t.id === visibleActiveTabId}
+        aria-disabled={paneMode.stale}
         title={tabTooltip(t)}
-        draggable="true"
+        draggable={!paneMode.stale}
         ondragstart={(e) => onDragStart(e, t.id, visibleSide)}
         ondragend={(e) => onDragEnd(e, t.id, visibleSide)}
         ondragover={(e) => onTabDragOver(e, i)}
@@ -1347,8 +1374,10 @@
         {/if}
         <button
           class="close"
+          disabled={paneMode.stale}
           onclick={(e) => {
             e.stopPropagation();
+            if (paneMode.stale) return;
             closeTab(pane.id, t.id);
           }}
           title="close"
@@ -1359,6 +1388,33 @@
     {#if dropIndicator === visibleTabs.length}
       <div class="drop-bar" aria-hidden="true"></div>
     {/if}
+    {#each paneModeStagedEditors as intent (intent.id)}
+      {@const label = intent.kind === "diagram" ? "New diagram" : "New draft"}
+      <div
+        class="tab staged staged-editor"
+        class:stale={paneMode.stale}
+        aria-label={label}
+      >
+        <span class="tab-icon" aria-hidden="true">
+          {#if intent.kind === "diagram"}
+            <Shapes size={14} strokeWidth={1.75} />
+          {:else}
+            <FileText size={14} strokeWidth={1.75} />
+          {/if}
+        </span>
+        <span class="path">{label}</span>
+        <button
+          class="close"
+          disabled={paneMode.stale}
+          onclick={(e) => {
+            e.stopPropagation();
+            paneModeRemoveStagedDraftEditor(intent.id);
+          }}
+          title={`remove ${label.toLowerCase()}`}
+          aria-label={`remove ${label.toLowerCase()}`}
+        >×</button>
+      </div>
+    {/each}
     <!-- Top-bar dead zone. The empty stretch between the last tab
          and the hamburger actions captures
          mousedown + double-click to enter Hybrid Nav in transaction
@@ -1376,6 +1432,7 @@
       <button
         class="side-toggle"
         class:side-toggle-flash={sideToggleFlashActive}
+        disabled={paneMode.stale}
         onclick={() => flipHybrid(pane.id)}
         onanimationend={(e) => {
           if (e.animationName.includes("pane-side-toggle-flash")) sideToggleFlashActive = false;
@@ -1509,22 +1566,26 @@
   >
     {#if paneMode.active}
           <div class="pane-mode-preview" aria-label="Hybrid Nav preview">
-            <div class="pane-mode-title">{active ? tabLabel(active, browserCtxFor(active)) : "Empty pane"}</div>
-            <div class="pane-mode-subtitle">
-              {active?.kind === "file"
-                ? active.path
-                : active?.kind === "terminal"
-                  ? "terminal"
-                  : active?.kind === "graph"
-                    ? active.scopeId
-                    : active?.kind === "browser"
-                      ? "file browser"
-                      : active?.kind === "dashboard"
-                        ? "dashboard"
-                        : active?.kind === "extension"
-                          ? `extension: ${active.extensionId}`
-                        : "no active tab"}
-            </div>
+            {#if paneMode.stale && viewLayout.activePaneId === pane.id}
+              <div class="pane-mode-stale-warning" role="status">Layout changed. Esc to discard.</div>
+            {:else}
+              <div class="pane-mode-title">{active ? tabLabel(active, browserCtxFor(active)) : "Empty pane"}</div>
+              <div class="pane-mode-subtitle">
+                {active?.kind === "file"
+                  ? active.path
+                  : active?.kind === "terminal"
+                    ? "terminal"
+                    : active?.kind === "graph"
+                      ? active.scopeId
+                      : active?.kind === "browser"
+                        ? "file browser"
+                        : active?.kind === "dashboard"
+                          ? "dashboard"
+                          : active?.kind === "extension"
+                            ? `extension: ${active.extensionId}`
+                          : "no active tab"}
+              </div>
+            {/if}
           </div>
     {:else if active?.kind === "browser"}
       <FileBrowserSurface
@@ -1694,6 +1755,9 @@
   .pane[data-focus-color="orange"] { --pane-active-focus: #f97316; }
   .pane[data-focus-color="green"] { --pane-active-focus: #22c55e; }
   .pane[data-focus-color="pink"] { --pane-active-focus: #ff5fb7; }
+  .pane.pane-mode-stale {
+    pointer-events: none;
+  }
   /* Focus ring is the pane's own border swapping to the focus
      colour. The transparent 1px border on `.pane` reserves the
      space at the outer edge so swapping the colour never shifts
@@ -1879,6 +1943,16 @@
   .tab.staged.active {
     opacity: 0.85;
   }
+  .tab.staged.stale {
+    opacity: 0.35;
+    filter: saturate(0.4);
+  }
+  .tab.staged-editor {
+    cursor: default;
+  }
+  .tab.staged-editor:hover {
+    transform: none;
+  }
   /* CSS-only spinner shown while a tab's content is loading. Inherits
      color from the tab's text-secondary so it sits at the same
      visual weight as the surrounding label. */
@@ -1911,7 +1985,12 @@
   }
   .tab:hover .close,
   .tab.active .close { opacity: 1; }
+  .tab.staged-editor .close { opacity: 1; }
   .tab .close:hover { color: var(--text); }
+  .tab .close:disabled {
+    color: var(--text-secondary);
+    cursor: not-allowed;
+  }
   .dirty {
     font-size: 10px;
     line-height: 1;
@@ -2025,6 +2104,10 @@
   }
   .side-toggle:hover {
     background: var(--hover-bg);
+  }
+  .side-toggle:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
   }
   .side-toggle.side-toggle-flash {
     animation: pane-side-toggle-flash 620ms ease-in-out;
@@ -2171,6 +2254,11 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .pane-mode-stale-warning {
+    color: var(--warn-text);
+    font-size: 14px;
+    font-weight: 600;
   }
   /* Empty pane shell. Single-pane lone-pane case is hosted by the
      EmptyPaneCarousel component (welcome / metadata / indexing

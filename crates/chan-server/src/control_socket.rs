@@ -3990,6 +3990,7 @@ fn term_list(registry: &TerminalRegistry, windows: &[WindowRecord]) -> Result<St
         };
         let entry = serde_json::json!({
             "name": summary.tab_name,
+            "spawn_name": summary.spawn_name,
             // The server-derived submit agent (null for a shell session), so
             // a sender can look up a target's chord instead of guessing it.
             "agent": summary.agent.map(SubmitAgent::name),
@@ -4012,7 +4013,7 @@ fn term_list(registry: &TerminalRegistry, windows: &[WindowRecord]) -> Result<St
 // pub(crate): `routes::open` (POST /api/open, the command-launcher Open)
 // calls this directly so the HTTP path and `cs open` share ONE semantics
 // (dir -> browser, text/sniffed-text -> editor, missing -> create + open,
-// binary -> refusal) instead of a reimplementation.
+// binary -> browser reveal) instead of a reimplementation.
 pub(crate) fn open_path(
     workspace: &Workspace,
     self_writes: &crate::self_writes::SelfWrites,
@@ -4051,14 +4052,18 @@ pub(crate) fn open_path(
             // route applies (the extension fast-path OR an 8 KiB content
             // sniff), so `cs open` and the editor never disagree about what is
             // openable text. An extensionless / odd-suffix text file opens;
-            // a binary file (image, archive, ...) is refused below rather than
-            // revealed in the browser.
+            // a binary file (image, archive, ...) is revealed in the browser.
             WindowCommand::OpenFile {
                 path: rel.clone(),
                 destination: destination.clone(),
             }
         } else {
-            return Err(format!("cannot open binary file {rel}"));
+            WindowCommand::OpenBrowser {
+                path: parent_rel(&rel),
+                select: Some(rel.clone()),
+                enter: false,
+                destination: destination.clone(),
+            }
         }
     } else {
         // Nonexistent path: create it empty and open it, for ANY name (not
@@ -5250,13 +5255,13 @@ mod tests {
         assert_eq!(frame["path"], "LICENSE");
     }
 
-    /// An existing binary file (a NUL byte in the first 8 KiB) is refused with
-    /// a clear message, not revealed in the browser.
+    /// An existing binary file is revealed in its parent directory.
     #[test]
-    fn open_path_refuses_binary_file() {
+    fn open_path_reveals_binary_file() {
         let cfg = tempfile::tempdir().expect("config dir");
         let root = tempfile::tempdir().expect("workspace root");
-        std::fs::write(root.path().join("data.bin"), [0u8, 1, 2, 3]).expect("seed binary");
+        std::fs::create_dir_all(root.path().join("media")).expect("media dir");
+        std::fs::write(root.path().join("media/data.bin"), [0u8, 1, 2, 3]).expect("seed binary");
         let lib =
             chan_workspace::Library::open_at(cfg.path().join("config.toml")).expect("library");
         lib.register_workspace(root.path())
@@ -5264,25 +5269,31 @@ mod tests {
         let workspace = lib.open_workspace(root.path()).expect("open workspace");
         let self_writes = crate::self_writes::SelfWrites::new();
         let (tx, mut rx) = broadcast::channel(4);
-        let session_registry = SessionRegistry::new();
+        let (session_registry, _guard) = live_window("window-a");
 
-        let err = open_path(
+        let message = open_path(
             &workspace,
             &self_writes,
             "window-a",
-            &root.path().join("data.bin"),
-            None,
+            &root.path().join("media/data.bin"),
+            Some(TabDestination {
+                pane_id: Some("pane-2".into()),
+                side: Some(chan_shell::PaneSide::B),
+            }),
             &session_registry,
             &tx,
         )
-        .expect_err("binary file should be refused");
+        .expect("open path");
 
-        assert!(
-            err.contains("cannot open binary file") && err.contains("data.bin"),
-            "unexpected error: {err}"
-        );
-        // No window command was broadcast for the refusal.
-        assert!(rx.try_recv().is_err(), "no frame should be sent on refusal");
+        assert!(message.contains("media/data.bin"));
+        let frame: Value = serde_json::from_str(&rx.try_recv().expect("window command"))
+            .expect("window command json");
+        assert_eq!(frame["command"], "open_browser");
+        assert_eq!(frame["path"], "media");
+        assert_eq!(frame["select"], "media/data.bin");
+        assert!(frame.get("enter").is_none());
+        assert_eq!(frame["destination"]["pane_id"], "pane-2");
+        assert_eq!(frame["destination"]["side"], "b");
     }
 
     /// A nonexistent path (any plaintext name, not just `.md`) is created empty
@@ -5669,6 +5680,9 @@ mod tests {
                 env: Default::default(),
             })
             .expect("spawn session");
+        registry
+            .update_live_metadata(handle.id(), "renamed".into(), Some("default".into()))
+            .expect("rename live metadata");
         assert!(registry.update_session_layout(
             handle.id(),
             Some("pane-4".into()),
@@ -5679,6 +5693,8 @@ mod tests {
         let json = term_list(&registry, &[]).expect("term list");
         let value: Value = serde_json::from_str(&json).expect("json");
         let row = &value["groups"]["default"][0];
+        assert_eq!(row["name"], "renamed");
+        assert_eq!(row["spawn_name"], "placed");
         assert_eq!(row["pane"], "pane-4");
         assert_eq!(row["side"], "b");
         assert_eq!(row["tab"], "tab-7");

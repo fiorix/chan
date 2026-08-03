@@ -16,17 +16,31 @@ function sourceBetween(startMarker: string, endMarker: string): string {
 describe("Hybrid Nav keymap (inversion)", () => {
   test("arrow keys move focus", () => {
     expect(app).toContain('case "ArrowUp":\n        paneModeMoveFocus("up");');
-    expect(app).toContain('case "ArrowLeft":\n        paneModeMoveFocus("left");');
-    expect(app).toContain('case "ArrowDown":\n        paneModeMoveFocus("down");');
-    expect(app).toContain('case "ArrowRight":\n        paneModeMoveFocus("right");');
+    expect(app).toContain(
+      'case "ArrowLeft":\n        paneModeMoveFocus("left");',
+    );
+    expect(app).toContain(
+      'case "ArrowDown":\n        paneModeMoveFocus("down");',
+    );
+    expect(app).toContain(
+      'case "ArrowRight":\n        paneModeMoveFocus("right");',
+    );
   });
 
   test("WASD swaps tiles (lowercase + uppercase, including 's')", () => {
-    expect(app).toContain('case "w":\n      case "W":\n        paneModeSwap("up");');
-    expect(app).toContain('case "a":\n      case "A":\n        paneModeSwap("left");');
-    expect(app).toContain('case "d":\n      case "D":\n        paneModeSwap("right");');
+    expect(app).toContain(
+      'case "w":\n      case "W":\n        paneModeSwap("up");',
+    );
+    expect(app).toContain(
+      'case "a":\n      case "A":\n        paneModeSwap("left");',
+    );
+    expect(app).toContain(
+      'case "d":\n      case "D":\n        paneModeSwap("right");',
+    );
     // `s` rejoins WASD; Search moved to `f`.
-    expect(app).toContain('case "s":\n      case "S":\n        paneModeSwap("down");');
+    expect(app).toContain(
+      'case "s":\n      case "S":\n        paneModeSwap("down");',
+    );
   });
 });
 
@@ -95,19 +109,55 @@ describe("Hybrid Nav transactional staging", () => {
     expect(app).not.toMatch(/paneModeOpenTeamWorkTerminal/);
   });
 
-  test("Enter materializes staged draft editors before commit", () => {
+  test("Enter snapshots intents and commits before parallel materialization", () => {
     expect(app).toMatch(
-      /case "Enter": \{[\s\S]*?materializeStagedDraftEditors\(\);[\s\S]*?commitPaneMode\(\);/,
+      /case "Enter": \{[\s\S]*?const stagedEditors = paneMode\.stagedDraftEditors\.slice\(\);[\s\S]*?commitPaneMode\(\);[\s\S]*?materializeStagedDraftEditors\(stagedEditors\);/,
     );
+    expect(app).toMatch(/void Promise\.allSettled\(creations\);/);
   });
 
   test("Escape cancels without materializing staged draft editors", () => {
-    expect(app).toMatch(
-      /case "Escape":[\s\S]{0,800}cancelPaneMode\(\);/,
-    );
+    expect(app).toMatch(/case "Escape":[\s\S]{0,800}cancelPaneMode\(\);/);
     // The Escape branch must not call materializeStagedDraftEditors.
     expect(app).not.toMatch(
       /case "Escape":[\s\S]{0,400}materializeStagedDraftEditors\(\);[\s\S]{0,400}cancelPaneMode\(\);/,
+    );
+  });
+});
+
+describe("Hybrid Nav stale gate", () => {
+  test("permits only Escape and h/H before the healthy dispatcher", () => {
+    const gate = sourceBetween(
+      "    if (paneMode.stale) {",
+      "    const large =",
+    );
+    expect(gate).toContain('e.key === "Escape"');
+    expect(gate).toContain("cancelPaneMode();");
+    expect(gate).toContain('e.key === "h" || e.key === "H"');
+    expect(gate).toContain("paneModeHelpVisible = !paneModeHelpVisible;");
+    expect(gate.trimEnd().endsWith("return;\n    }")).toBe(true);
+    for (const forbidden of [
+      "commitPaneMode(",
+      "paneModeMoveFocus(",
+      "paneModeSwap(",
+      "paneModeResize(",
+      "paneModeEqualize(",
+      "paneModeOpen",
+      "paneModeStage",
+      "paneModeSplit(",
+      "flipHybrid(",
+      "toggleBrowserSidePane(",
+    ]) {
+      expect(gate).not.toContain(forbidden);
+    }
+  });
+
+  test("uses the specified missing-target fallback after each create", () => {
+    expect(app).toMatch(
+      /const recorded = resolveTabDestination\(\{[\s\S]*?paneId: entry\.paneId,[\s\S]*?side: entry\.side,[\s\S]*?\}\);[\s\S]*?const destination = recorded \?\? resolveTabDestination\(\);/,
+    );
+    expect(app).toContain(
+      'setTransientStatus("Target pane disappeared; opened here.");',
     );
   });
 });
@@ -190,9 +240,7 @@ describe("Track C pane shortcut wiring", () => {
     expect(app).toMatch(
       /case "app\.pane\.closeTabs":[\s\S]*?closeTabsInActivePane\(\);/,
     );
-    expect(app).toMatch(
-      /case "app\.pane\.kill":[\s\S]*?killActivePane\(\);/,
-    );
+    expect(app).toMatch(/case "app\.pane\.kill":[\s\S]*?killActivePane\(\);/);
     expect(app).toMatch(
       /function closeTabsInActivePane\(\): void \{[\s\S]*?closeTabsInPane\(paneId\)\.then\(\(closed\) => \{[\s\S]*?if \(closed\) scheduleSessionSave\(\);/,
     );

@@ -12,13 +12,21 @@ describe("TerminalTab tracks terminal surface body theme", () => {
   test("$effect reads the effective terminal surface theme", () => {
     expect(terminalTab).toContain('effectiveHybridSurfaceTheme("terminal")');
     expect(terminalTab).toContain(
-      'data-theme={surfaceThemeOverride("terminal")}',
+      "data-theme={terminalSurfaceThemeOverride()}",
+    );
+  });
+
+  test("$effect subscribes to custom colours before the renderer guard", () => {
+    expect(terminalTab).toMatch(
+      /\$effect\(\(\) => \{\s*effectiveHybridSurfaceTheme\("terminal"\);\s*customTerminalColors;\s*applyTerminalTheme\(\);/,
     );
   });
 
   test("effective theme is resolved through the shared store", () => {
     expect(terminalTab).toContain("function effectiveTerminalTheme()");
-    expect(terminalTab).toContain('return effectiveHybridSurfaceTheme("terminal")');
+    expect(terminalTab).toContain(
+      'customTerminalColors?.contrast ?? effectiveHybridSurfaceTheme("terminal")',
+    );
   });
 
   test("terminalTheme() branches on effective terminal theme", () => {
@@ -28,6 +36,58 @@ describe("TerminalTab tracks terminal surface body theme", () => {
 
   test("terminalTheme() reads CSS variables from host, not document root", () => {
     expect(terminalTab).toContain("getComputedStyle(host ?? document.documentElement)");
+  });
+
+  test("one resolved custom result drives palette and surface chrome", () => {
+    expect(terminalTab).toContain(
+      "resolveTerminalColors(workspace.info?.preferences?.terminal_colors)",
+    );
+    expect(terminalTab).toContain(
+      'customTerminalColors?.contrast ?? surfaceThemeOverride("terminal")',
+    );
+    expect(terminalTab).toContain("customTerminalColors?.background");
+    expect(terminalTab).toContain("customTerminalColors?.foreground");
+    expect(terminalTab).toContain("customTerminalColors?.cursor");
+  });
+
+  test("standard mode retains selection and both exact ANSI palettes", () => {
+    expect(terminalTab).toContain('selectionBackground: "rgba(88, 166, 255, 0.35)"');
+    for (const colour of [
+      "#24292f",
+      "#cf222e",
+      "#1a7f37",
+      "#8a6300",
+      "#0969da",
+      "#8250df",
+      "#1b7c83",
+      "#4b5563",
+      "#57606a",
+      "#a40e26",
+      "#116329",
+      "#6f4e00",
+      "#0550ae",
+      "#6639ba",
+      "#0a6b73",
+      "#6e7781",
+      "#0c0c0d",
+      "#ff6b6b",
+      "#6cd07a",
+      "#e3b341",
+      "#58a6ff",
+      "#b07dff",
+      "#5dd8d8",
+      "#d8d8de",
+      "#6c6c70",
+      "#ff8585",
+      "#8be89a",
+      "#f2d16b",
+      "#7dbdff",
+      "#c8a6ff",
+      "#7df0f0",
+      "#ffffff",
+    ]) {
+      expect(terminalTab).toContain(colour);
+    }
   });
 });
 

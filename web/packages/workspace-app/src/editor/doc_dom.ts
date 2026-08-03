@@ -22,7 +22,6 @@ export const DOC_CONTAINER_CLASS = "chan-print-page";
 // use (slides restyle those two).
 const DOC_EDITOR_VARS = [
   "--chan-editor-body-family",
-  "--chan-editor-body-size",
   "--chan-editor-body-color",
   "--chan-editor-bg",
   "--chan-editor-heading-family",
@@ -101,7 +100,7 @@ export function buildDocDom(opts: DocDomOptions): DocDom {
     `background:${tokens.bg}`,
     `color:${tokens.fg}`,
     `font-family:${tokens.bodyFamily}`,
-    `font-size:${tokens.bodySize}`,
+    `font-size:var(--chan-editor-body-size,${tokens.bodySize})`,
     "line-height:1.65",
   ].join(";");
 

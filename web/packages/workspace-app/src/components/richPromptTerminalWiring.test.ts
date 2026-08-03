@@ -4,6 +4,26 @@ import terminalCommands from "../state/commands/terminal.ts?raw";
 import terminal from "./TerminalTab.svelte?raw";
 import pane from "./Pane.svelte?raw";
 
+function frameArm(type: string, nextType: string): string {
+  const startMarker = `frame.type === "${type}") {`;
+  const endMarker = `} else if (frame.type === "${nextType}")`;
+  const start = terminal.indexOf(startMarker);
+  const end = terminal.indexOf(endMarker, start);
+  if (start < 0 || end < 0) {
+    throw new Error(`missing ${type} frame arm before ${nextType}`);
+  }
+  return terminal.slice(start, end);
+}
+
+function expectInOrder(source: string, ...snippets: string[]): void {
+  let cursor = -1;
+  for (const snippet of snippets) {
+    const next = source.indexOf(snippet, cursor + 1);
+    expect(next, `missing or out of order: ${snippet}`).toBeGreaterThan(cursor);
+    cursor = next;
+  }
+}
+
 // Rich Prompt - the terminal wiring: TerminalTab registers the prompt
 // sink (WS `prompt` frame, NOT raw input), mounts the bubble over the active
 // terminal, and exposes the right-click "Show/Hide Rich Prompt" entry. The
@@ -43,8 +63,10 @@ describe("TerminalTab Rich Prompt wiring", () => {
 
   test("session frame replaces the transient server-reported submit identity", () => {
     expect(terminal).toMatch(/submit_agent\?: SubmitAgent;/);
-    expect(terminal).toMatch(
-      /setTerminalSession\(tab, frame\.id\);[\s\S]{1,260}setTerminalSubmitAgent\(tab, frame\.submit_agent\);/,
+    expectInOrder(
+      frameArm("session", "renamed"),
+      "setTerminalSession(tab, frame.id);",
+      "setTerminalSubmitAgent(tab, frame.submit_agent);",
     );
   });
 
@@ -68,11 +90,17 @@ describe("TerminalTab Rich Prompt wiring", () => {
     // closed/exit arms: depth 0 + fail BEFORE clearTerminalSession (the
     // scrollback-snapshot clear, keyed by the now-dead session id, sits between
     // the fail and the session clear -- still before clearTerminalSession).
-    expect(terminal).toMatch(
-      /frame\.type === "closed"\) \{[\s\S]{1,600}setTerminalQueueDepth\(tab, 0\);\s*failPendingPrompt\(tab\);[\s\S]{0,320}clearTerminalSession\(tab\);/,
+    expectInOrder(
+      frameArm("closed", "exit"),
+      "setTerminalQueueDepth(tab, 0);",
+      "failPendingPrompt(tab);",
+      "clearTerminalSession(tab);",
     );
-    expect(terminal).toMatch(
-      /frame\.type === "exit"\) \{[\s\S]{1,400}setTerminalQueueDepth\(tab, 0\);\s*failPendingPrompt\(tab\);\s*clearTerminalSession\(tab\);/,
+    expectInOrder(
+      frameArm("exit", "error"),
+      "setTerminalQueueDepth(tab, 0);",
+      "failPendingPrompt(tab);",
+      "clearTerminalSession(tab);",
     );
   });
 

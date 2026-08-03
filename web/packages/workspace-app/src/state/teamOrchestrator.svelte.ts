@@ -28,7 +28,6 @@ import {
   closeTab,
   layout,
   openTerminalInPane,
-  renameTerminalTab,
   sendPromptToTerminal,
   setActivePane,
   setTerminalBroadcastEnabled,
@@ -309,7 +308,6 @@ async function launchLead(
     group,
   });
   if (!tab) throw new Error("failed to open the lead terminal");
-  renameTerminalTab(tab, lead.handle);
   // Drop the Cmd+P placeholder shell + its session. Force-close so no
   // confirm modal blocks the bootstrap; done AFTER opening the fresh lead
   // so the lead pane is never momentarily empty.
@@ -411,14 +409,13 @@ export async function runTeamBootstrap(
         window_id: sessionWindowId(),
       });
       const paneId = workerPanes[i] ?? ctx.leadPaneId;
-      const tab = openTerminalInPane(paneId, {
+      openTerminalInPane(paneId, {
         sessionId: response.session,
         title: response.tab_label,
         group,
       });
-      if (tab) {
-        renameTerminalTab(tab, m.handle);
-      }
+      // `tab_label` is already the registry-settled name. The attach prelude
+      // will confirm the same live/spawn metadata once this tab mounts.
     } catch (err) {
       notify(`spawn failed for ${m.handle}: ${(err as Error).message ?? err}`);
     }

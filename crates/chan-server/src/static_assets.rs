@@ -315,8 +315,8 @@ fn inject_launcher_meta(html: &[u8], surface: LauncherSurface) -> Vec<u8> {
     out
 }
 
-/// Conservative MIME map for the file types the SPA bundle ships:
-/// hashed JS / CSS, source maps, fonts, images, and a couple of
+/// Conservative MIME map for SPA assets and workspace file responses:
+/// hashed JS / CSS, source maps, fonts, images, browser-native media, and
 /// well-known toplevel files. Falls back to
 /// `application/octet-stream` so unknown extensions never get the
 /// wrong type assigned.
@@ -347,6 +347,9 @@ pub fn content_type_for(path: &str) -> &'static str {
         "webm" => "video/webm",
         "mov" => "video/quicktime",
         "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "aif" | "aiff" => "audio/aiff",
+        "ogg" => "audio/ogg",
         _ => "application/octet-stream",
     }
 }
@@ -498,6 +501,19 @@ mod tests {
             content_type_for("manifest.webmanifest"),
             "application/manifest+json"
         );
+    }
+
+    #[test]
+    fn content_type_for_maps_audio_case_insensitively() {
+        for (path, expected) in [
+            ("TRACK.MP3", "audio/mpeg"),
+            ("TRACK.WAV", "audio/wav"),
+            ("TRACK.AIF", "audio/aiff"),
+            ("TRACK.AIFF", "audio/aiff"),
+            ("TRACK.OGG", "audio/ogg"),
+        ] {
+            assert_eq!(content_type_for(path), expected, "{path}");
+        }
     }
 
     #[tokio::test]

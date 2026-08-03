@@ -70,7 +70,7 @@ function mockApi() {
   vi.spyOn(api, "writeTeamConfig").mockResolvedValue(undefined as unknown as void);
   const spawn = vi.spyOn(api, "spawnTerminal").mockResolvedValue({
     session: "lead-fresh",
-    tab_label: "fresh",
+    tab_label: "@@Lead-2",
   });
   const restart = vi
     .spyOn(api, "restartTerminal")
@@ -117,13 +117,13 @@ describe("lead launch (spawn-fresh, lead-first)", () => {
     expect(leadFromLayout().terminalSessionId).toBe("lead-fresh");
   });
 
-  test("names the fresh lead tab the lead handle", async () => {
+  test("keeps the registry-settled lead label without a local rewrite", async () => {
     setLayout(placeholder());
     mockApi();
     await runTeamBootstrap(config(), {
       leadTabId: "lead-tab",
       leadPaneId: "pane-test",
     });
-    expect(leadFromLayout().title).toBe("@@Lead");
+    expect(leadFromLayout().title).toBe("@@Lead-2");
   });
 });

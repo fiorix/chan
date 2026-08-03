@@ -19,7 +19,6 @@ import {
   activeTerminalTab,
   renameTerminalTab,
   terminalTabName,
-  setTerminalGroup,
 } from "../tabs.svelte";
 import { workspace } from "../workspace.svelte";
 
@@ -38,15 +37,15 @@ async function renameActiveTerminal(): Promise<void> {
   if (name !== null) renameTerminalTab(t, name);
 }
 
-/// Set the active terminal's group. The group reaches the shell only on
-/// the next spawn, so flag that the change applies after a restart.
+/// Propose the active terminal's complete live metadata pair. The server
+/// settles the name while changing the group atomically; the running shell's
+/// spawn environment stays immutable and the tab surfaces that divergence.
 async function setActiveTerminalGroup(): Promise<void> {
   const t = activeTerminalTab();
   if (!t) return;
   const group = await uiPrompt("Terminal group");
   if (group === null) return;
-  setTerminalGroup(t, group);
-  setTransientStatus("Group set; applies on next restart");
+  renameTerminalTab(t, terminalTabName(t), group);
 }
 
 function configuredTerminalBackend(): "xterm" | "ghostty" {

@@ -40,10 +40,13 @@ const MARKDOWN_EXTENSIONS = new Set(["md", "txt"]);
 // support (`/api/files` answers plain GETs on these with
 // `Accept-Ranges` + 206). No transcode: a container whose codec the
 // browser can't decode still classifies as video, `<video>` just
-// reports it can't play. Keep in lockstep with the server's
-// `is_streamable_media` (chan-server files route), which also covers
-// mp3 audio; audio preview is a follow-up surface.
+// reports it can't play.
 const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov"]);
+
+// Browser-native audio containers. Audio stays in the path classifier's
+// binary fallback; this standalone viewer predicate does not create a new
+// file or wire kind.
+const AUDIO_EXTENSIONS = new Set(["mp3", "wav", "aif", "aiff", "ogg"]);
 
 const IMAGE_EXTENSIONS = new Set([
   "png",
@@ -305,6 +308,13 @@ export function isPdf(path: string): boolean {
 /// viewer) key off this path check, exactly like `isImage` callers.
 export function isVideo(path: string): boolean {
   return VIDEO_EXTENSIONS.has(extOf(path) ?? "");
+}
+
+/// True for browser-native audio files. Like video, audio stays binary in
+/// `classifyPath`; inspector and viewer surfaces opt in through this path
+/// predicate without widening the server's file taxonomy.
+export function isAudio(path: string): boolean {
+  return AUDIO_EXTENSIONS.has(extOf(path) ?? "");
 }
 
 /// True for markdown-class files (.md / .txt): the note-shaped text

@@ -17,6 +17,7 @@ import {
   activePane,
   allPaneTabs,
   applyTerminalRoster,
+  applyTerminalSessionMetadata,
   beginMissingFileReopen,
   broadcastTerminalInput,
   canReopenClosedTab,
@@ -34,11 +35,12 @@ import {
   commitPaneMode,
   detachTabToPaneEdge,
   dismissConflict,
-  dismissTerminalEnvNamePrompt,
+  dismissTerminalEnvironmentPrompt,
   draftCloseState,
   enterPaneMode,
   enterPaneModeTransaction,
   flipHybrid,
+  failTerminalMetadataRename,
   focusColorForWindow,
   browserTabLabel,
   graphTabLabel,
@@ -77,12 +79,13 @@ import {
   registerTerminalInputSink,
   resolveDraftClose,
   markLocalTabDrop,
-  markTerminalEnvNameRestarted,
+  markTerminalEnvironmentRestarted,
   moveActiveTabToSide,
   moveTab,
   reattachTerminalInPane,
+  registerTerminalMetadataSink,
   renameTerminalTab,
-  uniqueTerminalName,
+  resolveTerminalMetadataRename,
   reopenClosedTab,
   reorderTab,
   reloadConflictedTab,
@@ -116,7 +119,10 @@ import {
   tabLabelInPane,
   TAB_TITLE_MAX_LENGTH,
   terminalBroadcastMemberIds,
+  terminalEnvironmentPromptDismissed,
   terminalEnvTabNameStale,
+  terminalMetadataDraft,
+  terminalStaleEnvironmentVariables,
   terminalTabGroup,
   toggleActiveFileTabMode,
   toggleActiveTerminalBroadcastSelectAll,
@@ -196,6 +202,7 @@ afterEach(() => {
   cancelPaneMode();
   clearRecentlyClosedTabsForTest();
   dismissConflict();
+  applyTerminalRoster([]);
   editorToolsPrefs.stripTrailingWhitespaceOnSave = false;
 });
 
@@ -1850,65 +1857,47 @@ describe("pane state", () => {
     expect(created?.id).toBe(spawned.id);
   });
 
-  test("uniqueTerminalName disambiguates collisions with a -N suffix", () => {
-    resetLayout([
-      terminalTab({ id: "a", title: "agent" }),
-      terminalTab({ id: "b", title: "agent-2" }),
-    ]);
-    // Free when no clash; -2 on a clash; skips to -3 when -2 is taken too.
-    expect(uniqueTerminalName("worker")).toBe("worker");
-    expect(uniqueTerminalName("agent")).toBe("agent-3");
-    // excludeTabId lets a tab keep its own name (rename to the same value).
-    expect(uniqueTerminalName("agent", "a")).toBe("agent");
+  test("creation labels remain proposals until the attach prelude settles them", () => {
+    resetLayout([terminalTab({ id: "a", title: "build" })]);
+    const spawned = openTerminalInPane(layout.activePaneId, {
+      title: "build",
+      sessionId: "created-sess",
+    });
+    expect(spawned?.title).toBe("build");
+
+    applyTerminalSessionMetadata(spawned as TerminalTab, {
+      name: "build-2",
+      group: "default",
+      spawnName: "build-2",
+      spawnGroup: "default",
+    });
+    expect(spawned?.title).toBe("build-2");
   });
 
-  test("uniqueTerminalName dedups against terminals in OTHER windows", () => {
-    resetLayout([terminalTab({ id: "local", title: "build" })]);
-    // Two terminals live in another window (per the cross-window roster):
-    // "Terminal-2" (group A) and "Terminal-1" (group B). A rename here must
-    // avoid them tenant-wide, across groups (the bug: renaming to a name only
-    // taken in another window used to collide).
-    applyTerminalRoster([
-      { id: "sess-x", tab_name: "Terminal-2", tab_group: "A", window_id: "other-win", broadcast: false },
-      { id: "sess-y", tab_name: "Terminal-1", tab_group: "B", window_id: "other-win", broadcast: false },
-    ]);
-    expect(uniqueTerminalName("Terminal-2")).toBe("Terminal-2-2");
-    expect(uniqueTerminalName("Terminal-1")).toBe("Terminal-1-2");
-    // A name free tenant-wide passes through.
-    expect(uniqueTerminalName("Terminal-9")).toBe("Terminal-9");
-    applyTerminalRoster([]);
-  });
-
-  test("uniqueTerminalName excludes a moved session's own roster entry", () => {
-    resetLayout([terminalTab({ id: "local", title: "shell" })]);
-    // The moved terminal "build" is still live in the SOURCE window's roster
-    // entry at drop time (a cross-window move closes the source only AFTER the
-    // drop). Without excluding it, dedup would treat it as a conflict.
-    applyTerminalRoster([
-      { id: "moved-sess", tab_name: "build", tab_group: "G", window_id: "other-win", broadcast: false },
-    ]);
-    expect(uniqueTerminalName("build")).toBe("build-2");
-    // Excluding the moved session itself -> the name passes through unchanged.
-    expect(uniqueTerminalName("build", undefined, "moved-sess")).toBe("build");
-    applyTerminalRoster([]);
-  });
-
-  test("reattachTerminalInPane keeps the name on a clash-free move (no suffix, env not stale)", () => {
+  test("a moved terminal takes live and spawn metadata from its attach prelude", () => {
     const pane = resetLayout([terminalTab({ id: "local", title: "shell" })]);
-    // Moved terminal still present in the source window's roster at drop time.
-    applyTerminalRoster([
-      { id: "moved-sess", tab_name: "Terminal-2", tab_group: "G", window_id: "other-win", broadcast: false },
-    ]);
     const tab = reattachTerminalInPane(pane.id, {
       terminalSessionId: "moved-sess",
-      title: "Terminal-2",
-      terminalEnvTabName: "Terminal-2",
+      title: "payload-name",
+      terminalEnvTabName: "payload-spawn",
+      group: "payload-group",
+    }) as TerminalTab;
+
+    applyTerminalSessionMetadata(tab, {
+      name: "live-name",
+      group: "live-group",
+      spawnName: "spawn-name",
+      spawnGroup: "spawn-group",
     });
-    expect(tab).not.toBeNull();
-    expect(tab?.title).toBe("Terminal-2"); // Bug 1: no spurious -N
-    expect(tab?.terminalEnvTabName).toBe("Terminal-2"); // Bug 2: env carried
-    expect(terminalEnvTabNameStale(tab as TerminalTab)).toBe(false); // names match -> no warning
-    applyTerminalRoster([]);
+
+    expect(tab.title).toBe("live-name");
+    expect(terminalTabGroup(tab)).toBe("live-group");
+    expect(tab.terminalEnvTabName).toBe("spawn-name");
+    expect(tab.terminalEnvTabGroup).toBe("spawn-group");
+    expect(terminalStaleEnvironmentVariables(tab)).toEqual([
+      "$CHAN_TAB_NAME",
+      "$CHAN_TAB_GROUP",
+    ]);
   });
 
   test("applyTerminalRoster reconciles a local tab whose session the server moved out of band", () => {
@@ -1919,7 +1908,7 @@ describe("pane state", () => {
     // instead of stranding it alone in the stale group.
     const lead = terminalTab({
       id: "lead",
-      title: "@@Lead",
+      title: "old-lead",
       terminalSessionId: "lead-sess",
       group: "default",
     });
@@ -1929,7 +1918,13 @@ describe("pane state", () => {
       terminalSessionId: "worker-sess",
       group: "v0380",
     });
-    resetLayout([lead, worker]);
+    const leadCopy = terminalTab({
+      id: "lead-copy",
+      title: "old-lead-copy",
+      terminalSessionId: "lead-sess",
+      group: "default",
+    });
+    resetLayout([lead, leadCopy, worker]);
     const tab = (id: string) =>
       activePane().tabs.find((c) => c.id === id) as TerminalTab;
 
@@ -1938,7 +1933,10 @@ describe("pane state", () => {
       { id: "worker-sess", tab_name: "@@Boot", tab_group: "v0380", window_id: "w1", broadcast: false },
     ]);
 
+    expect(tab("lead").title).toBe("@@Lead");
+    expect(tab("lead-copy").title).toBe("@@Lead");
     expect(terminalTabGroup(tab("lead"))).toBe("v0380");
+    expect(terminalTabGroup(tab("lead-copy"))).toBe("v0380");
     expect(terminalTabGroup(tab("worker"))).toBe("v0380");
     applyTerminalRoster([]);
   });
@@ -1965,70 +1963,107 @@ describe("pane state", () => {
     applyTerminalRoster([]);
   });
 
-  test("reattachTerminalInPane suffixes + flags stale env only on a real conflict", () => {
-    // A DIFFERENT terminal already holds "Terminal-2" in this window.
-    const pane = resetLayout([terminalTab({ id: "local", title: "Terminal-2" })]);
-    const tab = reattachTerminalInPane(pane.id, {
-      terminalSessionId: "moved-sess",
-      title: "Terminal-2",
-      terminalEnvTabName: "Terminal-2",
+  test("rename proposes one atomic pair and adopts the server-settled suffix", () => {
+    const tab = terminalTab({
+      title: "build",
+      group: "old-group",
+      terminalSessionId: "sess-rename",
     });
-    expect(tab?.title).toBe("Terminal-2-2"); // forced suffix on real conflict
-    expect(tab?.terminalEnvTabName).toBe("Terminal-2"); // env is the original
-    expect(terminalEnvTabNameStale(tab as TerminalTab)).toBe(true); // title != env -> warning fires
-  });
-
-  test("reattachTerminalInPane preserves an already-stale env across the move", () => {
-    const pane = resetLayout([terminalTab({ id: "local", title: "shell" })]);
-    // Source was renamed (title "deploy") but not restarted (env still "build").
-    const tab = reattachTerminalInPane(pane.id, {
-      terminalSessionId: "moved-sess",
-      title: "deploy",
-      terminalEnvTabName: "build",
+    resetLayout([tab]);
+    const live = activePane().tabs[0] as TerminalTab;
+    const sent: Array<{ name: string; group: string }> = [];
+    const unregister = registerTerminalMetadataSink("sess-rename", (metadata) => {
+      sent.push(metadata);
+      return true;
     });
-    expect(tab?.title).toBe("deploy"); // no conflict -> no suffix
-    expect(tab?.terminalEnvTabName).toBe("build");
-    expect(terminalEnvTabNameStale(tab as TerminalTab)).toBe(true); // deploy != build -> warning persists
+
+    expect(renameTerminalTab(live, " worker ", " ops ")).toBe(true);
+    expect(sent).toEqual([{ name: "worker", group: "ops" }]);
+    expect(live.title).toBe("build");
+    expect(terminalTabGroup(live)).toBe("old-group");
+    expect(terminalMetadataDraft(live)).toEqual({ name: " worker ", group: " ops " });
+    expect(live.terminalMetadataPending).toEqual({ name: "worker", group: "ops" });
+    expect(renameTerminalTab(live, "second", "other")).toBe(false);
+    expect(sent).toHaveLength(1);
+
+    resolveTerminalMetadataRename("sess-rename", "worker-2", "ops");
+    expect(live.title).toBe("worker-2");
+    expect(terminalTabGroup(live)).toBe("ops");
+    expect(terminalMetadataDraft(live)).toEqual({ name: "worker-2", group: "ops" });
+    expect(live.terminalMetadataPending).toBeUndefined();
+    expect(live.terminalMetadataError).toBeUndefined();
+    unregister();
   });
 
-  test("setTerminalSession keeps the carried env on a reattach (same id), resets on a new id", () => {
-    const pane = resetLayout([terminalTab({ id: "local", title: "Terminal-2" })]);
-    const tab = reattachTerminalInPane(pane.id, {
-      terminalSessionId: "moved-sess",
-      title: "Terminal-2",
-      terminalEnvTabName: "Terminal-2",
-    }) as TerminalTab;
-    // title suffixed to Terminal-2-2; env is the original Terminal-2.
-    // The move handshake re-attaches to the SAME session id -> env unchanged.
-    setTerminalSession(tab, "moved-sess");
-    expect(tab.terminalEnvTabName).toBe("Terminal-2");
-    expect(terminalEnvTabNameStale(tab)).toBe(true);
-    // A DIFFERENT session id (cross-tenant fresh spawn) resets env to the title.
-    setTerminalSession(tab, "fresh-sess");
-    expect(tab.terminalEnvTabName).toBe("Terminal-2-2");
-    expect(terminalEnvTabNameStale(tab)).toBe(false);
+  test("rename failure and disconnection preserve an editable draft", () => {
+    const tab = terminalTab({ title: "build", terminalSessionId: "sess-fail" });
+    resetLayout([tab]);
+    const live = activePane().tabs[0] as TerminalTab;
+    const unregister = registerTerminalMetadataSink("sess-fail", () => true);
+
+    expect(renameTerminalTab(live, "deploy", "release")).toBe(true);
+    failTerminalMetadataRename("sess-fail", "name rejected");
+    expect(live.title).toBe("build");
+    expect(terminalMetadataDraft(live)).toEqual({ name: "deploy", group: "release" });
+    expect(live.terminalMetadataPending).toBeUndefined();
+    expect(live.terminalMetadataError).toBe("name rejected");
+    unregister();
+
+    expect(renameTerminalTab(live, "ship", "release")).toBe(false);
+    expect(live.title).toBe("build");
+    expect(terminalMetadataDraft(live)).toEqual({ name: "ship", group: "release" });
+    expect(live.terminalMetadataError).toBe("Terminal is disconnected.");
   });
 
-  test("renameTerminalTab enforces a unique name (auto -N, never rejects)", () => {
-    const seed = resetLayout([
-      terminalTab({ id: "a", title: "agent" }),
-      terminalTab({ id: "b", title: "Terminal-2" }),
-    ]);
-    const b = (layout.nodes[seed.id] as LeafNode).tabs.find(
-      (t) => t.id === "b",
-    ) as TerminalTab;
-    renameTerminalTab(b, "agent");
-    expect(b.title).toBe("agent-2");
-    // Renaming to its own current name is a no-op (excludes itself).
-    renameTerminalTab(b, "agent-2");
-    expect(b.title).toBe("agent-2");
+  test("a socket disappearing after send marks the proposal unconfirmed", () => {
+    const tab = terminalTab({ title: "build", terminalSessionId: "sess-drop" });
+    resetLayout([tab]);
+    const live = activePane().tabs[0] as TerminalTab;
+    const unregister = registerTerminalMetadataSink("sess-drop", () => true);
+
+    renameTerminalTab(live, "deploy", "default");
+    unregister();
+
+    expect(live.title).toBe("build");
+    expect(terminalMetadataDraft(live).name).toBe("deploy");
+    expect(live.terminalMetadataPending).toBeUndefined();
+    expect(live.terminalMetadataError).toContain("before the metadata update was confirmed");
+
+    applyTerminalSessionMetadata(live, {
+      name: "server-truth",
+      group: "default",
+      spawnName: "build",
+      spawnGroup: "default",
+    });
+    expect(live.title).toBe("server-truth");
+    expect(terminalMetadataDraft(live).name).toBe("server-truth");
+    expect(live.terminalMetadataError).toBeUndefined();
   });
 
-  test("a passed creation name is deduped (cs --tab-name / team spawn)", () => {
-    resetLayout([terminalTab({ id: "a", title: "build" })]);
-    const seed = layout.activePaneId;
-    const spawned = openTerminalInPane(seed, { title: "build" });
-    expect(spawned?.title).toBe("build-2");
+  test("session identity never fabricates unknown spawn provenance", () => {
+    const tab = terminalTab({
+      title: "live",
+      terminalSessionId: "old-sess",
+      terminalEnvTabName: "spawn",
+      terminalEnvTabGroup: "spawn-group",
+    });
+    resetLayout([tab]);
+
+    setTerminalSession(tab, "old-sess");
+    expect(tab.terminalEnvTabName).toBe("spawn");
+    setTerminalSession(tab, "new-sess");
+    expect(tab.terminalEnvTabName).toBeUndefined();
+    expect(tab.terminalEnvTabGroup).toBeUndefined();
+
+    applyTerminalSessionMetadata(tab, {
+      name: "settled",
+      group: "default",
+      spawnName: null,
+      spawnGroup: null,
+    });
+    expect(tab.terminalEnvTabName).toBeUndefined();
+    expect(tab.terminalEnvTabGroup).toBeUndefined();
+    expect(terminalStaleEnvironmentVariables(tab)).toEqual([]);
   });
 
   test("repeated openBrowserInActivePane / openGraphInActivePane stack", () => {
@@ -2738,25 +2773,36 @@ describe("terminal session serialization", () => {
     expect(tab.terminalActivity).toBeUndefined();
   });
 
-  test("terminal rename staleness resets after restart marker update", () => {
+  test("environment staleness consolidates variables, rearms, and clears", () => {
     const tab = terminalTab({
       terminalSessionId: "term_123",
-      terminalEnvTabName: "first",
+    });
+    resetLayout([tab]);
+    const live = activePane().tabs[0] as TerminalTab;
+    applyTerminalSessionMetadata(live, {
+      name: "first",
+      group: "old-group",
+      spawnName: "first",
+      spawnGroup: "old-group",
     });
 
-    renameTerminalTab(tab, "second");
-    expect(terminalEnvTabNameStale(tab)).toBe(true);
+    resolveTerminalMetadataRename("term_123", "second", "old-group");
+    expect(terminalStaleEnvironmentVariables(live)).toEqual(["$CHAN_TAB_NAME"]);
 
-    dismissTerminalEnvNamePrompt(tab);
-    expect(tab.terminalEnvNamePromptDismissed).toBe(true);
+    resolveTerminalMetadataRename("term_123", "second", "new-group");
+    expect(terminalStaleEnvironmentVariables(live)).toEqual([
+      "$CHAN_TAB_NAME",
+      "$CHAN_TAB_GROUP",
+    ]);
 
-    markTerminalEnvNameRestarted(tab);
-    expect(terminalEnvTabNameStale(tab)).toBe(false);
-    expect(tab.terminalEnvNamePromptDismissed).toBe(false);
+    dismissTerminalEnvironmentPrompt(live);
+    expect(terminalEnvironmentPromptDismissed(live)).toBe(true);
 
-    renameTerminalTab(tab, "third");
-    expect(terminalEnvTabNameStale(tab)).toBe(true);
-    expect(tab.terminalEnvNamePromptDismissed).toBe(false);
+    resolveTerminalMetadataRename("term_123", "third", "new-group");
+    expect(terminalEnvironmentPromptDismissed(live)).toBe(false);
+
+    markTerminalEnvironmentRestarted(live);
+    expect(terminalStaleEnvironmentVariables(live)).toEqual([]);
   });
 
   test("clearing a terminal session clears activity state", () => {
@@ -3326,28 +3372,42 @@ describe("terminal tab naming", () => {
     expect(created.title).toBe("Terminal-4");
   });
 
-  test("tracks stale CHAN_TAB_NAME after renaming a live terminal", () => {
-    const tab = terminalTab({ title: "build" });
+  test("roster metadata changes rearm a dismissed environment prompt", () => {
+    const tab = terminalTab({ title: "build", terminalSessionId: "term_live" });
     resetLayout([tab]);
+    const live = activePane().tabs[0] as TerminalTab;
+    applyTerminalSessionMetadata(live, {
+      name: "build",
+      group: "default",
+      spawnName: "build",
+      spawnGroup: "default",
+    });
 
-    setTerminalSession(tab, "term_live");
-    expect(tab.terminalEnvTabName).toBe("build");
-    expect(terminalEnvTabNameStale(tab)).toBe(false);
+    applyTerminalRoster([
+      {
+        id: "term_live",
+        tab_name: "deploy",
+        tab_group: "default",
+        window_id: "w1",
+        broadcast: false,
+      },
+    ]);
+    expect(terminalEnvTabNameStale(live)).toBe(true);
+    dismissTerminalEnvironmentPrompt(live);
+    expect(terminalEnvironmentPromptDismissed(live)).toBe(true);
 
-    renameTerminalTab(tab, "deploy");
-
-    expect(terminalEnvTabNameStale(tab)).toBe(true);
-    expect(tab.terminalEnvNamePromptDismissed).toBe(false);
-
-    dismissTerminalEnvNamePrompt(tab);
-    expect(tab.terminalEnvNamePromptDismissed).toBe(true);
-
-    renameTerminalTab(tab, "ship");
-    expect(tab.terminalEnvNamePromptDismissed).toBe(false);
-
-    setTerminalSession(tab, "term_new");
-    expect(tab.terminalEnvTabName).toBe("ship");
-    expect(terminalEnvTabNameStale(tab)).toBe(false);
+    applyTerminalRoster([
+      {
+        id: "term_live",
+        tab_name: "ship",
+        tab_group: "default",
+        window_id: "w1",
+        broadcast: false,
+      },
+    ]);
+    expect(live.title).toBe("ship");
+    expect(terminalEnvironmentPromptDismissed(live)).toBe(false);
+    applyTerminalRoster([]);
   });
 });
 

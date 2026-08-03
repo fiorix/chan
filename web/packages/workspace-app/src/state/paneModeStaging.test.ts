@@ -9,7 +9,7 @@ import pane from "../components/Pane.svelte?raw";
 describe("paneMode state: stagedDraftEditors field", () => {
   test("paneMode singleton carries stagedDraftEditors as an array field", () => {
     expect(tabs).toMatch(
-      /stagedDraftEditors: \{\s*paneId: string;\s*side: PaneSide;\s*kind: PaneModeDraftEditorKind;\s*\}\[\];[\s\S]{1,400}stagedDraftEditors: \[\],/,
+      /stagedDraftEditors: PaneModeStagedDraftEditor\[\];[\s\S]{1,600}stagedDraftEditors: \[\],/,
     );
   });
 
@@ -27,7 +27,7 @@ describe("paneMode state: stagedDraftEditors field", () => {
 
   test("cancelPaneMode clears stagedDraftEditors as part of teardown", () => {
     expect(tabs).toMatch(
-      /export function cancelPaneMode\(\): void \{[\s\S]{1,600}paneMode\.stagedDraftEditors = \[\];\s*notifyPaneModeSettled\(\);\s*\}/,
+      /export function cancelPaneMode\(\): void \{[\s\S]{1,900}paneMode\.stagedDraftEditors = \[\];\s*notifyPaneModeSettled\(pendingRemoteLayout\);\s*\}/,
     );
   });
 });
@@ -43,7 +43,7 @@ describe("paneMode staging: spawn helpers", () => {
 
   test("paneModeStageDraftEditor pushes pane id, side, and kind pinned at press time", () => {
     expect(tabs).toMatch(
-      /export function paneModeStageDraftEditor\(kind: PaneModeDraftEditorKind = "draft"\): void \{[\s\S]{1,220}const paneId = paneMode\.draft\.activePaneId;[\s\S]{1,180}const node = leafPaneFrom\(paneMode\.draft, paneId\);[\s\S]{1,240}paneMode\.stagedDraftEditors\.push\(\{\s*paneId,\s*side: node \? paneSide\(node\) : "a",\s*kind,/,
+      /export function paneModeStageDraftEditor\(kind: PaneModeDraftEditorKind = "draft"\): void \{[\s\S]{1,260}const paneId = paneMode\.draft\.activePaneId;[\s\S]{1,180}const node = leafPaneFrom\(paneMode\.draft, paneId\);[\s\S]{1,260}paneMode\.stagedDraftEditors\.push\(\{\s*id: id\("staged-editor"\),\s*paneId,\s*side: node \? paneSide\(node\) : "a",\s*kind,/,
     );
   });
 

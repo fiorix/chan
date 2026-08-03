@@ -69,7 +69,10 @@ import {
   layoutHasDurableContent,
   layoutHasPersistableStructure,
   layoutHasReattachableTerminal,
+  paneMode,
+  paneModeDeferRemoteLayout,
   reconcileLayout,
+  registerPaneModeSettledSink,
   registerDraftPromotionSink,
   resizePane,
   resolveTabDestination,
@@ -83,10 +86,12 @@ import {
   type OpenGraphOptions,
   type PaneSide,
   type ResolvedTabDestination,
+  type SerNode,
   type SpawnContext,
   type Tab,
 } from "./tabs.svelte";
 import { isEditableText } from "./fileTypes";
+import { openMediaViewer } from "./mediaOpen";
 import {
   activeTransferCount,
   beginTransfer,
@@ -1455,13 +1460,10 @@ async function respondClipboardWrite(
 
 /// Resolve a survey's target `tabName` (a terminal's `--tab-name`) to the SPA
 /// tab id its per-terminal overlay renders on, or null when no terminal matches
-/// (the survey then uses the window-wide fallback). Matches the stable session
-/// name ($CHAN_TAB_NAME / terminalEnvTabName) first, then the display title (so
-/// it still resolves before a rename's env name catches up).
+/// (the survey then uses the window-wide fallback). The display title is the
+/// server-settled live name used by every by-name operation.
 function terminalSlotForName(name: string): string | null {
-  const t = allTerminalTabs().find(
-    (tab) => tab.terminalEnvTabName === name || tab.title === name,
-  );
+  const t = allTerminalTabs().find((tab) => tab.title === name);
   return t?.id ?? null;
 }
 
@@ -1611,10 +1613,12 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
         destination,
       });
     } else {
-      revealPathInBrowser(typeof frame.select === "string" ? frame.select : frame.path, {
+      const selected = typeof frame.select === "string" ? frame.select : frame.path;
+      revealPathInBrowser(selected, {
         inspectorOpen: true,
         destination,
       });
+      if (typeof frame.select === "string") openMediaViewer(frame.select);
     }
     setTransientStatus(
       frame.select ? `selected ${frame.select}` : `opened ${frame.path || "/"}`,
@@ -2874,27 +2878,43 @@ async function applyRemoteSessionBlob(): Promise<void> {
   // fetch then observes post-flush state: either our own blob (content
   // compare no-ops) or a genuinely newer peer write (applied; last
   // writer wins inside a debounce window).
-  if (sessionTimer) {
+  if (sessionTimer && !paneMode.active) {
     flushPendingSessionSave();
     scheduleSessionSyncRefetch();
     return;
   }
   const fetched = await api.getSession();
   if (!fetched) return;
-  // An echo of a blob this window already carries needs no apply.
-  if (JSON.stringify(fetched) === lastSessionSnapshot) return;
   const payload: SessionPayload = isLegacyLayoutPayload(fetched)
     ? { layout: fetched }
     : (fetched as SessionPayload);
   const remoteLayout = payload.layout;
   if (!remoteLayout) return;
-  if (reconcileLayout(remoteLayout) === "applied") {
+  // Screen before echo dedupe: once a transaction is stale, even a newer
+  // snapshot that resembles its entry baseline must replace the pending one.
+  if (paneModeDeferRemoteLayout(remoteLayout)) {
+    // A reactive save armed before the conflict must not write the local
+    // baseline back over the authoritative peer snapshot.
+    if (sessionTimer) {
+      clearTimeout(sessionTimer);
+      sessionTimer = null;
+    }
+    return;
+  }
+  // An echo of a blob this window already carries needs no apply.
+  if (JSON.stringify(fetched) === lastSessionSnapshot) return;
+  applyRemoteSessionLayout(remoteLayout);
+}
+
+function applyRemoteSessionLayout(remoteLayout: SerNode): void {
+  const result = reconcileLayout(remoteLayout);
+  if (result === "applied") {
     // Pre-seed the save dedupe with OUR serialization of the just-applied
     // state so the trailing reactive save no-ops instead of echoing the
     // apply back to the peer.
     const local = serializeSession();
     lastSessionSnapshot = local ? JSON.stringify(local) : "";
-  } else {
+  } else if (result === "diverged") {
     // The apply kept local-only state the remote no longer carries (a
     // dirty tab, an unattachable terminal). Push it back to the peer:
     // invalidate the dedupe snapshot and schedule the save. Leaving the
@@ -2906,6 +2926,10 @@ async function applyRemoteSessionBlob(): Promise<void> {
     scheduleSessionSave();
   }
 }
+
+registerPaneModeSettledSink((pendingRemoteLayout) => {
+  if (pendingRemoteLayout) applyRemoteSessionLayout(pendingRemoteLayout);
+});
 
 /// Discard this window's saved session: delete the blob NOW (by default the
 /// server also reaps the window's live terminal sessions, keyed on the window

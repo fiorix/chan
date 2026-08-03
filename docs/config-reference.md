@@ -22,6 +22,7 @@ Source: `crates/chan-server/src/config.rs`.
 | `terminal.scrollback_mb` | `u32` | `10` (clamped `10..=50`) | `PATCH /api/config` | SPA xterm.js scrollback line cap |
 | `terminal.default_term` | `String` | `"xterm-256color"` | `PATCH /api/config` | PTY spawn `TERM` env |
 | `terminal.font` | `TerminalFontChoice` | `os-default` | `PATCH /api/config` + Settings | xterm.js fontFamily chain; `source-code-pro` opts into the bundled font (download flow on non-embed builds) |
+| `terminal.font_size` | `u32` | `14` (clamped `8..=32`) | `PATCH /api/config` + Settings | captured when xterm.js or ghostty-web constructs a renderer; both backends and ghostty's xterm-compatible cell measurement use the same pixel size |
 | `terminal.mcp_env` | `bool` | `false` | `PATCH /api/config` + Settings | whether new non-team terminals export `CHAN_MCP_*`; per-request `?mcp_env=on` overrides, team spawns use the team config's own `mcp_env` |
 | `terminal.mouse_capture` | `bool` | `true` | `PATCH /api/config` + Settings | whether full-screen TUIs may capture the mouse; off strips the DECSET mouse-enable sequences in the SPA so click-drag selection keeps working (new terminals only) |
 | `terminal.ghostty` | `bool` | `false` | `PATCH /api/config` + Settings | experimental: new terminals use the ghostty-web backend (Ghostty's WASM VT parser, ~420 KB fetched on first enable) instead of xterm.js |
@@ -102,6 +103,12 @@ Source: `crates/chan-server/src/preferences.rs`.
 | Field | Type | Reachability | Consumers |
 |-------|------|--------------|-----------|
 | `editor_theme` | `EditorTheme` | `PATCH /api/config` | Settings → Editor → theme selector |
+| `editor_font_size` | `Option<u32>` | `PATCH /api/config` + Settings | optional absolute editor body size, clamped `10..=32`; unset uses the active theme, while `N` sets body/source to `Npx`/`(N - 2)px` |
+| `terminal_colors.mode` | `TerminalColorMode` | `PATCH /api/config` + Settings | `standard` uses the terminal surface's Inherit/Light/Dark choice; `custom` activates the complete custom payload |
+| `terminal_colors.custom.background` | `String` | `PATCH /api/config` + Settings | optional dormant custom payload; accepts `#rgb` or `#rrggbb` and persists lowercase `#rrggbb` |
+| `terminal_colors.custom.foreground` | `String` | `PATCH /api/config` + Settings | custom terminal foreground, validated with the complete object |
+| `terminal_colors.custom.cursor` | `String` | `PATCH /api/config` + Settings | custom terminal cursor, validated with the complete object |
+| `terminal_colors.custom.contrast` | `TerminalContrast` | `PATCH /api/config` + Settings | `auto`, `dark`, or `light`; auto chooses the existing ANSI palette and chrome from WCAG background luminance at the fixed `0.179` threshold |
 | `theme` | `ThemeChoice` | `PATCH /api/config` | Settings → Appearance |
 | `pane_widths.inspector` | `u32` | drag-resize | resize handle persistence |
 | `pane_widths.graph` | `u32` | drag-resize | same |
@@ -117,6 +124,23 @@ Source: `crates/chan-server/src/preferences.rs`.
 | `hybrid_surface_themes` | `HybridSurfaceThemes` | Settings | per-surface Hybrid Nav theming |
 | `empty_pane_carousel_cycling` | `bool` | Settings | empty-pane behavior |
 | `shortcuts` | `Map<command-id, {web?,macos?,linux?,windows?}>` | `PATCH /api/config` | shortcut assignment; keymap override layer (opaque chord strings, sparse) |
+
+`editor_font_size` is unset by default. The Settings `Use theme` action clears it, restoring the exact body and source sizes supplied by `editor_theme`. Inline and block code keep the theme's existing `em` ratios. The root override and the document/slide token paths update mounted editor surfaces without a reload.
+
+`terminal_colors` defaults to `mode = "standard"` with no custom payload. First activation snapshots the currently resolved standard background, foreground, and cursor into one custom owner write with `contrast = "auto"`. Returning to standard mode retains that payload without changing `hybrid_surface_themes.terminal`; later custom activation reuses it. Invalid custom fields reject the whole object, so no partial colour update is persisted or broadcast.
+
+```toml
+editor_font_size = 20
+
+[terminal_colors]
+mode = "custom"
+
+[terminal_colors.custom]
+background = "#1c1c1e"
+foreground = "#ebebf0"
+cursor = "#58a6ff"
+contrast = "auto"
+```
 
 ## chan-workspace
 

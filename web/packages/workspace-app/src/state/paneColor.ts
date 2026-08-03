@@ -10,6 +10,7 @@
 /// the URL can never inject arbitrary CSS.
 
 import type { FocusColor } from "./tabs.svelte";
+import type { TerminalColorPrefs, TerminalContrast } from "../api/types";
 
 const CSS_VAR = "--pane-highlight-color";
 
@@ -57,6 +58,59 @@ export function normalizeHexColor(raw: string | null | undefined): string | null
           .join("")
       : body;
   return `#${full.toLowerCase()}`;
+}
+
+export type ResolvedTerminalColors = {
+  background: string;
+  foreground: string;
+  cursor: string;
+  contrast: Exclude<TerminalContrast, "auto">;
+};
+
+export type TerminalColorTriplet = Pick<
+  ResolvedTerminalColors,
+  "background" | "foreground" | "cursor"
+>;
+
+/** Read the same standard terminal colours TerminalTab resolves from its
+ * themed host. Fallbacks match the renderer's current standard path. */
+export function readStandardTerminalColors(source: Element): TerminalColorTriplet {
+  const styles = getComputedStyle(source);
+  return {
+    background: normalizeHexColor(styles.getPropertyValue("--bg")) ?? "#1c1c1e",
+    foreground: normalizeHexColor(styles.getPropertyValue("--text")) ?? "#ebebf0",
+    cursor: normalizeHexColor(styles.getPropertyValue("--link")) ?? "#58a6ff",
+  };
+}
+
+/** WCAG relative luminance for a normalized or shorthand hex colour. */
+export function relativeLuminance(raw: string): number | null {
+  const hex = normalizeHexColor(raw);
+  if (!hex) return null;
+  const channels = [1, 3, 5].map((offset) => {
+    const srgb = Number.parseInt(hex.slice(offset, offset + 2), 16) / 255;
+    return srgb <= 0.04045 ? srgb / 12.92 : ((srgb + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+}
+
+/** Resolve a complete custom terminal payload to canonical colours and one
+ * contrast choice. Invalid or standard-mode input has no custom result. */
+export function resolveTerminalColors(
+  prefs: TerminalColorPrefs | null | undefined,
+): ResolvedTerminalColors | null {
+  if (prefs?.mode !== "custom" || !prefs.custom) return null;
+  const background = normalizeHexColor(prefs.custom.background);
+  const foreground = normalizeHexColor(prefs.custom.foreground);
+  const cursor = normalizeHexColor(prefs.custom.cursor);
+  if (!background || !foreground || !cursor) return null;
+  const contrast =
+    prefs.custom.contrast === "auto"
+      ? (relativeLuminance(background) ?? 0) > 0.179
+        ? "light"
+        : "dark"
+      : prefs.custom.contrast;
+  return { background, foreground, cursor, contrast };
 }
 
 /// Read the `?pane=` query param. Returns the raw (URL-decoded) value, or null

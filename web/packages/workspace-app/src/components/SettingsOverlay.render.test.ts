@@ -23,6 +23,8 @@ type Cfg = {
 function basePrefs(): Record<string, unknown> {
   return {
     editor_theme: "github",
+    editor_font_size: null,
+    terminal_colors: { mode: "standard" },
     attachments_dir: "attachments",
     theme: "system",
     hybrid_surface_themes: {},
@@ -39,6 +41,7 @@ function basePrefs(): Record<string, unknown> {
       scrollback_mb: 50,
       default_term: "xterm-256color",
       font: "os-default",
+      font_size: 14,
       mcp_env: false,
       mouse_capture: true,
     },
@@ -82,6 +85,10 @@ beforeEach(() => {
   server = { revision: 1, preferences: basePrefs(), workspaces: [] };
   patches = [];
   settingsPanel.open = false;
+  document.documentElement.dataset.theme = "dark";
+  document.documentElement.style.setProperty("--bg", "#1C1C1E");
+  document.documentElement.style.setProperty("--text", "#EBEBF0");
+  document.documentElement.style.setProperty("--link", "#58A6FF");
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = typeof input === "string" ? input : input.toString();
     const method = init?.method ?? "GET";
@@ -111,6 +118,11 @@ beforeEach(() => {
 afterEach(() => {
   for (const c of mounted.splice(0)) unmount(c);
   document.body.innerHTML = "";
+  document.documentElement.style.removeProperty("--bg");
+  document.documentElement.style.removeProperty("--text");
+  document.documentElement.style.removeProperty("--link");
+  document.documentElement.style.removeProperty("--chan-editor-body-size");
+  document.documentElement.style.removeProperty("--chan-editor-source-size");
   settingsPanel.open = false;
   vi.restoreAllMocks();
 });
@@ -267,6 +279,160 @@ describe("settings surface render", () => {
     expect((last.preferences.terminal as { mcp_env: boolean }).mcp_env).toBe(
       false,
     );
+  });
+
+  test("terminal font size clamps on blur and PATCHes the terminal owner", async () => {
+    const target = openSurface();
+    await flush();
+    const terminalTab = [...target.querySelectorAll(".section-tab")].find(
+      (e) => e.textContent?.trim() === "Terminal",
+    ) as HTMLElement;
+    terminalTab.click();
+    await flush();
+    const input = target.querySelector(
+      'input[aria-label="Terminal font size"]',
+    ) as HTMLInputElement;
+    input.value = "99";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+    await flush();
+
+    const terminal = patches[patches.length - 1]!.preferences.terminal as {
+      font_size: number;
+    };
+    expect(terminal.font_size).toBe(32);
+    expect(input.value).toBe("32");
+  });
+
+  test("editor 20 applies live and Use theme clears both CSS variables", async () => {
+    const target = openSurface();
+    await flush();
+    const editorTab = [...target.querySelectorAll(".section-tab")].find(
+      (e) => e.textContent?.trim() === "Editor",
+    ) as HTMLElement;
+    editorTab.click();
+    await flush();
+    const input = target.querySelector(
+      'input[aria-label="Editor font size"]',
+    ) as HTMLInputElement;
+    expect(input.placeholder).toMatch(/px$/);
+    input.value = "20";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+    await flush();
+
+    expect(patches[patches.length - 1]!.preferences.editor_font_size).toBe(20);
+    expect(
+      document.documentElement.style.getPropertyValue("--chan-editor-body-size"),
+    ).toBe("20px");
+    expect(
+      document.documentElement.style.getPropertyValue("--chan-editor-source-size"),
+    ).toBe("18px");
+
+    const useTheme = [...target.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Use theme",
+    ) as HTMLButtonElement;
+    useTheme.click();
+    await flush();
+    expect(patches[patches.length - 1]!.preferences.editor_font_size).toBeNull();
+    expect(
+      document.documentElement.style.getPropertyValue("--chan-editor-body-size"),
+    ).toBe("");
+    expect(
+      document.documentElement.style.getPropertyValue("--chan-editor-source-size"),
+    ).toBe("");
+  });
+
+  test("first custom activation snapshots standard colours atomically", async () => {
+    const target = openSurface();
+    await flush();
+    const customPill = [...target.querySelectorAll("label.pill")].find(
+      (label) => label.textContent?.trim() === "Custom terminal colours",
+    ) as HTMLLabelElement;
+    const checkbox = customPill.querySelector("input") as HTMLInputElement;
+    checkbox.click();
+    await flush();
+
+    const colors = patches[patches.length - 1]!.preferences.terminal_colors as {
+      mode: string;
+      custom: Record<string, string>;
+    };
+    expect(colors).toEqual({
+      mode: "custom",
+      custom: {
+        background: "#1c1c1e",
+        foreground: "#ebebf0",
+        cursor: "#58a6ff",
+        contrast: "auto",
+      },
+    });
+
+    const patchCount = patches.length;
+    const foreground = target.querySelector(
+      "#terminal-colour-foreground",
+    ) as HTMLInputElement;
+    foreground.value = "invalid";
+    foreground.dispatchEvent(new Event("input", { bubbles: true }));
+    foreground.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+    await flush();
+    expect(patches).toHaveLength(patchCount);
+    expect(foreground.getAttribute("aria-invalid")).toBe("true");
+
+    checkbox.click();
+    await flush();
+    checkbox.click();
+    await flush();
+    const restoredForeground = target.querySelector(
+      "#terminal-colour-foreground",
+    ) as HTMLInputElement;
+    expect(restoredForeground.value).toBe("#ebebf0");
+    expect(restoredForeground.getAttribute("aria-invalid")).toBeNull();
+
+    const lightContrast = target.querySelector(
+      'input[name="settings-terminal-contrast"][value="light"]',
+    ) as HTMLInputElement;
+    lightContrast.click();
+    await flush();
+    const manual = patches[patches.length - 1]!.preferences.terminal_colors as {
+      mode: string;
+      custom: Record<string, string>;
+    };
+    expect(manual.custom.contrast).toBe("light");
+
+    checkbox.click();
+    await flush();
+    const dormant = patches[patches.length - 1]!.preferences.terminal_colors as {
+      mode: string;
+      custom: Record<string, string>;
+    };
+    expect(dormant.mode).toBe("standard");
+    expect(dormant.custom).toEqual(manual.custom);
+
+    document.documentElement.style.setProperty("--bg", "#223344");
+    document.documentElement.style.setProperty("--text", "#F0F1F2");
+    document.documentElement.style.setProperty("--link", "#AABBCC");
+    checkbox.click();
+    await flush();
+    const restored = patches[patches.length - 1]!.preferences.terminal_colors as {
+      mode: string;
+      custom: Record<string, string>;
+    };
+    expect(restored.custom).toEqual(manual.custom);
+
+    const reset = [...target.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Reset to current standard",
+    ) as HTMLButtonElement;
+    reset.click();
+    await flush();
+    expect(patches[patches.length - 1]!.preferences.terminal_colors).toEqual({
+      mode: "custom",
+      custom: {
+        background: "#223344",
+        foreground: "#f0f1f2",
+        cursor: "#aabbcc",
+        contrast: "auto",
+      },
+    });
   });
 
   test("toggling mouse capture PATCHes terminal.mouse_capture and keeps siblings", async () => {

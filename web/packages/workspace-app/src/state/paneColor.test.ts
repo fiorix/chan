@@ -8,6 +8,9 @@ import {
   applyNamedFocusColor,
   namedForPaneHex,
   normalizeHexColor,
+  relativeLuminance,
+  readStandardTerminalColors,
+  resolveTerminalColors,
   seedInitialFocusColor,
   syncLiveFocusColorMenu,
 } from "./paneColor";
@@ -63,6 +66,66 @@ describe("normalizeHexColor", () => {
     expect(normalizeHexColor("#")).toBeNull();
     expect(normalizeHexColor(null)).toBeNull();
     expect(normalizeHexColor(undefined)).toBeNull();
+  });
+});
+
+describe("terminal colour contrast", () => {
+  const custom = (
+    background: string,
+    contrast: "auto" | "dark" | "light" = "auto",
+  ) => ({
+    mode: "custom" as const,
+    custom: {
+      background,
+      foreground: "#ABC",
+      cursor: "#123456",
+      contrast,
+    },
+  });
+
+  test("computes WCAG luminance on both sides of the fixed threshold", () => {
+    expect(relativeLuminance("#757575")).toBeLessThanOrEqual(0.179);
+    expect(relativeLuminance("#767676")).toBeGreaterThan(0.179);
+    expect(resolveTerminalColors(custom("#757575"))?.contrast).toBe("dark");
+    expect(resolveTerminalColors(custom("#767676"))?.contrast).toBe("light");
+  });
+
+  test("manual contrast overrides automatic luminance", () => {
+    expect(resolveTerminalColors(custom("#ffffff", "dark"))?.contrast).toBe(
+      "dark",
+    );
+    expect(resolveTerminalColors(custom("#000000", "light"))?.contrast).toBe(
+      "light",
+    );
+  });
+
+  test("normalizes the complete payload and rejects partial invalid input", () => {
+    expect(resolveTerminalColors(custom("#DEF"))).toEqual({
+      background: "#ddeeff",
+      foreground: "#aabbcc",
+      cursor: "#123456",
+      contrast: "light",
+    });
+    const invalid = custom("#123456");
+    invalid.custom.foreground = "not-a-colour";
+    expect(resolveTerminalColors(invalid)).toBeNull();
+    expect(
+      resolveTerminalColors({ ...custom("#ffffff"), mode: "standard" }),
+    ).toBeNull();
+  });
+
+  test("standard colour snapshots normalize CSS tokens to persisted hex", () => {
+    const source = document.createElement("div");
+    source.style.setProperty("--bg", "#ABC");
+    source.style.setProperty("--text", "#DDEEFF");
+    source.style.setProperty("--link", "#123456");
+    document.body.append(source);
+    expect(readStandardTerminalColors(source)).toEqual({
+      background: "#aabbcc",
+      foreground: "#ddeeff",
+      cursor: "#123456",
+    });
+    source.remove();
   });
 });
 
