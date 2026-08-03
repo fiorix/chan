@@ -1163,6 +1163,15 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use tempfile::TempDir;
 
+    /// Bound for waits on the coordinator's rebuild pipeline (pass start
+    /// signals and rebuild completions). These waits only detect a lost or
+    /// stuck generation, so the value must absorb rebuild work on a
+    /// contended host -- spawn_blocking scheduling, disk, the index build
+    /// itself -- instead of racing it: a tight bound reads scheduler load as
+    /// a lost generation. 30 s matches the rebuild smoke budget in
+    /// chan-workspace's index facade.
+    const CONVERGENCE_BUDGET: Duration = Duration::from_secs(30);
+
     fn setup_workspace() -> (TempDir, TempDir, Arc<Workspace>) {
         let cfg = TempDir::new().unwrap();
         let workspace_dir = TempDir::new().unwrap();
@@ -1510,7 +1519,7 @@ mod tests {
 
         let required_generation = workspace.request_recovery(RecoveryAction::FullRebuild);
         tx.send(required_generation).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(CONVERGENCE_BUDGET, async {
             loop {
                 if matches!(*status.lock().unwrap(), IndexStatus::Error { .. }) {
                     break;
@@ -1526,7 +1535,7 @@ mod tests {
             "failed rebuild should remain queued or already be reclaimed: {recovery:?}"
         );
 
-        let convergence = tokio::time::timeout(Duration::from_secs(5), async {
+        let convergence = tokio::time::timeout(CONVERGENCE_BUDGET, async {
             loop {
                 let recovery = workspace.recovery_status();
                 if recovery.is_ready() && recovery.completed_generation >= required_generation {
@@ -1590,7 +1599,7 @@ mod tests {
         let first_generation = workspace.request_recovery(RecoveryAction::FullRebuild);
         tx.send(first_generation).unwrap();
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), started_rx.recv())
+            tokio::time::timeout(CONVERGENCE_BUDGET, started_rx.recv())
                 .await
                 .unwrap(),
             Some(1)
@@ -1608,8 +1617,11 @@ mod tests {
         release_tx.send(()).unwrap();
         let released_at = Instant::now();
 
+        // Pass 1 must finish real work before the follow-up starts, so the
+        // wait rides the convergence budget; a swallowed generation is the
+        // only way it elapses.
         assert_eq!(
-            tokio::time::timeout(Duration::from_millis(750), started_rx.recv())
+            tokio::time::timeout(CONVERGENCE_BUDGET, started_rx.recv())
                 .await
                 .expect("mid-rebuild generation was swallowed"),
             Some(2)
@@ -1618,7 +1630,7 @@ mod tests {
             released_at.elapsed() >= cooldown,
             "follow-up rebuild started before the cooldown floor"
         );
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(CONVERGENCE_BUDGET, async {
             loop {
                 let recovery = workspace.recovery_status();
                 if recovery.is_ready() && recovery.completed_generation >= required_generation {

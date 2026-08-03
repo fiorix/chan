@@ -48,3 +48,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# The shutdown-grace test runs on a paused tokio clock
+# (`#[tokio::test(start_paused = true)]`) so the grace bound holds exactly on a
+# loaded host; `start_paused` lives behind tokio's own `test-util` feature.
+tokio = { workspace = true, features = ["test-util"] }
