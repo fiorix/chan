@@ -20,6 +20,7 @@ vi.mock("./excalidraw_render", () => ({
 
 afterEach(() => {
   document.body.innerHTML = "";
+  vi.restoreAllMocks();
 });
 
 describe("buildDocDom", () => {
@@ -105,6 +106,27 @@ describe("buildDocDom", () => {
     document.body.append(root);
     expect(root.querySelector("hr.chan-page-break")).not.toBeNull();
     expect(docCss()).toContain(`.${DOC_CONTAINER_CLASS} hr.chan-page-break`);
+  });
+
+  test("keeps the live body override while copying the theme's em code ratio", () => {
+    vi.spyOn(globalThis, "getComputedStyle").mockReturnValue({
+      backgroundColor: "rgb(255, 255, 255)",
+      color: "rgb(31, 35, 40)",
+      fontFamily: "sans-serif",
+      fontSize: "20px",
+      getPropertyValue: (name: string) =>
+        name === "--chan-editor-code-size" ? "0.85em" : "",
+    } as CSSStyleDeclaration);
+    const { root } = buildDocDom({
+      markdown: "body",
+      path: "doc.md",
+      theme: "light",
+      contentWidthPx: 669,
+    });
+
+    expect(root.style.fontSize).toBe("var(--chan-editor-body-size,20px)");
+    expect(root.style.getPropertyValue("--chan-editor-body-size")).toBe("");
+    expect(root.style.getPropertyValue("--chan-editor-code-size")).toBe("0.85em");
   });
 });
 

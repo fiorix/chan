@@ -30,7 +30,7 @@
   } from "../state/store.svelte";
   import { overlayMaximized, setOverlayMaximized } from "../state/pageWidth.svelte";
   import { bumpTabFocusPulse } from "../state/tabs.svelte";
-  import { applyEditorTheme } from "../state/editorTheme";
+  import { applyEditorFontSize, applyEditorTheme } from "../state/editorTheme";
   import { editorToolsPrefs } from "../state/editorTools.svelte";
   import { DATE_FORMATS } from "../editor/dateFormats";
   import OverlayShell from "./OverlayShell.svelte";
@@ -145,7 +145,16 @@
   // Live-apply the editor theme so it is already in place when the surface
   // closes. Other fields apply on the server refresh.
   $effect(() => {
-    if (editing) applyEditorTheme(editing.editor_theme);
+    if (editing) {
+      applyEditorTheme(editing.editor_theme);
+      applyEditorFontSize(editing.editor_font_size);
+    }
+  });
+
+  // This component stays mounted while Settings is closed, so server boot and
+  // config_changed refreshes can apply the persisted override in every window.
+  $effect(() => {
+    applyEditorFontSize(workspace.info?.preferences?.editor_font_size);
   });
 
   // Keep the editor-tools snapshot in sync so an open editor observes a

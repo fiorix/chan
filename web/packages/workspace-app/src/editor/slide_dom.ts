@@ -563,7 +563,7 @@ export function slidePageBoxStyle(
     `background:${tokens.bg}`,
     `color:${tokens.fg}`,
     `font-family:${tokens.bodyFamily}`,
-    `font-size:${tokens.bodySize}`,
+    `font-size:var(--chan-editor-body-size,${tokens.bodySize})`,
     "line-height:1.55",
   ].join(";");
 }

@@ -47,6 +47,7 @@ afterEach(() => {
   deferred.resolveMermaid = undefined;
   deferred.resolveExcalidrawFile = undefined;
   document.body.innerHTML = "";
+  vi.restoreAllMocks();
 });
 
 function mount(html: string): HTMLElement {
@@ -216,6 +217,25 @@ describe("slidePageBoxStyle", () => {
     expect(
       slidePageBoxStyle({ widthPx: 1238.4, heightPx: 928.8 }, null, "light", 54),
     ).toContain("padding:54px");
+  });
+
+  test("retains the live body override and copied em code ratio", () => {
+    vi.spyOn(globalThis, "getComputedStyle").mockReturnValue({
+      backgroundColor: "rgb(255, 255, 255)",
+      color: "rgb(31, 35, 40)",
+      fontFamily: "sans-serif",
+      fontSize: "20px",
+      getPropertyValue: (name: string) =>
+        name === "--chan-editor-code-size" ? "0.85em" : "",
+    } as CSSStyleDeclaration);
+    const style = slidePageBoxStyle(
+      { widthPx: 1123, heightPx: 794 },
+      null,
+      "light",
+    );
+
+    expect(style).toContain("font-size:var(--chan-editor-body-size,20px)");
+    expect(style).toContain("--chan-editor-code-size:0.85em");
   });
 });
 

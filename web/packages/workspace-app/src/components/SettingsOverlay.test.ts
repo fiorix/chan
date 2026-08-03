@@ -5,6 +5,7 @@ import { describe, expect, test } from "vitest";
 import overlaySource from "./SettingsOverlay.svelte?raw";
 import appearanceSource from "./settings/AppearanceSection.svelte?raw";
 import terminalSource from "./settings/TerminalSection.svelte?raw";
+import editorSource from "./settings/EditorSection.svelte?raw";
 
 describe("SettingsOverlay config writes (source pins)", () => {
   test("the default write path routes through updateGlobalConfigSerial", () => {
@@ -33,6 +34,14 @@ describe("SettingsOverlay config writes (source pins)", () => {
     // The download endpoint is fired so the preference is only committed
     // after the woff2 lands (matching the terminal card invariant).
     expect(terminalSource).toMatch(/api\.fontsSourceCodeProDownload\(\)/);
+  });
+
+  test("appearance size controls clamp and commit on blur or Enter", () => {
+    expect(terminalSource).toMatch(/font_size: next/);
+    expect(terminalSource).toMatch(/onblur=\{commitFontSize\}/);
+    expect(editorSource).toMatch(/editor_font_size: next/);
+    expect(editorSource).toMatch(/editor_font_size: null/);
+    expect(editorSource).toMatch(/onblur=\{commitFontSize\}/);
   });
 
   test("secret masking is display-only in terminal settings", () => {

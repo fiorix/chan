@@ -262,7 +262,7 @@ export type Preferences = {
   editor_theme: EditorTheme;
   /// Optional absolute editor body size in pixels. Unset leaves typography to
   /// the active editor theme.
-  editor_font_size?: number;
+  editor_font_size?: number | null;
   /// Atomic terminal colour mode and its dormant custom payload.
   terminal_colors?: TerminalColorPrefs;
   /// Where image uploads land (relative to workspace root). Default

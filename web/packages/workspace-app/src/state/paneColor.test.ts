@@ -9,6 +9,7 @@ import {
   namedForPaneHex,
   normalizeHexColor,
   relativeLuminance,
+  readStandardTerminalColors,
   resolveTerminalColors,
   seedInitialFocusColor,
   syncLiveFocusColorMenu,
@@ -111,6 +112,20 @@ describe("terminal colour contrast", () => {
     expect(
       resolveTerminalColors({ ...custom("#ffffff"), mode: "standard" }),
     ).toBeNull();
+  });
+
+  test("standard colour snapshots normalize CSS tokens to persisted hex", () => {
+    const source = document.createElement("div");
+    source.style.setProperty("--bg", "#ABC");
+    source.style.setProperty("--text", "#DDEEFF");
+    source.style.setProperty("--link", "#123456");
+    document.body.append(source);
+    expect(readStandardTerminalColors(source)).toEqual({
+      background: "#aabbcc",
+      foreground: "#ddeeff",
+      cursor: "#123456",
+    });
+    source.remove();
   });
 });
 

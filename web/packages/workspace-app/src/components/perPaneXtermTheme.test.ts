@@ -43,6 +43,46 @@ describe("TerminalTab tracks terminal surface body theme", () => {
     expect(terminalTab).toContain("customTerminalColors?.foreground");
     expect(terminalTab).toContain("customTerminalColors?.cursor");
   });
+
+  test("standard mode retains selection and both exact ANSI palettes", () => {
+    expect(terminalTab).toContain('selectionBackground: "rgba(88, 166, 255, 0.35)"');
+    for (const colour of [
+      "#24292f",
+      "#cf222e",
+      "#1a7f37",
+      "#8a6300",
+      "#0969da",
+      "#8250df",
+      "#1b7c83",
+      "#4b5563",
+      "#57606a",
+      "#a40e26",
+      "#116329",
+      "#6f4e00",
+      "#0550ae",
+      "#6639ba",
+      "#0a6b73",
+      "#6e7781",
+      "#0c0c0d",
+      "#ff6b6b",
+      "#6cd07a",
+      "#e3b341",
+      "#58a6ff",
+      "#b07dff",
+      "#5dd8d8",
+      "#d8d8de",
+      "#6c6c70",
+      "#ff8585",
+      "#8be89a",
+      "#f2d16b",
+      "#7dbdff",
+      "#c8a6ff",
+      "#7df0f0",
+      "#ffffff",
+    ]) {
+      expect(terminalTab).toContain(colour);
+    }
+  });
 });
 
 describe("GraphCanvas MutationObserver watches graph body theme", () => {

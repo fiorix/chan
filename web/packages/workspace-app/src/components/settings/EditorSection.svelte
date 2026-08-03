@@ -13,6 +13,13 @@
   } from "../../state/pageWidth.svelte";
   import SettingField from "./SettingField.svelte";
   import PillToggle from "./PillToggle.svelte";
+  import {
+    applyEditorFontSize,
+    clampEditorFontSize,
+    EDITOR_FONT_SIZE_MAX,
+    EDITOR_FONT_SIZE_MIN,
+    resolvedEditorThemeBodySizePx,
+  } from "../../state/editorTheme";
 
   let { prefs, commit }: { prefs: Preferences; commit: CommitFn } = $props();
 
@@ -36,7 +43,67 @@
       commit((p) => ({ ...p, page_width_ratio: pct / 100 }));
     }, 200);
   }
+
+  let fontSizeText = $state("");
+  let themeSizePlaceholder = $state("16 px");
+  $effect(() => {
+    void prefs.editor_theme;
+    fontSizeText =
+      prefs.editor_font_size === null || prefs.editor_font_size === undefined
+        ? ""
+        : String(clampEditorFontSize(prefs.editor_font_size));
+    const themeSize = Math.round(resolvedEditorThemeBodySizePx() * 100) / 100;
+    themeSizePlaceholder = `${themeSize} px`;
+  });
+
+  function commitFontSize(): void {
+    const trimmed = fontSizeText.trim();
+    if (trimmed === "") {
+      useThemeFontSize();
+      return;
+    }
+    const parsed = Number(trimmed);
+    const next = clampEditorFontSize(Number.isFinite(parsed) ? parsed : 16);
+    fontSizeText = String(next);
+    applyEditorFontSize(next);
+    if (prefs.editor_font_size === next) return;
+    commit((p) => ({ ...p, editor_font_size: next }));
+  }
+
+  function useThemeFontSize(): void {
+    fontSizeText = "";
+    applyEditorFontSize(null);
+    if (prefs.editor_font_size === null || prefs.editor_font_size === undefined) return;
+    commit((p) => ({ ...p, editor_font_size: null }));
+  }
+
+  function onFontSizeKeydown(event: KeyboardEvent & { currentTarget: HTMLInputElement }): void {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    commitFontSize();
+    event.currentTarget.blur();
+  }
 </script>
+
+<SettingField
+  label="Editor font size"
+  hint="Absolute body size for WYSIWYG, source, document, and slide surfaces. Leave empty to use the active theme."
+>
+  <input
+    class="font-size"
+    type="number"
+    min={EDITOR_FONT_SIZE_MIN}
+    max={EDITOR_FONT_SIZE_MAX}
+    step="1"
+    value={fontSizeText}
+    placeholder={themeSizePlaceholder}
+    oninput={(event) => (fontSizeText = event.currentTarget.value)}
+    onblur={commitFontSize}
+    onkeydown={onFontSizeKeydown}
+    aria-label="Editor font size"
+  />
+  <button type="button" class="use-theme" onclick={useThemeFontSize}>Use theme</button>
+</SettingField>
 
 <SettingField
   label="Date format"
@@ -99,5 +166,21 @@
     font-size: 13px;
     min-width: 3.5em;
     text-align: right;
+  }
+  input.font-size {
+    width: 7em;
+    min-width: 7em;
+  }
+  .use-theme {
+    padding: 5px 10px;
+    border: 1px solid var(--btn-border);
+    border-radius: 4px;
+    background: var(--btn-bg);
+    color: var(--text);
+    cursor: pointer;
+    font: inherit;
+  }
+  .use-theme:hover {
+    border-color: var(--btn-hover);
   }
 </style>

@@ -67,6 +67,22 @@ export type ResolvedTerminalColors = {
   contrast: Exclude<TerminalContrast, "auto">;
 };
 
+export type TerminalColorTriplet = Pick<
+  ResolvedTerminalColors,
+  "background" | "foreground" | "cursor"
+>;
+
+/** Read the same standard terminal colours TerminalTab resolves from its
+ * themed host. Fallbacks match the renderer's current standard path. */
+export function readStandardTerminalColors(source: Element): TerminalColorTriplet {
+  const styles = getComputedStyle(source);
+  return {
+    background: normalizeHexColor(styles.getPropertyValue("--bg")) ?? "#1c1c1e",
+    foreground: normalizeHexColor(styles.getPropertyValue("--text")) ?? "#ebebf0",
+    cursor: normalizeHexColor(styles.getPropertyValue("--link")) ?? "#58a6ff",
+  };
+}
+
 /** WCAG relative luminance for a normalized or shorthand hex colour. */
 export function relativeLuminance(raw: string): number | null {
   const hex = normalizeHexColor(raw);
