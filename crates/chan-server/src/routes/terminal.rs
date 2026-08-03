@@ -153,6 +153,14 @@ enum ClientFrame {
         #[serde(default)]
         tab_id: Option<String>,
     },
+    /// Atomically propose a new live name/group pair. The registry settles the
+    /// final unique name and replies on this socket with the complete pair.
+    #[serde(rename = "rename")]
+    Rename {
+        name: String,
+        #[serde(default)]
+        group: Option<String>,
+    },
     #[serde(rename = "close")]
     Close,
     /// Rich Prompt bubble submit. Unlike `Input` (raw keystrokes
@@ -202,6 +210,13 @@ enum ServerFrame {
     #[serde(rename = "session")]
     Session {
         id: String,
+        /// Server-authoritative live metadata and immutable spawn provenance.
+        /// Optional names preserve honest unknowns from legacy fd-store data;
+        /// all fields are always present on the wire.
+        name: Option<String>,
+        group: String,
+        spawn_name: Option<String>,
+        spawn_group: Option<String>,
         seq: u64,
         /// This session incarnation's epoch. A restart reuses the id but bumps
         /// this and resets `seq`, so the SPA invalidates a cached scrollback
@@ -226,6 +241,10 @@ enum ServerFrame {
         #[serde(skip_serializing_if = "Option::is_none")]
         submit_agent: Option<&'static str>,
     },
+    #[serde(rename = "renamed")]
+    Renamed { name: String, group: String },
+    #[serde(rename = "rename_failed")]
+    RenameFailed { message: String },
     #[serde(rename = "activity")]
     Activity { bytes_since_focus: u64 },
     #[serde(rename = "ready")]
@@ -409,14 +428,17 @@ pub async fn api_create_terminal(
         env: body.env,
     };
     match state.terminal_sessions.create(opts) {
-        Ok(handle) => (
-            StatusCode::CREATED,
-            Json(CreateTerminalResponse {
-                session: handle.id().to_string(),
-                tab_label: name,
-            }),
-        )
-            .into_response(),
+        Ok(handle) => {
+            let tab_label = handle.live_metadata().name.unwrap_or(name);
+            (
+                StatusCode::CREATED,
+                Json(CreateTerminalResponse {
+                    session: handle.id().to_string(),
+                    tab_label,
+                }),
+            )
+                .into_response()
+        }
         Err(CreateError::Capped) => {
             (StatusCode::CONFLICT, "terminal session cap reached").into_response()
         }
@@ -749,6 +771,25 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                                     tab_id.and_then(|id| normalize_layout_id(&id)),
                                 );
                             }
+                            Ok(ClientFrame::Rename { name, group }) => {
+                                let result = rename_terminal_session(
+                                    &state.terminal_sessions,
+                                    session.id(),
+                                    &name,
+                                    group.as_deref(),
+                                );
+                                let frame = match result {
+                                    Ok(metadata) => ServerFrame::Renamed {
+                                        name: metadata
+                                            .name
+                                            .expect("settled terminal rename has a name"),
+                                        group: metadata.group,
+                                    },
+                                    Err(message) => ServerFrame::RenameFailed { message },
+                                };
+                                let _ = send_frame(&mut socket, frame).await;
+                                state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
+                            }
                             Ok(ClientFrame::Close) => {
                                 let id = session.id().to_owned();
                                 state.terminal_sessions.close(&id, CloseReason::Explicit);
@@ -980,8 +1021,13 @@ fn session_frame(session: &AttachHandle) -> ServerFrame {
         session.spawn_env("CHAN_AGENT"),
     )
     .map(SubmitAgent::name);
+    let metadata = session.live_metadata();
     ServerFrame::Session {
         id: session.id().to_owned(),
+        name: metadata.name,
+        group: metadata.group,
+        spawn_name: session.spawn_name().map(str::to_string),
+        spawn_group: session.spawn_group().map(str::to_string),
         seq: session.seq,
         generation: session.generation,
         missed_bytes: session.missed_bytes,
@@ -990,6 +1036,21 @@ fn session_frame(session: &AttachHandle) -> ServerFrame {
         queued_prompt_ids: session.queued_prompt_ids(),
         submit_agent,
     }
+}
+
+fn rename_terminal_session(
+    registry: &crate::terminal_sessions::Registry,
+    session_id: &str,
+    name: &str,
+    group: Option<&str>,
+) -> Result<crate::terminal_sessions::LiveTerminalMetadata, String> {
+    let Some(name) = normalize_tab_name(name) else {
+        return Err("terminal name is required".to_string());
+    };
+    let group = group.and_then(normalize_tab_group);
+    registry
+        .update_live_metadata(session_id, name, group)
+        .ok_or_else(|| "terminal session is no longer live".to_string())
 }
 
 async fn send_frame(socket: &mut WebSocket, frame: ServerFrame) -> Result<(), axum::Error> {
@@ -1513,6 +1574,10 @@ mod tests {
         );
         let session = ServerFrame::Session {
             id: "abc".into(),
+            name: Some("live".into()),
+            group: "group".into(),
+            spawn_name: Some("spawn".into()),
+            spawn_group: Some("spawn-group".into()),
             seq: 7,
             generation: 3,
             missed_bytes: 0,
@@ -1523,12 +1588,16 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&session).unwrap(),
-            r#"{"type":"session","id":"abc","seq":7,"generation":3,"missed_bytes":0,"bytes_since_focus":0,"queue_depth":2,"queued_prompt_ids":["u-1","u-2"],"submit_agent":"opencode"}"#
+            r#"{"type":"session","id":"abc","name":"live","group":"group","spawn_name":"spawn","spawn_group":"spawn-group","seq":7,"generation":3,"missed_bytes":0,"bytes_since_focus":0,"queue_depth":2,"queued_prompt_ids":["u-1","u-2"],"submit_agent":"opencode"}"#
         );
         // Empty list still serializes as `[]` (always present; the SPA can
         // assume the field exists -- pre-release, no back-compat).
         let session_empty = ServerFrame::Session {
             id: "abc".into(),
+            name: None,
+            group: "default".into(),
+            spawn_name: None,
+            spawn_group: None,
             seq: 0,
             generation: 0,
             missed_bytes: 0,
@@ -1539,7 +1608,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&session_empty).unwrap(),
-            r#"{"type":"session","id":"abc","seq":0,"generation":0,"missed_bytes":0,"bytes_since_focus":0,"queue_depth":0,"queued_prompt_ids":[]}"#
+            r#"{"type":"session","id":"abc","name":null,"group":"default","spawn_name":null,"spawn_group":null,"seq":0,"generation":0,"missed_bytes":0,"bytes_since_focus":0,"queue_depth":0,"queued_prompt_ids":[]}"#
         );
         // cancel-prompt decode (client→server) -- pin the tag + field so a
         // rename can't silently break the SPA wire with a green build.
@@ -1668,6 +1737,113 @@ mod tests {
             ClientFrame::SetBroadcast { on } => assert!(!on),
             other => panic!("expected SetBroadcast, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn terminal_rename_frames_pin_the_atomic_wire_contract() {
+        let proposed: ClientFrame =
+            serde_json::from_str(r#"{"type":"rename","name":"requested","group":"workers"}"#)
+                .unwrap();
+        match proposed {
+            ClientFrame::Rename { name, group } => {
+                assert_eq!(name, "requested");
+                assert_eq!(group.as_deref(), Some("workers"));
+            }
+            other => panic!("expected Rename, got {other:?}"),
+        }
+        assert_eq!(
+            serde_json::to_string(&ServerFrame::Renamed {
+                name: "settled-2".into(),
+                group: "workers".into(),
+            })
+            .unwrap(),
+            r#"{"type":"renamed","name":"settled-2","group":"workers"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ServerFrame::RenameFailed {
+                message: "terminal name is required".into(),
+            })
+            .unwrap(),
+            r#"{"type":"rename_failed","message":"terminal name is required"}"#
+        );
+    }
+
+    #[test]
+    fn terminal_rename_ack_uses_settled_pair_and_failure_preserves_live_metadata() {
+        let state = crate::state::test_support::make_test_state(false);
+        let create = |name: &str| CreateOptions {
+            size: pty_size(None, None),
+            tab_name: Some(name.into()),
+            tab_group: None,
+            window_id: None,
+            mcp_env: false,
+            cwd: None,
+            command: Some("sleep 5".into()),
+            env: Default::default(),
+        };
+        let first = state.terminal_sessions.create(create("taken")).unwrap();
+        let second = state.terminal_sessions.create(create("other")).unwrap();
+
+        let settled = rename_terminal_session(
+            &state.terminal_sessions,
+            second.id(),
+            " taken ",
+            Some(" workers "),
+        )
+        .unwrap();
+        assert_eq!(settled.name.as_deref(), Some("taken-2"));
+        assert_eq!(settled.group, "workers");
+        let roster = state.terminal_sessions.roster();
+        let entry = roster.iter().find(|entry| entry.id == second.id()).unwrap();
+        assert_eq!(entry.tab_name.as_deref(), Some("taken-2"));
+        assert_eq!(entry.tab_group, "workers");
+
+        assert_eq!(
+            rename_terminal_session(&state.terminal_sessions, second.id(), " ", None),
+            Err("terminal name is required".to_string())
+        );
+        assert_eq!(second.live_metadata(), settled);
+        assert_eq!(
+            rename_terminal_session(&state.terminal_sessions, "missing", "name", None),
+            Err("terminal session is no longer live".to_string())
+        );
+        state.terminal_sessions.close_all(CloseReason::Shutdown);
+        drop(first);
+    }
+
+    #[test]
+    fn reattach_prelude_ignores_query_metadata_and_returns_live_and_spawn_pairs() {
+        let (state, initial) = create_identity_session("sleep 5", None);
+        let id = initial.id().to_string();
+        state
+            .terminal_sessions
+            .update_live_metadata(&id, "live-name".into(), Some("live-group".into()))
+            .unwrap();
+        let attached = state
+            .terminal_sessions
+            .get_or_create_for_ws(
+                Some(&id),
+                Some(0),
+                CreateOptions {
+                    size: pty_size(None, None),
+                    tab_name: Some("query-must-not-win".into()),
+                    tab_group: Some("query-group".into()),
+                    window_id: None,
+                    mcp_env: false,
+                    cwd: None,
+                    command: None,
+                    env: Default::default(),
+                },
+                TerminalPlacement::default(),
+                None,
+            )
+            .unwrap();
+        let frame = serde_json::to_value(session_frame(&attached)).unwrap();
+        assert_eq!(frame["name"], "live-name");
+        assert_eq!(frame["group"], "live-group");
+        assert_eq!(frame["spawn_name"], "@@Identity");
+        assert_eq!(frame["spawn_group"], "default");
+        state.terminal_sessions.close(&id, CloseReason::Explicit);
     }
 
     #[tokio::test]
@@ -1937,6 +2113,27 @@ mod tests {
         state
             .terminal_sessions
             .close(session, CloseReason::Explicit);
+    }
+
+    #[tokio::test]
+    async fn api_create_terminal_returns_the_registry_settled_name() {
+        let state = crate::state::test_support::make_test_state(false);
+        let first = api_create_terminal(
+            State(state.clone()),
+            Ok(Json(create_terminal_body("sleep 5"))),
+        )
+        .await;
+        let first = response_json(first).await;
+        assert_eq!(first["tab_label"], "@@Spawned");
+
+        let second = api_create_terminal(
+            State(state.clone()),
+            Ok(Json(create_terminal_body("sleep 5"))),
+        )
+        .await;
+        let second = response_json(second).await;
+        assert_eq!(second["tab_label"], "@@Spawned-2");
+        state.terminal_sessions.close_all(CloseReason::Shutdown);
     }
 
     #[tokio::test]
