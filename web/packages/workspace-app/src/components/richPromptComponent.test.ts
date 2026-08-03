@@ -157,27 +157,25 @@ describe("RichPrompt.svelte component", () => {
     expect(richPromptSrc).toMatch(/content\.length > 0 \|\| !lastQueued\) return false/);
     expect(richPromptSrc).toMatch(/const \{ id, text \} = lastQueued;/);
     expect(richPromptSrc).toMatch(/sendCancelToTerminal\(tab\.id, id\)/);
-    // Esc drops the queued message (card up, or empty composer with a queued
-    // one): cancel + clear, keeping the bubble open; otherwise abandon the draft.
-    expect(richPromptSrc).toMatch(
-      /lastQueued && \(isPending \|\| content\.length === 0\)\) \{[\s\S]{1,160}sendCancelToTerminal\(tab\.id, lastQueued\.id\)/,
-    );
+    // Stopping a send is ONE action whichever route runs it, so Esc delegates
+    // to the recall path rather than carrying its own cancel-and-clear: the
+    // message leaves the queue and its text stays in the composer. Esc only
+    // abandons the draft when there is nothing queued to stop.
+    const dropBody = richPromptSrc.match(
+      /function dropOrAbandonFromView\(view: EditorView\): boolean \{[\s\S]*?\n  \}/,
+    )?.[0];
+    expect(dropBody).toContain("if (isPending) return recallFromView(view);");
+    expect(dropBody).toContain("abandonDraft();");
     expect(richPromptSrc).toMatch(/function abandonDraft\(\): void/);
     expect(richPromptSrc).toMatch(/hideRichPromptForTab\(tab\.id\)/);
-    // The strip's cancel is its own action, never the Esc handler: that one
-    // falls through to abandonDraft() when `lastQueued` is null, which a
-    // pending prompt restored from a blank draft genuinely is, and a cancel
-    // button must not make the composer disappear.
-    expect(richPromptSrc).toMatch(
-      /function cancelPending\(view: EditorView\): void/,
-    );
-    const cancelBody = richPromptSrc.match(
-      /function cancelPending\(view: EditorView\): void \{[\s\S]*?\n  \}/,
+    // The strip's stop runs the same recall path. It must never reach the
+    // abandon fallthrough, which hides the whole bubble.
+    const primaryClickBody = richPromptSrc.match(
+      /function onPrimaryClick\(\): void \{[\s\S]*?\n  \}/,
     )?.[0];
-    expect(cancelBody).toContain("sendCancelToTerminal(tab.id, lastQueued.id)");
-    expect(cancelBody).toContain("enterLocalEdit();");
-    expect(cancelBody).not.toContain("abandonDraft");
-    expect(cancelBody).not.toContain("hideRichPromptForTab");
+    expect(primaryClickBody).toContain("if (isPending) recallFromView(promptView);");
+    expect(primaryClickBody).not.toContain("abandonDraft");
+    expect(primaryClickBody).not.toContain("dropOrAbandonFromView");
   });
 
   test("fast-path grace + ack timeout constants gate the chip and the dead-socket fail", () => {
@@ -201,11 +199,11 @@ describe("RichPrompt.svelte component", () => {
       /transientNote \?\? \(queuedCount > 0 \? `\$\{queuedCount\} queued` : null\)/,
     );
     // The affordances are controls, not label text. The primary carries the
-    // pending state: submit becomes cancel and back again. The secondary
-    // carries edit while pending, recall once the composer is free.
-    expect(richPromptSrc).toMatch(/\{ label: "↑ edit", disabled: false \}/);
+    // pending state: submit becomes stop and back again. Recall is a control
+    // only when nothing is pending, because stopping a send already returns
+    // the text to the composer and a second control would repeat it.
     expect(richPromptSrc).toMatch(
-      /\{ label: "↑ recall", disabled: content\.length > 0 \}/,
+      /if \(isPending\) return null;[\s\S]{1,120}\{ label: "↑ recall", disabled: content\.length > 0 \}/,
     );
     expect(richPromptSrc).toMatch(
       /\{ label: "esc cancel", disabled: false \}/,
@@ -213,6 +211,7 @@ describe("RichPrompt.svelte component", () => {
     expect(richPromptSrc).toMatch(
       /\{ label: submitLabel, disabled: content\.trim\(\)\.length === 0 \}/,
     );
+    expect(richPromptSrc).not.toMatch(/label: "↑ edit"/);
   });
 
   test("submitAgent prefers server identity and delegates protocol fallback", () => {

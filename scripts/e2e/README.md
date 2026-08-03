@@ -18,6 +18,7 @@ A scenario graduates into the gate only after it has proven stable across severa
 `scenarios/` holds behavioral catalogs: what must hold, when a scenario is worth re-running, and which executable check or test backs it. A pack names the harness it runs on and does not restate harness documentation.
 
 - [`scenarios/workspace-lifecycle.md`](scenarios/workspace-lifecycle.md): startup, shutdown, close and remove, root loss, and durable state across all of them.
+- [`scenarios/rich-prompt.md`](scenarios/rich-prompt.md): composing a terminal prompt, sending it through the prompt queue, stopping a send, and restoring every one of those states after a reload.
 
 Write a new pack when a coding session produces a set of end-to-end expectations worth keeping. Name it for its subject, never for the session that produced it, and state every expectation in the present tense: a pack describes behavior that must hold, not work that was done.
 

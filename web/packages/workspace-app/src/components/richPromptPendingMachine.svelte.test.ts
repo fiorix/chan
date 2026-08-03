@@ -227,12 +227,18 @@ describe("the control strip drives the composer with a pointer alone", () => {
     primaryOf(target).click();
     await tick();
 
+    // The cancel must actually reach the server, addressed by the restored
+    // prompt id. Moving the composer on without sending it would leave the
+    // message queued forever while the user believes they stopped it.
+    expect(sendCancelSpy).toHaveBeenCalledWith(tab.id, "p1");
     expect(isRichPromptVisible(tab.id)).toBe(true);
     expect(tab.pendingPrompt).toBeUndefined();
     expect(labelOf(primaryOf(target))).toMatch(SUBMIT_LABEL);
   });
 
-  test("the secondary control appears only when there is something to reach", async () => {
+  test("the strip offers one stop control, not two", async () => {
+    // Stopping a send and pulling the message back for editing are the same
+    // action, so while pending the strip must not offer both.
     const tab = makeTab({ richPromptDraftPath: ".Drafts/t/draft.md" });
     showRichPromptForTab(tab.id);
     readMock.mockResolvedValue({ content: "hello agent" } as unknown);
@@ -245,12 +251,40 @@ describe("the control strip drives the composer with a pointer alone", () => {
 
     primaryOf(target).click();
     await tick();
-    expect(labelOf(secondaryOf(target))).toBe("↑ edit");
+    expect(labelOf(primaryOf(target))).toBe("esc cancel");
+    expect(secondaryOf(target)).toBeNull();
+  });
 
-    secondaryOf(target)!.click();
-    await tick();
-    expect(sendCancelSpy).toHaveBeenCalledTimes(1);
-    expect(view.state.doc.toString()).toBe("hello agent"); // pulled back, not dropped
+  test("every stop route keeps the prompt in the composer", async () => {
+    // The text is the user's work. A stop takes the message off the queue; it
+    // is never a discard, whichever of the three routes runs it.
+    for (const stop of ["button", "escape", "arrowup"] as const) {
+      sendCancelSpy.mockClear();
+      const tab = makeTab({
+        id: `term-${stop}`,
+        richPromptDraftPath: ".Drafts/t/draft.md",
+      });
+      showRichPromptForTab(tab.id);
+      readMock.mockResolvedValue({ content: "a long prompt" } as unknown);
+      const { target, content } = await mountRP(tab);
+      const view = EditorView.findFromDOM(content!)!;
+      await settle(view, "a long prompt");
+      await tick();
+
+      primaryOf(target).click();
+      await tick();
+      expect(labelOf(primaryOf(target))).toBe("esc cancel");
+
+      if (stop === "button") primaryOf(target).click();
+      else if (stop === "escape") press(content!, "Escape");
+      else press(content!, "ArrowUp");
+      await tick();
+
+      expect(sendCancelSpy).toHaveBeenCalledTimes(1);
+      expect(view.state.doc.toString()).toBe("a long prompt");
+      expect(isRichPromptVisible(tab.id)).toBe(true);
+      expect(labelOf(primaryOf(target))).toMatch(SUBMIT_LABEL);
+    }
   });
 
   test("no recall control for a queue this client cannot reach", async () => {

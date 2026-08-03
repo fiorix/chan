@@ -35,7 +35,7 @@ state                     text slot    secondary   primary
 idle, empty composer      (none)       (none)      submit (disabled)
 idle, composer has text   (none)       (none)      submit
 queue, nothing pending    "N queued"   recall      submit
-prompt pending            "N queued"   edit        cancel
+prompt pending            "N queued"   (none)      stop
 transient note showing    note text    per state   per state
 ```
 
@@ -44,12 +44,12 @@ A transient note replaces the count in the text slot only. It never removes or d
 ### Primary button
 
 - Not pending: the label is `submitLabel`, and the action is `submitFromView`. It is disabled when the document is blank, matching the guard the handler already applies.
-- Pending: the label is `esc cancel`, and the action cancels the queued message and returns the composer to its editable state, at which point the button reads `submitLabel` again.
-- The primary button never hides the bubble. It is bound to a dedicated cancel action rather than to `dropOrAbandonFromView`, because that handler's fallthrough reaches `abandonDraft()` when `lastQueued` is null, which a restored blank pending bubble genuinely produces. The cancel action sends the cancel only when `lastQueued` is set, and otherwise just returns the composer to local editing.
+- Pending: the label is `esc cancel`, and the action takes the message off the queue and returns the composer to its editable state with the prompt text intact, at which point the button reads `submitLabel` again. Stopping a send is never a discard: the text is the user's work and there is no undo.
+- The primary button never hides the bubble. It runs `recallFromView` rather than `dropOrAbandonFromView`, because that handler's fallthrough reaches `abandonDraft()` and hides the whole composer.
 
 ### Secondary button
 
-- Pending: the label is `↑ edit`, and the action is `recallFromView`, which pulls the queued text back into an unlocked composer.
+- Pending: absent. Stopping the send already returns the text to the composer, so a separate pull-back control would offer the same action twice.
 - Not pending, with a queue and a message this client still remembers: the label is `↑ recall`, and the action is `recallFromView`. A queue depth on its own is not enough, because it can be a teammate's `cs terminal write`, which nothing here can pull back; offering recall there would be a control that does nothing.
 - Disabled when the composer already has text, matching `recallFromView`'s own `content.length > 0` guard, and absent entirely when there is nothing to recall.
 
@@ -75,7 +75,8 @@ Source and unit tests must prove:
 
 - the primary button's label and action follow the pending state, and a cancel returns it to the submit label with an editable composer;
 - the primary button is disabled on a blank composer and never invokes `abandonDraft`, including when a pending prompt was restored with `lastQueued === null`;
-- the secondary button reads `↑ edit` while pending and `↑ recall` otherwise, is disabled when the composer has text, and is absent both with nothing to recall and when the only queue depth came from another client;
+- the secondary button is absent while pending, reads `↑ recall` otherwise, is disabled when the composer has text, and is absent both with nothing to recall and when the only queue depth came from another client;
+- every stop route, the button, `Escape`, and `ArrowUp`, takes the message off the queue, leaves the prompt text in the composer, and sends the cancel addressed by the restored prompt id rather than moving the composer on without it;
 - a transient note leaves both buttons present and operable; and
 - the strip is not `aria-hidden`, and each control is a button with its visible text as its accessible name.
 
@@ -97,17 +98,21 @@ Add one focused real-browser smoke: type into the composer, press the submit but
 ## Implementation evidence
 
 - `6febee90` replaces the composite `labelText` with derived slots and renders them as one advisory text span plus two buttons. The primary carries the pending state, so submitting turns it into cancel and cancelling turns it back into submit. The buttons reach the live view through a `ViewPlugin.define` capture inside the composer's own extension bundle, so nothing imperative reaches into `Wysiwyg`'s private view, and all three action signatures and bodies are unchanged.
-- The same commit adds `cancelPending` and binds the primary button to it instead of `dropOrAbandonFromView`, whose fallthrough hides the whole bubble when `lastQueued` is null. A pending prompt restored from a blank draft is exactly that state.
+- The primary button runs `recallFromView`, never `dropOrAbandonFromView`, whose fallthrough reaches `abandonDraft()` and hides the whole bubble. `Escape` delegates to the same path while a message is pending, so every stop route is one action and the composer keeps the prompt text.
 - `lastQueued` becomes reactive state so the secondary control can depend on it, and the recall control is absent rather than present and inert when the queue depth came from another client that this one cannot reach.
 - The tap target is the button's own 24px box rather than an absolute overlay, which would have reached past the strip and swallowed taps aimed at the composer's last line.
 
 ## Validation evidence
 
 - The full `workspace-app` suite passed 3237 tests across 342 files, and `svelte-check` reported 0 errors and 0 warnings over 4865 files. The five Rich Prompt files pass 37 tests together.
-- The blank-draft cancel check was verified adversarially: pointing the primary button back at `dropOrAbandonFromView` makes it fail with the bubble hidden, and restoring `cancelPending` makes it pass. The check observes the behavior rather than the wiring, and it also demonstrates that the underlying defect is reachable.
+- Both restoration behaviors were verified adversarially, by regressing the implementation and confirming the check fails. Re-gating the mount-time seed on the draft text makes the blank-draft check fail on a cancel that never reached the server, and restoring the `Escape` wipe makes the stop-route check fail on an emptied composer. An earlier version of the blank-draft check passed under the first of those regressions, because the recall path tolerates a missing record; asserting the cancel itself is what gave it teeth.
 - The keymap and handler-body pins in `richPromptComponent.test.ts` were not edited and stayed green, which is the evidence that the three actions were not rewritten.
 - The behavioral checks run against a real mount with real clicks, extending the existing pending-machine harness rather than adding a second rig.
 
-## Open items
+## Stop semantics
 
-- The Escape path still carries the defect the button avoids: on a pending bubble restored from a blank draft, `dropOrAbandonFromView` hides the composer instead of cancelling the queued message. Fixing the keyboard path is deliberately outside this item, and it is one symptom of a wider split in how the bubble reconstructs itself from a persisted draft.
+Stopping a send is one action whichever route runs it. The button, `Escape`, and `ArrowUp` all take the message off the queue and leave its text in the composer, so a stop is never a discard. `Escape` keeps its separate meaning only when nothing is queued, where it abandons the draft and hides the bubble, and that remains the one path that discards prompt text.
+
+Reconstruction seeds the queued message from `tab.pendingPrompt.id` rather than from whether the draft text survived. A queued message exists on the server either way, so a blank draft must still leave a composer that can stop it. Gating the seed on the text was what let a restored bubble either strand a queued message or, through `Escape`, hide itself entirely.
+
+The end-to-end expectations these satisfy are catalogued in [`scripts/e2e/scenarios/rich-prompt.md`](../../../scripts/e2e/scenarios/rich-prompt.md), RP-03 and RP-04.

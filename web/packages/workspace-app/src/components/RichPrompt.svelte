@@ -160,14 +160,18 @@
   const textSlot = $derived(
     transientNote ?? (queuedCount > 0 ? `${queuedCount} queued` : null),
   );
+  // No secondary control while a message is in flight: stopping the send and
+  // pulling it back for editing are the same action there, so the strip would
+  // otherwise offer the same thing twice. Recall stays its own control only
+  // once nothing is pending, where it does something submit does not.
   const secondaryAction = $derived.by(() => {
-    if (isPending) return { label: "↑ edit", disabled: false };
+    if (isPending) return null;
     if (queuedCount > 0 && lastQueued)
       return { label: "↑ recall", disabled: content.length > 0 };
     return null;
   });
-  // Pending is the only cancel state, so one control carries both: submitting
-  // turns it into cancel, and cancelling turns it back into submit.
+  // Pending is the only stop state, so one control carries both: submitting
+  // turns it into stop, and stopping turns it back into submit.
   const primaryAction = $derived.by(() =>
     isPending
       ? { label: "esc cancel", disabled: false }
@@ -368,9 +372,11 @@
         consumeTerminalPhase(phase);
       } else if (phase === "sent" || phase === "queued") {
         pendingChipVisible = true;
-        if (content.trim()) {
-          lastQueued = { id: tab.pendingPrompt!.id, text: content };
-        }
+        // Seed from the id, never from whether the draft survived. The message
+        // is queued on the server either way, so a blank draft must still leave
+        // a bubble that can stop it; gating this on the text was what stranded
+        // a queued message behind a composer that could only hide itself.
+        lastQueued = { id: tab.pendingPrompt!.id, text: content };
         if (phase === "sent" && ackTimer === null) {
           ackTimer = setTimeout(() => {
             ackTimer = null;
@@ -422,7 +428,11 @@
   }
 
   function dropOrAbandonFromView(view: EditorView): boolean {
-    if (lastQueued && (isPending || content.length === 0)) {
+    // Stopping a send is one action whichever key runs it: the message leaves
+    // the queue and its text stays in the composer, ready to edit and send
+    // again. The text is the user's work and a stop is not a discard.
+    if (isPending) return recallFromView(view);
+    if (lastQueued && content.length === 0) {
       sendCancelToTerminal(tab.id, lastQueued.id);
       lastQueued = null;
       enterLocalEdit();
@@ -438,30 +448,12 @@
     return true;
   }
 
-  // The strip's cancel drops the queued message and nothing else. It is not
-  // `dropOrAbandonFromView`: that handler falls through to `abandonDraft()`,
-  // hiding the whole bubble, whenever `lastQueued` is null, and a pending
-  // prompt restored from a blank draft leaves it exactly that way (onMount
-  // only remembers a message whose text survived). Pressing a cancel button
-  // must never make the composer disappear.
-  function cancelPending(view: EditorView): void {
-    if (lastQueued) {
-      sendCancelToTerminal(tab.id, lastQueued.id);
-      lastQueued = null;
-    }
-    enterLocalEdit();
-    content = "";
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: "" },
-      effects: lockCompartment.reconfigure(lockExtensions(false)),
-    });
-    void flushWrite();
-    view.focus();
-  }
-
+  // The strip's stop runs `recallFromView`, never `dropOrAbandonFromView`:
+  // that handler's fallthrough reaches `abandonDraft()` and hides the whole
+  // bubble, which a stop control must never do.
   function onPrimaryClick(): void {
     if (!promptView) return;
-    if (isPending) cancelPending(promptView);
+    if (isPending) recallFromView(promptView);
     else submitFromView(promptView);
   }
 
@@ -488,7 +480,11 @@
     e.stopPropagation();
     if (e.defaultPrevented) return;
     e.preventDefault();
-    if (lastQueued && (isPending || content.length === 0)) {
+    if (isPending) {
+      if (promptView) recallFromView(promptView);
+      return;
+    }
+    if (lastQueued && content.length === 0) {
       sendCancelToTerminal(tab.id, lastQueued.id);
       lastQueued = null;
       enterLocalEdit();
