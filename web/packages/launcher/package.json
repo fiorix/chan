@@ -15,6 +15,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@chan/web-shared": "*",
     "lucide-svelte": "^1.0.1"
   }
 }
