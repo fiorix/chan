@@ -10,7 +10,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import TerminalTab from "./TerminalTab.svelte";
 import TerminalTabTestHarness from "./TerminalTabTestHarness.svelte";
 import terminalSource from "./TerminalTab.svelte?raw";
-import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
+import { layout, type TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
 
 const fitMock = vi.hoisted(() => ({
@@ -139,6 +139,7 @@ afterEach(() => {
   fitMock.failure = null;
   fitMock.size = null;
   globalThis.requestAnimationFrame = immediateAnimationFrame;
+  setTerminalTabsInLayout([]);
 });
 
 function terminalTab(partial: Partial<TerminalTabState> = {}): TerminalTabState {
@@ -151,6 +152,21 @@ function terminalTab(partial: Partial<TerminalTabState> = {}): TerminalTabState 
     broadcastTargetIds: [],
     ...partial,
   };
+}
+
+function setTerminalTabsInLayout(tabs: TerminalTabState[]): TerminalTabState[] {
+  const paneId = "terminal-tab-test-pane";
+  layout.rootId = paneId;
+  layout.activePaneId = paneId;
+  layout.nodes = {
+    [paneId]: {
+      kind: "leaf",
+      id: paneId,
+      tabs,
+      activeTabId: tabs[0]?.id ?? null,
+    },
+  };
+  return (layout.nodes[paneId] as { tabs: TerminalTabState[] }).tabs;
 }
 
 async function renderTerminal(
@@ -292,6 +308,134 @@ describe("TerminalTab activity frames", () => {
       expect(terminalFocuses.length).toBeGreaterThan(0);
     },
   );
+});
+
+describe("TerminalTab metadata settlement", () => {
+  test("blur sends one pair, disables both fields, and adopts the settled ack", async () => {
+    const [tab] = setTerminalTabsInLayout([
+      terminalTab({ title: "url-name", group: "url-group" }),
+    ]);
+    await renderTerminal(tab, true);
+    const socket = openSocket();
+
+    await socket.onmessage?.({
+      data: JSON.stringify({
+        type: "session",
+        id: "term-session-1",
+        seq: 0,
+        generation: 1,
+        name: "worker",
+        group: "ops",
+        spawn_name: "spawn-worker",
+        spawn_group: "spawn-ops",
+      }),
+    });
+    openTabMenu(tab.id, { left: 0, top: 0, right: 0, bottom: 0 });
+    await tick();
+
+    const [nameInput, groupInput] = Array.from(
+      document.body.querySelectorAll<HTMLInputElement>(".rename-input"),
+    );
+    expect(nameInput.value).toBe("worker");
+    expect(groupInput.value).toBe("ops");
+
+    nameInput.value = "deploy";
+    nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    groupInput.value = "release";
+    groupInput.dispatchEvent(new Event("input", { bubbles: true }));
+    groupInput.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+    await tick();
+
+    const renameFrames = socket.sent
+      .map((raw) => JSON.parse(raw))
+      .filter((frame) => frame.type === "rename");
+    expect(renameFrames).toEqual([{ type: "rename", name: "deploy", group: "release" }]);
+    expect(tab.title).toBe("worker");
+    expect(tab.group).toBe("ops");
+    expect(nameInput.disabled).toBe(true);
+    expect(groupInput.disabled).toBe(true);
+
+    await socket.onmessage?.({
+      data: JSON.stringify({
+        type: "renamed",
+        name: "deploy-2",
+        group: "release",
+      }),
+    });
+    await tick();
+
+    expect(tab.title).toBe("deploy-2");
+    expect(tab.group).toBe("release");
+    expect(nameInput.value).toBe("deploy-2");
+    expect(groupInput.value).toBe("release");
+    expect(nameInput.disabled).toBe(false);
+    expect(groupInput.disabled).toBe(false);
+    const stalePrompt = document.body.querySelector(".env-stale-row")?.textContent ?? "";
+    expect(stalePrompt).toContain("$CHAN_TAB_NAME");
+    expect(stalePrompt).toContain("$CHAN_TAB_GROUP");
+
+    nameInput.value = "rejected-name";
+    nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    nameInput.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+    await socket.onmessage?.({
+      data: JSON.stringify({ type: "rename_failed", message: "name rejected" }),
+    });
+    await tick();
+
+    expect(tab.title).toBe("deploy-2");
+    expect(nameInput.value).toBe("rejected-name");
+    expect(nameInput.disabled).toBe(false);
+    expect(document.body.querySelector('[role="alert"]')?.textContent).toContain(
+      "name rejected",
+    );
+  });
+
+  test("Enter submits once and a socket drop leaves the draft editable", async () => {
+    const [tab] = setTerminalTabsInLayout([terminalTab()]);
+    await renderTerminal(tab, true);
+    const socket = openSocket();
+
+    await socket.onmessage?.({
+      data: JSON.stringify({
+        type: "session",
+        id: "term-session-drop",
+        seq: 0,
+        generation: 1,
+        name: "worker",
+        group: "default",
+        spawn_name: "worker",
+        spawn_group: "default",
+      }),
+    });
+    openTabMenu(tab.id, { left: 0, top: 0, right: 0, bottom: 0 });
+    await tick();
+
+    const nameInput = document.body.querySelector<HTMLInputElement>(".rename-input")!;
+    nameInput.value = "unconfirmed";
+    nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    nameInput.focus();
+    nameInput.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+    );
+    await tick();
+
+    expect(
+      socket.sent
+        .map((raw) => JSON.parse(raw))
+        .filter((frame) => frame.type === "rename"),
+    ).toEqual([{ type: "rename", name: "unconfirmed", group: "default" }]);
+    expect(nameInput.disabled).toBe(true);
+
+    socket.close();
+    await tick();
+
+    expect(tab.title).toBe("worker");
+    expect(nameInput.value).toBe("unconfirmed");
+    expect(nameInput.disabled).toBe(false);
+    expect(document.body.querySelector('[role="alert"]')?.textContent).toContain(
+      "before the metadata update was confirmed",
+    );
+  });
 });
 
 describe("TerminalTab menu", () => {

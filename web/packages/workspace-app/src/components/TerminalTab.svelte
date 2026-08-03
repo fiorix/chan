@@ -41,22 +41,25 @@
   import { chordFor, currentOS, shouldEscapeTerminal } from "../state/shortcuts";
   import {
     allTerminalTabs,
+    applyTerminalSessionMetadata,
     applyGlobalTerminalName,
     broadcastTerminalInput,
     crossWindowBroadcastMembers,
     closeTab,
     clearTerminalSession,
     ensureTerminalKeyboardProtocol,
-    dismissTerminalEnvNamePrompt,
+    dismissTerminalEnvironmentPrompt,
+    failTerminalMetadataRename,
     isTerminalMoving,
-    markTerminalEnvNameRestarted,
     registerTerminalCancelSink,
     registerTerminalCloseSink,
     registerTerminalInputSink,
+    registerTerminalMetadataSink,
     registerTerminalPromptSink,
     removeExplicitlyClosedTerminalTab,
     renameTerminalTab,
     reproveRestoredPrompt,
+    resolveTerminalMetadataRename,
     resolvePromptCancelled,
     setTerminalBroadcastEnabled,
     setTerminalBroadcastTarget,
@@ -70,10 +73,12 @@
     setTerminalSubmitAgent,
     tabFocusPulse,
     terminalBroadcastMemberIds,
-    terminalEnvTabNameStale,
+    terminalEnvironmentPromptDismissed,
+    terminalMetadataDraft,
+    terminalStaleEnvironmentVariables,
     terminalTabGroup,
     terminalTabName,
-    setTerminalGroup,
+    setTerminalMetadataDraft,
     type PaneSide,
     type TerminalTab as TerminalTabState,
   } from "../state/tabs.svelte";
@@ -215,7 +220,15 @@
         /// Spawn-derived submit identity. Omitted by old servers and for
         /// shells or unknown launch commands.
         submit_agent?: SubmitAgent;
+        /// Authoritative live metadata and immutable spawn provenance. The
+        /// fields are optional only for compatibility with an older server.
+        name?: string;
+        group?: string;
+        spawn_name?: string | null;
+        spawn_group?: string | null;
       }
+    | { type: "renamed"; name: string; group: string }
+    | { type: "rename_failed"; message: string }
     | { type: "activity"; bytes_since_focus: number }
     /// Queue-visibility frames (server: routes/terminal.rs). `queue` carries
     /// the absolute LOGICAL MESSAGE depth on every change, so a drained batch
@@ -276,6 +289,7 @@
   // window that's actually in memory.
   let scrollbackLines = scrollbackLinesFromMb(SCROLLBACK_MB_DEFAULT);
   let ws: WebSocket | null = null;
+  let unregisterTerminalMetadataSink: (() => void) | null = null;
   // Liveness + reconnect for the PTY socket: the watcher kit (constants
   // shared from transport.ts so the two cannot drift) applied to the one SPA
   // socket that had neither half. The app-level ping keeps an inbound pong
@@ -399,22 +413,45 @@
       ) &&
       crossWindowMembers.every((m) => m.broadcast),
   );
-  const staleEnvName = $derived(terminalEnvTabNameStale(tab));
+  const metadataDraft = $derived(terminalMetadataDraft(tab));
+  const metadataPending = $derived(Boolean(tab.terminalMetadataPending));
+  const staleEnvironmentVariables = $derived(terminalStaleEnvironmentVariables(tab));
   const showStaleEnvPrompt = $derived(
-    staleEnvName && !tab.terminalEnvNamePromptDismissed,
+    staleEnvironmentVariables.length > 0 && !terminalEnvironmentPromptDismissed(tab),
   );
-  // Pending broadcast-group edit. `null` = not editing; the field then
-  // shows the effective group. The effective group (`tab.group`) is the
-  // SPAWN value: it drives client broadcast scoping AND is sent to the
-  // server, and it changes only on restart, so the SPA group and the
-  // server's per-session `tab_group` never diverge. Typing here only
-  // stages a value; `restart()` commits it past the cancel gate.
-  let groupDraft = $state<string | null>(null);
-  const groupFieldValue = $derived(groupDraft ?? terminalTabGroup(tab));
-  const groupChanged = $derived(
-    groupDraft !== null &&
-      (groupDraft.trim() || "default") !== terminalTabGroup(tab),
-  );
+
+  function updateTerminalMetadataDraft(field: "name" | "group", value: string): void {
+    const draft = terminalMetadataDraft(tab);
+    setTerminalMetadataDraft(
+      tab,
+      field === "name" ? value : draft.name,
+      field === "group" ? value : draft.group,
+    );
+  }
+
+  function submitTerminalMetadata(): void {
+    if (tab.terminalMetadataPending) return;
+    const draft = terminalMetadataDraft(tab);
+    const proposedName = draft.name.trim() || "Terminal";
+    const proposedGroup = draft.group.trim() || "default";
+    if (proposedName === terminalTabName(tab) && proposedGroup === terminalTabGroup(tab)) {
+      return;
+    }
+    renameTerminalTab(tab, draft.name, draft.group);
+  }
+
+  function clearTerminalMetadataSink(): void {
+    const unregister = unregisterTerminalMetadataSink;
+    unregisterTerminalMetadataSink = null;
+    unregister?.();
+  }
+
+  function installTerminalMetadataSink(sessionId: string): void {
+    clearTerminalMetadataSink();
+    unregisterTerminalMetadataSink = registerTerminalMetadataSink(sessionId, ({ name, group }) =>
+      send({ type: "rename", name, group }),
+    );
+  }
   $effect(() => {
     if (!host || term) return;
     void tick().then(start);
@@ -1328,7 +1365,18 @@
           }
         }
         pendingSnapshot = null;
+        // A session prelude supersedes any unconfirmed proposal from the
+        // prior connection. Unregister before adopting a replacement id so
+        // the old session's pending proposal can be failed accurately.
+        clearTerminalMetadataSink();
         setTerminalSession(tab, frame.id);
+        installTerminalMetadataSink(frame.id);
+        applyTerminalSessionMetadata(tab, {
+          name: frame.name ?? terminalTabName(tab),
+          group: frame.group ?? terminalTabGroup(tab),
+          spawnName: frame.spawn_name ?? null,
+          spawnGroup: frame.spawn_group ?? null,
+        });
         // Replace, including with undefined, on every session frame. Restart
         // and reattach preludes are authoritative for the current PTY life.
         setTerminalSubmitAgent(tab, frame.submit_agent);
@@ -1348,6 +1396,19 @@
         statusDetail = `session ${frame.id.slice(0, 8)}`;
         if (missedBytes > 0) {
           term?.writeln(`\r\nterminal replay missed ${missedBytes} bytes`);
+        }
+      } else if (frame.type === "renamed") {
+        if (tab.terminalSessionId) {
+          resolveTerminalMetadataRename(
+            tab.terminalSessionId,
+            frame.name,
+            frame.group,
+          );
+          scheduleTerminalSessionSave();
+        }
+      } else if (frame.type === "rename_failed") {
+        if (tab.terminalSessionId) {
+          failTerminalMetadataRename(tab.terminalSessionId, frame.message);
         }
       } else if (frame.type === "resize" || frame.type === "resize_other") {
         if (!active && term && (term.cols !== frame.cols || term.rows !== frame.rows)) {
@@ -1387,6 +1448,7 @@
         // drop it so a closed terminal does not hold cache budget (a future
         // session gets a fresh id, so it would never be reused anyway).
         if (tab.terminalSessionId) clearTerminalSnapshot(tab.terminalSessionId);
+        clearTerminalMetadataSink();
         clearTerminalSession(tab);
         if (frame.reason === "explicit") {
           // The user (or another window / `cs terminal close`) deleted this
@@ -1412,6 +1474,7 @@
         statusDetail = frame.code == null ? "exited" : `exit ${frame.code}`;
         setTerminalQueueDepth(tab, 0);
         failPendingPrompt(tab);
+        clearTerminalMetadataSink();
         clearTerminalSession(tab);
         scheduleTerminalSessionSave();
         term?.writeln(
@@ -1458,6 +1521,7 @@
     };
     ws.onclose = () => {
       clearLiveness();
+      clearTerminalMetadataSink();
       // Socket gone: any in-flight prompt can no longer observe its
       // delivery -- fail it (bubble unlocks, keeps text, labels honestly;
       // the message may still be queued server-side). The badge zeroes and
@@ -1842,6 +1906,7 @@
   function closeSocket(): void {
     attachReplayActive = false;
     suppressAttachReplayGeneratedReplies = false;
+    clearTerminalMetadataSink();
     // Intentional teardown: stop the heartbeat and any scheduled redial (the
     // handlers are detached below, so no onclose will re-arm them).
     clearLiveness();
@@ -1903,13 +1968,6 @@
       });
       if (!confirmed) return;
     }
-    // Commit a pending group edit past the cancel gate. The new group
-    // takes effect on this respawn for both the SPA (broadcast scoping)
-    // and the server ($CHAN_TAB_GROUP + registry tab_group).
-    if (groupDraft !== null) {
-      setTerminalGroup(tab, groupDraft);
-      groupDraft = null;
-    }
     if (tab.controlledTerminal && tab.terminalSessionId) {
       try {
         await api.restartTerminal(tab.terminalSessionId, {
@@ -1917,7 +1975,6 @@
           group: terminalTabGroup(tab),
           window_id: sessionWindowId(),
         });
-        markTerminalEnvNameRestarted(tab);
         // A controlled restart reuses the session id but kills the old
         // shell and spawns a fresh one, so the negotiated keyboard
         // protocol no longer applies: reset it in place (same object the
@@ -1940,6 +1997,7 @@
   function explicitCloseSession(): void {
     if (tab.terminalSessionId) {
       send({ type: "close" });
+      clearTerminalMetadataSink();
       clearTerminalSession(tab);
       scheduleTerminalSessionSave();
     }
@@ -1953,6 +2011,7 @@
     // window's WS doesn't reconnect during teardown. Window-local cleanup
     // (Rich Prompt draft, bubble entry) below still runs - the tab is gone here.
     if (isTerminalMoving(tab.id)) {
+      clearTerminalMetadataSink();
       clearTerminalSession(tab);
     } else {
       explicitCloseSession();
@@ -2385,10 +2444,15 @@
         </span>
         <input
           class="rename-input"
-          value={tab.title}
+          value={metadataDraft.name}
           spellcheck="false"
-          oninput={(e) => (tab.title = (e.currentTarget as HTMLInputElement).value)}
-          onblur={() => renameTerminalTab(tab, tab.title)}
+          disabled={metadataPending}
+          oninput={(e) =>
+            updateTerminalMetadataDraft(
+              "name",
+              (e.currentTarget as HTMLInputElement).value,
+            )}
+          onblur={submitTerminalMetadata}
           onkeydown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
@@ -2404,10 +2468,16 @@
         </span>
         <input
           class="rename-input"
-          value={groupFieldValue}
+          value={metadataDraft.group}
           spellcheck="false"
           placeholder="default"
-          oninput={(e) => (groupDraft = (e.currentTarget as HTMLInputElement).value)}
+          disabled={metadataPending}
+          oninput={(e) =>
+            updateTerminalMetadataDraft(
+              "group",
+              (e.currentTarget as HTMLInputElement).value,
+            )}
+          onblur={submitTerminalMetadata}
           onkeydown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
@@ -2416,11 +2486,9 @@
           }}
         />
       </label>
-      {#if groupChanged}
-        <div class="env-stale-row">
-          <span>Group change applies on restart (the shell respawns in the new group).</span>
-          <button type="button" onclick={() => void restart()}>Restart now</button>
-          <button type="button" onclick={() => (groupDraft = null)}>Cancel</button>
+      {#if tab.terminalMetadataError}
+        <div class="metadata-error-row" role="alert">
+          {tab.terminalMetadataError}
         </div>
       {/if}
       <!-- Status reads "connected: <detail>" (colon, not em dash). -->
@@ -2431,15 +2499,19 @@
         {#if missedBytes > 0}
           <span class="session-note">missed {missedBytes} bytes</span>
         {/if}
-        {#if staleEnvName}
+        {#if staleEnvironmentVariables.length > 0}
           <span class="session-note">stale env</span>
         {/if}
       </div>
       {#if showStaleEnvPrompt}
         <div class="env-stale-row">
-          <span>Tab name changed. $CHAN_TAB_NAME will stay at {tab.terminalEnvTabName} until restart.</span>
+          <span>
+            {staleEnvironmentVariables.join(" and ")}
+            {staleEnvironmentVariables.length === 1 ? "still reflects" : "still reflect"}
+            this shell's spawn metadata. Restart to update the environment.
+          </span>
           <button type="button" onclick={() => void restart()}>Restart now</button>
-          <button type="button" onclick={() => dismissTerminalEnvNamePrompt(tab)}>Later</button>
+          <button type="button" onclick={() => dismissTerminalEnvironmentPrompt(tab)}>Later</button>
         </div>
       {/if}
       <!-- Terminal tab menu. Header rows stay above the broadcast
@@ -2714,6 +2786,16 @@
   }
   .rename-input:focus {
     border-color: var(--link);
+  }
+  .rename-input:disabled {
+    cursor: wait;
+    opacity: 0.65;
+  }
+  .metadata-error-row {
+    margin: 2px 8px 4px;
+    color: var(--danger, #ef4444);
+    font-size: 12px;
+    line-height: 1.35;
   }
   .terminal-status-row {
     display: flex;
