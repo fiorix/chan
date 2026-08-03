@@ -52,7 +52,7 @@ describe("New draft command wiring", () => {
 
   test("staged draft materialization also refreshes Drafts state before opening", () => {
     expect(app).toMatch(
-      /const \{ path \} =[\s\S]*?entry\.kind === "diagram"[\s\S]*?await api\.createDiagram\(\)[\s\S]*?: await api\.createDraft\(\);[\s\S]*?await noteDraftCreated\(path\);[\s\S]*?await openInPane\(entry\.paneId, path, \{[\s\S]*?side: entry\.side,[\s\S]*?initialSelection: NEW_DRAFT_TITLE_SELECTION/,
+      /const \{ path \} =[\s\S]*?entry\.kind === "diagram"[\s\S]*?await api\.createDiagram\(\)[\s\S]*?: await api\.createDraft\(\);[\s\S]*?await noteDraftCreated\(path\);[\s\S]*?await openInPane\(destination\.paneId, path, \{[\s\S]*?side: destination\.side,[\s\S]*?initialSelection: NEW_DRAFT_TITLE_SELECTION/,
     );
   });
 
