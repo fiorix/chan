@@ -3990,6 +3990,7 @@ fn term_list(registry: &TerminalRegistry, windows: &[WindowRecord]) -> Result<St
         };
         let entry = serde_json::json!({
             "name": summary.tab_name,
+            "spawn_name": summary.spawn_name,
             // The server-derived submit agent (null for a shell session), so
             // a sender can look up a target's chord instead of guessing it.
             "agent": summary.agent.map(SubmitAgent::name),
@@ -5679,6 +5680,9 @@ mod tests {
                 env: Default::default(),
             })
             .expect("spawn session");
+        registry
+            .update_live_metadata(handle.id(), "renamed".into(), Some("default".into()))
+            .expect("rename live metadata");
         assert!(registry.update_session_layout(
             handle.id(),
             Some("pane-4".into()),
@@ -5689,6 +5693,8 @@ mod tests {
         let json = term_list(&registry, &[]).expect("term list");
         let value: Value = serde_json::from_str(&json).expect("json");
         let row = &value["groups"]["default"][0];
+        assert_eq!(row["name"], "renamed");
+        assert_eq!(row["spawn_name"], "placed");
         assert_eq!(row["pane"], "pane-4");
         assert_eq!(row["side"], "b");
         assert_eq!(row["tab"], "tab-7");
