@@ -25,11 +25,11 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | --- | --- | --- |
 | [large-transfer-capability](v0.84.0/large-transfer-capability.md) | registered, grounded, needs a spec | tune the tunnel transport, build the bulk-transfer lane and its admission control, then raise the write ceiling last |
 | [web-marketing-onboarding](v0.84.0/web-marketing-onboarding.md) | registered, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
-| [cs-open-non-text-reveal-and-audio](v0.84.0/cs-open-non-text-reveal-and-audio.md) | implemented and validated on `docs/v0.84-implementation-specs` | ship at v0.84.0 GA |
-| [hybrid-nav-staged-editor-bubble](v0.84.0/hybrid-nav-staged-editor-bubble.md) | implemented and validated on `docs/v0.84-implementation-specs` | ship at v0.84.0 GA |
-| [terminal-tab-rename-reaches-inventory](v0.84.0/terminal-tab-rename-reaches-inventory.md) | implemented and validated on `docs/v0.84-implementation-specs`, except the Linux fdstore handoff run | ship at v0.84.0 GA, and run `scripts/e2e/devserver-fdstore.sh` once the devserver user unit is idle |
-| [terminal-editor-appearance-settings](v0.84.0/terminal-editor-appearance-settings.md) | implemented and validated on `docs/v0.84-implementation-specs` | ship at v0.84.0 GA |
-| [release-platform-verification](v0.84.0/release-platform-verification.md) | implemented and validated on `docs/v0.84-implementation-specs` | ship at v0.84.0 GA |
+| [cs-open-non-text-reveal-and-audio](v0.84.0/cs-open-non-text-reveal-and-audio.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
+| [hybrid-nav-staged-editor-bubble](v0.84.0/hybrid-nav-staged-editor-bubble.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
+| [terminal-tab-rename-reaches-inventory](v0.84.0/terminal-tab-rename-reaches-inventory.md) | implemented and validated on `v0840-base`, except the Linux fdstore handoff run | ship at v0.84.0 GA, and run `scripts/e2e/devserver-fdstore.sh` once the devserver user unit is idle |
+| [terminal-editor-appearance-settings](v0.84.0/terminal-editor-appearance-settings.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
+| [release-platform-verification](v0.84.0/release-platform-verification.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
 | [ghostty-macos-trackpad-scroll-parity](v0.84.0/ghostty-macos-trackpad-scroll-parity.md) | registered, grounded, ruled, specified | calibrate Ghostty's macOS pixel-mode scrollback travel to xterm.js without changing TUI wheel input |
 | [ghostty-live-output-scroll-stability](v0.84.0/ghostty-live-output-scroll-stability.md) | registered, grounded, ruled, specified | keep a manually scrolled Ghostty viewport under user control while Kimi or any other process emits output |
 | [notifications](v0.84.0/notifications.md) | registered, not specced | ground `cs notify` and decide how a local session or a devserver reaches chan-launcher to raise a text notification |
@@ -37,7 +37,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [hybrid-nav-mouse-split-affordances](v0.84.0/hybrid-nav-mouse-split-affordances.md) | registered, not specced | suggest horizontal and vertical splits on mouse hover once a pane drag enters Hybrid Nav |
 | [graph-inspector-language-node-detail](v0.84.0/graph-inspector-language-node-detail.md) | registered, not specced | add COCOMO and the top directories for a selected language node, sourced from chan-report's existing roll-up |
 | [file-browser-context-menu-inspector-actions](v0.84.0/file-browser-context-menu-inspector-actions.md) | registered, not specced | give the file browser's right-click menu the inspector's per-type actions |
-| [rich-prompt-submit-button](v0.84.0/rich-prompt-submit-button.md) | implemented and validated on `v084/rich-prompt-control-strip` | turn the Rich Prompt's hint into a control strip whose primary button submits and becomes cancel while a prompt is in flight |
+| [rich-prompt-submit-button](v0.84.0/rich-prompt-submit-button.md) | implemented and validated on `v0840-base` | turn the Rich Prompt's hint into a control strip whose primary button submits and becomes cancel while a prompt is in flight |
 
 ## Completed
 
