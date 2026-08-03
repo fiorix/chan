@@ -2566,7 +2566,7 @@ fn classify_control_result(result: Result<String>) -> Result<ControlOutcome> {
 }
 
 /// Render the `cs terminal list` registry JSON
-/// (`{groups: {group: [{name, session_id, cwd}]}}`) as a markdown table
+/// (`{groups: {group: [{name, spawn_name, session_id, cwd}]}}`) as a markdown table
 /// grouped by terminal group. This is the default human output; `--json`
 /// emits the raw payload instead. An empty registry yields a short line
 /// rather than a blank table.
@@ -2590,14 +2590,17 @@ fn render_terminal_list_markdown(raw: &str) -> Result<String> {
     for (group, sessions) in groups {
         out.push_str(&format!("## {group}\n\n"));
         out.push_str(
-            "| name | agent | session | window | pane | side | tab | kind | status | cwd |\n",
+            "| name | spawn | agent | session | window | pane | side | tab | kind | status | cwd |\n",
         );
-        out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+        out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
         if let Some(arr) = sessions.as_array() {
             for s in arr {
                 out.push_str(&format!(
-                    "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                    "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
                     str_field(s, "name"),
+                    // Immutable PTY-incarnation provenance. Always keep the
+                    // column; a legacy fd-store import renders unknown as `-`.
+                    str_field(s, "spawn_name"),
                     // The server-derived submit agent ("-" for a shell
                     // session), so a poker never has to guess the target.
                     str_field(s, "agent"),
@@ -2845,17 +2848,17 @@ mod tests {
 
     #[test]
     fn terminal_list_markdown_renders_window_columns() {
-        let raw = r#"{"groups":{"default":[{"name":"probe","agent":"codex","session_id":"s1","window":"w-abc","pane":"p-1","side":"b","tab":"t-1","window_kind":"standalone-terminal","window_status":"alive","cwd":"/tmp"}]}}"#;
+        let raw = r#"{"groups":{"default":[{"name":"probe-live","spawn_name":"probe-spawn","agent":"codex","session_id":"s1","window":"w-abc","pane":"p-1","side":"b","tab":"t-1","window_kind":"standalone-terminal","window_status":"alive","cwd":"/tmp"}]}}"#;
         let out = render_terminal_list_markdown(raw).expect("render");
         assert!(
             out.contains(
-                "| name | agent | session | window | pane | side | tab | kind | status | cwd |"
+                "| name | spawn | agent | session | window | pane | side | tab | kind | status | cwd |"
             ),
             "header: {out}"
         );
         assert!(
             out.contains(
-                "| probe | codex | s1 | w-abc | p-1 | b | t-1 | standalone-terminal | alive | /tmp |"
+                "| probe-live | probe-spawn | codex | s1 | w-abc | p-1 | b | t-1 | standalone-terminal | alive | /tmp |"
             ),
             "row: {out}"
         );
@@ -2863,13 +2866,13 @@ mod tests {
 
     #[test]
     fn terminal_list_markdown_tolerates_a_pre_identity_server() {
-        // A server that omits the agent/window/pane/tab/kind/status fields
-        // (or reports a null agent for a shell session) renders `-` in those
-        // columns rather than erroring.
-        let raw = r#"{"groups":{"default":[{"name":"probe","session_id":"s1","cwd":"/tmp"}]}}"#;
+        // A server that omits the spawn/agent/window/pane/tab/kind/status
+        // fields (or reports a null spawn/agent) renders `-` in those columns
+        // rather than erroring. The spawn column itself never disappears.
+        let raw = r#"{"groups":{"default":[{"name":"probe","spawn_name":null,"session_id":"s1","cwd":"/tmp"}]}}"#;
         let out = render_terminal_list_markdown(raw).expect("render");
         assert!(
-            out.contains("| probe | - | s1 | - | - | - | - | - | - | /tmp |"),
+            out.contains("| probe | - | - | s1 | - | - | - | - | - | - | /tmp |"),
             "row: {out}"
         );
     }
