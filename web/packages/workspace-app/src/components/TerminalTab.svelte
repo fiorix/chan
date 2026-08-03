@@ -565,6 +565,7 @@
   // palette follows the per-surface override.
   $effect(() => {
     effectiveHybridSurfaceTheme("terminal");
+    customTerminalColors;
     applyTerminalTheme();
   });
 

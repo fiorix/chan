@@ -16,6 +16,12 @@ describe("TerminalTab tracks terminal surface body theme", () => {
     );
   });
 
+  test("$effect subscribes to custom colours before the renderer guard", () => {
+    expect(terminalTab).toMatch(
+      /\$effect\(\(\) => \{\s*effectiveHybridSurfaceTheme\("terminal"\);\s*customTerminalColors;\s*applyTerminalTheme\(\);/,
+    );
+  });
+
   test("effective theme is resolved through the shared store", () => {
     expect(terminalTab).toContain("function effectiveTerminalTheme()");
     expect(terminalTab).toContain(
