@@ -157,15 +157,25 @@ describe("RichPrompt.svelte component", () => {
     expect(richPromptSrc).toMatch(/content\.length > 0 \|\| !lastQueued\) return false/);
     expect(richPromptSrc).toMatch(/const \{ id, text \} = lastQueued;/);
     expect(richPromptSrc).toMatch(/sendCancelToTerminal\(tab\.id, id\)/);
-    // Esc drops the queued message (card up, or empty composer with a queued
-    // one): cancel + clear, keeping the bubble open; otherwise abandon the draft.
-    expect(richPromptSrc).toMatch(
-      /lastQueued && \(isPending \|\| content\.length === 0\)\) \{[\s\S]{1,160}sendCancelToTerminal\(tab\.id, lastQueued\.id\)/,
-    );
+    // Stopping a send is ONE action whichever route runs it, so Esc delegates
+    // to the recall path rather than carrying its own cancel-and-clear: the
+    // message leaves the queue and its text stays in the composer. Esc only
+    // abandons the draft when there is nothing queued to stop.
+    const dropBody = richPromptSrc.match(
+      /function dropOrAbandonFromView\(view: EditorView\): boolean \{[\s\S]*?\n  \}/,
+    )?.[0];
+    expect(dropBody).toContain("if (isPending) return recallFromView(view);");
+    expect(dropBody).toContain("abandonDraft();");
     expect(richPromptSrc).toMatch(/function abandonDraft\(\): void/);
     expect(richPromptSrc).toMatch(/hideRichPromptForTab\(tab\.id\)/);
-    // The card's label IS its chrome: ↑ edit · esc cancel.
-    expect(richPromptSrc).toMatch(/queued · ↑ edit · esc cancel/);
+    // The strip's stop runs the same recall path. It must never reach the
+    // abandon fallthrough, which hides the whole bubble.
+    const primaryClickBody = richPromptSrc.match(
+      /function onPrimaryClick\(\): void \{[\s\S]*?\n  \}/,
+    )?.[0];
+    expect(primaryClickBody).toContain("if (isPending) recallFromView(promptView);");
+    expect(primaryClickBody).not.toContain("abandonDraft");
+    expect(primaryClickBody).not.toContain("dropOrAbandonFromView");
   });
 
   test("fast-path grace + ack timeout constants gate the chip and the dead-socket fail", () => {
@@ -176,17 +186,32 @@ describe("RichPrompt.svelte component", () => {
     expect(richPromptSrc).toMatch(/failPendingPrompt\(tab\);/);
   });
 
-  test("label surfaces the queue depth (server + the local just-submitted) with the right affordance", () => {
+  test("strip surfaces the queue depth (server + the local just-submitted) beside its controls", () => {
     // queuedCount = max(server queueDepth, the local just-submitted message
     // after the grace window) -- so a teammate `cs terminal write` and the
     // user's own queued messages both show.
     expect(richPromptSrc).toMatch(
       /Math\.max\(tab\.queueDepth \?\? 0, isPending && pendingChipVisible \? 1 : 0\)/,
     );
-    // Card up (isPending): edit/cancel affordances ARE the chrome. Moved-on but
-    // messages still queued: the recall hint + the submit hint.
-    expect(richPromptSrc).toMatch(/isPending\) return `\$\{queuedCount\} queued · ↑ edit · esc cancel`/);
-    expect(richPromptSrc).toMatch(/\$\{queuedCount\} queued · ↑ recall · \$\{submitLabel\}/);
+    // The count and a transient note share one advisory text slot; a note
+    // takes the slot without disturbing either control.
+    expect(richPromptSrc).toMatch(
+      /transientNote \?\? \(queuedCount > 0 \? `\$\{queuedCount\} queued` : null\)/,
+    );
+    // The affordances are controls, not label text. The primary carries the
+    // pending state: submit becomes stop and back again. Recall is a control
+    // only when nothing is pending, because stopping a send already returns
+    // the text to the composer and a second control would repeat it.
+    expect(richPromptSrc).toMatch(
+      /if \(isPending\) return null;[\s\S]{1,120}\{ label: "↑ recall", disabled: content\.length > 0 \}/,
+    );
+    expect(richPromptSrc).toMatch(
+      /\{ label: "esc cancel", disabled: false \}/,
+    );
+    expect(richPromptSrc).toMatch(
+      /\{ label: submitLabel, disabled: content\.trim\(\)\.length === 0 \}/,
+    );
+    expect(richPromptSrc).not.toMatch(/label: "↑ edit"/);
   });
 
   test("submitAgent prefers server identity and delegates protocol fallback", () => {

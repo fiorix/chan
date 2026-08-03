@@ -37,7 +37,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [hybrid-nav-mouse-split-affordances](v0.84.0/hybrid-nav-mouse-split-affordances.md) | registered, not specced | suggest horizontal and vertical splits on mouse hover once a pane drag enters Hybrid Nav |
 | [graph-inspector-language-node-detail](v0.84.0/graph-inspector-language-node-detail.md) | registered, not specced | add COCOMO and the top directories for a selected language node, sourced from chan-report's existing roll-up |
 | [file-browser-context-menu-inspector-actions](v0.84.0/file-browser-context-menu-inspector-actions.md) | registered, not specced | give the file browser's right-click menu the inspector's per-type actions |
-| [rich-prompt-submit-button](v0.84.0/rich-prompt-submit-button.md) | registered, grounded, not specced | turn the Rich Prompt's submit hint into a real button so a mobile user can submit by tapping |
+| [rich-prompt-submit-button](v0.84.0/rich-prompt-submit-button.md) | implemented and validated on `v084/rich-prompt-control-strip` | turn the Rich Prompt's hint into a control strip whose primary button submits and becomes cancel while a prompt is in flight |
 
 ## Completed
 
