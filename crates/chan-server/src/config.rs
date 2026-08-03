@@ -25,7 +25,10 @@ use crate::Error;
 // Re-export it so `ServerConfig.terminal`, the settings route, and other
 // `crate::config::TerminalConfig` users name it here; the on-disk and
 // `/api/config` wire shape is identical to the registry's own definition.
-pub use chan_library::{TerminalConfig, TERMINAL_SCROLLBACK_MB_MAX, TERMINAL_SCROLLBACK_MB_MIN};
+pub use chan_library::{
+    TerminalConfig, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN, TERMINAL_SCROLLBACK_MB_MAX,
+    TERMINAL_SCROLLBACK_MB_MIN,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -135,6 +138,7 @@ mod tests {
                 scrollback_mb: 25,
                 default_term: "tmux-256color".into(),
                 font: chan_library::TerminalFontChoice::SourceCodePro,
+                font_size: 18,
                 mcp_env: true,
                 mouse_capture: false,
                 ghostty: true,

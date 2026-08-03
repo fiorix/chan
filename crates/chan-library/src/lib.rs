@@ -32,8 +32,8 @@ pub mod windows;
 pub mod workspace_persist;
 
 pub use config::{
-    TerminalConfig, TerminalFontChoice, TERMINAL_SCROLLBACK_MB_MAX, TERMINAL_SCROLLBACK_MB_MIN,
-    TERMINAL_SECRET_MASK_SUFFIX_MAX,
+    TerminalConfig, TerminalFontChoice, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN,
+    TERMINAL_SCROLLBACK_MB_MAX, TERMINAL_SCROLLBACK_MB_MIN, TERMINAL_SECRET_MASK_SUFFIX_MAX,
 };
 pub use devserver_registry::{DevserverEntry, DevserverInput, DevserverRegistry, DevserverStatus};
 pub use error::Error;

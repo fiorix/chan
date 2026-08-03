@@ -16,9 +16,15 @@ use axum::Json;
 use chan_workspace::SearchAggression;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{TerminalConfig, TERMINAL_SCROLLBACK_MB_MAX, TERMINAL_SCROLLBACK_MB_MIN};
+use crate::config::{
+    TerminalConfig, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN, TERMINAL_SCROLLBACK_MB_MAX,
+    TERMINAL_SCROLLBACK_MB_MIN,
+};
 use crate::error::{err, Error};
-use crate::preferences::BubbleOverlayMode;
+use crate::preferences::{
+    BubbleOverlayMode, TerminalColorMode, TerminalColorPrefs, EDITOR_FONT_SIZE_MAX,
+    EDITOR_FONT_SIZE_MIN,
+};
 use crate::state::AppState;
 use crate::{
     BrowserSidePanes, EditorPrefs, EditorTheme, HybridSurfaceThemes, LineSpacing, PaneWidths,
@@ -29,6 +35,10 @@ use crate::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreferencesView {
     pub editor_theme: EditorTheme,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_font_size: Option<u32>,
+    #[serde(default)]
+    pub terminal_colors: TerminalColorPrefs,
     pub attachments_dir: String,
     pub theme: ThemeChoice,
     pub pane_widths: PaneWidths,
@@ -77,6 +87,8 @@ pub(super) fn preferences_view(state: &AppState) -> Result<PreferencesView, Erro
         .map_err(|_| Error::Config("server config lock poisoned".into()))?;
     Ok(PreferencesView {
         editor_theme: editor.editor_theme,
+        editor_font_size: editor.editor_font_size,
+        terminal_colors: editor.terminal_colors.clone(),
         attachments_dir: server.attachments_dir.clone(),
         theme: editor.theme,
         pane_widths: editor.pane_widths,
@@ -125,6 +137,9 @@ pub struct PatchConfigBody {
 struct PreferencesPatch {
     // EditorPrefs owner.
     editor_theme: Option<EditorTheme>,
+    #[serde(default, deserialize_with = "deserialize_nullable_editor_font_size")]
+    editor_font_size: Option<Option<u32>>,
+    terminal_colors: Option<TerminalColorPrefs>,
     theme: Option<ThemeChoice>,
     pane_widths: Option<PaneWidths>,
     browser_side_panes: Option<BrowserSidePanes>,
@@ -145,6 +160,15 @@ struct PreferencesPatch {
     terminal: Option<TerminalConfig>,
 }
 
+fn deserialize_nullable_editor_font_size<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<u32>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<u32>::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PreferencesOwner {
     Editor,
@@ -154,6 +178,8 @@ enum PreferencesOwner {
 impl PreferencesPatch {
     fn owner(&self) -> Result<PreferencesOwner, Error> {
         let editor = self.editor_theme.is_some()
+            || self.editor_font_size.is_some()
+            || self.terminal_colors.is_some()
             || self.theme.is_some()
             || self.pane_widths.is_some()
             || self.browser_side_panes.is_some()
@@ -182,9 +208,16 @@ impl PreferencesPatch {
         }
     }
 
-    fn apply_editor(self, editor: &mut EditorPrefs) {
+    fn apply_editor(self, editor: &mut EditorPrefs) -> Result<(), Error> {
         if let Some(value) = self.editor_theme {
             editor.editor_theme = value;
+        }
+        if let Some(value) = self.editor_font_size {
+            editor.editor_font_size =
+                value.map(|size| size.clamp(EDITOR_FONT_SIZE_MIN, EDITOR_FONT_SIZE_MAX));
+        }
+        if let Some(value) = self.terminal_colors {
+            editor.terminal_colors = sanitize_terminal_colors(value)?;
         }
         if let Some(value) = self.theme {
             editor.theme = value;
@@ -225,6 +258,7 @@ impl PreferencesPatch {
         if let Some(value) = self.shortcuts {
             editor.shortcuts = value;
         }
+        Ok(())
     }
 
     fn apply_server(self, server: &mut ServerConfig) -> Result<(), Error> {
@@ -376,7 +410,7 @@ fn patch_config_with_saves(
                 .lock()
                 .map_err(|_| Error::Config("editor prefs lock poisoned".into()))?;
             let mut next = current.clone();
-            body.preferences.apply_editor(&mut next);
+            body.preferences.apply_editor(&mut next)?;
             save_editor(&next)?;
             *current = next;
         }
@@ -427,6 +461,9 @@ fn sanitize_terminal_config(mut cfg: TerminalConfig) -> TerminalConfig {
     if cfg.ring_bytes == 0 {
         cfg.ring_bytes = defaults.ring_bytes;
     }
+    cfg.font_size = cfg
+        .font_size
+        .clamp(TERMINAL_FONT_SIZE_MIN, TERMINAL_FONT_SIZE_MAX);
     // Scrollback clamps to the Settings slider
     // bounds. A literal 0 (legacy / cleared field) snaps to the
     // default so an over-eager wipe can't strand new terminals with
@@ -449,6 +486,46 @@ fn sanitize_terminal_config(mut cfg: TerminalConfig) -> TerminalConfig {
         trimmed.to_string()
     };
     cfg
+}
+
+fn sanitize_terminal_colors(mut prefs: TerminalColorPrefs) -> Result<TerminalColorPrefs, Error> {
+    let Some(custom) = prefs.custom.as_mut() else {
+        return if prefs.mode == TerminalColorMode::Custom {
+            Err(Error::BadRequest(
+                "terminal_colors.custom is required in custom mode".into(),
+            ))
+        } else {
+            Ok(prefs)
+        };
+    };
+    custom.background = normalize_terminal_color("background", &custom.background)?;
+    custom.foreground = normalize_terminal_color("foreground", &custom.foreground)?;
+    custom.cursor = normalize_terminal_color("cursor", &custom.cursor)?;
+    Ok(prefs)
+}
+
+fn normalize_terminal_color(field: &str, value: &str) -> Result<String, Error> {
+    let invalid = || {
+        Error::BadRequest(format!(
+            "terminal_colors.custom.{field} must be #rgb or #rrggbb"
+        ))
+    };
+    let hex = value.strip_prefix('#').ok_or_else(invalid)?;
+    if !matches!(hex.len(), 3 | 6) || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(invalid());
+    }
+    let mut normalized = String::with_capacity(7);
+    normalized.push('#');
+    if hex.len() == 3 {
+        for byte in hex.bytes() {
+            let digit = (byte as char).to_ascii_lowercase();
+            normalized.push(digit);
+            normalized.push(digit);
+        }
+    } else {
+        normalized.push_str(&hex.to_ascii_lowercase());
+    }
+    Ok(normalized)
 }
 
 #[cfg(test)]
@@ -610,17 +687,21 @@ mod tests {
 
         let too_high = sanitize_terminal_config(TerminalConfig {
             scrollback_mb: 9_999,
+            font_size: 9_999,
             default_term: "  xterm  ".into(),
             ..TerminalConfig::default()
         });
         assert_eq!(too_high.scrollback_mb, TERMINAL_SCROLLBACK_MB_MAX);
+        assert_eq!(too_high.font_size, TERMINAL_FONT_SIZE_MAX);
         assert_eq!(too_high.default_term, "xterm");
 
         let too_low = sanitize_terminal_config(TerminalConfig {
             scrollback_mb: 1,
+            font_size: 1,
             ..TerminalConfig::default()
         });
         assert_eq!(too_low.scrollback_mb, TERMINAL_SCROLLBACK_MB_MIN);
+        assert_eq!(too_low.font_size, TERMINAL_FONT_SIZE_MIN);
 
         let in_range = sanitize_terminal_config(TerminalConfig {
             scrollback_mb: 25,
@@ -629,6 +710,138 @@ mod tests {
         });
         assert_eq!(in_range.scrollback_mb, 25);
         assert_eq!(in_range.default_term, "tmux-256color");
+    }
+
+    fn custom_terminal_colors(
+        background: &str,
+        foreground: &str,
+        cursor: &str,
+    ) -> TerminalColorPrefs {
+        TerminalColorPrefs {
+            mode: TerminalColorMode::Custom,
+            custom: Some(crate::preferences::TerminalCustomColors {
+                background: background.into(),
+                foreground: foreground.into(),
+                cursor: cursor.into(),
+                contrast: crate::preferences::TerminalContrast::Auto,
+            }),
+        }
+    }
+
+    #[test]
+    fn appearance_patch_clamps_sizes_and_normalizes_the_complete_colour_object() {
+        let state = make_test_state(false);
+        let view = patch_config_with_saves(
+            &state,
+            patch_body(
+                1,
+                PreferencesPatch {
+                    editor_font_size: Some(Some(99)),
+                    terminal_colors: Some(custom_terminal_colors("#ABC", "#DDEEFF", "#123456")),
+                    ..Default::default()
+                },
+            ),
+            noop_save_editor,
+            noop_save_server,
+        )
+        .expect("appearance patch");
+
+        assert_eq!(
+            view.preferences.editor_font_size,
+            Some(EDITOR_FONT_SIZE_MAX)
+        );
+        let custom = view.preferences.terminal_colors.custom.unwrap();
+        assert_eq!(custom.background, "#aabbcc");
+        assert_eq!(custom.foreground, "#ddeeff");
+        assert_eq!(custom.cursor, "#123456");
+
+        let cleared = patch_config_with_saves(
+            &state,
+            patch_body(
+                view.revision,
+                PreferencesPatch {
+                    editor_font_size: Some(None),
+                    ..Default::default()
+                },
+            ),
+            noop_save_editor,
+            noop_save_server,
+        )
+        .expect("clear editor font size");
+        assert_eq!(cleared.preferences.editor_font_size, None);
+    }
+
+    #[test]
+    fn invalid_terminal_colour_rejects_the_whole_owner_without_save_or_broadcast() {
+        let state = make_test_state(false);
+        let before = state.editor_prefs.lock().unwrap().clone();
+        let editor_saves = AtomicUsize::new(0);
+        let mut events = state.events_tx.subscribe();
+
+        let error = patch_config_with_saves(
+            &state,
+            patch_body(
+                1,
+                PreferencesPatch {
+                    editor_font_size: Some(Some(20)),
+                    terminal_colors: Some(custom_terminal_colors(
+                        "#112233",
+                        "not-a-colour",
+                        "#abcdef",
+                    )),
+                    ..Default::default()
+                },
+            ),
+            |_| {
+                editor_saves.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+            noop_save_server,
+        )
+        .expect_err("invalid colour must reject the owner write");
+
+        let PatchConfigError::Error(Error::BadRequest(message)) = error else {
+            panic!("expected field validation error");
+        };
+        assert!(message.contains("terminal_colors.custom.foreground"));
+        assert_eq!(*state.editor_prefs.lock().unwrap(), before);
+        assert_eq!(editor_saves.load(Ordering::Relaxed), 0);
+        assert_eq!(state.config_revision.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn custom_mode_requires_a_payload_but_standard_accepts_none() {
+        let missing = TerminalColorPrefs {
+            mode: TerminalColorMode::Custom,
+            custom: None,
+        };
+        assert!(sanitize_terminal_colors(missing).is_err());
+        assert_eq!(
+            sanitize_terminal_colors(TerminalColorPrefs::default()).unwrap(),
+            TerminalColorPrefs::default()
+        );
+    }
+
+    #[test]
+    fn editor_font_size_patch_distinguishes_absent_from_explicit_null() {
+        let absent: PatchConfigBody = serde_json::from_value(json!({
+            "expected_revision": 1,
+            "preferences": {"theme": "dark"}
+        }))
+        .unwrap();
+        assert_eq!(absent.preferences.editor_font_size, None);
+
+        let clear: PatchConfigBody = serde_json::from_value(json!({
+            "expected_revision": 1,
+            "preferences": {"editor_font_size": null}
+        }))
+        .unwrap();
+        assert_eq!(clear.preferences.editor_font_size, Some(None));
+        assert_eq!(clear.preferences.owner().unwrap(), PreferencesOwner::Editor);
     }
 
     #[test]
