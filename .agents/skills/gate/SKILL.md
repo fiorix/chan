@@ -33,6 +33,8 @@ The gate runs, in order:
 
 Steps 1 and 2 lint `packaging/`, `scripts/`, and the workflows; step 3 additionally proves that every shipped build surface still has an automatic native, distro, or container build edge. `scripts/lint-static.sh` fetches both linters at a pinned version, each verified against a checksum, into `${XDG_CACHE_HOME:-~/.cache}/chan/lint-tools` (override with `CHAN_LINT_TOOLS_DIR`). The cache is deliberately outside `target/`, which the gate discipline wipes: a per-worktree cache under `target/` would mean a fresh download for every isolated or GA gate. Only a cold cache needs network. The severity and the exclude list, with the reason for each exclude, live in `.shellcheckrc`.
 
+`make pre-push` is host-native, not a cross-platform gate. The release gate runs on Linux, so it cannot see Windows or macOS breakage. `make windows-cross-check` deliberately remains outside `pre-push` and is a mandatory release-checklist step; it compiles and lints the CLI crate graph for Windows GNU but does not link or smoke a Windows binary. The mandatory `release.yml` dry run supplies the macOS compile. Neither release check changes the per-push gate.
+
 The gateway is a separate Cargo workspace and is NOT a member of the root workspace. A `crates/`-scoped check misses it, plus the `chan-desktop` (`desktop/src-tauri`) construction sites. When a change touches a cross-workspace struct, build the whole repo, not just the default workspace.
 
 ## Discipline

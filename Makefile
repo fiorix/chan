@@ -21,6 +21,7 @@ WEB_ALREADY_BUILT ?= 0
 WEB_PREREQ = $(if $(filter 1,$(WEB_ALREADY_BUILT)),,web)
 AUR_ROOTFS ?= archlinux
 AUR_REV ?= HEAD
+WINDOWS_CROSS_ROOTFS ?= ubuntu
 LINUX_TARGET ?= x86_64-unknown-linux-gnu
 DEB_TARGET ?= $(LINUX_TARGET)
 RPM_TARGET ?= $(LINUX_TARGET)
@@ -35,6 +36,7 @@ CHAN_TARGET ?=
 DISTRO ?= ubuntu
 UNAME_S := $(shell uname -s)
 SDME ?= $(if $(filter Darwin,$(UNAME_S)),limactl shell default sudo sdme,sudo sdme)
+WINDOWS_CROSS_TARGET_DIR ?= $(REPO_ROOT)/target/windows-cross-check
 
 # make copr-check knobs: the container command for the SRPM stage, the matrix
 # slice, the sdme rootfs names (imported names vary per host), and whether a
@@ -161,6 +163,12 @@ ppa-upload: ## dput the built source packages to the Launchpad PPA.
 aur-check: ## Build and smoke both AUR packages in a disposable sdme Arch container.
 	AUR_ROOTFS="$(AUR_ROOTFS)" REV="$(AUR_REV)" SDME="$(SDME)" \
 		packaging/distros/arch/build-with-sdme.sh
+
+.PHONY: windows-cross-check
+windows-cross-check: ## Check the release CLI for Windows GNU in a disposable sdme container.
+	CARGO_TARGET_DIR="$(WINDOWS_CROSS_TARGET_DIR)" \
+		WINDOWS_CROSS_ROOTFS="$(WINDOWS_CROSS_ROOTFS)" SDME="$(SDME)" \
+		scripts/windows-cross-check.sh
 
 .PHONY: homebrew-check
 homebrew-check: ## Render and syntax-check both Homebrew tap definitions from released assets.

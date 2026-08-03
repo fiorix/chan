@@ -66,3 +66,20 @@ The release skill must state plainly that `make pre-push` is Linux-only and cann
 - No macOS cross-compile. The `publish=false` dispatch remains the only macOS coverage.
 - No new per-push gate work; `make pre-push` does not gain a cross-compile.
 - No change to `ci-windows` or the CI matrix.
+
+## Implementation evidence
+
+- Added `make windows-cross-check` and `scripts/windows-cross-check.sh`. The script creates a disposable Ubuntu `sdme` container, installs the pinned Rust toolchain plus MinGW in the guest, and runs the exact contract command with `RUSTFLAGS="-D warnings"`.
+- The host target is dedicated to this check at `target/windows-cross-check` and is bound to `/cargo-target` in the guest. The guest receives `CARGO_TARGET_DIR=/cargo-target`, so it never uses the shared workspace target or its Cargo lock.
+- The script records the Cargo status in the dedicated bind and validates it on the host. This is necessary because the local `sdme` command path can return zero when the guest command fails.
+- `scripts/check-build-matrix.py` is unchanged. Its contract covers automatic shipped-build edges; this target is an explicitly manual release-checklist check, so registering it would widen the checker beyond its existing scope.
+- The release skill now requires the Windows check and the existing macOS dry run before GA close. The gate skill states that `make pre-push` is host-native and Linux-only in the release environment.
+
+## Validation evidence
+
+- A cold `make windows-cross-check` completed green in `589.78s` (`9m49.78s`); Cargo reported `7m24s`. The dedicated target occupied `670M`. This meets the expected release-checklist scale of under ten minutes cold.
+- A final clean check completed green in `118.10s` with a synthetic host `PATH` containing no `cargo`, `rustc`, `rustup`, `cc`, `gcc`, or `x86_64-w64-mingw32-gcc`. `SDME` was supplied by absolute path. This proves the host toolchain is not used.
+- Temporarily removing only the `#[cfg(unix)]` guard from `CHILD_SHUTDOWN_GRACE` made the corrected target fail with status 101, surfaced by Make as exit 2. The output contained `constant CHILD_SHUTDOWN_GRACE is never used` and noted that `-D dead-code` was implied by `-D warnings`. The guard was restored immediately; `crates/chan-server/src/extensions.rs` is clean and the injection was never staged or committed.
+- Direct ShellCheck 0.11.0 and `bash -n` passed for the new script. `scripts/lint-static.sh workflows` passed, including Actionlint. `python3 scripts/check-build-matrix.py` passed.
+- The `pre-push` recipe extracted from `HEAD:Makefile` and from the worktree had the same SHA-256, `6b1b10835a3139119f08ad524a05930d37e24ef6431f1b4252eca7fd643823e5`. `make -n pre-push` contained neither `windows-cross-check` nor `x86_64-pc-windows-gnu`, proving its content and execution graph are unchanged. The lane did not run the full gate.
+- The cross-check compiles and lints only. It does not link or smoke a Windows binary; `ci-windows` remains authoritative.
