@@ -1540,6 +1540,71 @@ impl WorkspaceHost {
             .any(accept)
     }
 
+    /// True when one tenant currently has a `/ws` presence for `window_id`.
+    /// Scoped command capabilities bind to this presence so authority ends
+    /// with the invoking browser/webview window.
+    pub fn tenant_has_live_window(&self, prefix: &str, window_id: &str) -> bool {
+        let Ok(prefix) = sanitize_prefix(prefix) else {
+            return false;
+        };
+        let Ok(workspaces) = self.workspaces.read() else {
+            return false;
+        };
+        workspaces.get(&prefix).is_some_and(|runtime| {
+            runtime
+                .artifacts
+                .window_presence
+                .connected_ids()
+                .iter()
+                .any(|id| id == window_id)
+        })
+    }
+
+    /// Token-authenticated form of [`tenant_has_live_window`](Self::tenant_has_live_window).
+    /// The token never leaves the host. Requiring the same tenant to satisfy
+    /// both token and presence prevents a bearer for one workspace from minting
+    /// authority for a live window in another.
+    pub fn tenant_token_has_live_window(
+        &self,
+        prefix: &str,
+        window_id: &str,
+        accept: impl Fn(&str) -> bool,
+    ) -> bool {
+        let Ok(prefix) = sanitize_prefix(prefix) else {
+            return false;
+        };
+        let Ok(workspaces) = self.workspaces.read() else {
+            return false;
+        };
+        workspaces.get(&prefix).is_some_and(|runtime| {
+            runtime.handle.token.as_deref().is_some_and(accept)
+                && runtime
+                    .artifacts
+                    .window_presence
+                    .connected_ids()
+                    .iter()
+                    .any(|id| id == window_id)
+        })
+    }
+
+    /// Test-only stand-in for the tenant `/ws` guard.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn test_connect_window_presence(
+        &self,
+        prefix: &str,
+        window_id: &str,
+    ) -> Option<crate::window_presence::PresenceGuard> {
+        let prefix = sanitize_prefix(prefix).ok()?;
+        let workspaces = self.workspaces.read().ok()?;
+        Some(
+            workspaces
+                .get(&prefix)?
+                .artifacts
+                .window_presence
+                .connect(window_id),
+        )
+    }
+
     /// Whether a persisted window row appears in the LIVE window feed. A workspace
     /// window shows only while its workspace is currently MOUNTED/ON: turning the
     /// workspace OFF leaves the record on disk (so ON restores the same

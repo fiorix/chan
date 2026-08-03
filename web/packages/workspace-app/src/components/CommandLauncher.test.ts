@@ -3,16 +3,25 @@
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-// Isolate from the real catalog registrations (install pulls every lane's
-// action module); register a small known set instead.
+const scopedLibrary = vi.hoisted(() => ({
+  load: vi.fn(),
+  run: vi.fn(),
+}));
+
 vi.mock("../state/commands/install", () => ({}));
+vi.mock("../api/libraryCommand", () => ({
+  loadScopedLibrarySnapshot: scopedLibrary.load,
+  runScopedLibraryAction: scopedLibrary.run,
+}));
 
 import CommandLauncher from "./CommandLauncher.svelte";
-import appRaw from "../App.svelte?raw";
-import launcherRaw from "./CommandLauncher.svelte?raw";
-import overlayShellRaw from "./OverlayShell.svelte?raw";
+import deckRaw from "../../../web-shared/src/components/CommandDeck.svelte?raw";
+import { ApiError } from "../api/errors";
 import {
+  clearLauncherDraft,
+  launcherDraft,
   launcherPanel,
+  openCommandLauncher,
   overlayStack,
   searchPanel,
   syncOverlayStack,
@@ -21,33 +30,18 @@ import {
 import { registerCommands } from "../state/commands";
 import { layout, type BrowserTab, type LeafNode } from "../state/tabs.svelte";
 
-// jsdom does not implement scrollIntoView; the launcher calls it on the
-// highlighted row.
 Element.prototype.scrollIntoView = vi.fn();
 
 const runSearch = vi.fn();
 const runNewFile = vi.fn();
 const runBrowserAlpha = vi.fn();
 const runBrowserZoom = vi.fn();
-const runLate = vi.fn();
-const runHidden = vi.fn();
 const runFlip = vi.fn();
 let overlayAtFlipRun: ReturnType<typeof topOverlay> = null;
-const runGuardedFlip = vi.fn(() => {
-  overlayAtFlipRun = topOverlay();
-  if (overlayAtFlipRun === null) runFlip();
-});
-let showLate = false;
 let showFlip = false;
 
-// Register once. allCommands de-dups by (id, category, title), so a
-// re-register under a re-run collapses rather than stacking.
 registerCommands([
   {
-    // Reuses a kept, chorded SHORTCUTS id (app.window.reload) so chordFor
-    // resolves a real chord for the "shows the current chord" test. The
-    // displayed title is arbitrary for the fixture; the id only feeds the
-    // chord lookup (the launcher dispatches run(), not the id).
     id: "app.window.reload",
     title: "Search",
     category: "Global",
@@ -64,14 +58,6 @@ registerCommands([
     run: runNewFile,
   },
   {
-    id: "app.browser.zoom",
-    title: "Zoom browser",
-    category: "File Browser",
-    keywords: ["files"],
-    available: () => true,
-    run: runBrowserZoom,
-  },
-  {
     id: "app.browser.alpha",
     title: "Alpha browser",
     category: "File Browser",
@@ -80,64 +66,61 @@ registerCommands([
     run: runBrowserAlpha,
   },
   {
-    id: "app.browser.late",
-    title: "Late browser",
+    id: "app.browser.zoom",
+    title: "Zoom browser",
     category: "File Browser",
-    keywords: ["catalog"],
-    available: () => showLate,
-    run: runLate,
-  },
-  {
-    id: "app.hidden.one",
-    title: "Hidden command",
-    category: "Global",
-    available: () => false,
-    run: runHidden,
+    keywords: ["files"],
+    available: () => true,
+    run: runBrowserZoom,
   },
   {
     id: "app.pane.flip",
     title: "Flip pane",
     category: "Global",
     available: () => showFlip,
-    run: runGuardedFlip,
+    run: () => {
+      overlayAtFlipRun = topOverlay();
+      if (overlayAtFlipRun === null) runFlip();
+    },
   },
 ]);
 
+function snapshot(windowMode: "browser" | "desktop" | "native_watcher" = "browser") {
+  return {
+    library_id: "lib-local-test",
+    role: "owner" as const,
+    window_mode: windowMode,
+    windows: [
+      {
+        window_id: "control-1",
+        kind: "terminal" as const,
+        title: "Control terminal",
+        ordinal: 1,
+        workspace_path: null,
+        connected: true,
+        hidden: false,
+        control: true,
+        can_act: true,
+        launch_path: "/api/library/command-capabilities/cap/windows/control-1/launch",
+      },
+    ],
+    workspaces: [
+      {
+        workspace_id: "project-a",
+        path: "/work/project-a",
+        label: "Project A",
+        on: true,
+        status: "running" as const,
+        library_id: "lib-local-test",
+        devserver_id: null,
+        prefix: "project-a",
+        can_act: true,
+      },
+    ],
+  };
+}
+
 const mounted: Array<Record<string, unknown>> = [];
-
-// Let the open effect's `tick().then(focus)` and any queued microtasks run.
-async function flush(): Promise<void> {
-  await tick();
-  await tick();
-}
-
-async function typeLauncherQuery(query = "r"): Promise<void> {
-  launcherPanel.query = query;
-  await tick();
-}
-
-function openLauncher(): HTMLElement {
-  const target = document.createElement("div");
-  document.body.append(target);
-  mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
-  launcherPanel.open = true;
-  return target;
-}
-
-function rowTitles(target: HTMLElement): (string | null)[] {
-  return [...target.querySelectorAll(".row .title")].map((e) => e.textContent);
-}
-
-function groupLabels(target: HTMLElement): (string | null)[] {
-  return [...target.querySelectorAll(".group-label")].map((e) => e.textContent);
-}
-
-function rowTitlesInGroup(target: HTMLElement, label: string): (string | null)[] {
-  const group = [...target.querySelectorAll(".group")].find(
-    (g) => g.querySelector(".group-label")?.textContent === label,
-  );
-  return group ? rowTitles(group as HTMLElement) : [];
-}
 
 function resetLayout(): LeafNode {
   const pane: LeafNode = {
@@ -165,341 +148,323 @@ function setActiveBrowserTab(): void {
   pane.activeTabId = tab.id;
 }
 
+async function flush(): Promise<void> {
+  await tick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await tick();
+}
+
+function openLauncher(): HTMLElement {
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
+  launcherPanel.open = true;
+  return target;
+}
+
+function dialog(target: HTMLElement): HTMLElement {
+  return target.querySelector('[role="dialog"]') as HTMLElement;
+}
+
+function input(target: HTMLElement): HTMLInputElement {
+  return target.querySelector(".deck-input") as HTMLInputElement;
+}
+
+function titles(target: HTMLElement): string[] {
+  return [...target.querySelectorAll(".deck-result-title")].map((node) => node.textContent ?? "");
+}
+
+function result(target: HTMLElement, title: string): HTMLButtonElement {
+  const row = [...target.querySelectorAll<HTMLButtonElement>("button.deck-result")].find(
+    (button) => button.querySelector(".deck-result-title")?.textContent === title,
+  );
+  if (!row) throw new Error(`missing ${title}; visible: ${titles(target).join(", ")}`);
+  return row;
+}
+
+function clonedSessionStorage(source: Storage): Storage {
+  const values = new Map<string, string>();
+  for (let index = 0; index < source.length; index += 1) {
+    const key = source.key(index);
+    if (key !== null) values.set(key, source.getItem(key) ?? "");
+  }
+  return {
+    get length() {
+      return values.size;
+    },
+    clear: () => values.clear(),
+    getItem: (key) => values.get(key) ?? null,
+    key: (index) => [...values.keys()][index] ?? null,
+    removeItem: (key) => values.delete(key),
+    setItem: (key, value) => values.set(key, value),
+  };
+}
+
+async function typeQuery(target: HTMLElement, query: string): Promise<void> {
+  const field = input(target);
+  field.value = query;
+  field.dispatchEvent(new InputEvent("input", { bubbles: true, data: query }));
+  await tick();
+}
+
+async function key(target: HTMLElement, value: string): Promise<void> {
+  dialog(target).dispatchEvent(new KeyboardEvent("keydown", { key: value, bubbles: true }));
+  await tick();
+}
+
 beforeEach(() => {
-  resetLayout();
+  sessionStorage.clear();
   launcherPanel.open = false;
-  launcherPanel.query = "";
+  clearLauncherDraft();
+  resetLayout();
   searchPanel.open = false;
   overlayStack.ids = [];
   overlayAtFlipRun = null;
-  showLate = false;
   showFlip = false;
+  scopedLibrary.load.mockResolvedValue(snapshot());
+  scopedLibrary.run.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
-  for (const c of mounted.splice(0)) unmount(c);
+  for (const component of mounted.splice(0)) unmount(component);
   document.body.innerHTML = "";
   launcherPanel.open = false;
-  launcherPanel.query = "";
   searchPanel.open = false;
   overlayStack.ids = [];
-  overlayAtFlipRun = null;
   vi.clearAllMocks();
-  showLate = false;
-  showFlip = false;
+  vi.restoreAllMocks();
 });
 
-describe("command launcher overlay", () => {
-  test("command launcher chords route through the app keymap", () => {
-    expect(appRaw).toMatch(
-      /const os = currentOS\(\);[\s\S]{1,120}isTauriDesktop\(\) && os === "mac"[\s\S]{1,220}e\.metaKey[\s\S]{1,220}e\.ctrlKey && !e\.metaKey && e\.altKey[\s\S]{1,240}toggleCommandLauncher\(\);/,
-    );
-  });
-
-  test("launcher backdrop is a plain dark scrim with no blur while launcher chrome stays opaque", () => {
-    expect(launcherRaw).toMatch(
-      /\.search-row \{[\s\S]{1,240}background: color-mix\(in srgb, var\(--bg-elev\) 86%, transparent\);/,
-    );
-    expect(launcherRaw).toMatch(
-      /\.results \{[\s\S]{1,240}background: color-mix\(in srgb, var\(--bg-card\) 82%, var\(--bg-elev\) 18%\);/,
-    );
-    expect(overlayShellRaw).toMatch(
-      /\.overlay\.top,[\s\S]{1,80}\.overlay\.center \{[\s\S]{1,160}background: rgba\(0, 0, 0, 0\.4\);/,
-    );
-    expect(overlayShellRaw).not.toMatch(/blur\(10px\)/);
-    expect(overlayShellRaw).toMatch(
-      /\.overlay\.top \.panel,[\s\S]{1,80}\.overlay\.center \.panel \{[\s\S]{1,320}background: color-mix\(in srgb, var\(--bg-elev\) 82%, transparent\);[\s\S]{1,240}backdrop-filter: blur\(24px\) saturate\(1\.12\);/,
-    );
-    expect(overlayShellRaw).toMatch(
-      /@keyframes spotlight-pop \{[\s\S]{1,240}filter: blur\(14px\);[\s\S]{1,240}filter: blur\(0\);/,
-    );
-  });
-
+describe("inline contextual command deck", () => {
   test("renders nothing while closed", async () => {
     const target = document.createElement("div");
     document.body.append(target);
     mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
     await flush();
-    expect(target.querySelector(".launcher")).toBeNull();
+    expect(target.querySelector(".deck-shell")).toBeNull();
   });
 
-  test("opens focused with only the search box, then lists available commands", async () => {
+  test("opens focused and empty with four persistent scope orbs", async () => {
     const target = openLauncher();
     await flush();
-    const input = target.querySelector("input.search") as HTMLInputElement;
-    expect(input).not.toBeNull();
-    expect(document.activeElement).toBe(input);
-    expect(input.getAttribute("aria-expanded")).toBe("false");
-    expect(rowTitles(target)).toEqual([]);
-
-    await typeLauncherQuery();
-    expect(input.getAttribute("aria-expanded")).toBe("true");
-    const titles = rowTitles(target);
-    expect(titles).toContain("Search");
-    expect(titles).toContain("New file");
-    expect(titles).toContain("Alpha browser");
-    expect(titles).not.toContain("Hidden command");
-  });
-
-  test("a non-matching query still shows the full catalog, sorted", async () => {
-    const target = openLauncher();
-    await flush();
-    // No command matches "zzz", so there is no Results section and the whole
-    // available catalog stays visible for discovery, category-sorted.
-    await typeLauncherQuery("zzz");
-    expect(groupLabels(target)).toEqual(["Editor", "File Browser", "Global"]);
-    expect(rowTitlesInGroup(target, "File Browser")).toEqual([
-      "Alpha browser",
-      "Zoom browser",
-    ]);
-  });
-
-  test("Enter on a no-match query does nothing", async () => {
-    const target = openLauncher();
-    await flush();
-    await typeLauncherQuery("zzz");
-    // Nothing matched: the discovery catalog is visible but no row is
-    // auto-highlighted, so a blind Enter must not run a command.
-    expect(target.querySelector(".row[aria-selected='true']")).toBeNull();
-    const input = target.querySelector("input.search") as HTMLInputElement;
-    expect(input.getAttribute("aria-activedescendant")).toBeNull();
-    const launcher = target.querySelector(".launcher") as HTMLElement;
-    launcher.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    expect(document.activeElement).toBe(input(target));
+    expect(titles(target)).toEqual([]);
+    expect(target.querySelectorAll(".deck-scope")).toHaveLength(4);
+    expect(target.querySelector('[aria-label="Computers scope"]')?.hasAttribute("disabled")).toBe(
+      false,
     );
-    await tick();
-    expect(runSearch).not.toHaveBeenCalled();
-    expect(runNewFile).not.toHaveBeenCalled();
-    expect(runBrowserAlpha).not.toHaveBeenCalled();
-    expect(runBrowserZoom).not.toHaveBeenCalled();
-    expect(launcherPanel.open).toBe(true);
   });
 
-  test("arrowing into the discovery catalog re-arms Enter on a no-match query", async () => {
+  test("ranks focused-tab matches first", async () => {
+    setActiveBrowserTab();
     const target = openLauncher();
     await flush();
-    await typeLauncherQuery("zzz");
-    const launcher = target.querySelector(".launcher") as HTMLElement;
-    launcher.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
-    );
+    await typeQuery(target, "files");
+    expect(titles(target).slice(0, 2)).toEqual(["Zoom browser", "Alpha browser"]);
+    expect(target.querySelector(".deck-result-path")?.textContent).toBe("Tab › File Browser");
+  });
+
+  test("typed search crosses into this library without opening a submenu", async () => {
+    const target = openLauncher();
+    await flush();
+    await typeQuery(target, "control terminal");
+    expect(titles(target)[0]).toBe("Control terminal");
+    expect(target.querySelector(".deck-result-path")?.textContent).toContain("Computers › Focus");
+  });
+
+  test("a browser-owned new terminal gets a fresh launcher draft", async () => {
+    sessionStorage.setItem("chan.auth.token", "keep-me");
+    let popup:
+      | {
+          name: string;
+          location: { href: string };
+          focus: ReturnType<typeof vi.fn>;
+          close: ReturnType<typeof vi.fn>;
+          sessionStorage: Storage;
+        }
+      | undefined;
+    vi.spyOn(window, "open").mockImplementation(() => {
+      popup = {
+        name: "",
+        location: { href: "" },
+        focus: vi.fn(),
+        close: vi.fn(),
+        sessionStorage: clonedSessionStorage(sessionStorage),
+      };
+      return popup as unknown as Window;
+    });
+    scopedLibrary.run.mockResolvedValue({
+      window: {
+        window_id: "terminal-2",
+        launch_path: "/api/library/command-capabilities/cap/windows/terminal-2/launch",
+      },
+    });
+    const target = openLauncher();
+    await flush();
+    await typeQuery(target, "shell");
+    result(target, "This library").click();
+    await flush();
+
+    expect(scopedLibrary.run).toHaveBeenCalledWith({ action: "new_terminal" });
+    expect(popup?.sessionStorage.getItem("chan.command-launcher.v1:contextual")).toBeNull();
+    expect(popup?.sessionStorage.getItem("chan.auth.token")).toBe("keep-me");
+    expect(sessionStorage.getItem("chan.command-launcher.v1:contextual")).not.toBeNull();
+  });
+
+  test("a direct standalone tenant opens only same-tenant browser windows", async () => {
+    scopedLibrary.load.mockRejectedValue(new ApiError(404, "not found"));
+    sessionStorage.setItem("chan.token", "standalone-token");
+    let popup:
+      | {
+          name: string;
+          location: { href: string };
+          focus: ReturnType<typeof vi.fn>;
+          sessionStorage: Storage;
+        }
+      | undefined;
+    vi.spyOn(window, "open").mockImplementation(() => {
+      popup = {
+        name: "",
+        location: { href: "" },
+        focus: vi.fn(),
+        sessionStorage: clonedSessionStorage(sessionStorage),
+      };
+      return popup as unknown as Window;
+    });
+
+    const target = openLauncher();
+    await flush();
+    const computers = target.querySelector(
+      '[aria-label="Computers scope"]',
+    ) as HTMLButtonElement;
+    expect(computers.disabled).toBe(false);
+    computers.click();
     await tick();
-    // First catalog row (Editor / New file) takes the highlight...
-    expect(
-      target.querySelector(".row[aria-selected='true'] .title")?.textContent,
-    ).toBe("New file");
-    launcher.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
-    );
+    expect(titles(target)).toEqual(["New terminal", "New window"]);
+    result(target, "New terminal").click();
     await tick();
-    // ...and Enter now runs the explicit pick.
-    expect(runNewFile).toHaveBeenCalledTimes(1);
+    result(target, "This server").click();
+    await flush();
+
+    expect(scopedLibrary.run).not.toHaveBeenCalled();
+    expect(popup?.name).toMatch(/^standalone-/);
+    expect(popup?.location.href).toMatch(
+      /^\/index\.html\?w=standalone-[^&]+&kind=terminal$/,
+    );
+    expect(popup?.sessionStorage.getItem("chan.command-launcher.v1:contextual")).toBeNull();
+    expect(popup?.sessionStorage.getItem("chan.token")).toBe("standalone-token");
     expect(launcherPanel.open).toBe(false);
   });
 
-  test("ArrowUp from the top row wraps to the last row on a match query", async () => {
+  test("a read-only library capability exposes no window actions", async () => {
+    const readonly = snapshot();
+    scopedLibrary.load.mockResolvedValue({
+      ...readonly,
+      role: "readonly",
+      windows: readonly.windows.map((window) => ({ ...window, can_act: false })),
+      workspaces: readonly.workspaces.map((workspace) => ({ ...workspace, can_act: false })),
+    });
     const target = openLauncher();
     await flush();
-    await typeLauncherQuery("new");
-    const launcher = target.querySelector(".launcher") as HTMLElement;
-    launcher.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }),
-    );
-    await tick();
-    const rows = [...target.querySelectorAll(".row")];
-    const selected = target.querySelector(".row[aria-selected='true']");
-    expect(selected).toBeTruthy();
-    expect(selected).toBe(rows[rows.length - 1]);
-  });
-
-  test("pins the active tab category before the alphabetical sections", async () => {
-    setActiveBrowserTab();
-    const target = openLauncher();
-    await flush();
-    await typeLauncherQuery("zzz");
-    expect(groupLabels(target)).toEqual(["File Browser", "Editor", "Global"]);
-  });
-
-  test("keeps the active surface pinned below the query matches", async () => {
-    setActiveBrowserTab();
-    const target = openLauncher();
-    await flush();
-    await typeLauncherQuery("new");
-    // Matches lead under "Results"; the active surface (File Browser) is
-    // pinned ahead of the other discovery sections even though none of its
-    // commands matched the query.
-    expect(groupLabels(target)).toEqual(["Results", "File Browser", "Global"]);
-    expect(rowTitlesInGroup(target, "Results")).toEqual(["New file"]);
-  });
-
-  test("shows the current chord next to a chorded command", async () => {
-    const target = openLauncher();
-    await flush();
-    await typeLauncherQuery("search");
-    const searchRow = [...target.querySelectorAll(".row")].find(
-      (r) => r.querySelector(".title")?.textContent === "Search",
-    ) as HTMLElement;
-    // The chord renders inside the assign affordance; a chorded command shows
-    // its resolved chord (not the "Assign" prompt).
-    const chord = searchRow.querySelector(".chord-btn");
-    expect(chord).not.toBeNull();
-    const text = chord?.textContent?.trim() ?? "";
-    expect(text.length).toBeGreaterThan(0);
-    expect(text).not.toBe("Assign");
-  });
-
-  test("a query promotes matches to a Results section but hides nothing", async () => {
-    const target = openLauncher();
-    await flush();
-    launcherPanel.query = "new";
-    await tick();
-    // "New file" matches and leads the list under a "Results" section...
-    expect(groupLabels(target)[0]).toBe("Results");
-    expect(rowTitlesInGroup(target, "Results")).toEqual(["New file"]);
-    expect(rowTitles(target)[0]).toBe("New file");
-    // ...but every other available command stays discoverable below, in its
-    // own category rather than dropped.
-    expect(rowTitlesInGroup(target, "File Browser")).toEqual([
-      "Alpha browser",
-      "Zoom browser",
-    ]);
-    expect(rowTitlesInGroup(target, "Global")).toEqual(["Search"]);
-    expect(rowTitles(target)).not.toContain("Hidden command");
-  });
-
-  test("catalog growth below Results preserves the highlighted command", async () => {
-    setActiveBrowserTab();
-    const target = openLauncher();
-    await flush();
-    await typeLauncherQuery("new");
-    const launcher = target.querySelector(".launcher") as HTMLElement;
-
-    launcher.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
-    );
-    await tick();
-    expect(
-      target.querySelector(".row[aria-selected='true'] .title")?.textContent,
-    ).toBe("Alpha browser");
-
-    showLate = true;
-    resetLayout();
-    await tick();
-    setActiveBrowserTab();
+    const computers = target.querySelector(
+      '[aria-label="Computers scope"]',
+    ) as HTMLButtonElement;
+    expect(computers.disabled).toBe(true);
+    computers.click();
     await tick();
 
-    expect(rowTitlesInGroup(target, "File Browser")).toEqual([
-      "Alpha browser",
-      "Late browser",
-      "Zoom browser",
-    ]);
-    expect(
-      target.querySelector(".row[aria-selected='true'] .title")?.textContent,
-    ).toBe("Alpha browser");
+    expect(titles(target)).toEqual([]);
+    expect(scopedLibrary.run).not.toHaveBeenCalled();
   });
 
-  test("rows follow pointer movement, not mouseenter caused by inserted rows", () => {
-    expect(launcherRaw).toContain("onpointermove={() => setHighlight(row.index)}");
-    expect(launcherRaw).not.toContain("onmouseenter");
-  });
-
-  test("clearing the query closes results and returns to the centered state", async () => {
+  test("a native-watcher launch creates a record without opening a browser popup", async () => {
+    scopedLibrary.load.mockResolvedValue(snapshot("native_watcher"));
+    scopedLibrary.run.mockResolvedValue({ window: { window_id: "terminal-native" } });
+    const open = vi.spyOn(window, "open");
     const target = openLauncher();
     await flush();
-    const input = target.querySelector("input.search") as HTMLInputElement;
-
-    await typeLauncherQuery("new");
-    expect(target.querySelector(".results")).not.toBeNull();
-    expect(target.querySelector(".panel.lifted")).not.toBeNull();
-    expect(input.getAttribute("aria-expanded")).toBe("true");
-
-    await typeLauncherQuery("");
-    expect(target.querySelector(".results")).toBeNull();
-    expect(target.querySelector(".panel.lifted")).toBeNull();
-    expect(input.getAttribute("aria-expanded")).toBe("false");
-  });
-
-  test("arrows move the highlight and aria-activedescendant", async () => {
-    const target = openLauncher();
-    await flush();
-    await typeLauncherQuery();
-    const input = target.querySelector("input.search") as HTMLInputElement;
-    const launcher = target.querySelector(".launcher") as HTMLElement;
-    const rows = () => [...target.querySelectorAll(".row")];
-    expect(rows()[0].getAttribute("aria-selected")).toBe("true");
-    expect(input.getAttribute("aria-activedescendant")).toBe(rows()[0].id);
-
-    launcher.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
-    );
+    (target.querySelector('[aria-label="Computers scope"]') as HTMLButtonElement).click();
     await tick();
-    expect(rows()[0].getAttribute("aria-selected")).toBe("false");
-    expect(rows()[1].getAttribute("aria-selected")).toBe("true");
-    expect(input.getAttribute("aria-activedescendant")).toBe(rows()[1].id);
+    result(target, "New terminal").click();
+    await tick();
+    result(target, "This library").click();
+    await flush();
+
+    expect(scopedLibrary.run).toHaveBeenCalledWith({ action: "new_terminal" });
+    expect(open).not.toHaveBeenCalled();
   });
 
-  test("Enter runs the highlighted command and closes", async () => {
+  test("the Computers branch returns with ArrowLeft and a hidden draft resumes", async () => {
     const target = openLauncher();
     await flush();
-    await typeLauncherQuery("new");
-    const launcher = target.querySelector(".launcher") as HTMLElement;
-    launcher.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
-    );
+    (target.querySelector('[aria-label="Computers scope"]') as HTMLButtonElement).click();
     await tick();
-    expect(runNewFile).toHaveBeenCalledTimes(1);
-    expect(runSearch).not.toHaveBeenCalled();
+    result(target, "New window").click();
+    await tick();
+    expect(launcherDraft.path).toEqual(["new-window"]);
+    expect(target.querySelector(".deck-placeholder")?.textContent).toBe("New window");
+    expect(titles(target)).toEqual(["Project A"]);
+    await key(target, "ArrowLeft");
+    expect(launcherDraft.path).toEqual([]);
+
+    await typeQuery(target, "project");
+    await key(target, "Escape");
     expect(launcherPanel.open).toBe(false);
-  });
-
-  test("clicking a row runs it and closes", async () => {
-    const target = openLauncher();
+    expect(launcherDraft.query).toBe("project");
+    launcherPanel.open = true;
     await flush();
-    await typeLauncherQuery("new");
-    const newFileRow = [...target.querySelectorAll(".row")].find(
-      (r) => r.querySelector(".title")?.textContent === "New file",
-    ) as HTMLElement;
-    newFileRow.click();
-    await tick();
-    expect(runNewFile).toHaveBeenCalledTimes(1);
-    expect(launcherPanel.open).toBe(false);
+    expect(input(target).value).toBe("project");
   });
 
-  test("removes the launcher from the overlay stack before running a command", async () => {
+  test("removes itself from the overlay stack before dispatching", async () => {
     showFlip = true;
     const target = openLauncher();
     await flush();
     syncOverlayStack();
     expect(topOverlay()).toBe("launcher");
-    await typeLauncherQuery("flip");
-    const flipRow = [...target.querySelectorAll(".row")].find(
-      (r) => r.querySelector(".title")?.textContent === "Flip pane",
-    ) as HTMLElement;
-
-    flipRow.click();
-
-    expect(runGuardedFlip).toHaveBeenCalledTimes(1);
+    await typeQuery(target, "Flip pane");
+    await key(target, "Enter");
     expect(overlayAtFlipRun).toBeNull();
     expect(runFlip).toHaveBeenCalledTimes(1);
   });
 
-  test("keeps a launcher-dispatched flip blocked by an underlying search overlay", async () => {
+  test("leaves an underlying overlay on top before dispatching", async () => {
     showFlip = true;
     searchPanel.open = true;
-    syncOverlayStack();
     const target = openLauncher();
     await flush();
     syncOverlayStack();
     expect(overlayStack.ids).toEqual(["search", "launcher"]);
-    await typeLauncherQuery("flip");
-    const flipRow = [...target.querySelectorAll(".row")].find(
-      (r) => r.querySelector(".title")?.textContent === "Flip pane",
-    ) as HTMLElement;
 
-    flipRow.click();
+    await typeQuery(target, "Flip pane");
+    await key(target, "Enter");
 
-    expect(runGuardedFlip).toHaveBeenCalledTimes(1);
     expect(overlayAtFlipRun).toBe("search");
     expect(runFlip).not.toHaveBeenCalled();
+    expect(overlayStack.ids).toEqual(["search"]);
+  });
+
+  test("restores focus to the invoking element when dismissed", async () => {
+    const target = document.createElement("div");
+    const invokingButton = document.createElement("button");
+    document.body.append(invokingButton, target);
+    mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
+    invokingButton.focus();
+
+    openCommandLauncher();
+    await flush();
+    expect(document.activeElement).toBe(input(target));
+
+    await key(target, "Escape");
+    await flush();
+    expect(document.activeElement).toBe(invokingButton);
+  });
+
+  test("keeps the shared deck's motion and theme-aware scrim", () => {
+    expect(deckRaw).toContain("padding: min(17vh, 136px) 16px 16px;");
+    expect(deckRaw).toContain("--deck-scrim: rgba(0, 0, 0, 0.56);");
+    expect(deckRaw).toContain(':global([data-theme="light"]) .deck-overlay');
+    expect(deckRaw).toContain('filter id="chan-command-orb-blob"');
+    expect(deckRaw).toMatch(/\.deck-shell \{[\s\S]{1,360}animation: deck-arrive/);
   });
 });

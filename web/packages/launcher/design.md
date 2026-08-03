@@ -6,7 +6,7 @@ How the launcher is built and reached. The [`README`](README.md) covers the stac
 
 ```mermaid
 flowchart TB
-    subgraph spa["web-launcher SPA (one bundle, ~29 KB)"]
+    subgraph spa["web-launcher SPA (one bundle, ~46 KiB gzip)"]
         LIB["launcher API client -- pure /api/library/* HTTP<br/>workspaces · windows · devservers · gateways<br/>bearer via ?t= (Authorization header; ?t= query for the watch WS)"]
         UI["TopBar · ScreenFlip (Library | Gateways) · SelectionBar · NewWorkspaceDialog<br/>reads &lt;meta chan-launcher-surface&gt; -> gates capabilities"]
     end
@@ -43,6 +43,19 @@ flowchart TB
 ## What the launcher is
 
 The launcher is a pure `/api/library/*` HTTP client: it never opens native windows, never dials a devserver, and never parses an opaque window or workspace id. Every type mirrors a struct the library serializes -- the field names *are* the wire, pinned by server byte-tests. It is served at the devserver/library root `/`, and the bundle uses a relative asset base so assets resolve under any mount. It renders four registries: workspaces, windows, devservers, and gateways.
+
+## Unified command launcher authority
+
+The **command launcher** is the searchable command deck rendered inside a SPA. The **launcher SPA** is this package's Computers/library application. They are distinct concepts even though the launcher SPA hosts one command launcher.
+
+There is no native command-launcher window. `@chan/web-shared` owns one `CommandDeck` presentation and interaction model, while each SPA adapts commands it already has authority to execute:
+
+- The launcher SPA supplies the full library snapshot already authorized by its `/api/library/*` bearer. On the desktop loopback that is Chan Desktop's aggregate Computers inventory, including connected devservers and gateways.
+- A workspace or terminal SPA supplies its contextual command registry plus a scoped snapshot of only the library serving that window. It mints a short-lived command capability with its tenant bearer and live `window_id`; the capability expires with that window's `/ws` presence and never includes another library.
+- A direct `chan open --standalone` tenant has no `WorkspaceHost` root launcher API. Its workspace adapter degrades to two same-tenant browser navigations, `New terminal` and `New window`, and exposes no roster or window-management actions.
+- A remotely served workspace therefore cannot enumerate or control Chan Desktop's other libraries. Desktop-wide commands remain in the trusted launcher SPA.
+
+Window affinity follows the invoking record. A browser-origin window creates browser-origin records and opens them with `window.open`; a native-origin window creates native-origin records and lets the existing desktop watcher reconcile them into Tauri windows. The command deck itself owns no native geometry, focus handoff, transparent surface, or cross-window draft state.
 
 ## The `/api/library/*` surface
 

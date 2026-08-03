@@ -12,6 +12,12 @@ import type {
   TreeEntry,
 } from "../api/types";
 import {
+  createDeckDraft,
+  loadSessionDeckDraft,
+  saveSessionDeckDraft,
+  type DeckDraft,
+} from "@chan/web-shared/command-deck";
+import {
   ApiError,
   api,
   authToken,
@@ -3114,20 +3120,41 @@ export const searchPanel = $state<{
 
 // ---- command launcher overlay ------------------------------------------
 //
-// The Spotlight-style command palette (Cmd+K on native macOS,
-// Ctrl+Alt+K on web and off-mac native). Its `.open` flag is the
-// single source of truth for "is it on screen", so the shared overlay
-// stack in App.svelte tracks it exactly like searchPanel. `query` is
-// the live type-ahead string; it lives here rather than in the
-// component so open always starts from a known-blank state and the
-// overlay can be re-mounted without losing the reset.
-export const launcherPanel = $state<{
-  open: boolean;
-  query: string;
-}>({
-  open: false,
-  query: "",
-});
+// The launcher keeps one per-tab serializable draft in sessionStorage. The
+// compatibility accessors preserve the `.open` / `.query` API used by App's
+// overlay stack while the shared command deck receives the full draft.
+const LAUNCHER_DRAFT_KEY = "chan.command-launcher.v1:contextual";
+export const launcherDraft = $state<DeckDraft>(
+  loadSessionDeckDraft(LAUNCHER_DRAFT_KEY, "contextual"),
+);
+
+export const launcherPanel: { open: boolean; query: string } = {
+  get open(): boolean {
+    return launcherDraft.visible;
+  },
+  set open(value: boolean) {
+    launcherDraft.visible = value;
+    persistLauncherDraft();
+  },
+  get query(): string {
+    return launcherDraft.query;
+  },
+  set query(value: string) {
+    launcherDraft.query = value;
+    persistLauncherDraft();
+  },
+};
+
+export function persistLauncherDraft(): void {
+  saveSessionDeckDraft(LAUNCHER_DRAFT_KEY, launcherDraft);
+}
+
+export function clearLauncherDraft(): void {
+  const visible = launcherDraft.visible;
+  Object.assign(launcherDraft, createDeckDraft("contextual"));
+  launcherDraft.visible = visible;
+  persistLauncherDraft();
+}
 
 /// The element that held focus when the launcher last opened. Captured
 /// here (not in the component) so a command whose flow OUTLIVES the
@@ -3143,13 +3170,11 @@ export function launcherReturnFocus(): HTMLElement | null {
   return launcherReturnFocusEl;
 }
 
-/// Open the launcher, clearing the query so each invocation starts
-/// blank (the Spotlight convention). Idempotent when already open.
+/// Open or resume this window's launcher draft. Idempotent when already open.
 /// Captures the currently-focused element for launcherReturnFocus.
 export function openCommandLauncher(): void {
   launcherReturnFocusEl =
     document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  launcherPanel.query = "";
   launcherPanel.open = true;
 }
 

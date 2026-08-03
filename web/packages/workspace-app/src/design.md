@@ -11,6 +11,8 @@ chan ships **three** Svelte 5 + Vite web SPAs: the gateway profile SPA (`@chan/p
 
 The two are complementary: the launcher is the cross-workspace registry (pick / add / toggle a workspace, mint a window), and opening a workspace window lands the user in the main SPA. Both honor the theme axes + canonical palette below, so a launcher served over a tunnel and the workspace UI on loopback read identically.
 
+Both SPAs mount the same inline `@chan/web-shared/CommandDeck`. The workspace adapter contributes its contextual command registry and, when hosted by a `WorkspaceHost`, may mint a live-window-bound capability for the one library serving it. A direct `chan open --standalone` tenant has no root launcher router; after that route answers 404/405, its adapter exposes only same-tenant browser navigation for `New terminal` and `New window`, with a fresh `w` each time. It never fabricates a library roster or window controls. The launcher SPA contributes its already-authorized Computers inventory. Authority follows the SPA origin: a remote workspace never receives the desktop launcher's aggregate bearer or inventory, and no Tauri overlay hosts command-launcher UI or draft state.
+
 ```mermaid
 flowchart TB
     subgraph web["main SPA (the workspace UI)"]

@@ -16,16 +16,18 @@
 //! launcher would have been blind to its own windows; unifying them here fixes
 //! that and removes the double-registration.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::{header, Method, Request, StatusCode};
+use axum::extract::{Extension, Path as AxumPath, Query, State};
+use axum::http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use chan_library::{allocate_workspace_prefix, ServeConfig};
@@ -36,8 +38,8 @@ use crate::devserver::bytes_eq;
 use crate::static_assets::{serve_launcher, LauncherSurface};
 use crate::{
     CreateWindow, DesktopWindowOp, DevserverEntry, DevserverInput, GatewayEntry, GatewayInput,
-    LauncherWorkspace, SetWorkspaceOnOutcome, WindowKind, WindowRecord, WindowSet, WorkspaceHost,
-    WorkspaceLifecycleOutcome, WorkspaceStatus,
+    LauncherWorkspace, SetWorkspaceOnOutcome, WindowKind, WindowOrigin, WindowRecord, WindowSet,
+    WorkspaceHost, WorkspaceLifecycleOutcome, WorkspaceStatus,
 };
 
 /// State shared by the `/api/library/workspaces` handlers: the library host plus
@@ -54,6 +56,39 @@ use crate::{
 struct LauncherState {
     host: Arc<WorkspaceHost>,
     serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
+}
+
+const COMMAND_CAPABILITY_TTL: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum CommandCapabilityRole {
+    Owner,
+    Readonly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CommandCapabilityWindowMode {
+    Browser,
+    Desktop,
+    NativeWatcher,
+}
+
+#[derive(Clone)]
+struct LibraryCommandCapability {
+    token: String,
+    window_id: String,
+    tenant_prefix: String,
+    role: CommandCapabilityRole,
+    origin: WindowOrigin,
+    expires_at: Instant,
+}
+
+struct LibraryCommandState {
+    host: Arc<WorkspaceHost>,
+    bearer_required: bool,
+    capabilities: std::sync::Mutex<HashMap<String, LibraryCommandCapability>>,
 }
 
 /// The `windows/watch` WS path: the one `/api/library/*` route that accepts the
@@ -107,6 +142,11 @@ pub fn launcher_router(
     } else {
         LauncherSurface::Devserver
     };
+    let command_state = Arc::new(LibraryCommandState {
+        host: host.clone(),
+        bearer_required: bearer.is_some(),
+        capabilities: std::sync::Mutex::new(HashMap::new()),
+    });
     // Windows: list/mint/discard on BOTH surfaces (per-view state, low-risk).
     let windows = Router::new()
         .route(
@@ -253,6 +293,41 @@ pub fn launcher_router(
     // surface-bearer gate needs the host to validate a window's per-tenant
     // token against the live tenants.
     let host_for_surface = host.clone();
+    // A workspace mints one short-lived capability with its own tenant token.
+    // Uses are authenticated by the opaque capability and remain scoped to the
+    // one library serving the invoking live window.
+    let command_mint = Router::new()
+        .route(
+            "/api/library/command-capabilities",
+            post(handle_mint_library_command_capability),
+        )
+        .route_layer(middleware::from_fn(command_capability_response_headers))
+        .with_state(command_state.clone());
+    let command_mint = if let Some(surface_token) = bearer.clone() {
+        let host = host_for_surface.clone();
+        command_mint.route_layer(middleware::from_fn(move |req, next| {
+            let token = surface_token.clone();
+            let host = host.clone();
+            async move { require_surface_bearer(token, host, req, next).await }
+        }))
+    } else {
+        command_mint
+    };
+    let command_uses = Router::new()
+        .route(
+            "/api/library/command-capabilities/{capability}",
+            get(handle_library_command_snapshot),
+        )
+        .route(
+            "/api/library/command-capabilities/{capability}/actions",
+            post(handle_library_command_action),
+        )
+        .route(
+            "/api/library/command-capabilities/{capability}/windows/{window_id}/launch",
+            get(handle_library_command_launch),
+        )
+        .route_layer(middleware::from_fn(command_capability_response_headers))
+        .with_state(command_state);
     // Gateways: list on BOTH surfaces (a registry-less surface returns
     // empty); add/update/remove gated mutable (403 read-only, 404 no
     // registry) inside the handlers, same as the devserver block below.
@@ -308,7 +383,10 @@ pub fn launcher_router(
         }
         None => (launcher_api, config),
     };
-    let api = launcher_api.merge(config);
+    let api = launcher_api
+        .merge(config)
+        .merge(command_mint)
+        .merge(command_uses);
     // The static SPA shell is ALWAYS public (loads before it holds the token) and
     // carries the surface hint so the SPA hides mutation controls on a read-only
     // surface rather than showing buttons that 403. A tunnel-origin owner keeps
@@ -430,6 +508,471 @@ async fn require_surface_bearer(
         )
             .into_response()
     }
+}
+// ---------------------------------------------------------------------------
+// Scoped command capability (workspace/terminal -> invoking library only).
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct MintLibraryCommandCapability {
+    window_id: String,
+    tenant_prefix: String,
+}
+
+#[derive(Serialize)]
+struct MintedLibraryCommandCapability {
+    token: String,
+    role: CommandCapabilityRole,
+    expires_in_seconds: u64,
+}
+
+#[derive(Serialize)]
+struct ScopedLibraryWindow {
+    window_id: String,
+    kind: WindowKind,
+    title: String,
+    ordinal: u32,
+    workspace_path: Option<String>,
+    connected: bool,
+    hidden: bool,
+    control: bool,
+    can_act: bool,
+    launch_path: String,
+}
+
+#[derive(Serialize)]
+struct ScopedLibraryWorkspace {
+    #[serde(flatten)]
+    workspace: LauncherWorkspace,
+    can_act: bool,
+}
+
+#[derive(Serialize)]
+struct ScopedLibrarySnapshot {
+    library_id: String,
+    role: CommandCapabilityRole,
+    window_mode: CommandCapabilityWindowMode,
+    windows: Vec<ScopedLibraryWindow>,
+    workspaces: Vec<ScopedLibraryWorkspace>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum ScopedLibraryAction {
+    NewTerminal,
+    NewWorkspaceWindow { workspace_id: String },
+    FocusWindow { window_id: String },
+    SetWindowVisibility { window_id: String, hidden: bool },
+}
+
+#[derive(Serialize)]
+struct ScopedLibraryActionResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    window: Option<ScopedLibraryWindow>,
+}
+
+fn command_capability_error(status: StatusCode, message: &'static str) -> Response {
+    (status, message).into_response()
+}
+
+async fn command_capability_response_headers(req: Request<Body>, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    // Capability paths are bearer credentials. Keep them out of caches and out
+    // of the Referer header when the launch redirect enters a tenant URL.
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, private"),
+    );
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
+}
+
+fn resolve_command_capability(
+    state: &LibraryCommandState,
+    token: &str,
+) -> Result<LibraryCommandCapability, (StatusCode, &'static str)> {
+    let now = Instant::now();
+    let mut capabilities = state
+        .capabilities
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    capabilities.retain(|_, capability| capability.expires_at > now);
+    let Some(capability) = capabilities.get(token).cloned() else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "invalid or expired library command capability",
+        ));
+    };
+    if !state
+        .host
+        .tenant_has_live_window(&capability.tenant_prefix, &capability.window_id)
+    {
+        capabilities.remove(token);
+        return Err((StatusCode::GONE, "the invoking window is no longer live"));
+    }
+    if let Some(live) = capabilities.get_mut(token) {
+        live.expires_at = now + COMMAND_CAPABILITY_TTL;
+    }
+    Ok(capability)
+}
+
+fn scoped_launch_path(capability: &str, window_id: &str) -> String {
+    format!(
+        "/api/library/command-capabilities/{}/windows/{}/launch",
+        url::form_urlencoded::byte_serialize(capability.as_bytes()).collect::<String>(),
+        url::form_urlencoded::byte_serialize(window_id.as_bytes()).collect::<String>(),
+    )
+}
+
+fn command_capability_window_mode(
+    host: &WorkspaceHost,
+    capability: &LibraryCommandCapability,
+) -> CommandCapabilityWindowMode {
+    if capability.origin == WindowOrigin::Browser {
+        CommandCapabilityWindowMode::Browser
+    } else if host.has_desktop_bridge() {
+        CommandCapabilityWindowMode::Desktop
+    } else {
+        // A native-origin record served by a remote devserver is reconciled by
+        // the connected desktop's per-library watcher. The remote server may
+        // mutate its own records, but it cannot focus an already-visible host
+        // window because no desktop bridge crosses that origin boundary.
+        CommandCapabilityWindowMode::NativeWatcher
+    }
+}
+
+fn scoped_window(
+    capability: &LibraryCommandCapability,
+    record: WindowRecord,
+) -> ScopedLibraryWindow {
+    ScopedLibraryWindow {
+        launch_path: scoped_launch_path(&capability.token, &record.window_id),
+        window_id: record.window_id,
+        kind: record.kind,
+        title: record.title,
+        ordinal: record.ordinal,
+        workspace_path: record.workspace_path,
+        connected: record.connected,
+        hidden: record.hidden,
+        control: record.control,
+        can_act: capability.role == CommandCapabilityRole::Owner,
+    }
+}
+
+fn scoped_local_windows(
+    host: &WorkspaceHost,
+    capability: &LibraryCommandCapability,
+) -> Vec<ScopedLibraryWindow> {
+    let library_id = host.library_id();
+    let mut rows: Vec<_> = host
+        .assemble_window_records()
+        .into_iter()
+        .filter(|record| record.library_id == library_id)
+        .map(|record| scoped_window(capability, record))
+        .collect();
+    rows.sort_by(|a, b| {
+        let kind_rank = |kind: WindowKind| match kind {
+            WindowKind::Terminal => 0,
+            WindowKind::Workspace => 1,
+        };
+        (a.window_id != capability.window_id)
+            .cmp(&(b.window_id != capability.window_id))
+            .then_with(|| kind_rank(a.kind).cmp(&kind_rank(b.kind)))
+            .then_with(|| a.ordinal.cmp(&b.ordinal))
+            .then_with(|| a.window_id.cmp(&b.window_id))
+    });
+    rows
+}
+
+fn scoped_local_workspaces(
+    host: &WorkspaceHost,
+    role: CommandCapabilityRole,
+) -> Vec<ScopedLibraryWorkspace> {
+    let library_id = host.library_id().to_string();
+    let mut rows: Vec<_> = host
+        .library()
+        .list_workspaces()
+        .into_iter()
+        .filter_map(|workspace| {
+            let workspace_id = allocate_workspace_prefix(&workspace.root_path)
+                .ok()?
+                .trim_start_matches('/')
+                .to_string();
+            let (status, error) = host.workspace_status(&workspace.root_path);
+            Some(ScopedLibraryWorkspace {
+                workspace: LauncherWorkspace {
+                    path: workspace.root_path.to_string_lossy().into_owned(),
+                    label: workspace
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| workspace_label(&workspace.root_path)),
+                    on: status == WorkspaceStatus::Running,
+                    status,
+                    error,
+                    library_id: Some(library_id.clone()),
+                    devserver_id: None,
+                    prefix: workspace_id.clone(),
+                    workspace_id,
+                },
+                can_act: role == CommandCapabilityRole::Owner,
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| a.workspace.workspace_id.cmp(&b.workspace.workspace_id));
+    rows
+}
+
+async fn handle_mint_library_command_capability(
+    State(state): State<Arc<LibraryCommandState>>,
+    origin: Option<Extension<crate::TunnelOrigin>>,
+    headers: HeaderMap,
+    Json(request): Json<MintLibraryCommandCapability>,
+) -> Response {
+    if request.window_id.is_empty()
+        || request.window_id.len() > 256
+        || request.tenant_prefix.len() > 512
+    {
+        return command_capability_error(StatusCode::BAD_REQUEST, "invalid invoking window");
+    }
+    let role = origin
+        .as_ref()
+        .map(|origin| {
+            if origin.owner() {
+                CommandCapabilityRole::Owner
+            } else {
+                CommandCapabilityRole::Readonly
+            }
+        })
+        .unwrap_or(CommandCapabilityRole::Owner);
+    let authorized = if origin.is_some() {
+        state
+            .host
+            .tenant_has_live_window(&request.tenant_prefix, &request.window_id)
+    } else if state.bearer_required {
+        let presented = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "));
+        presented.is_some_and(|presented| {
+            state.host.tenant_token_has_live_window(
+                &request.tenant_prefix,
+                &request.window_id,
+                |expected| bytes_eq(expected.as_bytes(), presented.as_bytes()),
+            )
+        })
+    } else {
+        state
+            .host
+            .tenant_has_live_window(&request.tenant_prefix, &request.window_id)
+    };
+    if !authorized {
+        return command_capability_error(
+            StatusCode::FORBIDDEN,
+            "the tenant token does not own that live window",
+        );
+    }
+
+    let Some(source) = state
+        .host
+        .assemble_window_records()
+        .into_iter()
+        .find(|record| {
+            record.library_id == state.host.library_id() && record.window_id == request.window_id
+        })
+    else {
+        return command_capability_error(
+            StatusCode::FORBIDDEN,
+            "the invoking window is not in this library",
+        );
+    };
+
+    let token = crate::auth::random_token();
+    let capability = LibraryCommandCapability {
+        token: token.clone(),
+        window_id: request.window_id,
+        tenant_prefix: request.tenant_prefix,
+        role,
+        origin: source.origin,
+        expires_at: Instant::now() + COMMAND_CAPABILITY_TTL,
+    };
+    let mut capabilities = state
+        .capabilities
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    capabilities.retain(|_, live| {
+        live.expires_at > Instant::now()
+            && !(live.window_id == capability.window_id
+                && live.tenant_prefix == capability.tenant_prefix)
+    });
+    capabilities.insert(token.clone(), capability);
+    Json(MintedLibraryCommandCapability {
+        token,
+        role,
+        expires_in_seconds: COMMAND_CAPABILITY_TTL.as_secs(),
+    })
+    .into_response()
+}
+
+async fn handle_library_command_snapshot(
+    State(state): State<Arc<LibraryCommandState>>,
+    AxumPath(capability): AxumPath<String>,
+) -> Response {
+    let capability = match resolve_command_capability(&state, &capability) {
+        Ok(capability) => capability,
+        Err(error) => return error.into_response(),
+    };
+    Json(ScopedLibrarySnapshot {
+        library_id: state.host.library_id().to_string(),
+        role: capability.role,
+        window_mode: command_capability_window_mode(&state.host, &capability),
+        windows: scoped_local_windows(&state.host, &capability),
+        workspaces: scoped_local_workspaces(&state.host, capability.role),
+    })
+    .into_response()
+}
+
+async fn handle_library_command_action(
+    State(state): State<Arc<LibraryCommandState>>,
+    AxumPath(capability): AxumPath<String>,
+    Json(action): Json<ScopedLibraryAction>,
+) -> Response {
+    let capability = match resolve_command_capability(&state, &capability) {
+        Ok(capability) => capability,
+        Err(error) => return error.into_response(),
+    };
+    if capability.role != CommandCapabilityRole::Owner {
+        return command_capability_error(
+            StatusCode::FORBIDDEN,
+            "this gateway role may inspect but not control the library",
+        );
+    }
+    let record = match action {
+        ScopedLibraryAction::NewTerminal => {
+            state
+                .host
+                .mint_window_with_origin(WindowKind::Terminal, None, capability.origin)
+        }
+        ScopedLibraryAction::NewWorkspaceWindow { workspace_id } => {
+            let Some((_, root)) = resolve_workspace(&state.host, &workspace_id) else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            if state.host.workspace_status(&root).0 != WorkspaceStatus::Running {
+                return command_capability_error(StatusCode::CONFLICT, "workspace is not running");
+            }
+            state.host.mint_window_with_origin(
+                WindowKind::Workspace,
+                Some(root.to_string_lossy().into_owned()),
+                capability.origin,
+            )
+        }
+        ScopedLibraryAction::FocusWindow { window_id } => {
+            let local = state
+                .host
+                .assemble_window_records()
+                .into_iter()
+                .any(|record| {
+                    record.library_id == state.host.library_id() && record.window_id == window_id
+                });
+            if !local {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            if command_capability_window_mode(&state.host, &capability)
+                != CommandCapabilityWindowMode::Desktop
+            {
+                return command_capability_error(
+                    StatusCode::CONFLICT,
+                    "this library has no desktop focus bridge",
+                );
+            }
+            return dispatch_window_op(&state.host, |reply| DesktopWindowOp::Open {
+                id: window_id,
+                reply,
+            })
+            .await;
+        }
+        ScopedLibraryAction::SetWindowVisibility { window_id, hidden } => {
+            let Some(record) = state
+                .host
+                .assemble_window_records()
+                .into_iter()
+                .find(|record| {
+                    record.library_id == state.host.library_id() && record.window_id == window_id
+                })
+            else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            if record.control {
+                return command_capability_error(
+                    StatusCode::FORBIDDEN,
+                    "control terminals are not managed by a scoped capability",
+                );
+            }
+            return match state.host.set_window_hidden(&window_id, hidden) {
+                Ok(true) => StatusCode::NO_CONTENT.into_response(),
+                Ok(false) => StatusCode::NOT_FOUND.into_response(),
+                Err(error) => {
+                    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+                }
+            };
+        }
+    };
+    match record {
+        Ok(record) => Json(ScopedLibraryActionResult {
+            window: Some(scoped_window(&capability, record)),
+        })
+        .into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+async fn handle_library_command_launch(
+    State(state): State<Arc<LibraryCommandState>>,
+    AxumPath((capability, window_id)): AxumPath<(String, String)>,
+) -> Response {
+    let capability = match resolve_command_capability(&state, &capability) {
+        Ok(capability) => capability,
+        Err(error) => return error.into_response(),
+    };
+    // This redirect contains the target tenant bearer. A read-only gateway
+    // capability may inspect the redacted snapshot but must never exchange its
+    // capability for a tenant credential.
+    if capability.role != CommandCapabilityRole::Owner {
+        return command_capability_error(
+            StatusCode::FORBIDDEN,
+            "this gateway role may inspect but not open library windows",
+        );
+    }
+    let Some(record) = state
+        .host
+        .assemble_window_records()
+        .into_iter()
+        .find(|record| {
+            record.library_id == state.host.library_id() && record.window_id == window_id
+        })
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if record.token.is_empty() {
+        return command_capability_error(StatusCode::CONFLICT, "window tenant is not running");
+    }
+    let prefix = record.prefix.trim_end_matches('/');
+    let path = if prefix.is_empty() {
+        "/index.html".to_string()
+    } else {
+        format!("{prefix}/index.html")
+    };
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair("t", &record.token);
+    query.append_pair("w", &record.window_id);
+    query.append_pair("lib", state.host.library_id());
+    if record.kind == WindowKind::Terminal {
+        query.append_pair("kind", "terminal");
+    }
+    let target = format!("{path}?{}", query.finish());
+    Redirect::temporary(&target).into_response()
 }
 
 /// Gate tunnel-origin mutations by the gateway caller role. The headless
@@ -1688,6 +2231,10 @@ async fn handle_set_collapsed_machines(
         Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
     }
 }
+
+#[cfg(test)]
+#[path = "library_command_capability_tests.rs"]
+mod command_capability_tests;
 
 #[cfg(test)]
 mod devserver_route_tests {

@@ -209,11 +209,11 @@ const OPEN_LAUNCHER: &str = r#"Inside the window, everything chan can do is one 
 launcher is Cmd+K on the macOS desktop app and Ctrl+Alt+K everywhere
 else (web, Linux, Windows). Cmd+P is Team Work, not the launcher.
 
-The list is empty until you type, and a query never hides a command: it
-only reorders. Matches float into a "Results" group, and the rest of the
-catalog stays listed below, grouped by category with the active tab's
-category pinned first, so even a query that matches nothing still shows
-everything available here.
+In a workspace or terminal window the contextual list is empty until you
+type. Typing filters and ranks commands from the focused tab, pane, window,
+and the library serving that window. The scope orbs browse those catalogs
+directly; Computers opens its action branches without requiring a query.
+The Computers SPA searches its authorized aggregate library instead.
 
 Apps you can spawn from it:
 
