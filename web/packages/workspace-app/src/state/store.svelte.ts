@@ -87,6 +87,7 @@ import {
   type Tab,
 } from "./tabs.svelte";
 import { isEditableText } from "./fileTypes";
+import { openMediaViewer } from "./mediaOpen";
 import {
   activeTransferCount,
   beginTransfer,
@@ -1611,10 +1612,12 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
         destination,
       });
     } else {
-      revealPathInBrowser(typeof frame.select === "string" ? frame.select : frame.path, {
+      const selected = typeof frame.select === "string" ? frame.select : frame.path;
+      revealPathInBrowser(selected, {
         inspectorOpen: true,
         destination,
       });
+      if (typeof frame.select === "string") openMediaViewer(frame.select);
     }
     setTransientStatus(
       frame.select ? `selected ${frame.select}` : `opened ${frame.path || "/"}`,

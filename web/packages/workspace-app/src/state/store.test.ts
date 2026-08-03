@@ -53,6 +53,7 @@ import {
   surveyState,
 } from "./survey.svelte";
 import type { TreeEntry } from "../api/types";
+import * as mediaOpen from "./mediaOpen";
 
 function setTerminalLayout(tab: Partial<TerminalTab> = {}): void {
   const terminal: TerminalTab = {
@@ -702,21 +703,31 @@ describe("window commands", () => {
     expect(treeExpanded.map["notes/sub"]).toBe(true);
   });
 
-  test("open_browser select keeps file selection behavior", () => {
+  test("open_browser reveals before routing the selection to a viewer", () => {
     window.history.replaceState(null, "", "/?w=window-a");
+    const viewerSpy = vi.spyOn(mediaOpen, "openMediaViewer").mockImplementation((path) => {
+      expect(browserSelection.path).toBe(path);
+      const tab = activePane().tabs.at(-1) as BrowserTab;
+      expect(tab.kind).toBe("browser");
+      expect(tab.inspectorOpen).toBe(true);
+      return false;
+    });
 
     onWatchEvent({
       type: "window_command",
       window_id: "window-a",
       command: "open_browser",
       path: "notes",
-      select: "notes/photo.png",
+      select: "notes/archive.bin",
     });
 
-    expect(browserSelection.path).toBe("notes/photo.png");
+    expect(viewerSpy).toHaveBeenCalledOnce();
+    expect(viewerSpy).toHaveBeenCalledWith("notes/archive.bin");
+    expect(browserSelection.path).toBe("notes/archive.bin");
     expect(activePane().tabs.some((tab) => tab.kind === "browser")).toBe(true);
     expect(treeExpanded.map[""]).toBe(true);
     expect(treeExpanded.map["notes"]).toBe(true);
+    viewerSpy.mockRestore();
   });
 
   test("open_graph_link opens a graph tab through the existing link parser", () => {
