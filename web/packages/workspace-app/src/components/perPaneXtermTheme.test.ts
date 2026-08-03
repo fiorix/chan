@@ -12,13 +12,15 @@ describe("TerminalTab tracks terminal surface body theme", () => {
   test("$effect reads the effective terminal surface theme", () => {
     expect(terminalTab).toContain('effectiveHybridSurfaceTheme("terminal")');
     expect(terminalTab).toContain(
-      'data-theme={surfaceThemeOverride("terminal")}',
+      "data-theme={terminalSurfaceThemeOverride()}",
     );
   });
 
   test("effective theme is resolved through the shared store", () => {
     expect(terminalTab).toContain("function effectiveTerminalTheme()");
-    expect(terminalTab).toContain('return effectiveHybridSurfaceTheme("terminal")');
+    expect(terminalTab).toContain(
+      'customTerminalColors?.contrast ?? effectiveHybridSurfaceTheme("terminal")',
+    );
   });
 
   test("terminalTheme() branches on effective terminal theme", () => {
@@ -28,6 +30,18 @@ describe("TerminalTab tracks terminal surface body theme", () => {
 
   test("terminalTheme() reads CSS variables from host, not document root", () => {
     expect(terminalTab).toContain("getComputedStyle(host ?? document.documentElement)");
+  });
+
+  test("one resolved custom result drives palette and surface chrome", () => {
+    expect(terminalTab).toContain(
+      "resolveTerminalColors(workspace.info?.preferences?.terminal_colors)",
+    );
+    expect(terminalTab).toContain(
+      'customTerminalColors?.contrast ?? surfaceThemeOverride("terminal")',
+    );
+    expect(terminalTab).toContain("customTerminalColors?.background");
+    expect(terminalTab).toContain("customTerminalColors?.foreground");
+    expect(terminalTab).toContain("customTerminalColors?.cursor");
   });
 });
 

@@ -29,7 +29,7 @@ describe("Track C: Hybrid surface body themes", () => {
 
   test("Hybrid bodies opt into their surface override only", () => {
     expect(fileEditor).toContain('data-theme={surfaceThemeOverride("editor")}');
-    expect(terminal).toContain('data-theme={surfaceThemeOverride("terminal")}');
+    expect(terminal).toContain("data-theme={terminalSurfaceThemeOverride()}");
     expect(browser).toContain(
       'data-theme={isTab ? surfaceThemeOverride("browser") : undefined}',
     );

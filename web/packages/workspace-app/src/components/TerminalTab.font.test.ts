@@ -8,8 +8,8 @@ import main from "../main.ts?raw";
 // from disk relative to the vitest cwd (= web/) instead.
 const fonts = readFileSync("src/fonts.css", "utf8");
 
-// TerminalTab ships Source Code Pro Regular and pins xterm.js to a
-// non-blinking block cursor at 14 pt. Per-OS native mono leads the
+// TerminalTab ships Source Code Pro Regular and defaults renderers to a
+// non-blinking block cursor at 14 px. Per-OS native mono leads the
 // fontFamily chain; SCP appears after the OS-native faces and activates
 // only when the user opts in via Settings.
 
@@ -39,8 +39,15 @@ describe("TerminalTab font + cursor parity", () => {
     );
   });
 
-  test("fontSize matches iTerm reference (14)", () => {
-    expect(tab).toMatch(/fontSize:\s*14,/);
+  test("fontSize is captured once for both backends and cell measurement", () => {
+    expect(tab).toMatch(
+      /const rendererFontSize = terminalPrefs\?\.font_size \?\? 14;/,
+    );
+    expect(tab.match(/fontSize:\s*rendererFontSize,/g)).toHaveLength(2);
+    expect(tab).toMatch(
+      /measureXtermCellDimensions\([\s\S]*?fontFamily,\s*rendererFontSize,\s*1\.2/,
+    );
+    expect(tab).not.toMatch(/fontSize:\s*14,/);
   });
 
   test("cursor is non-blinking block per iTerm defaults", () => {

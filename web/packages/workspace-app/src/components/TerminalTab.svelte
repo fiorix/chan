@@ -36,6 +36,7 @@
     writeClipboardText,
   } from "../api/desktop";
   import { isOsFileDrag, shellEscapePaths } from "../state/fileDropGuard";
+  import { resolveTerminalColors } from "../state/paneColor";
   import { openExternalUrl } from "../editor/external_links";
   import { chordFor, currentOS, shouldEscapeTerminal } from "../state/shortcuts";
   import {
@@ -309,6 +310,9 @@
   let webglRendererActive = false;
   let webglContextLossRetries = 0;
   const ptyWrites = new PtyWriteTracker();
+  const customTerminalColors = $derived(
+    resolveTerminalColors(workspace.info?.preferences?.terminal_colors),
+  );
   // The writer handed to ptyWrites. On xterm this is the terminal
   // itself (its write callback fires off xterm's own queue). On
   // ghostty it is a SYNCHRONOUS wrapper: ghostty-web parses inside
@@ -528,16 +532,26 @@
   });
 
   function effectiveTerminalTheme(): "dark" | "light" {
-    return effectiveHybridSurfaceTheme("terminal");
+    return customTerminalColors?.contrast ?? effectiveHybridSurfaceTheme("terminal");
+  }
+
+  function terminalSurfaceThemeOverride(): "dark" | "light" | undefined {
+    return customTerminalColors?.contrast ?? surfaceThemeOverride("terminal");
   }
 
   function terminalTheme() {
     // Read CSS variables from `host` so the terminal surface's
     // `data-theme` override resolves before xterm paints.
     const styles = getComputedStyle(host ?? document.documentElement);
-    const bg = styles.getPropertyValue("--bg").trim() || "#1c1c1e";
-    const text = styles.getPropertyValue("--text").trim() || "#ebebf0";
-    const cursor = styles.getPropertyValue("--link").trim() || "#58a6ff";
+    const bg =
+      customTerminalColors?.background ??
+      (styles.getPropertyValue("--bg").trim() || "#1c1c1e");
+    const text =
+      customTerminalColors?.foreground ??
+      (styles.getPropertyValue("--text").trim() || "#ebebf0");
+    const cursor =
+      customTerminalColors?.cursor ??
+      (styles.getPropertyValue("--link").trim() || "#58a6ff");
     const base = {
       background: bg,
       foreground: text,
@@ -766,6 +780,7 @@
   async function start(): Promise<void> {
     if (!host || term) return;
     const terminalPrefs = workspace.info?.preferences?.terminal;
+    const rendererFontSize = terminalPrefs?.font_size ?? 14;
     // Scrollback honors the Settings MB budget. Read once here so a
     // settings change after spawn doesn't reach through and resize
     // the existing xterm.js buffer; the hint copy under the slider
@@ -854,7 +869,7 @@
         cursorBlink: false,
         cursorStyle: "block",
         fontFamily,
-        fontSize: 14,
+        fontSize: rendererFontSize,
         ghostty: ghosttyKit.ghostty,
         scrollback: scrollbackLines,
         theme: terminalTheme(),
@@ -921,7 +936,7 @@
         cursorBlink: false,
         cursorStyle: "block",
         fontFamily,
-        fontSize: 14,
+        fontSize: rendererFontSize,
         lineHeight: 1.2,
         macOptionIsMeta: true,
         scrollback: scrollbackLines,
@@ -958,7 +973,7 @@
       const targetCell = measureXtermCellDimensions(
         host,
         fontFamily,
-        14,
+        rendererFontSize,
         1.2,
       );
       if (
@@ -2278,7 +2293,7 @@
 <div
   class="terminal-tab"
   class:active
-  data-theme={surfaceThemeOverride("terminal")}
+  data-theme={terminalSurfaceThemeOverride()}
   data-terminal-tab-id={tab.id}
   role="tabpanel"
   aria-hidden={!active}

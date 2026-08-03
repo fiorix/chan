@@ -155,6 +155,10 @@ export type TerminalPreferences = {
   /// (per-OS native mono). `source-code-pro` opts into Source
   /// Code Pro; the SPA triggers the download endpoint when needed.
   font?: TerminalFontChoice;
+  /// Terminal renderer font size in pixels. Captured when a renderer is
+  /// constructed; mounted renderers keep their current value. Optional for
+  /// older servers; absent means 14.
+  font_size?: number;
   /// Whether newly-spawned terminals get the chan MCP discovery env
   /// vars (`CHAN_MCP_*`) so external agent CLIs can find the chan MCP
   /// server. Off by default (a stray env descriptor breaks some
@@ -184,6 +188,20 @@ export type TerminalPreferences = {
 };
 
 export type TerminalFontChoice = "os-default" | "source-code-pro";
+
+export type TerminalContrast = "auto" | "dark" | "light";
+
+export type TerminalCustomColors = {
+  background: string;
+  foreground: string;
+  cursor: string;
+  contrast: TerminalContrast;
+};
+
+export type TerminalColorPrefs = {
+  mode: "standard" | "custom";
+  custom?: TerminalCustomColors;
+};
 
 export type BubbleOverlayMode = "stack" | "tray";
 
@@ -242,6 +260,11 @@ export type TerminalRestartRequest = {
 
 export type Preferences = {
   editor_theme: EditorTheme;
+  /// Optional absolute editor body size in pixels. Unset leaves typography to
+  /// the active editor theme.
+  editor_font_size?: number;
+  /// Atomic terminal colour mode and its dormant custom payload.
+  terminal_colors?: TerminalColorPrefs;
   /// Where image uploads land (relative to workspace root). Default
   /// `attachments/`. Included in the aggregate read and updated only
   /// when a partial patch names this server-owned field.
