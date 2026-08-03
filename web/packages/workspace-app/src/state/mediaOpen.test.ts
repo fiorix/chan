@@ -110,8 +110,8 @@ describe("openMediaViewer routing", () => {
     for (const path of ["notes/readme.md", "notes/plain.txt", "media/archive.zip"]) {
       if (!openMediaViewer(path)) fallback(path);
     }
-    // All three fall through to the caller's open attempt, exactly as
-    // before; no viewer overlay mounted.
+    // All three fall through to the caller's open attempt; no viewer
+    // overlay mounts.
     expect(fallback).toHaveBeenCalledTimes(3);
     expect(imageViewer()).toBeNull();
     expect(document.querySelector(".md-audio-viewer")).toBeNull();
