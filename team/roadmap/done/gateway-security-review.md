@@ -1,6 +1,6 @@
 # Gateway security review
 
-Status: REGISTERED for v0.83.0, grounded and implemented 2026-08-02; awaiting merge.
+Status: SHIPPED in [v0.83.0](../release/release-v0.83.0.md). Entry-path failures are registry-independent, the identity SPA policy admits the provider avatar it renders, and audit-IP parsing is strict.
 
 ## What
 

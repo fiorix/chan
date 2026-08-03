@@ -19,17 +19,6 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-### v0.83.0
-
-| item | state | what needs to happen |
-| --- | --- | --- |
-| [unified-command-launcher](v0.83.0/unified-command-launcher.md) | implemented, validated | one searchable command deck rendered inline by the SPA that owns the focused window, with authority following the rendering SPA |
-| [gateway-security-review](v0.83.0/gateway-security-review.md) | implemented, validated | uniform tunnel and entry failure responses, a truthful identity SPA policy, strict audit-IP parsing |
-| [terminal-secret-masking](v0.83.0/terminal-secret-masking.md) | implemented, validated | mask secret-shaped values in the terminal, two config fields, Settings surface |
-| [kimi-submit-agent](v0.83.0/kimi-submit-agent.md) | implemented, validated | Kimi as a named submit agent with its own measured chord, command derivation, and SPA mirror |
-| [team-spawn-poke-tui-readiness](v0.83.0/team-spawn-poke-tui-readiness.md) | implemented, validated | gate each agent identity poke on DECSET 2004 with a bounded, named failure |
-| [cs-tunnel-single-port-shorthand](v0.83.0/cs-tunnel-single-port-shorthand.md) | implemented, validated | accept `cs tunnel <port>` as shorthand for `<port>:<port>` in the one spec parser |
-
 ### v0.84.0
 
 | item | state | what needs to happen |
@@ -49,6 +38,17 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [rich-prompt-submit-button](v0.84.0/rich-prompt-submit-button.md) | registered, grounded, not specced | turn the Rich Prompt's submit hint into a real button so a mobile user can submit by tapping |
 
 ## Completed
+
+### v0.83.0
+
+Shipped 2026-08-03; see [release-v0.83.0](../release/release-v0.83.0.md). Closed items in [`done/`](done/):
+
+- [unified-command-launcher](done/unified-command-launcher.md) - one searchable command deck rendered inline by the SPA that owns the focused window, with authority following the rendering SPA and no Tauri overlay window.
+- [gateway-security-review](done/gateway-security-review.md) - entry-path failures made registry-independent, the identity SPA policy corrected to admit the provider avatar it renders, and strict audit-IP parsing.
+- [terminal-secret-masking](done/terminal-secret-masking.md) - secret-shaped values masked in the terminal, with a malformed suffix no longer able to overwrite the user's server.toml.
+- [kimi-submit-agent](done/kimi-submit-agent.md) - Kimi as a named submit agent with its own measured chord, command derivation, batching, and SPA mirror.
+- [team-spawn-poke-tui-readiness](done/team-spawn-poke-tui-readiness.md) - the identity poke gates on DECSET 2004 with a bounded, named failure instead of a fixed grace.
+- [cs-tunnel-single-port-shorthand](done/cs-tunnel-single-port-shorthand.md) - `cs tunnel <port>` as shorthand for `<port>:<port>`.
 
 ### v0.82.0
 

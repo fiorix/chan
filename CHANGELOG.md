@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.83.0] - 2026-08-03
+
+v0.83.0 adds one searchable command launcher rendered inline by the SPA that owns the focused window, closes the gateway security review's remainder, masks secret-shaped values in the terminal, makes Kimi a named submit agent, gates the team spawn poke on terminal readiness, and accepts a lone port as a `cs tunnel` shorthand.
+
+### Added
+
+- **One command launcher across every Chan surface.** A single searchable command deck, rendered inline by the SPA that owns the focused window, replaces a different action set per surface. Authority follows the rendering SPA rather than being handed to the invoking page. Empty-query opens a contextual deck ordering focused tab, pane and window actions before Computers actions; typed search may jump across nested levels while still stopping at every required argument and confirmation.
+- **`cs tunnel <port>` is shorthand for `<port>:<port>`.** A lone port after the bind-address peel is used for both ends. `cs tunnel 0` stays refused because the devserver end would have nothing to dial, and `1.2.3.4:8080` still fails as an invalid desktop port.
+- **Kimi is a first-class submit agent.** `SubmitAgent` gains `Kimi` with its own measured chord rather than an alias, the command sniff resolves a bare `kimi` or an absolute launcher path, and the TypeScript mirror moves in lockstep. A team member running Kimi no longer needs `CHAN_AGENT="codex"` to receive a submit chord.
+- **Terminal secret masking.** Values whose variable name looks secret are visually masked, driven by two config fields with a Settings surface and a per-tab toggle.
+
+### Changed
+
+- **The team identity poke waits for the member's terminal instead of a fixed grace.** `cs terminal team new` gated each agent's identity poke on a three-second sleep, so a member whose TUI was not yet in control of the PTY never received it: the bytes went to whatever program was foreground, the agent started with an empty compose box, and the round stalled while looking healthy. The poke now waits for the PTY to enter bracketed-paste mode, bounded, and a member that never signals readiness is named in the spawn summary and makes the command exit non-zero.
+
+### Fixed
+
+- **Gateway entry-path failures no longer reveal devserver liveness.** Method, Origin, Content-Type and the bounded one-field form are all validated before the registry is consulted, and every entry-specific 404 uses one JSON shape regardless of `Accept`. Previously two 404 constructors disagreed on whether they honored `Accept`, so an unauthenticated caller could distinguish "exactly one live devserver" from "none or several" by response Content-Type alone.
+- **The identity SPA policy admits the avatar it renders.** The Content-Security-Policy blocked the OAuth provider avatar the profile page displays and deliberately never proxies; `img-src` now allows it, and the policy test asserts the literal string so a weakened policy fails.
+- **A malformed `terminal.secret_mask_suffixes` entry no longer destroys `server.toml`.** An entry containing a character outside `[A-Za-z0-9_]` failed the whole config parse, the server fell back to defaults in memory, and the next settings write persisted those defaults over every other setting in the file. Invalid entries are now dropped with a warning and duplicates removed.
+- **Terminal masking no longer rescans the whole scrollback on every write.** Once scrollback reached its cap, which is the steady state of any long-lived terminal, each PTY write triggered a full-buffer rescan. The matcher was also replaced with a linear scan after the generated pattern was measured backtracking quadratically.
+
 ## [v0.82.0] - 2026-08-01
 
 v0.82.0 removes the whole-file read class from every HTTP read path, makes `cs tunnel` deliver every byte it read before closing, stops one failed assertion from aborting the chan-server test binary, makes the terminal engine visible and switchable, and retires the legacy devserver window endpoint.

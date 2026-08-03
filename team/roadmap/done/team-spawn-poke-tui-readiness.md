@@ -1,6 +1,6 @@
 # Team identity pokes wait for TUI readiness
 
-Status: IMPLEMENTED and VERIFIED for v0.83.0.
+Status: SHIPPED in [v0.83.0](../release/release-v0.83.0.md). The identity poke gates on DECSET 2004 with a bounded, named failure instead of a fixed grace.
 
 ## What
 

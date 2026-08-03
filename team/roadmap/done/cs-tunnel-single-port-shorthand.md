@@ -1,6 +1,6 @@
 # `cs tunnel <port>` forwards that port to itself
 
-Status: REGISTERED for v0.83.0, grounded 2026-08-02, ruled 2026-08-02, ready to implement.
+Status: SHIPPED in [v0.83.0](../release/release-v0.83.0.md). A lone port is shorthand for both ends of the tunnel spec.
 
 ## What
 

@@ -1,5 +1,7 @@
 # Unified command launcher, SPA-only prototype
 
+Status: SHIPPED in [v0.83.0](../release/release-v0.83.0.md). One searchable command deck rendered inline by the SPA that owns the focused window; no Tauri overlay window. An earlier overlay implementation was built and withdrawn.
+
 ## Decision
 
 Build one searchable command-deck interaction model, rendered inline by the SPA that owns the focused window. Do not create a Tauri command-launcher window or transparent overlay.

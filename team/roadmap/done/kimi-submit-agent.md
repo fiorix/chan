@@ -1,6 +1,6 @@
 # Kimi Code is a first-class submit agent
 
-Status: IMPLEMENTED and VERIFIED for v0.83.0, grounded 2026-08-02.
+Status: SHIPPED in [v0.83.0](../release/release-v0.83.0.md). Kimi is a named submit agent with its own measured chord, command derivation, and SPA mirror.
 
 ## What
 
