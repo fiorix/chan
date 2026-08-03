@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.83.1] - 2026-08-03
+
+v0.83.1 makes the desktop render the command deck inline, the way the browser already did, instead of opening a separate Tauri overlay window.
+
+### Fixed
+
+- **The desktop opens the command launcher inline instead of in an overlay window.** `showCommandLauncher` routed Tauri desktop to a transparent, always-on-top `command-launcher` window while the inline deck ran only in the browser, so the two surfaces behaved differently and the overlay could be left on screen with no way to dismiss it. Every surface now renders the same inline deck. Three desktop short-circuits that deferred to the overlay are gone with it: the scoped library snapshot no longer returns early on desktop, its refresh poll no longer skips desktop, and the Computers scope is offered from loaded data rather than asserted from `isTauriDesktop`, so Computers actions resolve on desktop instead of appearing empty.
+- **Escape releases a pending command instead of hanging the deck.** `pending` is the one operation kind with no button of its own, so a command left in the blocking "Working..." view could not be dismissed. Escape now drops the blocking view while the command it was waiting on keeps running.
+
 ## [v0.83.0] - 2026-08-03
 
 v0.83.0 adds one searchable command launcher rendered inline by the SPA that owns the focused window, closes the gateway security review's remainder, masks secret-shaped values in the terminal, makes Kimi a named submit agent, gates the team spawn poke on terminal readiness, and accepts a lone port as a `cs tunnel` shorthand.
