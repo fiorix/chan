@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.83.3] - 2026-08-03
+
+v0.83.3 removes the retired command-launcher overlay end to end and makes the wall-clock timing tests load-proof. (v0.83.2 was skipped.)
+
+### Removed
+
+- **The command-launcher overlay is gone, and the launcher chords are page-owned everywhere.** The desktop-owned `command-launcher` window was withdrawn before v0.83.0 shipped, but its host, permissions, chord claims, and frontend protocol stayed in the tree, and the native key bridge kept routing Cmd+K / Cmd+Shift+K to it on desktop while every other trigger opened the inline deck. The whole path is deleted: the Tauri host and its eight commands, the overlay capability and permission sets, the `?command=1` overlay mode, the source-submission protocol in both SPAs, and the bridge's launcher chord claims, so the SPA keymap opens the same inline deck on every surface. The transparent window was the only consumer of `macOSPrivateApi`, which is removed with it.
+
+### Fixed
+
+- **Wall-clock timing tests no longer fail under host load.** Two tests measured the host scheduler and could fail a gate run on a contended machine with no defect present. The shutdown-grace test now runs on tokio's paused clock, so its 100 ms bound holds exactly on any host while still catching a grace multiplication at exactly 400 ms virtual. The indexer recovery tests drop their rate ceilings for one 30 s convergence budget sized for real rebuild work; the 750 ms window that read scheduler load as a lost generation is gone, and a genuinely swallowed generation still fails with a clear message.
+
 ## [v0.83.1] - 2026-08-03
 
 v0.83.1 makes the desktop render the command deck inline, the way the browser already did, instead of opening a separate Tauri overlay window.

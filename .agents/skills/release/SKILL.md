@@ -50,7 +50,7 @@ Every pin moves to the same `X.Y.Z` (or `X.Y.Z-rcN`) in one commit. Missing one 
 - `desktop/src-tauri/tauri.conf.json`: the `.app` bundle version. The desktop Rust package inherits the workspace version, so once this matches, the `.app` and the workspace stay aligned.
 - The web `package.json` versions (root plus each package under `web/packages/`), and the marketing `package.json` `@chan/*` dependency pins.
 - The three regenerated lockfiles: `Cargo.lock` and `gateway/Cargo.lock` (each refreshed with `cargo update -w`, which moves only the workspace-member versions), and `web/package-lock.json` (refreshed with `npm install`).
-- BOTH Nix fixed-output pins in `packaging/nix/chan-desktop.nix`: `npmDeps.hash` (invalidated by the regenerated `web/package-lock.json`) and `cargoHash` (invalidated by the regenerated `Cargo.lock`). Re-pin them in the SAME commit (build once and copy each hash from Nix's mismatch error, or run `make nix-check` where Nix is installed; the errors surface one at a time, npm first). The Cachix publish job checks out the TAG, so a hash missed here cannot be repaired for that release afterward; v0.81.0 shipped without Cachix pins for exactly this reason.
+- The Nix fixed-output pins: the `npmDeps.hash` shared by both `packaging/nix/*.nix` derivations (invalidated by the regenerated `web/package-lock.json`), and each derivation's own `cargoHash` in `packaging/nix/chan.nix` and `packaging/nix/chan-desktop.nix` (invalidated by the regenerated `Cargo.lock`). Re-pin all three in the SAME commit: set the stale fields to `lib.fakeHash`, build, and copy each `got: sha256-...` from the mismatch error (one surfaces at a time, npm first), or run `make nix-check` where Nix is installed. On a host without Nix, use the sdme container recipe below. The Cachix publish job checks out the TAG, so a hash missed here cannot be repaired for that release afterward; v0.81.0 shipped without Cachix pins for exactly this reason.
 
 The marketing site reads the workspace version at build time, so it needs no separate bump; confirm nothing else has drifted.
 
@@ -61,6 +61,17 @@ GA only (not rc pins), the distro source packages -- both publish after the tag 
 - Arch: no manual version edit and no GA pin. `packaging/linux/arch/PKGBUILD` remains the local binary QA path. The AUR renderer under `packaging/distros/arch/` derives `pkgver` from the GA tag and uses `pkgrel=1` unless a packaging-only repair is dispatched explicitly.
 - Nix: no manual version edit. The flake reads the root Cargo workspace version, and the GA downstream job creates the two versioned Cachix pins after building the tagged source.
 - Homebrew: no manual version edit and no GA pin. The tap renderer under `packaging/distros/homebrew/` derives the version from the GA tag and hashes the published release assets; `publish-downstream` regenerates and pushes both fiorix/homebrew-chan files.
+
+### Nix hashes on a host without Nix (sdme)
+
+Run Nix in an sdme OCI-app container (the `nixos/nix` image on a systemd-capable base rootfs; verified with `nixos/nix:2.32.4`):
+
+- `sudo sdme fs import docker.io/nixos/nix:2.32.4 --name nix --oci-mode=app --base-fs chan-devserver` (any imported base rootfs with systemd works as `--base-fs`); the nix root lands at `/oci/apps/nix/root` inside the container.
+- `sudo sdme create --name nix -r nix -b <checkout>:/src && sudo sdme start nix`.
+- One-time chroot plumbing via `sudo sdme exec nix -- bash -c '...'`: bind the checkout into the app root (`mkdir -p /oci/apps/nix/root/src && mount --bind /src /oci/apps/nix/root/src`), mount the runtime filesystems (`mount -t proc proc /oci/apps/nix/root/proc`, `mount --rbind /sys /oci/apps/nix/root/sys`, `mount --rbind /dev /oci/apps/nix/root/dev`), copy DNS (`cp -L /etc/resolv.conf /oci/apps/nix/root/etc/resolv.conf`), and mark the checkout safe for libgit2 (`printf '[safe]\n\tdirectory = /src\n' > /oci/apps/nix/root/root/.gitconfig`).
+- Build with the store-path nix binary (find it with `ls -d /oci/apps/nix/root/nix/store/*-nix-2*/bin`), chrooted, with HOME forced so the safe-directory file is read: `sudo sdme exec nix -- chroot /oci/apps/nix/root /usr/bin/env HOME=/root /nix/store/<hash>-nix-<ver>/bin/nix --extra-experimental-features 'nix-command flakes' build /src#chan --no-link`.
+- Each failed build names one `got: sha256-...`; pin it and repeat: the shared `npmDeps.hash` surfaces first (pin it in BOTH derivations), then each `cargoHash` (`.#chan`, then `.#chan-desktop`). Fixed-output mismatches fail before any compilation, so the harvest is downloads only.
+- Git-backed flake evaluation includes modified tracked files from the working tree, so the harvest runs fine before the GA commit; untracked files (`web/dist`) are invisible to the flake, which is why the derivations build the bundles in `preBuild`.
 
 ## Invariants
 

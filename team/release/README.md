@@ -104,6 +104,7 @@ New agents should also read [`.agents/playbook.md`](../../.agents/playbook.md), 
 - [release-v0.83.0](release-v0.83.0.md) - one searchable command launcher across every Chan surface and a first extension surface; the gateway security review's remainder with two of its own claims corrected; terminal secret masking; Kimi as a named submit agent; and a readiness gate for the team spawn poke.
 - [release-v0.83.1](release-v0.83.1.md) - the desktop renders the command deck inline instead of in a Tauri overlay window, the Computers scope resolves on desktop, and Escape releases a pending command instead of hanging the deck.
 - [release-v0.82.0](release-v0.82.0.md) - the safety release: every HTTP read path bounded and the indexer off the workspace lock, `cs tunnel` delivering the bytes it already read, a poisoned session lock no longer aborting the process, the terminal engine made visible and switchable, the legacy devserver window endpoint retired, plus seven empty-pane animations and a headless Nix package.
+- [release-v0.83.3](release-v0.83.3.md) - the retired command-launcher overlay removed end to end (launcher chords page-owned on every surface, `macOSPrivateApi` gone, ADR 0001 amended to the broker design), and the wall-clock timing tests made load-proof; v0.83.2 skipped.
 
 ## Conventions
 
