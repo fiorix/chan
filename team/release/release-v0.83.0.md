@@ -1,12 +1,14 @@
 # release-v0.83.0
 
-v0.83.0 delivers one searchable command launcher across every Chan surface, closes the gateway security review's remainder, masks secret-shaped values in the terminal, makes Kimi a named submit agent, and gates the team spawn poke on terminal readiness instead of a fixed sleep.
+v0.83.0 delivers one searchable command launcher across every Chan surface and a first extension surface, closes the gateway security review's remainder, masks secret-shaped values in the terminal, makes Kimi a named submit agent, and gates the team spawn poke on terminal readiness instead of a fixed sleep.
 
 The launcher took two attempts. The first put the deck in a reusable transparent Tauri overlay owned by the desktop process; it produced six defects in sequence and was withdrawn after hand-testing on macOS and Linux. The second renders the deck inline in the SPA that owns the focused window, with authority following the rendering SPA, and is what ships. See the retrospective.
 
 ## What shipped
 
 **One command launcher across every Chan surface.** A single searchable command deck, rendered inline by the SPA that owns the focused window, replaces a different action set reached through different code per surface. Authority follows the rendering SPA rather than being handed to the invoking page. The empty query opens a contextual deck ordering focused tab, pane and window actions before Computers actions; typed search may jump across nested levels while still stopping at every required argument and confirmation. This is the second implementation; the first is in the retrospective.
+
+**Extensions v1.** A TOML-declared extension runs as a supervised subprocess behind an iframe tab, with host capabilities, declared commands, and a proxied endpoint. The extension's endpoint and token are their own trust domain: chan hands the iframe the endpoint and otherwise stays out of the extension's auth.
 
 **The gateway security review's remainder landed, with two of its own claims corrected.** Entry-path failures are now registry-independent: method, Origin, Content-Type and the bounded one-field form are all validated before the registry is consulted, and every entry-specific 404 uses one JSON shape regardless of `Accept`. The original commit claimed that property but did not have it: two 404 constructors disagreed on whether they honored `Accept`, so an unauthenticated caller could distinguish "exactly one live devserver" from "none or several" by the response Content-Type alone, and the regression test passed only because none of its cases sent an `Accept` header. The identity SPA's new Content-Security-Policy also blocked the OAuth provider avatar the profile page renders and never proxies; `img-src` now admits it, and the policy test asserts the literal string rather than the constant it is generated from, so a weakened policy fails. Two further findings were investigated and dismissed against the deployed configuration rather than patched: the tightened `X-Forwarded-For` parse is correct because the edge discards inbound XFF and emits a bare peer address, and the SPA's missing `nosniff` and `Referrer-Policy` are supplied at the edge.
 
@@ -22,9 +24,7 @@ The launcher took two attempts. The first put the deck in a reusable transparent
 
 ## What did not ship
 
-**Seven items move to v0.84.0.** Six were never picked up: `cs-open-non-text-reveal`, `hybrid-nav-staged-editor-bubble`, `terminal-tab-rename-reaches-inventory`, `terminal-editor-appearance-settings`, `large-transfer-capability`, and `web-marketing-onboarding`.
-
-The seventh is `extensions-v1`. Its implementation branch merges cleanly onto this release and its Rust tests pass, but its only end-to-end coverage, browser-smoke check 122, fails deterministically on a host where the harness is otherwise green: a control check passes in six seconds while 122 times out navigating, twice. That converts the check from unverified to failing, and the branch also carries scope authored on it that was never accepted into the item.
+**Six items move to v0.84.0**, none of them picked up during the round: `cs-open-non-text-reveal`, `hybrid-nav-staged-editor-bubble`, `terminal-tab-rename-reaches-inventory`, `terminal-editor-appearance-settings`, `large-transfer-capability`, and `web-marketing-onboarding`.
 
 ## Team and process
 
