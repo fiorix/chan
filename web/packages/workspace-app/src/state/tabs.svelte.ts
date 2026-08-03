@@ -2043,19 +2043,11 @@ export function dismissTerminalEnvironmentPrompt(tab: TerminalTab): void {
   tab.terminalEnvNamePromptDismissed = true;
 }
 
-export function dismissTerminalEnvNamePrompt(tab: TerminalTab): void {
-  dismissTerminalEnvironmentPrompt(tab);
-}
-
 export function markTerminalEnvironmentRestarted(tab: TerminalTab): void {
   tab.terminalEnvTabName = terminalTabName(tab);
   tab.terminalEnvTabGroup = terminalTabGroup(tab);
   tab.terminalEnvNamePromptDismissed = false;
   tab.terminalEnvPromptDismissedFor = undefined;
-}
-
-export function markTerminalEnvNameRestarted(tab: TerminalTab): void {
-  markTerminalEnvironmentRestarted(tab);
 }
 
 export function setTerminalBroadcastEnabled(tab: TerminalTab, enabled: boolean): void {

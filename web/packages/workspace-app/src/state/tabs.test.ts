@@ -79,7 +79,7 @@ import {
   registerTerminalInputSink,
   resolveDraftClose,
   markLocalTabDrop,
-  markTerminalEnvNameRestarted,
+  markTerminalEnvironmentRestarted,
   moveActiveTabToSide,
   moveTab,
   reattachTerminalInPane,
@@ -2801,7 +2801,7 @@ describe("terminal session serialization", () => {
     resolveTerminalMetadataRename("term_123", "third", "new-group");
     expect(terminalEnvironmentPromptDismissed(live)).toBe(false);
 
-    markTerminalEnvNameRestarted(live);
+    markTerminalEnvironmentRestarted(live);
     expect(terminalStaleEnvironmentVariables(live)).toEqual([]);
   });
 

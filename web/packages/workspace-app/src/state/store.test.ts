@@ -966,6 +966,45 @@ describe("window commands", () => {
     expect(richPrompt.byTab["term-1"]).toBe(true);
   });
 
+  test("survey targeting matches only the settled live terminal name", async () => {
+    window.history.replaceState(null, "", "/?w=window-a");
+    setTerminalLayout({
+      title: "LiveTarget",
+      terminalEnvTabName: "SpawnTarget",
+    });
+
+    onWatchEvent({
+      type: "window_command",
+      window_id: "window-a",
+      command: "open_survey",
+      tabName: "SpawnTarget",
+      survey: {
+        surveyId: "survey-spawn-alias",
+        title: null,
+        bodyMarkdown: "Must not target the terminal",
+        options: ["A"],
+      },
+    });
+    await Promise.resolve();
+    expect(surveyFor("term-1")).toBeNull();
+    expect(surveyFor(null)?.surveyId).toBe("survey-spawn-alias");
+
+    onWatchEvent({
+      type: "window_command",
+      window_id: "window-a",
+      command: "open_survey",
+      tabName: "LiveTarget",
+      survey: {
+        surveyId: "survey-live-name",
+        title: null,
+        bodyMarkdown: "Target the live terminal",
+        options: ["B"],
+      },
+    });
+    await Promise.resolve();
+    expect(surveyFor("term-1")?.surveyId).toBe("survey-live-name");
+  });
+
   test("close_survey without tabName closes only the window-wide group survey", async () => {
     window.history.replaceState(null, "", "/?w=window-a");
     setTerminalLayout({ title: "@@Target" });

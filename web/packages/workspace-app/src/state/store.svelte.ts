@@ -1460,13 +1460,10 @@ async function respondClipboardWrite(
 
 /// Resolve a survey's target `tabName` (a terminal's `--tab-name`) to the SPA
 /// tab id its per-terminal overlay renders on, or null when no terminal matches
-/// (the survey then uses the window-wide fallback). Matches the stable session
-/// name ($CHAN_TAB_NAME / terminalEnvTabName) first, then the display title (so
-/// it still resolves before a rename's env name catches up).
+/// (the survey then uses the window-wide fallback). The display title is the
+/// server-settled live name used by every by-name operation.
 function terminalSlotForName(name: string): string | null {
-  const t = allTerminalTabs().find(
-    (tab) => tab.terminalEnvTabName === name || tab.title === name,
-  );
+  const t = allTerminalTabs().find((tab) => tab.title === name);
   return t?.id ?? null;
 }
 
