@@ -57,7 +57,7 @@ afterEach(() => {
   library.leaders = {};
 });
 
-describe("WindowRow self-managed EYE", () => {
+describe("WindowRow self-managed actions", () => {
   it("renders OPEN plus a leader-allowed HIDE toggle when leaderless", () => {
     const el = render(win({ window_id: "w", library_id: "local" }));
     expect(el.querySelector('[aria-label="Open window"]')).not.toBeNull();
@@ -78,6 +78,19 @@ describe("WindowRow self-managed EYE", () => {
     const el = render(win({ window_id: "w", library_id: "local" }));
     const hide = el.querySelector('[aria-label="Hide window"]') as HTMLButtonElement;
     expect(hide.disabled).toBe(true);
+  });
+
+  it("does not expose terminal caption editing to a follower", () => {
+    library.leaders = { p: "w-other-leader" };
+    const el = render(
+      win({
+        window_id: "w",
+        library_id: "local",
+        label: "shared text",
+      }),
+    );
+    expect(el.textContent).toContain("Terminal Window 1 [shared text]");
+    expect(el.querySelector('button[title="Add or edit window text"]')).toBeNull();
   });
 
   it("the toggle drives setWindowVisibility (the /visibility web op)", async () => {

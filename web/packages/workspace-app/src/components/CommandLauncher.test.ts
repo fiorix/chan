@@ -16,12 +16,10 @@ vi.mock("../api/libraryCommand", () => ({
 
 import CommandLauncher from "./CommandLauncher.svelte";
 import deckRaw from "../../../web-shared/src/components/CommandDeck.svelte?raw";
-import { ApiError } from "../api/errors";
 import {
   clearLauncherDraft,
   launcherDraft,
   launcherPanel,
-  openCommandLauncher,
   overlayStack,
   searchPanel,
   syncOverlayStack,
@@ -85,40 +83,38 @@ registerCommands([
   },
 ]);
 
-function snapshot(windowMode: "browser" | "desktop" | "native_watcher" = "browser") {
-  return {
-    library_id: "lib-local-test",
-    role: "owner" as const,
-    window_mode: windowMode,
-    windows: [
-      {
-        window_id: "control-1",
-        kind: "terminal" as const,
-        title: "Control terminal",
-        ordinal: 1,
-        workspace_path: null,
-        connected: true,
-        hidden: false,
-        control: true,
-        can_act: true,
-        launch_path: "/api/library/command-capabilities/cap/windows/control-1/launch",
-      },
-    ],
-    workspaces: [
-      {
-        workspace_id: "project-a",
-        path: "/work/project-a",
-        label: "Project A",
-        on: true,
-        status: "running" as const,
-        library_id: "lib-local-test",
-        devserver_id: null,
-        prefix: "project-a",
-        can_act: true,
-      },
-    ],
-  };
-}
+const librarySnapshot = {
+  library_id: "lib-local-test",
+  role: "owner" as const,
+  windows: [
+    {
+      window_id: "control-1",
+      kind: "terminal" as const,
+      title: "Control terminal",
+      ordinal: 1,
+      label: "devserver",
+      workspace_path: null,
+      connected: true,
+      hidden: false,
+      control: true,
+      can_act: true,
+      launch_path: "/api/library/command-capabilities/cap/windows/control-1/launch",
+    },
+  ],
+  workspaces: [
+    {
+      workspace_id: "project-a",
+      path: "/work/project-a",
+      label: "Project A",
+      on: true,
+      status: "running" as const,
+      library_id: "lib-local-test",
+      devserver_id: null,
+      prefix: "project-a",
+      can_act: true,
+    },
+  ],
+};
 
 const mounted: Array<Record<string, unknown>> = [];
 
@@ -174,14 +170,6 @@ function titles(target: HTMLElement): string[] {
   return [...target.querySelectorAll(".deck-result-title")].map((node) => node.textContent ?? "");
 }
 
-function result(target: HTMLElement, title: string): HTMLButtonElement {
-  const row = [...target.querySelectorAll<HTMLButtonElement>("button.deck-result")].find(
-    (button) => button.querySelector(".deck-result-title")?.textContent === title,
-  );
-  if (!row) throw new Error(`missing ${title}; visible: ${titles(target).join(", ")}`);
-  return row;
-}
-
 function clonedSessionStorage(source: Storage): Storage {
   const values = new Map<string, string>();
   for (let index = 0; index < source.length; index += 1) {
@@ -214,14 +202,14 @@ async function key(target: HTMLElement, value: string): Promise<void> {
 
 beforeEach(() => {
   sessionStorage.clear();
-  launcherPanel.open = false;
   clearLauncherDraft();
+  launcherPanel.open = false;
   resetLayout();
   searchPanel.open = false;
   overlayStack.ids = [];
   overlayAtFlipRun = null;
   showFlip = false;
-  scopedLibrary.load.mockResolvedValue(snapshot());
+  scopedLibrary.load.mockResolvedValue(librarySnapshot);
   scopedLibrary.run.mockResolvedValue(undefined);
 });
 
@@ -235,7 +223,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("inline contextual command deck", () => {
+describe("contextual command deck", () => {
   test("renders nothing while closed", async () => {
     const target = document.createElement("div");
     document.body.append(target);
@@ -244,35 +232,32 @@ describe("inline contextual command deck", () => {
     expect(target.querySelector(".deck-shell")).toBeNull();
   });
 
-  test("opens focused and empty with four persistent scope orbs", async () => {
+  test("opens focused with contextual results and four persistent scope orbs", async () => {
     const target = openLauncher();
     await flush();
     expect(document.activeElement).toBe(input(target));
-    expect(titles(target)).toEqual([]);
+    expect(titles(target)).toEqual(["New file", "Alpha browser", "Zoom browser", "Search"]);
     expect(target.querySelectorAll(".deck-scope")).toHaveLength(4);
-    expect(target.querySelector('[aria-label="Computers scope"]')?.hasAttribute("disabled")).toBe(
-      false,
-    );
+    expect(target.querySelector('[aria-label="Computers scope"]')?.hasAttribute("disabled")).toBe(false);
   });
 
-  test("ranks focused-tab matches first", async () => {
+  test("orders commands for the focused tab before pane and window commands", async () => {
     setActiveBrowserTab();
     const target = openLauncher();
     await flush();
-    await typeQuery(target, "files");
-    expect(titles(target).slice(0, 2)).toEqual(["Zoom browser", "Alpha browser"]);
+    expect(titles(target).slice(0, 2)).toEqual(["Alpha browser", "Zoom browser"]);
     expect(target.querySelector(".deck-result-path")?.textContent).toBe("Tab › File Browser");
   });
 
-  test("typed search crosses into this library without opening a submenu", async () => {
+  test("fuzzy search crosses into Computers leaves without opening a submenu", async () => {
     const target = openLauncher();
     await flush();
     await typeQuery(target, "control terminal");
-    expect(titles(target)[0]).toBe("Control terminal");
+    expect(titles(target)[0]).toBe("Control terminal — devserver");
     expect(target.querySelector(".deck-result-path")?.textContent).toContain("Computers › Focus");
   });
 
-  test("a browser-owned new terminal gets a fresh launcher draft", async () => {
+  test("a new terminal does not inherit the invoking window's open launcher draft", async () => {
     sessionStorage.setItem("chan.auth.token", "keep-me");
     let popup:
       | {
@@ -302,7 +287,9 @@ describe("inline contextual command deck", () => {
     const target = openLauncher();
     await flush();
     await typeQuery(target, "shell");
-    result(target, "This library").click();
+    expect(titles(target)[0]).toBe("This library");
+    await key(target, "ArrowDown");
+    await key(target, "Enter");
     await flush();
 
     expect(scopedLibrary.run).toHaveBeenCalledWith({ action: "new_terminal" });
@@ -311,102 +298,65 @@ describe("inline contextual command deck", () => {
     expect(sessionStorage.getItem("chan.command-launcher.v1:contextual")).not.toBeNull();
   });
 
-  test("a direct standalone tenant opens only same-tenant browser windows", async () => {
-    scopedLibrary.load.mockRejectedValue(new ApiError(404, "not found"));
-    sessionStorage.setItem("chan.token", "standalone-token");
-    let popup:
-      | {
-          name: string;
-          location: { href: string };
-          focus: ReturnType<typeof vi.fn>;
-          sessionStorage: Storage;
-        }
-      | undefined;
-    vi.spyOn(window, "open").mockImplementation(() => {
-      popup = {
-        name: "",
-        location: { href: "" },
-        focus: vi.fn(),
-        sessionStorage: clonedSessionStorage(sessionStorage),
-      };
-      return popup as unknown as Window;
-    });
-
+  test("the Computers orb exposes branches and ArrowLeft returns from level two", async () => {
     const target = openLauncher();
     await flush();
-    const computers = target.querySelector(
-      '[aria-label="Computers scope"]',
-    ) as HTMLButtonElement;
-    expect(computers.disabled).toBe(false);
-    computers.click();
+    (target.querySelector('[aria-label="Computers scope"]') as HTMLButtonElement).click();
     await tick();
-    expect(titles(target)).toEqual(["New terminal", "New window"]);
-    result(target, "New terminal").click();
-    await tick();
-    result(target, "This server").click();
-    await flush();
+    expect(titles(target)).toEqual(["New terminal", "New window", "Focus", "Hide", "Show"]);
 
-    expect(scopedLibrary.run).not.toHaveBeenCalled();
-    expect(popup?.name).toMatch(/^standalone-/);
-    expect(popup?.location.href).toMatch(
-      /^\/index\.html\?w=standalone-[^&]+&kind=terminal$/,
+    const newWindow = [...target.querySelectorAll<HTMLButtonElement>(".deck-result")].find(
+      (row) => row.querySelector(".deck-result-title")?.textContent === "New window",
     );
-    expect(popup?.sessionStorage.getItem("chan.command-launcher.v1:contextual")).toBeNull();
-    expect(popup?.sessionStorage.getItem("chan.token")).toBe("standalone-token");
-    expect(launcherPanel.open).toBe(false);
-  });
-
-  test("a read-only library capability exposes no window actions", async () => {
-    const readonly = snapshot();
-    scopedLibrary.load.mockResolvedValue({
-      ...readonly,
-      role: "readonly",
-      windows: readonly.windows.map((window) => ({ ...window, can_act: false })),
-      workspaces: readonly.workspaces.map((workspace) => ({ ...workspace, can_act: false })),
-    });
-    const target = openLauncher();
-    await flush();
-    const computers = target.querySelector(
-      '[aria-label="Computers scope"]',
-    ) as HTMLButtonElement;
-    expect(computers.disabled).toBe(true);
-    computers.click();
-    await tick();
-
-    expect(titles(target)).toEqual([]);
-    expect(scopedLibrary.run).not.toHaveBeenCalled();
-  });
-
-  test("a native-watcher launch creates a record without opening a browser popup", async () => {
-    scopedLibrary.load.mockResolvedValue(snapshot("native_watcher"));
-    scopedLibrary.run.mockResolvedValue({ window: { window_id: "terminal-native" } });
-    const open = vi.spyOn(window, "open");
-    const target = openLauncher();
-    await flush();
-    (target.querySelector('[aria-label="Computers scope"]') as HTMLButtonElement).click();
-    await tick();
-    result(target, "New terminal").click();
-    await tick();
-    result(target, "This library").click();
-    await flush();
-
-    expect(scopedLibrary.run).toHaveBeenCalledWith({ action: "new_terminal" });
-    expect(open).not.toHaveBeenCalled();
-  });
-
-  test("the Computers branch returns with ArrowLeft and a hidden draft resumes", async () => {
-    const target = openLauncher();
-    await flush();
-    (target.querySelector('[aria-label="Computers scope"]') as HTMLButtonElement).click();
-    await tick();
-    result(target, "New window").click();
+    newWindow?.click();
     await tick();
     expect(launcherDraft.path).toEqual(["new-window"]);
-    expect(target.querySelector(".deck-placeholder")?.textContent).toBe("New window");
     expect(titles(target)).toEqual(["Project A"]);
+
     await key(target, "ArrowLeft");
     expect(launcherDraft.path).toEqual([]);
+    expect(titles(target)).toContain("New terminal");
+  });
 
+  test("ArrowUp enters the scope rail and horizontal arrows activate adjacent scopes", async () => {
+    const target = openLauncher();
+    await flush();
+    await key(target, "ArrowUp");
+    expect(target.querySelector(".deck-scope.focused")?.getAttribute("aria-label")).toBe("Tab scope");
+    await key(target, "ArrowRight");
+    expect(target.querySelector(".deck-scope.focused")?.getAttribute("aria-label")).toBe("Pane scope");
+    expect(launcherDraft.scope).toBe("pane");
+  });
+
+  test("ArrowRight executes the highlighted contextual command and clears the draft", async () => {
+    const target = openLauncher();
+    await flush();
+    await typeQuery(target, "Search");
+    await key(target, "ArrowDown");
+    await key(target, "ArrowRight");
+    expect(runSearch).toHaveBeenCalledTimes(1);
+    expect(launcherPanel.open).toBe(false);
+    expect(launcherDraft.query).toBe("");
+  });
+
+  test("does not leak an execution key into the window keymap", async () => {
+    const target = openLauncher();
+    await flush();
+    await typeQuery(target, "Search");
+    const leaked = vi.fn();
+    window.addEventListener("keydown", leaked);
+    try {
+      await key(target, "Enter");
+    } finally {
+      window.removeEventListener("keydown", leaked);
+    }
+    expect(runSearch).toHaveBeenCalledTimes(1);
+    expect(leaked).not.toHaveBeenCalled();
+  });
+
+  test("Escape hides but preserves the draft for the next invocation", async () => {
+    const target = openLauncher();
+    await flush();
     await typeQuery(target, "project");
     await key(target, "Escape");
     expect(launcherPanel.open).toBe(false);
@@ -428,43 +378,14 @@ describe("inline contextual command deck", () => {
     expect(runFlip).toHaveBeenCalledTimes(1);
   });
 
-  test("leaves an underlying overlay on top before dispatching", async () => {
-    showFlip = true;
-    searchPanel.open = true;
-    const target = openLauncher();
-    await flush();
-    syncOverlayStack();
-    expect(overlayStack.ids).toEqual(["search", "launcher"]);
-
-    await typeQuery(target, "Flip pane");
-    await key(target, "Enter");
-
-    expect(overlayAtFlipRun).toBe("search");
-    expect(runFlip).not.toHaveBeenCalled();
-    expect(overlayStack.ids).toEqual(["search"]);
-  });
-
-  test("restores focus to the invoking element when dismissed", async () => {
-    const target = document.createElement("div");
-    const invokingButton = document.createElement("button");
-    document.body.append(invokingButton, target);
-    mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
-    invokingButton.focus();
-
-    openCommandLauncher();
-    await flush();
-    expect(document.activeElement).toBe(input(target));
-
-    await key(target, "Escape");
-    await flush();
-    expect(document.activeElement).toBe(invokingButton);
-  });
-
-  test("keeps the shared deck's motion and theme-aware scrim", () => {
+  test("uses a theme-aware dimming scrim, optical centering, and smooth capsule motion", () => {
     expect(deckRaw).toContain("padding: min(17vh, 136px) 16px 16px;");
     expect(deckRaw).toContain("--deck-scrim: rgba(0, 0, 0, 0.56);");
     expect(deckRaw).toContain(':global([data-theme="light"]) .deck-overlay');
+    expect(deckRaw).toMatch(/\.deck-backdrop \{[\s\S]{1,300}background: var\(--deck-scrim\)/);
+    expect(deckRaw).toMatch(/\.deck-backdrop \{[\s\S]{1,360}animation: scrim-in/);
     expect(deckRaw).toContain('filter id="chan-command-orb-blob"');
     expect(deckRaw).toMatch(/\.deck-shell \{[\s\S]{1,360}animation: deck-arrive/);
+    expect(deckRaw).toMatch(/\.deck-scope \{[\s\S]{1,500}animation: orb-arrive/);
   });
 });

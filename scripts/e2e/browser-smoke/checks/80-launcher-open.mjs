@@ -11,20 +11,23 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+const LAUNCHER_SELECTOR = '[role="dialog"][aria-label="Command launcher"]';
+const LAUNCHER_INPUT_SELECTOR = `${LAUNCHER_SELECTOR} input[role="combobox"]`;
+
 async function raiseLauncher(page) {
   await page.keyboard.down("Control");
   await page.keyboard.down("Alt");
   await page.keyboard.press("KeyK");
   await page.keyboard.up("Alt");
   await page.keyboard.up("Control");
-  await page.waitForSelector(".launcher .search", { timeout: 10_000 });
+  await page.waitForSelector(LAUNCHER_INPUT_SELECTOR, { timeout: 10_000 });
 }
 
 async function launcherRun(page, query) {
   await raiseLauncher(page);
-  await page.type(".launcher .search", query);
+  await page.type(LAUNCHER_INPUT_SELECTOR, query);
   // The top Results row is auto-highlighted; wait for it, then Enter.
-  await page.waitForSelector(".launcher .results .row", { timeout: 10_000 });
+  await page.waitForSelector(`${LAUNCHER_SELECTOR} [role="option"]`, { timeout: 10_000 });
   await page.keyboard.press("Enter");
 }
 

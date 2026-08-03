@@ -11,9 +11,9 @@
   import Gateways from "./components/Gateways.svelte";
   import NewWorkspaceDialog from "./components/NewWorkspaceDialog.svelte";
   import ConfirmDialog from "./components/ConfirmDialog.svelte";
+  import CommandLauncher from "./components/CommandLauncher.svelte";
   import Modal from "./components/Modal.svelte";
   import NoticeBubbles from "./components/NoticeBubbles.svelte";
-  import CommandLauncher from "./components/CommandLauncher.svelte";
   import { library, loadLibrary, reportError, resync } from "./state/library.svelte";
   import { pushNotice, type Notice } from "./state/notices.svelte";
   import { dialog } from "./state/dialog.svelte";
@@ -26,14 +26,19 @@
     pruneControlAttention,
     resolvePendingControlAttention,
   } from "./state/controlAttention.svelte";
-  import { onTauriEvent, restartDesktopAfterUpdate } from "./api/desktop";
-  import { applyTheme, reconcileLocalTheme } from "./state/theme.svelte";
+  import {
+    isNativeCommandOverlay,
+    onTauriEvent,
+    restartDesktopAfterUpdate,
+  } from "./api/desktop";
+  import { applyTheme, reconcileLocalTheme, watchLocalTheme } from "./state/theme.svelte";
   import { reconcileCollapsedMachines } from "./state/machineCollapse.svelte";
-  import { readOnly } from "./state/capabilities";
+  import { hasDesktopBridge, readOnly } from "./state/capabilities";
 
   let updateReadyVersion: string | null = $state(null);
   let updateRestarting = $state(false);
   let updateError: string | null = $state(null);
+  const commandOverlay = isNativeCommandOverlay();
 
   type DesktopUpdateReadyPayload = {
     version: string;
@@ -57,11 +62,15 @@
   }
 
   onMount(() => {
+    document.documentElement.classList.toggle("chan-command-overlay", commandOverlay);
     applyTheme();
     // Reconcile the first-paint localStorage theme with the authoritative
     // desktop-config value, so a cleared WebView store or a second writer can
     // never leave the launcher and the local terminals on different themes.
     void reconcileLocalTheme();
+    // The native command deck is its own webview. Follow the desktop theme
+    // feed so a switch made there updates this Computers window immediately.
+    const unwatchLocalTheme = hasDesktopBridge && !commandOverlay ? watchLocalTheme() : null;
     // Same reconcile for the per-machine collapse set: localStorage is a
     // first-paint cache, the desktop config is authoritative (a desktop restart
     // gets a fresh loopback origin, so localStorage alone cannot survive it).
@@ -106,12 +115,14 @@
       unlistenNotice = un;
     });
     return () => {
+      document.documentElement.classList.remove("chan-command-overlay");
       unlistenAttention?.();
       unlistenRestored?.();
       unlistenUpdate?.();
       unlistenAuthError?.();
       unlistenAuthChanged?.();
       unlistenNotice?.();
+      unwatchLocalTheme?.();
     };
   });
 
@@ -138,6 +149,9 @@
   });
 </script>
 
+{#if commandOverlay}
+  <CommandLauncher nativeOverlay />
+{:else}
 <TopBar />
 
 <main class="content" class:with-bulk-bar={!readOnly && checksVisible()}>
@@ -154,10 +168,13 @@
 
 {#if !readOnly}
   <SelectionBar />
-  <CommandLauncher />
 {/if}
 
 <NoticeBubbles />
+
+{#if !readOnly}
+  <CommandLauncher />
+{/if}
 
 {#if dialog.open}
   <NewWorkspaceDialog />
@@ -195,6 +212,7 @@
       </button>
     </div>
   </Modal>
+{/if}
 {/if}
 
 <style>

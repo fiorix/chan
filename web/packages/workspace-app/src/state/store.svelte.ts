@@ -3120,9 +3120,11 @@ export const searchPanel = $state<{
 
 // ---- command launcher overlay ------------------------------------------
 //
-// The launcher keeps one per-tab serializable draft in sessionStorage. The
-// compatibility accessors preserve the `.open` / `.query` API used by App's
-// overlay stack while the shared command deck receives the full draft.
+// The inline browser launcher keeps one per-tab draft in sessionStorage. The
+// accessors preserve the long-standing `.open` / `.query` API used by the
+// overlay stack while the shared deck receives the complete serializable draft.
+// A reload recreates this module and restores visibility, query, scope, path,
+// selection, and recoverable operation state. Closing the browser tab drops it.
 const LAUNCHER_DRAFT_KEY = "chan.command-launcher.v1:contextual";
 export const launcherDraft = $state<DeckDraft>(
   loadSessionDeckDraft(LAUNCHER_DRAFT_KEY, "contextual"),
@@ -3656,6 +3658,10 @@ export function resolveSpawnContext(): SpawnContext {
     case "dashboard":
       // Dashboard carries no path context; spawn from here lands at
       // workspace root.
+      return { dir: "" };
+    case "extension":
+      // Extensions are external surfaces and carry no workspace path
+      // context. Spawn from the workspace root.
       return { dir: "" };
   }
 }

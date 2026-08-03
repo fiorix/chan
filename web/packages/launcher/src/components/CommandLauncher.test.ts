@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 
-import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { flushSync, mount, tick, unmount } from "svelte";
 
 const actions = vi.hoisted(() => ({
+  close: vi.fn(),
   focus: vi.fn(),
   newTerminal: vi.fn(),
   newWorkspace: vi.fn(),
@@ -16,11 +17,12 @@ vi.mock("../api/backend", async () => {
   return { backend: mockApi };
 });
 
-vi.mock("../state/capabilities", () => ({
-  surface: "desktop",
+vi.mock("../state/capabilities", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/capabilities")>()),
+  surface: "devserver",
   canMutateRegistry: true,
-  hasDesktopBridge: true,
-  selfManagedWindows: false,
+  hasDesktopBridge: false,
+  selfManagedWindows: true,
   readOnly: false,
   hostOs: "linux",
 }));
@@ -28,6 +30,7 @@ vi.mock("../state/capabilities", () => ({
 vi.mock("../state/computerActions", () => ({
   canManageWindow: () => true,
   canOpenWorkspaceWindow: () => true,
+  closeComputerWindow: actions.close,
   connectComputer: vi.fn(),
   focusComputerWindow: actions.focus,
   newTerminal: actions.newTerminal,
@@ -37,9 +40,10 @@ vi.mock("../state/computerActions", () => ({
 }));
 
 import CommandLauncher from "./CommandLauncher.svelte";
-import type { DevserverEntry, WindowRecord, WorkspaceEntry } from "../api/library";
+import type { WindowRecord, WorkspaceEntry } from "../api/library";
 import { library } from "../state/library.svelte";
 import {
+  activeCommandLauncherDraft,
   clearCommandLauncherDraft,
   closeCommandLauncher,
   commandLauncher,
@@ -55,17 +59,18 @@ const workspace: WorkspaceEntry = {
   label: "Project",
   on: true,
   status: "running",
-  library_id: "local",
+  library_id: "lib-local-live-shape",
   devserver_id: null,
   prefix: "ws-project",
 };
 
 const windowRecord: WindowRecord = {
   window_id: "w-project-1",
-  library_id: "local",
+  library_id: "lib-local-live-shape",
   kind: "workspace",
   title: "⌂ /work/project Window 1",
   ordinal: 1,
+  label: "release checks",
   workspace_path: "/work/project",
   prefix: "ws-project",
   token: "token",
@@ -76,36 +81,17 @@ const windowRecord: WindowRecord = {
 
 const terminalRecord: WindowRecord = {
   window_id: "w-terminal-2",
-  library_id: "local",
+  library_id: "lib-local-live-shape",
   kind: "terminal",
   title: "⌂ Terminal Window 2",
   ordinal: 2,
+  label: "deploy shell",
   workspace_path: null,
   prefix: "terminal",
   token: "token",
   persisted: true,
   connected: true,
   control: true,
-};
-
-const remote: DevserverEntry = {
-  id: "remote-1",
-  url: "http://devbox:8787",
-  host: "devbox",
-  port: 8787,
-  label: "Dev box",
-  script: "",
-  has_token: true,
-  library_id: "lib-remote",
-  status: "connected",
-  pending_signin: false,
-  auto_hide_control: false,
-  os: "linux",
-  pretty_name: "Linux",
-  gateway_id: null,
-  gateway_url: "",
-  shared: false,
-  native_trust_required: false,
 };
 
 let target: HTMLElement;
@@ -157,8 +143,10 @@ beforeEach(() => {
   library.leaders = {};
   screen.current = "computers";
   screen.flips = 0;
+  commandLauncher.entryMode = "computers";
+  clearCommandLauncherDraft("contextual");
+  clearCommandLauncherDraft("computers");
   closeCommandLauncher();
-  clearCommandLauncherDraft();
   app = mount(CommandLauncher, { target }) as Record<string, unknown>;
 });
 
@@ -169,8 +157,8 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("Computers inline command deck", () => {
-  it("opens from the desktop chord without a native overlay", () => {
+describe("Computers command deck", () => {
+  it("opens from the web chord with the clean root action set", () => {
     window.dispatchEvent(
       new KeyboardEvent("keydown", {
         key: "k",
@@ -181,32 +169,40 @@ describe("Computers inline command deck", () => {
       }),
     );
     flushSync();
-    expect(commandLauncher.draft.visible).toBe(true);
-    expect(result("New terminal")).toBeTruthy();
-    expect(result("New window")).toBeTruthy();
-    expect(result("Focus")).toBeTruthy();
-    expect(target.querySelectorAll(".deck-scope")).toHaveLength(1);
+    expect(activeCommandLauncherDraft().visible).toBe(true);
+    for (const title of ["New terminal", "New window", "Focus", "Hide", "Show"]) {
+      expect(result(title)).toBeTruthy();
+    }
+    expect(target.querySelectorAll(".deck-scope")).toHaveLength(4);
   });
 
-  it("deep-searches the control terminal and focuses its exact record", async () => {
-    openCommandLauncher();
+  it("does not expose the Desktop theme command on a devserver", async () => {
+    openCommandLauncher("computers");
     flushSync();
-    await query("focus control terminal");
+    await query("theme");
+    const titles = [...target.querySelectorAll(".deck-result-title")].map(
+      (node) => node.textContent,
+    );
+    expect(titles).not.toContain("Switch to light theme");
+    expect(titles).not.toContain("Switch to dark theme");
+  });
+
+  it("deep-searches a control terminal note and focuses that exact record", async () => {
+    openCommandLauncher("computers");
+    flushSync();
+    await query("focus deploy shell");
     result("Control terminal").click();
     await settle();
-    expect(actions.focus).toHaveBeenCalledWith(
-      expect.objectContaining({ window_id: "w-terminal-2" }),
-    );
+    expect(actions.focus).toHaveBeenCalledWith(expect.objectContaining({ window_id: "w-terminal-2" }));
   });
 
-  it("uses branches for hide and show", async () => {
-    openCommandLauncher();
+  it("uses branches for Hide and Show, with ArrowLeft returning to root", async () => {
+    openCommandLauncher("computers");
     flushSync();
-    await query("hide");
     result("Hide").click();
     await tick();
-    expect(commandLauncher.draft.path).toEqual(["hide"]);
-    result("Window 1").click();
+    expect(activeCommandLauncherDraft().path).toEqual(["hide"]);
+    result("Window 1 [release checks]").click();
     await settle();
     expect(actions.setShown).toHaveBeenCalledWith(
       expect.objectContaining({ window_id: "w-project-1" }),
@@ -214,79 +210,44 @@ describe("Computers inline command deck", () => {
     );
 
     library.windows = [{ ...windowRecord, hidden: true }];
-    openCommandLauncher();
+    openCommandLauncher("computers");
     flushSync();
-    await query("show");
     result("Show").click();
     await tick();
-    result("Window 1").click();
-    await settle();
-    expect(actions.setShown).toHaveBeenLastCalledWith(
-      expect.objectContaining({ window_id: "w-project-1" }),
-      true,
-    );
+    await key("ArrowLeft");
+    expect(activeCommandLauncherDraft().path).toEqual([]);
+    expect(result("Show")).toBeTruthy();
   });
 
-  it("selects the first target after a pointer-opened branch replaces the list", async () => {
-    openCommandLauncher();
+  it("keeps destructive Close inside the keyboard-visible confirmation", async () => {
+    openCommandLauncher("computers");
     flushSync();
-    result("Focus").click();
+    await query("close");
+    result("Close").click();
     await tick();
-
-    expect(target.querySelector("button.deck-result")?.getAttribute("aria-selected")).toBe(
-      "true",
+    result("Window 1 [release checks]").click();
+    await tick();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain("Close Window 1 [release checks]?");
+    expect(actions.close).not.toHaveBeenCalled();
+    const confirm = [...target.querySelectorAll<HTMLButtonElement>(".deck-decisions button")].find(
+      (button) => button.textContent === "Close",
     );
+    confirm?.click();
+    await settle();
+    expect(actions.close).toHaveBeenCalledWith(expect.objectContaining({ window_id: "w-project-1" }));
   });
 
-  it("opens a local running workspace from the New window submenu", async () => {
-    openCommandLauncher();
+  it("opens a running workspace from the New window submenu", async () => {
+    openCommandLauncher("computers");
     flushSync();
     result("New window").click();
     await tick();
     result("Project").click();
     await settle();
-    expect(actions.newWorkspace).toHaveBeenCalledWith(
-      expect.objectContaining({ path: "/work/project" }),
-    );
+    expect(actions.newWorkspace).toHaveBeenCalledWith(expect.objectContaining({ path: "/work/project" }));
   });
 
-  it("offers connected-devserver terminals from the aggregate SPA", async () => {
-    library.devservers = [{ ...remote }];
-    openCommandLauncher();
-    flushSync();
-    result("New terminal").click();
-    await tick();
-    result("Dev box").click();
-    await settle();
-    expect(actions.newTerminal).toHaveBeenCalledWith(expect.objectContaining({ id: "remote-1" }));
-  });
-
-  it("offers a connected-devserver workspace from the aggregate SPA", async () => {
-    library.devservers = [{ ...remote }];
-    library.workspaces = [
-      { ...workspace },
-      {
-        ...workspace,
-        workspace_id: "remote-project",
-        path: "/srv/remote-project",
-        label: "Remote project",
-        library_id: "lib-remote",
-        devserver_id: "remote-1",
-        prefix: "remote-project",
-      },
-    ];
-    openCommandLauncher();
-    flushSync();
-    result("New window").click();
-    await tick();
-    result("Remote project").click();
-    await settle();
-    expect(actions.newWorkspace).toHaveBeenCalledWith(
-      expect.objectContaining({ devserver_id: "remote-1", path: "/srv/remote-project" }),
-    );
-  });
-
-  it("dismisses as soon as a new terminal succeeds", async () => {
+  it("dismisses a typed keyboard launch as soon as the new terminal succeeds", async () => {
     let finishLaunch!: () => void;
     actions.newTerminal.mockImplementationOnce(
       () =>
@@ -294,58 +255,49 @@ describe("Computers inline command deck", () => {
           finishLaunch = resolve;
         }),
     );
-    openCommandLauncher();
+    openCommandLauncher("computers");
     flushSync();
-    result("New terminal").click();
-    await tick();
-    result("This machine").click();
-    await tick();
-    expect(commandLauncher.draft.visible).toBe(true);
+    await query("ter");
+
+    const rootTitles = [...target.querySelectorAll(".deck-result-title")].map(
+      (node) => node.textContent,
+    );
+    const branchIndex = rootTitles.indexOf("New terminal");
+    expect(branchIndex).toBeGreaterThanOrEqual(0);
+    for (let index = 0; index <= branchIndex; index += 1) await key("ArrowDown");
+    expect(target.querySelector(".deck-result.active .deck-result-title")?.textContent).toBe(
+      "New terminal",
+    );
+    await key("Enter");
+    expect(activeCommandLauncherDraft().path).toEqual(["new-terminal"]);
+    expect(result("This machine")).toBeTruthy();
+
+    await key("ArrowDown");
+    await key("Enter");
+    expect(actions.newTerminal).toHaveBeenCalledOnce();
+    expect(activeCommandLauncherDraft().visible).toBe(true);
     finishLaunch();
+    // Flush the nested action -> provider -> shared-deck promise chain without
+    // advancing the 260 ms success timer this regression is guarding against.
     for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
     await tick();
-    expect(commandLauncher.draft.visible).toBe(false);
-    expect(commandLauncher.draft.query).toBe("");
+
+    expect(activeCommandLauncherDraft().visible).toBe(false);
+    expect(activeCommandLauncherDraft().query).toBe("");
+    expect(target.querySelector('[role="dialog"]')).toBeNull();
   });
 
-  it("does not let a dismissed pending action close a reused deck", async () => {
-    let finishLaunch!: () => void;
-    actions.newTerminal.mockImplementationOnce(
-      () =>
-        new Promise<void>((resolve) => {
-          finishLaunch = resolve;
-        }),
-    );
-    openCommandLauncher();
+  it("Escape hides and preserves the current submenu until explicitly cleared", async () => {
+    openCommandLauncher("computers");
     flushSync();
-    result("New terminal").click();
-    await tick();
-    result("This machine").click();
-    await tick();
-    const dismiss = [...target.querySelectorAll<HTMLButtonElement>("button")].find(
-      (button) => button.textContent === "Dismiss",
-    );
-    expect(dismiss).toBeTruthy();
-    dismiss?.click();
-    await tick();
-
-    finishLaunch();
-    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
-    await tick();
-    expect(commandLauncher.draft.visible).toBe(true);
-    expect(commandLauncher.draft.operation).toBeNull();
-  });
-
-  it("Escape hides and preserves the current submenu", async () => {
-    openCommandLauncher();
-    flushSync();
-    result("New window").click();
+    await query("close");
+    result("Close").click();
     await tick();
     await key("Escape");
-    expect(commandLauncher.draft.visible).toBe(false);
-    expect(commandLauncher.draft.path).toEqual(["new-window"]);
-    openCommandLauncher();
+    expect(activeCommandLauncherDraft().visible).toBe(false);
+    expect(activeCommandLauncherDraft().path).toEqual(["close"]);
+    openCommandLauncher("computers");
     flushSync();
-    expect(result("Project")).toBeTruthy();
+    expect(result("Window 1 [release checks]")).toBeTruthy();
   });
 });

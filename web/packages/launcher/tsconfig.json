@@ -10,6 +10,11 @@
     "isolatedModules": true,
     "moduleDetection": "force",
     "moduleResolution": "bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@chan/web-shared/command-deck": ["../web-shared/src/command-deck/model.ts"],
+      "@chan/web-shared/CommandDeck.svelte": ["../web-shared/src/components/CommandDeck.svelte"]
+    },
     "strict": true,
     "noUncheckedIndexedAccess": false,
     "skipLibCheck": true,

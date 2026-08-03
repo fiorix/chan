@@ -302,6 +302,7 @@ mod tests {
             kind,
             title: "🏠 Terminal Window 1".into(),
             ordinal: 1,
+            label: String::new(),
             workspace_path: None,
             prefix: "/terminal".into(),
             token: "tok".into(),

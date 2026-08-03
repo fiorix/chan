@@ -13,6 +13,7 @@
 // `workspace_path`.
 
 export type WindowKind = "terminal" | "workspace";
+export const MAX_WINDOW_LABEL_CHARS = 64;
 
 /** Which surface minted a window: a chan-desktop native window, or a launcher
  * `window.open` target. Drives the desktop watcher's twin-window suppression so
@@ -29,6 +30,11 @@ export interface WindowRecord {
   title: string;
   /** Per-(kind, workspace/library) "Window N"; library-owned, persisted. */
   ordinal: number;
+  /** Optional user text appended to the generated Terminal Window N / Window N
+   * label. Empty values are omitted from the wire. Ordinary terminal and
+   * workspace windows expose this as inline-editable text; clients keep the
+   * generated ordinal separate. */
+  label?: string;
   /** kind=workspace: full root path. null for kind=terminal. */
   workspace_path: string | null;
   /** Route prefix of the tenant serving this window's content. */
@@ -376,6 +382,9 @@ export interface LibraryApi {
   /** Hide (bury) a window via the desktop window bridge, notification-free,
    * unlike the OS close button. Rejects with no desktop attached. */
   hideWindow(id: string): Promise<void>;
+  /** Permanently close a native window through the desktop bridge. The owning
+   * registry row is discarded; live local terminals retain the native confirm. */
+  closeWindow(id: string): Promise<void>;
   /** Discard (unpersist + reap) a window record: the web-op close, distinct from
    * the desktop `/hide` bridge and reachable bridgeless. A follower never calls
    * it. `actingWindowId` claims the caller's leader identity for the per-tenant
@@ -385,6 +394,8 @@ export interface LibraryApi {
    * desktop `/hide` bridge). `actingWindowId` is the same leader claim as
    * discardWindow. */
   setWindowVisibility(id: string, hidden: boolean, actingWindowId?: string): Promise<void>;
+  /** Persist optional user text beside a non-control window's generated label. */
+  setWindowLabel(id: string, label: string, actingWindowId?: string): Promise<void>;
 }
 
 /** A non-2xx response, carrying the status and the server's text body. */
@@ -585,6 +596,7 @@ export const liveApi: LibraryApi = {
     }),
   openWindow: (id) => req("POST", `/api/library/windows/${encodeURIComponent(id)}/open`),
   hideWindow: (id) => req("POST", `/api/library/windows/${encodeURIComponent(id)}/hide`),
+  closeWindow: (id) => req("POST", `/api/library/windows/${encodeURIComponent(id)}/close`),
   discardWindow: (id, actingWindowId) =>
     req(
       "DELETE",
@@ -595,6 +607,11 @@ export const liveApi: LibraryApi = {
   setWindowVisibility: (id, hidden, actingWindowId) =>
     req("POST", `/api/library/windows/${encodeURIComponent(id)}/visibility`, {
       hidden,
+      ...(actingWindowId ? { acting_window_id: actingWindowId } : {}),
+    }),
+  setWindowLabel: (id, label, actingWindowId) =>
+    req("PUT", `/api/library/windows/${encodeURIComponent(id)}/label`, {
+      label,
       ...(actingWindowId ? { acting_window_id: actingWindowId } : {}),
     }),
 };

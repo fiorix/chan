@@ -15,6 +15,7 @@ mod cs_link;
 pub(crate) mod doc;
 mod drafts;
 mod excluded_dirs;
+mod extensions;
 mod files;
 mod fonts;
 mod fs_graph;
@@ -68,6 +69,7 @@ pub use drafts::{
     api_create_diagram, api_create_draft, api_discard_draft, api_inspect_draft, api_promote_draft,
 };
 pub use excluded_dirs::{api_excluded_dirs_get, api_excluded_dirs_put};
+pub use extensions::{api_extensions, proxy_extension, proxy_extension_root};
 pub use files::{
     api_create_file, api_delete_file, api_fs_transfer, api_list_files, api_move, api_read_file,
     api_resolve_session_conflict, api_upload_file, api_write_file,
@@ -85,6 +87,7 @@ pub use index::{
     api_semantic_models, api_semantic_state,
 };
 pub use inspector::api_inspector;
+pub(crate) use library::require_local_mutation;
 pub use library::{launcher_router, LauncherBearer};
 pub use mentions::api_get_mentions;
 pub use metadata::{api_metadata_export, api_metadata_import};

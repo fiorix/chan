@@ -1,5 +1,5 @@
 // Smoke test: the launcher root mounts and renders its top bar with the
-// theme toggle and the New-workspace button. Registry/feed rendering loads
+// command + Select controls and the New-workspace button. Registry/feed rendering loads
 // asynchronously from the backend and is covered by the state + component
 // tests; this keeps the mount path itself green. Also covers the error
 // notice bubble's Dismiss -- a real component mount, since an error with no
@@ -13,6 +13,14 @@ import { library, reportError } from "./state/library.svelte";
 import { clearNotices } from "./state/notices.svelte";
 import { screen } from "./state/screen.svelte";
 import { controlAttention, clearAllControlAttention } from "./state/controlAttention.svelte";
+import {
+  activeCommandLauncherDraft,
+  clearCommandLauncherDraft,
+  closeCommandLauncher,
+  commandLauncher,
+  openCommandLauncher,
+} from "./state/commandLauncher.svelte";
+import { applyTheme, themeState } from "./state/theme.svelte";
 
 // Pin the in-memory mock as the backend so loadLibrary succeeds (no spurious
 // error banner from a failed fetch) and the banner test controls library.error.
@@ -40,9 +48,14 @@ describe("launcher root", () => {
     clearAllControlAttention();
     screen.current = "computers";
     screen.flips = 0;
+    commandLauncher.entryMode = "computers";
+    closeCommandLauncher();
+    clearCommandLauncherDraft("computers");
+    themeState.theme = "dark";
+    applyTheme();
   });
 
-  it("renders the top bar: title, subtitle, theme toggle, and no [+]", () => {
+  it("renders the top bar: title, subtitle, matching command icon, and no theme or [+]", () => {
     target = document.createElement("div");
     document.body.appendChild(target);
     app = mount(App, { target });
@@ -51,7 +64,11 @@ describe("launcher root", () => {
     expect(topbar).not.toBeNull();
     expect(topbar.textContent).toContain("Computers");
     expect(topbar.textContent).toContain("This machine & devservers");
-    expect(target.querySelector('[aria-label="Toggle theme"]')).not.toBeNull();
+    expect(target.querySelector('[aria-label="Toggle theme"]')).toBeNull();
+    const command = target.querySelector('[aria-label="Open command launcher"]');
+    expect(command).not.toBeNull();
+    // Match the pane hamburger's Command icon, including its lighter stroke.
+    expect(command?.querySelector("svg")?.getAttribute("stroke-width")).toBe("1.75");
     // The Gmail-style Select-mode toggle (reveals the row checkboxes).
     expect(topbar.querySelector("button.select")).not.toBeNull();
     // The add-workspace / add-devserver / open-terminal entry points all moved
@@ -60,6 +77,38 @@ describe("launcher root", () => {
     expect(topbar.querySelector('[aria-label="New local workspace"]')).toBeNull();
     expect(topbar.querySelector('[aria-label="Open terminal"]')).toBeNull();
     expect(topbar.querySelector('[aria-label="New local terminal"]')).toBeNull();
+  });
+
+  it("switches theme from the Desktop Computers launcher and dismisses it", async () => {
+    themeState.theme = "dark";
+    applyTheme();
+    target = document.createElement("div");
+    document.body.appendChild(target);
+    app = mount(App, { target });
+    await settle();
+
+    openCommandLauncher("computers");
+    flushSync();
+    expect(
+      target.querySelectorAll('[role="dialog"][aria-label="Command launcher"]'),
+    ).toHaveLength(1);
+    const input = target.querySelector(".deck-input") as HTMLInputElement;
+    input.value = "theme";
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "theme" }));
+    await settle();
+    flushSync();
+
+    const themeCommand = [...target.querySelectorAll<HTMLButtonElement>("button.deck-result")].find(
+      (button) => button.querySelector(".deck-result-title")?.textContent === "Switch to light theme",
+    );
+    expect(themeCommand).toBeTruthy();
+    themeCommand?.click();
+    await settle();
+    flushSync();
+
+    expect(themeState.theme).toBe("light");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+    expect(activeCommandLauncherDraft().visible).toBe(false);
   });
 
   it("renders the Local new-terminal + new-workspace actions and the add-devserver button once loaded", async () => {

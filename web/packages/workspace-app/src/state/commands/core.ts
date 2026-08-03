@@ -18,7 +18,7 @@ import {
   canReopenClosedTab,
 } from "../tabs.svelte";
 
-type ReuseOptions = Pick<Command, "shortcutEditable" | "shortcutIds">;
+type ReuseOptions = Pick<Command, "shortcutEditable" | "shortcutIds" | "confirm">;
 
 /// A reuse-existing chorded command: run() dispatches the id, available()
 /// mirrors runCommand's window-mode guard so the launcher hides it in the
@@ -72,7 +72,14 @@ registerCommands([
   reuse("app.dashboard.open", "New dashboard", "Apps", ["slides", "present"]),
 
   // Tabs
-  reuse("app.tab.close", "Close tab", "Tabs", ["close"]),
+  reuse("app.tab.close", "Close tab", "Tabs", ["close"], {
+    confirm: {
+      title: "Close the active tab?",
+      message: "The tab will be removed from this pane.",
+      actionLabel: "Close tab",
+      danger: true,
+    },
+  }),
   reuse("app.tab.next", "Next tab", "Tabs", ["tab", "next", "switch"]),
   reuse("app.tab.prev", "Previous tab", "Tabs", [
     "tab",
@@ -101,10 +108,23 @@ registerCommands([
   ]),
   reuse("app.pane.prev", "Previous pane", "Panes", ["focus", "pane"]),
   reuse("app.pane.next", "Next pane", "Panes", ["focus", "pane"]),
-  reuse("app.pane.closeTabs", "Close all tabs in pane", "Panes", ["close"]),
+  reuse("app.pane.closeTabs", "Close all tabs in pane", "Panes", ["close"], {
+    confirm: {
+      title: "Close every tab in this pane?",
+      message: "Unsaved drafts will still keep their normal safety check.",
+      actionLabel: "Close tabs",
+      danger: true,
+    },
+  }),
   reuse("app.pane.kill", "Close pane", "Panes", ["close", "kill"], {
     shortcutEditable: false,
     shortcutIds: ["app.tab.close", "app.window.close"],
+    confirm: {
+      title: "Close this pane?",
+      message: "Every tab in the pane will close with it.",
+      actionLabel: "Close pane",
+      danger: true,
+    },
   }),
   reuse("app.pane.flip", "Flip pane", "Panes", [
     "flip",

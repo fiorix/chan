@@ -30,21 +30,18 @@
   import OsIcon, { hasOsIcon } from "./OsIcon.svelte";
   import {
     library,
-    toggleWorkspace,
-    openWorkspaceWindow,
-    openDevserverWorkspace,
-    setDevserverWorkspaceOn,
-    connectDevserver,
-    grantNativeTrustAndConnect,
     revokeDevserverNativeTrust,
     disconnectDevserver,
-    openDevserverTerminal,
-    openTerminal,
     reportError,
     clearError,
   } from "../state/library.svelte";
-  import { liveTerminalsCount } from "../api/library";
-  import { requestConfirm } from "../state/confirm.svelte";
+  import {
+    connectComputer,
+    canOpenWorkspaceWindow,
+    newTerminal,
+    newWorkspaceWindow,
+    setWorkspacePower,
+  } from "../state/computerActions";
   import { checksVisible, isSelected, toggleSelected } from "../state/selection.svelte";
   import { isPending, servedKey, wsKey, dsKey } from "../state/pending.svelte";
   import { hasControlAttention } from "../state/controlAttention.svelte";
@@ -57,9 +54,7 @@
     type WorkspaceNode,
   } from "../lib/machineTree";
   import { isMachineCollapsed, toggleMachineCollapsed } from "../state/machineCollapse.svelte";
-  import { readOnly, hasDesktopBridge, selfManagedWindows, hostOs } from "../state/capabilities";
-  import { canActOnTenant, ownsTenantLeader, tenantLeader } from "../state/leadership.svelte";
-  import { mintWindow } from "../state/windowManager.svelte";
+  import { readOnly, hasDesktopBridge, hostOs } from "../state/capabilities";
   import { demoState, resetDemo } from "../state/demo.svelte";
   import type { DevserverEntry, WorkspaceEntry } from "../api/library";
 
@@ -124,95 +119,6 @@
     }
   }
 
-  const NATIVE_TRUST_MESSAGE =
-    "This shared devserver controls the web content in its Chan windows. Native access can read and write your clipboard, read files you select, save downloads, control Chan windows, and open links in your system browser. Grant access only if you trust its owner.";
-
-  function connectWithNativeTrust(ds: DevserverEntry): void {
-    if (!ds.native_trust_required) {
-      void run(connectDevserver(ds.id));
-      return;
-    }
-    requestConfirm({
-      title: "Grant native access?",
-      message: NATIVE_TRUST_MESSAGE,
-      confirmLabel: "Grant native access",
-      onConfirm: () => run(grantNativeTrustAndConnect(ds.id)),
-    });
-  }
-
-  // The acting leader claim for minting onto a tenant: the leader window_id when
-  // this launcher owns it, else undefined (leaderless allows; the server rejects
-  // a stale claim against a live leader).
-  function actingFor(prefix: string): string | undefined {
-    return ownsTenantLeader(prefix) ? (tenantLeader(prefix) ?? undefined) : undefined;
-  }
-
-  // New window on a workspace. A self-managed surface browser-mints it (the
-  // window manager opens it in-app, synchronously in this click gesture so the
-  // browser does not block the popup); the desktop surface keeps the native mint
-  // (the watcher opens it) and the served card keeps its devserver bridge route.
-  function newWorkspaceWindow(
-    ws: WorkspaceEntry,
-    kind: "workspace" | "served",
-    devserverId: string | null,
-  ): Promise<void> {
-    if (kind === "served") return openDevserverWorkspace(devserverId!, ws.path);
-    if (selfManagedWindows) {
-      return mintWindow("workspace", {
-        workspacePath: ws.path,
-        actingWindowId: actingFor(ws.prefix),
-      }).then(() => {});
-    }
-    return openWorkspaceWindow(ws.path);
-  }
-
-  // New local terminal: browser-mint on a self-managed surface, else native mint.
-  function newLocalTerminal(): Promise<void> {
-    if (selfManagedWindows) return mintWindow("terminal").then(() => {});
-    return openTerminal();
-  }
-
-  // Turning a workspace OFF can hit live terminal sessions: the server answers
-  // 409 live_terminals with the count, so on that specific error we open the
-  // in-SPA confirm (never a native dialog) and, on confirm, retry the SAME off
-  // forced. Any other error goes to the banner. Shared by local + devserver off.
-  async function offWorkspaceWithConfirm(off: (force: boolean) => Promise<void>): Promise<void> {
-    clearError();
-    try {
-      await off(false);
-    } catch (e) {
-      const n = liveTerminalsCount(e);
-      if (n === null) {
-        reportError(e);
-        return;
-      }
-      requestConfirm({
-        title: "Turn off workspace?",
-        message: `${n} live terminal session${n === 1 ? "" : "s"} ${n === 1 ? "is" : "are"} still running. Turn off anyway?`,
-        confirmLabel: "Turn off",
-        onConfirm: () => run(off(true)),
-      });
-    }
-  }
-
-  function toggleLocalWorkspace(id: string, on: boolean): void {
-    if (on) {
-      void run(toggleWorkspace(id, true));
-      return;
-    }
-    void offWorkspaceWithConfirm((force) => toggleWorkspace(id, false, force));
-  }
-
-  function toggleRemoteWorkspace(devserverId: string, prefix: string, on: boolean): void {
-    if (on) {
-      void run(setDevserverWorkspaceOn(devserverId, prefix, true));
-      return;
-    }
-    void offWorkspaceWithConfirm((force) =>
-      setDevserverWorkspaceOn(devserverId, prefix, false, force),
-    );
-  }
-
   // The pending key for a workspace row (local by workspace_id, served by
   // devserver_id + prefix), matching the action handlers.
   function rowKey(ws: WorkspaceEntry): string {
@@ -237,7 +143,7 @@
   const connected = (ds: DevserverEntry): boolean => ds.status === "connected";
   // The devserver's connection dropped out from under it: the control script
   // exited, or a connected transport stopped answering. The identity row's
-  // status dot turns RED (same dot, same spot as the green connected one)
+  // machine icon turns RED (the same icon is green while connected)
   // in place of a textual "connection lost" cue; the control row's eye flash
   // rides the same attention state. Both clear on recovery, reconnect, the
   // user acting on the control row, or the row leaving the feed.
@@ -245,7 +151,7 @@
   // sets status `unreachable` while the connection record still exists) is the
   // honest source here: a gateway devserver structurally can't hold control
   // attention (the 5s workspace poll's fresh-TCP successes clear it), so the
-  // status field, not attention, carries its lost state.
+  // status field, not attention, carries its lost icon colour.
   const connectionLost = (ds: DevserverEntry): boolean =>
     ds.status === "unreachable" ||
     (ds.library_id !== null && ds.library_id !== undefined && hasControlAttention(ds.library_id));
@@ -253,6 +159,14 @@
   // optimistic bridge is open. A dropped tunnel lands `disconnected` + clears it.
   const dsSpinning = (ds: DevserverEntry): boolean =>
     ds.status === "connecting" || isPending(dsKey(ds.id));
+  const machineStatusTitle = (ds: DevserverEntry): string =>
+    connectionLost(ds)
+      ? "Connection lost"
+      : connected(ds)
+        ? "Connected"
+        : dsSpinning(ds)
+          ? "Connecting"
+          : "Disconnected";
 
   // A machine shows its content block while connected, while a fresh dial is
   // `connecting`, while its feed is `unreachable` (a live-but-degraded connection
@@ -350,12 +264,12 @@
           type="button"
           disabled={ws.status !== "running" ||
             spinning(ws) ||
-            (selfManagedWindows && !canActOnTenant(ws.prefix))}
-          title={selfManagedWindows && !canActOnTenant(ws.prefix)
+            !canOpenWorkspaceWindow(ws)}
+          title={!canOpenWorkspaceWindow(ws)
             ? "The session leader manages this workspace's windows"
             : `New window of ${displayName(ws)}`}
           aria-label={`New window of ${displayName(ws)}`}
-          onclick={() => run(newWorkspaceWindow(ws, kind, devserverId))}>
+          onclick={() => run(newWorkspaceWindow(ws))}>
           <AppWindow size={16} />
         </button>
         <button
@@ -376,10 +290,7 @@
             : spinning(ws)
               ? `Working on ${displayName(ws)}`
               : `${ws.on ? "Turn off" : "Turn on"} ${displayName(ws)}`}
-          onclick={() =>
-            kind === "workspace"
-              ? toggleLocalWorkspace(ws.workspace_id, !ws.on)
-              : toggleRemoteWorkspace(devserverId!, ws.prefix, !ws.on)}>
+          onclick={() => run(setWorkspacePower(ws, !ws.on))}>
           {#if spinning(ws)}
             <LoaderCircle class="spin" size={16} />
           {:else if locked(ws)}
@@ -450,7 +361,12 @@
      surface renders it static with no edit affordance. -->
 {#snippet dsIdentity(ds: DevserverEntry, withPencil: boolean)}
   <span class="ds-name-row">
-    <span class="ds-glyph">
+    <span
+      class="ds-glyph"
+      class:live={connected(ds) && !connectionLost(ds) && !dsSpinning(ds)}
+      class:working={dsSpinning(ds)}
+      class:lost={connectionLost(ds)}
+      title={machineStatusTitle(ds)}>
       {#if hasOsIcon(ds.os)}
         <OsIcon os={ds.os} prettyName={ds.pretty_name} size={16} />
       {:else}
@@ -458,8 +374,6 @@
       {/if}
     </span>
     <span class="row-name">{devserverName(ds)}</span>
-    {#if connectionLost(ds)}<span class="status-dot lost" title="Connection lost"></span>
-    {:else if connected(ds)}<span class="status-dot live" title="Connected"></span>{/if}
     {#if ds.has_token}<span class="chip">🔒 token</span>{/if}
   </span>
   <span class="ds-addr-row">
@@ -502,7 +416,7 @@
   <section class="machine">
     {#if node.kind === "local"}
       <div class="machine-header">
-        <span class="machine-icon">
+        <span class="machine-icon live" title="This machine">
           {#if hasOsIcon(hostOs)}
             <OsIcon os={hostOs} size={16} />
           {:else}
@@ -510,7 +424,6 @@
           {/if}
         </span>
         <span class="machine-name">This machine</span>
-        <span class="status-dot live" title="This machine"></span>
         <div class="machine-actions">
           {@render windowCountToggle(node)}
           {#if !readOnly}
@@ -519,7 +432,7 @@
               type="button"
               title="New terminal"
               aria-label="New local terminal"
-              onclick={() => run(newLocalTerminal())}>
+              onclick={() => run(newTerminal())}>
               <SquareTerminal size={16} />
             </button>
             <button
@@ -572,7 +485,7 @@
               type="button"
               title="New terminal"
               aria-label={`New terminal on ${devserverName(ds)}`}
-              onclick={() => run(openDevserverTerminal(ds.id))}>
+              onclick={() => run(newTerminal(ds))}>
               <SquareTerminal size={16} />
             </button>
           {/if}
@@ -636,7 +549,7 @@
                   : ds.pending_signin
                     ? `Re-open sign-in in your browser for ${devserverName(ds)}`
                     : `Connect ${devserverName(ds)}`}
-                onclick={() => connectWithNativeTrust(ds)}>
+                onclick={() => run(connectComputer(ds))}>
                 <Plug size={16} />
               </button>
             {/if}
@@ -648,7 +561,7 @@
           {@render machineContent(node)}
         {:else if ds.pending_signin}
           <!-- The connect handed off to a browser sign-in: narrate the wait.
-               The row stays Disconnected (no status dot); the desktop clears
+               The row stays Disconnected (a muted icon); the desktop clears
                the state on the deep-link callback, its timeout, or teardown. -->
           <p class="connect-prompt waiting">
             <LoaderCircle class="spin" size={14} aria-hidden="true" />
@@ -731,34 +644,26 @@
     flex-shrink: 0;
   }
 
+  .machine-icon.live,
+  .ds-glyph.live {
+    color: var(--accent);
+    filter: drop-shadow(0 0 3px color-mix(in srgb, var(--accent) 70%, transparent));
+  }
+
+  .ds-glyph.working {
+    color: var(--brand);
+    filter: drop-shadow(0 0 3px color-mix(in srgb, var(--brand) 70%, transparent));
+  }
+
+  .ds-glyph.lost {
+    color: var(--danger);
+    filter: drop-shadow(0 0 3px color-mix(in srgb, var(--danger) 70%, transparent));
+  }
+
   .machine-name {
     font-size: 0.95rem;
     font-weight: 600;
     color: var(--text);
-  }
-
-  /* A small accent dot: this machine is present / the devserver is connected. */
-  .status-dot {
-    width: 0.45rem;
-    height: 0.45rem;
-    border-radius: 50%;
-    background: var(--text-secondary);
-    opacity: 0.4;
-    flex-shrink: 0;
-  }
-
-  .status-dot.live {
-    background: var(--accent);
-    opacity: 1;
-    box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 70%, transparent);
-  }
-
-  /* Same dot, connection lost: the script died or the transport stopped
-     answering. Steady red, no flashing. */
-  .status-dot.lost {
-    background: var(--danger);
-    opacity: 1;
-    box-shadow: 0 0 6px color-mix(in srgb, var(--danger) 70%, transparent);
   }
 
   /* The devserver identity block (name row over address row). On the mutable

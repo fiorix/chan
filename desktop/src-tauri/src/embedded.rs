@@ -30,6 +30,7 @@ const WINDOW_OPS_CHANNEL_CAPACITY: usize = 32;
 
 pub struct EmbeddedServer {
     host: Arc<chan_server::WorkspaceHost>,
+    extension_runtime: chan_server::ExtensionRuntime,
     addr: SocketAddr,
     shutdown_tx: watch::Sender<bool>,
     /// Cached launch URL of the single shared `/terminal` tenant that backs
@@ -85,10 +86,11 @@ impl EmbeddedServer {
             window_ops: Some(window_ops_tx),
             window_titles: Arc::new(WindowTitles::new()),
         };
+        let extension_runtime = chan_server::ExtensionRuntime::start().await;
         let host = Arc::new(chan_server::WorkspaceHost::with_desktop_bridge(
             library,
             bridge,
-            chan_server::route_builder(),
+            chan_server::route_builder_with_extensions(&extension_runtime),
         ));
         // Register the host's self-handle so its per-tenant control sockets can
         // reach it for teardown -- otherwise the desktop's tenants report
@@ -189,6 +191,7 @@ impl EmbeddedServer {
         });
         Ok(Self {
             host,
+            extension_runtime,
             addr,
             shutdown_tx,
             terminal_url: tokio::sync::Mutex::new(None),
@@ -346,10 +349,13 @@ impl EmbeddedServer {
     /// Drain every hosted workspace, shared-terminal, and control-terminal
     /// tenant concurrently while preserving the persisted workspace overlay.
     pub async fn shutdown_all(&self) -> Result<(), String> {
-        self.host
+        let hosted = self
+            .host
             .shutdown_all()
             .await
-            .map_err(|e| format!("shutting down embedded tenants: {e}"))
+            .map_err(|e| format!("shutting down embedded tenants: {e}"));
+        self.extension_runtime.shutdown().await;
+        hosted
     }
 
     /// Return the tokened launch URL of the single shared `/terminal` tenant
@@ -723,6 +729,7 @@ mod tests {
             kind: chan_server::WindowKind::Workspace,
             title: String::new(),
             ordinal: 1,
+            label: String::new(),
             workspace_path: Some("/tmp/notes".into()),
             prefix: prefix.into(),
             token: "tok".into(),

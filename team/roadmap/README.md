@@ -23,7 +23,6 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 | item | state | what needs to happen |
 | --- | --- | --- |
-| [extensions-v1](v0.84.0/extensions-v1.md) | registered, grounded, needs rulings | rule the open decisions, then review the existing implementation branch, whose browser-smoke check currently fails |
 | [large-transfer-capability](v0.84.0/large-transfer-capability.md) | registered, grounded, needs a spec | tune the tunnel transport, build the bulk-transfer lane and its admission control, then raise the write ceiling last |
 | [web-marketing-onboarding](v0.84.0/web-marketing-onboarding.md) | registered, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
 | [cs-open-non-text-reveal](v0.84.0/cs-open-non-text-reveal.md) | registered, grounded, ruled, ready to spec | drop `open_path`'s binary refusal so any non-text file reveals in the browser, and view it when the SPA can |
@@ -44,6 +43,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 Shipped 2026-08-03; see [release-v0.83.0](../release/release-v0.83.0.md). Closed items in [`done/`](done/):
 
 - [unified-command-launcher](done/unified-command-launcher.md) - one searchable command deck rendered inline by the SPA that owns the focused window, with authority following the rendering SPA and no Tauri overlay window.
+- [extensions-v1](done/extensions-v1.md) - TOML-declared extensions run as supervised subprocesses behind an iframe tab, with host capabilities and declared commands.
 - [gateway-security-review](done/gateway-security-review.md) - entry-path failures made registry-independent, the identity SPA policy corrected to admit the provider avatar it renders, and strict audit-IP parsing.
 - [terminal-secret-masking](done/terminal-secret-masking.md) - secret-shaped values masked in the terminal, with a malformed suffix no longer able to overwrite the user's server.toml.
 - [kimi-submit-agent](done/kimi-submit-agent.md) - Kimi as a named submit agent with its own measured chord, command derivation, batching, and SPA mirror.

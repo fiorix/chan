@@ -32,9 +32,28 @@ interface FakeWin {
   close: ReturnType<typeof vi.fn>;
   focus: ReturnType<typeof vi.fn>;
   location: { href: string };
+  sessionStorage: Storage;
 }
 
 let opened: { win: FakeWin; url: string; name: string }[] = [];
+
+function clonedSessionStorage(source: Storage): Storage {
+  const values = new Map<string, string>();
+  for (let index = 0; index < source.length; index += 1) {
+    const key = source.key(index);
+    if (key !== null) values.set(key, source.getItem(key) ?? "");
+  }
+  return {
+    get length() {
+      return values.size;
+    },
+    clear: () => values.clear(),
+    getItem: (key) => values.get(key) ?? null,
+    key: (index) => [...values.keys()][index] ?? null,
+    removeItem: (key) => values.delete(key),
+    setItem: (key, value) => values.set(key, value),
+  };
+}
 
 function fakeWin(): FakeWin {
   const w: FakeWin = {
@@ -44,6 +63,7 @@ function fakeWin(): FakeWin {
     }),
     focus: vi.fn(),
     location: { href: "" },
+    sessionStorage: clonedSessionStorage(sessionStorage),
   };
   return w;
 }
@@ -68,6 +88,7 @@ function record(over: Partial<WindowRecord>): WindowRecord {
 const set = (windows: WindowRecord[]): WindowSet => ({ windows });
 
 beforeEach(() => {
+  sessionStorage.clear();
   resetWindowManager();
   clearAllWindowAttention();
   setDemoReset(null);
@@ -87,6 +108,21 @@ afterEach(() => {
 });
 
 describe("mintWindow", () => {
+  it("removes cloned launcher drafts from a newly minted child window", async () => {
+    sessionStorage.setItem("chan.command-launcher.v1:contextual", '{"visible":true,"query":"ter"}');
+    sessionStorage.setItem("chan.command-launcher.v1:computers", '{"visible":true,"query":"ter"}');
+    sessionStorage.setItem("chan.auth.token", "keep-me");
+    createWindow.mockResolvedValue(record({ window_id: "w-new", prefix: "proj-1", token: "tok9" }));
+
+    await mintWindow("terminal");
+
+    const childStorage = opened[0].win.sessionStorage;
+    expect(childStorage.getItem("chan.command-launcher.v1:contextual")).toBeNull();
+    expect(childStorage.getItem("chan.command-launcher.v1:computers")).toBeNull();
+    expect(childStorage.getItem("chan.auth.token")).toBe("keep-me");
+    expect(sessionStorage.getItem("chan.command-launcher.v1:contextual")).not.toBeNull();
+  });
+
   it("opens a blank window, mints with origin:browser + acting id, then navigates it", async () => {
     createWindow.mockResolvedValue(record({ window_id: "w-new", prefix: "proj-1", token: "tok9" }));
     const rec = await mintWindow("workspace", { workspacePath: "/x/proj", actingWindowId: "w-leader" });

@@ -2,7 +2,7 @@
 //
 // When a connected devserver stops answering while its CONTROL terminal is still
 // alive, the desktop emits `devserver-control-attention`. The launcher turns the
-// devserver identity row's status dot RED (the same dot that shows green while
+// devserver identity row's machine icon RED (the same icon is green while
 // connected) and slow-flashes the control row's eye. Both clear when the desktop
 // reports the connection restored, or when the user acts on the control row.
 //
@@ -97,7 +97,7 @@ export function hasControlAttention(libraryId: string): boolean {
 /** Drop attention flags whose library no longer owns a control window in the
  * feed. The feed is authoritative: while a control terminal is alive (a script
  * died and it sits at "process exited") its record is present, so its flag
- * survives (the identity dot stays red, the eye keeps flashing); once the
+ * survives (the identity icon stays red, the eye keeps flashing); once the
  * terminal is closed / reaped its record leaves the feed and the flag is
  * cleared here, so a torn-down or reconnected library does not leak a flag or
  * resurface a stale cue. Runs on the same reactive pass as

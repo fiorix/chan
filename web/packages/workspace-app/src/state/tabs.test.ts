@@ -48,6 +48,7 @@ import {
   layout,
   openBrowserInActivePane,
   openDashboardInActivePane,
+  openExtensionInActivePane,
   openGraphInActivePane,
   openInPane,
   openLinkTarget,
@@ -1300,6 +1301,25 @@ describe("pane state", () => {
     if (first?.kind !== "dashboard") throw new Error("expected dashboard tab");
     expect(first.title).toBe("Dashboard");
     expect(activePane().activeTabId).toBe(first.id);
+  });
+
+  test("hash round-trips an Extension tab without an entry URL", async () => {
+    resetLayout([]);
+    const opened = openExtensionInActivePane("echo", "Echo test");
+    expect(opened?.extensionId).toBe("echo");
+
+    const snapshot = serializeLayout();
+    expect(JSON.stringify(snapshot)).toContain('"xi":"echo"');
+    expect(JSON.stringify(snapshot)).not.toContain("entry_path");
+    await restoreLayout(snapshot!);
+
+    const restored = activePane().tabs[0];
+    if (restored?.kind !== "extension") {
+      throw new Error("expected extension tab after restore");
+    }
+    expect(restored.extensionId).toBe("echo");
+    expect(restored.title).toBe("Echo test");
+    expect(activePane().activeTabId).toBe(restored.id);
   });
 
   test("hash round-trips a Dashboard tab's carousel slide cursor", async () => {

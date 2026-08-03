@@ -279,6 +279,12 @@ registerCommands([
     title: "Close window",
     category: "Global",
     keywords: ["close", "window", "discard", "destroy"],
+    confirm: {
+      title: "Close this window?",
+      message: "Its tabs and terminal sessions will close.",
+      actionLabel: "Close window",
+      danger: true,
+    },
     available: (ctx) =>
       isTauriDesktop() && allowedInWindow("app.window.close", ctx),
     run: () => void requestCloseWindow(),

@@ -562,6 +562,16 @@ export type DashboardTab = {
   autoRotate?: boolean;
 };
 
+/// Local extension surface. The authenticated entry URL deliberately does not
+/// live on the tab: URL hashes and session blobs persist this object, while the
+/// credential stays only in the process-fetched extension catalog.
+export type ExtensionTab = {
+  kind: "extension";
+  id: string;
+  title: string;
+  extensionId: string;
+};
+
 /// Carousel slot count, shared by the on/off helpers below and the
 /// restore-time clamp. The carousel template renders exactly these three
 /// slides (About / Workspace / Search); keeping the count here lets the
@@ -614,7 +624,8 @@ export type Tab =
   | TerminalTab
   | GraphTab
   | BrowserTab
-  | DashboardTab;
+  | DashboardTab
+  | ExtensionTab;
 
 type ClosedTab = {
   paneId: string;
@@ -684,6 +695,7 @@ export function tabLabel(t: Tab, ctx?: BrowserLabelCtx): string {
   if (t.kind === "graph") return graphTabLabel(t);
   if (t.kind === "browser") return browserTabLabel(t, ctx);
   if (t.kind === "dashboard") return t.title;
+  if (t.kind === "extension") return t.title;
   const p = t.path;
   if (!p) return p;
   const slash = p.lastIndexOf("/");
@@ -793,6 +805,7 @@ export function tabTooltip(t: Tab): string {
     return t.selected ? `File Browser: ${t.selected}` : "File Browser";
   }
   if (t.kind === "dashboard") return t.title;
+  if (t.kind === "extension") return `${t.title} (${t.extensionId})`;
   return t.path;
 }
 
@@ -3459,6 +3472,14 @@ function cloneTab(src: Tab): Tab {
       ...(src.autoRotate === false ? { autoRotate: false } : {}),
     };
   }
+  if (src.kind === "extension") {
+    return {
+      kind: "extension",
+      id: src.id,
+      title: src.title,
+      extensionId: src.extensionId,
+    };
+  }
   return {
     kind: "file",
     fileKind: src.fileKind,
@@ -4051,6 +4072,66 @@ export function openDashboardInPane(
 
 export function openDashboardInActivePane(opts?: OpenDashboardOptions): void {
   openDashboardInPane(layout.activePaneId, opts);
+}
+
+/// Open a local extension inside the named pane. The caller passes only stable
+/// public metadata; ExtensionTab.svelte resolves the tokened URL from the
+/// in-memory catalog when it mounts.
+export function openExtensionInPane(
+  paneId: string,
+  extensionId: string,
+  title: string,
+  side?: PaneSide,
+): ExtensionTab | null {
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(extensionId)) return null;
+  const node = layout.nodes[paneId];
+  if (!node || node.kind !== "leaf") return null;
+  const targetSide = side ?? paneSide(node);
+  const tab: ExtensionTab = {
+    kind: "extension",
+    id: id("extension"),
+    title: title.trim() || extensionId,
+    extensionId,
+  };
+  mutablePaneTabs(node, targetSide).push(tab);
+  setPaneActiveTabId(node, tab.id, targetSide);
+  node.side = targetSide;
+  layout.activePaneId = node.id;
+  return tab;
+}
+
+export function openExtensionInActivePane(
+  extensionId: string,
+  title: string,
+): ExtensionTab | null {
+  return openExtensionInPane(layout.activePaneId, extensionId, title);
+}
+
+/// Focus the existing singleton extension tab wherever it lives in this
+/// window, or create it in the active pane. The extension catalog decides
+/// singleton policy; persisted tabs remain credential-free either way.
+export function openOrFocusExtension(
+  extensionId: string,
+  title: string,
+  singleton: boolean,
+): ExtensionTab | null {
+  if (singleton) {
+    for (const node of Object.values(layout.nodes)) {
+      if (node.kind !== "leaf") continue;
+      for (const side of ["a", "b"] as const) {
+        const existing = paneTabs(node, side).find(
+          (tab): tab is ExtensionTab =>
+            tab.kind === "extension" && tab.extensionId === extensionId,
+        );
+        if (!existing) continue;
+        setPaneActiveTabId(node, existing.id, side);
+        node.side = side;
+        layout.activePaneId = node.id;
+        return existing;
+      }
+    }
+  }
+  return openExtensionInActivePane(extensionId, title);
 }
 
 /// Open a Dashboard tab focused on the Indexing (Search) slide with
@@ -4999,14 +5080,13 @@ export function dirtyPaths(): Set<string> {
 // Tree-shaped serialized form. We store the layout as a recursive
 // shape without IDs; restore generates fresh IDs. Tabs carry just
 // enough to reconstruct each variant.
-//   k: "f" file tab (the only kind today; older sessions may carry
-//      "b" browser, "s" settings, "g" graph, "h" health, all silently
-//      dropped on restore since each became a window-level overlay).
+//   k: compact tab-kind discriminator. Legacy "s" settings and "h" health
+//      entries are dropped on restore; current kinds are reconstructed below.
 //   p,m,o only meaningful for files
 //   a: active tab in this pane (one per pane)
 //   f: focused pane (one per layout)
 export type SerTab = {
-  k?: "f" | "b" | "s" | "g" | "h" | "t" | "d";
+  k?: "f" | "b" | "s" | "g" | "h" | "t" | "d" | "x";
   p?: string;
   n?: string;
   m?: Mode;
@@ -5124,6 +5204,9 @@ export type SerTab = {
   /// DashboardTab auto-rotate flag. Omitted when true (the default);
   /// emitted as false when the tab opted out of auto-rotation.
   ar?: boolean;
+  /// Stable extension id. The authenticated entry URL is intentionally never
+  /// serialized; it is resolved from the process-local catalog after restore.
+  xi?: string;
 };
 export type SerFocusColor = "o" | "g" | "p";
 export type SerHybridTheme = "d" | "l";
@@ -5406,6 +5489,14 @@ function serializeTab(
       ...active,
     };
   }
+  if (t.kind === "extension") {
+    return {
+      k: "x",
+      xi: t.extensionId,
+      n: t.title,
+      ...active,
+    };
+  }
   // Only file tabs left; omit `k:"f"` since `"f"` is the default.
   // Skip the caret field when it sits at the doc start. New tabs
   // (and never-focused restored tabs) have caret==undefined; only
@@ -5659,6 +5750,17 @@ function restoreDashboardTabFromSer(sertab: SerTab): DashboardTab {
   return tab;
 }
 
+function restoreExtensionTabFromSer(sertab: SerTab): ExtensionTab | null {
+  const extensionId = sertab.xi?.trim() ?? "";
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(extensionId)) return null;
+  return {
+    kind: "extension",
+    id: id("extension"),
+    title: sertab.n?.trim() || extensionId,
+    extensionId,
+  };
+}
+
 function restoreFileTabFromSer(sertab: SerTab): FileTab {
   // Recompute fileKind from the path. Cheaper than persisting
   // it (the hash already carries the path) and keeps a session
@@ -5778,13 +5880,16 @@ export async function restoreLayout(
             if (sertab.rpv ?? savedTerm?.rpv) showRichPromptForTab(tab.id);
             continue;
           }
-          if (kind === "g" || kind === "b" || kind === "d") {
+          if (kind === "g" || kind === "b" || kind === "d" || kind === "x") {
             const tab =
               kind === "g"
                 ? restoreGraphTabFromSer(sertab)
                 : kind === "b"
                   ? restoreBrowserTabFromSer(sertab)
-                  : restoreDashboardTabFromSer(sertab);
+                  : kind === "d"
+                    ? restoreDashboardTabFromSer(sertab)
+                    : restoreExtensionTabFromSer(sertab);
+            if (!tab) continue;
             targetTabs.push(tab);
             if (sertab.a) setPaneActiveTabId(p, tab.id, side);
             continue;
@@ -5856,7 +5961,8 @@ export type ReconcileResult = "applied" | "diverged";
 /// overrides, the window focus color, and terminal titles. Tabs are
 /// matched TREE-WIDE by stable identity -- terminals by `tsid` (with an
 /// ordinal fallback for structure-only blobs that omit session ids),
-/// files by path + ordinal, graph/browser/dashboard by kind + ordinal --
+/// files by path + ordinal, graph/browser/dashboard by kind + ordinal, and
+/// extensions by stable extension id + ordinal --
 /// so a matched live tab OBJECT moves to its remote position, including
 /// across panes (the keyed component salvage local drag-move relies on).
 /// Remote tabs with no live match are created via the restore
@@ -5959,7 +6065,8 @@ function liveLeavesInOrder(nodeId: string, out: LeafNode[] = []): LeafNode[] {
 /// transient structure-only blob (serialized before its terminals
 /// reconnected) does not close every live terminal here. Files match by
 /// path in ordinal order (dup paths pair up nth-to-nth); graph, browser,
-/// and dashboard tabs by kind in ordinal order. Tree-wide (not per-pane)
+/// and dashboard tabs by kind in ordinal order; extension tabs by extension
+/// id in ordinal order. Tree-wide (not per-pane)
 /// so a tab the peer moved across panes matches its live object and
 /// moves instead of close-and-recreate.
 function matchRemoteTabs(remote: SerNode): TabMatch {
@@ -6002,7 +6109,13 @@ function matchRemoteTabs(remote: SerNode): TabMatch {
       termQueue.push(t);
     } else {
       const key =
-        t.kind === "graph" ? "g" : t.kind === "browser" ? "b" : "d";
+        t.kind === "graph"
+          ? "g"
+          : t.kind === "browser"
+            ? "b"
+            : t.kind === "dashboard"
+              ? "d"
+              : `x:${t.extensionId}`;
       const q = kindQueues.get(key);
       if (q) q.push(t);
       else kindQueues.set(key, [t]);
@@ -6029,8 +6142,9 @@ function matchRemoteTabs(remote: SerNode): TabMatch {
       if (hit) byRemote.set(st, hit);
       continue;
     }
-    if (kind === "g" || kind === "b" || kind === "d") {
-      const hit = take(kindQueues.get(kind));
+    if (kind === "g" || kind === "b" || kind === "d" || kind === "x") {
+      const key = kind === "x" ? `x:${st.xi ?? ""}` : kind;
+      const hit = take(kindQueues.get(key));
       if (hit) byRemote.set(st, hit);
     }
   }
@@ -6211,7 +6325,10 @@ function materializeSide(
           ? restoreBrowserTabFromSer(sertab)
           : kind === "d"
             ? restoreDashboardTabFromSer(sertab)
-            : restoreFileTabFromSer(sertab);
+            : kind === "x"
+              ? restoreExtensionTabFromSer(sertab)
+              : restoreFileTabFromSer(sertab);
+    if (!tab) continue;
     ctx.materialized.set(sertab, tab);
     out.push(tab);
     if (tab.kind === "file" && tab.path) {

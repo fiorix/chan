@@ -96,12 +96,9 @@ function parseOperation(value: unknown): DeckOperation | null {
   const itemId = boundedString(raw.itemId, 512);
   const title = boundedString(raw.title, 256);
   if (!itemId || !title) return null;
-  // `pending` and `success` describe an execution that is in flight or has
-  // just landed. The promise behind them does not survive a hide, a reload, or
-  // a handover to another source, so restoring either paints a state nothing
-  // will ever clear. A background execution that really did fail is persisted
-  // by the host as `error`, which does restore.
-  if (raw.kind === "pending" || raw.kind === "success") return null;
+  if (raw.kind === "pending" || raw.kind === "success") {
+    return { kind: raw.kind, itemId, title };
+  }
   if (raw.kind === "confirm") {
     const message = boundedString(raw.message, 1024);
     const actionLabel = boundedString(raw.actionLabel, 128);

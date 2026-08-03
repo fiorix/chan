@@ -41,13 +41,12 @@ const proxyPort = process.env.VITE_PROXY_PORT ?? "8787";
 // HTTP-client SPA (its only runtime dep is lucide-svelte); this budget FAILS the
 // build if an accidental heavy import lands -- a CodeMirror/xterm/cytoscape pull,
 // or a non-tree-shaken import from @chan/web-shared, would multiply the bundle,
-// so the gate catches it here instead of at release. The bundle is ~46 KiB
+// so the gate catches it here instead of at release. The bundle is ~42 KiB
 // gzipped (the client-side window manager, per-tenant leadership derivation,
-// window URL builder, config-backed per-machine collapse, the Gateways screen,
-// and the shared command deck with its Computers provider); the ceiling carries
-// headroom for normal drift while staying far below what any heavy import would
-// produce, since CodeMirror or xterm would multiply rather than merely nudge it.
-const LAUNCHER_GZIP_BUDGET_BYTES = 56 * 1024;
+// window URL builder, config-backed per-machine collapse, and the Gateways
+// screen plus the Computers command launcher); the ceiling carries headroom
+// for normal drift while staying far below what any heavy import would produce.
+const LAUNCHER_GZIP_BUDGET_BYTES = 48 * 1024;
 
 function launcherSizeBudget(): Plugin {
   return {
@@ -84,10 +83,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@chan/web-shared/command-deck": join(here, "../web-shared/src/command-deck/model.ts"),
-      "@chan/web-shared/CommandDeck.svelte": join(
-        here,
-        "../web-shared/src/components/CommandDeck.svelte",
-      ),
+      "@chan/web-shared/CommandDeck.svelte": join(here, "../web-shared/src/components/CommandDeck.svelte"),
     },
   },
   server: {

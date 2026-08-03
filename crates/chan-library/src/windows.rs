@@ -39,6 +39,12 @@ const ICON_LOCAL_HOME: &str = "\u{2302}"; // ⌂ house
 /// U+FE0E text-presentation selector keeps it line-art alongside ⌂ / ⊕.
 const ICON_LOCAL_OTHER: &str = "\u{1F5A5}\u{FE0E}"; // 🖥︎ desktop computer
 
+/// Maximum user-supplied text appended to a non-control window's generated
+/// `Terminal Window N` / `Window N` label. Counted in Unicode scalar values by
+/// the authoritative server; the launcher's HTML `maxlength` is an earlier
+/// input guard.
+pub const MAX_WINDOW_LABEL_CHARS: usize = 64;
+
 // ---------------------------------------------------------------------------
 // The window wire contract. The serde field names ARE the wire, so a one-sided
 // rename compiles green and breaks at runtime; the `*_wire` byte tests pin them.
@@ -99,6 +105,11 @@ pub struct WindowRecord {
     /// Per-(kind, workspace/library) "Window N": library-owned, persisted,
     /// stable. On the wire so a client can recompose the title fully.
     pub ordinal: u32,
+    /// Optional user text appended to the generated `Window N` display label.
+    /// Kept separate from the library-owned title and ordinal so clients never
+    /// need to parse either. Empty is the default and is omitted from the wire.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
     /// `kind == Workspace`: the full workspace root path. `None` for a terminal
     /// window; omitted from the wire when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,6 +166,7 @@ impl std::fmt::Debug for WindowRecord {
             .field("kind", &self.kind)
             .field("title", &self.title)
             .field("ordinal", &self.ordinal)
+            .field("label", &self.label)
             .field("workspace_path", &self.workspace_path)
             .field("prefix", &self.prefix)
             .field("token", &"[REDACTED]")
@@ -223,6 +235,10 @@ pub struct PersistedWindow {
     pub kind: WindowKind,
     pub title: String,
     pub ordinal: u32,
+    /// User-supplied terminal/workspace-window caption. Empty on legacy rows
+    /// and omitted from disk to preserve their existing shape.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
     /// A devserver control terminal (runs the connect script). True only for the
@@ -275,6 +291,7 @@ impl PersistedWindow {
             kind: self.kind,
             title: self.title.clone(),
             ordinal: self.ordinal,
+            label: self.label.clone(),
             workspace_path: self.workspace_path.clone(),
             prefix,
             token,
@@ -417,6 +434,7 @@ impl WindowRegistry {
                 kind,
                 title,
                 ordinal,
+                label: String::new(),
                 workspace_path,
                 control: false,
                 library_id: None,
@@ -447,6 +465,7 @@ impl WindowRegistry {
             kind: WindowKind::Terminal,
             title: "Control Terminal".to_string(),
             ordinal: 0,
+            label: String::new(),
             workspace_path: None,
             control: true,
             library_id: Some(library_id),
@@ -522,6 +541,34 @@ impl WindowRegistry {
                     matched = true;
                     if w.hidden != hidden {
                         w.hidden = hidden;
+                        changed = true;
+                    }
+                    break;
+                }
+            }
+            (matched, changed, windows.clone())
+        };
+        if changed {
+            self.save_best_effort(&snapshot);
+            self.notify.notify_waiters();
+        }
+        matched
+    }
+
+    /// Set `window_id`'s user caption. The route layer excludes generated
+    /// control terminals and validates the text; the registry owns persistence
+    /// and the watch notification. Returns whether a row matched. Setting the
+    /// existing value is an idempotent match and does not rewrite the store.
+    pub fn set_label(&self, window_id: &str, label: String) -> bool {
+        let (matched, changed, snapshot) = {
+            let mut windows = self.lock();
+            let mut matched = false;
+            let mut changed = false;
+            for w in windows.iter_mut() {
+                if w.window_id == window_id {
+                    matched = true;
+                    if w.label != label {
+                        w.label = label;
                         changed = true;
                     }
                     break;
@@ -734,6 +781,7 @@ mod tests {
             kind: WindowKind::Terminal,
             title: "🏠 Terminal Window 1".into(),
             ordinal: 1,
+            label: String::new(),
             workspace_path: None,
             prefix: "/api/terminal".into(),
             token: "tok_term".into(),
@@ -776,6 +824,7 @@ mod tests {
             kind: WindowKind::Workspace,
             title: "🏠 /home/u/notes Window 2".into(),
             ordinal: 2,
+            label: "release checks".into(),
             workspace_path: Some("/home/u/notes".into()),
             prefix: "/api/notes-1a2b3c".into(),
             token: String::new(),
@@ -794,6 +843,7 @@ mod tests {
                 "kind": "workspace",
                 "title": "🏠 /home/u/notes Window 2",
                 "ordinal": 2,
+                "label": "release checks",
                 "workspace_path": "/home/u/notes",
                 "prefix": "/api/notes-1a2b3c",
                 "token": "",
@@ -817,11 +867,9 @@ mod tests {
             "persisted": true,
             "connected": false,
         });
-        assert!(
-            !serde_json::from_value::<WindowRecord>(legacy)
-                .unwrap()
-                .active_transfer
-        );
+        let legacy = serde_json::from_value::<WindowRecord>(legacy).unwrap();
+        assert!(!legacy.active_transfer);
+        assert_eq!(legacy.label, "", "legacy rows default to no user text");
     }
 
     #[test]
@@ -833,6 +881,7 @@ mod tests {
                 kind: WindowKind::Terminal,
                 title: "🏠 Terminal Window 1".into(),
                 ordinal: 1,
+                label: String::new(),
                 workspace_path: None,
                 prefix: "/api/terminal".into(),
                 token: "tok_term".into(),
@@ -882,6 +931,7 @@ mod tests {
             kind: WindowKind::Terminal,
             title: "Control Terminal".into(),
             ordinal: 0,
+            label: String::new(),
             workspace_path: None,
             control: true,
             library_id: Some("lib-0f1e2d3c4b5a6978".into()),
@@ -970,6 +1020,7 @@ mod tests {
             kind: WindowKind::Workspace,
             title: "🏠 /n Window 1".into(),
             ordinal: 1,
+            label: String::new(),
             workspace_path: Some("/n".into()),
             control: false,
             library_id: None,
@@ -996,6 +1047,7 @@ mod tests {
             kind: WindowKind::Workspace,
             title: "🏠 /n Window 1".into(),
             ordinal: 1,
+            label: String::new(),
             workspace_path: Some("/n".into()),
             control: false,
             library_id: None,
@@ -1014,12 +1066,19 @@ mod tests {
             })
         );
         assert_eq!(p, serde_json::from_value(v).unwrap());
+        let mut labeled = p.clone();
+        labeled.label = "release checks".into();
+        assert_eq!(
+            serde_json::to_value(&labeled).unwrap()["label"],
+            "release checks"
+        );
         // A terminal row omits workspace_path AND the default control/library_id/hidden.
         let t = PersistedWindow {
             window_id: "w-0".into(),
             kind: WindowKind::Terminal,
             title: "🏠 Terminal Window 1".into(),
             ordinal: 1,
+            label: String::new(),
             workspace_path: None,
             control: false,
             library_id: None,
@@ -1037,6 +1096,7 @@ mod tests {
             kind: WindowKind::Terminal,
             title: "Control Terminal".into(),
             ordinal: 0,
+            label: String::new(),
             workspace_path: None,
             control: true,
             library_id: Some("lib-f81913a8ca0a6ff6".into()),
@@ -1063,6 +1123,7 @@ mod tests {
             kind: WindowKind::Terminal,
             title: "🏠 Terminal Window 2".into(),
             ordinal: 2,
+            label: String::new(),
             workspace_path: None,
             control: false,
             library_id: None,
@@ -1166,6 +1227,34 @@ mod tests {
                 .map(|x| x.hidden),
             Some(true),
             "hidden persisted to disk"
+        );
+    }
+
+    #[test]
+    fn terminal_label_persists_across_reload_and_can_be_cleared() {
+        let (reg, dir) = registry();
+        let path = dir.path().join("windows.json");
+        let window = reg.create(WindowKind::Terminal, None);
+        assert!(!reg.set_label("nope", "ignored".into()));
+        assert!(reg.set_label(&window.window_id, "release checks".into()));
+        let reloaded = WindowRegistry::open(path.clone());
+        assert_eq!(
+            reloaded
+                .snapshot()
+                .into_iter()
+                .find(|row| row.window_id == window.window_id)
+                .map(|row| row.label),
+            Some("release checks".into())
+        );
+        assert!(reloaded.set_label(&window.window_id, String::new()));
+        let cleared = WindowRegistry::open(path);
+        assert_eq!(
+            cleared
+                .snapshot()
+                .into_iter()
+                .find(|row| row.window_id == window.window_id)
+                .map(|row| row.label),
+            Some(String::new())
         );
     }
 
@@ -1325,6 +1414,7 @@ mod tests {
             kind: WindowKind::Workspace,
             title: "🏠 /n Window 1".into(),
             ordinal: 1,
+            label: "release checks".into(),
             workspace_path: Some("/n".into()),
             control: false,
             library_id: None,
@@ -1344,6 +1434,7 @@ mod tests {
         // The durable fields carry through unchanged.
         assert_eq!(rec.kind, WindowKind::Workspace);
         assert_eq!(rec.ordinal, 1);
+        assert_eq!(rec.label, "release checks");
         assert_eq!(rec.workspace_path.as_deref(), Some("/n"));
 
         // A control row assembles to control:true + persisted:false, carrying the
@@ -1353,6 +1444,7 @@ mod tests {
             kind: WindowKind::Terminal,
             title: "Control Terminal".into(),
             ordinal: 0,
+            label: String::new(),
             workspace_path: None,
             control: true,
             library_id: Some("lib-remote".into()),

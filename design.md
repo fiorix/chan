@@ -94,6 +94,7 @@ Stable contracts:
 - Per-launch auth gates every `/api/*` and `/ws` route. SPA fallback must not mask `/api/*` or `/ws` misses.
 - Streaming reads use NDJSON on established `?stream=1` read/report/graph/backlink endpoints; clients must tolerate incremental records.
 - `/api/devserver/*` is reserved local-only management surface; the gateway tunnel must 404 it publicly.
+- `/api/extensions` is an authenticated ready catalog whose entries contain only random capability-scoped paths, host grants, singleton policy, and static commands. Chan reverse-proxies HTTP and WebSocket requests to process-private loopback extension endpoints, adding the extension-owned bearer and a private tenant scope upstream, so browser, desktop, devserver, and gateway-tunnel clients stay on one IP and port. Upstream URLs, tokens, proxy capabilities, and tenant scope never enter persisted window/session state.
 - `GET /ws` is the watcher and window-presence side channel; window tags are part of that presence contract.
 - A terminal WebSocket's `session` frame carries optional `submit_agent`, derived from the current PTY incarnation's stored spawn command and `CHAN_AGENT`. Restart and reattach recompute it; shells and unknown commands omit it, so old clients and servers remain wire-compatible.
 
@@ -203,6 +204,7 @@ App-level state outside chan-workspace is intentionally narrow:
 - App/server preferences and update-check throttle live at the application layer and mutate through config APIs.
 - API key storage is optional; environment variables and OS keychain sources take precedence when available.
 - Devserver supervision state carries the reused bearer token and enabled workspace set needed to re-mount after restart.
+- Local extension declarations live under the chan home, while their subprocess handles, shutdown signal, and tokened ready catalog live only for the owning chan-server process. Multi-tenant hosts share one runtime rather than spawning per workspace.
 
 Bearer tokens and on-disk secrets are mode 0600 on Unix. App-layer writes use the same atomic-write and parent-dir fsync discipline as workspace content, so durability semantics do not vary by storage owner.
 

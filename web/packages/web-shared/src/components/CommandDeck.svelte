@@ -75,7 +75,6 @@
     const ids = items.map((item) => item.id).join("\u001f");
     void ids;
     if (!open) return;
-    pointerIndex = null;
     reconcileSelection();
   });
 
@@ -157,31 +156,20 @@
     draft.operation = { kind: "pending", itemId: item.id, title: item.title };
     try {
       await onChoose(item);
-      // A dismissed pending command can finish after the deck has been reused
-      // for another operation. Never paint that result into the newer state.
-      if (
-        draft !== executionDraft ||
-        executionDraft.operation?.kind !== "pending" ||
-        executionDraft.operation.itemId !== item.id
-      ) return;
+      // A hidden pending command can finish after another native window takes
+      // ownership of the reusable overlay. Never paint that result into the
+      // new source's draft.
+      if (draft !== executionDraft) return;
       if (item.dismissImmediatelyOnSuccess) {
         onSuccess?.(item);
         return;
       }
       executionDraft.operation = { kind: "success", itemId: item.id, title: item.title };
       await new Promise((resolve) => setTimeout(resolve, 260));
-      if (
-        draft !== executionDraft ||
-        executionDraft.operation?.kind !== "success" ||
-        executionDraft.operation.itemId !== item.id
-      ) return;
+      if (draft !== executionDraft) return;
       onSuccess?.(item);
     } catch (error) {
-      if (
-        draft !== executionDraft ||
-        executionDraft.operation?.kind !== "pending" ||
-        executionDraft.operation.itemId !== item.id
-      ) return;
+      if (draft !== executionDraft) return;
       executionDraft.operation = {
         kind: "error",
         itemId: item.id,
@@ -241,16 +229,12 @@
   }
 
   function onKeydown(event: KeyboardEvent): void {
+    // The deck owns keyboard input while open. A command can synchronously
+    // activate an app-level key mode, so letting the execution key bubble
+    // would immediately drive that new mode with the same event.
+    event.stopPropagation();
     if (event.key === "Escape") {
       event.preventDefault();
-      event.stopPropagation();
-      // `pending` is the one operation kind with no button of its own, so
-      // Escape has to release it here or the deck has no way out. This drops
-      // the blocking view; the command it was waiting on keeps running.
-      if (draft.operation?.kind === "pending") {
-        draft.operation = null;
-        return;
-      }
       onClose();
       return;
     }
@@ -441,9 +425,6 @@
             {:else if operation.kind === "pending"}
               <span class="deck-spinner" aria-hidden="true"></span>
               <div class="deck-operation-copy"><strong>{operation.title}</strong><span>Working…</span></div>
-              <div class="deck-decisions">
-                <button type="button" onclick={() => { draft.operation = null; }}>Dismiss</button>
-              </div>
             {:else if operation.kind === "success"}
               <div class="deck-operation-icon success">✓</div>
               <div class="deck-operation-copy"><strong>{operation.title}</strong><span>Done</span></div>

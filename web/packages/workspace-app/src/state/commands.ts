@@ -45,7 +45,8 @@ export type CommandSurface =
   | "terminal"
   | "graph"
   | "browser"
-  | "dashboard";
+  | "dashboard"
+  | "extension";
 
 /// The runtime context an availability predicate sees: the window-mode
 /// gates (from the `?kind=` URL) plus the active surface.
@@ -85,6 +86,14 @@ export type Command = {
   /// and run() receives the verbatim remainder. A bare invocation (row
   /// picked with no remainder) passes undefined. Defaults to false.
   acceptsArg?: boolean;
+  /// Optional launcher-owned safety gate. The shared deck renders it inline
+  /// and requires a fresh Enter before run() is called.
+  confirm?: {
+    title: string;
+    message: string;
+    actionLabel: string;
+    danger?: boolean;
+  };
   /// Perform the action. Reuse-existing commands dispatch their id
   /// through the chan:command bridge; chordless commands call their
   /// action directly. `arg` is the launcher's verbatim remainder for

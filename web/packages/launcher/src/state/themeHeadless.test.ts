@@ -138,4 +138,37 @@ describe("launcher local-theme desktop sync", () => {
     await reconcileLocalTheme();
     expect(themeState.theme).toBe("dark");
   });
+
+  test("watchLocalTheme applies a change written by another launcher webview", async () => {
+    vi.stubGlobal("matchMedia", matchMediaStub({ light: false }));
+    class SocketStub {
+      static instances: SocketStub[] = [];
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      closed = false;
+
+      constructor(readonly url: string) {
+        SocketStub.instances.push(this);
+      }
+
+      close(): void {
+        this.closed = true;
+      }
+    }
+    vi.stubGlobal("WebSocket", SocketStub);
+    const { themeState, watchLocalTheme } = await import("./theme.svelte");
+
+    const stop = watchLocalTheme();
+    const socket = SocketStub.instances[0];
+    expect(socket.url).toContain("/api/library/local-theme/watch");
+    socket.onmessage?.(
+      new MessageEvent("message", { data: JSON.stringify({ theme: "light" }) }),
+    );
+
+    expect(themeState.theme).toBe("light");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+    stop();
+    expect(socket.closed).toBe(true);
+  });
 });

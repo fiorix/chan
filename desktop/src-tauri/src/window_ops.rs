@@ -5,7 +5,7 @@
 //! receiver and turns each [`DesktopWindowOp`] into the matching Tauri action,
 //! then completes the op's `oneshot` so the blocked caller unblocks. The
 //! requests come from two surfaces: the `cs window new|open|rm|hide|title` CLI,
-//! and the launcher's `/api/library/*` HTTP routes (status-dot open/hide, the
+//! and the launcher's `/api/library/*` HTTP routes (window open/hide, the
 //! devserver Connect button, the New-Workspace folder picker).
 //!
 //! Tauri window operations (build / show / destroy / set_title / dialogs)
@@ -55,6 +55,10 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
             })
             .await
             .and_then(|inner| inner);
+            let _ = reply.send(result);
+        }
+        DesktopWindowOp::SetWindowLabel { id, label, reply } => {
+            let result = set_remote_window_label(&state, &id, &label).await;
             let _ = reply.send(result);
         }
         DesktopWindowOp::Hide { id, reply } => {
@@ -171,7 +175,7 @@ async fn new_workspace_window(state: &Arc<AppState>, key: &str) -> Result<String
     Ok(crate::window_watcher::native_label(&record))
 }
 
-/// `cs window hide` / the launcher status-dot hide: route through the OS
+/// `cs window hide` / the launcher window hide: route through the OS
 /// close-button path so the existing bury handler (which knows this window's
 /// restore key) runs. `close()` requests a close -- the handler hides SPA
 /// windows -- unlike `destroy()`, which `rm` uses to truly remove. Resolves the
@@ -181,7 +185,7 @@ fn hide_window(app: &AppHandle, id: &str) -> Result<(), String> {
     let label = serve::resolve_window_label(app, id);
     match app.get_webview_window(&label) {
         Some(w) => {
-            // The status-dot hide IS the explicit hide gesture, so suppress the
+            // The launcher hide IS the explicit hide gesture, so suppress the
             // close handler's "was hidden, not closed" notice (that teaches the
             // red-button gesture). Flag the label before `close()` so the
             // CloseRequested bury consumes it; both run on the main thread.
@@ -211,15 +215,31 @@ async fn close_window(
     force: bool,
     reply: tokio::sync::oneshot::Sender<Result<bool, String>>,
 ) {
+    if let Some(devserver_id) = id.strip_prefix("control-terminal-") {
+        crate::close_devserver_control_terminal(&app, &state, devserver_id).await;
+        let _ = reply.send(Ok(true));
+        return;
+    }
+
+    // A remote row's registry lives on its devserver. Delete it there and let
+    // the devserver watch reconcile close the local native view. This preserves
+    // the existing remote-close behavior while local rows below gain proper
+    // bare-id → composite-label resolution.
+    if state.devserver_feed.record_for_window_id(&id).is_some() {
+        let _ = reply.send(crate::discard_devserver_window_by_id(&app, &id).await);
+        return;
+    }
+
+    let label = serve::resolve_window_label(&app, &id);
     // Probe liveness / title / live-shells on the main thread.
     let probe = {
         let app2 = app.clone();
         let state2 = Arc::clone(&state);
-        let id2 = id.clone();
+        let label2 = label.clone();
         on_main(&app, move || {
-            app2.get_webview_window(&id2).map(|w| {
-                let title = w.title().unwrap_or_else(|_| id2.clone());
-                let shells = serve::window_has_live_shells(&state2, &id2);
+            app2.get_webview_window(&label2).map(|w| {
+                let title = w.title().unwrap_or_else(|_| label2.clone());
+                let shells = serve::window_has_live_shells(&state2, &label2);
                 (title, shells)
             })
         })
@@ -233,13 +253,9 @@ async fn close_window(
         }
     };
     let Some((title, shells)) = live else {
-        // No live LOCAL window. Before reporting "nothing here", try the
-        // cross-host path: the bare id may name a connected devserver's window,
-        // whose registry row lives remote-side and so is unreachable from the
-        // embedded host's own discard. DELETE it there if so (Ok(true)); a plain
-        // local window or unknown id yields Ok(false) and the server then deletes
-        // any saved layout for this id.
-        let _ = reply.send(crate::discard_devserver_window_by_id(&app, &id).await);
+        // An offline or buried local row has no live webview. The HTTP route
+        // still discards its durable registry row after this false reply.
+        let _ = reply.send(Ok(false));
         return;
     };
 
@@ -250,7 +266,9 @@ async fn close_window(
         // "Remove" default. If scheduling the modal fails, the callback never
         // runs, the reply sender drops, and the server maps that to an error.
         let app2 = app.clone();
+        let state2 = Arc::clone(&state);
         let id2 = id.clone();
+        let label2 = label.clone();
         crate::native_dialog::confirm(
             &app,
             "Remove window?",
@@ -259,8 +277,13 @@ async fn close_window(
             "Cancel",
             move |confirmed| {
                 if confirmed {
+                    // Drop the authoritative row before destroying the view so
+                    // the watcher cannot race the HTTP route and reopen it.
+                    if let Some(embedded) = state2.embedded() {
+                        let _ = embedded.discard_window(&id2);
+                    }
                     let destroyed = app2
-                        .get_webview_window(&id2)
+                        .get_webview_window(&label2)
                         .map(|w| w.destroy().is_ok())
                         .unwrap_or(false);
                     let _ = reply.send(Ok(destroyed));
@@ -273,18 +296,37 @@ async fn close_window(
     }
 
     // No shells, or forced: destroy now.
-    let id2 = id.clone();
+    // As in the confirmed branch, discard before destroy to prevent a watcher
+    // reconcile from briefly recreating the still-authoritative row.
+    if let Some(embedded) = state.embedded() {
+        let _ = embedded.discard_window(&id);
+    }
+    let label2 = label.clone();
     let app2 = app.clone();
-    let result = on_main(&app, move || match app2.get_webview_window(&id2) {
+    let result = on_main(&app, move || match app2.get_webview_window(&label2) {
         Some(w) => w
             .destroy()
             .map(|()| true)
-            .map_err(|e| format!("destroying {id2}: {e}")),
+            .map_err(|e| format!("destroying {label2}: {e}")),
         None => Ok(false),
     })
     .await
     .and_then(|inner| inner);
     let _ = reply.send(result);
+}
+
+async fn set_remote_window_label(
+    state: &Arc<AppState>,
+    window_id: &str,
+    label: &str,
+) -> Result<(), String> {
+    let Some((devserver_id, record)) = state.devserver_feed.record_for_window_id(window_id) else {
+        return Err(format!("window {window_id} was not found"));
+    };
+    let Some(conn) = state.devservers.get(&devserver_id) else {
+        return Err(format!("devserver {devserver_id} is not connected"));
+    };
+    crate::devserver::set_window_label(&conn, &record.window_id, label).await
 }
 
 /// Run `f` on the Tauri main thread and await its result. Tauri window

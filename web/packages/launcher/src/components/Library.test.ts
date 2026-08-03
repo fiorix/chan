@@ -83,6 +83,8 @@ describe("Library: Local group", () => {
 
   it("has a home header with new-terminal + new-workspace actions and no select-all", () => {
     mountList();
+    expect(target!.querySelector(".machine-icon.live")).not.toBeNull();
+    expect(target!.querySelector(".machine-header .status-dot")).toBeNull();
     expect(byAria("New local terminal")).toBeTruthy();
     expect(byAria("New local workspace")).toBeTruthy();
     // The select-all-local checkbox is gone (the mock has none); selection is
@@ -219,7 +221,7 @@ describe("Library: devserver groups", () => {
     // A gateway connect that handed off to the browser: status stays
     // disconnected (waiting is a row state, not a connection state), but the
     // row must narrate the wait instead of sitting at "Not connected", keep
-    // the red dot reserved for dropped live connections, and keep the plug
+    // the red icon reserved for dropped live connections, and keep the plug
     // clickable so a re-click re-opens the sign-in page.
     await saveDevserver({ host: "gw.example", port: 443, label: "gw" });
     library.devservers = library.devservers.map(
@@ -236,15 +238,15 @@ describe("Library: devserver groups", () => {
     const waiting = gw!.querySelector(".connect-prompt.waiting");
     expect(waiting).not.toBeNull();
     expect(waiting!.querySelector("svg.spin")).not.toBeNull();
-    // No red dot: the wait is not a dropped connection.
-    expect(gw!.querySelector(".status-dot.lost")).toBeNull();
+    // No red icon: the wait is not a dropped connection.
+    expect(gw!.querySelector(".ds-glyph.lost")).toBeNull();
     // The plug stays live and says what a re-click does.
     const reopen = byAria("Re-open sign-in in your browser for gw");
     expect(reopen).toBeTruthy();
     expect(reopen!.disabled).toBe(false);
   });
 
-  it("turns the identity dot red for a connected devserver that needs attention", () => {
+  it("turns the machine icon red for a connected devserver that needs attention", () => {
     const ds = library.devservers.find((d) => d.id === "ds-1")!;
     controlAttention.libs[ds.library_id!] = true;
 
@@ -254,11 +256,12 @@ describe("Library: devserver groups", () => {
     const prod = machines.find((m) => m.textContent?.includes("box.example.com:8787"));
     expect(prod).toBeTruthy();
     expect(prod!.textContent).toContain("Control terminal");
-    // The textual connection-lost cue is the identity row's status dot turned
-    // red (the same dot that shows green while connected), not a flashing
+    // The textual connection-lost cue is the identity row's OS icon turned
+    // red (the same icon that shows green while connected), not a flashing
     // pill; the control row's eye still flashes for attention.
-    expect(prod!.querySelector(".status-dot.lost")).not.toBeNull();
-    expect(prod!.querySelector(".status-dot.live")).toBeNull();
+    expect(prod!.querySelector(".ds-glyph.lost")).not.toBeNull();
+    expect(prod!.querySelector(".ds-glyph.live")).toBeNull();
+    expect(prod!.querySelector(".status-dot")).toBeNull();
     expect(prod!.querySelector("button.icon-btn.attention")).not.toBeNull();
     const disconnect = byAria("Disconnect prod");
     expect(disconnect).toBeTruthy();
@@ -266,10 +269,10 @@ describe("Library: devserver groups", () => {
     expect(disconnect!.classList.contains("on")).toBe(false);
   });
 
-  it("renders a disconnected devserver's DEAD control row with a red dot so it can be reopened", () => {
+  it("renders a disconnected devserver's DEAD control row with a red icon so it can be reopened", () => {
     // A control script died: the devserver is marked disconnected but its control
     // terminal stays ALIVE in the feed sitting at "process exited". The launcher
-    // must keep that row mounted, with the identity dot red, so the user can open
+    // must keep that row mounted, with the identity icon red, so the user can open
     // it to read the death reason; the row only clears once the control terminal
     // is closed and leaves the feed (covered by the reaped-control test below).
     const ds = library.devservers.find((d) => d.id === "ds-1")!;
@@ -285,13 +288,13 @@ describe("Library: devserver groups", () => {
     expect(prod).toBeTruthy();
     expect(prod!.textContent).toContain("Control terminal");
     expect(prod!.textContent).not.toContain("Not connected");
-    expect(prod!.querySelector(".status-dot.lost")).not.toBeNull();
+    expect(prod!.querySelector(".ds-glyph.lost")).not.toBeNull();
     expect(prod!.querySelector("button.icon-btn.attention")).not.toBeNull();
   });
 
-  it("turns the identity dot red for an unreachable devserver off the status field alone", () => {
+  it("turns the identity icon red for an unreachable devserver off the status field alone", () => {
     // The desktop watchdog marks a post-sleep zombie `unreachable` while the
-    // connection record still exists. The launcher shows the red "lost" dot from
+    // connection record still exists. The launcher shows the red "lost" icon from
     // the status field with NO control attention (a gateway devserver can't hold
     // it), and keeps the content visible so each window can raise its own
     // Reconnect overlay.
@@ -304,9 +307,9 @@ describe("Library: devserver groups", () => {
     const machines = [...target!.querySelectorAll("section.machine")];
     const prod = machines.find((m) => m.textContent?.includes("box.example.com:8787"));
     expect(prod).toBeTruthy();
-    // Red lost dot, no green live dot -- driven purely by status (no attention set).
-    expect(prod!.querySelector(".status-dot.lost")).not.toBeNull();
-    expect(prod!.querySelector(".status-dot.live")).toBeNull();
+    // Red lost icon, no green live icon -- driven purely by status (no attention set).
+    expect(prod!.querySelector(".ds-glyph.lost")).not.toBeNull();
+    expect(prod!.querySelector(".ds-glyph.live")).toBeNull();
     // Content stays mounted (not collapsed to the "Not connected" prompt).
     expect(prod!.textContent).toContain("Control terminal");
     expect(prod!.textContent).not.toContain("Not connected");
@@ -333,6 +336,8 @@ describe("Library: devserver groups", () => {
     expect(prod!.textContent).toContain("Control terminal");
     expect(prod!.textContent).not.toContain("Not connected");
     expect(byAria("Working on prod")).toBeTruthy();
+    expect(prod!.querySelector(".ds-glyph.working")).not.toBeNull();
+    expect(prod!.querySelector(".ds-glyph.live")).toBeNull();
   });
 
   it("does not retain a reaped control row from stale attention alone", () => {
@@ -373,6 +378,11 @@ describe("Library: devserver groups", () => {
     expect(spinning).toBeTruthy();
     expect(spinning!.disabled).toBe(true);
     expect(spinning!.querySelector("svg.spin")).toBeTruthy();
+    expect(
+      [...target!.querySelectorAll("section.machine")]
+        .find((machine) => machine.textContent?.includes("box.example.com:8787"))
+        ?.querySelector(".ds-glyph.working"),
+    ).not.toBeNull();
     expect(byAria("Disconnect prod")).toBeUndefined();
   });
 

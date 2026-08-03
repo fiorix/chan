@@ -14,8 +14,9 @@ Dependencies self-install on first run (`npm install` in this directory). The fu
 
 - `SMOKE_OUT_DIR`: output directory for `results.json` + screenshots (default: a fresh `/tmp/chan-browser-smoke-*`).
 - `CHAN_BIN`: chan binary (default `<repo>/target/debug/chan`).
+- `CHAN_ECHO_EXTENSION_BIN`: echo extension fixture (default `<repo>/target/debug/examples/echo-extension`).
 - `CHROME_BIN`: Chrome executable (default: newest `~/.cache/puppeteer/chrome/linux-*/chrome-linux64/chrome`).
-- `SMOKE_SKIP_BUILD=1`: skip the web + cargo builds.
+- `SMOKE_SKIP_BUILD=1`: skip the web + cargo builds; when the extension check is selected, both `CHAN_BIN` and `CHAN_ECHO_EXTENSION_BIN` must already be current.
 - `SMOKE_ONLY=50,101`: run only the checks whose filenames start with one of the comma-separated prefixes (lexical filename-prefix match).
 - `TMPDIR`: the throwaway workspace is created under the OS tmpdir; a stray `.git` in `/tmp` makes chan's vcs-parent check refuse it, so point `TMPDIR` at a clean directory when that happens.
 

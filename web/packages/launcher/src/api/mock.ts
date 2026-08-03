@@ -653,6 +653,13 @@ export const mockApi: LibraryApi = {
     return tick(undefined);
   },
 
+  closeWindow: (id) => {
+    const i = windows.findIndex((w) => w.window_id === id);
+    if (i >= 0) windows.splice(i, 1);
+    notify();
+    return tick(undefined);
+  },
+
   // The web-op close and visibility flip the mock uses in place of the desktop
   // bridge ops: discard drops the record, visibility mirrors open/hide's
   // hidden+connected split. `actingWindowId` is a no-op in the mock (no gate).
@@ -671,6 +678,13 @@ export const mockApi: LibraryApi = {
       w.hidden = hidden;
       w.connected = !hidden;
     }
+    notify();
+    return tick(undefined);
+  },
+
+  setWindowLabel: (id, label) => {
+    const w = windows.find((x) => x.window_id === id);
+    if (w) w.label = label.trim();
     notify();
     return tick(undefined);
   },

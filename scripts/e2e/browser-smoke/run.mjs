@@ -71,6 +71,11 @@ if (process.env.SMOKE_SKIP_BUILD !== "1") {
   execFileSync("npm", ["run", "build"], { cwd: join(REPO, "web"), stdio: "inherit" });
   console.log("[smoke] building chan binary...");
   execFileSync("cargo", ["build", "-p", "chan"], { cwd: REPO, stdio: "inherit" });
+  console.log("[smoke] building echo extension fixture...");
+  execFileSync("cargo", ["build", "-p", "chan-server", "--example", "echo-extension"], {
+    cwd: REPO,
+    stdio: "inherit",
+  });
 }
 if (!existsSync(chanBin)) {
   console.error(`chan binary missing at ${chanBin}; build first or set CHAN_BIN`);
@@ -118,7 +123,9 @@ try {
     }
   });
 
-  await page.goto(serverUrl, { waitUntil: "networkidle2", timeout: 60_000 });
+  // The app keeps background transports and capability polling alive. DOM
+  // load plus the shell selector below is the explicit readiness barrier.
+  await page.goto(serverUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForSelector(".pane", { timeout: 30_000 });
 
   // Shared check context (see README.md).

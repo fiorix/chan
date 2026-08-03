@@ -89,9 +89,9 @@ describe("Library read-only parity", () => {
     expect(target!.querySelector('[aria-label="Hide window"]')).toBeNull();
   });
 
-  it("shows the red lost dot for an unreachable devserver on the gateway surface", () => {
+  it("shows the red lost icon for an unreachable devserver on the gateway surface", () => {
     // The gateway (read-only) surface is where a post-sleep unreachable devserver
-    // appears; the honest red dot comes from the status field, no mutation
+    // appears; the honest red icon comes from the status field, no mutation
     // controls involved.
     library.devservers = library.devservers.map(
       (d): DevserverEntry => (d.id === "ds-1" ? { ...d, status: "unreachable" } : d),
@@ -101,8 +101,8 @@ describe("Library read-only parity", () => {
       m.textContent?.includes("box.example.com:8787"),
     );
     expect(prod).toBeTruthy();
-    expect(prod!.querySelector(".status-dot.lost")).not.toBeNull();
-    expect(prod!.querySelector(".status-dot.live")).toBeNull();
+    expect(prod!.querySelector(".ds-glyph.lost")).not.toBeNull();
+    expect(prod!.querySelector(".ds-glyph.live")).toBeNull();
     expect(prod!.textContent).not.toContain("Not connected");
   });
 

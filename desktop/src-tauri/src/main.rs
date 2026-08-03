@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod auth;
+mod command_launcher;
 mod config;
 mod cs_install;
 mod devserver;
@@ -115,7 +116,7 @@ pub struct AppState {
     /// family). Entries leave the list on unbury or window destroy.
     pub buried_windows: Mutex<Vec<BuriedWindow>>,
     /// Native labels whose NEXT `CloseRequested`-bury should skip the
-    /// "was hidden, not closed" teaching notice. The launcher status-dot hide
+    /// "was hidden, not closed" teaching notice. The launcher Hide action
     /// routes through the OS close path (so the bury handler runs) but is an
     /// explicit hide gesture of its own -- the notice teaches the red-button
     /// gesture, so we suppress it here. One-shot: the close handler consumes the
@@ -619,7 +620,7 @@ impl AppState {
     }
 
     /// Mark `label` so its next close-button bury skips the teaching notice
-    /// (the launcher status-dot hide is its own explicit gesture). Set on the
+    /// (the launcher Hide action is its own explicit gesture). Set on the
     /// main thread just before `window.close()`; consumed by the close handler.
     pub fn mark_silent_hide(&self, label: &str) {
         self.silent_hides.lock().unwrap().insert(label.to_string());
@@ -4343,7 +4344,7 @@ async fn request_close_window(
 /// (hide it, keep its sessions warm and its record reopenable) instead of
 /// destroying it. The red-dot `CloseRequested` handler already `prevent_close`d
 /// and evaled `app.window.confirmClose` into the webview; this is the "Hide"
-/// answer. Mirrors the launcher status-dot hide, minus the (now removed) teaching
+/// answer. Mirrors the launcher Hide action, minus the (now removed) teaching
 /// notice. "Close" is the sibling answer and rides `request_close_window`
 /// (discard + destroy). The window label alone reaches the bury; its LRU restore
 /// key is recovered from the label via `serve::restore_key_for_label`.
@@ -4884,12 +4885,14 @@ fn main() {
     *state.gateway_migration.lock().unwrap() = migration_outcome;
     let state_for_exit = Arc::clone(&state);
     let state_for_setup = Arc::clone(&state);
+    let command_launcher_host = Arc::new(command_launcher::CommandLauncherHost::default());
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
+        .manage(command_launcher_host)
         // The migration summary waits for the FIRST launcher page load: a
         // notice emitted at startup would fire before the SPA subscribes,
         // and the launcher-notice event has no replay.
@@ -5369,6 +5372,14 @@ fn main() {
             hide_window_from_close_confirm,
             abandon_devserver_for_window,
             reconnect_devserver_for_window,
+            command_launcher::open_command_launcher,
+            command_launcher::command_launcher_source_ready,
+            command_launcher::submit_command_launcher_context,
+            command_launcher::command_launcher_snapshot,
+            command_launcher::save_command_launcher_draft,
+            command_launcher::hide_command_launcher,
+            command_launcher::execute_command_launcher_item,
+            command_launcher::finish_command_launcher_execution,
             restart_desktop_after_update,
             download::download_file_native,
             download::begin_generated_download,
@@ -7524,6 +7535,7 @@ mod tests {
             kind: chan_server::WindowKind::Terminal,
             title: "Terminal Window 1".into(),
             ordinal: 1,
+            label: String::new(),
             workspace_path: None,
             prefix: "/api/terminal".into(),
             token: "tok-test".into(),
@@ -7654,6 +7666,7 @@ mod tests {
             kind: chan_server::WindowKind::Terminal,
             title: "Terminal".into(),
             ordinal: 1,
+            label: String::new(),
             workspace_path: None,
             prefix: "/lib".into(),
             token: "tok".into(),
@@ -7688,6 +7701,7 @@ mod tests {
             kind: chan_server::WindowKind::Terminal,
             title: "Terminal".into(),
             ordinal: 1,
+            label: String::new(),
             workspace_path: None,
             prefix: "/terminal".into(),
             token: "fresh-token".into(),
@@ -7725,6 +7739,7 @@ mod tests {
             kind: chan_server::WindowKind::Terminal,
             title: "Terminal".into(),
             ordinal: 1,
+            label: String::new(),
             workspace_path: None,
             prefix: "/terminal".into(),
             token: "tok".into(),
@@ -7825,6 +7840,7 @@ mod tests {
             kind: chan_server::WindowKind::Terminal,
             title: "Terminal".into(),
             ordinal: 1,
+            label: String::new(),
             workspace_path: None,
             prefix: "/terminal".into(),
             token: "tok".into(),

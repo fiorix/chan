@@ -139,12 +139,14 @@
   import {
     hideWindowFromCloseConfirm,
     isTauriDesktop,
+    openNativeCommandLauncher,
     reloadWindow,
     requestCloseWindow,
   } from "./api/desktop";
   import { activeTransferCount } from "./state/transfers.svelte";
   import { chordFromEvent, currentOS } from "./state/shortcuts";
   import { allCommands, commandContext } from "./state/commands";
+  import { loadExtensions } from "./state/extensions.svelte";
   import { createDiagramAndOpen } from "./state/commands/diagram";
   import { createSlidesAndOpen } from "./state/commands/slides";
   import {
@@ -186,6 +188,14 @@
   // in-mode binding. The flag lives in App.svelte because Hybrid Nav is
   // global (one transaction per Cmd+. press), no per-pane scoping needed.
   let paneModeHelpVisible = $state(false);
+
+  function showCommandLauncher(mode: "contextual" | "computers" = "contextual"): void {
+    if (isTauriDesktop()) {
+      void openNativeCommandLauncher(mode);
+    } else if (mode === "contextual") {
+      toggleCommandLauncher();
+    }
+  }
   $effect(() => {
     // Touch enough of the layout to trip reactivity on common
     // mutations (URL persistence) AND watch every file tab's content
@@ -396,6 +406,7 @@
     // initial load still flushes any in-flight session changes.
     installSessionFlushHook();
     await bootstrap();
+    if (!ui.terminalOnly) await loadExtensions();
     // The docked FB default lives in chan-server's
     // `BrowserSidePanes::default()`: a new preferences.toml ships with
     // both docks OFF (`left: false`), so a new workspace opens with just
@@ -587,6 +598,16 @@
         ? commandIdForChord(overrideChord, commands)
         : undefined;
       if (overrideId) {
+        if (overrideId === "app.launcher.toggle") {
+          e.preventDefault();
+          showCommandLauncher("contextual");
+          return;
+        }
+        if (overrideId === "app.launcher.computers" && isTauriDesktop()) {
+          e.preventDefault();
+          showCommandLauncher("computers");
+          return;
+        }
         const cmd = commands.find((c) => c.id === overrideId);
         if (cmd && cmd.available(commandContext())) {
           e.preventDefault();
@@ -602,7 +623,7 @@
         : e.ctrlKey && !e.metaKey && e.altKey && !e.shiftKey && e.code === "KeyK";
     if (commandLauncherChord) {
       e.preventDefault();
-      toggleCommandLauncher();
+      showCommandLauncher("contextual");
       return;
     }
     const settingsChord =
@@ -1198,7 +1219,10 @@
         searchPanel.open = !searchPanel.open;
         return;
       case "app.launcher.toggle":
-        toggleCommandLauncher();
+        showCommandLauncher("contextual");
+        return;
+      case "app.launcher.computers":
+        if (isTauriDesktop()) showCommandLauncher("computers");
         return;
       case "app.graph.toggle":
         spawnGraphFromContext();
@@ -1355,6 +1379,14 @@
         closeFind(t.id);
         return;
       }
+    }
+    // Extension commands register after the process catalog loads, so they
+    // cannot have compile-time switch cases. Resolve them through the same
+    // registry used by the launcher; this is also the path user-assigned
+    // extension shortcuts and native command dispatch take.
+    if (commandName.startsWith("extension.")) {
+      const command = allCommands().find((candidate) => candidate.id === commandName);
+      if (command?.available(commandContext())) command.run();
     }
   }
   function onChanCommand(e: Event): void {
