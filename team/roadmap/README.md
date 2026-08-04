@@ -41,6 +41,12 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Completed
 
+### v0.83.3
+
+Shipped 2026-08-03; see [release-v0.83.3](../release/release-v0.83.3.md). Closed items in [`done/`](done/):
+
+- [timing-test-virtual-clock](done/timing-test-virtual-clock.md) - the shutdown-grace test runs on tokio's paused clock and the indexer recovery waits ride one 30 s convergence budget, so a contended host cannot fail the gate.
+
 ### v0.83.0
 
 Shipped 2026-08-03; see [release-v0.83.0](../release/release-v0.83.0.md). Closed items in [`done/`](done/):

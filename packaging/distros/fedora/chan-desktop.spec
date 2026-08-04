@@ -8,7 +8,7 @@
 # package instead of depending on it.
 
 %global debug_package %{nil}
-%global upstream_version 0.83.1
+%global upstream_version 0.83.3
 
 Name:           chan-desktop
 Version:        %(echo %{upstream_version} | tr - '~')
