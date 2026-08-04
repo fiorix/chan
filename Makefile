@@ -22,6 +22,8 @@ WEB_PREREQ = $(if $(filter 1,$(WEB_ALREADY_BUILT)),,web)
 AUR_ROOTFS ?= archlinux
 AUR_REV ?= HEAD
 WINDOWS_CROSS_ROOTFS ?= ubuntu
+NIX_PACKAGE ?= all
+NIX_SDME_ROOTFS ?= ubuntu
 LINUX_TARGET ?= x86_64-unknown-linux-gnu
 DEB_TARGET ?= $(LINUX_TARGET)
 RPM_TARGET ?= $(LINUX_TARGET)
@@ -37,6 +39,7 @@ DISTRO ?= ubuntu
 UNAME_S := $(shell uname -s)
 SDME ?= $(if $(filter Darwin,$(UNAME_S)),limactl shell default sudo sdme,sudo sdme)
 WINDOWS_CROSS_TARGET_DIR ?= $(REPO_ROOT)/target/windows-cross-check
+NIX_SDME_OUT ?= $(REPO_ROOT)/target/nix-sdme-check
 
 # make copr-check knobs: the container command for the SRPM stage, the matrix
 # slice, the sdme rootfs names (imported names vary per host), and whether a
@@ -218,6 +221,12 @@ nix-check: ## Evaluate, build, and smoke both Nix packages.
 		}; \
 		scripts/smoke-nix-package.sh "$$out" "$$package"; \
 	done
+
+.PHONY: nix-sdme-check
+nix-sdme-check: ## Run Nix checks in a disposable Ubuntu sdme guest.
+	NIX_PACKAGE="$(NIX_PACKAGE)" NIX_SDME_ROOTFS="$(NIX_SDME_ROOTFS)" \
+		OUT="$(NIX_SDME_OUT)" SDME="$(SDME)" \
+		packaging/nix/build-with-sdme.sh
 
 .PHONY: pre-push
 pre-push: ## Run the local pre-push gate.

@@ -52,6 +52,19 @@ make nix-check
 
 `make nix-check` evaluates both systems, builds both native packages, checks each output layout and update refusal, and boots each packaged devserver long enough to prove its health endpoint.
 
+On a host without Nix, import a plain Ubuntu rootfs once and run the supplementary sdme check:
+
+```sh
+sudo sdme fs import docker.io/ubuntu:26.04 --name ubuntu --install-packages=yes -v
+make nix-sdme-check
+make nix-sdme-check NIX_PACKAGE=chan
+make nix-sdme-check NIX_PACKAGE=chan-desktop
+```
+
+`NIX_SDME_ROOTFS` selects the explicitly imported Ubuntu rootfs. The driver verifies the guest identity, installs Ubuntu's `nix-bin` package inside the disposable overlay, and enables flakes there. `NIX_PACKAGE=all` delegates to the native `make nix-check` contract; either named package evaluates the flake, builds and validates exactly that output, and runs its package smoke without first building the other package.
+
+The checkout is mounted read-only at `/src`, and the only writable host mount is `target/nix-sdme-check` at `/out`. Combined guest output is retained as `build.log` beside the guest status file. The container, installed packages, Nix store, and built closures are removed after every run. This check never publishes to Cachix or creates release artifacts.
+
 The packages follow the repository's pinned Rust toolchain. They use Node.js 22 from nixpkgs because Node.js 20 is end-of-life and has been removed from the current nixpkgs input; the rest of the project's existing CI remains on its own Node version.
 
 ## Fixed-output maintenance

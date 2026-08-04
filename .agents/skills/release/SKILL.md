@@ -65,14 +65,16 @@ GA only (not rc pins), the distro source packages -- both publish after the tag 
 
 ### Nix hashes on a host without Nix (sdme)
 
-Run Nix in an sdme OCI-app container (the `nixos/nix` image on a systemd-capable base rootfs; verified with `nixos/nix:2.32.4`):
+Use the tracked supplementary Ubuntu sdme workflow. It keeps the checkout read-only, returns only the log and status to the host, and discards the guest's installed packages, Nix store, and closures:
 
-- `sudo sdme fs import docker.io/nixos/nix:2.32.4 --name nix --oci-mode=app --base-fs chan-devserver` (any imported base rootfs with systemd works as `--base-fs`); the nix root lands at `/oci/apps/nix/root` inside the container.
-- `sudo sdme create --name nix -r nix -b <checkout>:/src && sudo sdme start nix`.
-- One-time chroot plumbing via `sudo sdme exec nix -- bash -c '...'`: bind the checkout into the app root (`mkdir -p /oci/apps/nix/root/src && mount --bind /src /oci/apps/nix/root/src`), mount the runtime filesystems (`mount -t proc proc /oci/apps/nix/root/proc`, `mount --rbind /sys /oci/apps/nix/root/sys`, `mount --rbind /dev /oci/apps/nix/root/dev`), copy DNS (`cp -L /etc/resolv.conf /oci/apps/nix/root/etc/resolv.conf`), and mark the checkout safe for libgit2 (`printf '[safe]\n\tdirectory = /src\n' > /oci/apps/nix/root/root/.gitconfig`).
-- Build with the store-path nix binary (find it with `ls -d /oci/apps/nix/root/nix/store/*-nix-2*/bin`), chrooted, with HOME forced so the safe-directory file is read: `sudo sdme exec nix -- chroot /oci/apps/nix/root /usr/bin/env HOME=/root /nix/store/<hash>-nix-<ver>/bin/nix --extra-experimental-features 'nix-command flakes' build /src#chan --no-link`.
-- Each failed build names one `got: sha256-...`; pin it and repeat: the shared `npmDeps.hash` surfaces first (pin it in BOTH derivations), then each `cargoHash` (`.#chan`, then `.#chan-desktop`). Fixed-output mismatches fail before any compilation, so the harvest is downloads only.
-- Git-backed flake evaluation includes modified tracked files from the working tree, so the harvest runs fine before the GA commit; untracked files (`web/dist`) are invisible to the flake, which is why the derivations build the bundles in `preBuild`.
+```sh
+sudo sdme fs import docker.io/ubuntu:26.04 --name ubuntu --install-packages=yes -v
+make nix-sdme-check
+make nix-sdme-check NIX_PACKAGE=chan
+make nix-sdme-check NIX_PACKAGE=chan-desktop
+```
+
+`NIX_PACKAGE=all` delegates to the native `make nix-check` contract. Use a named package while harvesting one fixed-output hash so the other package is not forced first. Each failed build records its combined output in `target/nix-sdme-check/build.log`; copy the reported `got: sha256-...` into the affected field and repeat. The shared `npmDeps.hash` is pinned in both derivations, while each package has its own `cargoHash`. The workflow builds only: it never pushes or pins Cachix, publishes a release, tags, or copies release artifacts. Native `make nix-check`, GA CI, and the Cachix publication jobs remain authoritative for release validation and publication.
 
 ## Invariants
 
