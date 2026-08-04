@@ -48,3 +48,13 @@ All three mechanisms were read in code on the v0.83.3 lineage; the first two are
 - No persisted pending-delete across a desktop restart (documented residual).
 - No redesign of the window watcher, the feed, or the reconnect cadence; this item changes decisions at the edges, not the loops.
 - No change to the CloseConfirmOverlay's copy or its three actions.
+
+## Implementation evidence (2026-08-04)
+
+- `e69087ee` adds process-local pending-delete suppression, bounded DELETE attempts, status-aware connecting probes with webview cookies, connecting-screen close routing, and native raise/focus before the close prompt. `4798af17` retries pending deletes on the first valid feed snapshot after reconnect and settles them once absent. `065afa4b` cancels SPA close confirmation across disconnect and reconnect transitions. `bcbf0880` keeps the pending-delete assertion helper test-only for a warning-clean production build.
+- `cargo test -p chan-desktop pending_delete`: 5 passed. `cargo test -p chan-desktop connecting_probe_classifies_gateway_and_loopback_responses`, `cargo test -p chan-desktop close_requested`, and `cargo test -p chan-desktop connecting_screen_windows_close_for_real`: 1 passed each.
+- `cargo clippy -p chan-desktop --all-targets -- -D warnings` and `cargo fmt --check`: passed. `cargo fmt` also ran before each Rust implementation commit.
+- `cd web/packages/workspace-app && npx vitest run src/state/closeConfirm.test.ts src/components/closeConfirmOverlay.test.ts src/components/closeConfirmConnection.test.ts`: 3 files and 12 tests passed.
+- `cd web && npm run check`: all workspace checks passed; the Svelte workspaces reported 0 errors and 0 warnings.
+- Residual: pending deletes are process-local. Restarting the desktop before the remote DELETE settles can allow the authoritative window record to return on the next process start, as bounded by this item.
+- The worker terminal had no live gateway reboot environment. The owner hand-smoke remains required before acceptance.
