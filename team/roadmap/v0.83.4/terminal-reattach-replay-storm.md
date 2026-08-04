@@ -34,3 +34,21 @@ From code reading and git archaeology on 2026-08-04 (lead, before this item was 
 - No redesign of the replay, snapshot, or generation protocol.
 - No change to the secret-masking feature contract (visual-only, post-parse); if the masker is implicated, fix the interaction, not the feature.
 - No gateway changes.
+
+## Implementation evidence (2026-08-04)
+
+The controlled investigation did not reproduce a replay storm. Browser probes counted PTY WebSocket creations plus `session` and `ready` frames so repeated rendering could not be mistaken for repeated attachment.
+
+| Case | Observed attachment and replay |
+| --- | --- |
+| Busy preserved PTY through a real systemd devserver restart and tenant reauthorization | The same session survived with `NFileDescriptorStore=1` before and after restart. Reauthorization produced one successful PTY socket, one `session`, one `ready`, and one bounded 2.09 MiB replay. |
+| Full page reload with 12 MiB of terminal output and no usable snapshot | One PTY socket, one `session`, one `ready`, and one bounded 2.09 MiB replay. |
+| Explicit PTY WebSocket drop | One replacement PTY socket, one `session`, one `ready`, and redraw-only incremental bytes. |
+| Seven-second main-thread/wake gap | One replacement PTY socket, one `session`, one `ready`, and redraw-only incremental bytes. No follow-on recycle. |
+| Retry with the pre-restart tenant token | The WebSocket handshakes failed authorization and delivered zero `session` frames and zero replay bytes. Loading the fresh tenant token then produced the single successful attach recorded above. |
+
+The v0.83.0..v0.83.3 comparison has no introducing change in the attach path. `TerminalTab.svelte`, `web/packages/workspace-app/src/terminal/**`, the watcher store, the terminal route/session registry, desktop watcher wiring, and desktop devserver connection code are byte-identical across the tags. `serve.rs` differs only for the retired command-launcher overlay removal; its navigation and retarget path did not change. A behavioral bisect therefore cannot name an introducing commit in this window.
+
+There is a matching historical desktop precedent: `c05d1ffb` stopped gateway feed token churn from changing `RemoteLaunchKey` and retargeting every open WebView on every feed push. Its regression test is `remote_launch_key_ignores_token_churn_for_gateway_windows`. That fix predates and is an ancestor of both v0.83.0 and v0.83.3, so it does not explain a new regression between those releases.
+
+The mechanism remains **UNPINNED**. If the storm recurs on the fixed build, the next step is an owner-side live trace that records whether the DevTools console clears between repetitions (page navigation/desktop retarget) or persists (SPA WebSocket reconnect), together with timestamps and cadence for every PTY `session` and `ready` frame. That trace, rather than another protocol change, determines the owning lane and the regression test.
