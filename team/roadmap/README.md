@@ -24,26 +24,28 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | item | state | what needs to happen |
 | --- | --- | --- |
 | [web-marketing-onboarding](v0.85.0/web-marketing-onboarding.md) | accepted, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
+| [large-transfer-capability](v0.85.0/large-transfer-capability.md) | implementation in progress | finish the bulk-transfer lane, admission control, queue protocol, browser state, and acceptance evidence before raising the ceiling |
+| [ghostty-macos-trackpad-scroll-parity](v0.85.0/ghostty-macos-trackpad-scroll-parity.md) | implemented, owner validation pending | calibrate the accepted factor on macOS hardware and complete live client checks |
+| [ghostty-live-output-scroll-stability](v0.85.0/ghostty-live-output-scroll-stability.md) | implemented, owner validation pending | complete the real streaming and browser evidence |
+| [notifications](v0.85.0/notifications.md) | implemented, validation pending | complete integrated frontend validation and live browser and desktop evidence |
+| [hybrid-nav-mouse-split-affordances](v0.85.0/hybrid-nav-mouse-split-affordances.md) | implemented, validation pending | clear the integrated web gate and complete runtime input evidence |
+| [file-browser-context-menu-inspector-actions](v0.85.0/file-browser-context-menu-inspector-actions.md) | correction in progress | remove stale authority and copy while retaining ordinary-file replacement |
+| [chan-config-key-coverage](v0.85.0/chan-config-key-coverage.md) | implemented, validation pending | complete integrated validation of the serialized key authority |
 
 ### v0.84.0
 
 | item | state | what needs to happen |
 | --- | --- | --- |
-| [large-transfer-capability](v0.84.0/large-transfer-capability.md) | registered, grounded, needs a spec | tune the tunnel transport, build the bulk-transfer lane and its admission control, then raise the write ceiling last |
 | [cs-open-non-text-reveal-and-audio](v0.84.0/cs-open-non-text-reveal-and-audio.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
 | [hybrid-nav-staged-editor-bubble](v0.84.0/hybrid-nav-staged-editor-bubble.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
 | [terminal-tab-rename-reaches-inventory](v0.84.0/terminal-tab-rename-reaches-inventory.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
 | [terminal-editor-appearance-settings](v0.84.0/terminal-editor-appearance-settings.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
 | [release-platform-verification](v0.84.0/release-platform-verification.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
-| [ghostty-macos-trackpad-scroll-parity](v0.84.0/ghostty-macos-trackpad-scroll-parity.md) | registered, grounded, ruled, specified | calibrate Ghostty's macOS pixel-mode scrollback travel to xterm.js without changing TUI wheel input |
-| [ghostty-live-output-scroll-stability](v0.84.0/ghostty-live-output-scroll-stability.md) | registered, grounded, ruled, specified | keep a manually scrolled Ghostty viewport under user control while Kimi or any other process emits output |
-| [notifications](v0.84.0/notifications.md) | registered, not specced | ground `cs notify` and decide how a local session or a devserver reaches chan-launcher to raise a text notification |
-| [hybrid-nav-mouse-split-affordances](v0.84.0/hybrid-nav-mouse-split-affordances.md) | registered, not specced | suggest horizontal and vertical splits on mouse hover once a pane drag enters Hybrid Nav |
-| [graph-inspector-language-node-detail](v0.84.0/graph-inspector-language-node-detail.md) | registered, not specced | add COCOMO and the top directories for a selected language node, sourced from chan-report's existing roll-up |
-| [file-browser-context-menu-inspector-actions](v0.84.0/file-browser-context-menu-inspector-actions.md) | registered, not specced | give the file browser's right-click menu the inspector's per-type actions |
-| [tests-inherit-ambient-chan-env](v0.84.0/tests-inherit-ambient-chan-env.md) | registered, grounded, not specced | stop tests reading the ambient `CHAN_*` namespace, so the gate passes from a chan terminal and no assertion renders a credential |
+| [graph-inspector-language-node-detail](v0.84.0/graph-inspector-language-node-detail.md) | implemented, focused validation complete | ship at v0.84.0 GA after the integrated release gate |
+| [tests-inherit-ambient-chan-env](v0.84.0/tests-inherit-ambient-chan-env.md) | implemented, focused validation complete | ship at v0.84.0 GA after the integrated release gate |
 | [rich-prompt-submit-button](v0.84.0/rich-prompt-submit-button.md) | implemented and validated on `v0840-base` | turn the Rich Prompt's hint into a control strip whose primary button submits and becomes cancel while a prompt is in flight |
-| [chan-config-key-coverage](v0.84.0/chan-config-key-coverage.md) | registered, grounded, needs a spec | derive `chan config get`/`set` from the same key set the dump prints, so the 19 keys it prints but rejects become settable |
+| [terminal-secret-masking-default-off](v0.84.0/terminal-secret-masking-default-off.md) | implemented, focused validation pending | ship the opt-in default while preserving explicit configuration and the existing ephemeral per-tab switch |
+| [sdme-ubuntu-nix-build](v0.84.0/sdme-ubuntu-nix-build.md) | implemented, live guest validation pending | run the tracked `NIX_PACKAGE=chan` build in an Ubuntu sdme guest and retain its result |
 
 ## Completed
 

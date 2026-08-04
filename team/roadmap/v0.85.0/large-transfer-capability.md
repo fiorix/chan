@@ -1,6 +1,6 @@
 # Large transfer capability
 
-Status: REGISTERED for v0.83.0; grounded 2026-07-31.
+Status: REGISTERED for v0.85.0; grounded 2026-07-31; implementation in progress.
 
 ## What
 

@@ -1,6 +1,6 @@
 # Ghostty macOS trackpad scroll parity
 
-Status: REGISTERED for v0.84.0, grounded 2026-08-03, ruled 2026-08-03, specified 2026-08-03.
+Status: REGISTERED for v0.85.0, grounded 2026-08-03, ruled 2026-08-03, specified 2026-08-03, implemented, owner validation pending.
 
 ## What
 

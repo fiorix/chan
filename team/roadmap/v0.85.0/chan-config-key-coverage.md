@@ -1,6 +1,6 @@
 # `chan config` accepts only a third of the keys it prints
 
-Status: REGISTERED for v0.84.0, grounded 2026-08-04.
+Status: REGISTERED for v0.85.0, grounded 2026-08-04, implemented, integrated validation pending.
 
 ## What
 
