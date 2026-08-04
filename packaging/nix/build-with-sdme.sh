@@ -156,8 +156,7 @@ run_check() {
         return 1
     fi
 
-    export TMPDIR=/var/tmp
-    install -d -m 1777 "$TMPDIR" || return
+    install -d -m 0755 /var/tmp "$TMPDIR" "$NIX_BUILD_DIR" || return
     apt-get update || return
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates curl git make nix-bin nix-setup-systemd python3 || return
@@ -165,7 +164,7 @@ run_check() {
     mkdir -p /etc/nix || return
     printf "%s\n" \
         "experimental-features = nix-command flakes" \
-        "build-dir = /var/tmp" >>/etc/nix/nix.conf || return
+        "build-dir = $NIX_BUILD_DIR" >>/etc/nix/nix.conf || return
     export NIX_REMOTE=local
 
     echo ">> guest OS: $(. /etc/os-release && printf "%s %s" "$ID" "${VERSION_ID:-unknown}")"
@@ -199,7 +198,8 @@ set +e
 "${SDME_CMD[@]}" new --name "$CONTAINER" -r "$NIX_SDME_ROOTFS" -t 180 \
     -b "$SOURCE_SNAPSHOT:/src:ro" -b "$OUT:/out" \
     -- /usr/bin/env HOST_UID="$HOST_UID" HOST_GID="$HOST_GID" \
-    NIX_PACKAGE="$NIX_PACKAGE" /bin/bash -c "$GUEST_RUN" \
+    NIX_PACKAGE="$NIX_PACKAGE" TMPDIR=/var/tmp/chan-nix-tmp \
+    NIX_BUILD_DIR=/var/tmp/chan-nix-build /bin/bash -c "$GUEST_RUN" \
     2>&1 | tee "$LOG_FILE"
 pipeline_status=("${PIPESTATUS[@]}")
 set -e

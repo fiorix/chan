@@ -143,7 +143,7 @@ case "${1:-}" in
         printf '%s\n' "$rootfs" >"$state/rootfs"
         while [ "$#" -gt 0 ]; do
             case "$1" in
-                HOST_UID=*|HOST_GID=*|NIX_PACKAGE=*|TMPDIR=*|NIX_REMOTE=*)
+                HOST_UID=*|HOST_GID=*|NIX_PACKAGE=*|TMPDIR=*|NIX_BUILD_DIR=*|NIX_REMOTE=*)
                     export "$1"
                     case "$1" in NIX_PACKAGE=*) package="${1#NIX_PACKAGE=}" ;; esac
                     ;;
@@ -345,14 +345,14 @@ assert_grep '^absent$' "$STATE/run/source-target-ignored.bin" "an ignored build 
 assert_grep '^absent$' "$STATE/run/source-.git" "Git metadata is excluded"
 assert_grep "^nix-check NIX=nix NIX_FLAKE=path:$RUN_SOURCE$" "$STATE/run/make" "all delegates to make nix-check with the mounted path flake"
 assert_grep '^all$' "$STATE/run/package" "all reaches the guest command"
-assert_grep '^-d -m 1777 /var/tmp[|]TMPDIR=/var/tmp$' "$STATE/run/install" "guest temporary state is prepared under /var/tmp"
+assert_grep '^-d -m 0755 /var/tmp /var/tmp/chan-nix-tmp /var/tmp/chan-nix-build[|]TMPDIR=/var/tmp/chan-nix-tmp$' "$STATE/run/install" "the disposable guest protects the complete /var/tmp build path"
 assert_grep '^install -y --no-install-recommends ca-certificates curl git make nix-bin nix-setup-systemd python3$' "$STATE/run/apt" "the declared Nix and smoke prerequisites are requested"
 assert_grep '^--create /usr/lib/tmpfiles.d/nix-daemon.conf$' "$STATE/run/tmpfiles" "the Ubuntu Nix store layout is initialized"
 assert_grep '^experimental-features = nix-command flakes$' "$STATE/run/etc-nix/nix.conf" "flakes are enabled inside the guest"
-assert_grep '^build-dir = /var/tmp$' "$STATE/run/etc-nix/nix.conf" "Nix build directories stay off /tmp"
+assert_grep '^build-dir = /var/tmp/chan-nix-build$' "$STATE/run/etc-nix/nix.conf" "Nix uses a protected build directory under /var/tmp"
 assert_grep '^store ping$' "$STATE/run/nix" "the local Nix store is checked before the build"
-assert_grep '^TMPDIR=/var/tmp NIX_REMOTE=local$' "$STATE/run/nix-env" "Nix uses /var/tmp and the disposable local store"
-assert_grep '^TMPDIR=/var/tmp NIX_REMOTE=local$' "$STATE/run/make-env" "the all-package check inherits the guest build environment"
+assert_grep '^TMPDIR=/var/tmp/chan-nix-tmp NIX_REMOTE=local$' "$STATE/run/nix-env" "Nix uses protected /var/tmp state and the disposable local store"
+assert_grep '^TMPDIR=/var/tmp/chan-nix-tmp NIX_REMOTE=local$' "$STATE/run/make-env" "the all-package check inherits the guest build environment"
 assert_grep '^0$' "$TEST_OUT/status" "guest status is retained"
 assert_grep 'guest OS: ubuntu 26.04' "$TEST_OUT/build.log" "combined guest output is retained"
 assert_grep '^chan-nix-check-[0-9]+$' "$STATE/run/removed" "the PID-scoped container is removed on success"
@@ -362,7 +362,7 @@ assert_status 0 "$RUN_STATUS" "the chan-only check succeeds"
 assert_grep "^flake check --all-systems --no-build path:$RUN_SOURCE$" "$STATE/run/nix" "chan evaluates the tracked snapshot as a path flake"
 assert_grep "^build --no-link --print-out-paths path:$RUN_SOURCE#chan$" "$STATE/run/nix" "chan builds exactly its path-flake output"
 assert_grep '^/nix/store/stub-chan chan$' "$STATE/run/smoke" "chan validates and smokes its output"
-assert_grep '^TMPDIR=/var/tmp NIX_REMOTE=local$' "$STATE/run/smoke-env" "the package smoke stays off /tmp"
+assert_grep '^TMPDIR=/var/tmp/chan-nix-tmp NIX_REMOTE=local$' "$STATE/run/smoke-env" "the package smoke stays off /tmp"
 assert_not_grep 'chan-desktop' "$STATE/run/nix" "chan does not force chan-desktop"
 
 run_driver chan-desktop
