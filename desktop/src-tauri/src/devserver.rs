@@ -1196,17 +1196,30 @@ pub(crate) fn install_gateway_webview_session(
         )
     });
     *gw.session_installer.lock().unwrap() = Some(Arc::clone(&installer));
-    while let Some(session) = gw
-        .session
-        .lock()
-        .unwrap()
-        .clone()
-        .filter(GatewaySession::is_fresh)
-    {
+    install_current_gateway_session(gw, installer.as_ref())
+}
+
+fn install_current_gateway_session(
+    gw: &GatewayConn,
+    installer: &GatewaySessionInstaller,
+) -> Result<(), String> {
+    loop {
+        // Keep this guard scoped to the block. In an edition-2021 `while let`
+        // scrutinee it would live through the body and deadlock the re-check.
+        let session = {
+            let current = gw.session.lock().unwrap();
+            current.clone().filter(GatewaySession::is_fresh)
+        };
+        let Some(session) = session else {
+            break;
+        };
         installer(&gw.proxy_origin, &session)?;
-        let installed_is_current = gw.session.lock().unwrap().as_ref().is_some_and(|current| {
-            current.is_fresh() && current.cookie_header == session.cookie_header
-        });
+        let installed_is_current = {
+            let current = gw.session.lock().unwrap();
+            current.as_ref().is_some_and(|current| {
+                current.is_fresh() && current.cookie_header == session.cookie_header
+            })
+        };
         if installed_is_current {
             break;
         }
@@ -3149,6 +3162,35 @@ mod tests {
         assert_eq!(
             extract_cookie_max_age(&headers, "__Host-devserver_gate"),
             Some(3600)
+        );
+    }
+
+    #[test]
+    fn gateway_session_install_returns_with_a_fresh_session() {
+        let conn = gateway_test_conn("https://id.chan.app/desktop/v1/devserver/entry".into());
+        let gw = conn.gateway.as_ref().unwrap();
+        *gw.session.lock().unwrap() = Some(GatewaySession {
+            gate: "gate-current".into(),
+            cookie_header: "__Host-devserver_gate=gate-current; __Host-devserver_csrf=csrf-current"
+                .into(),
+            csrf: "csrf-current".into(),
+            expires_at: Instant::now() + Duration::from_secs(60),
+        });
+        let installed = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let installed_for_callback = Arc::clone(&installed);
+        let installer: Arc<GatewaySessionInstaller> = Arc::new(move |origin, session| {
+            installed_for_callback
+                .lock()
+                .unwrap()
+                .push((origin.to_string(), session.csrf.clone()));
+            Ok(())
+        });
+
+        install_current_gateway_session(gw, installer.as_ref()).unwrap();
+
+        assert_eq!(
+            installed.lock().unwrap().as_slice(),
+            [(gw.proxy_origin.clone(), "csrf-current".to_string())]
         );
     }
 

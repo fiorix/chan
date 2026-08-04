@@ -69,6 +69,16 @@ Focused checks, rerun on the integrated team branch:
 - `cd web/packages/workspace-app && npm exec vitest run src/state/store.test.ts src/components/SettingsOverlay.render.test.ts src/api/transport.test.ts src/api/uploadCsrf.test.ts src/api/desktop.test.ts`: 5 files passed, 103 tests passed. This includes the synchronous keepalive DELETE and settings PATCH regressions plus cache timing coverage.
 - `cd web && npm run check`: passed for every workspace; all Svelte checks reported 0 errors and 0 warnings, and the marketing build and smoke checks passed.
 
+Live regression follow-up on 2026-08-04:
+
+- Fresh-session cookie convergence now runs in a helper that clones the current session inside a dedicated mutex-guard scope, installs it after that guard drops, and re-locks only for the current-session check. This removes the edition-2021 `while let` scrutinee lifetime that deadlocked every gateway connect with a live session.
+- `cargo test -p chan-desktop gateway_session_install_returns_with_a_fresh_session -- --nocapture`: 1 passed. The focused test enters the production convergence helper with a fresh session and records one completed install; the deadlocking loop never returned from this case.
+- `cargo test -p chan-desktop gateway_csrf_token -- --nocapture`: 1 passed.
+- `cargo test -p chan-desktop runtime_capability::tests -- --nocapture`: 6 passed.
+- `cargo test -p chan-desktop concurrent_session_miss_and_auth_refresh_each_exchange_once -- --nocapture`: 1 passed.
+- `cargo clippy -p chan-desktop --all-targets -- -D warnings`: passed.
+- `cargo fmt --check`: passed.
+
 Owner live gateway hand-smoke: requested from the acting lead on 2026-08-04; result pending.
 
 ## Boundaries
