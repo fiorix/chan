@@ -2002,10 +2002,6 @@ mod tests {
     };
     use tempfile::TempDir;
 
-    /// Both drop tests assert absolute values against one process-global
-    /// producer counter, so they must not observe each other's readers.
-    static BOUNDED_READER_DROP_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn workspace_fixture() -> (TempDir, TempDir, std::sync::Arc<crate::Workspace>) {
         let cfg = TempDir::new().unwrap();
         let root = TempDir::new().unwrap();
@@ -2876,9 +2872,6 @@ mod tests {
 
     #[test]
     fn dropping_bounded_slice_reader_joins_blocked_producer() {
-        let _serial = BOUNDED_READER_DROP_TEST_GUARD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let (_cfg, root, workspace) = workspace_fixture();
         let size = BINARY_STREAM_CHUNK_SIZE * (BINARY_STREAM_QUEUE_DEPTH + 16);
         std::fs::write(root.path().join("slice-disconnect.bin"), vec![0x5a; size]).unwrap();
@@ -2886,7 +2879,11 @@ mod tests {
         let reader = workspace
             .read_bytes_bounded_slice("slice-disconnect.bin", 1, size as u64)
             .unwrap();
-        let tracked = root.path().join("slice-disconnect.bin");
+        // Tracked paths must textually match the producer's
+        // self.root().join(rel): the registry canonicalizes the root at
+        // registration, and on macOS the tempdir is a /var symlink to
+        // /private/var, so root.path() and workspace.root() differ.
+        let tracked = workspace.root().join("slice-disconnect.bin");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while active_bounded_file_readers(&tracked) == 0 && std::time::Instant::now() < deadline {
             std::thread::yield_now();
@@ -2904,15 +2901,12 @@ mod tests {
 
     #[test]
     fn dropping_bounded_reader_joins_blocked_producer() {
-        let _serial = BOUNDED_READER_DROP_TEST_GUARD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let (_cfg, root, workspace) = workspace_fixture();
         let size = BINARY_STREAM_CHUNK_SIZE * (BINARY_STREAM_QUEUE_DEPTH + 16);
         std::fs::write(root.path().join("disconnect.bin"), vec![0x5a; size]).unwrap();
 
         let reader = workspace.read_bytes_bounded("disconnect.bin").unwrap();
-        let tracked = root.path().join("disconnect.bin");
+        let tracked = workspace.root().join("disconnect.bin");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while active_bounded_file_readers(&tracked) == 0 && std::time::Instant::now() < deadline {
             std::thread::yield_now();
