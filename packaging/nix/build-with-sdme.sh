@@ -98,6 +98,7 @@ trap 'exit 143' TERM
 
 GUEST_RUN='set -uo pipefail
 run_check() {
+    local flake_ref="path:/src"
     if ! grep -Eq "^ID=(ubuntu|\"ubuntu\")$" /etc/os-release; then
         echo "error: Nix sdme check requires an Ubuntu guest" >&2
         return 1
@@ -121,12 +122,12 @@ run_check() {
     cd /src || return
 
     if [ "$NIX_PACKAGE" = all ]; then
-        make nix-check NIX=nix
+        make nix-check NIX=nix NIX_FLAKE="$flake_ref"
         return
     fi
 
-    nix flake check --all-systems --no-build || return
-    out="$(nix build --no-link --print-out-paths ".#$NIX_PACKAGE")" || return
+    nix flake check --all-systems --no-build "$flake_ref" || return
+    out="$(nix build --no-link --print-out-paths "$flake_ref#$NIX_PACKAGE")" || return
     if [ -z "$out" ] || [ "$(printf "%s\n" "$out" | wc -l)" -ne 1 ]; then
         echo "error: expected one Nix output path for $NIX_PACKAGE, got: $out" >&2
         return 1

@@ -8,6 +8,7 @@
 PREFIX ?= $(if $(XDG_BIN_HOME),$(XDG_BIN_HOME:/bin=),$(HOME)/.local)
 CARGO ?= cargo
 NIX ?= nix
+NIX_FLAKE ?= .
 NPM ?= npm
 PYTHON ?= python3
 # The AUR recipes populate web/node_modules with `npm ci` in prepare() and then
@@ -211,10 +212,10 @@ build-matrix-check: ## Verify every shipped build surface remains gated.
 
 .PHONY: nix-check
 nix-check: ## Evaluate, build, and smoke both Nix packages.
-	$(NIX) flake check --all-systems --no-build
+	$(NIX) flake check --all-systems --no-build "$(NIX_FLAKE)"
 	@set -e; \
 	for package in chan chan-desktop; do \
-		out="$$($(NIX) build --no-link --print-out-paths ".#$$package")"; \
+		out="$$($(NIX) build --no-link --print-out-paths "$(NIX_FLAKE)#$$package")"; \
 		[ -n "$$out" ] && [ "$$(printf '%s\n' "$$out" | wc -l)" -eq 1 ] || { \
 			echo "error: expected one Nix output path for $$package, got: $$out" >&2; \
 			exit 1; \

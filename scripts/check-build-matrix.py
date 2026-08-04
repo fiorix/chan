@@ -119,9 +119,9 @@ def check_make_contract() -> None:
         makefile,
         "nix-check",
         (
-            "flake check --all-systems --no-build",
+            'flake check --all-systems --no-build "$(NIX_FLAKE)"',
             "for package in chan chan-desktop",
-            'build --no-link --print-out-paths ".#$$package"',
+            'build --no-link --print-out-paths "$(NIX_FLAKE)#$$package"',
             'scripts/smoke-nix-package.sh "$$out" "$$package"',
         ),
     )

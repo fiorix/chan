@@ -19,6 +19,7 @@ case "$TMP_BASE" in
 esac
 TMP="$(mktemp -d "$TMP_BASE/chan-nix-sdme-contract.XXXXXX")"
 TEST_REPO="$TMP/repo"
+TEST_FLAKE="path:$TEST_REPO"
 STATE="$TMP/state"
 BIN="$TMP/bin"
 TEST_OUT="$TMP/output"
@@ -218,7 +219,7 @@ if [ "${1:-}" = build ]; then
         exit 7
     fi
     package="${*: -1}"
-    printf '/nix/store/stub-%s\n' "${package#.#}"
+    printf '/nix/store/stub-%s\n' "${package##*#}"
 fi
 STUB
 
@@ -260,7 +261,7 @@ if [ "$(wc -l <"$STATE/run/binds")" -ne 2 ]; then
 fi
 assert_not_grep '^/:' "$STATE/run/binds" "host root is never bound"
 assert_not_grep "^$HOME:" "$STATE/run/binds" "host home is never bound"
-assert_grep '^nix-check NIX=nix$' "$STATE/run/make" "all delegates to make nix-check"
+assert_grep "^nix-check NIX=nix NIX_FLAKE=$TEST_FLAKE$" "$STATE/run/make" "all delegates to make nix-check with the mounted path flake"
 assert_grep '^all$' "$STATE/run/package" "all reaches the guest command"
 assert_grep '^-d -m 1777 /var/tmp[|]TMPDIR=/var/tmp$' "$STATE/run/install" "guest temporary state is prepared under /var/tmp"
 assert_grep '^install -y --no-install-recommends ca-certificates curl git make nix-bin nix-setup-systemd python3$' "$STATE/run/apt" "the declared Nix and smoke prerequisites are requested"
@@ -276,15 +277,15 @@ assert_grep '^chan-nix-check-[0-9]+$' "$STATE/run/removed" "the PID-scoped conta
 
 run_driver chan
 assert_status 0 "$RUN_STATUS" "the chan-only check succeeds"
-assert_grep '^flake check --all-systems --no-build$' "$STATE/run/nix" "chan evaluates the flake"
-assert_grep '^build --no-link --print-out-paths \.#chan$' "$STATE/run/nix" "chan builds exactly its output"
+assert_grep "^flake check --all-systems --no-build $TEST_FLAKE$" "$STATE/run/nix" "chan evaluates the mounted checkout as a path flake"
+assert_grep "^build --no-link --print-out-paths $TEST_FLAKE#chan$" "$STATE/run/nix" "chan builds exactly its path-flake output"
 assert_grep '^/nix/store/stub-chan chan$' "$STATE/run/smoke" "chan validates and smokes its output"
 assert_grep '^TMPDIR=/var/tmp NIX_REMOTE=local$' "$STATE/run/smoke-env" "the package smoke stays off /tmp"
 assert_not_grep 'chan-desktop' "$STATE/run/nix" "chan does not force chan-desktop"
 
 run_driver chan-desktop
 assert_status 0 "$RUN_STATUS" "the chan-desktop-only check succeeds"
-assert_grep '^build --no-link --print-out-paths \.#chan-desktop$' "$STATE/run/nix" "chan-desktop builds exactly its output"
+assert_grep "^build --no-link --print-out-paths $TEST_FLAKE#chan-desktop$" "$STATE/run/nix" "chan-desktop builds exactly its path-flake output"
 assert_grep '^/nix/store/stub-chan-desktop chan-desktop$' "$STATE/run/smoke" "chan-desktop validates and smokes its output"
 
 run_driver invalid
