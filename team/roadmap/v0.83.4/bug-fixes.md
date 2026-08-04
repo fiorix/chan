@@ -25,6 +25,10 @@ Contract: keyboard paste on the Ghostty backend delivers the native paste event 
 
 Acceptance: a chord test mirrors the existing xterm paste-chord pin for the Ghostty wrapper ("does not suppress the native paste"), and the existing ghostty compatibility tests stay green.
 
+Implementation evidence (2026-08-04):
+
+- `cd web/packages/workspace-app && npm test -- src/components/TerminalTab.ghosttyPasteChord.test.ts src/components/terminalCopyPasteChords.test.ts src/components/TerminalTab.ghosttyBackend.test.ts src/terminal/ghosttyCompat.test.ts`: 4 test files passed, 36 tests passed.
+
 ## Boundaries
 
 - No Rich Prompt behavior change beyond the error surface and retry; the submit strip and its in-flight states are untouched.

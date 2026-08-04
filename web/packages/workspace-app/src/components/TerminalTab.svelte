@@ -112,6 +112,7 @@
     handleTerminalClipboardChord,
     isTerminalCopyChord,
     isTerminalPasteChord,
+    terminalClipboardKeyHandlerResult,
   } from "../terminal/clipboardChord";
   import { isHostOwnedChord } from "../terminal/hostChord";
   import { installTerminalReportGuards } from "../terminal/xtermReports";
@@ -1032,9 +1033,10 @@
     // The custom-key-handler contracts are INVERTED between the
     // backends: xterm skips the keystroke when the handler returns
     // FALSE, ghostty-web skips it when the handler returns TRUE.
-    // handleTerminalKeyEvent is written to xterm's semantics; wrap it
-    // for ghostty so "chan consumed this chord" maps to ghostty's
-    // "handled" on both backends.
+    // handleTerminalKeyEvent uses xterm's semantics except for the native
+    // paste result prepared for this inversion; wrap it for ghostty so "chan
+    // consumed this chord" maps to ghostty's "handled" on both backends while
+    // paste still reaches ghostty-web's native-paste early-return.
     if (backend === "ghostty") {
       term.attachCustomKeyEventHandler((e) => !handleTerminalKeyEvent(e));
     } else {
@@ -2193,17 +2195,17 @@
     // Copy/paste chords act on the xterm selection / system clipboard, not
     // the PTY. Resolve them here (the custom handler runs before xterm
     // processes the key) so no bytes reach the shell and Ctrl+Shift+C does not
-    // raise SIGINT. `false` tells xterm to skip the keystroke. For paste this
-    // deliberately leaves the browser's native paste to fire so xterm's own
-    // `paste` listener handles it (see handleTerminalClipboardChord) - that is
-    // the buttonless, bracketed path, not a double-paste.
+    // raise SIGINT. `false` tells xterm to skip the keystroke. Paste leaves the
+    // browser's native event to each backend's own `paste` listener; Ghostty's
+    // pre-inversion result is true so its wrapper also passes the key through
+    // without suppressing that native event.
     if (
       handleTerminalClipboardChord(e, {
         os: currentOS(),
         copySelection: () => void copySelectionToClipboard(),
       })
     ) {
-      return false;
+      return terminalClipboardKeyHandlerResult(e, currentOS(), backend);
     }
     // Chord-escape registry. When the incoming event matches a shortcut
     // flagged `escapeTerminal: true` in shortcuts.ts, return false so xterm
