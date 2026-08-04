@@ -192,6 +192,14 @@ identifier = "allow-open-reverse-tunnel"
 description = "Enables the open_reverse_tunnel command (the cs tunnel trigger; the devserver to dial resolves from the invoking window's own connection)."
 commands.allow = ["open_reverse_tunnel"]
 
+# Deliberately NOT in the workspace-window set: only an authenticated exact
+# gateway origin needs the native mirror, and the runtime-minted capability is
+# the authority that binds that origin to its lib-* windows.
+[[permission]]
+identifier = "allow-gateway-csrf-token"
+description = "Enables an exact-origin gateway window to read its current CSRF token."
+commands.allow = ["gateway_csrf_token"]
+
 # Deliberately NOT in the workspace-window set: the macOS drag
 # pasteboard is system-wide, so this is granted only to locally-served
 # windows via capabilities/local-drop.json (workspace-*, terminal-*) --

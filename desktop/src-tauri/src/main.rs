@@ -2503,6 +2503,8 @@ async fn connect_rostered_devserver(
         &devserver_id,
         policy_generation,
     )?;
+    devserver::install_gateway_webview_session(&app, &conn, None)
+        .map_err(|e| format!("installing gateway WebView session: {e}"))?;
 
     let rows = devserver::fetch_workspaces(&conn)
         .await
@@ -5456,6 +5458,7 @@ fn main() {
             add_outbound_workspace,
             open_outbound_workspace,
             remove_outbound_workspace,
+            devserver::gateway_csrf_token,
             list_devserver_workspaces,
             reconnect_devserver,
             auth::auth_status,
