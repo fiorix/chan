@@ -89,6 +89,11 @@ pub struct GatewayConn {
     /// Serializes entry mint/exchange. The sync mutex above only protects the
     /// cached value and is never held over network I/O.
     session_refresh: Arc<tokio::sync::Mutex<()>>,
+    /// Publishes each newly exchanged session into the process-wide WebView
+    /// cookie store. Installed once the connection reaches the Tauri-owned
+    /// connect path; tests install a recorder instead. Keeping the publisher
+    /// on the connection makes every re-mint share one propagation chokepoint.
+    session_installer: Arc<Mutex<Option<Arc<GatewaySessionInstaller>>>>,
 }
 
 impl std::fmt::Debug for GatewayConn {
@@ -121,6 +126,7 @@ impl GatewayConn {
             entry_target: None,
             session: Arc::new(Mutex::new(None)),
             session_refresh: Arc::new(tokio::sync::Mutex::new(())),
+            session_installer: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -145,6 +151,9 @@ struct GatewaySession {
     csrf: String,
     expires_at: Instant,
 }
+
+type GatewaySessionInstaller =
+    dyn Fn(&str, &GatewaySession) -> Result<(), String> + Send + Sync + 'static;
 
 impl GatewaySession {
     fn is_fresh(&self) -> bool {
@@ -902,6 +911,7 @@ pub async fn gateway_conn(
         entry_target,
         session: Arc::new(Mutex::new(None)),
         session_refresh: Arc::new(tokio::sync::Mutex::new(())),
+        session_installer: Arc::new(Mutex::new(None)),
     };
     establish_gateway_session_from_entry(&gw, &entry)
         .await
@@ -1000,8 +1010,26 @@ async fn establish_gateway_session_from_entry(
         csrf,
         expires_at,
     };
-    *gw.session.lock().unwrap() = Some(session.clone());
+    publish_gateway_session(gw, &session)?;
     Ok((session, gateway_url(gw, location)))
+}
+
+fn publish_gateway_session(gw: &GatewayConn, session: &GatewaySession) -> Result<(), String> {
+    *gw.session.lock().unwrap() = Some(session.clone());
+    let installer = gw.session_installer.lock().unwrap().clone();
+    if let Some(installer) = installer {
+        if let Err(error) = installer(&gw.proxy_origin, session) {
+            let mut current = gw.session.lock().unwrap();
+            if current
+                .as_ref()
+                .is_some_and(|current| current.cookie_header == session.cookie_header)
+            {
+                *current = None;
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 fn validate_gateway_navigation_location(
@@ -1076,28 +1104,138 @@ pub(crate) async fn refresh_gateway_session_if_current(
         .map(|_| ())
 }
 
+fn gateway_connection_for_window(
+    state: &crate::AppState,
+    window_label: &str,
+) -> Result<DevserverConn, String> {
+    if !window_label.starts_with("lib-") {
+        return Err("gateway CSRF token is unavailable to this window".to_string());
+    }
+    let (devserver_id, _) = state
+        .devserver_feed
+        .record_for_native_label(window_label)
+        .ok_or_else(|| "gateway CSRF token has no matching devserver window".to_string())?;
+    let conn = state
+        .devservers
+        .get(&devserver_id)
+        .ok_or_else(|| "gateway CSRF token connection is not available".to_string())?;
+    if conn.gateway.is_none() {
+        return Err("gateway CSRF token is unavailable on a direct connection".to_string());
+    }
+    Ok(conn)
+}
+
+async fn gateway_csrf_token_for_connection(
+    conn: &DevserverConn,
+    window_label: &str,
+    window_url: &url::Url,
+) -> Result<String, String> {
+    if !window_label.starts_with("lib-") {
+        return Err("gateway CSRF token is unavailable to this window".to_string());
+    }
+    let gw = conn
+        .gateway
+        .as_ref()
+        .ok_or_else(|| "gateway CSRF token is unavailable on a direct connection".to_string())?;
+    if window_url.origin().ascii_serialization() != gw.proxy_origin {
+        return Err("gateway CSRF token origin does not match this window".to_string());
+    }
+    gateway_session(gw).await.map(|session| session.csrf)
+}
+
+/// Return the current gateway CSRF token only to the exact managed window and
+/// origin that own its connection. The runtime capability rejects calls from
+/// other labels and origins first; these checks independently bind the handler
+/// to live connection state and cover a window that navigates during refresh.
+#[tauri::command]
+pub(crate) async fn gateway_csrf_token(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<crate::AppState>>,
+    window: tauri::WebviewWindow,
+) -> Result<String, String> {
+    let label = window.label().to_string();
+    let conn = gateway_connection_for_window(state.inner(), &label)?;
+    install_gateway_webview_session(&app, &conn, Some(&label))?;
+    let url = window
+        .url()
+        .map_err(|e| format!("reading gateway window URL: {e}"))?;
+    gateway_csrf_token_for_connection(&conn, &label, &url).await?;
+
+    // A reconnect can replace the connection while an expired session is being
+    // minted. Resolve both the connection and URL again so the returned token
+    // belongs to what the caller is showing now.
+    let conn = gateway_connection_for_window(state.inner(), &label)?;
+    install_gateway_webview_session(&app, &conn, Some(&label))?;
+    let url = window
+        .url()
+        .map_err(|e| format!("reading gateway window URL after refresh: {e}"))?;
+    gateway_csrf_token_for_connection(&conn, &label, &url).await
+}
+
 /// Copy the native client's freshly exchanged opaque session into the shared
 /// Tauri WebView cookie store before a clean tenant URL is opened. This keeps
 /// the entry credential out of navigation URLs while preserving HttpOnly on
-/// the authorization cookie.
+/// the authorization cookie. The installer remains attached to the connection
+/// so every later session re-mint updates the store without a navigation.
 pub(crate) fn install_gateway_webview_session(
     app: &tauri::AppHandle,
     conn: &DevserverConn,
     preferred_window_label: Option<&str>,
 ) -> Result<(), String> {
-    use tauri::Manager;
     let Some(gw) = conn.gateway.as_ref() else {
         return Ok(());
     };
-    let session = gw
-        .session
-        .lock()
-        .unwrap()
-        .clone()
-        .filter(|session| session.is_fresh())
-        .ok_or_else(|| "gateway session is not established".to_string())?;
-    let origin = url::Url::parse(&gw.proxy_origin)
-        .map_err(|e| format!("invalid pinned gateway origin: {e}"))?;
+    let app = app.clone();
+    let preferred_window_label = preferred_window_label.map(str::to_string);
+    let installer: Arc<GatewaySessionInstaller> = Arc::new(move |origin, session| {
+        install_gateway_webview_session_values(
+            &app,
+            origin,
+            session,
+            preferred_window_label.as_deref(),
+        )
+    });
+    *gw.session_installer.lock().unwrap() = Some(Arc::clone(&installer));
+    install_current_gateway_session(gw, installer.as_ref())
+}
+
+fn install_current_gateway_session(
+    gw: &GatewayConn,
+    installer: &GatewaySessionInstaller,
+) -> Result<(), String> {
+    loop {
+        // Keep this guard scoped to the block. In an edition-2021 `while let`
+        // scrutinee it would live through the body and deadlock the re-check.
+        let session = {
+            let current = gw.session.lock().unwrap();
+            current.clone().filter(GatewaySession::is_fresh)
+        };
+        let Some(session) = session else {
+            break;
+        };
+        installer(&gw.proxy_origin, &session)?;
+        let installed_is_current = {
+            let current = gw.session.lock().unwrap();
+            current.as_ref().is_some_and(|current| {
+                current.is_fresh() && current.cookie_header == session.cookie_header
+            })
+        };
+        if installed_is_current {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn install_gateway_webview_session_values(
+    app: &tauri::AppHandle,
+    proxy_origin: &str,
+    session: &GatewaySession,
+    preferred_window_label: Option<&str>,
+) -> Result<(), String> {
+    use tauri::Manager;
+    let origin =
+        url::Url::parse(proxy_origin).map_err(|e| format!("invalid pinned gateway origin: {e}"))?;
     let domain = origin
         .host_str()
         .ok_or_else(|| "pinned gateway origin has no host".to_string())?
@@ -1107,14 +1245,14 @@ pub(crate) fn install_gateway_webview_session(
     // SoupCookieJar) bypasses Set-Cookie prefix parsing, and a domain
     // with no leading dot stays host-only, so the `__Host-` names are
     // accepted here even though a `.domain()` attribute is present.
-    let gate = tauri::webview::Cookie::build(("__Host-devserver_gate", session.gate))
+    let gate = tauri::webview::Cookie::build(("__Host-devserver_gate", session.gate.clone()))
         .domain(domain.clone())
         .path("/")
         .secure(secure)
         .http_only(true)
         .same_site(tauri::webview::cookie::SameSite::Lax)
         .build();
-    let csrf = tauri::webview::Cookie::build(("__Host-devserver_csrf", session.csrf))
+    let csrf = tauri::webview::Cookie::build(("__Host-devserver_csrf", session.csrf.clone()))
         .domain(domain)
         .path("/")
         .secure(secure)
@@ -1124,8 +1262,10 @@ pub(crate) fn install_gateway_webview_session(
     let webview = preferred_window_label
         .and_then(|label| app.get_webview_window(label))
         .or_else(|| app.get_webview_window("main"))
-        .or_else(|| app.webview_windows().into_values().next())
-        .ok_or_else(|| "no WebView is available to install the gateway session".to_string())?;
+        .or_else(|| app.webview_windows().into_values().next());
+    let Some(webview) = webview else {
+        return Ok(());
+    };
     webview
         .set_cookie(gate)
         .map_err(|e| format!("installing gateway session cookie: {e}"))?;
@@ -3025,6 +3165,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn gateway_session_install_returns_with_a_fresh_session() {
+        let conn = gateway_test_conn("https://id.chan.app/desktop/v1/devserver/entry".into());
+        let gw = conn.gateway.as_ref().unwrap();
+        *gw.session.lock().unwrap() = Some(GatewaySession {
+            gate: "gate-current".into(),
+            cookie_header: "__Host-devserver_gate=gate-current; __Host-devserver_csrf=csrf-current"
+                .into(),
+            csrf: "csrf-current".into(),
+            expires_at: Instant::now() + Duration::from_secs(60),
+        });
+        let installed = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let installed_for_callback = Arc::clone(&installed);
+        let installer: Arc<GatewaySessionInstaller> = Arc::new(move |origin, session| {
+            installed_for_callback
+                .lock()
+                .unwrap()
+                .push((origin.to_string(), session.csrf.clone()));
+            Ok(())
+        });
+
+        install_current_gateway_session(gw, installer.as_ref()).unwrap();
+
+        assert_eq!(
+            installed.lock().unwrap().as_slice(),
+            [(gw.proxy_origin.clone(), "csrf-current".to_string())]
+        );
+    }
+
     #[tokio::test]
     async fn concurrent_session_miss_and_auth_refresh_each_exchange_once() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3083,6 +3252,16 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let conn = gateway_test_conn(format!("http://{addr}/desktop/v1/devserver/entry"));
         let gw = conn.gateway.as_ref().unwrap().as_ref().clone();
+        let installed = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let installed_for_callback = Arc::clone(&installed);
+        let installer: Arc<GatewaySessionInstaller> = Arc::new(move |origin, session| {
+            installed_for_callback
+                .lock()
+                .unwrap()
+                .push((origin.to_string(), session.csrf.clone()));
+            Ok(())
+        });
+        *gw.session_installer.lock().unwrap() = Some(installer);
 
         let mut tasks = tokio::task::JoinSet::new();
         for _ in 0..24 {
@@ -3094,6 +3273,17 @@ mod tests {
         }
         assert_eq!(entry_hits.load(Ordering::SeqCst), 1);
         assert_eq!(exchange_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            installed.lock().unwrap().as_slice(),
+            [(proxy_origin.clone(), "csrf-1".to_string())]
+        );
+        let window_url = url::Url::parse(&format!("{proxy_origin}/notes")).unwrap();
+        assert_eq!(
+            gateway_csrf_token_for_connection(&conn, "lib-1::w-1", &window_url)
+                .await
+                .as_deref(),
+            Ok("csrf-1")
+        );
 
         let observed = gw
             .session
@@ -3118,8 +3308,55 @@ mod tests {
             gw.session.lock().unwrap().as_ref().unwrap().cookie_header,
             observed
         );
+        assert_eq!(
+            installed.lock().unwrap().as_slice(),
+            [
+                (proxy_origin.clone(), "csrf-1".to_string()),
+                (proxy_origin, "csrf-2".to_string()),
+            ]
+        );
+        assert_eq!(
+            gateway_csrf_token_for_connection(&conn, "lib-1::w-1", &window_url)
+                .await
+                .as_deref(),
+            Ok("csrf-2")
+        );
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn gateway_csrf_token_refuses_foreign_origins_and_non_library_labels() {
+        let conn = gateway_test_conn("https://id.chan.app/desktop/v1/devserver/entry".into());
+        let gw = conn.gateway.as_ref().unwrap();
+        *gw.session.lock().unwrap() = Some(GatewaySession {
+            gate: "gate-current".into(),
+            cookie_header: "__Host-devserver_gate=gate-current; __Host-devserver_csrf=csrf-current"
+                .into(),
+            csrf: "csrf-current".into(),
+            expires_at: Instant::now() + Duration::from_secs(60),
+        });
+        let own_url = url::Url::parse(&format!("{}/notes", gw.proxy_origin)).unwrap();
+        assert_eq!(
+            gateway_csrf_token_for_connection(&conn, "lib-1::w-1", &own_url)
+                .await
+                .as_deref(),
+            Ok("csrf-current")
+        );
+
+        let foreign = url::Url::parse("https://bob--bbbbbbbbbbbb.p1.devserver.chan.app/").unwrap();
+        assert!(
+            gateway_csrf_token_for_connection(&conn, "lib-1::w-1", &foreign)
+                .await
+                .unwrap_err()
+                .contains("origin does not match")
+        );
+        assert!(
+            gateway_csrf_token_for_connection(&conn, "settings", &own_url)
+                .await
+                .unwrap_err()
+                .contains("unavailable to this window")
+        );
     }
 
     #[tokio::test]

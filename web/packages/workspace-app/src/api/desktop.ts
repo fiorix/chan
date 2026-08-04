@@ -13,7 +13,7 @@ import {
   setTransferProgress,
   waitForTransferSlot,
 } from "../state/transfers.svelte";
-import { withTokenQuery } from "./client";
+import { setGatewayCsrfTokenReader, withTokenQuery } from "./transport";
 
 type TauriWindow = Window &
   typeof globalThis & {
@@ -52,6 +52,24 @@ export async function tauriInvoke<T = unknown>(
   if (!invoke) throw new Error(`tauriInvoke(${cmd}): not running under Tauri`);
   return (await invoke(cmd, args)) as T;
 }
+
+/// Read the current gateway connection's CSRF token from chan-desktop. Exact
+/// origin and window-label checks live on both the runtime capability and the
+/// command handler. Expected denials on browser, loopback, and outbound windows
+/// become `null` so the transport can continue to its readable-cookie source.
+export async function readGatewayCsrfToken(): Promise<string | null> {
+  if (!isTauriDesktop()) return null;
+  try {
+    return await tauriInvoke<string>("gateway_csrf_token");
+  } catch {
+    return null;
+  }
+}
+
+// Keep the invoke vocabulary in this audited bridge while letting the HTTP
+// transport own source ordering and retry behavior. Plain browsers register no
+// reader, so their cookie path never pays even the one-time hydration turn.
+setGatewayCsrfTokenReader(isTauriDesktop() ? readGatewayCsrfToken : null);
 
 /// Read clipboard text without tripping WebKit's DOM-paste "Paste" button.
 ///

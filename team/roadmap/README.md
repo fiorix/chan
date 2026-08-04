@@ -38,8 +38,18 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [graph-inspector-language-node-detail](v0.84.0/graph-inspector-language-node-detail.md) | registered, not specced | add COCOMO and the top directories for a selected language node, sourced from chan-report's existing roll-up |
 | [file-browser-context-menu-inspector-actions](v0.84.0/file-browser-context-menu-inspector-actions.md) | registered, not specced | give the file browser's right-click menu the inspector's per-type actions |
 | [rich-prompt-submit-button](v0.84.0/rich-prompt-submit-button.md) | implemented and validated on `v0840-base` | turn the Rich Prompt's hint into a control strip whose primary button submits and becomes cancel while a prompt is in flight |
+| [chan-config-key-coverage](v0.84.0/chan-config-key-coverage.md) | registered, grounded, needs a spec | derive `chan config get`/`set` from the same key set the dump prints, so the 19 keys it prints but rejects become settable |
 
 ## Completed
+
+### v0.83.4
+
+Shipped 2026-08-04; see [release-v0.83.4](../release/release-v0.83.4.md). Closed items in [`done/`](done/):
+
+- [gateway-served-surface-failures](done/gateway-served-surface-failures.md) - desktop windows served through the gateway read the CSRF token from an origin-scoped Tauri command instead of a cookie WebKit never exposes to JavaScript, and session re-mints publish fresh cookies into open windows, so every mutating surface works again.
+- [desktop-window-outage-lifecycle](done/desktop-window-outage-lifecycle.md) - a close during a remote outage settles as closed instead of boomeranging, the connecting probe classifies responses instead of accepting any status, and the close prompt raises its own window instead of stranding behind newer ones.
+- [terminal-reattach-replay-storm](done/terminal-reattach-replay-storm.md) - the reattach replay was one full-ring stream paying a per-chunk masker scan; replay writes now batch behind a single whole-buffer scan, taking a 2.1 MiB reattach from over 180 s to 2.8 s.
+- [v0.83.4-bug-fixes](done/v0.83.4-bug-fixes.md) - the Rich Prompt recovers from a failed draft create with a visible error and retry, and keyboard paste is no longer suppressed on the Ghostty backend.
 
 ### v0.83.3
 

@@ -221,12 +221,13 @@ nix-check: ## Evaluate, build, and smoke both Nix packages.
 
 .PHONY: pre-push
 pre-push: ## Run the local pre-push gate.
-	# The two static linters run first: they are seconds-long, they cover the
+	# The static checks run first: they are seconds-long, they cover the
 	# packaging and CI surface no cargo/npm target reads, and a finding there
 	# is not worth a full compile to discover.
 	$(MAKE) shell-check
 	$(MAKE) workflow-check
 	$(MAKE) build-matrix-check
+	$(MAKE) web-lock-check
 	$(CARGO) fmt --check
 	RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
 	RUSTFLAGS="-D warnings" $(CARGO) test --all-targets
@@ -342,6 +343,27 @@ web-launcher: ## Build the embedded launcher bundle (web-launcher/dist).
 web: web-launcher ## Build the embedded web bundle.
 	cd web && $(NPM_INSTALL) && $(NPM) run build -w @chan/workspace-app
 	@date -u '+%Y-%m-%dT%H:%M:%SZ' > "$(WEB_BUILD_STAMP)"
+
+.PHONY: web-lock-check
+web-lock-check: ## Verify web/package-lock.json is in sync with every package.json.
+	# Every other web target runs `npm install`, which silently REPAIRS a
+	# desynced lockfile in the working tree, so the committed file can be
+	# broken while the whole gate stays green. Only a strict `npm ci` rejects
+	# it, and until now the only strict `npm ci` in the system lived in the Nix
+	# sandbox, which runs after the tag is pushed and checks out the tag: by
+	# then the release cannot be repaired. v0.83.3 lost its Cachix lane exactly
+	# this way, when a version-bump regen dropped the root @chan/workspace-app
+	# workspace link.
+	#
+	# This runs among the static checks, before anything can rewrite the file,
+	# and costs about two seconds. --dry-run resolves and validates without
+	# touching node_modules. --ignore-scripts is required, not cosmetic: npm
+	# still runs lifecycle scripts under --dry-run, and this package tree has a
+	# `postinstall: patch-package`, so on a fresh checkout (every CI runner)
+	# the check would exit 127 on a binary that is not installed yet. The
+	# lockfile sync validation happens before any script runs, so skipping
+	# scripts costs the check nothing.
+	cd web && $(NPM) ci --dry-run --ignore-scripts
 
 .PHONY: web-check
 web-check: web-launcher ## Run frontend check, vitest, and production build.

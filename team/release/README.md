@@ -105,6 +105,7 @@ New agents should also read [`.agents/playbook.md`](../../.agents/playbook.md), 
 - [release-v0.83.1](release-v0.83.1.md) - the desktop renders the command deck inline instead of in a Tauri overlay window, the Computers scope resolves on desktop, and Escape releases a pending command instead of hanging the deck.
 - [release-v0.82.0](release-v0.82.0.md) - the safety release: every HTTP read path bounded and the indexer off the workspace lock, `cs tunnel` delivering the bytes it already read, a poisoned session lock no longer aborting the process, the terminal engine made visible and switchable, the legacy devserver window endpoint retired, plus seven empty-pane animations and a headless Nix package.
 - [release-v0.83.3](release-v0.83.3.md) - the retired command-launcher overlay removed end to end (launcher chords page-owned on every surface, `macOSPrivateApi` gone, ADR 0001 amended to the broker design), and the wall-clock timing tests made load-proof; v0.83.2 skipped.
+- [release-v0.83.4](release-v0.83.4.md) - a fix release scoped entirely by running v0.83.3 on real hardware: desktop windows served through the gateway can mutate again (the CSRF token off an origin-scoped command instead of a cookie WebKit hides from JavaScript, plus session re-mints published into open windows), windows settle across a remote reboot instead of boomeranging or stranding their close prompt, terminal reattach stops paying a per-chunk masker scan and drops from over 180 s to 2.8 s, and the Rich Prompt and Ghostty keyboard paste are repaired.
 
 ## Conventions
 

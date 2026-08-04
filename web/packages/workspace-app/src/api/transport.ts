@@ -44,6 +44,7 @@ export interface WatchSocket {
 const TOKEN_KEY = "chan.token";
 
 function readPrefix(): string {
+  if (typeof document === "undefined") return "";
   const m = document.querySelector('meta[name="chan-prefix"]');
   const v = m?.getAttribute("content")?.trim() ?? "";
   // The server only injects the tag when a prefix is set, but be
@@ -60,6 +61,7 @@ function readPrefix(): string {
 export const SETTINGS_DISABLED = readBoolMeta("chan-settings-disabled");
 
 function readBoolMeta(name: string): boolean {
+  if (typeof document === "undefined") return false;
   const m = document.querySelector(`meta[name="${name}"]`);
   return m?.getAttribute("content")?.trim() === "1";
 }
@@ -94,6 +96,7 @@ export function rootPath(path: string): string {
 }
 
 function loadToken(): string | null {
+  if (typeof window === "undefined") return null;
   const url = new URL(window.location.href);
   const t = url.searchParams.get("t");
   if (t) {
@@ -161,6 +164,57 @@ function isUnsafeMethod(method: string): boolean {
   );
 }
 
+export type GatewayCsrfTokenReader = () => Promise<string | null>;
+
+let gatewayCsrfTokenReader: GatewayCsrfTokenReader | null = null;
+// `undefined` is the one cold-cache state. `null` is a completed native read
+// with no gateway token, so browser cookies and loopback can stay synchronous.
+let cachedGatewayCsrfToken: string | null | undefined = null;
+let gatewayCsrfHydration: Promise<void> | null = null;
+
+function hydrateGatewayCsrfToken(): Promise<void> {
+  const reader = gatewayCsrfTokenReader;
+  if (!reader) {
+    cachedGatewayCsrfToken = null;
+    return Promise.resolve();
+  }
+
+  let read: Promise<string | null>;
+  try {
+    // Start the invoke now. Registration uses this path once at module init so
+    // steady-state mutations do not wait for a new microtask before dispatch.
+    read = reader();
+  } catch {
+    cachedGatewayCsrfToken = null;
+    return Promise.resolve();
+  }
+  const hydration = read.then(
+    (csrf) => {
+      if (gatewayCsrfTokenReader === reader) cachedGatewayCsrfToken = csrf || null;
+    },
+    () => {
+      if (gatewayCsrfTokenReader === reader) cachedGatewayCsrfToken = null;
+    },
+  );
+  gatewayCsrfHydration = hydration;
+  void hydration.then(() => {
+    if (gatewayCsrfHydration === hydration) gatewayCsrfHydration = null;
+  });
+  return hydration;
+}
+
+/// Install the native gateway-token reader and eagerly hydrate its cache once.
+/// Passing null clears both the reader and cache; browser cookie and loopback
+/// requests then retain their synchronous path.
+export function setGatewayCsrfTokenReader(
+  reader: GatewayCsrfTokenReader | null,
+): void {
+  gatewayCsrfTokenReader = reader;
+  cachedGatewayCsrfToken = reader ? undefined : null;
+  gatewayCsrfHydration = null;
+  if (reader) void hydrateGatewayCsrfToken();
+}
+
 function headersWithValue(
   headers: HeadersInit | undefined,
   name: string,
@@ -181,29 +235,92 @@ function headersWithValue(
   return { ...(headers ?? {}), [name]: value };
 }
 
-/// Header pairs mirroring the gateway's double-submit CSRF cookie into
-/// `x-chan-csrf` for a request that can mutate state. Empty for safe methods
-/// and when the `__Host-devserver_csrf` cookie is absent (loopback), so consumers can
-/// apply the pairs unconditionally. The single source of the mirror logic:
-/// `withGatewayCsrf` covers the fetch path, and the XHR multipart helpers in
-/// client.ts (which the fetch seam does not cover) consume the pairs directly.
-export function gatewayCsrfHeaderPairs(method: string): [string, string][] {
-  if (!isUnsafeMethod(method)) return [];
+type GatewayCsrfSource = "desktop" | "cookie" | "absent";
+
+interface GatewayCsrfHeaders {
+  pairs: [string, string][];
+  source: GatewayCsrfSource;
+}
+
+function cachedGatewayCsrfHeaders(): GatewayCsrfHeaders {
+  if (cachedGatewayCsrfToken) {
+    return {
+      pairs: [["x-chan-csrf", cachedGatewayCsrfToken]],
+      source: "desktop",
+    };
+  }
   const csrf = cookieValue("__Host-devserver_csrf");
-  if (!csrf) return [];
-  return [["x-chan-csrf", csrf]];
+  if (!csrf) return { pairs: [], source: "absent" };
+  return { pairs: [["x-chan-csrf", csrf]], source: "cookie" };
+}
+
+function resolveGatewayCsrfHeaders(
+  method: string,
+): GatewayCsrfHeaders | Promise<GatewayCsrfHeaders> {
+  if (!isUnsafeMethod(method)) return { pairs: [], source: "absent" };
+  if (cachedGatewayCsrfToken !== undefined || !gatewayCsrfTokenReader) {
+    return cachedGatewayCsrfHeaders();
+  }
+  // Only the first unsafe call can land here, if it races the eager desktop
+  // hydration. Once the read settles, every steady-state request is sync.
+  return (gatewayCsrfHydration ?? hydrateGatewayCsrfToken()).then(
+    cachedGatewayCsrfHeaders,
+  );
+}
+
+/// Resolve the gateway's double-submit mirror for one request. Desktop gateway
+/// windows read the live native token first; browsers fall back to their
+/// readable cookie; loopback has neither and gets an empty list.
+export async function gatewayCsrfHeaderPairs(
+  method: string,
+): Promise<[string, string][]> {
+  return (await resolveGatewayCsrfHeaders(method)).pairs;
 }
 
 /// Add the gateway CSRF mirror when a request can mutate state. The cookie is
 /// absent on loopback, so this is a no-op outside the gateway.
-export function withGatewayCsrf(init: RequestInit = {}): RequestInit {
-  const pairs = gatewayCsrfHeaderPairs(init.method ?? "GET");
+export async function withGatewayCsrf(init: RequestInit = {}): Promise<RequestInit> {
+  const pairs = await gatewayCsrfHeaderPairs(init.method ?? "GET");
   if (pairs.length === 0) return init;
   let headers = init.headers;
   for (const [name, value] of pairs) {
     headers = headersWithValue(headers, name, value);
   }
   return { ...init, headers };
+}
+
+function sendWithGatewayCsrfRetry<T extends { status: number }>(
+  first: GatewayCsrfHeaders,
+  send: (pairs: [string, string][]) => Promise<T>,
+): Promise<T> {
+  // `send` is intentionally called before this function returns. Pagehide and
+  // other keepalive callers require the browser request to exist synchronously.
+  const response = send(first.pairs);
+  // Browser-cookie and loopback requests never retry, so return their original
+  // promise too. Besides preserving dispatch timing, this keeps their response
+  // microtask schedule byte-for-byte equivalent to the pre-desktop path.
+  if (first.source !== "desktop") return response;
+  return response.then((settled) => {
+    if (settled.status !== 403) return settled;
+    return hydrateGatewayCsrfToken().then(() =>
+      send(cachedGatewayCsrfHeaders().pairs),
+    );
+  });
+}
+
+/// Run an unsafe request with the best available CSRF mirror. The hydrated
+/// desktop, cookie, and absent paths dispatch synchronously. Only a cold native
+/// cache may defer the first dispatch; a desktop-token 403 re-invokes the
+/// reader, updates the cache, and retries exactly once.
+export function withGatewayCsrfRetry<T extends { status: number }>(
+  method: string,
+  send: (pairs: [string, string][]) => Promise<T>,
+): Promise<T> {
+  const first = resolveGatewayCsrfHeaders(method);
+  if (first instanceof Promise) {
+    return first.then((resolved) => sendWithGatewayCsrfRetry(resolved, send));
+  }
+  return sendWithGatewayCsrfRetry(first, send);
 }
 
 /// Injectable HTTP + WebSocket primitives. Both default to the real browser
@@ -262,8 +379,16 @@ export function handleDemoDownload(path: string, isDir: boolean): boolean {
 
 /// The fetch every API call routes through: typed api methods, streaming
 /// NDJSON, and multipart uploads alike. Defaults to the global fetch.
-export function chanFetch(input: string, init?: RequestInit): Promise<Response> {
-  return fetchImpl(input, withGatewayCsrf(init));
+export function chanFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const method = init.method ?? "GET";
+  return withGatewayCsrfRetry(method, (pairs) => {
+    if (pairs.length === 0) return fetchImpl(input, init);
+    let headers = init.headers;
+    for (const [name, value] of pairs) {
+      headers = headersWithValue(headers, name, value);
+    }
+    return fetchImpl(input, { ...init, headers });
+  });
 }
 
 /// The WebSocket constructor every socket routes through: the watcher, the

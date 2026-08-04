@@ -79,6 +79,7 @@ pub fn exact_origin_capability_json(exact_origin: &str) -> Result<String, String
         "windows": ["lib-*"],
         "permissions": [
             "workspace-window",
+            "allow-gateway-csrf-token",
             "allow-download-file-native",
             "allow-upload-files-native",
             "allow-native-transfer-status",
@@ -171,6 +172,14 @@ mod tests {
         "stub-tunnel"
     }
 
+    /// Stub for the gateway-only CSRF mirror command. Unlike the broader
+    /// workspace-window set, its permission is carried directly by the minted
+    /// exact-origin capability.
+    #[tauri::command]
+    fn gateway_csrf_token() -> &'static str {
+        "stub-csrf"
+    }
+
     /// Stub for `read_dropped_paths` - the one command a loopback
     /// workspace window holds that `lib-*` windows never get, on any
     /// origin. Registered so the out-of-set denial pin cannot pass
@@ -190,6 +199,7 @@ mod tests {
         mock_builder()
             .invoke_handler(tauri::generate_handler![
                 platform_os,
+                gateway_csrf_token,
                 read_dropped_paths,
                 open_reverse_tunnel
             ])
@@ -293,6 +303,11 @@ mod tests {
             Ok("stub-os".into()),
             "an already-open window gains the grant on its next invoke"
         );
+        assert_eq!(
+            invoke_from(&open_before_mint, GATEWAY_PAGE, "gateway_csrf_token"),
+            Ok("stub-csrf".into()),
+            "the gateway-only token command rides the minted exact-origin grant"
+        );
 
         let opened_after_mint = lib_window(&app, "lib-after", GATEWAY_PAGE);
         assert_eq!(
@@ -325,6 +340,10 @@ mod tests {
                 invoke_from(&lib, denied, "platform_os").is_err(),
                 "origin {denied} must stay outside the exact grant"
             );
+            assert!(
+                invoke_from(&lib, denied, "gateway_csrf_token").is_err(),
+                "origin {denied} must not read the gateway CSRF token"
+            );
         }
         assert!(
             invoke_from(&lib, GATEWAY_PAGE, "read_dropped_paths").is_err(),
@@ -340,6 +359,10 @@ mod tests {
         assert!(
             invoke_from(&non_lib, GATEWAY_PAGE, "platform_os").is_err(),
             "window labels outside lib-* stay denied"
+        );
+        assert!(
+            invoke_from(&non_lib, GATEWAY_PAGE, "gateway_csrf_token").is_err(),
+            "window labels outside lib-* cannot read the gateway CSRF token"
         );
     }
 

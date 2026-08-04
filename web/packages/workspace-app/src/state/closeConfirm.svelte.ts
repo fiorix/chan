@@ -36,3 +36,9 @@ export function resolveCloseConfirm(choice: CloseConfirmChoice): void {
   closeConfirmState.open = false;
   r?.(choice);
 }
+
+/// Cancel any pending close prompt when its window changes connection state.
+/// Idempotent so both disconnect and reconnect transitions can call it.
+export function cancelCloseConfirmForConnectionChange(): void {
+  resolveCloseConfirm("cancel");
+}

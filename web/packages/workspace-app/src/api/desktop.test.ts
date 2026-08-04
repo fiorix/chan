@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   isTauriDesktop,
   openWebInspector,
+  readGatewayCsrfToken,
   reloadWindow,
   runDesktopDownload,
   runDesktopUpload,
@@ -65,6 +66,30 @@ describe("tauriInvoke", () => {
     setTauriInternals(spy);
     await expect(tauriInvoke("ping")).resolves.toBe("ok");
     expect(spy).toHaveBeenCalledWith("ping", undefined);
+  });
+});
+
+describe("readGatewayCsrfToken", () => {
+  afterEach(clearTauriGlobals);
+
+  test("returns null outside Tauri", async () => {
+    await expect(readGatewayCsrfToken()).resolves.toBeNull();
+  });
+
+  test("dispatches the no-argument gateway command", async () => {
+    const invoke = vi.fn(async () => "csrf-current");
+    setTauriInternals(invoke);
+
+    await expect(readGatewayCsrfToken()).resolves.toBe("csrf-current");
+    expect(invoke).toHaveBeenCalledWith("gateway_csrf_token", undefined);
+  });
+
+  test("treats an expected capability denial as unavailable", async () => {
+    setTauriInternals(async () => {
+      throw new Error("not allowed");
+    });
+
+    await expect(readGatewayCsrfToken()).resolves.toBeNull();
   });
 });
 

@@ -45,6 +45,8 @@
   let editor = $state<Wysiwyg>();
   let content = $state("");
   let loaded = $state(false);
+  let mounting = $state(false);
+  let mountError = $state<string | null>(null);
   // Seeded from the persisted per-terminal height so a restored bubble
   // reopens at the size the user left it; drag-resize commits back on end.
   // svelte-ignore state_referenced_locally
@@ -354,19 +356,35 @@
   }
 
   async function loadContent(path: string): Promise<string> {
-    try {
-      return (await api.read(path)).content ?? "";
-    } catch {
-      return "";
-    }
+    return (await api.read(path)).content ?? "";
   }
 
-  onMount(() => {
-    void (async () => {
-      draftPath = await ensureDraft();
+  function mountFailure(operation: "create" | "load", error: unknown): string {
+    const detail =
+      error instanceof Error && error.message
+        ? error.message
+        : typeof error === "string" && error
+          ? error
+          : "unknown error";
+    return `Could not ${operation} Rich Prompt draft: ${detail}`;
+  }
+
+  async function mountDraft(): Promise<void> {
+    if (mounting) return;
+    mounting = true;
+    let operation: "create" | "load" = tab.richPromptDraftPath
+      ? "load"
+      : "create";
+    try {
+      const path = await ensureDraft();
       if (destroyed) return;
-      content = await loadContent(draftPath);
+      operation = "load";
+      const nextContent = await loadContent(path);
+      if (destroyed) return;
+      draftPath = path;
+      content = nextContent;
       loaded = true;
+      mountError = null;
       const phase = tab.pendingPrompt?.phase;
       if (phase === "delivered" || phase === "rejected" || phase === "failed") {
         consumeTerminalPhase(phase);
@@ -384,7 +402,18 @@
           }, PROMPT_ACK_TIMEOUT_MS);
         }
       }
-    })();
+    } catch (error) {
+      if (destroyed) return;
+      draftPath = "";
+      loaded = false;
+      mountError = mountFailure(operation, error);
+    } finally {
+      if (!destroyed) mounting = false;
+    }
+  }
+
+  onMount(() => {
+    void mountDraft();
   });
 
   onDestroy(() => {
@@ -525,7 +554,19 @@
     onpointercancel={onResizeEnd}
   ></div>
   <div class="rp-editor">
-    {#if draftPath}
+    {#if mountError}
+      <div class="rp-load-error" role="alert" aria-busy={mounting}>
+        <span>{mountError}</span>
+        <button
+          class="rp-retry"
+          type="button"
+          disabled={mounting}
+          onclick={() => void mountDraft()}
+        >
+          {mounting ? "Retrying..." : "Retry"}
+        </button>
+      </div>
+    {:else if draftPath}
       <Wysiwyg
         bind:this={editor}
         bind:value={content}
@@ -625,6 +666,31 @@
   }
   .rp-editor :global(.cm-content) {
     padding: 0 !important;
+  }
+  .rp-load-error {
+    min-height: 2.4em;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
+  .rp-load-error span {
+    flex: 1 1 auto;
+    overflow-wrap: anywhere;
+  }
+  .rp-retry {
+    flex: 0 0 auto;
+    padding: 4px 9px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-primary);
+    cursor: pointer;
+  }
+  .rp-retry:disabled {
+    opacity: 0.6;
+    cursor: default;
   }
   /* Flush-left composer lines, EXCEPT list-hang lines: the Wysiwyg hang rule
      pairs padding-left (the marker column) with a negative text-indent, and

@@ -118,6 +118,7 @@
     handleTerminalClipboardChord,
     isTerminalCopyChord,
     isTerminalPasteChord,
+    terminalClipboardKeyHandlerResult,
   } from "../terminal/clipboardChord";
   import { isHostOwnedChord } from "../terminal/hostChord";
   import { installTerminalReportGuards } from "../terminal/xtermReports";
@@ -140,6 +141,7 @@
     DEFAULT_SECRET_MASK_SUFFIXES,
     TerminalSecretMasker,
   } from "../terminal/secretMasking";
+  import { ReplayMaskScanBatch } from "../terminal/replayMasking";
   import type { Terminal as GhosttyTerminal } from "ghostty-web";
   import {
     refreshTerminalRows as refreshTerminalRowsImpl,
@@ -327,6 +329,7 @@
   const customTerminalColors = $derived(
     resolveTerminalColors(workspace.info?.preferences?.terminal_colors),
   );
+  const replayMaskScans = new ReplayMaskScanBatch();
   // The writer handed to ptyWrites. On xterm this is the terminal
   // itself (its write callback fires off xterm's own queue). On
   // ghostty it is a SYNCHRONOUS wrapper: ghostty-web parses inside
@@ -1085,9 +1088,10 @@
     // The custom-key-handler contracts are INVERTED between the
     // backends: xterm skips the keystroke when the handler returns
     // FALSE, ghostty-web skips it when the handler returns TRUE.
-    // handleTerminalKeyEvent is written to xterm's semantics; wrap it
-    // for ghostty so "chan consumed this chord" maps to ghostty's
-    // "handled" on both backends.
+    // handleTerminalKeyEvent uses xterm's semantics except for the native
+    // paste result prepared for this inversion; wrap it for ghostty so "chan
+    // consumed this chord" maps to ghostty's "handled" on both backends while
+    // paste still reaches ghostty-web's native-paste early-return.
     if (backend === "ghostty") {
       term.attachCustomKeyEventHandler((e) => !handleTerminalKeyEvent(e));
     } else {
@@ -1303,6 +1307,7 @@
       }
       if (frame.type === "ready") {
         attachReplayActive = false;
+        replayMaskScans.ready();
         suppressAttachReplayGeneratedReplies = false;
         statusDetail = `${frame.cols}x${frame.rows}`;
         terminalCwdAbs = frame.cwd ?? null;
@@ -1315,6 +1320,7 @@
         const priorId = tab.terminalSessionId;
         const duplicateReplay = reattaching && !sawSessionControl;
         attachReplayActive = true;
+        replayMaskScans.begin(() => secretMasker?.scanAll());
         suppressAttachReplayGeneratedReplies = duplicateReplay;
         sawSessionControl = true;
         // A successful attach proves the session + path healthy: reset the
@@ -1768,12 +1774,14 @@
     // clipboard copies -- the WASM parser swallows them with no JS hook.
     osc52Bridge?.push(bytes);
     const masker = secretMasker;
-    const maskSnapshot = masker?.captureWrite() ?? null;
-    ptyWrites.write(termWriter, bytes, origin, () => {
-      // The tracker completes a write exactly once, so live output,
-      // snapshot prime, and ring replay are each scanned once on this path.
-      masker?.scanWrite(maskSnapshot);
-    });
+    const completeMaskScan = replayMaskScans.track(
+      attachReplayActive,
+      () => masker?.captureWrite() ?? null,
+      (snapshot) => masker?.scanWrite(snapshot),
+    );
+    // Keep the existing writer + origin ordering. Replay callbacks only drain
+    // the batch; live callbacks still run their captured per-write scan.
+    ptyWrites.write(termWriter, bytes, origin, completeMaskScan);
   }
 
   /// Decode a base64 agent-event payload into the string
@@ -1939,6 +1947,7 @@
       activityPulseTimer = null;
     }
     closeSocket();
+    replayMaskScans.reset();
     resizeObserver?.disconnect();
     resizeObserver = null;
     host?.removeEventListener("keydown", onGhosttyHostChord, true);
@@ -2268,17 +2277,17 @@
     // Copy/paste chords act on the xterm selection / system clipboard, not
     // the PTY. Resolve them here (the custom handler runs before xterm
     // processes the key) so no bytes reach the shell and Ctrl+Shift+C does not
-    // raise SIGINT. `false` tells xterm to skip the keystroke. For paste this
-    // deliberately leaves the browser's native paste to fire so xterm's own
-    // `paste` listener handles it (see handleTerminalClipboardChord) - that is
-    // the buttonless, bracketed path, not a double-paste.
+    // raise SIGINT. `false` tells xterm to skip the keystroke. Paste leaves the
+    // browser's native event to each backend's own `paste` listener; Ghostty's
+    // pre-inversion result is true so its wrapper also passes the key through
+    // without suppressing that native event.
     if (
       handleTerminalClipboardChord(e, {
         os: currentOS(),
         copySelection: () => void copySelectionToClipboard(),
       })
     ) {
-      return false;
+      return terminalClipboardKeyHandlerResult(e, currentOS(), backend);
     }
     // Chord-escape registry. When the incoming event matches a shortcut
     // flagged `escapeTerminal: true` in shortcuts.ts, return false so xterm

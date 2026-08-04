@@ -23,9 +23,10 @@
 //                SPA state + window-config restore survive the navigation.
 //   * Reachability is probed through a single Tauri command:
 //         invoke('probe_url', { url }) -> { reachable, status, detail }
-//     reachable is true for ANY HTTP response (even 401/404: the server
-//     is up), false only on a transport failure (refused / DNS / TLS /
-//     timeout), which is exactly the blank-white case to retry past.
+//     For a gateway target, reachable is false on 502/503/504 and on a
+//     transport failure; 401/403/404 prove the gate answered and are reachable.
+//     Loopback targets keep the any-response behavior. The Rust request carries
+//     the target origin's webview cookies when available.
 //     The page cannot fetch the remote itself: the strict CSP
 //     (default-src 'self') blocks cross-origin connect-src, so detection
 //     must run in Rust, which has no CORS restriction and owns the
