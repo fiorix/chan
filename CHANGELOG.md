@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+v0.83.4 fixes the gateway-served desktop window regressions reported from live use: every mutating surface 403'd from chan-desktop windows connected through the gateway, and a remote reboot trapped windows in close and reconnect loops. It also recovers the Rich Prompt after a failed draft create and restores keyboard paste on the Ghostty backend.
+
+### Fixed
+
+- **Desktop gateway windows can mutate again: the CSRF token no longer rides the WebView cookie jar.** The desktop installs `__Host-devserver_csrf` into the WebView cookie store natively, and WebKit attaches it to requests but never surfaces it to `document.cookie`, so the SPA's double-submit mirror sent no `x-chan-csrf` header and the gateway answered every unsafe method with 403: the Computers scope never opened ("This window was not granted library access"), the Rich Prompt mounted without its composer, `cs paste` hung waiting on a reply POST, and session and config writes failed silently. A new origin-scoped `gateway_csrf_token` command returns the live token to the exact `lib-*` window on the minted origin and nothing else; the SPA mirror prefers it and keeps the readable-cookie fallback for browsers, re-reading the token and retrying once on a 403 so mid-session rotation self-heals; and a session publisher installs fresh cookies into the shared store after every re-mint, so open windows no longer drift past the gateway's one-hour session cap.
+- **Windows settle across a remote reboot.** Closing a devserver window during an outage now records a pending delete instead of unburying the record, so closed windows no longer respawn on the connecting screen in an unbreakable loop; the delete retries when the feed reconnects (bounded, then a launcher notice) and the suppression lifts only when the authoritative snapshot confirms the record is gone. The connecting probe classifies responses instead of accepting any status: gateway 502/503/504 and transport failures keep the window on the connecting screen, and the probe carries the window's session cookies, so restored windows no longer navigate onto the gateway's static error page where nothing could close them. A pending close-confirmation prompt auto-cancels on the disconnect and reconnect transitions, and the native close path raises and focuses the window before prompting, so the "closing will stop the shell" prompt can no longer strand behind newer windows.
+- **The Rich Prompt recovers from a failed draft create.** A failed `POST /api/drafts/new` rejected an unguarded `onMount` await and left the bubble chrome-only forever with no error; the mount now surfaces the failure with a retry that recreates or reloads the draft.
+- **Keyboard paste works on the Ghostty backend.** The custom-key wrapper's inverted contract made ghostty-web `preventDefault` the paste chord, suppressing the browser's native paste event on every origin; the chord now resolves a backend-aware result so Ghostty's own KeyV early-return passes the key through, matching xterm.
+
 ## [v0.83.3] - 2026-08-03
 
 v0.83.3 removes the retired command-launcher overlay end to end and makes the wall-clock timing tests load-proof. (v0.83.2 was skipped.)
