@@ -92,6 +92,12 @@ static OPEN_AFTER_HELP: std::sync::LazyLock<String> = std::sync::LazyLock::new(|
 /// where there is no OS supervisor, and the portable choice everywhere).
 mod devserver_daemon;
 
+/// Serialized ambient-`CHAN_*` isolation for env-reading tests and spawned
+/// test children. Not `cfg(test)` because integration tests link this crate
+/// without it.
+#[doc(hidden)]
+pub mod test_env;
+
 /// Default listen port shared by `chan open` (standalone serve) and
 /// `chan devserver`. Single-sourced so the two cannot drift: `cmd_serve` relies
 /// on them being equal to recognize the "a devserver already owns 8787" bind
@@ -8566,19 +8572,52 @@ mod tests {
 
     #[test]
     fn devserver_tunnel_url_has_no_domain_default() {
+        let _env = test_env::ChanTestEnv::new();
         let cli = Cli::parse_from(["chan", "devserver"]);
         match cli.command {
             Command::Devserver {
                 tunnel_url,
                 tunnel_token,
                 ..
-            } => {
-                assert_eq!(tunnel_url, None);
-                // No token by default → tunnel mode stays off until opted in.
-                assert_eq!(tunnel_token, None);
-            }
+            } => assert_tunnel_defaults_off(&tunnel_url, &tunnel_token),
             other => panic!("expected Command::Devserver, got {other:?}"),
         }
+    }
+
+    /// Asserts the devserver tunnel defaults without rendering any received
+    /// value: `tunnel_token` can carry a live `chan_pat_` credential, so a
+    /// failure names the field and stays redacted.
+    fn assert_tunnel_defaults_off(tunnel_url: &Option<String>, tunnel_token: &Option<String>) {
+        assert!(
+            tunnel_url.is_none(),
+            "tunnel URL must default to unset (value redacted)"
+        );
+        // No token by default → tunnel mode stays off until opted in.
+        assert!(
+            tunnel_token.is_none(),
+            "tunnel token must default to unset (value redacted)"
+        );
+    }
+
+    /// Negative coverage for the redaction contract: a failing default-check
+    /// must not leak the received value into the panic payload.
+    #[test]
+    fn tunnel_default_failure_never_renders_the_value() {
+        const SENTINEL: &str = "chan_pat_test_sentinel_value";
+        let panicked = std::panic::catch_unwind(|| {
+            assert_tunnel_defaults_off(&None, &Some(SENTINEL.to_string()));
+        });
+        let payload = panicked.expect_err("the check must fail on a set token");
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .expect("assert! payload is a string");
+        assert!(
+            !message.contains(SENTINEL),
+            "failure output must not render the token value"
+        );
+        assert!(message.contains("redacted"), "{message}");
     }
 
     /// The `listen` resolution matrix: tunnel mode flips the default to no-bind
@@ -8654,6 +8693,7 @@ mod tests {
     /// `--rotate-token` parses and sits in the exclusive action group.
     #[test]
     fn devserver_rotate_token_flag_parses() {
+        let _env = test_env::ChanTestEnv::new();
         let cli = Cli::parse_from(["chan", "devserver", "--rotate-token"]);
         match cli.command {
             Command::Devserver { rotate_token, .. } => assert!(rotate_token),
@@ -8669,6 +8709,7 @@ mod tests {
     /// them mutually exclusive.
     #[test]
     fn devserver_action_group_parse() {
+        let _env = test_env::ChanTestEnv::new();
         let cli = Cli::parse_from(["chan", "devserver", "--service=systemd", "--stop"]);
         match cli.command {
             Command::Devserver {
@@ -8722,6 +8763,7 @@ mod tests {
     /// flag (`--service --join`) still resolves to `Auto` and parses the verb.
     #[test]
     fn devserver_service_kind_parse() {
+        let _env = test_env::ChanTestEnv::new();
         let kind = |args: &[&str]| match Cli::parse_from(args).command {
             Command::Devserver { service, .. } => service,
             other => panic!("expected Command::Devserver, got {other:?}"),
@@ -9470,6 +9512,7 @@ mod tests {
 
     #[test]
     fn devserver_tunnel_url_accepts_explicit_endpoint() {
+        let _env = test_env::ChanTestEnv::new();
         let cli = Cli::parse_from([
             "chan",
             "devserver",
@@ -10323,6 +10366,7 @@ mod tests {
 
     #[test]
     fn devserver_name_flag_parses() {
+        let _env = test_env::ChanTestEnv::new();
         let cli = Cli::parse_from(["chan", "devserver", "--tunnel-devserver-name", "office box"]);
         match cli.command {
             Command::Devserver {

@@ -9,14 +9,20 @@
 //! Requirement under test: on a workspace that is being served, calling
 //! `close` sends the signal that tears down the serving process.
 //!
-//! Isolation: a throwaway `HOME` redirects the whole `~/.chan` library, and a
-//! shared socket dir is set as `XDG_RUNTIME_DIR` on the serve child and the
+//! Isolation: a throwaway `CHAN_HOME` redirects the whole chan library
+//! (registry, devserver config, lock records), a throwaway `HOME` covers
+//! anything that still consults the OS home, and a shared socket dir is set as
+//! `XDG_RUNTIME_DIR` on the serve child and the
 //! close invocation, with `TMPDIR` matching for older binaries. The per-pid
 //! control-socket discovery only resolves when both processes agree on where
-//! the socket lives.
-//! `--standalone` and `CHAN_NO_DESKTOP_HANDOFF` keep the serve from handing off
-//! to a running chan-desktop. Unix-only: the control socket is a Unix socket and
-//! the discovery glob is unix-first (Windows named pipes aren't enumerable here).
+//! the socket lives. The child's inherited environment is rebuilt from a
+//! scrubbed copy of the parent environment with the complete `CHAN_*`
+//! namespace removed, so a test launched from inside a chan terminal inherits
+//! neither terminal-session state nor credentials.
+//! `CHAN_NO_DESKTOP_HANDOFF` and `CHAN_NO_DEVSERVER_HANDOFF` keep the serve from
+//! handing off to a running chan-desktop or devserver. Unix-only: the control
+//! socket is a Unix socket and the discovery glob is unix-first (Windows named
+//! pipes aren't enumerable here).
 
 #![cfg(unix)]
 
@@ -36,11 +42,12 @@ const CHAN: &str = env!("CARGO_BIN_EXE_chan");
 const READY_BUDGET: Duration = Duration::from_secs(30);
 const EXIT_BUDGET: Duration = Duration::from_secs(15);
 
-/// Throwaway `HOME` (the whole `~/.chan` library) + a shared socket dir set as
-/// `XDG_RUNTIME_DIR` (where the per-pid control socket lives) and `TMPDIR`, so
-/// the serve and close processes agree on the control-socket location.
-/// Dropping it removes everything.
+/// Throwaway `CHAN_HOME` (the whole chan library) + a throwaway `HOME` + a
+/// shared socket dir set as `XDG_RUNTIME_DIR` (where the per-pid control
+/// socket lives) and `TMPDIR`, so the serve and close processes agree on the
+/// control-socket location. Dropping it removes everything.
 struct Sandbox {
+    chan_home: TempDir,
     home: TempDir,
     sockdir: TempDir,
     scratch: TempDir,
@@ -49,6 +56,7 @@ struct Sandbox {
 impl Sandbox {
     fn new() -> Self {
         Self {
+            chan_home: tempfile::tempdir().expect("chan home tempdir"),
             home: tempfile::tempdir().expect("home tempdir"),
             sockdir: tempfile::tempdir().expect("sockdir tempdir"),
             scratch: tempfile::tempdir().expect("scratch tempdir"),
@@ -63,20 +71,21 @@ impl Sandbox {
         root
     }
 
-    /// A `chan` command preloaded with the sandbox env. The inherited `CHAN_*`
-    /// terminal-session vars are stripped so a test launched from inside a chan
-    /// terminal doesn't accidentally drive handoff or socket reuse.
+    /// A `chan` command preloaded with the sandbox env. The inherited
+    /// environment is rebuilt from a scrubbed copy with the complete `CHAN_*`
+    /// namespace removed, so a test launched from inside a chan terminal
+    /// cannot inherit terminal-session state, handoff hints, or credentials;
+    /// only the explicit sandbox values below carry `CHAN_` names.
     fn command(&self) -> Command {
         let mut cmd = Command::new(CHAN);
-        cmd.env("HOME", self.home.path())
+        cmd.env_clear()
+            .envs(chan::test_env::scrubbed_process_env())
+            .env("CHAN_HOME", self.chan_home.path())
+            .env("HOME", self.home.path())
             .env("TMPDIR", self.sockdir.path())
             .env("XDG_RUNTIME_DIR", self.sockdir.path())
             .env("CHAN_NO_DESKTOP_HANDOFF", "1")
-            .env("CHAN_NO_DEVSERVER_HANDOFF", "1")
-            .env_remove("CHAN_CONTROL_SOCKET")
-            .env_remove("CHAN_WINDOW_ID")
-            .env_remove("CHAN_TAB_NAME")
-            .env_remove("CHAN_TAB_GROUP");
+            .env("CHAN_NO_DEVSERVER_HANDOFF", "1");
         cmd
     }
 }
@@ -171,9 +180,9 @@ fn poll(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
     }
 }
 
-/// The first non-empty `writer.lock` under `HOME/.chan/workspaces/*/locks/`.
-fn writer_lock(home: &Path) -> Option<PathBuf> {
-    let dir = home.join(".chan/workspaces");
+/// The first non-empty `writer.lock` under `CHAN_HOME/workspaces/*/locks/`.
+fn writer_lock(chan_home: &Path) -> Option<PathBuf> {
+    let dir = chan_home.join("workspaces");
     for entry in std::fs::read_dir(&dir).ok()?.flatten() {
         let lock = entry.path().join("locks/writer.lock");
         if std::fs::metadata(&lock)
@@ -187,8 +196,8 @@ fn writer_lock(home: &Path) -> Option<PathBuf> {
 }
 
 /// Whether the live `writer.lock` record names `pid` as the holder.
-fn lock_held_by(home: &Path, pid: u32) -> bool {
-    writer_lock(home)
+fn lock_held_by(chan_home: &Path, pid: u32) -> bool {
+    writer_lock(chan_home)
         .and_then(|l| std::fs::read_to_string(l).ok())
         .map(|s| s.contains(&format!("\"pid\":{pid}")))
         .unwrap_or(false)
@@ -208,7 +217,7 @@ fn close_tears_down_the_separate_serve_process() {
         serve.stderr_dump(),
     );
     assert!(
-        lock_held_by(sandbox.home.path(), serve.pid()),
+        lock_held_by(sandbox.chan_home.path(), serve.pid()),
         "serve is ready but its writer.lock record is missing or names another pid"
     );
 
@@ -247,7 +256,7 @@ fn close_tears_down_the_separate_serve_process() {
     let fresh = Serve::spawn(&sandbox, &ws);
     assert!(
         poll(READY_BUDGET, || lock_held_by(
-            sandbox.home.path(),
+            sandbox.chan_home.path(),
             fresh.pid()
         )),
         "a fresh serve never acquired the released flock after close:\n{}",
