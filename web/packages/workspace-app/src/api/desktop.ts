@@ -67,8 +67,9 @@ export async function readGatewayCsrfToken(): Promise<string | null> {
 }
 
 // Keep the invoke vocabulary in this audited bridge while letting the HTTP
-// transport own source ordering and retry behavior.
-setGatewayCsrfTokenReader(readGatewayCsrfToken);
+// transport own source ordering and retry behavior. Plain browsers register no
+// reader, so their cookie path never pays even the one-time hydration turn.
+setGatewayCsrfTokenReader(isTauriDesktop() ? readGatewayCsrfToken : null);
 
 /// Read clipboard text without tripping WebKit's DOM-paste "Paste" button.
 ///

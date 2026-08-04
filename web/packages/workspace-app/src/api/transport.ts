@@ -167,14 +167,52 @@ function isUnsafeMethod(method: string): boolean {
 export type GatewayCsrfTokenReader = () => Promise<string | null>;
 
 let gatewayCsrfTokenReader: GatewayCsrfTokenReader | null = null;
+// `undefined` is the one cold-cache state. `null` is a completed native read
+// with no gateway token, so browser cookies and loopback can stay synchronous.
+let cachedGatewayCsrfToken: string | null | undefined = null;
+let gatewayCsrfHydration: Promise<void> | null = null;
 
-/// Install the native gateway-token reader. The Tauri bridge owns the invoke
-/// vocabulary and registers its reader when that module loads; browser builds
-/// leave this unset and continue to mirror the readable cookie.
+function hydrateGatewayCsrfToken(): Promise<void> {
+  const reader = gatewayCsrfTokenReader;
+  if (!reader) {
+    cachedGatewayCsrfToken = null;
+    return Promise.resolve();
+  }
+
+  let read: Promise<string | null>;
+  try {
+    // Start the invoke now. Registration uses this path once at module init so
+    // steady-state mutations do not wait for a new microtask before dispatch.
+    read = reader();
+  } catch {
+    cachedGatewayCsrfToken = null;
+    return Promise.resolve();
+  }
+  const hydration = read.then(
+    (csrf) => {
+      if (gatewayCsrfTokenReader === reader) cachedGatewayCsrfToken = csrf || null;
+    },
+    () => {
+      if (gatewayCsrfTokenReader === reader) cachedGatewayCsrfToken = null;
+    },
+  );
+  gatewayCsrfHydration = hydration;
+  void hydration.then(() => {
+    if (gatewayCsrfHydration === hydration) gatewayCsrfHydration = null;
+  });
+  return hydration;
+}
+
+/// Install the native gateway-token reader and eagerly hydrate its cache once.
+/// Passing null clears both the reader and cache; browser cookie and loopback
+/// requests then retain their synchronous path.
 export function setGatewayCsrfTokenReader(
   reader: GatewayCsrfTokenReader | null,
 ): void {
   gatewayCsrfTokenReader = reader;
+  cachedGatewayCsrfToken = reader ? undefined : null;
+  gatewayCsrfHydration = null;
+  if (reader) void hydrateGatewayCsrfToken();
 }
 
 function headersWithValue(
@@ -204,22 +242,30 @@ interface GatewayCsrfHeaders {
   source: GatewayCsrfSource;
 }
 
-async function resolveGatewayCsrfHeaders(method: string): Promise<GatewayCsrfHeaders> {
-  if (!isUnsafeMethod(method)) return { pairs: [], source: "absent" };
-  if (gatewayCsrfTokenReader) {
-    try {
-      const csrf = await gatewayCsrfTokenReader();
-      if (csrf) {
-        return { pairs: [["x-chan-csrf", csrf]], source: "desktop" };
-      }
-    } catch {
-      // A local, outbound, or no-longer-managed window has no grant. Continue
-      // through the browser source order without surfacing an expected denial.
-    }
+function cachedGatewayCsrfHeaders(): GatewayCsrfHeaders {
+  if (cachedGatewayCsrfToken) {
+    return {
+      pairs: [["x-chan-csrf", cachedGatewayCsrfToken]],
+      source: "desktop",
+    };
   }
   const csrf = cookieValue("__Host-devserver_csrf");
   if (!csrf) return { pairs: [], source: "absent" };
   return { pairs: [["x-chan-csrf", csrf]], source: "cookie" };
+}
+
+function resolveGatewayCsrfHeaders(
+  method: string,
+): GatewayCsrfHeaders | Promise<GatewayCsrfHeaders> {
+  if (!isUnsafeMethod(method)) return { pairs: [], source: "absent" };
+  if (cachedGatewayCsrfToken !== undefined || !gatewayCsrfTokenReader) {
+    return cachedGatewayCsrfHeaders();
+  }
+  // Only the first unsafe call can land here, if it races the eager desktop
+  // hydration. Once the read settles, every steady-state request is sync.
+  return (gatewayCsrfHydration ?? hydrateGatewayCsrfToken()).then(
+    cachedGatewayCsrfHeaders,
+  );
 }
 
 /// Resolve the gateway's double-submit mirror for one request. Desktop gateway
@@ -243,19 +289,38 @@ export async function withGatewayCsrf(init: RequestInit = {}): Promise<RequestIn
   return { ...init, headers };
 }
 
-/// Run an unsafe request with the best available CSRF mirror. A request that
-/// used the native token and receives 403 re-reads the token and retries once;
-/// cookie-only browser requests and loopback requests retain their one-attempt
-/// behavior.
-export async function withGatewayCsrfRetry<T extends { status: number }>(
+function sendWithGatewayCsrfRetry<T extends { status: number }>(
+  first: GatewayCsrfHeaders,
+  send: (pairs: [string, string][]) => Promise<T>,
+): Promise<T> {
+  // `send` is intentionally called before this function returns. Pagehide and
+  // other keepalive callers require the browser request to exist synchronously.
+  const response = send(first.pairs);
+  // Browser-cookie and loopback requests never retry, so return their original
+  // promise too. Besides preserving dispatch timing, this keeps their response
+  // microtask schedule byte-for-byte equivalent to the pre-desktop path.
+  if (first.source !== "desktop") return response;
+  return response.then((settled) => {
+    if (settled.status !== 403) return settled;
+    return hydrateGatewayCsrfToken().then(() =>
+      send(cachedGatewayCsrfHeaders().pairs),
+    );
+  });
+}
+
+/// Run an unsafe request with the best available CSRF mirror. The hydrated
+/// desktop, cookie, and absent paths dispatch synchronously. Only a cold native
+/// cache may defer the first dispatch; a desktop-token 403 re-invokes the
+/// reader, updates the cache, and retries exactly once.
+export function withGatewayCsrfRetry<T extends { status: number }>(
   method: string,
   send: (pairs: [string, string][]) => Promise<T>,
 ): Promise<T> {
-  const first = await resolveGatewayCsrfHeaders(method);
-  const response = await send(first.pairs);
-  if (response.status !== 403 || first.source !== "desktop") return response;
-  const retry = await resolveGatewayCsrfHeaders(method);
-  return send(retry.pairs);
+  const first = resolveGatewayCsrfHeaders(method);
+  if (first instanceof Promise) {
+    return first.then((resolved) => sendWithGatewayCsrfRetry(resolved, send));
+  }
+  return sendWithGatewayCsrfRetry(first, send);
 }
 
 /// Injectable HTTP + WebSocket primitives. Both default to the real browser

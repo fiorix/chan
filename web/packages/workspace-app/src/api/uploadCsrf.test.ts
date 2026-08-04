@@ -9,7 +9,11 @@
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { api } from "./client";
-import { setGatewayCsrfTokenReader, setXhrFactory } from "./transport";
+import {
+  gatewayCsrfHeaderPairs,
+  setGatewayCsrfTokenReader,
+  setXhrFactory,
+} from "./transport";
 
 /// Minimal XHR stand-in: records the request headers and answers each send with
 /// its configured status.
@@ -73,6 +77,19 @@ describe("XHR multipart gateway CSRF mirror", () => {
     await api.uploadFile(new File(["x"], "a.txt"), "inbox");
 
     expect(created[0].headers["x-chan-csrf"]).toBe("desktop-token");
+  });
+
+  test("starts XHR synchronously after eager desktop hydration", async () => {
+    const readToken = vi.fn(async () => "desktop-token");
+    setGatewayCsrfTokenReader(readToken);
+    await gatewayCsrfHeaderPairs("POST");
+    const created = installFakeXhr();
+
+    const upload = api.uploadFile(new File(["x"], "a.txt"), "inbox");
+    expect(created).toHaveLength(1);
+    expect(created[0].headers["x-chan-csrf"]).toBe("desktop-token");
+    await upload;
+    expect(readToken).toHaveBeenCalledTimes(1);
   });
 
   test("re-reads the desktop token and retries one 403 exactly once", async () => {
