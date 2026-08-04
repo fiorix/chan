@@ -58,6 +58,7 @@ Implemented on 2026-08-04 in `17576cbb` (`fix(web): mirror gateway CSRF through 
 Focused checks, rerun on the integrated team branch:
 
 - `cargo fmt --all -- --check`: passed.
+- `cargo test -p chan-desktop origin_aware_acl_grants_spa_invoke_vocabulary_per_window_class -- --nocapture`: 1 passed. The two loopback classes deliberately exclude the gateway-only command; both exact-origin gateway classes remain granted.
 - `cargo test -p chan-desktop runtime_capability::tests -- --nocapture`: 6 passed.
 - `cargo test -p chan-desktop gateway_csrf_token -- --nocapture`: 1 passed.
 - `cargo test -p chan-desktop concurrent_session_miss_and_auth_refresh_each_exchange_once -- --nocapture`: 1 passed.

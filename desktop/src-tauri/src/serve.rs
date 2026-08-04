@@ -3545,7 +3545,14 @@ mod tests {
     /// read_dropped_paths: the macOS drag pasteboard is system-wide and
     /// outlives the drag, so the command stays off lib-* windows on EVERY
     /// origin -- local-drop.json's windows list deliberately has no lib-*.
-    const DELIBERATE_EXCLUSIONS: [(&str, &str); 3] = [
+    ///
+    /// gateway_csrf_token: only exact-origin gateway lib-* windows receive
+    /// the runtime grant. The loopback classes run the same SPA but stay
+    /// ungranted, and the handler's label, origin, and live-connection checks
+    /// independently refuse callers outside that gateway binding.
+    const DELIBERATE_EXCLUSIONS: [(&str, &str); 5] = [
+        ("loopback workspace window", "gateway_csrf_token"),
+        ("loopback lib window", "gateway_csrf_token"),
         ("loopback lib window", "read_dropped_paths"),
         ("official exact-origin lib window", "read_dropped_paths"),
         ("custom exact-origin lib window", "read_dropped_paths"),
