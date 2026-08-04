@@ -19,12 +19,17 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
+### v0.85.0
+
+| item | state | what needs to happen |
+| --- | --- | --- |
+| [web-marketing-onboarding](v0.85.0/web-marketing-onboarding.md) | accepted, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
+
 ### v0.84.0
 
 | item | state | what needs to happen |
 | --- | --- | --- |
 | [large-transfer-capability](v0.84.0/large-transfer-capability.md) | registered, grounded, needs a spec | tune the tunnel transport, build the bulk-transfer lane and its admission control, then raise the write ceiling last |
-| [web-marketing-onboarding](v0.84.0/web-marketing-onboarding.md) | registered, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
 | [cs-open-non-text-reveal-and-audio](v0.84.0/cs-open-non-text-reveal-and-audio.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
 | [hybrid-nav-staged-editor-bubble](v0.84.0/hybrid-nav-staged-editor-bubble.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
 | [terminal-tab-rename-reaches-inventory](v0.84.0/terminal-tab-rename-reaches-inventory.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
@@ -33,7 +38,6 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [ghostty-macos-trackpad-scroll-parity](v0.84.0/ghostty-macos-trackpad-scroll-parity.md) | registered, grounded, ruled, specified | calibrate Ghostty's macOS pixel-mode scrollback travel to xterm.js without changing TUI wheel input |
 | [ghostty-live-output-scroll-stability](v0.84.0/ghostty-live-output-scroll-stability.md) | registered, grounded, ruled, specified | keep a manually scrolled Ghostty viewport under user control while Kimi or any other process emits output |
 | [notifications](v0.84.0/notifications.md) | registered, not specced | ground `cs notify` and decide how a local session or a devserver reaches chan-launcher to raise a text notification |
-| [hybrid-nav-staged-destructive-actions](v0.84.0/hybrid-nav-staged-destructive-actions.md) | registered, not specced | enumerate the Hybrid Nav actions that execute on the keystroke, then stage delete as a droppable pending intent |
 | [hybrid-nav-mouse-split-affordances](v0.84.0/hybrid-nav-mouse-split-affordances.md) | registered, not specced | suggest horizontal and vertical splits on mouse hover once a pane drag enters Hybrid Nav |
 | [graph-inspector-language-node-detail](v0.84.0/graph-inspector-language-node-detail.md) | registered, not specced | add COCOMO and the top directories for a selected language node, sourced from chan-report's existing roll-up |
 | [file-browser-context-menu-inspector-actions](v0.84.0/file-browser-context-menu-inspector-actions.md) | registered, not specced | give the file browser's right-click menu the inspector's per-type actions |
@@ -43,6 +47,10 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [chan-config-key-coverage](v0.84.0/chan-config-key-coverage.md) | registered, grounded, needs a spec | derive `chan config get`/`set` from the same key set the dump prints, so the 19 keys it prints but rejects become settable |
 
 ## Completed
+
+### Withdrawn for v0.84.0
+
+- [hybrid-nav-staged-destructive-actions](done/hybrid-nav-staged-destructive-actions.md) - did not ship; destructive operations retain the established immediate action and confirmation boundary.
 
 ### v0.83.4
 
