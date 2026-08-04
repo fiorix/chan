@@ -1209,14 +1209,33 @@ fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), S
                             );
                             return;
                         }
+                        // A devserver window still on the connecting page has no
+                        // SPA command handler to answer a prompt. Route its OS
+                        // close through the same pending-delete path as the
+                        // page's close chords and Disconnect button.
+                        let on_connecting =
+                            window_on_connecting_screen(&app_for_close, &label_for_close);
+                        if on_connecting && label_for_close.starts_with("lib-") {
+                            api.prevent_close();
+                            if let Some(window) =
+                                app_for_close.get_webview_window(&label_for_close)
+                            {
+                                let app = app_for_close.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    if let Err(e) = crate::request_close_window(app, window).await {
+                                        tracing::warn!(error = %e, "closing connecting devserver window failed");
+                                    }
+                                });
+                            }
+                            return;
+                        }
                         // Decide whether there is a live workspace SPA to ASK. A
-                        // `local::` or `lib-` watcher window always has one (it
-                        // always buried before). A standalone `terminal-` with no
-                        // live shells, a `control-terminal-` still connecting, and
-                        // any window still on the pre-SPA connecting screen have
-                        // nothing to keep or no SPA to ask, so they REAL-close
-                        // exactly as before (return without prevent_close; the
-                        // Destroyed branch cleans up).
+                        // `local::` or connected `lib-` watcher window has one. A
+                        // standalone `terminal-` with no live shells, a
+                        // `control-terminal-` still connecting, and any window
+                        // still on the pre-SPA connecting screen have nothing to
+                        // keep or no SPA to ask, so they real-close (return without
+                        // prevent_close; the Destroyed branch cleans up).
                         let ask = if label_for_close.starts_with("local::")
                             || label_for_close.starts_with("lib-")
                         {
@@ -1267,7 +1286,7 @@ fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), S
                                 state.devservers.is_connected(id)
                             }
                         } else {
-                            !window_on_connecting_screen(&app_for_close, &label_for_close)
+                            !on_connecting
                         };
                         if !ask {
                             // Real close; the Destroyed branch cleans up.
@@ -1284,6 +1303,13 @@ fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), S
                         else {
                             return;
                         };
+                        let _ = window.unminimize();
+                        if let Err(e) = window.show() {
+                            tracing::warn!(label = %label_for_close, error = %e, "raising close-confirm window failed");
+                        }
+                        if let Err(e) = window.set_focus() {
+                            tracing::warn!(label = %label_for_close, error = %e, "focusing close-confirm window failed");
+                        }
                         let _ = window.eval(CONFIRM_CLOSE_DISPATCH_JS);
                     }
                     // Single cleanup point for EVERY destroy path: the
@@ -3071,6 +3097,16 @@ mod tests {
         // nothing buries here until the SPA calls back.
         assert!(arm.contains("api.prevent_close();"));
         assert!(arm.contains("window.eval(CONFIRM_CLOSE_DISPATCH_JS)"));
+        let raise = arm
+            .find("window.show()")
+            .expect("the prompt owner is raised");
+        let focus = arm
+            .find("window.set_focus()")
+            .expect("the prompt owner is focused");
+        let eval = arm
+            .find("window.eval(CONFIRM_CLOSE_DISPATCH_JS)")
+            .expect("the close prompt is evaluated");
+        assert!(raise < focus && focus < eval);
         // The real-close cases (terminal with no shells, control terminal still
         // connecting, pre-SPA connecting screen) return WITHOUT prevent_close.
         assert!(arm.contains("if !ask {"));
@@ -3294,17 +3330,20 @@ mod tests {
 
     #[test]
     fn connecting_screen_windows_close_for_real() {
-        // A window still on connecting.html must be CLOSABLE: the red
-        // dot really closes (no bury - a buried connecting window is an
-        // unkillable hidden retry loop), and the page itself offers
-        // Cmd/Ctrl+W + Ctrl+D chords that invoke request_close_window
-        // (destroy, bypassing the bury handler). concat! so the source
-        // pin doesn't match this test.
+        // A window still on connecting.html must be closable. A devserver
+        // window's red button routes through request_close_window so its remote
+        // record becomes a pending delete, while the page offers the same path
+        // from Cmd/Ctrl+W, Ctrl+D, and Disconnect.
         const SERVE_RS: &str = include_str!("serve.rs");
-        assert!(SERVE_RS.contains(concat!(
-            "!window_on_connecting",
-            "_screen(&app_for_close, &label_for_close)"
-        )));
+        let close_arm = SERVE_RS
+            .split("WindowEvent::CloseRequested { api, .. } => {")
+            .nth(1)
+            .expect("CloseRequested arm exists")
+            .split("WindowEvent::Destroyed")
+            .next()
+            .expect("close arm ends before Destroyed");
+        assert!(close_arm.contains("if on_connecting && label_for_close.starts_with(\"lib-\")"));
+        assert!(close_arm.contains("crate::request_close_window(app, window)"));
         // KEY_BRIDGE_JS claims the close chord (window capture +
         // stopImmediatePropagation) before BOTH the page's listener and
         // the File-menu accelerator, so the bridge itself must route

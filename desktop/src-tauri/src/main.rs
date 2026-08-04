@@ -154,6 +154,11 @@ pub struct AppState {
     /// the webview (drops the `/ws`) rather than hiding it alive, letting the
     /// launcher dot reflect hidden. Dropped on disconnect with the watcher.
     pub devserver_watcher_views: Mutex<HashMap<String, Arc<window_watcher::WatcherViewState>>>,
+    /// Devserver windows whose remote registry DELETE has not yet been observed
+    /// absent from an authoritative feed snapshot. Process-local by design: the
+    /// close intent survives watcher replacement and suppresses stale records,
+    /// but a desktop restart clears it.
+    pub(crate) pending_window_deletes: Arc<window_watcher::PendingDeleteState>,
     /// Composite native labels (`{library_id}::{window_id}`) of connected-
     /// devserver windows that currently have an in-flight file transfer, as
     /// reported by each devserver's windows feed (`WindowRecord.active_transfer`).
@@ -259,6 +264,7 @@ impl AppState {
             devserver_windows: Mutex::new(HashMap::new()),
             devserver_watchers: Mutex::new(HashMap::new()),
             devserver_watcher_views: Mutex::new(HashMap::new()),
+            pending_window_deletes: Arc::new(window_watcher::PendingDeleteState::default()),
             devserver_active_transfers: Mutex::new(std::collections::HashSet::new()),
             control_terminal_prefixes: Mutex::new(HashMap::new()),
             control_terminal_runs: Mutex::new(HashMap::new()),
@@ -3668,13 +3674,11 @@ fn restart_desktop_after_update() -> Result<(), String> {
     ))
 }
 
-/// Result of a connecting-screen reachability probe. `reachable` is
-/// true when the remote returned ANY HTTP response (even 401 / 404:
-/// the server is up and serving). It is false only on a transport
-/// failure (connection refused / DNS / TLS / timeout), which is exactly
-/// the blank-white case the connecting screen retries past. `detail` is
-/// a short ASCII reason shown in the per-attempt row; `status` is the
-/// HTTP code when reachable.
+/// Result of a connecting-screen reachability probe. Loopback targets treat
+/// every HTTP response as reachable. Non-loopback targets also require that a
+/// gateway upstream status (502, 503, or 504) was not returned. `detail` is a
+/// short ASCII reason shown in the per-attempt row; `status` is the HTTP code
+/// when a response arrived.
 #[derive(Debug, Clone, Serialize)]
 struct ProbeResult {
     reachable: bool,
@@ -3688,14 +3692,57 @@ struct ProbeResult {
 /// page's retry loop.
 const PROBE_TIMEOUT_SECS: u64 = 5;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeTargetKind {
+    Loopback,
+    Gateway,
+}
+
+fn probe_target_kind(raw_url: &str) -> ProbeTargetKind {
+    let Ok(parsed) = url::Url::parse(raw_url) else {
+        return ProbeTargetKind::Gateway;
+    };
+    let loopback = match parsed.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        Some(url::Host::Domain(domain)) => {
+            domain.eq_ignore_ascii_case("localhost")
+                || domain
+                    .to_ascii_lowercase()
+                    .strip_suffix(".localhost")
+                    .is_some()
+        }
+        None => false,
+    };
+    if loopback {
+        ProbeTargetKind::Loopback
+    } else {
+        ProbeTargetKind::Gateway
+    }
+}
+
+fn probe_response_reachable(target: ProbeTargetKind, status: Option<reqwest::StatusCode>) -> bool {
+    status.is_some_and(|status| {
+        target == ProbeTargetKind::Loopback
+            || !matches!(
+                status,
+                reqwest::StatusCode::BAD_GATEWAY
+                    | reqwest::StatusCode::SERVICE_UNAVAILABLE
+                    | reqwest::StatusCode::GATEWAY_TIMEOUT
+            )
+    })
+}
+
 /// Reachability probe for the chan-desktop connecting screen. Outbound
 /// windows load `connecting.html` instead of pointing the webview
 /// straight at the remote (a down remote paints a blank white webview);
 /// that page calls this command on a retry loop until the remote answers,
 /// then navigates. Runs from Rust because the page's CSP
-/// (`default-src 'self'`) blocks a cross-origin `fetch`.
+/// (`default-src 'self'`) blocks a cross-origin `fetch`. Authentication cookies
+/// for the target origin are copied from the calling webview when available.
 #[tauri::command]
-async fn probe_url(url: String) -> ProbeResult {
+async fn probe_url(window: tauri::WebviewWindow, url: String) -> ProbeResult {
+    let target = probe_target_kind(&url);
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(PROBE_TIMEOUT_SECS))
         .build()
@@ -3709,14 +3756,32 @@ async fn probe_url(url: String) -> ProbeResult {
             }
         }
     };
-    match client.get(&url).send().await {
-        Ok(resp) => ProbeResult {
-            reachable: true,
-            status: Some(resp.status().as_u16()),
-            detail: resp.status().to_string(),
-        },
+    let mut request = client.get(&url);
+    if let Ok(parsed) = url::Url::parse(&url) {
+        if let Ok(cookies) = window.cookies_for_url(parsed) {
+            let cookie_header = cookies
+                .iter()
+                .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
+                .collect::<Vec<_>>()
+                .join("; ");
+            if !cookie_header.is_empty() {
+                if let Ok(value) = reqwest::header::HeaderValue::from_str(&cookie_header) {
+                    request = request.header(reqwest::header::COOKIE, value);
+                }
+            }
+        }
+    }
+    match request.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            ProbeResult {
+                reachable: probe_response_reachable(target, Some(status)),
+                status: Some(status.as_u16()),
+                detail: status.to_string(),
+            }
+        }
         Err(e) => ProbeResult {
-            reachable: false,
+            reachable: probe_response_reachable(target, None),
             status: None,
             detail: probe_error_detail(&e),
         },
@@ -4289,46 +4354,41 @@ async fn request_close_window(
             }
         }
     }
-    // A watcher-managed DEVSERVER window (`lib-<library_id>::<window_id>`) emptied:
-    // discard its record on the owning devserver -- the async analog of the
-    // `local::` discard above. The server drops + PERSISTS the removal and fires
-    // the watch, so the close survives a restart instead of the record reopening
-    // empty. The DELETE is an HTTP round-trip, so run it async and destroy the
-    // native window now for an instant close. The label is buried in the owning
-    // devserver's watcher view FIRST: a feed frame landing mid-DELETE (e.g. the
-    // destroyed webview's `/ws` drop flipping `connected`) must not reconcile
-    // the still-live record back open. On DELETE success the record leaves the
-    // feed and the bury entry is inert; on failure the unbury lets the record
-    // reconcile back open -- visibly, with a launcher notice saying why.
+    // A watcher-managed DEVSERVER window (`lib-<library_id>::<window_id>`) closes
+    // immediately while its registry DELETE runs asynchronously. Record the
+    // close intent before destroying the native surface. A stale feed snapshot
+    // must keep treating this label as suppressed when the DELETE cannot reach
+    // the server; reconnect retries the same intent without reopening it.
     if closing.starts_with("lib-") {
-        let state = app.state::<Arc<AppState>>();
+        let state = Arc::clone(app.state::<Arc<AppState>>().inner());
         let label = closing.to_string();
-        let view =
-            devserver_id_for_window_label(&state.devserver_feed, closing).and_then(|ds_id| {
-                state
-                    .devserver_watcher_views
-                    .lock()
-                    .unwrap()
-                    .get(&ds_id)
-                    .cloned()
-            });
-        if let Some(view) = &view {
-            view.bury(&label);
-        }
-        let app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            if let Err(e) = discard_devserver_window(&app, &label).await {
-                tracing::warn!(label = %label, error = %e, "discarding a closed devserver window failed");
-                if let Some(view) = &view {
-                    view.unbury(&label);
-                }
-                emit_system_notice(
-                    &app,
-                    "warning",
-                    format!("Closing the devserver window failed ({e}); it was reopened."),
-                );
+        if let Some((devserver_id, record)) = state.devserver_feed.record_for_native_label(&label) {
+            state.pending_window_deletes.queue(&devserver_id, &record);
+            if let Some(view) = state
+                .devserver_watcher_views
+                .lock()
+                .unwrap()
+                .get(&devserver_id)
+                .cloned()
+            {
+                // The watcher view closes the surface on any reconcile that
+                // races the direct destroy. The process-wide pending state is
+                // the durable suppression across watcher replacement.
+                view.bury(&label);
             }
-        });
+            if let Some(conn) = state.devservers.get(&devserver_id) {
+                if let Some(attempt) = state.pending_window_deletes.begin(&label) {
+                    spawn_pending_window_delete_attempt(
+                        app.clone(),
+                        Arc::clone(&state),
+                        conn,
+                        attempt,
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(window = %label, "closed devserver window is absent from the feed");
+        }
         return window.destroy().map_err(err);
     }
     // `destroy()`, not `close()`: this is the SPA's DELIBERATE close-cascade
@@ -6653,27 +6713,49 @@ async fn mint_another_devserver_window(
         .map(|_| ())
 }
 
-/// Discard a closed devserver window's record on its owning devserver -- the
-/// `DELETE` the empty-window close-cascade sends for `lib-` windows (the
-/// devserver analog of `embedded.discard_window`). The owning conn resolves
-/// through the window feed (`record_for_native_label`), which covers
-/// persisted-config devservers AND gateway-rostered ones (whose synthesized
-/// ids never live in `cfg.devservers` -- an id-list walk over the persisted
-/// config silently skips them and the un-DELETEd record reopens on the next
-/// reconcile). A no-op if the devserver is gone or the record already left
-/// the feed.
-async fn discard_devserver_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
-    let state = app.state::<Arc<AppState>>();
-    let Some((devserver_id, record)) = state.devserver_feed.record_for_native_label(label) else {
-        return Ok(());
-    };
-    let Some(conn) = state.devservers.get(&devserver_id) else {
-        return Ok(());
-    };
-    devserver::discard_library_window(&conn, &record.window_id).await
+/// Run one bounded attempt for a process-local pending window DELETE. Both the
+/// close path and the feed-reconnect driver use this owner so completion and
+/// the one terminal notice cannot diverge.
+pub(crate) fn spawn_pending_window_delete_attempt(
+    app: tauri::AppHandle,
+    state: Arc<AppState>,
+    conn: devserver::DevserverConn,
+    attempt: window_watcher::PendingDeleteAttempt,
+) {
+    tauri::async_runtime::spawn(async move {
+        let result = devserver::discard_library_window(&conn, &attempt.window_id).await;
+        let error = result.as_ref().err().cloned();
+        if let Some(error) = &error {
+            tracing::warn!(
+                window = %attempt.label,
+                window_name = %attempt.window_name,
+                attempt = attempt.attempt,
+                error = %error,
+                "discarding a closed devserver window failed",
+            );
+        }
+        let finish = state
+            .pending_window_deletes
+            .finish(&attempt.label, result.is_ok());
+        if let Some(window_watcher::PendingDeleteFinish::Exhausted {
+            window_id,
+            window_name,
+            attempts,
+        }) = finish
+        {
+            let error = error.unwrap_or_else(|| "unknown error".to_string());
+            emit_system_notice(
+                &app,
+                "warning",
+                format!(
+                    "Could not delete closed window \"{window_name}\" ({window_id}) after {attempts} attempts: {error}. It remains closed for this desktop session."
+                ),
+            );
+        }
+    });
 }
 
-/// Like [`discard_devserver_window`] but matched by the BARE `window_id` (what
+/// Discard a devserver window matched by the BARE `window_id` (what
 /// `cs window rm` sends) instead of the composite native label -- the cross-host
 /// path where a local terminal removes a connected devserver's window, whose
 /// registry row lives remote-side and so cannot be reached by the embedded
@@ -7621,6 +7703,51 @@ mod tests {
     }
 
     #[test]
+    fn connecting_probe_classifies_gateway_and_loopback_responses() {
+        use reqwest::StatusCode;
+
+        assert_eq!(
+            probe_target_kind("http://127.0.0.1:4000/workspace"),
+            ProbeTargetKind::Loopback,
+        );
+        assert_eq!(
+            probe_target_kind("http://[::1]:4000/workspace"),
+            ProbeTargetKind::Loopback,
+        );
+        assert_eq!(
+            probe_target_kind("https://alice--0123456789ab.proxy.example/workspace"),
+            ProbeTargetKind::Gateway,
+        );
+
+        for status in [
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            assert!(!probe_response_reachable(
+                ProbeTargetKind::Gateway,
+                Some(status),
+            ));
+            assert!(probe_response_reachable(
+                ProbeTargetKind::Loopback,
+                Some(status),
+            ));
+        }
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+        ] {
+            assert!(probe_response_reachable(
+                ProbeTargetKind::Gateway,
+                Some(status),
+            ));
+        }
+        assert!(!probe_response_reachable(ProbeTargetKind::Gateway, None));
+        assert!(!probe_response_reachable(ProbeTargetKind::Loopback, None,));
+    }
+
+    #[test]
     fn desktop_update_uses_event_and_narrow_restart_command() {
         const MAIN_RS: &str = include_str!("main.rs");
         assert!(
@@ -7760,17 +7887,17 @@ mod tests {
     fn devserver_close_paths_resolve_conns_from_the_feed_not_the_config() {
         // The persisted `cfg.devservers` vec never carries rostered gateway
         // devservers, so any conn resolution that walks it silently skips
-        // them; the discard/mint helpers must resolve through the feed.
+        // them; the close path must resolve through the feed.
         const MAIN_RS: &str = include_str!("main.rs");
-        let discard = MAIN_RS
-            .split("async fn discard_devserver_window(")
+        let close = MAIN_RS
+            .split("fn request_close_window")
             .nth(1)
-            .expect("discard_devserver_window exists")
-            .split("async fn discard_devserver_window_by_id(")
+            .expect("request_close_window exists")
+            .split("fn hide_window_from_close_confirm")
             .next()
-            .expect("label discard precedes the by-id sibling");
-        assert!(discard.contains("record_for_native_label"));
-        assert!(!discard.contains("cfg.devservers"));
+            .expect("close handler precedes the hide callback");
+        assert!(close.contains("record_for_native_label"));
+        assert!(!close.contains("cfg.devservers"));
         let by_id = MAIN_RS
             .split("async fn discard_devserver_window_by_id(")
             .nth(1)
@@ -7783,11 +7910,7 @@ mod tests {
     }
 
     #[test]
-    fn devserver_window_close_buries_before_destroy_and_unburies_on_failure() {
-        // The lib- close branch must bury the label in the owning devserver's
-        // watcher view BEFORE destroying the webview (a feed frame landing
-        // mid-DELETE must not reconcile the record back open), and a failed
-        // DELETE must unbury + surface a notice instead of reopening silently.
+    fn devserver_window_close_records_pending_delete_before_destroy() {
         const MAIN_RS: &str = include_str!("main.rs");
         let close = MAIN_RS
             .split("fn request_close_window")
@@ -7800,15 +7923,32 @@ mod tests {
             .split("if closing.starts_with(\"lib-\")")
             .nth(1)
             .expect("devserver close branch exists");
+        let pending = lib_branch
+            .find("pending_window_deletes")
+            .expect("records the pending delete");
         let bury = lib_branch
             .find("view.bury(&label)")
-            .expect("buries the label");
+            .expect("suppresses a racing reconcile");
+        let attempt = lib_branch
+            .find("spawn_pending_window_delete_attempt")
+            .expect("starts the first delete attempt");
         let destroy = lib_branch
             .find("window.destroy()")
             .expect("destroys the webview");
-        assert!(bury < destroy, "the bury must precede the destroy");
-        assert!(lib_branch.contains("view.unbury(&label)"));
-        assert!(lib_branch.contains("emit_system_notice"));
+        assert!(pending < bury);
+        assert!(bury < attempt);
+        assert!(attempt < destroy);
+        assert!(!lib_branch.contains("view.unbury"));
+
+        let runner = MAIN_RS
+            .split("fn spawn_pending_window_delete_attempt")
+            .nth(1)
+            .expect("pending delete runner exists")
+            .split("async fn discard_devserver_window_by_id")
+            .next()
+            .expect("runner precedes the by-id discard");
+        assert!(runner.contains("PendingDeleteFinish::Exhausted"));
+        assert!(runner.contains("It remains closed for this desktop session."));
     }
 
     #[test]

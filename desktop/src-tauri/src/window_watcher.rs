@@ -22,7 +22,7 @@
 //! `WindowFeed` impls, the Tauri `NativeSurface` impl, the `watch_loop` spawn) and
 //! the close handlers (bury/unbury through the view state).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
@@ -45,6 +45,152 @@ pub enum WatchLoopStop {
 /// `window_id` = `w-<hex>`, so `::` never appears inside either part.
 pub fn native_label(record: &WindowRecord) -> String {
     format!("{}::{}", record.library_id, record.window_id)
+}
+
+/// Maximum number of DELETE attempts for one closed devserver window. The
+/// first attempt runs at close time; later attempts run when the window feed
+/// reconnects.
+pub(crate) const MAX_PENDING_DELETE_ATTEMPTS: u8 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingDeleteAttempt {
+    pub label: String,
+    pub window_id: String,
+    pub window_name: String,
+    pub attempt: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PendingDeleteFinish {
+    AwaitingRetry,
+    AwaitingFeed,
+    Exhausted {
+        window_id: String,
+        window_name: String,
+        attempts: u8,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingDeletePhase {
+    Ready,
+    InFlight,
+    Landed,
+    Exhausted,
+}
+
+#[derive(Debug, Clone)]
+struct PendingDelete {
+    devserver_id: String,
+    label: String,
+    window_id: String,
+    window_name: String,
+    attempts: u8,
+    phase: PendingDeletePhase,
+}
+
+/// Process-local close intents whose remote registry DELETE has not yet been
+/// confirmed by an authoritative feed snapshot. Pending labels stay suppressed
+/// from the native surface in every phase, including after the retry budget is
+/// exhausted. This keeps "closed" truthful even when the server cannot accept
+/// the DELETE during the desktop process lifetime.
+#[derive(Default)]
+pub(crate) struct PendingDeleteState {
+    entries: Mutex<HashMap<String, PendingDelete>>,
+}
+
+impl PendingDeleteState {
+    pub fn queue(&self, devserver_id: &str, record: &WindowRecord) {
+        let label = native_label(record);
+        let window_name = if record.title.trim().is_empty() {
+            record.window_id.clone()
+        } else {
+            record.title.clone()
+        };
+        self.entries
+            .lock()
+            .unwrap()
+            .entry(label.clone())
+            .or_insert_with(|| PendingDelete {
+                devserver_id: devserver_id.to_string(),
+                label,
+                window_id: record.window_id.clone(),
+                window_name,
+                attempts: 0,
+                phase: PendingDeletePhase::Ready,
+            });
+    }
+
+    pub fn begin(&self, label: &str) -> Option<PendingDeleteAttempt> {
+        let mut entries = self.entries.lock().unwrap();
+        begin_pending_delete(entries.get_mut(label)?)
+    }
+
+    pub fn begin_for_devserver(&self, devserver_id: &str) -> Vec<PendingDeleteAttempt> {
+        let mut entries = self.entries.lock().unwrap();
+        let mut attempts: Vec<_> = entries
+            .values_mut()
+            .filter(|entry| entry.devserver_id == devserver_id)
+            .filter_map(begin_pending_delete)
+            .collect();
+        attempts.sort_by(|a, b| a.label.cmp(&b.label));
+        attempts
+    }
+
+    pub fn finish(&self, label: &str, landed: bool) -> Option<PendingDeleteFinish> {
+        let mut entries = self.entries.lock().unwrap();
+        let entry = entries.get_mut(label)?;
+        if entry.phase != PendingDeletePhase::InFlight {
+            return None;
+        }
+        if landed {
+            entry.phase = PendingDeletePhase::Landed;
+            return Some(PendingDeleteFinish::AwaitingFeed);
+        }
+        if entry.attempts >= MAX_PENDING_DELETE_ATTEMPTS {
+            entry.phase = PendingDeletePhase::Exhausted;
+            return Some(PendingDeleteFinish::Exhausted {
+                window_id: entry.window_id.clone(),
+                window_name: entry.window_name.clone(),
+                attempts: entry.attempts,
+            });
+        }
+        entry.phase = PendingDeletePhase::Ready;
+        Some(PendingDeleteFinish::AwaitingRetry)
+    }
+
+    /// Remove close intents whose record is absent from a full feed snapshot.
+    /// DELETE success alone is not enough: retaining suppression until this
+    /// observation prevents a stale pre-delete snapshot from reopening the
+    /// native window between the response and the feed update.
+    pub fn settle_snapshot(&self, devserver_id: &str, records: &[WindowRecord]) {
+        let present: HashSet<String> = records.iter().map(native_label).collect();
+        self.entries.lock().unwrap().retain(|_, entry| {
+            entry.devserver_id != devserver_id || present.contains(&entry.label)
+        });
+    }
+
+    pub fn contains(&self, label: &str) -> bool {
+        self.entries.lock().unwrap().contains_key(label)
+    }
+
+    fn labels_snapshot(&self) -> HashSet<String> {
+        self.entries.lock().unwrap().keys().cloned().collect()
+    }
+}
+
+fn begin_pending_delete(entry: &mut PendingDelete) -> Option<PendingDeleteAttempt> {
+    if entry.phase != PendingDeletePhase::Ready || entry.attempts >= MAX_PENDING_DELETE_ATTEMPTS {
+        return None;
+    }
+    entry.attempts += 1;
+    entry.phase = PendingDeletePhase::InFlight;
+    Some(PendingDeleteAttempt {
+        label: entry.label.clone(),
+        window_id: entry.window_id.clone(),
+        window_name: entry.window_name.clone(),
+        attempt: entry.attempts,
+    })
 }
 
 /// The native window surface a reconcile drives. Abstracted behind a trait so the
@@ -152,13 +298,27 @@ pub trait WindowFeed {
 /// desktop-local**: the browser has no native windows, so a buried window lives
 /// only in this set, never in the authoritative window set. Mutating it fires
 /// `changed` so the loop re-reconciles without waiting on a feed change.
-#[derive(Default)]
 pub struct WatcherViewState {
     buried: Mutex<HashSet<String>>,
+    pending_deletes: Arc<PendingDeleteState>,
     changed: Notify,
 }
 
+impl Default for WatcherViewState {
+    fn default() -> Self {
+        Self::with_pending_deletes(Arc::new(PendingDeleteState::default()))
+    }
+}
+
 impl WatcherViewState {
+    pub(crate) fn with_pending_deletes(pending_deletes: Arc<PendingDeleteState>) -> Self {
+        Self {
+            buried: Mutex::new(HashSet::new()),
+            pending_deletes,
+            changed: Notify::new(),
+        }
+    }
+
     /// Bury a native window (the standalone-terminal close button): the next
     /// reconcile closes it, and it surfaces in the Window menu for reopen.
     pub fn bury(&self, native_label: &str) {
@@ -174,6 +334,12 @@ impl WatcherViewState {
 
     fn buried_snapshot(&self) -> HashSet<String> {
         self.buried.lock().unwrap().clone()
+    }
+
+    fn suppressed_snapshot(&self) -> HashSet<String> {
+        let mut suppressed = self.buried_snapshot();
+        suppressed.extend(self.pending_deletes.labels_snapshot());
+        suppressed
     }
 
     /// Whether `native_label` is currently buried. Lets the desktop's window
@@ -234,7 +400,7 @@ pub async fn watch_loop<F, S, C>(
             library_id = Some(record.library_id.clone());
         }
         if let Some(library_id) = &library_id {
-            reconcile(library_id, &snapshot, &view.buried_snapshot(), &surface);
+            reconcile(library_id, &snapshot, &view.suppressed_snapshot(), &surface);
         }
 
         tokio::select! {
@@ -247,7 +413,7 @@ pub async fn watch_loop<F, S, C>(
                     // server-side, so a reconnect restores them). A no-op if
                     // nothing was opened.
                     if let Some(library_id) = &library_id {
-                        reconcile(library_id, &[], &view.buried_snapshot(), &surface);
+                        reconcile(library_id, &[], &view.suppressed_snapshot(), &surface);
                     }
                 }
                 break;
@@ -481,6 +647,87 @@ mod tests {
         let s2 = FakeSurface::with(&["local::w-1"]);
         reconcile("local", &snap, &buried, &s2);
         assert_eq!(*s2.closed.borrow(), vec!["local::w-1"]);
+    }
+
+    #[test]
+    fn pending_delete_is_not_reopened_by_reconcile() {
+        let record = rec("lib-test", "w-1", WindowKind::Terminal);
+        let pending = Arc::new(PendingDeleteState::default());
+        pending.queue("devserver-1", &record);
+        let view = WatcherViewState::with_pending_deletes(Arc::clone(&pending));
+
+        let closed = FakeSurface::with(&[]);
+        reconcile(
+            "lib-test",
+            std::slice::from_ref(&record),
+            &view.suppressed_snapshot(),
+            &closed,
+        );
+        assert!(closed.opened.borrow().is_empty());
+
+        let still_open = FakeSurface::with(&["lib-test::w-1"]);
+        reconcile(
+            "lib-test",
+            std::slice::from_ref(&record),
+            &view.suppressed_snapshot(),
+            &still_open,
+        );
+        assert_eq!(*still_open.closed.borrow(), vec!["lib-test::w-1"]);
+    }
+
+    #[test]
+    fn pending_delete_retries_then_settles_from_the_feed() {
+        let record = rec("lib-test", "w-1", WindowKind::Terminal);
+        let pending = PendingDeleteState::default();
+        pending.queue("devserver-1", &record);
+
+        let first = pending.begin("lib-test::w-1").unwrap();
+        assert_eq!(first.attempt, 1);
+        assert_eq!(
+            pending.finish(&first.label, false),
+            Some(PendingDeleteFinish::AwaitingRetry),
+        );
+
+        let retries = pending.begin_for_devserver("devserver-1");
+        assert_eq!(retries.len(), 1);
+        assert_eq!(retries[0].attempt, 2);
+        assert_eq!(
+            pending.finish(&retries[0].label, true),
+            Some(PendingDeleteFinish::AwaitingFeed),
+        );
+
+        pending.settle_snapshot("devserver-1", std::slice::from_ref(&record));
+        assert!(pending.contains("lib-test::w-1"));
+        pending.settle_snapshot("devserver-1", &[]);
+        assert!(!pending.contains("lib-test::w-1"));
+    }
+
+    #[test]
+    fn pending_delete_exhausts_without_becoming_visible() {
+        let record = rec("lib-test", "w-1", WindowKind::Terminal);
+        let pending = PendingDeleteState::default();
+        pending.queue("devserver-1", &record);
+
+        for attempt_number in 1..MAX_PENDING_DELETE_ATTEMPTS {
+            let attempt = pending.begin("lib-test::w-1").unwrap();
+            assert_eq!(attempt.attempt, attempt_number);
+            assert_eq!(
+                pending.finish(&attempt.label, false),
+                Some(PendingDeleteFinish::AwaitingRetry),
+            );
+        }
+        let final_attempt = pending.begin("lib-test::w-1").unwrap();
+        assert_eq!(final_attempt.attempt, MAX_PENDING_DELETE_ATTEMPTS);
+        assert_eq!(
+            pending.finish(&final_attempt.label, false),
+            Some(PendingDeleteFinish::Exhausted {
+                window_id: "w-1".to_string(),
+                window_name: "🏠 Terminal Window 1".to_string(),
+                attempts: MAX_PENDING_DELETE_ATTEMPTS,
+            }),
+        );
+        assert!(pending.begin("lib-test::w-1").is_none());
+        assert!(pending.contains("lib-test::w-1"));
     }
 
     #[test]
