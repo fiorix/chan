@@ -19,6 +19,14 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
+### v0.83.4
+
+| item | state | what needs to happen |
+| --- | --- | --- |
+| [gateway-served-surface-failures](v0.83.4/gateway-served-surface-failures.md) | registered, grounded, specified | deliver the csrf token to desktop gateway windows off the cookie jar, propagate session refreshes to open windows, and free IPC from the blocked custom protocol on HTTPS pages |
+| [desktop-window-outage-lifecycle](v0.83.4/desktop-window-outage-lifecycle.md) | registered, grounded, specified | closes during a remote outage settle as closed, the connecting probe discriminates, and the close prompt cannot strand behind newer windows |
+| [bug-fixes](v0.83.4/bug-fixes.md) | registered, grounded, specified | guard the Rich Prompt's draft-create mount, and unsuppress keyboard paste on the Ghostty backend |
+
 ### v0.84.0
 
 | item | state | what needs to happen |
