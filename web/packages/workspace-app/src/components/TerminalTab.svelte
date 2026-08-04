@@ -135,6 +135,7 @@
     DEFAULT_SECRET_MASK_SUFFIXES,
     TerminalSecretMasker,
   } from "../terminal/secretMasking";
+  import { ReplayMaskScanBatch } from "../terminal/replayMasking";
   import type { Terminal as GhosttyTerminal } from "ghostty-web";
   import {
     refreshTerminalRows as refreshTerminalRowsImpl,
@@ -310,6 +311,7 @@
   let webglRendererActive = false;
   let webglContextLossRetries = 0;
   const ptyWrites = new PtyWriteTracker();
+  const replayMaskScans = new ReplayMaskScanBatch();
   // The writer handed to ptyWrites. On xterm this is the terminal
   // itself (its write callback fires off xterm's own queue). On
   // ghostty it is a SYNCHRONOUS wrapper: ghostty-web parses inside
@@ -1252,6 +1254,7 @@
       }
       if (frame.type === "ready") {
         attachReplayActive = false;
+        replayMaskScans.ready();
         suppressAttachReplayGeneratedReplies = false;
         statusDetail = `${frame.cols}x${frame.rows}`;
         terminalCwdAbs = frame.cwd ?? null;
@@ -1264,6 +1267,7 @@
         const priorId = tab.terminalSessionId;
         const duplicateReplay = reattaching && !sawSessionControl;
         attachReplayActive = true;
+        replayMaskScans.begin(() => secretMasker?.scanAll());
         suppressAttachReplayGeneratedReplies = duplicateReplay;
         sawSessionControl = true;
         // A successful attach proves the session + path healthy: reset the
@@ -1690,12 +1694,14 @@
     // clipboard copies -- the WASM parser swallows them with no JS hook.
     osc52Bridge?.push(bytes);
     const masker = secretMasker;
-    const maskSnapshot = masker?.captureWrite() ?? null;
-    ptyWrites.write(termWriter, bytes, origin, () => {
-      // The tracker completes a write exactly once, so live output,
-      // snapshot prime, and ring replay are each scanned once on this path.
-      masker?.scanWrite(maskSnapshot);
-    });
+    const completeMaskScan = replayMaskScans.track(
+      attachReplayActive,
+      () => masker?.captureWrite() ?? null,
+      (snapshot) => masker?.scanWrite(snapshot),
+    );
+    // Keep the existing writer + origin ordering. Replay callbacks only drain
+    // the batch; live callbacks still run their captured per-write scan.
+    ptyWrites.write(termWriter, bytes, origin, completeMaskScan);
   }
 
   /// Decode a base64 agent-event payload into the string
@@ -1860,6 +1866,7 @@
       activityPulseTimer = null;
     }
     closeSocket();
+    replayMaskScans.reset();
     resizeObserver?.disconnect();
     resizeObserver = null;
     host?.removeEventListener("keydown", onGhosttyHostChord, true);
