@@ -4,16 +4,18 @@
 // chanFetch seam does not cover, so the gateway CSRF mirror must be applied
 // on the XHR itself: through a gateway-proxied devserver a POST without the
 // `__Host-devserver_csrf` cookie mirrored into `x-chan-csrf` is 403'd before the
-// tunnel. These tests pin that both helpers mirror the cookie when it is
-// present and stay header-free on loopback (no cookie).
+// tunnel. These tests pin the native-then-cookie source order, the one-shot
+// desktop retry, and the header-free loopback path.
 
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { api } from "./client";
-import { setXhrFactory } from "./transport";
+import { setGatewayCsrfTokenReader, setXhrFactory } from "./transport";
 
-/// Minimal XHR stand-in: records the request headers the helpers set and
-/// answers every send with a 200 upload response so the promise resolves.
+/// Minimal XHR stand-in: records the request headers and answers each send with
+/// its configured status.
 class FakeXhr {
+  constructor(private readonly responseStatus = 200) {}
+
   headers: Record<string, string> = {};
   body: Document | XMLHttpRequestBodyInit | null = null;
   status = 0;
@@ -32,7 +34,7 @@ class FakeXhr {
   }
   send(body: Document | XMLHttpRequestBodyInit | null = null): void {
     this.body = body;
-    this.status = 200;
+    this.status = this.responseStatus;
     this.responseText = JSON.stringify({ path: "a.txt", size: 1 });
     queueMicrotask(() => {
       this.onload?.();
@@ -44,10 +46,10 @@ class FakeXhr {
   }
 }
 
-function installFakeXhr(): FakeXhr[] {
+function installFakeXhr(statuses: number[] = [200]): FakeXhr[] {
   const created: FakeXhr[] = [];
   setXhrFactory(() => {
-    const xhr = new FakeXhr();
+    const xhr = new FakeXhr(statuses[created.length] ?? statuses.at(-1) ?? 200);
     created.push(xhr);
     return xhr as unknown as XMLHttpRequest;
   });
@@ -56,12 +58,43 @@ function installFakeXhr(): FakeXhr[] {
 
 afterEach(() => {
   setXhrFactory(null);
+  setGatewayCsrfTokenReader(null);
   // `Secure` is required: the `__Host-` prefix mandates it, and jsdom's cookie
   // jar rejects a `__Host-` cookie set without it, so the read would see nothing.
   document.cookie = "__Host-devserver_csrf=; Max-Age=0; path=/; Secure";
 });
 
 describe("XHR multipart gateway CSRF mirror", () => {
+  test("prefers the desktop token over the readable cookie", async () => {
+    document.cookie = "__Host-devserver_csrf=cookie-token; path=/; Secure";
+    setGatewayCsrfTokenReader(async () => "desktop-token");
+    const created = installFakeXhr();
+
+    await api.uploadFile(new File(["x"], "a.txt"), "inbox");
+
+    expect(created[0].headers["x-chan-csrf"]).toBe("desktop-token");
+  });
+
+  test("re-reads the desktop token and retries one 403 exactly once", async () => {
+    const readToken = vi
+      .fn<() => Promise<string | null>>()
+      .mockResolvedValueOnce("csrf-old")
+      .mockResolvedValue("csrf-fresh");
+    setGatewayCsrfTokenReader(readToken);
+    const created = installFakeXhr([403, 403, 200]);
+
+    await expect(
+      api.uploadFile(new File(["x"], "a.txt"), "inbox"),
+    ).rejects.toMatchObject({ status: 403 });
+
+    expect(readToken).toHaveBeenCalledTimes(2);
+    expect(created).toHaveLength(2);
+    expect(created.map((xhr) => xhr.headers["x-chan-csrf"])).toEqual([
+      "csrf-old",
+      "csrf-fresh",
+    ]);
+  });
+
   test("uploadFile mirrors the __Host-devserver_csrf cookie into x-chan-csrf", async () => {
     document.cookie = "__Host-devserver_csrf=csrf-token; path=/; Secure";
     const created = installFakeXhr();

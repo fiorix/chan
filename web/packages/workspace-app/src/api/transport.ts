@@ -44,6 +44,7 @@ export interface WatchSocket {
 const TOKEN_KEY = "chan.token";
 
 function readPrefix(): string {
+  if (typeof document === "undefined") return "";
   const m = document.querySelector('meta[name="chan-prefix"]');
   const v = m?.getAttribute("content")?.trim() ?? "";
   // The server only injects the tag when a prefix is set, but be
@@ -60,6 +61,7 @@ function readPrefix(): string {
 export const SETTINGS_DISABLED = readBoolMeta("chan-settings-disabled");
 
 function readBoolMeta(name: string): boolean {
+  if (typeof document === "undefined") return false;
   const m = document.querySelector(`meta[name="${name}"]`);
   return m?.getAttribute("content")?.trim() === "1";
 }
@@ -94,6 +96,7 @@ export function rootPath(path: string): string {
 }
 
 function loadToken(): string | null {
+  if (typeof window === "undefined") return null;
   const url = new URL(window.location.href);
   const t = url.searchParams.get("t");
   if (t) {
@@ -161,6 +164,19 @@ function isUnsafeMethod(method: string): boolean {
   );
 }
 
+export type GatewayCsrfTokenReader = () => Promise<string | null>;
+
+let gatewayCsrfTokenReader: GatewayCsrfTokenReader | null = null;
+
+/// Install the native gateway-token reader. The Tauri bridge owns the invoke
+/// vocabulary and registers its reader when that module loads; browser builds
+/// leave this unset and continue to mirror the readable cookie.
+export function setGatewayCsrfTokenReader(
+  reader: GatewayCsrfTokenReader | null,
+): void {
+  gatewayCsrfTokenReader = reader;
+}
+
 function headersWithValue(
   headers: HeadersInit | undefined,
   name: string,
@@ -181,29 +197,65 @@ function headersWithValue(
   return { ...(headers ?? {}), [name]: value };
 }
 
-/// Header pairs mirroring the gateway's double-submit CSRF cookie into
-/// `x-chan-csrf` for a request that can mutate state. Empty for safe methods
-/// and when the `__Host-devserver_csrf` cookie is absent (loopback), so consumers can
-/// apply the pairs unconditionally. The single source of the mirror logic:
-/// `withGatewayCsrf` covers the fetch path, and the XHR multipart helpers in
-/// client.ts (which the fetch seam does not cover) consume the pairs directly.
-export function gatewayCsrfHeaderPairs(method: string): [string, string][] {
-  if (!isUnsafeMethod(method)) return [];
+type GatewayCsrfSource = "desktop" | "cookie" | "absent";
+
+interface GatewayCsrfHeaders {
+  pairs: [string, string][];
+  source: GatewayCsrfSource;
+}
+
+async function resolveGatewayCsrfHeaders(method: string): Promise<GatewayCsrfHeaders> {
+  if (!isUnsafeMethod(method)) return { pairs: [], source: "absent" };
+  if (gatewayCsrfTokenReader) {
+    try {
+      const csrf = await gatewayCsrfTokenReader();
+      if (csrf) {
+        return { pairs: [["x-chan-csrf", csrf]], source: "desktop" };
+      }
+    } catch {
+      // A local, outbound, or no-longer-managed window has no grant. Continue
+      // through the browser source order without surfacing an expected denial.
+    }
+  }
   const csrf = cookieValue("__Host-devserver_csrf");
-  if (!csrf) return [];
-  return [["x-chan-csrf", csrf]];
+  if (!csrf) return { pairs: [], source: "absent" };
+  return { pairs: [["x-chan-csrf", csrf]], source: "cookie" };
+}
+
+/// Resolve the gateway's double-submit mirror for one request. Desktop gateway
+/// windows read the live native token first; browsers fall back to their
+/// readable cookie; loopback has neither and gets an empty list.
+export async function gatewayCsrfHeaderPairs(
+  method: string,
+): Promise<[string, string][]> {
+  return (await resolveGatewayCsrfHeaders(method)).pairs;
 }
 
 /// Add the gateway CSRF mirror when a request can mutate state. The cookie is
 /// absent on loopback, so this is a no-op outside the gateway.
-export function withGatewayCsrf(init: RequestInit = {}): RequestInit {
-  const pairs = gatewayCsrfHeaderPairs(init.method ?? "GET");
+export async function withGatewayCsrf(init: RequestInit = {}): Promise<RequestInit> {
+  const pairs = await gatewayCsrfHeaderPairs(init.method ?? "GET");
   if (pairs.length === 0) return init;
   let headers = init.headers;
   for (const [name, value] of pairs) {
     headers = headersWithValue(headers, name, value);
   }
   return { ...init, headers };
+}
+
+/// Run an unsafe request with the best available CSRF mirror. A request that
+/// used the native token and receives 403 re-reads the token and retries once;
+/// cookie-only browser requests and loopback requests retain their one-attempt
+/// behavior.
+export async function withGatewayCsrfRetry<T extends { status: number }>(
+  method: string,
+  send: (pairs: [string, string][]) => Promise<T>,
+): Promise<T> {
+  const first = await resolveGatewayCsrfHeaders(method);
+  const response = await send(first.pairs);
+  if (response.status !== 403 || first.source !== "desktop") return response;
+  const retry = await resolveGatewayCsrfHeaders(method);
+  return send(retry.pairs);
 }
 
 /// Injectable HTTP + WebSocket primitives. Both default to the real browser
@@ -262,8 +314,16 @@ export function handleDemoDownload(path: string, isDir: boolean): boolean {
 
 /// The fetch every API call routes through: typed api methods, streaming
 /// NDJSON, and multipart uploads alike. Defaults to the global fetch.
-export function chanFetch(input: string, init?: RequestInit): Promise<Response> {
-  return fetchImpl(input, withGatewayCsrf(init));
+export function chanFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const method = init.method ?? "GET";
+  return withGatewayCsrfRetry(method, (pairs) => {
+    if (pairs.length === 0) return fetchImpl(input, init);
+    let headers = init.headers;
+    for (const [name, value] of pairs) {
+      headers = headersWithValue(headers, name, value);
+    }
+    return fetchImpl(input, { ...init, headers });
+  });
 }
 
 /// The WebSocket constructor every socket routes through: the watcher, the

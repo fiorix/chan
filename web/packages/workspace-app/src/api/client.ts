@@ -60,10 +60,10 @@ import {
   authToken as transportAuthToken,
   chanFetch,
   createXhr,
-  gatewayCsrfHeaderPairs,
   openWatch,
   request,
   requestRoot,
+  withGatewayCsrfRetry,
   withTokenQuery as transportWithTokenQuery,
 } from "./transport";
 import type { WatchSocket } from "./transport";
@@ -294,6 +294,79 @@ function xhrTextError(status: number, statusText: string, text: string): never {
     // Keep the raw text fallback.
   }
   throw new ApiError(status, message);
+}
+
+interface UploadProgressOptions {
+  signal?: AbortSignal;
+  onProgress?: (progress: {
+    loaded: number;
+    total: number | null;
+    lengthComputable: boolean;
+  }) => void;
+}
+
+interface XhrResponse {
+  status: number;
+  statusText: string;
+  responseText: string;
+}
+
+function uploadXhrAttempt(
+  form: FormData,
+  opts: UploadProgressOptions,
+  csrfHeaders: [string, string][],
+): Promise<XhrResponse> {
+  return new Promise((resolve, reject) => {
+    const xhr = createXhr();
+    xhr.open("POST", apiPath("/api/files/upload"));
+    for (const [name, value] of Object.entries(directAuthHeaders())) {
+      xhr.setRequestHeader(name, value);
+    }
+    for (const [name, value] of csrfHeaders) {
+      xhr.setRequestHeader(name, value);
+    }
+    xhr.upload.onprogress = (event) => {
+      opts.onProgress?.({
+        loaded: event.loaded,
+        total: event.lengthComputable ? event.total : null,
+        lengthComputable: event.lengthComputable,
+      });
+    };
+    xhr.onload = () => {
+      resolve({
+        status: xhr.status,
+        statusText: xhr.statusText,
+        responseText: xhr.responseText,
+      });
+    };
+    xhr.onerror = () => reject(new ApiError(xhr.status || 0, "upload failed"));
+    xhr.onabort = () => {
+      const err = new Error("upload cancelled");
+      err.name = "AbortError";
+      reject(err);
+    };
+    const abort = () => xhr.abort();
+    opts.signal?.addEventListener("abort", abort, { once: true });
+    xhr.onloadend = () => opts.signal?.removeEventListener("abort", abort);
+    if (opts.signal?.aborted) {
+      xhr.abort();
+      return;
+    }
+    xhr.send(form);
+  });
+}
+
+async function uploadMultipart(
+  form: FormData,
+  opts: UploadProgressOptions,
+): Promise<{ path: string; size: number }> {
+  const response = await withGatewayCsrfRetry("POST", (csrfHeaders) =>
+    uploadXhrAttempt(form, opts, csrfHeaders),
+  );
+  if (response.status < 200 || response.status >= 300) {
+    xhrTextError(response.status, response.statusText, response.responseText);
+  }
+  return JSON.parse(response.responseText) as { path: string; size: number };
 }
 
 function contentDispositionFilename(value: string | null): string | null {
@@ -722,129 +795,23 @@ export const api = {
   uploadFile: (
     file: File,
     dir: string,
-    opts: {
-      signal?: AbortSignal;
-      onProgress?: (progress: {
-        loaded: number;
-        total: number | null;
-        lengthComputable: boolean;
-      }) => void;
-    } = {},
-  ): Promise<{ path: string; size: number }> =>
-    new Promise((resolve, reject) => {
-      const form = new FormData();
-      form.append("dir", dir);
-      form.append("file", file);
-      const xhr = createXhr();
-      xhr.open("POST", apiPath("/api/files/upload"));
-      for (const [name, value] of Object.entries(directAuthHeaders())) {
-        xhr.setRequestHeader(name, value);
-      }
-      // The gateway's double-submit CSRF guard 403s a tunneled POST without
-      // the cookie mirror; chanFetch applies it via withGatewayCsrf, but this
-      // XHR path bypasses the fetch seam, so mirror it here too.
-      for (const [name, value] of gatewayCsrfHeaderPairs("POST")) {
-        xhr.setRequestHeader(name, value);
-      }
-      xhr.upload.onprogress = (event) => {
-        opts.onProgress?.({
-          loaded: event.loaded,
-          total: event.lengthComputable ? event.total : null,
-          lengthComputable: event.lengthComputable,
-        });
-      };
-      xhr.onload = () => {
-        if (xhr.status < 200 || xhr.status >= 300) {
-          try {
-            xhrTextError(xhr.status, xhr.statusText, xhr.responseText);
-          } catch (err) {
-            reject(err);
-          }
-          return;
-        }
-        try {
-          resolve(JSON.parse(xhr.responseText) as { path: string; size: number });
-        } catch (err) {
-          reject(err);
-        }
-      };
-      xhr.onerror = () => reject(new ApiError(xhr.status || 0, "upload failed"));
-      xhr.onabort = () => {
-        const err = new Error("upload cancelled");
-        err.name = "AbortError";
-        reject(err);
-      };
-      const abort = () => xhr.abort();
-      opts.signal?.addEventListener("abort", abort, { once: true });
-      xhr.onloadend = () => opts.signal?.removeEventListener("abort", abort);
-      if (opts.signal?.aborted) {
-        xhr.abort();
-        return;
-      }
-      xhr.send(form);
-    }),
+    opts: UploadProgressOptions = {},
+  ): Promise<{ path: string; size: number }> => {
+    const form = new FormData();
+    form.append("dir", dir);
+    form.append("file", file);
+    return uploadMultipart(form, opts);
+  },
   replaceFile: (
     file: File,
     path: string,
-    opts: {
-      signal?: AbortSignal;
-      onProgress?: (progress: {
-        loaded: number;
-        total: number | null;
-        lengthComputable: boolean;
-      }) => void;
-    } = {},
-  ): Promise<{ path: string; size: number }> =>
-    new Promise((resolve, reject) => {
-      const form = new FormData();
-      form.append("path", path);
-      form.append("file", file);
-      const xhr = createXhr();
-      xhr.open("POST", apiPath("/api/files/upload"));
-      for (const [name, value] of Object.entries(directAuthHeaders())) {
-        xhr.setRequestHeader(name, value);
-      }
-      // Same gateway CSRF mirror as uploadFile: XHR bypasses the fetch seam.
-      for (const [name, value] of gatewayCsrfHeaderPairs("POST")) {
-        xhr.setRequestHeader(name, value);
-      }
-      xhr.upload.onprogress = (event) => {
-        opts.onProgress?.({
-          loaded: event.loaded,
-          total: event.lengthComputable ? event.total : null,
-          lengthComputable: event.lengthComputable,
-        });
-      };
-      xhr.onload = () => {
-        if (xhr.status < 200 || xhr.status >= 300) {
-          try {
-            xhrTextError(xhr.status, xhr.statusText, xhr.responseText);
-          } catch (err) {
-            reject(err);
-          }
-          return;
-        }
-        try {
-          resolve(JSON.parse(xhr.responseText) as { path: string; size: number });
-        } catch (err) {
-          reject(err);
-        }
-      };
-      xhr.onerror = () => reject(new ApiError(xhr.status || 0, "upload failed"));
-      xhr.onabort = () => {
-        const err = new Error("upload cancelled");
-        err.name = "AbortError";
-        reject(err);
-      };
-      const abort = () => xhr.abort();
-      opts.signal?.addEventListener("abort", abort, { once: true });
-      xhr.onloadend = () => opts.signal?.removeEventListener("abort", abort);
-      if (opts.signal?.aborted) {
-        xhr.abort();
-        return;
-      }
-      xhr.send(form);
-    }),
+    opts: UploadProgressOptions = {},
+  ): Promise<{ path: string; size: number }> => {
+    const form = new FormData();
+    form.append("path", path);
+    form.append("file", file);
+    return uploadMultipart(form, opts);
+  },
   /// Create a new draft directory with a seeded draft.md via
   /// /api/drafts/new. Picks the next `untitled` / `untitled-N`
   /// name server-side. Returns the real in-workspace relpath
