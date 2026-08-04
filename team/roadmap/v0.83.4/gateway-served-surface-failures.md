@@ -46,6 +46,27 @@ Grounded against the live gateway (DevTools on the failing window), not inferred
 - Focused `cargo test -p <crate> <filter>`, `cargo clippy -p <crate> --all-targets -- -D warnings`, `cargo fmt`, and `npm run check` plus the touched vitest files are green.
 - Owner hand-smoke on the live gateway (the environment this was grounded in), on a window open past a session refresh: right-click Paste in terminal and editor, `cs paste` of text and of an image, Rich Prompt edit and submit, the Computers scope, and a file save.
 
+## Implementation evidence
+
+Implemented on 2026-08-04 in `17576cbb` (`fix(web): mirror gateway CSRF through desktop IPC`) and `51b392e6` (`fix(desktop): keep gateway sessions in sync`).
+
+- `gateway_csrf_token` is registered with no JavaScript arguments. The handler resolves the calling `lib-*` label through the live feed, requires a connected gateway connection, compares the WebView's current origin with the pinned proxy origin, and repeats those checks after an awaited refresh. `allow-gateway-csrf-token` is a direct permission only on the runtime-minted exact-origin `gateway-window` capability.
+- Every exchanged gateway session goes through one publisher on `GatewayConn`. The rostered connect path attaches the shared WebView-cookie-store installer before the first authenticated fetch, later native HTTP and navigation re-mints reuse it, and a missing WebView returns `Ok(())`. The concurrency/refresh test records `csrf-1` and then `csrf-2` through that same publisher and reads the second token without navigation.
+- The SPA resolves unsafe-request mirrors in desktop-token, readable-cookie, absent order. Only a request whose first mirror came from desktop retries a 403, and it re-reads the mirror before that single retry. `chanFetch` covers Fetch consumers and the two multipart upload methods share the same behavior through a fresh XHR per attempt. Browser cookie and loopback requests remain single-attempt paths.
+- HTTPS IPC audit: `Cargo.lock` pins Tauri 2.11.2. Its injected `invoke` sends one message through the IPC dispatcher; when the custom-protocol fetch fails, `ipc-protocol.js` marks that frame blocked, recursively submits the same message through `window.ipc.postMessage`, and keeps later messages on postMessage. `protocol.rs` receives the blocked marker and resolves the original callback without a custom-protocol response channel. Clipboard text/image, native upload/download plus progress/cancel, and generated-download begin/append/finish/cancel all use the SPA's centralized injected `invoke`; none was rerouted. This verifies the code path, while actual WKWebView delivery remains part of the owner live smoke.
+
+Focused checks, rerun on the integrated team branch:
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo test -p chan-desktop runtime_capability::tests -- --nocapture`: 6 passed.
+- `cargo test -p chan-desktop gateway_csrf_token -- --nocapture`: 1 passed.
+- `cargo test -p chan-desktop concurrent_session_miss_and_auth_refresh_each_exchange_once -- --nocapture`: 1 passed.
+- `cargo clippy -p chan-desktop --all-targets -- -D warnings`: passed.
+- `cd web/packages/workspace-app && npm exec vitest run src/api/desktop.test.ts src/api/transport.test.ts src/api/uploadCsrf.test.ts src/tauri_invoke_centralization.test.ts`: 4 files passed, 38 tests passed.
+- `cd web/packages/workspace-app && npm run check`: 0 errors and 0 warnings.
+
+Owner live gateway hand-smoke: requested from the acting lead on 2026-08-04; result pending.
+
 ## Boundaries
 
 - No gateway changes: the proxy's double-submit check, the entry exchange, and the cookie contract stay exactly as they are.
