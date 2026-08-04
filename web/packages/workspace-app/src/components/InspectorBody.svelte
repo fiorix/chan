@@ -41,6 +41,7 @@
     onNavigate,
     onContactNavigate,
     onSetAsScope,
+    onOpenDirectory,
     onNewTerminal,
     allowUpload = true,
     showRefs = true,
@@ -68,6 +69,11 @@
     /// path doesn't make sense to scope from search, so the search
     /// host leaves it unbound for file selections).
     onSetAsScope?: () => void;
+    /// Forwarded to LanguageInfoBody: directory-row click ("graph
+    /// from there"). GraphPanel binds the same directory routing its
+    /// folder inspector uses; hosts without a graph leave it absent
+    /// and the rows render as plain text.
+    onOpenDirectory?: (path: string) => void;
     /// Forwarded to FileInfoBody's directory branch. The dashboard
     /// Search slot binds it to open a terminal rooted at the selected
     /// directory; other hosts leave it absent.
@@ -129,6 +135,7 @@
     files={selection.files}
     code={selection.code}
     {onSetAsScope}
+    {onOpenDirectory}
   />
 {:else}
   <TagInfoBody

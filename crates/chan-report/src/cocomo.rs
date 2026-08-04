@@ -54,7 +54,7 @@ impl Default for CocomoParams {
 }
 
 /// JSONL `kind: "cocomo"` record.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct CocomoSummary {
     pub model: String,
     pub effort_person_months: f64,

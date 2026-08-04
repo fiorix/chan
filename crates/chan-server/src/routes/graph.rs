@@ -22,8 +22,8 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chan_workspace::{
-    normalize_graph_edges, resolve_link_target as resolve_link_dst, EdgeKind, FileClass, PathClass,
-    PathPermission, ReportFileBucket, ReportFileStats,
+    normalize_graph_edges, resolve_link_target as resolve_link_dst, CocomoSummary, EdgeKind,
+    FileClass, PathClass, PathPermission, ReportFileBucket, ReportFileStats,
 };
 use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -476,6 +476,30 @@ struct LanguageGraphResponse {
     max_depth: u32,
     nodes: Vec<LanguageGraphNode>,
     edges: Vec<LanguageGraphEdge>,
+    /// Inspector detail for the requested language: complete ranked
+    /// directory list (no depth truncation) plus the COCOMO summary
+    /// chan-report computes for the language's file set. Present only
+    /// when the caller passed `?language=`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<LanguageDetailResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct LanguageDetailResponse {
+    language: String,
+    files: u64,
+    code: u64,
+    cocomo: CocomoSummary,
+    directories: Vec<LanguageDetailDirectory>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct LanguageDetailDirectory {
+    path: String,
+    label: String,
+    rank: u32,
+    files: u64,
+    code: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -647,6 +671,28 @@ fn parent_directory(path: &str) -> String {
         .replace('\\', "/")
 }
 
+/// Case-insensitive language match shared by the language graph and
+/// the inspector detail so both surfaces select the same file set.
+fn language_matches(file_language: &str, filter_lowercase: &str) -> bool {
+    file_language.to_lowercase() == filter_lowercase
+}
+
+/// Directory ranking shared by the language graph's directory edges
+/// and the inspector detail: files descending, code descending, path
+/// ascending. This is product policy encoded once; both surfaces must
+/// consume this one comparator so their tie order cannot drift.
+fn compare_language_directories(
+    a_path: &str,
+    a: &LanguageDirectoryStats,
+    b_path: &str,
+    b: &LanguageDirectoryStats,
+) -> std::cmp::Ordering {
+    b.files
+        .cmp(&a.files)
+        .then_with(|| b.code.cmp(&a.code))
+        .then_with(|| a_path.cmp(b_path))
+}
+
 fn build_language_graph(
     files: &[ReportFileStats],
     depth: u32,
@@ -663,7 +709,7 @@ fn build_language_graph(
             continue;
         }
         if let Some(filter) = &filter {
-            if file.language.to_lowercase() != *filter {
+            if !language_matches(&file.language, filter) {
                 continue;
             }
         }
@@ -695,12 +741,8 @@ fn build_language_graph(
 
     for (language, directories) in &by_language {
         let mut ranked: Vec<(&String, &LanguageDirectoryStats)> = directories.iter().collect();
-        ranked.sort_by(|(a_path, a), (b_path, b)| {
-            b.files
-                .cmp(&a.files)
-                .then_with(|| b.code.cmp(&a.code))
-                .then_with(|| a_path.cmp(b_path))
-        });
+        ranked
+            .sort_by(|(a_path, a), (b_path, b)| compare_language_directories(a_path, a, b_path, b));
 
         let language_files = directories.values().map(|s| s.files).sum();
         let language_code = directories.values().map(|s| s.code).sum();
@@ -745,7 +787,90 @@ fn build_language_graph(
         max_depth,
         nodes,
         edges,
+        detail: None,
     }
+}
+
+/// Inspector detail for one language: every directory holding that
+/// language's files, ranked with the same `compare_language_directories`
+/// order as the language graph's directory edges but with NO depth
+/// cutoff, plus the COCOMO summary chan-report computed for the
+/// language's file set. The graph's depth slider trims rendered nodes;
+/// the inspector must stay complete regardless, so this list is built
+/// from the same report rows without a rank limit.
+fn build_language_detail(
+    files: &[ReportFileStats],
+    language: &str,
+    cocomo: CocomoSummary,
+) -> LanguageDetailResponse {
+    let filter = language.to_lowercase();
+    let mut by_directory: std::collections::BTreeMap<String, LanguageDirectoryStats> =
+        std::collections::BTreeMap::new();
+    let mut canonical_language: Option<String> = None;
+
+    for file in files {
+        if file.language.trim().is_empty() || !language_matches(&file.language, &filter) {
+            continue;
+        }
+        canonical_language.get_or_insert_with(|| file.language.clone());
+        let directory = parent_directory(&file.path);
+        let stats = by_directory.entry(directory).or_default();
+        stats.files += 1;
+        stats.code += file.code;
+    }
+
+    let mut ranked: Vec<(String, LanguageDirectoryStats)> = by_directory.into_iter().collect();
+    ranked.sort_by(|(a_path, a), (b_path, b)| compare_language_directories(a_path, a, b_path, b));
+
+    let mut total_files = 0;
+    let mut total_code = 0;
+    let mut directories = Vec::with_capacity(ranked.len());
+    for (idx, (path, stats)) in ranked.into_iter().enumerate() {
+        total_files += stats.files;
+        total_code += stats.code;
+        directories.push(LanguageDetailDirectory {
+            label: directory_label(&path),
+            path,
+            rank: u32::try_from(idx + 1).unwrap_or(u32::MAX),
+            files: stats.files,
+            code: stats.code,
+        });
+    }
+
+    LanguageDetailResponse {
+        language: canonical_language.unwrap_or_else(|| language.to_string()),
+        files: total_files,
+        code: total_code,
+        cocomo,
+        directories,
+    }
+}
+
+/// Detail builder for the HTTP handler: the file set comes from the
+/// caller's snapshot, then a scoped report over exactly that set
+/// supplies the rows and the COCOMO summary, so the estimate is
+/// chan-report's own computation over the language's paths. Both
+/// `workspace.report()` and `workspace.report_for_files()` return
+/// maintained roll-up snapshots of the workspace index; they are two
+/// separate maintained roll-ups, not one atomic snapshot across the
+/// two calls.
+fn language_detail_scoped(
+    workspace: &chan_workspace::Workspace,
+    files: &[ReportFileStats],
+    language: &str,
+) -> chan_workspace::Result<LanguageDetailResponse> {
+    let filter = language.to_lowercase();
+    let paths: Vec<String> = files
+        .iter()
+        .filter(|f| !f.language.trim().is_empty() && language_matches(&f.language, &filter))
+        .map(|f| f.path.clone())
+        .collect();
+    let scoped = workspace.report_for_files(&paths)?;
+    Ok(build_language_detail(
+        &scoped.files,
+        language,
+        scoped.cocomo,
+    ))
 }
 
 fn graph_scope_path(p: &GraphParams) -> &str {
@@ -1300,12 +1425,14 @@ pub async fn api_language_graph(
                 Ok(r) => r,
                 Err(e) => return err_from(&e),
             };
-            Json(build_language_graph(
-                &report.files,
-                p.depth,
-                p.language.as_deref(),
-            ))
-            .into_response()
+            let mut graph = build_language_graph(&report.files, p.depth, p.language.as_deref());
+            if let Some(language) = p.language.as_deref() {
+                match language_detail_scoped(&workspace, &report.files, language) {
+                    Ok(detail) => graph.detail = Some(detail),
+                    Err(e) => return err_from(&e),
+                }
+            }
+            Json(graph).into_response()
         },
         "language graph",
     )
@@ -3458,5 +3585,183 @@ mod tests {
         assert_eq!(graph.max_depth, 0);
         assert!(graph.nodes.is_empty());
         assert!(graph.edges.is_empty());
+        assert!(graph.detail.is_none());
+    }
+
+    fn detail_cocomo() -> CocomoSummary {
+        CocomoSummary {
+            model: "basic-organic".to_string(),
+            effort_person_months: 1.5,
+            schedule_months: 2.5,
+            developers: 0.6,
+            estimated_cost_usd: 28_800.0,
+        }
+    }
+
+    #[test]
+    fn language_detail_ranks_every_directory_without_a_depth_cutoff() {
+        let detail = build_language_detail(
+            &[
+                report_file("d1/lib.rs", "Rust", 10),
+                report_file("d2/lib.rs", "Rust", 10),
+                report_file("d3/lib.rs", "Rust", 10),
+                report_file("d4/lib.rs", "Rust", 10),
+                report_file("d5/lib.rs", "Rust", 10),
+                report_file("d6/lib.rs", "Rust", 10),
+                report_file("d6/extra.rs", "Rust", 5),
+                report_file("web/App.svelte", "Svelte", 99),
+            ],
+            "rust",
+            detail_cocomo(),
+        );
+
+        // Six Rust directories: the graph's depth slider would trim
+        // this to the top N, the inspector detail must carry all of
+        // them in rank order.
+        let paths: Vec<&str> = detail
+            .directories
+            .iter()
+            .map(|dir| dir.path.as_str())
+            .collect();
+        assert_eq!(paths, ["d6", "d1", "d2", "d3", "d4", "d5"]);
+        assert_eq!(
+            detail
+                .directories
+                .iter()
+                .map(|dir| dir.rank)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5, 6]
+        );
+        assert_eq!(detail.language, "Rust");
+        assert_eq!(detail.files, 7);
+        assert_eq!(detail.code, 65);
+        assert_eq!(detail.cocomo, detail_cocomo());
+    }
+
+    #[test]
+    fn language_detail_breaks_ties_by_code_then_path() {
+        let detail = build_language_detail(
+            &[
+                report_file("z/lib.rs", "Rust", 10),
+                report_file("b/lib.rs", "Rust", 30),
+                report_file("a/lib.rs", "Rust", 30),
+            ],
+            "Rust",
+            detail_cocomo(),
+        );
+
+        let paths: Vec<&str> = detail
+            .directories
+            .iter()
+            .map(|dir| dir.path.as_str())
+            .collect();
+        assert_eq!(paths, ["a", "b", "z"]);
+    }
+
+    #[test]
+    fn language_graph_and_detail_share_the_directory_tie_order() {
+        // Tie-heavy rows: `c` wins on file count; `a`, `b`, and `z`
+        // tie on both files and code so only the path ordering
+        // separates them. Two independently drifting comparators in
+        // the graph and detail builders would order these rows
+        // differently and fail this test.
+        let files = [
+            report_file("z/lib.rs", "Rust", 30),
+            report_file("b/lib.rs", "Rust", 30),
+            report_file("a/lib.rs", "Rust", 30),
+            report_file("c/one.rs", "Rust", 10),
+            report_file("c/two.rs", "Rust", 10),
+            report_file("web/App.svelte", "Svelte", 99),
+        ];
+
+        let graph = build_language_graph(&files, 0, Some("rust"));
+        let detail = build_language_detail(&files, "rust", detail_cocomo());
+
+        // The graph emits directory edges in rank order for the single
+        // filtered language; the detail lists directories in rank
+        // order. Both must be the same sequence.
+        let graph_order: Vec<&str> = graph
+            .edges
+            .iter()
+            .map(|edge| edge.target.as_str())
+            .collect();
+        let detail_order: Vec<String> = detail
+            .directories
+            .iter()
+            .map(|dir| directory_node_id(&dir.path))
+            .collect();
+        assert_eq!(graph_order, detail_order);
+        assert_eq!(
+            graph_order,
+            [
+                directory_node_id("c"),
+                directory_node_id("a"),
+                directory_node_id("b"),
+                directory_node_id("z"),
+            ]
+        );
+    }
+
+    #[test]
+    fn language_detail_labels_root_directory_with_slash() {
+        let detail = build_language_detail(
+            &[report_file("lib.rs", "Rust", 12)],
+            "Rust",
+            detail_cocomo(),
+        );
+
+        assert_eq!(detail.directories.len(), 1);
+        assert_eq!(detail.directories[0].path, "");
+        assert_eq!(detail.directories[0].label, "/");
+        assert_eq!(detail.directories[0].rank, 1);
+    }
+
+    #[test]
+    fn language_detail_unknown_language_keeps_query_name_and_zeroes() {
+        let detail = build_language_detail(
+            &[report_file("lib.rs", "Rust", 12)],
+            "Cobol",
+            CocomoSummary::default(),
+        );
+
+        assert_eq!(detail.language, "Cobol");
+        assert_eq!(detail.files, 0);
+        assert_eq!(detail.code, 0);
+        assert!(detail.directories.is_empty());
+    }
+
+    #[test]
+    fn language_detail_scoped_report_computes_cocomo_for_the_language() {
+        let (_cfg, root, workspace) = open_workspace();
+        // chan-report rounds the COCOMO fields to two decimals, so the
+        // fixtures need more than a couple of SLOC for the effort to
+        // survive rounding.
+        let body = "fn main() {}\n".repeat(20);
+        put(root.path(), "src/lib.rs", body.as_bytes());
+        put(root.path(), "src/sub/mod.rs", body.as_bytes());
+        put(root.path(), "notes/doc.md", b"# doc\n\nprose\n");
+        let report = workspace.report().unwrap();
+
+        let detail = language_detail_scoped(&workspace, &report.files, "rust").unwrap();
+
+        assert_eq!(detail.language, "Rust");
+        assert_eq!(detail.files, 2);
+        let paths: Vec<&str> = detail
+            .directories
+            .iter()
+            .map(|dir| dir.path.as_str())
+            .collect();
+        assert_eq!(paths, ["src", "src/sub"]);
+        // The COCOMO summary must be chan-report's own computation for
+        // the language file set: organic model label, non-zero effort.
+        assert_eq!(detail.cocomo.model, "basic-organic");
+        assert!(detail.cocomo.effort_person_months > 0.0);
+
+        // A language with no tracked files yields an empty detail, not
+        // an error.
+        let empty = language_detail_scoped(&workspace, &report.files, "Cobol").unwrap();
+        assert_eq!(empty.language, "Cobol");
+        assert!(empty.directories.is_empty());
+        assert_eq!(empty.cocomo.effort_person_months, 0.0);
     }
 }

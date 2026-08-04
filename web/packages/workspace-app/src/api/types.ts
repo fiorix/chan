@@ -606,10 +606,31 @@ export type LanguageGraphEdge = GraphViewEdge & {
   code: number;
 };
 
+export type LanguageGraphDetailDirectory = {
+  path: string;
+  label: string;
+  rank: number;
+  files: number;
+  code: number;
+};
+
+/// Inspector detail for one language: the complete ranked directory
+/// list (no graph-depth cutoff) plus the COCOMO summary chan-report
+/// computed for the language's file set. Present on the response only
+/// when the request passed `?language=`.
+export type LanguageGraphDetail = {
+  language: string;
+  files: number;
+  code: number;
+  cocomo: ReportCocomoSummary;
+  directories: LanguageGraphDetailDirectory[];
+};
+
 export type LanguageGraphResponse = {
   max_depth: number;
   nodes: Array<Extract<GraphViewNode, { kind: "language" | "folder" | "directory" }>>;
   edges: LanguageGraphEdge[];
+  detail?: LanguageGraphDetail;
 };
 
 export type FsGraphScope = "file" | "directory";

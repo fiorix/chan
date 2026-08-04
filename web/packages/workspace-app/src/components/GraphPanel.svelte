@@ -2982,6 +2982,13 @@
           }
           onNavigate={selectByPath}
           onContactNavigate={selectByPath}
+          onOpenDirectory={
+            // Language-inspector directory rows route through the
+            // same "Graph from here" directory routing the folder
+            // inspector uses: a NEW graph tab scoped to the clicked
+            // directory.
+            (path) => graphFromHere(path, true)
+          }
           onSetAsScope={
             inspectorSelection?.kind === "file" ||
             inspectorSelection?.kind === "directory"
