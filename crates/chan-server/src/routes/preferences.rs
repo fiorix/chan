@@ -851,7 +851,7 @@ mod tests {
         let json = to_json(&view);
         assert_eq!(json["revision"], 1);
         assert!(json["workspaces"].is_array());
-        assert_eq!(json["preferences"]["terminal"]["secret_masking"], true);
+        assert_eq!(json["preferences"]["terminal"]["secret_masking"], false);
         assert_eq!(
             json["preferences"]["terminal"]["secret_mask_suffixes"][0],
             "TOKEN"

@@ -193,7 +193,7 @@ mod tests {
         assert_eq!(cfg.scrollback_mb, 10);
         assert_eq!(cfg.default_term, "xterm-256color");
         assert!(cfg.mouse_capture);
-        assert!(cfg.secret_masking);
+        assert!(!cfg.secret_masking);
         assert!(cfg.secret_mask_suffixes.contains(&"TOKEN".to_string()));
     }
 
@@ -216,11 +216,20 @@ mod tests {
         assert_eq!(cfg.terminal.scrollback_mb, 10);
         assert_eq!(cfg.terminal.default_term, "xterm-256color");
         assert!(cfg.terminal.mouse_capture);
-        assert!(cfg.terminal.secret_masking);
+        assert!(!cfg.terminal.secret_masking);
         assert!(cfg
             .terminal
             .secret_mask_suffixes
             .contains(&"KEY_BASE64".to_string()));
+    }
+
+    #[test]
+    fn terminal_config_preserves_explicit_secret_masking_true() {
+        let tmp = TempDir::new().unwrap();
+        let p = tmp.path().join("server.toml");
+        std::fs::write(&p, "[terminal]\nsecret_masking = true\n").unwrap();
+        let cfg = ServerConfig::load_from(&p).unwrap();
+        assert!(cfg.terminal.secret_masking);
     }
 
     #[test]

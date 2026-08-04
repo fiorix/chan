@@ -171,7 +171,7 @@ fn default_terminal_mouse_capture() -> bool {
 }
 
 fn default_terminal_secret_masking() -> bool {
-    true
+    false
 }
 
 fn default_terminal_secret_mask_suffixes() -> Vec<String> {
@@ -247,13 +247,22 @@ mod tests {
     use std::cell::Cell;
 
     #[test]
-    fn secret_masking_defaults_to_the_stock_literal_suffixes() {
+    fn secret_masking_defaults_off_and_preserves_explicit_true() {
         let config = TerminalConfig::default();
-        assert!(config.secret_masking);
+        assert!(!config.secret_masking);
         assert_eq!(
             config.secret_mask_suffixes,
             DEFAULT_TERMINAL_SECRET_MASK_SUFFIXES
         );
+
+        let missing: TerminalConfig = serde_json::from_value(json!({})).unwrap();
+        assert!(!missing.secret_masking);
+
+        let configured: TerminalConfig = serde_json::from_value(json!({
+            "secret_masking": true
+        }))
+        .unwrap();
+        assert!(configured.secret_masking);
     }
 
     #[test]

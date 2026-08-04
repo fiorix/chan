@@ -281,7 +281,7 @@
   // Visual-only masking owner for this xterm instance. Null on ghostty and
   // disposed with the terminal; the enabled bit is session-scoped per tab.
   let secretMasker: TerminalSecretMasker | null = null;
-  let secretMaskingEnabled = $state(true);
+  let secretMaskingEnabled = $state(false);
   // Last cols value the masker scanned at; the resize handler rescans only
   // when cols actually changed.
   let resizeScanCols = 0;
@@ -838,7 +838,7 @@
       : new MouseModeFilter();
     // The persisted flag seeds each fresh tab. The menu/launcher toggle only
     // changes this component instance, so a respawn returns to the config.
-    secretMaskingEnabled = terminalPrefs?.secret_masking ?? true;
+    secretMaskingEnabled = terminalPrefs?.secret_masking ?? false;
     const secretMaskSuffixes =
       terminalPrefs?.secret_mask_suffixes ?? DEFAULT_SECRET_MASK_SUFFIXES;
     // Backend honors the Settings toggle under the same spawn-time

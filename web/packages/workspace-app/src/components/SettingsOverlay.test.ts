@@ -48,6 +48,9 @@ describe("SettingsOverlay config writes (source pins)", () => {
     // The row renders the effective state and suffixes but owns no commit
     // path; the values persist via hand-edited TOML or PATCH only.
     expect(terminalSource).toMatch(/label="Secret masking"/);
+    expect(terminalSource).toMatch(
+      /secretMaskingOn = \$derived\(prefs\.terminal\.secret_masking \?\? false\)/,
+    );
     expect(terminalSource).not.toMatch(/secret_masking:\s/);
     expect(terminalSource).not.toMatch(/secret_mask_suffixes:\s/);
   });

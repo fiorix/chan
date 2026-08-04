@@ -76,6 +76,36 @@ describe("terminal body-context vs tab-context split", () => {
       /tabMenu\.source === "body"[\s\S]{1,500}class="terminal-backend-label" data-terminal-backend=\{backend\}[\s\S]{1,200}\{backend\}[\s\S]{1,1000}onclick=\{toggleSecretMasking\}[\s\S]{1,1000}<div class="msep" role="separator"><\/div>/,
     );
   });
+
+  test("new xterm tabs seed from the persisted boolean with omitted default off", () => {
+    expect(terminal).toMatch(/let secretMaskingEnabled = \$state\(false\)/);
+    expect(terminal).toMatch(
+      /async function start\(\): Promise<void> \{[\s\S]{1,1200}secretMaskingEnabled = terminalPrefs\?\.secret_masking \?\? false/,
+    );
+    expect(terminal).toMatch(
+      /new TerminalSecretMasker\([\s\S]{1,300}secretMaskingEnabled/,
+    );
+  });
+
+  test("component recreation runs start and reseeds masking from configuration", () => {
+    expect(terminal).toMatch(
+      /\$effect\(\(\) => \{\s*if \(!host \|\| term\) return;\s*void tick\(\)\.then\(start\);\s*return teardown;\s*\}\)/,
+    );
+  });
+
+  test("the menu and command masking toggle stays ephemeral and xterm-only", () => {
+    const toggle = terminal.match(
+      /function toggleSecretMasking\(\): void \{([\s\S]*?)\n  \}/,
+    )?.[1];
+    expect(toggle).toBeDefined();
+    expect(toggle).toMatch(/backend !== "xterm"/);
+    expect(toggle).toContain("Secret masking unavailable on ghostty backend");
+    expect(toggle).toMatch(/secretMasker\?\.setEnabled\(secretMaskingEnabled\)/);
+    expect(toggle).not.toMatch(/api\.|localStorage|sessionStorage/);
+    expect(terminal).toMatch(
+      /name === "app\.terminal\.secretMasking\.toggle"\) toggleSecretMasking\(\)/,
+    );
+  });
 });
 
 describe("Close anchors the foot", () => {

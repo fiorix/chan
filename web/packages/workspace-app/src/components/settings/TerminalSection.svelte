@@ -17,7 +17,7 @@
   // pre-field server display the SPA fallback. These are the configured
   // values, read by terminals at spawn: already-open terminals keep the
   // flag and suffixes they started with.
-  const secretMaskingOn = $derived(prefs.terminal.secret_masking ?? true);
+  const secretMaskingOn = $derived(prefs.terminal.secret_masking ?? false);
   const secretMaskSuffixes = $derived(
     prefs.terminal.secret_mask_suffixes ?? DEFAULT_SECRET_MASK_SUFFIXES,
   );
