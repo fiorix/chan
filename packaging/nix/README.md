@@ -52,7 +52,7 @@ make nix-check
 
 `make nix-check` evaluates both systems, builds both native packages, checks each output layout and update refusal, and boots each packaged devserver long enough to prove its health endpoint.
 
-On a host without Nix, import a plain Ubuntu rootfs once and run the supplementary sdme check:
+On a Linux host without Nix, import a plain Ubuntu rootfs once and run the supplementary sdme check:
 
 ```sh
 sudo sdme fs import docker.io/ubuntu:26.04 --name ubuntu --install-packages=yes -v
@@ -61,9 +61,11 @@ make nix-sdme-check NIX_PACKAGE=chan
 make nix-sdme-check NIX_PACKAGE=chan-desktop
 ```
 
-`NIX_SDME_ROOTFS` selects the explicitly imported Ubuntu rootfs. The driver verifies the guest identity, installs Ubuntu's `nix-bin` package inside the disposable overlay, and enables flakes there. `NIX_PACKAGE=all` delegates to the native `make nix-check` contract; either named package evaluates the flake, builds and validates exactly that output, and runs its package smoke without first building the other package.
+`NIX_SDME_ROOTFS` selects the explicitly imported Ubuntu rootfs. The driver verifies the guest identity, installs Ubuntu's `nix-bin` and `nix-setup-systemd` packages inside the disposable overlay, initializes the local store, enables flakes, and keeps Nix build directories and smoke-test temporary files under `/var/tmp`. `NIX_PACKAGE=all` delegates to the native `make nix-check` contract; either named package evaluates the flake, builds and validates exactly that output, and runs its package smoke without first building the other package.
 
-The checkout is mounted read-only at `/src`, and the only writable host mount is `target/nix-sdme-check` at `/out`. Combined guest output is retained as `build.log` beside the guest status file. The container, installed packages, Nix store, and built closures are removed after every run. This check never publishes to Cachix or creates release artifacts.
+The checkout is mounted read-only at `/src`, and the only writable host mount is the selected output directory at `/out`, `/var/tmp/chan-nix-sdme-check` by default. The driver rejects an output directory that contains the checkout, is contained by the checkout, or resolves to the checkout itself. Combined guest output is retained as `build.log` beside the guest status file. Cleanup failure is reported and fails an otherwise successful run without replacing an earlier build failure. This check never publishes to Cachix or creates release artifacts.
+
+Run `make nix-sdme-contract-check` to exercise rootfs, bind, store setup, status, failure, and cleanup behavior against a stub. It does not start a container or install Nix.
 
 The packages follow the repository's pinned Rust toolchain. They use Node.js 22 from nixpkgs because Node.js 20 is end-of-life and has been removed from the current nixpkgs input; the rest of the project's existing CI remains on its own Node version.
 

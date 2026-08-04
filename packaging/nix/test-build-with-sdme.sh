@@ -5,10 +5,23 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRIVER="$SCRIPT_DIR/build-with-sdme.sh"
-TMP="$(mktemp -d)"
+TMP_BASE="${TMPDIR:-/var/tmp}"
+case "$TMP_BASE" in
+    /tmp|/tmp/*)
+        echo "error: contract-test temporary state must not use /tmp" >&2
+        exit 1
+        ;;
+    /*) ;;
+    *)
+        echo "error: TMPDIR must be an absolute path" >&2
+        exit 1
+        ;;
+esac
+TMP="$(mktemp -d "$TMP_BASE/chan-nix-sdme-contract.XXXXXX")"
 TEST_REPO="$TMP/repo"
 STATE="$TMP/state"
 BIN="$TMP/bin"
+TEST_OUT="$TMP/output"
 failures=0
 
 cleanup() {
@@ -31,7 +44,7 @@ assert_grep() {
 
 assert_not_grep() {
     local pattern="$1" file="$2" message="$3"
-    if grep -Eq -- "$pattern" "$file"; then
+    if [ -e "$file" ] && grep -Eq -- "$pattern" "$file"; then
         fail "$message"
     fi
 }
@@ -44,11 +57,11 @@ assert_status() {
 run_driver() {
     local package="$1"
     shift
-    rm -rf "$STATE/run" "$TEST_REPO/target/nix-sdme-check"
+    rm -rf "$STATE/run" "$TEST_OUT"
     mkdir -p "$STATE/run"
     set +e
     env PATH="$BIN:/usr/bin:/bin" SDME="$BIN/sdme" \
-        STUB_STATE="$STATE/run" NIX_PACKAGE="$package" "$@" \
+        STUB_STATE="$STATE/run" NIX_PACKAGE="$package" OUT="$TEST_OUT" "$@" \
         "$TEST_REPO/packaging/nix/build-with-sdme.sh" \
         >"$STATE/run/driver.log" 2>&1
     RUN_STATUS=$?
@@ -74,6 +87,10 @@ case "${1:-}" in
         ;;
     rm)
         printf '%s\n' "${3:-missing}" >>"$state/removed"
+        if [ "${STUB_RM_FAIL:-0}" = 1 ]; then
+            echo "stub cleanup failure" >&2
+            exit 23
+        fi
         rm -f "$state/container"
         ;;
     new)
@@ -117,7 +134,7 @@ case "${1:-}" in
         printf '%s\n' "$rootfs" >"$state/rootfs"
         while [ "$#" -gt 0 ]; do
             case "$1" in
-                HOST_UID=*|HOST_GID=*|NIX_PACKAGE=*)
+                HOST_UID=*|HOST_GID=*|NIX_PACKAGE=*|TMPDIR=*|NIX_REMOTE=*)
                     export "$1"
                     case "$1" in NIX_PACKAGE=*) package="${1#NIX_PACKAGE=}" ;; esac
                     ;;
@@ -164,11 +181,36 @@ printf '%s\n' "$*" >>"${STUB_STATE:?}/apt"
 exit 0
 STUB
 
+cat >"$BIN/install" <<'STUB'
+#!/usr/bin/env bash
+printf '%s|TMPDIR=%s\n' "$*" "${TMPDIR:-}" >>"${STUB_STATE:?}/install"
+exit 0
+STUB
+
+cat >"$BIN/systemd-tmpfiles" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${STUB_STATE:?}/tmpfiles"
+if [ "${STUB_STORE_SETUP_FAIL:-0}" = 1 ]; then
+    echo "stub store setup failure" >&2
+    exit 24
+fi
+: >"${STUB_STATE:?}/store-ready"
+STUB
+
 cat >"$BIN/nix" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${STUB_STATE:?}/nix"
+printf 'TMPDIR=%s NIX_REMOTE=%s\n' "${TMPDIR:-}" "${NIX_REMOTE:-}" >>"${STUB_STATE:?}/nix-env"
 if [ "${1:-}" = --version ]; then
     echo "nix (stub) 2.24.0"
+    exit 0
+fi
+if [ "${1:-} ${2:-}" = "store ping" ]; then
+    if [ ! -e "${STUB_STATE:?}/store-ready" ] || [ "${STUB_STORE_PING_FAIL:-0}" = 1 ]; then
+        echo "stub store unavailable" >&2
+        exit 25
+    fi
+    echo "Store URL: local"
     exit 0
 fi
 if [ "${1:-}" = build ]; then
@@ -183,6 +225,7 @@ STUB
 cat >"$BIN/make" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${STUB_STATE:?}/make"
+printf 'TMPDIR=%s NIX_REMOTE=%s\n' "${TMPDIR:-}" "${NIX_REMOTE:-}" >>"${STUB_STATE:?}/make-env"
 if [ "${STUB_GUEST_FAIL:-0}" = 1 ]; then
     exit 7
 fi
@@ -197,9 +240,11 @@ STUB
 cat >"$TEST_REPO/scripts/smoke-nix-package.sh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${STUB_STATE:?}/smoke"
+printf 'TMPDIR=%s NIX_REMOTE=%s\n' "${TMPDIR:-}" "${NIX_REMOTE:-}" >>"${STUB_STATE:?}/smoke-env"
 STUB
 
-chmod +x "$BIN/sdme" "$BIN/apt-get" "$BIN/nix" "$BIN/make" "$BIN/chown" \
+chmod +x "$BIN/sdme" "$BIN/apt-get" "$BIN/install" "$BIN/systemd-tmpfiles" \
+    "$BIN/nix" "$BIN/make" "$BIN/chown" \
     "$TEST_REPO/scripts/smoke-nix-package.sh"
 
 export STUB_BIN="$BIN"
@@ -209,7 +254,7 @@ assert_status 0 "$RUN_STATUS" "the default all-package check succeeds"
 assert_grep '^-r$' "$STATE/run/new-args" "sdme new uses explicit -r"
 assert_grep '^ubuntu$' "$STATE/run/rootfs" "the default imported rootfs is selected"
 assert_grep "^$TEST_REPO:/src:ro$" "$STATE/run/binds" "the repository bind is read-only"
-assert_grep "^$TEST_REPO/target/nix-sdme-check:/out$" "$STATE/run/binds" "the output bind is writable at /out"
+assert_grep "^$TEST_OUT:/out$" "$STATE/run/binds" "the output bind is writable at /out"
 if [ "$(wc -l <"$STATE/run/binds")" -ne 2 ]; then
     fail "the repository and sole output are the only host binds"
 fi
@@ -217,10 +262,16 @@ assert_not_grep '^/:' "$STATE/run/binds" "host root is never bound"
 assert_not_grep "^$HOME:" "$STATE/run/binds" "host home is never bound"
 assert_grep '^nix-check NIX=nix$' "$STATE/run/make" "all delegates to make nix-check"
 assert_grep '^all$' "$STATE/run/package" "all reaches the guest command"
-assert_grep '^install -y --no-install-recommends ca-certificates git make nix-bin$' "$STATE/run/apt" "only the declared Ubuntu packages are requested"
+assert_grep '^-d -m 1777 /var/tmp[|]TMPDIR=/var/tmp$' "$STATE/run/install" "guest temporary state is prepared under /var/tmp"
+assert_grep '^install -y --no-install-recommends ca-certificates curl git make nix-bin nix-setup-systemd python3$' "$STATE/run/apt" "the declared Nix and smoke prerequisites are requested"
+assert_grep '^--create /usr/lib/tmpfiles.d/nix-daemon.conf$' "$STATE/run/tmpfiles" "the Ubuntu Nix store layout is initialized"
 assert_grep '^experimental-features = nix-command flakes$' "$STATE/run/etc-nix/nix.conf" "flakes are enabled inside the guest"
-assert_grep '^0$' "$TEST_REPO/target/nix-sdme-check/status" "guest status is retained"
-assert_grep 'guest OS: ubuntu 26.04' "$TEST_REPO/target/nix-sdme-check/build.log" "combined guest output is retained"
+assert_grep '^build-dir = /var/tmp$' "$STATE/run/etc-nix/nix.conf" "Nix build directories stay off /tmp"
+assert_grep '^store ping$' "$STATE/run/nix" "the local Nix store is checked before the build"
+assert_grep '^TMPDIR=/var/tmp NIX_REMOTE=local$' "$STATE/run/nix-env" "Nix uses /var/tmp and the disposable local store"
+assert_grep '^TMPDIR=/var/tmp NIX_REMOTE=local$' "$STATE/run/make-env" "the all-package check inherits the guest build environment"
+assert_grep '^0$' "$TEST_OUT/status" "guest status is retained"
+assert_grep 'guest OS: ubuntu 26.04' "$TEST_OUT/build.log" "combined guest output is retained"
 assert_grep '^chan-nix-check-[0-9]+$' "$STATE/run/removed" "the PID-scoped container is removed on success"
 
 run_driver chan
@@ -228,6 +279,7 @@ assert_status 0 "$RUN_STATUS" "the chan-only check succeeds"
 assert_grep '^flake check --all-systems --no-build$' "$STATE/run/nix" "chan evaluates the flake"
 assert_grep '^build --no-link --print-out-paths \.#chan$' "$STATE/run/nix" "chan builds exactly its output"
 assert_grep '^/nix/store/stub-chan chan$' "$STATE/run/smoke" "chan validates and smokes its output"
+assert_grep '^TMPDIR=/var/tmp NIX_REMOTE=local$' "$STATE/run/smoke-env" "the package smoke stays off /tmp"
 assert_not_grep 'chan-desktop' "$STATE/run/nix" "chan does not force chan-desktop"
 
 run_driver chan-desktop
@@ -262,10 +314,50 @@ if [ -e "$STATE/run/calls" ]; then
     fail "a host-home output directory invokes sdme"
 fi
 
+run_driver all OUT="$TEST_REPO"
+assert_status 1 "$RUN_STATUS" "an output equal to the repository is rejected"
+assert_grep 'repository and output directory must not overlap' "$STATE/run/driver.log" "equal repository and output paths are diagnosed"
+if [ -e "$STATE/run/calls" ]; then
+    fail "an output equal to the repository invokes sdme"
+fi
+
+run_driver all OUT="$TEST_REPO/nix-output"
+assert_status 1 "$RUN_STATUS" "an output below the repository is rejected"
+assert_grep 'repository and output directory must not overlap' "$STATE/run/driver.log" "a repository-contained output is diagnosed"
+if [ -e "$STATE/run/calls" ]; then
+    fail "an output below the repository invokes sdme"
+fi
+if [ -e "$TEST_REPO/nix-output" ]; then
+    fail "rejecting a repository-contained output creates it"
+fi
+
+ln -s "$TEST_REPO" "$TMP/repo-alias"
+run_driver all OUT="$TMP/repo-alias/nix-output"
+assert_status 1 "$RUN_STATUS" "an output below a repository symlink is rejected"
+assert_grep 'repository and output directory must not overlap' "$STATE/run/driver.log" "a symlinked repository-contained output is diagnosed"
+if [ -e "$STATE/run/calls" ]; then
+    fail "an output below a repository symlink invokes sdme"
+fi
+if [ -e "$TEST_REPO/nix-output" ]; then
+    fail "rejecting a symlinked repository-contained output creates it"
+fi
+
+run_driver all OUT="$TMP"
+assert_status 1 "$RUN_STATUS" "an output containing the repository is rejected"
+assert_grep 'repository and output directory must not overlap' "$STATE/run/driver.log" "an output containing the repository is diagnosed"
+if [ -e "$STATE/run/calls" ]; then
+    fail "an output containing the repository invokes sdme"
+fi
+
 run_driver all STUB_ROOTFS_MISSING=1
 assert_status 1 "$RUN_STATUS" "a missing rootfs fails preflight"
 assert_grep 'hint: .*/sdme fs import docker.io/ubuntu:26.04 --name ubuntu --install-packages=yes -v' "$STATE/run/driver.log" "the missing-rootfs error prints the exact import hint"
 assert_not_grep '^new ' "$STATE/run/calls" "a missing rootfs never starts a container"
+
+run_driver all STUB_FS_FAIL=1
+assert_status 1 "$RUN_STATUS" "a rootfs-list failure fails preflight"
+assert_grep 'stub fs failure' "$STATE/run/driver.log" "a rootfs-list failure retains the sdme diagnostic"
+assert_not_grep '^new ' "$STATE/run/calls" "a rootfs-list failure never starts a container"
 
 run_driver all NIX_SDME_ROOTFS=jammy STUB_ROOTFS_NAME=jammy STUB_GUEST_ID=fedora
 assert_status 1 "$RUN_STATUS" "a non-Ubuntu guest is refused"
@@ -276,8 +368,18 @@ assert_grep '^chan-nix-check-[0-9]+$' "$STATE/run/removed" "the container is rem
 
 run_driver all STUB_GUEST_FAIL=1
 assert_status 7 "$RUN_STATUS" "guest command status propagates when sdme returns zero"
-assert_grep '^7$' "$TEST_REPO/target/nix-sdme-check/status" "a failing guest status is retained"
+assert_grep '^7$' "$TEST_OUT/status" "a failing guest status is retained"
 assert_grep '^chan-nix-check-[0-9]+$' "$STATE/run/removed" "the container is removed after guest failure"
+
+run_driver all STUB_STORE_SETUP_FAIL=1
+assert_status 24 "$RUN_STATUS" "a failed Nix store setup propagates"
+assert_grep 'stub store setup failure' "$TEST_OUT/build.log" "a failed Nix store setup is retained in the build log"
+assert_not_grep '^flake check|^build ' "$STATE/run/nix" "a failed store setup prevents Nix evaluation and builds"
+
+run_driver all STUB_STORE_PING_FAIL=1
+assert_status 25 "$RUN_STATUS" "an unusable local Nix store propagates"
+assert_grep 'stub store unavailable' "$TEST_OUT/build.log" "an unusable local store is diagnosed"
+assert_not_grep '^flake check|^build ' "$STATE/run/nix" "an unusable local store prevents evaluation and builds"
 
 run_driver all STUB_SDME_FAIL=1
 assert_status 19 "$RUN_STATUS" "sdme infrastructure failure propagates"
@@ -292,11 +394,20 @@ assert_status 1 "$RUN_STATUS" "an invalid guest status fails"
 assert_grep "wrote invalid status 'not-a-status'" "$STATE/run/driver.log" "the invalid guest status is diagnosed"
 assert_grep '^chan-nix-check-[0-9]+$' "$STATE/run/removed" "the container is removed after invalid status"
 
-rm -rf "$STATE/run" "$TEST_REPO/target/nix-sdme-check"
+run_driver all STUB_RM_FAIL=1
+assert_status 23 "$RUN_STATUS" "cleanup failure fails an otherwise successful run"
+assert_grep "could not remove sdme container 'chan-nix-check-[0-9]+' \(status 23\)" "$STATE/run/driver.log" "cleanup failure is diagnosed"
+assert_grep '^stub cleanup failure$' "$STATE/run/driver.log" "the cleanup command diagnostic is retained"
+
+run_driver all STUB_GUEST_FAIL=1 STUB_RM_FAIL=1
+assert_status 7 "$RUN_STATUS" "cleanup failure does not mask a guest failure"
+assert_grep "could not remove sdme container 'chan-nix-check-[0-9]+' \(status 23\)" "$STATE/run/driver.log" "cleanup failure is reported beside a guest failure"
+
+rm -rf "$STATE/run" "$TEST_OUT"
 mkdir -p "$STATE/run"
 set +e
 setsid env PATH="$BIN:/usr/bin:/bin" SDME="$BIN/sdme" STUB_BIN="$BIN" \
-    STUB_STATE="$STATE/run" STUB_SLEEP=1 NIX_PACKAGE=all \
+    STUB_STATE="$STATE/run" STUB_SLEEP=1 NIX_PACKAGE=all OUT="$TEST_OUT" \
     "$TEST_REPO/packaging/nix/build-with-sdme.sh" \
     >"$STATE/run/driver.log" 2>&1 &
 signal_pid=$!
@@ -318,6 +429,7 @@ assert_grep '^chan-nix-check-[0-9]+$' "$STATE/run/removed" "the container is rem
 
 assert_not_grep 'cachix[[:space:]]+(push|pin)|git[[:space:]]+(push|tag)|gh[[:space:]]+release|publish-downstream' "$DRIVER" "the driver contains no publication command"
 assert_not_grep 'nixos/nix|oci-mode|curl[[:space:]].*sh' "$DRIVER" "the driver has no OCI-app or curl-installer fallback"
+assert_not_grep '(^|[="[:space:]])/tmp(/|["[:space:]]|$)' "$DRIVER" "the driver never selects /tmp for guest build state"
 
 if [ "$failures" -ne 0 ]; then
     echo "FAIL: $failures contract assertion(s) failed" >&2

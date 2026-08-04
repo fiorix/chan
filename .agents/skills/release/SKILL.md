@@ -74,7 +74,7 @@ make nix-sdme-check NIX_PACKAGE=chan
 make nix-sdme-check NIX_PACKAGE=chan-desktop
 ```
 
-`NIX_PACKAGE=all` delegates to the native `make nix-check` contract. Use a named package while harvesting one fixed-output hash so the other package is not forced first. Each failed build records its combined output in `target/nix-sdme-check/build.log`; copy the reported `got: sha256-...` into the affected field and repeat. The shared `npmDeps.hash` is pinned in both derivations, while each package has its own `cargoHash`. The workflow builds only: it never pushes or pins Cachix, publishes a release, tags, or copies release artifacts. Native `make nix-check`, GA CI, and the Cachix publication jobs remain authoritative for release validation and publication.
+`NIX_PACKAGE=all` delegates to the native `make nix-check` contract. Use a named package while harvesting one fixed-output hash so the other package is not forced first. Each failed build records its combined output in `/var/tmp/chan-nix-sdme-check/build.log`; copy the reported `got: sha256-...` into the affected field and repeat. The shared `npmDeps.hash` is pinned in both derivations, while each package has its own `cargoHash`. The workflow builds only: it never pushes or pins Cachix, publishes a release, tags, or copies release artifacts. Native `make nix-check`, GA CI, and the Cachix publication jobs remain authoritative for release validation and publication.
 
 ## Invariants
 

@@ -39,7 +39,7 @@ DISTRO ?= ubuntu
 UNAME_S := $(shell uname -s)
 SDME ?= $(if $(filter Darwin,$(UNAME_S)),limactl shell default sudo sdme,sudo sdme)
 WINDOWS_CROSS_TARGET_DIR ?= $(REPO_ROOT)/target/windows-cross-check
-NIX_SDME_OUT ?= $(REPO_ROOT)/target/nix-sdme-check
+NIX_SDME_OUT ?= /var/tmp/chan-nix-sdme-check
 
 # make copr-check knobs: the container command for the SRPM stage, the matrix
 # slice, the sdme rootfs names (imported names vary per host), and whether a
@@ -228,6 +228,10 @@ nix-sdme-check: ## Run Nix checks in a disposable Ubuntu sdme guest.
 		OUT="$(NIX_SDME_OUT)" SDME="$(SDME)" \
 		packaging/nix/build-with-sdme.sh
 
+.PHONY: nix-sdme-contract-check
+nix-sdme-contract-check: ## Check the sdme Nix driver without starting a guest.
+	TMPDIR=/var/tmp packaging/nix/test-build-with-sdme.sh
+
 .PHONY: pre-push
 pre-push: ## Run the local pre-push gate.
 	# The static checks run first: they are seconds-long, they cover the
@@ -236,6 +240,7 @@ pre-push: ## Run the local pre-push gate.
 	$(MAKE) shell-check
 	$(MAKE) workflow-check
 	$(MAKE) build-matrix-check
+	$(MAKE) nix-sdme-contract-check
 	$(MAKE) web-lock-check
 	$(CARGO) fmt --check
 	RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings

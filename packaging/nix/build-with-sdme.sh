@@ -8,7 +8,8 @@ REPO="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 SDME="${SDME:-sudo sdme}"
 NIX_SDME_ROOTFS="${NIX_SDME_ROOTFS:-ubuntu}"
 NIX_PACKAGE="${NIX_PACKAGE:-all}"
-OUT="${OUT:-$REPO/target/nix-sdme-check}"
+OUT="${OUT:-/var/tmp/chan-nix-sdme-check}"
+OUT_INPUT="$OUT"
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
 CONTAINER="chan-nix-check-$$"
@@ -29,8 +30,10 @@ read -r -a SDME_CMD <<<"$SDME"
     exit 1
 }
 
-mkdir -p "$OUT"
-OUT="$(cd "$OUT" && pwd -P)"
+if ! OUT="$(realpath -m -- "$OUT_INPUT")"; then
+    echo "error: could not resolve output directory '$OUT_INPUT'" >&2
+    exit 1
+fi
 HOST_HOME=
 if [ -n "${HOME:-}" ] && [ -d "$HOME" ]; then
     HOST_HOME="$(cd "$HOME" && pwd -P)"
@@ -45,6 +48,16 @@ if [ "$OUT" = / ]; then
 fi
 if [ -n "$HOST_HOME" ] && { [ "$REPO" = "$HOST_HOME" ] || [ "$OUT" = "$HOST_HOME" ]; }; then
     echo "error: refusing to bind the host home directory" >&2
+    exit 1
+fi
+if [[ "$OUT" == "$REPO" || "$OUT" == "$REPO/"* || "$REPO" == "$OUT/"* ]]; then
+    echo "error: repository and output directory must not overlap ($REPO, $OUT)" >&2
+    exit 1
+fi
+mkdir -p "$OUT"
+OUT="$(cd "$OUT" && pwd -P)"
+if [[ "$OUT" == "$REPO" || "$OUT" == "$REPO/"* || "$REPO" == "$OUT/"* ]]; then
+    echo "error: repository and output directory must not overlap ($REPO, $OUT)" >&2
     exit 1
 fi
 
@@ -65,7 +78,19 @@ STATUS_FILE="$OUT/$STATUS_NAME"
 rm -f "$LOG_FILE" "$STATUS_FILE"
 
 cleanup() {
-    "${SDME_CMD[@]}" rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    local status="$?" cleanup_output cleanup_status
+    trap - EXIT INT TERM
+    if cleanup_output="$("${SDME_CMD[@]}" rm -f "$CONTAINER" 2>&1)"; then
+        exit "$status"
+    else
+        cleanup_status=$?
+    fi
+    echo "error: could not remove sdme container '$CONTAINER' (status $cleanup_status)" >&2
+    [ -z "$cleanup_output" ] || printf '%s\n' "$cleanup_output" >&2
+    if [ "$status" -ne 0 ]; then
+        exit "$status"
+    fi
+    exit "$cleanup_status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -78,14 +103,21 @@ run_check() {
         return 1
     fi
 
+    export TMPDIR=/var/tmp
+    install -d -m 1777 "$TMPDIR" || return
     apt-get update || return
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates git make nix-bin || return
+        ca-certificates curl git make nix-bin nix-setup-systemd python3 || return
+    systemd-tmpfiles --create /usr/lib/tmpfiles.d/nix-daemon.conf || return
     mkdir -p /etc/nix || return
-    printf "%s\n" "experimental-features = nix-command flakes" >>/etc/nix/nix.conf || return
+    printf "%s\n" \
+        "experimental-features = nix-command flakes" \
+        "build-dir = /var/tmp" >>/etc/nix/nix.conf || return
+    export NIX_REMOTE=local
 
     echo ">> guest OS: $(. /etc/os-release && printf "%s %s" "$ID" "${VERSION_ID:-unknown}")"
     nix --version || return
+    nix store ping || return
     cd /src || return
 
     if [ "$NIX_PACKAGE" = all ]; then
