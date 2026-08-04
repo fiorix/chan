@@ -170,6 +170,7 @@ impl PendingDeleteState {
         });
     }
 
+    #[cfg(test)]
     pub fn contains(&self, label: &str) -> bool {
         self.entries.lock().unwrap().contains_key(label)
     }
