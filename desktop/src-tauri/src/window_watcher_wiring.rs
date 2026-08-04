@@ -24,7 +24,8 @@ use tokio::sync::{watch, Notify};
 
 use crate::devserver::DevserverConn;
 use crate::window_watcher::{
-    native_label, watch_loop, NativeSurface, WatchLoopStop, WatcherViewState, WindowFeed,
+    native_label, watch_loop, NativeSurface, PendingDeleteAttempt, PendingDeleteState,
+    WatchLoopStop, WatcherViewState, WindowFeed,
 };
 use crate::{serve, AppState};
 
@@ -623,6 +624,24 @@ async fn keepalive_pump(
     Ok(())
 }
 
+/// Settle DELETEs already absent from a full feed snapshot, then claim one
+/// retry attempt for each remaining close intent on the first snapshot of a
+/// connection round. Later frames only settle state; they cannot create an
+/// unbounded retry loop on a persistent 4xx.
+fn pending_delete_attempts_for_feed_snapshot(
+    pending: &PendingDeleteState,
+    devserver_id: &str,
+    windows: &[WindowRecord],
+    first_snapshot: bool,
+) -> Vec<PendingDeleteAttempt> {
+    pending.settle_snapshot(devserver_id, windows);
+    if first_snapshot {
+        pending.begin_for_devserver(devserver_id)
+    } else {
+        Vec::new()
+    }
+}
+
 /// One connection's lifetime: open the `/watch` WS, then push every `WindowSet`
 /// text frame into `snapshot` + wake `change`. Raw tunnel devservers auth with a
 /// bearer header; gateway devservers auth with the devserver-gate cookie.
@@ -660,6 +679,7 @@ async fn stream_window_feed(
             .map(|(ws, _)| ws)
             .map_err(|e| format!("connect /watch: {e}"))?
     };
+    let mut saw_snapshot = false;
     keepalive_pump(&mut ws, FEED_PING_INTERVAL, FEED_MAX_MISSED, |text| {
         // Any inbound data frame means the feed is live. Mark it, and on the FIRST
         // such frame clear any Unreachable state so the launcher's red icon clears
@@ -679,6 +699,22 @@ async fn stream_window_feed(
             // (`devserver::window_navigation_url`), never stamped into
             // the feed.
             let windows = set.windows;
+            let first_snapshot = !saw_snapshot;
+            saw_snapshot = true;
+            let pending_attempts = pending_delete_attempts_for_feed_snapshot(
+                &state.pending_window_deletes,
+                id,
+                &windows,
+                first_snapshot,
+            );
+            for attempt in pending_attempts {
+                crate::spawn_pending_window_delete_attempt(
+                    app.clone(),
+                    Arc::clone(state),
+                    conn.clone(),
+                    attempt,
+                );
+            }
             // Refresh this library's active-transfer cache so the desktop
             // close guard can see a remote window's in-flight transfer (the
             // desktop sees no remote `/ws`; the feed bit is its only signal).
@@ -835,6 +871,7 @@ pub(crate) async fn spawn_devserver_window_watcher(
     // Shared state so the feed task can refresh the active-transfer cache the
     // close guard reads for this devserver's windows.
     let state = Arc::clone(app.state::<Arc<AppState>>().inner());
+    let pending_deletes = Arc::clone(&state.pending_window_deletes);
     // The WS feed task owns a `conn` clone, pushes changes into `snapshot` +
     // wakes `change`, and stops when `cancel` flips true.
     tauri::async_runtime::spawn(run_devserver_window_feed(
@@ -854,7 +891,7 @@ pub(crate) async fn spawn_devserver_window_watcher(
         nudge: Some(Arc::clone(&change)),
     };
     let feed = DevserverWindowFeed { snapshot, change };
-    let view = Arc::new(WatcherViewState::default());
+    let view = Arc::new(WatcherViewState::with_pending_deletes(pending_deletes));
     // A handle on the view for the caller so the close handler can bury THIS
     // devserver's windows through it: a bury flips `should_show` false and
     // the reconcile CLOSES the webview (drops the `/ws`), so the launcher dot
@@ -986,6 +1023,40 @@ mod tests {
             RemoteLaunchKey::from_record(&base, true),
             RemoteLaunchKey::from_record(&prefix, true)
         );
+    }
+
+    #[test]
+    fn pending_delete_retries_on_first_feed_snapshot_and_settles_when_absent() {
+        let record = rec();
+        let pending = PendingDeleteState::default();
+        pending.queue("devserver-1", &record);
+        let initial = pending.begin("lib-test::w-1").unwrap();
+        let _ = pending.finish(&initial.label, false);
+
+        assert!(pending_delete_attempts_for_feed_snapshot(
+            &pending,
+            "devserver-1",
+            std::slice::from_ref(&record),
+            false,
+        )
+        .is_empty());
+
+        let retries = pending_delete_attempts_for_feed_snapshot(
+            &pending,
+            "devserver-1",
+            std::slice::from_ref(&record),
+            true,
+        );
+        assert_eq!(retries.len(), 1);
+        assert_eq!(retries[0].attempt, 2);
+        let _ = pending.finish(&retries[0].label, true);
+
+        assert!(pending.contains("lib-test::w-1"));
+        assert!(
+            pending_delete_attempts_for_feed_snapshot(&pending, "devserver-1", &[], false,)
+                .is_empty()
+        );
+        assert!(!pending.contains("lib-test::w-1"));
     }
 
     #[tokio::test]
