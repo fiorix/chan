@@ -27,7 +27,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [web-marketing-onboarding](v0.84.0/web-marketing-onboarding.md) | registered, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
 | [cs-open-non-text-reveal-and-audio](v0.84.0/cs-open-non-text-reveal-and-audio.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
 | [hybrid-nav-staged-editor-bubble](v0.84.0/hybrid-nav-staged-editor-bubble.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
-| [terminal-tab-rename-reaches-inventory](v0.84.0/terminal-tab-rename-reaches-inventory.md) | implemented and validated on `v0840-base`, except the Linux fdstore handoff run | ship at v0.84.0 GA, and run `scripts/e2e/devserver-fdstore.sh` once the devserver user unit is idle |
+| [terminal-tab-rename-reaches-inventory](v0.84.0/terminal-tab-rename-reaches-inventory.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
 | [terminal-editor-appearance-settings](v0.84.0/terminal-editor-appearance-settings.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
 | [release-platform-verification](v0.84.0/release-platform-verification.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
 | [ghostty-macos-trackpad-scroll-parity](v0.84.0/ghostty-macos-trackpad-scroll-parity.md) | registered, grounded, ruled, specified | calibrate Ghostty's macOS pixel-mode scrollback travel to xterm.js without changing TUI wheel input |
