@@ -19,7 +19,8 @@ Two branches, `v083/drop-launcher-overlay` and `v083/timing-test-virtual-clock`,
 - Overlay deletion: `cargo check`/`clippy`/`fmt` clean, chan-desktop 324/324 tests, launcher 315/315, workspace-app 3230/3230, the shortcuts-help consistency check, all five launcher browser-smoke checks (15/60/80/90/95) end to end, and the full pre-push gate including the AppImage devserver smoke.
 - Timing fix: mutation-proven both ways (a 4x grace deadline fails the tenant bound at exactly 400 ms virtual; an unregistered follow-up fails the indexer test with the swallow message), 40 of 40 logged iterations under parallel vite builds plus this machine's chronic agent load, the full `indexer::` module 30 of 30, and the pre-push gate green on the branch push.
 - An intermediate state of the timing fix (5 s ceilings) failed once in 40 logged iterations at the final rebuild-completion wait, which is what moved every rebuild-pipeline wait to the 30 s budget; the failure and its evidence are recorded in `team/roadmap/done/timing-test-virtual-clock.md`.
-- CI on the merge commit and the publish=false dry run: recorded at tag time.
+- CI on the merge commit `4b8c78fd`: green. The publish=false dry run on the GA commit: green across the artifact matrix, including macOS sign/notarize and the signed Windows packages. The tagged publish run: green on rerun after a transient Apple timestamp-service failure at the DMG codesign, then assets, `/dl` metadata, and Pages published.
+- Downstream: Docker (all five manifests, both architectures), COPR `chan` and `chan-desktop`, Launchpad PPA, and Homebrew all green. AUR red while its maintenance lasts; re-dispatch against the then-current tag when it clears. Cachix red for this tag: the version-bump lockfile regen (npm 9.2.0 on the release host) dropped the root `@chan/workspace-app` workspace link, and only the Nix sandbox's strict `npm ci` catches it. The Cachix job builds the tag, so v0.83.3's lane cannot be repaired; the lock resync and re-pinned hash (`9dbab5fa`) landed on `main` right after the release and ride the next one.
 
 ## Retrospective
 
@@ -29,3 +30,4 @@ The gate roulette was the trigger for taking the timing fix the same day instead
 
 - The broker IPC for a desktop-wide Computers scope (ADR 0001 as amended) is the next launcher item; the overlay code it replaces is already gone.
 - AUR publication remains in maintenance; re-dispatch against the current tag when it clears.
+- The release skill's lockfile step carries no sync verification; adding an `npm ci --dry-run` check to the regen step is the obvious hardening, and noting npm 9.2.0 as a known-bad regen tool for this tree.
