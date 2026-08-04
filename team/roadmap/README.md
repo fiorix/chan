@@ -46,6 +46,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [graph-inspector-language-node-detail](v0.84.0/graph-inspector-language-node-detail.md) | registered, not specced | add COCOMO and the top directories for a selected language node, sourced from chan-report's existing roll-up |
 | [file-browser-context-menu-inspector-actions](v0.84.0/file-browser-context-menu-inspector-actions.md) | registered, not specced | give the file browser's right-click menu the inspector's per-type actions |
 | [rich-prompt-submit-button](v0.84.0/rich-prompt-submit-button.md) | registered, grounded, not specced | turn the Rich Prompt's submit hint into a real button so a mobile user can submit by tapping |
+| [chan-config-key-coverage](v0.84.0/chan-config-key-coverage.md) | registered, grounded, needs a spec | derive `chan config get`/`set` from the same key set the dump prints, so the 19 keys it prints but rejects become settable |
 
 ## Completed
 
