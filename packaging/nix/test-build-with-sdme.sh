@@ -19,11 +19,11 @@ case "$TMP_BASE" in
 esac
 TMP="$(mktemp -d "$TMP_BASE/chan-nix-sdme-contract.XXXXXX")"
 TEST_REPO="$TMP/repo"
-TEST_FLAKE="path:$TEST_REPO"
 STATE="$TMP/state"
 BIN="$TMP/bin"
 TEST_OUT="$TMP/output"
 failures=0
+RUN_SOURCE=
 
 cleanup() {
     rm -rf "$TMP"
@@ -62,11 +62,19 @@ run_driver() {
     mkdir -p "$STATE/run"
     set +e
     env PATH="$BIN:/usr/bin:/bin" SDME="$BIN/sdme" \
-        STUB_STATE="$STATE/run" NIX_PACKAGE="$package" OUT="$TEST_OUT" "$@" \
+        STUB_STATE="$STATE/run" STUB_TEST_REPO="$TEST_REPO" \
+        NIX_PACKAGE="$package" OUT="$TEST_OUT" "$@" \
         "$TEST_REPO/packaging/nix/build-with-sdme.sh" \
         >"$STATE/run/driver.log" 2>&1
     RUN_STATUS=$?
     set -e
+    RUN_SOURCE=
+    if [ -r "$STATE/run/source" ]; then
+        RUN_SOURCE="$(<"$STATE/run/source")"
+        if [ -e "$RUN_SOURCE" ]; then
+            fail "the tracked source snapshot survives driver exit: $RUN_SOURCE"
+        fi
+    fi
 }
 
 cat >"$BIN/sdme" <<'STUB'
@@ -144,6 +152,44 @@ case "${1:-}" in
             shift
         done
         printf '%s\n' "$package" >"$state/package"
+        printf '%s\n' "$repo" >"$state/source"
+        if [ "$repo" = "${STUB_TEST_REPO:?}" ]; then
+            printf 'worktree\n' >"$state/source-kind"
+        else
+            printf 'snapshot\n' >"$state/source-kind"
+        fi
+        if [ -r "$repo/tracked.txt" ]; then
+            cat "$repo/tracked.txt" >"$state/source-tracked"
+        else
+            printf 'missing\n' >"$state/source-tracked"
+        fi
+        newline_name=$'line\nbreak.txt'
+        for fixture in "space name.txt" "$newline_name" "-leading.txt" staged-add.txt; do
+            case "$fixture" in
+                "space name.txt") label=space-name ;;
+                "$newline_name") label=newline-name ;;
+                "-leading.txt") label=leading-name ;;
+                staged-add.txt) label=staged-add ;;
+            esac
+            if [ -r "$repo/$fixture" ]; then
+                cat "$repo/$fixture" >"$state/source-$label"
+            else
+                printf 'missing\n' >"$state/source-$label"
+            fi
+        done
+        if [ -L "$repo/dangling-link" ]; then
+            readlink "$repo/dangling-link" >"$state/source-dangling-link"
+        else
+            printf 'missing\n' >"$state/source-dangling-link"
+        fi
+        for entry in deleted.txt untracked.txt target/ignored.bin .git; do
+            label="${entry//\//-}"
+            if [ -e "$repo/$entry" ] || [ -L "$repo/$entry" ]; then
+                printf 'present\n' >"$state/source-$label"
+            else
+                printf 'absent\n' >"$state/source-$label"
+            fi
+        done
         : >"$state/started"
         if [ "${STUB_SLEEP:-0}" = 1 ]; then
             trap 'exit 143' TERM
@@ -248,20 +294,56 @@ chmod +x "$BIN/sdme" "$BIN/apt-get" "$BIN/install" "$BIN/systemd-tmpfiles" \
     "$BIN/nix" "$BIN/make" "$BIN/chown" \
     "$TEST_REPO/scripts/smoke-nix-package.sh"
 
+git init -q "$TEST_REPO"
+printf '/target/\n' >"$TEST_REPO/.gitignore"
+printf '{}\n' >"$TEST_REPO/flake.nix"
+printf 'indexed\n' >"$TEST_REPO/tracked.txt"
+printf 'deleted\n' >"$TEST_REPO/deleted.txt"
+printf 'space\n' >"$TEST_REPO/space name.txt"
+newline_name=$'line\nbreak.txt'
+printf 'newline\n' >"$TEST_REPO/$newline_name"
+printf 'leading\n' >"$TEST_REPO/-leading.txt"
+ln -s missing-target "$TEST_REPO/dangling-link"
+git -C "$TEST_REPO" add -- .
+git -C "$TEST_REPO" -c user.name=contract \
+    -c user.email=contract@example.invalid commit -qm baseline
+printf 'working-tree\n' >"$TEST_REPO/tracked.txt"
+git -C "$TEST_REPO" rm -q -- deleted.txt
+printf 'staged-add\n' >"$TEST_REPO/staged-add.txt"
+git -C "$TEST_REPO" add -- staged-add.txt
+printf 'untracked\n' >"$TEST_REPO/untracked.txt"
+mkdir -p "$TEST_REPO/target"
+printf 'ignored\n' >"$TEST_REPO/target/ignored.bin"
+
 export STUB_BIN="$BIN"
 
 run_driver all
 assert_status 0 "$RUN_STATUS" "the default all-package check succeeds"
 assert_grep '^-r$' "$STATE/run/new-args" "sdme new uses explicit -r"
 assert_grep '^ubuntu$' "$STATE/run/rootfs" "the default imported rootfs is selected"
-assert_grep "^$TEST_REPO:/src:ro$" "$STATE/run/binds" "the repository bind is read-only"
+case "$RUN_SOURCE" in
+    /var/tmp/chan-nix-source.*) ;;
+    *) fail "the source snapshot is not an isolated /var/tmp directory: $RUN_SOURCE" ;;
+esac
+assert_grep "^$RUN_SOURCE:/src:ro$" "$STATE/run/binds" "the tracked source snapshot bind is read-only"
 assert_grep "^$TEST_OUT:/out$" "$STATE/run/binds" "the output bind is writable at /out"
 if [ "$(wc -l <"$STATE/run/binds")" -ne 2 ]; then
-    fail "the repository and sole output are the only host binds"
+    fail "the tracked source snapshot and sole output are the only host binds"
 fi
 assert_not_grep '^/:' "$STATE/run/binds" "host root is never bound"
 assert_not_grep "^$HOME:" "$STATE/run/binds" "host home is never bound"
-assert_grep "^nix-check NIX=nix NIX_FLAKE=$TEST_FLAKE$" "$STATE/run/make" "all delegates to make nix-check with the mounted path flake"
+assert_grep '^snapshot$' "$STATE/run/source-kind" "the worktree itself is not bound into the guest"
+assert_grep '^working-tree$' "$STATE/run/source-tracked" "modified tracked content reaches the source snapshot"
+assert_grep '^space$' "$STATE/run/source-space-name" "a tracked filename containing spaces reaches the source snapshot"
+assert_grep '^newline$' "$STATE/run/source-newline-name" "a tracked filename containing a newline reaches the source snapshot"
+assert_grep '^leading$' "$STATE/run/source-leading-name" "a tracked filename beginning with a dash reaches the source snapshot"
+assert_grep '^staged-add$' "$STATE/run/source-staged-add" "a staged addition reaches the source snapshot"
+assert_grep '^missing-target$' "$STATE/run/source-dangling-link" "a tracked dangling symlink reaches the source snapshot"
+assert_grep '^absent$' "$STATE/run/source-deleted.txt" "a staged deletion stays absent"
+assert_grep '^absent$' "$STATE/run/source-untracked.txt" "an untracked file is excluded"
+assert_grep '^absent$' "$STATE/run/source-target-ignored.bin" "an ignored build artifact is excluded"
+assert_grep '^absent$' "$STATE/run/source-.git" "Git metadata is excluded"
+assert_grep "^nix-check NIX=nix NIX_FLAKE=path:$RUN_SOURCE$" "$STATE/run/make" "all delegates to make nix-check with the mounted path flake"
 assert_grep '^all$' "$STATE/run/package" "all reaches the guest command"
 assert_grep '^-d -m 1777 /var/tmp[|]TMPDIR=/var/tmp$' "$STATE/run/install" "guest temporary state is prepared under /var/tmp"
 assert_grep '^install -y --no-install-recommends ca-certificates curl git make nix-bin nix-setup-systemd python3$' "$STATE/run/apt" "the declared Nix and smoke prerequisites are requested"
@@ -277,15 +359,15 @@ assert_grep '^chan-nix-check-[0-9]+$' "$STATE/run/removed" "the PID-scoped conta
 
 run_driver chan
 assert_status 0 "$RUN_STATUS" "the chan-only check succeeds"
-assert_grep "^flake check --all-systems --no-build $TEST_FLAKE$" "$STATE/run/nix" "chan evaluates the mounted checkout as a path flake"
-assert_grep "^build --no-link --print-out-paths $TEST_FLAKE#chan$" "$STATE/run/nix" "chan builds exactly its path-flake output"
+assert_grep "^flake check --all-systems --no-build path:$RUN_SOURCE$" "$STATE/run/nix" "chan evaluates the tracked snapshot as a path flake"
+assert_grep "^build --no-link --print-out-paths path:$RUN_SOURCE#chan$" "$STATE/run/nix" "chan builds exactly its path-flake output"
 assert_grep '^/nix/store/stub-chan chan$' "$STATE/run/smoke" "chan validates and smokes its output"
 assert_grep '^TMPDIR=/var/tmp NIX_REMOTE=local$' "$STATE/run/smoke-env" "the package smoke stays off /tmp"
 assert_not_grep 'chan-desktop' "$STATE/run/nix" "chan does not force chan-desktop"
 
 run_driver chan-desktop
 assert_status 0 "$RUN_STATUS" "the chan-desktop-only check succeeds"
-assert_grep "^build --no-link --print-out-paths $TEST_FLAKE#chan-desktop$" "$STATE/run/nix" "chan-desktop builds exactly its path-flake output"
+assert_grep "^build --no-link --print-out-paths path:$RUN_SOURCE#chan-desktop$" "$STATE/run/nix" "chan-desktop builds exactly its path-flake output"
 assert_grep '^/nix/store/stub-chan-desktop chan-desktop$' "$STATE/run/smoke" "chan-desktop validates and smokes its output"
 
 run_driver invalid
@@ -408,7 +490,8 @@ rm -rf "$STATE/run" "$TEST_OUT"
 mkdir -p "$STATE/run"
 set +e
 setsid env PATH="$BIN:/usr/bin:/bin" SDME="$BIN/sdme" STUB_BIN="$BIN" \
-    STUB_STATE="$STATE/run" STUB_SLEEP=1 NIX_PACKAGE=all OUT="$TEST_OUT" \
+    STUB_STATE="$STATE/run" STUB_TEST_REPO="$TEST_REPO" STUB_SLEEP=1 \
+    NIX_PACKAGE=all OUT="$TEST_OUT" \
     "$TEST_REPO/packaging/nix/build-with-sdme.sh" \
     >"$STATE/run/driver.log" 2>&1 &
 signal_pid=$!
@@ -427,6 +510,10 @@ signal_status=$?
 set -e
 assert_status 143 "$signal_status" "SIGTERM propagates as status 143"
 assert_grep '^chan-nix-check-[0-9]+$' "$STATE/run/removed" "the container is removed after SIGTERM"
+signal_source="$(<"$STATE/run/source")"
+if [ -e "$signal_source" ]; then
+    fail "the tracked source snapshot survives SIGTERM: $signal_source"
+fi
 
 assert_not_grep 'cachix[[:space:]]+(push|pin)|git[[:space:]]+(push|tag)|gh[[:space:]]+release|publish-downstream' "$DRIVER" "the driver contains no publication command"
 assert_not_grep 'nixos/nix|oci-mode|curl[[:space:]].*sh' "$DRIVER" "the driver has no OCI-app or curl-installer fallback"

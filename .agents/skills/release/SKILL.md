@@ -65,7 +65,7 @@ GA only (not rc pins), the distro source packages -- both publish after the tag 
 
 ### Nix hashes on a host without Nix (sdme)
 
-Use the tracked supplementary Ubuntu sdme workflow. It keeps the checkout read-only, returns only the log and status to the host, and discards the guest's installed packages, Nix store, and closures:
+Use the tracked supplementary Ubuntu sdme workflow. It mounts a snapshot of the indexed working-tree files read-only, returns only the log and status to the host, and discards the source snapshot, guest packages, Nix store, and closures:
 
 ```sh
 sudo sdme fs import docker.io/ubuntu:26.04 --name ubuntu --install-packages=yes -v

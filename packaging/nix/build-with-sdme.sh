@@ -14,6 +14,8 @@ HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
 CONTAINER="chan-nix-check-$$"
 STATUS_NAME="status"
+SOURCE_SNAPSHOT=
+CONTAINER_STARTED=0
 
 # Selection is deliberately validated before the first sdme invocation.
 case "$NIX_PACKAGE" in
@@ -78,15 +80,37 @@ STATUS_FILE="$OUT/$STATUS_NAME"
 rm -f "$LOG_FILE" "$STATUS_FILE"
 
 cleanup() {
-    local status="$?" cleanup_output cleanup_status
+    local status="$?" cleanup_output step_status cleanup_status=0
     trap - EXIT INT TERM
-    if cleanup_output="$("${SDME_CMD[@]}" rm -f "$CONTAINER" 2>&1)"; then
-        exit "$status"
-    else
-        cleanup_status=$?
+    if [ "$CONTAINER_STARTED" -eq 1 ]; then
+        if cleanup_output="$("${SDME_CMD[@]}" rm -f "$CONTAINER" 2>&1)"; then
+            :
+        else
+            step_status=$?
+            echo "error: could not remove sdme container '$CONTAINER' (status $step_status)" >&2
+            [ -z "$cleanup_output" ] || printf '%s\n' "$cleanup_output" >&2
+            cleanup_status="$step_status"
+        fi
     fi
-    echo "error: could not remove sdme container '$CONTAINER' (status $cleanup_status)" >&2
-    [ -z "$cleanup_output" ] || printf '%s\n' "$cleanup_output" >&2
+    if [ -n "$SOURCE_SNAPSHOT" ]; then
+        case "$SOURCE_SNAPSHOT" in
+            /var/tmp/chan-nix-source.*) ;;
+            *)
+                echo "error: refusing to remove unexpected source snapshot '$SOURCE_SNAPSHOT'" >&2
+                [ "$cleanup_status" -ne 0 ] || cleanup_status=1
+                SOURCE_SNAPSHOT=
+                ;;
+        esac
+    fi
+    if [ -n "$SOURCE_SNAPSHOT" ]; then
+        if rm -rf -- "$SOURCE_SNAPSHOT"; then
+            SOURCE_SNAPSHOT=
+        else
+            step_status=$?
+            echo "error: could not remove source snapshot '$SOURCE_SNAPSHOT' (status $step_status)" >&2
+            [ "$cleanup_status" -ne 0 ] || cleanup_status="$step_status"
+        fi
+    fi
     if [ "$status" -ne 0 ]; then
         exit "$status"
     fi
@@ -95,6 +119,34 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+if ! git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "error: Nix sdme source must be a Git working tree" >&2
+    exit 1
+fi
+if git -C "$REPO" ls-files --stage |
+    awk '$1 == "160000" { found = 1 } END { exit !found }'; then
+    echo "error: Nix sdme source snapshots do not support submodules" >&2
+    exit 1
+fi
+
+SOURCE_SNAPSHOT="$(mktemp -d /var/tmp/chan-nix-source.XXXXXX)"
+SOURCE_SNAPSHOT="$(cd "$SOURCE_SNAPSHOT" && pwd -P)"
+if [[ "$OUT" == "$SOURCE_SNAPSHOT" || "$OUT" == "$SOURCE_SNAPSHOT/"* || "$SOURCE_SNAPSHOT" == "$OUT/"* ]]; then
+    echo "error: source snapshot and output directory must not overlap ($SOURCE_SNAPSHOT, $OUT)" >&2
+    exit 1
+fi
+(
+    cd "$REPO"
+    git ls-files -z --cached |
+    while IFS= read -r -d '' path; do
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            printf '%s\0' "$path"
+        fi
+    done |
+    tar -c --null --verbatim-files-from --no-recursion \
+        -T - -f -
+) | tar -x -C "$SOURCE_SNAPSHOT" -f -
 
 GUEST_RUN='set -uo pipefail
 run_check() {
@@ -142,9 +194,10 @@ chown "$HOST_UID:$HOST_GID" /out/status /out/build.log 2>/dev/null || true
 exit 0'
 
 echo ">> Nix sdme check: package=$NIX_PACKAGE rootfs=$NIX_SDME_ROOTFS out=$OUT" >&2
+CONTAINER_STARTED=1
 set +e
 "${SDME_CMD[@]}" new --name "$CONTAINER" -r "$NIX_SDME_ROOTFS" -t 180 \
-    -b "$REPO:/src:ro" -b "$OUT:/out" \
+    -b "$SOURCE_SNAPSHOT:/src:ro" -b "$OUT:/out" \
     -- /usr/bin/env HOST_UID="$HOST_UID" HOST_GID="$HOST_GID" \
     NIX_PACKAGE="$NIX_PACKAGE" /bin/bash -c "$GUEST_RUN" \
     2>&1 | tee "$LOG_FILE"
