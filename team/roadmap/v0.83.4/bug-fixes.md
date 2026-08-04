@@ -12,6 +12,11 @@ Contract: a failed draft create or content load leaves the bubble in a visible e
 
 Acceptance: vitest drives the component (or the extracted mount logic) through create-failure, load-failure, and retry-then-success, pinning the error surface and the recovery; no unhandled rejection is logged in any leg.
 
+Implementation evidence (2026-08-04):
+
+- `cd web/packages/workspace-app && npm test -- src/components/RichPrompt.mountGuard.test.ts src/components/richPromptPendingMachine.test.ts`: 2 test files passed, 5 tests passed.
+- `cd web/packages/workspace-app && npm run check`: `svelte-check` found 0 errors and 0 warnings.
+
 ## Ghostty: keyboard paste suppressed on every origin
 
 Root cause, read in code: the custom-key-handler wrapper for the Ghostty backend inverts the chan-level handler's return (`TerminalTab.svelte`, `(e) => !handleTerminalKeyEvent(e)`). For the paste chord the chan handler deliberately returns without preventing default (the design is to let the browser's native paste event through, pinned by the xterm chord test), but through the inversion Ghostty's `handleKeyDown` then calls `preventDefault()` before its own early-return, and the native paste event never fires. Keyboard paste (Cmd+V / Ctrl+Shift+V) is dead on the Ghostty backend on every origin, loopback included; the xterm backend is unaffected.
