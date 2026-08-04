@@ -26,6 +26,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [gateway-served-surface-failures](v0.83.4/gateway-served-surface-failures.md) | implemented and validated on `v0834-patch`; live gateway hand-smoke pending | deliver the csrf token to desktop gateway windows off the cookie jar, propagate session refreshes to open windows, and free IPC from the blocked custom protocol on HTTPS pages |
 | [desktop-window-outage-lifecycle](v0.83.4/desktop-window-outage-lifecycle.md) | implemented and validated on `v0834-patch`; live gateway hand-smoke pending | closes during a remote outage settle as closed, the connecting probe discriminates, and the close prompt cannot strand behind newer windows |
 | [bug-fixes](v0.83.4/bug-fixes.md) | implemented and validated on `v0834-patch` | guard the Rich Prompt's draft-create mount, and unsuppress keyboard paste on the Ghostty backend |
+| [terminal-reattach-replay-storm](v0.83.4/terminal-reattach-replay-storm.md) | registered, grounded, needs a spec | pin why reattach replays loop on v0.83.3 and stop the storm; the lane writes the spec when the mechanism is named |
 
 ### v0.84.0
 
