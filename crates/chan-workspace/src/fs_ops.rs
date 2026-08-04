@@ -2886,16 +2886,17 @@ mod tests {
         let reader = workspace
             .read_bytes_bounded_slice("slice-disconnect.bin", 1, size as u64)
             .unwrap();
+        let tracked = root.path().join("slice-disconnect.bin");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while active_bounded_file_readers() == 0 && std::time::Instant::now() < deadline {
+        while active_bounded_file_readers(&tracked) == 0 && std::time::Instant::now() < deadline {
             std::thread::yield_now();
         }
-        assert_eq!(active_bounded_file_readers(), 1);
+        assert_eq!(active_bounded_file_readers(&tracked), 1);
 
         drop(reader);
 
         assert_eq!(
-            active_bounded_file_readers(),
+            active_bounded_file_readers(&tracked),
             0,
             "BoundedFileReader::drop must close the queue and join its producer"
         );
@@ -2911,16 +2912,17 @@ mod tests {
         std::fs::write(root.path().join("disconnect.bin"), vec![0x5a; size]).unwrap();
 
         let reader = workspace.read_bytes_bounded("disconnect.bin").unwrap();
+        let tracked = root.path().join("disconnect.bin");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while active_bounded_file_readers() == 0 && std::time::Instant::now() < deadline {
+        while active_bounded_file_readers(&tracked) == 0 && std::time::Instant::now() < deadline {
             std::thread::yield_now();
         }
-        assert_eq!(active_bounded_file_readers(), 1);
+        assert_eq!(active_bounded_file_readers(&tracked), 1);
 
         drop(reader);
 
         assert_eq!(
-            active_bounded_file_readers(),
+            active_bounded_file_readers(&tracked),
             0,
             "BoundedFileReader::drop must close the queue and join its producer"
         );

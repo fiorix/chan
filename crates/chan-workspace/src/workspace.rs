@@ -206,22 +206,50 @@ impl Drop for BoundedFileReader {
 }
 
 #[cfg(test)]
-static ACTIVE_BOUNDED_FILE_READERS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static ACTIVE_BOUNDED_FILE_READERS: std::sync::Mutex<Vec<(u64, std::path::PathBuf)>> =
+    std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
-struct ActiveBoundedFileReaderGuard;
+static NEXT_BOUNDED_FILE_READER_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(test)]
-impl Drop for ActiveBoundedFileReaderGuard {
-    fn drop(&mut self) {
-        ACTIVE_BOUNDED_FILE_READERS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+struct ActiveBoundedFileReaderGuard(u64);
+
+#[cfg(test)]
+impl ActiveBoundedFileReaderGuard {
+    fn track(path: &std::path::Path) -> Self {
+        let id = NEXT_BOUNDED_FILE_READER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        ACTIVE_BOUNDED_FILE_READERS
+            .lock()
+            .unwrap()
+            .push((id, path.to_path_buf()));
+        Self(id)
     }
 }
 
 #[cfg(test)]
-pub(crate) fn active_bounded_file_readers() -> usize {
-    ACTIVE_BOUNDED_FILE_READERS.load(std::sync::atomic::Ordering::Acquire)
+impl Drop for ActiveBoundedFileReaderGuard {
+    fn drop(&mut self) {
+        ACTIVE_BOUNDED_FILE_READERS
+            .lock()
+            .unwrap()
+            .retain(|(id, _)| *id != self.0);
+    }
+}
+
+// Tests ask for their own file's producers, never a process-global
+// count: the binary runs tests in parallel and every bounded reader
+// feeds one entry, so a global count reads a neighbor test's live
+// producer as ours.
+#[cfg(test)]
+pub(crate) fn active_bounded_file_readers(path: &std::path::Path) -> usize {
+    ACTIVE_BOUNDED_FILE_READERS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, active)| active == path)
+        .count()
 }
 
 /// Ordered events produced by `Workspace::read_text_with_stat_chunked`.
@@ -1543,13 +1571,13 @@ impl Workspace {
         let slice = (start, len);
         let (sender, receiver) =
             std::sync::mpsc::sync_channel::<Result<Vec<u8>>>(BINARY_STREAM_QUEUE_DEPTH);
+        #[cfg(test)]
+        let track_path = self.root().join(rel);
         let worker = std::thread::Builder::new()
             .name("chan-byte-reader".to_string())
             .spawn(move || {
                 #[cfg(test)]
-                ACTIVE_BOUNDED_FILE_READERS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                #[cfg(test)]
-                let _active_guard = ActiveBoundedFileReaderGuard;
+                let _active_guard = ActiveBoundedFileReaderGuard::track(&track_path);
 
                 if let Err(error) = file.seek(SeekFrom::Start(start)) {
                     let _ = sender.send(Err(ChanError::Io(error.to_string())));
