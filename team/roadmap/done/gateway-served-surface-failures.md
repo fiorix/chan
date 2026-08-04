@@ -1,6 +1,6 @@
 # Gateway-served surface failures
 
-Status: REGISTERED for v0.83.4, grounded 2026-08-04, specified 2026-08-04. Retargeted from v0.84.0: the grounding run closed the question the v0.84.0 registration left open, and the fix is patch-sized.
+Status: SHIPPED in [v0.83.4](../../release/release-v0.83.4.md). Desktop gateway windows read the CSRF token from an origin-scoped Tauri command instead of the cookie WebKit never exposes to JavaScript, and every session re-mint publishes fresh cookies into the open windows. The owner smoked the Computers scope and `cs paste` live; the IPC-over-HTTPS leg rests on a static Tauri source audit and is carried as a follow-up.
 
 ## What
 
@@ -79,7 +79,7 @@ Live regression follow-up on 2026-08-04:
 - `cargo clippy -p chan-desktop --all-targets -- -D warnings`: passed.
 - `cargo fmt --check`: passed.
 
-Owner live gateway hand-smoke: requested from the acting lead on 2026-08-04; result pending.
+Owner live gateway hand-smoke, 2026-08-04, partial: the launcher's Computers scope opens and `cs paste` completes, which are the two loudest CSRF-403 symptoms this item names. Not run: right-click Paste in the terminal and the editor, `cs paste` of an image (the one probe that would exercise the blocked `ipc://localhost` fallback directly), a Rich Prompt edit and submit, a file save, and a window mutation past a session refresh. The IPC-over-HTTPS contract therefore ships on a static Tauri source audit alone; see the follow-ups in the release report.
 
 ## Boundaries
 

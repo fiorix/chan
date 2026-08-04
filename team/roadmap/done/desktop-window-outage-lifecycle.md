@@ -1,6 +1,6 @@
 # Desktop window lifecycle across a remote outage
 
-Status: REGISTERED for v0.83.4, grounded 2026-08-04, specified 2026-08-04.
+Status: SHIPPED in [v0.83.4](../../release/release-v0.83.4.md). A close during a remote outage settles as closed instead of boomeranging, the connecting probe classifies responses instead of accepting any status, and the close prompt raises its own window instead of stranding behind newer ones. Proven mechanically by unit and component coverage; the owner's live check was a quick pass on the fixed build, not the full remote-reboot matrix this item's acceptance describes.
 
 ## What
 
@@ -57,4 +57,4 @@ All three mechanisms were read in code on the v0.83.3 lineage; the first two are
 - `cd web/packages/workspace-app && npx vitest run src/state/closeConfirm.test.ts src/components/closeConfirmOverlay.test.ts src/components/closeConfirmConnection.test.ts`: 3 files and 12 tests passed.
 - `cd web && npm run check`: all workspace checks passed; the Svelte workspaces reported 0 errors and 0 warnings.
 - Residual: pending deletes are process-local. Restarting the desktop before the remote DELETE settles can allow the authoritative window record to return on the next process start, as bounded by this item.
-- The worker terminal had no live gateway reboot environment. The owner hand-smoke remains required before acceptance.
+- The worker terminal had no live gateway reboot environment, so every clause above is proven by unit and component coverage rather than a live outage. The owner reported a quick pass on the fixed build at release time and accepted the item on that basis; the full reboot matrix in the acceptance list was not re-run, and is carried as a follow-up in the release report.

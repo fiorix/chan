@@ -1,6 +1,6 @@
 # Terminal reattach replay storm
 
-Status: IMPLEMENTED for v0.83.4, grounded and fixed 2026-08-04; owner hand-smoke pending.
+Status: SHIPPED in [v0.83.4](../../release/release-v0.83.4.md). The apparent replay storm was one full-ring replay paying a per-chunk masker capture and scan; replay-window writes are now batched behind one whole-buffer scan after the drain, taking a 2.1 MiB reattach from over 180 s to 2.8 s. Owner-confirmed live.
 
 ## What
 
@@ -65,4 +65,4 @@ The deterministic headless probe retained the same approximately 2.096 MiB ring 
 
 Chunk counts vary with PTY read boundaries, while retained bytes remained 2.095-2.097 MiB. Source-path profiling identifies the catastrophic multiplier as one `captureWrite`/`scanWrite` pair per chunk, including whole-buffer fallback when queued-write markers are disposed. With that multiplier removed, a sampled masking-on run concentrates its remaining work in the intended single scan: `#scanGroup` used about 1.45 s self time and xterm marker/decorations about 0.19 s on the secret-dense corpus.
 
-`ReplayMaskScanBatch` now joins server `ready` with xterm write-drain completion and invokes one `scanAll`. `TerminalTab.svelte` leaves the WebSocket frames, replay bytes, `PtyWriteTracker` origin ordering, snapshot/generation rules, and live-write mask path unchanged. Focused verification: 24 terminal/secret-mask/xterm/Ghostty Vitest files passed (202 tests), and the full web `npm run check` passed with 0 Svelte errors or warnings.
+`ReplayMaskScanBatch` now joins server `ready` with xterm write-drain completion and invokes one `scanAll`. `TerminalTab.svelte` leaves the WebSocket frames, replay bytes, `PtyWriteTracker` origin ordering, snapshot/generation rules, and live-write mask path unchanged. The regression pin is `web/packages/workspace-app/src/terminal/replayMasking.test.ts`, whose six cases cover the contract clause for clause: live writes stay on the per-write scan path, replay writes skip per-write scans and take one `scanAll` after ready drains, an attach with no replay writes still scans once, live writes stay byte-identical while a replay drains, a new attach supersedes an abandoned replay's callbacks, and the `TerminalTab.svelte` wiring is source-pinned. Focused verification: 24 terminal/secret-mask/xterm/Ghostty Vitest files passed (202 tests), and the full web `npm run check` passed with 0 Svelte errors or warnings.

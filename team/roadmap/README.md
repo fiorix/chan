@@ -19,15 +19,6 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-### v0.83.4
-
-| item | state | what needs to happen |
-| --- | --- | --- |
-| [gateway-served-surface-failures](v0.83.4/gateway-served-surface-failures.md) | implemented and validated on `v0834-patch`; live gateway hand-smoke pending | deliver the csrf token to desktop gateway windows off the cookie jar, propagate session refreshes to open windows, and free IPC from the blocked custom protocol on HTTPS pages |
-| [desktop-window-outage-lifecycle](v0.83.4/desktop-window-outage-lifecycle.md) | implemented and validated on `v0834-patch`; live gateway hand-smoke pending | closes during a remote outage settle as closed, the connecting probe discriminates, and the close prompt cannot strand behind newer windows |
-| [bug-fixes](v0.83.4/bug-fixes.md) | implemented and validated on `v0834-patch` | guard the Rich Prompt's draft-create mount, and unsuppress keyboard paste on the Ghostty backend |
-| [terminal-reattach-replay-storm](v0.83.4/terminal-reattach-replay-storm.md) | registered, grounded, needs a spec | pin why reattach replays loop on v0.83.3 and stop the storm; the lane writes the spec when the mechanism is named |
-
 ### v0.84.0
 
 | item | state | what needs to happen |
@@ -49,6 +40,15 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [chan-config-key-coverage](v0.84.0/chan-config-key-coverage.md) | registered, grounded, needs a spec | derive `chan config get`/`set` from the same key set the dump prints, so the 19 keys it prints but rejects become settable |
 
 ## Completed
+
+### v0.83.4
+
+Shipped 2026-08-04; see [release-v0.83.4](../release/release-v0.83.4.md). Closed items in [`done/`](done/):
+
+- [gateway-served-surface-failures](done/gateway-served-surface-failures.md) - desktop windows served through the gateway read the CSRF token from an origin-scoped Tauri command instead of a cookie WebKit never exposes to JavaScript, and session re-mints publish fresh cookies into open windows, so every mutating surface works again.
+- [desktop-window-outage-lifecycle](done/desktop-window-outage-lifecycle.md) - a close during a remote outage settles as closed instead of boomeranging, the connecting probe classifies responses instead of accepting any status, and the close prompt raises its own window instead of stranding behind newer ones.
+- [terminal-reattach-replay-storm](done/terminal-reattach-replay-storm.md) - the reattach replay was one full-ring stream paying a per-chunk masker scan; replay writes now batch behind a single whole-buffer scan, taking a 2.1 MiB reattach from over 180 s to 2.8 s.
+- [v0.83.4-bug-fixes](done/v0.83.4-bug-fixes.md) - the Rich Prompt recovers from a failed draft create with a visible error and retry, and keyboard paste is no longer suppressed on the Ghostty backend.
 
 ### v0.83.3
 
