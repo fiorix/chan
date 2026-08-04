@@ -14,8 +14,12 @@
   // off desktop and the host only evals confirmClose in chan-desktop, so a plain
   // browser never opens this overlay.
 
-  import { closeConfirmState, resolveCloseConfirm } from "../state/closeConfirm.svelte";
-  import { discardWindowSession } from "../state/store.svelte";
+  import {
+    cancelCloseConfirmForConnectionChange,
+    closeConfirmState,
+    resolveCloseConfirm,
+  } from "../state/closeConfirm.svelte";
+  import { discardWindowSession, ui } from "../state/store.svelte";
   import {
     isTauriDesktop,
     requestCloseWindow,
@@ -28,6 +32,20 @@
   let closeBtn: HTMLButtonElement | null = $state(null);
 
   const open = $derived(closeConfirmState.open);
+
+  // A connection transition invalidates the native close request that opened
+  // this prompt. Cancel immediately on both drop and recovery, before another
+  // native window can leave this decision occluded. A prompt opened after the
+  // socket is already down is cancelled by the second condition as well.
+  let previousWs = ui.ws;
+  $effect(() => {
+    const ws = ui.ws;
+    const connectionChanged = ws !== previousWs;
+    previousWs = ws;
+    if (connectionChanged || (open && ws !== "open")) {
+      cancelCloseConfirmForConnectionChange();
+    }
+  });
 
   // Hide: bury the window (sessions stay warm, reopenable from the Window menu).
   function hide(): void {
