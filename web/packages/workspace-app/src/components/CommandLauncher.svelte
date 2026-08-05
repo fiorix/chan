@@ -48,7 +48,7 @@
     type CommandSurface,
   } from "../state/commands";
   import { chordFor } from "../state/shortcuts";
-  import { blockedWindowMessage } from "../api/desktop";
+  import { blockedWindowMessage, isTauriDesktop } from "../api/desktop";
   import { sessionWindowId } from "../api/client";
   import { ApiError } from "../api/errors";
   import {
@@ -294,6 +294,23 @@
   }
 
   async function focusScopedWindow(window: ScopedLibraryWindow): Promise<void> {
+    // chan-desktop has no popups: `window.open` returns null in every chan
+    // webview, so the browser's open-and-navigate dance cannot run here. A
+    // devserver window record already has its native window, opened and
+    // labelled by the desktop's window watcher, so un-burying is the only
+    // action this surface owns. Raising an already-visible native window needs
+    // a surface neither the scoped library nor the desktop exposes yet.
+    if (isTauriDesktop()) {
+      if (window.hidden && window.can_act) {
+        await runScopedLibraryAction({
+          action: "set_window_visibility",
+          window_id: window.window_id,
+          hidden: false,
+        });
+      }
+      await refreshScopedLibrary();
+      return;
+    }
     const popup = popupFor(window);
     if (window.hidden && window.can_act) {
       await runScopedLibraryAction({
@@ -314,6 +331,18 @@
       | { action: "new_terminal" }
       | { action: "new_workspace_window"; workspace_id: string },
   ): Promise<void> {
+    // chan-desktop opens the native window itself: the action creates the
+    // devserver window record, and the window watcher reconciles it into a
+    // native window carrying the `<library_id>::<window_id>` label the runtime
+    // capability is scoped to. Opening a popup here cannot participate in that
+    // -- the label is not knowable until the record exists -- and `window.open`
+    // returns null in chan webviews regardless.
+    if (isTauriDesktop()) {
+      const result = await runScopedLibraryAction(action);
+      if (!result?.window) throw new Error("Chan did not return the new window");
+      await refreshScopedLibrary();
+      return;
+    }
     // Must happen before the first await so keyboard activation retains the
     // browser's popup grant.
     const popup = globalThis.window.open("", "_blank");

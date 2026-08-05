@@ -1,7 +1,8 @@
 # chan-desktop cannot open a library window: the flow depends on `window.open`
 
 Status: REGISTERED for v0.84.1, filed 2026-08-05, grounded 2026-08-05 by live owner testing,
-accepted, not yet specced. This item was originally filed as a gateway CSRF/IPC-grant failure
+implemented for window creation, owner validation pending. Raising an already-visible native window
+is NOT fixed and needs a surface that does not exist yet (see Open). This item was originally filed as a gateway CSRF/IPC-grant failure
 triggered by a gateway outage; live testing disproved that framing entirely, and the disproof is
 recorded under Ruled out so it is not re-litigated.
 
@@ -63,6 +64,26 @@ Supporting facts:
   delivery that round fixed — not window creation from it. That is how the round passed with this
   path broken.
 
+Why it returns null is settled, and it is an omission rather than a platform limit. wry 0.55.1
+implements the macOS UI delegate `webView:createWebViewWithConfiguration:forNavigationAction:windowFeatures:`
+(`wry-0.55.1/src/wkwebview/class/wry_web_view_ui_delegate.rs:140`), but its whole body is gated on
+`new_window_req_handler` being set; unset, it returns nil. tauri-runtime-wry only sets that handler
+`if let Some(new_window_handler) = pending.new_window_handler`
+(`tauri-runtime-wry-2.11.2/src/lib.rs:4908-4910`), whose public knob is
+`WebviewWindowBuilder::on_new_window` (`tauri-2.11.2/src/webview/webview_window.rs:315`).
+chan-desktop never calls it: zero hits across `desktop/src-tauri/src/`, and every builder site
+(`serve.rs:1048`, `main.rs:5144`, `main.rs:6479`) omits it.
+
+Enabling that handler was evaluated and rejected. Both `NewWindowResponse::Allow` and
+`Create { window }` produce a SECOND window: `native_label(record)` is
+`format!("{}::{}", record.library_id, record.window_id)` (`window_watcher.rs:46-48`), the SPA opens
+its popup before the record exists (`CommandLauncher.svelte`, popup at the top of
+`createScopedWindow`, record created by the action that follows), so no correct label is knowable at
+popup time — and `reconcile` opens the properly-labelled native window for every `should_show`
+record that is not already on screen (`window_watcher.rs:255-269`). On a gateway origin the popup
+window would also carry a label the minted `lib-*` capability does not match, reproducing the
+ungranted-window class v0.83.4 closed.
+
 The failure is chan-desktop-wide, not gateway-specific: a local window fails the same click path the
 same way. The reading is that this has never worked in chan-desktop. What would falsify it: any
 chan-desktop build in which the Computers scope opens a window, or in which
@@ -107,6 +128,9 @@ No user-facing message may attribute a chan-desktop failure to a browser popup b
 
 ## Implementation shape
 
+Implemented in `web/packages/workspace-app/src/components/CommandLauncher.svelte`; the remaining
+item is the focus surface under Open.
+
 - Branch the two call sites on `isTauriDesktop()`.
 - On desktop, skip the popup entirely: run the scoped action and let the existing window watcher
   reconcile the new record into a native window (`desktop/src-tauri/src/window_watcher.rs`, the
@@ -136,12 +160,15 @@ satisfied by the postMessage fallback.
 
 ## Open
 
-- Why `window.open` returns null in chan-desktop at all — whether wry/Tauri simply does not
-  implement the WKWebView `createWebViewWith` UI delegate, or it is configurable. If it is
-  configurable, enabling it is a smaller repair than re-routing the flow, and that should be
-  settled before the desktop branch is written.
-- What the native activation path for an existing window record should be — whether an existing
-  command already covers focus/show, or one is needed.
+- **Raising an already-visible native window has no surface.** The desktop branch un-buries a
+  hidden window (the watcher then opens it) but cannot bring a visible one to the front. The
+  launcher does this over HTTP with `POST /api/library/windows/{id}/open`
+  (`launcher/src/api/library.ts:597`), which `workspace-app` cannot reach: it talks only through
+  the capability-scoped path, whose action enum is `new_terminal`, `new_workspace_window`,
+  `set_window_visibility`, `close_window` (`libraryCommand.ts:56-60`). No registered Tauri command
+  focuses a window by label either. Closing this needs a new surface — a scoped `open_window`
+  action, or a native focus command with its permission wired into both `workspace-window` and the
+  minted gateway capability, following the `gateway_csrf_token` pattern.
 - Whether the launcher's capability model
   (`web/packages/launcher/src/state/capabilities.ts`, which already distinguishes client-side
   `window.open` management from a native bridge) should be shared with `workspace-app` rather than

@@ -16,6 +16,7 @@ vi.mock("../api/libraryCommand", () => ({
 
 import CommandLauncher from "./CommandLauncher.svelte";
 import deckRaw from "../../../web-shared/src/components/CommandDeck.svelte?raw";
+import launcherRaw from "./CommandLauncher.svelte?raw";
 import {
   clearLauncherDraft,
   launcherDraft,
@@ -387,5 +388,38 @@ describe("contextual command deck", () => {
     expect(deckRaw).toContain('filter id="chan-command-orb-blob"');
     expect(deckRaw).toMatch(/\.deck-shell \{[\s\S]{1,360}animation: deck-arrive/);
     expect(deckRaw).toMatch(/\.deck-scope \{[\s\S]{1,500}animation: orb-arrive/);
+  });
+});
+
+/// `window.open` returns null in every chan-desktop webview, so both library
+/// window paths must leave through the native branch before they ever reach a
+/// popup. Driving these through the mounted deck would mean walking the whole
+/// scope UI, so they are pinned at the source in the same style as the deck
+/// pins above and the Rust source pins in `main.rs`.
+describe("chan-desktop library window paths", () => {
+  test("createScopedWindow takes the native branch before opening a popup", () => {
+    const body = launcherRaw.split("async function createScopedWindow")[1];
+    expect(body).toBeDefined();
+    const guard = body.indexOf("isTauriDesktop()");
+    const popup = body.indexOf('globalThis.window.open("", "_blank")');
+    expect(guard).toBeGreaterThan(-1);
+    expect(popup).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(popup);
+  });
+
+  test("focusScopedWindow takes the native branch before popupFor", () => {
+    const body = launcherRaw.split("async function focusScopedWindow")[1];
+    expect(body).toBeDefined();
+    const guard = body.indexOf("isTauriDesktop()");
+    const popup = body.indexOf("popupFor(window)");
+    expect(guard).toBeGreaterThan(-1);
+    expect(popup).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(popup);
+  });
+
+  test("the browser path still opens and navigates a popup", () => {
+    const body = launcherRaw.split("async function createScopedWindow")[1];
+    expect(body).toContain('globalThis.window.open("", "_blank")');
+    expect(body).toContain("popup.location.href = result.window.launch_path");
   });
 });
