@@ -24,12 +24,12 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | item | state | what needs to happen |
 | --- | --- | --- |
 | [graph-large-workspace-render-cost](v0.84.1/graph-large-workspace-render-cost.md) | implemented, owner validation pending | confirm selection and drag behaviour in a real browser on a large workspace |
-| [desktop-library-window-open-unavailable](v0.84.1/desktop-library-window-open-unavailable.md) | grounded, not specced | give the command deck's library actions a native desktop path instead of `window.open` |
 
 ### v0.85.0
 
 | item | state | what needs to happen |
 | --- | --- | --- |
+| [desktop-library-window-open-unavailable](v0.85.0/desktop-library-window-open-unavailable.md) | deferred from v0.84.1, specced | add the capability-gated native commands so chan-desktop can open and focus library windows |
 | [web-marketing-onboarding](v0.85.0/web-marketing-onboarding.md) | accepted, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
 | [large-transfer-capability](v0.85.0/large-transfer-capability.md) | implementation in progress | finish the bulk-transfer lane, admission control, queue protocol, browser state, and acceptance evidence before raising the ceiling |
 | [ghostty-macos-trackpad-scroll-parity](v0.85.0/ghostty-macos-trackpad-scroll-parity.md) | implemented, owner validation pending | calibrate the accepted factor on macOS hardware and complete live client checks |

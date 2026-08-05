@@ -1,10 +1,14 @@
 # chan-desktop cannot open a library window: the flow depends on `window.open`
 
-Status: REGISTERED for v0.84.1, filed 2026-08-05, grounded 2026-08-05 by live owner testing,
-NOT implemented. An SPA-only desktop branch was written, tested live, and REVERTED: it creates
-window records the desktop is designed never to open (see Attempted and reverted). This item was originally filed as a gateway CSRF/IPC-grant failure
-triggered by a gateway outage; live testing disproved that framing entirely, and the disproof is
-recorded under Ruled out so it is not re-litigated.
+Status: REGISTERED for v0.85.0, DEFERRED from v0.84.1 on 2026-08-05, filed and grounded 2026-08-05
+by live owner testing, accepted, not implemented. It moves because the repair needs a new native
+command and its capability wiring, which is more than a patch release should carry: an SPA-only
+branch was written, tested live, and reverted (see Attempted and reverted). The v0.84.1 diagnostic
+work that came out of this investigation SHIPPED and stays in v0.84.1.
+
+This item was originally filed as a gateway CSRF/IPC-grant failure triggered by a gateway outage;
+live testing disproved that framing entirely, and the disproof is recorded under Ruled out so it is
+not re-litigated.
 
 Component: `workspace-app` SPA (`web/packages/workspace-app`) and `chan-desktop`
 (`desktop/src-tauri`). Observed on chan-desktop 0.84.0, devserver 0.84.0, gateway 0.84.0.
@@ -141,17 +145,28 @@ The cause is server-side and cannot be fixed from the SPA: the scoped library ac
 `:500-504`. The branch therefore produced orphan records, which is worse than the honest error it
 replaced.
 
-## Implementation shape
+## Implementation shape (accepted approach)
 
-- Branch the two call sites on `isTauriDesktop()`.
-- The desktop branch must obtain a NATIVE-origin window record. The SPA cannot: see Open for why
-  the obvious server-side rule is weaker than it looks.
-- For activating an existing record, replace `popup.focus()` with a native focus/show path rather
-  than a popup handle.
-- Rekey `blockedWindowMessage` (`web/packages/workspace-app/src/api/desktop.ts`) on
-  `isTauriDesktop()` alone. As shipped in `aee1ede4` it keys on a recorded `gateway_csrf_token`
-  refusal, which this investigation shows never occurs, so the corrected wording is currently dead
-  code.
+The desktop mints the record; the web route is not taught to mint native windows. This keeps "may
+cause a native window to open" inside the Tauri capability system that already scopes `lib-*`
+windows to one authenticated exact origin, rather than resting it on a client-supplied `window_id`
+that the HTTP mint authorizes only as a live window of the tenant.
+
+- New native commands in `desktop/src-tauri`, one family covering both gaps: create a library
+  window, and focus an existing one by its record id. The desktop already owns a native-origin mint
+  path (origin omitted => `WindowOrigin::Native`), which is what these use.
+- Permission wiring follows `gateway_csrf_token` exactly: an `allow-*` entry in
+  `desktop/src-tauri/permissions/app.toml`, added to the `workspace-window` set so local windows
+  hold it, AND to the minted capability's permission list in
+  `runtime_capability.rs::exact_origin_capability_json` so gateway `lib-*` windows hold it on their
+  exact origin. No scoped permissions and no deny entries -- the module doc's absolute rules.
+- Expect the full-gate parity table to need attention, in the style of the `read_dropped_paths` and
+  `gateway_csrf_token` `DELIBERATE_EXCLUSIONS` entries in `desktop/src-tauri/src/serve.rs`, if the
+  commands are deliberately class-scoped.
+- The invoke goes in `web/packages/workspace-app/src/api/desktop.ts`: the repository requires every
+  Tauri invoke to live in that audited bridge.
+- `CommandLauncher.svelte` then branches on `isTauriDesktop()` at both call sites, calling the
+  commands instead of `window.open`, and keeps the browser path untouched.
 
 ## Acceptance checks
 
@@ -171,8 +186,9 @@ satisfied by the postMessage fallback.
 
 ## Open
 
-- **How a desktop surface obtains a native-origin record, and who else could.** The obvious rule --
-  derive the minted origin from the acting window's origin -- is weaker than it sounds. The command
+- **Settled, kept here as the rationale for the accepted approach.** The alternative rule --
+  derive the minted origin from the acting window's origin, server-side -- was rejected as weaker
+  than it sounds. The command
   capability binds a client-supplied `window_id` (`library.rs:518-521`), and the mint handler
   authorizes it only as "a live window of this tenant"
   (`tenant_has_live_window` / `tenant_token_has_live_window`, `library.rs:735-753`), never as "the
@@ -183,12 +199,10 @@ satisfied by the postMessage fallback.
   cross-user escalation (tunnel guests are `Readonly` and refused at `:815`), but it moves "may
   cause a native window to open" from the desktop to any tenant-authenticated web surface, with UI
   spam as the cheap abuse and the opened window's native vocabulary as the expensive one.
-  The alternative that keeps the decision inside the existing trust boundary: have the desktop mint
-  it, through a capability-gated Tauri command, so the ACL that already scopes `lib-*` windows to an
-  exact origin governs this too -- the machinery v0.83.4 built. That command could carry the focus
-  case below as well.
-- **Raising an already-visible native window has no surface.** The desktop branch un-buries a
-  hidden window (the watcher then opens it) but cannot bring a visible one to the front. The
+  Hence Implementation shape above: the desktop mints, through a capability-gated command, so the
+  ACL that already scopes `lib-*` windows to an exact origin governs this too.
+- **Raising an already-visible native window has no surface today.** Un-burying a hidden window
+  works (the watcher then opens it), but nothing brings a visible one to the front. The
   launcher does this over HTTP with `POST /api/library/windows/{id}/open`
   (`launcher/src/api/library.ts:597`), which `workspace-app` cannot reach: it talks only through
   the capability-scoped path, whose action enum is `new_terminal`, `new_workspace_window`,
