@@ -48,7 +48,6 @@
     border-color: var(--btn-hover);
   }
   .pill.on {
-    border-color: var(--link);
     background: var(--hover-bg);
   }
 </style>
