@@ -14,7 +14,7 @@ The release artifact is a single static binary with the frontend bundle embedded
 2. [writing-rules.md](writing-rules.md) - documentation and comment style.
 3. [patterns.md](patterns.md) - contributor patterns for code changes.
 4. [playbook.md](playbook.md) - cross-phase operational lessons.
-5. [skills/](skills/) - executable workflows (test server, release, gate) plus vendored general skill profiles.
+5. [skills/](skills/) - executable workflows (test server, release, gate, archive-round) plus vendored general skill profiles.
 
 Subsystem guides: [desktop.md](desktop.md) (chan-desktop), [gateway.md](gateway.md) (the cloud gateway workspace).
 

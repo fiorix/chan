@@ -35,6 +35,7 @@ The phase-13 r2 Team Work revamp REMOVED the fsnotify event-watcher / poke-dispa
 - Verify a write landed BEFORE you poke about it: grep or Read the file, then poke. Never bundle a heredoc-write plus a poke plus a grep into one shell command; truncation silently drops the later steps. (phase 8)
 - Redistribute spillover from the queue TAIL, not the head: the lane is already working its next-up item. (phase 7)
 - Status reports are curated highlights / lowlights / contention, not full tabular dumps; the detail stays in the task files. (phase 7+)
+- **Moving a round's raw data to `../chan-dev` at close is a sanitization step, not a copy.** Rounds run in `dev/`, agents are routed by absolute path, so briefs, `config.toml`, tasks, and journals all name the worktree they ran in. Archived verbatim they become literal home paths in a repository meant to go public, and one sweep does not hold: the same regression reappeared across eight commits in four days and reached 58 files before it was caught. Rewrite paths and identity BEFORE the commit, because cleaning up afterwards leaves the original in the history and costs a rewrite and a force push. See [skills/archive-round/SKILL.md](skills/archive-round/SKILL.md). (v0.84.0)
 
 ## Git and commit discipline in a shared worktree
 
