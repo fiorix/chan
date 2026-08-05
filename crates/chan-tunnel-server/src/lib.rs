@@ -503,15 +503,20 @@ where
 }
 
 /// Yamux config with tighter caps than the upstream default. The
-/// upstream `Config::default` allows 8192 concurrent substreams per
+/// upstream `Config::default` allows 512 concurrent substreams per
 /// connection; that's a single tunnel's per-process budget, and a
 /// public visitor that opens many slow requests can fill it. 256
 /// is plenty for normal browser-shaped concurrency (a handful of
 /// pipelined requests + a WebSocket or two) and bounds the worst
-/// case to a manageable memory footprint.
+/// case to a manageable memory footprint. The 64 MiB connection
+/// receive window is the connection-wide budget yamux's per-stream
+/// auto-tuning may draw on; both peers advertise the same values.
 fn tunnel_yamux_config() -> YamuxConfig {
     let mut cfg = YamuxConfig::default();
-    cfg.set_max_num_streams(256);
+    cfg.set_max_num_streams(chan_tunnel_proto::TUNNEL_YAMUX_MAX_STREAMS)
+        .set_max_connection_receive_window(Some(
+            chan_tunnel_proto::TUNNEL_YAMUX_CONNECTION_RECEIVE_WINDOW,
+        ));
     cfg
 }
 
@@ -551,5 +556,45 @@ mod tests {
         assert!(debug.contains("REDACTED"));
         assert!(!debug.contains(lease));
         assert!(!debug.contains("assertion-key-sentinel"));
+    }
+
+    /// The terminator builds its yamux config from the shared proto
+    /// constants; reverting to a bare default or a local duplicate
+    /// value fails this test. `Config` exposes no getters, so the
+    /// check reads its Debug projection of the constructed value.
+    #[test]
+    fn yamux_config_applies_the_shared_transport_values() {
+        let debug = format!("{:?}", tunnel_yamux_config());
+        assert!(
+            debug.contains(&format!(
+                "max_num_streams: {}",
+                chan_tunnel_proto::TUNNEL_YAMUX_MAX_STREAMS
+            )),
+            "{debug}"
+        );
+        assert!(
+            debug.contains(&format!(
+                "max_connection_receive_window: Some({})",
+                chan_tunnel_proto::TUNNEL_YAMUX_CONNECTION_RECEIVE_WINDOW
+            )),
+            "{debug}"
+        );
+    }
+
+    /// The shared constants must keep the yamux constructor's own
+    /// assertion satisfied (connection window >= 256 KiB * streams) and
+    /// the h2 connection window above the stream window, so several
+    /// busy substreams cannot stall on the shared budget prematurely.
+    #[test]
+    fn transport_constants_hold_their_arithmetic_invariants() {
+        const YAMUX_DEFAULT_STREAM_CREDIT: usize = 256 * 1024;
+        assert!(
+            chan_tunnel_proto::TUNNEL_YAMUX_CONNECTION_RECEIVE_WINDOW
+                >= chan_tunnel_proto::TUNNEL_YAMUX_MAX_STREAMS * YAMUX_DEFAULT_STREAM_CREDIT
+        );
+        assert!(
+            chan_tunnel_proto::TUNNEL_H2_CONNECTION_WINDOW
+                > chan_tunnel_proto::TUNNEL_H2_STREAM_WINDOW
+        );
     }
 }

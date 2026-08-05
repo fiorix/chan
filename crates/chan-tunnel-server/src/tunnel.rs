@@ -36,6 +36,18 @@ struct LocalAdmission {
     max_workspaces_per_user: usize,
 }
 
+/// The h2 server builder with the shared tunnel flow-control windows.
+/// h2's default 64 KiB stream window throttles bulk transfer over any
+/// nontrivial RTT regardless of the yamux windows above it; both tunnel
+/// peers advertise the same windows so both directions are covered.
+fn tunnel_h2_server_builder() -> h2::server::Builder {
+    let mut builder = h2::server::Builder::new();
+    builder
+        .initial_window_size(chan_tunnel_proto::TUNNEL_H2_STREAM_WINDOW)
+        .initial_connection_window_size(chan_tunnel_proto::TUNNEL_H2_CONNECTION_WINDOW);
+    builder
+}
+
 #[async_trait::async_trait]
 impl RegistrationAdmission for LocalAdmission {
     async fn admit(
@@ -164,16 +176,20 @@ async fn handle_tunnel_conn(
     // on the next is bounded by the next stage's timer rather than
     // sitting indefinitely on `HELLO_READ_TIMEOUT` only (which kicks
     // in much later, after the 200).
-    let mut conn =
-        match tokio::time::timeout(H2_HANDSHAKE_TIMEOUT, h2::server::handshake(tcp)).await {
-            Ok(Ok(c)) => c,
-            Ok(Err(e)) => return Err(ServerError::Handshake(format!("h2 handshake: {e}"))),
-            Err(_) => {
-                return Err(ServerError::Handshake(format!(
-                    "h2 handshake timed out after {H2_HANDSHAKE_TIMEOUT:?}"
-                )))
-            }
-        };
+    let mut conn = match tokio::time::timeout(
+        H2_HANDSHAKE_TIMEOUT,
+        tunnel_h2_server_builder().handshake(tcp),
+    )
+    .await
+    {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => return Err(ServerError::Handshake(format!("h2 handshake: {e}"))),
+        Err(_) => {
+            return Err(ServerError::Handshake(format!(
+                "h2 handshake timed out after {H2_HANDSHAKE_TIMEOUT:?}"
+            )))
+        }
+    };
 
     let accepted = match tokio::time::timeout(FIRST_STREAM_TIMEOUT, conn.accept()).await {
         Ok(opt) => opt,
@@ -425,8 +441,97 @@ fn extract_bearer<B>(request: &http::Request<B>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_bearer;
+    use super::{extract_bearer, tunnel_h2_server_builder};
     use http::header::AUTHORIZATION;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    /// Read one h2 frame as (frame type, stream id, payload).
+    async fn read_h2_frame(stream: &mut TcpStream) -> (u8, u32, Vec<u8>) {
+        let mut header = [0u8; 9];
+        stream.read_exact(&mut header).await.expect("frame header");
+        let len = u32::from_be_bytes([0, header[0], header[1], header[2]]) as usize;
+        let stream_id =
+            u32::from_be_bytes([header[5], header[6], header[7], header[8]]) & 0x7fff_ffff;
+        let mut payload = vec![0u8; len];
+        stream
+            .read_exact(&mut payload)
+            .await
+            .expect("frame payload");
+        (header[3], stream_id, payload)
+    }
+
+    /// The listener advertises the shared tunnel windows on the wire:
+    /// the stream window in its first SETTINGS frame, and the
+    /// connection raise as a stream-0 WINDOW_UPDATE over the h2
+    /// default (65_535).
+    #[tokio::test]
+    async fn server_advertises_the_shared_h2_windows() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let serving = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut conn = tunnel_h2_server_builder()
+                .handshake::<_, bytes::Bytes>(tcp)
+                .await
+                .expect("server h2 handshake");
+            // Drive the connection so the queued SETTINGS/WINDOW_UPDATE
+            // frames flush; ends when the test drops the client.
+            while let Some(_next) = conn.accept().await {}
+        });
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+            .await
+            .unwrap();
+        // An empty client SETTINGS completes the peer's side of the exchange.
+        client
+            .write_all(&[0, 0, 0, 0x4, 0, 0, 0, 0, 0])
+            .await
+            .unwrap();
+
+        let mut initial_window = None;
+        let mut connection_increment = None;
+        for _ in 0..6 {
+            let (frame_type, stream_id, payload) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                read_h2_frame(&mut client),
+            )
+            .await
+            .expect("server frames must arrive promptly");
+            match frame_type {
+                0x4 => {
+                    assert_eq!(stream_id, 0);
+                    for pair in payload.chunks_exact(6) {
+                        let id = u16::from_be_bytes([pair[0], pair[1]]);
+                        let value = u32::from_be_bytes([pair[2], pair[3], pair[4], pair[5]]);
+                        if id == 0x4 {
+                            initial_window = Some(value);
+                        }
+                    }
+                }
+                0x8 => {
+                    assert_eq!(stream_id, 0);
+                    connection_increment =
+                        Some(u32::from_be_bytes(payload[..4].try_into().unwrap()) & 0x7fff_ffff);
+                }
+                _ => {}
+            }
+            if initial_window.is_some() && connection_increment.is_some() {
+                break;
+            }
+        }
+        assert_eq!(
+            initial_window,
+            Some(chan_tunnel_proto::TUNNEL_H2_STREAM_WINDOW)
+        );
+        assert_eq!(
+            connection_increment,
+            Some(chan_tunnel_proto::TUNNEL_H2_CONNECTION_WINDOW - 65_535)
+        );
+        drop(client);
+        let _ = serving.await;
+    }
 
     fn req_with_auth(value: &str) -> http::Request<()> {
         http::Request::builder()

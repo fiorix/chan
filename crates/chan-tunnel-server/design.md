@@ -125,7 +125,7 @@ sequenceDiagram
 `serve_tunnel_listener(listener, validator, registry, max_workspaces_per_user)`:
 
 1. `TcpListener::accept`. Try to acquire one permit from a per-listener `Semaphore::new(MAX_INFLIGHT_HANDSHAKES)` (1024). If the semaphore is empty, the TCP socket is dropped and the loop continues; this bounds memory against floods of half-open peers that have not yet hit a per-stage timeout. Otherwise spawn `handle_tunnel_conn` carrying the owned permit.
-2. `h2::server::handshake(tcp)` under `H2_HANDSHAKE_TIMEOUT` (10s).
+2. The h2 server builder advertises the shared 16 MiB stream and 32 MiB connection receive windows, then handshakes under `H2_HANDSHAKE_TIMEOUT` (10s).
 3. First `conn.accept()` under `FIRST_STREAM_TIMEOUT` (10s).
 4. Reject `(method != POST) || (path != TUNNEL_PATH)` with 404.
 5. Parse `Authorization: Bearer ...` (case-insensitive scheme, SP/HTAB separator, trimmed token); reject missing / empty with 401.
@@ -138,7 +138,7 @@ sequenceDiagram
    - `read_frame::<Hello>` with `HELLO_READ_TIMEOUT` (15s) bound.
    - Reject non-V1 protocol and invalid workspace names. Each rejection writes a `HelloAck::Refused { code, message }` frame (best-effort) before returning so the client receives a structured error instead of a transport disconnect.
    - Run the admission check for post-validate policy: `LocalAdmission::admit` does a best-effort per-user count over distinct `devserver_id`s (controller deployments substitute their own `RegistrationAdmission`), run under `VALIDATE_TIMEOUT` before the ack. On failure, the `ServerError` is mapped to a stable refusal code (`chan_tunnel_proto::error_code`) and a `HelloAck::Refused` is written before returning.
-   - On success, write `HelloAck::Ok(HelloAckOk { prefix: "/{devserver_id}", user, workspace, .. })` and wrap the duplex in yamux server mode with a 256-substream cap.
+   - On success, write `HelloAck::Ok(HelloAckOk { prefix: "/{devserver_id}", user, workspace, .. })` and wrap the duplex in yamux server mode with a 256-substream cap and 64 MiB aggregate receive window.
 11. `registry.register_authorized_with_id_and_cap(...)` returns a `TunnelHandle`, the open-request `mpsc::Receiver`, and the eviction `oneshot::Receiver`. This is the authoritative cap check: the admission count was best-effort, and two parallel dials could both pass it; `register_authorized_with_id_and_cap` does count + insert under one lock acquisition. A loser here has already received HelloAck; dropping the yamux connection on the early return surfaces as a transport disconnect. The in-flight semaphore permit is dropped after registration so a long-lived tunnel does not consume an accept slot.
 12. `workspace_tunnel(...)` runs until close or eviction. On exit, `registry.deregister_if_owner(&handle)`.
 
@@ -208,7 +208,7 @@ Server-specific notes:
 - The 200 response is sent BEFORE the framed `Hello` is read but AFTER the validator and tunnel-scope gate run. This split is the reason `handshake_validated` exists alongside `handshake`: the listener needs to return a uniform 401 for authentication failures prior to committing to the body.
 - Failures after the 200 (bad protocol, bad workspace name, `pre_ack` policy) are reported in-band as `HelloAck::Refused` with a stable code, written best-effort before the stream is dropped. `refusal_for` maps `TooManyWorkspaces` and `AdmissionAtCapacity` to `too_many_workspaces` and `ControlUnavailable` to `control_unavailable`; anything else surfaces as `internal` with the error's `Display` as message.
 - `HELLO_READ_TIMEOUT = 15s` bounds slow-loris-style peers that connect, get the 200, and never frame a `Hello`. 15s is plenty for trans-pacific; tighter would risk false positives on slow mobile uplinks.
-- The yamux config overrides the upstream default of 8192 max concurrent streams down to 256. Per-tunnel cap; a visitor opening many slow requests is bounded.
+- The yamux config caps each tunnel at 256 concurrent streams and a 64 MiB aggregate receive window. A visitor opening many slow requests is bounded without reducing normal browser concurrency.
 - `HelloAckOk.prefix` is `/{devserver_id}` (the resolved id the registration is keyed on; the devserver client ignores it -- tenants self-prefix at their public slugs). The username travels in the wildcard host on the public side, not in the path.
 
 ## 6. Trust boundaries / validation
@@ -225,9 +225,8 @@ Server-specific notes:
 - **Bearer parsing**: scheme name is case-insensitive (RFC 6750); the scheme/token separator is one or more SP / HTAB (RFC 7230 BWS); empty / whitespace-only tokens are rejected.
 - **Listener back-pressure cap**: at most `MAX_INFLIGHT_HANDSHAKES` (1024) connections may sit in the authenticate-and-handshake stages simultaneously. Above that the TCP socket is closed immediately so a flood of half-open peers cannot exhaust memory. Per-stage timeouts (h2 handshake 10s, first stream 10s, validate 10s, Hello read 15s) bound each slot.
 - **Public-side controls**: the items below describe the forwarding hygiene the gateway enforces; the knobs are devserver-proxy environment configuration.
-- **Request body cap on the public side**: `MAX_REQUEST_BYTES` (default 100 MiB, 0 disables) wraps the forwarded body in `http_body_util::Limited`. Without a cap a public client could stream gigabytes through to the devserver (paid for in tunnel egress and devserver memory).
-- **Response body cap**: `MAX_RESPONSE_BYTES` (default 100 MiB, 0 disables) wraps the upstream body in `http_body_util::Limited`. Past the cap the body stream errors mid-flight; the public client sees a truncated read. Counterpart to the request cap: a compromised devserver cannot burn unbounded egress on a single request.
-- **Upstream request timeout**: `REQUEST_TIMEOUT_SECS` (default 60s, 0 disables) is one deadline across opening the substream, the h1 handshake, response headers, AND body streaming (`DeadlineBody`), min'd with the session's expiry; 504 Gateway Timeout on a miss before headers, and a mid-body miss errors the stream.
+- **Public-side body policy**: `MAX_REQUEST_BYTES` and `MAX_RESPONSE_BYTES` default to 100 MiB and wrap general request and response bodies in `http_body_util::Limited`; zero disables the corresponding general cap. Exact multipart-upload and form-decoded download routes use explicit 100 GiB caps. The server-side copy route retains the general JSON byte caps. A non-HEAD response whose declared length exceeds its effective cap is refused with 502 before body forwarding; unknown-length responses remain bounded while streaming.
+- **Upstream request timeout**: `REQUEST_TIMEOUT_SECS` (default 60s, 0 disables) is one deadline across opening the substream, the h1 handshake, response headers, and body streaming (`DeadlineBody`), limited by the session expiry. Exact upload, download, and server-side copy routes use a 24-hour deadline. A miss before headers returns 504 and a mid-body miss errors the stream.
 - **WS idle window**: a bridged WebSocket is cut only after BOTH directions are quiet for `DEFAULT_WS_IDLE_TIMEOUT` (300s); any frame resets the window, and teardown sends a real Close frame to each half. Keeps a public client that 101'd and went silent from pinning the substream forever.
 - **Host routing**: the dispatcher accepts only the configured apex and the configured wildcard suffix (`{owner}` / `{owner}--{disc}` single label); any other Host is 404, so a misrouted listener exposes nothing.
 - **Per-visitor rate limit**: none in-process. Behind nginx the visible peer is always the proxy, so a peer-IP limiter would key every visitor into a single bucket; rate-limiting belongs upstream (`limit_req_zone $binary_remote_addr`).

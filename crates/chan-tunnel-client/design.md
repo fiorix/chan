@@ -120,7 +120,8 @@ Client-specific notes:
   - `401 UNAUTHORIZED`: invalid token or missing tunnel scope. Mapped to `ClientError::Handshake("unauthorized (bad token or missing tunnel scope)")`.
   - anything else: `ClientError::Handshake("unexpected status ...")`.
 - After the response headers arrive, `H2Duplex::new(send, recv)` becomes the duplex; `handshake` writes the `Hello` and reads the `HelloAck`. A `HelloAck::Refused` becomes `ClientError::RemoteRefusal { code, message }`; the codes are the `chan_tunnel_proto::error_code` strings, so callers can match known refusals and fall back to the message for unknown codes. A non-V1 ack protocol is a `Handshake` error.
-- yamux client mode (`Mode::Client`) over the duplex. Data substreams are inbound; the only outbound stream is the admission-lease refresh protocol.
+- The h2 client advertises the shared 16 MiB stream and 32 MiB connection receive windows for TLS and loopback h2c dials.
+- yamux client mode (`Mode::Client`) over the duplex, with the shared 256-substream cap and 64 MiB aggregate receive window. Data substreams are inbound; the only outbound stream is the admission-lease refresh protocol.
 
 ## 6. Trust boundaries / validation
 

@@ -55,7 +55,9 @@ use std::task::{Context, Poll};
 use axum::body::Body;
 use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, FromRequestParts, Request};
-use axum::http::{header, request::Parts, HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
+use axum::http::{
+    header, request::Parts, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri,
+};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use chan_tunnel_proto::gateway_assertion;
@@ -372,6 +374,7 @@ pub async fn handle(
     // ordinary upstream application data.
     let upstream_path_and_query = forward_path(req.uri());
     let extension_frame = is_extension_proxy_path(&upstream_path_and_query);
+    let policy = route_body_policy(&state.cfg, req.method(), &upstream_path_and_query);
 
     if is_ws {
         let (mut parts, body) = req.into_parts();
@@ -424,9 +427,9 @@ pub async fn handle(
     }
 
     let opts = ProxyOpts {
-        max_request_bytes: state.cfg.max_request_bytes,
-        max_response_bytes: state.cfg.max_response_bytes,
-        request_timeout: state.cfg.request_timeout,
+        max_request_bytes: policy.max_request_bytes,
+        max_response_bytes: policy.max_response_bytes,
+        request_timeout: policy.request_timeout,
         authorization: &authorization,
         forwarded_proto: state.cfg.forwarded_proto.as_str(),
         assertion,
@@ -537,6 +540,119 @@ struct ProxyOpts<'a> {
     authorization: &'a SessionRecord,
     forwarded_proto: &'a str,
     assertion: HeaderValue,
+}
+
+/// Body and deadline policy for one forwarded request: the transfer
+/// route's explicit allowance, or the configured general caps.
+struct RouteBodyPolicy {
+    max_request_bytes: Option<usize>,
+    max_response_bytes: Option<usize>,
+    request_timeout: Option<std::time::Duration>,
+}
+
+/// Select the body/deadline policy for one forwarded request. Bulk
+/// transfer routes get the explicit `TRANSFER_ROUTE_*` allowance; the
+/// server-side copy route gets only the long deadline on top of the
+/// general byte caps; every other route keeps the configured general
+/// policy unchanged.
+fn route_body_policy(
+    cfg: &crate::config::Config,
+    method: &Method,
+    path_and_query: &str,
+) -> RouteBodyPolicy {
+    let general = || RouteBodyPolicy {
+        max_request_bytes: cfg.max_request_bytes,
+        max_response_bytes: cfg.max_response_bytes,
+        request_timeout: cfg.request_timeout,
+    };
+    match transfer_route_class(method, path_and_query) {
+        Some(TransferRoute::Bulk) => RouteBodyPolicy {
+            max_request_bytes: Some(crate::config::TRANSFER_ROUTE_MAX_BYTES),
+            max_response_bytes: Some(crate::config::TRANSFER_ROUTE_MAX_BYTES),
+            request_timeout: Some(crate::config::TRANSFER_ROUTE_TIMEOUT),
+        },
+        Some(TransferRoute::ServerSideCopy) => RouteBodyPolicy {
+            request_timeout: Some(crate::config::TRANSFER_ROUTE_TIMEOUT),
+            ..general()
+        },
+        None => general(),
+    }
+}
+
+/// The narrow set of routes allowed off the general body/deadline
+/// policy.
+enum TransferRoute {
+    /// Large bodies in either direction: the multipart upload, and
+    /// downloads of file content or directory archives.
+    Bulk,
+    /// A potentially long server-side copy whose request and response
+    /// stay small JSON: only the deadline relaxes.
+    ServerSideCopy,
+}
+
+/// Classify a forwarded request by method, path, and query. The path
+/// here is the forwarded `/{workspace}/...` path; the tenant segment is
+/// stripped before matching so workspace and terminal tenants classify
+/// identically. Only the sanctioned bulk shapes qualify:
+///
+/// - `POST /{tenant}/api/files/upload` (multipart upload),
+/// - `GET /{tenant}/api/files/{*path}` with a truthy `download` query
+///   flag (file and directory-archive downloads),
+/// - `POST /{tenant}/api/fs/transfer` (server-side copy).
+///
+/// Plain GET reads, `stream=1` reads, PUT writes, DELETE, the bare
+/// `/api/files` listing and create routes, other tenant APIs, and
+/// root-level paths all retain the general policy.
+fn transfer_route_class(method: &Method, path_and_query: &str) -> Option<TransferRoute> {
+    let mut parts = path_and_query.splitn(2, '?');
+    let path = parts.next().unwrap_or("");
+    let query = parts.next();
+    let rest = path.strip_prefix('/')?;
+    let tenant_path = rest.split_once('/').map(|(_, tail)| tail).unwrap_or("");
+    if method == Method::POST {
+        if tenant_path == "api/files/upload" {
+            return Some(TransferRoute::Bulk);
+        }
+        if tenant_path == "api/fs/transfer" {
+            return Some(TransferRoute::ServerSideCopy);
+        }
+        return None;
+    }
+    if method == Method::GET
+        && tenant_path.starts_with("api/files/")
+        && query_flag_truthy(query, "download")
+    {
+        return Some(TransferRoute::Bulk);
+    }
+    None
+}
+
+/// Whether `name` appears in the query string with exactly one
+/// form-decoded value that is truthy under the same accepted set as the
+/// server's `query_flag` (`1`, `true`, `TRUE`, `yes`, `YES`, `on`,
+/// `ON`). The server's Axum `Query<ReadFileQuery>` form-decodes the
+/// query (so `download=%31` reaches it as the accepted value `1`) and
+/// rejects duplicate struct fields, so classification decodes the same
+/// way and refuses duplicates rather than reading raw `&`-split pairs.
+/// A bare flag without `=` decodes to an empty value and is not truthy,
+/// matching the server.
+fn query_flag_truthy(query: Option<&str>, name: &str) -> bool {
+    let Some(query) = query else {
+        return false;
+    };
+    let mut values = url::form_urlencoded::parse(query.as_bytes())
+        .filter(|(key, _)| key == name)
+        .map(|(_, value)| value);
+    let Some(value) = values.next() else {
+        return false;
+    };
+    if values.next().is_some() {
+        return false;
+    }
+    matches!(
+        value.as_ref(),
+        "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+    )
 }
 
 struct GatewayCaller {
@@ -883,6 +999,7 @@ async fn proxy_http(
     let conn_abort = conn_handle.abort_handle();
 
     let (mut parts, body) = req.into_parts();
+    let request_method = parts.method.clone();
 
     let forwarded = forwarded_headers(&parts, opts.forwarded_proto);
     strip_inbound_headers(&mut parts.headers);
@@ -919,6 +1036,22 @@ async fn proxy_http(
     };
 
     let (parts, body) = res.into_parts();
+    // Response-cap invariant: a non-HEAD response that declares a body
+    // length above the configured cap is refused with a deterministic
+    // 502 before any body bytes forward, and the upstream connection
+    // task is aborted. HEAD responses carry no body, so their declared
+    // representation length is not capped. A response with no declared
+    // length streams through the `Limited` backstop below.
+    if let Some(max) = opts.max_response_bytes {
+        if declared_response_over_cap(&request_method, &parts.headers, max) {
+            conn_abort.abort();
+            return Ok((
+                StatusCode::BAD_GATEWAY,
+                "upstream response exceeds the gateway body cap",
+            )
+                .into_response());
+        }
+    }
     let mut builder = Response::builder().status(parts.status);
     for (k, v) in strip_response_headers(&parts.headers) {
         builder = builder.header(k, v);
@@ -943,6 +1076,23 @@ async fn proxy_http(
     builder
         .body(response_body)
         .map_err(|e| Error::Anyhow(anyhow::anyhow!("response: {e}")))
+}
+
+/// Whether a response whose headers declare a content length must be
+/// refused under the configured cap. The declared length is parsed as
+/// `u64` and compared against the cap widened to `u64`. HEAD responses
+/// carry no body, so their declared representation length is never
+/// capped; responses with no declared length return false here and
+/// stream through the `Limited` backstop.
+fn declared_response_over_cap(method: &Method, headers: &HeaderMap, max: usize) -> bool {
+    if method == Method::HEAD {
+        return false;
+    }
+    headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .is_some_and(|len| len > max as u64)
 }
 
 /// Drop hop-by-hop headers, Host, Cookie (the __Host-devserver_gate cookie has
@@ -1495,6 +1645,223 @@ mod tests {
             forward_path(&u("/blog/path?a=1&t=secret&b=2")),
             "/blog/path?a=1&t=secret&b=2"
         );
+    }
+
+    #[test]
+    fn transfer_route_classification_requires_the_sanctioned_method_and_query() {
+        let class = transfer_route_class as fn(&Method, &str) -> Option<TransferRoute>;
+        let bulk = |m: Option<TransferRoute>| matches!(m, Some(TransferRoute::Bulk));
+        let copy = |m: Option<TransferRoute>| matches!(m, Some(TransferRoute::ServerSideCopy));
+
+        // The sanctioned bulk shapes.
+        assert!(bulk(class(&Method::POST, "/blog/api/files/upload")));
+        assert!(bulk(class(
+            &Method::GET,
+            "/blog/api/files/big.bin?download=1"
+        )));
+        assert!(bulk(class(
+            &Method::GET,
+            "/t/api/files/archive.tar?download=true"
+        )));
+        assert!(copy(class(&Method::POST, "/blog/api/fs/transfer")));
+
+        // The same paths under the wrong method stay general.
+        for method in [Method::GET, Method::PUT, Method::DELETE] {
+            assert!(
+                class(&method, "/blog/api/files/upload").is_none(),
+                "{method}"
+            );
+            assert!(
+                class(&method, "/blog/api/fs/transfer").is_none(),
+                "{method}"
+            );
+        }
+        for method in [Method::POST, Method::PUT, Method::DELETE] {
+            assert!(
+                class(&method, "/blog/api/files/big.bin?download=1").is_none(),
+                "{method}"
+            );
+        }
+
+        // GET on the file surface needs a truthy `download` flag.
+        for path in [
+            // Plain read.
+            "/blog/api/files/notes/x.md",
+            // Streamed editor read.
+            "/blog/api/files/big.bin?stream=1",
+            // Falsy and bare flag values.
+            "/blog/api/files/big.bin?download=0",
+            "/blog/api/files/big.bin?download",
+            // Flag on another key.
+            "/blog/api/files/big.bin?download2=1",
+        ] {
+            assert!(class(&Method::GET, path).is_none(), "{path}");
+        }
+
+        // The server's full accepted truthy set qualifies.
+        for value in ["1", "true", "TRUE", "yes", "YES", "on", "ON"] {
+            let path = format!("/blog/api/files/big.bin?download={value}");
+            assert!(bulk(class(&Method::GET, &path)), "{path}");
+        }
+
+        // The query is form-decoded like the server's extractor: `%31`
+        // reaches the classifier as the accepted value `1`.
+        assert!(bulk(class(
+            &Method::GET,
+            "/blog/api/files/big.bin?download=%31"
+        )));
+
+        // Duplicate `download` fields keep the general policy because
+        // the server extractor rejects duplicate struct fields, and an
+        // encoded falsy value stays falsy.
+        for path in [
+            "/blog/api/files/big.bin?download=1&download=1",
+            "/blog/api/files/big.bin?download=0&download=1",
+            "/blog/api/files/big.bin?download=%30",
+        ] {
+            assert!(class(&Method::GET, path).is_none(), "{path}");
+        }
+
+        // Bare listing/create, other tenant APIs, and root-level paths
+        // are never transfer routes.
+        for (method, path) in [
+            (Method::GET, "/blog/api/files"),
+            (Method::GET, "/blog/api/files?dir=sub&download=1"),
+            (Method::POST, "/blog/api/files"),
+            (Method::POST, "/api/files/upload"),
+            (Method::GET, "/api/files/big.bin?download=1"),
+            (Method::POST, "/api/fs/transfer"),
+            (Method::GET, "/blog/api/graph"),
+            (Method::GET, "/blog/api/config"),
+            (Method::GET, "/blog/"),
+            (Method::GET, "/blog"),
+            (Method::GET, "/"),
+        ] {
+            assert!(class(&method, path).is_none(), "{method} {path}");
+        }
+    }
+
+    #[test]
+    fn transfer_route_policy_replaces_the_general_caps() {
+        let mut cfg = test_config();
+        cfg.max_request_bytes = Some(64);
+        cfg.max_response_bytes = Some(128);
+        cfg.request_timeout = Some(std::time::Duration::from_secs(60));
+
+        let transfer = route_body_policy(&cfg, &Method::GET, "/blog/api/files/big.bin?download=1");
+        assert_eq!(
+            transfer.max_request_bytes,
+            Some(crate::config::TRANSFER_ROUTE_MAX_BYTES)
+        );
+        assert_eq!(
+            transfer.max_response_bytes,
+            Some(crate::config::TRANSFER_ROUTE_MAX_BYTES)
+        );
+        assert_eq!(
+            transfer.request_timeout,
+            Some(crate::config::TRANSFER_ROUTE_TIMEOUT)
+        );
+
+        // The server-side copy relaxes only the deadline; its JSON
+        // request and response keep the general byte caps.
+        let copy = route_body_policy(&cfg, &Method::POST, "/blog/api/fs/transfer");
+        assert_eq!(copy.max_request_bytes, Some(64));
+        assert_eq!(copy.max_response_bytes, Some(128));
+        assert_eq!(
+            copy.request_timeout,
+            Some(crate::config::TRANSFER_ROUTE_TIMEOUT)
+        );
+
+        let general = route_body_policy(&cfg, &Method::GET, "/blog/api/graph");
+        assert_eq!(general.max_request_bytes, Some(64));
+        assert_eq!(general.max_response_bytes, Some(128));
+        assert_eq!(
+            general.request_timeout,
+            Some(std::time::Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn declared_response_over_cap_skips_head_and_unknown_lengths() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_LENGTH, "8192".parse().unwrap());
+
+        // A non-HEAD response declared over the cap is refused.
+        assert!(declared_response_over_cap(&Method::GET, &headers, 1024));
+        assert!(declared_response_over_cap(&Method::POST, &headers, 1024));
+
+        // HEAD declares the representation length but carries no body,
+        // so an over-cap declared length is not a refusal.
+        assert!(!declared_response_over_cap(&Method::HEAD, &headers, 1024));
+
+        // At the exact cap boundary the response passes.
+        assert!(!declared_response_over_cap(&Method::GET, &headers, 8192));
+
+        // A declared length beyond 32-bit usize range still compares
+        // correctly as u64.
+        headers.insert(
+            header::CONTENT_LENGTH,
+            "18446744073709551615".parse().unwrap(),
+        );
+        assert!(declared_response_over_cap(&Method::GET, &headers, 1024));
+
+        // No declared length streams through the Limited backstop.
+        assert!(!declared_response_over_cap(
+            &Method::GET,
+            &HeaderMap::new(),
+            1024
+        ));
+
+        // An unparseable declared length is not a refusal here.
+        headers.insert(header::CONTENT_LENGTH, "not-a-number".parse().unwrap());
+        assert!(!declared_response_over_cap(&Method::GET, &headers, 1024));
+    }
+
+    /// Minimal Config for policy tests: every field inert, only the
+    /// cap/deadline knobs vary.
+    fn test_config() -> crate::config::Config {
+        crate::config::Config {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            tunnel_bind_addr: "127.0.0.1:0".parse().unwrap(),
+            apex_host: String::new(),
+            wildcard_suffix: String::new(),
+            identity_url: "http://127.0.0.1/".parse().unwrap(),
+            identity_auth_token: String::new(),
+            dashboard_url: String::new(),
+            identity_origin: devserver_control_proto::CanonicalOrigin::parse("https://gw.chan.app")
+                .unwrap(),
+            entry_verifiers: gateway_common::devserver_gate::EntryVerifierRing::from_base64_list(
+                &gateway_common::devserver_gate::EntrySigner::from_base64(
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                )
+                .unwrap()
+                .verifying_key_base64(),
+            )
+            .unwrap(),
+            admission_lease_verifier: devserver_control_proto::AdmissionLeaseVerifier::from_base64(
+                &devserver_control_proto::AdmissionLeaseSigner::from_base64(
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                )
+                .unwrap()
+                .verifying_key_base64(),
+            )
+            .unwrap(),
+            control_url: "http://127.0.0.1/".parse().unwrap(),
+            proxy_token: String::new(),
+            proxy_id: devserver_control_proto::ProxyId::parse("p1").unwrap(),
+            proxy_base_url: devserver_control_proto::CanonicalOrigin::parse(
+                "https://p1.devserver.chan.app",
+            )
+            .unwrap(),
+            max_response_bytes: None,
+            max_request_bytes: None,
+            request_timeout: None,
+            ws_idle_timeout: crate::config::DEFAULT_WS_IDLE_TIMEOUT,
+            session_max_active: 1,
+            session_lifetime: std::time::Duration::from_secs(60),
+            entry_replay_max_active: 1,
+            forwarded_proto: "https".into(),
+        }
     }
 
     #[test]

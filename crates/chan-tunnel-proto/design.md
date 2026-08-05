@@ -131,6 +131,8 @@ Carried inside `Hello` as a transparent `u16`. The path (`/v1/tunnel`) is a stab
 
 Symmetric: server side's `RecvStream` is the request body and `SendStream` is the response body; client side is the reverse. The adapter doesn't care which.
 
+Both peers advertise a 16 MiB HTTP/2 stream window and a 32 MiB HTTP/2 connection window. The yamux peers cap the connection at 256 concurrent substreams and a 64 MiB aggregate receive window. These values are protocol-level transport invariants owned by this crate, even though they do not change the serialized control frames.
+
 ## 6. Trust boundaries / validation
 
 This crate is the validator surface for two values that flow into public routing: the workspace name (from the client's `Hello`) and the username (from the server's `Validated`).

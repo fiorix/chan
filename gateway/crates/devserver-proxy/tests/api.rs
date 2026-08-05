@@ -129,16 +129,35 @@ struct TestApp {
 
 impl TestApp {
     async fn new() -> Self {
-        Self::new_inner(DEFAULT_WS_IDLE_TIMEOUT).await
+        Self::new_inner(DEFAULT_WS_IDLE_TIMEOUT, None, None).await
     }
 
     /// The WS-bridge tests inject a sub-second idle window so the cut
     /// is observable without waiting out the production default.
     async fn new_with_ws_idle_timeout(ws_idle_timeout: std::time::Duration) -> Self {
-        Self::new_inner(ws_idle_timeout).await
+        Self::new_inner(ws_idle_timeout, None, None).await
     }
 
-    async fn new_inner(ws_idle_timeout: std::time::Duration) -> Self {
+    /// The transfer-policy tests inject tight general body caps so the
+    /// transfer route's explicit 100 GiB allowance is observable
+    /// without giant fixtures.
+    async fn new_with_caps(
+        max_request_bytes: Option<usize>,
+        max_response_bytes: Option<usize>,
+    ) -> Self {
+        Self::new_inner(
+            DEFAULT_WS_IDLE_TIMEOUT,
+            max_request_bytes,
+            max_response_bytes,
+        )
+        .await
+    }
+
+    async fn new_inner(
+        ws_idle_timeout: std::time::Duration,
+        max_request_bytes: Option<usize>,
+        max_response_bytes: Option<usize>,
+    ) -> Self {
         let registry = Registry::new();
 
         let cfg = Arc::new(Config {
@@ -156,8 +175,8 @@ impl TestApp {
             proxy_token: "unused-control-token".into(),
             proxy_id: ProxyId::parse("p1").unwrap(),
             proxy_base_url: CanonicalOrigin::parse("https://p1.devserver.chan.app").unwrap(),
-            max_response_bytes: None,
-            max_request_bytes: None,
+            max_response_bytes,
+            max_request_bytes,
             request_timeout: None,
             ws_idle_timeout,
             session_max_active: 10_000,
@@ -1180,6 +1199,134 @@ async fn proxy_preserves_workspace_segment() {
         .unwrap();
     assert_eq!(res.text().await.unwrap(), "root");
 
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn transfer_route_admits_body_beyond_the_general_request_cap() {
+    // The transfer route replaces the general MAX_REQUEST_BYTES cap with
+    // the explicit 100 GiB allowance; a tight injected cap makes the
+    // difference observable with a small body.
+    let app = TestApp::new_with_caps(Some(1024), None).await;
+    let uid = Uuid::new_v4();
+    let captured = Captured::default();
+    app.register_tunnel("alice", "blog", uid, capturing_router(captured.clone()))
+        .await;
+
+    let host = host_for("alice");
+    let csrf = "csrf-test-token";
+    let proxy_addr = serve_router_real(app.router.clone()).await;
+    let client = reqwest::Client::new();
+    let body = vec![b'x'; 8 * 1024];
+    let cookie = session_and_csrf_cookie(&app, uid, "blog", &host, csrf);
+
+    let res = client
+        .post(format!("http://{proxy_addr}/blog/api/files/upload"))
+        .header(header::HOST, &host)
+        .header(header::COOKIE, &cookie)
+        .header("x-chan-csrf", csrf)
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(captured.requests.lock().unwrap().len(), 1);
+
+    // A non-transfer route over the same cap is cut mid-body and never
+    // reaches the devserver.
+    let res = client
+        .post(format!("http://{proxy_addr}/blog/api/graph"))
+        .header(header::HOST, &host)
+        .header(header::COOKIE, &cookie)
+        .header("x-chan-csrf", csrf)
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(res.status(), StatusCode::OK);
+    assert_eq!(captured.requests.lock().unwrap().len(), 1);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn transfer_route_serves_body_beyond_the_general_response_cap() {
+    // Same split on the response side: the transfer route streams past
+    // the general MAX_RESPONSE_BYTES cap while a general route's
+    // over-cap response is refused with a 502 before any body streams.
+    let app = TestApp::new_with_caps(None, Some(1024)).await;
+    let uid = Uuid::new_v4();
+    let big = Bytes::from(vec![b'y'; 8 * 1024]);
+    let upstream = Router::new().fallback(move || {
+        let big = big.clone();
+        async move { big }
+    });
+    app.register_tunnel("alice", "blog", uid, upstream).await;
+
+    let host = host_for("alice");
+    let cookie = session_cookie(&app, uid, "blog", &host);
+    let proxy_addr = serve_router_real(app.router.clone()).await;
+    let client = reqwest::Client::new();
+
+    let res = client
+        .get(format!(
+            "http://{proxy_addr}/blog/api/files/big.bin?download=1"
+        ))
+        .header(header::HOST, &host)
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.bytes().await.unwrap().len(), 8 * 1024);
+
+    let res = client
+        .get(format!("http://{proxy_addr}/blog/api/graph"))
+        .header(header::HOST, &host)
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+    let body = res.bytes().await;
+    assert!(
+        body.is_err() || body.unwrap().len() < 8 * 1024,
+        "a general route's over-cap body must not arrive whole"
+    );
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn head_response_declared_over_cap_is_not_refused() {
+    // HEAD carries no body, so an upstream that declares an over-cap
+    // representation length still gets its headers through under the
+    // general policy; the declared-length refusal applies only to
+    // responses that actually stream a body.
+    let app = TestApp::new_with_caps(None, Some(1024)).await;
+    let uid = Uuid::new_v4();
+    let big = Bytes::from(vec![b'y'; 8 * 1024]);
+    let upstream = Router::new().fallback(move || {
+        let big = big.clone();
+        async move { big }
+    });
+    app.register_tunnel("alice", "blog", uid, upstream).await;
+
+    let host = host_for("alice");
+    let cookie = session_cookie(&app, uid, "blog", &host);
+    let proxy_addr = serve_router_real(app.router.clone()).await;
+    let client = reqwest::Client::new();
+
+    let res = client
+        .head(format!("http://{proxy_addr}/blog/api/graph"))
+        .header(header::HOST, &host)
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    // The upstream declares the over-cap representation length (the
+    // same 8192 the GET twin is refused for); the declared-length
+    // refusal must not fire for HEAD, and no body streams.
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.bytes().await.unwrap().len(), 0);
     app.cleanup().await;
 }
 

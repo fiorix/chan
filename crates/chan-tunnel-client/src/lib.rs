@@ -261,8 +261,22 @@ where
         workspace: ok.workspace,
         owner_user_id: ok.owner_user_id,
     };
-    let yamux = YamuxConnection::new(socket.compat(), YamuxConfig::default(), Mode::Client);
+    let yamux = YamuxConnection::new(socket.compat(), tunnel_yamux_config(), Mode::Client);
     Ok((registration, yamux))
+}
+
+/// Yamux client config matching the terminator's: one shared stream cap
+/// and connection receive window so bulk transfer is tuned identically
+/// on both peers. yamux auto-tunes each stream's window from the 256
+/// KiB protocol default toward the bandwidth-delay product, bounded by
+/// the connection-wide budget.
+fn tunnel_yamux_config() -> YamuxConfig {
+    let mut cfg = YamuxConfig::default();
+    cfg.set_max_num_streams(chan_tunnel_proto::TUNNEL_YAMUX_MAX_STREAMS)
+        .set_max_connection_receive_window(Some(
+            chan_tunnel_proto::TUNNEL_YAMUX_CONNECTION_RECEIVE_WINDOW,
+        ));
+    cfg
 }
 
 /// Serve every inbound yamux substream with `router` until the
@@ -661,5 +675,33 @@ mod backoff_tests {
         drop(remote_streams);
         pumping.abort();
         serving.abort();
+    }
+}
+
+#[cfg(test)]
+mod yamux_config_tests {
+    use super::*;
+
+    /// The client builds its yamux config from the shared proto
+    /// constants; reverting to a bare default or a local duplicate
+    /// value fails this test. `Config` exposes no getters, so the
+    /// check reads its Debug projection of the constructed value.
+    #[test]
+    fn yamux_config_applies_the_shared_transport_values() {
+        let debug = format!("{:?}", tunnel_yamux_config());
+        assert!(
+            debug.contains(&format!(
+                "max_num_streams: {}",
+                chan_tunnel_proto::TUNNEL_YAMUX_MAX_STREAMS
+            )),
+            "{debug}"
+        );
+        assert!(
+            debug.contains(&format!(
+                "max_connection_receive_window: Some({})",
+                chan_tunnel_proto::TUNNEL_YAMUX_CONNECTION_RECEIVE_WINDOW
+            )),
+            "{debug}"
+        );
     }
 }

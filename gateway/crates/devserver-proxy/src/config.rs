@@ -11,6 +11,20 @@ use url::Url;
 pub const DEFAULT_WS_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 const MAX_SESSION_LIFETIME_SECS: usize = 60 * 60;
 
+/// Transfer-route body allowance in each direction (100 GiB). The
+/// general `MAX_REQUEST_BYTES` / `MAX_RESPONSE_BYTES` caps (default
+/// 100 MiB) exist to stop a public visitor from streaming unbounded
+/// bytes through the tunnel; the file-transfer surface is the
+/// sanctioned bulk path and gets an explicit, much larger allowance
+/// instead of inheriting the abuse caps.
+pub const TRANSFER_ROUTE_MAX_BYTES: usize = 100 * 1024 * 1024 * 1024;
+
+/// Transfer-route deadline covering headers and streaming body
+/// (24 hours). A multi-gigabyte transfer over a slow link legitimately
+/// outlives the general 60-second request timeout.
+pub const TRANSFER_ROUTE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(24 * 60 * 60);
+
 /// Runtime config sourced from environment variables.
 #[derive(Clone)]
 pub struct Config {

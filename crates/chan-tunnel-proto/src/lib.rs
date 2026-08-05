@@ -38,3 +38,30 @@ pub const TUNNEL_PATH: &str = "/v1/tunnel";
 /// are tiny; this guards against a malicious or buggy peer trying to
 /// allocate gigabytes before yamux even starts.
 pub const MAX_CONTROL_FRAME_BYTES: usize = 64 * 1024;
+
+/// HTTP/2 initial stream-level flow-control window both tunnel peers
+/// advertise (16 MiB). The h2 default (64 KiB) throttles bulk transfer
+/// over a high-latency link no matter what yamux does above it; the
+/// window is per-direction, so client and server must raise it for both
+/// directions to benefit.
+pub const TUNNEL_H2_STREAM_WINDOW: u32 = 16 * 1024 * 1024;
+
+/// HTTP/2 initial connection-level flow-control window both tunnel
+/// peers advertise (32 MiB). Sized above the stream window so several
+/// busy yamux substreams do not stall on the shared h2 connection
+/// budget before their own stream windows are exhausted.
+pub const TUNNEL_H2_CONNECTION_WINDOW: u32 = 32 * 1024 * 1024;
+
+/// Maximum concurrent yamux substreams per tunnel connection (256).
+/// Bounds a visitor opening many slow requests to a manageable memory
+/// footprint while leaving plenty of room for browser-shaped
+/// concurrency (pipelined requests plus a WebSocket or two).
+pub const TUNNEL_YAMUX_MAX_STREAMS: usize = 256;
+
+/// Total yamux receive window across all streams of a tunnel
+/// connection (64 MiB). yamux auto-tunes each stream's window from the
+/// 256 KiB protocol default toward the bandwidth-delay product; this is
+/// the connection-wide budget that tuning may draw on. It must satisfy
+/// yamux's own floor of `256 KiB * TUNNEL_YAMUX_MAX_STREAMS`, and it
+/// does so exactly.
+pub const TUNNEL_YAMUX_CONNECTION_RECEIVE_WINDOW: usize = 64 * 1024 * 1024;
