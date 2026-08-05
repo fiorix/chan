@@ -11,7 +11,9 @@
     ChevronRight,
     Copy,
     Download,
+    Eye,
     FilePlus,
+    FileText,
     Folder,
     FolderOpen,
     Network,
@@ -30,6 +32,12 @@
   import { openMediaViewer } from "../state/mediaOpen";
   import { classifyFile, iconFor } from "../state/kinds";
   import {
+    classifyFileActions,
+    fileMediaKind,
+    type FileActionId,
+  } from "../state/fileActions";
+  import { exportPathToPdf } from "../state/fileActionExecutors";
+  import {
     dirtyPaths,
     layout,
     openBrowserInActivePane,
@@ -41,6 +49,8 @@
   import {
     browserSelection,
     clearTreeLoadingForPath,
+    draftsDir,
+    isDraftPath,
     workspace,
     fbClearSelection,
     fbClipboard,
@@ -104,7 +114,6 @@
     onFlip?: () => void;
   } = $props();
   const rightDock = $derived(dockSide === "right");
-  const docked = $derived(dockSide !== undefined);
 
   // Mime type recognized by Pane.onDrop. Keep in sync with Pane.svelte.
   const FILE_DRAG_MIME = "application/x-md-file";
@@ -558,6 +567,125 @@
     ev.stopPropagation();
     menu = { x: ev.clientX, y: ev.clientY, path, isDir };
   }
+
+  /// Per-type menu rows from the shared classifier
+  /// (state/fileActions): the same applicability policy the inspector
+  /// pill/dropdown consumes, so a video right-clicked in the tree
+  /// offers the same View / Download actions its inspector would.
+  /// Every handler is tree-local and variant-independent. Copy Path /
+  /// Rename / Delete are NOT part of this model (the tree's separate
+  /// destructive and path-mutation policy below).
+  type IconComponent = typeof Upload;
+  type MenuActionRow = {
+    id: FileActionId;
+    label: string;
+    icon: IconComponent;
+    chord?: string;
+    onClick: () => void;
+  };
+
+  function menuRowFor(id: FileActionId, path: string, isDir: boolean): MenuActionRow {
+    switch (id) {
+      case "open":
+        return {
+          id,
+          label: isDir ? "Open in File Browser" : "Open",
+          icon: isDir ? FolderOpen : FileText,
+          onClick: () => {
+            menu = null;
+            if (isDir) openSelectionInFileBrowser(path);
+            else openFileRow(path);
+          },
+        };
+      case "showFile":
+        return {
+          id,
+          label: "Open in File Browser",
+          icon: FolderOpen,
+          onClick: () => openSelectionInFileBrowser(path),
+        };
+      case "viewMedia": {
+        const media = fileMediaKind(path);
+        return {
+          id,
+          label:
+            media === "image"
+              ? "View / Zoom"
+              : media === "video"
+                ? "View Video"
+                : media === "audio"
+                  ? "View Audio"
+                  : "View PDF",
+          icon: Eye,
+          onClick: () => {
+            menu = null;
+            void openMediaViewer(path);
+          },
+        };
+      }
+      case "download":
+        return {
+          id,
+          label: "Download",
+          icon: Download,
+          onClick: () => downloadSelection(path, isDir),
+        };
+      case "upload":
+        return {
+          id,
+          label: "Upload",
+          icon: Upload,
+          onClick: () => uploadSelection(path, isDir),
+        };
+      case "newTerminal":
+        return {
+          id,
+          label: "New Terminal",
+          icon: TerminalIcon,
+          chord: chordFor("app.terminal.toggle") ?? "",
+          onClick: () => terminalFromHere(path, isDir),
+        };
+      case "exportPdf":
+        return {
+          id,
+          label: "Export to PDF",
+          icon: FileText,
+          onClick: () => {
+            menu = null;
+            void exportPathToPdf(path);
+          },
+        };
+      case "graphFromHere":
+        return {
+          id,
+          label: "New Graph",
+          icon: Network,
+          chord: chordFor("app.graph.toggle") ?? "",
+          onClick: () => graphThis(path, isDir),
+        };
+    }
+  }
+
+  const menuActions = $derived.by<MenuActionRow[]>(() => {
+    if (!menu) return [];
+    // The server-projected kind (content-sniffed on per-directory
+    // listings) decides editable-vs-binary, matching the inspector;
+    // rows missing from the flat listing fall back to path
+    // classification inside the classifier.
+    const entryKind = tree.entries.find((e) => e.path === menu!.path)?.kind;
+    const set = classifyFileActions(
+      {
+        path: menu.path,
+        isDir: menu.isDir,
+        serverKind: entryKind,
+        isDraft: menu.path === draftsDir() || isDraftPath(menu.path),
+      },
+      { open: true, reveal: true, graph: true, upload: true },
+    );
+    return [set.main, ...set.secondary].map((id) =>
+      menuRowFor(id, menu!.path, menu!.isDir),
+    );
+  });
 
   /// Unified "New File or Directory" entry. Opens a single
   /// PathPromptModal with `kind: "either"`; trailing slash → dir,
@@ -1365,16 +1493,21 @@
 {#if menu}
   <div class="ctx" use:portal use:clampMenu={{ x: menu.x, y: menu.y }}>
     <!-- In-tree selection menu. Section label first ("From
-         selection"), workflow entries (New File or Directory /
-         New Terminal / New Graph), then row ops (Copy Path
-         / Rename / Delete, kept here since this is the only surface
-         for destructive + path ops). The unified "New File or
-         Directory" entry detects file-vs-dir from the path's
-         trailing slash. A Flip entry renders at the foot
-         when `onFlip` is wired (tab variant only; dock + overlay
-         variants pass no onFlip so the entry hides). Transfer rows
-         are docked only because tab and overlay variants expose the
-         shared inspector actions. -->
+         selection"), the dir-only "New File or Directory" creation
+         entry (file-vs-dir detected from the path's trailing slash),
+         then the per-type action rows from the shared classifier
+         (state/fileActions -- the same applicability policy the
+         inspector consumes; handlers + labels are tree-local). For an
+         ordinary non-draft file, a tree-only Upload row follows:
+         single-file replacement through the picker
+         (fileOps.replaceFileAt), the transfer counterpart of the
+         classifier's directory upload. Drafts never get it; the
+         fileOps contract refuses writes there. Copy Path / Rename /
+         Delete follow as the tree's separate destructive +
+         path-mutation policy (this is the only surface for those). A
+         Flip entry renders at the foot when `onFlip` is wired (tab
+         variant only; dock + overlay variants pass no onFlip so the
+         entry hides). -->
     <div class="from-selection-label">From selection</div>
     {#if menu.isDir}
       <button onclick={() => newFileOrDir(menu!.path)}>
@@ -1382,29 +1515,20 @@
         <span>New File or Directory</span>
       </button>
     {/if}
-    <button onclick={() => terminalFromHere(menu!.path, menu!.isDir)}>
-      <TerminalIcon size={16} strokeWidth={1.75} aria-hidden="true" />
-      <span class="menu-row-label">New Terminal</span>
-      <span class="menu-row-chord">{chordFor("app.terminal.toggle") ?? ""}</span>
-    </button>
-    <button onclick={() => graphThis(menu!.path, menu!.isDir)}>
-      <Network size={16} strokeWidth={1.75} aria-hidden="true" />
-      <span class="menu-row-label">New Graph</span>
-      <span class="menu-row-chord">{chordFor("app.graph.toggle") ?? ""}</span>
-    </button>
-    {#if docked}
-      <button onclick={() => openSelectionInFileBrowser(menu!.path)}>
-        <FolderOpen size={16} strokeWidth={1.75} aria-hidden="true" />
-        <span>Open in File Browser</span>
+    {#each menuActions as row (row.id)}
+      {@const RowIcon = row.icon}
+      <button onclick={row.onClick}>
+        <RowIcon size={16} strokeWidth={1.75} aria-hidden="true" />
+        <span class="menu-row-label">{row.label}</span>
+        {#if row.chord}
+          <span class="menu-row-chord">{row.chord}</span>
+        {/if}
       </button>
-      <div class="ctx-sep" role="separator"></div>
-      <button onclick={() => uploadSelection(menu!.path, menu!.isDir)}>
+    {/each}
+    {#if !menu.isDir && menu.path !== draftsDir() && !isDraftPath(menu.path)}
+      <button onclick={() => uploadSelection(menu!.path, false)}>
         <Upload size={16} strokeWidth={1.75} aria-hidden="true" />
         <span>Upload</span>
-      </button>
-      <button onclick={() => downloadSelection(menu!.path, menu!.isDir)}>
-        <Download size={16} strokeWidth={1.75} aria-hidden="true" />
-        <span>Download</span>
       </button>
     {/if}
     <div class="ctx-sep" role="separator"></div>

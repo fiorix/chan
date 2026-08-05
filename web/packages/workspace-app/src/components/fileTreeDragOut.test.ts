@@ -38,13 +38,16 @@ describe("FileTree browser drag-out removed", () => {
     expect(fileTree).not.toMatch(/from "\.\.\/api\/desktop"/);
   });
 
-  test("docked selection context menu uses Upload and Download transfer rows", () => {
-    expect(fileTree).toMatch(/const docked = \$derived\(dockSide !== undefined\)/);
+  test("selection context menu keeps Upload and Download transfer rows", () => {
+    // Transfer rows come from the shared classifier (the same
+    // applicability the inspector consumes) and are
+    // variant-independent; the handlers are the tree-local download
+    // link + upload picker.
+    expect(fileTree).toMatch(/label: "Upload",[\s\S]{1,160}onClick: \(\) => uploadSelection\(path, isDir\)/);
+    expect(fileTree).toMatch(/label: "Download",[\s\S]{1,160}onClick: \(\) => downloadSelection\(path, isDir\)/);
+    expect(fileTree).not.toMatch(/\{#if docked\}/);
     expect(fileTree).toMatch(/function downloadSelection\(path: string, isDir: boolean\): void/);
     expect(fileTree).toMatch(/link\.href = api\.downloadUrl\(path\)/);
-    expect(fileTree).toMatch(
-      /\{#if docked\}[\s\S]{1,500}<span>Open in File Browser<\/span>[\s\S]{1,300}<div class="ctx-sep" role="separator"><\/div>[\s\S]{1,500}<span>Upload<\/span>[\s\S]{1,500}<span>Download<\/span>[\s\S]{1,300}\{\/if\}[\s\S]{1,120}<div class="ctx-sep" role="separator"><\/div>/,
-    );
   });
 
   test("shared inspectors expose Upload and Download transfer actions", () => {

@@ -50,9 +50,27 @@ describe("shared actions section under the filename", () => {
     expect(fileInfo).toMatch(/menuOpen = false;[\s\S]{1,40}item\.onClick\(\);/);
   });
 
+  test("applicability comes from the shared classifier, capabilities from the host", () => {
+    // The inspector does not decide WHICH actions exist; it feeds the
+    // entry facts + host-bound capabilities into classifyFileActions
+    // (the same policy the FileTree menu consumes) and maps the ids.
+    expect(fileInfo).toMatch(
+      /import \{[\s\S]*?classifyFileActions,[\s\S]*?\} from "\.\.\/state\/fileActions";/,
+    );
+    expect(fileInfo).toMatch(
+      /const set = classifyFileActions\([\s\S]*?path: entry\.path,[\s\S]*?isDir: entry\.is_dir,[\s\S]*?serverKind: entry\.kind,[\s\S]*?isDraft: entry\.path === draftsDir\(\) \|\| isDraftPath\(entry\.path\),/,
+    );
+    expect(fileInfo).toMatch(
+      /open: !!onOpen,[\s\S]*?reveal: !!onReveal,[\s\S]*?graph: !!onSetAsScope,[\s\S]*?upload: allowUpload,/,
+    );
+    expect(fileInfo).toMatch(
+      /return \{ main: actionFor\(set\.main\), secondary: set\.secondary\.map\(actionFor\) \};/,
+    );
+  });
+
   test("directory pill is Open -> a new File Browser tab", () => {
     expect(fileInfo).toMatch(
-      /if \(isDir\) \{[\s\S]{1,80}main = \{ label: "Open", onClick: openDirInBrowser \}/,
+      /case "open":[\s\S]{1,160}\{ label: "Open", onClick: openDirInBrowser \}/,
     );
     // openDirInBrowser prefers the host onReveal, else reveals a new tab.
     expect(fileInfo).toMatch(
@@ -62,57 +80,47 @@ describe("shared actions section under the filename", () => {
 
   test("media pill keeps per-kind labels over the shared media router", () => {
     expect(fileInfo).toMatch(
-      /label: image[\s\S]{1,220}"View \/ Zoom"[\s\S]{1,220}"View Video"[\s\S]{1,220}"View Audio"[\s\S]{1,220}"View PDF"[\s\S]{1,100}onClick: \(\) => void openMediaViewer\(p\)/,
+      /case "viewMedia":[\s\S]{1,400}"View \/ Zoom"[\s\S]{1,220}"View Video"[\s\S]{1,220}"View Audio"[\s\S]{1,220}"View PDF"[\s\S]{1,100}onClick: \(\) => void openMediaViewer\(p\)/,
     );
   });
 
-  test("editable file pill is Open (onOpen) or Show file (editor Show Details)", () => {
-    // FB / search bind onOpen -> "Open" (Hybrid Editor).
+  test("download / upload / graph map to the inspector handlers with their labels", () => {
     expect(fileInfo).toMatch(
-      /if \(onOpen\) \{[\s\S]{1,80}main = \{ label: "Open", onClick: onOpen \}/,
-    );
-    // Editor "Show Details" binds no onOpen -> "Show file" via onReveal.
-    expect(fileInfo).toMatch(
-      /\} else if \(onReveal\) \{[\s\S]{1,120}main = \{ label: "Show file", onClick: onReveal \}/,
-    );
-  });
-
-  test("binary (incl symlinks) pill is Download file, dropdown only Graph", () => {
-    // The else branch (not dir / media / editable) makes download the main
-    // action; Graph from here is the only secondary it offers.
-    expect(fileInfo).toMatch(
-      /\} else \{[\s\S]{1,120}main = download;[\s\S]{1,80}if \(graph\) secondary\.push\(graph\)/,
+      /case "download":[\s\S]{1,200}label: e\.is_dir \? "Download tarball" : "Download file",[\s\S]{1,120}onClick: downloadSelection/,
     );
     expect(fileInfo).toMatch(
-      /label: isDir \? "Download tarball" : "Download file",[\s\S]{1,80}onClick: downloadSelection/,
+      /case "upload":[\s\S]{1,160}label: "Upload file here", onClick: triggerUpload/,
+    );
+    expect(fileInfo).toMatch(
+      /case "graphFromHere":[\s\S]{1,160}label: "Graph from here", onClick: \(\) => onSetAsScope\?\.\(\)/,
     );
   });
 
-  test("markdown files carry an Export to PDF secondary action", () => {
-    // Gated on isMarkdown (never a directory), unconditional across web
-    // and desktop; only the save path differs inside the handler.
+  test("markdown Export to PDF rides the shared executor", () => {
+    // The operation lives in state/fileActionExecutors so the FileTree
+    // context menu exports the same way; the inspector delegates.
     expect(fileInfo).toMatch(
-      /!isDir && isMarkdown\(p\)[\s\S]{1,80}label: "Export to PDF", onClick: exportSelectionToPdf/,
-    );
-    // The editable branch surfaces it in the dropdown.
-    expect(fileInfo).toMatch(
-      /secondary\.push\(download, newTerminal\);[\s\S]{1,60}if \(exportPdf\) secondary\.push\(exportPdf\);/,
-    );
-    // The handler branches desktop Downloads vs the shared web helper.
-    expect(fileInfo).toMatch(
-      /async function exportSelectionToPdf\(\): Promise<void> \{[\s\S]{1,900}saveBytesToDownloads\(bytes, filename\)[\s\S]{1,200}downloadBytes\(bytes, filename, "application\/pdf"\)/,
+      /import \{ exportPathToPdf \} from "\.\.\/state\/fileActionExecutors";/,
     );
     expect(fileInfo).toMatch(
-      /import \{ downloadBytes \} from "\.\.\/api\/download";/,
+      /async function exportSelectionToPdf\(\): Promise<void> \{[\s\S]{1,160}await exportPathToPdf\(entry\.path\);/,
+    );
+    expect(fileInfo).toMatch(
+      /case "exportPdf":[\s\S]{1,120}label: "Export to PDF", onClick: exportSelectionToPdf/,
     );
   });
 
-  test("New terminal here is a secondary action seeded via fromHere", () => {
+  test("New terminal here maps to the fromHere helper, draft files to the abs-path seed", () => {
+    // Draft directories root the terminal in the directory via
+    // newTerminalHere; only draft files take the abs-path seed.
     expect(fileInfo).toMatch(
-      /label: "New terminal here",[\s\S]{1,40}onClick: newTerminalHere,/,
+      /case "newTerminal":[\s\S]{1,450}\{ label: "Terminal from here", onClick: newTerminalHere \}[\s\S]{1,120}\{ label: "Terminal from here", onClick: draftTerminalHere \}[\s\S]{1,120}\{ label: "New terminal here", onClick: newTerminalHere \}/,
     );
     expect(fileInfo).toMatch(
       /function newTerminalHere\(\): void \{[\s\S]{1,200}terminalFromHereTarget\(entry\.path, entry\.is_dir\)/,
+    );
+    expect(fileInfo).toMatch(
+      /function draftTerminalHere\(\): void \{[\s\S]{1,300}shellQuotePath\(draftAbs\)/,
     );
     expect(fileInfo).toMatch(
       /import \{[^}]*\bterminalFromHereTarget\b[^}]*\} from "\.\.\/terminal\/fromHere";/,

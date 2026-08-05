@@ -20,8 +20,6 @@
   // tracking does the gating).
 
   import { api, withTokenQuery } from "../api/client";
-  import { isTauriDesktop, saveBytesToDownloads } from "../api/desktop";
-  import { downloadBytes } from "../api/download";
   import type {
     GraphEdge,
     InspectorPayload,
@@ -31,13 +29,7 @@
     TreeEntry,
   } from "../api/types";
   import { AUDIO_UNSUPPORTED_MESSAGE } from "../state/audioViewer";
-  import {
-    isAudio,
-    isImage,
-    isMarkdown,
-    isPdf,
-    isVideo,
-  } from "../state/fileTypes";
+  import { isAudio, isImage, isPdf, isVideo } from "../state/fileTypes";
   import { basename, formatMtime, formatSize } from "../state/format";
   import {
     ensureGraphLoaded,
@@ -47,10 +39,10 @@
   import { openImageZoom } from "../state/imageZoom";
   import { dirImageSet, openMediaViewer } from "../state/mediaOpen";
   import { openVideoViewer } from "../state/videoViewer";
+  import { exportPathToPdf } from "../state/fileActionExecutors";
   import {
     copyTextToClipboard,
     draftsDir,
-    effectiveHybridSurfaceTheme,
     isDraftPath,
     setTransientStatus,
     ui,
@@ -68,7 +60,11 @@
   } from "../state/store.svelte";
   import { openTerminalInActivePane } from "../state/tabs.svelte";
   import { terminalFromHereTarget, shellQuotePath } from "../terminal/fromHere";
-  import { classifyEntry, isOpenableTextKind } from "../state/kinds";
+  import { classifyEntry } from "../state/kinds";
+  import {
+    classifyFileActions,
+    type FileActionId,
+  } from "../state/fileActions";
   import KindChip from "./KindChip.svelte";
   import { ChevronDown, Copy } from "lucide-svelte";
 
@@ -431,34 +427,12 @@
   /// native Downloads pipeline on desktop, a browser download on the
   /// web. The engine loads on first use (dynamic import) and renders
   /// with the editor surface theme.
+  /// Markdown -> PDF rides the shared executor (state/fileActionExecutors)
+  /// so the inspector and the file browser context menu export the
+  /// same way.
   async function exportSelectionToPdf(): Promise<void> {
     if (!entry || entry.is_dir) return;
-    const path = entry.path;
-    setTransientStatus(`exporting ${basename(path)}...`);
-    try {
-      const doc = await api.read(path);
-      const { exportMarkdownToPdf, pdfFilenameFor } = await import(
-        "../editor/pdf_export"
-      );
-      const theme =
-        effectiveHybridSurfaceTheme("editor") === "dark" ? "dark" : "light";
-      const bytes = await exportMarkdownToPdf({
-        path,
-        markdown: doc.content,
-        theme,
-        styleSource: null,
-      });
-      const filename = pdfFilenameFor(path);
-      if (isTauriDesktop()) {
-        await saveBytesToDownloads(bytes, filename);
-      } else {
-        downloadBytes(bytes, filename, "application/pdf");
-      }
-      setTransientStatus(`exported ${filename}`);
-    } catch (err) {
-      ui.status = `PDF export failed: ${err instanceof Error ? err.message : String(err)}`;
-      ui.statusKind = "persistent";
-    }
+    await exportPathToPdf(entry.path);
   }
 
   // Desktop-download progress now shows in the transfer bubble (the single
@@ -515,14 +489,14 @@
       : "Download this file. You can also drag rows out of the File Browser where supported.",
   );
 
-  /// Action model for the pill + dropdown. One main action plus a list of
-  /// secondary actions, chosen per item category (directory / media /
-  /// editable file / binary). The surface also matters: the editor "Show
-  /// Details" inspector binds no onOpen (the file is already open there),
-  /// so its file main action is "Show file" instead of "Open". Built
-  /// reactively so it tracks the selection and the host-provided
-  /// handlers; an action whose handler a surface doesn't bind drops out
-  /// (e.g. no onSetAsScope => no "Graph from here").
+  /// Action model for the pill + dropdown. Applicability (which
+  /// actions exist for this entry) comes from the shared classifier
+  /// in `state/fileActions` -- the same policy the FileTree context
+  /// menu consumes -- so the two surfaces can never drift. Only the
+  /// handler/label mapping lives here. The surface still matters
+  /// through capabilities: the editor "Show Details" inspector binds
+  /// no onOpen (the file is already open there), so its file main
+  /// action is "Show file" instead of "Open".
   type InspectorAction = {
     label: string;
     onClick: () => void;
@@ -558,129 +532,102 @@
     openTerminalInActivePane(terminalFromHereTarget(entry.path, entry.is_dir));
   }
 
+  /// A draft FILE is scratch space, so the classifier yields only the
+  /// terminal action. Its handler opens a terminal seeded with
+  /// {cursor}{space}{ABSOLUTE-path-of-the-draft}. The absolute path comes
+  /// from the inspector payload (abs_path); cwd is the workspace root, so the
+  /// location-independent absolute seed is what reaches the prompt. The
+  /// {cursor}{space} prefix is added by TerminalTab's seed mechanism.
+  function draftTerminalHere(): void {
+    if (!entry) return;
+    const draftAbs = inspectorPayload?.abs_path ?? null;
+    openTerminalInActivePane(
+      draftAbs
+        ? { cwd: "", seedInput: shellQuotePath(draftAbs) }
+        : terminalFromHereTarget(entry.path, false),
+    );
+  }
+
+  /// Maps a classifier action id to this surface's handlers and
+  /// labels. Only called with `entry` set (actionModel returns null
+  /// before any mapping).
+  function actionFor(id: FileActionId): InspectorAction {
+    const e = entry!;
+    const p = e.path;
+    switch (id) {
+      case "open":
+        return e.is_dir
+          ? { label: "Open", onClick: openDirInBrowser }
+          : { label: "Open", onClick: () => onOpen?.() };
+      // Search binds both Open + reveal; the reveal-only main is the
+      // editor "Show Details" case (file already open there).
+      case "showFile":
+        return { label: "Show file", onClick: () => onReveal?.() };
+      // Same routing as the file tree's double-click / Enter: image ->
+      // zoom with the directory sibling set, audio/video/PDF -> their
+      // setless viewers.
+      case "viewMedia":
+        return {
+          label: isImage(p)
+            ? "View / Zoom"
+            : isVideo(p)
+              ? "View Video"
+              : isAudio(p)
+                ? "View Audio"
+                : "View PDF",
+          onClick: () => void openMediaViewer(p),
+        };
+      case "download":
+        return {
+          label: e.is_dir ? "Download tarball" : "Download file",
+          onClick: downloadSelection,
+          title: downloadTitle,
+        };
+      case "upload":
+        return { label: "Upload file here", onClick: triggerUpload, title: uploadTitle };
+      case "newTerminal": {
+        // Drafts are scratch space, but the two draft shapes route
+        // differently: a draft DIRECTORY roots the terminal in the
+        // directory itself (newTerminalHere), while a draft FILE keeps
+        // the absolute-path seed with the workspace root as cwd
+        // (draftTerminalHere).
+        const isDraft = e.path === draftsDir() || isDraftPath(e.path);
+        if (isDraft) {
+          return e.is_dir
+            ? { label: "Terminal from here", onClick: newTerminalHere }
+            : { label: "Terminal from here", onClick: draftTerminalHere };
+        }
+        return { label: "New terminal here", onClick: newTerminalHere };
+      }
+      // Markdown documents export to PDF on every surface (web and
+      // desktop alike; the save path differs, not the availability).
+      case "exportPdf":
+        return { label: "Export to PDF", onClick: exportSelectionToPdf };
+      case "graphFromHere":
+        return { label: "Graph from here", onClick: () => onSetAsScope?.() };
+    }
+  }
+
   const actionModel = $derived.by<{
     main: InspectorAction;
     secondary: InspectorAction[];
   } | null>(() => {
     if (!entry) return null;
-    // The Drafts dir is uncommitted scratch space, so "Open" (a File
-    // Browser tab), Upload, Download tarball and Graph-from-here don't
-    // apply. The one meaningful action is to drop a terminal there, so
-    // the Drafts node gets a SINGLE "Terminal from here" button and no
-    // dropdown.
-    if (entry.path === draftsDir()) {
-      return {
-        main: { label: "Terminal from here", onClick: newTerminalHere },
-        secondary: [],
-      };
-    }
-    // A draft FILE is scratch too, so Open / Show file / Download /
-    // Graph-from-here don't apply. A SINGLE "Terminal from
-    // here" button (no dropdown) that opens a terminal seeded with
-    // {cursor}{space}{ABSOLUTE-path-of-the-draft}. The absolute path comes
-    // from the inspector payload (abs_path); cwd is the workspace root, so the
-    // location-independent absolute seed is what reaches the prompt. The
-    // {cursor}{space} prefix is added by TerminalTab's seed mechanism.
-    if (isDraftPath(entry.path)) {
-      const draftAbs = inspectorPayload?.abs_path ?? null;
-      return {
-        main: {
-          label: "Terminal from here",
-          onClick: () =>
-            openTerminalInActivePane(
-              draftAbs
-                ? { cwd: "", seedInput: shellQuotePath(draftAbs) }
-                : terminalFromHereTarget(entry.path, false),
-            ),
-        },
-        secondary: [],
-      };
-    }
-    const isDir = entry.is_dir;
-    const p = entry.path;
-    const image = !isDir && isImage(p);
-    const pdf = !isDir && isPdf(p);
-    const video = !isDir && isVideo(p);
-    const audio = !isDir && isAudio(p);
-    // Editability follows the server-provided content kind, not the path
-    // extension: the file browser's per-directory listing content-sniffs
-    // an odd-suffix file to `text` / `binary`, so a plaintext file with an
-    // unknown extension gets "Open" (matching the tree's double-click,
-    // which peeks the content) instead of the extension-gated "Download".
-    const editable = !isDir && isOpenableTextKind(classifyEntry(entry));
-    const media = image || pdf || video || audio;
-
-    const download: InspectorAction = {
-      label: isDir ? "Download tarball" : "Download file",
-      onClick: downloadSelection,
-      title: downloadTitle,
-    };
-    const newTerminal: InspectorAction = {
-      label: "New terminal here",
-      onClick: newTerminalHere,
-    };
-    // Markdown documents export to PDF on every surface (web and
-    // desktop alike; the save path differs, not the availability).
-    const exportPdf: InspectorAction | null =
-      !isDir && isMarkdown(p)
-        ? { label: "Export to PDF", onClick: exportSelectionToPdf }
-        : null;
-    const graph: InspectorAction | null = onSetAsScope
-      ? { label: "Graph from here", onClick: onSetAsScope }
-      : null;
-    const secondary: InspectorAction[] = [];
-    let main: InspectorAction;
-
-    if (isDir) {
-      main = { label: "Open", onClick: openDirInBrowser };
-      if (allowUpload) {
-        secondary.push({
-          label: "Upload file here",
-          onClick: triggerUpload,
-          title: uploadTitle,
-        });
-      }
-      secondary.push(download, newTerminal);
-      if (graph) secondary.push(graph);
-    } else if (media) {
-      // Same routing as the file tree's double-click / Enter: image ->
-      // zoom with the directory sibling set, audio/video/PDF -> their
-      // setless viewers.
-      main = {
-        label: image
-          ? "View / Zoom"
-          : video
-            ? "View Video"
-            : audio
-              ? "View Audio"
-              : "View PDF",
-        onClick: () => void openMediaViewer(p),
-      };
-      secondary.push(download, newTerminal);
-      if (graph) secondary.push(graph);
-    } else if (editable) {
-      if (onOpen) {
-        main = { label: "Open", onClick: onOpen };
-        // Search binds both Open + reveal; surface "Show file" too.
-        if (onReveal) secondary.push({ label: "Show file", onClick: onReveal });
-      } else if (onReveal) {
-        // Editor "Show Details": the file is already open in this editor.
-        main = { label: "Show file", onClick: onReveal };
-      } else {
-        main = download;
-      }
-      secondary.push(download, newTerminal);
-      if (exportPdf) secondary.push(exportPdf);
-      if (graph) secondary.push(graph);
-    } else {
-      // Binary, including symlinks: download is the only sensible action.
-      main = download;
-      if (graph) secondary.push(graph);
-    }
-
-    // The main action never repeats in the dropdown (object identity, so
-    // the fallback `main = download` collapses the duplicate cleanly).
-    return { main, secondary: secondary.filter((a) => a !== main) };
+    const set = classifyFileActions(
+      {
+        path: entry.path,
+        isDir: entry.is_dir,
+        serverKind: entry.kind,
+        isDraft: entry.path === draftsDir() || isDraftPath(entry.path),
+      },
+      {
+        open: !!onOpen,
+        reveal: !!onReveal,
+        graph: !!onSetAsScope,
+        upload: allowUpload,
+      },
+    );
+    return { main: actionFor(set.main), secondary: set.secondary.map(actionFor) };
   });
 
   /// Dropdown open state for the secondary-action menu. Resets whenever
