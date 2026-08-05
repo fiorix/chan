@@ -1,10 +1,6 @@
 # Terminal appearance settings do not reach a standalone terminal
 
-Status: REGISTERED for v0.85.0, filed 2026-08-05, accepted, not specced. Follow-up to the custom
-terminal background work that ships in v0.84.1 (`6ffbe7d7`), which paints the terminal chrome from
-the resolved custom background in a workspace window. The owner reports the appearance settings do
-not take effect in a standalone terminal window; the break has not yet been located, which is the
-first task.
+Status: REGISTERED for v0.85.0, filed 2026-08-05, accepted, break located 2026-08-05. Follow-up to the custom terminal background work that ships in v0.84.1 (`6ffbe7d7`), which paints the terminal chrome from the resolved custom background in a workspace window. The owner reported that appearance settings do not take effect in a standalone terminal window. The break is two SPA boundaries, recorded below, and the fix reaches the whole terminal preference set rather than appearance alone.
 
 Component: `workspace-app` SPA (`web/packages/workspace-app`), and whichever server surface backs a
 standalone terminal tenant.
@@ -32,12 +28,17 @@ which kind of window opened it.
 - The custom values come from `prefs.terminal_colors` (`components/settings/AppearanceSection.svelte:116-117`,
   typed at `api/types.ts:267`).
 
-NOT established, and the first thing to settle: where the chain breaks. The candidates are that the
-slim tenant does not serve or persist the preference, that the SPA does not load preferences in
-terminal-only mode, or that it loads them and the surface does not apply them. These have different
-fixes, so the investigation precedes the spec — the same discipline the
-[`desktop-library-window-open-unavailable`](desktop-library-window-open-unavailable.md) item earned
-the hard way.
+**Located 2026-08-05.** Of the three candidates, the second is correct: the slim tenant serves the preferences and the SPA never asks for them.
+
+The server side is complete. `terminal_router` mounts `GET /api/config` (`crates/chan-server/src/lib.rs:1112`), and `build_terminal_app` loads the same global `EditorPrefs` and `ServerConfig` a workspace tenant loads (`:846-859`), with a comment stating the editor preferences are loaded so they can seed the SPA shell in terminal mode. `PreferencesView` is documented as the shared shape returned over both `/api/workspace` and `/api/config` (`crates/chan-server/src/routes/preferences.rs:34-69`) and carries `terminal_colors` and `terminal`.
+
+The apply side is also complete: both window kinds render the same `TerminalTab.svelte`, whose colour derivation, live re-theme effect, and chrome binding are unconditional.
+
+The break is two SPA boundaries. On initial load, `bootstrapTerminalOnly()` (`web/packages/workspace-app/src/state/store.svelte.ts:2019-2079`) never populates `workspace.info` and never fetches preferences, where the workspace path does at `:2087-2089`. On a live change, `config_changed` routes to `scheduleWorkspaceRefresh()` (`:844`), which returns early for terminal-only windows (`:2451`) because `/api/workspace` genuinely 404s on that tenant. Fixing either alone leaves the other broken.
+
+Every read of `workspace.info?.preferences` in a standalone terminal therefore yields `undefined` and falls back to a default. The effect is wider than appearance: the same null source also defaults `scrollback_mb`, `mouse_capture`, `secret_masking`, the font chain, and the terminal backend (`components/TerminalTab.svelte:823-850, 888`). A user who selected the ghostty backend gets xterm.js in every standalone terminal. The fix restores the source, so standalone terminals begin honoring the selected backend, scrollback, mouse capture, and secret masking, not only appearance.
+
+`SettingsOverlay.svelte` already reads `api.config()` for its own form (`:99-101`), with a comment naming exactly this asymmetry. That is why the bug is invisible from the settings surface: the values display and persist correctly while the terminal beside them renders defaults.
 
 ## Contract
 
@@ -65,6 +66,5 @@ terminal that mode does render, not about restoring workspace surfaces.
 
 ## Open
 
-- Whether the slim standalone tenant persists preferences per user or per tenant, and what it does
-  with a preference it has no workspace to scope to.
+- Whether the slim standalone tenant persists preferences per user or per tenant, and what it does with a preference it has no workspace to scope to. The fix does not change where the server reads configuration from, so whether a gateway-served standalone terminal's `/api/config` reflects the owner's preferences is still unsettled and remains an owner acceptance check.
 - Whether any other setting reachable in terminal-only mode has the same silent no-op shape.
