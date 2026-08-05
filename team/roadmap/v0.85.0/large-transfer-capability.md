@@ -24,7 +24,9 @@ A dedicated bulk-transfer lane owns a fixed set of threads and a bounded job que
 
 Admission is a permit taken when a transfer starts and released when its body is dropped. This is the shape the gateway already proves for its watcher and connection limits, including release on drop, so the mechanism is copied rather than invented.
 
-The concurrency bound is two bulk transfers process-wide, and excess work queues rather than being refused. The bound lives on the server, so a browser, a second window, `curl`, MCP, and a shell inside a chan terminal all obey the same number. The transfer bubble renders queue position. Two direct download anchors in the SPA bypass the client-side queue, and both are routed so they cannot escape the server bound; the desktop host's native download registers with the client queue and reaches the same server route, so the bound covers it too.
+The concurrency bound is two bulk transfers process-wide, and excess work queues up to a bounded depth. The queue is not unbounded: two active plus thirty-two waiting are admitted, and the thirty-fifth request is refused with HTTP 503 and `Retry-After: 1` before any body is read. An unbounded queue would violate the bounded-channel discipline the rest of this design rests on, and a bounded one has to refuse somewhere; the refusal is the bound made visible rather than an exception to it. A 503 here is not a transfer failure and not a file error, since nothing was read and nothing was written.
+
+The bound lives on the server, so a browser, a second window, `curl`, MCP, and a shell inside a chan terminal all obey the same number. The transfer bubble renders queue position for callers that opt into tracking. Untracked callers are a permanent class rather than a defect: the SPA's two direct download anchors cannot carry a request header, and native desktop transfers dispatch through the desktop host so the request is issued outside the page. Both remain admitted and both still obey the bound; what they lack is a position display.
 
 The runtime sets an explicit maximum blocking-thread count; the runtime builder declares no ceiling, so the tokio default applies.
 
@@ -41,7 +43,7 @@ Whole-file-read elimination, shipped in v0.82.0, is a prerequisite for all of it
 ## Contract
 
 - Bulk transfer never draws from the thread pool that editor and terminal work draw from.
-- Two concurrent bulk transfers process-wide; further work queues, with position visible to the user. The bound is server-authoritative and no client path can bypass it.
+- Two concurrent bulk transfers process-wide; further work queues to a bounded depth of thirty-two, and the request past that bound is refused with HTTP 503 and `Retry-After: 1` before any body is read. Position is visible to callers that opt into tracking, and is a rank among that tenant's own waiting work rather than a global queue depth. The bound is server-authoritative and no client path can bypass it, including the paths that cannot be tracked.
 - The runtime declares its blocking-thread ceiling explicitly.
 - A raised write ceiling is configuration, validated, with a finite maximum and no value meaning unlimited. Every mirrored ceiling consumes one server-reported effective value.
 - Remote transfer over the tunnel is a supported path, not an accident of defaults. The gateway states a transfer policy rather than applying its general body cap and deadline.
