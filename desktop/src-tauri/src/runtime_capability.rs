@@ -118,6 +118,10 @@ pub fn mint_exact_origin_grant<R: tauri::Runtime>(
     // resolution tolerates.
     let mut minted = minted_origins().lock().unwrap_or_else(|e| e.into_inner());
     if minted.contains(&urls[0]) {
+        tracing::debug!(
+            exact_origin = %urls[0],
+            "gateway-window capability already minted for this origin"
+        );
         return Ok(false);
     }
     let json = exact_origin_capability_json(&urls[0])?;
@@ -129,7 +133,17 @@ pub fn mint_exact_origin_grant<R: tauri::Runtime>(
     manager
         .add_capability(json)
         .map_err(|e| format!("adding gateway capability: {e}"))?;
-    minted.insert(urls.into_iter().next().expect("urls is non-empty"));
+    let origin = urls.into_iter().next().expect("urls is non-empty");
+    // The ACL refuses gateway_csrf_token before any handler runs, so no
+    // desktop-side code sees a refusal and nothing else records which origin
+    // actually carries the grant. Pair this line with the SPA's refusal log
+    // (origin + window label) to tell an origin that was never minted from one
+    // minted for a different origin than the window presents.
+    tracing::info!(
+        exact_origin = %origin,
+        "minted the gateway-window capability for lib-* windows on this origin"
+    );
+    minted.insert(origin);
     Ok(true)
 }
 

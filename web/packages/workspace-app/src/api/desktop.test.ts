@@ -36,6 +36,28 @@ function setTauriInternals(invoke: (cmd: string, args?: unknown) => Promise<unkn
   });
 }
 
+/// Tauri publishes the current window and webview labels through
+/// `__TAURI_INTERNALS__.metadata`; the refusal record reads them from there.
+function setTauriInternalsWithLabel(
+  invoke: (cmd: string, args?: unknown) => Promise<unknown>,
+  label: string,
+): void {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    value: {
+      invoke,
+      metadata: { currentWindow: { label }, currentWebview: { label } },
+    },
+    configurable: true,
+  });
+}
+
+/// A fresh module instance, so the module-level refusal record starts null and
+/// these cases stay order-independent.
+async function freshDesktopModule(): Promise<typeof import("./desktop")> {
+  vi.resetModules();
+  return await import("./desktop");
+}
+
 describe("isTauriDesktop", () => {
   afterEach(clearTauriGlobals);
 
@@ -90,6 +112,83 @@ describe("readGatewayCsrfToken", () => {
     });
 
     await expect(readGatewayCsrfToken()).resolves.toBeNull();
+  });
+});
+
+/// The ACL refuses `gateway_csrf_token` before any command handler runs, so the
+/// desktop side never sees the caller. These pin the webview-side record that
+/// carries the refused window's origin and label into the console, which is what
+/// distinguishes an origin that was never minted from a mismatched one.
+describe("gateway CSRF refusal diagnostics", () => {
+  afterEach(() => {
+    clearTauriGlobals();
+    vi.restoreAllMocks();
+  });
+
+  test("records the refused window's origin and label on a lib window", async () => {
+    const desktop = await freshDesktopModule();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    setTauriInternalsWithLabel(async () => {
+      throw new Error("Not allowed to request resource");
+    }, "lib-0a1b2c3d::w-4e5f6a7b");
+
+    await expect(desktop.readGatewayCsrfToken()).resolves.toBeNull();
+
+    expect(desktop.gatewayCsrfRefusal()).toEqual({
+      origin: window.location.origin,
+      windowLabel: "lib-0a1b2c3d::w-4e5f6a7b",
+      webviewLabel: "lib-0a1b2c3d::w-4e5f6a7b",
+      message: "Not allowed to request resource",
+    });
+    expect(errors).toHaveBeenCalledTimes(1);
+  });
+
+  test("records a refusal whatever label the window presents", async () => {
+    const desktop = await freshDesktopModule();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    setTauriInternalsWithLabel(async () => {
+      throw new Error("not allowed");
+    }, "workspace-window");
+
+    await expect(desktop.readGatewayCsrfToken()).resolves.toBeNull();
+    // A window whose label the minted capability does not match is a candidate
+    // explanation, so it must be recorded rather than filtered away.
+    expect(desktop.gatewayCsrfRefusal()?.windowLabel).toBe("workspace-window");
+    expect(errors).toHaveBeenCalledTimes(1);
+  });
+
+  test("logs one line per distinct refusal, not one per request", async () => {
+    const desktop = await freshDesktopModule();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    setTauriInternalsWithLabel(async () => {
+      throw new Error("Not allowed to request resource");
+    }, "lib-0a1b2c3d::w-4e5f6a7b");
+
+    await desktop.readGatewayCsrfToken();
+    await desktop.readGatewayCsrfToken();
+    await desktop.readGatewayCsrfToken();
+
+    expect(errors).toHaveBeenCalledTimes(1);
+  });
+
+  test("blockedWindowMessage keeps the browser wording until a refusal", async () => {
+    const desktop = await freshDesktopModule();
+    expect(desktop.blockedWindowMessage("browser wording")).toBe("browser wording");
+  });
+
+  test("blockedWindowMessage names the desktop denial after a refusal", async () => {
+    const desktop = await freshDesktopModule();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    setTauriInternalsWithLabel(async () => {
+      throw new Error("Not allowed to request resource");
+    }, "lib-0a1b2c3d::w-4e5f6a7b");
+    await desktop.readGatewayCsrfToken();
+
+    const message = desktop.blockedWindowMessage("browser wording");
+    expect(message).not.toContain("browser wording");
+    expect(message).toContain("chan-desktop denied native access");
+    expect(message).toContain(window.location.origin);
+    expect(message).toContain("lib-0a1b2c3d::w-4e5f6a7b");
   });
 });
 

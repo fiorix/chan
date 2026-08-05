@@ -19,6 +19,10 @@ type TauriWindow = Window &
   typeof globalThis & {
     __TAURI_INTERNALS__?: {
       invoke?: (cmd: string, args?: unknown) => Promise<unknown>;
+      metadata?: {
+        currentWindow?: { label?: string };
+        currentWebview?: { label?: string };
+      };
     };
     __TAURI__?: {
       invoke?: (cmd: string, args?: unknown) => Promise<unknown>;
@@ -53,17 +57,85 @@ export async function tauriInvoke<T = unknown>(
   return (await invoke(cmd, args)) as T;
 }
 
+/// What a `gateway_csrf_token` refusal looked like from inside the webview.
+/// The Tauri ACL rejects the invoke before any command handler runs, so the
+/// desktop side never observes the caller: this is the only place the refused
+/// window's own origin and label can be recorded.
+export type GatewayCsrfRefusal = {
+  origin: string;
+  windowLabel: string | null;
+  webviewLabel: string | null;
+  message: string;
+};
+
+let lastRefusal: GatewayCsrfRefusal | null = null;
+const loggedRefusals = new Set<string>();
+
+/// The most recent unexpected `gateway_csrf_token` refusal in this webview, or
+/// `null` if there has not been one.
+export function gatewayCsrfRefusal(): GatewayCsrfRefusal | null {
+  return lastRefusal;
+}
+
+function tauriLabels(): {
+  windowLabel: string | null;
+  webviewLabel: string | null;
+} {
+  const meta = (window as TauriWindow).__TAURI_INTERNALS__?.metadata;
+  return {
+    windowLabel: meta?.currentWindow?.label ?? null,
+    webviewLabel: meta?.currentWebview?.label ?? null,
+  };
+}
+
 /// Read the current gateway connection's CSRF token from chan-desktop. Exact
 /// origin and window-label checks live on both the runtime capability and the
 /// command handler. Expected denials on browser, loopback, and outbound windows
 /// become `null` so the transport can continue to its readable-cookie source.
+///
+/// A denial on a `lib-*` window is NOT expected: that window is exactly what the
+/// minted capability grants. Record and log it with the origin and label the
+/// window presents, so it can be compared against the `exact_origin` the desktop
+/// logs at mint time. Equal origins mean the grant is present but not resolving;
+/// different origins mean the window is on an origin that was never minted.
 export async function readGatewayCsrfToken(): Promise<string | null> {
   if (!isTauriDesktop()) return null;
   try {
     return await tauriInvoke<string>("gateway_csrf_token");
-  } catch {
+  } catch (error) {
+    const { windowLabel, webviewLabel } = tauriLabels();
+    lastRefusal = {
+      origin: window.location.origin,
+      windowLabel,
+      webviewLabel,
+      message: error instanceof Error ? error.message : String(error),
+    };
+    // Deliberately NOT gated on a `lib-*` label. The minted capability matches
+    // `windows: ["lib-*"]` on one exact origin, so a window presenting some
+    // other label is itself a candidate explanation for the refusal, and
+    // filtering on the label would hide exactly that finding. Dedupe instead:
+    // the transport calls this on every unsafe request, and a loopback window's
+    // expected denial should cost one line, not one per request.
+    const record = JSON.stringify(lastRefusal);
+    if (!loggedRefusals.has(record)) {
+      loggedRefusals.add(record);
+      console.error("[chan-desktop] gateway_csrf_token refused", record);
+    }
     return null;
   }
+}
+
+/// Message for a native window chan-desktop would not create. The popup-blocker
+/// wording is right in a browser and wrong in chan-desktop, which has no popup
+/// blocker: there, a window that could not read its CSRF token was refused its
+/// native grant, and the browser wording sends the user hunting for a setting
+/// that is not involved. Carries the origin and label so a screenshot of the
+/// error is enough to place the window.
+export function blockedWindowMessage(browserMessage: string): string {
+  const refusal = gatewayCsrfRefusal();
+  if (!refusal || !isTauriDesktop()) return browserMessage;
+  const label = refusal.windowLabel ?? refusal.webviewLabel ?? "unknown";
+  return `chan-desktop denied native access to this window (${refusal.origin}, ${label}). Reconnect the gateway, or fully quit and reopen chan-desktop.`;
 }
 
 // Keep the invoke vocabulary in this audited bridge while letting the HTTP

@@ -48,6 +48,7 @@
     type CommandSurface,
   } from "../state/commands";
   import { chordFor } from "../state/shortcuts";
+  import { blockedWindowMessage } from "../api/desktop";
   import { sessionWindowId } from "../api/client";
   import { ApiError } from "../api/errors";
   import {
@@ -279,7 +280,8 @@
   function popupFor(window: ScopedLibraryWindow): Window {
     if (window.window_id === sessionWindowId()) return globalThis.window;
     const popup = globalThis.window.open("", window.window_id);
-    if (!popup) throw new Error("The browser blocked the Chan window");
+    if (!popup)
+      throw new Error(blockedWindowMessage("The browser blocked the Chan window"));
     return popup;
   }
 
@@ -315,7 +317,10 @@
     // Must happen before the first await so keyboard activation retains the
     // browser's popup grant.
     const popup = globalThis.window.open("", "_blank");
-    if (!popup) throw new Error("The browser blocked the new Chan window");
+    if (!popup)
+      throw new Error(
+        blockedWindowMessage("The browser blocked the new Chan window"),
+      );
     clearClonedSessionDeckDrafts(popup);
     try {
       const result = await runScopedLibraryAction(action);
