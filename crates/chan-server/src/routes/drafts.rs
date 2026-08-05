@@ -551,7 +551,7 @@ mod tests {
         // mock). `events_tx` is the /ws fan-out the editor's
         // external-edit banner listens on; a self-write must never land
         // there.
-        let self_writes = Arc::new(SelfWrites::new());
+        let self_writes = Arc::new(SelfWrites::with_window(std::time::Duration::from_secs(60)));
         let (events_tx, mut events_rx) = broadcast::channel::<String>(1024);
         let (index_tx, _index_rx) = broadcast::channel::<WatchEvent>(1024);
         let scopes = Arc::new(ScopeRegistry::new());
