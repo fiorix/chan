@@ -19,6 +19,12 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
+### v0.84.1
+
+| item | state | what needs to happen |
+| --- | --- | --- |
+| [graph-large-workspace-render-cost](v0.84.1/graph-large-workspace-render-cost.md) | implemented, owner validation pending | confirm selection and drag behaviour in a real browser on a large workspace |
+
 ### v0.85.0
 
 | item | state | what needs to happen |
@@ -31,7 +37,6 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [hybrid-nav-mouse-split-affordances](v0.85.0/hybrid-nav-mouse-split-affordances.md) | implemented, validation pending | clear the integrated web gate and complete runtime input evidence |
 | [file-browser-context-menu-inspector-actions](v0.85.0/file-browser-context-menu-inspector-actions.md) | correction in progress | remove stale authority and copy while retaining ordinary-file replacement |
 | [chan-config-key-coverage](v0.85.0/chan-config-key-coverage.md) | implemented, validation pending | complete integrated validation of the serialized key authority |
-| [graph-large-workspace-render-cost](v0.85.0/graph-large-workspace-render-cost.md) | implemented, owner validation pending | confirm selection and drag behaviour in a real browser on a large workspace |
 
 ## Completed
 

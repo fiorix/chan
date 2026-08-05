@@ -1,6 +1,6 @@
 # Graph render cost on a large workspace
 
-Status: REGISTERED for v0.85.0, grounded 2026-08-05, implemented, owner validation pending.
+Status: REGISTERED for v0.84.1, grounded 2026-08-05, implemented, owner validation pending.
 
 ## What
 
