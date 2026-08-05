@@ -167,7 +167,14 @@ use tower_http::trace::TraceLayer;
 // host lifecycle + tenant builder take them). Re-exported so the route layer,
 // the devserver, and the `chan` binary keep naming them via `crate::` /
 // `chan_server::` unchanged.
-pub use chan_library::{sanitize_prefix, ServeConfig, ServeHandle};
+//
+// `allocate_workspace_prefix` is re-exported for the same reason: chan-desktop
+// depends on chan-server but not on chan-library, and it needs the one
+// authoritative `{slug}-{8hex}` computation to resolve a workspace id a client
+// sent. Recomputing that string in the shell would make a fourth copy of an
+// algorithm that must stay byte-identical, and a drift would surface as a
+// workspace that cannot be opened rather than as a build failure.
+pub use chan_library::{allocate_workspace_prefix, sanitize_prefix, ServeConfig, ServeHandle};
 
 /// Combine the `open_browser` config flag with the `BROWSER` env
 /// var. Returns false if the flag is off or if `BROWSER` is set to
