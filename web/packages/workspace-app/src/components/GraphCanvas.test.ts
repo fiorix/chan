@@ -150,12 +150,33 @@ describe("focus-on-select spotlights the 1st-degree neighbourhood", () => {
 
   test("edges dim to FOCUS_DIM_EDGE under selection, then incident edges are relit", () => {
     // Base pass dims the whole graph when a node is selected; a second
-    // pass redraws only the incident edges at full strength on top.
+    // pass redraws only the incident edges at full strength on top. Both
+    // passes draw pre-grouped buckets: the grouping depends on the
+    // selection and the working set but never on node positions, so it is
+    // memoised in selectionPaint() rather than rebuilt per frame.
     expect(source).toMatch(
-      /drawEdgeSet\(visibleEdgeRefs, hasSelection \? FOCUS_DIM_EDGE : EDGE_ALPHA\);/,
+      /drawEdgeBuckets\(sel\.base, hasSelection \? FOCUS_DIM_EDGE : EDGE_ALPHA\);/,
     );
     expect(source).toMatch(
-      /if \(hasSelection\) \{[\s\S]{0,220}drawEdgeSet\(\s*visibleEdgeRefs\.filter\(\(e\) => isIncidentEdge\(e\) \|\| isSpineEdge\(e\)\),\s*FOCUS_LIT_EDGE,?\s*\);/,
+      /if \(hasSelection && sel\.lit\) \{\s*drawEdgeBuckets\(sel\.lit, FOCUS_LIT_EDGE\);\s*\}/,
+    );
+  });
+
+  test("the lit overlay is exactly the incident + spine edges", () => {
+    // The membership rule is unchanged by the memoisation: an edge is relit
+    // when it touches the selection or lies on its containment spine.
+    expect(source).toMatch(
+      /bucketEdges\(\s*visibleEdgeRefs\.filter\(\(e\) => isIncidentEdge\(e\) \|\| isSpineEdge\(e\)\),\s*\)/,
+    );
+  });
+
+  test("selection-derived paint inputs are memoised on working set + selection", () => {
+    // Guards the fix for the post-click stall: recomputing the spine walk,
+    // the incident scan and the edge bucketing on every frame made a
+    // selected node cost more to draw the larger the graph got.
+    expect(source).toMatch(/let workingSetRev = 0;/);
+    expect(source).toMatch(
+      /paintCache\s*&& paintCache\.rev === workingSetRev\s*&& paintCache\.selected === selectedId/,
     );
   });
 
