@@ -814,23 +814,24 @@ SEE ALSO:
 pub(crate) const CS_TERMINAL_LIST: &str = r#"List every live terminal session this server owns, grouped by tab
 group.
 
-The markdown table carries one row per session: name, agent,
-session id, window, pane, side, tab, window kind, window status and
-cwd. `agent` is the server-derived submit agent (claude / codex /
-gemini / kimi / opencode, `-` for a shell session), derived from the
-session's spawn command and CHAN_AGENT spawn env; it is what a
-`cs terminal write --submit` delivery will actually encode for,
-so read it here instead of guessing a target's chord. The window
-columns are resolved against the library's window set, so a session
-reads back kind `workspace`, `standalone-terminal` or `control`
-with status `alive` / `offline` while its window has a row,
-`orphaned` once that window is gone, and `none` when the session
-was created outside any browser window. --json emits the raw
-payload ({"groups": {...}}) instead; --json --pretty indents it.
-The JSON form carries the same `agent` field (null for a shell
-session) plus queue_depth per session, the number of messages
-still pending in that session's write queue, which the markdown
-table omits.
+The markdown table carries one row per session: name, spawn, agent,
+session id, window, pane, side, tab, window kind, window status,
+queue and cwd. `agent` is the server-derived submit agent (claude
+/ codex / gemini / kimi / opencode, `-` for a shell session),
+derived from the session's spawn command and CHAN_AGENT spawn env;
+it is what a `cs terminal write --submit` delivery will actually
+encode for, so read it here instead of guessing a target's chord.
+`queue` is the number of logical messages still pending in that
+session's write queue: `0` is an idle queue, and a deep queue means
+that session has not seen the latest write yet. The window columns
+are resolved against the library's window set, so a session reads
+back kind `workspace`, `standalone-terminal` or `control` with
+status `alive` / `offline` while its window has a row, `orphaned`
+once that window is gone, and `none` when the session was created
+outside any browser window. --json emits the raw payload
+({"groups": {...}}) instead; --json --pretty indents it. The JSON
+form carries the same `agent` field (null for a shell session) and
+the same count as `queue_depth`.
 "#;
 
 /// `cs terminal list` examples, side effects, and caveats.

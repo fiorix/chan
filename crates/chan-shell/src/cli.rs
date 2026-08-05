@@ -2586,17 +2586,25 @@ fn render_terminal_list_markdown(raw: &str) -> Result<String> {
             .unwrap_or("-")
             .to_string()
     };
+    // Numeric counterpart to `str_field`. A server that predates the field
+    // renders `-`, distinguishing "not reported" from a reported empty queue,
+    // which is `0`.
+    let num_field = |s: &serde_json::Value, key: &str| {
+        s.get(key)
+            .and_then(|v| v.as_u64())
+            .map_or_else(|| "-".to_string(), |n| n.to_string())
+    };
     let mut out = String::new();
     for (group, sessions) in groups {
         out.push_str(&format!("## {group}\n\n"));
         out.push_str(
-            "| name | spawn | agent | session | window | pane | side | tab | kind | status | cwd |\n",
+            "| name | spawn | agent | session | window | pane | side | tab | kind | status | queue | cwd |\n",
         );
-        out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+        out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
         if let Some(arr) = sessions.as_array() {
             for s in arr {
                 out.push_str(&format!(
-                    "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                    "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
                     str_field(s, "name"),
                     // Immutable PTY-incarnation provenance. Always keep the
                     // column; a legacy fd-store import renders unknown as `-`.
@@ -2611,6 +2619,11 @@ fn render_terminal_list_markdown(raw: &str) -> Result<String> {
                     str_field(s, "tab"),
                     str_field(s, "window_kind"),
                     str_field(s, "window_status"),
+                    // Logical messages still queued for this session, so a
+                    // coordinator can see an undelivered backlog without
+                    // reaching for --json. Deep queue means the session has
+                    // not seen the latest write yet.
+                    num_field(s, "queue_depth"),
                     str_field(s, "cwd"),
                 ));
             }
@@ -2848,19 +2861,45 @@ mod tests {
 
     #[test]
     fn terminal_list_markdown_renders_window_columns() {
-        let raw = r#"{"groups":{"default":[{"name":"probe-live","spawn_name":"probe-spawn","agent":"codex","session_id":"s1","window":"w-abc","pane":"p-1","side":"b","tab":"t-1","window_kind":"standalone-terminal","window_status":"alive","cwd":"/tmp"}]}}"#;
+        let raw = r#"{"groups":{"default":[{"name":"probe-live","spawn_name":"probe-spawn","agent":"codex","session_id":"s1","window":"w-abc","pane":"p-1","side":"b","tab":"t-1","window_kind":"standalone-terminal","window_status":"alive","queue_depth":0,"cwd":"/tmp"}]}}"#;
         let out = render_terminal_list_markdown(raw).expect("render");
         assert!(
             out.contains(
-                "| name | spawn | agent | session | window | pane | side | tab | kind | status | cwd |"
+                "| name | spawn | agent | session | window | pane | side | tab | kind | status | queue | cwd |"
             ),
             "header: {out}"
         );
         assert!(
             out.contains(
-                "| probe-live | probe-spawn | codex | s1 | w-abc | p-1 | b | t-1 | standalone-terminal | alive | /tmp |"
+                "| probe-live | probe-spawn | codex | s1 | w-abc | p-1 | b | t-1 | standalone-terminal | alive | 0 | /tmp |"
             ),
             "row: {out}"
+        );
+    }
+
+    #[test]
+    fn terminal_list_markdown_reports_queue_depth_per_session() {
+        // The table is the default output, so a coordinator watching a drain
+        // should not have to reach for --json. An empty queue reports 0, not
+        // a blank or a dash: zero pending is an answer, and rendering it the
+        // same as "this server does not report depth" would erase the
+        // difference.
+        let raw = r#"{"groups":{"crew":[
+            {"name":"idle","spawn_name":"sp","agent":"claude","session_id":"s1","window":"w","pane":"p","side":"a","tab":"t","window_kind":"workspace","window_status":"alive","queue_depth":0,"cwd":"/tmp"},
+            {"name":"backed-up","spawn_name":"sp","agent":"claude","session_id":"s2","window":"w","pane":"p","side":"b","tab":"t","window_kind":"workspace","window_status":"alive","queue_depth":7,"cwd":"/tmp"}
+        ]}}"#;
+        let out = render_terminal_list_markdown(raw).expect("render");
+        assert!(
+            out.contains(
+                "| idle | sp | claude | s1 | w | p | a | t | workspace | alive | 0 | /tmp |"
+            ),
+            "empty queue: {out}"
+        );
+        assert!(
+            out.contains(
+                "| backed-up | sp | claude | s2 | w | p | b | t | workspace | alive | 7 | /tmp |"
+            ),
+            "pending queue: {out}"
         );
     }
 
@@ -2869,10 +2908,12 @@ mod tests {
         // A server that omits the spawn/agent/window/pane/tab/kind/status
         // fields (or reports a null spawn/agent) renders `-` in those columns
         // rather than erroring. The spawn column itself never disappears.
+        // An absent queue_depth renders `-` for the same reason, which is not
+        // the `0` a server reporting an empty queue produces.
         let raw = r#"{"groups":{"default":[{"name":"probe","spawn_name":null,"session_id":"s1","cwd":"/tmp"}]}}"#;
         let out = render_terminal_list_markdown(raw).expect("render");
         assert!(
-            out.contains("| probe | - | - | s1 | - | - | - | - | - | - | /tmp |"),
+            out.contains("| probe | - | - | s1 | - | - | - | - | - | - | - | /tmp |"),
             "row: {out}"
         );
     }
