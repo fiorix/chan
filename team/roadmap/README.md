@@ -29,6 +29,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 | item | state | what needs to happen |
 | --- | --- | --- |
+| [standalone-terminal-appearance-settings](v0.85.0/standalone-terminal-appearance-settings.md) | accepted, not specced | locate where terminal appearance settings stop short of a standalone terminal, then make them apply |
 | [desktop-library-window-open-unavailable](v0.85.0/desktop-library-window-open-unavailable.md) | deferred from v0.84.1, specced | add the capability-gated native commands so chan-desktop can open and focus library windows |
 | [web-marketing-onboarding](v0.85.0/web-marketing-onboarding.md) | accepted, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
 | [large-transfer-capability](v0.85.0/large-transfer-capability.md) | implementation in progress | finish the bulk-transfer lane, admission control, queue protocol, browser state, and acceptance evidence before raising the ceiling |
