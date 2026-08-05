@@ -11,7 +11,7 @@ import tab from "./TerminalTab.svelte?raw";
 describe("TerminalTab ghostty backend wiring", () => {
   test("backend reads from Preferences at spawn time with the lazy kit loader", () => {
     expect(tab).toMatch(
-      /const terminalPrefs = workspace\.info\?\.preferences\?\.terminal;[\s\S]*?backend = terminalBackendFromPrefs\(terminalPrefs\);/,
+      /const terminalPrefs = currentPreferences\(\)\?\.terminal;[\s\S]*?backend = terminalBackendFromPrefs\(terminalPrefs\);/,
     );
     expect(tab).toMatch(/await loadGhosttyKit\(\)/);
     // A failed wasm load falls back to xterm.js, never breaks the spawn.

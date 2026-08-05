@@ -32,7 +32,7 @@ describe("TerminalTab font + cursor parity", () => {
     // The preference is read once at spawn; existing terminals keep
     // their font until session restart.
     expect(tab).toMatch(
-      /workspace\.info\?\.preferences\?\.terminal\?\.font\s*\?\?\s*"os-default"/,
+      /currentPreferences\(\)\?\.terminal\?\.font\s*\?\?\s*"os-default"/,
     );
     expect(tab).toMatch(
       /fontPref === "source-code-pro"\s*\?\s*FONT_CHAIN_SOURCE_CODE_PRO\s*:\s*FONT_CHAIN_OS_DEFAULT/,

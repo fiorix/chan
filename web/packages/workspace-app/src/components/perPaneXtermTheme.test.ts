@@ -40,7 +40,7 @@ describe("TerminalTab tracks terminal surface body theme", () => {
 
   test("one resolved custom result drives palette and surface chrome", () => {
     expect(terminalTab).toContain(
-      "resolveTerminalColors(workspace.info?.preferences?.terminal_colors)",
+      "resolveTerminalColors(currentPreferences()?.terminal_colors)",
     );
     expect(terminalTab).toContain(
       'customTerminalColors?.contrast ?? surfaceThemeOverride("terminal")',

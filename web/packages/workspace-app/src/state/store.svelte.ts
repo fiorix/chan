@@ -2,6 +2,7 @@
 // One module-level singleton per concern; components import them directly.
 
 import type {
+  Preferences,
   WorkspaceInfo,
   WorkspaceWarning,
   HybridSurfaceKind,
@@ -684,6 +685,45 @@ function persistThemeChoice(choice: ThemeChoice): Promise<void> {
  *  theme value comes in via the bootstrap `/api/workspace` fetch. */
 export function applyInitialTheme(): void {
   applyResolvedTheme();
+}
+
+/// Preferences for a window that has no workspace to carry them. A
+/// terminal-only window is served by the slim tenant, which mounts no
+/// `/api/workspace`, so its settings arrive from `/api/config` instead.
+/// The payload is the same `Preferences` either way: the server builds
+/// one `PreferencesView` for both routes.
+const standalonePreferences = $state<{ current: Preferences | null }>({
+  current: null,
+});
+
+/// The effective global preferences for this window, whichever kind it is.
+/// Read this rather than `workspace.info?.preferences` from any surface a
+/// terminal-only window also renders, or that surface silently falls back
+/// to its defaults in a standalone terminal.
+export function currentPreferences(): Preferences | null {
+  return workspace.info?.preferences ?? standalonePreferences.current;
+}
+
+export function __testSetStandalonePreferences(prefs: Preferences | null): void {
+  standalonePreferences.current = prefs;
+}
+
+/// Load the global preferences for a workspace-less window from /api/config.
+/// Best-effort: a window that cannot read its settings still runs its
+/// terminal on defaults, which is what it did before it asked at all.
+/// Deliberately does NOT run `applyServerPreferences`. That mirror is for a
+/// workspace window: it would switch the docked file browsers back on from the
+/// persisted value, and this window has just forced them off because the slim
+/// tenant serves no `/api/files`, and it would fight the launcher's
+/// `local-theme` choice that a standalone terminal follows instead of the
+/// config theme. The terminal reads what it needs through `currentPreferences`.
+async function refreshStandalonePreferences(): Promise<void> {
+  try {
+    standalonePreferences.current = (await api.config()).preferences;
+  } catch {
+    // Left as-is rather than cleared: a failed refresh should not throw away
+    // preferences that are already applied and still correct.
+  }
 }
 
 /** Mirror server preferences (theme, pane widths) into local state.
@@ -2022,6 +2062,12 @@ async function bootstrapTerminalOnly(): Promise<void> {
   // and it would fetch `/api/files`, which the terminal tenant does not serve.
   browserSidePanes.left = false;
   browserSidePanes.right = false;
+  // Settings still apply here: the terminal this window renders reads the same
+  // preferences a workspace window's terminal does. The slim tenant serves
+  // them from /api/config, since it mounts no /api/workspace. Failure is
+  // non-fatal; the terminal falls back to its defaults rather than the window
+  // refusing to boot over a settings fetch.
+  await refreshStandalonePreferences();
   bootstrapHydrated = false;
   try {
     // The fresh-window marker and the layout hash both apply here: a
@@ -2445,10 +2491,15 @@ export async function refreshWorkspace(): Promise<void> {
 /// to hammer the server with one /api/workspace call per event.
 let workspaceRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 export function scheduleWorkspaceRefresh(): void {
-  // No workspace payload to refresh in a terminal-only window (the slim
-  // tenant serves no /api/workspace); skip so a stray watcher frame can't
-  // fire a guaranteed 404.
-  if (ui.terminalOnly) return;
+  // A terminal-only window has no workspace payload to refresh, and asking
+  // the slim tenant for one is a guaranteed 404. Its settings still change,
+  // though, and a `config_changed` frame arrives here, so refresh the same
+  // preferences from the route that tenant does serve. Undebounced: this
+  // path is driven by settings writes, not by a watcher-event burst.
+  if (ui.terminalOnly) {
+    void refreshStandalonePreferences();
+    return;
+  }
   if (workspaceRefreshTimer) return;
   workspaceRefreshTimer = setTimeout(() => {
     workspaceRefreshTimer = null;

@@ -16,7 +16,7 @@ describe("TerminalTab scrollback wiring", () => {
 
   test("start() recomputes the line cap from current Preferences", () => {
     expect(tab).toMatch(
-      /const terminalPrefs = workspace\.info\?\.preferences\?\.terminal;[\s\S]*?scrollbackLines = scrollbackLinesFromMb\(\s*clampScrollbackMb\(terminalPrefs\?\.scrollback_mb\),?\s*\)/,
+      /const terminalPrefs = currentPreferences\(\)\?\.terminal;[\s\S]*?scrollbackLines = scrollbackLinesFromMb\(\s*clampScrollbackMb\(terminalPrefs\?\.scrollback_mb\),?\s*\)/,
     );
   });
 

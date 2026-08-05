@@ -177,7 +177,7 @@ describe("MouseModeFilter: throughput sanity", () => {
 describe("TerminalTab mouse-capture wiring", () => {
   test("setting read is spawn-time with the ?? true fallback; on means no filter", () => {
     expect(tab).toMatch(
-      /const terminalPrefs = workspace\.info\?\.preferences\?\.terminal;[\s\S]*?mouseFilter = \(terminalPrefs\?\.mouse_capture \?\? true\)\s*\? null\s*: new MouseModeFilter\(\)/,
+      /const terminalPrefs = currentPreferences\(\)\?\.terminal;[\s\S]*?mouseFilter = \(terminalPrefs\?\.mouse_capture \?\? true\)\s*\? null\s*: new MouseModeFilter\(\)/,
     );
   });
 

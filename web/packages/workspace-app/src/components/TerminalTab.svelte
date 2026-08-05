@@ -84,6 +84,7 @@
   } from "../state/tabs.svelte";
   import {
     workspace,
+    currentPreferences,
     effectiveHybridSurfaceTheme,
     fileOps,
     scheduleSessionSave,
@@ -327,7 +328,7 @@
   let webglContextLossRetries = 0;
   const ptyWrites = new PtyWriteTracker();
   const customTerminalColors = $derived(
-    resolveTerminalColors(workspace.info?.preferences?.terminal_colors),
+    resolveTerminalColors(currentPreferences()?.terminal_colors),
   );
   const replayMaskScans = new ReplayMaskScanBatch();
   // The writer handed to ptyWrites. On xterm this is the terminal
@@ -824,7 +825,7 @@
 
   async function start(): Promise<void> {
     if (!host || term) return;
-    const terminalPrefs = workspace.info?.preferences?.terminal;
+    const terminalPrefs = currentPreferences()?.terminal;
     const rendererFontSize = terminalPrefs?.font_size ?? 14;
     // Scrollback honors the Settings MB budget. Read once here so a
     // settings change after spawn doesn't reach through and resize
@@ -889,7 +890,7 @@
       '"SF Mono", SFMono-Regular, "Cascadia Code", "DejaVu Sans Mono", ui-monospace, Menlo, Consolas, "Liberation Mono", "Source Code Pro", monospace';
     const FONT_CHAIN_SOURCE_CODE_PRO =
       '"Source Code Pro", "SF Mono", SFMono-Regular, "Cascadia Code", "DejaVu Sans Mono", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace';
-    const fontPref = workspace.info?.preferences?.terminal?.font ?? "os-default";
+    const fontPref = currentPreferences()?.terminal?.font ?? "os-default";
     const fontFamily =
       fontPref === "source-code-pro"
         ? FONT_CHAIN_SOURCE_CODE_PRO
