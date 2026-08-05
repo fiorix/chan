@@ -2363,6 +2363,7 @@
   class="terminal-tab"
   class:active
   data-theme={terminalSurfaceThemeOverride()}
+  style:--terminal-background={customTerminalColors?.background}
   data-terminal-tab-id={tab.id}
   role="tabpanel"
   aria-hidden={!active}
@@ -2677,7 +2678,7 @@
     flex-direction: column;
     min-width: 0;
     min-height: 0;
-    background: var(--bg);
+    background: var(--terminal-background, var(--bg));
     color: var(--text);
     visibility: hidden;
     pointer-events: none;
@@ -2725,15 +2726,15 @@
     flex: 1;
     min-height: 0;
     padding: 8px;
-    background: var(--bg);
+    background: var(--terminal-background, var(--bg));
     overflow: hidden;
   }
   .terminal-host :global(.xterm) {
     height: 100%;
   }
   .terminal-host :global(.xterm-viewport) {
-    background-color: var(--bg);
-    scrollbar-color: var(--separator) var(--bg);
+    background-color: var(--terminal-background, var(--bg));
+    scrollbar-color: var(--separator) var(--terminal-background, var(--bg));
   }
   .terminal-tab-menu-bubble {
     position: fixed;
