@@ -40,6 +40,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | --- | --- | --- |
 | [notifications](v0.86.0/notifications.md) | deferred from v0.85.0, not implemented on the release ancestry | start from the contract; the earlier implementation is on an abandoned candidate chain and was excluded from the v0.85.0 recovery |
 | [web-marketing-onboarding](v0.86.0/web-marketing-onboarding.md) | deferred from v0.85.0, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
+| [web-lock-check-destroys-node-modules](v0.86.0/web-lock-check-destroys-node-modules.md) | accepted, specced | make the lockfile sync check non-destructive on the pinned npm, and correct the comment that says it already is |
 
 ## Completed
 
