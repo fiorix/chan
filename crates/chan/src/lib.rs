@@ -4123,14 +4123,39 @@ async fn watchdog_probe(
     }
 }
 
+/// Resolve when a non-terminal stdin reaches EOF.
+///
+/// SSH remote commands and the desktop control terminal give `--join` a pipe
+/// for stdin. Closing that transport does not reliably signal the remote
+/// process, so stdin EOF is the ownership boundary that keeps a healthy
+/// watchdog from becoming an orphan. A real terminal stays Ctrl-C-driven.
+async fn wait_for_join_stdin_eof() {
+    use std::io::IsTerminal;
+
+    if std::io::stdin().is_terminal() {
+        return std::future::pending::<()>().await;
+    }
+
+    let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+    let _ = std::thread::Builder::new()
+        .name("chan-join-stdin".to_string())
+        .spawn(move || {
+            let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
+            let _ = closed_tx.send(());
+        });
+    // A thread-spawn failure drops the sender and detaches safely. The backing
+    // service remains supervised either way.
+    let _ = closed_rx.await;
+}
+
 /// Stay foreground watching a running `--service` backend until it dies or the
-/// user detaches with Ctrl-C -- the unified reattach contract (no journald /
-/// launchd log follow). Detaching leaves the backing server running and exits
-/// 0. The server dying exits non-zero, but only after [`WATCHDOG_GRACE`] of
-/// continuous failure: a `--restart` bounce or a slow network shows as a
-/// narrated wait + re-attach instead of killing the join (whose exit tears
-/// down the desktop connection riding on it). The exit code still tells the
-/// launcher survey a clean detach from a crash.
+/// user detaches with Ctrl-C or its non-TTY stdin closes -- the unified
+/// reattach contract (no journald / launchd log follow). Detaching leaves the
+/// backing server running and exits 0. The server dying exits non-zero, but
+/// only after [`WATCHDOG_GRACE`] of continuous failure: a `--restart` bounce or
+/// a slow network shows as a narrated wait + re-attach instead of killing the
+/// join (whose exit tears down the desktop connection riding on it). The exit
+/// code still tells the launcher survey a clean detach from a crash.
 async fn run_health_watchdog(
     addr: &str,
     mut liveness: DaemonLiveness,
@@ -4139,10 +4164,17 @@ async fn run_health_watchdog(
     let health_url = format!("http://{addr}/api/health");
     let client = reqwest::Client::new();
     let mut state = WatchdogState::new(WATCHDOG_GRACE);
+    let stdin_eof = wait_for_join_stdin_eof();
+    tokio::pin!(stdin_eof);
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("chan devserver: detached; the {subject} keeps running.");
+                return Ok(());
+            }
+            _ = &mut stdin_eof => {
+                // The controlling pipe is normally gone too, so do not print:
+                // eprintln! would panic on a broken stderr pipe.
                 return Ok(());
             }
             // The probe rides inside the select so Ctrl-C stays responsive
