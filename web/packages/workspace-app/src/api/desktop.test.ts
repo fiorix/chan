@@ -171,24 +171,22 @@ describe("gateway CSRF refusal diagnostics", () => {
     expect(errors).toHaveBeenCalledTimes(1);
   });
 
-  test("blockedWindowMessage keeps the browser wording until a refusal", async () => {
+  test("blockedWindowMessage keeps the browser wording outside Tauri", async () => {
     const desktop = await freshDesktopModule();
     expect(desktop.blockedWindowMessage("browser wording")).toBe("browser wording");
   });
 
-  test("blockedWindowMessage names the desktop denial after a refusal", async () => {
+  /// `window.open` returns null in every chan-desktop webview, so the desktop
+  /// wording must not depend on a CSRF refusal having been recorded first --
+  /// live testing showed that refusal never happens.
+  test("blockedWindowMessage replaces the popup wording on desktop with no refusal", async () => {
     const desktop = await freshDesktopModule();
-    vi.spyOn(console, "error").mockImplementation(() => {});
-    setTauriInternalsWithLabel(async () => {
-      throw new Error("Not allowed to request resource");
-    }, "lib-0a1b2c3d::w-4e5f6a7b");
-    await desktop.readGatewayCsrfToken();
+    setTauriInternals(async () => "unused");
 
-    const message = desktop.blockedWindowMessage("browser wording");
-    expect(message).not.toContain("browser wording");
-    expect(message).toContain("chan-desktop denied native access");
-    expect(message).toContain(window.location.origin);
-    expect(message).toContain("lib-0a1b2c3d::w-4e5f6a7b");
+    expect(desktop.gatewayCsrfRefusal()).toBeNull();
+    const message = desktop.blockedWindowMessage("The browser blocked the new Chan window");
+    expect(message).not.toContain("browser blocked");
+    expect(message).toContain("chan-desktop could not open this Chan window natively");
   });
 });
 

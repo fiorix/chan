@@ -126,16 +126,17 @@ export async function readGatewayCsrfToken(): Promise<string | null> {
 }
 
 /// Message for a native window chan-desktop would not create. The popup-blocker
-/// wording is right in a browser and wrong in chan-desktop, which has no popup
-/// blocker: there, a window that could not read its CSRF token was refused its
-/// native grant, and the browser wording sends the user hunting for a setting
-/// that is not involved. Carries the origin and label so a screenshot of the
-/// error is enough to place the window.
+/// wording is right in a browser and always wrong in chan-desktop, which has no
+/// popup blocker: `window.open` returns null in every chan-desktop webview,
+/// gateway-served or local, so the browser wording sends the user hunting for a
+/// setting that does not exist.
+///
+/// Keyed on `isTauriDesktop()` alone, NOT on a recorded CSRF refusal: live
+/// testing showed `gateway_csrf_token` resolves normally through Tauri's
+/// postMessage fallback, so a refusal-keyed message never fired.
 export function blockedWindowMessage(browserMessage: string): string {
-  const refusal = gatewayCsrfRefusal();
-  if (!refusal || !isTauriDesktop()) return browserMessage;
-  const label = refusal.windowLabel ?? refusal.webviewLabel ?? "unknown";
-  return `chan-desktop denied native access to this window (${refusal.origin}, ${label}). Reconnect the gateway, or fully quit and reopen chan-desktop.`;
+  if (!isTauriDesktop()) return browserMessage;
+  return "chan-desktop could not open this Chan window natively. This is a known chan-desktop limitation, not a browser setting.";
 }
 
 // Keep the invoke vocabulary in this audited bridge while letting the HTTP
