@@ -24,7 +24,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | item | state | what needs to happen |
 | --- | --- | --- |
 | [standalone-terminal-appearance-settings](v0.85.0/standalone-terminal-appearance-settings.md) | accepted, not specced | locate where terminal appearance settings stop short of a standalone terminal, then make them apply |
-| [desktop-library-window-open-unavailable](v0.85.0/desktop-library-window-open-unavailable.md) | deferred from v0.84.1, specced | add the capability-gated native commands so chan-desktop can open and focus library windows |
+| [desktop-library-window-open-unavailable](v0.85.0/desktop-library-window-open-unavailable.md) | implemented, owner validation pending | confirm native window creation and focus in a gateway-served and a local chan-desktop window on macOS |
 | [large-transfer-capability](v0.85.0/large-transfer-capability.md) | implementation in progress | finish the bulk-transfer lane, admission control, queue protocol, browser state, and acceptance evidence before raising the ceiling |
 | [ghostty-macos-trackpad-scroll-parity](v0.85.0/ghostty-macos-trackpad-scroll-parity.md) | implemented, owner validation pending | calibrate the accepted factor on macOS hardware and complete live client checks |
 | [ghostty-live-output-scroll-stability](v0.85.0/ghostty-live-output-scroll-stability.md) | implemented, owner validation pending | complete the real streaming and browser evidence |

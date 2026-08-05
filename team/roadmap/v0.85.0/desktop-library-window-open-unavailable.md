@@ -1,10 +1,8 @@
 # chan-desktop cannot open a library window: the flow depends on `window.open`
 
-Status: REGISTERED for v0.85.0, DEFERRED from v0.84.1 on 2026-08-05, filed and grounded 2026-08-05
-by live owner testing, accepted, not implemented. It moves because the repair needs a new native
-command and its capability wiring, which is more than a patch release should carry: an SPA-only
-branch was written, tested live, and reverted (see Attempted and reverted). The v0.84.1 diagnostic
-work that came out of this investigation SHIPPED and stays in v0.84.1.
+Status: REGISTERED for v0.85.0, DEFERRED from v0.84.1 on 2026-08-05, filed and grounded 2026-08-05 by live owner testing, implemented, owner validation pending. The accepted approach shipped: the desktop mints and raises library windows through two capability-gated native commands, and the browser keeps `window.open`. What remains is owner acceptance on real macOS hardware, which is the only place a WKWebView delivering an invoke from a remote https page can be observed.
+
+It moved out of v0.84.1 because the repair needs a new native command and its capability wiring, which is more than a patch release should carry: an SPA-only branch was written, tested live, and reverted (see Attempted and reverted). The v0.84.1 diagnostic work that came out of this investigation SHIPPED and stays in v0.84.1.
 
 This item was originally filed as a gateway CSRF/IPC-grant failure triggered by a gateway outage;
 live testing disproved that framing entirely, and the disproof is recorded under Ruled out so it is
@@ -152,31 +150,30 @@ cause a native window to open" inside the Tauri capability system that already s
 windows to one authenticated exact origin, rather than resting it on a client-supplied `window_id`
 that the HTTP mint authorizes only as a live window of the tenant.
 
-- New native commands in `desktop/src-tauri`, one family covering both gaps: create a library
-  window, and focus an existing one by its record id. The desktop already owns a native-origin mint
-  path (origin omitted => `WindowOrigin::Native`), which is what these use.
-- Permission wiring follows `gateway_csrf_token` exactly: an `allow-*` entry in
-  `desktop/src-tauri/permissions/app.toml`, added to the `workspace-window` set so local windows
-  hold it, AND to the minted capability's permission list in
-  `runtime_capability.rs::exact_origin_capability_json` so gateway `lib-*` windows hold it on their
-  exact origin. No scoped permissions and no deny entries -- the module doc's absolute rules.
-- Expect the full-gate parity table to need attention, in the style of the `read_dropped_paths` and
-  `gateway_csrf_token` `DELIBERATE_EXCLUSIONS` entries in `desktop/src-tauri/src/serve.rs`, if the
-  commands are deliberately class-scoped.
-- The invoke goes in `web/packages/workspace-app/src/api/desktop.ts`: the repository requires every
-  Tauri invoke to live in that audited bridge.
-- `CommandLauncher.svelte` then branches on `isTauriDesktop()` at both call sites, calling the
-  commands instead of `window.open`, and keeps the browser path untouched.
+- `create_library_window` and `focus_library_window` in `desktop/src-tauri/src/main.rs`. Both resolve the target library from the INVOKING window's own label, so a window reaches only its own library: `{library_id}::{window_id}` yields `local` or `lib-<hex>`, a `workspace-*` label resolves to the local library, and every other label is refused.
+- Creation mints a NATIVE-origin record. The local library goes through the embedded host, a devserver library through `devserver::mint_library_window`. The window watcher opens the OS window.
+- Focus raises through `unbury_window`, the same path the launcher's `/open` route drives, and it persists `hidden = false` on the way, so the SPA does not also send the scoped visibility action.
+- Hiding and closing another window depended on the same popup handle and failed the same way. They run the scoped action alone: both mutations make the record fail the watcher's show test, so the reconcile closes the OS window without a native command or any new authority.
+- The opaque `workspace_id` is resolved to a root path on the desktop side, so no filesystem path is accepted from the page.
+- Permission wiring goes in the `workspace-window` set only. The runtime-minted capability lists `"workspace-window"` as its first permission, so a permission in that set already reaches gateway-served `lib-*` windows on their exact origin; listing it again in `exact_origin_capability_json` would be a redundant literal, not a second grant. `allow-gateway-csrf-token` is listed separately precisely because it is deliberately NOT in that set, so it is the wrong pattern to copy for a command every window class needs.
+- The full-gate parity table needs no new entry. `origin_aware_acl_grants_spa_invoke_vocabulary_per_window_class` enforces `DELIBERATE_EXCLUSIONS` in both directions, and with both permissions in the `workspace-window` set all four origin classes are granted, so an exclusion entry would fail the test rather than satisfy it.
+- `web/packages/workspace-app/src/api/libraryWindows.ts` owns the desktop/browser split; the two `tauriInvoke` call sites stay in `api/desktop.ts`, which is the file the ACL parity test parses.
 
 ## Acceptance checks
 
-- In chan-desktop, in BOTH a gateway-served and a local window: the Computers scope lists,
-  activating an existing window brings it to front, and creating a terminal or workspace window
-  opens a native window.
+Discharged by automated evidence:
+
+- The desktop branch does not call `window.open` and the browser branch still does. Driven through the real functions in `web/packages/workspace-app/src/api/libraryWindows.test.ts`, which fails on exactly the desktop cases when the branch regresses while the browser cases keep passing.
+- Both commands are granted on all four window/origin classes, and denied on a sibling tenant, the proxy apex, a wrong port, an unrelated remote origin, and a non-`lib-*` label.
+
+Owner acceptance, not reachable by any test on a headless host:
+
+- In chan-desktop, in BOTH a gateway-served and a local window: the Computers scope lists, activating an existing window brings it to front, and creating a terminal or workspace window opens a native window.
 - In a browser tab, the existing `window.open` behaviour is unchanged.
-- Unit: the desktop branch does not call `window.open`, and the browser branch still does.
-- Unit: `blockedWindowMessage` returns the desktop wording under `isTauriDesktop()` with no CSRF
-  refusal recorded.
+
+## Assumption carried
+
+`workspace-*` labels map to the local library on the strength of the desktop's own `library_id: "local"` declaration in the `WindowSpec` it builds for those windows, not on a live observation that the Computers scope lists in a `workspace-*` window. The mapping exists so that class does not hold the permission and then error on use.
 
 ## Boundaries
 
@@ -201,15 +198,10 @@ satisfied by the postMessage fallback.
   spam as the cheap abuse and the opened window's native vocabulary as the expensive one.
   Hence Implementation shape above: the desktop mints, through a capability-gated command, so the
   ACL that already scopes `lib-*` windows to an exact origin governs this too.
-- **Raising an already-visible native window has no surface today.** Un-burying a hidden window
-  works (the watcher then opens it), but nothing brings a visible one to the front. The
-  launcher does this over HTTP with `POST /api/library/windows/{id}/open`
-  (`launcher/src/api/library.ts:597`), which `workspace-app` cannot reach: it talks only through
-  the capability-scoped path, whose action enum is `new_terminal`, `new_workspace_window`,
-  `set_window_visibility`, `close_window` (`libraryCommand.ts:56-60`). No registered Tauri command
-  focuses a window by label either. Closing this needs a new surface — a scoped `open_window`
-  action, or a native focus command with its permission wired into both `workspace-window` and the
-  minted gateway capability, following the `gateway_csrf_token` pattern.
+- **Settled: raising an already-visible native window now has a surface.** `focus_library_window` is
+  it. It raises through `unbury_window`, the same path the launcher's `/open` route drives, and
+  persists `hidden = false` on the way, so the SPA does not also send the scoped visibility action
+  and the two cannot disagree.
 - Whether the launcher's capability model
   (`web/packages/launcher/src/state/capabilities.ts`, which already distinguishes client-side
   `window.open` management from a native bridge) should be shared with `workspace-app` rather than
