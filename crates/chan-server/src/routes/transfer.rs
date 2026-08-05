@@ -108,14 +108,49 @@ impl Write for TarChannelWriter {
     }
 }
 
+/// Client-supplied tracking identity for one transfer. Both headers must be
+/// present to opt in; a caller that sends neither is admitted and bounded
+/// identically and simply receives no frames.
+///
+/// These are routing keys, not authorization claims. The socket that receives
+/// the frames asserts its own `window_id` the same way, so validating one end
+/// would manufacture an authority the other end does not have. The real
+/// boundary is the per-launch bearer that guards every route here.
+pub(crate) struct TransferTracking {
+    pub window_id: String,
+    pub transfer_id: String,
+}
+
+impl TransferTracking {
+    pub(crate) fn from_headers(headers: &axum::http::HeaderMap) -> Option<Self> {
+        let value = |name| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        };
+        Some(Self {
+            window_id: value("x-chan-window-id")?,
+            transfer_id: value("x-chan-transfer-id")?,
+        })
+    }
+}
+
 /// Stream a tar archive straight to the response body, built on the fly by
 /// `build` (no staged temp file). The caller is expected to have already
 /// pre-flighted readability, so the build does not fail mid-stream under normal
 /// conditions; a client disconnect stops it cleanly (BrokenPipe), and any other
 /// late error is forwarded so the body fails rather than completing a truncated
 /// archive silently.
-pub(crate) fn stream_tar_response<F>(
+///
+/// `events` and `tracking` are both `None` for an untracked caller, which is
+/// admitted and bounded identically and simply reports nothing.
+pub(crate) fn stream_tar_response_tracked<F>(
     bulk: &BulkTransferTenant,
+    events: Option<tokio::sync::broadcast::Sender<String>>,
+    tracking: Option<TransferTracking>,
     archive_name: String,
     build: F,
 ) -> Response
@@ -140,12 +175,29 @@ where
         // retry without having paid for a walk of the tree.
         Err(full) => return full.into_response(),
     };
+    // `alive_tx` rides with the job so the reporter learns the response is
+    // gone by its sender dropping, rather than by polling for it.
+    let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<std::convert::Infallible>();
+    if let (Some(events), Some(tracking)) = (events, tracking) {
+        crate::routes::ws::spawn_transfer_queue_reporter(
+            events,
+            tracking.window_id,
+            tracking.transfer_id,
+            job.tracker(),
+            alive_rx,
+        );
+    }
     // The job handle rides in the body's state so a disconnected or dropped
     // response cancels the build and releases its lane slot. Holding it
     // anywhere else would keep a slot occupied for a client that is gone.
-    let body = Body::from_stream(stream::unfold((rx, job), |(mut rx, job)| async move {
-        rx.recv().await.map(|message| (message, (rx, job)))
-    }));
+    let body = Body::from_stream(stream::unfold(
+        (rx, job, alive_tx),
+        |(mut rx, job, alive_tx)| async move {
+            rx.recv()
+                .await
+                .map(|message| (message, (rx, job, alive_tx)))
+        },
+    ));
     (
         [
             (header::CONTENT_TYPE, "application/x-tar".to_string()),
@@ -173,6 +225,7 @@ pub async fn api_terminal_read_file(
     State(state): State<std::sync::Arc<crate::state::AppState>>,
     AxumPath(path): AxumPath<String>,
     Query(query): Query<TerminalDownloadQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
     // The slim terminal tenant fetches no file content inline (no editor, no
     // file browser); the only legitimate GET here is the download gesture, so a
@@ -195,9 +248,13 @@ pub async fn api_terminal_read_file(
         Ok(Ok(TerminalDownload::Directory { name })) => {
             let build_abs = abs;
             let build_name = name.clone();
-            stream_tar_response(&state.bulk_transfer, name, move |builder| {
-                builder.append_dir_all(&build_name, &build_abs)
-            })
+            stream_tar_response_tracked(
+                &state.bulk_transfer,
+                Some(state.events_tx.clone()),
+                TransferTracking::from_headers(&headers),
+                name,
+                move |builder| builder.append_dir_all(&build_name, &build_abs),
+            )
         }
         // Pre-flight / IO failures are reported before any archive bytes go out.
         Ok(Err(message)) => err(StatusCode::BAD_REQUEST, message),
@@ -731,7 +788,7 @@ mod tests {
         }
         // A directory pre-flights readable and is marked for streaming; the
         // stream builds a real tar via the same `append_dir_all` the handler
-        // hands `stream_tar_response`.
+        // hands `stream_tar_response_tracked`.
         match terminal_download_plan(dir.path()).unwrap() {
             TerminalDownload::Directory { name } => {
                 let mut buf = Vec::new();
@@ -818,7 +875,7 @@ mod tests {
 
         let built = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let observed = built.clone();
-        let resp = stream_tar_response(&bulk, "arc".into(), move |b| {
+        let resp = stream_tar_response_tracked(&bulk, None, None, "arc".into(), move |b| {
             observed.store(true, std::sync::atomic::Ordering::SeqCst);
             b.append_dir_all("arc", &src)
         });
@@ -846,7 +903,9 @@ mod tests {
         let src = dir.path().to_path_buf();
 
         let bulk = crate::state::test_support::make_test_bulk_transfer_tenant();
-        let resp = stream_tar_response(&bulk, "arc".into(), move |b| b.append_dir_all("arc", &src));
+        let resp = stream_tar_response_tracked(&bulk, None, None, "arc".into(), move |b| {
+            b.append_dir_all("arc", &src)
+        });
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();

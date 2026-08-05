@@ -44,10 +44,97 @@ pub struct WsQuery {
 /// connection. A format drift just makes this return `None`, so the frame is
 /// forwarded and the SPA's own `window_id` gate still filters it: it fails safe.
 fn window_command_target(frame: &str) -> Option<&str> {
-    const PREFIX: &str = "{\"type\":\"window_command\",\"window_id\":\"";
-    let rest = frame.strip_prefix(PREFIX)?;
-    let end = rest.find('"')?;
-    Some(&rest[..end])
+    // Both targeted frame types put `type` then `window_id` first, so the id
+    // reads off a fixed prefix without parsing the tail. For window_command
+    // that tail can be a multi-MB base64 payload we must not re-parse on every
+    // connection; for transfer_queue it is small but the shape is shared.
+    // A format drift just yields None, so the frame broadcasts rather than
+    // being dropped, and the ordering is pinned by tests on both sides.
+    const PREFIXES: [&str; 2] = [
+        "{\"type\":\"window_command\",\"window_id\":\"",
+        "{\"type\":\"transfer_queue\",\"window_id\":\"",
+    ];
+    for prefix in PREFIXES {
+        if let Some(rest) = frame.strip_prefix(prefix) {
+            let end = rest.find('"')?;
+            return Some(&rest[..end]);
+        }
+    }
+    None
+}
+
+/// One `transfer_queue` frame. Field order is load-bearing: `type` and
+/// `window_id` must serialize first so the socket pump can read the target off
+/// a fixed prefix.
+#[derive(serde::Serialize)]
+struct TransferQueueFrame<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    window_id: &'a str,
+    transfer_id: &'a str,
+    state: &'static str,
+    /// Absent, not null and not zero, while the transfer is running. The
+    /// browser distinguishes "no rank" from "rank 0" and must never see the
+    /// latter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    position: Option<usize>,
+}
+
+/// Report one tracked transfer's queue position to the window that started it,
+/// until it starts running or its response goes away.
+///
+/// Untracked callers get no reporter at all: `curl`, MCP, and the SPA's direct
+/// download anchors are admitted and bounded exactly the same, they simply
+/// have no window to address. Absence of frames never means absence of
+/// admission.
+pub(crate) fn spawn_transfer_queue_reporter(
+    events_tx: broadcast::Sender<String>,
+    window_id: String,
+    transfer_id: String,
+    tracker: crate::bulk_transfer::BulkTracker,
+    mut response_alive: tokio::sync::oneshot::Receiver<std::convert::Infallible>,
+) {
+    tokio::spawn(async move {
+        let mut changes = tracker.changes();
+        let mut last: Option<crate::bulk_transfer::BulkState> = None;
+        loop {
+            let now = tracker.state();
+            if last != Some(now) {
+                let (state, position) = match now {
+                    crate::bulk_transfer::BulkState::Waiting(rank) => ("waiting", Some(rank)),
+                    crate::bulk_transfer::BulkState::Active => ("active", None),
+                };
+                let frame = serde_json::to_string(&TransferQueueFrame {
+                    kind: "transfer_queue",
+                    window_id: &window_id,
+                    transfer_id: &transfer_id,
+                    state,
+                    position,
+                });
+                if let Ok(frame) = frame {
+                    // A send failure means no socket is attached, which is
+                    // normal between reloads and is not worth reporting.
+                    let _ = events_tx.send(frame);
+                }
+                last = Some(now);
+            }
+            // Running is terminal for this reporter: the HTTP response carries
+            // the outcome, so a completion frame would only race it.
+            if now == crate::bulk_transfer::BulkState::Active {
+                return;
+            }
+            tokio::select! {
+                // The response owner dropped, so the transfer is cancelled and
+                // there is nobody left to inform.
+                _ = &mut response_alive => return,
+                changed = changes.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
 }
 
 pub async fn ws_upgrade(
@@ -399,6 +486,75 @@ mod tests {
             None
         );
         assert_eq!(window_command_target("not json"), None);
+    }
+
+    #[test]
+    fn transfer_queue_frames_are_addressed_to_one_window() {
+        // Same fixed-prefix read as window_command, so a queue position never
+        // reaches another window's socket.
+        let waiting = r#"{"type":"transfer_queue","window_id":"workspace-aa-0","transfer_id":"t-1","state":"waiting","position":3}"#;
+        assert_eq!(window_command_target(waiting), Some("workspace-aa-0"));
+        let active = r#"{"type":"transfer_queue","window_id":"terminal-7","transfer_id":"t-2","state":"active"}"#;
+        assert_eq!(window_command_target(active), Some("terminal-7"));
+    }
+
+    #[test]
+    fn transfer_queue_frame_matches_the_published_wire_shape() {
+        // Every string here is runtime-validated, not compiler-validated, and
+        // the browser parses this exact shape. Field ORDER is load-bearing:
+        // the pump reads window_id off a fixed prefix.
+        let waiting = serde_json::to_string(&TransferQueueFrame {
+            kind: "transfer_queue",
+            window_id: "w-1",
+            transfer_id: "t-1",
+            state: "waiting",
+            position: Some(2),
+        })
+        .expect("frame serializes");
+        assert_eq!(
+            waiting,
+            r#"{"type":"transfer_queue","window_id":"w-1","transfer_id":"t-1","state":"waiting","position":2}"#
+        );
+
+        // Absent, not null and not zero: the browser distinguishes "no rank"
+        // from "rank 0" and must never be handed the latter.
+        let active = serde_json::to_string(&TransferQueueFrame {
+            kind: "transfer_queue",
+            window_id: "w-1",
+            transfer_id: "t-1",
+            state: "active",
+            position: None,
+        })
+        .expect("frame serializes");
+        assert_eq!(
+            active,
+            r#"{"type":"transfer_queue","window_id":"w-1","transfer_id":"t-1","state":"active"}"#
+        );
+        assert!(!active.contains("position"));
+    }
+
+    #[test]
+    fn tracking_requires_both_headers_and_untracked_is_not_degraded() {
+        use crate::routes::transfer::TransferTracking;
+        let mut headers = axum::http::HeaderMap::new();
+        assert!(TransferTracking::from_headers(&headers).is_none());
+
+        headers.insert("x-chan-window-id", "w-1".parse().unwrap());
+        assert!(
+            TransferTracking::from_headers(&headers).is_none(),
+            "one header alone must not opt in"
+        );
+
+        headers.insert("x-chan-transfer-id", "   ".parse().unwrap());
+        assert!(
+            TransferTracking::from_headers(&headers).is_none(),
+            "a blank id must not opt in"
+        );
+
+        headers.insert("x-chan-transfer-id", "t-1".parse().unwrap());
+        let tracking = TransferTracking::from_headers(&headers).expect("both headers opt in");
+        assert_eq!(tracking.window_id, "w-1");
+        assert_eq!(tracking.transfer_id, "t-1");
     }
 
     #[test]

@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 /// Bulk jobs executing at once, and therefore the worker-thread count.
 pub const ACTIVE_CAPACITY: usize = 2;
@@ -127,6 +127,11 @@ struct LaneInner {
 struct SharedLane {
     inner: Mutex<LaneInner>,
     wake: Condvar,
+    /// Bumped on every change to queue shape. Watchers recompute their own
+    /// rank from it rather than being handed one, which keeps the lane free of
+    /// any per-observer bookkeeping and means a slow observer coalesces
+    /// missed changes instead of queueing them.
+    changes: watch::Sender<u64>,
 }
 
 impl SharedLane {
@@ -136,6 +141,13 @@ impl SharedLane {
     /// process lifetime would be the worse failure.
     fn lock(&self) -> MutexGuard<'_, LaneInner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Signal that queue shape changed. Called after the admission lock is
+    /// released so a watcher never wakes into contention with the mutation
+    /// that woke it.
+    fn announce_change(&self) {
+        self.changes.send_modify(|seq| *seq = seq.wrapping_add(1));
     }
 
     /// Rank of `id` among `tenant`'s own waiting jobs, 1-based. `None` once the
@@ -169,7 +181,9 @@ impl SharedLane {
         if let Some(job) = inner.active.iter().find(|job| job.id == id) {
             job.cancel.store(true, Ordering::SeqCst);
         }
+        drop(inner);
         self.wake.notify_all();
+        self.announce_change();
     }
 }
 
@@ -230,6 +244,7 @@ impl BulkTransferTenant {
         });
         drop(inner);
         self.shared.wake.notify_all();
+        self.shared.announce_change();
 
         Ok(BulkJob {
             id,
@@ -254,6 +269,18 @@ impl<T> BulkJob<T> {
     /// Rank among this tenant's waiting jobs, 1-based; `None` once running.
     pub fn position(&self) -> Option<usize> {
         self.shared.tenant_position(self.tenant, self.id)
+    }
+
+    /// A non-owning view of this job's queue state, for an observer that
+    /// reports progress. Deliberately separate from the job handle: the handle
+    /// cancels on drop, so an observer holding one would keep a transfer alive
+    /// exactly as long as the observer lived.
+    pub fn tracker(&self) -> BulkTracker {
+        BulkTracker {
+            id: self.id,
+            tenant: self.tenant,
+            shared: self.shared.clone(),
+        }
     }
 
     /// Cancel without waiting for the outcome.
@@ -288,6 +315,40 @@ impl<T> Drop for BulkJob<T> {
     }
 }
 
+/// Where a tracked job currently sits, as an observer sees it.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum BulkState {
+    /// Queued, with a 1-based rank among this tenant's own waiting jobs.
+    Waiting(usize),
+    /// Running, or finished. An observer cannot distinguish those and does not
+    /// need to: the HTTP response is what reports the outcome.
+    Active,
+}
+
+/// Non-owning observer of one job's queue state. Dropping it does nothing to
+/// the job, which is the whole point of it being separate from `BulkJob`.
+pub struct BulkTracker {
+    id: u64,
+    tenant: TenantId,
+    shared: Arc<SharedLane>,
+}
+
+impl BulkTracker {
+    pub fn state(&self) -> BulkState {
+        match self.shared.tenant_position(self.tenant, self.id) {
+            Some(rank) => BulkState::Waiting(rank),
+            None => BulkState::Active,
+        }
+    }
+
+    /// Resolves when queue shape changes. A watcher that falls behind
+    /// coalesces the missed changes into one wake, so a burst of promotions
+    /// cannot make an observer emit a frame per promotion.
+    pub fn changes(&self) -> watch::Receiver<u64> {
+        self.shared.changes.subscribe()
+    }
+}
+
 /// The process-owned lane: the lifecycle object and the sole owner of the
 /// worker threads. Exactly one exists per hosted process and per standalone
 /// serve. Dropping the last owner shuts the lane down.
@@ -308,6 +369,7 @@ impl BulkTransferLane {
                 next_id: 1,
             }),
             wake: Condvar::new(),
+            changes: watch::channel(0).0,
         });
 
         let mut workers = Vec::with_capacity(ACTIVE_CAPACITY);
@@ -354,6 +416,7 @@ impl Drop for BulkTransferLane {
             inner.queue.clear();
         }
         self.shared.wake.notify_all();
+        self.shared.announce_change();
         for handle in self.workers.drain(..) {
             let _ = handle.join();
         }
@@ -396,6 +459,7 @@ fn worker_main(shared: Arc<SharedLane>) {
             inner.active.retain(|active| active.id != id);
         }
         shared.wake.notify_all();
+        shared.announce_change();
 
         // Second boundary: delivery drops the result value when the receiver
         // is gone, and a user value with a panicking destructor would

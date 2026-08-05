@@ -980,8 +980,10 @@ pub async fn api_read_file(
                 let build_ws = workspace;
                 let build_path = path;
                 let build_name = root_name.clone();
-                crate::routes::transfer::stream_tar_response(
+                crate::routes::transfer::stream_tar_response_tracked(
                     &state.bulk_transfer,
+                    Some(state.events_tx.clone()),
+                    crate::routes::transfer::TransferTracking::from_headers(&headers),
                     root_name,
                     move |builder| {
                         append_dir_to_archive(builder, &build_ws, &build_path, &build_name)
