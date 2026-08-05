@@ -352,7 +352,7 @@
     if (paneMode.stale) return;
     if (!paneMode.transactionMode) return;
     const grab = paneMode.grabPaneId;
-    if (!grab || grab === pane.id) return;
+    if (!grab) return;
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const zone = classifyMouseSplitZone(
       e.clientX - rect.left,
@@ -366,30 +366,33 @@
       return;
     }
     paneModeSetMouseSplit(null);
-    if (zone === "center") paneModeSetHover(pane.id);
+    if (zone === "center" && grab !== pane.id) paneModeSetHover(pane.id);
     else paneModeSetHover(null);
   }
 
   /// Pane-body mouseup while in transaction mode with a grab held.
-  /// If the cursor is over this pane (we are the drop target) and
-  /// the grab is on a different pane, commit the armed action: an edge
-  /// preview splits the target and moves the grabbed content into the
-  /// new sibling, the center keeps the swap. A refused edge cleared the
-  /// hover, so the mouseup is a no-op and the grab survives for the
-  /// next attempt. Transaction stays active for chained drops until
-  /// Enter / Esc.
-  function onPaneBodyMouseUp(): void {
+  /// An armed edge splits this target, including when it is also the
+  /// grabbed pane. Without an edge, a different target keeps the swap
+  /// while the grabbed pane itself releases the grab. A refused edge
+  /// clears the target and preserves the grab for the next attempt.
+  /// Transaction stays active for chained drops until Enter / Esc.
+  function onPaneBodyMouseUp(e: MouseEvent): void {
     if (paneMode.stale) return;
     if (!paneMode.transactionMode) return;
     const grab = paneMode.grabPaneId;
     if (!grab) return;
-    if (grab === pane.id) {
-      paneModeSetGrab(null);
-      return;
-    }
     const preview = paneMode.mouseSplit;
     if (preview && preview.paneId === pane.id) {
+      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      if (!edgeSplitAllowed(preview.edge, rect.width, rect.height)) {
+        paneModeSetMouseSplit(null);
+        paneModeSetHover(null);
+        return;
+      }
       paneModeMoveGrabToEdge(grab, pane.id, preview.edge);
+    } else if (grab === pane.id) {
+      paneModeSetGrab(null);
+      return;
     } else if (paneMode.hoverPaneId !== pane.id) {
       return;
     } else {

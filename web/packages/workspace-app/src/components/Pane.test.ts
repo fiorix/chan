@@ -846,10 +846,98 @@ describe("Pane Hybrid NAV transaction mode", () => {
     expect(paneSource).not.toMatch(
       /class="dead-zone"[\s\S]{0,200}draggable="true"/,
     );
+    expect(paneSource).not.toMatch(/onpointer(?:down|move|up)=/);
+    expect(paneSource).not.toMatch(/ontouch(?:start|move|end)=/);
+  });
+
+  test("touch events do not enter the mouse-only transaction", async () => {
+    const pane: LeafNode = {
+      kind: "leaf",
+      id: "pane-touch-isolation",
+      tabs: [terminalTab()],
+      activeTabId: "term-1",
+    };
+    const target = await renderPane(pane, { paneMode: false });
+    const deadZone = target.querySelector<HTMLElement>(".dead-zone");
+    expect(deadZone).not.toBeNull();
+
+    deadZone!.dispatchEvent(new Event("touchstart", { bubbles: true }));
+    deadZone!.dispatchEvent(new Event("touchmove", { bubbles: true }));
+    deadZone!.dispatchEvent(new Event("touchend", { bubbles: true }));
+    await tick();
+
+    expect(paneMode.active).toBe(false);
+    expect(paneMode.transactionMode).toBe(false);
   });
 });
 
 describe("Pane Hybrid NAV mouse edge splits", () => {
+  test("dead-zone drag can split the only pane against its own edge", async () => {
+    const pane: LeafNode = {
+      kind: "leaf",
+      id: "pane-only-edge",
+      tabs: [terminalTab({ id: "term-only", title: "Only" })],
+      activeTabId: "term-only",
+    };
+    const target = await renderPane(pane, { paneMode: false });
+    const paneEl = target.querySelector<HTMLElement>(".pane");
+    const deadZone = target.querySelector<HTMLElement>(".dead-zone");
+    expect(paneEl).not.toBeNull();
+    expect(deadZone).not.toBeNull();
+    paneEl!.getBoundingClientRect = () =>
+      ({
+        left: 0,
+        top: 0,
+        width: 800,
+        height: 600,
+        right: 800,
+        bottom: 600,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+
+    deadZone!.dispatchEvent(
+      new MouseEvent("mousedown", {
+        bubbles: true,
+        button: 0,
+        clientX: 100,
+        clientY: 100,
+      }),
+    );
+    window.dispatchEvent(
+      new MouseEvent("mousemove", { clientX: 106, clientY: 100 }),
+    );
+    expect(paneMode.transactionMode).toBe(true);
+    expect(paneMode.grabPaneId).toBe(pane.id);
+
+    paneEl!.dispatchEvent(
+      new MouseEvent("mousemove", { bubbles: true, clientX: 10, clientY: 300 }),
+    );
+    await tick();
+    expect(paneMode.mouseSplit).toEqual({ paneId: pane.id, edge: "left" });
+    expect(paneEl!.classList.contains("transaction-split-left")).toBe(true);
+    expect(Object.keys(paneMode.draft?.nodes ?? {})).toHaveLength(1);
+    expect(Object.keys(layout.nodes)).toHaveLength(1);
+
+    paneEl!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    await tick();
+    expect(Object.keys(paneMode.draft?.nodes ?? {})).toHaveLength(3);
+    expect(Object.keys(layout.nodes)).toHaveLength(1);
+    const root = paneMode.draft?.nodes[paneMode.draft.rootId];
+    expect(root?.kind).toBe("split");
+    if (!root || root.kind !== "split") throw new Error("expected split root");
+    expect(root.direction).toBe("row");
+    expect(root.b).toBe(pane.id);
+    const moved = paneMode.draft?.nodes[root.a];
+    expect(moved?.kind === "leaf" && moved.tabs[0]?.id).toBe("term-only");
+    const source = paneMode.draft?.nodes[pane.id];
+    expect(source?.kind === "leaf" && source.tabs).toHaveLength(0);
+    expect(paneMode.grabPaneId).toBeNull();
+    expect(paneMode.hoverPaneId).toBeNull();
+    expect(paneMode.mouseSplit).toBeNull();
+  });
+
   test("an armed edge replaces the swap cue with the per-edge split preview class", async () => {
     const leftTab = terminalTab({ id: "term-left", title: "Left" });
     const leftPane: LeafNode = {
@@ -1043,6 +1131,65 @@ describe("Pane Hybrid NAV mouse edge splits", () => {
     expect(paneMode.grabPaneId).toBe(leftPane.id);
     const source = paneMode.draft?.nodes[leftPane.id];
     expect(source?.kind === "leaf" && source.tabs[0]?.id).toBe("term-left");
+  });
+
+  test("mouseup revalidates an armed edge after the pane shrinks", async () => {
+    const leftTab = terminalTab({ id: "term-left", title: "Left" });
+    const leftPane: LeafNode = {
+      kind: "leaf",
+      id: "pane-left",
+      tabs: [leftTab],
+      activeTabId: leftTab.id,
+    };
+    layout.rootId = leftPane.id;
+    layout.activePaneId = leftPane.id;
+    layout.nodes = { [leftPane.id]: leftPane };
+    layout.focusColor = "blue";
+    splitPane(leftPane.id, "row", "after");
+    const root = layout.nodes[layout.rootId];
+    if (root?.kind !== "split") throw new Error("expected split");
+    const rightPane = layout.nodes[root.b];
+    if (rightPane?.kind !== "leaf") throw new Error("expected leaf");
+
+    cancelPaneMode();
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(Pane, { target, props: { pane: rightPane } });
+    mounted.push(component);
+    await tick();
+
+    const paneEl = target.querySelector<HTMLElement>(".pane");
+    expect(paneEl).not.toBeNull();
+    let width = 800;
+    paneEl!.getBoundingClientRect = () =>
+      ({
+        left: 0,
+        top: 0,
+        width,
+        height: 600,
+        right: width,
+        bottom: 600,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+
+    enterPaneModeTransaction(leftPane.id);
+    paneEl!.dispatchEvent(
+      new MouseEvent("mousemove", { bubbles: true, clientX: 10, clientY: 300 }),
+    );
+    await tick();
+    expect(paneMode.mouseSplit).toEqual({ paneId: rightPane.id, edge: "left" });
+
+    width = 491;
+    paneEl!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    await tick();
+
+    expect(Object.keys(paneMode.draft?.nodes ?? {})).toHaveLength(3);
+    expect(Object.keys(layout.nodes)).toHaveLength(3);
+    expect(paneMode.grabPaneId).toBe(leftPane.id);
+    expect(paneMode.hoverPaneId).toBeNull();
+    expect(paneMode.mouseSplit).toBeNull();
   });
 
   test("re-grab and same-pane mouseup clear the armed edge preview through the real handlers", async () => {

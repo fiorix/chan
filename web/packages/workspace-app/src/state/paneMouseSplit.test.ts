@@ -16,6 +16,7 @@ import {
   enterPaneModeTransaction,
   layout,
   paneMode,
+  paneModeMarkStaleForAuthoritativeMetadata,
   paneModeMoveGrabToEdge,
   paneModeSetGrab,
   paneModeSetHover,
@@ -68,6 +69,20 @@ function twoPaneLayout(): { left: LeafNode; right: LeafNode } {
   right.activeTabId = "term-right";
   layout.activePaneId = left.id;
   return { left, right };
+}
+
+function onePaneLayout(): LeafNode {
+  const pane: LeafNode = {
+    kind: "leaf",
+    id: "pane-only",
+    tabs: [termTab("term-only")],
+    activeTabId: "term-only",
+  };
+  layout.rootId = pane.id;
+  layout.activePaneId = pane.id;
+  layout.nodes = { [pane.id]: pane };
+  layout.focusColor = "blue";
+  return pane;
 }
 
 function draftLeaf(paneId: string): LeafNode {
@@ -154,22 +169,60 @@ describe("edgeSplitAllowed", () => {
     expect(MIN_SPLIT_PANE_HEIGHT).toBe(160);
   });
 
-  test("horizontal edges halve the width: exact acceptance, one pixel under refuses", () => {
-    expect(edgeSplitAllowed("left", 480, 160)).toBe(true);
-    expect(edgeSplitAllowed("right", 480, 160)).toBe(true);
-    expect(edgeSplitAllowed("left", 479, 160)).toBe(false);
-    expect(edgeSplitAllowed("left", 480, 159)).toBe(false);
+  test("horizontal edges account for divider and pane margins", () => {
+    expect(edgeSplitAllowed("left", 492, 160)).toBe(true);
+    expect(edgeSplitAllowed("right", 492, 160)).toBe(true);
+    expect(edgeSplitAllowed("left", 491, 160)).toBe(false);
+    expect(edgeSplitAllowed("left", 492, 159)).toBe(false);
   });
 
-  test("vertical edges halve the height: exact acceptance, one pixel under refuses", () => {
-    expect(edgeSplitAllowed("top", 240, 320)).toBe(true);
-    expect(edgeSplitAllowed("bottom", 240, 320)).toBe(true);
-    expect(edgeSplitAllowed("top", 239, 320)).toBe(false);
-    expect(edgeSplitAllowed("top", 240, 319)).toBe(false);
+  test("vertical edges account for divider and pane margins", () => {
+    expect(edgeSplitAllowed("top", 240, 332)).toBe(true);
+    expect(edgeSplitAllowed("bottom", 240, 332)).toBe(true);
+    expect(edgeSplitAllowed("top", 239, 332)).toBe(false);
+    expect(edgeSplitAllowed("top", 240, 331)).toBe(false);
   });
 });
 
 describe("paneMode mouse split transaction", () => {
+  test("each edge splits a pane against itself and places its content on that edge", () => {
+    const cases: Array<{
+      edge: PaneMouseSplitEdge;
+      direction: "row" | "column";
+      placement: "before" | "after";
+    }> = [
+      { edge: "left", direction: "row", placement: "before" },
+      { edge: "right", direction: "row", placement: "after" },
+      { edge: "top", direction: "column", placement: "before" },
+      { edge: "bottom", direction: "column", placement: "after" },
+    ];
+
+    for (const { edge, direction, placement } of cases) {
+      const pane = onePaneLayout();
+      const liveBefore = JSON.stringify(serializeLayout({ terminalSessions: true }));
+      enterPaneModeTransaction(pane.id);
+      paneModeMoveGrabToEdge(pane.id, pane.id, edge);
+
+      const draft = paneMode.draft;
+      expect(Object.keys(draft?.nodes ?? {})).toHaveLength(3);
+      const root = draft?.nodes[draft.rootId];
+      expect(root?.kind).toBe("split");
+      if (!root || root.kind !== "split") throw new Error("expected split root");
+      expect(root.direction).toBe(direction);
+      expect(placement === "before" ? root.b : root.a).toBe(pane.id);
+      const movedId = placement === "before" ? root.a : root.b;
+      const moved = draftLeaf(movedId);
+      expect(moved.tabs.map((tab) => tab.id)).toEqual(["term-only"]);
+      expect(moved.activeTabId).toBe("term-only");
+      expect(draftLeaf(pane.id).tabs).toHaveLength(0);
+      expect(draft?.activePaneId).toBe(movedId);
+      expect(JSON.stringify(serializeLayout({ terminalSessions: true }))).toBe(
+        liveBefore,
+      );
+      cancelPaneMode();
+    }
+  });
+
   test("hover arms preview state only; neither draft nor live layout changes", () => {
     const { left, right } = twoPaneLayout();
     enterPaneModeTransaction(left.id);
@@ -241,10 +294,12 @@ describe("paneMode mouse split transaction", () => {
     }
   });
 
-  test("moving a pane with both sides populated carries both tab lists", () => {
+  test("moving a pane carries both sides, active ids, visible side, and theme", () => {
     const { left, right } = twoPaneLayout();
     left.bTabs = [termTab("term-left-b")];
     left.bActiveTabId = "term-left-b";
+    left.side = "b";
+    left.theme = "dark";
     enterPaneModeTransaction(left.id);
     paneModeMoveGrabToEdge(left.id, right.id, "right");
 
@@ -252,9 +307,16 @@ describe("paneMode mouse split transaction", () => {
     const moved = draftLeaf(parent.b);
     expect(moved.tabs.map((t) => t.id)).toEqual(["term-left"]);
     expect(moved.bTabs?.map((t) => t.id)).toEqual(["term-left-b"]);
+    expect(moved.activeTabId).toBe("term-left");
+    expect(moved.bActiveTabId).toBe("term-left-b");
+    expect(moved.side).toBe("b");
+    expect(moved.theme).toBe("dark");
     const source = draftLeaf(left.id);
     expect(allPaneTabs(source)).toHaveLength(0);
     expect(source.bTabs).toBeUndefined();
+    expect(source.bActiveTabId).toBeUndefined();
+    expect(source.side).toBeUndefined();
+    expect(source.theme).toBeUndefined();
   });
 
   test("Enter seals the staged split into the live layout exactly once", () => {
@@ -329,6 +391,22 @@ describe("paneMode mouse split transaction", () => {
     paneModeMoveGrabToEdge(left.id, right.id, "left");
     expect(Object.keys(paneMode.draft?.nodes ?? {})).toHaveLength(3);
     paneMode.stale = false;
+  });
+
+  test("becoming stale clears an armed mouse target", () => {
+    const { left, right } = twoPaneLayout();
+    enterPaneModeTransaction(left.id);
+    paneModeSetHover(right.id);
+    paneModeSetMouseSplit({ paneId: right.id, edge: "left" });
+
+    paneModeMarkStaleForAuthoritativeMetadata();
+
+    expect(paneMode.stale).toBe(true);
+    expect(paneMode.grabPaneId).toBeNull();
+    expect(paneMode.hoverPaneId).toBeNull();
+    expect(paneMode.mouseSplit).toBeNull();
+    expect(Object.keys(paneMode.draft?.nodes ?? {})).toHaveLength(3);
+    expect(Object.keys(layout.nodes)).toHaveLength(3);
   });
 
   test("a new or cleared grab drops the armed edge preview and hover", () => {

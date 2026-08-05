@@ -3978,7 +3978,6 @@ export function paneModeMoveGrabToEdge(
 ): void {
   const draft = draftLayout();
   if (!draft) return;
-  if (grabId === targetId) return;
   const grab = draft.nodes[grabId];
   const target = draft.nodes[targetId];
   if (!grab || grab.kind !== "leaf" || !target || target.kind !== "leaf") return;
@@ -3992,11 +3991,10 @@ export function paneModeMoveGrabToEdge(
   const { direction, placement } = edgeSplitSpec(edge);
   insertSiblingPaneIn(draft, target.id, newPane, direction, placement);
   draft.activePaneId = newPane.id;
-  // Grab, target, and the new sibling all changed size or content, so
-  // all three wobble: the eye tracks where the content landed and what
-  // gave up room for it.
+  // Each distinct source, target, and new sibling changed size or content,
+  // so the eye tracks where the content landed and what gave up room for it.
   requestPaneWobble(grab.id);
-  requestPaneWobble(target.id);
+  if (target.id !== grab.id) requestPaneWobble(target.id);
   requestPaneWobble(newPane.id);
 }
 
@@ -5700,6 +5698,13 @@ function clonePaneModeRemoteLayout(layout: SerNode | null): SerNode | null {
   return layout ? (JSON.parse(JSON.stringify(layout)) as SerNode) : null;
 }
 
+function markPaneModeStale(): void {
+  paneMode.stale = true;
+  paneMode.grabPaneId = null;
+  paneMode.hoverPaneId = null;
+  paneMode.mouseSplit = null;
+}
+
 /// Screen an authoritative remote layout against the fixed entry snapshot.
 /// Once stale, every subsequent snapshot replaces the pending value, including
 /// a snapshot that happens to resemble the original baseline.
@@ -5712,7 +5717,7 @@ export function paneModeDeferRemoteLayout(incoming: SerNode | null): boolean {
   if (paneModeLayoutsSemanticallyEqual(paneMode.entryLayout, incoming)) {
     return false;
   }
-  paneMode.stale = true;
+  markPaneModeStale();
   paneMode.pendingRemoteLayout = clonePaneModeRemoteLayout(incoming);
   return true;
 }
@@ -5722,7 +5727,7 @@ export function paneModeDeferRemoteLayout(incoming: SerNode | null): boolean {
 /// session snapshot.
 export function paneModeMarkStaleForAuthoritativeMetadata(): void {
   if (!paneMode.active) return;
-  paneMode.stale = true;
+  markPaneModeStale();
 }
 
 function serializeFocusColor(color: FocusColor | undefined): { wc?: SerFocusColor } {

@@ -17,6 +17,11 @@ export const MOUSE_SPLIT_EDGE_FRACTION = 0.25;
 export const MIN_SPLIT_PANE_WIDTH = 240;
 export const MIN_SPLIT_PANE_HEIGHT = 160;
 
+/// The target pane rectangle excludes its own 4 px margins. Replacing that
+/// pane with a nested split reclaims those margins, then consumes a 4 px
+/// divider and margins for two child panes. The net main-axis cost is 12 px.
+const SPLIT_MAIN_AXIS_CHROME = 12;
+
 /// Classify a point inside a pane rect into an edge zone or the
 /// center. A corner falls in two zones and resolves to the nearer
 /// edge; an exact tie resolves horizontally so the result never
@@ -71,7 +76,13 @@ export function edgeSplitAllowed(
   height: number,
 ): boolean {
   if (edge === "left" || edge === "right") {
-    return width / 2 >= MIN_SPLIT_PANE_WIDTH && height >= MIN_SPLIT_PANE_HEIGHT;
+    return (
+      (width - SPLIT_MAIN_AXIS_CHROME) / 2 >= MIN_SPLIT_PANE_WIDTH &&
+      height >= MIN_SPLIT_PANE_HEIGHT
+    );
   }
-  return height / 2 >= MIN_SPLIT_PANE_HEIGHT && width >= MIN_SPLIT_PANE_WIDTH;
+  return (
+    (height - SPLIT_MAIN_AXIS_CHROME) / 2 >= MIN_SPLIT_PANE_HEIGHT &&
+    width >= MIN_SPLIT_PANE_WIDTH
+  );
 }
