@@ -13,6 +13,7 @@ import {
   setTransferProgress,
   waitForTransferSlot,
 } from "../state/transfers.svelte";
+import type { ScopedWindowKind } from "./libraryCommand";
 import { setGatewayCsrfTokenReader, withTokenQuery } from "./transport";
 
 type TauriWindow = Window &
@@ -271,6 +272,43 @@ export async function openNewWindow(): Promise<void> {
   } catch (err) {
     console.warn("openNewWindow: open_new_window IPC failed", err);
   }
+}
+
+/// Create a window in the library that serves THIS window, natively.
+///
+/// `window.open` returns null in every chan-desktop webview, and the scoped
+/// HTTP action mints a browser-origin record the desktop watcher refuses to
+/// open as a native twin, so neither half of the browser flow can work here.
+/// The desktop mints instead: it resolves the library from the invoking
+/// window's own label and mints a native-origin record, which the window
+/// watcher reconciles into a real OS window.
+///
+/// `workspaceId` is the library's opaque workspace id, never a filesystem
+/// path: the desktop resolves the path itself, so a caller cannot name an
+/// arbitrary directory to open natively. Required for `workspace`, ignored for
+/// `terminal`. Throws off-desktop and on IPC/ACL refusal, because a silent
+/// failure here is indistinguishable from the orphan-record symptom this
+/// command exists to avoid.
+export async function createNativeLibraryWindow(
+  kind: ScopedWindowKind,
+  workspaceId: string | null,
+): Promise<void> {
+  if (!isTauriDesktop()) throw new Error("not running under Tauri");
+  await tauriInvoke("create_library_window", { kind, workspaceId });
+}
+
+/// Raise a window of THIS window's library to the front, natively, un-hiding
+/// it first if it was hidden.
+///
+/// The browser path holds a popup handle and calls `focus()` on it; chan-desktop
+/// has no popup handle to hold. The desktop resolves the library from the
+/// invoking window's label and raises `{library_id}::{windowId}`, so a caller
+/// can only reach windows of its own library. The command persists the un-hide
+/// itself, which is why the caller does not also send the scoped visibility
+/// action. Throws off-desktop and on IPC/ACL refusal.
+export async function focusNativeLibraryWindow(windowId: string): Promise<void> {
+  if (!isTauriDesktop()) throw new Error("not running under Tauri");
+  await tauriInvoke("focus_library_window", { windowId });
 }
 
 /// Close the current workspace window and return focus to the

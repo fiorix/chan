@@ -4,7 +4,6 @@
   // owns presentation, keyboard zones, motion, and persisted draft semantics.
   import CommandDeck from "@chan/web-shared/CommandDeck.svelte";
   import {
-    clearClonedSessionDeckDrafts,
     fuzzyDeckScore,
     rankDeckItems,
     type DeckItem,
@@ -48,7 +47,6 @@
     type CommandSurface,
   } from "../state/commands";
   import { chordFor } from "../state/shortcuts";
-  import { blockedWindowMessage } from "../api/desktop";
   import { sessionWindowId } from "../api/client";
   import { ApiError } from "../api/errors";
   import {
@@ -58,6 +56,13 @@
     type ScopedLibraryWindow,
     type ScopedLibraryWorkspace,
   } from "../api/libraryCommand";
+  import {
+    buryLibraryWindow,
+    createLibraryWindow,
+    focusLibraryWindow,
+    type CreateLibraryWindowAction,
+    type LibraryWindowBridge,
+  } from "../api/libraryWindows";
   import "../state/commands/install";
 
   type ComputerCommandId = "new-terminal" | "new-window" | "focus" | "hide" | "show" | "close";
@@ -277,76 +282,25 @@
     return window.workspace_path?.split("/").filter(Boolean).at(-1) ?? "Workspace";
   }
 
-  function popupFor(window: ScopedLibraryWindow): Window {
-    if (window.window_id === sessionWindowId()) return globalThis.window;
-    const popup = globalThis.window.open("", window.window_id);
-    if (!popup)
-      throw new Error(blockedWindowMessage("The browser blocked the Chan window"));
-    return popup;
+  // The deck keeps the capability lifecycle and the snapshot; how a window is
+  // created, raised, or buried differs between a browser and chan-desktop and
+  // lives in the api module, where it can be driven without the deck UI.
+  const libraryWindowBridge: LibraryWindowBridge = {
+    runAction: runScopedLibraryAction,
+    refresh: refreshScopedLibrary,
+    currentWindowId: sessionWindowId,
+  };
+
+  function focusScopedWindow(window: ScopedLibraryWindow): Promise<void> {
+    return focusLibraryWindow(libraryWindowBridge, window);
   }
 
-  function popupNeedsNavigation(popup: Window): boolean {
-    try {
-      return popup.location.href === "about:blank" || popup.location.href === "";
-    } catch {
-      return true;
-    }
+  function createScopedWindow(action: CreateLibraryWindowAction): Promise<void> {
+    return createLibraryWindow(libraryWindowBridge, action);
   }
 
-  async function focusScopedWindow(window: ScopedLibraryWindow): Promise<void> {
-    const popup = popupFor(window);
-    if (window.hidden && window.can_act) {
-      await runScopedLibraryAction({
-        action: "set_window_visibility",
-        window_id: window.window_id,
-        hidden: false,
-      });
-    }
-    if (popup !== globalThis.window && popupNeedsNavigation(popup)) {
-      popup.location.href = window.launch_path;
-    }
-    popup.focus();
-    await refreshScopedLibrary();
-  }
-
-  async function createScopedWindow(
-    action:
-      | { action: "new_terminal" }
-      | { action: "new_workspace_window"; workspace_id: string },
-  ): Promise<void> {
-    // Must happen before the first await so keyboard activation retains the
-    // browser's popup grant.
-    const popup = globalThis.window.open("", "_blank");
-    if (!popup)
-      throw new Error(
-        blockedWindowMessage("The browser blocked the new Chan window"),
-      );
-    clearClonedSessionDeckDrafts(popup);
-    try {
-      const result = await runScopedLibraryAction(action);
-      if (!result?.window) throw new Error("Chan did not return the new window");
-      popup.name = result.window.window_id;
-      popup.location.href = result.window.launch_path;
-      popup.focus();
-      await refreshScopedLibrary();
-    } catch (error) {
-      popup.close();
-      throw error;
-    }
-  }
-
-  async function buryScopedWindow(window: ScopedLibraryWindow, close: boolean): Promise<void> {
-    // Acquiring the named context is also synchronous for keyboard popup rules.
-    // If no such window exists the browser creates a blank one, which is closed
-    // after the server mutation.
-    const popup = popupFor(window);
-    await runScopedLibraryAction(
-      close
-        ? { action: "close_window", window_id: window.window_id }
-        : { action: "set_window_visibility", window_id: window.window_id, hidden: true },
-    );
-    popup.close();
-    if (popup !== globalThis.window) await refreshScopedLibrary();
+  function buryScopedWindow(window: ScopedLibraryWindow, close: boolean): Promise<void> {
+    return buryLibraryWindow(libraryWindowBridge, window, close);
   }
 
   function computerCommandEntry(

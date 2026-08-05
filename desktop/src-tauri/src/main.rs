@@ -4474,6 +4474,157 @@ async fn reconnect_devserver_for_window(
     Ok(())
 }
 
+/// The one library a window is allowed to act on: its own. A watcher-managed
+/// window's label is `{library_id}::{window_id}`, and a locally-supervised
+/// workspace window belongs to the local library by construction (its
+/// `WindowSpec` carries `library_id: "local"`). Every other label -- the
+/// launcher, About, an outbound URL attachment, a terminal-only window -- names
+/// no library, so the commands below refuse instead of guessing one.
+///
+/// Deriving this from the caller's own label rather than an argument is what
+/// keeps "may cause a native window to open" inside the Tauri capability
+/// system: the ACL already binds which windows on which origin may invoke at
+/// all, and the label then fixes which library they reach.
+fn library_id_for_window_label(label: &str) -> Option<&str> {
+    if let Some((library_id, _)) = label.split_once("::") {
+        return (library_id == "local" || library_id.starts_with("lib-")).then_some(library_id);
+    }
+    label.starts_with("workspace-").then_some("local")
+}
+
+/// Resolve the local library's opaque workspace id to its root path. The id is
+/// the workspace's slug prefix, so recomputing that prefix per registered root
+/// maps it back through the same function the library used to publish it. The
+/// workspace's CURRENTLY MOUNTED prefix is not the same string on chan-desktop
+/// (it mounts local workspaces at `workspace-<hash>`), so this cannot go
+/// through `mounted_prefix_for_root`.
+fn local_workspace_path(
+    embedded: &embedded::EmbeddedServer,
+    workspace_id: Option<String>,
+) -> Result<String, String> {
+    let workspace_id =
+        workspace_id.ok_or_else(|| "a workspace window needs a workspace id".to_string())?;
+    let wanted = workspace_id.trim_start_matches('/');
+    embedded
+        .library()
+        .list_workspaces()
+        .into_iter()
+        .map(|workspace| workspace.root_path)
+        .find(|root| {
+            chan_server::allocate_workspace_prefix(root)
+                .ok()
+                .as_deref()
+                .map(|prefix| prefix.trim_start_matches('/'))
+                == Some(wanted)
+        })
+        .map(|root| root.to_string_lossy().into_owned())
+        .ok_or_else(|| format!("no workspace {wanted} in this library"))
+}
+
+/// Resolve a devserver library's opaque workspace id to the root path that
+/// library reports for it. The id is the workspace's slug prefix, so the
+/// mapping belongs to the library that owns it; asking the devserver is what
+/// lets the command take an id instead of a filesystem path from the page.
+async fn devserver_workspace_path(
+    conn: &devserver::DevserverConn,
+    workspace_id: Option<String>,
+) -> Result<String, String> {
+    let workspace_id =
+        workspace_id.ok_or_else(|| "a workspace window needs a workspace id".to_string())?;
+    let wanted = workspace_id.trim_start_matches('/');
+    devserver::fetch_workspaces(conn)
+        .await?
+        .into_iter()
+        .find(|row| row.prefix.trim_start_matches('/') == wanted)
+        .map(|row| row.path)
+        .ok_or_else(|| format!("no workspace {wanted} on this devserver"))
+}
+
+/// Create a window in the invoking window's library, natively.
+///
+/// The command deck's browser flow cannot run in chan-desktop. `window.open`
+/// returns null in every chan webview, and the scoped HTTP action mints a
+/// `WindowOrigin::Browser` record, which the window watcher refuses to open as
+/// a native twin, so skipping the popup alone would leave records with no
+/// window behind them. The desktop mints with a native origin instead and the
+/// watcher reconciles the record into a real OS window, which is the same path
+/// every other devserver-driven window already takes.
+#[tauri::command]
+async fn create_library_window(
+    state: State<'_, Arc<AppState>>,
+    window: tauri::WebviewWindow,
+    kind: chan_server::WindowKind,
+    workspace_id: Option<String>,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    let library_id = library_id_for_window_label(&label)
+        .ok_or_else(|| format!("window {label} does not belong to a chan library"))?
+        .to_string();
+    if library_id == "local" {
+        let embedded = state
+            .embedded()
+            .ok_or_else(|| "the local library is not running".to_string())?;
+        let workspace_path = match kind {
+            chan_server::WindowKind::Terminal => None,
+            chan_server::WindowKind::Workspace => {
+                Some(local_workspace_path(embedded, workspace_id)?)
+            }
+        };
+        return embedded.mint_window(kind, workspace_path).map(|_| ());
+    }
+    let devserver_id = state
+        .devserver_feed
+        .devserver_id_for_library(&library_id)
+        .ok_or_else(|| format!("no devserver is connected for library {library_id}"))?;
+    // Clone the connection out of the registry before the first await so no
+    // registry guard is held across it.
+    let conn = state
+        .devservers
+        .get(&devserver_id)
+        .ok_or_else(|| format!("devserver {devserver_id} is not connected"))?;
+    let workspace_path = match kind {
+        chan_server::WindowKind::Terminal => None,
+        chan_server::WindowKind::Workspace => {
+            Some(devserver_workspace_path(&conn, workspace_id).await?)
+        }
+    };
+    devserver::mint_library_window(&conn, kind, workspace_path)
+        .await
+        .map(|_| ())
+}
+
+/// Raise a window of the invoking window's library to the front, un-hiding it
+/// first if it was hidden.
+///
+/// The browser path holds a popup handle and focuses it; chan-desktop has none.
+/// [`unbury_window`] is the same raise the launcher's `/open` route drives, and
+/// it persists `hidden = false` to the owning registry on the way, so this is
+/// one authority rather than a native raise layered over a separate HTTP
+/// unhide that could disagree with it.
+///
+/// The `::` guard is load-bearing, not defensive noise: the native label is
+/// `{library_id}::{window_id}`, so a window id carrying `::` would name a
+/// window in a different library and defeat the label scoping above.
+#[tauri::command]
+fn focus_library_window(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    window_id: String,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    let library_id = library_id_for_window_label(&label)
+        .ok_or_else(|| format!("window {label} does not belong to a chan library"))?;
+    if window_id.is_empty() || window_id.contains("::") {
+        return Err(format!("invalid window id {window_id:?}"));
+    }
+    let target = format!("{library_id}::{window_id}");
+    if unbury_window(&app, &target) {
+        Ok(())
+    } else {
+        Err(format!("window {window_id} is no longer open"))
+    }
+}
+
 /// Browser-style zoom controls. Step size is
 /// 10 % per Cmd++/Cmd+- press; the clamp range matches Tauri's own
 /// `zoom_hotkeys_enabled` polyfill semantics (0.25-5.0).
@@ -5430,6 +5581,11 @@ fn main() {
             hide_window_from_close_confirm,
             abandon_devserver_for_window,
             reconnect_devserver_for_window,
+            // The command deck's library-window actions. Both resolve the
+            // library from the invoking window's own label, so a window reaches
+            // only its own; the ACL decides which windows may invoke at all.
+            create_library_window,
+            focus_library_window,
             restart_desktop_after_update,
             download::download_file_native,
             download::begin_generated_download,
@@ -7692,6 +7848,42 @@ mod tests {
         );
         assert_eq!(devserver_id_for_window_label(&feed, "local::w-1"), None);
         assert_eq!(devserver_id_for_window_label(&feed, "lib-fed"), None);
+    }
+
+    /// The library-window commands scope every action to the library named by
+    /// the CALLER'S OWN label, so this mapping is the authority boundary: a
+    /// window that resolves to the wrong library, or to one at all when it
+    /// should not, reaches windows that are not its own.
+    #[test]
+    fn window_label_resolves_only_its_own_library() {
+        assert_eq!(library_id_for_window_label("local::w-1"), Some("local"));
+        assert_eq!(
+            library_id_for_window_label("lib-0a1b::w-1"),
+            Some("lib-0a1b")
+        );
+        // A locally-supervised workspace window carries no `library_id::`
+        // prefix but belongs to the local library by construction.
+        assert_eq!(
+            library_id_for_window_label("workspace-8f2c-0"),
+            Some("local")
+        );
+
+        // Windows that own no library must resolve to none rather than
+        // defaulting into one.
+        for label in [
+            "main",
+            "about",
+            "outbound-1a2b",
+            "terminal-1a2b",
+            "control-terminal-1a2b",
+            "lib-0a1b",
+            "settings",
+            // A label whose prefix merely resembles a library id.
+            "library::w-1",
+            "locals::w-1",
+        ] {
+            assert_eq!(library_id_for_window_label(label), None, "{label}");
+        }
     }
 
     #[test]

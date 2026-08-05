@@ -194,6 +194,20 @@ mod tests {
         "stub-csrf"
     }
 
+    /// Stubs for the command deck's library-window commands. Their permissions
+    /// sit in the `workspace-window` SET rather than in this capability's own
+    /// permission list, so these pins are what prove a gateway-served `lib-*`
+    /// window really reaches them through the set the minted capability carries.
+    #[tauri::command]
+    fn create_library_window() -> &'static str {
+        "stub-create"
+    }
+
+    #[tauri::command]
+    fn focus_library_window() -> &'static str {
+        "stub-focus"
+    }
+
     /// Stub for `read_dropped_paths` - the one command a loopback
     /// workspace window holds that `lib-*` windows never get, on any
     /// origin. Registered so the out-of-set denial pin cannot pass
@@ -215,7 +229,9 @@ mod tests {
                 platform_os,
                 gateway_csrf_token,
                 read_dropped_paths,
-                open_reverse_tunnel
+                open_reverse_tunnel,
+                create_library_window,
+                focus_library_window
             ])
             .build(crate::app_context())
             .expect("mock app builds from the real context")
@@ -358,6 +374,12 @@ mod tests {
                 invoke_from(&lib, denied, "gateway_csrf_token").is_err(),
                 "origin {denied} must not read the gateway CSRF token"
             );
+            for command in ["create_library_window", "focus_library_window"] {
+                assert!(
+                    invoke_from(&lib, denied, command).is_err(),
+                    "origin {denied} must not open or raise a native library window"
+                );
+            }
         }
         assert!(
             invoke_from(&lib, GATEWAY_PAGE, "read_dropped_paths").is_err(),
@@ -367,6 +389,16 @@ mod tests {
             invoke_from(&lib, GATEWAY_PAGE, "open_reverse_tunnel"),
             Ok("stub-tunnel".into()),
             "the cs tunnel trigger is part of the minted lib-window vocabulary"
+        );
+        assert_eq!(
+            invoke_from(&lib, GATEWAY_PAGE, "create_library_window"),
+            Ok("stub-create".into()),
+            "a gateway lib window mints its own library's windows natively"
+        );
+        assert_eq!(
+            invoke_from(&lib, GATEWAY_PAGE, "focus_library_window"),
+            Ok("stub-focus".into()),
+            "a gateway lib window raises its own library's windows natively"
         );
 
         let non_lib = lib_window(&app, "settings-scoped", GATEWAY_PAGE);

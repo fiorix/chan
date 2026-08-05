@@ -50,6 +50,8 @@ permissions = [
   "allow-read-clipboard-html",
   "allow-write-clipboard-html",
   "allow-open-reverse-tunnel",
+  "allow-create-library-window",
+  "allow-focus-library-window",
 ]
 
 [[permission]]
@@ -191,6 +193,22 @@ commands.allow = ["write_clipboard_html"]
 identifier = "allow-open-reverse-tunnel"
 description = "Enables the open_reverse_tunnel command (the cs tunnel trigger; the devserver to dial resolves from the invoking window's own connection)."
 commands.allow = ["open_reverse_tunnel"]
+
+# IN the workspace-window set on purpose, unlike allow-gateway-csrf-token below.
+# Both commands resolve their target library from the INVOKING window's own
+# label, so a window can only ever reach its own library, and every window class
+# that runs the command deck needs them: a loopback window gets them through
+# capabilities/workspace.json, and an authenticated exact-origin gateway lib-*
+# window gets them because the runtime-minted capability carries this same set.
+[[permission]]
+identifier = "allow-create-library-window"
+description = "Enables the create_library_window command (the command deck's native library-window mint)."
+commands.allow = ["create_library_window"]
+
+[[permission]]
+identifier = "allow-focus-library-window"
+description = "Enables the focus_library_window command (raise a window of the caller's own library)."
+commands.allow = ["focus_library_window"]
 
 # Deliberately NOT in the workspace-window set: only an authenticated exact
 # gateway origin needs the native mirror, and the runtime-minted capability is
