@@ -24,6 +24,26 @@ import clientSrc from "../api/client.ts?raw";
 import storeSrc from "./store.svelte.ts?raw";
 import typesSrc from "../api/types.ts?raw";
 
+/// Every `not.toMatch` below is only as good as the string it scans: a `?raw`
+/// import that resolved to nothing would satisfy all of them at once and read
+/// as proof that the client-side admission machinery is gone. Prove the sources
+/// actually loaded before trusting any absence claim about them.
+///
+/// This scans the production files only, never this test's own source. A test
+/// that reads itself and asserts the absence of a string will always find that
+/// string in its own assertion.
+describe("the scanned sources are real", () => {
+  test.each([
+    ["transfers.svelte.ts", transfersSrc, "export function beginTransfer"],
+    ["client.ts", clientSrc, "function uploadXhrAttempt"],
+    ["store.svelte.ts", storeSrc, "export function onWatchEvent"],
+    ["types.ts", typesSrc, "export type WsTransferQueueFrame"],
+  ])("%s loaded and is the file we think it is", (_name, source, anchor) => {
+    expect(source.length).toBeGreaterThan(1000);
+    expect(source).toContain(anchor);
+  });
+});
+
 function resetTransfers(): void {
   transfers.items = [];
   transfers.shown = false;
