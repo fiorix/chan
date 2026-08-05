@@ -25,14 +25,21 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | --- | --- | --- |
 | [standalone-terminal-appearance-settings](v0.85.0/standalone-terminal-appearance-settings.md) | accepted, not specced | locate where terminal appearance settings stop short of a standalone terminal, then make them apply |
 | [desktop-library-window-open-unavailable](v0.85.0/desktop-library-window-open-unavailable.md) | deferred from v0.84.1, specced | add the capability-gated native commands so chan-desktop can open and focus library windows |
-| [web-marketing-onboarding](v0.85.0/web-marketing-onboarding.md) | accepted, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
 | [large-transfer-capability](v0.85.0/large-transfer-capability.md) | implementation in progress | finish the bulk-transfer lane, admission control, queue protocol, browser state, and acceptance evidence before raising the ceiling |
 | [ghostty-macos-trackpad-scroll-parity](v0.85.0/ghostty-macos-trackpad-scroll-parity.md) | implemented, owner validation pending | calibrate the accepted factor on macOS hardware and complete live client checks |
 | [ghostty-live-output-scroll-stability](v0.85.0/ghostty-live-output-scroll-stability.md) | implemented, owner validation pending | complete the real streaming and browser evidence |
-| [notifications](v0.85.0/notifications.md) | implemented, validation pending | complete integrated frontend validation and live browser and desktop evidence |
 | [hybrid-nav-mouse-split-affordances](v0.85.0/hybrid-nav-mouse-split-affordances.md) | implemented, validation pending | clear the integrated web gate and complete runtime input evidence |
 | [file-browser-context-menu-inspector-actions](v0.85.0/file-browser-context-menu-inspector-actions.md) | correction in progress | remove stale authority and copy while retaining ordinary-file replacement |
 | [chan-config-key-coverage](v0.85.0/chan-config-key-coverage.md) | implemented, validation pending | complete integrated validation of the serialized key authority |
+| [settings-checked-checkbox-pill-border](v0.85.0/settings-checked-checkbox-pill-border.md) | accepted, specced | drop the blue outer border from checked checkbox pills while radio pills keep theirs |
+| [cs-terminal-list-queue-depth](v0.85.0/cs-terminal-list-queue-depth.md) | accepted, specced | add the queue depth column to the `cs terminal list` markdown table; the JSON field already exists |
+
+### v0.86.0
+
+| item | state | what needs to happen |
+| --- | --- | --- |
+| [notifications](v0.86.0/notifications.md) | deferred from v0.85.0, not implemented on the release ancestry | start from the contract; the earlier implementation is on an abandoned candidate chain and was excluded from the v0.85.0 recovery |
+| [web-marketing-onboarding](v0.86.0/web-marketing-onboarding.md) | deferred from v0.85.0, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
 
 ## Completed
 
