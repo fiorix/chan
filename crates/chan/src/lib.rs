@@ -6696,11 +6696,213 @@ struct StatusLanguage {
     code: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct ConfigOutput {
     editor: EditorPrefs,
     server: ServerConfig,
 }
+
+#[derive(Clone, Copy)]
+enum ConfigValueKind {
+    String,
+    NonEmptyString,
+    Bool,
+    U32,
+    U32Range(u32, u32),
+    U64NonZero,
+    UsizeNonZero,
+    F64Range(f64, f64),
+    Enum(&'static [&'static str]),
+    OptionalU32Range(u32, u32),
+    OptionalEnum(&'static [&'static str]),
+    StringList(usize),
+    Color,
+    ReadOnly(&'static str),
+    Collection(&'static str),
+}
+
+#[derive(Clone, Copy)]
+struct ConfigKeySpec {
+    key: &'static str,
+    kind: ConfigValueKind,
+}
+
+const CONFIG_KEYS: &[ConfigKeySpec] = &[
+    ConfigKeySpec {
+        key: "editor.editor_theme",
+        kind: ConfigValueKind::Enum(&["github", "google_docs", "word"]),
+    },
+    ConfigKeySpec {
+        key: "editor.editor_font_size",
+        kind: ConfigValueKind::OptionalU32Range(10, 32),
+    },
+    ConfigKeySpec {
+        key: "editor.terminal_colors.mode",
+        kind: ConfigValueKind::Enum(&["standard", "custom"]),
+    },
+    ConfigKeySpec {
+        key: "editor.terminal_colors.custom.background",
+        kind: ConfigValueKind::Color,
+    },
+    ConfigKeySpec {
+        key: "editor.terminal_colors.custom.foreground",
+        kind: ConfigValueKind::Color,
+    },
+    ConfigKeySpec {
+        key: "editor.terminal_colors.custom.cursor",
+        kind: ConfigValueKind::Color,
+    },
+    ConfigKeySpec {
+        key: "editor.terminal_colors.custom.contrast",
+        kind: ConfigValueKind::Enum(&["auto", "dark", "light"]),
+    },
+    ConfigKeySpec {
+        key: "editor.theme",
+        kind: ConfigValueKind::Enum(&["system", "light", "dark"]),
+    },
+    ConfigKeySpec {
+        key: "editor.pane_widths.inspector",
+        kind: ConfigValueKind::U32,
+    },
+    ConfigKeySpec {
+        key: "editor.pane_widths.graph",
+        kind: ConfigValueKind::U32,
+    },
+    ConfigKeySpec {
+        key: "editor.pane_widths.browser",
+        kind: ConfigValueKind::U32,
+    },
+    ConfigKeySpec {
+        key: "editor.pane_widths.search",
+        kind: ConfigValueKind::U32,
+    },
+    ConfigKeySpec {
+        key: "editor.pane_widths.outline",
+        kind: ConfigValueKind::U32,
+    },
+    ConfigKeySpec {
+        key: "editor.browser_side_panes.left",
+        kind: ConfigValueKind::Bool,
+    },
+    ConfigKeySpec {
+        key: "editor.browser_side_panes.right",
+        kind: ConfigValueKind::Bool,
+    },
+    ConfigKeySpec {
+        key: "editor.line_spacing",
+        kind: ConfigValueKind::Enum(&["standard", "compact"]),
+    },
+    ConfigKeySpec {
+        key: "editor.date_format",
+        kind: ConfigValueKind::String,
+    },
+    ConfigKeySpec {
+        key: "editor.strip_trailing_whitespace_on_save",
+        kind: ConfigValueKind::Bool,
+    },
+    ConfigKeySpec {
+        key: "editor.bubble_overlay_mode",
+        kind: ConfigValueKind::Enum(&["stack", "tray"]),
+    },
+    ConfigKeySpec {
+        key: "editor.hybrid_surface_themes.editor",
+        kind: ConfigValueKind::OptionalEnum(&["light", "dark"]),
+    },
+    ConfigKeySpec {
+        key: "editor.hybrid_surface_themes.terminal",
+        kind: ConfigValueKind::OptionalEnum(&["light", "dark"]),
+    },
+    ConfigKeySpec {
+        key: "editor.hybrid_surface_themes.browser",
+        kind: ConfigValueKind::OptionalEnum(&["light", "dark"]),
+    },
+    ConfigKeySpec {
+        key: "editor.hybrid_surface_themes.graph",
+        kind: ConfigValueKind::OptionalEnum(&["light", "dark"]),
+    },
+    ConfigKeySpec {
+        key: "editor.hybrid_surface_themes.dashboard",
+        kind: ConfigValueKind::OptionalEnum(&["light", "dark"]),
+    },
+    ConfigKeySpec {
+        key: "editor.empty_pane_carousel_cycling",
+        kind: ConfigValueKind::Bool,
+    },
+    ConfigKeySpec {
+        key: "editor.page_width_ratio",
+        kind: ConfigValueKind::F64Range(0.25, 1.0),
+    },
+    ConfigKeySpec {
+        key: "editor.overlay_maximized",
+        kind: ConfigValueKind::Bool,
+    },
+    ConfigKeySpec {
+        key: "editor.cs_dismissed",
+        kind: ConfigValueKind::ReadOnly("managed by the cs-link prompt"),
+    },
+    ConfigKeySpec {
+        key: "editor.shortcuts",
+        kind: ConfigValueKind::Collection(
+            "use Settings or PATCH /api/config to edit shortcut overrides",
+        ),
+    },
+    ConfigKeySpec {
+        key: "server.attachments_dir",
+        kind: ConfigValueKind::NonEmptyString,
+    },
+    ConfigKeySpec {
+        key: "server.search.aggression",
+        kind: ConfigValueKind::Enum(&["conservative", "balanced", "aggressive"]),
+    },
+    ConfigKeySpec {
+        key: "server.terminal.idle_timeout_secs",
+        kind: ConfigValueKind::U64NonZero,
+    },
+    ConfigKeySpec {
+        key: "server.terminal.session_cap",
+        kind: ConfigValueKind::UsizeNonZero,
+    },
+    ConfigKeySpec {
+        key: "server.terminal.ring_bytes",
+        kind: ConfigValueKind::UsizeNonZero,
+    },
+    ConfigKeySpec {
+        key: "server.terminal.scrollback_mb",
+        kind: ConfigValueKind::U32Range(10, 50),
+    },
+    ConfigKeySpec {
+        key: "server.terminal.default_term",
+        kind: ConfigValueKind::NonEmptyString,
+    },
+    ConfigKeySpec {
+        key: "server.terminal.font",
+        kind: ConfigValueKind::Enum(&["os-default", "source-code-pro"]),
+    },
+    ConfigKeySpec {
+        key: "server.terminal.font_size",
+        kind: ConfigValueKind::U32Range(8, 32),
+    },
+    ConfigKeySpec {
+        key: "server.terminal.mcp_env",
+        kind: ConfigValueKind::Bool,
+    },
+    ConfigKeySpec {
+        key: "server.terminal.mouse_capture",
+        kind: ConfigValueKind::Bool,
+    },
+    ConfigKeySpec {
+        key: "server.terminal.ghostty",
+        kind: ConfigValueKind::Bool,
+    },
+    ConfigKeySpec {
+        key: "server.terminal.secret_masking",
+        kind: ConfigValueKind::Bool,
+    },
+    ConfigKeySpec {
+        key: "server.terminal.secret_mask_suffixes",
+        kind: ConfigValueKind::StringList(100),
+    },
+];
 
 fn cmd_status(path: Option<PathBuf>, json: bool) -> Result<()> {
     let lib = library()?;
@@ -6847,6 +7049,7 @@ fn cmd_config(action: ConfigAction) -> Result<()> {
             match key.as_deref() {
                 None | Some("") => {
                     let output = ConfigOutput { editor, server };
+                    validate_config_dump(&serde_json::to_value(&output)?)?;
                     if json {
                         println!("{}", serde_json::to_string_pretty(&output)?);
                     } else {
@@ -6866,6 +7069,7 @@ fn cmd_config(action: ConfigAction) -> Result<()> {
         }
         ConfigAction::Set { key, value } => {
             let (key, raw_value) = split_assignment(&key, value.as_deref())?;
+            let key = canonical_config_key(&key);
             if key.starts_with("server.") {
                 let mut cfg = ServerConfig::load().context("loading server config")?;
                 write_server_config_key(&mut cfg, &key, &raw_value)?;
@@ -6987,92 +7191,308 @@ fn read_config_key(
     server: &ServerConfig,
     key: &str,
 ) -> Result<serde_json::Value> {
-    match key {
-        "editor.theme" => Ok(serde_json::json!(theme_choice_label(editor.theme))),
-        "editor.editor_theme" => Ok(serde_json::json!(editor_theme_label(editor.editor_theme))),
-        "editor.line_spacing" => Ok(serde_json::json!(line_spacing_label(editor.line_spacing))),
-        "editor.date_format" => Ok(serde_json::json!(editor.date_format.clone())),
-        "editor.pane_widths.inspector" => Ok(serde_json::json!(editor.pane_widths.inspector)),
-        "editor.pane_widths.graph" => Ok(serde_json::json!(editor.pane_widths.graph)),
-        "editor.pane_widths.browser" => Ok(serde_json::json!(editor.pane_widths.browser)),
-        "editor.pane_widths.search" => Ok(serde_json::json!(editor.pane_widths.search)),
-        "editor.pane_widths.outline" => Ok(serde_json::json!(editor.pane_widths.outline)),
-        "server.attachments_dir" => Ok(serde_json::json!(server.attachments_dir.clone())),
-        "server.search.aggression" => Ok(serde_json::json!(server.search.aggression.as_str())),
-        "server.terminal.idle_timeout_secs" => {
-            Ok(serde_json::json!(server.terminal.idle_timeout_secs))
+    let key = canonical_config_key(key);
+    let spec = config_key_spec(&key)?;
+    let config = serde_json::to_value(ConfigOutput {
+        editor: editor.clone(),
+        server: server.clone(),
+    })?;
+    if let Some(value) = config_value_at(&config, &key) {
+        return Ok(value.clone());
+    }
+    match spec.kind {
+        ConfigValueKind::OptionalU32Range(..) | ConfigValueKind::OptionalEnum(..) => {
+            Ok(serde_json::Value::Null)
         }
-        "server.terminal.session_cap" => Ok(serde_json::json!(server.terminal.session_cap)),
-        "server.terminal.ring_bytes" => Ok(serde_json::json!(server.terminal.ring_bytes)),
-        _ => Err(anyhow::anyhow!(
-            "unknown key `{key}`; try `chan config get` to list current values"
-        )),
+        ConfigValueKind::Collection(_) if key == "editor.shortcuts" => Ok(serde_json::json!({})),
+        _ => anyhow::bail!("supported config key `{key}` is missing from the serialized schema"),
     }
 }
 
 fn write_pref_key(prefs: &mut EditorPrefs, key: &str, value: &str) -> Result<()> {
-    match key {
-        "editor.theme" => {
-            prefs.theme = parse_theme_choice(value)?;
-        }
-        "editor.editor_theme" => {
-            prefs.editor_theme = parse_editor_theme(value)?;
-        }
-        "editor.line_spacing" => {
-            prefs.line_spacing = parse_line_spacing(value)?;
-        }
-        "editor.date_format" => {
-            prefs.date_format = value.to_owned();
-        }
-        "editor.pane_widths.inspector" => {
-            prefs.pane_widths.inspector = parse_u32(key, value)?;
-        }
-        "editor.pane_widths.graph" => {
-            prefs.pane_widths.graph = parse_u32(key, value)?;
-        }
-        "editor.pane_widths.browser" => {
-            prefs.pane_widths.browser = parse_u32(key, value)?;
-        }
-        "editor.pane_widths.search" => {
-            prefs.pane_widths.search = parse_u32(key, value)?;
-        }
-        "editor.pane_widths.outline" => {
-            prefs.pane_widths.outline = parse_u32(key, value)?;
-        }
-        _ => {
-            anyhow::bail!("unknown key `{key}`; try `chan config get` to list current values");
-        }
+    let key = canonical_config_key(key);
+    if !key.starts_with("editor.") {
+        anyhow::bail!("`{key}` is a server config key, not an editor preference");
     }
+    let updated = write_config_key(
+        ConfigOutput {
+            editor: prefs.clone(),
+            server: ServerConfig::default(),
+        },
+        &key,
+        value,
+    )?;
+    *prefs = updated.editor;
     Ok(())
 }
 
 fn write_server_config_key(cfg: &mut ServerConfig, key: &str, value: &str) -> Result<()> {
-    if value.is_empty() {
-        anyhow::bail!("{key} must be non-empty");
+    let key = canonical_config_key(key);
+    if !key.starts_with("server.") {
+        anyhow::bail!("`{key}` is an editor preference, not a server config key");
     }
-    match key {
-        "server.attachments_dir" => {
-            cfg.attachments_dir = value.to_owned();
-        }
-        "server.search.aggression" => {
-            cfg.search.aggression = value
-                .parse()
-                .map_err(|e: String| anyhow::anyhow!("{key}: {e}"))?;
-        }
-        "server.terminal.idle_timeout_secs" => {
-            cfg.terminal.idle_timeout_secs = parse_nonzero_u64(key, value)?;
-        }
-        "server.terminal.session_cap" => {
-            cfg.terminal.session_cap = parse_nonzero_usize(key, value)?;
-        }
-        "server.terminal.ring_bytes" => {
-            cfg.terminal.ring_bytes = parse_nonzero_usize(key, value)?;
-        }
-        _ => {
-            anyhow::bail!("unknown key `{key}`; try `chan config get` to list current values");
-        }
-    }
+    let updated = write_config_key(
+        ConfigOutput {
+            editor: EditorPrefs::default(),
+            server: cfg.clone(),
+        },
+        &key,
+        value,
+    )?;
+    *cfg = updated.server;
     Ok(())
+}
+
+fn canonical_config_key(key: &str) -> String {
+    key.strip_prefix("terminal.")
+        .map(|suffix| format!("server.terminal.{suffix}"))
+        .unwrap_or_else(|| key.to_owned())
+}
+
+fn config_key_spec(key: &str) -> Result<ConfigKeySpec> {
+    if key.starts_with("editor.shortcuts.") {
+        anyhow::bail!(
+            "`editor.shortcuts` is a collection; use Settings or PATCH /api/config to edit shortcut overrides"
+        );
+    }
+    CONFIG_KEYS
+        .iter()
+        .copied()
+        .find(|spec| spec.key == key)
+        .ok_or_else(|| {
+            let settable = CONFIG_KEYS
+                .iter()
+                .filter(|spec| {
+                    !matches!(
+                        spec.kind,
+                        ConfigValueKind::ReadOnly(_) | ConfigValueKind::Collection(_)
+                    )
+                })
+                .map(|spec| spec.key)
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::anyhow!("unknown key `{key}`; supported settable keys: {settable}")
+        })
+}
+
+fn config_value_at<'a>(root: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    key.split('.')
+        .try_fold(root, |value, segment| value.get(segment))
+}
+
+fn config_schema_sample() -> Result<serde_json::Value> {
+    let mut editor = EditorPrefs {
+        editor_font_size: Some(10),
+        terminal_colors: chan_server::TerminalColorPrefs {
+            custom: Some(chan_server::TerminalCustomColors {
+                background: "#000000".into(),
+                foreground: "#ffffff".into(),
+                cursor: "#ffffff".into(),
+                contrast: chan_server::TerminalContrast::Auto,
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    editor.hybrid_surface_themes.editor = Some(chan_server::SurfaceThemeChoice::Light);
+    editor.hybrid_surface_themes.terminal = Some(chan_server::SurfaceThemeChoice::Light);
+    editor.hybrid_surface_themes.browser = Some(chan_server::SurfaceThemeChoice::Light);
+    editor.hybrid_surface_themes.graph = Some(chan_server::SurfaceThemeChoice::Light);
+    editor.hybrid_surface_themes.dashboard = Some(chan_server::SurfaceThemeChoice::Light);
+    Ok(serde_json::to_value(ConfigOutput {
+        editor,
+        server: ServerConfig::default(),
+    })?)
+}
+
+fn write_config_key(config: ConfigOutput, key: &str, raw: &str) -> Result<ConfigOutput> {
+    let spec = config_key_spec(key)?;
+    let value = parse_config_scalar(spec, raw)?;
+    let mut serialized = serde_json::to_value(&config)?;
+    let sample = config_schema_sample()?;
+    set_config_value(&mut serialized, &sample, key, value)?;
+    if key == "editor.terminal_colors.mode"
+        && config_value_at(&serialized, key) == Some(&serde_json::json!("custom"))
+        && config_value_at(&serialized, "editor.terminal_colors.custom").is_none()
+    {
+        anyhow::bail!(
+            "editor.terminal_colors.mode=custom needs the custom color fields; set those first"
+        );
+    }
+    serde_json::from_value(serialized)
+        .with_context(|| format!("invalid value for config key `{key}`"))
+}
+
+fn set_config_value(
+    root: &mut serde_json::Value,
+    sample: &serde_json::Value,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<()> {
+    let segments: Vec<&str> = key.split('.').collect();
+    let mut current = root;
+    let mut sample_current = sample;
+    for segment in &segments[..segments.len() - 1] {
+        sample_current = sample_current
+            .get(*segment)
+            .ok_or_else(|| anyhow::anyhow!("config schema has no `{key}` leaf"))?;
+        let object = current
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("`{key}` crosses a scalar config value"))?;
+        current = object
+            .entry((*segment).to_owned())
+            .or_insert_with(|| sample_current.clone());
+    }
+    let leaf = segments.last().expect("config keys are non-empty");
+    current
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("`{key}` parent is not a config section"))?
+        .insert((*leaf).to_owned(), value);
+    Ok(())
+}
+
+fn parse_config_scalar(spec: ConfigKeySpec, raw: &str) -> Result<serde_json::Value> {
+    use serde_json::{Number, Value};
+
+    let invalid_enum = |values: &[&str]| {
+        anyhow::anyhow!("{}: expected {}, got `{raw}`", spec.key, values.join("|"))
+    };
+    let value = match spec.kind {
+        ConfigValueKind::String => Value::String(raw.to_owned()),
+        ConfigValueKind::NonEmptyString => {
+            if raw.is_empty() {
+                anyhow::bail!("{} must be non-empty", spec.key);
+            }
+            Value::String(raw.to_owned())
+        }
+        ConfigValueKind::Bool => Value::Bool(
+            raw.parse::<bool>()
+                .with_context(|| format!("{}: expected true|false, got `{raw}`", spec.key))?,
+        ),
+        ConfigValueKind::U32 => Value::Number(Number::from(parse_u32(spec.key, raw)?)),
+        ConfigValueKind::U32Range(min, max) => {
+            let parsed = parse_u32(spec.key, raw)?;
+            if !(min..=max).contains(&parsed) {
+                anyhow::bail!("{} must be in {min}..={max}, got `{raw}`", spec.key);
+            }
+            Value::Number(Number::from(parsed))
+        }
+        ConfigValueKind::U64NonZero => {
+            Value::Number(Number::from(parse_nonzero_u64(spec.key, raw)?))
+        }
+        ConfigValueKind::UsizeNonZero => {
+            let parsed = parse_nonzero_usize(spec.key, raw)?;
+            Value::Number(Number::from(parsed as u64))
+        }
+        ConfigValueKind::F64Range(min, max) => {
+            let parsed = raw
+                .parse::<f64>()
+                .with_context(|| format!("{}: expected a number, got `{raw}`", spec.key))?;
+            if !parsed.is_finite() || !(min..=max).contains(&parsed) {
+                anyhow::bail!("{} must be in {min}..={max}, got `{raw}`", spec.key);
+            }
+            Value::Number(Number::from_f64(parsed).expect("finite f64 has a JSON number"))
+        }
+        ConfigValueKind::Enum(values) => {
+            let normalized = match spec.key {
+                "editor.theme" => theme_choice_label(parse_theme_choice(raw)?).to_owned(),
+                "editor.editor_theme" => editor_theme_label(parse_editor_theme(raw)?).to_owned(),
+                "editor.line_spacing" => line_spacing_label(parse_line_spacing(raw)?).to_owned(),
+                _ => raw.to_owned(),
+            };
+            if !values.contains(&normalized.as_str()) {
+                return Err(invalid_enum(values));
+            }
+            Value::String(normalized)
+        }
+        ConfigValueKind::OptionalU32Range(min, max) => {
+            if matches!(raw, "none" | "null") {
+                Value::Null
+            } else {
+                let parsed = parse_u32(spec.key, raw)?;
+                if !(min..=max).contains(&parsed) {
+                    anyhow::bail!("{} must be in {min}..={max}, got `{raw}`", spec.key);
+                }
+                Value::Number(Number::from(parsed))
+            }
+        }
+        ConfigValueKind::OptionalEnum(values) => {
+            if matches!(raw, "none" | "null") {
+                Value::Null
+            } else {
+                if !values.contains(&raw) {
+                    return Err(invalid_enum(values));
+                }
+                Value::String(raw.to_owned())
+            }
+        }
+        ConfigValueKind::StringList(max) => {
+            let entries: Vec<String> = serde_json::from_str(raw).with_context(|| {
+                format!(
+                    "{}: expected a JSON string array, for example [\"TOKEN\",\"SECRET\"]",
+                    spec.key
+                )
+            })?;
+            if entries.len() > max {
+                anyhow::bail!("{} accepts at most {max} entries", spec.key);
+            }
+            if let Some(invalid) = entries.iter().find(|entry| {
+                entry.is_empty()
+                    || !entry
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            }) {
+                anyhow::bail!("{}: `{invalid}` is outside [A-Za-z0-9_]+", spec.key);
+            }
+            let mut seen = std::collections::HashSet::new();
+            if let Some(duplicate) = entries.iter().find(|entry| !seen.insert((*entry).clone())) {
+                anyhow::bail!("{}: duplicate entry `{duplicate}`", spec.key);
+            }
+            serde_json::to_value(entries)?
+        }
+        ConfigValueKind::Color => Value::String(normalize_config_color(spec.key, raw)?),
+        ConfigValueKind::ReadOnly(reason) => {
+            anyhow::bail!("{} is read-only in `chan config`: {reason}", spec.key)
+        }
+        ConfigValueKind::Collection(route) => {
+            anyhow::bail!("{} is a collection; {route}", spec.key)
+        }
+    };
+    Ok(value)
+}
+
+fn normalize_config_color(key: &str, raw: &str) -> Result<String> {
+    let hex = raw
+        .strip_prefix('#')
+        .filter(|hex| matches!(hex.len(), 3 | 6) && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| anyhow::anyhow!("{key}: expected #rgb or #rrggbb, got `{raw}`"))?;
+    let expanded = if hex.len() == 3 {
+        hex.chars().flat_map(|c| [c, c]).collect::<String>()
+    } else {
+        hex.to_owned()
+    };
+    Ok(format!("#{}", expanded.to_ascii_lowercase()))
+}
+
+fn validate_config_dump(config: &serde_json::Value) -> Result<()> {
+    fn walk(value: &serde_json::Value, path: &mut Vec<String>) -> Result<()> {
+        if let serde_json::Value::Object(fields) = value {
+            for (name, value) in fields {
+                path.push(name.clone());
+                walk(value, path)?;
+                path.pop();
+            }
+            return Ok(());
+        }
+        let key = path.join(".");
+        if key.starts_with("editor.shortcuts.") {
+            return Ok(());
+        }
+        config_key_spec(&key)
+            .with_context(|| format!("serialized config leaf `{key}` has no CLI policy"))?;
+        Ok(())
+    }
+    walk(config, &mut Vec::new())
 }
 
 fn parse_theme_choice(value: &str) -> Result<ThemeChoice> {
@@ -9924,6 +10344,7 @@ mod tests {
         let server = ServerConfig::default();
         let err = read_config_key(&prefs, &server, "editor.nope").unwrap_err();
         assert!(err.to_string().contains("unknown key"));
+        assert!(err.to_string().contains("server.terminal.secret_masking"));
 
         let mut prefs = EditorPrefs::default();
         let err = write_pref_key(&mut prefs, "editor.nope", "x").unwrap_err();
@@ -9932,6 +10353,187 @@ mod tests {
         let mut server = ServerConfig::default();
         let err = write_server_config_key(&mut server, "server.nope", "x").unwrap_err();
         assert!(err.to_string().contains("unknown key"));
+    }
+
+    fn config_leaf_paths(value: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
+        fn walk(
+            value: &serde_json::Value,
+            prefix: &mut Vec<String>,
+            leaves: &mut Vec<(String, serde_json::Value)>,
+        ) {
+            if let serde_json::Value::Object(fields) = value {
+                for (name, value) in fields {
+                    prefix.push(name.clone());
+                    walk(value, prefix, leaves);
+                    prefix.pop();
+                }
+            } else {
+                leaves.push((prefix.join("."), value.clone()));
+            }
+        }
+
+        let mut leaves = Vec::new();
+        walk(value, &mut Vec::new(), &mut leaves);
+        leaves
+    }
+
+    fn populated_config_for_coverage() -> (EditorPrefs, ServerConfig) {
+        let mut shortcuts = std::collections::BTreeMap::new();
+        shortcuts.insert(
+            "workspace.open".into(),
+            chan_server::ShortcutOverride {
+                web: Some("Mod+O".into()),
+                ..Default::default()
+            },
+        );
+        let editor = EditorPrefs {
+            editor_font_size: Some(20),
+            terminal_colors: chan_server::TerminalColorPrefs {
+                mode: chan_server::TerminalColorMode::Custom,
+                custom: Some(chan_server::TerminalCustomColors {
+                    background: "#112233".into(),
+                    foreground: "#ddeeff".into(),
+                    cursor: "#abcdef".into(),
+                    contrast: chan_server::TerminalContrast::Auto,
+                }),
+            },
+            hybrid_surface_themes: chan_server::HybridSurfaceThemes {
+                editor: Some(chan_server::SurfaceThemeChoice::Dark),
+                terminal: Some(chan_server::SurfaceThemeChoice::Light),
+                browser: Some(chan_server::SurfaceThemeChoice::Dark),
+                graph: Some(chan_server::SurfaceThemeChoice::Light),
+                dashboard: Some(chan_server::SurfaceThemeChoice::Dark),
+            },
+            shortcuts,
+            ..Default::default()
+        };
+        (editor, ServerConfig::default())
+    }
+
+    #[test]
+    fn config_serialized_leafs_have_get_set_coverage() {
+        let (editor, server) = populated_config_for_coverage();
+        let dump = serde_json::to_value(ConfigOutput {
+            editor: editor.clone(),
+            server: server.clone(),
+        })
+        .unwrap();
+        for (key, expected) in config_leaf_paths(&dump) {
+            if key.starts_with("editor.shortcuts.") {
+                continue;
+            }
+            let actual = read_config_key(&editor, &server, &key)
+                .unwrap_or_else(|error| panic!("{key} is printed but not readable: {error}"));
+            assert_eq!(actual, expected, "{key} read changed the serialized value");
+            if key == "editor.cs_dismissed" {
+                continue;
+            }
+            let raw = scalar_to_string(&expected);
+            if key.starts_with("server.") {
+                let mut updated = server.clone();
+                write_server_config_key(&mut updated, &key, &raw)
+                    .unwrap_or_else(|error| panic!("{key} is printed but not writable: {error}"));
+            } else {
+                let mut updated = editor.clone();
+                write_pref_key(&mut updated, &key, &raw)
+                    .unwrap_or_else(|error| panic!("{key} is printed but not writable: {error}"));
+            }
+        }
+
+        assert_eq!(
+            read_config_key(&editor, &server, "editor.shortcuts").unwrap(),
+            dump["editor"]["shortcuts"]
+        );
+        let mut updated = editor.clone();
+        let error = write_pref_key(&mut updated, "editor.shortcuts.workspace.open.web", "Mod+K")
+            .unwrap_err();
+        assert!(error.to_string().contains("collection"), "{error:#}");
+
+        let mut updated = editor;
+        let error = write_pref_key(&mut updated, "editor.cs_dismissed", "true").unwrap_err();
+        assert!(error.to_string().contains("read-only"), "{error:#}");
+
+        let mut updated = server;
+        let error = write_server_config_key(
+            &mut updated,
+            "server.terminal.secret_mask_suffixes",
+            "TOKEN",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("JSON string array"), "{error:#}");
+    }
+
+    #[test]
+    fn config_schema_audit_rejects_an_unowned_serialized_leaf() {
+        let (editor, server) = populated_config_for_coverage();
+        let mut dump = serde_json::to_value(ConfigOutput { editor, server }).unwrap();
+        dump["editor"]["future_leaf"] = serde_json::json!(true);
+        let error = validate_config_dump(&dump).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("future_leaf"), "{message}");
+        assert!(message.contains("no CLI policy"), "{message}");
+    }
+
+    #[test]
+    fn config_terminal_alias_and_validation_are_typed() {
+        let mut editor = EditorPrefs::default();
+        let mut server = ServerConfig::default();
+        write_server_config_key(&mut server, "terminal.secret_masking", "true").unwrap();
+        assert!(server.terminal.secret_masking);
+        assert_eq!(
+            read_config_key(&editor, &server, "terminal.secret_masking").unwrap(),
+            serde_json::json!(true)
+        );
+
+        let error =
+            write_server_config_key(&mut server, "server.terminal.scrollback_mb", "9").unwrap_err();
+        assert!(error.to_string().contains("10..=50"), "{error:#}");
+        let error = write_server_config_key(&mut server, "server.terminal.secret_masking", "yes")
+            .unwrap_err();
+        assert!(error.to_string().contains("true|false"), "{error:#}");
+        let error =
+            write_server_config_key(&mut server, "server.terminal.session_cap", "0").unwrap_err();
+        assert!(error.to_string().contains("greater than 0"), "{error:#}");
+        let error = write_server_config_key(
+            &mut server,
+            "server.terminal.secret_mask_suffixes",
+            "[\"TOKEN\",\"TOKEN\"]",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("duplicate"), "{error:#}");
+
+        let error = write_pref_key(&mut editor, "editor.editor_font_size", "9").unwrap_err();
+        assert!(error.to_string().contains("10..=32"), "{error:#}");
+        let error = write_pref_key(
+            &mut editor,
+            "editor.terminal_colors.custom.background",
+            "black",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("#rgb or #rrggbb"), "{error:#}");
+    }
+
+    #[test]
+    fn config_secret_masking_false_and_true_persist_in_isolated_home() {
+        let env = test_env::ChanTestEnv::new();
+        assert!(!ServerConfig::default().terminal.secret_masking);
+
+        cmd_config(ConfigAction::Set {
+            key: "terminal.secret_masking".into(),
+            value: Some("false".into()),
+        })
+        .unwrap();
+        let path = env.home().join("server.toml");
+        let saved = ServerConfig::load_from(&path).unwrap();
+        assert!(!saved.terminal.secret_masking);
+
+        cmd_config(ConfigAction::Set {
+            key: "server.terminal.secret_masking".into(),
+            value: Some("true".into()),
+        })
+        .unwrap();
+        let saved = ServerConfig::load_from(&path).unwrap();
+        assert!(saved.terminal.secret_masking);
     }
 
     #[tokio::test]

@@ -79,6 +79,10 @@ Keys are dotted and split across two namespaces: `editor.*` persists to
 the CHAN_HOME directory when that is set). No workspace is involved and
 nothing needs to be running.
 
+Terminal server keys are printed canonically as `server.terminal.*`.
+The shorter `terminal.*` spelling is accepted as an alias by both get
+and set; the HTTP config API continues to call that owner `terminal.*`.
+
 `chan config get` with no key prints the whole editor + server config as
 TOML, or JSON with --json. With a key it prints that one value.
 `chan config set` takes either `key=value` or `key value`, validates the
@@ -104,26 +108,23 @@ Set a value, either spelling:
 Read a value for a script:
   chan config get server.terminal.session_cap --json
 
+Disable terminal secret masking explicitly:
+  chan config set server.terminal.secret_masking false
+
 KEYS:
-  editor.theme                       system | light | dark
-  editor.editor_theme                github | google_docs | word
-  editor.line_spacing                standard | compact
-                                     (legacy `tight` = compact)
-  editor.date_format                 iso | medium | british-long |
-                                     british-ord | american-long |
-                                     dmy-slash | mdy-slash
-  editor.pane_widths.inspector       pixels
-  editor.pane_widths.graph           pixels
-  editor.pane_widths.browser         pixels
-  editor.pane_widths.search          pixels
-  editor.pane_widths.outline         pixels
-  server.attachments_dir             workspace-relative upload dir,
-                                     default `attachments`
-  server.search.aggression           conservative | balanced |
-                                     aggressive
-  server.terminal.idle_timeout_secs  nonzero integer
-  server.terminal.session_cap        nonzero integer
-  server.terminal.ring_bytes         nonzero integer
+The leaf paths printed by `chan config get` are the current serialized
+values. Every printed scalar is readable and writable except
+`editor.cs_dismissed`, which is read-only. Optional editor font and
+Hybrid surface values accept `none` to clear them.
+
+Enum values are the lowercase values printed by get. Integers retain
+their live bounds: editor font 10..=32, terminal scrollback 10..=50,
+terminal font 8..=32, and terminal timeout/session/ring values must be
+nonzero. `editor.page_width_ratio` is 0.25..=1.0. Colors accept #rgb or
+#rrggbb and are stored as lowercase #rrggbb. Booleans are true or false.
+The legacy line-spacing value `tight` is accepted as `compact`.
+`server.terminal.secret_mask_suffixes` accepts a JSON string array with
+at most 100 unique values matching [A-Za-z0-9_]+.
 
 SIDE EFFECTS:
 `set` rewrites ~/.chan/preferences.toml for an `editor.*` key and
@@ -133,10 +134,10 @@ change up from its watch on that directory and pushes it to open
 windows. `get` writes nothing.
 
 CAVEATS:
-Only the keys above are settable. A bare `chan config get` dumps the
-full config structs, so it also shows fields the Settings overlay owns
-that `set` does not expose. An empty value is refused rather than
-stored, so a typo cannot silently wipe a preference.
+`editor.shortcuts` is a map collection. Get can print it, but set
+refuses with the supported edit route: Settings or PATCH /api/config.
+An empty value is refused rather than stored, so a typo cannot silently
+wipe a preference.
 editor.date_format is stored verbatim without validation; an id the
 editor does not know renders as `iso`.
 
