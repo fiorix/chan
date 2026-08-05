@@ -4794,6 +4794,11 @@ fn run_as_chan_if_requested() -> Result<bool, String> {
     // on it too. shutdown_background() detaches chan-workspace's uncancellable
     // reindex pool on exit, matching the standalone `chan` binary's shim.
     let rt = tokio::runtime::Builder::new_multi_thread()
+        // Declared rather than inherited: this runtime serves workspaces and
+        // can execute transfer work, and tokio's default blocking pool is
+        // large enough that bulk work would expand into the threads
+        // interactive work needs.
+        .max_blocking_threads(chan_server::bulk_transfer::MAX_BLOCKING_THREADS)
         .enable_all()
         .build()
         .map_err(|e| format!("building chan runtime: {e}"))?;
@@ -7199,6 +7204,66 @@ fn spawn_terminal_window(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ceiling is a construction property, so it is pinned at the
+    /// construction seam. Counting live threads would prove nothing: tokio
+    /// creates blocking threads lazily, so a run that never needs 32 looks
+    /// identical to one that is capped at 32.
+    ///
+    /// Scope matters as much as the value. Only runtimes that can execute
+    /// transfer work take the ceiling; the hidden MCP proxy, the
+    /// current-thread `cs` client, and Tauri's own GUI runtime must not,
+    /// because capping them would throttle work this lane never admits.
+    #[test]
+    fn production_runtime_blocking_limit() {
+        // Only the production half: this test names the same call it checks
+        // for, so scanning the whole file would match itself and keep passing
+        // after the real call was deleted.
+        let production = include_str!("main.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("binary source has a production half");
+        assert!(
+            production.contains("fn run_as_chan_if_requested"),
+            "the production half must be what was scanned"
+        );
+
+        assert_eq!(
+            production
+                .matches(".max_blocking_threads(chan_server::bulk_transfer::MAX_BLOCKING_THREADS)")
+                .count(),
+            1,
+            "exactly one desktop runtime declares the ceiling"
+        );
+
+        // The one that has it is the `chan` CLI runtime, and the excluded
+        // builders keep their unbounded defaults.
+        let chan_runtime = production
+            .split("fn run_as_chan_if_requested")
+            .nth(1)
+            .expect("the chan CLI entry point");
+        assert!(
+            chan_runtime.contains(
+                ".max_blocking_threads(chan_server::bulk_transfer::MAX_BLOCKING_THREADS)"
+            ),
+            "the desktop chan runtime must declare its blocking-thread ceiling"
+        );
+
+        for excluded in [
+            "fn run_hidden_mcp_proxy_if_requested",
+            "fn run_as_cs_if_requested",
+        ] {
+            let body = production
+                .split(excluded)
+                .nth(1)
+                .and_then(|rest| rest.split("\nfn ").next())
+                .unwrap_or_else(|| panic!("{excluded} must exist"));
+            assert!(
+                !body.contains("max_blocking_threads"),
+                "{excluded} must keep tokio's default pool"
+            );
+        }
+    }
 
     /// The clipboard runner must not execute its operation on the thread that
     /// awaits it: a current-thread runtime is the strictest witness, because an
