@@ -50,6 +50,21 @@ describe("TerminalTab tracks terminal surface body theme", () => {
     expect(terminalTab).toContain("customTerminalColors?.cursor");
   });
 
+  test("custom background paints only the terminal body chrome", () => {
+    expect(terminalTab).toContain(
+      "style:--terminal-background={customTerminalColors?.background}",
+    );
+    expect(terminalTab).toMatch(
+      /\.terminal-tab \{[\s\S]*?background: var\(--terminal-background, var\(--bg\)\);/,
+    );
+    expect(terminalTab).toMatch(
+      /\.terminal-host \{[\s\S]*?background: var\(--terminal-background, var\(--bg\)\);/,
+    );
+    expect(terminalTab).toMatch(
+      /\.terminal-host :global\(\.xterm-viewport\) \{[\s\S]*?background-color: var\(--terminal-background, var\(--bg\)\);[\s\S]*?scrollbar-color: var\(--separator\) var\(--terminal-background, var\(--bg\)\);/,
+    );
+  });
+
   test("standard mode retains selection and both exact ANSI palettes", () => {
     expect(terminalTab).toContain('selectionBackground: "rgba(88, 166, 255, 0.35)"');
     for (const colour of [
