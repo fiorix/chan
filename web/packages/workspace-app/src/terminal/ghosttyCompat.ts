@@ -26,13 +26,6 @@ type GhosttyCellTextRenderer = GhosttyRendererLike & {
   ) => void;
 };
 
-type GhosttyScrollWriter = {
-  getScrollbackLength(): number;
-  getViewportY(): number;
-  scrollToLine(line: number): void;
-  write(data: string | Uint8Array): void;
-};
-
 const XTERM_DOM_MEASURE_REPETITIONS = 32;
 const CELL_FLAG_INVISIBLE = 32;
 const CELL_FLAG_FAINT = 128;
@@ -199,28 +192,6 @@ export function installGhosttyCustomGlyphs(
   };
   customGlyphRenderers.add(renderer);
   return true;
-}
-
-/// ghostty-web currently calls scrollToBottom() after every write. Restore a
-/// user's scrolled viewport immediately after the synchronous WASM write,
-/// advancing the distance from bottom as new scrollback lines are appended.
-export function writeGhosttyPreservingScroll(
-  terminal: GhosttyScrollWriter,
-  data: string | Uint8Array,
-): void {
-  const viewportBefore = terminal.getViewportY();
-  if (viewportBefore <= 0) {
-    terminal.write(data);
-    return;
-  }
-
-  const scrollbackBefore = terminal.getScrollbackLength();
-  terminal.write(data);
-  const scrollbackAfter = terminal.getScrollbackLength();
-  const appendedLines = Math.max(0, scrollbackAfter - scrollbackBefore);
-  terminal.scrollToLine(
-    Math.min(scrollbackAfter, viewportBefore + appendedLines),
-  );
 }
 
 function measureWithTextMetrics(

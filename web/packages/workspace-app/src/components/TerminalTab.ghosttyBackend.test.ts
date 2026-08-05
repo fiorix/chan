@@ -79,8 +79,19 @@ describe("TerminalTab ghostty backend wiring", () => {
     // suppression open (eating mouse reports + Alt+keys). The sync
     // wrapper is load-bearing; do not "simplify" it back to term.
     expect(tab).toMatch(/termWriter = \{\s*write: \(bytes, done\) => \{/);
-    expect(tab).toMatch(/writeGhosttyPreservingScroll\(ghosttyTerm, bytes\)/);
+    expect(tab).toMatch(/viewport\.write\(bytes\);\s*done\?\.\(\);/);
     expect(tab).toMatch(/ptyWrites\.write\(termWriter, bytes, origin,/);
+  });
+
+  test("every ghostty viewport mutation routes through the one controller", () => {
+    expect(tab).toMatch(/new GhosttyViewportController\(ghosttyTerm, \{/);
+    // The stateless write-restore helper is retired; the controller owns
+    // write reconciliation and the calibrated macOS pixel-scroll claim.
+    expect(tab).not.toContain("writeGhosttyPreservingScroll");
+    expect(tab).toMatch(/return ghosttyViewport\?\.handleWheel\(e\) \?\? false;/);
+    // Zero smooth-scroll duration retires ghostty-web's private animation
+    // target so a write-side restore cannot be overridden by a stale one.
+    expect(tab).toMatch(/smoothScrollDuration: 0,/);
   });
 
   test("secret masking reports unavailable without running xterm decorations", () => {

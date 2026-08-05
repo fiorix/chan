@@ -134,8 +134,8 @@
     alignGhosttyRendererToXterm,
     installGhosttyCustomGlyphs,
     measureXtermCellDimensions,
-    writeGhosttyPreservingScroll,
   } from "../terminal/ghosttyCompat";
+  import { GhosttyViewportController } from "../terminal/ghosttyViewport";
   import { Osc52Bridge } from "../terminal/osc52Bridge";
   import {
     DEFAULT_SECRET_MASK_SUFFIXES,
@@ -360,6 +360,10 @@
   // registerOscHandler (see osc52Bridge.ts). The xterm backend keeps
   // installTerminalReportGuards.
   let osc52Bridge: Osc52Bridge | null = null;
+  // Single owner of Chan-initiated Ghostty viewport mutations (PTY-write
+  // reconciliation plus the calibrated macOS pixel-scroll path), non-null
+  // ONLY on the ghostty backend and disposed with the terminal.
+  let ghosttyViewport: GhosttyViewportController | null = null;
   let hostResumeTimers: ReturnType<typeof setTimeout>[] = [];
   let hostResumeListenerCleanup: (() => void) | null = null;
   // Wall-clock-gap sleep/wake detector (shared `installWakeGapDetector`). See
@@ -913,6 +917,13 @@
         fontSize: rendererFontSize,
         ghostty: ghosttyKit.ghostty,
         scrollback: scrollbackLines,
+        // Ghostty's default 100ms smooth scroll keeps a private animation
+        // target that scrollToBottom() (called on every write away from
+        // the bottom) never syncs; a write interleaved with a gesture then
+        // resumes toward the stale target. Zero makes every viewport move
+        // synchronous, matching xterm.js, so the controller's write-side
+        // restore is the final word.
+        smoothScrollDuration: 0,
         theme: terminalTheme(),
       });
       term = ghosttyTerm;
@@ -954,10 +965,20 @@
       // swallows the sequence and exposes no registerOscHandler
       // equivalent (see osc52Bridge.ts). Applied in writePtyOutput.
       osc52Bridge = new Osc52Bridge();
+      // The viewport controller owns PTY-write reconciliation and the
+      // calibrated macOS pixel-scroll claim for this terminal instance.
+      const viewport = new GhosttyViewportController(ghosttyTerm, {
+        os: currentOS,
+        hasMouseTracking: () => ghosttyTerm.hasMouseTracking(),
+        isAlternateScreen: () =>
+          ghosttyTerm.buffer.active === ghosttyTerm.buffer.alternate,
+        cellHeight: () => ghosttyTerm.renderer?.getMetrics().height ?? 0,
+      });
+      ghosttyViewport = viewport;
       // Sync-callback writer for the origin tracker (see termWriter).
       termWriter = {
         write: (bytes, done) => {
-          writeGhosttyPreservingScroll(ghosttyTerm, bytes);
+          viewport.write(bytes);
           done?.();
         },
       };
@@ -1860,12 +1881,17 @@
   /// the scroller and true claims the event. With mouse tracking
   /// active, encode the report through the same sendInput path an
   /// xterm report takes (terminal-generated, no broadcast fan-out) and
-  /// claim the event; without tracking, decline so ghostty keeps its
-  /// local scroll / alt-screen arrow behavior. Coordinates come from
+  /// claim the event. Without tracking, the viewport controller claims
+  /// only the calibrated macOS pixel-mode primary-buffer case; every
+  /// other event declines so ghostty keeps its native local scroll /
+  /// alt-screen arrow behavior. Coordinates come from
   /// the canvas rect / live grid size (SGR coords are 1-based cells).
   function handleGhosttyWheel(e: WheelEvent): boolean {
     const t = backend === "ghostty" ? (term as GhosttyTerminal | null) : null;
-    if (!t || !t.hasMouseTracking()) return false;
+    if (!t) return false;
+    if (!t.hasMouseTracking()) {
+      return ghosttyViewport?.handleWheel(e) ?? false;
+    }
     const canvas = e.target as HTMLElement | null;
     const rect = canvas?.getBoundingClientRect?.();
     if (!rect) return false;
@@ -1959,6 +1985,7 @@
     ptyWrites.reset();
     mouseFilter = null;
     osc52Bridge = null;
+    ghosttyViewport = null;
     backend = "xterm";
     webglRendererActive = false;
     fit = null;

@@ -2,7 +2,6 @@ import { describe, expect, test, vi } from "vitest";
 import {
   alignGhosttyRendererToXterm,
   installGhosttyCustomGlyphs,
-  writeGhosttyPreservingScroll,
   xtermCellDimensionsFromMeasurement,
 } from "./ghosttyCompat";
 
@@ -158,43 +157,5 @@ describe("Ghostty custom box glyphs", () => {
       resize: vi.fn(),
     };
     expect(installGhosttyCustomGlyphs(renderer as never)).toBe(false);
-  });
-});
-
-describe("Ghostty scroll preservation", () => {
-  function terminal(viewport: number, lengths: number[]) {
-    let read = 0;
-    return {
-      getViewportY: vi.fn(() => viewport),
-      getScrollbackLength: vi.fn(() => lengths[read++] ?? lengths.at(-1)!),
-      scrollToLine: vi.fn(),
-      write: vi.fn(),
-    };
-  }
-
-  test("keeps following output when already at the bottom", () => {
-    const term = terminal(0, [20]);
-    writeGhosttyPreservingScroll(term, "output");
-    expect(term.write).toHaveBeenCalledWith("output");
-    expect(term.getScrollbackLength).not.toHaveBeenCalled();
-    expect(term.scrollToLine).not.toHaveBeenCalled();
-  });
-
-  test("restores a scrolled viewport after output appends lines", () => {
-    const term = terminal(7, [20, 23]);
-    writeGhosttyPreservingScroll(term, "output");
-    expect(term.scrollToLine).toHaveBeenCalledWith(10);
-  });
-
-  test("restores the same offset for an in-place screen update", () => {
-    const term = terminal(7, [20, 20]);
-    writeGhosttyPreservingScroll(term, "output");
-    expect(term.scrollToLine).toHaveBeenCalledWith(7);
-  });
-
-  test("clamps the restored viewport after scrollback is cleared", () => {
-    const term = terminal(7, [20, 3]);
-    writeGhosttyPreservingScroll(term, "output");
-    expect(term.scrollToLine).toHaveBeenCalledWith(3);
   });
 });
