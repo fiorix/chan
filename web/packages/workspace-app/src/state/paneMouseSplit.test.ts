@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, test } from "vitest";
+import paneSource from "../components/Pane.svelte?raw";
+import workspaceSource from "../components/Workspace.svelte?raw";
 import {
   classifyMouseSplitZone,
   edgeSplitAllowed,
@@ -181,6 +183,34 @@ describe("edgeSplitAllowed", () => {
     expect(edgeSplitAllowed("bottom", 240, 332)).toBe(true);
     expect(edgeSplitAllowed("top", 239, 332)).toBe(false);
     expect(edgeSplitAllowed("top", 240, 331)).toBe(false);
+  });
+
+  test("the size gate tracks the pane margin and divider in the CSS", () => {
+    // The main-axis chrome is a hand-derived duplicate of two CSS values
+    // living in two other components, with nothing linking them. Editing
+    // either stylesheet moves the real minimum away from this gate.
+    const margin = Number(paneSource.match(/^\s*margin: (\d+)px;$/m)?.[1]);
+    const rowDivider = Number(
+      workspaceSource.match(/^\s*\.split\.row > \.divider \{ width: (\d+)px;/m)?.[1],
+    );
+    const columnDivider = Number(
+      workspaceSource.match(/^\s*\.split\.column > \.divider \{ height: (\d+)px;/m)?.[1],
+    );
+    expect(margin).toBe(4);
+    expect(rowDivider).toBe(4);
+    expect(columnDivider).toBe(rowDivider);
+
+    // Replacing the target with a nested split reclaims the target's own
+    // two margins, then spends one divider plus two margins per child.
+    const chrome = rowDivider + 2 * margin;
+
+    const widthFloor = 2 * MIN_SPLIT_PANE_WIDTH + chrome;
+    expect(edgeSplitAllowed("left", widthFloor, MIN_SPLIT_PANE_HEIGHT)).toBe(true);
+    expect(edgeSplitAllowed("right", widthFloor - 1, MIN_SPLIT_PANE_HEIGHT)).toBe(false);
+
+    const heightFloor = 2 * MIN_SPLIT_PANE_HEIGHT + chrome;
+    expect(edgeSplitAllowed("top", MIN_SPLIT_PANE_WIDTH, heightFloor)).toBe(true);
+    expect(edgeSplitAllowed("bottom", MIN_SPLIT_PANE_WIDTH, heightFloor - 1)).toBe(false);
   });
 });
 

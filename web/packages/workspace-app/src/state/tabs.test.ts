@@ -61,6 +61,7 @@ import {
   paneMode,
   paneModeEqualize,
   paneModeMoveFocus,
+  paneModeMoveGrabToEdge,
   paneModeOpenBrowser,
   paneModeOpenGraph,
   paneModeOpenTerminal,
@@ -2058,6 +2059,67 @@ describe("pane state", () => {
     expect(() => unregister()).not.toThrow();
     expect(live.terminalMetadataPending).toBeUndefined();
     expect(live.terminalMetadataError).toContain("before the metadata update was confirmed");
+  });
+
+  test("a mouse edge split's own new nodes survive a terminal teardown", () => {
+    // One session shown in two panes: the grabbed copy moves into the
+    // split's new leaf while the other stays put in the target leaf.
+    const moving = terminalTab({ id: "term-moving", terminalSessionId: "sess-edge" });
+    const staying = terminalTab({ id: "term-staying", terminalSessionId: "sess-edge" });
+    const source = resetLayout([moving]);
+    splitPane(source.id, "row", "after");
+    const root = layout.nodes[layout.rootId];
+    if (root?.kind !== "split") throw new Error("expected split");
+    const target = layout.nodes[root.b];
+    if (target?.kind !== "leaf") throw new Error("expected leaf");
+    target.tabs.push(staying);
+    target.activeTabId = staying.id;
+
+    const unregister = registerTerminalMetadataSink("sess-edge", () => true);
+    renameTerminalTab(moving, "deploy", "default");
+    renameTerminalTab(staying, "deploy", "default");
+
+    const before = Object.keys(layout.nodes);
+    enterPaneModeTransaction(source.id);
+    paneModeMoveGrabToEdge(source.id, target.id, "left");
+    commitPaneMode();
+
+    // The edge split mints a leaf and a split, and the commit publishes
+    // both in the batch that re-parents the moved terminal.
+    const fresh = Object.keys(layout.nodes).filter((id) => !before.includes(id));
+    expect(fresh).toHaveLength(2);
+    const movedLeaf = fresh
+      .map((id) => layout.nodes[id])
+      .find((node) => node?.kind === "leaf");
+    if (movedLeaf?.kind !== "leaf") throw new Error("expected the new leaf");
+    const stayedLeaf = layout.nodes[target.id];
+    if (stayedLeaf?.kind !== "leaf") throw new Error("expected the target leaf");
+    const movedTab = movedLeaf.tabs[0] as TerminalTab;
+    const stayedTab = stayedLeaf.tabs[0] as TerminalTab;
+    expect(movedTab.id).toBe("term-moving");
+    expect(stayedTab.id).toBe("term-staying");
+    expect(movedTab.terminalMetadataPending).toBeDefined();
+    expect(stayedTab.terminalMetadataPending).toBeDefined();
+
+    // A terminal component torn down by that re-parent reads PRE-batch
+    // source values, so the ids the split just minted enumerate as keys
+    // and read back undefined. Model the holes on the ids this path
+    // actually produced rather than on a fabricated key.
+    for (const id of fresh) {
+      layout.nodes[id] = undefined as unknown as LeafNode;
+    }
+
+    expect(() => unregister()).not.toThrow();
+
+    // The pre-batch view is the point, not merely surviving it: the holed
+    // branch stays unseen while the surviving copy is still reached, so a
+    // guard that skipped the whole walk would not pass.
+    expect(movedTab.terminalMetadataPending).toBeDefined();
+    expect(movedTab.terminalMetadataError).toBeUndefined();
+    expect(stayedTab.terminalMetadataPending).toBeUndefined();
+    expect(stayedTab.terminalMetadataError).toContain(
+      "before the metadata update was confirmed",
+    );
   });
 
   test("session identity never fabricates unknown spawn provenance", () => {
