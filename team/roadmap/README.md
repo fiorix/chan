@@ -28,7 +28,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [large-transfer-capability](v0.85.0/large-transfer-capability.md) | implementation in progress | finish the bulk-transfer lane, admission control, queue protocol, browser state, and acceptance evidence before raising the ceiling |
 | [ghostty-macos-trackpad-scroll-parity](v0.85.0/ghostty-macos-trackpad-scroll-parity.md) | implemented, owner validation pending | calibrate the accepted factor on macOS hardware and complete live client checks |
 | [ghostty-live-output-scroll-stability](v0.85.0/ghostty-live-output-scroll-stability.md) | implemented, owner validation pending | complete the real streaming and browser evidence |
-| [hybrid-nav-mouse-split-affordances](v0.85.0/hybrid-nav-mouse-split-affordances.md) | implemented, validation pending | clear the integrated web gate and complete runtime input evidence |
+| [hybrid-nav-mouse-split-affordances](v0.85.0/hybrid-nav-mouse-split-affordances.md) | implemented, owner validation pending | complete runtime input evidence on real hardware; jsdom proves no layout |
 | [file-browser-context-menu-inspector-actions](v0.85.0/file-browser-context-menu-inspector-actions.md) | correction in progress | remove stale authority and copy while retaining ordinary-file replacement |
 | [chan-config-key-coverage](v0.85.0/chan-config-key-coverage.md) | implemented, validation pending | complete integrated validation of the serialized key authority |
 | [settings-checked-checkbox-pill-border](v0.85.0/settings-checked-checkbox-pill-border.md) | accepted, specced | drop the blue outer border from checked checkbox pills while radio pills keep theirs |
