@@ -156,11 +156,18 @@ run_check() {
         return 1
     fi
 
+    # $TMPDIR must exist before apt runs: package postinst scripts inherit it,
+    # and update-ca-certificates fails outright when it points nowhere.
     install -d -m 0755 /var/tmp "$TMPDIR" "$NIX_BUILD_DIR" || return
     apt-get update || return
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates curl git make nix-bin nix-setup-systemd python3 || return
     systemd-tmpfiles --create /usr/lib/tmpfiles.d/nix-daemon.conf || return
+    # Re-apply after the install: `q /var/tmp 1777` in
+    # /usr/lib/tmpfiles.d/tmp.conf restores the world-writable mode during a
+    # tmpfiles pass, and Nix refuses to build under a world-writable
+    # temporary directory.
+    install -d -m 0755 /var/tmp "$TMPDIR" "$NIX_BUILD_DIR" || return
     mkdir -p /etc/nix || return
     printf "%s\n" \
         "experimental-features = nix-command flakes" \

@@ -19,12 +19,6 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-### v0.84.1
-
-| item | state | what needs to happen |
-| --- | --- | --- |
-| [graph-large-workspace-render-cost](v0.84.1/graph-large-workspace-render-cost.md) | implemented, owner validated | close to `done/` at the v0.84.1 GA |
-
 ### v0.85.0
 
 | item | state | what needs to happen |
@@ -41,6 +35,14 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [chan-config-key-coverage](v0.85.0/chan-config-key-coverage.md) | implemented, validation pending | complete integrated validation of the serialized key authority |
 
 ## Completed
+
+### v0.84.1
+
+Shipped 2026-08-05; see [release-v0.84.1](../release/release-v0.84.1.md). Closed items in [`done/`](done/):
+
+- [graph-large-workspace-render-cost](done/graph-large-workspace-render-cost.md) - a selection click no longer re-heats the layout and a settled graph paints nothing, with the selection-derived paint inputs memoised and the viewport culled.
+
+The release also carried five fixes that entered from live use without their own roadmap items: live-only BM25 path enumeration, a pane split surviving a mid-teardown layout read, terminal chrome following a custom background, a devserver join detaching on non-TTY stdin EOF, and an honest chan-desktop window-open message with its refusal diagnostics. The desktop library-window repair behind that last one was deferred to v0.85.0 as [desktop-library-window-open-unavailable](v0.85.0/desktop-library-window-open-unavailable.md).
 
 ### v0.84.0
 

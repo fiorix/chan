@@ -1,7 +1,10 @@
 # Graph render cost on a large workspace
 
-Status: REGISTERED for v0.84.1, grounded 2026-08-05, implemented, owner validated 2026-08-05 in a
-real browser. Ready to close to `done/` at the v0.84.1 GA.
+Status: SHIPPED in [v0.84.1](../../release/release-v0.84.1.md). A selection click no longer pins or
+re-heats the simulation, a settled graph paints nothing, and the selection-derived paint inputs are
+memoised with the viewport culled. On a 3519-node, 12279-edge workspace: idle paints 196 to 0, paints
+from one click 412 to 1, and layout motion after that click 6606 ms to 0 ms. Owner validated
+2026-08-05 in a real browser. Settling after a deliberate drag stays open (see Open).
 
 ## What
 
