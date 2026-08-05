@@ -6,8 +6,11 @@ describe("FileInfoBody audio preview", () => {
     expect(fileInfo).toMatch(
       /import \{\s*isAudio,[^}]*\}\s*from "\.\.\/state\/fileTypes";/,
     );
-    expect(fileInfo).toMatch(/const audio = !isDir && isAudio\(p\);/);
-    expect(fileInfo).toMatch(/const media = image \|\| pdf \|\| video \|\| audio;/);
+    // Audio is discriminated inside the shared media branch, alongside
+    // image, video, and PDF, rather than by a kind of its own.
+    expect(fileInfo).toMatch(
+      /case "viewMedia":[\s\S]{1,200}isAudio\(p\)[\s\S]{1,60}"View Audio"/,
+    );
     expect(fileInfo).toMatch(/"View Audio"[\s\S]{1,220}openMediaViewer\(p\)/);
   });
 

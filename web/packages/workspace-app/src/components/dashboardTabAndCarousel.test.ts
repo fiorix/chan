@@ -617,15 +617,18 @@ describe("Search-slot directory inspector actions", () => {
     expect(fileInfo).toMatch(/onNewTerminal\?: \(\) => void;/);
     expect(fileInfo).toMatch(/allowUpload\?: boolean;/);
     expect(fileInfo).toMatch(/allowUpload = true,/);
-    // Upload is a directory dropdown action, gated behind allowUpload.
+    // Upload is a directory dropdown action, gated behind allowUpload: the
+    // prop feeds the shared classifier as a capability, and the row it
+    // unlocks binds triggerUpload.
+    expect(fileInfo).toMatch(/upload: allowUpload,/);
     expect(fileInfo).toMatch(
-      /if \(allowUpload\) \{[\s\S]{1,160}label: "Upload file here",[\s\S]{1,80}onClick: triggerUpload/,
+      /case "upload":[\s\S]{1,120}label: "Upload file here",[\s\S]{1,80}onClick: triggerUpload/,
     );
     // Download is always offered (tarball for dirs, "Download file" otherwise).
     expect(fileInfo).toMatch(/onClick: downloadSelection,/);
     // "New terminal here" prefers the host handler, else seeds via fromHere.
     expect(fileInfo).toMatch(
-      /label: "New terminal here",[\s\S]{1,40}onClick: newTerminalHere,/,
+      /label: "New terminal here",[\s\S]{1,40}onClick: newTerminalHere\s*[},]/,
     );
     expect(fileInfo).toMatch(
       /function newTerminalHere\(\): void \{[\s\S]{1,120}if \(onNewTerminal\) \{[\s\S]{1,60}onNewTerminal\(\);[\s\S]{1,160}terminalFromHereTarget\(entry\.path, entry\.is_dir\)/,
