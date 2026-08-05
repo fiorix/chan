@@ -48,6 +48,9 @@ pub struct PreferencesView {
     pub date_format: String,
     pub strip_trailing_whitespace_on_save: bool,
     pub search_aggression: SearchAggression,
+    /// Effective process transfer ceiling. Read-only: it is intentionally
+    /// absent from `PreferencesPatch` and changes only after process restart.
+    pub transfer_max_bytes: u64,
     pub terminal: TerminalConfig,
     #[serde(default)]
     pub bubble_overlay_mode: BubbleOverlayMode,
@@ -97,6 +100,7 @@ pub(super) fn preferences_view(state: &AppState) -> Result<PreferencesView, Erro
         date_format: editor.date_format.clone(),
         strip_trailing_whitespace_on_save: editor.strip_trailing_whitespace_on_save,
         search_aggression: server.search.aggression,
+        transfer_max_bytes: state.library.transfer_max_bytes(),
         terminal: server.terminal.clone(),
         bubble_overlay_mode: editor.bubble_overlay_mode,
         hybrid_surface_themes: editor.hybrid_surface_themes.clone(),
@@ -566,6 +570,30 @@ mod tests {
         let view = preferences_view(&state).expect("preferences view");
         let json = serde_json::to_value(view).expect("serialize");
         assert!(json.get("assistant").is_none());
+    }
+
+    #[test]
+    fn effective_transfer_cap_is_read_only() {
+        let state = make_test_state(false);
+        let view = preferences_view(&state).expect("preferences view");
+        assert_eq!(view.transfer_max_bytes, state.library.transfer_max_bytes());
+        let json = serde_json::to_value(view).expect("serialize");
+        assert_eq!(
+            json["transfer_max_bytes"],
+            state.library.transfer_max_bytes()
+        );
+        assert_eq!(json["terminal"]["secret_masking"], false);
+
+        assert!(
+            serde_json::from_value::<PatchConfigBody>(json!({
+                "expected_revision": 1,
+                "preferences": {
+                    "transfer_max_bytes": state.library.transfer_max_bytes()
+                }
+            }))
+            .is_err(),
+            "the effective cap is reported but is not a patchable preference"
+        );
     }
 
     #[test]

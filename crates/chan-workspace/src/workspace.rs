@@ -633,6 +633,9 @@ pub struct Workspace {
     /// operate on the drafts directory as a whole. Created lazily on
     /// the first `create_draft_dir`.
     drafts_root: std::path::PathBuf,
+    /// Effective transfer ceiling inherited immutably from the owning Library.
+    /// Kept separate from the current fixed transfer enforcement sites.
+    transfer_max_bytes: u64,
     paths: WorkspacePaths,
     /// Held for the lifetime of the Workspace. Released on drop.
     _lock: WorkspaceLock,
@@ -809,6 +812,7 @@ impl Workspace {
         entry: KnownWorkspace,
         walk_filter: Arc<fs_ops::WalkFilter>,
         drafts_dir: String,
+        transfer_max_bytes: u64,
     ) -> Result<(Arc<Self>, RecoveryPlan)> {
         // Defensive check: the registered path must still resolve to
         // a directory. A user (or another tool) could have replaced
@@ -1018,6 +1022,7 @@ impl Workspace {
             dir,
             drafts_dir_name,
             drafts_root,
+            transfer_max_bytes,
             paths,
             _lock: lock,
             _fd_permit: fd_permit,
@@ -1261,6 +1266,13 @@ impl Workspace {
 
     pub fn root(&self) -> &std::path::Path {
         &self.entry.root_path
+    }
+
+    /// Effective transfer ceiling captured by the Library that opened this
+    /// workspace. The fixed transfer limits remain authoritative until their
+    /// call sites consume this value.
+    pub fn transfer_max_bytes(&self) -> u64 {
+        self.transfer_max_bytes
     }
 
     /// Verify that the workspace root still resolves to the directory this

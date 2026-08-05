@@ -15,6 +15,40 @@ use crate::error::{ChanError, Result};
 use crate::fs_ops;
 use crate::paths;
 
+pub(crate) const DEFAULT_TRANSFER_MAX_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+pub(crate) const TRANSFER_MAX_BYTES_CEILING: u64 = 100 * 1024 * 1024 * 1024;
+
+/// Validated global transfer configuration persisted under `[transfer]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TransferConfig {
+    #[serde(default = "default_transfer_max_bytes")]
+    pub(crate) max_bytes: u64,
+}
+
+impl TransferConfig {
+    fn validate(self) -> Result<Self> {
+        if self.max_bytes == 0 || self.max_bytes > TRANSFER_MAX_BYTES_CEILING {
+            return Err(ChanError::InvalidTransferMaxBytes {
+                value: self.max_bytes,
+                max: TRANSFER_MAX_BYTES_CEILING,
+            });
+        }
+        Ok(self)
+    }
+}
+
+impl Default for TransferConfig {
+    fn default() -> Self {
+        Self {
+            max_bytes: default_transfer_max_bytes(),
+        }
+    }
+}
+
+const fn default_transfer_max_bytes() -> u64 {
+    DEFAULT_TRANSFER_MAX_BYTES
+}
+
 /// Default directory basenames excluded from indexing and graph rebuild walks.
 ///
 /// Stored in `~/.chan/config.toml` as `index_excluded_dirs` so users can
@@ -101,6 +135,10 @@ pub struct Registry {
     /// value falls back to `.Drafts` at workspace-open time.
     #[serde(default = "default_drafts_dir")]
     pub drafts_dir: String,
+    /// Global bounded-transfer policy. Loaded once into each `Library` so
+    /// existing processes keep one effective value until restart.
+    #[serde(default)]
+    pub(crate) transfer: TransferConfig,
     /// Known workspaces the user has opened on this machine. Sorted
     /// most-recent first by `last_seen_at`.
     #[serde(default)]
@@ -112,6 +150,7 @@ impl Default for Registry {
         Self {
             index_excluded_dirs: default_index_excluded_dirs(),
             drafts_dir: default_drafts_dir(),
+            transfer: TransferConfig::default(),
             workspaces: Vec::new(),
         }
     }
@@ -218,6 +257,7 @@ impl Registry {
             path: path.to_path_buf(),
             message: e.to_string(),
         })?;
+        reg.transfer = reg.transfer.validate()?;
         // Prime the canonical-path cache once at load. Comparisons
         // are then pure and don't re-canonicalize per call. Failure
         // here is non-fatal: an entry whose workspace root is missing or
@@ -527,5 +567,100 @@ mod tests {
         );
         assert!(reg.find(new.path()).is_some());
         assert!(reg.find(old.path()).is_none());
+    }
+
+    #[test]
+    fn transfer_max_bytes_missing_table_and_field_use_default() {
+        let tmp = TempDir::new().unwrap();
+        let missing_table = tmp.path().join("missing-table.toml");
+        std::fs::write(&missing_table, "workspaces = []\n").unwrap();
+        assert_eq!(
+            Registry::load_from(&missing_table)
+                .unwrap()
+                .transfer
+                .max_bytes,
+            DEFAULT_TRANSFER_MAX_BYTES
+        );
+
+        let missing_field = tmp.path().join("missing-field.toml");
+        std::fs::write(&missing_field, "workspaces = []\n[transfer]\n").unwrap();
+        assert_eq!(
+            Registry::load_from(&missing_field)
+                .unwrap()
+                .transfer
+                .max_bytes,
+            DEFAULT_TRANSFER_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn transfer_max_bytes_persists_explicit_nonzero_value() {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("source.toml");
+        let saved = tmp.path().join("saved.toml");
+        std::fs::write(
+            &source,
+            "workspaces = []\n[transfer]\nmax_bytes = 123456789\n",
+        )
+        .unwrap();
+
+        let registry = Registry::load_from(&source).unwrap();
+        assert_eq!(registry.transfer.max_bytes, 123_456_789);
+        registry.save_to(&saved).unwrap();
+        assert_eq!(
+            Registry::load_from(&saved).unwrap().transfer.max_bytes,
+            123_456_789
+        );
+    }
+
+    #[test]
+    fn transfer_max_bytes_rejects_zero() {
+        let tmp = TempDir::new().unwrap();
+        let config = tmp.path().join("config.toml");
+        std::fs::write(&config, "workspaces = []\n[transfer]\nmax_bytes = 0\n").unwrap();
+
+        assert!(matches!(
+            Registry::load_from(&config),
+            Err(ChanError::InvalidTransferMaxBytes {
+                value: 0,
+                max: TRANSFER_MAX_BYTES_CEILING,
+            })
+        ));
+    }
+
+    #[test]
+    fn transfer_max_bytes_accepts_exact_ceiling() {
+        let tmp = TempDir::new().unwrap();
+        let config = tmp.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!("workspaces = []\n[transfer]\nmax_bytes = {TRANSFER_MAX_BYTES_CEILING}\n"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            Registry::load_from(&config).unwrap().transfer.max_bytes,
+            TRANSFER_MAX_BYTES_CEILING
+        );
+    }
+
+    #[test]
+    fn transfer_max_bytes_rejects_one_byte_over_ceiling() {
+        let tmp = TempDir::new().unwrap();
+        let config = tmp.path().join("config.toml");
+        let value = TRANSFER_MAX_BYTES_CEILING + 1;
+        std::fs::write(
+            &config,
+            format!("workspaces = []\n[transfer]\nmax_bytes = {value}\n"),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            Registry::load_from(&config),
+            Err(ChanError::InvalidTransferMaxBytes {
+                value: rejected,
+                max: TRANSFER_MAX_BYTES_CEILING,
+            }) if rejected == value
+        ));
     }
 }

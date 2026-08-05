@@ -48,6 +48,8 @@ pub enum ChanError {
     ListingTooLarge { observed: usize, limit: usize },
     #[error("config decode error in {path}: {message}")]
     ConfigDecode { path: PathBuf, message: String },
+    #[error("invalid transfer.max_bytes {value}: expected a value from 1 through {max} bytes")]
+    InvalidTransferMaxBytes { value: u64, max: u64 },
     #[error("config encode error: {0}")]
     ConfigEncode(String),
     #[error("search error: {0}")]

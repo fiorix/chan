@@ -79,7 +79,7 @@ export type GlobalConfig = {
   workspaces?: KnownWorkspace[];
 };
 
-export type PreferencesPatch = Partial<Preferences>;
+export type PreferencesPatch = Partial<Omit<Preferences, "transfer_max_bytes">>;
 
 export type ConfigPatchRequest = {
   expected_revision: number;
@@ -180,7 +180,7 @@ export type TerminalPreferences = {
   ghostty?: boolean;
   /// Whether xterm.js terminals visually obscure values whose assignment
   /// names end in a configured secret suffix. Optional for older servers;
-  /// absent means enabled. Per-tab toggles do not persist this field.
+  /// absent means disabled. Per-tab toggles do not persist this field.
   secret_masking?: boolean;
   /// Literal, case-insensitive assignment-name suffixes for visual masking.
   /// The server validates `[A-Za-z0-9_]+` entries and caps the list at 100.
@@ -293,6 +293,10 @@ export type Preferences = {
   /// but included in /api/config so CLI/server config changes remain
   /// visible to clients.
   search_aggression: SearchAggression;
+  /// Effective transfer ceiling reported by the server. Read-only and absent
+  /// from PreferencesPatch. Optional for older and offline response fixtures;
+  /// clients do not derive or default this policy.
+  transfer_max_bytes?: number;
   /// Terminal PTY session retention settings. Not surfaced in
   /// Settings yet; replaced as one server-owned composite when patched.
   terminal: TerminalPreferences;

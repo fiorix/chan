@@ -58,6 +58,9 @@ pub struct Library {
 
 struct LibraryInner {
     config_path: PathBuf,
+    /// Effective transfer cap captured once when this Library opens. Registry
+    /// reloads deliberately do not mutate a running process's policy.
+    transfer_max_bytes: u64,
     /// In-memory registry. Persisted to `config_path` on every
     /// mutation. The Mutex serializes registry writes so
     /// `register_workspace` calls from concurrent threads don't race.
@@ -122,9 +125,11 @@ impl Library {
             }
         }
         let walk_filter = Arc::new(WalkFilter::new(registry.index_excluded_dirs.clone()));
+        let transfer_max_bytes = registry.transfer.max_bytes;
         Ok(Self {
             inner: Arc::new(LibraryInner {
                 config_path,
+                transfer_max_bytes,
                 registry: Mutex::new(registry),
                 live_workspaces: Mutex::new(HashMap::new()),
                 walk_filter: Mutex::new(walk_filter),
@@ -148,6 +153,11 @@ impl Library {
     /// Path backing this library's registry config.
     pub fn config_path(&self) -> PathBuf {
         self.inner.config_path.clone()
+    }
+
+    /// Effective transfer ceiling captured when this Library opened.
+    pub fn transfer_max_bytes(&self) -> u64 {
+        self.inner.transfer_max_bytes
     }
 
     /// Validated in-root drafts directory name from the registry
@@ -297,7 +307,8 @@ impl Library {
         }
         let filter = Arc::clone(&self.inner.walk_filter.lock().unwrap());
         let drafts_dir = self.drafts_dir();
-        let (workspace, recovery_plan) = Workspace::open(entry, filter, drafts_dir)?;
+        let (workspace, recovery_plan) =
+            Workspace::open(entry, filter, drafts_dir, self.inner.transfer_max_bytes)?;
         self.inner
             .live_workspaces
             .lock()
@@ -816,6 +827,43 @@ mod tests {
         .unwrap();
         let lib = Library::open_at(config_path).unwrap();
         assert_eq!(lib.drafts_dir(), crate::registry::DEFAULT_DRAFTS_DIR);
+    }
+
+    #[test]
+    fn transfer_cap_is_immutable_for_library_and_all_workspace_construction() {
+        let cfg = TempDir::new().unwrap();
+        let config_path = cfg.path().join("config.toml");
+        let initial = 8 * 1024 * 1024;
+        let reloaded = 16 * 1024 * 1024;
+        std::fs::write(
+            &config_path,
+            format!("workspaces = []\n[transfer]\nmax_bytes = {initial}\n"),
+        )
+        .unwrap();
+        let lib = Library::open_at(config_path.clone()).unwrap();
+        assert_eq!(lib.transfer_max_bytes(), initial);
+
+        let first_root = TempDir::new().unwrap();
+        lib.register_workspace(first_root.path()).unwrap();
+        let first = lib.open_workspace(first_root.path()).unwrap();
+        assert_eq!(first.transfer_max_bytes(), initial);
+
+        std::fs::write(
+            &config_path,
+            format!("workspaces = []\n[transfer]\nmax_bytes = {reloaded}\n"),
+        )
+        .unwrap();
+        lib.reload_registry().unwrap();
+        assert_eq!(
+            lib.transfer_max_bytes(),
+            initial,
+            "a live Library keeps the cap derived when it opened"
+        );
+
+        let second_root = TempDir::new().unwrap();
+        lib.register_workspace(second_root.path()).unwrap();
+        let second = lib.open_workspace(second_root.path()).unwrap();
+        assert_eq!(second.transfer_max_bytes(), initial);
     }
 
     #[test]
