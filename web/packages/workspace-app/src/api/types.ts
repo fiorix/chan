@@ -815,6 +815,33 @@ export type WsUnsubFrame = { type: "unsub"; dir: WatchScopeDir };
 /// once on each (re)connect; the server tracks it per-`/ws`-socket so the
 /// desktop close guard can prompt before closing a window mid-transfer.
 export type WsTransfersFrame = { type: "transfers"; active: number };
+/// Server -> client: server-authoritative admission state for ONE transfer,
+/// routed to a single window. Distinct from `WsTransfersFrame` despite the
+/// similar name: that one travels client -> server and reports a window's own
+/// in-flight count for the desktop close guard, while this one carries the
+/// server's admission decision. They must not be merged.
+///
+/// `position` is a 1-based rank among the WAITING transfers of the same tenant
+/// (one workspace, or one standalone terminal), never a global queue depth.
+/// Global dequeue order is FIFO across tenants, so a tenant-local `position: 1`
+/// means "next among mine", not "next to run on this server". The frame
+/// deliberately carries no other tenant's identifier, no cross-tenant count,
+/// and no total queue length, because those would disclose that another tenant
+/// exists and how busy it is. It also carries no path, filename, or content, so
+/// a receiver cannot label a transfer from the frame alone and must key into
+/// its own record by `transfer_id`.
+///
+/// `position` is ABSENT, not zero and not null, when `state` is `"active"`.
+/// Every string here is validated at runtime rather than by the compiler, so
+/// the literals are pinned on both sides.
+export type WsTransferQueueFrame = {
+  type: "transfer_queue";
+  window_id: string;
+  transfer_id: string;
+  state: "waiting" | "active";
+  position?: number;
+};
+
 /// Watcher heartbeat: a bare `{ type: "ping" }`. The server echoes
 /// `{ type: "pong" }` on the same socket, which the transport's read-deadline
 /// treats as liveness. Kept below the gateway proxy's per-direction idle cut so

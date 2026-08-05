@@ -10,6 +10,7 @@ import { mount, unmount, flushSync } from "svelte";
 import TransferBubble from "./TransferBubble.svelte";
 import {
   transfers,
+  applyTransferQueueFrame,
   beginTransfer,
   setTransferProgress,
   finishTransfer,
@@ -65,19 +66,27 @@ describe("TransferBubble", () => {
     expect(cancel).toHaveBeenCalledOnce();
   });
 
-  test("queued transfers remain visible and cancellable", () => {
+  test("a server-held transfer shows its rank and stays cancellable", () => {
     beginTransfer({ kind: "upload", filename: "active.md", cancel: vi.fn() });
-    const queuedCancel = vi.fn();
-    beginTransfer({ kind: "upload", filename: "queued.md", cancel: queuedCancel });
+    const waitingCancel = vi.fn();
+    const waiting = beginTransfer({
+      kind: "upload",
+      filename: "waiting.md",
+      cancel: waitingCancel,
+    });
+    // The rank is among THIS tenant's waiting transfers, so the wording must
+    // not imply a position on the server as a whole.
+    applyTransferQueueFrame({ transfer_id: waiting, state: "waiting", position: 2 });
     transfers.shown = true;
     const el = render();
     flushSync();
 
-    expect(el.textContent).toContain("Queued queued.md");
+    expect(el.textContent).toContain("Waiting to start waiting.md (#2 in your queue)");
+    expect(el.textContent).not.toContain("Uploading waiting.md");
     const actions = [...el.querySelectorAll(".tb-action")] as HTMLButtonElement[];
     expect(actions.map((button) => button.textContent)).toEqual(["Cancel", "Cancel"]);
     actions[1]!.click();
-    expect(queuedCancel).toHaveBeenCalledOnce();
+    expect(waitingCancel).toHaveBeenCalledOnce();
   });
 
   test("progress updates the bar width and percentage", () => {

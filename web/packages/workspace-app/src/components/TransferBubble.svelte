@@ -19,9 +19,21 @@
   function statusLine(t: Transfer): string {
     const verb = t.kind === "upload" ? "Uploading" : "Downloading";
     switch (t.state) {
-      case "queued":
-        return `Queued ${t.filename}`;
       case "active": {
+        // The server holds this one. Its rank is among THIS tenant's waiting
+        // transfers, so the wording says where it sits in our own queue and
+        // never implies a position on the server as a whole. With no rank, and
+        // for a transfer the server never reported on at all, the row just says
+        // it is waiting rather than inventing a number.
+        if (t.queue?.state === "waiting") {
+          // A 1-based rank: 1 is next among ours, not next on the server.
+          // "your queue" scopes it to this tenant without claiming a global
+          // position and without having to say whether the tenant is a
+          // workspace or a standalone terminal.
+          return t.queue.position === null
+            ? `Waiting to start ${t.filename}`
+            : `Waiting to start ${t.filename} (#${t.queue.position} in your queue)`;
+        }
         const p = pct(t);
         return p === null ? `${verb} ${t.filename}...` : `${verb} ${t.filename} (${p}%)`;
       }
@@ -52,7 +64,9 @@
           <div class="tb-track" aria-hidden="true">
             <div
               class="tb-bar"
-              class:indeterminate={t.state === "active" && t.progress === null}
+              class:indeterminate={t.state === "active" &&
+                t.progress === null &&
+                t.queue?.state !== "waiting"}
               class:done={t.state === "done"}
               class:bad={t.state === "cancelled" ||
                 t.state === "failed" ||
@@ -66,7 +80,7 @@
           </div>
           <div class="tb-line-row">
             <span class="tb-line">{statusLine(t)}</span>
-            {#if (t.state === "queued" || t.state === "active") && t.cancel}
+            {#if t.state === "active" && t.cancel}
               <button class="tb-action" type="button" onclick={() => t.cancel?.()}>Cancel</button>
             {:else if t.retry}
               <button class="tb-action" type="button" onclick={() => t.retry?.()}>Retry</button>

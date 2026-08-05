@@ -5,7 +5,6 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   beginTransfer,
   cancelAllTransfers,
-  cancelTransfer,
   failTransfer,
   finishTransfer,
   restoreTransfers,
@@ -26,38 +25,11 @@ afterEach(() => {
   resetTransfers();
 });
 
-describe("bounded transfer concurrency", () => {
-  test("a third download queues visibly and drains when either slot completes", async () => {
-    resetTransfers();
-    const first = beginTransfer({
-      kind: "download",
-      filename: "one",
-      cancel: null,
-    });
-    const second = beginTransfer({
-      kind: "download",
-      filename: "two",
-      cancel: null,
-    });
-    const third = beginTransfer({
-      kind: "download",
-      filename: "three",
-      cancel: null,
-    });
-
-    expect(transfers.items.map((transfer) => transfer.state)).toEqual([
-      "active",
-      "active",
-      "queued",
-    ]);
-    const thirdSlot = waitForTransferSlot(third);
-    finishTransfer(first);
-    await expect(thirdSlot).resolves.toBe(true);
-    expect(transfers.items.find((transfer) => transfer.id === third)?.state).toBe("active");
-    finishTransfer(second);
-    finishTransfer(third);
-  });
-
+// Admission belongs to the server, so there is no client-side concurrency
+// suite here any more. What the browser still owns is the record: progress
+// coalescing, cancellation, failure, and reload recovery. The server-reported
+// half lives in transferQueueReporting.test.ts.
+describe("transfer records", () => {
   test("progress is coalesced and never persists every producer tick", async () => {
     vi.useFakeTimers();
     resetTransfers();
@@ -77,7 +49,7 @@ describe("bounded transfer concurrency", () => {
     expect(persist.mock.calls.length).toBeLessThanOrEqual(2);
   });
 
-  test("uploads use one slot and a queued cancellation never starts", async () => {
+  test("cancelling one transfer leaves its peers alone", async () => {
     resetTransfers();
     const firstCancel = vi.fn();
     const secondCancel = vi.fn();
@@ -91,22 +63,22 @@ describe("bounded transfer concurrency", () => {
       filename: "two",
       cancel: secondCancel,
     });
-    const secondSlot = waitForTransferSlot(second);
 
-    expect(transfers.items.map((transfer) => transfer.state)).toEqual([
-      "active",
-      "queued",
-    ]);
     transfers.items.find((transfer) => transfer.id === second)?.cancel?.();
-    await expect(secondSlot).resolves.toBe(false);
+
+    await expect(waitForTransferSlot(second)).resolves.toBe(false);
     expect(secondCancel).toHaveBeenCalledOnce();
+    expect(firstCancel).not.toHaveBeenCalled();
     expect(transfers.items.find((transfer) => transfer.id === second)?.state).toBe(
       "cancelled",
+    );
+    expect(transfers.items.find((transfer) => transfer.id === first)?.state).toBe(
+      "active",
     );
     finishTransfer(first);
   });
 
-  test("app shutdown cancels active and queued work deterministically", () => {
+  test("app shutdown cancels every in-flight transfer deterministically", () => {
     resetTransfers();
     const cancels = [vi.fn(), vi.fn(), vi.fn()];
     for (const [index, cancel] of cancels.entries()) {
@@ -125,37 +97,20 @@ describe("bounded transfer concurrency", () => {
     );
   });
 
-  test("shutdown cancellation wins over a queued waiter promoted mid-pass", async () => {
+  test("a shutdown-cancelled transfer will not be started afterwards", async () => {
     resetTransfers();
     beginTransfer({ kind: "download", filename: "one", cancel: vi.fn() });
-    beginTransfer({ kind: "download", filename: "two", cancel: vi.fn() });
-    const queued = beginTransfer({
+    const last = beginTransfer({
       kind: "download",
-      filename: "three",
+      filename: "two",
       cancel: vi.fn(),
     });
-    const queuedSlot = waitForTransferSlot(queued);
 
     cancelAllTransfers();
 
-    await expect(queuedSlot).resolves.toBe(false);
-    expect(transfers.items.find((transfer) => transfer.id === queued)?.state).toBe(
+    await expect(waitForTransferSlot(last)).resolves.toBe(false);
+    expect(transfers.items.find((transfer) => transfer.id === last)?.state).toBe(
       "cancelled",
-    );
-  });
-
-  test("cancelled active transfer releases its slot to the oldest queued peer", async () => {
-    resetTransfers();
-    const first = beginTransfer({ kind: "download", filename: "one", cancel: null });
-    beginTransfer({ kind: "download", filename: "two", cancel: null });
-    const third = beginTransfer({ kind: "download", filename: "three", cancel: null });
-    const thirdSlot = waitForTransferSlot(third);
-
-    cancelTransfer(first);
-
-    await expect(thirdSlot).resolves.toBe(true);
-    expect(transfers.items.find((transfer) => transfer.id === third)?.state).toBe(
-      "active",
     );
   });
 

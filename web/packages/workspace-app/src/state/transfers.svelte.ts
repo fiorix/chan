@@ -15,16 +15,38 @@ import { sessionWindowId } from "../api/client";
 
 export type TransferKind = "upload" | "download";
 
-/// queued: waiting for this window's kind-specific concurrency slot.
-/// active: in flight. done/cancelled/failed: terminal, this session.
+/// active: started by this window and not yet settled, whether the server is
+/// running it or holding it. done/cancelled/failed: terminal, this session.
 /// interrupted: was in flight when the window reloaded -- the XHR is gone.
+///
+/// There is no "queued" state here. Admission belongs to the server, and the
+/// browser must not decide who may start; the server's view of a transfer
+/// arrives separately in `queue` below.
 export type TransferState =
-  | "queued"
   | "active"
   | "done"
   | "cancelled"
   | "failed"
   | "interrupted";
+
+/// The server's admission state for one transfer, as reported over `/ws`.
+///
+/// Keeping this is not the browser deciding admission. A local record of "this
+/// transfer exists and is in flight" is not an admission decision; computing
+/// who may start is, and the browser no longer does that. This field only
+/// mirrors what the server said.
+///
+/// `position` is a rank among the WAITING transfers of the same tenant, so
+/// `position: 1` means "next among mine", never "next to run on this server":
+/// dequeue order is FIFO across tenants, and a window can sit at 1 while
+/// another tenant's work runs ahead. It is null while running, matching the
+/// wire frame, which omits the field entirely rather than sending zero or null.
+/// A rank is not monotonic: it can jump by more than one when a sibling of the
+/// same tenant is cancelled, and it can rise again if a job is requeued.
+export interface TransferQueue {
+  state: "waiting" | "active";
+  position: number | null;
+}
 
 export interface Transfer {
   id: string;
@@ -45,6 +67,13 @@ export interface Transfer {
   /// Live retry handle for an interrupted/failed download, reconstructed on
   /// restore from `source`. NOT persisted.
   retry: (() => void) | null;
+  /// What the server last said about this transfer's admission, or null when
+  /// the server has said nothing. Null is NOT "not queued": a caller that sends
+  /// no tracking headers is admitted silently and never receives a frame, and
+  /// the SPA's direct download anchors cannot send headers at all. Treat null
+  /// as "unknown to us", never as "running" or as "not counted". NOT persisted:
+  /// it describes a live server-side job that a reload has already abandoned.
+  queue: TransferQueue | null;
 }
 
 interface TransfersState {
@@ -56,9 +85,16 @@ interface TransfersState {
 export const transfers = $state<TransfersState>({ items: [], shown: false });
 
 const STORE_KEY = "chan.transfers";
-const MAX_ACTIVE_DOWNLOADS = 2;
-const MAX_ACTIVE_UPLOADS = 1;
 const PROGRESS_INTERVAL_MS = 100;
+
+/// The states a transfer cannot leave. Used by restore to decide, by exclusion,
+/// which records a reload interrupted.
+const TERMINAL_STATES: readonly TransferState[] = [
+  "done",
+  "cancelled",
+  "failed",
+  "interrupted",
+];
 
 function storeKey(): string {
   return `${STORE_KEY}:${sessionWindowId()}`;
@@ -101,8 +137,21 @@ function persist(): void {
 }
 
 let nextId = 1;
+
+/// Transfer ids are scoped by window, because they are the ONLY key an
+/// admission frame can be matched on: the frame carries no path or filename,
+/// and its `window_id` is caller-asserted, so it cannot be used to disambiguate
+/// a collision. A bare per-window counter would hand every window the same
+/// `xfer-1`, and any frame that reached this socket for someone else's
+/// `xfer-1` would land on ours and show a stranger's rank. Scoping the id makes
+/// that impossible to express rather than merely unlikely, so an unrelated
+/// frame falls into the unknown-id path and is dropped.
+///
+/// This is misattribution hardening, not a security boundary: `/ws` already
+/// sits behind the per-launch bearer, and anyone able to assert a window id
+/// already holds it.
 function transferId(): string {
-  return `xfer-${nextId++}`;
+  return `xfer-${sessionWindowId()}-${nextId++}`;
 }
 
 function find(id: string): Transfer | undefined {
@@ -110,16 +159,7 @@ function find(id: string): Transfer | undefined {
 }
 
 function occupiesWindow(t: Transfer): boolean {
-  return t.state === "queued" || t.state === "active";
-}
-
-function activeOfKind(kind: TransferKind): number {
-  return transfers.items.filter((t) => t.kind === kind && t.state === "active").length;
-}
-
-function hasSlot(kind: TransferKind): boolean {
-  const limit = kind === "download" ? MAX_ACTIVE_DOWNLOADS : MAX_ACTIVE_UPLOADS;
-  return activeOfKind(kind) < limit;
+  return t.state === "active";
 }
 
 /// The count of in-flight transfers in THIS window -- the per-window
@@ -143,9 +183,10 @@ function emitSignal(): void {
   signalSink?.(activeTransferCount());
 }
 
-/// Start tracking a transfer; returns its id. It starts active when its
-/// kind-specific window has capacity, otherwise remains visibly queued until
-/// an older peer settles. `source` lets an interrupted download retry.
+/// Start tracking a transfer; returns its id. It starts active because the
+/// window has started it; whether the server runs it immediately or holds it is
+/// the server's call and arrives later in `queue`. `source` lets an interrupted
+/// download retry.
 export function beginTransfer(opts: {
   kind: TransferKind;
   filename: string;
@@ -153,7 +194,7 @@ export function beginTransfer(opts: {
   source?: { path: string; isDir: boolean } | null;
 }): string {
   const id = transferId();
-  const state: TransferState = hasSlot(opts.kind) ? "active" : "queued";
+  const state: TransferState = "active";
   const cancel = (): void => {
     opts.cancel?.();
     cancelTransfer(id);
@@ -169,45 +210,54 @@ export function beginTransfer(opts: {
     source: opts.source ?? null,
     cancel,
     retry: null,
+    queue: null,
   });
   persist();
   emitSignal();
   return id;
 }
 
-const slotWaiters = new Map<string, (started: boolean) => void>();
-
-function resolveSlotWaiter(id: string, started: boolean): void {
-  const resolve = slotWaiters.get(id);
-  slotWaiters.delete(id);
-  resolve?.(started);
-}
-
+/// Whether a just-begun transfer should still be issued. It no longer waits
+/// for anything: the server owns admission, so the request goes out immediately
+/// and the server holds it if it must. What remains is the one race this
+/// guarded all along, a transfer cancelled or dismissed between `beginTransfer`
+/// and the request leaving, which callers already handle by bailing on false.
+///
+/// The name is kept because renaming it would mean editing call sites in files
+/// this lane does not own.
 export function waitForTransferSlot(id: string): Promise<boolean> {
-  const transfer = find(id);
-  if (!transfer) return Promise.resolve(false);
-  if (transfer.state === "active") return Promise.resolve(true);
-  if (transfer.state !== "queued") return Promise.resolve(false);
-  return new Promise<boolean>((resolve) => slotWaiters.set(id, resolve)).then(
-    (started) => started && find(id)?.state === "active",
-  );
+  return Promise.resolve(find(id)?.state === "active");
 }
 
-function drainQueue(kind: TransferKind): void {
-  let changed = false;
-  while (hasSlot(kind)) {
-    const next = transfers.items.find(
-      (transfer) => transfer.kind === kind && transfer.state === "queued",
-    );
-    if (!next) break;
-    next.state = "active";
-    resolveSlotWaiter(next.id, true);
-    changed = true;
-  }
-  if (changed) {
-    persist();
-    emitSignal();
-  }
+/// Apply one server admission frame. Keyed by `transfer_id` alone: the frame
+/// carries no path, filename, or content, so the label always comes from our
+/// own record. An unknown id is dropped, which is what an untracked or
+/// already-settled transfer looks like from here.
+///
+/// This deliberately does NOT check `window_id`, for two reasons that point the
+/// same way. Routing to a single window is the server's job, so re-checking it
+/// here would be client-side filtering dressed up as isolation. And the id is
+/// caller-asserted and validated by nobody at either end: it is a routing key,
+/// not an authorization claim, so a check here would read as an authority
+/// boundary while buying none. The field is part of the wire shape and is
+/// pinned by the tests; it is not an input to any decision made here.
+export function applyTransferQueueFrame(frame: {
+  transfer_id: string;
+  state: "waiting" | "active";
+  position?: number;
+}): void {
+  const transfer = find(frame.transfer_id);
+  if (!transfer || transfer.state !== "active") return;
+  transfer.queue = {
+    state: frame.state,
+    // Absent means running, and the contract sends no field at all rather than
+    // zero or null. Anything non-numeric is treated as absent so a wire change
+    // degrades to "no rank shown" instead of rendering 0 or NaN.
+    position:
+      frame.state === "waiting" && typeof frame.position === "number"
+        ? frame.position
+        : null,
+  };
 }
 
 type PendingProgress = {
@@ -282,29 +332,26 @@ function clearProgressScheduling(id: string): void {
 export function finishTransfer(id: string, savedPath: string | null = null): void {
   const t = find(id);
   if (!t) return;
-  const kind = t.kind;
   clearProgressScheduling(id);
   t.state = "done";
   t.progress = 1;
   t.cancel = null;
   t.retry = null;
   t.savedPath = savedPath;
+  t.queue = null;
   persist();
   emitSignal();
-  drainQueue(kind);
 }
 
 export function cancelTransfer(id: string): void {
   const t = find(id);
   if (!t) return;
-  const kind = t.kind;
   clearProgressScheduling(id);
-  resolveSlotWaiter(id, false);
   t.state = "cancelled";
   t.cancel = null;
+  t.queue = null;
   persist();
   emitSignal();
-  drainQueue(kind);
 }
 
 export function failTransfer(
@@ -314,16 +361,14 @@ export function failTransfer(
 ): void {
   const t = find(id);
   if (!t) return;
-  const kind = t.kind;
   clearProgressScheduling(id);
-  resolveSlotWaiter(id, false);
   t.state = "failed";
   t.cancel = null;
   t.error = error;
   t.retry = retry;
+  t.queue = null;
   persist();
   emitSignal();
-  drainQueue(kind);
 }
 
 /// Remove a terminal transfer row (the bubble's per-row dismiss).
@@ -333,11 +378,9 @@ export function dismissTransfer(id: string): void {
   const [removed] = transfers.items.slice(i, i + 1);
   if (!removed) return;
   clearProgressScheduling(id);
-  resolveSlotWaiter(id, false);
   transfers.items.splice(i, 1);
   persist();
   emitSignal();
-  drainQueue(removed.kind);
 }
 
 export function showTransfers(): void {
@@ -378,7 +421,11 @@ export function restoreTransfers(
   }
   const items = Array.isArray(parsed.items) ? parsed.items : [];
   transfers.items = items.map((p): Transfer => {
-    const interrupted = p.state === "active" || p.state === "queued";
+    // Anything that had not reached a terminal state when the window died is
+    // interrupted, tested by exclusion rather than by listing the live states.
+    // A persisted value this build no longer produces therefore restores as
+    // interrupted instead of surviving as a state the union cannot express.
+    const interrupted = !TERMINAL_STATES.includes(p.state);
     const state: TransferState = interrupted ? "interrupted" : p.state;
     const retry =
       (interrupted || p.state === "failed") && p.kind === "download" && p.source
@@ -397,6 +444,9 @@ export function restoreTransfers(
       source: p.source,
       cancel: null,
       retry,
+      // A reload abandoned whatever the server was doing, so any rank we held
+      // is stale by definition.
+      queue: null,
     };
   });
   transfers.shown = parsed.shown === true;

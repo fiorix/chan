@@ -95,6 +95,7 @@ import { isEditableText } from "./fileTypes";
 import { openMediaViewer } from "./mediaOpen";
 import {
   activeTransferCount,
+  applyTransferQueueFrame,
   beginTransfer,
   cancelTransfer,
   failTransfer,
@@ -852,6 +853,16 @@ export function onWatchEvent(e: unknown): void {
   if (frameType === "progress") {
     applyProgressEvent(
       (e as { event?: ProgressFrame } | null)?.event ?? null,
+    );
+    return;
+  }
+  if (frameType === "transfer_queue") {
+    // Server-authoritative admission state for one of THIS window's transfers.
+    // Routing is server-side by window id, so the frame is not re-checked here;
+    // it is matched to a local record by transfer id alone, and an id we do not
+    // know is dropped.
+    applyTransferQueueFrame(
+      e as { transfer_id: string; state: "waiting" | "active"; position?: number },
     );
     return;
   }
@@ -5052,6 +5063,7 @@ export const fileOps = {
       if (!(await waitForTransferSlot(xferId))) return;
       await api.replaceFile(picked, targetPath, {
         signal: activeAbort.signal,
+        transferId: xferId,
         onProgress: (progress) => {
           const loaded = Math.min(Math.max(progress.loaded, 0), picked.size);
           setTransferProgress(xferId, picked.size > 0 ? Math.min(1, loaded / picked.size) : 1);
@@ -5130,6 +5142,7 @@ export const fileOps = {
         reportProgress(file, 0);
         const result = await api.uploadFile(file, destDir, {
           signal: activeAbort.signal,
+          transferId: xferId,
           onProgress: (progress) => reportProgress(file, progress.loaded),
         });
         activeAbort = null;
