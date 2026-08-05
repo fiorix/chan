@@ -17,8 +17,8 @@ use tauri::{AppHandle, WebviewWindow};
 use tokio::io::AsyncReadExt;
 
 use crate::native_transfer::{
-    endpoint_for_window, http_client, request_headers, EndpointKind, TransferProgress,
-    TransferRegistration,
+    endpoint_for_window, fetch_transfer_cap, http_client, request_headers, EndpointKind,
+    TransferCap, TransferProgress, TransferRegistration,
 };
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +75,16 @@ pub async fn upload_files_native(
     registration.progress.set_total(Some(total));
 
     let client = http_client()?;
+    // Preflight before the first POST, so an over-cap selection sends no bytes
+    // and leaves no partial write on the server. Both the batch and each file
+    // are checked: the route enforces per request, so a selection that only
+    // exceeds the ceiling in aggregate must still be refused here rather than
+    // uploading the files that individually fit and failing partway.
+    let cap = fetch_transfer_cap(&client, &endpoint, headers.clone()).await;
+    cap.check(total)?;
+    for file in &files {
+        cap.check(file.size)?;
+    }
     let mut uploaded = Vec::with_capacity(files.len());
     for file in files {
         if registration.progress.is_cancelled() {
@@ -83,8 +93,11 @@ pub async fn upload_files_native(
         let opened = tokio::fs::File::open(&file.path)
             .await
             .map_err(|error| format!("opening {}: {error}", file.path.display()))?;
-        let body =
-            reqwest::Body::wrap_stream(file_stream(opened, Arc::clone(&registration.progress)));
+        let body = reqwest::Body::wrap_stream(file_stream(
+            opened,
+            Arc::clone(&registration.progress),
+            cap,
+        ));
         let part = reqwest::multipart::Part::stream_with_length(body, file.size)
             .file_name(file.name.clone())
             .mime_str("application/octet-stream")
@@ -172,8 +185,9 @@ async fn validate_picked_files(paths: Vec<PathBuf>) -> Result<Vec<PickedFile>, S
 fn file_stream(
     file: tokio::fs::File,
     progress: Arc<TransferProgress>,
+    cap: TransferCap,
 ) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send + 'static {
-    stream::try_unfold(file, move |mut file| {
+    stream::try_unfold((file, 0u64), move |(mut file, sent)| {
         let progress = Arc::clone(&progress);
         async move {
             if progress.is_cancelled() {
@@ -187,9 +201,17 @@ fn file_stream(
             if count == 0 {
                 return Ok(None);
             }
+            // Backstop on the bytes actually read: the preflight measured the
+            // file at stat time, and a file that grows between stat and send
+            // would otherwise stream past the ceiling under a declared length
+            // that no longer describes it.
+            let sent = sent
+                .checked_add(count as u64)
+                .ok_or_else(|| std::io::Error::other("native upload byte count overflow"))?;
+            cap.check(sent).map_err(std::io::Error::other)?;
             chunk.truncate(count);
             progress.add_loaded(count as u64);
-            Ok(Some((Bytes::from(chunk), file)))
+            Ok(Some((Bytes::from(chunk), (file, sent))))
         }
     })
 }
@@ -316,7 +338,7 @@ mod tests {
         std::fs::write(temp.path(), vec![0x5a; 128 * 1024 + 9]).unwrap();
         let progress = Arc::new(TransferProgress::new_for_test(Some(128 * 1024 + 9)));
         let file = tokio::fs::File::open(temp.path()).await.unwrap();
-        let chunks: Vec<Bytes> = file_stream(file, Arc::clone(&progress))
+        let chunks: Vec<Bytes> = file_stream(file, Arc::clone(&progress), TransferCap::Unknown)
             .try_collect()
             .await
             .unwrap();
@@ -326,11 +348,47 @@ mod tests {
         );
         progress.cancel_for_test();
         let file = tokio::fs::File::open(temp.path()).await.unwrap();
-        let cancelled_stream = file_stream(file, progress);
+        let cancelled_stream = file_stream(file, progress, TransferCap::Unknown);
         futures::pin_mut!(cancelled_stream);
         assert!(
             cancelled_stream.next().await.unwrap().is_err(),
             "cancel stops before the first file chunk"
         );
+    }
+
+    /// The upload backstop. The preflight measures a file at stat time, so a
+    /// file that grows before it is read would otherwise stream past the
+    /// ceiling; the stream stops at the boundary instead of sending it all.
+    #[tokio::test]
+    async fn native_transfer_cap_stops_the_upload_stream_at_the_ceiling() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp.path(), vec![0x5a; 128 * 1024]).unwrap();
+        let progress = Arc::new(TransferProgress::new_for_test(Some(128 * 1024)));
+        let file = tokio::fs::File::open(temp.path()).await.unwrap();
+
+        // A ceiling inside the second chunk: the first 64 KiB chunk fits, the
+        // running total after the second does not.
+        let capped = file_stream(
+            file,
+            Arc::clone(&progress),
+            TransferCap::Known(64 * 1024 + 1),
+        );
+        futures::pin_mut!(capped);
+        assert_eq!(capped.next().await.unwrap().unwrap().len(), 64 * 1024);
+        let refused = capped
+            .next()
+            .await
+            .unwrap()
+            .expect_err("the chunk crossing the ceiling must refuse");
+        assert!(refused.to_string().contains("exceeds"), "{refused}");
+
+        // An unknown ceiling enforces nothing, which is the same file streaming
+        // to completion rather than a substituted default refusing it.
+        let file = tokio::fs::File::open(temp.path()).await.unwrap();
+        let uncapped: Vec<Bytes> = file_stream(file, progress, TransferCap::Unknown)
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(uncapped.iter().map(Bytes::len).sum::<usize>(), 128 * 1024);
     }
 }

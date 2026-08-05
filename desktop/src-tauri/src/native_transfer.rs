@@ -240,6 +240,101 @@ pub fn request_headers(
     Ok(headers)
 }
 
+/// The effective transfer ceiling. It has exactly one owner, the server that
+/// reports it, and this process keeps no constant, default, or fallback of its
+/// own: a second copy of the policy is a second policy, and they drift.
+///
+/// [`TransferCap::Unknown`] is a real state and is NOT a synonym for
+/// unlimited. It means this process could not learn the ceiling, either
+/// because the server does not report one or because reading it failed. The
+/// defined response is to enforce nothing client-side and leave the refusal to
+/// the server, which enforces on the route regardless of what any client
+/// believes. That is exactly the behaviour before this guard existed, so an
+/// unreadable ceiling costs the fail-fast and changes nothing else.
+///
+/// Deliberately no `Default` impl: there is no defensible default to derive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferCap {
+    Known(u64),
+    Unknown,
+}
+
+impl TransferCap {
+    /// Interpret what the server reported. `None` is the absent field.
+    pub fn from_reported(reported: Option<u64>) -> Self {
+        match reported {
+            Some(max) => Self::Known(max),
+            None => Self::Unknown,
+        }
+    }
+
+    /// Refuse `bytes` against a known ceiling. Used both as the preflight,
+    /// before a byte is written or sent, and as the streaming backstop against
+    /// the running total, because a declared length is a claim and the bytes
+    /// that actually arrive are the fact.
+    pub fn check(&self, bytes: u64) -> Result<(), String> {
+        match self {
+            Self::Known(max) if bytes > *max => Err(format!(
+                "transfer of {bytes} bytes exceeds the server's effective limit of {max} bytes"
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// The tenant's `/api/config` URL, derived from an ALREADY-VALIDATED transfer
+/// endpoint so it inherits that same-origin and workspace-prefix check instead
+/// of trusting a second URL from the page. The loopback surface authenticates
+/// on the `t` query parameter, so that one pair is carried over and every
+/// other query parameter is dropped.
+pub fn config_url_for_transfer(endpoint: &Url) -> Result<Url, String> {
+    let path = endpoint.path();
+    let at = path
+        .rfind("/api/files")
+        .ok_or_else(|| "transfer endpoint is not a file API URL".to_string())?;
+    let token = endpoint
+        .query_pairs()
+        .find(|(key, _)| key == "t")
+        .map(|(_, value)| value.into_owned());
+    let mut config = endpoint.clone();
+    config.set_path(&format!("{}/api/config", &path[..at]));
+    config.set_query(None);
+    if let Some(token) = token {
+        config.query_pairs_mut().append_pair("t", &token);
+    }
+    Ok(config)
+}
+
+/// Read the effective ceiling from the server that owns it, over the same
+/// validated origin and credentials the transfer itself uses.
+///
+/// Every failure path answers [`TransferCap::Unknown`] rather than a number.
+/// A transport error, a non-success status, an undecodable body, and an absent
+/// field are all the same thing from here: this process does not know the
+/// policy, so it does not get to invent one.
+pub async fn fetch_transfer_cap(
+    client: &reqwest::Client,
+    endpoint: &Url,
+    headers: HeaderMap,
+) -> TransferCap {
+    let Ok(url) = config_url_for_transfer(endpoint) else {
+        return TransferCap::Unknown;
+    };
+    let Ok(response) = client.get(url).headers(headers).send().await else {
+        return TransferCap::Unknown;
+    };
+    if !response.status().is_success() {
+        return TransferCap::Unknown;
+    }
+    let Ok(body) = response.json::<serde_json::Value>().await else {
+        return TransferCap::Unknown;
+    };
+    TransferCap::from_reported(
+        body.pointer("/preferences/transfer_max_bytes")
+            .and_then(serde_json::Value::as_u64),
+    )
+}
+
 pub fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -278,6 +373,75 @@ mod tests {
                 "{invalid}"
             );
         }
+    }
+
+    /// The boundary itself: exact size passes, one byte over is refused. The
+    /// message names both numbers so a refusal is diagnosable without a log.
+    #[test]
+    fn native_transfer_cap_allows_exact_and_refuses_one_byte_over() {
+        let cap = TransferCap::from_reported(Some(1024));
+        assert!(cap.check(0).is_ok());
+        assert!(cap.check(1023).is_ok());
+        assert!(cap.check(1024).is_ok(), "the cap is inclusive");
+
+        let refused = cap.check(1025).expect_err("one byte over must refuse");
+        assert!(refused.contains("1025"), "{refused}");
+        assert!(refused.contains("1024"), "{refused}");
+    }
+
+    /// The trap this item exists to prevent. An absent field is UNKNOWN, and
+    /// unknown must not become a number: no default, no fallback ceiling, no
+    /// re-derived policy. It also must not silently become unlimited by
+    /// accident, so this pins the reasoning as well as the behaviour: the
+    /// desktop enforces nothing it cannot read, and the server still does.
+    #[test]
+    fn native_transfer_cap_absent_field_is_unknown_and_invents_no_default() {
+        let cap = TransferCap::from_reported(None);
+        assert_eq!(cap, TransferCap::Unknown);
+
+        // Nothing is refused client-side, because there is no known ceiling to
+        // refuse against. This is the pre-guard behaviour, not a decision that
+        // transfers are unlimited; the route enforces regardless.
+        assert!(cap.check(0).is_ok());
+        assert!(cap.check(u64::MAX).is_ok());
+
+        // A reported zero is a known ceiling of zero, NOT the absent case.
+        // Conflating them is how "absent" turns into a default.
+        let zero = TransferCap::from_reported(Some(0));
+        assert_eq!(zero, TransferCap::Known(0));
+        assert!(zero.check(0).is_ok());
+        assert!(zero.check(1).is_err());
+    }
+
+    /// The config URL inherits the transfer endpoint's origin and workspace
+    /// prefix rather than being a second URL to trust, and carries only the
+    /// bearer query the loopback surface authenticates on.
+    #[test]
+    fn native_transfer_cap_config_url_derives_from_the_validated_endpoint() {
+        let endpoint =
+            Url::parse("https://alice.example/prefix/api/files/a.md?download=1&t=secret").unwrap();
+        let config = config_url_for_transfer(&endpoint).unwrap();
+        assert_eq!(
+            config.as_str(),
+            "https://alice.example/prefix/api/config?t=secret"
+        );
+
+        let upload = Url::parse("http://127.0.0.1:4090/api/files/upload?t=tok").unwrap();
+        assert_eq!(
+            config_url_for_transfer(&upload).unwrap().as_str(),
+            "http://127.0.0.1:4090/api/config?t=tok"
+        );
+
+        // No token to carry means no query at all, not an empty one.
+        let bare = Url::parse("https://alice.example/prefix/api/files/a.md?download=1").unwrap();
+        assert_eq!(
+            config_url_for_transfer(&bare).unwrap().as_str(),
+            "https://alice.example/prefix/api/config"
+        );
+
+        assert!(
+            config_url_for_transfer(&Url::parse("https://alice.example/nope").unwrap()).is_err()
+        );
     }
 
     #[test]

@@ -20,7 +20,8 @@ use tauri::WebviewWindow;
 use tokio::io::AsyncWriteExt;
 
 use crate::native_transfer::{
-    endpoint_for_window, http_client, request_headers, EndpointKind, TransferRegistration,
+    endpoint_for_window, fetch_transfer_cap, http_client, request_headers, EndpointKind,
+    TransferRegistration,
 };
 
 /// Cooperative SPA/Rust wire limit for a generated-download JSON chunk.
@@ -43,16 +44,23 @@ struct DownloadTarget {
 impl DownloadTarget {
     async fn create(filename: &str) -> Result<(Self, tokio::fs::File), String> {
         let safe = sanitize_filename(filename);
-        let (dir, target) = tokio::task::spawn_blocking(move || {
+        let dir = tokio::task::spawn_blocking(move || {
             let dir = downloads_dir()
                 .ok_or_else(|| "could not resolve a Downloads folder".to_string())?;
             std::fs::create_dir_all(&dir)
                 .map_err(|error| format!("creating {}: {error}", dir.display()))?;
-            let target = dir.join(safe);
-            Ok::<_, String>((dir, target))
+            Ok::<_, String>(dir)
         })
         .await
         .map_err(|error| format!("preparing native download target: {error}"))??;
+        Self::create_in(&dir, &safe).await
+    }
+
+    /// Split from [`DownloadTarget::create`] so the temp-and-commit contract is
+    /// exercisable against a scratch directory instead of the real Downloads
+    /// folder. `safe_name` is already sanitized.
+    async fn create_in(dir: &Path, safe_name: &str) -> Result<(Self, tokio::fs::File), String> {
+        let target = dir.join(safe_name);
         let temp = dir.join(format!(
             ".chan-download-{}-{}.tmp",
             std::process::id(),
@@ -134,7 +142,7 @@ pub async fn download_file_native(
     let headers = request_headers(&window, &endpoint, false)?;
     let registration = TransferRegistration::new(transfer_id, None)?;
     let client = http_client()?;
-    let request = client.get(endpoint).headers(headers).send();
+    let request = client.get(endpoint.clone()).headers(headers.clone()).send();
     let response = tokio::select! {
         _ = registration.progress.cancelled() => return Err("download cancelled".into()),
         response = request => response.map_err(|error| format!("download request failed: {error}"))?,
@@ -146,8 +154,15 @@ pub async fn download_file_native(
         return Err(response_error("download", response).await);
     }
     registration.progress.set_total(response.content_length());
+    // Preflight BEFORE DownloadTarget::create, so an over-cap download never
+    // creates a temp file at all rather than relying on cleanup to remove one.
+    let cap = fetch_transfer_cap(&client, &endpoint, headers).await;
+    if let Some(total) = response.content_length() {
+        cap.check(total)?;
+    }
     let (target, mut file) = DownloadTarget::create(&filename).await?;
     let mut body = response.bytes_stream();
+    let mut written: u64 = 0;
     loop {
         let chunk = tokio::select! {
             _ = registration.progress.cancelled() => return Err("download cancelled".into()),
@@ -157,6 +172,14 @@ pub async fn download_file_native(
             break;
         };
         let chunk = chunk.map_err(|error| format!("reading download response: {error}"))?;
+        // Backstop against the bytes that actually arrive: Content-Length is a
+        // claim, and a chunked or lying response carries none worth trusting.
+        // Refusing here drops `target`, whose Drop removes the temp, so an
+        // over-cap body leaves nothing behind and never reaches `commit`.
+        written = written
+            .checked_add(chunk.len() as u64)
+            .ok_or_else(|| "native download byte count overflow".to_string())?;
+        cap.check(written)?;
         file.write_all(&chunk)
             .await
             .map_err(|error| format!("writing {}: {error}", target.temp.display()))?;
@@ -518,6 +541,82 @@ fn split_ext(name: &str) -> (String, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::native_transfer::TransferCap;
+
+    /// The case that fails quietly. Refusing an over-cap download is easy;
+    /// leaving no temp file behind and not touching a same-named file that was
+    /// already there is the part that breaks without anyone noticing. Drives
+    /// the same running-total check `download_file_native` runs per chunk.
+    #[tokio::test]
+    async fn native_transfer_cap_refusal_leaves_no_temp_and_an_intact_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("report.pdf");
+        std::fs::write(&destination, b"original bytes").unwrap();
+
+        let cap = TransferCap::Known(8);
+        let (target, mut file) = DownloadTarget::create_in(dir.path(), "report.pdf")
+            .await
+            .unwrap();
+        let temp = target.temp.clone();
+        assert!(temp.exists(), "the temp file should exist while streaming");
+
+        let mut written: u64 = 0;
+        let mut refusal = None;
+        for chunk in [b"12345".as_slice(), b"6789".as_slice()] {
+            written += chunk.len() as u64;
+            if let Err(message) = cap.check(written) {
+                refusal = Some(message);
+                break;
+            }
+            file.write_all(chunk).await.unwrap();
+        }
+        let refusal = refusal.expect("9 bytes must exceed an 8 byte ceiling");
+        assert!(refusal.contains("exceeds"), "{refusal}");
+
+        // The refusal path returns Err, which drops both without committing.
+        drop(file);
+        drop(target);
+
+        assert!(
+            !temp.exists(),
+            "a refused download left its temp file behind"
+        );
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"original bytes",
+            "a refused download must not touch a file already at the destination"
+        );
+        let residue: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".chan-download-"))
+            .collect();
+        assert!(residue.is_empty(), "temp residue left behind: {residue:?}");
+    }
+
+    /// The exact boundary commits, so the guard refuses only what is over it.
+    #[tokio::test]
+    async fn native_transfer_cap_commits_a_download_at_exactly_the_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let cap = TransferCap::Known(9);
+        let (target, mut file) = DownloadTarget::create_in(dir.path(), "exact.bin")
+            .await
+            .unwrap();
+        let temp = target.temp.clone();
+
+        let mut written: u64 = 0;
+        for chunk in [b"12345".as_slice(), b"6789".as_slice()] {
+            written += chunk.len() as u64;
+            cap.check(written).expect("exactly the ceiling must pass");
+            file.write_all(chunk).await.unwrap();
+        }
+        let saved = target.commit(file).await.unwrap();
+
+        assert!(!temp.exists(), "commit must consume the temp file");
+        assert_eq!(std::fs::read(&saved.path).unwrap(), b"123456789");
+    }
 
     #[test]
     fn desktop_download_never_buffers_the_network_response_over_ipc() {
