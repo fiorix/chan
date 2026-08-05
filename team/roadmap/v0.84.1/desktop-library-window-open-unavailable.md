@@ -1,8 +1,8 @@
 # chan-desktop cannot open a library window: the flow depends on `window.open`
 
 Status: REGISTERED for v0.84.1, filed 2026-08-05, grounded 2026-08-05 by live owner testing,
-implemented for window creation, owner validation pending. Raising an already-visible native window
-is NOT fixed and needs a surface that does not exist yet (see Open). This item was originally filed as a gateway CSRF/IPC-grant failure
+NOT implemented. An SPA-only desktop branch was written, tested live, and REVERTED: it creates
+window records the desktop is designed never to open (see Attempted and reverted). This item was originally filed as a gateway CSRF/IPC-grant failure
 triggered by a gateway outage; live testing disproved that framing entirely, and the disproof is
 recorded under Ruled out so it is not re-litigated.
 
@@ -126,15 +126,26 @@ deck's library actions complete through the native window path on desktop, and k
 
 No user-facing message may attribute a chan-desktop failure to a browser popup blocker.
 
+## Attempted and reverted (2026-08-05)
+
+A desktop branch in `CommandLauncher.svelte` that skipped the popup and let the window watcher open
+the record was implemented and tested live on a local window. It creates the record -- the launcher
+lists it -- but NO native window ever appears, and the row's focus control does nothing because
+there is no window of any kind behind it. Reverted.
+
+The cause is server-side and cannot be fixed from the SPA: the scoped library action mints with
+`WindowOrigin::Browser` hardcoded (`crates/chan-server/src/routes/library.rs:825` for a terminal,
+`:837` for a workspace window), and the watcher deliberately refuses browser-origin records --
+`should_show` requires `record.origin.is_native()` (`window_watcher.rs:230-236`), documented at
+`:216` as "a browser-minted window is never opened as a native twin" and pinned by a test at
+`:500-504`. The branch therefore produced orphan records, which is worse than the honest error it
+replaced.
+
 ## Implementation shape
 
-Implemented in `web/packages/workspace-app/src/components/CommandLauncher.svelte`; the remaining
-item is the focus surface under Open.
-
 - Branch the two call sites on `isTauriDesktop()`.
-- On desktop, skip the popup entirely: run the scoped action and let the existing window watcher
-  reconcile the new record into a native window (`desktop/src-tauri/src/window_watcher.rs`, the
-  `should_show` reopen path), which is already the mechanism for devserver-driven windows.
+- The desktop branch must obtain a NATIVE-origin window record. The SPA cannot: see Open for why
+  the obvious server-side rule is weaker than it looks.
 - For activating an existing record, replace `popup.focus()` with a native focus/show path rather
   than a popup handle.
 - Rekey `blockedWindowMessage` (`web/packages/workspace-app/src/api/desktop.ts`) on
@@ -160,6 +171,22 @@ satisfied by the postMessage fallback.
 
 ## Open
 
+- **How a desktop surface obtains a native-origin record, and who else could.** The obvious rule --
+  derive the minted origin from the acting window's origin -- is weaker than it sounds. The command
+  capability binds a client-supplied `window_id` (`library.rs:518-521`), and the mint handler
+  authorizes it only as "a live window of this tenant"
+  (`tenant_has_live_window` / `tenant_token_has_live_window`, `library.rs:735-753`), never as "the
+  caller's own window". Window ids are listed in the library snapshot, so any client that can mint
+  at all -- including a plain browser tab on the loopback origin, which gets `Owner` because role
+  falls back to Owner when there is no `TunnelOrigin` (`library.rs:725-734`) -- could name a NATIVE
+  window as its acting window and thereby cause chan-desktop to open real OS windows. That is not a
+  cross-user escalation (tunnel guests are `Readonly` and refused at `:815`), but it moves "may
+  cause a native window to open" from the desktop to any tenant-authenticated web surface, with UI
+  spam as the cheap abuse and the opened window's native vocabulary as the expensive one.
+  The alternative that keeps the decision inside the existing trust boundary: have the desktop mint
+  it, through a capability-gated Tauri command, so the ACL that already scopes `lib-*` windows to an
+  exact origin governs this too -- the machinery v0.83.4 built. That command could carry the focus
+  case below as well.
 - **Raising an already-visible native window has no surface.** The desktop branch un-buries a
   hidden window (the watcher then opens it) but cannot bring a visible one to the front. The
   launcher does this over HTTP with `POST /api/library/windows/{id}/open`
