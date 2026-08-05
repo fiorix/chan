@@ -1,6 +1,6 @@
 # Rich Prompt control strip
 
-Status: REGISTERED for v0.84.0, grounded 2026-08-02, ruled 2026-08-03, specified 2026-08-03, implemented 2026-08-03.
+Status: SHIPPED in [v0.84.0](../../release/release-v0.84.0.md).
 
 ## What
 

@@ -1,6 +1,6 @@
 # `cs open` non-text reveal and audio preview
 
-Status: REGISTERED for v0.84.0, grounded 2026-08-02, specified 2026-08-03, ready to implement.
+Status: SHIPPED in [v0.84.0](../../release/release-v0.84.0.md).
 
 ## What
 

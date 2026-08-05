@@ -1,6 +1,6 @@
 # Terminal secret masking defaults off
 
-Status: REGISTERED for v0.84.0, implemented 2026-08-04, integrated release gate complete 2026-08-05.
+Status: SHIPPED in [v0.84.0](../../release/release-v0.84.0.md).
 
 ## What
 

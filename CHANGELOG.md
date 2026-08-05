@@ -4,7 +4,9 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.84.0] - 2026-08-05
+
+v0.84.0 adds terminal and editor appearance controls, browser-native audio previews, and graph language detail; makes terminal metadata server-settled and secret masking opt-in; hardens Hybrid Nav collaboration; and adds reproducible Windows and Nix checks in disposable Ubuntu guests.
 
 ### Added
 
@@ -21,6 +23,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Nix package checks run in a disposable Ubuntu sdme guest.** `make nix-sdme-check` snapshots indexed working-tree content under `/var/tmp`, mounts it read-only without Git metadata or ignored build products, installs Ubuntu's packaged Nix into a disposable overlay, and runs the existing flake evaluation, package build, and smoke contract against a local store. The only writable host bind is the selected `/var/tmp` result directory, and guest, source snapshot, store, and closure are removed after the result is returned.
 
 ### Changed
+
+- **The Rich Prompt hint is an actionable control strip.** The primary button submits the current prompt and switches to cancel while a prompt is in flight. The secondary recall action appears only when this client has a queued prompt it can recover. Existing keyboard shortcuts and queue behavior remain authoritative, and the buttons call the same actions rather than creating a second submission path.
 
 - **Terminal name and group are server-settled, and the session inventory agrees with the tab strip.** The registry is the only uniqueness authority: terminal WebSocket creation, POST and CLI creation, restart with overrides, and live metadata updates share one atomic settlement that normalizes the pair, reserves the name tenant-wide, and returns the complete settled pair even when only one input changed. A rename travels as one proposal over the terminal socket, both controls disable while it is in flight, and the settled result converges through the acknowledgement and the terminal roster, so co-viewing windows and `cs terminal list` describe the same terminal. Name and group are one interior-mutable value and are never read or published as a torn pair. Live metadata is distinct from spawn provenance: the name and group injected into a running PTY stay immutable for that incarnation, `TerminalSessionSummary` and `cs terminal list --json` always carry `spawn_name`, Markdown output always carries a `spawn` column rendering unknown as `-`, and fdstore persists and restores all four values, leaving a legacy manifest's spawn values unknown rather than fabricating them. Every by-name selector matches the settled live name only; neither a prior live name nor a spawn name is an alias. When live and spawn metadata diverge, one consolidated prompt names the stale variables and offers a restart.
 

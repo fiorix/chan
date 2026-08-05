@@ -1,6 +1,6 @@
 # Disposable sdme Ubuntu Nix build
 
-Status: REGISTERED for v0.84.0, implemented 2026-08-04, live Ubuntu guest and integrated release gate validation complete 2026-08-05.
+Status: SHIPPED in [v0.84.0](../../release/release-v0.84.0.md).
 
 ## What
 

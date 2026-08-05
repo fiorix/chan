@@ -1,6 +1,6 @@
 # Hybrid Nav staged destructive actions
 
-> Status: withdrawn for v0.84.0. This item did not ship. See the [Unreleased changelog](../../CHANGELOG.md#unreleased).
+> Status: withdrawn for v0.84.0. This item did not ship. See [release-v0.84.0](../../release/release-v0.84.0.md).
 
 ## Contract
 

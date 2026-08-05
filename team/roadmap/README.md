@@ -32,26 +32,23 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [file-browser-context-menu-inspector-actions](v0.85.0/file-browser-context-menu-inspector-actions.md) | correction in progress | remove stale authority and copy while retaining ordinary-file replacement |
 | [chan-config-key-coverage](v0.85.0/chan-config-key-coverage.md) | implemented, validation pending | complete integrated validation of the serialized key authority |
 
-### v0.84.0
-
-| item | state | what needs to happen |
-| --- | --- | --- |
-| [cs-open-non-text-reveal-and-audio](v0.84.0/cs-open-non-text-reveal-and-audio.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
-| [hybrid-nav-staged-editor-bubble](v0.84.0/hybrid-nav-staged-editor-bubble.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
-| [terminal-tab-rename-reaches-inventory](v0.84.0/terminal-tab-rename-reaches-inventory.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
-| [terminal-editor-appearance-settings](v0.84.0/terminal-editor-appearance-settings.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
-| [release-platform-verification](v0.84.0/release-platform-verification.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
-| [graph-inspector-language-node-detail](v0.84.0/graph-inspector-language-node-detail.md) | implemented, integrated gate complete | ship at v0.84.0 GA |
-| [tests-inherit-ambient-chan-env](v0.84.0/tests-inherit-ambient-chan-env.md) | implemented, integrated gate complete | ship at v0.84.0 GA |
-| [rich-prompt-submit-button](v0.84.0/rich-prompt-submit-button.md) | implemented and validated on `v0840-base` | turn the Rich Prompt's hint into a control strip whose primary button submits and becomes cancel while a prompt is in flight |
-| [terminal-secret-masking-default-off](v0.84.0/terminal-secret-masking-default-off.md) | implemented, integrated gate complete | ship the opt-in default at v0.84.0 GA |
-| [sdme-ubuntu-nix-build](v0.84.0/sdme-ubuntu-nix-build.md) | implemented, live Ubuntu and integrated gate complete | ship the tracked guest build at v0.84.0 GA |
-
 ## Completed
 
-### Withdrawn for v0.84.0
+### v0.84.0
 
-- [hybrid-nav-staged-destructive-actions](done/hybrid-nav-staged-destructive-actions.md) - did not ship; destructive operations retain the established immediate action and confirmation boundary.
+Shipped 2026-08-05; see [release-v0.84.0](../release/release-v0.84.0.md). Closed items in [`done/`](done/):
+
+- [cs-open-non-text-reveal-and-audio](done/cs-open-non-text-reveal-and-audio.md) - `cs open` reveals existing non-text files in the File Browser, and supported audio files gain inline and dedicated native players.
+- [hybrid-nav-staged-editor-bubble](done/hybrid-nav-staged-editor-bubble.md) - queued draft and diagram intents render as removable chips, while shared structural layout changes make the transaction stale and fail closed.
+- [terminal-tab-rename-reaches-inventory](done/terminal-tab-rename-reaches-inventory.md) - terminal name and group settle on the server and converge through the tab strip, session inventory, roster, selectors, and fdstore provenance.
+- [terminal-editor-appearance-settings](done/terminal-editor-appearance-settings.md) - terminal font size and colours persist through server configuration, while editor font size persists in user preferences and updates live.
+- [release-platform-verification](done/release-platform-verification.md) - a disposable Ubuntu sdme guest provides the mandatory Windows release cross-check alongside the macOS-capable workflow dry run.
+- [graph-inspector-language-node-detail](done/graph-inspector-language-node-detail.md) - language nodes show delivery estimates and ranked directory detail, with direct navigation into a selected directory scope.
+- [tests-inherit-ambient-chan-env](done/tests-inherit-ambient-chan-env.md) - tests clear ambient `CHAN_*` state, use isolated homes, and avoid rendering inherited credentials in failures.
+- [rich-prompt-submit-button](done/rich-prompt-submit-button.md) - the Rich Prompt hint is a control strip whose primary action switches between submit and cancel while retaining the existing keymap behavior.
+- [terminal-secret-masking-default-off](done/terminal-secret-masking-default-off.md) - secret masking defaults off for usable large scrollback replay, while explicit configuration and the existing ephemeral per-tab switch remain available.
+- [sdme-ubuntu-nix-build](done/sdme-ubuntu-nix-build.md) - Nix evaluation, package builds, and smokes run from a tracked-source snapshot in a disposable Ubuntu guest rather than the host filesystem.
+- [hybrid-nav-staged-destructive-actions](done/hybrid-nav-staged-destructive-actions.md) - withdrawn before implementation; destructive actions keep the established immediate action and confirmation flow.
 
 ### v0.83.4
 
