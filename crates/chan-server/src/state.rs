@@ -173,6 +173,15 @@ pub struct AppState {
     /// `cs window list` read it to show the real OS title alongside each
     /// `{id, connected, saved}` row.
     pub window_titles: crate::window_titles::SharedWindowTitles,
+    /// This tenant's admission handle onto the process-wide bulk transfer
+    /// lane. Deliberately the tenant handle and not the lane itself: routes
+    /// must be able to submit and cancel without being able to shut the lane
+    /// down or to observe another tenant's queue.
+    #[allow(
+        dead_code,
+        reason = "admission handle for the transfer routes; no route submits through it yet"
+    )]
+    pub bulk_transfer: crate::bulk_transfer::BulkTransferTenant,
     /// Random id minted when this tenant was built, exposed via
     /// `GET /api/health`. The SPA compares it across `/ws` reconnects:
     /// a CHANGED id means the process behind the window was restarted
@@ -255,7 +264,7 @@ pub(crate) mod test_support {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::atomic::AtomicU64;
-    use std::sync::{mpsc, Arc, Barrier, Mutex, RwLock};
+    use std::sync::{mpsc, Arc, Barrier, Mutex, OnceLock, RwLock};
     use std::time::Duration;
 
     use chan_workspace::Library;
@@ -265,6 +274,18 @@ pub(crate) mod test_support {
     use crate::self_writes::SelfWrites;
     use crate::terminal_sessions::{Registry as TerminalRegistry, RegistryConfig};
     use crate::{EditorPrefs, ServerConfig};
+
+    /// A distinct tenant handle over one lane shared by the whole test
+    /// binary. Per-call lanes would spawn two OS threads for every test that
+    /// builds an `AppState` and never join them, since a test state has no
+    /// teardown point. Sharing one lane keeps that bounded while still giving
+    /// each caller its own tenant identity, which is the property the
+    /// admission contract actually depends on.
+    pub fn make_test_bulk_transfer_tenant() -> crate::bulk_transfer::BulkTransferTenant {
+        static LANE: OnceLock<Arc<crate::bulk_transfer::BulkTransferLane>> = OnceLock::new();
+        LANE.get_or_init(crate::bulk_transfer::BulkTransferLane::new)
+            .tenant()
+    }
 
     /// Build an `AppState` with the two policy bools set to the
     /// requested values and everything else stubbed to defaults.
@@ -325,6 +346,7 @@ pub(crate) mod test_support {
             session_registry: Arc::new(crate::session_presence::SessionRegistry::new()),
             window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
             window_titles: Arc::new(crate::window_titles::WindowTitles::new()),
+            bulk_transfer: make_test_bulk_transfer_tenant(),
             instance_id: "test-instance".to_string(),
         })
     }

@@ -204,6 +204,7 @@ mod tests {
             session_registry,
             window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
             window_titles: Arc::new(crate::window_titles::WindowTitles::new()),
+            bulk_transfer: crate::state::test_support::make_test_bulk_transfer_tenant(),
             instance_id: "test-instance".to_string(),
         });
         (cfg, root, events_rx, crate::router(state), session_guard)

@@ -26,6 +26,10 @@ fn main() -> Result<()> {
         .unwrap_or(MAX_WORKER_THREADS);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(worker_threads)
+        // Declared rather than inherited: this runtime can execute transfer
+        // work, and tokio's default blocking pool is large enough that bulk
+        // work would just expand into the threads interactive work needs.
+        .max_blocking_threads(chan_server::bulk_transfer::MAX_BLOCKING_THREADS)
         .enable_all()
         .build()
         .context("building tokio runtime")?;
@@ -37,4 +41,33 @@ fn main() -> Result<()> {
     // index may be left partially populated until the next rebuild.
     rt.shutdown_background();
     res
+}
+
+#[cfg(test)]
+mod tests {
+    /// The ceiling is a construction property, so it is pinned at the
+    /// construction seam. Observing thread counts at runtime would prove
+    /// nothing: tokio creates blocking threads lazily, so a run that never
+    /// needs 32 looks identical to one that is capped at 32.
+    #[test]
+    fn production_runtime_blocking_limit() {
+        // Only the production half: this test names the same call it checks
+        // for, so scanning the whole file would match itself and keep passing
+        // after the real call was deleted.
+        let production = include_str!("main.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("binary source has a production half");
+        assert!(
+            production.contains("fn main()"),
+            "the production half must be what was scanned"
+        );
+        assert!(
+            production.contains(
+                ".max_blocking_threads(chan_server::bulk_transfer::MAX_BLOCKING_THREADS)"
+            ),
+            "the standalone runtime must declare its blocking-thread ceiling"
+        );
+        assert_eq!(chan_server::bulk_transfer::MAX_BLOCKING_THREADS, 32);
+    }
 }

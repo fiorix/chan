@@ -17,6 +17,7 @@
 
 mod atomic_file;
 mod auth;
+pub mod bulk_transfer;
 mod bus;
 mod collab_sessions;
 mod config;
@@ -207,6 +208,12 @@ struct AppArtifacts {
     /// tasks. Hosted and standalone teardown both await it before the
     /// workspace cell and route state can drop.
     tasks: chan_library::TenantTaskOwner,
+    /// The bulk transfer lane's lifecycle owner, held here so the lane
+    /// outlives every route that can submit to it. `AppState` deliberately
+    /// carries only a tenant handle, so this is the only thing keeping the
+    /// workers alive; dropping the last one shuts the lane down and joins
+    /// them.
+    bulk_transfer: Arc<crate::bulk_transfer::BulkTransferLane>,
     /// Mutable handle to the URL prefix injected into the SPA shell
     /// as `<meta name="chan-prefix">`. Local serve sets it once at
     /// build time from `ServeConfig::prefix`; tunnel mode swaps in
@@ -391,6 +398,23 @@ fn start_control_socket(
     }
 }
 
+/// Everything one workspace tenant's app is built from, other than the serve
+/// config. Grouped rather than passed positionally: the set is long enough
+/// that a caller reading a bare argument list cannot tell which `Option` or
+/// which `Arc` is which, and every caller supplies all of it.
+struct AppBuild {
+    library: Library,
+    workspace: Arc<Workspace>,
+    extension_catalog: Arc<extensions::ExtensionCatalog>,
+    desktop: crate::desktop_window_ops::DesktopBridge,
+    unserve: chan_library::UnserveMode,
+    control_identity: Option<String>,
+    /// The process lane this tenant admits bulk transfers against. Passed in
+    /// rather than created here so every tenant in a hosted process shares one
+    /// allocation and one bound.
+    bulk_transfer: Arc<crate::bulk_transfer::BulkTransferLane>,
+}
+
 #[cfg(test)]
 async fn build_app(
     library: Library,
@@ -401,26 +425,33 @@ async fn build_app(
     control_identity: Option<String>,
 ) -> Result<AppArtifacts, Error> {
     build_app_with_extensions(
-        library,
-        workspace,
+        AppBuild {
+            library,
+            workspace,
+            extension_catalog: extensions::empty_catalog(),
+            desktop,
+            unserve,
+            control_identity,
+            bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
+        },
         config,
-        extensions::empty_catalog(),
-        desktop,
-        unserve,
-        control_identity,
     )
     .await
 }
 
 async fn build_app_with_extensions(
-    library: Library,
-    workspace: Arc<Workspace>,
+    build: AppBuild,
     config: &ServeConfig,
-    extension_catalog: Arc<extensions::ExtensionCatalog>,
-    desktop: crate::desktop_window_ops::DesktopBridge,
-    unserve: chan_library::UnserveMode,
-    control_identity: Option<String>,
 ) -> Result<AppArtifacts, Error> {
+    let AppBuild {
+        library,
+        workspace,
+        extension_catalog,
+        desktop,
+        unserve,
+        control_identity,
+        bulk_transfer,
+    } = build;
     // Captured before `workspace` is moved into AppState below; the standalone
     // unserve scope names this root.
     let unserve_root = workspace.root().to_path_buf();
@@ -739,6 +770,7 @@ async fn build_app_with_extensions(
         session_registry,
         window_transfers,
         window_titles: desktop.window_titles.clone(),
+        bulk_transfer: bulk_transfer.tenant(),
         instance_id: random_token(),
     });
     // Doc-session background tasks: the flusher debounces dirty
@@ -804,6 +836,7 @@ async fn build_app_with_extensions(
         last_activity,
         workspace_cell: state_for_bridge.clone(),
         tasks,
+        bulk_transfer,
         prefix,
         mcp_bridge,
         control_socket,
@@ -837,6 +870,7 @@ async fn build_terminal_app(
     unserve: chan_library::UnserveMode,
     session_dir: Option<std::path::PathBuf>,
     control_identity: Option<String>,
+    bulk_transfer: Arc<crate::bulk_transfer::BulkTransferLane>,
 ) -> Result<AppArtifacts, Error> {
     let token = if config.no_token {
         None
@@ -1027,6 +1061,7 @@ async fn build_terminal_app(
         session_registry,
         window_transfers,
         window_titles: desktop.window_titles.clone(),
+        bulk_transfer: bulk_transfer.tenant(),
         instance_id: random_token(),
     });
 
@@ -1055,6 +1090,7 @@ async fn build_terminal_app(
         last_activity,
         workspace_cell,
         tasks,
+        bulk_transfer,
         prefix,
         // No workspace to MCP-bridge; the control socket above IS the
         // local CLI surface (terminal-scoped).
@@ -1169,6 +1205,10 @@ fn terminal_router(state: Arc<AppState>) -> Router {
 /// route-layer `AppArtifacts` to the host-facing `TenantArtifacts`.
 pub(crate) struct RouteLayer {
     extension_catalog: Arc<extensions::ExtensionCatalog>,
+    /// One lane for the whole hosted process, shared into every workspace and
+    /// terminal tenant this builder mounts. The bound is process-wide, so a
+    /// second mounted workspace must not get a second allocation.
+    bulk_transfer: Arc<crate::bulk_transfer::BulkTransferLane>,
 }
 
 /// The route layer's tenant constructor, as an `Arc<dyn TenantBuilder>` for a
@@ -1178,6 +1218,7 @@ pub(crate) struct RouteLayer {
 pub fn route_builder() -> Arc<dyn chan_library::TenantBuilder> {
     Arc::new(RouteLayer {
         extension_catalog: extensions::empty_catalog(),
+        bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
     })
 }
 
@@ -1189,6 +1230,7 @@ pub fn route_builder_with_extensions(
 ) -> Arc<dyn chan_library::TenantBuilder> {
     Arc::new(RouteLayer {
         extension_catalog: runtime.catalog(),
+        bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
     })
 }
 
@@ -1275,13 +1317,16 @@ impl chan_library::TenantBuilder for RouteLayer {
         control_identity: Option<String>,
     ) -> Result<chan_library::TenantArtifacts, Error> {
         let artifacts = build_app_with_extensions(
-            library,
-            workspace,
+            AppBuild {
+                library,
+                workspace,
+                extension_catalog: self.extension_catalog.clone(),
+                desktop,
+                unserve,
+                control_identity,
+                bulk_transfer: self.bulk_transfer.clone(),
+            },
             config,
-            self.extension_catalog.clone(),
-            desktop,
-            unserve,
-            control_identity,
         )
         .await?;
         Ok(into_tenant_artifacts(artifacts))
@@ -1304,6 +1349,7 @@ impl chan_library::TenantBuilder for RouteLayer {
             unserve,
             session_dir,
             control_identity,
+            self.bulk_transfer.clone(),
         )
         .await?;
         // The tenant's terminals run `command` (when set) rather than the
@@ -1325,6 +1371,7 @@ fn into_tenant_artifacts(a: AppArtifacts) -> chan_library::TenantArtifacts {
         last_activity,
         workspace_cell,
         tasks,
+        bulk_transfer,
         prefix,
         mcp_bridge,
         control_socket,
@@ -1354,7 +1401,16 @@ fn into_tenant_artifacts(a: AppArtifacts) -> chan_library::TenantArtifacts {
         session_registry,
         events_tx,
         cell,
-        keepalive: Box::new((last_activity, mcp_bridge, control_socket, state)),
+        // `bulk_transfer` rides here as the tenant's lane lifetime: the host
+        // drops this box when it unmounts the tenant, which is what releases
+        // the hosted process lane once its last tenant is gone.
+        keepalive: Box::new((
+            last_activity,
+            mcp_bridge,
+            control_socket,
+            state,
+            bulk_transfer,
+        )),
     }
 }
 
@@ -1427,13 +1483,18 @@ pub async fn serve(
     // identity either -- a window-spawned serve's control socket dies
     // with the process by design.
     let mut artifacts = build_app_with_extensions(
-        library,
-        workspace,
+        AppBuild {
+            library,
+            workspace,
+            extension_catalog: extension_runtime.catalog(),
+            desktop: crate::desktop_window_ops::DesktopBridge::default(),
+            unserve: chan_library::UnserveMode::Standalone,
+            control_identity: None,
+            // A standalone serve is its own process, so it owns its own lane
+            // rather than sharing a host's.
+            bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
+        },
         &config,
-        extension_runtime.catalog(),
-        crate::desktop_window_ops::DesktopBridge::default(),
-        chan_library::UnserveMode::Standalone,
-        None,
     )
     .await?;
     // External / CLI edits to the per-library config (`chan config`, a
@@ -1806,6 +1867,52 @@ fn router_with_extensions(
 // (`serve_config`) alongside the moved types.
 
 #[cfg(test)]
+mod bulk_transfer_construction_tests {
+    use super::*;
+    use crate::bulk_transfer::{BulkTransferLane, ACTIVE_CAPACITY, WAITING_CAPACITY};
+
+    /// A hosted process holds one `RouteLayer`, and both tenant constructors
+    /// mint from its single `bulk_transfer` field. If that field were
+    /// allocated per tenant instead, a second mounted workspace would double
+    /// the machine's concurrent transfer load, which is the failure the
+    /// process-wide bound exists to prevent.
+    #[test]
+    fn one_route_layer_holds_one_lane_for_every_tenant_it_mounts() {
+        let layer = RouteLayer {
+            extension_catalog: extensions::empty_catalog(),
+            bulk_transfer: BulkTransferLane::new(),
+        };
+        // Stand in for the two tenants a hosted process mounts; both come
+        // from the same field the real constructors read.
+        let workspace_tenant = layer.bulk_transfer.tenant();
+        let terminal_tenant = layer.bulk_transfer.tenant();
+
+        // Fill the whole process budget from one tenant, holding every job so
+        // nothing drains, then prove the sibling tenant is refused.
+        let mut releases = Vec::new();
+        let mut held = Vec::new();
+        for _ in 0..(ACTIVE_CAPACITY + WAITING_CAPACITY) {
+            let (release, park) = std::sync::mpsc::channel::<()>();
+            releases.push(release);
+            held.push(
+                workspace_tenant
+                    .submit(move |_| {
+                        let _ = park.recv();
+                    })
+                    .expect("within the process budget"),
+            );
+        }
+
+        assert!(
+            terminal_tenant.submit(|_| ()).is_err(),
+            "a second tenant of the same process must not get its own budget"
+        );
+
+        drop(releases);
+    }
+}
+
+#[cfg(test)]
 mod terminal_router_tests {
     use super::*;
     use crate::terminal_sessions::{
@@ -1899,6 +2006,7 @@ mod terminal_router_tests {
             chan_library::UnserveMode::Unsupported,
             None,
             None,
+            crate::bulk_transfer::BulkTransferLane::new(),
         )
         .await
         .expect("build terminal app");
