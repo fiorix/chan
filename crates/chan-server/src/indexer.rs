@@ -1439,6 +1439,24 @@ mod tests {
             index_paths.iter().all(|path| !path.starts_with("old/")),
             "directory event left stale search rows: {index_paths:?}"
         );
+
+        let opts = SearchOpts {
+            mode: SearchMode::Bm25,
+            limit: 10,
+            scope: None,
+        };
+        for query in ["old-a-token", "old-b-token"] {
+            let hits = workspace.search(query, &opts).unwrap().hits;
+            assert!(
+                hits.is_empty(),
+                "directory event left stale BM25 hits for {query}: {hits:?}"
+            );
+        }
+        let keep_hits = workspace.search("keep-token", &opts).unwrap().hits;
+        assert!(
+            keep_hits.iter().any(|hit| hit.path == "keep.md"),
+            "directory event removed the retained BM25 hit: {keep_hits:?}"
+        );
     }
 
     #[test]

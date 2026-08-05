@@ -18,9 +18,13 @@ use serde::Serialize;
 use tantivy::collector::TopDocs;
 use tantivy::indexer::IndexWriterOptions;
 use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, RegexQuery};
-use tantivy::schema::{Field, Schema, SchemaBuilder, Value, FAST, INDEXED, STORED, STRING, TEXT};
+use tantivy::schema::{
+    Field, IndexRecordOption, Schema, SchemaBuilder, Value, FAST, INDEXED, STORED, STRING, TEXT,
+};
 use tantivy::snippet::SnippetGenerator;
-use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
+use tantivy::{
+    doc, DocSet, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term, TERMINATED,
+};
 use thiserror::Error;
 
 use super::chunking::{self, Chunk};
@@ -270,12 +274,10 @@ impl Bm25Index {
         self.reader.searcher().num_docs()
     }
 
-    /// Snapshot of every distinct `path` value currently committed to
-    /// the index, sorted ascending. Walks each segment's term
-    /// dictionary on the path field; since `path` is a STRING field
-    /// (single-token, exact-match) each term is one full rel_path,
-    /// so the result is the set of files BM25 currently knows about
-    /// without scanning every document.
+    /// Snapshot of every distinct live `path` value currently committed
+    /// to the index, sorted ascending. Walks each segment's path term
+    /// dictionary and verifies terms against live postings on segments
+    /// that contain deletions. This avoids scanning stored documents.
     ///
     /// Used by `Index::build_all` to compute the set of paths that
     /// were indexed by a prior build but are no longer on disk, so
@@ -291,9 +293,24 @@ impl Bm25Index {
         for segment in searcher.segment_readers() {
             let inv = segment.inverted_index(self.fields.path)?;
             let mut stream = inv.terms().stream()?;
-            while let Some((term_bytes, _)) = stream.next() {
-                if let Ok(s) = std::str::from_utf8(term_bytes) {
-                    paths.insert(s.to_string());
+            while let Some((term_bytes, term_info)) = stream.next() {
+                let has_live_posting = match segment.alive_bitset() {
+                    None => true,
+                    Some(alive) => {
+                        let mut postings =
+                            inv.read_postings_from_terminfo(term_info, IndexRecordOption::Basic)?;
+                        let mut doc = postings.doc();
+                        while doc != TERMINATED && !alive.is_alive(doc) {
+                            doc = postings.advance();
+                        }
+                        doc != TERMINATED
+                    }
+                };
+                if !has_live_posting {
+                    continue;
+                }
+                if let Ok(path) = std::str::from_utf8(term_bytes) {
+                    paths.insert(path.to_string());
                 }
             }
         }
@@ -592,6 +609,43 @@ mod tests {
         idx.delete_file("a.md").unwrap();
         idx.commit().unwrap();
         assert!(idx.search("unique-term", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn known_paths_excludes_deleted_path_from_live_segment() {
+        let (_tmp, idx) = fresh();
+        {
+            let writer = idx.writer.lock().unwrap();
+            writer.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
+        }
+        idx.index_file("old.md", "staletombstone", &Chunking::WholeDoc)
+            .unwrap();
+        idx.index_file("keep.md", "livekeeper", &Chunking::WholeDoc)
+            .unwrap();
+        idx.commit().unwrap();
+        assert_eq!(idx.search("staletombstone", 10).unwrap()[0].path, "old.md");
+        assert_eq!(idx.search("livekeeper", 10).unwrap()[0].path, "keep.md");
+
+        let segment_ids = idx.index.searchable_segment_ids().unwrap();
+        idx.writer
+            .lock()
+            .unwrap()
+            .merge(&segment_ids)
+            .wait()
+            .unwrap();
+        idx.reader.reload().unwrap();
+
+        idx.delete_file("old.md").unwrap();
+        idx.commit().unwrap();
+
+        let searcher = idx.reader.searcher();
+        assert_eq!(searcher.segment_readers().len(), 1);
+        let segment = &searcher.segment_readers()[0];
+        assert_eq!(segment.num_docs(), 1);
+        assert_eq!(segment.num_deleted_docs(), 1);
+        assert_eq!(idx.known_paths().unwrap(), vec!["keep.md"]);
+        assert!(idx.search("staletombstone", 10).unwrap().is_empty());
+        assert_eq!(idx.search("livekeeper", 10).unwrap()[0].path, "keep.md");
     }
 
     #[test]
