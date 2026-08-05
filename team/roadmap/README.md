@@ -24,7 +24,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | item | state | what needs to happen |
 | --- | --- | --- |
 | [graph-large-workspace-render-cost](v0.84.1/graph-large-workspace-render-cost.md) | implemented, owner validation pending | confirm selection and drag behaviour in a real browser on a large workspace |
-| [gateway-ipc-grant-lost-after-outage](v0.84.1/gateway-ipc-grant-lost-after-outage.md) | accepted, investigation pending | distinguish a never-minted origin from a changed one, then make the grant an invariant of the recovery paths |
+| [gateway-ipc-grant-lost-after-outage](v0.84.1/gateway-ipc-grant-lost-after-outage.md) | diagnostic shipped, cause unknown | read the refused window's origin and label against the minted exact_origin, then spec the repair |
 
 ### v0.85.0
 

@@ -1,8 +1,9 @@
 # Gateway `lib-*` windows lose their IPC grant after a gateway outage
 
-Status: REGISTERED for v0.84.1, filed 2026-08-05, accepted, investigation pending. The field
-occurrence is the evidence; a controlled reproduction is not yet confirmed, and the root cause has
-two candidate shapes that need different fixes.
+Status: REGISTERED for v0.84.1, filed 2026-08-05, accepted, investigation pending. The v0.84.1
+diagnostic (`aee1ede4`) ships; the repair does not, because the cause is not yet known. The
+outage-shaped explanation this item was filed under has since been DISPROVED by owner experiment
+(see Retired hypotheses); the title is kept for continuity with the field report.
 
 Component: `chan-desktop` (`desktop/src-tauri`). Observed on chan-desktop 0.84.0, devserver 0.84.0,
 and gateway 0.84.0, all three at the same tag.
@@ -29,9 +30,11 @@ Severity is functional, not data-losing: the Computers/library scope and every n
 command are dead in an affected window until the user quits the app. The user-facing message
 actively misdirects toward a popup blocker.
 
-The workaround is a full quit of chan-desktop (Cmd+Q — closing the window is not enough, the stale
-authority only clears at process exit) followed by relaunch and reopening the devserver, so the
-connection goes through `connect_rostered_devserver`.
+The reported workaround is a full quit of chan-desktop (Cmd+Q — closing the window is not enough)
+followed by relaunch and reopening the devserver. Its stated rationale, that the relaunch is what
+puts the connection back through `connect_rostered_devserver`, is retired: the owner experiment
+below reached that same path without a quit and the refusal survived. Whether the full quit
+genuinely clears the condition is therefore unconfirmed.
 
 ## Verified current state (2026-08-05)
 
@@ -95,12 +98,39 @@ So the desktop has two recovery paths that report success while leaving the IPC 
 untouched, and one that repairs it. Whether a window works after an outage depends on which path
 happened to run.
 
-The field trigger: a production gateway rollout (0.83.3 -> 0.84.0) replaced the `devserver-proxy`
-pod. The tunnel dropped at 17:16:40 and did not re-establish until 17:19:57, a roughly three-minute
-outage. The desktop rode this out as a disconnect plus automatic poll recovery, never a fresh
-connect. Afterwards `gateway_csrf_token` was refused in the affected window while the connection
-showed healthy in the launcher. Any gateway restart or network blip long enough to trip the poll's
-`Err` arm should reproduce this.
+The field trigger, as originally read: a production gateway rollout (0.83.3 -> 0.84.0) replaced the
+`devserver-proxy` pod. The tunnel dropped at 17:16:40 and did not re-establish until 17:19:57, a
+roughly three-minute outage. The desktop rode this out as a disconnect plus automatic poll
+recovery, never a fresh connect. Afterwards `gateway_csrf_token` was refused in the affected window
+while the connection showed healthy in the launcher. The outage is real and the two recovery paths
+really do skip the mint, but the owner experiment below shows the outage is not what causes the
+refusal.
+
+### Retired hypotheses (2026-08-05, owner experiment)
+
+The owner deleted the keychain item holding the `gw.chan.app` token, disconnected the gateway,
+reconnected (which forced a fresh browser OAuth authorization), then reopened the geekom machine and
+the launcher menu. The failure was identical.
+
+That path runs `connect_rostered_devserver`, the only place a grant is minted, and the window is
+created after the mint. So the grant for the current `proxy_origin` exists and the window still
+cannot use it. This retires both hypotheses this item was filed under:
+
+- The "never minted" shape is retired independently by code: a gateway conn only exists in memory
+  via `main.rs:2520`, 24 lines after the mint at `:2496`. The other two conn-set sites (`:2790`,
+  `:3085`) are the non-gateway paths, and `gateway.rs:1389` is inside a `#[tokio::test]`. The
+  recovery paths cannot run for a gateway conn unless a mint already succeeded for its origin.
+- The "stale origin" shape is retired by `gateway.rs:433-445`: an origin change arrives as a roster
+  `moved` diff, which tears the connection down and fires `devserver_reconnect_hook`, wired at
+  `main.rs:5039-5053` to the full connect, which mints the new origin. The test
+  `moved_row_tears_down_drops_the_pin_and_reconnects` (`gateway.rs:1377`) pins this.
+
+Consequently the `ensure_exact_origin_grant` repair this item originally proposed would be a no-op
+against the observed failure, and was deliberately not implemented.
+
+Also checked and NOT the cause: `remote.urls` carries a bare origin with no path, but Tauri rewrites
+an empty-or-`/` pathname to `*` before matching (`tauri-utils-2.9.2/src/acl/mod.rs:284-296`), so the
+pattern matches every path on the origin. A window at a sub-path is fine.
 
 ### Ruled out
 
@@ -123,30 +153,35 @@ Established with evidence during triage; these do not need re-litigating.
 
 ## Open
 
-The mint set is process-global and persistent, so a grant minted once should still be present after
-a reconnect. Two candidate explanations are not yet distinguished, and they need different fixes,
-so the investigation must settle this before implementation starts.
+The grant for the window's origin exists and the ACL still refuses the invoke, so the mismatch is
+between what the capability binds and what the window presents. The mint binds three things —
+`windows: ["lib-*"]`, one exact origin in `remote.urls`, and the command list — and the refusal
+means at least one does not match at resolution time. Unresolved, in the order the diagnostic will
+answer them:
 
-- (a) The process never minted for this origin at all, because the connection was established by a
-  path that bypasses `connect_rostered_devserver`. Session restore at startup is the obvious
-  suspect; audit what runs on launch when a gateway devserver was connected in the previous
-  session.
-- (b) `proxy_origin` changed across the outage, so the surviving capability covers a stale origin.
-  The tenant origin embeds the user and devserver-id prefix
-  (`https://<user>--<devserver_id_prefix>.<proxy_id>.usr.chan.app`) and looked stable across this
-  incident, which makes (b) less likely, but it was not directly verified, and
-  `exact_origin_capability_json` binds `remote.urls` to one exact origin with no fallback.
+- The origin the window presents versus the `exact_origin` that was minted. `proxy_origin` and
+  `proxy_apex_origin` are both carried on the connection (`devserver.rs:117-124`) and only the
+  former is minted.
+- The label the window presents versus `lib-*`. The handler-side `starts_with("lib-")` guards pass
+  for these windows, but the handler never runs; nothing has confirmed the label the ACL sees is the
+  same string.
+- Whether Tauri re-resolves a runtime-added capability for a webview that already existed when
+  `add_capability` ran. The module doc asserts it does ("Already-open windows on the origin gain the
+  grant on their next invoke"); that assertion is unverified against tauri 2.11.2.
 
-Logging the minted origin and the invoking window's origin at refusal time would settle this
-immediately.
+The v0.84.1 diagnostic (`aee1ede4`) answers the first two directly: the SPA records the refused
+window's origin and label and logs each distinct refusal once, and the desktop logs the
+`exact_origin` at mint. The refusal record is deliberately not filtered on a `lib-*` label, since a
+window presenting an unmatched label is one of the candidates.
 
 ## Contract
 
-Grant presence is an invariant of "this gateway connection is healthy", not a side effect of one
-connect path. Any path that reports a gateway devserver as recovered must first ensure the IPC
-grant for its current `proxy_origin` resolves.
+Not yet stated: the contract depends on which of the above is true, and writing one now would pin
+the wrong invariant. The originally proposed contract ("grant presence is an invariant of a healthy
+gateway connection") is retained below as the shape the repair should take IF the cause turns out to
+be grant absence, which the owner experiment currently contradicts.
 
-## Implementation shape
+## Implementation shape (conditional, not accepted)
 
 - Extract an idempotent `ensure_exact_origin_grant(&app, &proxy_origin)`. The existing
   `mint_exact_origin_grant` already no-ops on a second call, so this is mostly a matter of calling
@@ -161,31 +196,27 @@ grant for its current `proxy_origin` resolves.
 
 ## Acceptance checks
 
-Reproduction, which must exercise the automatic recovery rather than the operator-driven one:
+For the v0.84.1 diagnostic, which is what actually ships: reproduce the refusal with both halves
+rebuilt from this base — the SPA lives in the devserver (`crates/chan-server/src/static_assets.rs`
+bakes `web/dist/`), the mint log in chan-desktop — and confirm the console carries
+`[chan-desktop] gateway_csrf_token refused` with a non-empty origin and label, and the desktop log
+carries `minted the gateway-window capability` with an `exact_origin`. Covered by unit tests in
+`web/packages/workspace-app/src/api/desktop.test.ts` (record on refusal, record whatever label the
+window presents, one log line per distinct refusal, and the corrected user-facing message).
 
-1. Connect chan-desktop to a gateway-rostered devserver and open a devserver window. Confirm the
-   Computers scope opens, so the grant is present.
+No outage is required to reproduce: the owner experiment reached the same refusal through a clean
+disconnect, re-authorization, and reopen.
+
+For the repair, once the cause is known: the acceptance check is that the affected window opens the
+Computers scope, and a regression pin in whichever mechanism turns out to be at fault. The
+outage-driven reproduction below is retained only as the original field sequence; it is not the
+minimal reproduction and should not gate the fix.
+
+1. Connect chan-desktop to a gateway-rostered devserver and open a devserver window.
 2. Restart the `devserver-proxy` serving that tenant, or otherwise break the tunnel for more than
    5s so `spawn_devserver_workspace_poll` takes its `Err` arm and calls `set_down(&id, true)`.
-3. Let it recover on its own. Do not use the disconnect overlay's Reconnect button; that path
-   repairs the grant and masks the bug.
+3. Let it recover on its own, without the disconnect overlay's Reconnect button.
 4. In the recovered window, open the command deck and then Computers.
-
-Expected after the fix: the scope opens. Before the fix: "The browser blocked the new Chan window",
-with `Fetch API cannot load ipc://localhost/gateway_csrf_token due to access control checks` in the
-console. Step 2 is the part that was never confirmed under controlled conditions, so confirm the
-exact sequence before treating the trigger as settled.
-
-Tests:
-
-- Unit: after `set_down(true)` then `set_down(false)` on a gateway connection, the origin's grant
-  still resolves. Drive it through the existing mock-runtime `on_message` dispatch in
-  `runtime_capability.rs`'s test module, which already resolves invokes against the real generated
-  ACL context.
-- Unit: `reconnect_devserver`'s gateway branch leaves a resolvable grant, mirroring the existing
-  `reconnect_devserver_for_window` coverage.
-- Regression pin: assert the recovery arms reference the ensure-grant call, in the style of the
-  existing source-introspection pins around `main.rs:7588`.
 
 ## Boundaries
 
