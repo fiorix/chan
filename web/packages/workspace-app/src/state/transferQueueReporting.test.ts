@@ -213,6 +213,46 @@ describe("the admission refusal is not a failure", () => {
   });
 });
 
+describe("the bytes the server actually emits", () => {
+  // Verbatim from the server's own serialization tests, not retyped from the
+  // contract prose. This is the half the browser could not check while it was
+  // built against a written shape: these strings are what the wire carries, so
+  // parsing them here proves the consumer matches the producer rather than
+  // matching a description both sides read.
+  const WAITING = `{"type":"transfer_queue","window_id":"w-1","transfer_id":"t-1","state":"waiting","position":2}`;
+  const ACTIVE = `{"type":"transfer_queue","window_id":"w-1","transfer_id":"t-1","state":"active"}`;
+
+  function feed(json: string, id: string): void {
+    const frame = JSON.parse(json) as {
+      type: string;
+      transfer_id: string;
+      state: "waiting" | "active";
+      position?: number;
+    };
+    expect(frame.type).toBe("transfer_queue");
+    applyTransferQueueFrame({ ...frame, transfer_id: id });
+  }
+
+  test("a real waiting frame yields the rank", () => {
+    resetTransfers();
+    const id = begin();
+    feed(WAITING, id);
+    expect(transfers.items[0]!.queue).toEqual({ state: "waiting", position: 2 });
+  });
+
+  test("a real active frame omits position entirely, and reads as no rank", () => {
+    // The producer uses skip_serializing_if, so the key is absent rather than
+    // null. Absent and null both have to land on null here, and neither may
+    // become 0.
+    expect(JSON.parse(ACTIVE)).not.toHaveProperty("position");
+    resetTransfers();
+    const id = begin();
+    feed(WAITING, id);
+    feed(ACTIVE, id);
+    expect(transfers.items[0]!.queue).toEqual({ state: "active", position: null });
+  });
+});
+
 describe("assumptions this build makes about the open contract point", () => {
   test("no terminal frame: the record settles on the HTTP response, not a frame", () => {
     // The server has not fixed whether completion or cancellation emits a
