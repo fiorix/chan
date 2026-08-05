@@ -1,6 +1,6 @@
 # Terminal secret masking defaults off
 
-Status: REGISTERED for v0.84.0, implemented 2026-08-04, focused validation complete, integrated release gate pending.
+Status: REGISTERED for v0.84.0, implemented 2026-08-04, integrated release gate complete 2026-08-05.
 
 ## What
 
@@ -30,3 +30,4 @@ Users who need masking can set `terminal.secret_masking = true`. The terminal co
 - `cargo test --locked -p chan-library secret_masking_defaults_off_and_preserves_explicit_true` passed 1 test on 2026-08-05.
 - `cargo test --locked -p chan-server terminal_config_` passed 5 tests, and `cargo test --locked -p chan-server global_config_view_keeps_host_fields_on_local_serve` passed 1 test on 2026-08-05.
 - The focused workspace-app run passed 36 tests across `SettingsOverlay.test.ts`, `terminalRightClickRevamp.test.ts`, and `languageInspectorDetail.test.ts` on 2026-08-05. The masking assertions cover the Settings fallback, terminal startup fallback, and existing ephemeral per-tab toggle.
+- `TMPDIR=/var/tmp CARGO_TARGET_DIR=/var/tmp/chan-v0840-release-cut/target CARGO_INCREMENTAL=0 npm_config_cache=/var/tmp/chan-v0840-npm-cache make pre-push` completed with status 0 on commit `fe450858` on 2026-08-05. The gate passed the Rust workspace, web checks, release CLI and devserver smoke, gateway build, and native Linux AppImage package and smoke.

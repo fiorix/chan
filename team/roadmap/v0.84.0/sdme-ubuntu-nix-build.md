@@ -1,6 +1,6 @@
 # Disposable sdme Ubuntu Nix build
 
-Status: REGISTERED for v0.84.0, implemented 2026-08-04, live Ubuntu guest validation complete 2026-08-05, integrated release gate pending.
+Status: REGISTERED for v0.84.0, implemented 2026-08-04, live Ubuntu guest and integrated release gate validation complete 2026-08-05.
 
 ## What
 
@@ -28,3 +28,4 @@ The release workflow needs a reproducible Nix build on hosts without Nix. The tr
 - `TMPDIR=/var/tmp make nix-sdme-check NIX_PACKAGE=chan NIX_SDME_ROOTFS=ubuntu NIX_SDME_OUT=/var/tmp/chan-v0840-nix-sdme SDME='sudo -n sdme'` completed with status 0 on 2026-08-05 from commit `dd16f198`.
 - The live guest identified itself as Ubuntu 26.04, initialized a local Nix 2.34.3 store, evaluated every declared system, built `chan`, and reported both `built devserver smoke: PASS` and `Nix package smoke: PASS`.
 - The source tree stayed clean. The PID-scoped guest and tracked-source snapshot were absent after cleanup.
+- `TMPDIR=/var/tmp CARGO_TARGET_DIR=/var/tmp/chan-v0840-release-cut/target CARGO_INCREMENTAL=0 npm_config_cache=/var/tmp/chan-v0840-npm-cache make pre-push` completed with status 0 on commit `fe450858` on 2026-08-05. Its static sdme contract, shell, workflow, and build-matrix checks passed with the rest of the integrated release gate.

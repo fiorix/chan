@@ -41,11 +41,11 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [terminal-tab-rename-reaches-inventory](v0.84.0/terminal-tab-rename-reaches-inventory.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
 | [terminal-editor-appearance-settings](v0.84.0/terminal-editor-appearance-settings.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
 | [release-platform-verification](v0.84.0/release-platform-verification.md) | implemented and validated on `v0840-base` | ship at v0.84.0 GA |
-| [graph-inspector-language-node-detail](v0.84.0/graph-inspector-language-node-detail.md) | implemented, focused validation complete | ship at v0.84.0 GA after the integrated release gate |
-| [tests-inherit-ambient-chan-env](v0.84.0/tests-inherit-ambient-chan-env.md) | implemented, focused validation complete | ship at v0.84.0 GA after the integrated release gate |
+| [graph-inspector-language-node-detail](v0.84.0/graph-inspector-language-node-detail.md) | implemented, integrated gate complete | ship at v0.84.0 GA |
+| [tests-inherit-ambient-chan-env](v0.84.0/tests-inherit-ambient-chan-env.md) | implemented, integrated gate complete | ship at v0.84.0 GA |
 | [rich-prompt-submit-button](v0.84.0/rich-prompt-submit-button.md) | implemented and validated on `v0840-base` | turn the Rich Prompt's hint into a control strip whose primary button submits and becomes cancel while a prompt is in flight |
-| [terminal-secret-masking-default-off](v0.84.0/terminal-secret-masking-default-off.md) | implemented, focused validation complete | ship the opt-in default after the integrated release gate |
-| [sdme-ubuntu-nix-build](v0.84.0/sdme-ubuntu-nix-build.md) | implemented, live Ubuntu validation complete | ship the tracked guest build after the integrated release gate |
+| [terminal-secret-masking-default-off](v0.84.0/terminal-secret-masking-default-off.md) | implemented, integrated gate complete | ship the opt-in default at v0.84.0 GA |
+| [sdme-ubuntu-nix-build](v0.84.0/sdme-ubuntu-nix-build.md) | implemented, live Ubuntu and integrated gate complete | ship the tracked guest build at v0.84.0 GA |
 
 ## Completed
 
