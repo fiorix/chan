@@ -1,6 +1,7 @@
 # Graph render cost on a large workspace
 
-Status: REGISTERED for v0.84.1, grounded 2026-08-05, implemented, owner validation pending.
+Status: REGISTERED for v0.84.1, grounded 2026-08-05, implemented, owner validated 2026-08-05 in a
+real browser. Ready to close to `done/` at the v0.84.1 GA.
 
 ## What
 
@@ -60,4 +61,4 @@ Measured after the change, against the same workspace and the same gestures: idl
 ## Open
 
 - Settling after a deliberate drag still takes tens of seconds at this size, because d3-force's alpha schedule is a fixed tick count and this change does not touch it. Bounding the charge force's range and scaling `alphaDecay` with node count are the levers, and both alter how the layout looks, so they belong to a separate decision rather than to this performance pass.
-- Owner validation on a real workspace in a real browser is outstanding. The evidence above comes from headless Chrome driving the real UI.
+- Owner validation on a real workspace in a real browser is DONE (2026-08-05). The measured evidence above comes from headless Chrome driving the real UI; the owner confirmed selection and drag behaviour live.
