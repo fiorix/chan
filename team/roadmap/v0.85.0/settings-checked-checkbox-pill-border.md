@@ -1,6 +1,6 @@
 # Checked checkbox pills switch their outer border to blue
 
-Status: REGISTERED for v0.85.0, grounded 2026-08-05.
+Status: IMPLEMENTED for v0.85.0, grounded 2026-08-05, automated evidence complete.
 
 ## What
 
