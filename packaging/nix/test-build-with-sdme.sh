@@ -3,6 +3,14 @@
 
 set -euo pipefail
 
+# Git hooks export repository-local variables to their child processes. Clear
+# them before creating the isolated fixture repository.
+mapfile -t git_local_env_vars < <(git rev-parse --local-env-vars)
+for git_local_env_var in "${git_local_env_vars[@]}"; do
+    unset "$git_local_env_var"
+done
+unset git_local_env_var git_local_env_vars
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRIVER="$SCRIPT_DIR/build-with-sdme.sh"
 TMP_BASE="${TMPDIR:-/var/tmp}"
