@@ -1601,20 +1601,14 @@ mod tests {
         let mut extension = StatusCode::OK.into_response();
         apply_credentialed_response_policy(&mut extension, true);
         assert_eq!(
-            extension
-                .headers()
-                .get("content-security-policy")
-                .unwrap(),
+            extension.headers().get("content-security-policy").unwrap(),
             "frame-ancestors 'self'"
         );
 
         let mut ordinary = StatusCode::OK.into_response();
         apply_credentialed_response_policy(&mut ordinary, false);
         assert_eq!(
-            ordinary
-                .headers()
-                .get("content-security-policy")
-                .unwrap(),
+            ordinary.headers().get("content-security-policy").unwrap(),
             "frame-ancestors 'none'"
         );
     }
