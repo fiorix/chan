@@ -980,10 +980,14 @@ pub async fn api_read_file(
                 let build_ws = workspace;
                 let build_path = path;
                 let build_name = root_name.clone();
-                crate::routes::transfer::stream_tar_response(root_name, move |builder| {
-                    append_dir_to_archive(builder, &build_ws, &build_path, &build_name)
-                        .map_err(|e| std::io::Error::other(e.to_string()))
-                })
+                crate::routes::transfer::stream_tar_response(
+                    &state.bulk_transfer,
+                    root_name,
+                    move |builder| {
+                        append_dir_to_archive(builder, &build_ws, &build_path, &build_name)
+                            .map_err(|e| std::io::Error::other(e.to_string()))
+                    },
+                )
             }
             Ok(Err(e)) => err_from(&e),
             Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),

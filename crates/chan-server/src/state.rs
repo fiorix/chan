@@ -177,10 +177,6 @@ pub struct AppState {
     /// lane. Deliberately the tenant handle and not the lane itself: routes
     /// must be able to submit and cancel without being able to shut the lane
     /// down or to observe another tenant's queue.
-    #[allow(
-        dead_code,
-        reason = "admission handle for the transfer routes; no route submits through it yet"
-    )]
     pub bulk_transfer: crate::bulk_transfer::BulkTransferTenant,
     /// Random id minted when this tenant was built, exposed via
     /// `GET /api/health`. The SPA compares it across `/ws` reconnects:

@@ -54,6 +54,25 @@ impl BulkFull {
     }
 }
 
+impl axum::response::IntoResponse for BulkFull {
+    /// 503 rather than 429: the machine is saturated, not the caller. The
+    /// rendering lives with the policy so every transfer route refuses
+    /// identically and no route can invent its own status or retry hint.
+    fn into_response(self) -> axum::response::Response {
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            [(
+                axum::http::header::RETRY_AFTER,
+                self.retry_after_secs().to_string(),
+            )],
+            axum::Json(serde_json::json!({
+                "error": "too many transfers in progress; retry shortly"
+            })),
+        )
+            .into_response()
+    }
+}
+
 /// What a submitted job produced.
 #[derive(Debug, PartialEq, Eq)]
 pub enum BulkOutcome<T> {
@@ -65,6 +84,10 @@ pub enum BulkOutcome<T> {
 
 /// Cooperative cancellation signal handed to a running job. Bulk work is
 /// chunked, so a job checks this between chunks rather than being killed.
+///
+/// Cloneable because the check usually happens inside a writer or reader the
+/// job hands to a library, not in the job closure itself.
+#[derive(Clone)]
 pub struct BulkCancel(Arc<AtomicBool>);
 
 impl BulkCancel {
@@ -380,6 +403,53 @@ fn worker_main(shared: Arc<SharedLane>) {
         if let Ok(completion) = completion {
             let _ = catch_unwind(AssertUnwindSafe(completion));
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    //! Standalone cancellation signals, so a route's writer or reader can be
+    //! unit-tested at its own seam without admitting a job to reach one.
+
+    use super::*;
+
+    pub(crate) fn uncancelled() -> BulkCancel {
+        BulkCancel(Arc::new(AtomicBool::new(false)))
+    }
+
+    pub(crate) fn cancelled() -> BulkCancel {
+        BulkCancel(Arc::new(AtomicBool::new(true)))
+    }
+
+    /// A tenant on its OWN lane. Tests that saturate admission must not use
+    /// the shared test lane: filling it would refuse admission for every other
+    /// test running at the same time. The returned lane must stay in scope for
+    /// the test's life; dropping it shuts the workers down.
+    pub(crate) fn isolated_tenant() -> (Arc<BulkTransferLane>, BulkTransferTenant) {
+        let lane = BulkTransferLane::new();
+        let tenant = lane.tenant();
+        (lane, tenant)
+    }
+
+    /// Hold every admission slot on `tenant`'s lane. Dropping the returned
+    /// senders releases the held jobs.
+    pub(crate) fn saturate_admission(
+        tenant: &BulkTransferTenant,
+    ) -> (Vec<std::sync::mpsc::Sender<()>>, Vec<BulkJob<()>>) {
+        let mut releases = Vec::new();
+        let mut held = Vec::new();
+        for _ in 0..(ACTIVE_CAPACITY + WAITING_CAPACITY) {
+            let (release, park) = std::sync::mpsc::channel::<()>();
+            releases.push(release);
+            held.push(
+                tenant
+                    .submit(move |_| {
+                        let _ = park.recv();
+                    })
+                    .expect("within the process budget"),
+            );
+        }
+        (releases, held)
     }
 }
 

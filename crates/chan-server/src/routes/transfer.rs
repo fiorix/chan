@@ -20,7 +20,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use axum::body::{Body, Bytes};
-use axum::extract::{multipart::Field, Multipart, Path as AxumPath, Query};
+use axum::extract::{multipart::Field, Multipart, Path as AxumPath, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -28,6 +28,7 @@ use futures::stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use crate::bulk_transfer::{BulkCancel, BulkTransferTenant};
 use crate::error::{err, err_from};
 use crate::routes::files::{
     content_disposition_archive, content_disposition_attachment, download_filename, query_flag,
@@ -79,10 +80,21 @@ pub(crate) fn verify_readable_fs(abs: &Path) -> Result<(), String> {
 /// nothing is staged on disk, so a cancelled download leaves no trace.
 pub(crate) struct TarChannelWriter {
     tx: mpsc::Sender<std::io::Result<Bytes>>,
+    cancel: BulkCancel,
 }
 
 impl Write for TarChannelWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // Checked per chunk so shutdown and explicit cancellation stop the
+        // build promptly. A disconnect alone would also surface below when the
+        // receiver is gone, but only once the next chunk is ready, which on a
+        // large member can be far later than the cancel.
+        if self.cancel.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "transfer cancelled",
+            ));
+        }
         self.tx
             .blocking_send(Ok(Bytes::copy_from_slice(buf)))
             .map_err(|_| {
@@ -102,22 +114,37 @@ impl Write for TarChannelWriter {
 /// conditions; a client disconnect stops it cleanly (BrokenPipe), and any other
 /// late error is forwarded so the body fails rather than completing a truncated
 /// archive silently.
-pub(crate) fn stream_tar_response<F>(archive_name: String, build: F) -> Response
+pub(crate) fn stream_tar_response<F>(
+    bulk: &BulkTransferTenant,
+    archive_name: String,
+    build: F,
+) -> Response
 where
     F: FnOnce(&mut tar::Builder<TarChannelWriter>) -> std::io::Result<()> + Send + 'static,
 {
     let (tx, rx) = mpsc::channel::<std::io::Result<Bytes>>(8);
-    tokio::task::spawn_blocking(move || {
-        let mut builder = tar::Builder::new(TarChannelWriter { tx: tx.clone() });
+    let job = match bulk.submit(move |cancel| {
+        let mut builder = tar::Builder::new(TarChannelWriter {
+            tx: tx.clone(),
+            cancel: cancel.clone(),
+        });
         let result = build(&mut builder).and_then(|()| builder.finish());
         if let Err(e) = result {
             if e.kind() != std::io::ErrorKind::BrokenPipe {
                 let _ = tx.blocking_send(Err(e));
             }
         }
-    });
-    let body = Body::from_stream(stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|message| (message, rx))
+    }) {
+        Ok(job) => job,
+        // Refused before a single archive byte is produced, so the caller can
+        // retry without having paid for a walk of the tree.
+        Err(full) => return full.into_response(),
+    };
+    // The job handle rides in the body's state so a disconnected or dropped
+    // response cancels the build and releases its lane slot. Holding it
+    // anywhere else would keep a slot occupied for a client that is gone.
+    let body = Body::from_stream(stream::unfold((rx, job), |(mut rx, job)| async move {
+        rx.recv().await.map(|message| (message, (rx, job)))
     }));
     (
         [
@@ -143,6 +170,7 @@ pub(crate) struct TerminalDownloadQuery {
 /// router, so `{*path}` is always a filesystem-absolute target (see
 /// [`abs_from_terminal_path`]).
 pub async fn api_terminal_read_file(
+    State(state): State<std::sync::Arc<crate::state::AppState>>,
     AxumPath(path): AxumPath<String>,
     Query(query): Query<TerminalDownloadQuery>,
 ) -> Response {
@@ -167,7 +195,7 @@ pub async fn api_terminal_read_file(
         Ok(Ok(TerminalDownload::Directory { name })) => {
             let build_abs = abs;
             let build_name = name.clone();
-            stream_tar_response(name, move |builder| {
+            stream_tar_response(&state.bulk_transfer, name, move |builder| {
                 builder.append_dir_all(&build_name, &build_abs)
             })
         }
@@ -755,9 +783,59 @@ mod tests {
         // fail so the build stops (nothing staged on disk = no trace).
         let (tx, rx) = mpsc::channel::<std::io::Result<Bytes>>(1);
         drop(rx);
-        let mut writer = TarChannelWriter { tx };
+        let mut writer = TarChannelWriter {
+            tx,
+            cancel: crate::bulk_transfer::test_support::uncancelled(),
+        };
         let e = writer.write(b"data").unwrap_err();
         assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn tar_channel_writer_stops_on_cancellation_before_touching_the_channel() {
+        // Cancellation must stop the build even when the reader is still
+        // draining, which is what makes a shutdown prompt rather than
+        // dependent on the next chunk filling the channel.
+        let (tx, mut rx) = mpsc::channel::<std::io::Result<Bytes>>(1);
+        let cancel = crate::bulk_transfer::test_support::cancelled();
+        let mut writer = TarChannelWriter { tx, cancel };
+        let e = writer.write(b"data").unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe);
+        assert!(
+            rx.try_recv().is_err(),
+            "a cancelled write must not enqueue archive bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_refuses_at_the_bound_with_a_retry_hint_and_no_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        let src = dir.path().to_path_buf();
+
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+        let (releases, _held) = crate::bulk_transfer::test_support::saturate_admission(&bulk);
+
+        let built = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = built.clone();
+        let resp = stream_tar_response(&bulk, "arc".into(), move |b| {
+            observed.store(true, std::sync::atomic::Ordering::SeqCst);
+            b.append_dir_all("arc", &src)
+        });
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+        assert!(
+            !built.load(std::sync::atomic::Ordering::SeqCst),
+            "a refusal must not walk the tree it declined to archive"
+        );
+
+        drop(releases);
     }
 
     #[tokio::test]
@@ -767,7 +845,8 @@ mod tests {
         std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
         let src = dir.path().to_path_buf();
 
-        let resp = stream_tar_response("arc".into(), move |b| b.append_dir_all("arc", &src));
+        let bulk = crate::state::test_support::make_test_bulk_transfer_tenant();
+        let resp = stream_tar_response(&bulk, "arc".into(), move |b| b.append_dir_all("arc", &src));
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
