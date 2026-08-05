@@ -168,9 +168,9 @@ A bare `chan devserver` (no action verb) runs in the FOREGROUND on
 --restart, --status, --join, --rotate-token -- drive a background
 service instead.
 --join brings the service up (or re-attaches to a running one) and
-stays attached, blocking on its health until Ctrl-C, at which point
-it detaches and the service keeps running; that is the form connect
-scripts use.
+stays attached, blocking on its health until Ctrl-C or its non-TTY
+stdin closes, at which point it detaches and the service keeps
+running; that is the form connect scripts use.
 --rotate-token re-mints the bearer token (the response to a
 suspected leak) and prints the new CHAN_DEVSERVER_TOKEN= marker and
 /?t= URL. A running devserver drops the old token immediately;
@@ -273,8 +273,9 @@ CAUTIONS:
   restart`, a watchdog kill, or a crash. --restart --force tears
   the sessions down first and restarts without them; --stop and
   `systemctl --user stop` end the terminals.
-  --join exits 0 when you detach with Ctrl-C, and non-zero when
-  the backing service dies or stops answering /api/health.
+  --join exits 0 when you detach with Ctrl-C or its non-TTY stdin
+  closes, and non-zero when the backing service dies or stops
+  answering /api/health.
   --tunnel-token is visible in `ps`; prefer CHAN_TUNNEL_TOKEN.
 
 CAVEATS:

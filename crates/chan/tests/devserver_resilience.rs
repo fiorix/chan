@@ -1039,15 +1039,16 @@ async fn chan_service_start_status_join_restart_stop() {
         "status output: {stdout}"
     );
 
-    let mut join_child = sandbox
-        .command()
+    let mut join_command = sandbox.command();
+    join_command
         .arg("devserver")
         .arg("--service=chan")
         .arg("--join")
         .args(["--bind", "127.0.0.1"])
         .args(["--port", &port.to_string()])
-        .spawn()
-        .expect("join chan service");
+        .stdin(Stdio::piped());
+    let mut join_child = join_command.spawn().expect("join chan service");
+    let join_stdin = join_child.stdin.take().expect("piped join stdin");
     let join_out = Transcript::capture(&mut join_child);
     let mut join = Server {
         child: join_child,
@@ -1060,10 +1061,13 @@ async fn chan_service_start_status_join_restart_stop() {
         )
         .await
         .unwrap_or_else(|| panic!("join never attached:\n{}", join.out.dump()));
-    send_signal(join.pid(), "INT");
+    // SSH and the desktop control terminal close the joiner's non-TTY stdin
+    // when their transport goes away. The join must treat that EOF like a
+    // clean detach instead of becoming a healthy orphan forever.
+    drop(join_stdin);
     let (status, _elapsed) = wait_exit(&mut join, EXIT_BUDGET)
         .await
-        .unwrap_or_else(|| panic!("join did not detach:\n{}", join.out.dump()));
+        .unwrap_or_else(|| panic!("join did not detach after stdin EOF:\n{}", join.out.dump()));
     assert!(status.success(), "join detach exit not clean: {status:?}");
     wait_devserver_up(&client, addr).await;
     assert!(
@@ -1127,15 +1131,16 @@ async fn chan_service_join_survives_stall_and_restart() {
     wait_devserver_up(&client, addr).await;
     let first_pid = daemon_pid(&sandbox);
 
-    let mut join_child = sandbox
-        .command()
+    let mut join_command = sandbox.command();
+    join_command
         .arg("devserver")
         .arg("--service=chan")
         .arg("--join")
         .args(["--bind", "127.0.0.1"])
         .args(["--port", &port.to_string()])
-        .spawn()
-        .expect("join chan service");
+        .stdin(Stdio::piped());
+    let mut join_child = join_command.spawn().expect("join chan service");
+    let _join_stdin = join_child.stdin.take().expect("piped join stdin");
     let join_out = Transcript::capture(&mut join_child);
     let mut join = Server {
         child: join_child,
