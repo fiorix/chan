@@ -136,8 +136,10 @@ describe("GraphCanvas pauses instead of tearing down when hidden", () => {
     // On un-pause with a live sim and a stopped loop: resize() (the pane
     // may have resized while hidden) then requestAnimationFrame(loop).
     // No start() -- that would reset the transform.
+    // markDirty() between the two: the repaint gate would otherwise hold
+    // the first post-resume frame back until something else changed.
     expect(graphCanvas).toMatch(
-      /if \(paused\) return;\s*if \(!sim \|\| rafId !== null\) return;\s*resize\(\);\s*rafId = requestAnimationFrame\(loop\);/,
+      /if \(paused\) return;\s*if \(!sim \|\| rafId !== null\) return;\s*resize\(\);\s*markDirty\(\);\s*rafId = requestAnimationFrame\(loop\);/,
     );
   });
 });

@@ -279,6 +279,40 @@
   /// Used at mouseup to decide whether the gesture was a tap
   /// (movement under a few pixels → onSelect) versus a drag.
   let downAt: { x: number; y: number } | null = null;
+  /// True once a press on a node has actually moved past
+  /// `DRAG_ACTIVATE_PX` and become a drag. A press alone must not pin the
+  /// node or re-heat the simulation: on a large graph the alpha injected by
+  /// a mere click takes hundreds of ticks to decay, which reads as the whole
+  /// cluster shaking for seconds after a plain selection. Pinning and
+  /// re-heating are therefore deferred to the first qualifying move.
+  let dragActive = false;
+
+  /// Repaint gate. The rAF loop is free-running, but a graph that is not
+  /// moving must not re-rasterise thousands of discs and edges 60 times a
+  /// second. `dirty` marks "something changed that the canvas has not drawn
+  /// yet"; `markDirty()` is called from every state transition the paint
+  /// pass observes. Continuous sources (a live simulation, an in-flight fit
+  /// ease, the indexing pulse) are detected per frame in `loop()` instead,
+  /// since they change on their own schedule.
+  let dirty = true;
+  function markDirty(): void {
+    dirty = true;
+  }
+
+  /// Below this alpha d3-force has stopped its own timer and node positions
+  /// are fixed, so there is nothing new to draw. Mirrors d3's internal
+  /// `alphaMin` default.
+  const SIM_ALPHA_MIN = 0.001;
+
+  /// Structural revision of the working set. Bumped by
+  /// `rebuildWorkingSet()` so paint-time caches keyed on it invalidate
+  /// exactly when nodes or edges actually change, and not on every frame.
+  let workingSetRev = 0;
+
+  /// True while any node carries `indexState: "indexing"`. Those discs
+  /// breathe on a timer, so they are the one thing that must keep painting
+  /// even when the layout has settled and nothing else has changed.
+  let hasIndexingPulse = false;
 
   // ---- icon rasterisation ----------------------------------------------
 
@@ -343,7 +377,7 @@
     img.src = dataUrl;
     // The decode resolves asynchronously; until it lands, paint
     // skips this kind's icon. The disc + ring still render.
-    img.decode?.().catch(() => { /* fall through; .complete remains true once loaded */ });
+    img.decode?.().then(markDirty).catch(() => { /* fall through; .complete remains true once loaded */ });
     bucket[kind] = img;
   }
 
@@ -462,6 +496,7 @@
     strokeColor = next.bg;
     textColor = next.text;
     rebuildIcons(next.bg, next.textSec);
+    markDirty();
   }
 
   /// Palette colour for a file/document node kind. Mirrors the
@@ -723,6 +758,14 @@
       dEdges.push(de);
       if (visibleSet.has(key)) visibleEdgeRefs.push(de);
     }
+    // Nodes and edges just changed identity, so every paint-time cache
+    // keyed on the working set is now stale and the canvas owes a frame.
+    workingSetRev++;
+    hasIndexingPulse = false;
+    for (const n of dNodes) {
+      if (n.indexState === "indexing") { hasIndexingPulse = true; break; }
+    }
+    markDirty();
     return { added, removed };
   }
 
@@ -839,6 +882,7 @@
     canvas.height = Math.max(1, Math.round(r.height * dpr));
     canvas.style.width = `${r.width}px`;
     canvas.style.height = `${r.height}px`;
+    markDirty();
     // setTransform inside paint() applies the DPR scaling along
     // with the user's pan/zoom, so we don't bake it here.
     // When GraphCanvas is hosted inside a hidden carousel slide, the
@@ -898,32 +942,63 @@
 
   // ---- paint ------------------------------------------------------------
 
-  function paint(): void {
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    const dpr = window.devicePixelRatio || 1;
-    // Combined transform: DPR scaling × user pan/zoom. setTransform
-    // re-applies from identity each frame so cumulative drift is
-    // impossible.
-    ctx.setTransform(
-      dpr * transform.k, 0, 0, dpr * transform.k,
-      dpr * transform.x, dpr * transform.y,
-    );
-    ctx.clearRect(
-      -transform.x / transform.k,
-      -transform.y / transform.k,
-      canvas.width / (dpr * transform.k),
-      canvas.height / (dpr * transform.k),
-    );
+  /// Edges grouped for painting: one bucket per kind, so the stroke style
+  /// changes once per kind rather than once per edge.
+  type EdgeBuckets = {
+    byKind: Record<RenderedEdgeKind, DEdge[]>;
+    linkByKind: Map<string, DEdge[]>;
+  };
 
-    const adj = selectedId !== null ? adjacency.get(selectedId) : null;
-    // Focus-on-select: with a node selected, its 1st-degree
-    // neighbourhood (itself + `adj`) is the spotlight; everything else
-    // dims so the selection reads at a glance. Drives both the node
-    // alpha (below) and the edge emphasis (incident edges lit, the rest
-    // faded).
-    const hasSelection = selectedId !== null;
+  /// Group an edge list for painting. `link` edges are sub-grouped by their
+  /// SOURCE document's kind so a markdown link strokes orange (--g-doc) and
+  /// a source file's link royalblue (--g-source), mirroring the node-fill
+  /// palette. Endpoints are read as resolved DNodes, which holds because
+  /// d3-force's `forceLink` swaps the string ids for node objects
+  /// synchronously inside `links()` / `nodes()`, both of which run before
+  /// the next paint.
+  function bucketEdges(edgeList: DEdge[]): EdgeBuckets {
+    const edgesByKind: Record<RenderedEdgeKind, DEdge[]> = {
+      link: [], tag: [], mention: [], contains: [], language: [], group: [],
+    };
+    for (const e of edgeList) edgesByKind[e.kind].push(e);
+    // Falls back to the doc colour when the source kind isn't a recognised
+    // file class (e.g. a tag/mention source, which shouldn't originate a
+    // `link` but is handled defensively).
+    const linkByKind = new Map<string, DEdge[]>();
+    for (const e of edgesByKind.link) {
+      const src = e.source as DNode;
+      const key = typeof src === "object" ? src.kind : "doc";
+      const bucket = linkByKind.get(key);
+      if (bucket) bucket.push(e);
+      else linkByKind.set(key, [e]);
+    }
+    return { byKind: edgesByKind, linkByKind };
+  }
+
+  type SelectionPaint = {
+    rev: number;
+    selected: string | null;
+    spine: { nodes: Set<string>; edges: Set<string> };
+    base: EdgeBuckets;
+    lit: EdgeBuckets | null;
+  };
+  let paintCache: SelectionPaint | null = null;
+
+  /// Selection-derived paint inputs, memoised on (working-set revision,
+  /// selection). Recomputing these every frame is what made a selected node
+  /// expensive on a large graph: the spine walk allocates two sets, the
+  /// incident-edge scan walks the whole edge list, and bucketing walks it
+  /// twice more. None of it depends on node POSITIONS, so the result stays
+  /// valid across every frame of a running simulation and is rebuilt only
+  /// when the selection or the working set actually changes.
+  function selectionPaint(): SelectionPaint {
+    if (
+      paintCache
+      && paintCache.rev === workingSetRev
+      && paintCache.selected === selectedId
+    ) {
+      return paintCache;
+    }
     // Containment spine: a node in the directory tree (any file /
     // directory / contact / symlink / media, i.e. anything with a
     // `contains` parent) also lights its whole parent chain up to the
@@ -944,6 +1019,65 @@
       const tId = typeof e.target === "object" ? e.target.id : e.target;
       return spine.edges.has(spineEdgeKey(sId, tId));
     };
+    paintCache = {
+      rev: workingSetRev,
+      selected: selectedId,
+      spine,
+      base: bucketEdges(visibleEdgeRefs),
+      // Lit overlay: the edges touching the selection, plus its path home
+      // to the workspace root. Drawn on top of the dimmed base pass.
+      lit:
+        selectedId === null
+          ? null
+          : bucketEdges(
+            visibleEdgeRefs.filter((e) => isIncidentEdge(e) || isSpineEdge(e)),
+          ),
+    };
+    return paintCache;
+  }
+
+  function paint(): void {
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const dpr = window.devicePixelRatio || 1;
+    // Combined transform: DPR scaling × user pan/zoom. setTransform
+    // re-applies from identity each frame so cumulative drift is
+    // impossible.
+    ctx.setTransform(
+      dpr * transform.k, 0, 0, dpr * transform.k,
+      dpr * transform.x, dpr * transform.y,
+    );
+    ctx.clearRect(
+      -transform.x / transform.k,
+      -transform.y / transform.k,
+      canvas.width / (dpr * transform.k),
+      canvas.height / (dpr * transform.k),
+    );
+
+    // World-space bounds of what is actually on screen. Anything fully
+    // outside is skipped: the rasteriser would discard it anyway, but the
+    // path building, the icon blits and the label measuring are paid in JS
+    // regardless, and on a multi-thousand-node graph that dominates the
+    // frame when the user is zoomed in.
+    const viewMinX = -transform.x / transform.k;
+    const viewMinY = -transform.y / transform.k;
+    const viewMaxX = viewMinX + canvas.width / (dpr * transform.k);
+    const viewMaxY = viewMinY + canvas.height / (dpr * transform.k);
+    /// Slack around the viewport, in world units, so a node just off-screen
+    /// still draws and its label (which extends above and to either side of
+    /// the disc) does not pop in at the edge.
+    const cullPad = 140 / Math.max(0.5, transform.k);
+
+    const adj = selectedId !== null ? adjacency.get(selectedId) : null;
+    // Focus-on-select: with a node selected, its 1st-degree
+    // neighbourhood (itself + `adj`) is the spotlight; everything else
+    // dims so the selection reads at a glance. Drives both the node
+    // alpha (below) and the edge emphasis (incident edges lit, the rest
+    // faded).
+    const hasSelection = selectedId !== null;
+    const sel = selectionPaint();
+    const spine = sel.spine;
 
     // Edges first so nodes paint on top. Group by kind so we only
     // change strokeStyle once per kind.
@@ -970,31 +1104,46 @@
       : kind === "language" ? theme.language
       : theme.accent;
 
+    /// Both endpoints strictly off the same side of the viewport means the
+    /// segment cannot cross it. Cheap conservative reject; a segment that
+    /// straddles the viewport diagonally is kept and clipped by the canvas.
+    const edgeOffscreen = (s: DNode, t: DNode): boolean =>
+      (s.x! < viewMinX && t.x! < viewMinX)
+      || (s.x! > viewMaxX && t.x! > viewMaxX)
+      || (s.y! < viewMinY && t.y! < viewMinY)
+      || (s.y! > viewMaxY && t.y! > viewMaxY);
+
     const strokePass = (list: DEdge[], color: string, alpha: number): void => {
       if (list.length === 0) return;
       ctx.globalAlpha = alpha;
       ctx.strokeStyle = color;
       ctx.beginPath();
+      // Counted rather than collected: broken edges are rare, and a
+      // `filter` here would allocate an array per kind per pass on a list
+      // that can run to five figures.
+      let broken = 0;
       for (const e of list) {
         const s = e.source as DNode;
         const t = e.target as DNode;
         if (s.x == null || t.x == null) continue;
-        if (e.broken) continue; // dashed pass below
+        if (e.broken) { broken++; continue; } // dashed pass below
+        if (edgeOffscreen(s, t)) continue;
         ctx.moveTo(s.x!, s.y!);
         ctx.lineTo(t.x!, t.y!);
       }
       ctx.stroke();
       // Broken edges: same colour, lower alpha, dashed.
-      const broken = list.filter((e) => e.broken);
-      if (broken.length > 0) {
+      if (broken > 0) {
         ctx.save();
         ctx.setLineDash([3 / Math.max(0.5, transform.k), 3 / Math.max(0.5, transform.k)]);
         ctx.globalAlpha = 0.12;
         ctx.beginPath();
-        for (const e of broken) {
+        for (const e of list) {
+          if (!e.broken) continue;
           const s = e.source as DNode;
           const t = e.target as DNode;
           if (s.x == null || t.x == null) continue;
+          if (edgeOffscreen(s, t)) continue;
           ctx.moveTo(s.x!, s.y!);
           ctx.lineTo(t.x!, t.y!);
         }
@@ -1003,33 +1152,17 @@
       }
     };
 
-    // Draw an edge list at one alpha, preserving the palette: each kind
-    // strokes in its own hue, and `link` edges sub-group by their source
-    // document's kind. Factored out so the base pass and the focus lit
-    // overlay share identical colour resolution.
-    const drawEdgeSet = (edgeList: DEdge[], alpha: number): void => {
-      const edgesByKind: Record<RenderedEdgeKind, DEdge[]> = {
-        link: [], tag: [], mention: [], contains: [], language: [], group: [],
-      };
-      for (const e of edgeList) edgesByKind[e.kind].push(e);
+    // Draw pre-grouped edges at one alpha, preserving the palette: each
+    // kind strokes in its own hue, and `link` edges sub-group by their
+    // source document's kind. Factored out so the base pass and the focus
+    // lit overlay share identical colour resolution. The grouping itself
+    // is memoised in `selectionPaint()`, so a frame only walks the
+    // buckets it draws.
+    const drawEdgeBuckets = (buckets: EdgeBuckets, alpha: number): void => {
       for (const kind of ["tag", "mention", "contains", "language", "group"] as const) {
-        strokePass(edgesByKind[kind], strokeForKind(kind), alpha);
+        strokePass(buckets.byKind[kind], strokeForKind(kind), alpha);
       }
-      // `link` edges grouped by source-document kind. Resolving the
-      // colour from the source node mirrors the node-fill palette so a
-      // doc's outgoing links share the doc's hue. Falls back to the doc
-      // colour when the source kind isn't a recognised file class (e.g.
-      // a tag/mention source, which shouldn't originate a `link` but is
-      // handled defensively).
-      const linkByKind = new Map<string, DEdge[]>();
-      for (const e of edgesByKind.link) {
-        const src = e.source as DNode;
-        const key = typeof src === "object" ? src.kind : "doc";
-        const bucket = linkByKind.get(key);
-        if (bucket) bucket.push(e);
-        else linkByKind.set(key, [e]);
-      }
-      for (const [kind, list] of linkByKind) {
+      for (const [kind, list] of buckets.linkByKind) {
         strokePass(list, fileKindColor(kind as DKind), alpha);
       }
     };
@@ -1039,12 +1172,9 @@
     // weight. Then, when selected, redraw the edges touching the
     // selection on top at full strength so the 1st-degree connections
     // light up against the faded rest.
-    drawEdgeSet(visibleEdgeRefs, hasSelection ? FOCUS_DIM_EDGE : EDGE_ALPHA);
-    if (hasSelection) {
-      drawEdgeSet(
-        visibleEdgeRefs.filter((e) => isIncidentEdge(e) || isSpineEdge(e)),
-        FOCUS_LIT_EDGE,
-      );
+    drawEdgeBuckets(sel.base, hasSelection ? FOCUS_DIM_EDGE : EDGE_ALPHA);
+    if (hasSelection && sel.lit) {
+      drawEdgeBuckets(sel.lit, FOCUS_LIT_EDGE);
     }
     ctx.globalAlpha = 1;
 
@@ -1053,6 +1183,18 @@
       if (n.x == null || n.y == null) continue;
       const isSel = n.id === selectedId;
       const isAdj = adj?.has(n.id) === true;
+      // Labelled nodes are exempt from culling: a label is drawn centred
+      // above its disc and can be far wider than it, so a node just past
+      // the pad could still owe visible text. There are only ever a
+      // handful of them (the selection, its neighbours, its spine).
+      const labelled = isSel || isAdj || spine.nodes.has(n.id);
+      if (
+        !labelled
+        && (n.x < viewMinX - cullPad || n.x > viewMaxX + cullPad
+          || n.y < viewMinY - cullPad || n.y > viewMaxY + cullPad)
+      ) {
+        continue;
+      }
       const isHover = n.id === hoverId;
       // Out of the spotlight: a selection is active and this node is
       // neither the selection nor one of its 1st-degree neighbours, so
@@ -1212,6 +1354,7 @@
       const ny = transform.y + (fitTarget.y - transform.y) * a;
       const nk = transform.k + (fitTarget.k - transform.k) * a;
       transform = { x: nx, y: ny, k: nk };
+      markDirty();
       if (
         now >= refitUntil
         && Math.abs(fitTarget.x - transform.x) < 0.5
@@ -1221,7 +1364,23 @@
         fitTarget = null;
       }
     }
-    paint();
+    // Repaint only when there is something new to show. A settled graph
+    // with an idle pointer is the common case, and re-rasterising
+    // thousands of discs, icon blits and edges into an identical frame
+    // sixty times a second is pure waste -- it is what makes the whole
+    // viewport feel heavy on a large workspace. Discrete changes announce
+    // themselves through `markDirty()`; the continuous sources below
+    // advance on their own schedule and so have to be polled here.
+    //
+    // `sim.alpha()` is the authoritative "is the layout still moving"
+    // signal: d3-force stops its own timer once alpha decays past
+    // alphaMin, and node positions are fixed from then on.
+    const simRunning = sim !== null && sim.alpha() > SIM_ALPHA_MIN;
+    const pulsing = hasIndexingPulse && !reduceMotion;
+    if (dirty || simRunning || fitTarget !== null || pulsing) {
+      paint();
+      dirty = false;
+    }
     rafId = requestAnimationFrame(loop);
   }
 
@@ -1239,10 +1398,14 @@
     downAt = { x: p.x, y: p.y };
     const n = pickNode(p.x, p.y);
     if (n) {
+      // Candidate drag only. Pinning the node and re-heating the
+      // simulation happen on the first qualifying move (see
+      // `activateDrag`), never on the press itself: a press that turns out
+      // to be a plain selection click would otherwise inject alpha that
+      // takes hundreds of ticks to decay, which on a large graph reads as
+      // the cluster shaking for seconds after every click.
       dragId = n.id;
-      n.fx = n.x;
-      n.fy = n.y;
-      sim?.alphaTarget(0.3).restart();
+      dragActive = false;
       cancelRefit();
       // Drag is user interaction; subsequent same-set data
       // refreshes must not snap the view back.
@@ -1254,20 +1417,48 @@
     }
   }
 
+  /// Movement past this many screen pixels promotes a press on a node into
+  /// a real drag. Matches the tap/drag threshold `onMouseUp` already uses
+  /// to decide between selecting and dragging, so the two never disagree.
+  const DRAG_ACTIVATE_PX = 3;
+
+  /// Promote the pending press into a live drag: pin the node under the
+  /// cursor and re-heat the simulation so the cluster follows it.
+  function activateDrag(n: DNode): void {
+    dragActive = true;
+    n.fx = n.x;
+    n.fy = n.y;
+    sim?.alphaTarget(0.3).restart();
+  }
+
   function onMouseMove(e: MouseEvent): void {
     if (!canvas) return;
     const p = localCoords(e);
     if (dragId !== null) {
       const n = nodeById.get(dragId);
       if (!n) return;
+      if (!dragActive) {
+        // Still deciding whether this press is a click or a drag. Until it
+        // clears the threshold the simulation stays untouched.
+        if (
+          !downAt
+          || (Math.abs(p.x - downAt.x) <= DRAG_ACTIVATE_PX
+            && Math.abs(p.y - downAt.y) <= DRAG_ACTIVATE_PX)
+        ) {
+          return;
+        }
+        activateDrag(n);
+      }
       const w = screenToWorld(p.x, p.y);
       n.fx = w.x;
       n.fy = w.y;
+      markDirty();
       return;
     }
     if (panStart) {
       transform.x = panStart.tx + (e.clientX - panStart.x);
       transform.y = panStart.ty + (e.clientY - panStart.y);
+      markDirty();
       return;
     }
     // Cheap hover update. Match the wider click slack so the cursor
@@ -1275,22 +1466,34 @@
     // the user will actually tap. Drag-detect (onMouseDown) uses the
     // tighter slack to keep pan-on-empty usable.
     const h = pickNode(p.x, p.y, PICK_SLACK_CLICK_PX);
-    hoverId = h?.id ?? null;
+    const next = h?.id ?? null;
+    if (next !== hoverId) {
+      hoverId = next;
+      markDirty();
+    }
   }
 
   function onMouseUp(e: MouseEvent): void {
     const p = localCoords(e);
     const moved =
-      downAt && (Math.abs(p.x - downAt.x) > 3 || Math.abs(p.y - downAt.y) > 3);
+      downAt
+      && (Math.abs(p.x - downAt.x) > DRAG_ACTIVATE_PX
+        || Math.abs(p.y - downAt.y) > DRAG_ACTIVATE_PX);
     if (dragId !== null) {
-      const n = nodeById.get(dragId);
-      if (n && !n.isFocal) {
-        // Release the node back to the simulation. Focal nodes
-        // remain pinned at origin regardless.
-        n.fx = null;
-        n.fy = null;
+      // Only a drag that actually activated pinned the node and re-heated
+      // the simulation, so only that path has anything to undo. A plain
+      // selection click leaves the layout untouched.
+      if (dragActive) {
+        const n = nodeById.get(dragId);
+        if (n && !n.isFocal) {
+          // Release the node back to the simulation. Focal nodes
+          // remain pinned at origin regardless.
+          n.fx = null;
+          n.fy = null;
+        }
+        sim?.alphaTarget(0);
       }
-      sim?.alphaTarget(0);
+      dragActive = false;
       dragId = null;
       if (!moved) {
         // A tap on a node (no drag movement) selects it. Use the
@@ -1351,6 +1554,7 @@
     transform.x = p.x - ((p.x - transform.x) * k2) / transform.k;
     transform.y = p.y - ((p.y - transform.y) * k2) / transform.k;
     transform.k = k2;
+    markDirty();
   }
 
   function onContextMenuLocal(e: MouseEvent): void {
@@ -1473,7 +1677,10 @@
   /// open after the sim has pre-ticked into a settled layout.
   function fitToContent(pad: number): void {
     const t = computeFit(pad);
-    if (t) transform = t;
+    if (t) {
+      transform = t;
+      markDirty();
+    }
   }
 
   /// Open a refit window for `ms` so the rAF loop tracks the cluster
@@ -1551,6 +1758,7 @@
     reduceMotion = reduceMotionQuery.matches;
     const onReduceMotionChange = (e: MediaQueryListEvent): void => {
       reduceMotion = e.matches;
+      markDirty();
     };
     reduceMotionQuery.addEventListener("change", onReduceMotionChange);
     if (open) start();
@@ -1592,7 +1800,18 @@
     if (paused) return;
     if (!sim || rafId !== null) return;
     resize();
+    markDirty();
     rafId = requestAnimationFrame(loop);
+  });
+
+  /// Selection / hover emphasis. The paint pass reads `selectedId` straight
+  /// from props rather than through reactivity, so the repaint has to be
+  /// requested explicitly. Load-bearing now that idle frames are gated:
+  /// without it, selecting a node on a settled graph would change nothing
+  /// on screen until the next unrelated repaint.
+  $effect(() => {
+    void selectedId;
+    markDirty();
   });
 
   /// Nodes / edges arrays changed (new graph payload from the
