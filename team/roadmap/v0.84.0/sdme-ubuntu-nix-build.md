@@ -1,6 +1,6 @@
 # Disposable sdme Ubuntu Nix build
 
-Status: REGISTERED for v0.84.0, implemented 2026-08-04, live guest validation pending.
+Status: REGISTERED for v0.84.0, implemented 2026-08-04, live Ubuntu guest validation complete 2026-08-05, integrated release gate pending.
 
 ## What
 
@@ -21,3 +21,10 @@ The release workflow needs a reproducible Nix build on hosts without Nix. The tr
 - The stubbed contract test rejects a missing explicit rootfs, every source/output overlap, and guest build state under `/tmp`. It proves tracked modifications are present while tracked deletions, Git metadata, ignored files, and untracked files are absent.
 - Shell syntax, shellcheck, workflow checks, build-matrix checks, and the Make dry run pass.
 - A clean `NIX_PACKAGE=chan` run succeeds from an Ubuntu guest, preserves a clean source tree, and leaves no matching container.
+
+## Evidence
+
+- The stub contract passed after exercising rootfs selection, tracked-source snapshot semantics, protected `/var/tmp` paths, failure propagation, cleanup precedence, and signal cleanup. Shell syntax, shellcheck, build-matrix, Make dry-run, and diff checks also passed.
+- `TMPDIR=/var/tmp make nix-sdme-check NIX_PACKAGE=chan NIX_SDME_ROOTFS=ubuntu NIX_SDME_OUT=/var/tmp/chan-v0840-nix-sdme SDME='sudo -n sdme'` completed with status 0 on 2026-08-05 from commit `dd16f198`.
+- The live guest identified itself as Ubuntu 26.04, initialized a local Nix 2.34.3 store, evaluated every declared system, built `chan`, and reported both `built devserver smoke: PASS` and `Nix package smoke: PASS`.
+- The source tree stayed clean. The PID-scoped guest and tracked-source snapshot were absent after cleanup.

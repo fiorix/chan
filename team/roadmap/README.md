@@ -44,8 +44,8 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [graph-inspector-language-node-detail](v0.84.0/graph-inspector-language-node-detail.md) | implemented, focused validation complete | ship at v0.84.0 GA after the integrated release gate |
 | [tests-inherit-ambient-chan-env](v0.84.0/tests-inherit-ambient-chan-env.md) | implemented, focused validation complete | ship at v0.84.0 GA after the integrated release gate |
 | [rich-prompt-submit-button](v0.84.0/rich-prompt-submit-button.md) | implemented and validated on `v0840-base` | turn the Rich Prompt's hint into a control strip whose primary button submits and becomes cancel while a prompt is in flight |
-| [terminal-secret-masking-default-off](v0.84.0/terminal-secret-masking-default-off.md) | implemented, focused validation pending | ship the opt-in default while preserving explicit configuration and the existing ephemeral per-tab switch |
-| [sdme-ubuntu-nix-build](v0.84.0/sdme-ubuntu-nix-build.md) | implemented, live guest validation pending | run the tracked `NIX_PACKAGE=chan` build in an Ubuntu sdme guest and retain its result |
+| [terminal-secret-masking-default-off](v0.84.0/terminal-secret-masking-default-off.md) | implemented, focused validation complete | ship the opt-in default after the integrated release gate |
+| [sdme-ubuntu-nix-build](v0.84.0/sdme-ubuntu-nix-build.md) | implemented, live Ubuntu validation complete | ship the tracked guest build after the integrated release gate |
 
 ## Completed
 

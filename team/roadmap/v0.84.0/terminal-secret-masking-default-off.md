@@ -1,6 +1,6 @@
 # Terminal secret masking defaults off
 
-Status: REGISTERED for v0.84.0, implemented 2026-08-04, focused validation pending.
+Status: REGISTERED for v0.84.0, implemented 2026-08-04, focused validation complete, integrated release gate pending.
 
 ## What
 
@@ -24,3 +24,9 @@ Users who need masking can set `terminal.secret_masking = true`. The terminal co
 - Web tests pin the Settings display fallback, terminal startup fallback, and context-menu switch.
 - The config reference states the new default and the two opt-in paths.
 - The integrated release gate passes.
+
+## Evidence
+
+- `cargo test --locked -p chan-library secret_masking_defaults_off_and_preserves_explicit_true` passed 1 test on 2026-08-05.
+- `cargo test --locked -p chan-server terminal_config_` passed 5 tests, and `cargo test --locked -p chan-server global_config_view_keeps_host_fields_on_local_serve` passed 1 test on 2026-08-05.
+- The focused workspace-app run passed 36 tests across `SettingsOverlay.test.ts`, `terminalRightClickRevamp.test.ts`, and `languageInspectorDetail.test.ts` on 2026-08-05. The masking assertions cover the Settings fallback, terminal startup fallback, and existing ephemeral per-tab toggle.
