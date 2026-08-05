@@ -896,10 +896,19 @@ export function ensureTerminalKeyboardProtocol(
   return tab.keyboardProtocol;
 }
 
+/// Walks `state.nodes` defensively because this runs from component teardown
+/// too: `registerTerminalMetadataSink`'s unregister fires inside the Svelte
+/// batch that a split commits, and Svelte serves a torn-down branch the
+/// PRE-batch value of every source. A node added by the same batch (the new
+/// pane and its split) therefore reads back as `undefined` while `ownKeys`
+/// still lists it, so `Object.values` hands out holes. Skipping them observes
+/// the layout as it was when the effect was alive, which is what the teardown
+/// wants; throwing on the hole aborts the flush mid-render and wedges the
+/// window.
 function terminalTabsIn(state: LayoutState): TerminalTab[] {
   const out: TerminalTab[] = [];
   for (const node of Object.values(state.nodes)) {
-    if (node.kind !== "leaf") continue;
+    if (!node || node.kind !== "leaf") continue;
     for (const tab of allPaneTabs(node)) {
       if (tab.kind === "terminal") out.push(tab);
     }

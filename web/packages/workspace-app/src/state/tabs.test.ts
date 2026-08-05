@@ -2040,6 +2040,26 @@ describe("pane state", () => {
     expect(live.terminalMetadataError).toBeUndefined();
   });
 
+  test("a rename failure survives a half-applied layout", () => {
+    const tab = terminalTab({ title: "build", terminalSessionId: "sess-split" });
+    resetLayout([tab]);
+    const live = activePane().tabs[0] as TerminalTab;
+    const unregister = registerTerminalMetadataSink("sess-split", () => true);
+
+    renameTerminalTab(live, "deploy", "default");
+    // A split commits its new pane and split nodes in the same Svelte batch
+    // that tears the old terminal component down, and a teardown reads
+    // PRE-batch source values: the fresh node ids enumerate as keys but read
+    // back undefined. Model that hole directly -- walking it must not throw,
+    // because the throw aborts the render flush and wedges the window.
+    layout.nodes["pane-splitting"] = undefined as unknown as LeafNode;
+    expect(Object.values(layout.nodes)).toContain(undefined);
+
+    expect(() => unregister()).not.toThrow();
+    expect(live.terminalMetadataPending).toBeUndefined();
+    expect(live.terminalMetadataError).toContain("before the metadata update was confirmed");
+  });
+
   test("session identity never fabricates unknown spawn provenance", () => {
     const tab = terminalTab({
       title: "live",
