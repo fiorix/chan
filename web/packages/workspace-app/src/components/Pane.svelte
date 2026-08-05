@@ -23,9 +23,11 @@
     reattachTerminalInPane,
     paneMode,
     paneModeSplit,
+    paneModeMoveGrabToEdge,
     paneModeRemoveStagedDraftEditor,
     paneModeSetGrab,
     paneModeSetHover,
+    paneModeSetMouseSplit,
     paneModeStagedDraftEditorsFor,
     paneModeStagedTabIds,
     paneModeSwapWith,
@@ -108,6 +110,10 @@
   } from "../api/client";
   import { ApiError } from "../api/errors";
   import { applyNamedFocusColor } from "../state/paneColor";
+  import {
+    classifyMouseSplitZone,
+    edgeSplitAllowed,
+  } from "../state/paneMouseSplit";
   import { onDestroy, onMount } from "svelte";
   import { applyPageWidthToElement, pageWidth } from "../state/pageWidth.svelte";
 
@@ -334,12 +340,44 @@
     if (paneMode.stale) return;
     if (!paneMode.transactionMode) return;
     if (paneMode.hoverPaneId === pane.id) paneModeSetHover(null);
+    if (paneMode.mouseSplit?.paneId === pane.id) paneModeSetMouseSplit(null);
+  }
+
+  /// Zone tracking over a hovered pane while a grab is held. The pane
+  /// divides into 25 percent edge zones plus a center: the center keeps
+  /// the swap affordance, an allowed edge arms the split preview, and a
+  /// refused edge (the split would violate the minimum pane size) drops
+  /// the target entirely rather than falling back to a swap.
+  function onPaneBodyMouseMove(e: MouseEvent): void {
+    if (paneMode.stale) return;
+    if (!paneMode.transactionMode) return;
+    const grab = paneMode.grabPaneId;
+    if (!grab || grab === pane.id) return;
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const zone = classifyMouseSplitZone(
+      e.clientX - rect.left,
+      e.clientY - rect.top,
+      rect.width,
+      rect.height,
+    );
+    if (zone !== "center" && edgeSplitAllowed(zone, rect.width, rect.height)) {
+      paneModeSetHover(pane.id);
+      paneModeSetMouseSplit({ paneId: pane.id, edge: zone });
+      return;
+    }
+    paneModeSetMouseSplit(null);
+    if (zone === "center") paneModeSetHover(pane.id);
+    else paneModeSetHover(null);
   }
 
   /// Pane-body mouseup while in transaction mode with a grab held.
   /// If the cursor is over this pane (we are the drop target) and
-  /// the grab is on a different pane, commit the swap. Transaction
-  /// stays active for chained swaps until Enter / Esc.
+  /// the grab is on a different pane, commit the armed action: an edge
+  /// preview splits the target and moves the grabbed content into the
+  /// new sibling, the center keeps the swap. A refused edge cleared the
+  /// hover, so the mouseup is a no-op and the grab survives for the
+  /// next attempt. Transaction stays active for chained drops until
+  /// Enter / Esc.
   function onPaneBodyMouseUp(): void {
     if (paneMode.stale) return;
     if (!paneMode.transactionMode) return;
@@ -349,7 +387,15 @@
       paneModeSetGrab(null);
       return;
     }
-    paneModeSwapWith(grab, pane.id);
+    const preview = paneMode.mouseSplit;
+    if (preview && preview.paneId === pane.id) {
+      paneModeMoveGrabToEdge(grab, pane.id, preview.edge);
+    } else if (paneMode.hoverPaneId !== pane.id) {
+      return;
+    } else {
+      paneModeSwapWith(grab, pane.id);
+    }
+    paneModeSetMouseSplit(null);
     paneModeSetGrab(null);
     paneModeSetHover(null);
   }
@@ -360,11 +406,19 @@
   const isTransactionGrab = $derived(
     paneMode.transactionMode && paneMode.grabPaneId === pane.id,
   );
+  /// Edge zone currently previewed on this pane, or null. An armed edge
+  /// replaces the full-pane swap cue with the split-half preview.
+  const transactionSplitEdge = $derived(
+    paneMode.transactionMode && paneMode.mouseSplit?.paneId === pane.id
+      ? paneMode.mouseSplit.edge
+      : null,
+  );
   const isTransactionDropTarget = $derived(
     paneMode.transactionMode &&
       paneMode.grabPaneId !== null &&
       paneMode.grabPaneId !== pane.id &&
-      paneMode.hoverPaneId === pane.id,
+      paneMode.hoverPaneId === pane.id &&
+      transactionSplitEdge === null,
   );
 
   /// Ids of tabs added by app-spawn chords during the current
@@ -1180,6 +1234,10 @@
   class:transaction-active={paneMode.transactionMode}
   class:transaction-grab={isTransactionGrab}
   class:transaction-drop-target={isTransactionDropTarget}
+  class:transaction-split-left={transactionSplitEdge === "left"}
+  class:transaction-split-right={transactionSplitEdge === "right"}
+  class:transaction-split-top={transactionSplitEdge === "top"}
+  class:transaction-split-bottom={transactionSplitEdge === "bottom"}
   bind:this={paneEl}
   style:--pane-side-flip-start={sideFlipStartTransform}
   style:--pane-side-flip-back={sideFlipBackTransform}
@@ -1192,6 +1250,7 @@
   }}
   onmouseenter={onPaneBodyMouseEnter}
   onmouseleave={onPaneBodyMouseLeave}
+  onmousemove={onPaneBodyMouseMove}
   onmouseup={onPaneBodyMouseUp}
   onanimationend={(e) => {
     // Svelte scopes keyframe names (svelte-<hash>-pane-wobble-once), so a
@@ -2170,6 +2229,24 @@
     background: color-mix(in srgb, var(--pane-focus) 8%, transparent);
     z-index: 5;
   }
+  /* Edge-split preview: an armed edge replaces the full-pane swap cue
+     and tints the half the moved content would occupy after the 50/50
+     split, so the user sees the resulting geometry before mouseup. */
+  .pane.transaction-split-left::before,
+  .pane.transaction-split-right::before,
+  .pane.transaction-split-top::before,
+  .pane.transaction-split-bottom::before {
+    content: "";
+    position: absolute;
+    pointer-events: none;
+    border: 2px solid var(--pane-focus);
+    background: color-mix(in srgb, var(--pane-focus) 12%, transparent);
+    z-index: 5;
+  }
+  .pane.transaction-split-left::before { inset: 0 50% 0 0; }
+  .pane.transaction-split-right::before { inset: 0 0 0 50%; }
+  .pane.transaction-split-top::before { inset: 0 0 50% 0; }
+  .pane.transaction-split-bottom::before { inset: 50% 0 0 0; }
   :global(.hamburger-menu .menu-label) {
     display: flex;
     align-items: center;

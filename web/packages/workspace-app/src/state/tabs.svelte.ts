@@ -28,6 +28,7 @@ import { parseSlidesSpec } from "../editor/slides";
 import { uiConfirm } from "./confirm.svelte";
 import { editorToolsPrefs } from "./editorTools.svelte";
 import { classifyPath, isCsv, isEditableText, isExcalidraw, isJson } from "./fileTypes";
+import { edgeSplitSpec, type PaneMouseSplitEdge } from "./paneMouseSplit";
 import type { FileKind } from "./kinds";
 import {
   createTerminalKeyboardProtocolState,
@@ -1152,6 +1153,10 @@ export const paneMode = $state<{
   stale: boolean;
   entryLayout: SerNode | null;
   pendingRemoteLayout: SerNode | null;
+  /// Edge-split preview for the mouse transaction: the hovered target
+  /// pane plus the edge zone the cursor sits in. Preview state only;
+  /// the draft tree changes on mouseup, never on hover.
+  mouseSplit: { paneId: string; edge: PaneMouseSplitEdge } | null;
   /// Queue of "new draft editor" intents staged during the current
   /// pane-mode session. Materialized on Enter (commit); discarded on
   /// Esc (cancel). Each entry pins the target paneId at press time so
@@ -1167,6 +1172,7 @@ export const paneMode = $state<{
   stale: false,
   entryLayout: null,
   pendingRemoteLayout: null,
+  mouseSplit: null,
   stagedDraftEditors: [],
 });
 
@@ -3736,6 +3742,7 @@ export function enterPaneMode(): void {
   paneMode.stale = false;
   paneMode.entryLayout = serializeLayout({ terminalSessions: true });
   paneMode.pendingRemoteLayout = null;
+  paneMode.mouseSplit = null;
   paneMode.stagedDraftEditors = [];
   notifyPaneModeSettled();
 }
@@ -3757,15 +3764,19 @@ export function enterPaneModeTransaction(grabPaneId: string | null): void {
   }
   paneMode.transactionMode = true;
   paneMode.grabPaneId = grabPaneId;
+  paneMode.mouseSplit = null;
 }
 
 /// Set the current grab pane while in transaction mode. Used when the
 /// user clicks and drags inside any pane after entering via double-click,
-/// or re-grabs a different pane mid-transaction. No-op outside
-/// transaction mode.
+/// or re-grabs a different pane mid-transaction. A new or cleared grab
+/// has no prior drop target: hover and any armed edge preview clear
+/// atomically with it. No-op outside transaction mode.
 export function paneModeSetGrab(paneId: string | null): void {
   if (!paneMode.transactionMode || paneMode.stale) return;
   paneMode.grabPaneId = paneId;
+  paneMode.hoverPaneId = null;
+  paneMode.mouseSplit = null;
 }
 
 /// Track the pane currently under the cursor while a grab is held.
@@ -3773,6 +3784,17 @@ export function paneModeSetGrab(paneId: string | null): void {
 export function paneModeSetHover(paneId: string | null): void {
   if (!paneMode.transactionMode || paneMode.stale) return;
   paneMode.hoverPaneId = paneId;
+}
+
+/// Arm or clear the edge-split preview while a grab hovers a target
+/// pane. Preview state only: the draft tree stays untouched until
+/// mouseup applies the move through `paneModeMoveGrabToEdge`. No-op
+/// outside transaction mode.
+export function paneModeSetMouseSplit(
+  target: { paneId: string; edge: PaneMouseSplitEdge } | null,
+): void {
+  if (!paneMode.transactionMode || paneMode.stale) return;
+  paneMode.mouseSplit = target;
 }
 
 export function commitPaneMode(): void {
@@ -3801,6 +3823,7 @@ export function commitPaneMode(): void {
   paneMode.stale = false;
   paneMode.entryLayout = null;
   paneMode.pendingRemoteLayout = null;
+  paneMode.mouseSplit = null;
   paneMode.stagedDraftEditors = [];
   notifyPaneModeSettled();
 }
@@ -3817,6 +3840,7 @@ export function cancelPaneMode(): void {
   paneMode.stale = false;
   paneMode.entryLayout = null;
   paneMode.pendingRemoteLayout = null;
+  paneMode.mouseSplit = null;
   paneMode.stagedDraftEditors = [];
   notifyPaneModeSettled(pendingRemoteLayout);
 }
@@ -3939,6 +3963,59 @@ export function paneModeSwapWith(grabId: string, dropId: string): void {
   const draft = draftLayout();
   if (!draft) return;
   swapPaneContentsIn(draft, grabId, dropId);
+}
+
+/// Transaction-mode mouse drop on a target pane's edge zone: split the
+/// target leaf in the draft and move the grabbed pane's whole content
+/// into the new sibling. The emptied source leaf stays behind
+/// uncollapsed; an empty Hybrid pane is a valid resting state and only
+/// explicit close paths remove one. Focus follows the moved content so
+/// chained drops read naturally.
+export function paneModeMoveGrabToEdge(
+  grabId: string,
+  targetId: string,
+  edge: PaneMouseSplitEdge,
+): void {
+  const draft = draftLayout();
+  if (!draft) return;
+  if (grabId === targetId) return;
+  const grab = draft.nodes[grabId];
+  const target = draft.nodes[targetId];
+  if (!grab || grab.kind !== "leaf" || !target || target.kind !== "leaf") return;
+  const newPane: LeafNode = {
+    kind: "leaf",
+    id: id("pane"),
+    tabs: [],
+    activeTabId: null,
+  };
+  movePaneContents(grab, newPane);
+  const { direction, placement } = edgeSplitSpec(edge);
+  insertSiblingPaneIn(draft, target.id, newPane, direction, placement);
+  draft.activePaneId = newPane.id;
+  // Grab, target, and the new sibling all changed size or content, so
+  // all three wobble: the eye tracks where the content landed and what
+  // gave up room for it.
+  requestPaneWobble(grab.id);
+  requestPaneWobble(target.id);
+  requestPaneWobble(newPane.id);
+}
+
+/// Move every content field between two leaves, leaving the source
+/// empty. The swap counterpart exchanges both directions; this one
+/// clears the source for an edge-split move.
+function movePaneContents(source: LeafNode, dest: LeafNode): void {
+  dest.tabs = source.tabs;
+  dest.activeTabId = source.activeTabId;
+  dest.bTabs = source.bTabs;
+  dest.bActiveTabId = source.bActiveTabId;
+  dest.side = source.side;
+  dest.theme = source.theme;
+  source.tabs = [];
+  source.activeTabId = null;
+  source.bTabs = undefined;
+  source.bActiveTabId = undefined;
+  source.side = undefined;
+  source.theme = undefined;
 }
 
 function swapPaneContentsIn(

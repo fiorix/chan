@@ -21,6 +21,7 @@ import {
   paneModeOpenBrowser,
   paneModeSetGrab,
   paneModeSetHover,
+  paneModeSetMouseSplit,
   paneModeStageDiagramEditor,
   paneModeStageDraftEditor,
   paneSide,
@@ -845,6 +846,285 @@ describe("Pane Hybrid NAV transaction mode", () => {
     expect(paneSource).not.toMatch(
       /class="dead-zone"[\s\S]{0,200}draggable="true"/,
     );
+  });
+});
+
+describe("Pane Hybrid NAV mouse edge splits", () => {
+  test("an armed edge replaces the swap cue with the per-edge split preview class", async () => {
+    const leftTab = terminalTab({ id: "term-left", title: "Left" });
+    const leftPane: LeafNode = {
+      kind: "leaf",
+      id: "pane-left",
+      tabs: [leftTab],
+      activeTabId: leftTab.id,
+    };
+    layout.rootId = leftPane.id;
+    layout.activePaneId = leftPane.id;
+    layout.nodes = { [leftPane.id]: leftPane };
+    layout.focusColor = "blue";
+    splitPane(leftPane.id, "row", "after");
+    const root = layout.nodes[layout.rootId];
+    if (root?.kind !== "split") throw new Error("expected split");
+    const rightPane = layout.nodes[root.b];
+    if (rightPane?.kind !== "leaf") throw new Error("expected leaf");
+
+    cancelPaneMode();
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(Pane, { target, props: { pane: rightPane } });
+    mounted.push(component);
+    await tick();
+
+    const paneEl = target.querySelector<HTMLElement>(".pane");
+    expect(paneEl).not.toBeNull();
+
+    enterPaneModeTransaction(leftPane.id);
+    paneModeSetHover(rightPane.id);
+    await tick();
+    // Center zone: the full-pane swap cue shows, no split preview.
+    expect(paneEl!.classList.contains("transaction-drop-target")).toBe(true);
+    expect(paneEl!.classList.contains("transaction-split-left")).toBe(false);
+
+    paneModeSetMouseSplit({ paneId: rightPane.id, edge: "left" });
+    await tick();
+    // Edge zone: the split preview owns the cue and the swap highlight
+    // is suppressed so the two never read as the same drop.
+    expect(paneEl!.classList.contains("transaction-split-left")).toBe(true);
+    expect(paneEl!.classList.contains("transaction-drop-target")).toBe(false);
+
+    paneModeSetMouseSplit({ paneId: rightPane.id, edge: "bottom" });
+    await tick();
+    expect(paneEl!.classList.contains("transaction-split-left")).toBe(false);
+    expect(paneEl!.classList.contains("transaction-split-bottom")).toBe(true);
+
+    // A preview aimed at another pane never leaks onto this one.
+    paneModeSetMouseSplit({ paneId: leftPane.id, edge: "top" });
+    await tick();
+    expect(paneEl!.classList.contains("transaction-split-top")).toBe(false);
+  });
+
+  test("mousemove into an allowed edge arms preview only; mouseup runs the draft move", async () => {
+    const leftTab = terminalTab({ id: "term-left", title: "Left" });
+    const leftPane: LeafNode = {
+      kind: "leaf",
+      id: "pane-left",
+      tabs: [leftTab],
+      activeTabId: leftTab.id,
+    };
+    layout.rootId = leftPane.id;
+    layout.activePaneId = leftPane.id;
+    layout.nodes = { [leftPane.id]: leftPane };
+    layout.focusColor = "blue";
+    splitPane(leftPane.id, "row", "after");
+    const root = layout.nodes[layout.rootId];
+    if (root?.kind !== "split") throw new Error("expected split");
+    const rightPane = layout.nodes[root.b];
+    if (rightPane?.kind !== "leaf") throw new Error("expected leaf");
+
+    cancelPaneMode();
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(Pane, { target, props: { pane: rightPane } });
+    mounted.push(component);
+    await tick();
+
+    const paneEl = target.querySelector<HTMLElement>(".pane");
+    expect(paneEl).not.toBeNull();
+    paneEl!.getBoundingClientRect = () =>
+      ({
+        left: 0,
+        top: 0,
+        width: 800,
+        height: 600,
+        right: 800,
+        bottom: 600,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+
+    enterPaneModeTransaction(leftPane.id);
+
+    // Cursor at (10, 300) of an 800x600 pane: left edge zone, and the
+    // 50/50 row split leaves 400x600 halves, inside the 240x160 floor.
+    paneEl!.dispatchEvent(
+      new MouseEvent("mousemove", { bubbles: true, clientX: 10, clientY: 300 }),
+    );
+    await tick();
+    expect(paneMode.mouseSplit).toEqual({ paneId: rightPane.id, edge: "left" });
+    expect(paneMode.hoverPaneId).toBe(rightPane.id);
+    expect(paneEl!.classList.contains("transaction-split-left")).toBe(true);
+    // Hover armed preview state only: neither the draft tree nor the
+    // live layout changed shape.
+    expect(Object.keys(paneMode.draft?.nodes ?? {})).toHaveLength(3);
+    expect(Object.keys(layout.nodes)).toHaveLength(3);
+
+    paneEl!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    await tick();
+    // The draft gained the split + the moved leaf; live is untouched.
+    expect(Object.keys(paneMode.draft?.nodes ?? {})).toHaveLength(5);
+    expect(Object.keys(layout.nodes)).toHaveLength(3);
+    const parent = Object.values(paneMode.draft?.nodes ?? {}).find(
+      (n): n is Extract<typeof n, { kind: "split" }> =>
+        n.kind === "split" && (n.a === rightPane.id || n.b === rightPane.id),
+    );
+    expect(parent?.direction).toBe("row");
+    expect(parent?.b).toBe(rightPane.id);
+    const moved = paneMode.draft?.nodes[parent!.a];
+    expect(moved?.kind === "leaf" && moved.tabs.map((t) => t.id)).toEqual([
+      "term-left",
+    ]);
+    const source = paneMode.draft?.nodes[leftPane.id];
+    expect(source?.kind === "leaf" && source.tabs).toHaveLength(0);
+    // The transaction cleared grab / hover / preview for the next drop.
+    expect(paneMode.grabPaneId).toBeNull();
+    expect(paneMode.hoverPaneId).toBeNull();
+    expect(paneMode.mouseSplit).toBeNull();
+  });
+
+  test("a refused undersized edge drops the target through the real handler", async () => {
+    const leftTab = terminalTab({ id: "term-left", title: "Left" });
+    const leftPane: LeafNode = {
+      kind: "leaf",
+      id: "pane-left",
+      tabs: [leftTab],
+      activeTabId: leftTab.id,
+    };
+    layout.rootId = leftPane.id;
+    layout.activePaneId = leftPane.id;
+    layout.nodes = { [leftPane.id]: leftPane };
+    layout.focusColor = "blue";
+    splitPane(leftPane.id, "row", "after");
+    const root = layout.nodes[layout.rootId];
+    if (root?.kind !== "split") throw new Error("expected split");
+    const rightPane = layout.nodes[root.b];
+    if (rightPane?.kind !== "leaf") throw new Error("expected leaf");
+
+    cancelPaneMode();
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(Pane, { target, props: { pane: rightPane } });
+    mounted.push(component);
+    await tick();
+
+    const paneEl = target.querySelector<HTMLElement>(".pane");
+    expect(paneEl).not.toBeNull();
+    // 400 wide halves to 200 per side, under the 240 floor: the left
+    // edge zone must refuse rather than fall back to a swap.
+    paneEl!.getBoundingClientRect = () =>
+      ({
+        left: 0,
+        top: 0,
+        width: 400,
+        height: 600,
+        right: 400,
+        bottom: 600,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+
+    enterPaneModeTransaction(leftPane.id);
+    paneEl!.dispatchEvent(
+      new MouseEvent("mousemove", { bubbles: true, clientX: 10, clientY: 300 }),
+    );
+    await tick();
+    expect(paneMode.mouseSplit).toBeNull();
+    expect(paneMode.hoverPaneId).toBeNull();
+    expect(paneEl!.classList.contains("transaction-drop-target")).toBe(false);
+    expect(paneEl!.classList.contains("transaction-split-left")).toBe(false);
+
+    paneEl!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    await tick();
+    // No split, no swap: both trees keep their shape and the grab
+    // survives so the user can aim again.
+    expect(Object.keys(paneMode.draft?.nodes ?? {})).toHaveLength(3);
+    expect(Object.keys(layout.nodes)).toHaveLength(3);
+    expect(paneMode.grabPaneId).toBe(leftPane.id);
+    const source = paneMode.draft?.nodes[leftPane.id];
+    expect(source?.kind === "leaf" && source.tabs[0]?.id).toBe("term-left");
+  });
+
+  test("re-grab and same-pane mouseup clear the armed edge preview through the real handlers", async () => {
+    const leftTab = terminalTab({ id: "term-left", title: "Left" });
+    const leftPane: LeafNode = {
+      kind: "leaf",
+      id: "pane-left",
+      tabs: [leftTab],
+      activeTabId: leftTab.id,
+    };
+    layout.rootId = leftPane.id;
+    layout.activePaneId = leftPane.id;
+    layout.nodes = { [leftPane.id]: leftPane };
+    layout.focusColor = "blue";
+    splitPane(leftPane.id, "row", "after");
+    const root = layout.nodes[layout.rootId];
+    if (root?.kind !== "split") throw new Error("expected split");
+    const rightPane = layout.nodes[root.b];
+    if (rightPane?.kind !== "leaf") throw new Error("expected leaf");
+
+    cancelPaneMode();
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(Pane, { target, props: { pane: rightPane } });
+    mounted.push(component);
+    await tick();
+
+    const paneEl = target.querySelector<HTMLElement>(".pane");
+    expect(paneEl).not.toBeNull();
+    paneEl!.getBoundingClientRect = () =>
+      ({
+        left: 0,
+        top: 0,
+        width: 800,
+        height: 600,
+        right: 800,
+        bottom: 600,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+
+    enterPaneModeTransaction(leftPane.id);
+    paneEl!.dispatchEvent(
+      new MouseEvent("mousemove", { bubbles: true, clientX: 10, clientY: 300 }),
+    );
+    await tick();
+    expect(paneMode.mouseSplit).toEqual({ paneId: rightPane.id, edge: "left" });
+    expect(paneEl!.classList.contains("transaction-split-left")).toBe(true);
+
+    // Re-grab THIS pane: the preview it was carrying must not survive.
+    paneEl!.dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, button: 0 }),
+    );
+    await tick();
+    expect(paneMode.grabPaneId).toBe(rightPane.id);
+    expect(paneMode.hoverPaneId).toBeNull();
+    expect(paneMode.mouseSplit).toBeNull();
+    expect(paneEl!.classList.contains("transaction-split-left")).toBe(false);
+
+    // The same-pane mouseup releases the grab and leaves no target
+    // state behind for a later grab to inherit.
+    paneEl!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    await tick();
+    expect(paneMode.grabPaneId).toBeNull();
+    expect(paneMode.hoverPaneId).toBeNull();
+    expect(paneMode.mouseSplit).toBeNull();
+    expect(Object.keys(paneMode.draft?.nodes ?? {})).toHaveLength(3);
+    expect(Object.keys(layout.nodes)).toHaveLength(3);
+  });
+
+  test("zone classification runs on pane mousemove through the pure helper", () => {
+    expect(paneSource).toContain("onmousemove={onPaneBodyMouseMove}");
+    expect(paneSource).toMatch(/classifyMouseSplitZone\(/);
+    expect(paneSource).toMatch(/edgeSplitAllowed\(/);
+  });
+
+  test("the split preview styles tint the half the moved content would occupy", () => {
+    expect(paneSource).toMatch(/\.pane\.transaction-split-left::before \{ inset: 0 50% 0 0; \}/);
+    expect(paneSource).toMatch(/\.pane\.transaction-split-right::before \{ inset: 0 0 0 50%; \}/);
+    expect(paneSource).toMatch(/\.pane\.transaction-split-top::before \{ inset: 0 0 50% 0; \}/);
+    expect(paneSource).toMatch(/\.pane\.transaction-split-bottom::before \{ inset: 50% 0 0 0; \}/);
   });
 });
 
