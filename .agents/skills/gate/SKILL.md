@@ -21,7 +21,7 @@ The gate runs, in order:
 1. `make shell-check` (shellcheck over every tracked shell script)
 2. `make workflow-check` (actionlint over `.github/workflows`, with shellcheck on the `run:` blocks)
 3. `make build-matrix-check` (the static contract tying native CI, distro, and container jobs to their real build targets)
-4. `cargo fmt --check`
+4. `cargo fmt --check` for the root workspace and `make gateway-fmt` for the separate gateway workspace
 5. `cargo clippy --all-targets -- -D warnings` (with `RUSTFLAGS=-D warnings`)
 6. `cargo test --all-targets` (with `RUSTFLAGS=-D warnings`)
 7. `cargo build --no-default-features` (with `RUSTFLAGS=-D warnings`)
@@ -39,7 +39,7 @@ The gateway is a separate Cargo workspace and is NOT a member of the root worksp
 
 ## Discipline
 
-- **Re-run after the last edit.** A check that ran before a later edit is stale. `cargo fmt --check` in particular must run AFTER the final edit, or an "own-gate-green" report is wrong.
+- **Re-run after the last edit.** A check that ran before a later edit is stale. `cargo fmt --check` and `make gateway-fmt` in particular must run AFTER the final edit, or an "own-gate-green" report is wrong.
 - **Don't pipe the command you are verifying.** `cargo ... | tail` reports tail's exit 0 and hides cargo's failure. Run bare and check `$?`, or set `pipefail`.
 - **The gate gates every push, including tags.** A backgrounded gated push can SIGPIPE (exit 141) and silently fail to update the remote. Push in the foreground, redirect to a file, and verify with `git ls-remote`.
 

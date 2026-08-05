@@ -244,6 +244,7 @@ pre-push: ## Run the local pre-push gate.
 	$(MAKE) nix-sdme-contract-check
 	$(MAKE) web-lock-check
 	$(CARGO) fmt --check
+	$(MAKE) gateway-fmt
 	RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
 	RUSTFLAGS="-D warnings" $(CARGO) test --all-targets
 	RUSTFLAGS="-D warnings" $(CARGO) build --no-default-features
@@ -323,6 +324,10 @@ ci-release: pre-push ## Run the local release validation target.
 .PHONY: gateway-spa
 gateway-spa: ## Build the gateway identity SPA bundle (rust-embed input).
 	cd web && $(NPM) install && $(NPM) run build -w @chan/profile
+
+.PHONY: gateway-fmt
+gateway-fmt: ## Check formatting in the separate gateway workspace.
+	cd gateway && $(CARGO) fmt --check
 
 .PHONY: gateway-build
 gateway-build: gateway-spa ## Build the gateway release crates (GATEWAY_CARGO_FLAGS adds cross/release).
