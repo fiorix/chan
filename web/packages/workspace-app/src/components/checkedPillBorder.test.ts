@@ -4,14 +4,15 @@ import pillRadio from "./settings/PillRadio.svelte?raw";
 import reportsControl from "./settings/workspace/ReportsControl.svelte?raw";
 import semanticControl from "./settings/workspace/SemanticControl.svelte?raw";
 
-// A checked checkbox pill keeps its shape, spacing, neutral border, and
-// checked background, and does not switch the outer border to blue. A
-// checked radio pill still does. The three checkbox sites carry a
-// `.pill.on` rule textually identical to the radio one, so the thing that
-// separates "remove" from "preserve" is the file and the input type inside
-// it, never the selector text; a selector-level sweep across settings would
-// take the radio rule out too. Hence the radio assertion below: it is what
-// distinguishes this change from a deletion of the shared blue-border idiom.
+// Checkbox and radio pills carry the same selected-state contract: shape,
+// spacing, neutral border, and checked background stay, and the selected
+// state does not switch the outer border to blue. Aligning the two controls
+// is an explicit maintainer decision rather than an accident of the CSS, so
+// the radio site is pinned by name alongside the checkbox ones. All four
+// carry a `.pill.on` rule whose selector text is identical, which means
+// nothing in the selector distinguishes them and a sweep across settings
+// could reintroduce the blue border at one site and leave the rest
+// inconsistent.
 //
 // Pinned against source rather than computed style. The vitest block in
 // vite.config.ts runs jsdom with no `css` option and the svelte plugin emits
@@ -58,20 +59,27 @@ describe("checked checkbox pills carry no outer border colour", () => {
   }
 });
 
-describe("radio pills keep their blue checked border", () => {
-  test("PillRadio: .pill.on still sets border-color: var(--link)", () => {
+describe("checked radio pills carry no outer border colour either", () => {
+  test("PillRadio: .pill.on sets no border-color at all", () => {
+    // Same standard as the checkbox sites: the selected pill falls back to
+    // the base rule's neutral border, so any border-color here is a
+    // regression, not only `var(--link)`.
+    expect(ruleBlock(pillRadio, ".pill.on")).not.toMatch(/border-color:/);
+  });
+
+  test("PillRadio: .pill.on keeps the checked background", () => {
     expect(ruleBlock(pillRadio, ".pill.on")).toMatch(
-      /border-color: var\(--link\);/,
+      /background: var\(--hover-bg\);/,
     );
   });
 
-  test("PillRadio is the radio surface, so that retained rule is the radio one", () => {
+  test("PillRadio is the radio surface, so the rule above is the radio one", () => {
     expect(pillRadio).toMatch(/type="radio"/);
     expect(pillRadio).not.toMatch(/type="checkbox"/);
   });
 });
 
-describe("the surrounding pill rules are untouched", () => {
+describe("the surrounding checkbox pill rules are untouched", () => {
   for (const site of CHECKBOX_SITES) {
     test(`${site.name}: shape, spacing, and neutral border survive`, () => {
       const base = ruleBlock(site.source, ".pill");
@@ -109,4 +117,36 @@ describe("the surrounding pill rules are untouched", () => {
       );
     });
   }
+});
+
+describe("the surrounding radio pill rules are untouched", () => {
+  test("PillRadio: shape, spacing, and neutral border survive", () => {
+    const base = ruleBlock(pillRadio, ".pill");
+    expect(base).toMatch(/padding: 4px 10px;/);
+    expect(base).toMatch(/border: 1px solid var\(--btn-border\);/);
+    expect(base).toMatch(/border-radius: 4px;/);
+    expect(base).toMatch(/background: var\(--btn-bg\);/);
+  });
+
+  test("PillRadio: the hover border rule survives", () => {
+    expect(ruleBlock(pillRadio, ".pill:hover")).toMatch(
+      /border-color: var\(--btn-hover\);/,
+    );
+  });
+
+  test("PillRadio: the native radio reset survives", () => {
+    // Zeroes the input's own chrome only. The selected dot and the focus
+    // ring are the native control's, and neither is expressed through
+    // `.pill.on`, so they outlive the border-colour change.
+    expect(ruleBlock(pillRadio, '.pill input[type="radio"]')).toMatch(
+      /border: 0;/,
+    );
+  });
+
+  test("PillRadio: a label.pill still wraps a native radio", () => {
+    // The item cannot be satisfied by dropping the pill chrome instead, and
+    // the label wrapper is what keeps the control keyboard-reachable.
+    expect(pillRadio).toMatch(/<label class="pill" class:on=/);
+    expect(pillRadio).toMatch(/type="radio"/);
+  });
 });
