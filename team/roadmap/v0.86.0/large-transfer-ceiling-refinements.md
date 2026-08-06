@@ -30,21 +30,23 @@ The v0.85.0 large-transfer work raises the write ceiling and admits transfer rou
 
 Small to medium, and gap 2 is the one worth doing first: it is the one known case where current behaviour lets an operation exceed the ceiling rather than refusing conservatively. Gap 1's priority cannot be set until its classification is settled, which is the first task in its acceptance rather than an assumption in its favour.
 
-## Related question, NOT a follow-up: whether to bound the terminal download
+## The terminal download bound was ruled and delivered, and it did not settle shrink detection
 
-Recorded as an open product decision rather than as work, and rewritten after an earlier version of this section got it wrong.
+This section recorded an open product decision: whether to bound the terminal download. It is answered. The ceiling bounds it, with a clear error at the cap, and v0.85.0 implements that on the terminal tenant.
 
-The terminal download path deliberately declares no `Content-Length`. That is not an omission: `crates/chan-server/src/routes/transfer.rs:826` asserts the header is absent, with the message "a live file stream must not promise its open-time length". The path streams what it reads and ends.
+The delivered behavior is narrower than "the growing-file contract is replaced", and the difference is worth holding because the shorter wording invites the wider reading:
 
-So a file that shrinks mid-read produces fewer bytes and contradicts nothing, because nothing was promised. That is a different contract from the workspace download path, which does declare a length and where ending early genuinely breaks a promise. Only the second is a defect.
+- Growth **above** the ceiling now fails. That is what was decided.
+- Growth **below** the ceiling still streams, unchanged.
+- Shrink is still not an error, because nothing is promised.
 
-The reason this cannot be treated as a simple improvement is that a declared length and a read bound are the same change. Seeding the reader with the open-time size to detect a shrink simultaneously bounds it, which breaks a file that GROWS during the read. Growth currently works, deliberately, and the assertion above is the design stating which side of that trade it chose.
+The response still declares no `Content-Length`, and the assertion pinning that is kept with its message rewritten to state the post-ruling contract. A ceiling is a maximum rather than a count, so the byte total is still unknown when headers are chosen; declaring the size seen at open would reintroduce exactly the truncation the constraint below warns about. The assertion is identified by its subject rather than by a line number, because this section has already outlived one such citation.
 
-So the question is two-directional and product-level: is shrink detection worth losing live-growth streaming on a path that promises neither? It also requires changing a test whose message records the current choice, which is the signal that it is a decision rather than a fix.
+**Shrink detection is NOT settled by that ruling and stays open for the owner.** The original framing here was shrink detection against live growth, which is a different axis from a configured ceiling. Bounding by `max_bytes` needs no open-time length, so it buys no shrink detection and costs no growth below the ceiling; the two questions only looked like one because a length-seeded reader would have answered both at once. Whether a path that promises no length should nevertheless detect a short read is still a product decision on its merits.
 
-It belongs to the owner on its merits, not absorbed into a transfer slice, and this entry exists so it is not mistaken for a queued refinement.
+**The workspace download arm stays deliberately unbounded on read.** It declares a `Content-Length` from the file's own open-time size and consults no ceiling, and the ruling's literal wording reaches it. It is excluded on purpose: bounding it would refuse a user a file already sitting in their own workspace, which fails toward "you cannot get your data" rather than fail-safe. A write ceiling stops chan consuming unbounded disk; a read ceiling on a user's own file protects nothing that is worth that cost. Gap 1 above covers the Range accounting question on that same path, so the two are related but not the same decision.
 
-**Constraint on any future implementation.** Whatever is decided, a bound must either preserve the growing-file contract or replace it knowingly. It must not arrive as a side effect of seeding a reader with a length, which is how it nearly arrived here: the reader change that detects a shrink is the same change that stops serving a file that grows, and only one of those two effects is usually the one being asked for. If the contract is replaced, the assertion at `transfer.rs:826` and its message are updated in the same change, so the record states the new choice rather than losing the old one.
+**Constraint on any future implementation.** A bound must either preserve the growing-file contract or replace it knowingly, and must not arrive as a side effect of seeding a reader with a length. That is how it nearly arrived the first time: the reader change that detects a shrink is the same change that stops serving a file that grows, and only one of those two effects is usually the one being asked for. If the contract is replaced, the no-length assertion and its message are updated in the same change, so the record states the new choice rather than losing the old one. The v0.85.0 bound was implemented under this constraint and satisfies it: it bounds without declaring, and the assertion's message was rewritten in the same commit.
 
 ## Two further residuals from the same round, recorded rather than assumed
 
