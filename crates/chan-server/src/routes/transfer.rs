@@ -15,6 +15,11 @@
 //! Terminal uploads rely on their atomic writer as the authoritative
 //! writability check; workspace uploads use
 //! `Workspace::ensure_writable`.
+//!
+//! The configured transfer ceiling governs both directions on this tenant.
+//! Single-file reads and writes are bounded by it and refuse past it; a
+//! directory archive is bounded by lane admission and concurrency only, because
+//! its size is not known until it has been built.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -186,22 +191,31 @@ enum PlannedDownload {
 /// that counts requests, so the job reports its plan over a oneshot and then
 /// keeps going into the body.
 ///
-/// A refusal is returned before the job exists, so a declined download has not
-/// opened a file or walked a tree. Every early return past that point drops the
-/// job, which cancels it and releases its slot.
+/// An admission refusal is returned before the job exists, so a declined
+/// download has not opened a file or walked a tree. A ceiling refusal is the
+/// job's own: it costs one open and no streamed byte, because the size it
+/// refuses against is only knowable from a handle. Every early return past that
+/// point drops the job, which cancels it and releases its slot.
+///
+/// `limit` is the server-reported effective transfer ceiling, handed in for the
+/// same reason the upload arm is handed it: the terminal tenant reads outside
+/// any workspace and cannot inherit a workspace's budget, and one configured
+/// ceiling has to govern both tenants rather than two that drift.
 async fn stream_planned_download_tracked(
     bulk: &BulkTransferTenant,
     events: Option<tokio::sync::broadcast::Sender<String>>,
     tracking: Option<TransferTracking>,
     abs: PathBuf,
+    limit: u64,
 ) -> Response {
     let (tx, rx) = mpsc::channel::<std::io::Result<Bytes>>(8);
-    let (plan_tx, plan_rx) = tokio::sync::oneshot::channel::<Result<PlannedDownload, String>>();
+    let (plan_tx, plan_rx) =
+        tokio::sync::oneshot::channel::<Result<PlannedDownload, DownloadRefusal>>();
     let job = match bulk.submit(move |cancel| {
-        let planned = match terminal_download_plan(&abs) {
+        let planned = match terminal_download_plan(&abs, limit) {
             Ok(planned) => planned,
-            Err(message) => {
-                let _ = plan_tx.send(Err(message));
+            Err(refusal) => {
+                let _ = plan_tx.send(Err(refusal));
                 return;
             }
         };
@@ -270,7 +284,7 @@ async fn stream_planned_download_tracked(
         Ok(Ok(planned)) => planned,
         // The plan ran on an admitted job, so a failure here is reported after
         // the transfer genuinely occupied a slot. Returning drops the job.
-        Ok(Err(message)) => return err(StatusCode::BAD_REQUEST, message),
+        Ok(Err(refusal)) => return err(refusal.status, refusal.message),
         Err(_) => {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -280,7 +294,10 @@ async fn stream_planned_download_tracked(
     };
     let (content_type, disposition) = match &planned {
         // No Content-Length on either arm: a tar has no known length, and a
-        // live file must not promise the length it had at open.
+        // file arm bounded by the ceiling still has none, because a ceiling is
+        // a maximum rather than a count. The file may grow while it streams, so
+        // the only length that could be declared is the one seen at open, which
+        // is exactly the promise this path does not make.
         PlannedDownload::File { name } => (
             content_type_for(name).to_string(),
             content_disposition_attachment(name),
@@ -332,6 +349,7 @@ pub async fn api_terminal_read_file(
         Some(state.events_tx.clone()),
         TransferTracking::from_headers(&headers),
         abs_from_terminal_path(&path),
+        state.library.transfer_max_bytes(),
     )
     .await
 }
@@ -343,16 +361,25 @@ pub async fn api_terminal_read_file(
 /// the caller do the reading on a thread it already owns rather than paying for
 /// a producer of its own.
 ///
-/// The read runs to EOF rather than to an open-time byte count, deliberately:
-/// this response declares no `Content-Length`, so there is no promise a live
-/// file could fall short of, and bounding the read to the length seen at open
-/// would truncate a file that grew while it streamed.
+/// The read runs to EOF or to the effective transfer ceiling, whichever comes
+/// first, and never to the byte count seen at open. Those are different bounds
+/// and only the second would truncate a file that grew while it streamed: a
+/// file may still grow freely below the ceiling, because this response declares
+/// no `Content-Length` and so promises no length a live file could contradict.
+/// What the ceiling forbids is passing it, which is why the count is kept here
+/// rather than derived from the size the plan measured.
 struct AbsoluteFileReader {
     file: Option<std::fs::File>,
+    /// Size of the open handle, which the plan refuses against before any
+    /// header is sent. Read from the handle rather than the path so it
+    /// describes the file that will actually be streamed.
+    size: u64,
+    limit: u64,
+    streamed: u64,
 }
 
 impl AbsoluteFileReader {
-    fn open(abs: &Path) -> Result<Self, String> {
+    fn open(abs: &Path, limit: u64) -> Result<Self, String> {
         let file =
             std::fs::File::open(abs).map_err(|e| format!("cannot read {}: {e}", abs.display()))?;
         let metadata = file
@@ -361,7 +388,12 @@ impl AbsoluteFileReader {
         if !metadata.is_file() {
             return Err(format!("not a regular file: {}", abs.display()));
         }
-        Ok(Self { file: Some(file) })
+        Ok(Self {
+            file: Some(file),
+            size: metadata.len(),
+            limit,
+            streamed: 0,
+        })
     }
 }
 
@@ -377,6 +409,24 @@ impl Iterator for AbsoluteFileReader {
                 None
             }
             Ok(count) => {
+                // Counted against the ceiling as bytes stream, not once from
+                // the plan's measurement: appending to a file after it was
+                // measured is otherwise enough to serve past the bound, and the
+                // plan cannot see a write that has not happened yet.
+                let attempted = self
+                    .streamed
+                    .saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+                if attempted > self.limit {
+                    // An error rather than a clean end. A stream that simply
+                    // stops is indistinguishable from a complete transfer and
+                    // hands the client a truncated file it believes is whole.
+                    self.file = None;
+                    return Some(Err(std::io::Error::other(format!(
+                        "file grew past the {} byte transfer ceiling while streaming",
+                        self.limit
+                    ))));
+                }
+                self.streamed = attempted;
                 chunk.truncate(count);
                 Some(Ok(chunk))
             }
@@ -388,8 +438,9 @@ impl Iterator for AbsoluteFileReader {
     }
 }
 
-/// What a terminal download resolves to: a bounded open-file reader, or a
-/// directory whose tree has been pre-flighted readable and is ready to stream.
+/// What a terminal download resolves to: an open-file reader already inside the
+/// ceiling and carrying it, or a directory whose tree has been pre-flighted
+/// readable and is ready to stream.
 enum TerminalDownload {
     File {
         reader: AbsoluteFileReader,
@@ -400,20 +451,63 @@ enum TerminalDownload {
     },
 }
 
-fn terminal_download_plan(abs: &Path) -> Result<TerminalDownload, String> {
-    let meta =
-        std::fs::metadata(abs).map_err(|e| format!("cannot access {}: {e}", abs.display()))?;
+/// Why a download will not be served, carrying the status with the message.
+///
+/// A file past the ceiling and an unreadable path are both refusals returned
+/// before a byte is streamed, but they are not the same failure and a caller
+/// cannot act on them the same way. Keeping the status here is what lets one
+/// place report both without inferring the kind from the wording.
+#[cfg_attr(test, derive(Debug))]
+struct DownloadRefusal {
+    status: StatusCode,
+    message: String,
+}
+
+impl DownloadRefusal {
+    fn unreadable(message: String) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message,
+        }
+    }
+
+    /// Names both numbers so a refusal is diagnosable from the response alone,
+    /// without correlating it against a log or the server's configuration.
+    fn over_ceiling(size: u64, limit: u64) -> Self {
+        Self {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            message: format!(
+                "download too large: {size} bytes exceeds the {limit} byte transfer ceiling"
+            ),
+        }
+    }
+}
+
+fn terminal_download_plan(abs: &Path, limit: u64) -> Result<TerminalDownload, DownloadRefusal> {
+    let meta = std::fs::metadata(abs).map_err(|e| {
+        DownloadRefusal::unreadable(format!("cannot access {}: {e}", abs.display()))
+    })?;
     let name = download_filename(&abs.to_string_lossy());
     if meta.is_dir() {
         // Pre-flight the whole tree before streaming so an unreadable entry
         // fails fast with a clear status instead of truncating a streamed
         // archive mid-flight.
-        verify_readable_fs(abs)?;
+        //
+        // No ceiling refusal on this arm: an archive has no size until it has
+        // been built, so bounding it is cumulative accounting during the build
+        // rather than a check the plan can make.
+        verify_readable_fs(abs).map_err(DownloadRefusal::unreadable)?;
         Ok(TerminalDownload::Directory { name })
     } else {
         // Opening happens before headers are sent. The returned reader keeps
         // the exact file handle and bounded producer alive.
-        let reader = AbsoluteFileReader::open(abs)?;
+        let reader = AbsoluteFileReader::open(abs, limit).map_err(DownloadRefusal::unreadable)?;
+        // Refused here rather than mid-stream so an over-ceiling download costs
+        // one open and produces a status the caller can act on, instead of a
+        // 200 that aborts partway through a body.
+        if reader.size > limit {
+            return Err(DownloadRefusal::over_ceiling(reader.size, limit));
+        }
         Ok(TerminalDownload::File { reader, name })
     }
 }
@@ -1136,7 +1230,7 @@ mod tests {
         let content = vec![0x5a; chan_workspace::BINARY_STREAM_CHUNK_SIZE.saturating_mul(2) + 17];
         std::fs::write(dir.path().join("one.txt"), &content).unwrap();
 
-        match terminal_download_plan(&dir.path().join("one.txt")).unwrap() {
+        match terminal_download_plan(&dir.path().join("one.txt"), u64::MAX).unwrap() {
             TerminalDownload::File { mut reader, name } => {
                 let chunks: std::io::Result<Vec<Vec<u8>>> = reader.by_ref().collect();
                 let chunks = chunks.unwrap();
@@ -1156,7 +1250,7 @@ mod tests {
         // A directory pre-flights readable and is marked for streaming; the
         // stream builds a real tar via the same `append_dir_all` the download
         // job hands `build_tar_into`.
-        match terminal_download_plan(dir.path()).unwrap() {
+        match terminal_download_plan(dir.path(), u64::MAX).unwrap() {
             TerminalDownload::Directory { name } => {
                 let mut buf = Vec::new();
                 {
@@ -1168,11 +1262,20 @@ mod tests {
             }
             TerminalDownload::File { .. } => panic!("expected a directory"),
         }
-        let missing = match terminal_download_plan(&dir.path().join("missing")) {
+        let missing = match terminal_download_plan(&dir.path().join("missing"), u64::MAX) {
             Err(error) => error,
             Ok(_) => panic!("missing download must fail"),
         };
-        assert!(missing.contains("cannot access"), "{missing}");
+        assert!(
+            missing.message.contains("cannot access"),
+            "{}",
+            missing.message
+        );
+        assert_eq!(
+            missing.status,
+            StatusCode::BAD_REQUEST,
+            "an unreadable path is not a ceiling refusal"
+        );
     }
 
     /// Dropping the response must release the lane slot, because the job handle
@@ -1213,7 +1316,8 @@ mod tests {
             })
             .expect("an idle lane admits");
 
-        let response = stream_planned_download_tracked(&bulk, None, None, path.clone()).await;
+        let response =
+            stream_planned_download_tracked(&bulk, None, None, path.clone(), u64::MAX).await;
         assert_eq!(
             response.status(),
             StatusCode::OK,
@@ -1221,7 +1325,7 @@ mod tests {
         );
         assert!(
             response.headers().get(header::CONTENT_LENGTH).is_none(),
-            "a live file stream must not promise its open-time length"
+            "the ceiling bounds this stream but is not its length, so the response promises none"
         );
 
         // Fill the rest of the lane behind the running download, so the refusal
@@ -1288,7 +1392,7 @@ mod tests {
         let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
         let (_releases, _held) = crate::bulk_transfer::test_support::saturate_admission(&bulk);
 
-        let refused = stream_planned_download_tracked(&bulk, None, None, missing).await;
+        let refused = stream_planned_download_tracked(&bulk, None, None, missing, u64::MAX).await;
         assert_eq!(
             refused.status(),
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1304,6 +1408,101 @@ mod tests {
         );
     }
 
+    /// The effective ceiling on the download arm, from both sides, in the shape
+    /// the upload arm already uses: exactly the ceiling is served, one byte past
+    /// it is refused.
+    ///
+    /// The refused body is asserted, not just the status. A bare 413 tells the
+    /// caller a number was exceeded without saying which number or by how much,
+    /// and a refusal nobody can act on is the reason this test reads the message.
+    #[tokio::test]
+    async fn a_terminal_download_serves_the_exact_ceiling_and_refuses_one_byte_over() {
+        const CAP: u64 = 4096;
+        let dir = tempfile::tempdir().unwrap();
+        let exact = dir.path().join("exact.bin");
+        std::fs::write(&exact, vec![0x7e; CAP as usize]).unwrap();
+        let over = dir.path().join("over.bin");
+        std::fs::write(&over, vec![0x7e; CAP as usize + 1]).unwrap();
+
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+
+        let served = stream_planned_download_tracked(&bulk, None, None, exact, CAP).await;
+        assert_eq!(
+            served.status(),
+            StatusCode::OK,
+            "a download of exactly the effective ceiling must be served"
+        );
+        let body = axum::body::to_bytes(served.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            body.len() as u64,
+            CAP,
+            "the served download must carry the whole file, not a truncated prefix"
+        );
+
+        let refused = stream_planned_download_tracked(&bulk, None, None, over, CAP).await;
+        assert_eq!(
+            refused.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "one byte past the effective ceiling must be refused"
+        );
+        let message = String::from_utf8(
+            axum::body::to_bytes(refused.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            message.contains("4097") && message.contains("4096"),
+            "the refusal must name the size and the ceiling it exceeded: {message}"
+        );
+    }
+
+    /// The bound has to survive a file that grows after the plan measured it,
+    /// or appending to a file is enough to walk past the ceiling. Opening at the
+    /// ceiling and extending before the first pull is exactly the case a
+    /// plan-time size check cannot see.
+    ///
+    /// Both sides at the same seam: a file that stays at the ceiling streams to
+    /// EOF, so the error above is attributable to the growth rather than to a
+    /// reader that refuses its last chunk.
+    #[test]
+    fn the_download_reader_stops_when_a_growing_file_passes_the_ceiling() {
+        const CAP: u64 = 8;
+        let dir = tempfile::tempdir().unwrap();
+
+        let steady = dir.path().join("steady.bin");
+        std::fs::write(&steady, b"12345678").unwrap();
+        let chunks: std::io::Result<Vec<Vec<u8>>> = AbsoluteFileReader::open(&steady, CAP)
+            .unwrap()
+            .by_ref()
+            .collect();
+        assert_eq!(
+            chunks.expect("a file at the ceiling must stream").concat(),
+            b"12345678",
+            "a file that stays at the ceiling must stream to EOF"
+        );
+
+        let growing = dir.path().join("growing.bin");
+        std::fs::write(&growing, b"12345678").unwrap();
+        let mut reader = AbsoluteFileReader::open(&growing, CAP).unwrap();
+        std::fs::write(&growing, b"12345678and then some more").unwrap();
+
+        let error = loop {
+            match reader.next() {
+                Some(Ok(_)) => continue,
+                Some(Err(error)) => break error,
+                None => panic!("a file grown past the ceiling must not stream to EOF"),
+            }
+        };
+        assert!(
+            error.to_string().contains("ceiling"),
+            "the reader must name the bound it stopped at: {error}"
+        );
+    }
+
     /// Laziness is the property the lane depends on: no byte may be read before
     /// the consumer pulls, so the thread that pulls is the thread that reads.
     #[test]
@@ -1312,7 +1511,7 @@ mod tests {
         let path = dir.path().join("lazy.bin");
         std::fs::write(&path, vec![0x7a; chan_workspace::BINARY_STREAM_CHUNK_SIZE]).unwrap();
 
-        let mut reader = AbsoluteFileReader::open(&path).unwrap();
+        let mut reader = AbsoluteFileReader::open(&path, u64::MAX).unwrap();
         // Replacing the contents after open but before the first pull is
         // visible only to a reader that had not already buffered them.
         std::fs::write(&path, vec![0x5b; chan_workspace::BINARY_STREAM_CHUNK_SIZE]).unwrap();
@@ -1383,7 +1582,8 @@ mod tests {
         let (releases, _held) = crate::bulk_transfer::test_support::saturate_admission(&bulk);
 
         let refused =
-            stream_planned_download_tracked(&bulk, None, None, dir.path().to_path_buf()).await;
+            stream_planned_download_tracked(&bulk, None, None, dir.path().to_path_buf(), u64::MAX)
+                .await;
 
         assert_eq!(
             refused.status(),
@@ -1409,7 +1609,8 @@ mod tests {
 
         let bulk = crate::state::test_support::make_test_bulk_transfer_tenant();
         let resp =
-            stream_planned_download_tracked(&bulk, None, None, dir.path().to_path_buf()).await;
+            stream_planned_download_tracked(&bulk, None, None, dir.path().to_path_buf(), u64::MAX)
+                .await;
 
         assert_eq!(
             resp.headers()
