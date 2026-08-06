@@ -28,7 +28,7 @@ use futures::stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::bulk_transfer::{BulkCancel, BulkTransferTenant};
+use crate::bulk_transfer::{BulkCancel, BulkOutcome, BulkTransferTenant};
 use crate::error::{err, err_from};
 use crate::routes::files::{
     content_disposition_archive, content_disposition_attachment, download_filename, query_flag,
@@ -162,68 +162,6 @@ pub(crate) fn build_tar_into<F>(
             let _ = tx.blocking_send(Err(e));
         }
     }
-}
-
-/// Stream a tar archive straight to the response body, built on the fly by
-/// `build` (no staged temp file). The caller is expected to have already
-/// pre-flighted readability, so the build does not fail mid-stream under normal
-/// conditions; a client disconnect stops it cleanly (BrokenPipe), and any other
-/// late error is forwarded so the body fails rather than completing a truncated
-/// archive silently.
-///
-/// `events` and `tracking` are both `None` for an untracked caller, which is
-/// admitted and bounded identically and simply reports nothing.
-pub(crate) fn stream_tar_response_tracked<F>(
-    bulk: &BulkTransferTenant,
-    events: Option<tokio::sync::broadcast::Sender<String>>,
-    tracking: Option<TransferTracking>,
-    archive_name: String,
-    build: F,
-) -> Response
-where
-    F: FnOnce(&mut tar::Builder<TarChannelWriter>) -> std::io::Result<()> + Send + 'static,
-{
-    let (tx, rx) = mpsc::channel::<std::io::Result<Bytes>>(8);
-    let job = match bulk.submit(move |cancel| build_tar_into(&tx, cancel, build)) {
-        Ok(job) => job,
-        // Refused before a single archive byte is produced, so the caller can
-        // retry without having paid for a walk of the tree.
-        Err(full) => return full.into_response(),
-    };
-    // `alive_tx` rides with the job so the reporter learns the response is
-    // gone by its sender dropping, rather than by polling for it.
-    let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<std::convert::Infallible>();
-    if let (Some(events), Some(tracking)) = (events, tracking) {
-        crate::routes::ws::spawn_transfer_queue_reporter(
-            events,
-            tracking.window_id,
-            tracking.transfer_id,
-            job.tracker(),
-            alive_rx,
-        );
-    }
-    // The job handle rides in the body's state so a disconnected or dropped
-    // response cancels the build and releases its lane slot. Holding it
-    // anywhere else would keep a slot occupied for a client that is gone.
-    let body = Body::from_stream(stream::unfold(
-        (rx, job, alive_tx),
-        |(mut rx, job, alive_tx)| async move {
-            rx.recv()
-                .await
-                .map(|message| (message, (rx, job, alive_tx)))
-        },
-    ));
-    (
-        [
-            (header::CONTENT_TYPE, "application/x-tar".to_string()),
-            (
-                header::CONTENT_DISPOSITION,
-                content_disposition_archive(&archive_name),
-            ),
-        ],
-        body,
-    )
-        .into_response()
 }
 
 #[derive(Default, Deserialize)]
@@ -476,7 +414,11 @@ struct TerminalUploadResponse {
 /// `POST /api/files/upload` on the terminal tenant: write the uploaded file into
 /// the cwd / uid-scoped `dir`. No replace (`path`) flow -- the slim tenant has no
 /// file browser. Mounted only on the terminal router, so `dir` is absolute.
-pub async fn api_terminal_upload_file(mut multipart: Multipart) -> Response {
+pub async fn api_terminal_upload_file(
+    State(state): State<std::sync::Arc<crate::state::AppState>>,
+    headers: axum::http::HeaderMap,
+    mut multipart: Multipart,
+) -> Response {
     let mut dir = String::new();
     let mut dir_seen = false;
     loop {
@@ -493,10 +435,15 @@ pub async fn api_terminal_upload_file(mut multipart: Multipart) -> Response {
                         }
                         let filename = field.file_name().unwrap_or("").to_owned();
                         let abs_dir = abs_from_terminal_path(&dir);
-                        return match stream_terminal_upload(abs_dir, filename, field).await {
-                            Ok(response) => Json(response).into_response(),
-                            Err(error) => err_from(&error),
-                        };
+                        return stream_terminal_upload(
+                            &state.bulk_transfer,
+                            Some(state.events_tx.clone()),
+                            TransferTracking::from_headers(&headers),
+                            abs_dir,
+                            filename,
+                            field,
+                        )
+                        .await;
                     }
                     "dir" => match read_multipart_text_field(field).await {
                         Ok(s) => {
@@ -527,15 +474,47 @@ enum TerminalUploadMessage {
     Failed(String),
 }
 
+/// Admit one terminal upload and write it inside a SINGLE lane job.
+///
+/// The job is the writer. It is admitted before the first body byte is pulled,
+/// so a refusal has read nothing, opened nothing, and left no temp file, and
+/// the disk work runs on the transfer lane rather than the pool that serves
+/// editor saves and terminal spawns. The async half only moves the multipart
+/// field into the job's bounded channel; that channel is also the backpressure,
+/// so a queued upload stalls its sender instead of buffering the body.
+///
+/// Returning early drops the job, which cancels it and releases its slot.
 async fn stream_terminal_upload(
+    bulk: &BulkTransferTenant,
+    events: Option<tokio::sync::broadcast::Sender<String>>,
+    tracking: Option<TransferTracking>,
     abs_dir: PathBuf,
     filename: String,
     mut field: Field<'_>,
-) -> chan_workspace::Result<TerminalUploadResponse> {
+) -> Response {
     let (tx, rx) = mpsc::channel(8);
-    let consumer = tokio::task::spawn_blocking(move || {
-        terminal_upload_stream_sync(&abs_dir, &filename, rx, chan_workspace::BYTES_WRITE_LIMIT)
-    });
+    let job = match bulk.submit(move |cancel| {
+        terminal_upload_stream_sync(
+            &abs_dir,
+            &filename,
+            rx,
+            chan_workspace::BYTES_WRITE_LIMIT,
+            cancel,
+        )
+    }) {
+        Ok(job) => job,
+        Err(full) => return full.into_response(),
+    };
+    let (_alive_tx, alive_rx) = tokio::sync::oneshot::channel::<std::convert::Infallible>();
+    if let (Some(events), Some(tracking)) = (events, tracking) {
+        crate::routes::ws::spawn_transfer_queue_reporter(
+            events,
+            tracking.window_id,
+            tracking.transfer_id,
+            job.tracker(),
+            alive_rx,
+        );
+    }
     loop {
         let message = match field.chunk().await {
             Ok(Some(bytes)) => TerminalUploadMessage::Chunk(bytes),
@@ -548,9 +527,18 @@ async fn stream_terminal_upload(
         }
     }
     drop(tx);
-    consumer
-        .await
-        .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?
+    match job.outcome().await {
+        BulkOutcome::Done(Ok(response)) => Json(response).into_response(),
+        BulkOutcome::Done(Err(error)) => err_from(&error),
+        // Cancellation, lane shutdown, and a panicked job are reported
+        // identically and cannot be told apart here. All three mean the write
+        // did not complete and nothing was persisted, so the caller is told to
+        // retry rather than given a result that never existed.
+        BulkOutcome::Cancelled => err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "upload did not complete".into(),
+        ),
+    }
 }
 
 fn terminal_upload_stream_sync(
@@ -558,6 +546,7 @@ fn terminal_upload_stream_sync(
     original_name: &str,
     mut rx: mpsc::Receiver<TerminalUploadMessage>,
     limit: u64,
+    cancel: &BulkCancel,
 ) -> chan_workspace::Result<TerminalUploadResponse> {
     let metadata = std::fs::metadata(abs_dir)
         .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?;
@@ -580,6 +569,15 @@ fn terminal_upload_stream_sync(
     loop {
         match rx.blocking_recv() {
             Some(TerminalUploadMessage::Chunk(bytes)) => {
+                // Checked per chunk rather than once at the start: an abandoned
+                // upload must return its admission slot within one chunk's work
+                // instead of holding it for a transfer nobody is waiting on. The
+                // temp file is dropped unpersisted, so nothing is left behind.
+                if cancel.is_cancelled() {
+                    return Err(chan_workspace::ChanError::Io(
+                        "upload cancelled before it completed".into(),
+                    ));
+                }
                 let attempted =
                     written.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
                 if attempted > limit {
@@ -664,7 +662,11 @@ mod tests {
              terminal-stream\r\n\
              --{boundary}--\r\n"
         );
-        let app = Router::new().route("/upload", post(api_terminal_upload_file));
+        // The shared test lane is right here: this test admits one job and
+        // never saturates, so it cannot refuse admission for a concurrent test.
+        let app = Router::new()
+            .route("/upload", post(api_terminal_upload_file))
+            .with_state(crate::state::test_support::make_test_state(false));
 
         let response = app
             .oneshot(
@@ -685,6 +687,172 @@ mod tests {
         assert_eq!(
             std::fs::read(dir.path().join("note.bin")).unwrap(),
             b"terminal-stream"
+        );
+    }
+
+    /// A multipart body carrying a single `file` part, so a test can reach
+    /// `stream_terminal_upload` directly instead of through the router. Going
+    /// through the router would put the upload on the shared test lane, which
+    /// must never be saturated: filling it refuses admission for whatever else
+    /// is running at that moment, and the red surfaces in an unrelated test.
+    async fn file_field_multipart(boundary: &str, filename: &str, content: &str) -> Multipart {
+        use axum::extract::FromRequest;
+
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\r\n\
+             {content}\r\n\
+             --{boundary}--\r\n"
+        );
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/upload")
+            .header(
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(Body::from(body))
+            .unwrap();
+        Multipart::from_request(request, &()).await.unwrap()
+    }
+
+    /// Both sides of the admission bound, because a refusal on its own can pass
+    /// for the wrong reason: the same upload must succeed once the lane drains,
+    /// which is what pins the 503 to the bound rather than to a broken route.
+    ///
+    /// The refused target directory does not exist, so if the refusal ever
+    /// stopped preceding the write this test would fail with a write error
+    /// instead of a 503.
+    #[tokio::test]
+    async fn a_terminal_upload_refused_at_the_bound_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("not-here");
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+        let (releases, held) = crate::bulk_transfer::test_support::saturate_admission(&bulk);
+
+        let mut refused_body = file_field_multipart("refused-upload", "declined.bin", "body").await;
+        let refused_field = refused_body.next_field().await.unwrap().unwrap();
+        let refused = stream_terminal_upload(
+            &bulk,
+            None,
+            None,
+            missing.clone(),
+            "declined.bin".into(),
+            refused_field,
+        )
+        .await;
+        assert_eq!(
+            refused.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a full lane must refuse the upload rather than write it"
+        );
+        assert_eq!(
+            refused
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("1"),
+            "a refusal must tell the caller when to come back"
+        );
+        assert!(
+            !missing.exists(),
+            "a refused upload must not touch its destination"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "a refused upload must leave no target and no temp file"
+        );
+
+        // Awaiting every held job is proof the slots are free, where dropping
+        // the senders and continuing would only be a guess about timing.
+        drop(releases);
+        for job in held {
+            let _ = job.outcome().await;
+        }
+
+        let mut admitted_body =
+            file_field_multipart("admitted-upload", "admitted.bin", "body").await;
+        let admitted_field = admitted_body.next_field().await.unwrap().unwrap();
+        let admitted = stream_terminal_upload(
+            &bulk,
+            None,
+            None,
+            dir.path().to_path_buf(),
+            "admitted.bin".into(),
+            admitted_field,
+        )
+        .await;
+        assert_eq!(
+            admitted.status(),
+            StatusCode::OK,
+            "the same upload must succeed once the lane has capacity"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("admitted.bin")).unwrap(),
+            b"body"
+        );
+    }
+
+    /// The writer must observe cancellation BETWEEN chunks rather than once
+    /// before the loop, or an abandoned upload holds its slot for the length of
+    /// the transfer instead of the length of one chunk.
+    ///
+    /// Channel capacity 1 is what makes that discriminating: the second send
+    /// returns only after the writer has taken the first chunk out of the
+    /// buffer, so the flag is set strictly after the writer entered the loop. A
+    /// start-only check would already have passed and would persist the file.
+    #[tokio::test]
+    async fn a_cancelled_terminal_upload_stops_between_chunks_and_leaves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("aborted.bin");
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+
+        let (tx, rx) = mpsc::channel(1);
+        let abs_dir = dir.path().to_path_buf();
+        let job = bulk
+            .submit(move |cancel| {
+                terminal_upload_stream_sync(
+                    &abs_dir,
+                    "aborted.bin",
+                    rx,
+                    chan_workspace::BYTES_WRITE_LIMIT,
+                    cancel,
+                )
+            })
+            .expect("an idle lane admits");
+
+        tx.send(TerminalUploadMessage::Chunk(Bytes::from_static(b"first")))
+            .await
+            .unwrap();
+        tx.send(TerminalUploadMessage::Chunk(Bytes::from_static(b"second")))
+            .await
+            .unwrap();
+
+        job.cancel();
+
+        // Sent after the flag, so the writer cannot reach `Complete` without
+        // having read a chunk with cancellation already visible to it.
+        for _ in 0..4 {
+            let _ = tx
+                .send(TerminalUploadMessage::Chunk(Bytes::from_static(b"more")))
+                .await;
+        }
+        let _ = tx.send(TerminalUploadMessage::Complete).await;
+        drop(tx);
+
+        assert!(
+            matches!(job.outcome().await, BulkOutcome::Cancelled),
+            "a cancelled job reports no result"
+        );
+        assert!(
+            !target.exists(),
+            "a cancelled upload must not persist its target"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "a cancelled upload must leave no temp file behind"
         );
     }
 
@@ -762,7 +930,14 @@ mod tests {
         tx.blocking_send(TerminalUploadMessage::Complete).unwrap();
         drop(tx);
 
-        let error = terminal_upload_stream_sync(dir.path(), "large.bin", rx, 8).unwrap_err();
+        let error = terminal_upload_stream_sync(
+            dir.path(),
+            "large.bin",
+            rx,
+            8,
+            &crate::bulk_transfer::test_support::uncancelled(),
+        )
+        .unwrap_err();
 
         assert!(matches!(
             error,
@@ -780,7 +955,14 @@ mod tests {
             .unwrap();
         drop(tx);
 
-        let error = terminal_upload_stream_sync(dir.path(), "cancelled.bin", rx, 1024).unwrap_err();
+        let error = terminal_upload_stream_sync(
+            dir.path(),
+            "cancelled.bin",
+            rx,
+            1024,
+            &crate::bulk_transfer::test_support::uncancelled(),
+        )
+        .unwrap_err();
 
         assert!(error.to_string().contains("before completion"));
         assert!(!dir.path().join("cancelled.bin").exists());
@@ -843,8 +1025,8 @@ mod tests {
             TerminalDownload::Directory { .. } => panic!("expected a file payload"),
         }
         // A directory pre-flights readable and is marked for streaming; the
-        // stream builds a real tar via the same `append_dir_all` the handler
-        // hands `stream_tar_response_tracked`.
+        // stream builds a real tar via the same `append_dir_all` the download
+        // job hands `build_tar_into`.
         match terminal_download_plan(dir.path()).unwrap() {
             TerminalDownload::Directory { name } => {
                 let mut buf = Vec::new();
@@ -993,48 +1175,67 @@ mod tests {
         );
     }
 
+    /// The archive arm's refusal, which costs more than the file arm's because
+    /// the work it declines is a whole-tree pre-flight rather than one open.
+    ///
+    /// The tree holds an unreadable file, so the pre-flight cannot succeed: a
+    /// refusal that stopped preceding the plan would surface as a 400 naming
+    /// that file instead of a 503, which is what makes the assertion about the
+    /// refusal's position rather than merely about its status.
+    #[cfg(unix)]
     #[tokio::test]
-    async fn archive_refuses_at_the_bound_with_a_retry_hint_and_no_bytes() {
+    async fn an_archive_refused_at_the_bound_walks_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
-        let src = dir.path().to_path_buf();
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, b"a").unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root bypasses permission bits, which would leave the pre-flight able
+        // to succeed and the test unable to discriminate.
+        if std::fs::File::open(&secret).is_ok() {
+            return;
+        }
 
         let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
         let (releases, _held) = crate::bulk_transfer::test_support::saturate_admission(&bulk);
 
-        let built = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let observed = built.clone();
-        let resp = stream_tar_response_tracked(&bulk, None, None, "arc".into(), move |b| {
-            observed.store(true, std::sync::atomic::Ordering::SeqCst);
-            b.append_dir_all("arc", &src)
-        });
+        let refused =
+            stream_planned_download_tracked(&bulk, None, None, dir.path().to_path_buf()).await;
 
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
-            resp.headers()
+            refused.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a full lane must refuse before walking the tree it declined to archive"
+        );
+        assert_eq!(
+            refused
+                .headers()
                 .get(header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok()),
             Some("1")
-        );
-        assert!(
-            !built.load(std::sync::atomic::Ordering::SeqCst),
-            "a refusal must not walk the tree it declined to archive"
         );
 
         drop(releases);
     }
 
     #[tokio::test]
-    async fn stream_tar_response_streams_a_valid_tar_on_the_fly() {
+    async fn a_terminal_directory_download_streams_a_valid_tar_on_the_fly() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
         std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
-        let src = dir.path().to_path_buf();
 
         let bulk = crate::state::test_support::make_test_bulk_transfer_tenant();
-        let resp = stream_tar_response_tracked(&bulk, None, None, "arc".into(), move |b| {
-            b.append_dir_all("arc", &src)
-        });
+        let resp =
+            stream_planned_download_tracked(&bulk, None, None, dir.path().to_path_buf()).await;
+
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/x-tar"),
+            "a directory download declares itself an archive"
+        );
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
