@@ -42,6 +42,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [web-marketing-onboarding](v0.86.0/web-marketing-onboarding.md) | deferred from v0.85.0, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
 | [web-lock-check-destroys-node-modules](v0.86.0/web-lock-check-destroys-node-modules.md) | accepted, specced | make the lockfile sync check non-destructive on the pinned npm, and correct the comment that says it already is |
 | [editor-widget-tests-are-nondeterministic](v0.86.0/editor-widget-tests-are-nondeterministic.md) | accepted, specced | fix the render race behind three intermittently failing editor tests so the gate stops going red on an unmodified tree |
+| [large-transfer-ceiling-refinements](v0.86.0/large-transfer-ceiling-refinements.md) | accepted, specced | bound archives cumulatively by the ceiling, charge ranged reads by transferred length, and plumb recovery with the reported value |
 
 ## Completed
 
