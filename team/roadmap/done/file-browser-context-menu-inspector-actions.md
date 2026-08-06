@@ -1,5 +1,7 @@
 # File browser context menu and inspector actions
 
+> Status: shipped in [v0.85.0](../../release/release-v0.85.0.md).
+
 Status: IMPLEMENTED for v0.85.0; automated evidence complete.
 
 - The file browser's right-click context menu offers a narrower set of actions than the inspector does for the same file, so a video reached by right-click has no view or download entry; the menu should carry the inspector's per-type actions, which means deciding whether the two surfaces share one action source or keep separate lists that drift.

@@ -1,5 +1,7 @@
 # `cs terminal list` does not show queue depth in its table
 
+> Status: shipped in [v0.85.0](../../release/release-v0.85.0.md).
+
 Status: REGISTERED for v0.85.0, grounded 2026-08-05.
 
 ## What

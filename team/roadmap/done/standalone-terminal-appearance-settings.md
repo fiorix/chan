@@ -1,5 +1,7 @@
 # Terminal appearance settings do not reach a standalone terminal
 
+> Status: shipped in [v0.85.0](../../release/release-v0.85.0.md).
+
 Status: REGISTERED for v0.85.0, filed 2026-08-05, accepted, break located 2026-08-05. Follow-up to the custom terminal background work that ships in v0.84.1 (`6ffbe7d7`), which paints the terminal chrome from the resolved custom background in a workspace window. The owner reported that appearance settings do not take effect in a standalone terminal window. The break is two SPA boundaries, recorded below, and the fix reaches the whole terminal preference set rather than appearance alone.
 
 Component: `workspace-app` SPA (`web/packages/workspace-app`), and whichever server surface backs a

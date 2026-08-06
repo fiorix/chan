@@ -1,5 +1,7 @@
 # Selected settings pills switch their outer border to blue
 
+> Status: shipped in [v0.85.0](../../release/release-v0.85.0.md).
+
 Status: IMPLEMENTED for v0.85.0, grounded 2026-08-05, extended to radio pills by owner ruling 2026-08-06, automated evidence complete.
 
 ## What

@@ -1,5 +1,7 @@
 # chan-desktop cannot open a library window: the flow depends on `window.open`
 
+> Status: shipped in [v0.85.0](../../release/release-v0.85.0.md).
+
 Status: REGISTERED for v0.85.0, DEFERRED from v0.84.1 on 2026-08-05, filed and grounded 2026-08-05 by live owner testing, implemented, owner validation pending. The accepted approach shipped: the desktop mints and raises library windows through two capability-gated native commands, and the browser keeps `window.open`. What remains is owner acceptance on real macOS hardware, which is the only place a WKWebView delivering an invoke from a remote https page can be observed.
 
 It moved out of v0.84.1 because the repair needs a new native command and its capability wiring, which is more than a patch release should carry: an SPA-only branch was written, tested live, and reverted (see Attempted and reverted). The v0.84.1 diagnostic work that came out of this investigation SHIPPED and stays in v0.84.1.

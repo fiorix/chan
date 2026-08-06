@@ -1,5 +1,7 @@
 # Ghostty live-output scroll stability
 
+> Status: shipped in [v0.85.0](../../release/release-v0.85.0.md).
+
 Status: REGISTERED for v0.85.0, grounded 2026-08-03, ruled 2026-08-03, specified 2026-08-03, implemented, owner validation pending.
 
 ## What

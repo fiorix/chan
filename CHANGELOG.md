@@ -4,9 +4,9 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.85.0] - 2026-08-06
 
-Large transfers are bounded by the server rather than by the browser: every transfer path now runs on a process-wide admission lane that never draws from the threads serving editor saves and terminal spawns, the 50 MiB compiled-in write limit is replaced by a validated configuration ceiling, and a client past the queue bound is refused before its body is read. Terminal appearance settings reach standalone terminal windows, Hybrid Nav splits panes with the mouse, the file browser and inspector share one action source, and chan-desktop opens library windows natively.
+Large transfers are bounded by the server rather than by the browser: every transfer path now runs on a process-wide admission lane that never draws from the threads serving editor saves and terminal spawns, the 50 MiB compiled-in write limit is replaced by a validated configuration ceiling that also bounds terminal downloads, and a client past the queue bound is refused before its body is read. Terminal appearance settings reach standalone terminal windows, Hybrid Nav splits panes with the mouse, the file browser and inspector share one action source, chan-desktop opens library windows natively, and ghostty stops erasing the last columns it draws over.
 
 ### Added
 

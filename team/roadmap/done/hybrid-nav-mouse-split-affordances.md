@@ -1,5 +1,7 @@
 # Hybrid Nav mouse split affordances
 
+> Status: shipped in [v0.85.0](../../release/release-v0.85.0.md).
+
 Status: IMPLEMENTED for v0.85.0; automated evidence complete, owner runtime validation pending.
 
 ## What

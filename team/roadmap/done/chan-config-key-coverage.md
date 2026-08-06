@@ -1,5 +1,7 @@
 # `chan config` accepts only a third of the keys it prints
 
+> Status: shipped in [v0.85.0](../../release/release-v0.85.0.md).
+
 Status: REGISTERED for v0.85.0, grounded 2026-08-04, implemented, integrated validation pending.
 
 ## What

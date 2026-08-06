@@ -19,21 +19,6 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-### v0.85.0
-
-| item | state | what needs to happen |
-| --- | --- | --- |
-| [standalone-terminal-appearance-settings](v0.85.0/standalone-terminal-appearance-settings.md) | implemented, owner validation pending | confirm a standalone terminal matches a workspace terminal on macOS, including the selected backend |
-| [desktop-library-window-open-unavailable](v0.85.0/desktop-library-window-open-unavailable.md) | implemented, owner validation pending | confirm native window creation and focus in a gateway-served and a local chan-desktop window on macOS |
-| [large-transfer-capability](v0.85.0/large-transfer-capability.md) | implementation in progress | finish the bulk-transfer lane, admission control, queue protocol, browser state, and acceptance evidence before raising the ceiling |
-| [ghostty-macos-trackpad-scroll-parity](v0.85.0/ghostty-macos-trackpad-scroll-parity.md) | implemented, owner validation pending | calibrate the accepted factor on macOS hardware and complete live client checks |
-| [ghostty-live-output-scroll-stability](v0.85.0/ghostty-live-output-scroll-stability.md) | implemented, owner validation pending | complete the real streaming and browser evidence |
-| [hybrid-nav-mouse-split-affordances](v0.85.0/hybrid-nav-mouse-split-affordances.md) | implemented, owner validation pending | complete runtime input evidence on real hardware; jsdom proves no layout |
-| [file-browser-context-menu-inspector-actions](v0.85.0/file-browser-context-menu-inspector-actions.md) | implemented, evidence complete | close at GA |
-| [chan-config-key-coverage](v0.85.0/chan-config-key-coverage.md) | implemented, validation pending | complete integrated validation of the serialized key authority |
-| [settings-checked-checkbox-pill-border](v0.85.0/settings-checked-checkbox-pill-border.md) | implemented, evidence complete | close at GA |
-| [cs-terminal-list-queue-depth](v0.85.0/cs-terminal-list-queue-depth.md) | implemented, evidence complete | close at GA |
-
 ### v0.86.0
 
 | item | state | what needs to happen |
@@ -44,8 +29,29 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [editor-widget-tests-are-nondeterministic](v0.86.0/editor-widget-tests-are-nondeterministic.md) | accepted, specced | fix the render race behind three intermittently failing editor tests so the gate stops going red on an unmodified tree |
 | [large-transfer-ceiling-refinements](v0.86.0/large-transfer-ceiling-refinements.md) | accepted, specced | bound archives cumulatively by the ceiling, charge ranged reads by transferred length, and plumb recovery with the reported value |
 | [gateway-tests-do-not-run-off-main](v0.86.0/gateway-tests-do-not-run-off-main.md) | accepted, specced | execute the gateway's tests on the path that delivers gateway code, not only on a push to main or a gateway-path PR |
+| [gateway-window-skew-presents-as-a-code-defect](v0.86.0/gateway-window-skew-presents-as-a-code-defect.md) | accepted, specced | make a chan-desktop build identifiable at runtime, and let a desktop advertise the command vocabulary it grants a remotely-served page |
+| [source-pins-bound-on-sibling-string-literals](v0.86.0/source-pins-bound-on-sibling-string-literals.md) | accepted, specced | fix two defects across four main.rs source pins, end-assertions that can never fire and needles that are not unique |
+| [aur-publication-is-suspended](v0.86.0/aur-publication-is-suspended.md) | accepted, blocked upstream | restore AUR publication once the incident notice is superseded and pushes are permitted, deleting the guard job in the same commit |
+| [cs-terminal-new-cannot-spawn-an-agent-session](v0.86.0/cs-terminal-new-cannot-spawn-an-agent-session.md) | accepted, specced | let cs terminal new set the spawn command and env so a single terminal can derive an agent and be poked |
 
 ## Completed
+
+### v0.85.0
+
+Shipped 2026-08-06; see [release-v0.85.0](../release/release-v0.85.0.md). Closed items in [`done/`](done/):
+
+- [large-transfer-capability](done/large-transfer-capability.md) - the 50 MiB compiled-in write limit replaced by a configuration ceiling, with every transfer path on a process-wide admission lane and a queue bound that refuses before reading a body.
+- [desktop-library-window-open-unavailable](done/desktop-library-window-open-unavailable.md) - chan-desktop opens and focuses library windows through capability-gated native commands, resolving the target library from the invoking window's own label.
+- [standalone-terminal-appearance-settings](done/standalone-terminal-appearance-settings.md) - standalone terminals fetch preferences and receive live changes, so the full terminal preference set applies rather than only defaults.
+- [hybrid-nav-mouse-split-affordances](done/hybrid-nav-mouse-split-affordances.md) - dragging a pane onto an edge zone previews and stages a 50/50 split, refusing an edge whose result would fall below the minimum pane size.
+- [file-browser-context-menu-inspector-actions](done/file-browser-context-menu-inspector-actions.md) - one capability-driven classifier behind both surfaces, so they cannot drift apart by construction.
+- [ghostty-live-output-scroll-stability](done/ghostty-live-output-scroll-stability.md) - ghostty writes and pixel-wheel input route through one viewport controller, with anchored output preserving its position.
+- [ghostty-macos-trackpad-scroll-parity](done/ghostty-macos-trackpad-scroll-parity.md) - synchronous primary-screen trackpad scrolling with the xterm parity factor, pinned by test and calibrated by the owner.
+- [settings-checked-checkbox-pill-border](done/settings-checked-checkbox-pill-border.md) - selected checkbox and radio pills keep the neutral border and are distinguished by background alone.
+- [cs-terminal-list-queue-depth](done/cs-terminal-list-queue-depth.md) - a queue column reporting messages still waiting, with an unreported value rendering as `-` rather than `0`.
+- [chan-config-key-coverage](done/chan-config-key-coverage.md) - the reader, writer, and dump derive from one key set, so a serialized field cannot reach the dump without reaching `get` and `set`.
+
+The release also carried the ghostty overlay scrollbar correction and the withheld-native-command message, neither of which had its own roadmap item: the first entered as an owner acceptance finding and the second from diagnosing one. The gateway acceptance failure that reopened the round was version skew rather than a defect, and is registered forward as [gateway-window-skew-presents-as-a-code-defect](v0.86.0/gateway-window-skew-presents-as-a-code-defect.md).
 
 ### v0.84.1
 
@@ -53,7 +59,7 @@ Shipped 2026-08-05; see [release-v0.84.1](../release/release-v0.84.1.md). Closed
 
 - [graph-large-workspace-render-cost](done/graph-large-workspace-render-cost.md) - a selection click no longer re-heats the layout and a settled graph paints nothing, with the selection-derived paint inputs memoised and the viewport culled.
 
-The release also carried five fixes that entered from live use without their own roadmap items: live-only BM25 path enumeration, a pane split surviving a mid-teardown layout read, terminal chrome following a custom background, a devserver join detaching on non-TTY stdin EOF, and an honest chan-desktop window-open message with its refusal diagnostics. The desktop library-window repair behind that last one was deferred to v0.85.0 as [desktop-library-window-open-unavailable](v0.85.0/desktop-library-window-open-unavailable.md).
+The release also carried five fixes that entered from live use without their own roadmap items: live-only BM25 path enumeration, a pane split surviving a mid-teardown layout read, terminal chrome following a custom background, a devserver join detaching on non-TTY stdin EOF, and an honest chan-desktop window-open message with its refusal diagnostics. The desktop library-window repair behind that last one was deferred to v0.85.0 as [desktop-library-window-open-unavailable](done/desktop-library-window-open-unavailable.md).
 
 ### v0.84.0
 
