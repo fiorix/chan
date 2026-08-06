@@ -17,6 +17,14 @@
 # kills its live terminals even though the unit itself is restored.
 #
 # Everything runs against a throwaway CHAN_HOME and a throwaway port.
+#
+# Run this inside an sdme container, never on a host serving live
+# terminals. The throwaway CHAN_HOME and port do not isolate the part
+# that matters: the suite drives the FIXED user unit above, and
+# restarting, stopping, or killing that unit ends every PTY it carries,
+# including the terminal running the test. CHAN_FDSTORE_E2E_ALLOW_TAKEOVER
+# is for a container where nothing else owns the unit, not for a host
+# where the refusal is inconvenient.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

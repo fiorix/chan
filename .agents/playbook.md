@@ -82,3 +82,5 @@ The phase-13 r2 Team Work revamp REMOVED the fsnotify event-watcher / poke-dispa
 ## Working as an agent inside chan
 
 chan doubles as the orchestration host. A terminal chan launches gets `CHAN_MCP_*` env vars to reach chan's in-process MCP server, and a `CHAN_TAB_NAME` it self-identifies from. The integration contracts (event files written atomically, the spawn protocol, MCP discovery) live in [`orchestration/`](orchestration/). Secrets never appear in journals, chat, or commits; signing-secret consumption is directed by NAME through GitHub Actions Secrets only. (phase 8+)
+
+Your own terminal is a PTY held by the devserver you are running on, and so is every teammate's. Anything that restarts, stops, or takes over that devserver ends the whole round's sessions at once, uncommitted work included, and it reaches further than a throwaway `CHAN_HOME` and port suggest. Systemd fdstore testing runs inside an sdme container for that reason; see [`../scripts/e2e/README.md`](../scripts/e2e/README.md).
