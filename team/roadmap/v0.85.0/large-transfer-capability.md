@@ -47,7 +47,15 @@ Whole-file-read elimination, shipped in v0.82.0, is a prerequisite for all of it
 - The runtime declares its blocking-thread ceiling explicitly.
 - A raised write ceiling is configuration, validated, with a finite maximum and no value meaning unlimited. Every mirrored ceiling consumes one server-reported effective value.
 - Remote transfer over the tunnel is a supported path, not an accident of defaults. The gateway states a transfer policy rather than applying its general body cap and deadline.
-- Crash consistency is stated rather than inherited: a multi-gigabyte commit must not stall unrelated saves at the journal.
+- Crash consistency is stated rather than inherited: the destination is old-or-complete and never partial, and the residual durability latency a multi-gigabyte commit can impose on co-journaled saves is stated explicitly rather than discovered. The position is below.
+
+### Crash consistency and journal isolation
+
+**Crash consistency and journal isolation.** A bulk transfer commits through the same discipline as every other workspace write: a same-directory temporary file, incremental validation and bounding as it is written, `sync_all` on the complete temporary, an atomic rename over the target, then a parent-directory sync. A transfer that is interrupted, cancelled, or refused therefore leaves the destination byte-for-byte as it was and leaves no temporary behind. The destination is old-or-complete, never partial.
+
+The durability cost of that guarantee is stated rather than hidden. A multi-gigabyte commit issues one large `sync_all` at the end of the transfer, and on a filesystem that shares a journal with the workspace, an unrelated small write committing in the same window can wait behind it. The wait is bounded by that single sync rather than by the transfer's whole duration, and it affects durability latency only: no unrelated write loses data, is reordered, or observes a partial state. The bound has not been measured and no number is offered.
+
+This is a known and accepted property of the current design, not an oversight. Progressive syncing, weaker durability for bulk writes, and filesystem-specific strategies were each considered and rejected for this release: the first two trade a guarantee users have today for latency they mostly do not observe, and the third makes behaviour depend on where the workspace happens to live. Reducing that residual is a future item, not a correction.
 
 ## Acceptance
 
