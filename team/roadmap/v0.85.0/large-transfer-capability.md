@@ -83,6 +83,10 @@ Each of the three iterations moved 2147483648 of 2147483648 bytes with a sha256 
 
 Peak resident set is roughly 139 MiB against a 2 GiB payload. It does not track fixture size, which is the criterion: a whole-file read would report a figure near `fixture_bytes`. The transfer streams rather than buffers.
 
+That figure also checks itself. The scenario is built with `--no-run` before the measured region opens, so a compile landing inside the region would report a compiler's resident set, which on this workspace runs an order of magnitude above 139 MiB. A figure at 139 MiB is therefore evidence from the record that the region held the scenario alone, rather than a property the reader has to take on trust from the script.
+
+`elapsed_seconds` is not a transfer time and must not be divided into `fixture_bytes`. It covers the whole measured test run, of which the three transfers are about 15.5 seconds; the rest is the scenario's own bring-up and its per-iteration hash verification of each 2 GiB result. Compilation is outside it by construction. A throughput computed from the elapsed figure understates the transfer by roughly an order of magnitude, and that is the comparison a later reader is most likely to reach for.
+
 What the run does not measure, stated so the number is not read wider than it is. The scenario is the reverse tunnel in one direction: an origin serving `/payload.bin`, forwarded through the tunnel, fetched by `curl`. It is therefore not a measurement of the local non-tunnel path, not of the upload direction, and not of a file at the configured ceiling, since the fixture is 2 GiB and the default ceiling is 10 GiB. The acceptance line asks for both directions, locally and through the tunnel, at the raised ceiling; this run discharges the tunnel download at 2 GiB and no more.
 
 ## Deferred
