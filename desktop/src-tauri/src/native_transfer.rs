@@ -248,9 +248,16 @@ pub fn request_headers(
 /// unlimited. It means this process could not learn the ceiling, either
 /// because the server does not report one or because reading it failed. The
 /// defined response is to enforce nothing client-side and leave the refusal to
-/// the server, which enforces on the route regardless of what any client
-/// believes. An unreadable ceiling therefore costs the client-side fail-fast
-/// and nothing else: the refusal still happens, later and from the server.
+/// the server.
+///
+/// What that fallback is worth depends on the direction and the tenant, and
+/// this process cannot tell them apart: both tenants serve `/api/files/...`,
+/// so the URL does not say which will answer. An upload is refused by the
+/// server on either tenant, and a terminal download is refused by the ceiling
+/// on its route, so for those the unreadable ceiling costs the client-side
+/// fail-fast and nothing else. A workspace download is bounded by no server
+/// ceiling, so there the check in [`crate::download`] is the only cap in the
+/// path and [`TransferCap::Unknown`] removes it rather than deferring it.
 ///
 /// Deliberately no `Default` impl: there is no defensible default to derive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
