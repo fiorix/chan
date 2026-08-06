@@ -607,10 +607,18 @@ async fn stream_planned_workspace_download_tracked(
 ///
 /// Cancellation is checked once per chunk, so an abandoned download releases
 /// its slot after at most one chunk's work rather than after the whole file.
-/// A read error, which is what a mid-read shrink produces, is FORWARDED and
-/// then ends the stream: the declared length is already on the wire, so ending
-/// cleanly instead would answer with fewer bytes than promised, which is the
-/// silent truncation the length exists to prevent.
+///
+/// Neither a read error nor a cancellation may end this stream cleanly. The
+/// declared length is already on the wire, so a clean end answers with fewer
+/// bytes than promised, which is the silent truncation the length exists to
+/// prevent. A read error, which is what a mid-read shrink produces, is
+/// forwarded; so is a cancellation, because cancel does not mean the client is
+/// gone: `BulkTransferLane`'s Drop cancels every active job at process
+/// shutdown, and a client mid-download then is still connected and draining.
+/// Forwarding is never worse than returning. With the client gone the send
+/// fails on the dropped receiver and nothing happens, exactly as a silent
+/// return would; with the client live the body fails instead of completing
+/// short.
 fn send_reader_into(
     tx: &mpsc::Sender<std::io::Result<Bytes>>,
     cancel: &crate::bulk_transfer::BulkCancel,
@@ -618,6 +626,9 @@ fn send_reader_into(
 ) {
     for next in reader.by_ref() {
         if cancel.is_cancelled() {
+            let _ = tx.blocking_send(Err(std::io::Error::other(
+                "transfer cancelled before the declared length was streamed",
+            )));
             return;
         }
         let message = next
@@ -3947,8 +3958,12 @@ mod write_tests {
         );
     }
 
+    /// A job cancelled before it reads sends no DATA, but it does send the
+    /// error that ends the body. Sending nothing at all is what a client
+    /// receives as a clean end, and on a length-declaring response that is a
+    /// short body presented as a complete one.
     #[test]
-    fn send_reader_into_sends_nothing_once_cancelled() {
+    fn send_reader_into_sends_no_data_but_does_fail_when_cancelled() {
         let (_cfg, root, workspace) = admitted_download_workspace();
         std::fs::write(root.path().join("cancelled.bin"), vec![1u8; 4096]).unwrap();
         let reader = match download_path_sync(&workspace, "cancelled.bin", None).unwrap() {
@@ -3960,9 +3975,16 @@ mod write_tests {
         let cancel = crate::bulk_transfer::test_support::cancelled();
         std::thread::spawn(move || send_reader_into(&tx, &cancel, reader));
 
+        let first = rx
+            .blocking_recv()
+            .expect("a cancelled job must not end cleanly");
+        assert!(
+            first.is_err(),
+            "the only item a cancelled job sends is the error that fails the body"
+        );
         assert!(
             rx.blocking_recv().is_none(),
-            "a cancelled job must send no chunk at all"
+            "nothing follows the error, and no data chunk is ever sent"
         );
     }
 
@@ -4046,6 +4068,65 @@ mod write_tests {
             "cancelled mid-stream, the reader delivered {delivered} of {CHUNKS} chunks; \
              a full-count delivery means the cancellation check was hoisted out of the \
              per-chunk loop, which leaks the admission slot for the rest of the transfer"
+        );
+    }
+    /// Cancel is not synonymous with "the client is gone". `BulkTransferLane`'s
+    /// Drop stores `true` into every active job's cancel flag at process
+    /// shutdown, so a client mid-download at that moment is connected and
+    /// draining. On this arm the response has already declared its
+    /// `Content-Length`, so a silent stop answers 200 with fewer bytes than
+    /// promised, which is the truncation the declared length exists to prevent.
+    ///
+    /// Asserting only that the stream ended does NOT discriminate: it ends
+    /// under both shapes. The assertion has to be that an error item reaches
+    /// the channel, which is what makes the body fail instead of complete.
+    #[tokio::test]
+    async fn cancelled_length_declaring_stream_fails_rather_than_ending_clean() {
+        const CHUNKS: usize = 64;
+        let (_cfg, root, workspace) = admitted_download_workspace();
+        std::fs::write(
+            root.path().join("cancelled-live.bin"),
+            vec![3u8; chan_workspace::BINARY_STREAM_CHUNK_SIZE * CHUNKS],
+        )
+        .unwrap();
+        let reader = match download_path_sync(&workspace, "cancelled-live.bin", None).unwrap() {
+            DownloadPayload::File(BinaryPlan::Full(reader)) => reader,
+            _ => panic!("expected a whole-file plan"),
+        };
+
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+        // Capacity 1: the writer is provably inside its loop once the first
+        // chunk has been taken, so the cancel lands mid-stream.
+        let (tx, mut rx) = mpsc::channel::<std::io::Result<Bytes>>(1);
+        let job = bulk
+            .submit(move |cancel| send_reader_into(&tx, cancel, reader))
+            .expect("admitted");
+
+        assert!(
+            rx.recv().await.is_some_and(|first| first.is_ok()),
+            "the first chunk must arrive before the cancel"
+        );
+
+        job.cancel();
+
+        // The client is still draining here, which is the shutdown case.
+        let mut saw_error = false;
+        let mut delivered = 1;
+        while let Some(message) = rx.recv().await {
+            delivered += 1;
+            if message.is_err() {
+                saw_error = true;
+            }
+        }
+        assert!(
+            delivered < CHUNKS,
+            "the cancel must stop the stream well before the file ends"
+        );
+        assert!(
+            saw_error,
+            "a cancelled transfer on a length-declaring response must fail the \
+             body with an error item; ending cleanly answers 200 with fewer \
+             bytes than the declared Content-Length promised"
         );
     }
 

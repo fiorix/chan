@@ -212,8 +212,22 @@ async fn stream_planned_download_tracked(
                 }
                 // The lane worker does the reading itself. Handing the reader
                 // to a pool task would cost a slot and a task for one request.
+                //
+                // A cancellation is forwarded rather than ending the stream.
+                // Cancel does not mean the client is gone: `BulkTransferLane`'s
+                // Drop cancels every active job at process shutdown, and a
+                // client mid-download then is still connected and draining.
+                // This response declares no length, so there is no promise to
+                // fall short of, but a clean end is indistinguishable from a
+                // complete transfer and hands the client a truncated file it
+                // believes is whole. Forwarding is never worse: with the client
+                // gone the send fails on the dropped receiver and nothing
+                // happens, exactly as a silent return would.
                 for next in reader.by_ref() {
                     if cancel.is_cancelled() {
+                        let _ = tx.blocking_send(Err(std::io::Error::other(
+                            "transfer cancelled before the file was fully streamed",
+                        )));
                         return;
                     }
                     let terminal = next.is_err();
