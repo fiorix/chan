@@ -43,6 +43,66 @@ export interface LibraryWindowBridge {
   currentWindowId: () => string;
 }
 
+/// Whether a rejected invoke was the app's ACL withholding the command rather
+/// than a command that ran and failed.
+///
+/// Tauri rejects an ungranted command before any handler runs, so the text is
+/// Tauri's: a release build reports `Command {cmd} not allowed by ACL` and a
+/// debug build one of several longer diagnostics. Every form names the command
+/// and says it is not allowed or explicitly denied, while the native
+/// library-window handlers report their own failures in other words entirely
+/// (a missing library, a disconnected devserver, an unknown window). Requiring
+/// both conditions is what keeps a handler's real reason from being reported
+/// as a version problem.
+function isAclRefusal(command: string, message: string): boolean {
+  if (!message.includes(command)) return false;
+  return message.includes("not allowed") || message.includes("explicitly denied");
+}
+
+/// Invoke a native library-window command, and describe a withheld one in
+/// terms of the app instead of Tauri's vocabulary.
+///
+/// Running inside a Tauri webview does not mean this app grants this command.
+/// A gateway-served window is delivered by the remote devserver while the ACL
+/// gating its invokes belongs to the chan-desktop installed on this machine,
+/// so the page and the ACL are independently versioned and the page can call a
+/// command the app has never heard of. A local window cannot skew that way,
+/// because chan-desktop embeds the bundle it serves.
+///
+/// There is no fallback to route to: `window.open` returns null in every chan
+/// webview, which is the reason the native path exists at all. So what the
+/// user is told is the entire remedy.
+///
+/// A release build collapses every rejection shape into one string that says
+/// only that the command was refused, so the message below has to hold for the
+/// whole class: a command the app has never heard of, and one it grants but not
+/// for this window. Version skew is named as the likely cause rather than the
+/// certain one for that reason. What is certain, and worth saying because the
+/// deck offers a retry, is that repeating the action cannot change the answer.
+async function invokeNative(
+  command: string,
+  attempt: string,
+  invoke: () => Promise<void>,
+): Promise<void> {
+  try {
+    await invoke();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!isAclRefusal(command, message)) {
+      throw new Error(`chan-desktop could not ${attempt}: ${message}`);
+    }
+    // Which command was withheld is the first thing a report of this needs and
+    // the last thing the user has any use for, so it goes to the console.
+    console.error(`[chan-desktop] ${command} withheld by the app ACL`, message);
+    throw new Error(
+      `chan-desktop cannot ${attempt}: the installed app refused this action. ` +
+        "A window served over the gateway is driven by the chan-desktop installed on this " +
+        "machine, which can be older than the page it is showing; if it is, update " +
+        "chan-desktop. Retrying will not help.",
+    );
+  }
+}
+
 function popupFor(window: ScopedLibraryWindow, bridge: LibraryWindowBridge): Window {
   if (window.window_id === bridge.currentWindowId()) return globalThis.window;
   const popup = globalThis.window.open("", window.window_id);
@@ -68,9 +128,16 @@ export async function createLibraryWindow(
     // and the window watcher opens the OS window from it. Running the scoped
     // HTTP action as well would mint a second, browser-origin record that
     // nothing ever opens.
-    await createNativeLibraryWindow(
-      action.action === "new_terminal" ? "terminal" : "workspace",
-      action.action === "new_terminal" ? null : action.workspace_id,
+    await invokeNative(
+      "create_library_window",
+      action.action === "new_terminal"
+        ? "open a new terminal window"
+        : "open a new workspace window",
+      () =>
+        createNativeLibraryWindow(
+          action.action === "new_terminal" ? "terminal" : "workspace",
+          action.action === "new_terminal" ? null : action.workspace_id,
+        ),
     );
     await bridge.refresh();
     return;
@@ -102,7 +169,9 @@ export async function focusLibraryWindow(
     // The native command persists the un-hide as part of raising, so this path
     // does not also send the scoped visibility action: one authority, not two
     // that can disagree.
-    await focusNativeLibraryWindow(window.window_id);
+    await invokeNative("focus_library_window", "bring that window to the front", () =>
+      focusNativeLibraryWindow(window.window_id),
+    );
     await bridge.refresh();
     return;
   }

@@ -31,6 +31,48 @@ function asDesktop(invoke: (cmd: string, args?: unknown) => Promise<unknown>): v
   });
 }
 
+/// What Tauri itself produces when the app's ACL does not grant a command. The
+/// rejection happens before any handler runs, so this text is Tauri's and never
+/// chan's. A release build emits the short form; a debug build emits one of
+/// several diagnostics, of which `unreferenced` is what an app that has never
+/// heard of the command produces and `denied` is what an explicit denial
+/// produces. All three are from tauri 2.11.2 (`webview/mod.rs`,
+/// `ipc/authority.rs`).
+type RefusalForm = "release" | "unreferenced" | "denied";
+
+function aclRefusal(cmd: string, form: RefusalForm): string {
+  if (form === "release") return `Command ${cmd} not allowed by ACL`;
+  if (form === "unreferenced") return `${cmd} not allowed. Command not found`;
+  return `${cmd} explicitly denied on origin https://a--b.c.usr.example\n\nreferenced by: capability: workspace-window, permission: allow-create-library-window`;
+}
+
+/// A webview whose app grants some commands and refuses others. Every other
+/// fake here is a webview that grants everything or a browser that is not a
+/// webview at all, and neither can express the state that breaks: a
+/// gateway-served page is delivered by the remote devserver while the ACL
+/// gating its invokes comes from the locally installed app, so the page can
+/// call a command that app has never heard of.
+function asDesktopWithout(
+  ungranted: readonly string[],
+  form: RefusalForm = "release",
+): ReturnType<typeof vi.fn> {
+  const invoke = vi.fn(async (cmd: string) => {
+    if (ungranted.includes(cmd)) throw new Error(aclRefusal(cmd, form));
+    return null;
+  });
+  asDesktop(invoke);
+  return invoke;
+}
+
+async function rejection(promise: Promise<unknown>): Promise<Error> {
+  const outcome = await promise.then(
+    () => null,
+    (error: unknown) => error,
+  );
+  if (!(outcome instanceof Error)) throw new Error("expected the call to reject");
+  return outcome;
+}
+
 function bridge(overrides: Partial<LibraryWindowBridge> = {}): LibraryWindowBridge {
   return {
     runAction: vi.fn().mockResolvedValue(undefined),
@@ -148,6 +190,126 @@ describe("chan-desktop native library windows", () => {
       "not allowed",
     );
     expect(host.refresh).not.toHaveBeenCalled();
+  });
+});
+
+/// Being inside a Tauri webview does not mean the app grants this command.
+/// The two answers diverge only where the page and the ACL are independently
+/// versioned, which is exactly a gateway-served window, and there is no
+/// fallback to reach for: `window.open` returns null in every chan webview,
+/// which is why the native path exists at all. So the whole correction is what
+/// the user is told.
+describe("a chan-desktop whose ACL does not grant the command", () => {
+  test("creating reports the app is behind the page, not the raw ACL string", async () => {
+    const open = vi.spyOn(window, "open");
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    asDesktopWithout(["create_library_window"]);
+    const host = bridge();
+
+    const error = await rejection(createLibraryWindow(host, { action: "new_terminal" }));
+
+    // Taken off the user's screen, not thrown away: which command was withheld
+    // is what a report of this needs.
+    expect(logged).toHaveBeenCalledWith(
+      expect.stringContaining("create_library_window"),
+      "Command create_library_window not allowed by ACL",
+    );
+
+    // The command name is Tauri's vocabulary, not the user's.
+    expect(error.message).not.toMatch(/create_library_window/);
+    expect(error.message).not.toMatch(/ACL/);
+    expect(error.message).toMatch(/chan-desktop/);
+    expect(error.message).toMatch(/update/i);
+    // There is no destination to fall back to, so a popup here would be a
+    // second failure with a worse message.
+    expect(open).not.toHaveBeenCalled();
+    expect(host.refresh).not.toHaveBeenCalled();
+  });
+
+  test("focusing reports it the same way", async () => {
+    const open = vi.spyOn(window, "open");
+    asDesktopWithout(["focus_library_window"]);
+    const host = bridge();
+
+    const error = await rejection(focusLibraryWindow(host, scopedWindow()));
+
+    expect(error.message).not.toMatch(/focus_library_window/);
+    expect(error.message).not.toMatch(/ACL/);
+    expect(error.message).toMatch(/chan-desktop/);
+    expect(open).not.toHaveBeenCalled();
+    expect(host.runAction).not.toHaveBeenCalled();
+  });
+
+  test("a debug-build refusal reads the same as a release one", async () => {
+    // Release and debug builds reject in different words. A correction that
+    // only recognised one would leave the other quoting Tauri at the user.
+    asDesktopWithout(["create_library_window"], "unreferenced");
+
+    const error = await rejection(createLibraryWindow(bridge(), { action: "new_terminal" }));
+
+    expect(error.message).not.toMatch(/create_library_window/);
+    expect(error.message).not.toMatch(/Command not found/);
+    expect(error.message).toMatch(/update/i);
+  });
+
+  test("an explicit denial reads the same, and leaks no capability names", async () => {
+    // The other debug wording, and the only one that names the capability and
+    // permission behind the denial. None of that belongs on a user's screen.
+    asDesktopWithout(["create_library_window"], "denied");
+
+    const error = await rejection(createLibraryWindow(bridge(), { action: "new_terminal" }));
+
+    expect(error.message).not.toMatch(/create_library_window/);
+    expect(error.message).not.toMatch(/capability|permission|allow-/);
+    expect(error.message).toMatch(/update/i);
+  });
+
+  test("a command the same app does grant still runs", async () => {
+    // Non-vacuity: the refusal above is the ACL withholding one command, not a
+    // webview that fails everything.
+    const invoke = asDesktopWithout(["create_library_window"]);
+    const host = bridge();
+
+    await focusLibraryWindow(host, scopedWindow());
+
+    expect(invoke).toHaveBeenCalledWith("focus_library_window", { windowId: "w-other" });
+    expect(host.refresh).toHaveBeenCalled();
+  });
+
+  test("a granted command that fails in the handler keeps its own reason", async () => {
+    // The handler's text is the only account of what actually went wrong, so
+    // the wrapper must not replace it with a guess about the app's version.
+    asDesktop(vi.fn().mockRejectedValue(new Error("no devserver is connected for library lib-0a1b")));
+
+    const error = await rejection(createLibraryWindow(bridge(), { action: "new_terminal" }));
+
+    expect(error.message).toMatch(/no devserver is connected for library lib-0a1b/);
+    expect(error.message).not.toMatch(/update/i);
+  });
+
+  // The two tests below are a pair, and between them they pin both halves of
+  // what separates a withheld command from a command that ran and failed. Each
+  // supplies exactly one half and must still be reported as a handler failure,
+  // so dropping either half from the check turns one of them red.
+
+  test("a handler failure that merely names the command is not read as a refusal", async () => {
+    asDesktop(vi.fn().mockRejectedValue(new Error("create_library_window timed out")));
+
+    const error = await rejection(createLibraryWindow(bridge(), { action: "new_terminal" }));
+
+    expect(error.message).toMatch(/timed out/);
+    expect(error.message).not.toMatch(/update/i);
+  });
+
+  test("a handler failure that merely says 'not allowed' is not read as a refusal", async () => {
+    // chan's own commands do use this wording about their arguments, so the
+    // phrase alone cannot be what decides it.
+    asDesktop(vi.fn().mockRejectedValue(new Error("picked file name is not allowed: \"..\"")));
+
+    const error = await rejection(createLibraryWindow(bridge(), { action: "new_terminal" }));
+
+    expect(error.message).toMatch(/picked file name is not allowed/);
+    expect(error.message).not.toMatch(/update/i);
   });
 });
 
