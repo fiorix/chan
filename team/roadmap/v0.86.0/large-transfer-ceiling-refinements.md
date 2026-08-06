@@ -29,3 +29,17 @@ The v0.85.0 large-transfer work raises the write ceiling and admits transfer rou
 ## Rough size
 
 Small to medium, and gap 2 is the one worth doing first: it is the one known case where current behaviour lets an operation exceed the ceiling rather than refusing conservatively. Gap 1's priority cannot be set until its classification is settled, which is the first task in its acceptance rather than an assumption in its favour.
+
+## Related follow-up: declare a length on the terminal download
+
+Deferred from v0.85.0 for scope, with the gateway interaction verified rather than assumed.
+
+The terminal download path streams without a `Content-Length`. A file that shrinks mid-read used to end the stream early and complete the response truncated and silent; v0.85.0 fixes that server-side, so the reader now carries a length from the open handle's stat and a short read errors naming the bytes still owed rather than returning an early end.
+
+What remains is declaring that length on the response, which the client cannot currently use to detect a short body.
+
+The interaction that made this worth checking rather than assuming: `3c81e748` gave the gateway a declared-length refusal, where an over-cap response with a known `Content-Length` is refused with 502 before any body bytes forward, while an unknown-length response keeps the streaming limiter. Declaring a length therefore moves this response from one path to the other.
+
+Checked, and it is benign. `api_terminal_read_file` requires `?download=1` and refuses without it, and the gateway classifies a GET under `api/files/` with a truthy `download` flag as `TransferRoute::Bulk`. So a terminal download always receives `TRANSFER_ROUTE_MAX_BYTES`, 100 GiB, rather than the 100 MiB general response cap. A declared length could only trigger the refusal above 100 GiB, where refusing early is better than streaming and truncating.
+
+So this is deferred because it needs its own evidence that the declared length matches the streamed bytes exactly, which is the check that fails silently when it is wrong, and not because the gateway behaviour is unknown.
