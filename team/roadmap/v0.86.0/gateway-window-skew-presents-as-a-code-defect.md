@@ -40,7 +40,9 @@ Cost: one acceptance cycle and roughly an hour of investigation, spent on a corr
 ## Contract
 
 - A chan-desktop build is identifiable at runtime as the specific build it is, not only as the release it descends from. An operator can tell which binary is running before drawing a conclusion from its behaviour.
-- A desktop advertises the command vocabulary it grants to a remotely-served page, so the page can determine what is available rather than discovering it through a thrown refusal. The SPA-side graceful degradation ships in v0.85.0; the desktop-side advertisement is the open half and is what makes degradation meaningful rather than guesswork.
+- A desktop advertises the command vocabulary it grants to a remotely-served page, so the page can determine what is available rather than discovering it through a thrown refusal. The SPA-side interpretation of a refusal ships in v0.85.0; the desktop-side advertisement is the open half.
+
+  **The two are complements, not stages, and the ordering does not run the way it first reads.** An advertisement is itself a command and needs its own ACL entry, so an app old enough to lack `create_library_window` is also old enough to lack the query that would have reported it missing. Asking would be refused exactly as the original call was, leaving the page where it started. Extending an already-granted command's response instead of adding a new one softens that, since an absent field is at least distinguishable from a refusal, but it still cannot enumerate what an older app grants. So for every build predating the advertisement, interpreting the refusal is not a stopgap awaiting an upgrade, it is the only mechanism there will ever be. Advertisement earns its place by letting the page suppress affordances for builds at or after the version that introduces it, which is a different and narrower claim than making the degradation meaningful.
 - A native refusal that reaches a user distinguishes "this app does not have that command" from "this app refused that command here". The first is a version statement and the second is an authority statement, and they call for different actions.
 
 ## Acceptance
@@ -48,7 +50,11 @@ Cost: one acceptance cycle and roughly an hour of investigation, spent on a corr
 - Two builds of chan-desktop from different commits are distinguishable at runtime without consulting the filesystem, and the identifier appears somewhere a person testing an acceptance item will see it.
 - A gateway-served page can query what the host grants, and a command absent from the host's vocabulary produces a message that says so, rather than one naming the command as refused.
 - The acceptance procedure for any gateway-surface item states that both ends must be built from the same commit and that the launch must be of the freshly built bundle, because neither is implied by the version string.
-- Reproduce the failure deliberately once, by running a bundle predating a command against a devserver serving the SPA that calls it, and confirm the new message identifies the cause as a version difference. A diagnosis that cannot be shown working on the case that produced it is not accepted.
+- Reproduce the failure deliberately once, by running a bundle predating a command against a devserver serving the SPA that calls it, and confirm the message identifies a version difference as the likely cause. A diagnosis that cannot be shown working on the case that produced it is not accepted.
+
+  State which of the two mechanisms that reproduction exercises, because it cannot be both. A bundle predating the command also predates the advertisement, so what it exercises is the refusal-interpreting path that shipped in v0.85.0, never the query. Testing the advertisement needs a bundle that has the query and lacks some later command, which is a second reproduction and not the same one.
+
+  The message under test asserts the version cause conditionally rather than flatly, and that hedge is deliberate: a release build collapses every rejection shape into one string, so at the moment of reporting the page cannot separate "this app never had the command" from "this app grants it but not for this window". An acceptance that demands the message state the version cause as fact is demanding something the build cannot support.
 
 ## Rough size
 
