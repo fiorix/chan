@@ -42,4 +42,6 @@ The reason this cannot be treated as a simple improvement is that a declared len
 
 So the question is two-directional and product-level: is shrink detection worth losing live-growth streaming on a path that promises neither? It also requires changing a test whose message records the current choice, which is the signal that it is a decision rather than a fix.
 
-It belongs to the host on its merits, not absorbed into a transfer slice, and this entry exists so it is not mistaken for a queued refinement.
+It belongs to the owner on its merits, not absorbed into a transfer slice, and this entry exists so it is not mistaken for a queued refinement.
+
+**Constraint on any future implementation.** Whatever is decided, a bound must either preserve the growing-file contract or replace it knowingly. It must not arrive as a side effect of seeding a reader with a length, which is how it nearly arrived here: the reader change that detects a shrink is the same change that stops serving a file that grows, and only one of those two effects is usually the one being asked for. If the contract is replaced, the assertion at `transfer.rs:826` and its message are updated in the same change, so the record states the new choice rather than losing the old one.
