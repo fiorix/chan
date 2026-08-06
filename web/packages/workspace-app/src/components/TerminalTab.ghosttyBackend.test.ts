@@ -42,6 +42,35 @@ describe("TerminalTab ghostty backend wiring", () => {
     expect(tab).toContain("using font-rendered box glyphs");
   });
 
+  test("ghostty's overlay scrollbar is painted onto the content it covers", () => {
+    // Without this adapter ghostty's overlay clears and background-fills the
+    // last columns of its own canvas, so the grid is sized to use them and
+    // they render as a blank strip. Losing the install call reintroduces a
+    // rendering defect that no other pin in this file would notice.
+    expect(tab).toContain("installGhosttyOverlayScrollbar(renderer)");
+    expect(tab).toContain("erases the last columns it covers");
+  });
+
+  test("the overlay's click region is gated after ghostty registers it", () => {
+    // The gate replaces ghostty's own capture-phase mousedown listener, so it
+    // is the sole claimant only once open() has registered that listener.
+    // Installed any earlier it would leave the ungated one live, and a click
+    // meant to place a selection in the columns this backend just made
+    // readable would scroll-jump instead, with immediate propagation stopped
+    // so nothing downstream could recover it.
+    expect(tab).toContain("gateGhosttyScrollbarClicks(ghosttyTerm, host)");
+    // Anchor both ends before comparing them: a missing needle indexes to -1,
+    // which orders ahead of everything and would read as a pass.
+    expect(tab).toContain("term.open(host);");
+    expect(tab.indexOf("term.open(host);")).toBeLessThan(
+      tab.indexOf("gateGhosttyScrollbarClicks("),
+    );
+    expect(tab).toContain("claims clicks while hidden");
+    // The disposer is the only path back to ghostty's own listener behavior,
+    // so teardown has to run it.
+    expect(tab).toMatch(/ghosttyScrollbarClickGate\?\.\(\);/);
+  });
+
   test("key handler is wrapped with INVERTED semantics on the ghostty branch", () => {
     expect(tab).toMatch(
       /term\.attachCustomKeyEventHandler\(\(e\) => !handleTerminalKeyEvent\(e\)\);/,
