@@ -30,16 +30,16 @@ The v0.85.0 large-transfer work raises the write ceiling and admits transfer rou
 
 Small to medium, and gap 2 is the one worth doing first: it is the one known case where current behaviour lets an operation exceed the ceiling rather than refusing conservatively. Gap 1's priority cannot be set until its classification is settled, which is the first task in its acceptance rather than an assumption in its favour.
 
-## Related follow-up: declare a length on the terminal download
+## Related question, NOT a follow-up: whether to bound the terminal download
 
-Deferred from v0.85.0 for scope, with the gateway interaction verified rather than assumed.
+Recorded as an open product decision rather than as work, and rewritten after an earlier version of this section got it wrong.
 
-The terminal download path streams without a `Content-Length`. A file that shrinks mid-read used to end the stream early and complete the response truncated and silent; v0.85.0 fixes that server-side, so the reader now carries a length from the open handle's stat and a short read errors naming the bytes still owed rather than returning an early end.
+The terminal download path deliberately declares no `Content-Length`. That is not an omission: `crates/chan-server/src/routes/transfer.rs:826` asserts the header is absent, with the message "a live file stream must not promise its open-time length". The path streams what it reads and ends.
 
-What remains is declaring that length on the response, which the client cannot currently use to detect a short body.
+So a file that shrinks mid-read produces fewer bytes and contradicts nothing, because nothing was promised. That is a different contract from the workspace download path, which does declare a length and where ending early genuinely breaks a promise. Only the second is a defect.
 
-The interaction that made this worth checking rather than assuming: `3c81e748` gave the gateway a declared-length refusal, where an over-cap response with a known `Content-Length` is refused with 502 before any body bytes forward, while an unknown-length response keeps the streaming limiter. Declaring a length therefore moves this response from one path to the other.
+The reason this cannot be treated as a simple improvement is that a declared length and a read bound are the same change. Seeding the reader with the open-time size to detect a shrink simultaneously bounds it, which breaks a file that GROWS during the read. Growth currently works, deliberately, and the assertion above is the design stating which side of that trade it chose.
 
-Checked, and it is benign. `api_terminal_read_file` requires `?download=1` and refuses without it, and the gateway classifies a GET under `api/files/` with a truthy `download` flag as `TransferRoute::Bulk`. So a terminal download always receives `TRANSFER_ROUTE_MAX_BYTES`, 100 GiB, rather than the 100 MiB general response cap. A declared length could only trigger the refusal above 100 GiB, where refusing early is better than streaming and truncating.
+So the question is two-directional and product-level: is shrink detection worth losing live-growth streaming on a path that promises neither? It also requires changing a test whose message records the current choice, which is the signal that it is a decision rather than a fix.
 
-So this is deferred because it needs its own evidence that the declared length matches the streamed bytes exactly, which is the check that fails silently when it is wrong, and not because the gateway behaviour is unknown.
+It belongs to the host on its merits, not absorbed into a transfer slice, and this entry exists so it is not mistaken for a queued refinement.
