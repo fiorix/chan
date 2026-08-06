@@ -262,18 +262,24 @@ pub async fn api_terminal_read_file(
     }
 }
 
-/// One absolute regular-file stream backed by a fixed-size bounded queue and
-/// one owned producer thread. Dropping the consumer closes the queue and joins
-/// the producer, so a disconnected response cannot leave a blocked reader
-/// behind.
+/// One absolute regular-file stream, read lazily by whoever pulls it.
+///
+/// The handle is opened up front so a missing or unreadable target fails before
+/// any header is sent, but no byte is read until `next()` is called, which lets
+/// the caller do the reading on a thread it already owns rather than paying for
+/// a producer of its own.
+///
+/// The read runs to EOF rather than to an open-time byte count, deliberately:
+/// this response declares no `Content-Length`, so there is no promise a live
+/// file could fall short of, and bounding the read to the length seen at open
+/// would truncate a file that grew while it streamed.
 struct AbsoluteFileReader {
-    receiver: Option<std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>>,
-    worker: Option<std::thread::JoinHandle<()>>,
+    file: Option<std::fs::File>,
 }
 
 impl AbsoluteFileReader {
     fn open(abs: &Path) -> Result<Self, String> {
-        let mut file =
+        let file =
             std::fs::File::open(abs).map_err(|e| format!("cannot read {}: {e}", abs.display()))?;
         let metadata = file
             .metadata()
@@ -281,31 +287,7 @@ impl AbsoluteFileReader {
         if !metadata.is_file() {
             return Err(format!("not a regular file: {}", abs.display()));
         }
-        let (sender, receiver) = std::sync::mpsc::sync_channel::<std::io::Result<Vec<u8>>>(
-            chan_workspace::BINARY_STREAM_QUEUE_DEPTH,
-        );
-        let worker = std::thread::Builder::new()
-            .name("chan-terminal-byte-reader".into())
-            .spawn(move || loop {
-                let mut chunk = vec![0u8; chan_workspace::BINARY_STREAM_CHUNK_SIZE];
-                let count = match file.read(&mut chunk) {
-                    Ok(0) => return,
-                    Ok(count) => count,
-                    Err(error) => {
-                        let _ = sender.send(Err(error));
-                        return;
-                    }
-                };
-                chunk.truncate(count);
-                if sender.send(Ok(chunk)).is_err() {
-                    return;
-                }
-            })
-            .map_err(|e| format!("cannot start reader for {}: {e}", abs.display()))?;
-        Ok(Self {
-            receiver: Some(receiver),
-            worker: Some(worker),
-        })
+        Ok(Self { file: Some(file) })
     }
 }
 
@@ -313,16 +295,20 @@ impl Iterator for AbsoluteFileReader {
     type Item = std::io::Result<Vec<u8>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.receiver.as_ref()?.recv().ok()
-    }
-}
-
-impl Drop for AbsoluteFileReader {
-    fn drop(&mut self) {
-        self.receiver.take();
-        if let Some(worker) = self.worker.take() {
-            if worker.join().is_err() {
-                tracing::warn!("terminal bounded file reader producer panicked");
+        let file = self.file.as_mut()?;
+        let mut chunk = vec![0u8; chan_workspace::BINARY_STREAM_CHUNK_SIZE];
+        match file.read(&mut chunk) {
+            Ok(0) => {
+                self.file = None;
+                None
+            }
+            Ok(count) => {
+                chunk.truncate(count);
+                Some(Ok(chunk))
+            }
+            Err(error) => {
+                self.file = None;
+                Some(Err(error))
             }
         }
     }
@@ -809,10 +795,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_terminal_file_response_joins_the_bounded_reader() {
+    async fn dropping_terminal_file_response_stops_the_bounded_reader() {
         let dir = tempfile::tempdir().unwrap();
-        let size = chan_workspace::BINARY_STREAM_CHUNK_SIZE
-            * (chan_workspace::BINARY_STREAM_QUEUE_DEPTH + 16);
+        // Big enough that the streaming bridge is still mid-file when the
+        // response drops, which is what makes the completion signal mean
+        // "stopped early" rather than "finished anyway". The exact multiple
+        // carries no meaning beyond not being drainable in one pull.
+        let size = chan_workspace::BINARY_STREAM_CHUNK_SIZE * 16;
         let path = dir.path().join("disconnect.bin");
         std::fs::write(&path, vec![0x44; size]).unwrap();
         let reader = match terminal_download_plan(&path).unwrap() {
@@ -832,6 +821,29 @@ mod tests {
             .await
             .expect("bounded terminal reader must stop after response drop")
             .expect("completion sender must fire");
+    }
+
+    /// Laziness is the property the lane depends on: no byte may be read before
+    /// the consumer pulls, so the thread that pulls is the thread that reads.
+    #[test]
+    fn terminal_reader_reads_nothing_before_the_first_pull() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lazy.bin");
+        std::fs::write(&path, vec![0x7a; chan_workspace::BINARY_STREAM_CHUNK_SIZE]).unwrap();
+
+        let mut reader = AbsoluteFileReader::open(&path).unwrap();
+        // Replacing the contents after open but before the first pull is
+        // visible only to a reader that had not already buffered them.
+        std::fs::write(&path, vec![0x5b; chan_workspace::BINARY_STREAM_CHUNK_SIZE]).unwrap();
+
+        let first = reader.next().expect("a chunk is available").unwrap();
+        // `all` is true on an empty slice, so the emptiness check is what stops
+        // this passing without having read anything.
+        assert!(!first.is_empty());
+        assert!(
+            first.iter().all(|byte| *byte == 0x5b),
+            "the reader buffered before its first pull"
+        );
     }
 
     #[test]
