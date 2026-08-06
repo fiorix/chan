@@ -585,16 +585,25 @@ mod tests {
     /// assertion satisfied (connection window >= 256 KiB * streams) and
     /// the h2 connection window above the stream window, so several
     /// busy substreams cannot stall on the shared budget prematurely.
+    ///
+    /// Both operands are compile-time constants, so the invariant is proven
+    /// while this crate is built rather than when the test happens to run. A
+    /// violation is a compile error, which means the constants cannot reach a
+    /// state where the yamux constructor would panic at connection setup.
     #[test]
     fn transport_constants_hold_their_arithmetic_invariants() {
         const YAMUX_DEFAULT_STREAM_CREDIT: usize = 256 * 1024;
-        assert!(
-            chan_tunnel_proto::TUNNEL_YAMUX_CONNECTION_RECEIVE_WINDOW
-                >= chan_tunnel_proto::TUNNEL_YAMUX_MAX_STREAMS * YAMUX_DEFAULT_STREAM_CREDIT
-        );
-        assert!(
-            chan_tunnel_proto::TUNNEL_H2_CONNECTION_WINDOW
-                > chan_tunnel_proto::TUNNEL_H2_STREAM_WINDOW
-        );
+        const {
+            assert!(
+                chan_tunnel_proto::TUNNEL_YAMUX_CONNECTION_RECEIVE_WINDOW
+                    >= chan_tunnel_proto::TUNNEL_YAMUX_MAX_STREAMS * YAMUX_DEFAULT_STREAM_CREDIT
+            );
+        }
+        const {
+            assert!(
+                chan_tunnel_proto::TUNNEL_H2_CONNECTION_WINDOW
+                    > chan_tunnel_proto::TUNNEL_H2_STREAM_WINDOW
+            );
+        }
     }
 }
