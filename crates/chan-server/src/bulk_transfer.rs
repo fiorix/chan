@@ -535,6 +535,94 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    /// The item's central claim, in the only form that is decidable rather
+    /// than a stopwatch reading: a fully saturated lane must leave the
+    /// blocking pool entirely free, because that pool is where editor saves
+    /// and terminal spawns run.
+    ///
+    /// The runtime is built with a blocking pool far smaller than the lane's
+    /// admission capacity. If a single admitted job drew from that pool, 34
+    /// parked jobs would exhaust two threads and the probe below could never
+    /// run at all. So the assertion is completion versus deadlock rather than
+    /// fast versus slow, and no timing threshold decides it.
+    ///
+    /// The first half is a fixture check, not decoration. It establishes that
+    /// the pool limit is genuinely enforced, so the lane's non-participation
+    /// in the second half is evidence rather than a coincidence: without it,
+    /// a probe that completed while the lane was saturated would prove
+    /// nothing, since it would also complete against an unbounded pool.
+    #[test]
+    fn a_saturated_lane_leaves_the_blocking_pool_free() {
+        const POOL: usize = 2;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(POOL)
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async {
+            // Fixture: fill the pool itself and confirm a further blocking task
+            // really is held off, then confirm it runs the moment a thread
+            // frees. Both directions, so the bound is pinned at POOL rather
+            // than assumed.
+            let mut pool_releases = Vec::new();
+            for _ in 0..POOL {
+                let (release, park) = mpsc::channel::<()>();
+                pool_releases.push(release);
+                tokio::task::spawn_blocking(move || {
+                    let _ = park.recv();
+                });
+            }
+            let (probe_tx, mut probe_rx) = tokio::sync::mpsc::channel::<()>(1);
+            let queued = probe_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let _ = queued.blocking_send(());
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), probe_rx.recv())
+                    .await
+                    .is_err(),
+                "the blocking pool must be full, or the second half proves nothing"
+            );
+            pool_releases.pop();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(10), probe_rx.recv())
+                    .await
+                    .is_ok(),
+                "freeing a pool thread must let the queued blocking task run"
+            );
+            drop(pool_releases);
+
+            // The property: every admission slot held, and a blocking task
+            // still runs. Under a lane that borrowed the ambient pool these 34
+            // parked jobs would own every thread and this would never return.
+            let (_lane, bulk) = test_support::isolated_tenant();
+            let (releases, held) = test_support::saturate_admission(&bulk);
+            assert!(
+                bulk.submit(|_| {}).is_err(),
+                "the lane must actually be saturated"
+            );
+
+            let (ran_tx, mut ran_rx) = tokio::sync::mpsc::channel::<()>(1);
+            tokio::task::spawn_blocking(move || {
+                let _ = ran_tx.blocking_send(());
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_secs(10), ran_rx.recv())
+                    .await
+                    .is_ok(),
+                "a saturated transfer lane must not consume blocking-pool capacity; \
+                 editor saves and terminal spawns run there"
+            );
+
+            drop(releases);
+            for job in held {
+                let _ = job.outcome().await;
+            }
+        });
+    }
+
     /// A job that parks until released, so a test can hold a worker for as
     /// long as it needs without sleeping.
     fn gate() -> (mpsc::Sender<()>, impl FnOnce(&BulkCancel) + Send + 'static) {
