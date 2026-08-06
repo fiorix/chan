@@ -145,8 +145,11 @@ impl TransferTracking {
 /// without spending a second one. Wrapping this in its own `submit` again is
 /// the one way a single request comes to consume two admissions, and it would
 /// look like ordinary reuse while doing it.
-fn build_tar_into<F>(tx: &mpsc::Sender<std::io::Result<Bytes>>, cancel: &BulkCancel, build: F)
-where
+pub(crate) fn build_tar_into<F>(
+    tx: &mpsc::Sender<std::io::Result<Bytes>>,
+    cancel: &BulkCancel,
+    build: F,
+) where
     F: FnOnce(&mut tar::Builder<TarChannelWriter>) -> std::io::Result<()> + Send + 'static,
 {
     let mut builder = tar::Builder::new(TarChannelWriter {
