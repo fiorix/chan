@@ -32,6 +32,7 @@ describe("TerminalTab ghostty backend wiring", () => {
   test("ghostty adopts xterm's measured cell metrics after open", () => {
     expect(tab).toContain("measureXtermCellDimensions(");
     expect(tab).toContain("alignGhosttyRendererToXterm(");
+    expect(tab).toContain("term.open(host);");
     expect(tab.indexOf("term.open(host);")).toBeLessThan(
       tab.indexOf("alignGhosttyRendererToXterm("),
     );
