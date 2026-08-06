@@ -30,7 +30,9 @@ The bound lives on the server, so a browser, a second window, `curl`, MCP, and a
 
 The runtime sets an explicit maximum blocking-thread count; the runtime builder declares no ceiling, so the tokio default applies.
 
-Once the lane exists, the write ceiling is raised and threaded from configuration through `Library` into `Workspace`, reaching the terminal upload path that does not go through `Workspace` and the editor-session recovery budget that reads the same constant, and reported to the browser as one value so no client keeps an independent stale constant.
+Once the lane exists, the write ceiling is raised and threaded from configuration through `Library` into `Workspace`, reaching the terminal upload path that does not go through `Workspace`, and reported to the browser as one value so no client keeps an independent stale constant.
+
+The editor-session recovery budget reads the same constant today, and this sentence previously listed it as another site the raised ceiling should reach. That reading is wrong and was corrected during delivery: recovery bounds a document held in memory for crash recovery, not a transfer, so raising it to the transfer ceiling would give recovery a multi-gigabyte budget for a reason that has nothing to do with recovery. Recovery is decoupled from the transfer constant instead, and until it is plumbed to its own configured value it keeps the smaller previous limit. That is deliberate and conservative: recovery may refuse a document the transfer paths would accept, and cannot accept one they would refuse. Plumbing it to its own value is registered for v0.86.0.
 
 ## Sequencing
 
