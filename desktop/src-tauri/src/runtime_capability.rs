@@ -272,6 +272,14 @@ mod tests {
 
     const EXACT_ORIGIN: &str = "https://alice--0a1b2c3d4e5f.devserver.chan.app";
     const GATEWAY_PAGE: &str = "https://alice--0a1b2c3d4e5f.devserver.chan.app/";
+    /// The label the window watcher actually builds: `native_label` is
+    /// `{library_id}::{window_id}`, never a flat `lib-x`.
+    const WATCHED_LABEL: &str = "lib-0a1b2c3d4e5f::w-7";
+    /// The page a watched gateway window actually loads: `gateway_url` joins
+    /// the pinned proxy origin to `window_entry_path`, so the document sits
+    /// under a tenant prefix, never at the origin root.
+    const WATCHED_PAGE: &str =
+        "https://alice--0a1b2c3d4e5f.devserver.chan.app/api/notes-1a2b3c/index.html";
     const SIBLING_PAGE: &str = "https://bob--1a2b3c4d5e6f.devserver.chan.app/";
     const PROXY_APEX_PAGE: &str = "https://devserver.chan.app/";
     const WRONG_PORT_PAGE: &str = "https://alice--0a1b2c3d4e5f.devserver.chan.app:444/";
@@ -409,6 +417,98 @@ mod tests {
         assert!(
             invoke_from(&non_lib, GATEWAY_PAGE, "gateway_csrf_token").is_err(),
             "window labels outside lib-* cannot read the gateway CSRF token"
+        );
+    }
+
+    /// The shapes production presents, which no other pin here uses: every
+    /// window above is labelled flat (`lib-scoped`) and every page is the
+    /// origin root, while a watcher-opened gateway window is
+    /// `{library_id}::{window_id}` on a tenant path. A grant that resolved
+    /// only for a flat label, or only at `/`, would pass every other pin in
+    /// this module and still refuse the window an owner actually gets.
+    #[test]
+    fn runtime_grant_covers_the_label_and_page_the_watcher_builds() {
+        let app = mock_desktop_app();
+        app.add_capability(production_json())
+            .expect("add_capability returned Ok");
+
+        let watched = lib_window(&app, WATCHED_LABEL, WATCHED_PAGE);
+        assert_eq!(
+            invoke_from(&watched, WATCHED_PAGE, "create_library_window"),
+            Ok("stub-create".into()),
+            "the command deck's mint must resolve for the real label and tenant path"
+        );
+        assert_eq!(
+            invoke_from(&watched, WATCHED_PAGE, "focus_library_window"),
+            Ok("stub-focus".into()),
+            "raising a sibling window must resolve for the real label and tenant path"
+        );
+        assert_eq!(
+            invoke_from(&watched, WATCHED_PAGE, "gateway_csrf_token"),
+            Ok("stub-csrf".into()),
+            "the CSRF mirror must resolve for the real label and tenant path"
+        );
+
+        // Non-vacuity: the scoping still holds at these shapes, so a pass
+        // above cannot come from a grant that stopped discriminating.
+        assert!(
+            invoke_from(&watched, SIBLING_PAGE, "create_library_window").is_err(),
+            "another tenant's page must stay outside the grant"
+        );
+        assert!(
+            invoke_from(&watched, WATCHED_PAGE, "read_dropped_paths").is_err(),
+            "commands outside the granted set stay denied at these shapes"
+        );
+        let foreign = lib_window(&app, "outbound-3", WATCHED_PAGE);
+        assert!(
+            invoke_from(&foreign, WATCHED_PAGE, "create_library_window").is_err(),
+            "a URL attachment on the same origin is not a library window"
+        );
+    }
+
+    /// The ordering the grant depends on and nothing else enforces. A
+    /// `lib-*` window reaches its native vocabulary only if the capability
+    /// for its origin was already added, and the ACL refuses before any
+    /// desktop code runs, so a mint that moved after the window could open
+    /// would surface as an unexplained per-command refusal on the page with
+    /// nothing logged on this side. Pinned against the source because the
+    /// invariant is the ORDER of three statements, which no unit test on the
+    /// mint itself can observe.
+    #[test]
+    fn the_rostered_connect_mints_before_a_window_can_exist() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let connect = MAIN_RS
+            .split("async fn connect_rostered_devserver")
+            .nth(1)
+            .expect("connect_rostered_devserver exists")
+            .split("async fn connect_devserver_impl_inner")
+            .next()
+            .expect("the rostered connect precedes the raw inner");
+
+        let mint = connect
+            .find("mint_exact_origin_grant")
+            .expect("the rostered connect mints the exact-origin grant");
+        let install = connect
+            .find("install_gateway_webview_session")
+            .expect("the rostered connect installs the WebView session");
+        let watcher = connect
+            .find("spawn_devserver_window_watcher")
+            .expect("the rostered connect spawns the window watcher");
+        assert!(
+            mint < install && mint < watcher,
+            "the grant must be in place before any window can be built on the origin"
+        );
+
+        let statement = &connect[mint..][..connect[mint..]
+            .find(';')
+            .expect("the mint is a single statement")];
+        assert!(
+            statement.contains("proxy_origin"),
+            "the mint must use the connection's pinned origin, the same value navigation builds from"
+        );
+        assert!(
+            statement.contains('?'),
+            "a failed mint must abort the connect rather than leave an ungranted window"
         );
     }
 
