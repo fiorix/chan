@@ -2,6 +2,7 @@ import type {
   CanvasRenderer,
   FontMetrics,
   GhosttyCell,
+  IRenderable,
 } from "ghostty-web";
 
 export type CellDimensions = {
@@ -26,10 +27,44 @@ type GhosttyCellTextRenderer = GhosttyRendererLike & {
   ) => void;
 };
 
+type GhosttyOverlayScrollbarRenderer = GhosttyRendererLike & {
+  canvas?: HTMLCanvasElement;
+  ctx?: CanvasRenderingContext2D;
+  devicePixelRatio?: number;
+  render?: (
+    buffer: IRenderable,
+    forceAll?: boolean,
+    viewportY?: number,
+    scrollbackProvider?: unknown,
+    scrollbarOpacity?: number,
+  ) => void;
+  renderScrollbar?: (
+    viewportY: number,
+    scrollbackLength: number,
+    rows: number,
+    opacity?: number,
+  ) => void;
+};
+
+type GhosttyScrollbarClickSource = {
+  handleMouseDown?: (event: MouseEvent) => void;
+  scrollbarOpacity?: number;
+};
+
 const XTERM_DOM_MEASURE_REPETITIONS = 32;
 const CELL_FLAG_INVISIBLE = 32;
 const CELL_FLAG_FAINT = 128;
 const customGlyphRenderers = new WeakSet<object>();
+const overlayScrollbarRenderers = new WeakSet<object>();
+
+// ghostty-web's overlay scrollbar geometry, mirrored so chan can paint the same
+// bar in the same place without the opaque fill upstream draws it on.
+const SCROLLBAR_THUMB_WIDTH = 8;
+const SCROLLBAR_MARGIN = 4;
+const SCROLLBAR_MIN_THUMB_HEIGHT = 20;
+const SCROLLBAR_TRACK_ALPHA = 0.1;
+const SCROLLBAR_THUMB_ALPHA_SCROLLED = 0.5;
+const SCROLLBAR_THUMB_ALPHA_AT_BOTTOM = 0.3;
 
 /// Reproduce xterm.js's device-pixel cell rounding from an already measured
 /// "W". Keeping this pure makes the renderer alignment independently testable.
@@ -192,6 +227,133 @@ export function installGhosttyCustomGlyphs(
   };
   customGlyphRenderers.add(renderer);
   return true;
+}
+
+/// ghostty-web's overlay scrollbar clears and background-fills a full-height
+/// strip at the right edge of its canvas on every frame it draws, ahead of its
+/// own opacity and scrollback checks, so the columns beneath it are erased just
+/// after they render and stay erased until something marks those rows dirty.
+/// The strip is anchored to the canvas rather than to the host, so no width
+/// held back by the fitter can move content out from under it. Paint the same
+/// translucent track and thumb straight onto the content instead, and force a
+/// full row repaint on every frame that paints the overlay plus the first frame
+/// after it stops: the thumb is translucent, so without fresh pixels beneath it
+/// it composites over its own previous alpha and converges on an opaque bar,
+/// which is the blank strip again in a different color. Fails open if the
+/// pinned build stops exposing the hooks or its device-pixel ratio.
+export function installGhosttyOverlayScrollbar(
+  renderer: GhosttyRendererLike,
+): boolean {
+  if (overlayScrollbarRenderers.has(renderer)) return true;
+  const mutable = renderer as GhosttyOverlayScrollbarRenderer;
+  const canvas = mutable.canvas;
+  const context = mutable.ctx;
+  const originalRender = mutable.render;
+  if (
+    !canvas ||
+    !context ||
+    typeof originalRender !== "function" ||
+    typeof mutable.renderScrollbar !== "function" ||
+    !Number.isFinite(mutable.devicePixelRatio) ||
+    (mutable.devicePixelRatio ?? 0) <= 0
+  ) {
+    return false;
+  }
+
+  let paintedOverlay = false;
+  mutable.render = (
+    buffer,
+    forceAll,
+    viewportY,
+    scrollbackProvider,
+    scrollbarOpacity = 1,
+  ): void => {
+    const paintsOverlay = Boolean(scrollbackProvider) && scrollbarOpacity > 0;
+    const needsFreshPixels = paintsOverlay || paintedOverlay;
+    paintedOverlay = paintsOverlay;
+    originalRender.call(
+      renderer,
+      buffer,
+      forceAll === true || needsFreshPixels,
+      viewportY,
+      scrollbackProvider,
+      scrollbarOpacity,
+    );
+  };
+
+  mutable.renderScrollbar = (
+    viewportY,
+    scrollbackLength,
+    rows,
+    opacity = 1,
+  ): void => {
+    if (opacity <= 0 || scrollbackLength === 0) return;
+    const ratio = mutable.devicePixelRatio ?? 1;
+    const barX =
+      canvas.width / ratio - SCROLLBAR_THUMB_WIDTH - SCROLLBAR_MARGIN;
+    const trackHeight = canvas.height / ratio - SCROLLBAR_MARGIN * 2;
+    const thumbHeight = Math.max(
+      SCROLLBAR_MIN_THUMB_HEIGHT,
+      (rows / (scrollbackLength + rows)) * trackHeight,
+    );
+    const thumbY =
+      SCROLLBAR_MARGIN +
+      (trackHeight - thumbHeight) * (1 - viewportY / scrollbackLength);
+    const thumbAlpha =
+      viewportY > 0
+        ? SCROLLBAR_THUMB_ALPHA_SCROLLED
+        : SCROLLBAR_THUMB_ALPHA_AT_BOTTOM;
+
+    context.save();
+    context.fillStyle = `rgba(128, 128, 128, ${SCROLLBAR_TRACK_ALPHA * opacity})`;
+    context.fillRect(
+      barX,
+      SCROLLBAR_MARGIN,
+      SCROLLBAR_THUMB_WIDTH,
+      trackHeight,
+    );
+    context.fillStyle = `rgba(128, 128, 128, ${thumbAlpha * opacity})`;
+    context.fillRect(barX, thumbY, SCROLLBAR_THUMB_WIDTH, thumbHeight);
+    context.restore();
+  };
+
+  overlayScrollbarRenderers.add(renderer);
+  return true;
+}
+
+/// ghostty-web claims mousedown across its overlay scrollbar strip whenever the
+/// buffer holds scrollback rather than while the overlay is visible, and stops
+/// immediate propagation, so nothing downstream can recover the event. Those
+/// pixels are content under chan's full-width grid, so an invisible overlay
+/// would swallow a click meant to place a selection in the last columns. Bind
+/// ghostty's own handler behind its own opacity, the same state that decides
+/// whether the user can see a scrollbar to aim at; a second copy of the fade
+/// timing would be a second answer to when a click means scroll. The handler
+/// does nothing outside the strip, so gating the whole listener costs no other
+/// behavior. Returns the listener cleanup, or null if the pinned build stops
+/// exposing the handler or the opacity, in which case its hidden click region
+/// stays live.
+export function gateGhosttyScrollbarClicks(
+  terminal: object,
+  host: HTMLElement,
+): (() => void) | null {
+  const source = terminal as GhosttyScrollbarClickSource;
+  const claimStrip = source.handleMouseDown;
+  if (
+    typeof claimStrip !== "function" ||
+    !Object.prototype.hasOwnProperty.call(terminal, "scrollbarOpacity")
+  ) {
+    return null;
+  }
+
+  const gated = (event: MouseEvent): void => {
+    if ((source.scrollbarOpacity ?? 0) > 0) claimStrip(event);
+  };
+  // Upstream registers its own listener in open() with capture, so the removal
+  // has to match those options for the gate to be the only claimant.
+  host.removeEventListener("mousedown", claimStrip, true);
+  host.addEventListener("mousedown", gated, true);
+  return () => host.removeEventListener("mousedown", gated, true);
 }
 
 function measureWithTextMetrics(

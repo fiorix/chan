@@ -133,7 +133,9 @@
   } from "../terminal/backend";
   import {
     alignGhosttyRendererToXterm,
+    gateGhosttyScrollbarClicks,
     installGhosttyCustomGlyphs,
+    installGhosttyOverlayScrollbar,
     measureXtermCellDimensions,
   } from "../terminal/ghosttyCompat";
   import { GhosttyViewportController } from "../terminal/ghosttyViewport";
@@ -365,6 +367,10 @@
   // reconciliation plus the calibrated macOS pixel-scroll path), non-null
   // ONLY on the ghostty backend and disposed with the terminal.
   let ghosttyViewport: GhosttyViewportController | null = null;
+  // Removes the gate that keeps ghostty-web's overlay scrollbar from claiming
+  // clicks on the content beneath it while it is invisible. Non-null ONLY on
+  // the ghostty backend, and only while the gate is installed.
+  let ghosttyScrollbarClickGate: (() => void) | null = null;
   let hostResumeTimers: ReturnType<typeof setTimeout>[] = [];
   let hostResumeListenerCleanup: (() => void) | null = null;
   // Wall-clock-gap sleep/wake detector (shared `installWakeGapDetector`). See
@@ -928,10 +934,13 @@
         theme: terminalTheme(),
       });
       term = ghosttyTerm;
-      // Ghostty paints its auto-hiding scrollbar over the canvas, so it
-      // consumes no layout width. Its upstream fitter reserves a gutter for
-      // that overlay; this FitLike retains the rest of its measurement and
-      // clamp behavior while using the whole content box.
+      // Ghostty's auto-hiding scrollbar is painted onto the content without
+      // clearing it (see installGhosttyOverlayScrollbar), so the columns under
+      // it stay readable and there is no gutter to hold back. Reserving width
+      // here could not help in any case: the overlay is anchored to the canvas,
+      // not to the host, so a narrower grid just moves the content it covers.
+      // This FitLike keeps upstream's measurement and clamp behavior over the
+      // whole content box.
       fit = {
         fit() {
           const metrics = ghosttyTerm.renderer?.getMetrics();
@@ -1056,6 +1065,17 @@
       if (renderer && !installGhosttyCustomGlyphs(renderer)) {
         console.warn(
           "[chan] ghostty-web text hook unavailable; using font-rendered box glyphs.",
+        );
+      }
+      if (renderer && !installGhosttyOverlayScrollbar(renderer)) {
+        console.warn(
+          "[chan] ghostty-web scrollbar hooks unavailable; its overlay erases the last columns it covers.",
+        );
+      }
+      ghosttyScrollbarClickGate = gateGhosttyScrollbarClicks(ghosttyTerm, host);
+      if (!ghosttyScrollbarClickGate) {
+        console.warn(
+          "[chan] ghostty-web mousedown hook unavailable; its overlay scrollbar claims clicks while hidden.",
         );
       }
     }
@@ -1978,6 +1998,8 @@
     resizeObserver?.disconnect();
     resizeObserver = null;
     host?.removeEventListener("keydown", onGhosttyHostChord, true);
+    ghosttyScrollbarClickGate?.();
+    ghosttyScrollbarClickGate = null;
     secretMasker?.dispose();
     secretMasker = null;
     term?.dispose();
