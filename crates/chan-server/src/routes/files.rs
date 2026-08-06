@@ -2163,6 +2163,7 @@ struct UploadFileResponse {
 
 pub async fn api_upload_file(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
     let mut dir = String::new();
@@ -2185,19 +2186,20 @@ pub async fn api_upload_file(
                             Ok(workspace) => workspace,
                             Err(e) => return err_state(&e),
                         };
-                        let result = stream_workspace_upload(
+                        return stream_workspace_upload(
+                            &state.bulk_transfer,
+                            Some(state.events_tx.clone()),
+                            crate::routes::transfer::TransferTracking::from_headers(&headers),
                             workspace,
                             Arc::clone(&state.self_writes),
-                            dir,
-                            replace_path,
-                            filename,
+                            UploadDestination {
+                                dir,
+                                replace_path,
+                                filename,
+                            },
                             field,
                         )
                         .await;
-                        return match result {
-                            Ok(upload) => Json(upload).into_response(),
-                            Err(e) => err_from(&e),
-                        };
                     }
                     "dir" => match read_multipart_text_field(field).await {
                         Ok(s) => {
@@ -2231,25 +2233,48 @@ pub async fn api_upload_file(
     )
 }
 
-async fn stream_workspace_upload(
-    workspace: Arc<chan_workspace::Workspace>,
-    self_writes: Arc<crate::self_writes::SelfWrites>,
+/// Admit one workspace upload and write it inside a SINGLE lane job.
+///
+/// Mirrors the terminal upload: the job is the writer, admitted before the
+/// first body byte is pulled, so a refusal has read nothing and resolved no
+/// destination, and the async half only moves the multipart field into the
+/// job's bounded channel. Returning early drops the job, which cancels it and
+/// releases its slot.
+/// Where one upload lands, as the multipart parts named it and before the
+/// target is resolved. Grouped so the admitted path stays inside clippy's
+/// argument budget without an allow.
+struct UploadDestination {
     dir: String,
     replace_path: Option<String>,
     filename: String,
+}
+
+async fn stream_workspace_upload(
+    bulk: &crate::bulk_transfer::BulkTransferTenant,
+    events: Option<tokio::sync::broadcast::Sender<String>>,
+    tracking: Option<crate::routes::transfer::TransferTracking>,
+    workspace: Arc<chan_workspace::Workspace>,
+    self_writes: Arc<crate::self_writes::SelfWrites>,
+    destination: UploadDestination,
     mut field: Field<'_>,
-) -> chan_workspace::Result<UploadFileResponse> {
+) -> Response {
     let (tx, mut rx) = mpsc::channel(8);
-    let consumer = tokio::task::spawn_blocking(move || {
-        workspace_upload_stream_sync(
-            &workspace,
-            &self_writes,
-            &dir,
-            replace_path.as_deref(),
-            &filename,
-            &mut rx,
-        )
-    });
+    let job = match bulk.submit(move |cancel| {
+        workspace_upload_stream_sync(&workspace, &self_writes, &destination, &mut rx, cancel)
+    }) {
+        Ok(job) => job,
+        Err(full) => return full.into_response(),
+    };
+    let (_alive_tx, alive_rx) = tokio::sync::oneshot::channel::<std::convert::Infallible>();
+    if let (Some(events), Some(tracking)) = (events, tracking) {
+        crate::routes::ws::spawn_transfer_queue_reporter(
+            events,
+            tracking.window_id,
+            tracking.transfer_id,
+            job.tracker(),
+            alive_rx,
+        );
+    }
 
     loop {
         let message = match field.chunk().await {
@@ -2263,23 +2288,46 @@ async fn stream_workspace_upload(
         }
     }
     drop(tx);
-    consumer
-        .await
-        .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?
+    match job.outcome().await {
+        crate::bulk_transfer::BulkOutcome::Done(Ok(upload)) => Json(upload).into_response(),
+        crate::bulk_transfer::BulkOutcome::Done(Err(error)) => err_from(&error),
+        // Cancellation, lane shutdown and a panicked job are reported
+        // identically and cannot be told apart here. All three mean the write
+        // did not complete and nothing was persisted.
+        crate::bulk_transfer::BulkOutcome::Cancelled => err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "upload did not complete".into(),
+        ),
+    }
 }
 
 fn workspace_upload_stream_sync(
     workspace: &chan_workspace::Workspace,
     self_writes: &crate::self_writes::SelfWrites,
-    dir: &str,
-    replace_path: Option<&str>,
-    filename: &str,
+    destination: &UploadDestination,
     rx: &mut mpsc::Receiver<RequestBodyMessage>,
+    cancel: &crate::bulk_transfer::BulkCancel,
 ) -> chan_workspace::Result<UploadFileResponse> {
-    let rel = workspace_upload_target(workspace, dir, replace_path, filename)?;
+    let rel = workspace_upload_target(
+        workspace,
+        &destination.dir,
+        destination.replace_path.as_deref(),
+        &destination.filename,
+    )?;
     let mut reservation = None;
     let result = workspace.write_atomic_stream(&rel, AtomicWriteKind::Bytes, |sink| {
-        consume_request_body(rx, |chunk| sink.write_chunk(chunk))?;
+        // Checked per chunk rather than once, so an abandoned upload returns
+        // its admission slot within one chunk's work. The atomic writer's temp
+        // file is discarded on this error, so nothing is left behind and the
+        // target is untouched.
+        consume_request_body(rx, |chunk| {
+            if cancel.is_cancelled() {
+                return Err(chan_workspace::ChanError::Io(
+                    "upload cancelled before it completed".into(),
+                ));
+            }
+            sink.write_chunk(chunk)
+        })?;
         reservation = Some(self_writes.reserve_after_preflight(&rel));
         Ok(())
     });
@@ -3021,6 +3069,161 @@ mod write_tests {
         assert!(route_table.contains("put(api_write_file).layer(DefaultBodyLimit::disable())"));
     }
 
+    /// A multipart body naming a destination and one file part, so a test can
+    /// drive the upload route without a router.
+    async fn upload_multipart(
+        boundary: &str,
+        dir: &str,
+        filename: &str,
+        content: &str,
+    ) -> Multipart {
+        use axum::extract::FromRequest;
+
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"dir\"\r\n\r\n\
+             {dir}\r\n\
+             --{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\r\n\
+             {content}\r\n\
+             --{boundary}--\r\n"
+        );
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/files/upload")
+            .body(Body::from(body))
+            .map(|mut request| {
+                request.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}")
+                        .parse()
+                        .unwrap(),
+                );
+                request
+            })
+            .unwrap();
+        Multipart::from_request(request, &()).await.unwrap()
+    }
+
+    /// Both sides of the bound on the workspace upload: a saturated lane
+    /// refuses it and nothing is written, and the same upload succeeds once the
+    /// lane drains. Checking only the refusal would pass against a route that
+    /// was broken for an unrelated reason.
+    #[tokio::test]
+    async fn a_workspace_upload_refused_at_the_bound_writes_nothing() {
+        let (lane, saturator) = crate::bulk_transfer::test_support::isolated_tenant();
+        let (_cfg, root, state) = super::doc_divert_tests::divert_app_with_tenant(lane.tenant());
+        let (releases, held) = crate::bulk_transfer::test_support::saturate_admission(&saturator);
+
+        let refused = super::api_upload_file(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            upload_multipart("refused-upload", "", "declined.bin", "payload").await,
+        )
+        .await;
+        assert_eq!(
+            refused.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a full lane must refuse the upload rather than write it"
+        );
+        assert_eq!(
+            refused
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("1"),
+            "a refusal must tell the caller when to come back"
+        );
+        assert!(
+            !root.path().join("declined.bin").exists(),
+            "a refused upload must not create its target"
+        );
+
+        // Awaiting the held jobs is proof the slots are free, where dropping
+        // the senders and continuing would only be a guess about timing.
+        drop(releases);
+        for job in held {
+            let _ = job.outcome().await;
+        }
+
+        let admitted = super::api_upload_file(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            upload_multipart("admitted-upload", "", "admitted.bin", "payload").await,
+        )
+        .await;
+        assert_eq!(
+            admitted.status(),
+            StatusCode::OK,
+            "the same upload must succeed once the lane has capacity"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("admitted.bin")).unwrap(),
+            b"payload"
+        );
+    }
+
+    /// The copy/move asymmetry is deliberate, so it is pinned from both sides
+    /// rather than left as a comment. A copy moves bytes and rides the lane; a
+    /// move is a rename plus a link-rewrite walk and must stay off it, or an
+    /// ordinary file-browser drag would wait behind two large downloads.
+    #[tokio::test]
+    async fn a_copy_batch_is_admitted_and_a_move_is_deliberately_not() {
+        let (lane, saturator) = crate::bulk_transfer::test_support::isolated_tenant();
+        let (_cfg, root, state) = super::doc_divert_tests::divert_app_with_tenant(lane.tenant());
+        let workspace = state.try_workspace().unwrap();
+        workspace.write_bytes("copied.bin", b"payload").unwrap();
+        workspace.write_bytes("moved.bin", b"payload").unwrap();
+        std::fs::create_dir(root.path().join("dest")).unwrap();
+
+        let (releases, held) = crate::bulk_transfer::test_support::saturate_admission(&saturator);
+
+        let copied = super::api_fs_transfer(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Json(TransferBody {
+                op: TransferOp::Copy,
+                sources: vec!["copied.bin".into()],
+                dest_dir: "dest".into(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            copied.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a copy moves bytes, so a full lane must refuse it"
+        );
+        assert!(
+            !root.path().join("dest").join("copied.bin").exists(),
+            "a refused copy must not have written anything"
+        );
+
+        let moved = super::api_fs_transfer(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Json(TransferBody {
+                op: TransferOp::Move,
+                sources: vec!["moved.bin".into()],
+                dest_dir: "dest".into(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            moved.status(),
+            StatusCode::OK,
+            "a move holds no admission, so a full lane must not block it"
+        );
+        assert!(
+            root.path().join("dest").join("moved.bin").exists(),
+            "the move must have completed while the lane was full"
+        );
+
+        drop(releases);
+        for job in held {
+            let _ = job.outcome().await;
+        }
+    }
+
     #[tokio::test]
     async fn workspace_upload_rejects_overflow_progressively_without_a_partial_target() {
         let cfg = tempfile::TempDir::new().unwrap();
@@ -3033,7 +3236,17 @@ mod write_tests {
         let ws = Arc::clone(&workspace);
         let writes = Arc::clone(&self_writes);
         let consumer = tokio::task::spawn_blocking(move || {
-            workspace_upload_stream_sync(&ws, &writes, "", None, "too-large.bin", &mut rx)
+            workspace_upload_stream_sync(
+                &ws,
+                &writes,
+                &UploadDestination {
+                    dir: String::new(),
+                    replace_path: None,
+                    filename: "too-large.bin".into(),
+                },
+                &mut rx,
+                &crate::bulk_transfer::test_support::uncancelled(),
+            )
         });
         let chunk = Bytes::from(vec![0x5a; 1024 * 1024]);
         let attempts = chan_workspace::BYTES_WRITE_LIMIT / chunk.len() as u64 + 2;
@@ -3076,7 +3289,17 @@ mod write_tests {
         let ws = Arc::clone(&workspace);
         let writes = Arc::clone(&self_writes);
         let consumer = tokio::task::spawn_blocking(move || {
-            workspace_upload_stream_sync(&ws, &writes, "", Some("same.bin"), "ignored.bin", &mut rx)
+            workspace_upload_stream_sync(
+                &ws,
+                &writes,
+                &UploadDestination {
+                    dir: String::new(),
+                    replace_path: Some("same.bin".into()),
+                    filename: "ignored.bin".into(),
+                },
+                &mut rx,
+                &crate::bulk_transfer::test_support::uncancelled(),
+            )
         });
         tx.send(RequestBodyMessage::Chunk(Bytes::from_static(b"new")))
             .await
@@ -4065,6 +4288,7 @@ fn parent_dir(path: &str) -> &str {
 
 pub async fn api_fs_transfer(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<TransferBody>,
 ) -> Response {
     let workspace = match state.try_workspace() {
@@ -4074,72 +4298,141 @@ pub async fn api_fs_transfer(
     let dest_dir = body.dest_dir.trim_end_matches('/').to_string();
     let op = body.op;
     let sources = body.sources.clone();
-
-    // The whole batch runs on a blocking thread: each move does a
-    // synchronous link-rewrite walk and each copy reads + writes N
-    // files, both off the tokio worker pool.
-    let dest_for_task = dest_dir.clone();
-    // Note every created/moved/rewritten path INSIDE the blocking task,
-    // as each workspace op reports it, so the watcher's Created/Removed
-    // events are suppressed before the await returns. Noting after the
-    // await (the old behavior) raced the watcher into firing phantom
-    // external-edit prompts on files the user may have open. The
-    // watcher still emits the events; the scoped `fs` registry routes
-    // them to subscribed File Browser instances + the Graph.
     let self_writes = Arc::clone(&state.self_writes);
-    let result = tokio::task::spawn_blocking(move || {
-        let mut resp = TransferResponse::default();
-        for src in &sources {
-            let name = basename(src);
-            // A move into the source's own current parent is a no-op
-            // (and would otherwise resolve a needless " copy" suffix).
-            if op == TransferOp::Move && parent_dir(src) == dest_for_task {
-                resp.skipped.push(src.clone());
-                continue;
-            }
-            // Resolve a non-colliding destination name; both copy and a
-            // cut-into-a-collision get a Finder-style " copy" suffix so
-            // we never overwrite.
-            let dest = match workspace.resolve_free_name(&dest_for_task, name) {
-                Ok(d) => d,
-                Err(e) => return Err(e),
+
+    // A copy moves bytes and is admitted to the transfer lane. A move is not,
+    // and that is deliberate rather than an omission: it is a rename plus a
+    // link-rewrite walk over markdown, which is metadata-sized work, and
+    // putting it behind a two-slot bound would make an ordinary file-browser
+    // drag wait behind two multi-gigabyte downloads. The lane exists to keep
+    // interactive work ahead of bulk work, so admitting a move would invert it.
+    let result = match op {
+        TransferOp::Copy => {
+            let job = match state.bulk_transfer.submit(move |cancel| {
+                fs_transfer_batch_sync(
+                    &workspace,
+                    &self_writes,
+                    op,
+                    &dest_dir,
+                    &sources,
+                    Some(cancel),
+                )
+            }) {
+                Ok(job) => job,
+                Err(full) => return full.into_response(),
             };
-            match op {
-                TransferOp::Move => {
-                    let outcome = workspace.rename_with_link_rewrite(src, &dest)?;
-                    for (from, to) in &outcome.renamed {
-                        self_writes.note(from);
-                        self_writes.note(to);
-                    }
-                    for path in &outcome.rewritten {
-                        self_writes.note(path);
-                    }
-                    resp.conflicts.extend(outcome.conflicts);
-                }
-                TransferOp::Copy => {
-                    let outcome = workspace.copy(src, &dest)?;
-                    for path in &outcome.created {
-                        self_writes.note(path);
-                    }
+            let (_alive_tx, alive_rx) = tokio::sync::oneshot::channel::<std::convert::Infallible>();
+            if let Some(tracking) =
+                crate::routes::transfer::TransferTracking::from_headers(&headers)
+            {
+                crate::routes::ws::spawn_transfer_queue_reporter(
+                    state.events_tx.clone(),
+                    tracking.window_id,
+                    tracking.transfer_id,
+                    job.tracker(),
+                    alive_rx,
+                );
+            }
+            match job.outcome().await {
+                crate::bulk_transfer::BulkOutcome::Done(result) => result,
+                crate::bulk_transfer::BulkOutcome::Cancelled => {
+                    return err(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "copy did not complete".into(),
+                    )
                 }
             }
-            self_writes.note(src);
-            self_writes.note(&dest);
-            resp.moved.push(TransferItem {
-                from: src.clone(),
-                to: dest,
-            });
         }
-        Ok::<_, chan_workspace::ChanError>(resp)
-    })
-    .await;
+        TransferOp::Move => {
+            match tokio::task::spawn_blocking(move || {
+                fs_transfer_batch_sync(&workspace, &self_writes, op, &dest_dir, &sources, None)
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(join) => {
+                    return err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string());
+                }
+            }
+        }
+    };
 
     let resp = match result {
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) => return err_from(&e),
-        Err(join) => return err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Ok(v) => v,
+        Err(e) => return err_from(&e),
     };
     Json(resp).into_response()
+}
+
+/// Run one copy or move batch synchronously.
+///
+/// Every created, moved and rewritten path is noted HERE, as each workspace op
+/// reports it, so the watcher's Created/Removed events are suppressed before
+/// the caller's await returns. Noting them afterwards raced the watcher into
+/// firing phantom external-edit prompts on files the user may have open. The
+/// watcher still emits the events; the scoped `fs` registry routes them to
+/// subscribed File Browser instances and the Graph.
+///
+/// `cancel` is `Some` only on the admitted copy path; a move holds no
+/// admission, so it has no signal to observe.
+fn fs_transfer_batch_sync(
+    workspace: &chan_workspace::Workspace,
+    self_writes: &crate::self_writes::SelfWrites,
+    op: TransferOp,
+    dest_dir: &str,
+    sources: &[String],
+    cancel: Option<&crate::bulk_transfer::BulkCancel>,
+) -> chan_workspace::Result<TransferResponse> {
+    let mut resp = TransferResponse::default();
+    for src in sources {
+        // Checked per source, so an abandoned batch returns its admission slot
+        // at the next entry rather than at the end of the batch. One entry is
+        // the finest granularity available here: `Workspace::copy` owns the
+        // per-file work and takes no cancellation signal, so a single very
+        // large file still holds its slot until that file finishes.
+        if cancel.is_some_and(|cancel| cancel.is_cancelled()) {
+            return Err(chan_workspace::ChanError::Io(
+                "transfer cancelled before it completed".into(),
+            ));
+        }
+        let name = basename(src);
+        // A move into the source's own current parent is a no-op
+        // (and would otherwise resolve a needless " copy" suffix).
+        if op == TransferOp::Move && parent_dir(src) == dest_dir {
+            resp.skipped.push(src.clone());
+            continue;
+        }
+        // Resolve a non-colliding destination name; both copy and a
+        // cut-into-a-collision get a Finder-style " copy" suffix so
+        // we never overwrite.
+        let dest = workspace.resolve_free_name(dest_dir, name)?;
+        match op {
+            TransferOp::Move => {
+                let outcome = workspace.rename_with_link_rewrite(src, &dest)?;
+                for (from, to) in &outcome.renamed {
+                    self_writes.note(from);
+                    self_writes.note(to);
+                }
+                for path in &outcome.rewritten {
+                    self_writes.note(path);
+                }
+                resp.conflicts.extend(outcome.conflicts);
+            }
+            TransferOp::Copy => {
+                let outcome = workspace.copy(src, &dest)?;
+                for path in &outcome.created {
+                    self_writes.note(path);
+                }
+            }
+        }
+        self_writes.note(src);
+        self_writes.note(&dest);
+        resp.moved.push(TransferItem {
+            from: src.clone(),
+            to: dest,
+        });
+    }
+    Ok(resp)
 }
 
 #[cfg(test)]
@@ -4300,6 +4593,15 @@ mod doc_divert_tests {
     use crate::{EditorPrefs, ServerConfig};
 
     pub(super) fn divert_app() -> (TempDir, TempDir, Arc<AppState>) {
+        divert_app_with_tenant(crate::state::test_support::make_test_bulk_transfer_tenant())
+    }
+
+    /// `divert_app` over a caller-supplied tenant, for tests that saturate
+    /// admission and therefore must not use the shared test lane. The caller
+    /// keeps the lane alive; dropping it shuts the workers down.
+    pub(super) fn divert_app_with_tenant(
+        bulk: crate::bulk_transfer::BulkTransferTenant,
+    ) -> (TempDir, TempDir, Arc<AppState>) {
         let cfg = TempDir::new().unwrap();
         let root = TempDir::new().unwrap();
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -4356,7 +4658,7 @@ mod doc_divert_tests {
             session_registry: Arc::new(crate::session_presence::SessionRegistry::new()),
             window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
             window_titles: Arc::new(crate::window_titles::WindowTitles::new()),
-            bulk_transfer: crate::state::test_support::make_test_bulk_transfer_tenant(),
+            bulk_transfer: bulk,
             instance_id: "test-instance".to_string(),
         });
         (cfg, root, state)
