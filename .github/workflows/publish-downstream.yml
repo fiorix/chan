@@ -8,6 +8,17 @@
 # others. Publication jobs no-op gracefully when their secret is absent
 # (e.g. on forks).
 #
+# AUR publication is suspended. The `aur-auth`, `aur-validate`, and
+# `aur-publish` jobs are gated off by a literal `false` in their `if:`
+# while the Arch Linux "Active AUR malicious packages incident" stands
+# unresolved, because its restrictions include pushing package updates:
+# https://archlinux.org/news/active-aur-malicious-packages-incident/
+# Restore when that notice is superseded by an announcement stating the
+# incident is resolved and package pushes are permitted again. Lifting is
+# one deletion per job: remove the `false &&` line. The jobs, the AUR
+# templates and renderers, and local AUR validation in ci.yml are all left
+# in place, so the recipes keep being exercised while nothing is pushed.
+#
 # Manual dispatch mirrors release.yml: `publish` defaults to false,
 # which builds and validates without pushing (and probes the PPA/AUR
 # credentials; Docker and Cachix intentionally skip publisher auth), while
@@ -361,20 +372,42 @@ jobs:
             exit 1
           fi
 
+  # A dispatch scoped to the AUR selects only the three suspended jobs, so
+  # without this it would run nothing at all and report success, which
+  # reads as a completed publication to whoever dispatched it. Scoped to
+  # `targets == 'aur'` alone so a full dispatch still publishes every
+  # other target and stays green. Delete this job in the same commit that
+  # lifts the suspension.
+  aur-suspended:
+    if: github.event_name == 'workflow_dispatch' && inputs.targets == 'aur'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse an AUR dispatch while publication is suspended
+        run: |
+          set -euo pipefail
+          echo "::error::AUR publication is suspended; this run pushed nothing to the AUR."
+          echo "See https://archlinux.org/news/active-aur-malicious-packages-incident/"
+          exit 1
+
   # The AUR is a git host for recipes: a push publishes immediately and is
   # only as good as the key behind it. Probe the credential in its own
   # short job so a key whose public half is not registered on the AUR
   # account fails here, in a dry run, instead of at publication time when
   # the release is already out.
+  # Suspended: see the AUR publication note in this file's header. The
+  # guard wraps the whole schedule rather than prefixing it, because `&&`
+  # binds tighter than `||` and a bare prefix would leave the second
+  # clause live. Lift by deleting the `false &&` line alone.
   aur-auth:
     if: >-
-      (github.event_name == 'workflow_dispatch' &&
-       (inputs.targets == 'all' || inputs.targets == 'aur') &&
-       !contains(inputs.tag, '-')) ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push' &&
-       startsWith(github.event.workflow_run.head_branch, 'v') &&
-       !contains(github.event.workflow_run.head_branch, '-'))
+      false &&
+      ((github.event_name == 'workflow_dispatch' &&
+        (inputs.targets == 'all' || inputs.targets == 'aur') &&
+        !contains(inputs.tag, '-')) ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        startsWith(github.event.workflow_run.head_branch, 'v') &&
+        !contains(github.event.workflow_run.head_branch, '-')))
     runs-on: ubuntu-latest
     outputs:
       credential: ${{ steps.probe.outputs.credential }}
@@ -422,15 +455,17 @@ jobs:
   # clean upstream Arch container before either repository is updated.
   # The package build logic is the same script local sdme validation
   # runs. This x86_64 job is the v0.73.0 publication gate.
+  # Suspended: see the AUR publication note in this file's header.
   aur-validate:
     if: >-
-      (github.event_name == 'workflow_dispatch' &&
-       (inputs.targets == 'all' || inputs.targets == 'aur') &&
-       !contains(inputs.tag, '-')) ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push' &&
-       startsWith(github.event.workflow_run.head_branch, 'v') &&
-       !contains(github.event.workflow_run.head_branch, '-'))
+      false &&
+      ((github.event_name == 'workflow_dispatch' &&
+        (inputs.targets == 'all' || inputs.targets == 'aur') &&
+        !contains(inputs.tag, '-')) ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        startsWith(github.event.workflow_run.head_branch, 'v') &&
+        !contains(github.event.workflow_run.head_branch, '-')))
     strategy:
       fail-fast: false
       matrix:
@@ -459,15 +494,19 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+  # Suspended: see the AUR publication note in this file's header. Gated
+  # in its own right rather than relying on its skipped dependencies, so
+  # the suspension does not depend on how Actions propagates a skip.
   aur-publish:
     if: >-
-      (github.event_name == 'workflow_dispatch' &&
-       (inputs.targets == 'all' || inputs.targets == 'aur') &&
-       !contains(inputs.tag, '-')) ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push' &&
-       startsWith(github.event.workflow_run.head_branch, 'v') &&
-       !contains(github.event.workflow_run.head_branch, '-'))
+      false &&
+      ((github.event_name == 'workflow_dispatch' &&
+        (inputs.targets == 'all' || inputs.targets == 'aur') &&
+        !contains(inputs.tag, '-')) ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        startsWith(github.event.workflow_run.head_branch, 'v') &&
+        !contains(github.event.workflow_run.head_branch, '-')))
     needs: [aur-auth, aur-validate]
     strategy:
       fail-fast: false
