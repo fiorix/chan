@@ -253,11 +253,11 @@ describe("the bytes the server actually emits", () => {
   });
 });
 
-describe("assumptions this build makes about the open contract point", () => {
+describe("settling a transfer", () => {
   test("no terminal frame: the record settles on the HTTP response, not a frame", () => {
-    // The server has not fixed whether completion or cancellation emits a
-    // final frame; it leans to no. If that changes, this test fails and the
-    // browser half gets revisited, rather than drifting silently.
+    // Completion and cancellation emit no frame. The HTTP response already
+    // tells the browser the outcome, and a completion frame would race it, so
+    // the record settles on the response and clears its rank there.
     resetTransfers();
     const id = begin();
     applyTransferQueueFrame({ transfer_id: id, state: "active" });
