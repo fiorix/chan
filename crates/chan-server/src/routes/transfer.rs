@@ -138,6 +138,29 @@ impl TransferTracking {
     }
 }
 
+/// Build a tar into an already-admitted job's byte channel.
+///
+/// Deliberately submits nothing. The admission belongs to whoever owns the job
+/// this runs inside, so a caller that already holds a slot can build an archive
+/// without spending a second one. Wrapping this in its own `submit` again is
+/// the one way a single request comes to consume two admissions, and it would
+/// look like ordinary reuse while doing it.
+fn build_tar_into<F>(tx: &mpsc::Sender<std::io::Result<Bytes>>, cancel: &BulkCancel, build: F)
+where
+    F: FnOnce(&mut tar::Builder<TarChannelWriter>) -> std::io::Result<()> + Send + 'static,
+{
+    let mut builder = tar::Builder::new(TarChannelWriter {
+        tx: tx.clone(),
+        cancel: cancel.clone(),
+    });
+    let result = build(&mut builder).and_then(|()| builder.finish());
+    if let Err(e) = result {
+        if e.kind() != std::io::ErrorKind::BrokenPipe {
+            let _ = tx.blocking_send(Err(e));
+        }
+    }
+}
+
 /// Stream a tar archive straight to the response body, built on the fly by
 /// `build` (no staged temp file). The caller is expected to have already
 /// pre-flighted readability, so the build does not fail mid-stream under normal
@@ -158,18 +181,7 @@ where
     F: FnOnce(&mut tar::Builder<TarChannelWriter>) -> std::io::Result<()> + Send + 'static,
 {
     let (tx, rx) = mpsc::channel::<std::io::Result<Bytes>>(8);
-    let job = match bulk.submit(move |cancel| {
-        let mut builder = tar::Builder::new(TarChannelWriter {
-            tx: tx.clone(),
-            cancel: cancel.clone(),
-        });
-        let result = build(&mut builder).and_then(|()| builder.finish());
-        if let Err(e) = result {
-            if e.kind() != std::io::ErrorKind::BrokenPipe {
-                let _ = tx.blocking_send(Err(e));
-            }
-        }
-    }) {
+    let job = match bulk.submit(move |cancel| build_tar_into(&tx, cancel, build)) {
         Ok(job) => job,
         // Refused before a single archive byte is produced, so the caller can
         // retry without having paid for a walk of the tree.
@@ -217,6 +229,130 @@ pub(crate) struct TerminalDownloadQuery {
     download: Option<String>,
 }
 
+/// What the plan resolved to, reported before the first byte so the response
+/// headers can be chosen while the same job goes on to stream the body.
+enum PlannedDownload {
+    File { name: String },
+    Directory { name: String },
+}
+
+/// Plan and stream one terminal download inside a SINGLE lane job.
+///
+/// Planning opens the file, or pre-flights a whole directory tree, which is
+/// real work and belongs on the transfer lane rather than the pool that serves
+/// editor saves and terminal spawns. Submitting the plan and the stream
+/// separately would make one request consume two admissions against a bound
+/// that counts requests, so the job reports its plan over a oneshot and then
+/// keeps going into the body.
+///
+/// A refusal is returned before the job exists, so a declined download has not
+/// opened a file or walked a tree. Every early return past that point drops the
+/// job, which cancels it and releases its slot.
+async fn stream_planned_download_tracked(
+    bulk: &BulkTransferTenant,
+    events: Option<tokio::sync::broadcast::Sender<String>>,
+    tracking: Option<TransferTracking>,
+    abs: PathBuf,
+) -> Response {
+    let (tx, rx) = mpsc::channel::<std::io::Result<Bytes>>(8);
+    let (plan_tx, plan_rx) = tokio::sync::oneshot::channel::<Result<PlannedDownload, String>>();
+    let job = match bulk.submit(move |cancel| {
+        let planned = match terminal_download_plan(&abs) {
+            Ok(planned) => planned,
+            Err(message) => {
+                let _ = plan_tx.send(Err(message));
+                return;
+            }
+        };
+        match planned {
+            TerminalDownload::File { mut reader, name } => {
+                if plan_tx.send(Ok(PlannedDownload::File { name })).is_err() {
+                    return;
+                }
+                // The lane worker does the reading itself. Handing the reader
+                // to a pool task would cost a slot and a task for one request.
+                for next in reader.by_ref() {
+                    if cancel.is_cancelled() {
+                        return;
+                    }
+                    let terminal = next.is_err();
+                    if tx.blocking_send(next.map(Bytes::from)).is_err() || terminal {
+                        return;
+                    }
+                }
+            }
+            TerminalDownload::Directory { name } => {
+                let build_name = name.clone();
+                let build_abs = abs.clone();
+                if plan_tx
+                    .send(Ok(PlannedDownload::Directory { name }))
+                    .is_err()
+                {
+                    return;
+                }
+                // Builds into this job's channel rather than through
+                // `stream_tar_response_tracked`, which would submit again.
+                build_tar_into(&tx, cancel, move |builder| {
+                    builder.append_dir_all(&build_name, &build_abs)
+                });
+            }
+        }
+    }) {
+        Ok(job) => job,
+        Err(full) => return full.into_response(),
+    };
+    let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<std::convert::Infallible>();
+    if let (Some(events), Some(tracking)) = (events, tracking) {
+        crate::routes::ws::spawn_transfer_queue_reporter(
+            events,
+            tracking.window_id,
+            tracking.transfer_id,
+            job.tracker(),
+            alive_rx,
+        );
+    }
+    let planned = match plan_rx.await {
+        Ok(Ok(planned)) => planned,
+        // The plan ran on an admitted job, so a failure here is reported after
+        // the transfer genuinely occupied a slot. Returning drops the job.
+        Ok(Err(message)) => return err(StatusCode::BAD_REQUEST, message),
+        Err(_) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "download plan did not report".into(),
+            )
+        }
+    };
+    let (content_type, disposition) = match &planned {
+        // No Content-Length on either arm: a tar has no known length, and a
+        // live file must not promise the length it had at open.
+        PlannedDownload::File { name } => (
+            content_type_for(name).to_string(),
+            content_disposition_attachment(name),
+        ),
+        PlannedDownload::Directory { name } => (
+            "application/x-tar".to_string(),
+            content_disposition_archive(name),
+        ),
+    };
+    let body = Body::from_stream(stream::unfold(
+        (rx, job, alive_tx),
+        |(mut rx, job, alive_tx)| async move {
+            rx.recv()
+                .await
+                .map(|message| (message, (rx, job, alive_tx)))
+        },
+    ));
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CONTENT_DISPOSITION, disposition),
+        ],
+        body,
+    )
+        .into_response()
+}
+
 /// `GET /api/files/{*path}?download=1` on the terminal tenant: stream the cwd /
 /// uid-scoped file or a tar of the directory. Mounted only on the slim terminal
 /// router, so `{*path}` is always a filesystem-absolute target (see
@@ -236,30 +372,13 @@ pub async fn api_terminal_read_file(
             "terminal file route requires ?download=1".into(),
         );
     }
-    let abs = abs_from_terminal_path(&path);
-    let plan_abs = abs.clone();
-    let plan = tokio::task::spawn_blocking(move || terminal_download_plan(&plan_abs)).await;
-    match plan {
-        Ok(Ok(TerminalDownload::File { reader, name })) => {
-            stream_terminal_file_response(&name, reader)
-        }
-        // The tree was pre-flighted readable in the plan; stream the tar on the
-        // fly so a cancel is trace-free by construction (no staged temp).
-        Ok(Ok(TerminalDownload::Directory { name })) => {
-            let build_abs = abs;
-            let build_name = name.clone();
-            stream_tar_response_tracked(
-                &state.bulk_transfer,
-                Some(state.events_tx.clone()),
-                TransferTracking::from_headers(&headers),
-                name,
-                move |builder| builder.append_dir_all(&build_name, &build_abs),
-            )
-        }
-        // Pre-flight / IO failures are reported before any archive bytes go out.
-        Ok(Err(message)) => err(StatusCode::BAD_REQUEST, message),
-        Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
-    }
+    stream_planned_download_tracked(
+        &state.bulk_transfer,
+        Some(state.events_tx.clone()),
+        TransferTracking::from_headers(&headers),
+        abs_from_terminal_path(&path),
+    )
+    .await
 }
 
 /// One absolute regular-file stream, read lazily by whoever pulls it.
@@ -342,58 +461,6 @@ fn terminal_download_plan(abs: &Path) -> Result<TerminalDownload, String> {
         let reader = AbsoluteFileReader::open(abs)?;
         Ok(TerminalDownload::File { reader, name })
     }
-}
-
-fn stream_terminal_file_response(path: &str, reader: AbsoluteFileReader) -> Response {
-    stream_terminal_file_response_inner(path, reader, None)
-}
-
-#[cfg(test)]
-fn stream_terminal_file_response_with_completion(
-    path: &str,
-    reader: AbsoluteFileReader,
-) -> (Response, tokio::sync::oneshot::Receiver<()>) {
-    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-    (
-        stream_terminal_file_response_inner(path, reader, Some(done_tx)),
-        done_rx,
-    )
-}
-
-fn stream_terminal_file_response_inner(
-    path: &str,
-    mut reader: AbsoluteFileReader,
-    completion: Option<tokio::sync::oneshot::Sender<()>>,
-) -> Response {
-    let (tx, rx) =
-        mpsc::channel::<std::io::Result<Bytes>>(chan_workspace::BINARY_STREAM_QUEUE_DEPTH);
-    tokio::task::spawn_blocking(move || {
-        for next in reader.by_ref() {
-            let terminal = next.is_err();
-            let message = next.map(Bytes::from);
-            if tx.blocking_send(message).is_err() || terminal {
-                break;
-            }
-        }
-        drop(reader);
-        if let Some(completion) = completion {
-            let _ = completion.send(());
-        }
-    });
-    let body = Body::from_stream(stream::unfold(rx, |mut rx| async {
-        rx.recv().await.map(|message| (message, rx))
-    }));
-    (
-        [
-            (header::CONTENT_TYPE, content_type_for(path).to_string()),
-            (
-                header::CONTENT_DISPOSITION,
-                content_disposition_attachment(path),
-            ),
-        ],
-        body,
-    )
-        .into_response()
 }
 
 #[derive(Serialize)]
@@ -794,33 +861,80 @@ mod tests {
         assert!(missing.contains("cannot access"), "{missing}");
     }
 
+    /// Dropping the response must release the lane slot, because the job handle
+    /// rides in the body's state and nowhere else. A slot held for a client that
+    /// is gone is indistinguishable from a busy lane, and the bound would drift
+    /// down one admission per abandoned download.
+    ///
+    /// Both sides are asserted rather than only the release: the lane refuses
+    /// while the download holds its slot, and admits again once the response is
+    /// dropped. Checking only the second would pass against a lane that never
+    /// filled.
     #[tokio::test]
-    async fn dropping_terminal_file_response_stops_the_bounded_reader() {
+    async fn dropping_a_download_response_releases_its_lane_slot() {
         let dir = tempfile::tempdir().unwrap();
-        // Big enough that the streaming bridge is still mid-file when the
-        // response drops, which is what makes the completion signal mean
-        // "stopped early" rather than "finished anyway". The exact multiple
-        // carries no meaning beyond not being drainable in one pull.
-        let size = chan_workspace::BINARY_STREAM_CHUNK_SIZE * 16;
         let path = dir.path().join("disconnect.bin");
-        std::fs::write(&path, vec![0x44; size]).unwrap();
-        let reader = match terminal_download_plan(&path).unwrap() {
-            TerminalDownload::File { reader, .. } => reader,
-            TerminalDownload::Directory { .. } => panic!("expected file"),
-        };
-        let (response, completed) =
-            stream_terminal_file_response_with_completion("disconnect.bin", reader);
+        // Large enough that the job is still streaming, not finished, when the
+        // response drops. A file that drained in one send would release its
+        // slot on its own and prove nothing about the drop.
+        std::fs::write(
+            &path,
+            vec![0x44; chan_workspace::BINARY_STREAM_CHUNK_SIZE * 16],
+        )
+        .unwrap();
+
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+        let (mut releases, _held) = crate::bulk_transfer::test_support::saturate_admission(&bulk);
+        // Free exactly ONE slot, so this download is the only thing the lane can
+        // admit and the next submission after it is a real test of release.
+        // `releases` keeps the rest alive; consuming it by iterator would drop
+        // every remaining release with it and leave the lane wide open.
+        releases.pop();
+
+        let response = stream_planned_download_tracked(&bulk, None, None, path.clone()).await;
         assert!(
             response.headers().get(header::CONTENT_LENGTH).is_none(),
             "a live file stream must not promise its open-time length"
         );
+        assert!(
+            bulk.submit(|_| {}).is_err(),
+            "the download must be holding the one free slot"
+        );
+    }
 
-        drop(response);
+    /// A refusal must cost the caller nothing: no slot, and no work done on the
+    /// target before the refusal is returned. The path is not even opened,
+    /// because `submit` refuses before the job that would open it exists.
+    ///
+    /// Both sides again: the lane admits the download when a slot is free and
+    /// refuses it when none is, so the test distinguishes a real bound from a
+    /// route that happens to be failing for some other reason.
+    #[tokio::test]
+    async fn a_download_refused_at_the_bound_reads_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("declined.bin");
+        std::fs::write(&path, b"payload").unwrap();
+        // Unreadable content would fail the PLAN, so if the refusal ever stopped
+        // preceding the plan this test would fail with a 400 rather than a 503.
+        let missing = dir.path().join("not-here.bin");
 
-        tokio::time::timeout(std::time::Duration::from_secs(2), completed)
-            .await
-            .expect("bounded terminal reader must stop after response drop")
-            .expect("completion sender must fire");
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+        let (_releases, _held) = crate::bulk_transfer::test_support::saturate_admission(&bulk);
+
+        let refused = stream_planned_download_tracked(&bulk, None, None, missing).await;
+        assert_eq!(
+            refused.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a full lane must refuse rather than plan"
+        );
+        assert_eq!(
+            refused
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("1"),
+            "a refusal must tell the caller when to come back"
+        );
     }
 
     /// Laziness is the property the lane depends on: no byte may be read before
