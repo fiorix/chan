@@ -456,6 +456,302 @@ fn download_path_sync(
     }
 }
 
+/// Header-shaped facts from an admitted download plan, carried out of the job
+/// so the route can build headers while the reader stays inside the job that
+/// streams it. Mirrors `BinaryPlan`'s variants rather than flattening them:
+/// the whole-file case and a `Range` that happens to span the whole file
+/// produce identical bytes and an identical `Content-Length`, and differ only
+/// in status and `Content-Range`, so the Full-versus-Partial decision
+/// `RangeOutcome` already made is carried here rather than re-derived from
+/// `start` and `len`, which cannot distinguish them.
+enum PlannedWorkspaceDownload {
+    Full {
+        len: u64,
+        stat: FileStat,
+    },
+    Partial {
+        start: u64,
+        len: u64,
+        stat: FileStat,
+    },
+    Unsatisfiable {
+        stat: FileStat,
+    },
+    Directory {
+        name: String,
+    },
+}
+
+/// Admit one workspace download to the transfer lane and stream it.
+///
+/// Planning opens the file or pre-flights a whole tree, which is real work and
+/// belongs on the transfer lane rather than the pool serving editor saves and
+/// terminal spawns. Plan and stream ride ONE admission: the job reports its
+/// plan over a oneshot so headers can be built, then keeps going into the body.
+/// Submitting them separately would make a single request cost two admissions
+/// against a bound that counts requests.
+///
+/// A refusal is returned before the job exists, so a declined download has not
+/// opened a file or walked a tree. Past that point every early return drops the
+/// job, which cancels it and releases its slot.
+async fn stream_planned_workspace_download_tracked(
+    bulk: &crate::bulk_transfer::BulkTransferTenant,
+    events: Option<tokio::sync::broadcast::Sender<String>>,
+    tracking: Option<crate::routes::transfer::TransferTracking>,
+    workspace: Arc<chan_workspace::Workspace>,
+    path: String,
+    range_header: Option<String>,
+) -> Response {
+    let (tx, rx) = mpsc::channel::<std::io::Result<Bytes>>(8);
+    let (plan_tx, plan_rx) =
+        tokio::sync::oneshot::channel::<Result<PlannedWorkspaceDownload, String>>();
+    let archive_name = download_filename(&path);
+    // The job takes the request path; headers are built from this copy.
+    let header_path = path.clone();
+    let job = match bulk.submit(move |cancel| {
+        let payload = match download_path_sync(&workspace, &path, range_header.as_deref()) {
+            Ok(payload) => payload,
+            Err(e) => {
+                let _ = plan_tx.send(Err(e.to_string()));
+                return;
+            }
+        };
+        match payload {
+            DownloadPayload::File(plan) => {
+                // The reader carries the framing, so the declared length and
+                // the streamed bytes come from the same `slice()`.
+                let (planned, reader) = match plan {
+                    BinaryPlan::Full(reader) => {
+                        let (_, len) = reader.slice();
+                        let stat = reader.stat().clone();
+                        (PlannedWorkspaceDownload::Full { len, stat }, Some(reader))
+                    }
+                    BinaryPlan::Partial(reader) => {
+                        let (start, len) = reader.slice();
+                        let stat = reader.stat().clone();
+                        (
+                            PlannedWorkspaceDownload::Partial { start, len, stat },
+                            Some(reader),
+                        )
+                    }
+                    BinaryPlan::Unsatisfiable(stat) => {
+                        (PlannedWorkspaceDownload::Unsatisfiable { stat }, None)
+                    }
+                };
+                if plan_tx.send(Ok(planned)).is_err() {
+                    return;
+                }
+                let Some(reader) = reader else { return };
+                send_reader_into(&tx, cancel, reader);
+            }
+            DownloadPayload::Directory => {
+                let build_ws = workspace;
+                let build_path = path;
+                let build_name = archive_name;
+                if plan_tx
+                    .send(Ok(PlannedWorkspaceDownload::Directory {
+                        name: build_name.clone(),
+                    }))
+                    .is_err()
+                {
+                    return;
+                }
+                // Builds into this job's channel rather than through
+                // `stream_tar_response_tracked`, which would submit again.
+                crate::routes::transfer::build_tar_into(&tx, cancel, move |builder| {
+                    append_dir_to_archive(builder, &build_ws, &build_path, &build_name)
+                        .map_err(|e| std::io::Error::other(e.to_string()))
+                });
+            }
+        }
+    }) {
+        Ok(job) => job,
+        Err(full) => return full.into_response(),
+    };
+    let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<Infallible>();
+    if let (Some(events), Some(tracking)) = (events, tracking) {
+        crate::routes::ws::spawn_transfer_queue_reporter(
+            events,
+            tracking.window_id,
+            tracking.transfer_id,
+            job.tracker(),
+            alive_rx,
+        );
+    }
+    let planned = match plan_rx.await {
+        Ok(Ok(planned)) => planned,
+        // The plan ran on an admitted job, so a failure here is reported after
+        // the transfer genuinely occupied a slot. Returning drops the job.
+        Ok(Err(message)) => return err(StatusCode::BAD_REQUEST, message),
+        Err(_) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "download plan did not report".into(),
+            )
+        }
+    };
+    let body = Body::from_stream(stream::unfold(
+        (rx, job, alive_tx),
+        |(mut rx, job, alive_tx)| async move {
+            rx.recv()
+                .await
+                .map(|message| (message, (rx, job, alive_tx)))
+        },
+    ));
+    planned_workspace_download_response(&path_for_headers(&planned, &header_path), planned, body)
+}
+
+/// Drain a bounded reader into the job's channel on the calling thread, which
+/// is the lane worker. Handing the reader to a pool task instead would cost a
+/// slot AND a task for one request.
+///
+/// Cancellation is checked once per chunk, so an abandoned download releases
+/// its slot after at most one chunk's work rather than after the whole file.
+/// A read error, which is what a mid-read shrink produces, is FORWARDED and
+/// then ends the stream: the declared length is already on the wire, so ending
+/// cleanly instead would answer with fewer bytes than promised, which is the
+/// silent truncation the length exists to prevent.
+fn send_reader_into(
+    tx: &mpsc::Sender<std::io::Result<Bytes>>,
+    cancel: &crate::bulk_transfer::BulkCancel,
+    mut reader: BoundedFileReader,
+) {
+    for next in reader.by_ref() {
+        if cancel.is_cancelled() {
+            return;
+        }
+        let message = next
+            .map(Bytes::from)
+            .map_err(|error| std::io::Error::other(error.to_string()));
+        let terminal = message.is_err();
+        if tx.blocking_send(message).is_err() || terminal {
+            return;
+        }
+    }
+}
+
+/// The response path's view of the download name. A file keeps the request
+/// path so content sniffing and disposition match what was asked for; an
+/// archive is named for the directory it wraps.
+fn path_for_headers(planned: &PlannedWorkspaceDownload, path: &str) -> String {
+    match planned {
+        PlannedWorkspaceDownload::Directory { name } => name.clone(),
+        _ => path.to_string(),
+    }
+}
+
+/// Build the download response from the carried plan facts. Header framing
+/// comes from the same `slice()` the job is streaming, never from a second
+/// stat, so `Content-Length` cannot disagree with the bytes.
+fn planned_workspace_download_response(
+    name: &str,
+    planned: PlannedWorkspaceDownload,
+    body: Body,
+) -> Response {
+    let mut response = match planned {
+        PlannedWorkspaceDownload::Full { len, stat } => {
+            let mut response = Response::new(body);
+            response.headers_mut().insert(
+                header::CONTENT_LENGTH,
+                len.to_string()
+                    .parse()
+                    .expect("file size is a valid header"),
+            );
+            response.headers_mut().insert(
+                header::ETAG,
+                strong_file_etag(&stat)
+                    .parse()
+                    .expect("etag is header-safe"),
+            );
+            response
+        }
+        PlannedWorkspaceDownload::Partial { start, len, stat } => {
+            let total = stat.size;
+            let mut response = Response::new(body);
+            *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+            response.headers_mut().insert(
+                header::CONTENT_RANGE,
+                format!("bytes {start}-{}/{total}", start + len - 1)
+                    .parse()
+                    .expect("content range is header-safe"),
+            );
+            response.headers_mut().insert(
+                header::CONTENT_LENGTH,
+                len.to_string()
+                    .parse()
+                    .expect("file size is a valid header"),
+            );
+            response.headers_mut().insert(
+                header::ETAG,
+                strong_file_etag(&stat)
+                    .parse()
+                    .expect("etag is header-safe"),
+            );
+            response
+        }
+        PlannedWorkspaceDownload::Unsatisfiable { stat } => {
+            let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+            response.headers_mut().insert(
+                header::CONTENT_RANGE,
+                format!("bytes */{}", stat.size)
+                    .parse()
+                    .expect("content range is header-safe"),
+            );
+            response.headers_mut().insert(
+                header::ETAG,
+                strong_file_etag(&stat)
+                    .parse()
+                    .expect("etag is header-safe"),
+            );
+            response
+        }
+        PlannedWorkspaceDownload::Directory { name } => {
+            let mut response = Response::new(body);
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                "application/x-tar".parse().expect("static header value"),
+            );
+            response.headers_mut().insert(
+                header::CONTENT_DISPOSITION,
+                content_disposition_archive(&name)
+                    .parse()
+                    .expect("archive filename is header-safe"),
+            );
+            return response;
+        }
+    };
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        content_type_for(name)
+            .parse()
+            .expect("known content type is header-safe"),
+    );
+    response
+        .headers_mut()
+        .insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        content_disposition_attachment(name)
+            .parse()
+            .expect("download filename is header-safe"),
+    );
+    if is_active_content_path(name) {
+        response.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            "sandbox".parse().expect("static header value"),
+        );
+        response.headers_mut().insert(
+            "x-content-type-options",
+            "nosniff".parse().expect("static header value"),
+        );
+    }
+    response
+}
+
+/// Unadmitted whole-plan download, retained for the plan-shape tests. The
+/// served download path admits to the transfer lane instead, so this has no
+/// production caller.
+#[cfg(test)]
 fn stream_binary_download(path: &str, plan: BinaryPlan) -> Response {
     stream_binary_plan(path, plan, true, None)
 }
@@ -964,36 +1260,20 @@ pub async fn api_read_file(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
     if query_flag(&query.download) {
-        let plan_ws = workspace.clone();
-        let plan_path = path.clone();
-        let plan_range = range_header.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            download_path_sync(&plan_ws, &plan_path, plan_range.as_deref())
-        })
+        // Plan and stream ride one admission on the transfer lane. Planning
+        // opens a file or walks a tree, so leaving it on the ambient pool is
+        // what made bulk transfer draw from the pool serving editor saves and
+        // terminal spawns. The tree is still pre-flighted readable inside the
+        // plan, and the tar streams on the fly, so a cancel stages nothing.
+        return stream_planned_workspace_download_tracked(
+            &state.bulk_transfer,
+            Some(state.events_tx.clone()),
+            crate::routes::transfer::TransferTracking::from_headers(&headers),
+            workspace,
+            path,
+            range_header,
+        )
         .await;
-        return match result {
-            Ok(Ok(DownloadPayload::File(plan))) => stream_binary_download(&path, plan),
-            // The tree was pre-flighted readable in the plan; stream the tar on
-            // the fly so a cancel is trace-free by construction (no staged temp).
-            Ok(Ok(DownloadPayload::Directory)) => {
-                let root_name = download_filename(&path);
-                let build_ws = workspace;
-                let build_path = path;
-                let build_name = root_name.clone();
-                crate::routes::transfer::stream_tar_response_tracked(
-                    &state.bulk_transfer,
-                    Some(state.events_tx.clone()),
-                    crate::routes::transfer::TransferTracking::from_headers(&headers),
-                    root_name,
-                    move |builder| {
-                        append_dir_to_archive(builder, &build_ws, &build_path, &build_name)
-                            .map_err(|e| std::io::Error::other(e.to_string()))
-                    },
-                )
-            }
-            Ok(Err(e)) => err_from(&e),
-            Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
-        };
     }
 
     if query_flag(&query.stream) {
@@ -3145,6 +3425,252 @@ mod write_tests {
             .await
             .expect("disconnect must stop the bridge and join the bounded reader")
             .expect("download bridge completion sender dropped");
+    }
+
+    /// Build a registered workspace over a temp root, returning it with the
+    /// guards that must outlive it.
+    fn admitted_download_workspace() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        Arc<chan_workspace::Workspace>,
+    ) {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        (cfg, root, workspace)
+    }
+
+    #[tokio::test]
+    async fn whole_file_range_and_no_range_differ_in_status_not_in_bytes() {
+        use axum::body::to_bytes;
+
+        // The discriminating case for the Full-versus-Partial decision. A
+        // `Range` spanning the whole file yields the SAME bytes and the SAME
+        // Content-Length as no `Range` at all; only the status and
+        // Content-Range differ. So a test that asserts the payload passes even
+        // if the two cases are collapsed, which is why this asserts neither
+        // body alone but the headers that actually carry the distinction.
+        let (_cfg, root, workspace) = admitted_download_workspace();
+        std::fs::write(root.path().join("whole.bin"), b"0123456789").unwrap();
+        let bulk = crate::state::test_support::make_test_bulk_transfer_tenant();
+
+        let full = stream_planned_workspace_download_tracked(
+            &bulk,
+            None,
+            None,
+            workspace.clone(),
+            "whole.bin".into(),
+            None,
+        )
+        .await;
+        assert_eq!(full.status(), StatusCode::OK);
+        assert!(
+            full.headers().get(header::CONTENT_RANGE).is_none(),
+            "a download with no Range must not answer with Content-Range"
+        );
+        assert_eq!(full.headers()[header::CONTENT_LENGTH], "10");
+
+        let partial = stream_planned_workspace_download_tracked(
+            &bulk,
+            None,
+            None,
+            workspace,
+            "whole.bin".into(),
+            Some("bytes=0-".into()),
+        )
+        .await;
+        assert_eq!(
+            partial.status(),
+            StatusCode::PARTIAL_CONTENT,
+            "a Range covering the whole file is still a Range request"
+        );
+        assert_eq!(partial.headers()[header::CONTENT_RANGE], "bytes 0-9/10");
+        assert_eq!(partial.headers()[header::CONTENT_LENGTH], "10");
+
+        // Stated as an assertion rather than a comment: the bodies really are
+        // identical, so anything asserting them cannot tell these cases apart.
+        let full_bytes = to_bytes(full.into_body(), usize::MAX).await.unwrap();
+        let partial_bytes = to_bytes(partial.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(full_bytes, partial_bytes);
+        assert_eq!(&full_bytes[..], b"0123456789");
+    }
+
+    #[tokio::test]
+    async fn admitted_download_declares_the_length_it_streams() {
+        use axum::body::to_bytes;
+
+        let (_cfg, root, workspace) = admitted_download_workspace();
+        std::fs::write(root.path().join("sized.bin"), vec![7u8; 4096]).unwrap();
+        let bulk = crate::state::test_support::make_test_bulk_transfer_tenant();
+
+        let response = stream_planned_workspace_download_tracked(
+            &bulk,
+            None,
+            None,
+            workspace,
+            "sized.bin".into(),
+            Some("bytes=100-199".into()),
+        )
+        .await;
+        let declared: usize = response.headers()[header::CONTENT_LENGTH]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            response.headers()[header::CONTENT_RANGE],
+            "bytes 100-199/4096"
+        );
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            body.len(),
+            declared,
+            "the declared length must equal the bytes streamed"
+        );
+        assert_eq!(declared, 100);
+    }
+
+    #[tokio::test]
+    async fn admitted_shrink_fails_the_body_rather_than_completing_short() {
+        use axum::body::to_bytes;
+
+        // The interaction between the declared length and the shrink error.
+        // The length is already on the wire when the reader reports its
+        // shortfall, so ending the stream cleanly would answer 200 with fewer
+        // bytes than promised. The body must fail instead.
+        let (_cfg, root, workspace) = admitted_download_workspace();
+        let declared = chan_workspace::BINARY_STREAM_CHUNK_SIZE * 256;
+        let path = root.path().join("shrinking.bin");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(declared as u64)
+            .unwrap();
+        let bulk = crate::state::test_support::make_test_bulk_transfer_tenant();
+
+        let response = stream_planned_workspace_download_tracked(
+            &bulk,
+            None,
+            None,
+            workspace,
+            "shrinking.bin".into(),
+            None,
+        )
+        .await;
+        assert_eq!(
+            response.headers()[header::CONTENT_LENGTH],
+            declared.to_string()
+        );
+
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(0)
+            .unwrap();
+
+        assert!(
+            to_bytes(response.into_body(), declared + 1).await.is_err(),
+            "an admitted transfer must fail rather than complete short of its declared length"
+        );
+    }
+
+    #[tokio::test]
+    async fn admitted_download_refuses_at_the_bound_without_opening_the_file() {
+        let (_cfg, root, workspace) = admitted_download_workspace();
+        let path = root.path().join("declined.bin");
+        std::fs::write(&path, b"payload").unwrap();
+        // Unreadable: if the refusal opened it, the plan would fail with a
+        // permission error and the status would not be 503.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+        let (releases, _held) = crate::bulk_transfer::test_support::saturate_admission(&bulk);
+
+        let response = stream_planned_workspace_download_tracked(
+            &bulk,
+            None,
+            None,
+            workspace,
+            "declined.bin".into(),
+            None,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+
+        drop(releases);
+    }
+
+    #[test]
+    fn send_reader_into_forwards_a_read_error_instead_of_ending_the_stream() {
+        // The shrink path at the seam: the error must arrive as an item, not
+        // as the end of the stream. A bridge that dropped it would leave the
+        // response completing cleanly under its declared length.
+        let (_cfg, root, workspace) = admitted_download_workspace();
+        let declared = chan_workspace::BINARY_STREAM_CHUNK_SIZE * 4;
+        let path = root.path().join("seam.bin");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(declared as u64)
+            .unwrap();
+        let reader = match download_path_sync(&workspace, "seam.bin", None).unwrap() {
+            DownloadPayload::File(BinaryPlan::Full(reader)) => reader,
+            _ => panic!("expected a whole-file plan"),
+        };
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(0)
+            .unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<std::io::Result<Bytes>>(8);
+        let cancel = crate::bulk_transfer::test_support::uncancelled();
+        std::thread::spawn(move || send_reader_into(&tx, &cancel, reader));
+
+        let mut saw_error = false;
+        while let Some(message) = rx.blocking_recv() {
+            if message.is_err() {
+                saw_error = true;
+            }
+        }
+        assert!(
+            saw_error,
+            "a shrink must reach the body as an error item, not as a clean end"
+        );
+    }
+
+    #[test]
+    fn send_reader_into_sends_nothing_once_cancelled() {
+        let (_cfg, root, workspace) = admitted_download_workspace();
+        std::fs::write(root.path().join("cancelled.bin"), vec![1u8; 4096]).unwrap();
+        let reader = match download_path_sync(&workspace, "cancelled.bin", None).unwrap() {
+            DownloadPayload::File(BinaryPlan::Full(reader)) => reader,
+            _ => panic!("expected a whole-file plan"),
+        };
+
+        let (tx, mut rx) = mpsc::channel::<std::io::Result<Bytes>>(8);
+        let cancel = crate::bulk_transfer::test_support::cancelled();
+        std::thread::spawn(move || send_reader_into(&tx, &cancel, reader));
+
+        assert!(
+            rx.blocking_recv().is_none(),
+            "a cancelled job must send no chunk at all"
+        );
     }
 
     #[tokio::test]
