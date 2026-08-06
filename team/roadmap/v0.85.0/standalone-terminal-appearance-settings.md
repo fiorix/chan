@@ -40,7 +40,7 @@ Every read of `workspace.info?.preferences` in a standalone terminal therefore y
 
 `SettingsOverlay.svelte` already reads `api.config()` for its own form (`:99-101`), with a comment naming exactly this asymmetry. That is why the bug is invisible from the settings surface: the values display and persist correctly while the terminal beside them renders defaults.
 
-**Fixed 2026-08-05 in `d958d04c`.** The SPA gained `currentPreferences()`, backed by a standalone source that the terminal-only bootstrap fills from `/api/config` and that `config_changed` refreshes through the same path. `TerminalTab` reads it at its three preference sites. The workspace path is unchanged and still takes its payload from `/api/workspace` with no additional round trip.
+**Fixed 2026-08-05 by `fix(terminal): apply terminal preferences in standalone windows`.** The SPA gained `currentPreferences()`, backed by a standalone source that the terminal-only bootstrap fills from `/api/config` and that `config_changed` refreshes through the same path. `TerminalTab` reads it at its three preference sites. The workspace path is unchanged and still takes its payload from `/api/workspace` with no additional round trip.
 
 ## Contract
 

@@ -72,7 +72,7 @@ This is a known and accepted property of the current design, not an oversight. P
 
 ## Recorded measurement
 
-`scripts/e2e/revtunnel-large-transfer.sh` run once at `436a2a93`, in a quiet window with every lane holding cargo work and the run serialized under the shared lock, so the figure is not competing with a build:
+`scripts/e2e/revtunnel-large-transfer.sh` run once on the branch at `fix(server): fail a cancelled download instead of ending it clean`, in a quiet window with every lane holding cargo work and the run serialized under the shared lock, so the figure is not competing with a build. Only `CHANGELOG.md` and documentation separate that commit from the branch head, so the figure measures the code that ships:
 
 ```
 fixture_bytes=2147483648 iterations=3
