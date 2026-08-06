@@ -43,6 +43,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [web-lock-check-destroys-node-modules](v0.86.0/web-lock-check-destroys-node-modules.md) | accepted, specced | make the lockfile sync check non-destructive on the pinned npm, and correct the comment that says it already is |
 | [editor-widget-tests-are-nondeterministic](v0.86.0/editor-widget-tests-are-nondeterministic.md) | accepted, specced | fix the render race behind three intermittently failing editor tests so the gate stops going red on an unmodified tree |
 | [large-transfer-ceiling-refinements](v0.86.0/large-transfer-ceiling-refinements.md) | accepted, specced | bound archives cumulatively by the ceiling, charge ranged reads by transferred length, and plumb recovery with the reported value |
+| [gateway-tests-do-not-run-off-main](v0.86.0/gateway-tests-do-not-run-off-main.md) | accepted, specced | execute the gateway's tests on the path that delivers gateway code, not only on a push to main or a gateway-path PR |
 
 ## Completed
 
