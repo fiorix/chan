@@ -3112,7 +3112,8 @@ mod write_tests {
     #[tokio::test]
     async fn a_workspace_upload_refused_at_the_bound_writes_nothing() {
         let (lane, saturator) = crate::bulk_transfer::test_support::isolated_tenant();
-        let (_cfg, root, state) = super::doc_divert_tests::divert_app_with_tenant(lane.tenant());
+        let (_cfg, root, state) =
+            super::doc_divert_tests::divert_app_with_tenant(lane.tenant(), None);
         let (releases, held) = crate::bulk_transfer::test_support::saturate_admission(&saturator);
 
         let refused = super::api_upload_file(
@@ -3170,7 +3171,8 @@ mod write_tests {
     #[tokio::test]
     async fn a_copy_batch_is_admitted_and_a_move_is_deliberately_not() {
         let (lane, saturator) = crate::bulk_transfer::test_support::isolated_tenant();
-        let (_cfg, root, state) = super::doc_divert_tests::divert_app_with_tenant(lane.tenant());
+        let (_cfg, root, state) =
+            super::doc_divert_tests::divert_app_with_tenant(lane.tenant(), None);
         let workspace = state.try_workspace().unwrap();
         workspace.write_bytes("copied.bin", b"payload").unwrap();
         workspace.write_bytes("moved.bin", b"payload").unwrap();
@@ -3224,11 +3226,79 @@ mod write_tests {
         }
     }
 
+    /// The ceiling at the route, from both sides: the upload that lands
+    /// exactly on the configured value succeeds, and the one byte past it is
+    /// refused with the target untouched and no temp file left behind.
+    ///
+    /// Asserting only the refusal would pass against a ceiling lower than the
+    /// test believes, which is the failure mode a one-sided boundary test
+    /// cannot see.
+    #[tokio::test]
+    async fn transfer_cap_admits_the_exact_ceiling_and_refuses_one_byte_over() {
+        const CAP: u64 = 4096;
+        let (lane, _saturator) = crate::bulk_transfer::test_support::isolated_tenant();
+        let (_cfg, root, state) =
+            super::doc_divert_tests::divert_app_with_tenant(lane.tenant(), Some(CAP));
+
+        let exact = super::api_upload_file(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            upload_multipart("cap-exact", "", "exact.bin", &"z".repeat(CAP as usize)).await,
+        )
+        .await;
+        assert_eq!(
+            exact.status(),
+            StatusCode::OK,
+            "an upload of exactly the configured ceiling must be accepted"
+        );
+        assert_eq!(
+            std::fs::metadata(root.path().join("exact.bin"))
+                .unwrap()
+                .len(),
+            CAP
+        );
+
+        let over = super::api_upload_file(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            upload_multipart("cap-over", "", "over.bin", &"z".repeat(CAP as usize + 1)).await,
+        )
+        .await;
+        assert_eq!(
+            over.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "one byte past the configured ceiling must be refused"
+        );
+        assert!(
+            !root.path().join("over.bin").exists(),
+            "a refused upload must leave no target"
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_name() != ".chan")
+                .count(),
+            1,
+            "a refused upload must leave no temp file beside the accepted one"
+        );
+    }
+
     #[tokio::test]
     async fn workspace_upload_rejects_overflow_progressively_without_a_partial_target() {
         let cfg = tempfile::TempDir::new().unwrap();
         let root = tempfile::TempDir::new().unwrap();
-        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        // A small configured ceiling, so overflow is reached in a few chunks
+        // instead of by writing the default multi-gigabyte cap. That the test
+        // can choose it at all is the point of the ceiling being configuration.
+        const CAP: u64 = 4 * 1024 * 1024;
+        let config_path = cfg.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            format!("workspaces = []\n[transfer]\nmax_bytes = {CAP}\n"),
+        )
+        .unwrap();
+        let lib = chan_workspace::Library::open_at(config_path).unwrap();
         lib.register_workspace(root.path()).unwrap();
         let workspace = lib.open_workspace(root.path()).unwrap();
         let self_writes = Arc::new(crate::self_writes::SelfWrites::new());
@@ -3249,7 +3319,7 @@ mod write_tests {
             )
         });
         let chunk = Bytes::from(vec![0x5a; 1024 * 1024]);
-        let attempts = chan_workspace::BYTES_WRITE_LIMIT / chunk.len() as u64 + 2;
+        let attempts = CAP / chunk.len() as u64 + 2;
         for _ in 0..attempts {
             if tx
                 .send(RequestBodyMessage::Chunk(chunk.clone()))
@@ -3893,6 +3963,89 @@ mod write_tests {
         assert!(
             rx.blocking_recv().is_none(),
             "a cancelled job must send no chunk at all"
+        );
+    }
+
+    /// The cadence, which is the half of the cancellation contract whose
+    /// violation actually leaks a slot. A check hoisted above the loop stops a
+    /// job cancelled before it started and never stops one cancelled while it
+    /// runs, so an abandoned transfer holds its admission until the file
+    /// finishes naturally, the effective bound drifts down over a session, and
+    /// nothing ever errors. The lane merely looks busy.
+    ///
+    /// The test above cannot see that, because a pre-set signal is caught by
+    /// both shapes. Capacity 1 is what makes this one discriminate: the writer
+    /// blocks until the test takes a chunk, so cancelling after the first
+    /// receive happens strictly after any pre-loop check would have run and
+    /// passed. Only a per-iteration check can still stop it.
+    #[tokio::test]
+    async fn send_reader_into_stops_when_cancelled_mid_stream() {
+        const CHUNKS: usize = 64;
+        let (_cfg, root, workspace) = admitted_download_workspace();
+        std::fs::write(
+            root.path().join("long.bin"),
+            vec![7u8; chan_workspace::BINARY_STREAM_CHUNK_SIZE * CHUNKS],
+        )
+        .unwrap();
+        let plan = |workspace: &chan_workspace::Workspace| match download_path_sync(
+            workspace, "long.bin", None,
+        )
+        .unwrap()
+        {
+            DownloadPayload::File(BinaryPlan::Full(reader)) => reader,
+            _ => panic!("expected a whole-file plan"),
+        };
+
+        // Its own lane. This does not saturate, but the writer holds an
+        // admission slot while blocked on the capacity-1 channel, which on the
+        // shared test lane would occupy capacity for every other test running
+        // at that moment.
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+
+        // The control, and it is what stops the assertion below from passing
+        // vacuously: an uncancelled run over the same file must deliver every
+        // chunk. Without it, a reader that ended early for any unrelated reason
+        // would satisfy the low count and prove nothing about cancellation.
+        let control_reader = plan(&workspace);
+        let (control_tx, mut control_rx) = mpsc::channel::<std::io::Result<Bytes>>(1);
+        let control = bulk
+            .submit(move |cancel| send_reader_into(&control_tx, cancel, control_reader))
+            .expect("an idle lane admits");
+        let mut control_delivered = 0;
+        while control_rx.recv().await.is_some() {
+            control_delivered += 1;
+        }
+        let _ = control.outcome().await;
+        assert_eq!(
+            control_delivered, CHUNKS,
+            "an uncancelled reader must deliver the whole file, or the count below means nothing"
+        );
+
+        let reader = plan(&workspace);
+        let (tx, mut rx) = mpsc::channel::<std::io::Result<Bytes>>(1);
+        let job = bulk
+            .submit(move |cancel| send_reader_into(&tx, cancel, reader))
+            .expect("an idle lane admits");
+
+        assert!(
+            rx.recv().await.is_some(),
+            "the first chunk is what proves the writer is already inside the loop"
+        );
+
+        job.cancel();
+
+        let mut delivered = 1;
+        while rx.recv().await.is_some() {
+            delivered += 1;
+        }
+        // Not an exact count: a chunk or two may be in flight between the
+        // cancel and the writer's next check, and pinning that exactly would be
+        // brittle for no gain. The discrimination is a handful against 64.
+        assert!(
+            delivered <= 4,
+            "cancelled mid-stream, the reader delivered {delivered} of {CHUNKS} chunks; \
+             a full-count delivery means the cancellation check was hoisted out of the \
+             per-chunk loop, which leaks the admission slot for the rest of the transfer"
         );
     }
 
@@ -4593,18 +4746,33 @@ mod doc_divert_tests {
     use crate::{EditorPrefs, ServerConfig};
 
     pub(super) fn divert_app() -> (TempDir, TempDir, Arc<AppState>) {
-        divert_app_with_tenant(crate::state::test_support::make_test_bulk_transfer_tenant())
+        divert_app_with_tenant(
+            crate::state::test_support::make_test_bulk_transfer_tenant(),
+            None,
+        )
     }
 
     /// `divert_app` over a caller-supplied tenant, for tests that saturate
     /// admission and therefore must not use the shared test lane. The caller
     /// keeps the lane alive; dropping it shuts the workers down.
+    ///
+    /// `transfer_cap` configures the workspace's effective transfer ceiling, so
+    /// a route-level boundary test can cross it without writing gigabytes.
     pub(super) fn divert_app_with_tenant(
         bulk: crate::bulk_transfer::BulkTransferTenant,
+        transfer_cap: Option<u64>,
     ) -> (TempDir, TempDir, Arc<AppState>) {
         let cfg = TempDir::new().unwrap();
         let root = TempDir::new().unwrap();
-        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let config_path = cfg.path().join("config.toml");
+        if let Some(cap) = transfer_cap {
+            std::fs::write(
+                &config_path,
+                format!("workspaces = []\n[transfer]\nmax_bytes = {cap}\n"),
+            )
+            .unwrap();
+        }
+        let lib = chan_workspace::Library::open_at(config_path).unwrap();
         lib.register_workspace(root.path()).unwrap();
         let workspace = lib.open_workspace(root.path()).unwrap();
 
@@ -5202,7 +5370,9 @@ mod doc_divert_tests {
     async fn streamed_put_accepts_a_legacy_file_larger_than_fifty_mib() {
         let (_cfg, root, state) = divert_app();
         let workspace = state.try_workspace().unwrap();
-        let replacement_size = chan_workspace::BYTES_WRITE_LIMIT + 64 * 1024;
+        // A text write, so the budget under test is the semantic one rather
+        // than the transfer ceiling; fifty MiB is simply well past it.
+        let replacement_size = 50 * 1024 * 1024 + 64 * 1024;
         let legacy = std::fs::File::create(root.path().join("legacy.md")).unwrap();
         legacy.set_len(replacement_size + 64 * 1024).unwrap();
         drop(legacy);

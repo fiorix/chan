@@ -389,7 +389,9 @@ Every workspace operation takes a workspace-relative POSIX path and goes through
 
 Opaque file delivery uses `BoundedFileReader`: one open handle, 64 KiB chunks, and a fixed-depth queue. A whole-file reader freezes its byte window from the open handle's stat; later growth is excluded from that representation and later shrinkage produces an error instead of a short successful stream. Slice readers clamp their requested window against the same open-handle size and expose the effective `(start, len)` for HTTP framing. Directory archives consume this reader through a `Read` adapter, so no tar member is materialized as one allocation.
 
-`TEXT_WRITE_LIMIT` (2 MiB) caps a single text write for new files; `semantic_write_budget(existing_size)` raises that budget only to the existing size so a legacy large file remains editable without further growth. `BYTES_WRITE_LIMIT` (50 MiB) follows the same intentional legacy-file rule for byte writes: the effective budget is `max(existing_size, BYTES_WRITE_LIMIT)`. The progressive sink rejects the first chunk that would cross the effective budget with `ChanError::WriteTooLarge`. Tree listings cap at `LIST_TREE_LIMIT` (500k entries) and per-dir listings at `LIST_DIR_LIMIT` (50k); exceeding callers get `ListingTooLarge`.
+`TEXT_WRITE_LIMIT` (2 MiB) caps a single text write for new files; `semantic_write_budget(existing_size)` raises that budget only to the existing size so a legacy large file remains editable without further growth. Byte writes follow the same intentional legacy-file rule against the workspace's configured transfer ceiling rather than a compiled-in constant: the effective budget is `max(existing_size, Workspace::transfer_max_bytes())`, so lowering the ceiling cannot turn an existing larger file read-only. That ceiling is `[transfer] max_bytes` in the registry (10 GiB by default, 100 GiB maximum, zero rejected), captured once when the `Library` opens and reported to clients as one effective value, so no caller keeps an independent copy. The progressive sink rejects the first chunk that would cross the effective budget with `ChanError::WriteTooLarge`.
+
+The editor-session recovery reader in chan-server carries a separate 50 MiB bound that deliberately does not track the transfer ceiling. A recovery record is read whole into memory when a file is opened, so its bound is an allocation bound; pointing it at a multi-gigabyte transfer ceiling would make a corrupt record a multi-gigabyte allocation on the editor-open path. Tree listings cap at `LIST_TREE_LIMIT` (500k entries) and per-dir listings at `LIST_DIR_LIMIT` (50k); exceeding callers get `ListingTooLarge`.
 
 `Workspace::copy` connects `BoundedFileReader` directly to the bytes-mode atomic sink. A new copy therefore inherits the 50 MiB binary budget, incremental UTF-8 validation when the destination is editable text, same-directory atomic commit, and temp cleanup on source or sink failure. The source's open-handle size is checked against the sink budget before the first chunk is accepted.
 
@@ -541,7 +543,7 @@ Notable variants:
   - `WriteConflict { current_mtime_ns }`: CAS write lost the race.
   - `TrashOccupied`: restore would clobber a live entry.
   - `SpecialFile { kind, path }`: target is a symlink, FIFO, socket, or device.
-  - `WriteTooLarge { kind, size, limit }`: write exceeds `TEXT_WRITE_LIMIT` / `BYTES_WRITE_LIMIT`.
+  - `WriteTooLarge { kind, size, limit }`: write exceeds `TEXT_WRITE_LIMIT` / the configured transfer ceiling.
   - `ListingTooLarge { observed, limit }`: listing exceeds `LIST_TREE_LIMIT` / `LIST_DIR_LIMIT`.
   - `NotEditableText`, `PathEscape`, `SymlinkEscape`: gate and sandbox refusals.
   - `DraftBroken { name, message }`: draft dir failed inspection.

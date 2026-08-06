@@ -4,17 +4,26 @@
 //! `.chan/editor-sessions/v1/` tree. Records use the workspace's canonical
 //! chunk-fed atomic writer, so a crash exposes either the previous complete
 //! record or the next one, never a partial JSON file. The matching reader is
-//! the workspace's bounded reader and refuses records above the binary
-//! semantic cap.
+//! the workspace's bounded reader and refuses records above
+//! [`RECOVERY_RECORD_LIMIT`].
 
 use std::io::{self, Write};
 
-use chan_workspace::{
-    AtomicWriteKind, AtomicWriteSink, ChanError, Workspace, WorkspacePath, BYTES_WRITE_LIMIT,
-};
+use chan_workspace::{AtomicWriteKind, AtomicWriteSink, ChanError, Workspace, WorkspacePath};
 use serde::{Deserialize, Serialize};
 
 const RECOVERY_FORMAT: u8 = 1;
+
+/// Largest editor-session recovery record this reader will accept.
+///
+/// This deliberately does NOT track the workspace transfer ceiling, and the
+/// two being equal today is coincidence rather than duplication. A recovery
+/// record is read whole into memory on the editor-open path, so its bound is
+/// an allocation bound; the transfer ceiling governs streamed writes and is
+/// configured in the tens of gigabytes. Pointing this at the transfer ceiling
+/// would turn a corrupt or hostile record into a multi-gigabyte allocation the
+/// moment a user opens a file. Do not unify the two constants.
+const RECOVERY_RECORD_LIMIT: u64 = 50 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -210,10 +219,10 @@ fn load_inner(
 ) -> Result<Option<RecoveryRecord>, ChanError> {
     match workspace.classify_workspace_path(recovery_path)? {
         WorkspacePath::Missing => return Ok(None),
-        WorkspacePath::Regular(stat) if stat.size <= BYTES_WRITE_LIMIT => {}
+        WorkspacePath::Regular(stat) if stat.size <= RECOVERY_RECORD_LIMIT => {}
         WorkspacePath::Regular(_) => {
             return Err(ChanError::Io(format!(
-                "editor-session recovery record exceeds {BYTES_WRITE_LIMIT} bytes"
+                "editor-session recovery record exceeds {RECOVERY_RECORD_LIMIT} bytes"
             )));
         }
         WorkspacePath::Directory(_) | WorkspacePath::Special(_) => {
@@ -226,7 +235,7 @@ fn load_inner(
     let mut reader = workspace.read_bytes_bounded(recovery_path)?;
     let capacity = usize::try_from(reader.stat().size)
         .unwrap_or(usize::MAX)
-        .min(BYTES_WRITE_LIMIT as usize);
+        .min(RECOVERY_RECORD_LIMIT as usize);
     let mut bytes = Vec::with_capacity(capacity);
     for chunk in &mut reader {
         let chunk = chunk?;
@@ -234,9 +243,9 @@ fn load_inner(
             .len()
             .checked_add(chunk.len())
             .ok_or_else(|| ChanError::Io("editor-session recovery size overflow".into()))?;
-        if next_len as u64 > BYTES_WRITE_LIMIT {
+        if next_len as u64 > RECOVERY_RECORD_LIMIT {
             return Err(ChanError::Io(format!(
-                "editor-session recovery record exceeds {BYTES_WRITE_LIMIT} bytes"
+                "editor-session recovery record exceeds {RECOVERY_RECORD_LIMIT} bytes"
             )));
         }
         bytes.extend_from_slice(&chunk);
@@ -259,7 +268,7 @@ pub(crate) fn store(workspace: &Workspace, record: &RecoveryRecord) -> Result<()
     record.validate_identity(record.kind, &record.path)?;
     let recovery_path = recovery_path(record.kind, &record.path)?;
     let encoded_size = serialized_size(record)?;
-    let record_budget = record.authority.write_budget.min(BYTES_WRITE_LIMIT);
+    let record_budget = record.authority.write_budget.min(RECOVERY_RECORD_LIMIT);
     if encoded_size > record_budget {
         tracing::warn!(
             path = record.path,

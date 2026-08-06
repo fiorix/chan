@@ -441,6 +441,7 @@ pub async fn api_terminal_upload_file(
                             TransferTracking::from_headers(&headers),
                             abs_dir,
                             filename,
+                            state.library.transfer_max_bytes(),
                             field,
                         )
                         .await;
@@ -484,24 +485,24 @@ enum TerminalUploadMessage {
 /// so a queued upload stalls its sender instead of buffering the body.
 ///
 /// Returning early drops the job, which cancels it and releases its slot.
+/// `limit` is the server-reported effective transfer ceiling. The terminal
+/// tenant writes outside any workspace, so it cannot inherit the budget
+/// `Workspace::write_atomic_stream` applies and has to be handed the same
+/// value explicitly; that is what keeps one configured ceiling governing both
+/// tenants rather than two that drift.
 async fn stream_terminal_upload(
     bulk: &BulkTransferTenant,
     events: Option<tokio::sync::broadcast::Sender<String>>,
     tracking: Option<TransferTracking>,
     abs_dir: PathBuf,
     filename: String,
+    limit: u64,
     mut field: Field<'_>,
 ) -> Response {
     let (tx, rx) = mpsc::channel(8);
-    let job = match bulk.submit(move |cancel| {
-        terminal_upload_stream_sync(
-            &abs_dir,
-            &filename,
-            rx,
-            chan_workspace::BYTES_WRITE_LIMIT,
-            cancel,
-        )
-    }) {
+    let job = match bulk
+        .submit(move |cancel| terminal_upload_stream_sync(&abs_dir, &filename, rx, limit, cancel))
+    {
         Ok(job) => job,
         Err(full) => return full.into_response(),
     };
@@ -738,6 +739,7 @@ mod tests {
             None,
             missing.clone(),
             "declined.bin".into(),
+            u64::MAX,
             refused_field,
         )
         .await;
@@ -780,6 +782,7 @@ mod tests {
             None,
             dir.path().to_path_buf(),
             "admitted.bin".into(),
+            u64::MAX,
             admitted_field,
         )
         .await;
@@ -812,13 +815,9 @@ mod tests {
         let abs_dir = dir.path().to_path_buf();
         let job = bulk
             .submit(move |cancel| {
-                terminal_upload_stream_sync(
-                    &abs_dir,
-                    "aborted.bin",
-                    rx,
-                    chan_workspace::BYTES_WRITE_LIMIT,
-                    cancel,
-                )
+                // The ceiling is not what this test is about, so it is set
+                // out of the way rather than at a value a chunk could reach.
+                terminal_upload_stream_sync(&abs_dir, "aborted.bin", rx, u64::MAX, cancel)
             })
             .expect("an idle lane admits");
 
@@ -856,6 +855,69 @@ mod tests {
         );
     }
 
+    /// The ceiling on the terminal tenant, from both sides. This path writes
+    /// outside any workspace, so it cannot inherit the workspace budget and is
+    /// handed the effective value instead; that hand-off is what this pins.
+    #[tokio::test]
+    async fn transfer_cap_admits_the_exact_ceiling_and_refuses_one_byte_over() {
+        const CAP: u64 = 4096;
+        let dir = tempfile::tempdir().unwrap();
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+
+        let mut exact_body =
+            file_field_multipart("cap-exact", "exact.bin", &"z".repeat(CAP as usize)).await;
+        let exact_field = exact_body.next_field().await.unwrap().unwrap();
+        let exact = stream_terminal_upload(
+            &bulk,
+            None,
+            None,
+            dir.path().to_path_buf(),
+            "exact.bin".into(),
+            CAP,
+            exact_field,
+        )
+        .await;
+        assert_eq!(
+            exact.status(),
+            StatusCode::OK,
+            "an upload of exactly the effective ceiling must be accepted"
+        );
+        assert_eq!(
+            std::fs::metadata(dir.path().join("exact.bin"))
+                .unwrap()
+                .len(),
+            CAP
+        );
+
+        let mut over_body =
+            file_field_multipart("cap-over", "over.bin", &"z".repeat(CAP as usize + 1)).await;
+        let over_field = over_body.next_field().await.unwrap().unwrap();
+        let over = stream_terminal_upload(
+            &bulk,
+            None,
+            None,
+            dir.path().to_path_buf(),
+            "over.bin".into(),
+            CAP,
+            over_field,
+        )
+        .await;
+        assert_eq!(
+            over.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "one byte past the effective ceiling must be refused"
+        );
+        assert!(
+            !dir.path().join("over.bin").exists(),
+            "a refused upload must leave no target"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "a refused upload must leave no temp file beside the accepted one"
+        );
+    }
+
     /// The same cadence at the writer's own seam, with no lane involved.
     ///
     /// Worth having next to the job-level test because it is the shape any
@@ -869,13 +931,7 @@ mod tests {
         let (cancel, flag) = crate::bulk_transfer::test_support::cancel_switch();
         let abs_dir = dir.path().to_path_buf();
         let writer = std::thread::spawn(move || {
-            terminal_upload_stream_sync(
-                &abs_dir,
-                "seam.bin",
-                rx,
-                chan_workspace::BYTES_WRITE_LIMIT,
-                &cancel,
-            )
+            terminal_upload_stream_sync(&abs_dir, "seam.bin", rx, u64::MAX, &cancel)
         });
 
         tx.send(TerminalUploadMessage::Chunk(Bytes::from_static(b"first")))

@@ -41,13 +41,6 @@ pub use crate::fs_ops::{AtomicWriteKind, AtomicWriteSink};
 /// chunked reads, but are not buffered or incrementally indexed.
 pub const TEXT_WRITE_LIMIT: u64 = 2 * 1024 * 1024;
 
-/// Hard cap on `write_bytes` (binary attachments / media). 50 MiB
-/// covers typical PDF / image / short audio attachments with margin.
-/// Same rationale as `TEXT_WRITE_LIMIT`: defense against runaway
-/// callers, not a UX feature; raise via a code change if a real use
-/// case appears.
-pub const BYTES_WRITE_LIMIT: u64 = 50 * 1024 * 1024;
-
 /// Chunk size for streaming editable text reads. Large enough to amortize
 /// syscalls, small enough that the editor can paint early on large files.
 pub const TEXT_READ_CHUNK_SIZE: usize = 64 * 1024;
@@ -1497,7 +1490,15 @@ impl Workspace {
         let existing_size = writable.stat.as_ref().map(|stat| stat.size);
         let limit = match kind {
             AtomicWriteKind::Text => semantic_write_budget(existing_size),
-            AtomicWriteKind::Bytes => std::cmp::max(existing_size.unwrap_or(0), BYTES_WRITE_LIMIT),
+            // The byte budget is this workspace's configured transfer ceiling,
+            // not a compiled-in constant, so one server-reported value governs
+            // uploads, copies and every other opaque-byte write. The
+            // `max(existing_size, ...)` rule is unchanged: a file already
+            // larger than the ceiling stays rewritable at its current size, so
+            // lowering the ceiling cannot turn existing files read-only.
+            AtomicWriteKind::Bytes => {
+                std::cmp::max(existing_size.unwrap_or(0), self.transfer_max_bytes)
+            }
         };
         let bytes_target_is_text = kind == AtomicWriteKind::Bytes && fs_ops::is_editable_text(rel);
         let validate_utf8 = kind == AtomicWriteKind::Text || bytes_target_is_text;
@@ -5219,6 +5220,24 @@ mod tests {
         (cfg, workspace_dir, workspace)
     }
 
+    /// A workspace whose effective transfer ceiling is `cap`, so a boundary
+    /// test can cross it without writing gigabytes. The ceiling is
+    /// configuration now, which is exactly what makes this possible.
+    fn fixture_with_transfer_cap(cap: u64) -> (TempDir, TempDir, Arc<Workspace>) {
+        let cfg = TempDir::new().unwrap();
+        let workspace_dir = TempDir::new().unwrap();
+        let config_path = cfg.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            format!("workspaces = []\n[transfer]\nmax_bytes = {cap}\n"),
+        )
+        .unwrap();
+        let lib = Library::open_at(config_path).unwrap();
+        lib.register_workspace(workspace_dir.path()).unwrap();
+        let workspace = lib.open_workspace(workspace_dir.path()).unwrap();
+        (cfg, workspace_dir, workspace)
+    }
+
     fn await_recovery_ready(workspace: &Workspace) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while !workspace.recovery_status().is_ready() && std::time::Instant::now() < deadline {
@@ -7290,17 +7309,51 @@ mod tests {
         assert!(!workspace.exists("a.md"));
     }
 
+    /// Both sides of the configured ceiling: the last write that fits is
+    /// accepted and the first byte past it is refused. Asserting only the
+    /// refusal would pass against a ceiling lower than the test believes.
     #[test]
-    fn write_bytes_rejects_oversize_content_for_new_file() {
-        let (_cfg, _root, workspace) = fixture();
-        // 50 MiB+1 byte. Heap-alloc once; cheap.
-        let big = vec![0u8; BYTES_WRITE_LIMIT as usize + 1];
-        let err = workspace.write_bytes("blob.bin", &big).unwrap_err();
+    fn write_bytes_accepts_the_exact_ceiling_and_refuses_one_byte_over() {
+        let cap = 4096;
+        let (_cfg, _root, workspace) = fixture_with_transfer_cap(cap);
+
+        workspace
+            .write_bytes("exact.bin", &vec![0u8; cap as usize])
+            .unwrap();
+        assert_eq!(workspace.stat("exact.bin").unwrap().size, cap);
+
+        let err = workspace
+            .write_bytes("over.bin", &vec![0u8; cap as usize + 1])
+            .unwrap_err();
         assert!(matches!(
             err,
-            ChanError::WriteTooLarge { kind: "bytes", .. }
+            ChanError::WriteTooLarge {
+                kind: "bytes",
+                size,
+                limit,
+            } if size == cap + 1 && limit == cap
         ));
-        assert!(!workspace.exists("blob.bin"));
+        assert!(!workspace.exists("over.bin"));
+    }
+
+    /// The ceiling is configuration rather than a constant, which only a
+    /// second workspace at a different value can show: each must refuse at its
+    /// own boundary and accept what the other refuses.
+    #[test]
+    fn two_workspaces_enforce_their_own_configured_ceilings() {
+        let (_small_cfg, _small_root, small) = fixture_with_transfer_cap(1024);
+        let (_large_cfg, _large_root, large) = fixture_with_transfer_cap(8192);
+
+        assert_eq!(small.transfer_max_bytes(), 1024);
+        assert_eq!(large.transfer_max_bytes(), 8192);
+
+        let payload = vec![0u8; 4096];
+        assert!(matches!(
+            small.write_bytes("blob.bin", &payload).unwrap_err(),
+            ChanError::WriteTooLarge { limit: 1024, .. }
+        ));
+        large.write_bytes("blob.bin", &payload).unwrap();
+        assert_eq!(large.stat("blob.bin").unwrap().size, 4096);
     }
 
     /// A pre-cap file (or a binary mistakenly named `.md`) larger
@@ -9419,10 +9472,11 @@ mod tests {
 
     #[test]
     fn copy_refuses_above_binary_budget_without_partial_destination() {
-        let (_cfg, root, workspace) = fixture();
+        let cap = 4096;
+        let (_cfg, root, workspace) = fixture_with_transfer_cap(cap);
         std::fs::File::create(root.path().join("huge.bin"))
             .unwrap()
-            .set_len(BYTES_WRITE_LIMIT + 1)
+            .set_len(cap + 1)
             .unwrap();
 
         let error = workspace.copy("huge.bin", "copy.bin").unwrap_err();
@@ -9432,8 +9486,8 @@ mod tests {
             ChanError::WriteTooLarge {
                 kind: "bytes",
                 size,
-                limit: BYTES_WRITE_LIMIT,
-            } if size == BYTES_WRITE_LIMIT + 1
+                limit,
+            } if size == cap + 1 && limit == cap
         ));
         assert!(!workspace.exists("copy.bin"));
         assert_eq!(
