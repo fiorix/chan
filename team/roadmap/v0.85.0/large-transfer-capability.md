@@ -68,6 +68,21 @@ This is a known and accepted property of the current design, not an oversight. P
 - One byte above the configured ceiling is refused, leaves the target byte-for-byte intact, and leaves no temporary file.
 - Remote throughput after window tuning is measured and reported against the pre-tuning baseline.
 
+## Recorded measurement
+
+`scripts/e2e/revtunnel-large-transfer.sh` run once at `436a2a93`, in a quiet window with every lane holding cargo work and the run serialized under the shared lock, so the figure is not competing with a build:
+
+```
+fixture_bytes=2147483648 iterations=3
+cargo_status=0 elapsed_seconds=155 peak_rss_kb=142636
+```
+
+Each of the three iterations moved 2147483648 of 2147483648 bytes with a sha256 identical to the source, in 4323, 5729, and 5424 ms.
+
+Peak resident set is roughly 139 MiB against a 2 GiB payload. It does not track fixture size, which is the criterion: a whole-file read would report a figure near `fixture_bytes`. The transfer streams rather than buffers.
+
+What the run does not measure, stated so the number is not read wider than it is. The scenario is the reverse tunnel in one direction: an origin serving `/payload.bin`, forwarded through the tunnel, fetched by `curl`. It is therefore not a measurement of the local non-tunnel path, not of the upload direction, and not of a file at the configured ceiling, since the fixture is 2 GiB and the default ceiling is 10 GiB. The acceptance line asks for both directions, locally and through the tunnel, at the raised ceiling; this run discharges the tunnel download at 2 GiB and no more.
+
 ## Deferred
 
 Upload resume needs an offset-addressed session protocol and is its own item. Download resume has only its server half: single-range serving is in place, and no client issues ranged retries. Chunk-level pacing against a live interactive-pressure signal is a real improvement and there is an in-tree model for it in the reindex pacing, but it holds a lane thread longer rather than shorter, so it is only additive once the lane exists. Free-space pre-flight, page-cache hinting so bulk transfer stops evicting the index and graph pages, and incremental range syncing are grouped as disk citizenship and follow.
