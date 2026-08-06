@@ -249,8 +249,8 @@ pub fn request_headers(
 /// because the server does not report one or because reading it failed. The
 /// defined response is to enforce nothing client-side and leave the refusal to
 /// the server, which enforces on the route regardless of what any client
-/// believes. That is exactly the behaviour before this guard existed, so an
-/// unreadable ceiling costs the fail-fast and changes nothing else.
+/// believes. An unreadable ceiling therefore costs the client-side fail-fast
+/// and nothing else: the refusal still happens, later and from the server.
 ///
 /// Deliberately no `Default` impl: there is no defensible default to derive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
