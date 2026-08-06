@@ -477,13 +477,21 @@ mod tests {
     #[test]
     fn the_rostered_connect_mints_before_a_window_can_exist() {
         const MAIN_RS: &str = include_str!("main.rs");
-        let connect = MAIN_RS
-            .split("async fn connect_rostered_devserver")
+        // Both needles are the DEFINITION form, at line start with its open
+        // paren, and both must be proven present. The bare name also appears
+        // in string literals in this file's own tests, so a looser needle
+        // bounds the slice on a test rather than on the function, and a
+        // `split(..).next()` end would widen it to the rest of the file: under
+        // either, the mint could be found somewhere else entirely while the
+        // rostered connect had lost it, and this pin would still pass.
+        let after = MAIN_RS
+            .split("\nasync fn connect_rostered_devserver(")
             .nth(1)
-            .expect("connect_rostered_devserver exists")
-            .split("async fn connect_devserver_impl_inner")
-            .next()
-            .expect("the rostered connect precedes the raw inner");
+            .expect("connect_rostered_devserver is defined");
+        let end = after
+            .find("\nasync fn connect_devserver_impl_inner(")
+            .expect("the rostered connect precedes the raw inner, which bounds this slice");
+        let connect = &after[..end];
 
         let mint = connect
             .find("mint_exact_origin_grant")
