@@ -102,8 +102,11 @@ describe("a standalone terminal loads its preferences at boot", () => {
     expect(prefs?.terminal_colors?.mode).toBe("custom");
     expect(prefs?.terminal_colors?.custom?.background).toBe("#101820");
     // The whole payload arrives, not an appearance slice of it, so every
-    // setting the same source feeds reaches the terminal. A user who picked
-    // ghostty previously got xterm.js in every standalone window.
+    // setting the same source feeds reaches the terminal. These four are the
+    // non-appearance settings that source drives, asserted here because an
+    // appearance-only fix would satisfy the colour and font-size cases above
+    // while still leaving the backend, scrollback, mouse capture, and secret
+    // masking on their defaults.
     expect(prefs?.terminal.ghostty).toBe(true);
     expect(prefs?.terminal.scrollback_mb).toBe(80);
     expect(prefs?.terminal.mouse_capture).toBe(false);
