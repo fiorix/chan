@@ -587,9 +587,15 @@ mod tests {
     /// busy substreams cannot stall on the shared budget prematurely.
     ///
     /// Both operands are compile-time constants, so the invariant is proven
-    /// while this crate is built rather than when the test happens to run. A
-    /// violation is a compile error, which means the constants cannot reach a
-    /// state where the yamux constructor would panic at connection setup.
+    /// when this crate's test targets are built rather than when the test body
+    /// runs: a violating pair fails compilation of that target instead of
+    /// waiting for someone to execute the assertion. Every gate and CI run
+    /// builds all targets, so such a pair cannot reach a merge.
+    ///
+    /// It is not proven by a plain `cargo build`, nor for a downstream
+    /// consumer of this crate, because the assertion lives in this test
+    /// module. The yamux constructor's own runtime assertion remains the last
+    /// line of defence there.
     #[test]
     fn transport_constants_hold_their_arithmetic_invariants() {
         const YAMUX_DEFAULT_STREAM_CREDIT: usize = 256 * 1024;
