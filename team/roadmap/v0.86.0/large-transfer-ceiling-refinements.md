@@ -8,11 +8,11 @@ The v0.85.0 large-transfer work raises the write ceiling and admits transfer rou
 
 ## The three gaps, exactly
 
-**1. A ranged request is charged by source size rather than transferred length.** A Range read consumes ceiling budget as though the whole file were transferred, so it over-charges rather than under-charges. Conservative, and no consumer exists: the v0.84.0 audit established that single-range serving exists in the server with no chan client issuing ranged retries.
+**1. Ranged reads are not charged against the ceiling, and whether that is permissive or conservative is UNSETTLED.** The requirement is that a ranged request be charged by transferred length rather than source size. On this branch there is no cap check on the Range path at all, and the effective cap is currently consulted in registry configuration rather than enforced on read paths. Whether the resulting gap lets a caller exceed the ceiling or merely leaves a read uncharged depends on how the ceiling comes to apply to reads versus writes, which this release does not settle: the item's own framing is a WRITE ceiling, and Range is a read path. Whoever implements the ceiling slice is in that code and settles this classification with it. It is deliberately not classified here.
 
-**2. An archive of a tree larger than the ceiling streams to completion.** It is bounded by lane admission and by concurrency, so it cannot exhaust the process, but it is NOT bounded by `max_bytes`. This is the one gap of the three that does not fail safe, and it is stated plainly rather than softened: a caller who archives a tree above the ceiling gets the whole archive. It has been unreachable in practice only because the 50 MiB wall made such trees untestable, and raising the ceiling is what makes it reachable.
+**2. An archive of a tree larger than the ceiling streams to completion.** It is bounded by lane admission and by concurrency, so it cannot exhaust the process, but it is NOT bounded by `max_bytes`. This is a known permissive gap, not a conservative fallback: a caller who archives a tree above the ceiling gets the whole archive. Single-file transfers are bounded by the ceiling; archives are the exception. It has been unreachable in practice only because the 50 MiB wall made such trees untestable, and raising the ceiling is what makes it reachable.
 
-**3. `doc_sessions/recovery.rs` validates against the old constant.** If the ceiling rises and recovery is not plumbed with it, recovery keeps the SMALLER budget. Fails closed: a recovery that would exceed the old constant is refused rather than allowed.
+**3. `doc_sessions/recovery.rs` validates against the old constant.** If the ceiling rises and recovery is not plumbed with it, recovery keeps the SMALLER budget. This one is conservative and was reasoned on its own rather than by grouping: recovery may refuse a document the transfer paths would accept, and cannot accept one they would refuse.
 
 ## Contract
 
@@ -22,10 +22,10 @@ The v0.85.0 large-transfer work raises the write ceiling and admits transfer rou
 
 ## Acceptance
 
-- A ranged read of a small window from a large file consumes budget proportional to the window, proven by a test that fails against source-size charging.
+- The Range classification is settled first, by reading the path rather than by grouping it with the other two: state whether an uncharged ranged read lets a caller exceed the ceiling or simply leaves a read outside a write ceiling's scope. Then a ranged read of a small window from a large file consumes budget proportional to the window, proven by a test that fails against source-size charging.
 - An archive of a tree above the ceiling refuses at the bound, and the refusal leaves no partial archive and no temporary file. Prove it can go red by removing the accounting and observing the archive complete.
 - Recovery accepts and refuses at exactly the same threshold as a direct write of the same size, driven from one reported value rather than two constants that can drift.
 
 ## Rough size
 
-Small to medium, and gap 2 is the one worth doing first. It is the only one of the three where the current behaviour lets an operation exceed the ceiling rather than refusing conservatively.
+Small to medium, and gap 2 is the one worth doing first: it is the one known case where current behaviour lets an operation exceed the ceiling rather than refusing conservatively. Gap 1's priority cannot be set until its classification is settled, which is the first task in its acceptance rather than an assumption in its favour.
