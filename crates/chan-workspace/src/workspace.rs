@@ -167,8 +167,12 @@ pub struct WritableFile {
 pub struct BoundedFileReader {
     stat: FileStat,
     slice: (u64, u64),
-    receiver: Option<std::sync::mpsc::Receiver<Result<Vec<u8>>>>,
-    worker: Option<std::thread::JoinHandle<()>>,
+    /// Open handle, already positioned at the slice start. Chunks are read on
+    /// the consumer's own thread rather than by a producer running ahead of
+    /// it, so a bulk transfer costs the lane worker that is already reading it
+    /// and no second thread.
+    file: Option<cap_std::fs::File>,
+    remaining: u64,
 }
 
 impl BoundedFileReader {
@@ -190,66 +194,39 @@ impl Iterator for BoundedFileReader {
     type Item = Result<Vec<u8>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.receiver.as_ref()?.recv().ok()
-    }
-}
-
-impl Drop for BoundedFileReader {
-    fn drop(&mut self) {
-        self.receiver.take();
-        if let Some(worker) = self.worker.take() {
-            if worker.join().is_err() {
-                tracing::warn!("bounded file reader producer panicked");
-            }
+        if self.remaining == 0 {
+            self.file = None;
+            return None;
         }
+        use std::io::Read as _;
+        let file = self.file.as_mut()?;
+        let want = self.remaining.min(BINARY_STREAM_CHUNK_SIZE as u64) as usize;
+        let mut chunk = vec![0u8; want];
+        let count = match file.read(&mut chunk) {
+            // Framing comes from the open handle's stat so callers can declare
+            // one stable representation. Growth is ignored after `remaining`
+            // reaches zero; shrinkage must fail the consumer instead of
+            // silently producing fewer bytes than its declared response or tar
+            // entry.
+            Ok(0) => {
+                let short_by = self.remaining;
+                self.remaining = 0;
+                self.file = None;
+                return Some(Err(ChanError::Io(format!(
+                    "file shortened during bounded read with {short_by} bytes remaining"
+                ))));
+            }
+            Ok(count) => count,
+            Err(error) => {
+                self.remaining = 0;
+                self.file = None;
+                return Some(Err(ChanError::Io(error.to_string())));
+            }
+        };
+        chunk.truncate(count);
+        self.remaining -= count as u64;
+        Some(Ok(chunk))
     }
-}
-
-#[cfg(test)]
-static ACTIVE_BOUNDED_FILE_READERS: std::sync::Mutex<Vec<(u64, std::path::PathBuf)>> =
-    std::sync::Mutex::new(Vec::new());
-
-#[cfg(test)]
-static NEXT_BOUNDED_FILE_READER_ID: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-#[cfg(test)]
-struct ActiveBoundedFileReaderGuard(u64);
-
-#[cfg(test)]
-impl ActiveBoundedFileReaderGuard {
-    fn track(path: &std::path::Path) -> Self {
-        let id = NEXT_BOUNDED_FILE_READER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        ACTIVE_BOUNDED_FILE_READERS
-            .lock()
-            .unwrap()
-            .push((id, path.to_path_buf()));
-        Self(id)
-    }
-}
-
-#[cfg(test)]
-impl Drop for ActiveBoundedFileReaderGuard {
-    fn drop(&mut self) {
-        ACTIVE_BOUNDED_FILE_READERS
-            .lock()
-            .unwrap()
-            .retain(|(id, _)| *id != self.0);
-    }
-}
-
-// Tests ask for their own file's producers, never a process-global
-// count: the binary runs tests in parallel and every bounded reader
-// feeds one entry, so a global count reads a neighbor test's live
-// producer as ours.
-#[cfg(test)]
-pub(crate) fn active_bounded_file_readers(path: &std::path::Path) -> usize {
-    ACTIVE_BOUNDED_FILE_READERS
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|(_, active)| active == path)
-        .count()
 }
 
 /// Ordered events produced by `Workspace::read_text_with_stat_chunked`.
@@ -1570,7 +1547,7 @@ impl Workspace {
         start: u64,
         len: u64,
     ) -> Result<BoundedFileReader> {
-        use std::io::{Read, Seek, SeekFrom};
+        use std::io::{Seek, SeekFrom};
 
         let (dir, rel_path) = self.resolve_io(rel)?;
         ensure_regular_file_in(dir, &rel_path)?;
@@ -1581,55 +1558,15 @@ impl Workspace {
         let start = start.min(stat.size);
         let len = len.min(stat.size - start);
         let slice = (start, len);
-        let (sender, receiver) =
-            std::sync::mpsc::sync_channel::<Result<Vec<u8>>>(BINARY_STREAM_QUEUE_DEPTH);
-        #[cfg(test)]
-        let track_path = self.root().join(rel);
-        let worker = std::thread::Builder::new()
-            .name("chan-byte-reader".to_string())
-            .spawn(move || {
-                #[cfg(test)]
-                let _active_guard = ActiveBoundedFileReaderGuard::track(&track_path);
-
-                if let Err(error) = file.seek(SeekFrom::Start(start)) {
-                    let _ = sender.send(Err(ChanError::Io(error.to_string())));
-                    return;
-                }
-                let mut remaining = len;
-                while remaining > 0 {
-                    let want = remaining.min(BINARY_STREAM_CHUNK_SIZE as u64) as usize;
-                    let mut chunk = vec![0u8; want];
-                    let count = match file.read(&mut chunk) {
-                        // Framing comes from the open handle's stat so callers
-                        // can declare one stable representation. Growth is
-                        // ignored after `remaining` reaches zero; shrinkage
-                        // must fail the consumer instead of silently producing
-                        // fewer bytes than its declared response or tar entry.
-                        Ok(0) => {
-                            let _ = sender.send(Err(ChanError::Io(format!(
-                                "file shortened during bounded read with {remaining} bytes remaining"
-                            ))));
-                            return;
-                        }
-                        Ok(count) => count,
-                        Err(error) => {
-                            let _ = sender.send(Err(ChanError::Io(error.to_string())));
-                            return;
-                        }
-                    };
-                    chunk.truncate(count);
-                    remaining -= count as u64;
-                    if sender.send(Ok(chunk)).is_err() {
-                        return;
-                    }
-                }
-            })
-            .map_err(|error| ChanError::Io(format!("spawn bounded file reader: {error}")))?;
+        // Seek once, here, so a bad offset fails the caller before any
+        // response framing is derived from the slice.
+        file.seek(SeekFrom::Start(start))
+            .map_err(|error| ChanError::Io(error.to_string()))?;
         Ok(BoundedFileReader {
             stat,
             slice,
-            receiver: Some(receiver),
-            worker: Some(worker),
+            file: Some(file),
+            remaining: len,
         })
     }
 

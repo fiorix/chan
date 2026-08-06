@@ -1997,8 +1997,8 @@ mod tests {
     use super::*;
     use crate::library::Library;
     use crate::workspace::{
-        active_bounded_file_readers, semantic_write_budget, AtomicWriteKind, WorkspacePath,
-        BINARY_STREAM_CHUNK_SIZE, BINARY_STREAM_QUEUE_DEPTH,
+        semantic_write_budget, AtomicWriteKind, WorkspacePath,
+        BINARY_STREAM_CHUNK_SIZE,
     };
     use tempfile::TempDir;
 
@@ -2871,55 +2871,36 @@ mod tests {
     }
 
     #[test]
-    fn dropping_bounded_slice_reader_joins_blocked_producer() {
+    fn bounded_reader_reads_lazily_instead_of_buffering_ahead() {
+        // The producer-thread design read ahead into a bounded queue, so a
+        // small file was already fully buffered before the consumer pulled
+        // once. Reading on the consumer's thread is what lets the lane worker
+        // BE the reader, and it is observable: a file truncated after the
+        // reader opens but before the first pull must report the shortfall
+        // rather than hand over bytes captured earlier.
         let (_cfg, root, workspace) = workspace_fixture();
-        let size = BINARY_STREAM_CHUNK_SIZE * (BINARY_STREAM_QUEUE_DEPTH + 16);
-        std::fs::write(root.path().join("slice-disconnect.bin"), vec![0x5a; size]).unwrap();
+        let size = BINARY_STREAM_CHUNK_SIZE * 4;
+        let path = root.path().join("lazy.bin");
+        std::fs::write(&path, vec![0x5a; size]).unwrap();
 
-        let reader = workspace
-            .read_bytes_bounded_slice("slice-disconnect.bin", 1, size as u64)
+        let mut reader = workspace.read_bytes_bounded("lazy.bin").unwrap();
+        assert_eq!(reader.slice(), (0, size as u64));
+
+        // Nothing has been pulled yet, so nothing has been read yet.
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(0)
             .unwrap();
-        // Tracked paths must textually match the producer's
-        // self.root().join(rel): the registry canonicalizes the root at
-        // registration, and on macOS the tempdir is a /var symlink to
-        // /private/var, so root.path() and workspace.root() differ.
-        let tracked = workspace.root().join("slice-disconnect.bin");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while active_bounded_file_readers(&tracked) == 0 && std::time::Instant::now() < deadline {
-            std::thread::yield_now();
+
+        match reader.next() {
+            Some(Err(ChanError::Io(message))) => assert!(
+                message.contains("file shortened during bounded read"),
+                "unexpected error: {message}"
+            ),
+            other => panic!("a lazy reader must observe the truncation, got {other:?}"),
         }
-        assert_eq!(active_bounded_file_readers(&tracked), 1);
-
-        drop(reader);
-
-        assert_eq!(
-            active_bounded_file_readers(&tracked),
-            0,
-            "BoundedFileReader::drop must close the queue and join its producer"
-        );
-    }
-
-    #[test]
-    fn dropping_bounded_reader_joins_blocked_producer() {
-        let (_cfg, root, workspace) = workspace_fixture();
-        let size = BINARY_STREAM_CHUNK_SIZE * (BINARY_STREAM_QUEUE_DEPTH + 16);
-        std::fs::write(root.path().join("disconnect.bin"), vec![0x5a; size]).unwrap();
-
-        let reader = workspace.read_bytes_bounded("disconnect.bin").unwrap();
-        let tracked = workspace.root().join("disconnect.bin");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while active_bounded_file_readers(&tracked) == 0 && std::time::Instant::now() < deadline {
-            std::thread::yield_now();
-        }
-        assert_eq!(active_bounded_file_readers(&tracked), 1);
-
-        drop(reader);
-
-        assert_eq!(
-            active_bounded_file_readers(&tracked),
-            0,
-            "BoundedFileReader::drop must close the queue and join its producer"
-        );
     }
 
     #[test]
