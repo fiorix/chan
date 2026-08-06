@@ -1997,8 +1997,7 @@ mod tests {
     use super::*;
     use crate::library::Library;
     use crate::workspace::{
-        semantic_write_budget, AtomicWriteKind, WorkspacePath,
-        BINARY_STREAM_CHUNK_SIZE,
+        semantic_write_budget, AtomicWriteKind, WorkspacePath, BINARY_STREAM_CHUNK_SIZE,
     };
     use tempfile::TempDir;
 
