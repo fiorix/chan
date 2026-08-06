@@ -485,6 +485,18 @@ pub(crate) mod test_support {
         BulkCancel(Arc::new(AtomicBool::new(true)))
     }
 
+    /// A signal a test can flip while a writer or reader is mid-stream.
+    ///
+    /// `uncancelled` and `cancelled` are fixed at construction, so neither can
+    /// tell a per-chunk check apart from a single check before the loop: the
+    /// first never fires and the second is already set when the work starts.
+    /// The cadence is the half whose violation leaks a slot, so proving it
+    /// needs a flag that changes after the work is underway.
+    pub(crate) fn cancel_switch() -> (BulkCancel, Arc<AtomicBool>) {
+        let flag = Arc::new(AtomicBool::new(false));
+        (BulkCancel(flag.clone()), flag)
+    }
+
     /// A tenant on its OWN lane. Tests that saturate admission must not use
     /// the shared test lane: filling it would refuse admission for every other
     /// test running at the same time. The returned lane must stay in scope for

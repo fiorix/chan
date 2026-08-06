@@ -856,6 +856,65 @@ mod tests {
         );
     }
 
+    /// The same cadence at the writer's own seam, with no lane involved.
+    ///
+    /// Worth having next to the job-level test because it is the shape any
+    /// other admitted writer or reader can copy: a flippable signal removes the
+    /// need to admit a job just to obtain a `BulkCancel`, and it is what lets a
+    /// test observe the per-chunk check instead of only the eventual stop.
+    #[tokio::test]
+    async fn the_upload_writer_observes_cancellation_between_chunks_at_its_seam() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel(1);
+        let (cancel, flag) = crate::bulk_transfer::test_support::cancel_switch();
+        let abs_dir = dir.path().to_path_buf();
+        let writer = std::thread::spawn(move || {
+            terminal_upload_stream_sync(
+                &abs_dir,
+                "seam.bin",
+                rx,
+                chan_workspace::BYTES_WRITE_LIMIT,
+                &cancel,
+            )
+        });
+
+        tx.send(TerminalUploadMessage::Chunk(Bytes::from_static(b"first")))
+            .await
+            .unwrap();
+        // Capacity 1, so this returns only once the writer has taken the first
+        // chunk: the flag below is therefore set strictly after the writer
+        // entered its loop, which a check placed before the loop would already
+        // have passed.
+        tx.send(TerminalUploadMessage::Chunk(Bytes::from_static(b"second")))
+            .await
+            .unwrap();
+
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        for _ in 0..4 {
+            let _ = tx
+                .send(TerminalUploadMessage::Chunk(Bytes::from_static(b"more")))
+                .await;
+        }
+        let _ = tx.send(TerminalUploadMessage::Complete).await;
+        drop(tx);
+
+        let error = writer.join().unwrap().unwrap_err();
+        assert!(
+            error.to_string().contains("cancelled"),
+            "the writer must stop on the flag, not finish: {error}"
+        );
+        assert!(
+            !dir.path().join("seam.bin").exists(),
+            "a cancelled write must not persist its target"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "a cancelled write must leave no temp file behind"
+        );
+    }
+
     #[test]
     fn abs_from_terminal_path_reroots_at_filesystem_root() {
         assert_eq!(
@@ -1069,22 +1128,75 @@ mod tests {
         .unwrap();
 
         let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
-        let (mut releases, _held) = crate::bulk_transfer::test_support::saturate_admission(&bulk);
-        // Free exactly ONE slot, so this download is the only thing the lane can
-        // admit and the next submission after it is a real test of release.
-        // `releases` keeps the rest alive; consuming it by iterator would drop
-        // every remaining release with it and leave the lane wide open.
-        releases.pop();
+
+        // Hold ONE active slot, so the download takes the other and actually
+        // runs. The lane is filled around the download rather than before it:
+        // saturating first and then freeing a slot does not work, because
+        // dropping a waiting job's release frees nothing (that closure never
+        // runs, so it never observes its sender being gone) and a download
+        // admitted behind a full queue would never reach a worker to hold a
+        // slot at all.
+        let (hold_release, hold_park) = std::sync::mpsc::channel::<()>();
+        let _held_active = bulk
+            .submit(move |_| {
+                let _ = hold_park.recv();
+            })
+            .expect("an idle lane admits");
 
         let response = stream_planned_download_tracked(&bulk, None, None, path.clone()).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the download must be admitted and running, not refused"
+        );
         assert!(
             response.headers().get(header::CONTENT_LENGTH).is_none(),
             "a live file stream must not promise its open-time length"
         );
+
+        // Fill the rest of the lane behind the running download, so the refusal
+        // below is caused by the download holding the second active slot.
+        let mut fillers = Vec::new();
+        let mut filler_releases = Vec::new();
+        loop {
+            let (release, park) = std::sync::mpsc::channel::<()>();
+            match bulk.submit(move |_| {
+                let _ = park.recv();
+            }) {
+                Ok(job) => {
+                    filler_releases.push(release);
+                    fillers.push(job);
+                }
+                Err(_) => break,
+            }
+        }
         assert!(
             bulk.submit(|_| {}).is_err(),
-            "the download must be holding the one free slot"
+            "the lane must be full while the download holds its slot"
         );
+
+        drop(response);
+
+        // Awaited rather than asserted immediately. An active job's slot returns
+        // once the running closure observes the cancellation flag, which is a
+        // per-chunk cadence rather than an instant, so an immediate assertion
+        // would be testing timing instead of release.
+        let mut readmitted = false;
+        for _ in 0..200 {
+            if let Ok(job) = bulk.submit(|_| {}) {
+                drop(job);
+                readmitted = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            readmitted,
+            "dropping the response must cancel the download and return its slot"
+        );
+
+        drop(filler_releases);
+        drop(hold_release);
     }
 
     /// A refusal must cost the caller nothing: no slot, and no work done on the
