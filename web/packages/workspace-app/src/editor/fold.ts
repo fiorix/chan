@@ -24,6 +24,7 @@ import {
   foldedRanges,
   foldService,
   syntaxTree,
+  syntaxTreeAvailable,
   unfoldEffect,
 } from "@codemirror/language";
 import { type EditorState, type Extension } from "@codemirror/state";
@@ -79,16 +80,29 @@ export function headingLevelAt(state: EditorState, pos: number): number {
 /// level, else to document end. Null when `pos` is not on a heading line, or the
 /// heading is the last line with nothing to fold. The forward scan runs to end
 /// of document and can leave the lazily parsed region, so it forces the parse
-/// (falling back to the lazy tree on a huge doc), which the naive per-line regex
-/// walk did not need but a tree walk does.
+/// through `budget` milliseconds (a non-positive budget answers from whatever
+/// is already parsed, without forcing).
+///
+/// "incomplete" means the parse ran out of budget before covering the document
+/// AND no terminator was found in the parsed prefix: whether a terminator
+/// exists is unknown, so no range can be offered. Only a COMPLETE parse with
+/// no terminator proves the heading owns the rest of the document and takes
+/// the doc-end fallback - an incomplete parse must never take it, because
+/// that range is indistinguishable from a real last-section fold and folding
+/// it would swallow sections the parse simply had not reached yet. A
+/// terminator found in the parsed prefix is trustworthy either way: the
+/// parsed prefix of an incremental parse is exact.
 export function headingFoldRange(
   state: EditorState,
   pos: number,
-): { from: number; to: number } | null {
+  budget: number = PARSE_BUDGET_MS,
+): { from: number; to: number } | "incomplete" | null {
   const line = state.doc.lineAt(pos);
   const level = headingLevelAt(state, line.from);
   if (level === 0) return null;
-  const tree = ensureSyntaxTree(state, state.doc.length, PARSE_BUDGET_MS) ?? syntaxTree(state);
+  const forced =
+    budget > 0 ? ensureSyntaxTree(state, state.doc.length, budget) : null;
+  const tree = forced ?? syntaxTree(state);
   let foldTo: number | null = null;
   tree.iterate({
     enter(node) {
@@ -102,14 +116,22 @@ export function headingFoldRange(
     },
   });
   if (foldTo !== null) return { from: line.to, to: foldTo };
+  if (forced === null && !syntaxTreeAvailable(state, state.doc.length)) {
+    return "incomplete";
+  }
   const docEnd = state.doc.length;
   if (line.to >= docEnd) return null;
   return { from: line.to, to: docEnd };
 }
 
-const headingFoldService = foldService.of((state, lineStart) =>
-  headingFoldRange(state, lineStart),
-);
+// CodeMirror's foldService contract is `{from,to} | null`, so "incomplete"
+// maps to no fold here: better no fold offered on this pass than a doc-end
+// fold that lies. The service is re-consulted constantly (and the background
+// parse keeps advancing), so the fold appears as soon as the tree covers it.
+const headingFoldService = foldService.of((state, lineStart) => {
+  const range = headingFoldRange(state, lineStart);
+  return range === "incomplete" ? null : range;
+});
 
 /// Gutter marker classes. One DOM per fold state so CM6 can reuse.
 class ChevronMarker extends GutterMarker {
@@ -180,9 +202,10 @@ const headingFoldGutter = gutter({
         return true;
       }
       // Same range the foldService emits: both call headingFoldRange, so the
-      // click and the service can never disagree.
+      // click and the service can never disagree ("incomplete" folds nothing,
+      // matching the service adapter above).
       const range = headingFoldRange(view.state, line.from);
-      if (!range || range.to <= line.to) return false;
+      if (range === "incomplete" || !range || range.to <= line.to) return false;
       view.dispatch({ effects: foldEffect.of(range) });
       return true;
     },

@@ -41,10 +41,26 @@ function levelOf(state: EditorState, text: string): number {
   return headingLevelAt(state, state.doc.line(lineOf(state, text)).from);
 }
 
-/// The fold range for the heading on the line with the given text.
-function rangeOf(state: EditorState, text: string): { from: number; to: number } | null {
+/// The fold range for the heading on the line with the given text. `budget`
+/// passes through to the helper's parse budget when given.
+function rangeOf(
+  state: EditorState,
+  text: string,
+  budget?: number,
+): { from: number; to: number } | "incomplete" | null {
   const line = state.doc.line(lineOf(state, text));
-  return headingFoldRange(state, line.from);
+  return budget === undefined
+    ? headingFoldRange(state, line.from)
+    : headingFoldRange(state, line.from, budget);
+}
+
+/// Narrow a rangeOf result to a real range, failing the test otherwise.
+function realRange(
+  r: { from: number; to: number } | "incomplete" | null,
+): { from: number; to: number } {
+  expect(r).not.toBeNull();
+  expect(r).not.toBe("incomplete");
+  return r as { from: number; to: number };
 }
 
 function mkView(doc: string, selHead: number): { view: EditorView; parent: HTMLElement } {
@@ -142,31 +158,48 @@ describe("fold gutter: heading detection from the syntax tree", () => {
       "## Next",
     ].join("\n");
     const state = mkState(doc);
-    const range = rangeOf(state, "## Setup");
-    expect(range).not.toBeNull();
+    const range = realRange(rangeOf(state, "## Setup"));
     const next = state.doc.line(lineOf(state, "## Next"));
-    expect(range!.to).toBe(next.from - 1);
+    expect(range.to).toBe(next.from - 1);
   });
 
   test("10. the doc-end fallback survives; a heading on the last line yields null", () => {
     const s1 = mkState(["intro", "## Last", "body line", "final body"].join("\n"));
-    const r = rangeOf(s1, "## Last");
-    expect(r).not.toBeNull();
-    expect(r!.to).toBe(s1.doc.length);
+    const r = realRange(rangeOf(s1, "## Last"));
+    expect(r.to).toBe(s1.doc.length);
+    // Completeness of the parse, not the size of the budget, is what admits
+    // the doc-end fallback: with a zero budget on this fully parsed doc the
+    // genuine last-section fold still comes back.
+    expect(realRange(rangeOf(s1, "## Last", 0)).to).toBe(s1.doc.length);
 
     const s2 = mkState(["# Body", "text", "## OnLastLine"].join("\n"));
     expect(rangeOf(s2, "## OnLastLine")).toBeNull();
   });
 
+  // The 4000-line filler puts `## Bottom` far past the initial in-budget
+  // parse (which never covers more than the first 3000 characters at state
+  // creation), so both cases below genuinely exercise the helper against an
+  // unparsed tail rather than a warm tree.
+  const FAR_TERMINATOR_DOC = `## Top\n${"prose paragraph line\n".repeat(4000)}## Bottom\ntail body`;
+
   test("11. a fold range reaches its terminator past the lazy-parse viewport", () => {
-    const filler = "prose paragraph line\n".repeat(4000);
-    const doc = `## Top\n${filler}## Bottom\ntail body`;
     // Do NOT pre-parse the whole doc: the helper must force the parse itself.
-    const state = mkState(doc, false);
-    const range = rangeOf(state, "## Top");
-    expect(range).not.toBeNull();
+    // The budget is one it cannot exhaust on a document this size, so the
+    // forced parse deterministically reaches the terminator; wall-clock load
+    // can slow the run but cannot change the outcome.
+    const state = mkState(FAR_TERMINATOR_DOC, false);
+    const range = realRange(rangeOf(state, "## Top", 60_000));
     const bottom = state.doc.line(lineOf(state, "## Bottom"));
-    expect(range!.to).toBe(bottom.from - 1);
+    expect(range.to).toBe(bottom.from - 1);
+  });
+
+  test("11b. an exhausted parse reports incomplete, never a doc-end range", () => {
+    // A zero budget answers from the lazily parsed prefix only, which cannot
+    // reach `## Bottom`; the helper must say so instead of returning the
+    // doc-end fallback, which would be indistinguishable from a real
+    // last-section fold and would swallow the unparsed sections.
+    const state = mkState(FAR_TERMINATOR_DOC, false);
+    expect(rangeOf(state, "## Top", 0)).toBe("incomplete");
   });
 });
 
@@ -237,6 +270,13 @@ describe("structural guarantees (source pins)", () => {
 
   test("11 (pin). the forward walk forces the parse past the viewport", () => {
     expect(foldSrc).toMatch(/ensureSyntaxTree\(/);
+  });
+
+  test("11b (pin). both consumers map incomplete to no fold", () => {
+    // The service adapter (foldService's contract is `{from,to} | null`) and
+    // the gutter click must both refuse to fold on an incomplete answer.
+    expect(foldSrc).toMatch(/range === "incomplete" \? null : range/);
+    expect(foldSrc).toMatch(/range === "incomplete" \|\| !range/);
   });
 
   test("12 (pin). both formatting chords guard on a code node", () => {
