@@ -42,7 +42,7 @@ flowchart TB
     PROXY <-->|h2c control stream · snapshots + admission + kills| CTL
     ID -->|aggregate reads · kills| CTL
     PROFILE -->|block eviction · sweeper marks| CTL
-    DS ==>|tunnel register with PAT · usr.{domain}/v1/tunnel| PROXY
+    DS ==>|"tunnel register with PAT · usr.{domain}/v1/tunnel"| PROXY
     PROXY ==>|gated tenant + root traffic over the tunnel| DS
     LAUNCH -->|/api/library/* via the proxy| PROXY
     ID --> COMMON

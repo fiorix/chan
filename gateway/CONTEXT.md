@@ -26,7 +26,7 @@ flowchart TB
     end
 
     IDSPA -->|OAuth · manage devservers · Open| ID
-    ID -->|mint entry token (drv, aud)| IDSPA
+    ID -->|"mint entry token (drv, aud)"| IDSPA
     ID <-->|users · grants · access| PROFILE
     PROFILE --- PG
     PROXY -->|validate PAT · /internal/v1/tokens/validate| ID

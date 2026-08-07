@@ -41,7 +41,7 @@ sequenceDiagram
   SRV-->>SOCK: ControlResponse JSON line (status = ok|error|submit_refused|timeout|queue_full|export)
   SOCK-->>CS: one response line
   CS->>U: formatted output + process exit code
-  Note over CS,SRV: cs tunnel only: no half-close; ack line, then the connection stays open for the tunnel's lifetime
+  Note over CS,SRV: cs tunnel only: no half-close, ack line, then the connection stays open for the tunnel's lifetime
 ```
 
   - The client reads two environment values a chan terminal sets: `$CHAN_CONTROL_SOCKET` (which server to reach) and `$CHAN_WINDOW_ID` (the default window to act on). Tab openers and `cs pane` can override the default with `--window`; session-scoped actions (`cs terminal list`, `cs search`, `cs window list`) need only the socket, because the server resolves their target through its own registry.
