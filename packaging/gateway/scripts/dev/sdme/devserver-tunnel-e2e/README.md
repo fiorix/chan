@@ -79,11 +79,11 @@ packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/zone-isolation-probe.sh
 
 | name                    | value                                              |
 |-------------------------|----------------------------------------------------|
-| `APEX_HOST`             | `devserver.localtest.me`                           |
-| `WILDCARD_SUFFIX`       | `.devserver.localtest.me`                          |
+| `APEX_HOST`             | `usr.localtest.me`                           |
+| `WILDCARD_SUFFIX`       | `.usr.localtest.me`                          |
 | `FORWARDED_PROTO`       | `https`                                             |
 | proxy public / tunnel   | loopback `:7002` / `:7100`; TLS edge `:7443` / `:7444` |
 | `IDENTITY_URL`          | `http://127.0.0.1:7799` (loopback stub)            |
 | `CHAN_DEVSERVER_LISTEN` | `1` (bind mgmt API; host reads the mounted prefix) |
 | tenant                  | user `alice`, workspace `notes`                    |
-| desktop entry origins   | `alice--<id-prefix>.p1.devserver.localtest.me:7443` |
+| desktop entry origins   | `alice--<id-prefix>.p1.usr.localtest.me:7443` |

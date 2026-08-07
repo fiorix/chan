@@ -43,7 +43,7 @@ C_PROXY="${C_PROXY:-gw-e2e-proxy}"
 C_DS="${C_DS:-gw-e2e-ds}"
 
 PROXY_ID="p1"
-APEX="devserver.localtest.me"
+APEX="usr.localtest.me"
 NODE_HOST="$PROXY_ID.$APEX"
 SUFFIX=".$NODE_HOST"
 TENANT_USER="alice"
@@ -70,7 +70,7 @@ DS_PORT=8787
 HOST_NAME="${TENANT_USER}--${DEVSERVER_ID:0:12}${SUFFIX}"
 HOSTHDR="$HOST_NAME:$PROXY_TLS_PORT"
 PROXY_ORIGIN="https://$HOSTHDR"
-IDENTITY_ORIGIN="https://id.localtest.me"
+IDENTITY_ORIGIN="https://gw.localtest.me"
 
 say()  { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
 info() { printf '   %s\n' "$*"; }
