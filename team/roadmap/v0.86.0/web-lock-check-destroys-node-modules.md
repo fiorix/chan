@@ -1,6 +1,6 @@
 # `make web-lock-check` deletes `node_modules` while claiming it does not
 
-Status: REGISTERED for v0.86.0, grounded 2026-08-05 by a live incident. Re-verification on 2026-08-07 falsified the grounding's npm attribution; the item needs re-scoping before execution, see the re-verification section.
+Status: REGISTERED for v0.86.0, grounded 2026-08-05 by a live incident. Re-verification on 2026-08-07 falsified the grounding's npm attribution, and the item was re-scoped by owner ruling the same day; see the ruling section.
 
 ## What
 
@@ -34,6 +34,12 @@ Confirmed during the v0.85.0 delivery round, where it cost real time:
 The target is at `Makefile:381` (not 386) and the quoted comment is verbatim at `Makefile:373-375`. But the host's only npm is 10.9.8 under `~/.local/node-v22.23.1-linux-x64`, not the 9.2.0 the grounding records; there is no `/usr/bin/npm` or `/usr/local/bin/npm`, a login shell resolves the same binary, and `NPM ?= npm` resolves via PATH. npm 10.9.8's own `lib/commands/ci.js:79-97` guards the `node_modules` removal behind `if (!dryRun)`, and the lockfile-sync `usageError` fires before that phase, so on the installed npm the target validates non-destructively, exactly as its comment claims. This is a source-level reading of npm, deliberately not an execution of the destructive command. CI pins Node 20, whose npm 10.x carries the same guard.
 
 The node install symlink predates the 2026-08-05 incident, so the incident either ran under a different toolchain than the one attributed or the version was misread; the v0.85.0 release record repeats the 9.2.0 attribution. As written, the item's acceptance would pass trivially today and its investigation budget aims at an npm version nothing here runs. Before execution the item must be re-scoped: re-ground the incident (which npm actually deleted the tree, and from which environment), then either close this as environment-fixed while adding a version floor or a pinned behavioral check to the target, or narrow it to the surviving defect, which is that the comment makes a load-bearing version-dependent claim no test pins.
+
+## Ruling 2026-08-07: re-scoped to pinning the version-dependent claim
+
+The owner accepted the re-scope. The re-grounding, as far as it can be taken without the incident environment: the deletion observation itself stands, but the host cannot have produced it. The host's only npm is 10.9.8, whose `ci.js` guards the removal phase behind `if (!dryRun)`, and its node install predates the incident. The recorded 9.2.0 matches the Ubuntu apt npm rather than anything installed on the host, and the round drove gates through disposable Ubuntu sdme guests, so the incident most plausibly ran under a guest's apt npm 9.2.0, where the delete phase does precede the dry-run short-circuit. The residual uncertainty is which exact environment ran it, and chasing that further buys nothing: the class is "npm 9 deletes, npm 10 does not", which is established from both versions' sources.
+
+The item is therefore environment-fixed on the host and CI (Node 20, npm 10.x), and its surviving defect is the one the release record already generalised: the comment makes a load-bearing behavioural claim that holds only above an npm major nothing pins. The re-scoped work: `make web-lock-check` refuses with a clear message when the resolved npm major is below 10, the comment states the version dependence instead of asserting unconditional safety, and the target keeps its ability to go red on a genuinely desynced lockfile. The original contract and acceptance below stand as written except that "on the pinned npm version" now means npm >= 10 enforced by the floor, and the destructive-behaviour reproduction is not attempted on the host.
 
 ## Contract
 

@@ -22,6 +22,14 @@ The v0.85.0 large-transfer work raises the write ceiling and admits transfer rou
 
 **Gap 3 is overtaken and should be struck rather than implemented.** Three hours after this item was written, the transfer-ceiling change landed a source ruling in `recovery.rs:17-25` that the recovery limit deliberately does not track the workspace transfer ceiling, because pointing it at a configurable ceiling would turn a corrupt or hostile record into a multi-gigabyte allocation at file open; it says plainly "Do not unify the two constants." Recovery also already consumes a plumbed budget, `record.authority.write_budget.min(RECOVERY_RECORD_LIMIT)` (`recovery.rs:271`) sourced from `semantic_write_budget` (`doc_sessions/mod.rs:488`), and recovery is a text path governed by `TEXT_WRITE_LIMIT`, not by `transfer_max_bytes`, which governs `AtomicWriteKind::Bytes` only (`workspace.rs:1500`, `:4341`). The round's work on this gap is to confirm the ruling and remove the gap from the contract, not to plumb the ceiling.
 
+## Ruling 2026-08-07: the item's substance is gap 2
+
+The owner accepted the narrowing, which resolves two of the three gaps by ruling rather than by code:
+
+- **Gap 1 is closed by extending the workspace-arm read ruling.** The Range path exists only on the workspace download arm, which this item already rules deliberately unbounded on read because refusing a user their own file protects nothing worth that cost. Charging ranged reads against a write ceiling is outside that ceiling's scope; an uncharged ranged read is the ruling, not a defect. The first contract bullet below is overridden accordingly.
+- **Gap 3 is struck.** The `recovery.rs` ruling that landed after this item was written is confirmed correct: recovery is a text path with its own plumbed budget, and unifying its limit with a configurable transfer ceiling would convert a hostile record into an arbitrary allocation at open. The third contract bullet below is overridden; no code changes.
+- **Gap 2 is the work**, on both arms, with the acceptance restated in streamable terms: cumulative accounting refuses before the first byte when the plan can already see the bound is exceeded, and otherwise errors the response body at the bound mid-stream; bytes already sent cannot be unsent and no temporary file exists to clean. The red-proof (remove the accounting, observe the archive complete) stands.
+
 ## Contract
 
 - A ranged request consumes ceiling budget equal to the bytes it actually transfers.

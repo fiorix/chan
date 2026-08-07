@@ -46,6 +46,10 @@ Every cited line is exact on current main: the needle occurs four times (`main.r
 2. **The reference fix breaks on a generic function.** `\nasync fn rostered_conn(` occurs zero times because the definition at `main.rs:2371` is `async fn rostered_conn<R: tauri::Runtime>(`. The definition-form recipe needs a generic-function clause (`\nasync fn rostered_conn` without the paren is unique); without it the fix is discovered broken mid-implementation at the `:7798` site.
 3. **The counts in the sizing are wrong, and the class is larger.** There are three pin sites, not four; four is the needle count including the definition. And the dead `.split(..).next().expect(..)` end-bound pattern occurs at 24 sites in `main.rs`, so the contract's "a bound that cannot fail is not a bound" reaches far beyond the three named sites if read literally. The item must state its boundary before execution: the three `connect_devserver_impl_inner` sites, or the whole 24-site class. Per the project's fix-the-whole-class discipline the class is the right boundary, which moves the size from small toward medium.
 
+## Ruling 2026-08-07: the boundary is the class
+
+The owner accepted the class boundary: the item covers every dead `.split(..).next().expect(..)` end-bound in `main.rs`, all 24 sites, not only the three `connect_devserver_impl_inner` pins. Needle-uniqueness verification applies to every pin whose slice the fix touches, the generic-function clause from the re-verification applies to the definition-form needles, and the size is medium. The mutation acceptance below still names the two-definition reorder as the mandatory proof for the three original pins; the remaining sites are proven by their own bound being able to fail.
+
 ## Contract
 
 - A source-slice pin binds to a needle that is unique in the file it slices, and the uniqueness is a property of the needle rather than of the current ordering.

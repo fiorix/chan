@@ -39,6 +39,10 @@ Three facts change the execution plan, and the third is a scope decision the ite
 2. **The server half already exists on HTTP.** `POST /api/terminals` (`routes/terminal.rs:390`, body at `:57-77`) takes `command` and `env`, spawns through `terminal_sessions.create`, and already has `normalize_terminal_command` and `validate_terminal_env`. Only the control-socket surface is missing, and acceptance criterion 3 is provably reachable: `control_socket.rs:5747-5786` already asserts `CHAN_AGENT=codex` in env yields `agent: "codex"`.
 3. **A restart-with-override path covers the case `--command` on `new` does not.** `POST /api/terminals/{session}/restart` (`routes/terminal.rs:456`) takes command and env overrides, and is how the team bootstrap flips the host's bash into the lead's agent. `cs terminal restart` exists (`cli.rs:884`) but preserves command and env. The round's burn scenario was an already-running shell tab, which a `new`-only flag cannot repair. The item must choose: `new` only, `restart --command/--env` only, or both surfaces.
 
+## Ruling 2026-08-07: both surfaces
+
+The owner accepted the route recommendation: implement both `cs terminal new --command/--env` and `cs terminal restart --command/--env`, sharing the wire and control-socket plumbing. `new` completes the capability this item was filed for; `restart` with overrides is the repair path for the burned scenario, an already-running shell tab, and dispatches onto the override behaviour `POST /api/terminals/{session}/restart` already implements. The acceptance below applies to both: a restarted session with a deriving command behaves identically to one spawned deriving, and `cs terminal restart` without the new flags keeps preserving the existing command and env.
+
 ## Interim workaround, which works today
 
 A one-member team: `cs terminal team new <dir> --config <toml>` with a single `is_lead = true` member carrying the command and env. It is heavier than a plain terminal, since it writes a `config.toml`, a `bootstrap.md`, and a tasks and journals tree into the workspace, but it produces a correctly deriving, pokeable session over the control socket.
