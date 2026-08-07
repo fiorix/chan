@@ -24,7 +24,7 @@ describe("terminalWsPath", () => {
         sessionId: "term_abc",
       }),
     ).toBe(
-      "/api/terminal/ws?cols=80&rows=24&tab_name=build+log&session=term_abc&since=0&agent_echo_since=0",
+      "/api/terminal/ws?cols=80&rows=24&tab_name=build+log&session=term_abc&since=0",
     );
   });
 
@@ -42,7 +42,7 @@ describe("terminalWsPath", () => {
         generation: 4,
       }),
     ).toBe(
-      "/api/terminal/ws?cols=80&rows=24&tab_name=build+log&session=term_abc&since=1500&generation=4&agent_echo_since=0",
+      "/api/terminal/ws?cols=80&rows=24&tab_name=build+log&session=term_abc&since=1500&generation=4",
     );
   });
 
@@ -78,20 +78,6 @@ describe("terminalWsPath", () => {
     expect(
       terminalWsPath({ cols: 80, rows: 24, tabName: "shell", paneId: "  " }),
     ).not.toContain("pane_id");
-  });
-
-  test("adds agent event echo replay cursor when reattaching", () => {
-    expect(
-      terminalWsPath({
-        cols: 80,
-        rows: 24,
-        tabName: "shell",
-        sessionId: "term_abc",
-        agentEchoSince: 7,
-      }),
-    ).toBe(
-      "/api/terminal/ws?cols=80&rows=24&tab_name=shell&session=term_abc&since=0&agent_echo_since=7",
-    );
   });
 
   test("never emits a per-terminal mcp_env override (now a global setting)", () => {

@@ -258,20 +258,7 @@
     | { type: "resize_other"; cols: number; rows: number }
     | { type: "closed"; reason: CloseReason }
     | { type: "exit"; code?: number }
-    | { type: "error"; message?: string; reason?: string }
-    /// Server-side `dispatch_agent_event` emits this frame rather
-    /// than writing the `poke + chord` echo directly to the agent
-    /// session's PTY. The SPA routes the payload through
-    /// `sendUserInput` so the broadcast layer fans the echo to every
-    /// selected broadcast target. Payload is base64 of the raw bytes
-    /// (the chord may include non-UTF8 bytes; base64 round-trips the
-    /// whole sequence without escape-string contortions).
-    | {
-        type: "agent_event_echo";
-        seq: number;
-        event_id: string;
-        payload_b64: string;
-      };
+    | { type: "error"; message?: string; reason?: string };
 
   type CloseReason = "idle" | "workspace" | "shutdown" | "explicit" | "capped" | "error";
 
@@ -1164,8 +1151,6 @@
     // byte cursor and the server replays the session's full ring. A
     // carried-over cursor would make the server skip everything the
     // PREVIOUS xterm had seen, and that buffer died with term.dispose().
-    // Echo dedupe (lastAgentEchoSeq) is independent of screen content
-    // and survives the remount.
     void connect();
     if (focused) queueMicrotask(focusTerminal);
   }
@@ -1303,7 +1288,6 @@
         sessionId: tab.terminalSessionId,
         since: resumeSince,
         generation: resumeGeneration,
-        agentEchoSince: tab.lastAgentEchoSeq,
         cwd: reattaching ? undefined : tab.cwd,
       }),
     );
@@ -1540,31 +1524,6 @@
         if (!detail.includes("unknown variant `ping`")) {
           statusDetail = detail;
           term?.writeln(`\r\nterminal error: ${detail}`);
-        }
-      } else if (frame.type === "agent_event_echo") {
-        // Server-side `dispatch_agent_event` (`terminal_sessions.rs`)
-        // emits this frame instead of writing the `poke + chord`
-        // bytes directly to the PTY. Routing the payload through
-        // `sendUserInput` does two things at once:
-        //   1. Hits `sendInput` → server writes to the local
-        //      PTY (the agent sees `poke` as if typed).
-        //   2. Hits `broadcastTerminalInput` (the fan-out): when
-        //      broadcast input is ON for this session, the same bytes
-        //      ALSO go to every selected broadcast target. When OFF,
-        //      the fan-out is a no-op.
-        // Single source of truth on broadcast targeting:
-        // `tab.broadcastEnabled` + the broadcast-member set
-        // that the SPA already owns.
-        const payload = decodeAgentEventEcho(frame.payload_b64);
-        if (payload) {
-          sendUserInput(payload);
-          if (Number.isFinite(frame.seq)) {
-            tab.lastAgentEchoSeq = Math.max(
-              Math.floor(tab.lastAgentEchoSeq ?? 0),
-              Math.floor(frame.seq),
-            );
-            scheduleTerminalSessionSave();
-          }
         }
       }
     };
@@ -1824,25 +1783,6 @@
     // Keep the existing writer + origin ordering. Replay callbacks only drain
     // the batch; live callbacks still run their captured per-write scan.
     ptyWrites.write(termWriter, bytes, origin, completeMaskScan);
-  }
-
-  /// Decode a base64 agent-event payload into the string
-  /// `sendUserInput` expects. Returns null on malformed base64 so
-  /// the WS handler can short-circuit without raising: a malformed
-  /// echo would still pass the JSON parse + the type discriminator,
-  /// so the decoder must fail soft. The decoded string carries the
-  /// raw byte
-  /// sequence (including any modifyOtherKeys chord that the
-  /// server picked per the session's submit-mode); the WS
-  /// `input` frame on the inbound leg accepts string verbatim
-  /// (PTY write is bytes-of-string).
-  function decodeAgentEventEcho(payload_b64: string): string | null {
-    try {
-      const binary = atob(payload_b64);
-      return binary;
-    } catch {
-      return null;
-    }
   }
 
   /// OS file dropped on this terminal: type the dropped files' absolute

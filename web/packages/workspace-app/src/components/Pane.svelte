@@ -816,7 +816,6 @@
               // The moved shell's real CHAN_TAB_NAME, so the target can decide
               // whether a conflict-forced rename leaves the env stale (warning).
               terminalEnvTabName: t.terminalEnvTabName,
-              lastAgentEchoSeq: t.lastAgentEchoSeq,
               group: t.group,
               cwd: t.cwd,
             }
@@ -874,7 +873,6 @@
       terminalSessionId?: string;
       extensionId?: string;
       terminalEnvTabName?: string;
-      lastAgentEchoSeq?: number;
       group?: string;
       cwd?: string;
     };
@@ -893,7 +891,6 @@
           terminalSessionId: parsed.terminalSessionId,
           title: parsed.title,
           terminalEnvTabName: parsed.terminalEnvTabName,
-          lastAgentEchoSeq: parsed.lastAgentEchoSeq,
           group: parsed.group,
           cwd: parsed.cwd,
         });

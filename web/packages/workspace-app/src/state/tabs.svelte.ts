@@ -400,7 +400,6 @@ export type TerminalTab = {
   /// restart or old server cannot leave stale agent identity on the tab.
   submitAgent?: SubmitAgent;
   controlledTerminal?: boolean;
-  lastAgentEchoSeq?: number;
   terminalActivity?: boolean;
   /// Refines terminalActivity. True while output is actively ARRIVING at
   /// this unfocused terminal (the unseen-output dot PULSES); flips false
@@ -1382,7 +1381,6 @@ function tabForReopen(src: Tab): Tab {
     tab.terminalSessionId = undefined;
     tab.submitAgent = undefined;
     tab.controlledTerminal = undefined;
-    tab.lastAgentEchoSeq = undefined;
     tab.terminalEnvTabName = undefined;
     tab.terminalEnvTabGroup = undefined;
     tab.terminalEnvNamePromptDismissed = undefined;
@@ -1653,7 +1651,6 @@ export type TerminalMovePayload = {
   /// so the target can tell whether a conflict-forced `-N` rename leaves the
   /// env stale and must surface the restart warning.
   terminalEnvTabName?: string;
-  lastAgentEchoSeq?: number;
   group?: string;
   cwd?: string;
 };
@@ -1661,8 +1658,7 @@ export type TerminalMovePayload = {
 /// Re-attach a MOVED terminal to its existing live PTY in the target window's
 /// pane. Distinct from `openTerminalInPane({ sessionId })`: this preserves the
 /// moved terminal's NAME verbatim (NO renumber - it's the same terminal, just
-/// in a new window) and carries the echo-dedupe cursor so agent echo replay
-/// stays suppressed. The source tab is removed WITHOUT killing
+/// in a new window). The source tab is removed WITHOUT killing
 /// the PTY (see `closeTab`'s `keepSession`), so the net effect is the terminal
 /// leaving the source and appearing here with the same shell + history and no
 /// duplicate. The PTY lives in the shared registry, so the attach succeeds.
@@ -1691,10 +1687,6 @@ export function reattachTerminalInPane(
     // prelude refreshes it.
     terminalEnvTabName: payload.terminalEnvTabName,
     controlledTerminal: undefined,
-    // Carry the echo-dedupe cursor so the re-attach (`connect()` sends
-    // `sessionId` + `agentEchoSince`) keeps agent echoes suppressed. The
-    // fresh xterm replays the full ring, same as a reload.
-    lastAgentEchoSeq: payload.lastAgentEchoSeq,
     cwd: payload.cwd?.trim() || undefined,
     seedInput: undefined,
     group: group && group !== DEFAULT_TERMINAL_GROUP ? group : undefined,
@@ -2196,7 +2188,6 @@ export function setTerminalSession(tab: TerminalTab, sessionId: string): void {
   tab.terminalSessionId = sessionId;
   if (wasFresh) {
     tab.submitAgent = undefined;
-    tab.lastAgentEchoSeq = undefined;
     tab.terminalEnvTabName = undefined;
     tab.terminalEnvTabGroup = undefined;
     tab.terminalEnvNamePromptDismissed = false;
@@ -2307,7 +2298,6 @@ export function clearTerminalSession(tab: TerminalTab): void {
   }
   tab.terminalSessionId = undefined;
   tab.submitAgent = undefined;
-  tab.lastAgentEchoSeq = undefined;
   tab.terminalActivity = undefined;
   tab.terminalActivityPulsing = undefined;
   tab.terminalEnvTabName = undefined;
@@ -3592,7 +3582,6 @@ function cloneTab(src: Tab): Tab {
       terminalMetadataError: src.terminalMetadataError,
       terminalSessionId: src.terminalSessionId,
       controlledTerminal: src.controlledTerminal,
-      lastAgentEchoSeq: src.lastAgentEchoSeq,
       cwd: src.cwd,
       seedInput: src.seedInput,
       pendingGlobalName: src.pendingGlobalName,
@@ -5405,9 +5394,6 @@ export type SerTab = {
   /// Terminal was created through the HTTP control channel; restart
   /// uses the server-side restart endpoint.
   tc?: 1;
-  /// Last injected agent-event echo sequence the browser handled.
-  /// Used only for replaying missed Team Work watcher dispatches.
-  tae?: number;
   /// Terminal broadcast group. Emitted only when non-default so a
   /// reattach after reload keeps the terminal in its group (and the
   /// SPA group stays consistent with the server's per-session tab_group).
@@ -5537,7 +5523,7 @@ export const paneModeConflictFieldSets = {
     },
     t: {
       included: ["k", "a", "n", "tg", "tsid"],
-      excluded: ["tc", "tae", "kp", "rpd", "rpc", "rph", "pp", "rpv", "twk"],
+      excluded: ["tc", "kp", "rpd", "rpc", "rph", "pp", "rpv", "twk"],
     },
     s: { included: ["k", "a"], excluded: [] },
     h: { included: ["k", "a"], excluded: [] },
@@ -5881,11 +5867,6 @@ function serializeTab(
         ? {
             tsid: t.terminalSessionId,
             ...(t.controlledTerminal ? { tc: 1 as const } : {}),
-            ...(typeof t.lastAgentEchoSeq === "number" &&
-            Number.isFinite(t.lastAgentEchoSeq) &&
-            t.lastAgentEchoSeq > 0
-              ? { tae: Math.floor(t.lastAgentEchoSeq) }
-              : {}),
             ...(() => {
               const kp = serializeKeyboardProtocolState(t.keyboardProtocol);
               return kp ? { kp } : {};
@@ -6185,12 +6166,6 @@ function restoreTerminalTabFromSer(
     keyboardProtocol: kpSnapshot
       ? restoreKeyboardProtocolState(kpSnapshot)
       : undefined,
-    lastAgentEchoSeq:
-      terminalSessionId &&
-      typeof (sertab.tae ?? savedTerm?.tae) === "number" &&
-      Number.isFinite(sertab.tae ?? savedTerm?.tae)
-        ? Math.max(0, Math.floor((sertab.tae ?? savedTerm?.tae)!))
-        : undefined,
     richPromptDraftPath: (sertab.rpd ?? savedTerm?.rpd) || undefined,
     ...(Array.isArray(rpc) && rpc.length === 2
       ? { richPromptCaret: { from: rpc[0], to: rpc[1] } }
@@ -6964,10 +6939,6 @@ export function hydrateTerminalSessionsFromLayout(sessionLayout: SerNode | null)
         if (!savedTerm) continue;
         if (savedTerm.tsid) {
           liveTerms[j]!.terminalSessionId = savedTerm.tsid;
-          liveTerms[j]!.lastAgentEchoSeq =
-            typeof savedTerm.tae === "number" && Number.isFinite(savedTerm.tae)
-              ? Math.max(0, Math.floor(savedTerm.tae))
-              : undefined;
         }
         if (savedTerm.rpd) liveTerms[j]!.richPromptDraftPath = savedTerm.rpd;
         if (savedTerm.rpc) {

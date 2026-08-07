@@ -17,7 +17,6 @@ export type TerminalWsPathOpts = {
   /// The session generation the cached snapshot belongs to. The server honors
   /// `since` only when this still matches the live session (a restart bumps it).
   generation?: number | null;
-  agentEchoSince?: number | null;
   cwd?: string | null;
 };
 
@@ -59,10 +58,6 @@ export function terminalWsPath(opts: TerminalWsPathOpts): string {
     if (opts.generation != null) {
       params.set("generation", String(Math.max(0, Math.floor(opts.generation))));
     }
-    params.set(
-      "agent_echo_since",
-      String(Math.max(0, Math.floor(opts.agentEchoSince ?? 0))),
-    );
   } else {
     const cwd = opts.cwd?.trim();
     if (cwd) params.set("cwd", cwd);

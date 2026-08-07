@@ -47,10 +47,4 @@ describe("terminal reattach resumes safely or full-replays", () => {
     );
     expect(term).toContain("pendingSnapshot = null");
   });
-
-  test("echo dedupe cursor survives the remount", () => {
-    // lastAgentEchoSeq is a SEPARATE cursor (Team Work echo dedupe, persisted
-    // as `tae`); independent of screen content, never cleared at mount.
-    expect(term).not.toMatch(/tab\.lastAgentEchoSeq = undefined/);
-  });
 });

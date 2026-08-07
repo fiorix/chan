@@ -2890,14 +2890,12 @@ describe("terminal session serialization", () => {
   test("clearing a terminal session clears activity state", () => {
     const tab = terminalTab({
       terminalSessionId: "term_123",
-      lastAgentEchoSeq: 7,
       terminalActivity: true,
     });
 
     clearTerminalSession(tab);
 
     expect(tab.terminalSessionId).toBeUndefined();
-    expect(tab.lastAgentEchoSeq).toBeUndefined();
     expect(tab.terminalActivity).toBeUndefined();
   });
 
@@ -2930,29 +2928,6 @@ describe("terminal session serialization", () => {
     if (tab?.kind !== "terminal") return;
     expect(tab.title).toBe("build");
     expect(tab.terminalSessionId).toBe("term_123");
-  });
-
-  test("round-trips terminal agent echo replay cursor only in session layouts", async () => {
-    resetLayout([
-      terminalTab({
-        title: "build",
-        terminalSessionId: "term_123",
-        lastAgentEchoSeq: 12,
-      }),
-    ]);
-
-    const hashSnapshot = serializeLayout();
-    const sessionSnapshot = serializeLayout({ terminalSessions: true });
-
-    expect(JSON.stringify(hashSnapshot)).not.toContain("\"tae\"");
-    expect(JSON.stringify(sessionSnapshot)).toContain("\"tae\":12");
-
-    await restoreLayout(sessionSnapshot!);
-
-    const [tab] = activePane().tabs;
-    expect(tab?.kind).toBe("terminal");
-    if (tab?.kind !== "terminal") return;
-    expect(tab.lastAgentEchoSeq).toBe(12);
   });
 
   test("round-trips the negotiated keyboard protocol in session layouts", async () => {
@@ -3004,7 +2979,6 @@ describe("terminal session serialization", () => {
     if (tab?.kind !== "terminal") return;
     expect(tab.title).toBe("build");
     expect(tab.terminalSessionId).toBe("term_abc");
-    expect(tab.lastAgentEchoSeq).toBeUndefined();
   });
 
   test("hydrates terminal session ids during restore before mount-time reads", async () => {
