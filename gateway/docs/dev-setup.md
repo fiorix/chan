@@ -2,50 +2,43 @@
 
 The gateway can run as a set of `sdme` containers, but a private bridge alone is not a trusted transport. This guide describes the production-shaped layout for hosts that also provide an authenticated, encrypted service overlay.
 
-It mirrors the production definitions in the sibling `chan-prod-setup` repo. Per "show the pattern, copy little", it walks ONE worked service container end to end and points at `chan-prod-setup` for the rest, rather than duplicating every prod config here.
+It mirrors the reference deployment in the sibling `chan-prod-setup` repo. Per "show the pattern, copy little", it describes the topology and one worked flow end to end, and points at the checked-in manifests ([`packaging/kube/`](../../packaging/kube/README.md)) and `chan-prod-setup` for the rest, rather than duplicating every config here.
 
-> A faster inner loop exists for rapid iteration: `packaging/gateway/scripts/dev/run.sh` runs the services as host `cargo run` binaries over `*.localtest.me` (see [`packaging/gateway/scripts/dev/README.md`](../../packaging/gateway/scripts/dev/README.md)). That is handy while editing code, but it is NOT the prod-like shape. This guide is the all-container stack.
+> A faster inner loop exists for rapid iteration: `packaging/gateway/scripts/dev/run.sh` runs the services as host `cargo run` binaries over `*.localtest.me` (see [`packaging/gateway/scripts/dev/README.md`](../../packaging/gateway/scripts/dev/README.md)). That is handy while editing code, but it is NOT the prod-like shape. This guide is the containerized stack.
 
-> **Load-bearing transport requirement:** an ordinary sdme `--network-zone` supplies network-namespace/L2 isolation, not authenticated encryption. It is therefore not sufficient grounds for `CHAN_GATEWAY_INTERNAL_TRANSPORT=protected-overlay`; never set that value just to make a cleartext non-loopback bind pass validation. The all-container commands below assume WireGuard, mTLS, or an equivalent authenticated and encrypted overlay is already in place. Without one, use the checked-in local runner: it keeps every cleartext Rust listener on literal loopback and puts verified TLS edges in the same host namespace.
+> **Load-bearing transport requirement:** an ordinary sdme `--network-zone` supplies network-namespace/L2 isolation, not authenticated encryption. It is therefore not sufficient grounds for `CHAN_GATEWAY_INTERNAL_TRANSPORT=protected-overlay`; never set that value just to make a cleartext non-loopback bind pass validation. The container commands below assume WireGuard, mTLS, or an equivalent authenticated and encrypted overlay is already in place wherever cleartext crosses a namespace boundary. Without one, use the checked-in local runner: it keeps every cleartext Rust listener on literal loopback and puts verified TLS edges in the same host namespace.
 
-## Why the all-container, prod-like stack
+## Why the prod-like stack
 
-The gateway's cross-tenant isolation is carried by two host-scoped cookies: `__Host-id_session` (host-only on `id.<domain>`) and `__Host-devserver_gate` (host-only on `{user}.devserver.<domain>`, scoped `Path=/` for the whole devserver). No `.<domain>`-wide cookie exists, so a browser never auto-attaches an identity session to a fetch on another tenant's subdomain. The whole-host devserver cookie is safe because the grant is whole-devserver; user-to-user isolation rides the host-only cookie plus the `aud` claim. That design, plus the reverse-proxy header hygiene (hop-by-hop stripping, dropped inbound Host/Cookie/Authorization, recomputed `X-Forwarded-*`), only fully exercises behind a real TLS terminator with real subdomains. Running the same containers and the same nginx as prod is how you exercise it.
+The gateway's cross-tenant isolation is carried by two host-scoped cookies: `__Host-id_session` (host-only on the identity origin `gw.<domain>`) and `__Host-devserver_gate` (host-only on the tenant host `{owner}--{disc}.{proxy}.usr.<domain>`, scoped `Path=/` for the whole devserver). No parent-domain cookie exists, so a browser never auto-attaches an identity session to a fetch on another tenant's host. The whole-host devserver cookie is safe because the grant is whole-devserver; user-to-user isolation rides the host-only cookie plus the `aud` claim. That design, plus the reverse-proxy header hygiene (hop-by-hop stripping, dropped inbound Host/Cookie/Authorization, recomputed `X-Forwarded-*`), only fully exercises behind a real TLS terminator with real subdomains. Running the same services in the same two-plane shape as production is how you exercise it.
 
-## Topology
+## Topology: two planes
+
+Production splits the gateway into an **account and control plane** and a **proxy data plane**, and the local stack mirrors that split:
+
+- **The gateway pod**: postgres, profile, identity, and devserver-control run as one pod sharing a network namespace, so they reach each other over loopback and no inter-service port is published. devserver-control rides inside the pod deliberately: identity and profile reach it on loopback instead of depending on cross-container name resolution. identity has two listeners: the public one behind the TLS edge, and an internal token-validate listener that is never routed publicly.
+- **A TLS edge for the identity origin**: an nginx terminator serving `gw.<domain>`; `:80` answers only ACME and a `301` (the OAuth flow never runs over cleartext), `:443` proxies to identity's public listener.
+- **The proxy plane**: each proxy node runs devserver-proxy behind its own TLS edge. That edge serves the `usr.<domain>` tunnel apex (`/v1/tunnel` is negotiated as h2 externally and `grpc_pass`ed as h2c into the proxy's tunnel listener) and the node's tenant wildcard `*.{proxy}.usr.<domain>` (ordinary HTTP plus WebSocket upgrade). The node connects back to the plane above over the authenticated overlay, and can reach exactly two things there: devserver-control's proxy-control listener and identity's internal token-validate listener. Nothing else (postgres, profile, identity's public listener) is reachable from a proxy node; production treats proxy nodes as compromisable, and `packaging/kube/network-policy.yaml` encodes the same reachability contract for clusters.
 
 ```mermaid
-flowchart TD
+flowchart TB
     browser["browser (https)"]
-    lima["127.0.0.1:443 (Lima forwards the VM :443 to the macOS host)"]
-    browser --> lima
-
-    subgraph zone["chan-svc authenticated + encrypted service overlay"]
-        nginx["chan-nginx: TLS terminator (the only published container, :80 / :443)"]
-        chanid["chan-id :7000"]
-        profile["chan-profile :7001"]
-        control["chan-devserver-control :7003 + :7101"]
-        proxy["chan-devserver-proxy :7002 + :7100"]
-        psql["chan-psql :5432 (also published :5432 for host cargo test)"]
+    devsrv["chan devserver (tunnel dial)"]
+    subgraph account["account + control plane"]
+        gwnginx["TLS edge: gw.<domain>"]
+        pod["gateway pod: postgres + profile + identity + control (loopback)"]
     end
-
-    lima --> nginx
-    nginx -->|"id.localtest.me"| chanid
-    nginx -->|"devserver.localtest.me apex (healthz)"| proxy
-    nginx -->|"/v1/tunnel (h2c, grpc_pass) -> :7100"| proxy
-    nginx -->|"*.devserver.localtest.me (tenant + WS upgrade)"| proxy
-
-    chanid -->|"PROFILE_SERVICE_URL"| profile
-    chanid -->|"DEVSERVER_ADMIN_URL"| control
-    profile -->|"DEVSERVER_ADMIN_URL"| control
-    proxy -->|"DEVSERVER_CONTROL_URL (h2c control session)"| control
-    proxy -->|"IDENTITY_URL"| chanid
-    profile -->|"DATABASE_URL"| psql
+    subgraph node["proxy node"]
+        pnginx["TLS edge: usr.<domain> apex + *.p1.usr.<domain>"]
+        proxy["devserver-proxy"]
+    end
+    browser -->|"sign-in"| gwnginx --> pod
+    browser -->|"tenant"| pnginx --> proxy
+    devsrv -->|"/v1/tunnel (h2c)"| pnginx
+    proxy -->|"overlay: control session + token validate ONLY"| pod
 ```
 
-chan-nginx terminates TLS at the overlay edge and fans the routes out across the `chan-svc` containers; this is the one route map for the stack (the nginx section below mirrors it). The tunnel vhost must negotiate h2 externally before forwarding h2c to `:7100`; browser/public vhosts terminate ordinary HTTP. nginx never routes the devserver-control ports: :7003 (the aggregate admin tree) and :7101 (the h2c proxy-control listener) are overlay-internal only.
-
-Services bind their default ports (`7000/7001/7002/7100/7003/7101`) INSIDE their containers and resolve each other by overlay identity (for example identity reads `chan-profile:7001`). Every cleartext non-loopback service must set `CHAN_GATEWAY_INTERNAL_TRANSPORT=protected-overlay`, and that assertion is valid only after the encrypted overlay exists. Nothing binds on the macOS host except what Lima forwards (nginx `:443`, and Postgres `:5432` for host-run tests).
+Admission fails closed: the proxy admits a tunnel registration only after identity validates the PAT and devserver-control verifies the identity-signed admission lease, so a proxy that cannot reach the control plane serves nothing. devserver-control also rejects a proxy whose package version differs from its own, so every service and every node must run the same release tag.
 
 ## Prerequisites: sdme
 
@@ -55,91 +48,58 @@ Install sdme. On Linux, on the host:
 curl -fsSL https://sdme.io/install.sh | sudo sh
 ```
 
-On macOS, sdme runs inside a Lima VM; install Lima and then sdme inside the VM, per [macOS only: Lima shim](#macos-only-lima-shim). Either way the `sdme ...` commands below then work (on macOS through the alias). The examples use the explicit `limactl shell default sudo sdme ...` form; drop that prefix on Linux.
+On macOS, sdme runs inside a Lima VM; install Lima and then sdme inside the VM, per [macOS only: Lima shim](#macos-only-lima-shim). Either way the `sdme ...` commands below then work (on macOS through the alias).
 
-## Build the gateway .deb packages
+## Bring up the gateway pod
 
-The service containers install the gateway `.deb`s, the same way prod does, so build them first (once per source change) in the gateway-build container:
+The checked-in manifests are the source of truth: [`packaging/kube/README.md`](../../packaging/kube/README.md) covers building the service images (`packaging/docker/build.sh`), generating the secret set (every bearer, both Ed25519 key pairs, the per-proxy credential map), applying `sdme/gateway-pod.yaml`, and proving the stack healthy. The same README documents the cluster-manifest shape for real deployments and the database-role pipeline (the owner credential exists only in the migration job; identity and profile run app roles with `CHAN_GATEWAY_MIGRATIONS=external`).
 
-```sh
-make linux-gateway     # root Makefile -> build-gateway.sh, uses gateway-build.sdme
-```
+The sdme pod is a functional-validation shape: its containers share one network namespace, so it proves wiring and behavior, not credential isolation. The per-service env contract lives in `gateway/crates/*/packaging/*.env`.
 
-`gateway-build.sdme` (in `packaging/gateway/scripts/dev/sdme/`) bakes the Rust toolchain, node/npm, and cargo-deb; no Postgres is needed at build time. The five packages (identity, profile, devserver-control, devserver-proxy, admin) land in the build's `dist/` staging dir, where the service containers pick them up.
+## The TLS edges
 
-## Postgres: chan-psql on the zone
+nginx terminates TLS for both host families; locally one nginx container can wear both, while production gives each proxy node its own edge. The route map is the topology above: `gw.<domain>` to identity's public listener with `proxy_pass`; the `usr.<domain>` apex health surface and the `*.{proxy}.usr.<domain>` tenant wildcard to devserver-proxy's HTTP listener; `/v1/tunnel` to the proxy's tunnel listener with `grpc_pass` (h2c). The internal listeners (identity token-validate, control's admin tree and proxy-control port) are never routed by nginx.
 
-Build and start the Postgres container on the `chan-svc` zone. The build file is a sanitized dev copy of the prod one (no host bind-mount, a throwaway `chan` superuser with password `chan`, both `chan_gateway` and `chan_gateway_test` seeded on first boot).
-
-```sh
-cd packaging/gateway/scripts/dev/sdme
-limactl shell default sudo sdme fs build chan-psql-dev chan-psql.sdme
-limactl shell default sudo sdme create --name chan-psql -r chan-psql-dev \
-    --network-zone chan-svc -p 5432:5432
-limactl shell default sudo sdme start chan-psql
-```
-
-Services reach it as `chan-psql:5432` on the zone; the published `:5432` (via Lima host networking) lets host-side `cargo test` use `127.0.0.1:5432`. The dev `create` drops prod's `--hardened` and secret bind (the dev rootfs self-seeds); `--network-zone chan-svc` is what puts it on the zone.
-
-## The service containers
-
-Each gateway service is its own container built from a tiny `.sdme` file that installs the matching `.deb` and enables its systemd unit. The prod files live in `chan-prod-setup/services/` (`chan-id.sdme`, `chan-profile.sdme`, `chan-devserver-control.sdme`, `chan-devserver-proxy.sdme`). Do not copy the old cleartext `*.localtest.me` example: public DNS origins are required to use TLS, even when they resolve into `127/8`. For a local stack, use the checked-in `packaging/gateway/scripts/dev/{setup,run}.sh` runner, which creates a local CA and keeps every cleartext Rust listener on a literal loopback address. A container topology must instead terminate TLS at the public edge and carry service-to-service cleartext only on an authenticated, encrypted overlay.
-
-Use the checked-in env templates for the exact service contract: control has separate operator/identity/profile admin rings, a per-proxy credential map, and `DEVSERVER_ADMISSION_VERIFYING_KEYS`; proxy points `IDENTITY_URL` at identity's internal listener (`http://chan-id:7004`) and receives only its own controller bearer plus the entry-verifier ring. The database owner credential belongs only to the migration unit; identity and profile run with distinct app-role URLs and `CHAN_GATEWAY_MIGRATIONS=external`. See `chan-prod-setup/services/` for the prod topology, but reconcile its secrets against these templates before deployment.
-
-## nginx container + TLS
-
-nginx is its own container (`chan-nginx`), the TLS terminator and the only one that publishes ports. Mirror `chan-prod-setup/services/chan-nginx.sdme` and `chan-prod-setup/etc/nginx/`; the routes are the ones in [Topology](#topology) above (`id.<domain>` -> chan-id:7000 with `proxy_pass`, the `devserver.<domain>` apex + `*.devserver.<domain>` -> chan-devserver-proxy:7002, and `/v1/tunnel` -> chan-devserver-proxy:7100 with `grpc_pass` h2c).
-
-The one dev difference is the certificate. Prod uses certbot with the dns-01 Cloudflare plugin to get a real `*.devserver.<domain>` wildcard (http-01 cannot issue wildcards). Locally, issue a local-CA wildcard with [`mkcert`](https://github.com/FiloSottile/mkcert) and mount it into the nginx container in place of `/etc/letsencrypt`:
+The one dev difference is the certificate. Production uses certbot with a dns-01 plugin for the wildcard (http-01 cannot issue wildcards; any DNS provider with a certbot plugin works). Locally, issue a local-CA wildcard with [`mkcert`](https://github.com/FiloSottile/mkcert) and mount it into the nginx container:
 
 ```sh
 mkcert -install
-mkcert "*.localtest.me" "*.devserver.localtest.me" localtest.me
+mkcert "*.localtest.me" "*.usr.localtest.me" "*.p1.usr.localtest.me" localtest.me
 ```
 
-Create chan-nginx on the zone, publishing `:443`, with the mkcert cert and your `:443` vhosts bind-mounted in:
+`*.localtest.me` resolves every subdomain, at any depth, to `127.0.0.1` via public DNS, so no `/etc/hosts` or dnsmasq is needed.
+
+## The overlay
+
+Whatever crosses a namespace boundary in cleartext must ride an authenticated, encrypted overlay; WireGuard between the proxy node's container and the account plane is the reference shape. Give the proxy reachability to only the two internal listeners it needs, mirroring `network-policy.yaml`. Every cleartext non-loopback service sets `CHAN_GATEWAY_INTERNAL_TRANSPORT=protected-overlay`, and that assertion is valid only after the overlay exists.
+
+## The worked flow
+
+Sign in at `https://gw.localtest.me` (or your chosen identity origin). Both feature flags ship default-off, so enrol yourself after the first sign-in with the admin CLI, run from wherever it can reach profile's service API (inside the pod when your image set carries it, or `cargo run -p admin --` from `gateway/` pointed at a reachable profile listener):
 
 ```sh
-limactl shell default sudo sdme create --name chan-nginx -r chan-nginx-dev \
-    --network-zone chan-svc -p 443:443 \
-    --bind <mkcert-dir>:/etc/nginx/certs:ro
-limactl shell default sudo sdme start chan-nginx
+chan-gateway-admin flag grant oauth_login      <your-email>
+chan-gateway-admin flag grant share_workspaces <your-email>
 ```
 
-## Reach it from the browser (macOS)
-
-`*.localtest.me` resolves to `127.0.0.1` for every subdomain via public DNS, so no `/etc/hosts` or dnsmasq is needed. Lima host networking exposes the chan-nginx `:443` on the macOS `localhost`, so the browser path is: `https://id.localtest.me` -> `127.0.0.1:443` (Lima) -> chan-nginx -> `chan-id:7000` on the zone. No `limactl` port-forward is needed: Lima host networking surfaces the published `:443` on the macOS `localhost` directly, the same way it does Postgres `:5432`.
-
-Sign in at `https://id.localtest.me`. Both feature flags ship default-off, so enrol yourself after the first sign-in (run the admin CLI inside the profile container, or against the published profile port):
+Publish a devserver from the sibling `chan` repo over the TLS tunnel apex. Registration is per-devserver: one tunnel carries the whole library, so add a workspace first and then dial:
 
 ```sh
-limactl shell default sudo sdme exec chan-profile -- \
-    chan-gateway-admin flag grant oauth_login      <your-email>
-limactl shell default sudo sdme exec chan-profile -- \
-    chan-gateway-admin flag grant share_workspaces <your-email>
-```
-
-Register a test workspace from the sibling `chan` repo over the TLS apex:
-
-```sh
+cargo run -p chan -- workspace add <workspace-dir>
 export CHAN_TUNNEL_TOKEN=chan_pat_...     # mint under the dashboard Tokens tab
-cargo run -p chan -- serve <workspace-dir> \
-  --tunnel-url=https://devserver.localtest.me/v1/tunnel \
-  --tunnel-workspace-name=blog
+cargo run -p chan -- devserver --tunnel-url=https://usr.localtest.me/v1/tunnel
 ```
 
-Clicking Open on the dashboard lands on `https://<user>.devserver.localtest.me/blog/`.
+Clicking Open on the dashboard lands on the tenant origin, `https://<owner>--<disc>.p1.usr.localtest.me/<workspace>/`.
 
-## From local to a real VPS
+## From local to a real host
 
-Because the local stack already IS the prod container shape, going to a real host changes only what is environment-specific, exactly as `chan-prod-setup` automates (`configure.sh` then `make all`):
+Because the local stack already has the prod shape, going to a real host changes only what is environment-specific, exactly as `chan-prod-setup` automates (`configure.sh`, then `make secrets` / `make all` / `make proxy-node`):
 
-- **DNS.** Real records for `id.<domain>`, the `devserver.<domain>` apex, and a wildcard `*.devserver.<domain>` pointed at the host; inbound `:80/:443` DNAT to chan-nginx in the zone.
-- **Certificates.** Swap mkcert for certbot with your provider's dns-01 plugin to get the real `*.devserver.<domain>` wildcard (the wildcard forces dns-01; any DNS provider with a certbot plugin works).
-- **Secrets.** Real per-service secrets bind-mounted from `/var/lib/chan/secrets` instead of the inlined dev values; `COOKIE_SECURE=true`.
-
-The containers, the zone, the nginx routes, and the cookie isolation are identical to what you ran locally.
+- **DNS.** Real records for `gw.<domain>`, the `usr.<domain>` tunnel apex, and each node's `*.{proxy}.usr.<domain>` wildcard.
+- **Certificates.** Swap mkcert for certbot with your DNS provider's dns-01 plugin on each edge.
+- **Secrets.** Real per-service secrets from `/var/lib/chan/secrets` instead of the inlined dev values; `COOKIE_SECURE=true`.
+- **Lockstep.** Deploy every service and every proxy node on the same release tag; a version-mismatched node is rejected at the control handshake.
 
 ## macOS only: Lima shim
 
@@ -165,32 +125,30 @@ export TEST_DATABASE_URL=postgres://chan:chan@127.0.0.1:5432/chan_gateway_test
 cargo test                             # profile + identity need the DB
 ```
 
-`devserver-proxy` and all `cargo test --lib` unit tests need no database; only `profile` and `identity` integration tests do. Per-test schema isolation means a `cargo test` run never clobbers the `chan_gateway` DB a running stack uses. CI (`gateway-ci.yml`) runs the same gate with a `postgres:16` service on `ubuntu-latest` (x86_64), the canonical lane; local sdme is the fast loop.
+`devserver-proxy` and all `cargo test --lib` unit tests need no database; only `profile` and `identity` integration tests do. The pod's postgres is internal to the pod, so host-run tests use a separately published local Postgres (the dev runner's, or a one-off container with `-p 5432:5432` seeding `chan_gateway` and `chan_gateway_test`). Per-test schema isolation means a `cargo test` run never clobbers the `chan_gateway` DB a running stack uses. CI (`gateway-ci.yml`) runs the same gate with a `postgres:16` service on `ubuntu-latest` (x86_64), the canonical lane; local sdme is the fast loop.
 
 ### Connection reaper (test infra)
 
-A flaky `cargo test` can panic mid-test and orphan sqlx pool connections; the role goes idle holding slots and the next run hits `PoolTimedOut`. `tests-shared/pg_reaper.rs` (wired into every DB-backed `TestApp::new()`) opens one durable connection and `pg_terminate_backend()`s its own role's idle peers on first use, then holds that connection so the role never falls fully idle. It recovers the realistic case automatically. The one case it cannot is **full exhaustion** (all non-superuser slots pinned): it panics pointing here. Reap manually as the postgres superuser:
+A flaky `cargo test` can panic mid-test and orphan sqlx pool connections; the role goes idle holding slots and the next run hits `PoolTimedOut`. `tests-shared/pg_reaper.rs` (wired into every DB-backed `TestApp::new()`) opens one durable connection and `pg_terminate_backend()`s its own role's idle peers on first use, then holds that connection so the role never falls fully idle. It recovers the realistic case automatically. The one case it cannot is **full exhaustion** (all non-superuser slots pinned): it panics pointing here. Reap manually as the postgres superuser against whichever Postgres your tests target, for example:
 
 ```sh
-limactl shell default sudo sdme exec chan-psql -- /bin/bash -c \
-    "runuser -u postgres -- /usr/bin/psql -c \
-        \"SELECT pg_terminate_backend(pid) \
-            FROM pg_stat_activity WHERE usename='chan';\""
+psql -U postgres -h 127.0.0.1 -c \
+    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename='chan';"
 ```
 
 Safe whenever no live stack is connected to `chan_gateway`.
 
 ## sdme cheatsheet
 
-- **Full container name**: pass the name you created (`chan-id`, `chan-psql`, ...). sdme also accepts an unambiguous prefix, but the full name keeps the examples copy-pasteable.
+- **Full container name**: pass the name you created (`chan-gateway`, ...). sdme also accepts an unambiguous prefix, but the full name keeps the examples copy-pasteable.
 - **Full paths after `--`**: `machinectl shell` sets no `PATH`. Use `/usr/bin/psql`, `/usr/bin/runuser`, `/usr/bin/systemctl`.
-- **Interactive shell**: `sdme join chan-id` drops you into a real shell inside the container; live `apt install ./chan-gateway-*.deb` works there without a rootfs rebuild.
-- **Restart a unit**: `sdme exec chan-id -- /usr/bin/systemctl restart chan-gateway-identity`.
+- **Interactive shell**: `sdme join chan-gateway` drops you into a real shell inside the pod.
+- **Pod exec**: `sdme exec chan-gateway --oci -- <cmd>` runs a command inside the pod's shared namespace (the health probes in the kube README use this).
 
 ## Troubleshooting
 
-- **`connection refused on localhost:5432`** -- `sdme ps` should list chan-psql Running; if stopped, `sdme start chan-psql`; if wedged under load, `sdme exec chan-psql -- /usr/bin/systemctl restart postgresql`.
-- **A service can't reach another** -- they resolve by container hostname ON the `chan-svc` zone, so every service container (and chan-psql) must be created with `--network-zone chan-svc`; check `sdme ps` and the hostname-based URLs in each unit's env.
+- **A service can't reach another** -- inside the pod they resolve over loopback; across containers they resolve by name only on the shared zone. Check `sdme ps` and the hostname-based URLs in each unit's env.
 - **Browser rejects the local cert** -- run `mkcert -install` so the local CA is trusted, and reissue the wildcard if you changed the domain.
-- **Signed-in but the workspace 404s** -- confirm nginx serves https and `FORWARDED_PROTO=https` is set on devserver-proxy; a scheme mismatch makes the `__Host-devserver_gate` cookie fail to attach.
+- **Signed-in but the tenant 404s** -- confirm nginx serves https and `FORWARDED_PROTO=https` is set on devserver-proxy; a scheme mismatch makes the `__Host-devserver_gate` cookie fail to attach.
+- **The proxy admits nothing** -- fail-closed is working: check that the proxy reaches devserver-control over the overlay, that its bearer matches control's per-proxy credential map, and that both sides run the same release tag.
 - **Tests pass locally but break on CI** -- same migration set must run (`migrations/0001..N` in order); a forgotten file shows up as missing-column errors on first use.
