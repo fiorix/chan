@@ -6,6 +6,7 @@
   // (see Pane.svelte), so it needs no terminal-window branch.
 
   import type { Component } from "svelte";
+  import AmberRecursion from "./AmberRecursion.svelte";
   import ChaoticHalo from "./ChaoticHalo.svelte";
   import ConcentricPulse from "./ConcentricPulse.svelte";
   import DottedSurface from "./DottedSurface.svelte";
@@ -64,6 +65,7 @@
     "hexagonal-bloom": HexagonalBloom,
     "turbulent-oculus": TurbulentOculus,
     "stellar-outburst": StellarOutburst,
+    "amber-recursion": AmberRecursion,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {

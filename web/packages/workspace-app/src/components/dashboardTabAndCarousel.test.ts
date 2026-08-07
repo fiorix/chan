@@ -457,6 +457,7 @@ describe("EmptyPaneWelcome empty-pane surface", () => {
     expect(welcome).toMatch(/"hexagonal-bloom": HexagonalBloom/);
     expect(welcome).toMatch(/"turbulent-oculus": TurbulentOculus/);
     expect(welcome).toMatch(/"stellar-outburst": StellarOutburst/);
+    expect(welcome).toMatch(/"amber-recursion": AmberRecursion/);
     expect(welcome).toMatch(/<ActiveAnimation \/>/);
     expect(welcome).not.toMatch(/workspace\.info/);
     expect(welcome).not.toMatch(/welcome-name/);

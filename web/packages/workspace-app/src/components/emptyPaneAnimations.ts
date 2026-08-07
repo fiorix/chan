@@ -114,6 +114,11 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Stellar Outburst",
     description: "A warm particle field radiating from a brilliant central core.",
   },
+  {
+    id: "amber-recursion",
+    name: "Amber Recursion",
+    description: "A rotating amber fractal lattice folding through mirrored depth.",
+  },
 ] as const;
 
 export type EmptyPaneAnimationId =
