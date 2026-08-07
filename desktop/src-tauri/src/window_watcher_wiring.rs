@@ -487,6 +487,59 @@ const FEED_MAX_MISSED: u32 = 2;
 /// reconnects never flips it -- only a persistent outage does.
 const FEED_UNREACHABLE_AFTER: u32 = 2;
 
+/// Floor on the wait between proactive session re-mints, so a gateway that
+/// advertises a very short cookie lifetime cannot spin the refresh loop.
+const GATEWAY_SESSION_MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
+/// Wait before retrying a failed proactive re-mint. The gateway may be briefly
+/// unreachable, and the session is still accepted for the safety margin already
+/// subtracted from `expires_at`, so a prompt retry beats waiting a full lifetime.
+const GATEWAY_SESSION_RETRY_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Re-mint a gateway connection's proxy session before it expires, until
+/// `cancel` fires.
+///
+/// The proxy's session lifetime is a hard cap rather than a sliding window, and
+/// the gate is checked on every HTTP request but only at upgrade for a
+/// WebSocket. A feed socket therefore stays connected straight through the
+/// expiry: nothing fails, so none of the reactive re-mint paths fire, and the
+/// WebView's cookies quietly stop being accepted. Every request under that
+/// window's tenant prefix then answers 404 -- the SPA's own API calls and any
+/// extension asset alike -- while the window still looks connected. Refreshing
+/// on a timer is what carries an open window across the cap.
+async fn run_gateway_session_refresh(
+    conn: DevserverConn,
+    mut cancel: watch::Receiver<DevserverWatcherStop>,
+) {
+    loop {
+        if (*cancel.borrow_and_update()).is_stopped() {
+            return;
+        }
+        // `None` is a connection that does not reach a gateway -- every plain
+        // loopback devserver -- so there is nothing to keep fresh.
+        let Some(delay) = crate::devserver::gateway_session_refresh_delay(&conn) else {
+            return;
+        };
+        tokio::select! {
+            _ = cancel.changed() => return,
+            _ = tokio::time::sleep(delay.max(GATEWAY_SESSION_MIN_REFRESH_INTERVAL)) => {}
+        }
+        if (*cancel.borrow_and_update()).is_stopped() {
+            return;
+        }
+        let observed = crate::devserver::cached_gateway_cookie_header(&conn).unwrap_or_default();
+        if let Err(error) =
+            crate::devserver::refresh_gateway_session_if_current(&conn, &observed).await
+        {
+            // Routine while a machine is asleep or the gateway is briefly down.
+            tracing::debug!(%error, "proactive gateway session refresh failed");
+            tokio::select! {
+                _ = cancel.changed() => return,
+                _ = tokio::time::sleep(GATEWAY_SESSION_RETRY_INTERVAL) => {}
+            }
+        }
+    }
+}
+
 /// Stream a devserver's window-set feed into `snapshot` + wake `change` on every
 /// push, reconnecting on a dropped socket until `cancel` fires. The server
 /// pushes a full snapshot on connect, so a drop self-heals on the next reconcile.
@@ -883,6 +936,10 @@ pub(crate) async fn spawn_devserver_window_watcher(
         state,
         cancel_rx.clone(),
     ));
+    // Shares the feed's lifetime and stop signal: the feed socket survives a
+    // session expiry silently, so nothing else on this connection would notice
+    // the cap passing.
+    tauri::async_runtime::spawn(run_gateway_session_refresh(conn.clone(), cancel_rx.clone()));
     let surface = TauriNativeSurface {
         app,
         opener: WindowOpener::Remote { conn },

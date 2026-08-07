@@ -159,6 +159,13 @@ impl GatewaySession {
     fn is_fresh(&self) -> bool {
         Instant::now() < self.expires_at
     }
+
+    /// Time left before this session should be re-minted. `expires_at` already
+    /// carries [`GATE_SESSION_EXPIRY_SAFETY_SECS`], so reaching it still leaves
+    /// a live window in which the replacement mint can complete.
+    fn refresh_due_in(&self) -> Duration {
+        self.expires_at.saturating_duration_since(Instant::now())
+    }
 }
 
 impl std::fmt::Debug for GatewaySession {
@@ -1089,6 +1096,24 @@ pub(crate) async fn gateway_cookie_header(conn: &DevserverConn) -> Result<String
         .as_ref()
         .ok_or_else(|| "not a gateway connection".to_string())?;
     gateway_session(gw).await.map(|s| s.cookie_header)
+}
+
+/// Time to wait before `conn`'s gateway session should be re-minted, or `None`
+/// when `conn` does not reach a gateway. `Some(ZERO)` means it is due now,
+/// including the case where no session has been minted yet.
+pub(crate) fn gateway_session_refresh_delay(conn: &DevserverConn) -> Option<Duration> {
+    let gw = conn.gateway.as_ref()?;
+    let session = gw.session.lock().unwrap().clone();
+    Some(session.map_or(Duration::ZERO, |session| session.refresh_due_in()))
+}
+
+/// Cookie header of the session currently cached for `conn`, minting nothing.
+/// The refresh loop hands this back to [`refresh_gateway_session_if_current`]
+/// so a session some other path already replaced is not re-minted twice.
+pub(crate) fn cached_gateway_cookie_header(conn: &DevserverConn) -> Option<String> {
+    let gw = conn.gateway.as_ref()?;
+    let session = gw.session.lock().unwrap().clone();
+    session.map(|session| session.cookie_header)
 }
 
 pub(crate) async fn refresh_gateway_session_if_current(
@@ -3146,6 +3171,52 @@ mod tests {
             gateway_session_ttl(Some(u64::MAX)),
             Duration::from_secs(24 * 60 * 60 - 30)
         );
+    }
+
+    #[test]
+    fn refresh_delay_tracks_the_cached_session_and_skips_loopback_conns() {
+        fn session(expires_at: Instant) -> GatewaySession {
+            GatewaySession {
+                gate: "g".into(),
+                cookie_header: "__Host-devserver_gate=g".into(),
+                csrf: "c".into(),
+                expires_at,
+            }
+        }
+
+        let conn = gateway_test_conn("http://127.0.0.1:9/entry".into());
+        // Nothing minted yet: due now, and there is no header to hand back.
+        assert_eq!(gateway_session_refresh_delay(&conn), Some(Duration::ZERO));
+        assert_eq!(cached_gateway_cookie_header(&conn), None);
+
+        let gw = conn.gateway.as_ref().unwrap();
+        *gw.session.lock().unwrap() = Some(session(Instant::now() + Duration::from_secs(600)));
+        let delay = gateway_session_refresh_delay(&conn).expect("gateway conn");
+        assert!(
+            delay > Duration::from_secs(590) && delay <= Duration::from_secs(600),
+            "{delay:?}"
+        );
+        assert_eq!(
+            cached_gateway_cookie_header(&conn).as_deref(),
+            Some("__Host-devserver_gate=g")
+        );
+
+        // A session already past its expiry reports zero rather than saturating
+        // backwards: the resumed-from-sleep case, where the re-mint is overdue.
+        *gw.session.lock().unwrap() = Some(session(Instant::now()));
+        assert_eq!(gateway_session_refresh_delay(&conn), Some(Duration::ZERO));
+
+        // A plain loopback devserver holds no gateway session to keep fresh, so
+        // the refresh loop exits instead of polling it forever.
+        let loopback = DevserverConn {
+            host: "127.0.0.1".into(),
+            port: 1234,
+            token: "t".into(),
+            name: "local".into(),
+            gateway: None,
+        };
+        assert_eq!(gateway_session_refresh_delay(&loopback), None);
+        assert_eq!(cached_gateway_cookie_header(&loopback), None);
     }
 
     #[test]
