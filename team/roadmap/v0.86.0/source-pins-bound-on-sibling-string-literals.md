@@ -38,6 +38,14 @@ The same class was found and fixed in `runtime_capability.rs`, which now carries
 
 The probe now covers four distinct breaks, each red with its own message: the statement deleted, its failure demoted from `?` to `.ok()`, the statement moved past the call it must precede, and the two definitions reordered.
 
+## Re-verified 2026-08-07
+
+Every cited line is exact on current main: the needle occurs four times (`main.rs:2622` definition, `:7714`, `:7798`, `:8512` literals), defect one is live at `:7714-7716` and `:7798-7800`, and the reference shape stands in `runtime_capability.rs:488-492`. Three corrections sharpen the spec:
+
+1. **The `:8512` collision is current behavior, not a hypothetical.** Its `.split(needle).nth(1)` over four occurrences yields the region from line 2622 to line 7714, terminating on a sibling test's string literal, computed against the file rather than inferred. Both of its `find` needles happen to fall inside that window, so the pin passes today by ordering luck. The slice is not "unbounded to the end of the file" as stated above; it is bounded on exactly the wrong thing.
+2. **The reference fix breaks on a generic function.** `\nasync fn rostered_conn(` occurs zero times because the definition at `main.rs:2371` is `async fn rostered_conn<R: tauri::Runtime>(`. The definition-form recipe needs a generic-function clause (`\nasync fn rostered_conn` without the paren is unique); without it the fix is discovered broken mid-implementation at the `:7798` site.
+3. **The counts in the sizing are wrong, and the class is larger.** There are three pin sites, not four; four is the needle count including the definition. And the dead `.split(..).next().expect(..)` end-bound pattern occurs at 24 sites in `main.rs`, so the contract's "a bound that cannot fail is not a bound" reaches far beyond the three named sites if read literally. The item must state its boundary before execution: the three `connect_devserver_impl_inner` sites, or the whole 24-site class. Per the project's fix-the-whole-class discipline the class is the right boundary, which moves the size from small toward medium.
+
 ## Contract
 
 - A source-slice pin binds to a needle that is unique in the file it slices, and the uniqueness is a property of the needle rather than of the current ordering.

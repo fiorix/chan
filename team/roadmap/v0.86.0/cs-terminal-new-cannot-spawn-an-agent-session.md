@@ -29,6 +29,16 @@ The failure is also quiet in the worst way: the poke is accepted, the ack report
 - `CHAN_AGENT` passed through `--env` forces derivation for a launcher the sniff does not recognise, proven with a launcher that the sniff genuinely misses rather than one it already handles.
 - The refusal path keeps its current behaviour and its exit code, so an ungranted submit still fails loudly rather than silently parking.
 
+## Re-verified 2026-08-07
+
+The defect and both citations hold exactly: derivation at `terminal_sessions.rs:3729-3733` from `spawn_opts.command` plus `spawn_opts.env["CHAN_AGENT"]`, the SPA attach path hardcoding `command: None` at `routes/terminal.rs:637`, and `cs terminal new` carrying only path and tab flags (`chan-shell/src/cli.rs:820-834`).
+
+Three facts change the execution plan, and the third is a scope decision the item does not currently make:
+
+1. **The control-socket route is five hops, not one.** Neither `ControlRequest::OpenTermNew` (`chan-shell/src/wire.rs:120`) nor the server-to-SPA `WindowCommand::OpenTermNew` (`chan-server/src/control_socket.rs:83`) nor `TerminalWsOptions` (`routes/terminal.rs:580-593`) carries command or env, which is why line 637 is hardcoded. Plumbing `cs terminal new --command/--env` spans CLI, wire, control socket, SPA TypeScript, WS query, and `CreateOptions`.
+2. **The server half already exists on HTTP.** `POST /api/terminals` (`routes/terminal.rs:390`, body at `:57-77`) takes `command` and `env`, spawns through `terminal_sessions.create`, and already has `normalize_terminal_command` and `validate_terminal_env`. Only the control-socket surface is missing, and acceptance criterion 3 is provably reachable: `control_socket.rs:5747-5786` already asserts `CHAN_AGENT=codex` in env yields `agent: "codex"`.
+3. **A restart-with-override path covers the case `--command` on `new` does not.** `POST /api/terminals/{session}/restart` (`routes/terminal.rs:456`) takes command and env overrides, and is how the team bootstrap flips the host's bash into the lead's agent. `cs terminal restart` exists (`cli.rs:884`) but preserves command and env. The round's burn scenario was an already-running shell tab, which a `new`-only flag cannot repair. The item must choose: `new` only, `restart --command/--env` only, or both surfaces.
+
 ## Interim workaround, which works today
 
 A one-member team: `cs terminal team new <dir> --config <toml>` with a single `is_lead = true` member carrying the command and env. It is heavier than a plain terminal, since it writes a `config.toml`, a `bootstrap.md`, and a tasks and journals tree into the workspace, but it produces a correctly deriving, pokeable session over the control socket.

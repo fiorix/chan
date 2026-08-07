@@ -1,6 +1,6 @@
 # `make web-lock-check` deletes `node_modules` while claiming it does not
 
-Status: REGISTERED for v0.86.0, grounded 2026-08-05 by a live incident.
+Status: REGISTERED for v0.86.0, grounded 2026-08-05 by a live incident. Re-verification on 2026-08-07 falsified the grounding's npm attribution; the item needs re-scoping before execution, see the re-verification section.
 
 ## What
 
@@ -28,6 +28,12 @@ Confirmed during the v0.85.0 delivery round, where it cost real time:
 - A member ran `npm ci --dry-run --ignore-scripts` in the shared implementation worktree to verify a fresh install. The tree went from 293 populated entries with a working `.bin/vitest` to a single `.package-lock.json`, with no other install running.
 - The directory inode stayed at 12288 bytes, the size of a directory that had held hundreds of entries, which is how the deletion was distinguished from an install that never populated.
 - The failure is silent in the worst way: an entry count taken during the deletion still reads plausibly, because top-level package directories are emptied before they are removed. Only probing an actual binary, such as `node_modules/.bin/vitest`, distinguishes a healthy tree from a dying one.
+
+## Re-verified 2026-08-07, and the premise does not hold on this host
+
+The target is at `Makefile:381` (not 386) and the quoted comment is verbatim at `Makefile:373-375`. But the host's only npm is 10.9.8 under `~/.local/node-v22.23.1-linux-x64`, not the 9.2.0 the grounding records; there is no `/usr/bin/npm` or `/usr/local/bin/npm`, a login shell resolves the same binary, and `NPM ?= npm` resolves via PATH. npm 10.9.8's own `lib/commands/ci.js:79-97` guards the `node_modules` removal behind `if (!dryRun)`, and the lockfile-sync `usageError` fires before that phase, so on the installed npm the target validates non-destructively, exactly as its comment claims. This is a source-level reading of npm, deliberately not an execution of the destructive command. CI pins Node 20, whose npm 10.x carries the same guard.
+
+The node install symlink predates the 2026-08-05 incident, so the incident either ran under a different toolchain than the one attributed or the version was misread; the v0.85.0 release record repeats the 9.2.0 attribution. As written, the item's acceptance would pass trivially today and its investigation budget aims at an npm version nothing here runs. Before execution the item must be re-scoped: re-ground the incident (which npm actually deleted the tree, and from which environment), then either close this as environment-fixed while adding a version floor or a pinned behavioral check to the target, or narrow it to the surviving defect, which is that the comment makes a load-bearing version-dependent claim no test pins.
 
 ## Contract
 

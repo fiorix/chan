@@ -36,6 +36,12 @@ Both transfer-class assertions are among them and both pass. The record is a one
 
 The whole-workspace `cargo test` that CI runs cannot be the local answer as it stands. `gateway/crates/identity/tests/admin_tokens.rs:50` requires `TEST_DATABASE_URL` and panics without it, so on a developer machine with no Postgres the command fails for reasons unrelated to the change under test. That is the constraint any fix has to handle, and it is the likely reason no such target was ever written.
 
+## Re-verified 2026-08-07
+
+The defect holds. The Makefile citations shifted three lines earlier: `gateway-fmt` recipe at `Makefile:327`, `gateway-build` at `:333`, `gateway-lint` at `:341`, `cargo clean` at `:458`, and those four remain the only `cd gateway` sites. `gateway-ci.yml:111` and `admin_tokens.rs:50` are exact.
+
+Two additions for the implementer. `gateway-ci.yml:35` also carries `workflow_dispatch`, a manual escape hatch the item does not mention; the contract should state whether a manual dispatch counts as coverage on the delivering path (it should not, but it is cheap stopgap leverage). And the database constraint is seven files, not one: the six identity integration suites plus `gateway/crates/profile/tests/api.rs`. The scoped-execution option the contract already permits is documented with a working recipe at `gateway/docs/dev-setup.md:119-128`: `devserver-proxy` and all `--lib` unit tests need no database, only `profile` and `identity` integration tests do. That is the fastest path to acceptance.
+
 ## Contract
 
 - Gateway code that reaches the owner has its tests executed on the path that delivers it, not only on the path that merges it.

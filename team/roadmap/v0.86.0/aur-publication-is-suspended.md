@@ -44,6 +44,10 @@ The mechanism actually chosen was verified independently of that check, and the 
 - `aur-auth` still proves the credential before anything is pushed, and `aur-validate` is still a hard `needs` of `aur-publish`. Restoration must not quietly widen what publishes.
 - The first restored publication is checked against the AUR RPC for both pkgbases, because the post-push verification poll has produced a false red before on a brand-new pkgbase.
 
+## Re-verified 2026-08-07
+
+The three guards are intact in their wrapped form (`publish-downstream.yml` lines 403, 461, 502) and `aur-validate` remains a hard `needs` of `aur-publish` (line 510). The restoration condition is not met: the news index shows nothing newer about the incident, and the only follow-up anywhere is a 2026-07-23 community post on aur-requests stating the compromised packages were cleaned, which is exactly the half-notice this item already rules insufficient. The item stays blocked and carries no v0.86.0 round work beyond re-checking the news page.
+
 ## Rough size
 
 Very small as a code change, one line per job. The judgement is entirely in reading the Arch announcement and deciding the condition is met.

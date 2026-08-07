@@ -54,6 +54,12 @@ That is a time-budgeted parse asserted exactly, and it is a different failure fr
 
 This is why the acceptance below separates them. A deterministic fake for the first mermaid initialization would address `diagram` and `table` and would not touch `fold`, whose parse budget is unrelated to mermaid.
 
+## Re-verified 2026-08-07
+
+All three cases exist unchanged: `fold.test.ts:161` (the name carries its `11. ` prefix, so a name-based filter must include it), `diagram.test.ts:86`, `table.test.ts:22`. No commit has touched `web/packages/workspace-app/src/editor/` since 2026-07-28, so nothing landed that could have fixed them. The fold fallback is confirmed in `headingFoldRange` (`fold.ts:82`): `ensureSyntaxTree(state, state.doc.length, PARSE_BUDGET_MS)` with a 100 ms budget falls back to the lazy `syntaxTree(state)` at `fold.ts:91`, and the terminator-not-found tail at `fold.ts:104-107` returns `{ from: line.to, to: doc.length }`.
+
+Two facts for the implementer. The fallback has two distinguishable degradation sites, budget exhaustion at line 91 and terminator-not-found at line 107, and a genuine last-section heading also reaches line 107, so "reports that it could not" has to separate those cases rather than flag the shared return shape. And `headingFoldRange` is consumed through `foldService.of(...)` (`fold.ts:110-112`), whose CodeMirror contract is `{from,to} | null`, so a gave-up signal cannot ride the return value without an adapter at that call site.
+
 ## Contract
 
 - The three tests pass deterministically, or the behavior they assert is covered by a test that does.

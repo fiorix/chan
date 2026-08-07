@@ -37,6 +37,12 @@ The owner then reran with every trap closed: both ends fetched to `6e4537e4` and
 
 Cost: one acceptance cycle and roughly an hour of investigation, spent on a correct implementation.
 
+## Re-verified 2026-08-07
+
+Neither half exists yet. The only runtime version surface is the About window, which renders `app.package_info().version` (`main.rs:6629`, `about.js:20-23`), exactly the insufficient signal described above; there is no git hash or build id anywhere in `desktop/src-tauri/`, no `cargo:rustc-env` emission in `build.rs`, and no vocabulary or capability query in the invoke-handler list (`main.rs:5566-5627`). Post-release the two version pins both read `0.85.0`, confirming the indistinguishability premise for the next pre-release branch.
+
+Implementation facts: the SPA-side refusal interpretation that shipped in v0.85.0 lives in `web/packages/workspace-app/src/api/libraryWindows.ts:47-61` (`isAclRefusal`) and is private to that module, so advertisement-aware suppression of other commands means lifting it out. The runtime ACL minting is `desktop/src-tauri/src/runtime_capability.rs`, whose module doc forbids scoped permissions and deny entries in a minted grant. Any advertisement command needs its own entry in `desktop/src-tauri/capabilities/` and a place in the minted gateway vocabulary, which is the bootstrap constraint the contract already names.
+
 ## Contract
 
 - A chan-desktop build is identifiable at runtime as the specific build it is, not only as the release it descends from. An operator can tell which binary is running before drawing a conclusion from its behaviour.
