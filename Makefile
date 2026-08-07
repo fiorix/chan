@@ -385,13 +385,28 @@ web-lock-check: ## Verify web/package-lock.json is in sync with every package.js
 	# the release cannot be repaired.
 	#
 	# This runs among the static checks, before anything can rewrite the file,
-	# and costs about two seconds. --dry-run resolves and validates without
-	# touching node_modules. --ignore-scripts is required, not cosmetic: npm
-	# still runs lifecycle scripts under --dry-run, and this package tree has a
-	# `postinstall: patch-package`, so on a fresh checkout (every CI runner)
-	# the check would exit 127 on a binary that is not installed yet. The
-	# lockfile sync validation happens before any script runs, so skipping
-	# scripts costs the check nothing.
+	# and costs about two seconds. npm 10+ skips the node_modules removal phase
+	# under --dry-run; the recipe enforces that floor before relying on it.
+	# --ignore-scripts is required, not cosmetic: npm still runs lifecycle
+	# scripts under --dry-run. This tree's `postinstall` calls patch-package, so
+	# on a fresh checkout (every CI runner) the check would exit 127 on a binary
+	# that is not installed yet. The lockfile sync
+	# validation happens before any script runs, so skipping scripts costs the
+	# check nothing.
+	@set -eu; \
+		npm_version="$$( $(NPM) --version )"; \
+		npm_major="$${npm_version%%.*}"; \
+		case "$$npm_major" in \
+			''|*[!0-9]*) \
+				printf 'error: web-lock-check could not parse npm version %s\n' \
+					"$$npm_version" >&2; \
+				exit 1 ;; \
+		esac; \
+		if [ "$$npm_major" -lt 10 ]; then \
+			printf '%s\n' \
+				"error: web-lock-check requires npm >= 10; resolved npm version $$npm_version may remove node_modules under --dry-run" >&2; \
+			exit 1; \
+		fi
 	cd web && $(NPM) ci --dry-run --ignore-scripts
 
 .PHONY: web-check
