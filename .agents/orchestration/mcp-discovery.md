@@ -1,6 +1,6 @@
 # MCP Discovery
 
-chan-server exposes its MCP bridge over a Unix-domain socket while `chan open` is running. It does not publish that socket into external agent config files on startup.
+chan-server exposes its MCP bridge over a Unix-domain socket (a named pipe on Windows) while a chan server is running. It does not publish that socket into external agent config files.
 
 In particular, chan does not write:
 
@@ -9,7 +9,7 @@ In particular, chan does not write:
 * `~/.gemini/settings.json`
 * `~/.config/opencode/opencode.json`
 
-Chan-launched terminal sessions are the supported discovery path. When the MCP bridge is available, terminal processes receive:
+Chan-launched terminal sessions are the supported discovery path, and the env descriptor is OFF by default (a stray descriptor makes codex fail to start; it wants file-based config). Opt in per server (the `terminal.mcp_env` config key), per attach (`?mcp_env=on` on the terminal WebSocket), or per team member (`cs terminal team new --mcp-env on`). When opted in, terminal processes receive:
 
 ```text
 CHAN_MCP_SERVER_NAME=chan
@@ -26,13 +26,12 @@ External agent CLIs launched from that terminal can translate the `CHAN_` descri
 The command descriptor points at the chan binary itself running a small bridge subcommand:
 
 ```
-chan __mcp-proxy <unix-socket-path>
+chan __mcp-proxy <socket-path>
 ```
 
-The socket path is the active `chan open` process's MCP bridge socket. chan-server rebinds it on each startup; terminal sessions get the live value through `CHAN_MCP_SOCKET` and `CHAN_MCP_SERVER_JSON`.
+The socket path is the running server's MCP bridge endpoint, rebound on each startup; terminal sessions get the live value through `CHAN_MCP_SOCKET` and `CHAN_MCP_SERVER_JSON`. chan-desktop exposes the same bridge as `chan-desktop __mcp-proxy`.
 
-## Out of scope (today)
+## Out of scope
 
 * Publishing chan into global or user-scoped agent config files.
-* Removing stale entries created by older chan versions. Existing entries remain a manual cleanup item.
-* Auto-discovery of agents outside chan-launched terminal sessions.
+* Auto-discovery for processes outside chan-launched terminal sessions.

@@ -2,9 +2,9 @@
 
 ## Local serving and self-contained runtime
 
-chan-desktop is fully self-contained. It links `chan-workspace` and `chan-server` directly and embeds the web bundle (`web/dist`) via rust-embed at build time. There is no `chan` binary at runtime and none is shipped in the app bundle.
+chan-desktop is fully self-contained. It links `chan-workspace` and `chan-server` directly, embeds both web bundles (`web/dist` and the launcher's `web-launcher/dist`) via rust-embed at build time, and links the `chan` CLI, `chan-shell` (`cs`), and `chan-revtunnel` as libraries, dispatching them in-process (`Personality::Desktop`). No separate `chan` binary ships inside the app bundle; a desktop install still provides `chan` and `cs` on the PATH through a shim into the app binary. The `frontendDist` in `tauri.conf.json` is `../src`, a small static shell (the about and connecting pages), not the SPA.
 
-Local workspaces open through the embedded chan-server `WorkspaceHost`, which owns a single `chan_workspace::Library`. Every registry mutation (add / remove) and feature toggle (semantic search, reports) runs in-process against that same `Library`, or against the live `Arc<Workspace>` the host already holds for a mounted workspace. Routing through one shared registry is what keeps a freshly-added workspace openable immediately: a subprocess `chan add` used to mutate only the on-disk registry, leaving the host's boot-time in-memory snapshot stale, which surfaced as a spurious "workspace not registered" error on first open.
+Local workspaces open through the embedded `WorkspaceHost` (owned by chan-library and re-exported as `chan_server::WorkspaceHost`), which owns a single `chan_workspace::Library`. Every registry mutation (add / remove) and feature toggle (semantic search, reports) runs in-process against that same `Library`, or against the live `Arc<Workspace>` the host already holds for a mounted workspace. Routing through one shared registry is what keeps a freshly-added workspace openable immediately: a subprocess `chan add` used to mutate only the on-disk registry, leaving the host's boot-time in-memory snapshot stale, which surfaced as a spurious "workspace not registered" error on first open.
 
 Blocking chan-workspace calls (`register_workspace`, `unregister_workspace`, `open_workspace`, `boot`, the feature setters) run via `tokio::task::spawn_blocking` so a slow initial scan never blocks the async executor. `remove_workspace` runs `unregister_workspace` in a bounded retry loop: `serve::stop` drops the host's handle synchronously, but a background indexer or in-flight request may hold the workspace's flock for a moment, surfacing as `WorkspaceAlreadyOpen` / `WorkspaceLocked` until it releases.
 
@@ -12,7 +12,7 @@ External `chan open` processes are still supported as explicit remote attachment
 
 ### No bundled binary
 
-There is no `chan-bin` Makefile step, no `bundle.macOS.files` entry, and no `bundle.externalBin`. `make dev` / `make build` / `make app-signed` / `make app-notarized` depend only on the `web` bundle (the rust-embed input) and the tauri CLI. The single codesigned + notarized artifact is the chan-desktop `.app` itself; Tauri's signing pass covers it directly, with no second binary to sign. This removed the v0.11.2-era universal2 / externalBin machinery entirely; multi-arch distribution is now purely a matter of how the `.app` itself is built and merged.
+There is no `chan-bin` Makefile step, no `bundle.macOS.files` entry, and no `bundle.externalBin`. `make dev` / `make build` depend only on the web bundles (the rust-embed inputs) and the tauri CLI; `app-signed` and `app-notarized` additionally check their signing and notarization prerequisites. Tauri's signing pass codesigns the `.app` directly, with no second binary to sign; the notarize recipe then signs, notarizes, and staples the `.dmg`, which is the artifact CI validates (`stapler validate` + `spctl`). The `.app` inside the updater payload is signed but unstapled. Multi-arch distribution is purely a matter of how the `.app` itself is built and merged. The desktop Makefile also carries `dmg-layout-proof` and the secret-free `ci-linux` / `ci-macos` / `ci-windows` package proofs.
 
 ## Debugging
 
@@ -42,7 +42,7 @@ The chan-desktop `.app` (and the bundled `.dmg`) are codesigned with an Apple De
 }
 ```
 
-The identity NAME is a public identifier (the same string that `security find-identity -v -p codesigning` prints), safe to land in the repo. The matching private key + cert blob stay outside the repo entirely: in the developer's macOS Keychain for local builds; in `secrets.APPLE_CERTIFICATE_BASE64` + `secrets.APPLE_CERTIFICATE_PASSWORD` for CI (imported into a temp keychain by `apple-actions/import-codesign-certs@v3` in `release-desktop.yml`). See the [release signing notes](skills/release/SKILL.md); the full per-secret table is kept in the team's private, gitignored dev/ tree.
+The identity NAME is a public identifier (the same string that `security find-identity -v -p codesigning` prints), safe to land in the repo. The matching private key + cert blob stay outside the repo entirely: in the developer's macOS Keychain for local builds; in `secrets.APPLE_CERTIFICATE_BASE64` + `secrets.APPLE_CERTIFICATE_PASSWORD` for CI (imported into a temp keychain by `apple-actions/import-codesign-certs@v7` in `release.yml`'s desktop job, and likewise in the manual `release-desktop.yml` dry run). See the [release signing notes](skills/release/SKILL.md); the full per-secret table is kept in the team's private, gitignored dev/ tree.
 
 `bundle.macOS.providerShortName` is omitted because chan-desktop's Apple Developer account is Individual enrollment with a single ASC team. Populate the field only if the account is associated with multiple teams.
 
@@ -50,7 +50,7 @@ The identity NAME is a public identifier (the same string that `security find-id
 
 * **Local build with the cert in your Keychain**: `make app-signed` and `make app-notarized` codesign the .app with the named identity. Works out of the box.
 * **Local build WITHOUT the cert**: `make app-signed` / `make app-notarized` fail at the codesign step with `identity '...' not in keychain` (the `sign-prereqs` check in `desktop/Makefile`). That is expected; it just means you cannot produce a signed bundle on a workstation that does not hold the signing key. `make build` (the unsigned path) still works for general development.
-* **CI build**: `release-desktop.yml` imports the cert into a temp keychain via secrets, then runs `make app-notarized` with the env vars populated. Same identity, just supplied differently.
+* **CI build**: `release.yml` (job `macos-desktop-artifacts`, the tag-triggered release path) imports the cert into a temp keychain via secrets, then runs `make macos-chan-dmg-notarised` (the root-Makefile alias for the desktop `app-notarized` recipe) with the env vars populated. `release-desktop.yml` is the manual `workflow_dispatch` dry run of the same lane. Same identity, just supplied differently.
 
 ### Rotation (if the Developer ID identity ever changes)
 
@@ -72,36 +72,34 @@ Runbook: [`desktop/updater-bridge.md`](../desktop/updater-bridge.md).
 
 ### Bridge release required after key rotation
 
-The configured pubkey was rotated from the original DEV updater key to the production updater key on 2026-05-23. Existing installs that already trust the old DEV pubkey need a bridge release:
+When the updater pubkey rotates, existing installs still trust only the OLD pubkey and need a bridge release:
 
-1. Ship one bridge release that embeds the NEW production pubkey but signs the update bundle with the OLD DEV private key, so existing installs accept it.
-2. Sign every release after the bridge with the NEW production private key.
-3. If the OLD DEV private key is unavailable, existing installs cannot auto-update across this key rotation. Users need a manual DMG install for the first production-key release.
-4. Old installs that never picked up the bridge release will fail to verify NEW-key-signed bundles and stall on their last good version until the user manually reinstalls. Plan the bridge window for how long you're willing to support that tail. A Homebrew cask install recovers with `brew reinstall --cask fiorix/chan/chan-desktop`: the cask is `auto_updates` so brew never refreshes it on its own, but every GA rewrites it to the current DMG.
+1. Ship one bridge release that embeds the NEW pubkey but signs the update bundle with the OLD private key, so existing installs accept it.
+2. Sign every release after the bridge with the NEW private key.
+3. If the OLD private key is unavailable, existing installs cannot auto-update across the rotation. Users need a manual DMG install for the first new-key release.
+4. Old installs that never picked up the bridge release will fail to verify new-key-signed bundles and stall on their last good version until the user manually reinstalls. Plan the bridge window for how long you're willing to support that tail. A Homebrew cask install recovers with `brew reinstall --cask fiorix/chan/chan-desktop`: the cask is `auto_updates` so brew never refreshes it on its own, but every GA rewrites it to the current DMG.
 5. The signing identity used at build time is selected via `TAURI_SIGNING_PRIVATE_KEY` (key contents) or `TAURI_SIGNING_PRIVATE_KEY_PATH` (file path), with optional `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. CI should pull these from a secrets store, never from the repo.
 
 ### Manifest endpoint
 
 Client probes a single static manifest: `https://chan.app/dl/desktop/latest.json`
 
-That manifest is generated at release time by `web/packages/marketing/scripts/generate-release-metadata.mjs` (driven by `.github/workflows/release.yml`) and deployed to GitHub Pages alongside the rest of chan.app; there is no separate dynamic server for `/dl`. It is a Tauri static updater manifest: a top-level `version` plus a `platforms` map keyed by `{os}-{arch}` (e.g. `darwin-aarch64`), each carrying the minisign `signature` and the release-asset `url`. Tauri selects the entry for the running target and compares `version`.
-
-Note: an earlier templated endpoint (`/dl/desktop/{{target}}/{{current_version}}/latest.json`) never matched the flat path the generator writes, so desktop self-upgrade 404'd until v0.26.1 flattened the endpoint to the static manifest above.
+That manifest is generated at release time by `web/packages/marketing/scripts/generate-release-metadata.mjs` (driven by `.github/workflows/release.yml`) and deployed to GitHub Pages alongside the rest of chan.app; there is no separate dynamic server for `/dl`. It is a Tauri static updater manifest: a top-level `version` plus a `platforms` map keyed by `{os}-{arch}` (e.g. `darwin-aarch64`), each carrying the minisign `signature` and the release-asset `url`. Tauri selects the entry for the running target and compares `version`. The endpoint is a flat static path; do not reintroduce a `{{target}}/{{current_version}}` templated URL, which the generator does not serve.
 
 ## Release package version metadata
 
 Tauri bundle artifact names are derived from `src-tauri/tauri.conf.json`:
 
 * `productName` supplies the `Chan` prefix.
-* `version` supplies the semantic version in bundle names. For the next cut, generated desktop artifacts should start with `Chan_0.14.0.` or `Chan_0.14.0_`, depending on the bundle type and platform suffix.
+* `version` supplies the semantic version in bundle names: the local DMG builds as `Chan_${VERSION}_${ARCH}.dmg`, and `release.yml` normalizes the published assets to `Chan_${VERSION}.dmg` plus `Chan_${VERSION}_aarch64.app.tar.gz`.
 
-Before pushing a `chan-vX.Y.Z` desktop release tag, update `src-tauri/tauri.conf.json` `version` to `X.Y.Z`. The Rust package version for `chan-desktop` is inherited from the workspace, so the `.app` version and the workspace stay aligned when chan bumps the workspace for the release.
+The `tauri.conf.json` `version` is a manual pin in the release version-pin bump; `release.yml` asserts at tag time that the tag, the workspace Cargo version, this field, and the gateway version all match. The Rust package version for `chan-desktop` is inherited from the workspace, so the `.app` version and the workspace stay aligned once this field matches.
 
 ## Local notarization setup
 
 `make app-notarized` (in `desktop/Makefile`) accepts notarization credentials from two sources, in this precedence order:
 
-1. **Environment variables** (`APPLE_ID` + `APPLE_PASSWORD` + `APPLE_TEAM_ID`). What CI uses; populated from GitHub Actions Secrets in `.github/workflows/release-desktop.yml`. Wins when present, so a one-off `APPLE_ID=... APPLE_PASSWORD=... APPLE_TEAM_ID=... make app-notarized` shadows whatever Keychain profile is configured locally.
+1. **Environment variables** (`APPLE_ID` + `APPLE_PASSWORD` + `APPLE_TEAM_ID`). What CI uses; populated from GitHub Actions Secrets in `.github/workflows/release.yml` (and the manual `release-desktop.yml` dry run). Wins when present, so a one-off `APPLE_ID=... APPLE_PASSWORD=... APPLE_TEAM_ID=... make app-notarized` shadows whatever Keychain profile is configured locally.
 2. **`notarytool` Keychain profile** (Apple's blessed mechanism for local dev). One-time setup on the workstation:
 
    ```
@@ -127,10 +125,10 @@ Returns the keychain item attributes if the profile exists, exits non-zero other
 
 ### Why the Makefile splits build from notarize
 
-`cargo tauri build --bundles app,dmg` signs the `.app` (via `codesign`, driven by `APPLE_SIGNING_IDENTITY`) and packages the `.dmg`. Tauri's bundler can ALSO notarize as part of that single command, but only when `APPLE_ID` + `APPLE_PASSWORD` + `APPLE_TEAM_ID` are present in the env. `tauri-bundler` 2.x does not consume `notarytool` Keychain profiles directly. To support the local Keychain-profile path AND the CI env-var path under one recipe, the Makefile unsets the three notarize env vars during the `cargo tauri build` call (so tauri-bundler skips its own notarize step) and then runs `xcrun notarytool submit` + `xcrun stapler staple` itself with the appropriate flag set.
+`cargo tauri build --bundles app` signs the `.app` (via `codesign`, driven by `APPLE_SIGNING_IDENTITY`); the `.dmg` is packaged separately by `packaging/desktop/build-dmg.sh` (`dmgbuild`), because tauri-bundler's DMG step drives Finder over AppleScript and no-ops on headless CI. Tauri's bundler can ALSO notarize as part of the build command, but only when `APPLE_ID` + `APPLE_PASSWORD` + `APPLE_TEAM_ID` are present in the env. `tauri-bundler` 2.x does not consume `notarytool` Keychain profiles directly. To support the local Keychain-profile path AND the CI env-var path under one recipe, the Makefile unsets the three notarize env vars during the `cargo tauri build` call (so tauri-bundler skips its own notarize step) and then runs `xcrun notarytool submit` + `xcrun stapler staple` itself with the appropriate flag set.
 
 CI behaviour is identical to the prior path: the credentials reach notarytool the same way, just via a manual invocation instead of tauri-bundler's internal one.
 
 ### CI does not need the Keychain profile
 
-`release-desktop.yml` reads `APPLE_ID` + `APPLE_PASSWORD` + `APPLE_TEAM_ID` straight from `secrets.APPLE_*` (per the macOS signing procedure; see the release signing notes in `skills/release/SKILL.md`). The env-var path runs unchanged on the runner; no `xcrun notarytool store-credentials` step is needed in CI.
+The release workflows read `APPLE_ID` + `APPLE_PASSWORD` + `APPLE_TEAM_ID` straight from `secrets.APPLE_*` (per the macOS signing procedure; see the release signing notes in `skills/release/SKILL.md`). The env-var path runs unchanged on the runner; no `xcrun notarytool store-credentials` step is needed in CI.

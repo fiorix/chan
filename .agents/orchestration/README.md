@@ -1,33 +1,32 @@
 # Orchestration with chan
 
-`chan` is the local notes-and-editor host. It also doubles as an orchestration host: a single-machine surface where agents (claude, codex, gemini, opencode, custom) can be spawned into named terminal tabs (the Team Work flow) and reach chan's MCP server through `CHAN_MCP_*` terminal environment variables.
+chan doubles as a single-machine orchestration host: agents (claude, codex, gemini, opencode, custom) run in named terminal tabs and drive each other through `cs`, the chan-shell control client every chan-launched terminal can reach. The agent-facing manual is built in: `chan dump-skill --topic <topic>` covers pokes, surveys, teams, and the rest of the `cs` surface, and each provisioned team carries a generated `bootstrap.md` that is the authoritative process doc for that team. This directory documents the standing contracts; do not hand-duplicate the generated material.
 
-> Status note: the fsnotify-driven event-coordination layer (typed event files -> watcher -> `poke` dispatch -> notification bubbles) was REMOVED in the Team Work revamp, along with the event-reply / submit-mode endpoints and the Spawn-agents dialog. The notification bubble overlay is now a frontend-only static stub. Equivalent functionality is planned to return in a later phase; the event/watcher contracts below are retained as the blueprint for that returning implementation.
+## Transport and identity
 
-This SKILL documents the contracts external authors need to integrate with that surface.
+Every chan-launched terminal gets `$CHAN_CONTROL_SOCKET` (the control socket `cs` speaks a typed wire protocol over; server side in `crates/chan-server/src/control_socket.rs`, wire types in `crates/chan-shell/src/wire.rs`) and `$CHAN_WINDOW_ID`. Identity: `$CHAN_TAB_NAME` is the tab's handle (set whenever the spawn carries a name), `$CHAN_TAB_GROUP` is its broadcast group (always set), and a recognized `$CHAN_AGENT` value in a session's spawn env (claude, codex, gemini, kimi, opencode, or none/shell) overrides the submit-encoding sniff; an unrecognized value falls through to the command sniff so a typo cannot silently disable submit. `CHAN_MODE` is read by nothing. The SPA drives the same terminal surface over HTTP (`/api/terminals` create/restart/delete, broadcast, the roster, the PTY WebSocket) with the bearer token or `t=` query param; agents use `cs`.
 
-## Quick paths
+## Pokes
 
-* "I want my agent to send events to other agents routed through chan" → [atomic-writes.md](./atomic-writes.md).
-* "I want chan to spawn an agent CLI for me" → [spawn-protocol.md](./spawn-protocol.md).
-* "I want claude / codex / gemini / opencode launched in a chan terminal to use chan's MCP server" -> [mcp-discovery.md](./mcp-discovery.md).
+`cs terminal write [text] --tab-name=<h>|--tab-group=<g> [--submit=<agent>]` is the message primitive. Messages are capped at 4096 bytes, enqueue on the target's per-session FIFO (bound 100), and deliver when the target's PTY goes output-quiet; consecutive same-encoding submitted messages batch into one agent turn. `--submit` names the TARGET's agent so the right submit chord is appended; the server derives the target's real agent from its spawn command (and `CHAN_AGENT`) and corrects a mismatch in the ack. Without `--submit`, the text parks unsubmitted in the target's compose box. Discipline: a poke is a one-line pointer to an append-only section; write the section first, then poke it.
 
-## What chan provides
+## Surveys
 
-* **Loopback HTTP server** at `127.0.0.1` with bearer-token auth (per-launch token printed on stderr; appended to the URL when chan launches a browser).
-* **Per-terminal-session fsnotify watcher** - REMOVED in the Team Work revamp; planned to return. It ingested typed event files written into a user-chosen directory, dispatched `poke\n` to the matching agent's PTY, and surfaced events to the Team Work bubble overlay (now a frontend-only static stub).
-* **In-process MCP server** exposed over a Unix-domain socket; chan-launched terminals get `CHAN_MCP_*` env vars to find it.
-* **HTTP control channel** for programmatic terminal-tab creation, naming, command execution, restart, and close.
+`cs terminal survey --tab-name=<host> --title ... --option ... (up to 4)` raises a blocking overlay in the target's window and parks the CLI on the reply; the recipient picks an option, sends a follow-up marker (an "answer coming later", not an answer), or dismisses. Timeout exits 124. In a team, only the lead surveys the host; workers route decisions through the lead and never raise a TUI survey.
+
+## Teams
+
+`cs terminal team new|load` provisions a whole agent team into named tabs from one config, with the team's coordination artifacts living inside the workspace. See [teams.md](teams.md).
+
+## Observability
+
+`cs terminal list [--json]` reports each tab's name, derived agent, session id, placement, window status, and cwd (`--json` adds `queue_depth`). `cs terminal scrollback --tab-name=<h>` reads a peer's terminal output. Judge a lane by the artifacts it produces, not by `offline` status or queue depth alone (see [../playbook.md](../playbook.md)).
+
+## MCP discovery
+
+The in-process MCP server rides the same terminal env plumbing and is off by default; see [mcp-discovery.md](mcp-discovery.md).
 
 ## What chan does NOT provide
 
-* A networked event bus. Events live on the local filesystem; chan watches them.
+* A networked event bus or filesystem message protocol. Messages ride the control socket; durable coordination state is ordinary workspace files.
 * Cross-host orchestration. The tunnel relocates the HTTP transport, not the agent runtime.
-
-## Contracts in one sentence
-
-* Event files: write atomically (temp + same-dir rename).
-* Watcher: reads once on fsnotify; never multi-reads.
-* chan-server: never writes back into a directory it watches.
-
-Detail in the linked guides.

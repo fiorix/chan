@@ -132,16 +132,17 @@ The user / identity / email triangle has a known concurrent first-time-login rac
 
 ### Service-to-service bearers
 
-Four distinct bearers, all `openssl rand -hex 32`:
+All bearers are `openssl rand -hex 32`; the authoritative per-service roster is each crate's `packaging/*.env` file. The cross-service ones:
 
 - `PROFILE_AUTH_TOKEN`: identity-service -> profile-service service API. profile-service also accepts `PROFILE_ADMIN_TOKEN` here so a single-token deployment works; the middleware runs both checks unconditionally (`regular | admin`) so a wrong token never short-circuits on the first byte.
 - `IDENTITY_INTERNAL_TOKEN`: devserver-proxy -> identity-service `/internal/v1/tokens/validate`. Required; no fallback to `PROFILE_AUTH_TOKEN`. Rotating one does not rotate the other.
-- `DEVSERVER_ADMIN_TOKEN`: identity-service and profile-service -> devserver-control `/admin/v1/*` tree. profile uses it on admin block; identity uses it on revoke, delete, and dashboard reads. `DEVSERVER_ADMIN_TOKEN` is a generic cross-service name; the service it points at is devserver-control.
-- `DEVSERVER_PROXY_TOKEN`: devserver-proxy -> devserver-control `/v1/proxies/connect` control session. Distinct from `DEVSERVER_ADMIN_TOKEN` on purpose: a proxy node holds no operator-admin credential.
+- The devserver-control `/admin/v1/*` credentials are scoped per caller and rotation-capable (each accepts a list): `DEVSERVER_OPERATOR_ADMIN_TOKENS` for operator tooling, `DEVSERVER_IDENTITY_ADMIN_TOKENS`, and `DEVSERVER_PROFILE_ADMIN_TOKENS`. identity and profile present their own values via the singular `DEVSERVER_IDENTITY_ADMIN_TOKEN` / `DEVSERVER_PROFILE_ADMIN_TOKEN`, both required. devserver-control rejects a credential reused across scopes, so a leaked service-scope token never grants the operator tree.
+- `DEVSERVER_PROXY_TOKEN`: devserver-proxy -> devserver-control `/v1/proxies/connect` control session. Distinct from the admin credentials on purpose: a proxy node holds no operator-admin credential.
 
-Plus the asymmetric entry keys:
+Plus the asymmetric key pairs:
 
 - `DEVSERVER_ENTRY_SIGNING_KEY` (identity only) and `DEVSERVER_ENTRY_VERIFYING_KEYS` (each proxy, a 1-2 key ring for rotation): Ed25519 keys for the 30s entry credential identity mints and devserver-proxy consumes at `/_chan/entry`. The proxy holds no signing key; a compromised node cannot mint entries.
+- `DEVSERVER_ADMISSION_SIGNING_KEY` and `DEVSERVER_ADMISSION_VERIFYING_KEYS`: the parallel Ed25519 pair for devserver admission, spanning identity, devserver-control, and the proxy fleet; each crate's `design.md` records who signs and who verifies.
 
 ## Contributor Patterns
 
@@ -190,7 +191,7 @@ Per-crate rules that come up often when editing this code. For the full design r
 ## Documentation
 
 - **Workspace overview**: [`gateway/README.md`](../gateway/README.md)
-- **Domain glossary**: [`gateway/CONTEXT.md`](../gateway/CONTEXT.md) fixes the devserver / library / workspace / tenant language; the decision behind the per-devserver model is [`gateway/docs/adr/0001-devserver-is-the-sharing-unit.md`](../gateway/docs/adr/0001-devserver-is-the-sharing-unit.md), and the fleet control plane is [`gateway/docs/adr/0002-control-plane-owns-proxy-fleet-state.md`](../gateway/docs/adr/0002-control-plane-owns-proxy-fleet-state.md).
+- **Domain glossary**: [`gateway/CONTEXT.md`](../gateway/CONTEXT.md) fixes the devserver / library / workspace / tenant language; the decision behind the per-devserver model is [`gateway/docs/adr/0001-devserver-is-the-sharing-unit.md`](../gateway/docs/adr/0001-devserver-is-the-sharing-unit.md), the fleet control plane is [`gateway/docs/adr/0002-control-plane-owns-proxy-fleet-state.md`](../gateway/docs/adr/0002-control-plane-owns-proxy-fleet-state.md), and the shared control authority over tunnels and tenant sessions is [`gateway/docs/adr/0003-tunnels-and-tenant-sessions-share-control-authority.md`](../gateway/docs/adr/0003-tunnels-and-tenant-sessions-share-control-authority.md).
 - **Crate design references** (canonical; `README.md` next to each is the consumer-facing entry):
   - [`gateway/crates/profile/design.md`](../gateway/crates/profile/design.md): schema, two-tier auth, atomic upsert, devserver grants, block fan-out.
   - [`gateway/crates/identity/design.md`](../gateway/crates/identity/design.md): OAuth providers, PAT lifecycle, session contract, entry-token mint, dashboard.

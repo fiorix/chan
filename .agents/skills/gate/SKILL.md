@@ -12,7 +12,7 @@ when_to_use: >-
 
 # The pre-push gate
 
-`scripts/pre-push` is the git hook; it `cd`s to the repo root and execs `make pre-push`. Keeping the target list in the Makefile keeps the local hook and CI from drifting. Install the hook with `./scripts/install-hooks`.
+`scripts/pre-push` is the git hook; it `cd`s to the repo root and runs `make pre-push`, teeing the output to `target/pre-push.log` so a red gate stays diagnosable after the push. Keeping the target list in the Makefile keeps the local hook and CI from drifting. Install the hook with `./scripts/install-hooks`.
 
 ## What `make pre-push` runs
 
@@ -21,19 +21,24 @@ The gate runs, in order:
 1. `make shell-check` (shellcheck over every tracked shell script)
 2. `make workflow-check` (actionlint over `.github/workflows`, with shellcheck on the `run:` blocks)
 3. `make build-matrix-check` (the static contract tying native CI, distro, and container jobs to their real build targets)
-4. `cargo fmt --check` for the root workspace and `make gateway-fmt` for the separate gateway workspace
-5. `cargo clippy --all-targets -- -D warnings` (with `RUSTFLAGS=-D warnings`)
-6. `cargo test --all-targets` (with `RUSTFLAGS=-D warnings`)
-7. `cargo build --no-default-features` (with `RUSTFLAGS=-D warnings`)
-8. `make gateway-build` (the SEPARATE gateway Cargo workspace; builds its SPA then its release crates)
-9. `make web-check` (svelte-check + vitest + production build)
-10. `make web-marketing-check` (marketing site build + smokes)
-11. `make shortcuts-check`
-12. `make host-build-check` (release CLI build plus a foreground-devserver health smoke, followed by a native AppImage on Linux or an ad-hoc-signed `.app` on macOS)
+4. `make nix-sdme-contract-check` (the sdme Nix driver exercised against a stub, without starting a guest)
+5. `make web-lock-check` (strict `npm ci --dry-run`; rejects a desynced `web/package-lock.json` that every other web target's `npm install` would silently repair in place)
+6. `cargo fmt --check` for the root workspace and `make gateway-fmt` for the separate gateway workspace
+7. `cargo clippy --all-targets -- -D warnings` (with `RUSTFLAGS=-D warnings`)
+8. `cargo test --all-targets` (with `RUSTFLAGS=-D warnings`)
+9. `cargo build --no-default-features` (with `RUSTFLAGS=-D warnings`)
+10. `make gateway-lint` (clippy over the SEPARATE gateway workspace, warnings denied; the root clippy run does not reach it)
+11. `make gateway-build` (the SEPARATE gateway Cargo workspace; builds its SPA then its release crates)
+12. `make web-check` (svelte-check + vitest + production build)
+13. `make web-marketing-check` (marketing site build + smokes)
+14. `make shortcuts-check`
+15. `make host-build-check` (release CLI build plus a foreground-devserver health smoke, followed by a native AppImage on Linux or an ad-hoc-signed `.app` on macOS)
 
-Steps 1 and 2 lint `packaging/`, `scripts/`, and the workflows; step 3 additionally proves that every shipped build surface still has an automatic native, distro, or container build edge. `scripts/lint-static.sh` fetches both linters at a pinned version, each verified against a checksum, into `${XDG_CACHE_HOME:-~/.cache}/chan/lint-tools` (override with `CHAN_LINT_TOOLS_DIR`). The cache is deliberately outside `target/`, which the gate discipline wipes: a per-worktree cache under `target/` would mean a fresh download for every isolated or GA gate. Only a cold cache needs network. The severity and the exclude list, with the reason for each exclude, live in `.shellcheckrc`.
+Steps 1 and 2 lint `packaging/`, `scripts/`, and the workflows; step 3 additionally proves that every shipped build surface still has an automatic native, distro, or container build edge.
 
-`make pre-push` is host-native, not a cross-platform gate. The release gate runs on Linux, so it cannot see Windows or macOS breakage. `make windows-cross-check` deliberately remains outside `pre-push` and is a mandatory release-checklist step; it compiles and lints the CLI crate graph for Windows GNU but does not link or smoke a Windows binary. The mandatory `release.yml` dry run supplies the macOS compile. Neither release check changes the per-push gate.
+The sdme in step 4 is the project's systemd-nspawn container manager, a third-party tool (installed from sdme.io) that drives the disposable local builds: the containerized Nix recipes, `make windows-cross-check`, the COPR matrix builds, and the Linux desktop bundles. It is local-dev tooling; CI never uses it. The contract check runs only the driver script against a stub and never starts a container; the real containerized Nix build (`make nix-sdme-check`, the release-time hash-harvesting tool) is deliberately NOT part of `pre-push`. `scripts/lint-static.sh` fetches both linters at a pinned version, each verified against a checksum, into `${XDG_CACHE_HOME:-~/.cache}/chan/lint-tools` (override with `CHAN_LINT_TOOLS_DIR`). The cache is deliberately outside `target/`, which the gate discipline wipes: a per-worktree cache under `target/` would mean a fresh download for every isolated or GA gate. Only a cold cache needs network. The severity and the exclude list, with the reason for each exclude, live in `.shellcheckrc`.
+
+`make pre-push` is host-native, not a cross-platform gate. The release gate runs on Linux, so it cannot see Windows or macOS breakage. `make windows-cross-check` deliberately remains outside `pre-push` and is a mandatory release-checklist step; it compiles and lints the CLI crate graph for Windows GNU inside a disposable sdme container (so it needs sdme and an imported Ubuntu rootfs on the host) but does not link or smoke a Windows binary. The mandatory `release.yml` dry run supplies the macOS compile. Neither release check changes the per-push gate.
 
 The gateway is a separate Cargo workspace and is NOT a member of the root workspace. A `crates/`-scoped check misses it, plus the `chan-desktop` (`desktop/src-tauri`) construction sites. When a change touches a cross-workspace struct, build the whole repo, not just the default workspace.
 
