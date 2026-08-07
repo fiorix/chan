@@ -88,7 +88,13 @@ async fn proxy_extension_request(
     request: Request<Body>,
 ) -> Response {
     let Some(entry) = catalog.find(&id, &capability).cloned() else {
-        return StatusCode::NOT_FOUND.into_response();
+        // The frame requesting this is opaque-origin, so a bare 404 reaches it
+        // as a CORS violation and the real status never surfaces. Carry the
+        // same response policy a proxied reply gets, so a stale capability
+        // reads as the 404 it is.
+        let mut response = StatusCode::NOT_FOUND.into_response();
+        apply_extension_response_policy(response.headers_mut());
+        return response;
     };
 
     if let Some(response) = cors_preflight(request.method(), request.headers()) {
@@ -942,5 +948,43 @@ mod tests {
             .unwrap();
         let response = app.oneshot(request).await.expect("local POST");
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_capability_404s_with_the_opaque_frame_cors_headers() {
+        let (tenant, _shutdown_tx) = tenant();
+        let app = Router::new()
+            .route(
+                "/_chan/extensions/{id}/{capability}/{*path}",
+                any(proxy_extension),
+            )
+            .layer(Extension(tenant))
+            .layer(Extension(catalog()));
+
+        let stale = "f".repeat(64);
+        let request = Request::builder()
+            .uri(format!("/_chan/extensions/echo/{stale}/app.js"))
+            .header(header::ORIGIN, "null")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.expect("stale capability");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        // Without these the sandboxed frame reports the 404 as a CORS failure
+        // and the real status never reaches the console.
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .expect("ACAO on the 404"),
+            "null"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .expect("no-store on the 404"),
+            "private, no-store"
+        );
     }
 }
