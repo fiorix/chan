@@ -19,7 +19,7 @@ function gatewayNotice(over: Partial<Notice> = {}): Notice {
   return {
     id: "ntc-9f3a",
     kind: "error",
-    source: { type: "gateway", id: "gw-1a2b3c4d", label: "id.chan.app" },
+    source: { type: "gateway", id: "gw-1a2b3c4d", label: "gw.chan.app" },
     title: "Gateway unreachable",
     message: "the roster poll failed three times; keeping the last-known devservers",
     at: 1,
@@ -52,7 +52,7 @@ describe("NoticeBubbles", () => {
     const bubbles = [...target!.querySelectorAll(".notice-bubble")];
     expect(bubbles).toHaveLength(2);
     expect(bubbles[0].getAttribute("role")).toBe("alert");
-    expect(bubbles[0].textContent).toContain("gateway id.chan.app");
+    expect(bubbles[0].textContent).toContain("gateway gw.chan.app");
     expect(bubbles[0].textContent).toContain("Gateway unreachable");
     expect(bubbles[1].getAttribute("role")).toBe("status");
     expect(bubbles[1].textContent).toContain("devserver laptop");

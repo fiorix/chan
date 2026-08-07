@@ -7,12 +7,12 @@ The account, sign-in, and reverse-proxy surface for chan.app, a separate nested 
 ```mermaid
 flowchart TB
     subgraph browser["Browser"]
-        IDSPA["identity SPA · id.chan.app"]
+        IDSPA["identity SPA · gw.{domain}"]
         LAUNCH["web-launcher SPA<br/>(served through the proxy at the devserver root)"]
     end
 
     subgraph gw["chan gateway (nested Cargo workspace)"]
-        ID["identity-service: id.chan.app<br/>OAuth sessions | PATs | policy composites | token/session validate"]
+        ID["identity-service: gw.{domain}<br/>OAuth sessions | PATs | policy composites | token/session validate"]
         PROXY["devserver-proxy<br/>tunnels | tenant HTTP/WS | opaque tenant sessions"]
         CONTROL["devserver-control<br/>fleet directory | signed-cap admission | tunnel/session inventory and commands"]
         PROFILE["profile-service<br/>users | identities | grants | durable user/fleet policy | auth audit"]
@@ -33,7 +33,7 @@ flowchart TB
     PROXY <-->|snapshot + deltas · admission · kills| CONTROL
     ID -->|aggregate /admin/v1/*| CONTROL
     PROFILE -->|aggregate /admin/v1/*| CONTROL
-    DS ==>|tunnel register with PAT · devserver.chan.app/v1/tunnel| PROXY
+    DS ==>|"tunnel register with PAT · usr.{domain}/v1/tunnel"| PROXY
     PROXY ==>|gated tenant + root traffic over the tunnel| DS
     LAUNCH -->|/api/library/* via the proxy| PROXY
     ID --> COMMON
@@ -55,7 +55,7 @@ flowchart TB
 
 ## Gate and identity
 
-**devserver-proxy**: The gateway reverse-proxy service at `devserver.chan.app` (apex) and `*.devserver.chan.app` (wildcard), and the fleet data plane: many provisioned nodes can run it, each with a stable node id. Renamed from workspace-proxy. _Avoid_: workspace-proxy, tenant-proxy
+**devserver-proxy**: The gateway reverse-proxy service at `{proxy}.usr.{domain}` (node apex) and `*.{proxy}.usr.{domain}` (wildcard), and the fleet data plane: many provisioned nodes can run it, each with a stable node id. _Avoid_: workspace-proxy, tenant-proxy
 
 **devserver-control**: The singleton, database-free control plane. Owns the dynamic proxy directory, the aggregate tunnel view, fleet admission, and command routing; serves `/admin/v1/*` to identity, profile, and the admin CLI. Every proxy node holds one authenticated h2 control session to it. _Avoid_: controller-service, fleet-db
 

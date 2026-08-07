@@ -120,7 +120,7 @@ impl Write for TarChannelWriter {
 /// These are routing keys, not authorization claims. The socket that receives
 /// the frames asserts its own `window_id` the same way, so validating one end
 /// would manufacture an authority the other end does not have. The real
-/// boundary is the per-launch bearer that guards every route here.
+/// boundary is the workspace bearer that guards every route here.
 pub(crate) struct TransferTracking {
     pub window_id: String,
     pub transfer_id: String,

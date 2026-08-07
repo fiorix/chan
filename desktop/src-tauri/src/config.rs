@@ -155,7 +155,7 @@ pub struct Gateway {
     /// charset is pinned to `[A-Za-z0-9_-]`.
     pub id: String,
     /// The gateway's public identity origin, scheme included, no path
-    /// (`https://id.chan.app`). Normalized to an origin at add time.
+    /// (`https://gw.chan.app`). Normalized to an origin at add time.
     pub url: String,
     /// Optional user label for the gateway badge; empty falls back to the
     /// URL host.
@@ -2395,7 +2395,7 @@ mod tests {
     #[test]
     fn gateway_enabled_defaults_true() {
         // A hand-edited row without the field behaves like a fresh add.
-        let raw = r#"{ "id": "gw-00000000", "url": "https://id.chan.app" }"#;
+        let raw = r#"{ "id": "gw-00000000", "url": "https://gw.chan.app" }"#;
         let gw: Gateway = serde_json::from_str(raw).expect("gateway row");
         assert!(gw.enabled);
         assert!(gw.label.is_empty());
@@ -2405,7 +2405,7 @@ mod tests {
     fn migration_converts_legacy_rows_and_keeps_plain_ones() {
         let mut cfg = Config {
             devservers: vec![
-                legacy_gateway_row("ds1", "https://ID.chan.app/consent?x=1", "work"),
+                legacy_gateway_row("ds1", "https://GW.chan.app/consent?x=1", "work"),
                 plain_row("ds2", "http://box.example.com:8787"),
             ],
             ..Default::default()
@@ -2415,7 +2415,7 @@ mod tests {
         // lowercased, path/query dropped), label + added_at carried, enabled.
         assert_eq!(cfg.gateways.len(), 1);
         let gw = &cfg.gateways[0];
-        assert_eq!(gw.url, "https://id.chan.app");
+        assert_eq!(gw.url, "https://gw.chan.app");
         assert_eq!(gw.label, "work");
         assert_eq!(gw.added_at, 42);
         assert!(gw.enabled);
@@ -2431,8 +2431,8 @@ mod tests {
     fn migration_merges_same_origin_rows_and_existing_gateways() {
         let mut cfg = Config {
             devservers: vec![
-                legacy_gateway_row("ds1", "https://id.chan.app/a", ""),
-                legacy_gateway_row("ds2", "https://id.chan.app/b", "named"),
+                legacy_gateway_row("ds1", "https://gw.chan.app/a", ""),
+                legacy_gateway_row("ds2", "https://gw.chan.app/b", "named"),
                 legacy_gateway_row("ds3", "https://other.example", "elsewhere"),
             ],
             gateways: vec![Gateway {
@@ -2452,7 +2452,7 @@ mod tests {
         assert_eq!(cfg.gateways.len(), 2);
         assert_eq!(cfg.gateways[0].url, "https://other.example");
         assert_eq!(cfg.gateways[0].label, "elsewhere");
-        assert_eq!(cfg.gateways[1].url, "https://id.chan.app");
+        assert_eq!(cfg.gateways[1].url, "https://gw.chan.app");
         assert_eq!(cfg.gateways[1].label, "named");
         assert!(cfg.devservers.is_empty());
         assert_eq!(outcome.created.len(), 1);
@@ -2513,7 +2513,7 @@ mod tests {
         {
             let mut guard = store.lock().unwrap();
             let cfg = Config {
-                devservers: vec![legacy_gateway_row("ds1", "https://id.chan.app", "")],
+                devservers: vec![legacy_gateway_row("ds1", "https://gw.chan.app", "")],
                 ..Default::default()
             };
             guard.save(&cfg).unwrap();
@@ -2536,12 +2536,12 @@ mod tests {
         crate::devserver::GatewayDiscovery {
             kind: "chan-gateway".into(),
             api_version: 1,
-            identity_origin: "https://id.chan.app".into(),
-            desktop_authorize_url: "https://id.chan.app/desktop/authorize".into(),
-            desktop_entry_url: "https://id.chan.app/desktop/v1/devserver/entry".into(),
-            devserver_proxy_origin: "https://x.devserver.chan.app".into(),
+            identity_origin: "https://gw.chan.app".into(),
+            desktop_authorize_url: "https://gw.chan.app/desktop/authorize".into(),
+            desktop_entry_url: "https://gw.chan.app/desktop/v1/devserver/entry".into(),
+            devserver_proxy_origin: "https://usr.chan.app".into(),
             devserver_proxy_host_depth: 2,
-            roster_url: Some("https://id.chan.app/desktop/v1/devservers".into()),
+            roster_url: Some("https://gw.chan.app/desktop/v1/devservers".into()),
         }
     }
 
@@ -2562,7 +2562,7 @@ mod tests {
             label: label.to_string(),
             online: true,
             shared,
-            proxy_origin: Some("https://node.p1.devserver.chan.app".to_string()),
+            proxy_origin: Some("https://p1.usr.chan.app".to_string()),
         }
     }
 
@@ -2577,7 +2577,7 @@ mod tests {
                 devservers: vec![plain_row("ds1", "http://box.example.com:8787")],
                 gateways: vec![Gateway {
                     id: "gw-1a2b3c4d".to_string(),
-                    url: "https://id.chan.app".to_string(),
+                    url: "https://gw.chan.app".to_string(),
                     label: "work".to_string(),
                     enabled: true,
                     added_at: 1,
@@ -2618,14 +2618,14 @@ mod tests {
         let own = &rows[1];
         assert_eq!(own.id, format!("gw:1a2b3c4d:alice:{}", "a".repeat(64)));
         assert_eq!(own.gateway_id.as_deref(), Some("gw-1a2b3c4d"));
-        assert_eq!(own.gateway_url, "https://id.chan.app");
+        assert_eq!(own.gateway_url, "https://gw.chan.app");
         assert!(!own.shared);
         assert!(!own.native_trust_required);
         assert_eq!(own.label, "laptop");
         assert_eq!(own.status, DevserverStatus::Disconnected);
         assert!(!own.has_token);
         assert!(own.script.is_empty());
-        assert_eq!(own.host, "id.chan.app");
+        assert_eq!(own.host, "gw.chan.app");
 
         let shared = &rows[2];
         assert_eq!(shared.id, format!("gw:1a2b3c4d:bob:{}", "b".repeat(64)));
@@ -2693,7 +2693,7 @@ mod tests {
             let cfg = Config {
                 gateways: vec![Gateway {
                     id: "gw-1a2b3c4d".to_string(),
-                    url: "https://id.chan.app".to_string(),
+                    url: "https://gw.chan.app".to_string(),
                     label: String::new(),
                     enabled: true,
                     added_at: 1,
@@ -2738,7 +2738,7 @@ mod tests {
         conns.set(
             rows[0].id.clone(),
             crate::devserver::DevserverConn {
-                host: "x.devserver.chan.app".to_string(),
+                host: "alice--aaaaaaaaaaaa.p1.usr.chan.app".to_string(),
                 port: 443,
                 token: String::new(),
                 name: "laptop".to_string(),
@@ -2787,12 +2787,12 @@ mod tests {
             let cfg = Config {
                 devservers: vec![
                     plain_row("ds1", "https://gw.example.com/some/path"),
-                    plain_row("ds2", "https://id.chan.app"),
+                    plain_row("ds2", "https://gw.chan.app"),
                     plain_row("ds3", "not a url"),
                 ],
                 gateways: vec![Gateway {
                     id: "gw-11111111".to_string(),
-                    url: "https://id.chan.app".to_string(),
+                    url: "https://gw.chan.app".to_string(),
                     label: String::new(),
                     enabled: true,
                     added_at: 1,
@@ -2839,11 +2839,11 @@ mod tests {
         );
         let added = reg
             .add(GatewayInput {
-                url: "https://ID.chan.app/consent?pick=1".to_string(),
+                url: "https://GW.chan.app/consent?pick=1".to_string(),
                 label: Some("  work  ".to_string()),
             })
             .expect("add");
-        assert_eq!(added.url, "https://id.chan.app");
+        assert_eq!(added.url, "https://gw.chan.app");
         assert_eq!(added.label, "work");
         assert!(added.enabled);
         assert_eq!(added.status, GatewayStatus::Disconnected);
@@ -2857,7 +2857,7 @@ mod tests {
         // Same origin (different noise) is a dup.
         let err = reg
             .add(GatewayInput {
-                url: "https://id.chan.app/other".to_string(),
+                url: "https://gw.chan.app/other".to_string(),
                 label: None,
             })
             .expect_err("dup origin");
@@ -2865,7 +2865,7 @@ mod tests {
         // Non-http(s) is rejected.
         assert!(reg
             .add(GatewayInput {
-                url: "ftp://id.chan.app".to_string(),
+                url: "ftp://gw.chan.app".to_string(),
                 label: None,
             })
             .is_err());
@@ -2885,7 +2885,7 @@ mod tests {
         );
         let added = reg
             .add(GatewayInput {
-                url: "https://id.chan.app".to_string(),
+                url: "https://gw.chan.app".to_string(),
                 label: Some("work".to_string()),
             })
             .expect("add");
@@ -2895,14 +2895,14 @@ mod tests {
             .update(
                 &added.id,
                 GatewayInput {
-                    url: "https://id.chan.app".to_string(),
+                    url: "https://gw.chan.app".to_string(),
                     label: Some("  prod  ".to_string()),
                 },
             )
             .expect("update")
             .expect("row exists");
         assert_eq!(updated.id, added.id);
-        assert_eq!(updated.url, "https://id.chan.app");
+        assert_eq!(updated.url, "https://gw.chan.app");
         assert_eq!(updated.label, "prod");
         let cfg = store.lock().unwrap().get().unwrap();
         assert_eq!(cfg.gateways[0].label, "prod");
@@ -2918,7 +2918,7 @@ mod tests {
             )
             .expect("update")
             .expect("row exists");
-        assert_eq!(cleared.url, "https://id.chan.app");
+        assert_eq!(cleared.url, "https://gw.chan.app");
         assert_eq!(cleared.label, "");
         // A different origin is refused: the URL is identity (remove + re-add
         // is the origin-change path) and the stored row stays untouched.
@@ -2933,14 +2933,14 @@ mod tests {
             .expect_err("url change refused");
         assert!(err.contains("immutable"), "{err}");
         let cfg = store.lock().unwrap().get().unwrap();
-        assert_eq!(cfg.gateways[0].url, "https://id.chan.app");
+        assert_eq!(cfg.gateways[0].url, "https://gw.chan.app");
         assert_eq!(cfg.gateways[0].label, "");
         // Same origin with URL noise still counts as a match (normalized).
         assert!(reg
             .update(
                 &added.id,
                 GatewayInput {
-                    url: "https://ID.chan.app/consent?pick=1".to_string(),
+                    url: "https://GW.chan.app/consent?pick=1".to_string(),
                     label: Some("noisy".to_string()),
                 },
             )
@@ -2983,7 +2983,7 @@ mod tests {
         assert!(removed_ids.lock().unwrap().is_empty());
         let added = reg
             .add(GatewayInput {
-                url: "https://id.chan.app".to_string(),
+                url: "https://gw.chan.app".to_string(),
                 label: None,
             })
             .expect("add");

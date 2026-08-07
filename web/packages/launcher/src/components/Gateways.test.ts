@@ -33,7 +33,7 @@ function settle(): Promise<void> {
 function gw(over: Partial<GatewayEntry> = {}): GatewayEntry {
   return {
     id: "gw-test0001",
-    url: "https://id.chan.app",
+    url: "https://gw.chan.app",
     label: "",
     enabled: true,
     status: "disconnected",
@@ -85,7 +85,7 @@ describe("Gateways screen", () => {
     const card = el.querySelector("section.gateway-card")!;
     expect(card).not.toBeNull();
     expect(card.textContent).toContain("prod");
-    expect(card.textContent).toContain("https://id.chan.app");
+    expect(card.textContent).toContain("https://gw.chan.app");
     expect(card.textContent).toContain("Not connected");
     expect(card.querySelector(".gw-glyph svg")).not.toBeNull();
     expect(card.querySelector('[aria-label="Connect gateway prod"]')).not.toBeNull();
@@ -95,7 +95,7 @@ describe("Gateways screen", () => {
   it("an unlabeled badge derives its name from the URL host", () => {
     library.gateways = [gw()];
     const el = render();
-    expect(el.querySelector('[aria-label="Connect gateway id.chan.app"]')).not.toBeNull();
+    expect(el.querySelector('[aria-label="Connect gateway gw.chan.app"]')).not.toBeNull();
   });
 
   it("a connected badge shows the live dot, the count chip, and Disconnect", () => {

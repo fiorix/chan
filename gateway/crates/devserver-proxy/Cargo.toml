@@ -35,8 +35,8 @@ h2 = { workspace = true }
 rand = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tokio-util = { workspace = true }
-# reqwest is the transport for the profile-service client only; the
-# upstream tunnel reverse-proxy uses hyper over yamux substreams.
+# reqwest is the transport for the identity-service token-validate client
+# only; the upstream tunnel reverse-proxy uses hyper over yamux substreams.
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -68,10 +68,10 @@ license-file = ["../../LICENSE", "0"]
 extended-description = """\
 Fleet data-plane service for the chan-gateway suite. The tunnel listener
 accepts controller-admitted registrations; wildcard
-*.devserver.chan.app hosts reverse-proxy tenant content into registered
+*.p{n}.usr.<domain> hosts reverse-proxy tenant content into registered
 chan-serve peers. An authenticated controller session supplies fleet
 admission and liveness state. No SPA or local admin API lives in this
-binary; the dashboard lives at id.chan.app."""
+binary; the dashboard lives at gw.<domain>."""
 section = "net"
 priority = "optional"
 depends = "$auto, adduser"

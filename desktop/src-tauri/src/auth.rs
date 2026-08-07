@@ -1,4 +1,4 @@
-//! id.chan.app sign-in flow + keychain-backed PAT storage, over a
+//! gw.{domain} sign-in flow + keychain-backed PAT storage, over a
 //! loopback redirect with PKCE.
 //!
 //! Flow:
@@ -9,7 +9,7 @@
 //!      process, and shell out to the user's default browser pointing at
 //!      `/desktop/authorize?...&redirect_uri=http://127.0.0.1:<port>/auth/callback\
 //!      &state=<nonce>&code_challenge=<challenge>&code_challenge_method=S256`.
-//!   2. id.chan.app handles OAuth (passkeys, autofill, all native to the
+//!   2. gw.{domain} handles OAuth (passkeys, autofill, all native to the
 //!      user's real browser), mints a PAT, stores it under a one-time
 //!      redemption `code` bound to the S256 challenge, and serves a
 //!      handoff page that navigates the browser back to the loopback
@@ -42,13 +42,13 @@
 //! a short server-side TTL, dead after the first redeem, and never logged
 //! (the listener has no request logging by construction).
 //!
-//! Keychain layout: service `chan-desktop`, account `id.chan.app`.
+//! Keychain layout: service `chan-desktop`, account `gw.chan.app`.
 //! Value is JSON `{id, secret, label, expires_at}` so sign-out can
 //! both clear locally and surface the token id for a future
 //! server-side revoke pass.
 //!
 //! v1 sign-out is local-only: we drop the keychain entry. Server-
-//! side revoke needs the id.chan.app session, which only the user's
+//! side revoke needs the gw.{domain} session, which only the user's
 //! browser has -- wiring that is a follow-up.
 
 use std::collections::HashMap;
@@ -72,17 +72,17 @@ use tokio::sync::watch;
 pub const AUTH_CHANGED: &str = "auth-changed";
 
 /// Event emitted when the callback fails (state mismatch, missing
-/// fields, id.chan.app returned `error=...`). Body is a human
+/// fields, the identity origin returned `error=...`). Body is a human
 /// string suitable for a banner.
 pub const AUTH_ERROR: &str = "auth-error";
 
 const KEYCHAIN_SERVICE: &str = "chan-desktop";
-const KEYCHAIN_ACCOUNT: &str = "id.chan.app";
-/// Origin serving `/desktop/authorize` for the hosted id.chan.app
+const KEYCHAIN_ACCOUNT: &str = "gw.chan.app";
+/// Origin serving `/desktop/authorize` for the hosted gw.chan.app
 /// flow; also what the loopback settle path redeems that flow's code
 /// against.
-const IDENTITY_ORIGIN: &str = "https://id.chan.app";
-const AUTHORIZE_URL: &str = "https://id.chan.app/desktop/authorize";
+const IDENTITY_ORIGIN: &str = "https://gw.chan.app";
+const AUTHORIZE_URL: &str = "https://gw.chan.app/desktop/authorize";
 /// Path the loopback listener answers and the `redirect_uri` names.
 const LOOPBACK_CALLBACK_PATH: &str = "/auth/callback";
 const SCOPES: &str = "tunnel";
@@ -311,7 +311,7 @@ pub fn auth_status() -> AuthStatus {
     }
 }
 
-/// Open id.chan.app/desktop/authorize in the user's default browser.
+/// Open gw.chan.app/desktop/authorize in the user's default browser.
 /// Short-circuits when already signed in.
 #[tauri::command]
 pub fn open_signin(app: AppHandle) -> Result<(), String> {
@@ -852,7 +852,7 @@ async fn redeem_inner(
         .map_err(|e| format!("decoding redeemed token: {e}"))
 }
 
-/// Map an id.chan.app `error=` reason token to the banner string. The
+/// Map an identity-origin `error=` reason token to the banner string. The
 /// tokens are the gateway's stable desktop-authorize vocabulary; the human
 /// strings live here on the desktop so gateway deploys never reword the UI.
 fn signin_error_message(reason: &str) -> String {
@@ -931,7 +931,7 @@ fn classify_request(head: &str, port: u16) -> RequestDecision {
 }
 
 /// Local sign-out. Clears the keychain entry. Server-side revoke is
-/// a follow-up -- it needs the id.chan.app session which only the
+/// a follow-up -- it needs the gw.{domain} session which only the
 /// user's browser has access to.
 #[tauri::command]
 pub fn signout(app: AppHandle) -> Result<AuthStatus, String> {
@@ -1021,7 +1021,7 @@ mod tests {
         let (shutdown, _rx) = watch::channel(false);
         Some(PendingAuth {
             state: state.to_string(),
-            account: "id.chan.app".to_string(),
+            account: "gw.chan.app".to_string(),
             identity_origin: "https://id.example".to_string(),
             resume_gateway_id: Some("gw-1".to_string()),
             code_verifier: "verifier-abc".to_string(),
@@ -1049,7 +1049,7 @@ mod tests {
                     "verifier comes from the slot"
                 );
                 assert_eq!(identity_origin, "https://id.example");
-                assert_eq!(account, "id.chan.app");
+                assert_eq!(account, "gw.chan.app");
                 assert_eq!(resume_gateway_id.as_deref(), Some("gw-1"));
             }
             other => panic!("expected Redeem, got {other:?}"),

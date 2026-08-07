@@ -1,7 +1,7 @@
 //! Tunnel listener: accepts h2c POSTs from `chan devserver` clients
 //! and registers them in the shared `Registry`.
 //!
-//! nginx terminates TLS for `devserver.chan.app` and `grpc_pass`es
+//! nginx terminates TLS for `usr.{domain}` and `grpc_pass`es
 //! `/v1/tunnel` as cleartext h2 (h2c) to this listener; everything
 //! else on the apex hits the axum HTTP listener. We run `h2::server`
 //! directly on the TCP socket; using axum/hyper here would force us

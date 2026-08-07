@@ -349,7 +349,7 @@ mod tests {
             sample_uuid(),
             sample_uuid(),
             "blog",
-            "alice.devserver.chan.app",
+            "alice--0123456789ab.p1.usr.chan.app",
             "p1",
             "/blog/",
         )
@@ -358,14 +358,14 @@ mod tests {
             &ring,
             &t,
             "p1",
-            "alice.devserver.chan.app",
+            "alice--0123456789ab.p1.usr.chan.app",
             "blog",
             sample_uuid(),
         )
         .unwrap();
         assert_eq!(c.sub, sample_uuid());
         assert_eq!(c.drv, "blog");
-        assert_eq!(c.aud, "alice.devserver.chan.app");
+        assert_eq!(c.aud, "alice--0123456789ab.p1.usr.chan.app");
         assert_eq!(c.typ, "entry");
         assert_eq!(c.iss, "chan-gateway-identity");
         assert_eq!(c.owner_user_id, sample_uuid());
@@ -382,7 +382,7 @@ mod tests {
             sample_uuid(),
             sample_uuid(),
             "blog",
-            "alice.devserver.chan.app",
+            "alice--0123456789ab.p1.usr.chan.app",
             "p1",
             "/blog/",
         )
@@ -391,7 +391,7 @@ mod tests {
             &ring,
             &t,
             "p1",
-            "bob.devserver.chan.app",
+            "bob--0123456789ab.p1.usr.chan.app",
             "blog",
             sample_uuid(),
         )
@@ -407,7 +407,7 @@ mod tests {
             sample_uuid(),
             sample_uuid(),
             "blog",
-            "alice.devserver.chan.app",
+            "alice--0123456789ab.p1.usr.chan.app",
             "p1",
             "/blog/",
         )
@@ -419,7 +419,7 @@ mod tests {
             &ring,
             &t,
             "p1",
-            "alice.devserver.chan.app",
+            "alice--0123456789ab.p1.usr.chan.app",
             "blog",
             sample_uuid(),
         )
@@ -437,9 +437,9 @@ mod tests {
         // with no signature trailing.
         let header = base64_url(r#"{"alg":"none","typ":"JWT"}"#);
         let payload = base64_url(
-            r#"{"iss":"id.chan.app","sub":"11111111-1111-4111-8111-111111111111",
+            r#"{"iss":"gw.chan.app","sub":"11111111-1111-4111-8111-111111111111",
                 "owner_user_id":"11111111-1111-4111-8111-111111111111",
-                "drv":"blog","aud":"alice.devserver.chan.app","typ":"entry",
+                "drv":"blog","aud":"alice--0123456789ab.p1.usr.chan.app","typ":"entry",
                 "iat":0,"exp":9999999999}"#,
         );
         let token = format!("{header}.{payload}.");
@@ -448,7 +448,7 @@ mod tests {
             &ring,
             &token,
             "p1",
-            "alice.devserver.chan.app",
+            "alice--0123456789ab.p1.usr.chan.app",
             "blog",
             sample_uuid(),
         )

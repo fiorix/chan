@@ -1,10 +1,10 @@
 # identity-service
 
-Public-facing OAuth2 sign-in service for id.chan.app. Runs the GitHub / Google / GitLab auth-code flow with PKCE, holds the host-only `__Host-id_session` cookie, and serves a Svelte SPA where users manage their profile, personal access tokens (PATs), and devservers (sharing). It mints the short-lived devserver-gate entry token that hands a user off to the devserver proxy.
+Public-facing OAuth2 sign-in service for `gw.{domain}`. Runs the GitHub / Google / GitLab auth-code flow with PKCE, holds the host-only `__Host-id_session` cookie, and serves a Svelte SPA where users manage their profile, personal access tokens (PATs), and devservers (sharing). It mints the short-lived devserver-gate entry token that hands a user off to the devserver proxy.
 
 ## Role in the system
 
-First public touch-point of chan-gateway. After a successful OAuth flow the browser holds the `__Host-id_session` cookie, which is host-only on id.chan.app and is NOT shared with the devserver proxy. To open a workspace, identity mints a short-lived devserver-gate entry credential and returns a no-store handoff page that POSTs it in the body to the exact proxy origin. The proxy verifies and consumes it, then mints its own opaque host-scoped cookie and redirects to the signed clean path. That split is the load-bearing piece of cross-tenant isolation: no `.chan.app`-scoped cookie exists and no entry secret enters browser history or referrers.
+First public touch-point of chan-gateway. After a successful OAuth flow the browser holds the `__Host-id_session` cookie, which is host-only on `gw.{domain}` and is NOT shared with the devserver proxy. To open a workspace, identity mints a short-lived devserver-gate entry credential and returns a no-store handoff page that POSTs it in the body to the exact proxy origin. The proxy verifies and consumes it, then mints its own opaque host-scoped cookie and redirects to the signed clean path. That split is the load-bearing piece of cross-tenant isolation: no `.chan.app`-scoped cookie exists and no entry secret enters browser history or referrers.
 
 Identity-service owns:
 

@@ -1,5 +1,5 @@
-/* Shared palette + base element styles for id.chan.app and
-   devserver.chan.app SPAs. Imported once per app from main.ts so the
+/* Shared palette + base element styles for the gw.{domain} and
+   usr.{domain} SPAs. Imported once per app from main.ts so the
    two surfaces stay visually identical without duplicated rules.
    Default dark; [data-theme="light"] flips it. */
 

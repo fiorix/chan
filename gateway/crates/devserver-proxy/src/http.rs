@@ -115,7 +115,7 @@ async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
     };
 
     // Wildcard root `/`: an UNAUTHENTICATED bare-domain hit bounces to the
-    // dashboard front door (id.chan.app/workspaces in prod, configurable
+    // dashboard front door (gw.{domain}/workspaces in prod, configurable
     // via DASHBOARD_URL) -- devserver-proxy renders no UI of its own, and an
     // unauthenticated launcher can't call `/api/library/*` (it needs the
     // session cookie), so the dashboard is where you sign in and Open.

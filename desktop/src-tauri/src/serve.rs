@@ -3528,7 +3528,7 @@ mod tests {
         (
             "official exact-origin lib window",
             "lib-0a1b::w-1",
-            "https://alice--0a1b2c3d4e5f.devserver.chan.app",
+            "https://alice--0a1b2c3d4e5f.p1.usr.chan.app",
         ),
         (
             "custom exact-origin lib window",
@@ -3738,7 +3738,7 @@ mod tests {
     /// too. The origin mirrors ORIGIN_CLASSES' gateway class.
     fn runtime_capabilities() -> Vec<String> {
         [
-            "https://alice--0a1b2c3d4e5f.devserver.chan.app",
+            "https://alice--0a1b2c3d4e5f.p1.usr.chan.app",
             "https://ws1.proxy.gw-test.example",
         ]
         .into_iter()
@@ -3862,22 +3862,22 @@ mod tests {
         ));
         assert!(!remote_url_matches(
             "http://127.0.0.1:*",
-            "https://alice.devserver.chan.app"
+            "https://alice--0a1b2c3d4e5f.p1.usr.chan.app"
         ));
         assert!(remote_url_matches(
-            "https://alice--0a1b2c3d4e5f.devserver.chan.app",
-            "https://alice--0a1b2c3d4e5f.devserver.chan.app"
+            "https://alice--0a1b2c3d4e5f.p1.usr.chan.app",
+            "https://alice--0a1b2c3d4e5f.p1.usr.chan.app"
         ));
         assert!(!remote_url_matches(
-            "https://alice--0a1b2c3d4e5f.devserver.chan.app",
-            "https://bob--1a2b3c4d5e6f.devserver.chan.app"
+            "https://alice--0a1b2c3d4e5f.p1.usr.chan.app",
+            "https://bob--1a2b3c4d5e6f.p1.usr.chan.app"
         ));
         assert!(!remote_url_matches(
-            "https://alice--0a1b2c3d4e5f.devserver.chan.app",
-            "https://devserver.chan.app"
+            "https://alice--0a1b2c3d4e5f.p1.usr.chan.app",
+            "https://p1.usr.chan.app"
         ));
         assert!(!remote_url_matches(
-            "https://alice--0a1b2c3d4e5f.devserver.chan.app",
+            "https://alice--0a1b2c3d4e5f.p1.usr.chan.app",
             "https://evil.example.com"
         ));
     }

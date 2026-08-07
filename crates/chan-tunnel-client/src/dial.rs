@@ -8,7 +8,7 @@
 //! When the URL scheme is `http://` we skip TLS and run h2 in
 //! cleartext (h2c) directly over the TCP socket. The server side
 //! (chan-tunnel-server) is already h2c-only in production: nginx
-//! terminates TLS at devserver.chan.app and `grpc_pass`-es `/v1/tunnel`
+//! terminates TLS at `usr.{domain}` and `grpc_pass`-es `/v1/tunnel`
 //! as h2c into devserver-proxy's tunnel listener. The h2c branch exists
 //! so a local stack can dial the devserver-proxy h2c port without
 //! standing up a TLS terminator.

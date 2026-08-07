@@ -41,8 +41,8 @@ use devserver_proxy::identity_validator::CapturingValidator;
 use devserver_proxy::registry::Registry;
 use devserver_proxy::session_store::SessionStore;
 
-const APEX_HOST: &str = "devserver.chan.app";
-const WILDCARD_SUFFIX: &str = ".devserver.chan.app";
+const APEX_HOST: &str = "p1.usr.chan.app";
+const WILDCARD_SUFFIX: &str = ".p1.usr.chan.app";
 const TEST_IDENTITY_ORIGIN: &str = "https://gw.chan.app";
 const TEST_DASHBOARD_URL: &str = "https://gw.chan.app/workspaces";
 
@@ -174,7 +174,7 @@ impl TestApp {
             control_url: "http://127.0.0.1:7101/".parse().unwrap(),
             proxy_token: "unused-control-token".into(),
             proxy_id: ProxyId::parse("p1").unwrap(),
-            proxy_base_url: CanonicalOrigin::parse("https://p1.devserver.chan.app").unwrap(),
+            proxy_base_url: CanonicalOrigin::parse("https://p1.usr.chan.app").unwrap(),
             max_response_bytes,
             max_request_bytes,
             request_timeout: None,
@@ -532,7 +532,7 @@ async fn apex_readyz_reflects_control_readiness() {
         control_url: "http://127.0.0.1:7101/".parse().unwrap(),
         proxy_token: "unused-control-token".into(),
         proxy_id: ProxyId::parse("p1").unwrap(),
-        proxy_base_url: CanonicalOrigin::parse("https://p1.devserver.chan.app").unwrap(),
+        proxy_base_url: CanonicalOrigin::parse("https://p1.usr.chan.app").unwrap(),
         max_response_bytes: None,
         max_request_bytes: None,
         request_timeout: None,
@@ -577,14 +577,7 @@ async fn unknown_host_is_404() {
 #[tokio::test]
 async fn wildcard_root_redirects_to_dashboard() {
     let app = TestApp::new().await;
-    let (s, hdrs, _) = send_host(
-        &app.router,
-        Method::GET,
-        "alice.devserver.chan.app",
-        "/",
-        &[],
-    )
-    .await;
+    let (s, hdrs, _) = send_host(&app.router, Method::GET, "alice.p1.usr.chan.app", "/", &[]).await;
     assert!(s.is_redirection(), "got {s}");
     let loc = hdrs.get(header::LOCATION).unwrap().to_str().unwrap();
     assert_eq!(loc, TEST_DASHBOARD_URL);
@@ -657,7 +650,7 @@ async fn entry_token_mints_session_cookie() {
     let set = hdrs.get(header::SET_COOKIE).unwrap().to_str().unwrap();
     assert!(set.starts_with("__Host-devserver_gate="), "got {set}");
     // Whole-host cookie: the grant is the whole devserver, so the cookie
-    // is no longer scoped to a per-workspace path.
+    // is not scoped to a per-workspace path.
     assert!(
         set.contains("Path=/;") || set.contains("Path=/ "),
         "got {set}"
@@ -987,9 +980,9 @@ async fn entry_token_for_wrong_host_is_404() {
     let uid = Uuid::new_v4();
     app.register_tunnel("alice", "blog", uid, Router::new())
         .await;
-    // Token minted with aud=bob.devserver.chan.app, presented on
-    // alice.devserver.chan.app.
-    let bad_token = mint(uid, "blog", "bob.devserver.chan.app");
+    // Token minted with aud=bob.p1.usr.chan.app, presented on
+    // alice.p1.usr.chan.app.
+    let bad_token = mint(uid, "blog", "bob.p1.usr.chan.app");
     let (s, _, _) = exchange_entry(&app.router, &host_for("alice"), &bad_token).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     app.cleanup().await;
@@ -1876,10 +1869,10 @@ async fn websocket_upgrade_requires_the_exact_tenant_origin() {
     for origin in [
         None,
         Some("null"),
-        Some("https://bob.devserver.chan.app"),
-        Some("http://alice.devserver.chan.app"),
-        Some("https://alice.devserver.chan.app:7002"),
-        Some("https://alice.devserver.chan.app/path"),
+        Some("https://bob.p1.usr.chan.app"),
+        Some("http://alice.p1.usr.chan.app"),
+        Some("https://alice.p1.usr.chan.app:7002"),
+        Some("https://alice.p1.usr.chan.app/path"),
     ] {
         let mut builder = Request::builder()
             .method(Method::GET)

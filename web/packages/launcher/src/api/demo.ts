@@ -137,7 +137,7 @@ function seed(): Seed {
     gateways: [
       {
         id: "gw-demo1a2b",
-        url: "https://id.chan.app",
+        url: "https://gw.chan.app",
         label: "chan.app",
         enabled: true,
         status: "connected",

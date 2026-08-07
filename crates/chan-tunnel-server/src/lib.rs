@@ -258,8 +258,9 @@ impl RegistrationAdmission for AllowAllAdmission {
 
 /// Public path prefix shape: `/{key}`, where `key` is the registration's
 /// second registry key (the token-resolved `devserver_id`). The fronting
-/// proxy uses wildcard subdomains (`{user}.devserver.chan.app`), so the
-/// username lives in the host header, not in the path. A devserver tenant
+/// proxy uses wildcard hosts (`{owner}--{disc}.{proxy}.usr.{domain}`), so
+/// the username lives in the host's `{owner}--{disc}` first label, not in
+/// the path. A devserver tenant
 /// already self-prefixes at its own public slug and the proxy forwards the
 /// full path, so the devserver client ignores this prefix; it is retained
 /// for the registration round-trip shape. No trailing slash.
@@ -315,9 +316,10 @@ where
     F: FnOnce(&Hello, &Validated) -> Result<(), ServerError>,
 {
     // Defense-in-depth: the validator has already authenticated the
-    // token, but the username it returns flows into the public host
-    // `{user}.devserver.chan.app`. If the upstream identity service ever
-    // emits a username with `/`, `..`, whitespace, or other
+    // token, but the username it returns flows into the `{owner}--{disc}`
+    // first label of the public host
+    // (`{owner}--{disc}.{proxy}.usr.{domain}`). If the upstream identity
+    // service ever emits a username with `/`, `..`, whitespace, or other
     // host-affecting bytes, the fronting proxy would mis-route or
     // leak it. Refuse here so the rest of the pipeline can
     // assume the username is URL-safe.

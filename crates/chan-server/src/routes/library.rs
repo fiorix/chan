@@ -11,10 +11,7 @@
 //!
 //! ONE bundle, installed on BOTH surfaces -- the headless devserver
 //! (`build_devserver_app`) and the desktop loopback (`embedded.rs`) -- over the
-//! shared [`WorkspaceHost`]. The window handlers used to live only in
-//! `build_devserver_app`, which the desktop loopback never got, so the desktop
-//! launcher would have been blind to its own windows; unifying them here fixes
-//! that and removes the double-registration.
+//! shared [`WorkspaceHost`].
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -461,13 +458,14 @@ async fn require_launcher_bearer(
 /// [`require_launcher_bearer`] (launcher-MANAGEMENT routes), the local-color
 /// routes set the surface's OWN cosmetic library colour from a pane's
 /// focus-border menu -- and a window is served with its per-TENANT token, not the
-/// launcher token (`desktop/serve.rs` `?t={record.token}`). A launcher-only gate
-/// therefore hard-401s every real window's GET/PUT/watch, so the colour never
-/// persists and a fresh window seeds blue. Tunnel-origin requests already
-/// passed the gateway auth boundary and carry no client credentials, so they are
-/// admitted here too. Accepts the same `Bearer` header and watch-WS `?t=` forms;
-/// comparisons are constant-time. A shared chan-server route, so this admits
-/// BOTH local and devserver windows in one place.
+/// launcher token (`desktop/src-tauri/src/serve.rs` `?t={record.token}`). A
+/// launcher-only gate therefore hard-401s every real window's GET/PUT/watch, so
+/// the colour never persists and a fresh window seeds blue. Tunnel-origin
+/// requests already passed the gateway auth boundary and carry no client
+/// credentials, so they are admitted here too. Accepts the same `Bearer` header
+/// and watch-WS `?t=` forms; comparisons are constant-time. A shared
+/// chan-server route, so this admits BOTH local and devserver windows in one
+/// place.
 async fn require_surface_bearer(
     launcher_token: LauncherBearer,
     host: Arc<WorkspaceHost>,
@@ -2802,8 +2800,9 @@ mod devserver_route_tests {
 
     #[tokio::test]
     async fn add_devserver_carries_no_color_but_round_trips_auto_hide_control() {
-        // The add/edit form no longer carries `color` (set from the focus-border
-        // flow), but it DOES carry `auto_hide_control`, echoed back.
+        // The add/edit form carries no `color` (that is set from the
+        // focus-border flow), but it DOES carry `auto_hide_control`,
+        // echoed back.
         let reg = Arc::new(FakeRegistry::default());
         let router = router_with(Some(reg), true);
         let (status, body) = request(
@@ -3153,7 +3152,7 @@ mod gateway_route_tests {
             FakeGatewayRegistry {
                 rows: Mutex::new(vec![GatewayEntry {
                     id: "gw-1a2b3c4d".into(),
-                    url: "https://id.chan.app".into(),
+                    url: "https://gw.chan.app".into(),
                     label: "work".into(),
                     enabled: true,
                     status: GatewayStatus::Disconnected,
@@ -3268,7 +3267,7 @@ mod gateway_route_tests {
         let (status, body) = request(&router, "GET", "/api/library/gateways", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body[0]["id"], "gw-1a2b3c4d");
-        assert_eq!(body[0]["url"], "https://id.chan.app");
+        assert_eq!(body[0]["url"], "https://gw.chan.app");
         assert_eq!(body[0]["status"], "disconnected");
         assert_eq!(body[0]["devserver_count"], 0);
         assert_eq!(body[0]["last_error"], serde_json::Value::Null);
@@ -3281,7 +3280,7 @@ mod gateway_route_tests {
             &router,
             "POST",
             "/api/library/gateways",
-            Some(r#"{"url":"https://id.chan.app"}"#),
+            Some(r#"{"url":"https://gw.chan.app"}"#),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -3310,7 +3309,7 @@ mod gateway_route_tests {
             &router,
             "PUT",
             "/api/library/gateways/gw-1a2b3c4d",
-            Some(r#"{"url":"https://id.chan.app","label":"prod"}"#),
+            Some(r#"{"url":"https://gw.chan.app","label":"prod"}"#),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -3320,7 +3319,7 @@ mod gateway_route_tests {
             &router,
             "PUT",
             "/api/library/gateways/gw-ghost",
-            Some(r#"{"url":"https://id.chan.app","label":"prod"}"#),
+            Some(r#"{"url":"https://gw.chan.app","label":"prod"}"#),
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
@@ -3353,7 +3352,7 @@ mod gateway_route_tests {
             (
                 "PUT",
                 "/api/library/gateways/gw-1a2b3c4d",
-                Some(r#"{"url":"https://id.chan.app","label":"x"}"#),
+                Some(r#"{"url":"https://gw.chan.app","label":"x"}"#),
             ),
             ("DELETE", "/api/library/gateways/gw-1a2b3c4d", None),
         ] {

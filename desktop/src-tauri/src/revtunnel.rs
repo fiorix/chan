@@ -239,8 +239,8 @@ mod tests {
             token: String::new(),
             name: "alice".into(),
             gateway: Some(Box::new(crate::devserver::GatewayConn::new(
-                "https://id.chan.app".into(),
-                "https://id.chan.app/desktop/v1/devserver/entry".into(),
+                "https://gw.chan.app".into(),
+                "https://gw.chan.app/desktop/v1/devserver/entry".into(),
                 proxy_origin.into(),
                 "pat".into(),
             ))),
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn a_gateway_devserver_is_dialed_at_its_pinned_proxy_origin_over_wss() {
-        let conn = gateway_conn("https://alice--0123456789ab.p1.devserver.chan.app");
+        let conn = gateway_conn("https://alice--0123456789ab.p1.usr.chan.app");
         let cfg = gateway_client_config(
             &conn,
             "__Host-devserver_gate=g".into(),
@@ -281,7 +281,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             control_url(&cfg),
-            "wss://alice--0123456789ab.p1.devserver.chan.app\
+            "wss://alice--0123456789ab.p1.usr.chan.app\
              /api/library/tunnel/control?tunnel=t-1"
         );
         assert_eq!(cfg.cookie.as_deref(), Some("__Host-devserver_gate=g"));
@@ -290,7 +290,7 @@ mod tests {
         // anything else.
         assert_eq!(
             cfg.origin.as_deref(),
-            Some("https://alice--0123456789ab.p1.devserver.chan.app")
+            Some("https://alice--0123456789ab.p1.usr.chan.app")
         );
         // The devserver-level bearer stays on the machine's own connection
         // record: the gateway hop authenticates the browser session.

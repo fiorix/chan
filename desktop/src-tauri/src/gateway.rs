@@ -1249,12 +1249,12 @@ mod tests {
         let mut rt = new_runtime(GatewayDiscovery {
             kind: "chan-gateway".into(),
             api_version: 1,
-            identity_origin: "https://id.chan.app".into(),
-            desktop_authorize_url: "https://id.chan.app/desktop/authorize".into(),
-            desktop_entry_url: "https://id.chan.app/desktop/v1/devserver/entry".into(),
-            devserver_proxy_origin: "https://x.devserver.chan.app".into(),
+            identity_origin: "https://gw.chan.app".into(),
+            desktop_authorize_url: "https://gw.chan.app/desktop/authorize".into(),
+            desktop_entry_url: "https://gw.chan.app/desktop/v1/devserver/entry".into(),
+            devserver_proxy_origin: "https://usr.chan.app".into(),
             devserver_proxy_host_depth: 2,
-            roster_url: Some("https://id.chan.app/desktop/v1/devservers".into()),
+            roster_url: Some("https://gw.chan.app/desktop/v1/devservers".into()),
         });
         rt.roster = rows;
         rt.status = GatewayStatus::Connected;
@@ -1841,7 +1841,7 @@ mod tests {
                             "identity_origin": o,
                             "desktop_authorize_url": format!("{o}/desktop/authorize"),
                             "desktop_entry_url": format!("{o}/desktop/v1/devserver/entry"),
-                            "devserver_proxy_origin": "https://devserver.chan.app",
+                            "devserver_proxy_origin": "https://usr.chan.app",
                             "devserver_proxy_host_depth": 2,
                             "roster_url": format!("{o}/desktop/v1/devservers"),
                         }))
@@ -1860,7 +1860,7 @@ mod tests {
                             "devserver_id": "a1",
                             "label": "laptop",
                             "online": true,
-                            "proxy_origin": "https://alice--a1.p1.devserver.chan.app"
+                            "proxy_origin": "https://alice--a1.p1.usr.chan.app"
                         }]
                     }))
                 }),
@@ -1905,7 +1905,7 @@ mod tests {
                 identity_origin: origin.clone(),
                 desktop_authorize_url: format!("{origin}/desktop/authorize"),
                 desktop_entry_url: format!("{origin}/desktop/v1/devserver/entry"),
-                devserver_proxy_origin: "https://devserver.chan.app".into(),
+                devserver_proxy_origin: "https://usr.chan.app".into(),
                 devserver_proxy_host_depth: 2,
                 roster_url: Some(format!("{origin}/desktop/v1/devservers")),
             });

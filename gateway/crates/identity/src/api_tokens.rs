@@ -7,8 +7,9 @@
 //! never persisted.
 //!
 //! Scope is intentionally flat: a token authenticates a user. Workspace
-//! ownership is enforced at the URL layer (`chan.app/{username}/...`)
-//! by chan-tunnel, not via per-token bindings.
+//! ownership is enforced at the tenant host
+//! (`{owner}--{disc}.{proxy}.usr.{domain}`) by chan-tunnel, not via
+//! per-token bindings; the workspace is a path segment only.
 //!
 //! Every state change writes one row to `api_token_audit`. Actions:
 //! `created` (SPA mint), `created_via_desktop` (desktop-authorize

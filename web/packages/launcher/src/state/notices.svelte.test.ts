@@ -16,7 +16,7 @@ function notice(id: string, over: Partial<Notice> = {}): Notice {
   return {
     id,
     kind: "info",
-    source: { type: "gateway", id: "gw-1a2b3c4d", label: "id.chan.app" },
+    source: { type: "gateway", id: "gw-1a2b3c4d", label: "gw.chan.app" },
     title: "title",
     message: "message",
     at: 1,

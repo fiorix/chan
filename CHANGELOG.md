@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- **The gw/usr gateway naming is used everywhere.** Every remaining `id.chan.app` / `devserver.chan.app` reference in docs, package metadata, systemd unit descriptions, test fixtures, and provisioning text uses the identity origin `gw.{domain}` and the tunnel namespace `usr.{domain}`.
+- **The devserver connect log treats every gateway alike.** The CLI no longer special-cases the maintainer's tunnel terminator: the tunnel-connected line prints the identity-only form for every `--tunnel-url`, and no deployment host is compiled into the binary.
+- **The desktop keychain account follows the identity origin.** Sign-in tokens are stored under `gw.chan.app`; an existing install prompts for one fresh sign-in to re-mint its PAT.
+
 ## [v0.85.0] - 2026-08-06
 
 Large transfers are bounded by the server rather than by the browser: every transfer path now runs on a process-wide admission lane that never draws from the threads serving editor saves and terminal spawns, the 50 MiB compiled-in write limit is replaced by a validated configuration ceiling that also bounds terminal downloads, and a client past the queue bound is refused before its body is read. Terminal appearance settings reach standalone terminal windows, Hybrid Nav splits panes with the mouse, the file browser and inspector share one action source, chan-desktop opens library windows natively, and ghostty stops erasing the last columns it draws over.

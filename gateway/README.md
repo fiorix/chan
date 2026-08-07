@@ -1,20 +1,20 @@
 # chan-gateway
 
-The self-hostable server side of chan's tunnel: the identity, profile, devserver-control, and devserver-proxy services that sit behind `id.chan.app` and `devserver.chan.app`.
+The self-hostable server side of chan's tunnel: the identity, profile, devserver-control, and devserver-proxy services that sit behind `gw.{domain}` and `usr.{domain}`.
 
-A fleet of `chan devserver` instances dials in over the tunnel and this gateway reverse-proxies each one back out at `{user}.devserver.chan.app/{workspace}/*`, turning them into a portable, multi-device workspace service you run on your own infrastructure (your own "Google Drive / Docs" equivalent, with chan's editor on top).
+A fleet of `chan devserver` instances dials in over the tunnel and this gateway reverse-proxies each one back out at `{owner}--{disc}.{proxy}.usr.{domain}/{workspace}/*`, turning them into a portable, multi-device workspace service you run on your own infrastructure (your own "Google Drive / Docs" equivalent, with chan's editor on top).
 
-`chan devserver --tunnel-url` points at a gateway you stand up. `id.chan.app` and `devserver.chan.app` are the maintainer's own deployment of this code, which is experimental, ships with sign-in off by default, and is not a hosted product. Nobody can authenticate until an operator enrols them.
+`chan devserver --tunnel-url` points at a gateway you stand up. `gw.chan.app` and `usr.chan.app` are the maintainer's own deployment of this code, which is experimental, ships with sign-in off by default, and is not a hosted product. Nobody can authenticate until an operator enrols them.
 
 ## What's here
 
 Seven crates; see [`CONTEXT.md`](CONTEXT.md) for the topology and request-flow diagram.
 
 - `profile`: internal HTTP API over Postgres. Users, OAuth identities, devserver grants, feature flags, durable user/fleet devserver policy, and auth audit.
-- `identity`: id.chan.app. OAuth2 sign-in with PKCE, indexed account sessions, personal access tokens, policy enforcement, and composite account/fleet admin operations.
+- `identity`: `gw.{domain}`. OAuth2 sign-in with PKCE, indexed account sessions, personal access tokens, policy enforcement, and composite account/fleet admin operations.
 - `devserver-control`: singleton, database-free control plane. Owns the dynamic proxy directory, signed-cap admission, aggregate tunnel and tenant-session inventory, and command routing.
 - `devserver-control-proto`: control protocol frames, validated ids/origins, and shared tunnel/proxy view types.
-- `devserver-proxy`: devserver.chan.app. Terminates each `chan devserver`'s yamux tunnel and reverse-proxies it back out at `{user}.devserver.chan.app/{workspace}/*`, behind the always-on devserver-gate (an unauthenticated request 404s like an unknown workspace, so probes can't enumerate). Every registration is admitted by devserver-control before the client sees `HelloAck::Ok`.
+- `devserver-proxy`: `{proxy}.usr.{domain}`. Terminates each `chan devserver`'s yamux tunnel and reverse-proxies it back out at `{owner}--{disc}.{proxy}.usr.{domain}/{workspace}/*`, behind the always-on devserver-gate (an unauthenticated request 404s like an unknown workspace, so probes can't enumerate). Every registration is admitted by devserver-control before the client sees `HelloAck::Ok`.
 - `admin`: operator CLI against profile's and devserver-control's admin trees.
 - `gateway-common`: shared library (HTTP clients, devserver-gate JWT, token bucket, static files, validators).
 
@@ -22,7 +22,7 @@ Personal access tokens (PATs, `chan_pat_...`) are the only credential the chan C
 
 ## Layout
 
-identity's SPA (`@chan/profile`) and the shared chrome (`@chan/web-shared`) live in the `./web` npm workspace at the repo root, so id.chan.app and the editor read as the same product: Svelte 5 + Vite + TypeScript, dark default with the same CSS variable palette.
+identity's SPA (`@chan/profile`) and the shared chrome (`@chan/web-shared`) live in the `./web` npm workspace at the repo root, so `gw.{domain}` and the editor read as the same product: Svelte 5 + Vite + TypeScript, dark default with the same CSS variable palette.
 
 ## Dev
 

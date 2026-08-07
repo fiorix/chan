@@ -270,8 +270,8 @@ mod tests {
         .map(|body| body.deserialize::<String>().expect("string response"))
     }
 
-    const EXACT_ORIGIN: &str = "https://alice--0a1b2c3d4e5f.devserver.chan.app";
-    const GATEWAY_PAGE: &str = "https://alice--0a1b2c3d4e5f.devserver.chan.app/";
+    const EXACT_ORIGIN: &str = "https://alice--0a1b2c3d4e5f.p1.usr.chan.app";
+    const GATEWAY_PAGE: &str = "https://alice--0a1b2c3d4e5f.p1.usr.chan.app/";
     /// The label the window watcher actually builds: `native_label` is
     /// `{library_id}::{window_id}`, never a flat `lib-x`.
     const WATCHED_LABEL: &str = "lib-0a1b2c3d4e5f::w-7";
@@ -279,10 +279,10 @@ mod tests {
     /// the pinned proxy origin to `window_entry_path`, so the document sits
     /// under a tenant prefix, never at the origin root.
     const WATCHED_PAGE: &str =
-        "https://alice--0a1b2c3d4e5f.devserver.chan.app/api/notes-1a2b3c/index.html";
-    const SIBLING_PAGE: &str = "https://bob--1a2b3c4d5e6f.devserver.chan.app/";
-    const PROXY_APEX_PAGE: &str = "https://devserver.chan.app/";
-    const WRONG_PORT_PAGE: &str = "https://alice--0a1b2c3d4e5f.devserver.chan.app:444/";
+        "https://alice--0a1b2c3d4e5f.p1.usr.chan.app/api/notes-1a2b3c/index.html";
+    const SIBLING_PAGE: &str = "https://bob--1a2b3c4d5e6f.p1.usr.chan.app/";
+    const PROXY_APEX_PAGE: &str = "https://p1.usr.chan.app/";
+    const WRONG_PORT_PAGE: &str = "https://alice--0a1b2c3d4e5f.p1.usr.chan.app:444/";
     const OTHER_REMOTE_PAGE: &str = "https://ws1.unrelated.example/";
 
     fn production_json() -> String {
@@ -296,18 +296,18 @@ mod tests {
             vec![EXACT_ORIGIN.to_string()]
         );
         assert_eq!(
-            exact_origin_remote_urls("https://alice--0a1b2c3d4e5f.devserver.chan.app:443").unwrap(),
+            exact_origin_remote_urls("https://alice--0a1b2c3d4e5f.p1.usr.chan.app:443").unwrap(),
             vec![EXACT_ORIGIN.to_string()],
             "effective default ports canonicalize"
         );
         for invalid in [
             "ftp://x",
             "not a url",
-            "https://*.devserver.chan.app",
-            "https://user@alice.devserver.chan.app",
-            "https://alice.devserver.chan.app/path",
-            "https://alice.devserver.chan.app/?q=1",
-            "https://alice.devserver.chan.app/#fragment",
+            "https://*.p1.usr.chan.app",
+            "https://user@alice--0a1b2c3d4e5f.p1.usr.chan.app",
+            "https://alice--0a1b2c3d4e5f.p1.usr.chan.app/path",
+            "https://alice--0a1b2c3d4e5f.p1.usr.chan.app/?q=1",
+            "https://alice--0a1b2c3d4e5f.p1.usr.chan.app/#fragment",
         ] {
             assert!(exact_origin_remote_urls(invalid).is_err(), "{invalid}");
         }

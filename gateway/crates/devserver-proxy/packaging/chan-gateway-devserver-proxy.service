@@ -1,5 +1,5 @@
 [Unit]
-Description=chan-gateway devserver-proxy service (devserver.chan.app)
+Description=chan-gateway devserver-proxy service (usr.{domain} fleet data plane)
 Documentation=https://github.com/fiorix/chan/tree/main/gateway
 After=network-online.target postgresql.service chan-gateway-profile.service
 Wants=network-online.target chan-gateway-profile.service

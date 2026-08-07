@@ -79,7 +79,7 @@ ENV BIND_ADDR=0.0.0.0:7001
 EXPOSE 7001
 ENTRYPOINT ["chan-gateway-profile"]
 
-# ---- devserver-proxy (devserver.<domain>, :7002 + h2c tunnel :7100) -------
+# ---- devserver-proxy ({proxy}.usr.{domain}, :7002 + h2c tunnel :7100) -----
 FROM runtime-base AS devserver-proxy
 COPY --from=builder /src/gateway/target/release/devserver-proxy-service \
      /usr/local/bin/chan-gateway-devserver-proxy

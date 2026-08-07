@@ -1,5 +1,5 @@
 [Unit]
-Description=chan-gateway identity service (id.chan.app, OAuth2 sign-in)
+Description=chan-gateway identity service (gw.{domain}, OAuth2 sign-in)
 Documentation=https://github.com/fiorix/chan/tree/main/gateway
 After=network-online.target postgresql.service chan-gateway-migrate.service chan-gateway-profile.service
 Requires=chan-gateway-migrate.service

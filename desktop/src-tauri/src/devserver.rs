@@ -387,7 +387,7 @@ pub fn conn_base_origin(conn: &DevserverConn) -> String {
 
 /// Parse a stored devserver URL into the `(host, port)` the raw-tunnel dial
 /// uses. The port defaults from the scheme when the URL omits it (`https`→443,
-/// `http`→80), so `https://x.devserver.chan.app` resolves without an explicit
+/// `http`→80), so `https://p1.usr.chan.app` resolves without an explicit
 /// port. Bare `host:port` (no scheme) is rejected -- the launcher requires a
 /// `scheme://host` URL. Gateway discovery uses the original URL before this
 /// raw-origin fallback is used.
@@ -2170,27 +2170,27 @@ mod tests {
         GatewayDiscovery {
             kind: "chan-gateway".into(),
             api_version: 1,
-            identity_origin: "https://id.chan.app".into(),
-            desktop_authorize_url: "https://id.chan.app/desktop/authorize".into(),
-            desktop_entry_url: "https://id.chan.app/desktop/v1/devserver/entry".into(),
-            devserver_proxy_origin: "https://devserver.chan.app".into(),
+            identity_origin: "https://gw.chan.app".into(),
+            desktop_authorize_url: "https://gw.chan.app/desktop/authorize".into(),
+            desktop_entry_url: "https://gw.chan.app/desktop/v1/devserver/entry".into(),
+            devserver_proxy_origin: "https://usr.chan.app".into(),
             devserver_proxy_host_depth: 2,
-            roster_url: Some("https://id.chan.app/desktop/v1/devservers".into()),
+            roster_url: Some("https://gw.chan.app/desktop/v1/devservers".into()),
         }
     }
 
     #[test]
     fn gateway_discovery_accepts_same_origin_https() {
-        let d = validate_gateway_discovery("https://id.chan.app", valid_gateway_discovery())
+        let d = validate_gateway_discovery("https://gw.chan.app", valid_gateway_discovery())
             .expect("valid gateway discovery");
-        assert_eq!(d.identity_origin, "https://id.chan.app");
+        assert_eq!(d.identity_origin, "https://gw.chan.app");
     }
 
     #[test]
     fn gateway_discovery_rejects_cross_origin_identity() {
         let mut d = valid_gateway_discovery();
         d.identity_origin = "https://evil.example".into();
-        let err = validate_gateway_discovery("https://id.chan.app", d).unwrap_err();
+        let err = validate_gateway_discovery("https://gw.chan.app", d).unwrap_err();
         assert!(err.contains("cross-origin"), "{err}");
     }
 
@@ -2198,19 +2198,19 @@ mod tests {
     fn gateway_discovery_rejects_cross_origin_entry_url() {
         let mut d = valid_gateway_discovery();
         d.desktop_entry_url = "https://evil.example/desktop/v1/devserver/entry".into();
-        let err = validate_gateway_discovery("https://id.chan.app", d).unwrap_err();
+        let err = validate_gateway_discovery("https://gw.chan.app", d).unwrap_err();
         assert!(err.contains("cross-origin"), "{err}");
     }
 
     #[test]
     fn gateway_discovery_rejects_http_for_non_loopback() {
         let mut d = valid_gateway_discovery();
-        d.identity_origin = "http://id.chan.app".into();
-        d.desktop_authorize_url = "http://id.chan.app/desktop/authorize".into();
-        d.desktop_entry_url = "http://id.chan.app/desktop/v1/devserver/entry".into();
-        d.devserver_proxy_origin = "http://devserver.chan.app".into();
-        d.roster_url = Some("http://id.chan.app/desktop/v1/devservers".into());
-        let err = validate_gateway_discovery("http://id.chan.app", d).unwrap_err();
+        d.identity_origin = "http://gw.chan.app".into();
+        d.desktop_authorize_url = "http://gw.chan.app/desktop/authorize".into();
+        d.desktop_entry_url = "http://gw.chan.app/desktop/v1/devserver/entry".into();
+        d.devserver_proxy_origin = "http://usr.chan.app".into();
+        d.roster_url = Some("http://gw.chan.app/desktop/v1/devservers".into());
+        let err = validate_gateway_discovery("http://gw.chan.app", d).unwrap_err();
         assert!(err.contains("must use https"), "{err}");
     }
 
@@ -2279,15 +2279,14 @@ mod tests {
             owner_user_id: test_owner_id(),
             username: "alice".into(),
             devserver_id: "a".repeat(64),
-            proxy_origin: "https://alice--aaaaaaaaaaaa.p1.devserver.chan.app".into(),
-            entry_exchange_url: "https://alice--aaaaaaaaaaaa.p1.devserver.chan.app/_chan/entry"
-                .into(),
+            proxy_origin: "https://alice--aaaaaaaaaaaa.p1.usr.chan.app".into(),
+            entry_exchange_url: "https://alice--aaaaaaaaaaaa.p1.usr.chan.app/_chan/entry".into(),
             entry_credential: "sentinel-entry-credential".into(),
         };
         let gw = GatewayConn::new(
-            "https://id.chan.app".into(),
-            "https://id.chan.app/desktop/v1/devserver/entry".into(),
-            "https://alice--aaaaaaaaaaaa.p1.devserver.chan.app".into(),
+            "https://gw.chan.app".into(),
+            "https://gw.chan.app/desktop/v1/devserver/entry".into(),
+            "https://alice--aaaaaaaaaaaa.p1.usr.chan.app".into(),
             "sentinel-gateway-pat".into(),
         );
         *gw.session.lock().unwrap() = Some(GatewaySession {
@@ -2616,19 +2615,19 @@ mod tests {
         // the desktop reports "too old for account mode" instead of failing.
         let mut d = valid_gateway_discovery();
         d.roster_url = None;
-        validate_gateway_discovery("https://id.chan.app", d).expect("absent roster_url is valid");
+        validate_gateway_discovery("https://gw.chan.app", d).expect("absent roster_url is valid");
     }
 
     #[test]
     fn gateway_discovery_rejects_cross_origin_or_http_roster_url() {
         let mut d = valid_gateway_discovery();
         d.roster_url = Some("https://evil.example/desktop/v1/devservers".into());
-        let err = validate_gateway_discovery("https://id.chan.app", d).unwrap_err();
+        let err = validate_gateway_discovery("https://gw.chan.app", d).unwrap_err();
         assert!(err.contains("cross-origin"), "{err}");
 
         let mut d = valid_gateway_discovery();
-        d.roster_url = Some("http://id.chan.app/desktop/v1/devservers".into());
-        let err = validate_gateway_discovery("https://id.chan.app", d).unwrap_err();
+        d.roster_url = Some("http://gw.chan.app/desktop/v1/devservers".into());
+        let err = validate_gateway_discovery("https://gw.chan.app", d).unwrap_err();
         assert!(
             err.contains("cross-origin") || err.contains("must use https"),
             "{err}"
@@ -2946,14 +2945,14 @@ mod tests {
     #[tokio::test]
     async fn gateway_workspace_poll_row_does_not_mint_entry_url() {
         let conn = DevserverConn {
-            host: "alice.devserver.chan.app".into(),
+            host: "alice--aaaaaaaaaaaa.p1.usr.chan.app".into(),
             port: 443,
             token: String::new(),
             name: "alice".into(),
             gateway: Some(Box::new(GatewayConn::new(
-                "https://id.chan.app".into(),
+                "https://gw.chan.app".into(),
                 "http://127.0.0.1:9/desktop/v1/devserver/entry".into(),
-                "https://alice.devserver.chan.app".into(),
+                "https://alice--aaaaaaaaaaaa.p1.usr.chan.app".into(),
                 "pat".into(),
             ))),
         };
@@ -2973,7 +2972,10 @@ mod tests {
         )
         .await
         .expect("row conversion should not call desktop_entry_url");
-        assert_eq!(row.url, "https://alice.devserver.chan.app/notes/index.html");
+        assert_eq!(
+            row.url,
+            "https://alice--aaaaaaaaaaaa.p1.usr.chan.app/notes/index.html"
+        );
     }
 
     #[test]
@@ -3001,8 +3003,8 @@ mod tests {
                 )
             } else {
                 (
-                    "https://alice--aaaaaaaaaaaa.p1.devserver.chan.app".into(),
-                    "https://devserver.chan.app".into(),
+                    "https://alice--aaaaaaaaaaaa.p1.usr.chan.app".into(),
+                    "https://usr.chan.app".into(),
                 )
             };
         let mut gateway = GatewayConn::new(
@@ -3167,7 +3169,7 @@ mod tests {
 
     #[test]
     fn gateway_session_install_returns_with_a_fresh_session() {
-        let conn = gateway_test_conn("https://id.chan.app/desktop/v1/devserver/entry".into());
+        let conn = gateway_test_conn("https://gw.chan.app/desktop/v1/devserver/entry".into());
         let gw = conn.gateway.as_ref().unwrap();
         *gw.session.lock().unwrap() = Some(GatewaySession {
             gate: "gate-current".into(),
@@ -3327,7 +3329,7 @@ mod tests {
 
     #[tokio::test]
     async fn gateway_csrf_token_refuses_foreign_origins_and_non_library_labels() {
-        let conn = gateway_test_conn("https://id.chan.app/desktop/v1/devserver/entry".into());
+        let conn = gateway_test_conn("https://gw.chan.app/desktop/v1/devserver/entry".into());
         let gw = conn.gateway.as_ref().unwrap();
         *gw.session.lock().unwrap() = Some(GatewaySession {
             gate: "gate-current".into(),
@@ -3344,7 +3346,7 @@ mod tests {
             Ok("csrf-current")
         );
 
-        let foreign = url::Url::parse("https://bob--bbbbbbbbbbbb.p1.devserver.chan.app/").unwrap();
+        let foreign = url::Url::parse("https://bob--bbbbbbbbbbbb.p1.usr.chan.app/").unwrap();
         assert!(
             gateway_csrf_token_for_connection(&conn, "lib-1::w-1", &foreign)
                 .await

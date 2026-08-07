@@ -29,9 +29,9 @@ describe("liveApi gateway routes (frozen wire)", () => {
     const { calls } = stubFetch();
     await liveApi.listGateways();
     const { calls: post } = stubFetch(200, {});
-    await liveApi.addGateway({ url: "https://id.chan.app", label: "" });
+    await liveApi.addGateway({ url: "https://gw.chan.app", label: "" });
     const { calls: putCalls } = stubFetch(200, {});
-    await liveApi.updateGateway("gw-1a2b3c4d", { url: "https://id.chan.app", label: "prod" });
+    await liveApi.updateGateway("gw-1a2b3c4d", { url: "https://gw.chan.app", label: "prod" });
     const { calls: rest } = stubFetch(204);
     await liveApi.removeGateway("gw-1a2b3c4d");
     await liveApi.connectGateway("gw-1a2b3c4d");
@@ -41,11 +41,11 @@ describe("liveApi gateway routes (frozen wire)", () => {
     expect(calls[0][1].method).toBe("GET");
     expect(post[0][0]).toBe("/api/library/gateways");
     expect(post[0][1].method).toBe("POST");
-    expect(post[0][1].body).toBe(JSON.stringify({ url: "https://id.chan.app", label: "" }));
+    expect(post[0][1].body).toBe(JSON.stringify({ url: "https://gw.chan.app", label: "" }));
     expect(putCalls[0][0]).toBe("/api/library/gateways/gw-1a2b3c4d");
     expect(putCalls[0][1].method).toBe("PUT");
     expect(putCalls[0][1].body).toBe(
-      JSON.stringify({ url: "https://id.chan.app", label: "prod" }),
+      JSON.stringify({ url: "https://gw.chan.app", label: "prod" }),
     );
     expect(rest.map(([url, init]) => [url, init.method])).toEqual([
       ["/api/library/gateways/gw-1a2b3c4d", "DELETE"],
@@ -58,7 +58,7 @@ describe("liveApi gateway routes (frozen wire)", () => {
     // The Contract C sample: every key present, no extras consumed.
     const wire = {
       id: "gw-1a2b3c4d",
-      url: "https://id.chan.app",
+      url: "https://gw.chan.app",
       label: "",
       enabled: true,
       status: "disconnected",

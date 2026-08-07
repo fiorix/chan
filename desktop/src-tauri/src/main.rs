@@ -3931,8 +3931,8 @@ fn optional_content<T>(result: Result<T, arboard::Error>) -> Result<Option<T>, a
 /// its own lifetime. macOS's NSPasteboard is a server-side clipboard, so the
 /// handle's lifetime carries no meaning, and on Windows `Clipboard::new()` OPENS
 /// the OLE clipboard, which must be closed promptly or every other app is
-/// locked out of it. Errors stay `arboard::Error` so each command keeps mapping
-/// acquisition and operation failures together, exactly as before.
+/// locked out of it. Errors stay `arboard::Error` so each command maps
+/// acquisition and operation failures together.
 #[cfg(not(target_os = "linux"))]
 fn on_clipboard<T>(
     op: impl FnOnce(&mut arboard::Clipboard) -> Result<T, arboard::Error>,
@@ -3996,9 +3996,9 @@ fn with_cached_clipboard<C, T, E>(
 
 /// Process-wide serialization for the native clipboard off macOS: one clipboard
 /// operation at a time while holding this guard. The X11 selection dance and
-/// Windows' OLE clipboard both misbehave when two of them run at once, and the
-/// synchronous commands used to get that mutual exclusion for free from the
-/// single invoke thread.
+/// Windows' OLE clipboard both misbehave when two of them run at once, and
+/// async commands run concurrently, so the mutual exclusion must be explicit
+/// rather than inherited from a single invoke thread.
 #[cfg(not(target_os = "macos"))]
 fn clipboard_serial_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -8711,7 +8711,7 @@ mod tests {
                 identity_origin: origin.clone(),
                 desktop_authorize_url: format!("{origin}/desktop/authorize"),
                 desktop_entry_url: format!("{origin}/desktop/v1/devserver/entry"),
-                devserver_proxy_origin: "https://devserver.chan.app".into(),
+                devserver_proxy_origin: "https://usr.chan.app".into(),
                 devserver_proxy_host_depth: 2,
                 roster_url: Some(format!("{origin}/desktop/v1/devservers")),
             },

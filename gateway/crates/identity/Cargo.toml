@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "OAuth2 sign-in + session for id.chan.app. Calls profile-service over HTTP."
+description = "OAuth2 sign-in + session for the gateway identity origin gw.<domain>. Calls profile-service over HTTP."
 
 [[bin]]
 name = "identity-service"
@@ -63,10 +63,11 @@ copyright = "2026, fiorix <fiorix@gmail.com>"
 license-file = ["../../LICENSE", "0"]
 extended-description = """\
 Public-facing OAuth2 sign-in service for the chan-gateway suite.
-Runs the GitHub auth-code + PKCE flow, maintains Postgres-backed
-sessions, and serves an embedded Svelte SPA at id.chan.app where
-users manage their workspace URLs. Calls chan-gateway-profile over
-HTTP. Single static binary (frontend baked in via rust-embed)."""
+Runs the GitHub / Google / GitLab auth-code + PKCE flows, maintains
+Postgres-backed sessions, and serves an embedded Svelte SPA at
+gw.<domain> where users manage their workspace URLs. Calls
+chan-gateway-profile over HTTP. Single static binary (frontend baked
+in via rust-embed)."""
 section = "net"
 priority = "optional"
 depends = "$auto, adduser, postgresql-client"

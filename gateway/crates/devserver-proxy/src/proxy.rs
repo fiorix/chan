@@ -6,11 +6,10 @@
 //! the wildcard `Host` header by `http::dispatch` and handed in. A
 //! user can hold many live devservers; a disc host addresses one of
 //! them by id prefix, and a bare `{user}` host resolves through the
-//! gate credential's `drv` claim (single live devserver: the pre-disc
-//! behavior). The gate is per-DEVSERVER: the `{workspace}` path
-//! segment is tenant routing only, never a gate key. It is forwarded
-//! into the tunnel unchanged and the devserver routes the tenant
-//! internally.
+//! gate credential's `drv` claim (the single-live-devserver case).
+//! The gate is per-DEVSERVER: the `{workspace}` path segment is
+//! tenant routing only, never a gate key. It is forwarded into the
+//! tunnel unchanged and the devserver routes the tenant internally.
 //!
 //! Auth gate, in this order:
 //!
@@ -1850,7 +1849,7 @@ mod tests {
             proxy_token: String::new(),
             proxy_id: devserver_control_proto::ProxyId::parse("p1").unwrap(),
             proxy_base_url: devserver_control_proto::CanonicalOrigin::parse(
-                "https://p1.devserver.chan.app",
+                "https://p1.usr.chan.app",
             )
             .unwrap(),
             max_response_bytes: None,
@@ -2020,27 +2019,27 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::ORIGIN,
-            HeaderValue::from_static("https://alice.devserver.chan.app"),
+            HeaderValue::from_static("https://alice--0123456789ab.p1.usr.chan.app"),
         );
         assert!(websocket_origin_matches(
             &headers,
             "https",
-            "alice.devserver.chan.app"
+            "alice--0123456789ab.p1.usr.chan.app"
         ));
 
         for origin in [
             "null",
-            "http://alice.devserver.chan.app",
-            "https://bob.devserver.chan.app",
-            "https://alice.devserver.chan.app:7002",
-            "https://alice.devserver.chan.app/path",
-            "HTTPS://alice.devserver.chan.app",
+            "http://alice--0123456789ab.p1.usr.chan.app",
+            "https://bob--0123456789ab.p1.usr.chan.app",
+            "https://alice--0123456789ab.p1.usr.chan.app:7002",
+            "https://alice--0123456789ab.p1.usr.chan.app/path",
+            "HTTPS://alice--0123456789ab.p1.usr.chan.app",
         ] {
             headers.insert(header::ORIGIN, HeaderValue::from_str(origin).unwrap());
             assert!(!websocket_origin_matches(
                 &headers,
                 "https",
-                "alice.devserver.chan.app"
+                "alice--0123456789ab.p1.usr.chan.app"
             ));
         }
 
@@ -2048,20 +2047,20 @@ mod tests {
         assert!(!websocket_origin_matches(
             &headers,
             "https",
-            "alice.devserver.chan.app"
+            "alice--0123456789ab.p1.usr.chan.app"
         ));
         headers.append(
             header::ORIGIN,
-            HeaderValue::from_static("https://alice.devserver.chan.app"),
+            HeaderValue::from_static("https://alice--0123456789ab.p1.usr.chan.app"),
         );
         headers.append(
             header::ORIGIN,
-            HeaderValue::from_static("https://alice.devserver.chan.app"),
+            HeaderValue::from_static("https://alice--0123456789ab.p1.usr.chan.app"),
         );
         assert!(!websocket_origin_matches(
             &headers,
             "https",
-            "alice.devserver.chan.app"
+            "alice--0123456789ab.p1.usr.chan.app"
         ));
     }
 }

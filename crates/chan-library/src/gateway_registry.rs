@@ -137,7 +137,7 @@ mod tests {
         // key is present, `last_error` rides as null when clear.
         let entry = GatewayEntry {
             id: "gw-1a2b3c4d".into(),
-            url: "https://id.chan.app".into(),
+            url: "https://gw.chan.app".into(),
             label: String::new(),
             enabled: true,
             status: GatewayStatus::Disconnected,
@@ -147,7 +147,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&entry).unwrap(),
-            "{\"id\":\"gw-1a2b3c4d\",\"url\":\"https://id.chan.app\",\"label\":\"\",\
+            "{\"id\":\"gw-1a2b3c4d\",\"url\":\"https://gw.chan.app\",\"label\":\"\",\
              \"enabled\":true,\"status\":\"disconnected\",\"pending_signin\":false,\
              \"devserver_count\":3,\"last_error\":null}"
         );
@@ -174,12 +174,12 @@ mod tests {
     fn input_label_is_optional() {
         // The launcher's add form posts url-only when the label is untouched.
         let input: GatewayInput =
-            serde_json::from_str("{\"url\":\"https://id.chan.app\"}").unwrap();
-        assert_eq!(input.url, "https://id.chan.app");
+            serde_json::from_str("{\"url\":\"https://gw.chan.app\"}").unwrap();
+        assert_eq!(input.url, "https://gw.chan.app");
         assert_eq!(input.label, None);
         // An explicit empty label stays distinguishable from an absent one.
         let input: GatewayInput =
-            serde_json::from_str("{\"url\":\"https://id.chan.app\",\"label\":\"\"}").unwrap();
+            serde_json::from_str("{\"url\":\"https://gw.chan.app\",\"label\":\"\"}").unwrap();
         assert_eq!(input.label, Some(String::new()));
     }
 }

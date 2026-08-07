@@ -25,7 +25,7 @@ function rosterRow(over: Partial<DevserverEntry> = {}): DevserverEntry {
   return {
     id: ROSTER_ID,
     url: "",
-    host: "id.chan.app",
+    host: "gw.chan.app",
     port: 443,
     label: "laptop",
     script: "",
@@ -37,7 +37,7 @@ function rosterRow(over: Partial<DevserverEntry> = {}): DevserverEntry {
     os: "",
     pretty_name: null,
     gateway_id: "gw-1a2b3c4d",
-    gateway_url: "https://id.chan.app",
+    gateway_url: "https://gw.chan.app",
     shared: false,
     native_trust_required: false,
     ...over,
@@ -47,7 +47,7 @@ function rosterRow(over: Partial<DevserverEntry> = {}): DevserverEntry {
 function hubGateway(): GatewayEntry {
   return {
     id: "gw-1a2b3c4d",
-    url: "https://id.chan.app",
+    url: "https://gw.chan.app",
     label: "hub",
     enabled: true,
     status: "connected",
@@ -114,7 +114,7 @@ describe("gateway roster rows in the Computers list", () => {
     const card = [...el.querySelectorAll("section.machine")].find((m) =>
       m.textContent?.includes("laptop"),
     )!;
-    expect(card.textContent).toContain("via id.chan.app");
+    expect(card.textContent).toContain("via gw.chan.app");
   });
 
   it("keeps the live-connection controls on a roster row", () => {

@@ -193,8 +193,8 @@ standalone server.
 
 The standalone server binds 127.0.0.1:8787 by default (::1 with -6),
 prints "chan is ready:" and the tokened URL on stderr, and opens the
-system browser unless --no-browser. There is no TLS, only a per-launch
-bearer token, so a non-loopback --host serves your workspace in
+system browser unless --no-browser. There is no TLS, only a
+bearer-token gate, so a non-loopback --host serves your workspace in
 plaintext and prints a warning saying so.
 
 Without --here, chan open refuses a path inside a Git, Mercurial, or
@@ -503,7 +503,7 @@ enum Command {
         /// resident indefinitely.
         #[arg(long, value_parser = parse_idle_timeout, verbatim_doc_comment)]
         timeout: Option<Duration>,
-        /// Skip the per-launch bearer-token gate. Local dev only;
+        /// Skip the bearer-token gate. Local dev only;
         /// never expose a no-token server on a shared machine.
         #[arg(long, verbatim_doc_comment)]
         no_token: bool,
@@ -2802,8 +2802,7 @@ fn missing_workspace_path(cmd: &str, hint: &str) -> anyhow::Error {
 /// path. We don't pull a URL crate for the discriminator -- the desktop parses
 /// and validates the full URL when it dials. Requiring `://` with a non-empty
 /// scheme and authority keeps a Windows path (`C:\…`) or a bare `host:port`
-/// (no `//`) from misfiring as a URL -- mirroring §3's "reject bare host:port"
-/// so the path/URL split is unambiguous.
+/// (no `//`) from misfiring as a URL, so the path/URL split is unambiguous.
 fn looks_like_devserver_url(target: &str) -> bool {
     match target.split_once("://") {
         Some((scheme, rest)) => {
@@ -3410,7 +3409,7 @@ async fn cmd_devserver(
 }
 
 /// Warn when a devserver bind exposes a non-loopback interface: there is no TLS,
-/// only the per-launch bearer-token gate.
+/// only the persisted bearer-token gate.
 fn warn_non_loopback_bind(addr: SocketAddr) {
     if !addr.ip().is_loopback() {
         eprintln!(
@@ -6222,11 +6221,10 @@ fn cmd_index_status(path: Option<PathBuf>, json: bool) -> Result<()> {
         "bm25"
     };
     if json {
-        // Emit `reports_enabled` alongside `semantic_enabled` so chan-desktop's
-        // `get_workspace_features` IPC can read both flags from one CLI
-        // round-trip. Both come from the per-workspace dashboard config; this
-        // is a strict additive extension (existing JSON consumers ignore
-        // unknown fields).
+        // Emit `reports_enabled` alongside `semantic_enabled` so a desktop
+        // caller reads both flags from one CLI round-trip. Both come from the
+        // per-workspace dashboard config; this is a strict additive extension
+        // (existing JSON consumers ignore unknown fields).
         let body = serde_json::json!({
             "workspace": canonical_root.display().to_string(),
             "mode": mode,
@@ -8039,7 +8037,9 @@ mod tests {
         // scheme://host shapes are devserver URLs.
         assert!(looks_like_devserver_url("https://box.example.com:8787"));
         assert!(looks_like_devserver_url("http://127.0.0.1:8787"));
-        assert!(looks_like_devserver_url("https://alice.devserver.chan.app"));
+        assert!(looks_like_devserver_url(
+            "https://alice--1a2b3c4d5e6f.p1.usr.chan.app"
+        ));
         // Everything else is a local path: bare host:port (no `//`), a
         // relative or absolute path, `.`, a Windows drive path, and an empty
         // authority.
@@ -9931,8 +9931,8 @@ mod tests {
     /// `devserver`.
     #[test]
     fn generated_supervisors_start_the_chan_cli() {
-        // The Arch / deb / rpm layout, the one that used to persist
-        // `chan-desktop devserver`.
+        // The Arch / deb / rpm layout: `chan-desktop` at `/usr/bin` with a
+        // `chan` sibling.
         let exe = select_relaunchable_exe(&RelaunchCandidates {
             current_exe: Some(PathBuf::from("/usr/bin/chan-desktop")),
             sibling_chan: Some(PathBuf::from("/usr/bin/chan")),
@@ -10119,9 +10119,9 @@ mod tests {
     }
 
     #[test]
-    fn workspace_group_renames_list_and_remove() {
-        // The registry verbs live under `chan workspace` now, with
-        // `list` renamed to `ls` and `remove` to `rm`.
+    fn workspace_group_uses_ls_and_rm() {
+        // The registry verbs live under `chan workspace`, spelled `ls`
+        // and `rm`.
         let cli = Cli::try_parse_from(["chan", "workspace", "ls", "--json"]).unwrap();
         match cli.command {
             Command::Workspace {
@@ -10141,9 +10141,9 @@ mod tests {
 
     #[test]
     fn flat_workspace_subcommands_are_rejected() {
-        // Pre-release reorg: no back-compat aliases. The old flat forms
-        // (`chan add`, `chan list`, `chan index`, ...) must no longer parse
-        // as top-level commands now that they moved under `chan workspace`.
+        // No back-compat aliases: the flat forms (`chan add`, `chan list`,
+        // `chan index`, ...) must not parse as top-level commands. They
+        // live under `chan workspace`.
         for argv in [
             ["chan", "add"].as_slice(),
             ["chan", "list"].as_slice(),
@@ -10155,7 +10155,7 @@ mod tests {
         ] {
             assert!(
                 Cli::try_parse_from(argv).is_err(),
-                "flat `{}` should no longer parse as a top-level command",
+                "flat `{}` must not parse as a top-level command",
                 argv[1],
             );
         }
@@ -10614,7 +10614,7 @@ mod tests {
     fn devserver_systemd_unit_tunnel_carries_token_and_url() {
         let tunnel = SystemdTunnel {
             token: "chan_pat_abc123".to_string(),
-            url: "https://devserver.chan.app/v1/tunnel".to_string(),
+            url: "https://usr.chan.app/v1/tunnel".to_string(),
             pinned_bind: None,
             pinned_port: None,
             pinned_name: None,
@@ -10630,7 +10630,7 @@ mod tests {
         // (loopback, OS-assigned port), so no default can fossilize here.
         assert!(unit.contains(
             "ExecStart=/home/dev/.local/bin/chan devserver \
-             --tunnel-url=https://devserver.chan.app/v1/tunnel\n"
+             --tunnel-url=https://usr.chan.app/v1/tunnel\n"
         ));
         assert!(!unit.contains("--bind="));
         assert!(!unit.contains("--port="));
@@ -10648,7 +10648,7 @@ mod tests {
         // ExecStart, so the tunnel service binds exactly there.
         let tunnel = SystemdTunnel {
             token: "chan_pat_abc123".to_string(),
-            url: "https://devserver.chan.app/v1/tunnel".to_string(),
+            url: "https://usr.chan.app/v1/tunnel".to_string(),
             pinned_bind: Some("0.0.0.0".parse().unwrap()),
             pinned_port: Some(9000),
             pinned_name: None,
@@ -10661,13 +10661,13 @@ mod tests {
         );
         assert!(unit.contains(
             "ExecStart=/home/dev/.local/bin/chan devserver --bind=0.0.0.0 \
-             --port=9000 --tunnel-url=https://devserver.chan.app/v1/tunnel\n"
+             --port=9000 --tunnel-url=https://usr.chan.app/v1/tunnel\n"
         ));
         // Each field pins independently: a port-only pin keeps the bind
         // omitted (the service resolves the loopback default).
         let port_only = SystemdTunnel {
             token: "chan_pat_abc123".to_string(),
-            url: "https://devserver.chan.app/v1/tunnel".to_string(),
+            url: "https://usr.chan.app/v1/tunnel".to_string(),
             pinned_bind: None,
             pinned_port: Some(9000),
             pinned_name: None,
@@ -10680,7 +10680,7 @@ mod tests {
         );
         assert!(unit.contains(
             "ExecStart=/home/dev/.local/bin/chan devserver --port=9000 \
-             --tunnel-url=https://devserver.chan.app/v1/tunnel\n"
+             --tunnel-url=https://usr.chan.app/v1/tunnel\n"
         ));
         assert!(!unit.contains("--bind="));
     }
@@ -10891,7 +10891,7 @@ mod tests {
         // carry them raw.
         let tunnel = SystemdTunnel {
             token: "chan_pat_abc123".to_string(),
-            url: "https://devserver.chan.app/v1/tunnel".to_string(),
+            url: "https://usr.chan.app/v1/tunnel".to_string(),
             pinned_bind: None,
             pinned_port: None,
             pinned_name: Some("office \"box\"\\".to_string()),

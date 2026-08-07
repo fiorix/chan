@@ -222,7 +222,7 @@ fn devserver_terminals_dir() -> Option<PathBuf> {
 
 fn devserver_config_path() -> std::io::Result<PathBuf> {
     // Routed through the single chan-home authority (`config_dir`) so `CHAN_HOME`
-    // relocates it; `config_dir` is infallible, so this no longer errors.
+    // relocates it; `config_dir` is infallible, so this never errors.
     Ok(chan_workspace::paths::config_dir()
         .join("devserver")
         .join("config.json"))
@@ -1372,13 +1372,11 @@ impl DevserverState {
     /// Mount the per-library SHARED terminal tenant. `open_terminal_session`
     /// records its prefix in the host's `terminal_tenant_prefix`, which the window
     /// feed's `terminal_window_live` resolves a Terminal record's prefix+token
-    /// against. The desktop does this via `embedded.rs`; the devserver never did
-    /// (it only ever mounted per-LABEL terminals via the lower-level
-    /// `open_terminal_session_with_command`, which does NOT set the OnceLock), so
-    /// every devserver Terminal window carried an empty token and the desktop
-    /// watcher's `should_show` (which requires a non-empty token) hid it --
-    /// vanishing on every reconnect. `Some(dir)` persists each window's pane
-    /// layout. One shared tenant per library, so this is called once at startup.
+    /// against. The desktop does this via `embedded.rs`; the devserver must
+    /// too: a Terminal window with an empty token fails the desktop watcher's
+    /// `should_show` and vanishes on reconnect. `Some(dir)` persists each
+    /// window's pane layout. One shared tenant per library, so this is called
+    /// once at startup.
     async fn mount_shared_terminal_tenant(&self) -> Result<(), Error> {
         self.host
             .open_terminal_session(
@@ -1942,17 +1940,6 @@ fn start_registry_reload_watcher(
 /// the registry key `(user, name)` never collides across users.
 const DEVSERVER_TUNNEL_NAME: &str = "devserver";
 
-/// True iff the tunnel dial endpoint is the production `devserver.chan.app`
-/// terminator. On that path the devserver can name the public host shape
-/// (`{user}.devserver.chan.app`); anywhere else (a dev gateway, a staging
-/// host) the terminator owns the URL scheme, so the connect log prints
-/// identity only.
-fn is_production_tunnel_url(tunnel_url: &str) -> bool {
-    url::Url::parse(tunnel_url)
-        .map(|u| u.scheme() == "https" && u.host_str() == Some("devserver.chan.app"))
-        .unwrap_or(false)
-}
-
 /// Dial the gateway tunnel on a background task that races the reconnect loop
 /// against the shutdown signal. The devserver is headless, so the lifecycle
 /// drainer only logs connect / disconnect / dial-failure: no QR, no
@@ -1977,24 +1964,15 @@ fn spawn_devserver_tunnel(
                 return;
             }
         };
-        let production = is_production_tunnel_url(&tunnel_url);
         let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(8);
         let events_task = tokio::spawn(async move {
             while let Some(ev) = events_rx.recv().await {
                 match ev {
                     chan_tunnel_client::TunnelEvent::Connected(reg) => {
-                        if production {
-                            eprintln!(
-                                "chan devserver: tunnel connected; workspaces are published at \
-                                 https://{user}.devserver.chan.app/<workspace>/",
-                                user = reg.user,
-                            );
-                        } else {
-                            eprintln!(
-                                "chan devserver: tunnel connected as user {user}",
-                                user = reg.user,
-                            );
-                        }
+                        eprintln!(
+                            "chan devserver: tunnel connected as user {user}",
+                            user = reg.user,
+                        );
                     }
                     chan_tunnel_client::TunnelEvent::Disconnected { retry_in } => {
                         eprintln!(
@@ -2076,9 +2054,8 @@ fn build_devserver_app(
     // Serve the web-launcher SPA at the library root `/` plus the `/api/library/*`
     // data surface (windows; workspaces next) as the host's root fallback --
     // without it the root 404s, since `host_dispatch` only matches
-    // workspace-tenant prefixes. The `/api/library/windows*` routes used to live
-    // in `authed` above; they now live in the shared launcher bundle so the
-    // desktop loopback gets them too (the loopback never built this router).
+    // workspace-tenant prefixes. The `/api/library/windows*` routes live in
+    // the shared launcher bundle so the desktop loopback gets them too.
     //
     // Gate the loopback launcher API with the same persisted devserver bearer as
     // `/api/devserver/*`. The static SPA shell remains public so it can load
@@ -4331,7 +4308,8 @@ mod tests {
 
         // The library-owned overlay records the workspace registered-but-off (by
         // path, the prefix re-derived at restore). On restart, `run_devserver`
-        // reads the overlay and `track_off`s this row rather than re-mounting.
+        // reads the overlay and records this row via
+        // `WorkspaceRecord::prepared` rather than re-mounting.
         let rows = state
             .host
             .workspace_overlay()
@@ -4634,9 +4612,9 @@ mod tests {
 
     #[tokio::test]
     async fn stale_closed_record_can_be_turned_on_again() {
-        // A stale map record with `on:true` but no live host tenant used to make
-        // `set_workspace_on(..., true)` a no-op. The toggle must use the host's
-        // real mount state so a stale-off row remounts cleanly.
+        // A stale map record with `on:true` but no live host tenant must not
+        // make `set_workspace_on(..., true)` a no-op: the toggle uses the
+        // host's real mount state so a stale-off row remounts cleanly.
         let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let ws = tempfile::tempdir().expect("workspace");

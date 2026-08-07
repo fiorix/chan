@@ -26,12 +26,13 @@
 #
 #   --user NAME        Linux user to own the service   (env CHAN_DEVSERVER_USER,
 #                      default: devserver)
-#   --token TOKEN      chan_pat_* PAT from id.chan.app  (env CHAN_TUNNEL_TOKEN)
+#   --token TOKEN      chan_pat_* PAT from gw.chan.app  (env CHAN_TUNNEL_TOKEN)
 #   --tunnel-url URL   override the gateway endpoint     (env CHAN_TUNNEL_URL;
-#                      default: chan's built-in https://devserver.chan.app/v1/tunnel)
+#                      default: chan's built-in https://usr.chan.app/v1/tunnel)
 #
-# The published host is resolved backend-side from the token, so it is the
-# token owner's handle -- {handle}.devserver.chan.app -- independent of --user.
+# The published host is resolved backend-side from the token, so it is keyed by
+# the token owner's handle -- {handle}--{disc}.{proxy}.usr.chan.app --
+# independent of --user.
 
 set -euo pipefail
 
@@ -77,7 +78,7 @@ done
 # dialog fills the token if it is still unset, but only with a real terminal.
 if [ -z "$TOKEN" ] && [ -t 0 ] && command -v dialog >/dev/null 2>&1; then
   TOKEN="$(dialog --stdout --insecure --passwordbox \
-    "chan_pat_ tunnel token for user '$USER_NAME' (from id.chan.app):" 8 64)" \
+    "chan_pat_ tunnel token for user '$USER_NAME' (from gw.chan.app):" 8 64)" \
     || die "cancelled"
   clear 2>/dev/null || true
 fi
@@ -250,5 +251,5 @@ printf '  unit:  %s\n' "$UNIT"
 printf '  check: su - %s      # interactive login shell has the session env, then:\n' "$USER_NAME"
 printf '           systemctl --user status chan-devserver\n'
 printf '           journalctl --user -u chan-devserver -f\n'
-printf '\nMounted workspaces publish at https://<handle>.devserver.chan.app/<workspace>/\n'
+printf '\nMounted workspaces publish at https://<handle>--<disc>.<proxy>.usr.chan.app/<workspace>/\n'
 printf '(<handle> is resolved from the token, not the Linux user name).\n'

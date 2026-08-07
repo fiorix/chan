@@ -1,5 +1,5 @@
-# Workspace manifest for chan-gateway: the services behind
-# id.chan.app and devserver.chan.app.
+# Workspace manifest for chan-gateway: the services behind the identity
+# origin gw.{domain} and the tenant/tunnel namespace usr.{domain}.
 #
 # Crates:
 #
@@ -9,25 +9,48 @@
 #                  identity-service and the operator CLI; not exposed
 #                  publicly.
 #
-#   - identity     public-facing service at id.chan.app. OAuth2
+#   - identity     public-facing service at gw.{domain}. OAuth2
 #                  sign-in (GitHub / Google / GitLab) with PKCE,
 #                  Postgres-backed sessions, personal access tokens,
 #                  the embedded Svelte dashboard SPA, and the
-#                  devserver-gate entry-token mint. Owns no domain
-#                  data; calls profile-service over HTTP.
+#                  devserver-gate entry-credential mint. Owns only its
+#                  own auth-artifact tables; user, identity and
+#                  workspace data goes through profile-service over
+#                  HTTP.
 #
-#   - devserver-proxy  public-facing service at devserver.chan.app
-#                  (apex: tunnel + admin) and *.devserver.chan.app
-#                  (wildcard: tenant content). Terminates `chan devserver`
-#                  tunnel registrations over h2c and reverse-proxies
-#                  HTTP + WebSocket traffic into them, gated by the
-#                  devserver-gate JWT handoff.
+#   - devserver-control  singleton, database-free control plane for
+#                  the proxy fleet. Owns the proxy directory, the
+#                  aggregate tunnel view, signed per-user admission,
+#                  and command routing. Proxy nodes hold authenticated
+#                  h2c control sessions; identity, profile, and the
+#                  operator CLI read its /admin/v1/* tree.
 #
-#   - admin        operator CLI against profile's and devserver-proxy's
-#                  admin trees (users, tokens, tunnels, flags, audit).
+#   - devserver-control-proto  wire contract between proxy nodes and
+#                  devserver-control: control-session frame types, the
+#                  length-prefixed JSON framing, the validated id and
+#                  origin types, and the shared limits.
 #
-#   - gateway-common  shared library: domain derivation, HTTP clients,
-#                  devserver-gate JWT, token bucket, validators.
+#   - devserver-proxy  public-facing fleet data plane. Node apex
+#                  (p{n}.usr.{domain}) serves /healthz + /readyz only;
+#                  the wildcard (*.p{n}.usr.{domain}) serves tenant
+#                  content. A separate listener terminates `chan
+#                  devserver` h2c tunnel dials arriving at
+#                  usr.{domain}/v1/tunnel, admitted by
+#                  devserver-control, and reverse-proxies HTTP +
+#                  WebSocket traffic into them behind the
+#                  devserver-gate entry handoff. Ships no SPA and no
+#                  local admin API.
+#
+#   - admin        operator CLI against profile's /v1/admin/* tree,
+#                  devserver-control's /admin/v1/* tree (tunnels,
+#                  proxies), and identity's /admin/v1/tokens. One
+#                  distinct bearer per destination; never reused.
+#
+#   - gateway-common  shared library: profile-service and
+#                  devserver-control HTTP clients, the Ed25519
+#                  devserver-gate entry credential, internal-transport
+#                  rules, graceful shutdown, embedded-SPA serving,
+#                  token bucket, validators.
 #
 # See README.md for the project narrative.
 
