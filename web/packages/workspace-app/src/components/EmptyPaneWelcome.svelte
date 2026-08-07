@@ -36,6 +36,7 @@
   import SpiralSpokes from "./SpiralSpokes.svelte";
   import StriatedCurrent from "./StriatedCurrent.svelte";
   import ThreefoldVeil from "./ThreefoldVeil.svelte";
+  import TurbulentOculus from "./TurbulentOculus.svelte";
   import TwinVeilDance from "./TwinVeilDance.svelte";
 
   const ANIMATION_COMPONENTS = {
@@ -60,6 +61,7 @@
     "rippled-duet": RippledDuet,
     "fourteenfold-bloom": FourteenfoldBloom,
     "hexagonal-bloom": HexagonalBloom,
+    "turbulent-oculus": TurbulentOculus,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {

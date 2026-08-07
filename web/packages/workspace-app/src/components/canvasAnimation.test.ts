@@ -5,6 +5,8 @@ import {
   canvasCssNumber,
   canvasCssValue,
   runCanvasAnimation,
+  runWebgl2Animation,
+  runWebglAnimation,
 } from "./canvasAnimation";
 
 afterEach(() => {
@@ -258,5 +260,69 @@ describe("canvas animation lifecycle", () => {
 
     cleanup?.();
     expect(ioDisconnect).toHaveBeenCalledOnce();
+  });
+
+  test("caps WebGL pixels and destroys renderer resources", () => {
+    const canvas = document.createElement("canvas");
+    document.body.append(canvas);
+    Object.defineProperties(canvas, {
+      clientWidth: { configurable: true, value: 400 },
+      clientHeight: { configurable: true, value: 400 },
+    });
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      value: false,
+    });
+    Object.defineProperty(window, "devicePixelRatio", {
+      configurable: true,
+      value: 2,
+    });
+
+    const viewport = vi.fn();
+    vi.spyOn(canvas, "getContext").mockReturnValue({
+      createShader: vi.fn(),
+      viewport,
+    } as unknown as WebGLRenderingContext);
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe = vi.fn();
+        disconnect = vi.fn();
+      },
+    );
+    vi.stubGlobal("requestAnimationFrame", vi.fn(() => 23));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    const destroy = vi.fn();
+    const cleanup = runWebglAnimation(
+      canvas,
+      () => ({
+        resize: vi.fn(),
+        frame: vi.fn(),
+        reducedMotion: vi.fn(),
+        destroy,
+      }),
+      { maxDpr: 2, maxPixels: 160_000 },
+    );
+
+    expect(canvas.width).toBe(400);
+    expect(canvas.height).toBe(400);
+    expect(viewport).toHaveBeenCalledWith(0, 0, 400, 400);
+
+    cleanup();
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
+  test("requests WebGL2 for GLSL ES 3 shaders", () => {
+    const canvas = document.createElement("canvas");
+    document.body.append(canvas);
+    const getContext = vi.spyOn(canvas, "getContext").mockReturnValue(null);
+    vi.stubGlobal("requestAnimationFrame", vi.fn(() => 31));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    const cleanup = runWebgl2Animation(canvas, () => null);
+
+    expect(getContext).toHaveBeenCalledWith("webgl2", expect.any(Object));
+    cleanup();
   });
 });

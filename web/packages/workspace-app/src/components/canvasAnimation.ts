@@ -12,11 +12,17 @@ export interface CanvasAnimationCallbacks {
   frame(timeMs: number): void;
   reducedMotion(): void;
   start?(): void;
+  destroy?(): void;
 }
 
 export interface CanvasAnimationOptions {
   frameRate?: number;
   maxDpr?: number;
+}
+
+export interface WebglAnimationOptions extends CanvasAnimationOptions {
+  maxPixels?: number;
+  contextAttributes?: WebGLContextAttributes;
 }
 
 export function canvasCssValue(
@@ -55,7 +61,17 @@ export function runCanvasAnimation(
     retryId = null;
     const context = canvas.getContext("2d");
     if (context && typeof context.clearRect === "function") {
-      cleanup = animate(canvas, context, create, options);
+      cleanup = animate(
+        canvas,
+        create(context),
+        options,
+        (width, height, maxDpr) => {
+          const dpr = Math.min(window.devicePixelRatio || 1, maxDpr);
+          canvas.width = Math.floor(width * dpr);
+          canvas.height = Math.floor(height * dpr);
+          context.setTransform(dpr, 0, 0, dpr, 0, 0);
+        },
+      );
       return;
     }
     if (remaining > 0) {
@@ -70,13 +86,122 @@ export function runCanvasAnimation(
   };
 }
 
+export function runWebglAnimation(
+  canvas: HTMLCanvasElement,
+  create: (
+    context: WebGLRenderingContext,
+  ) => CanvasAnimationCallbacks | null,
+  options: WebglAnimationOptions = {},
+): () => void {
+  return runGpuAnimation(canvas, "webgl", create, options);
+}
+
+export function runWebgl2Animation(
+  canvas: HTMLCanvasElement,
+  create: (
+    context: WebGL2RenderingContext,
+  ) => CanvasAnimationCallbacks | null,
+  options: WebglAnimationOptions = {},
+): () => void {
+  return runGpuAnimation(canvas, "webgl2", create, options);
+}
+
+function runGpuAnimation<
+  Context extends WebGLRenderingContext | WebGL2RenderingContext,
+>(
+  canvas: HTMLCanvasElement,
+  contextName: "webgl" | "webgl2",
+  create: (context: Context) => CanvasAnimationCallbacks | null,
+  options: WebglAnimationOptions,
+): () => void {
+  let retryId: number | null = null;
+  let cleanup: (() => void) | undefined;
+  let stopped = false;
+  const contextAttributes: WebGLContextAttributes = {
+    alpha: true,
+    antialias: false,
+    depth: false,
+    stencil: false,
+    premultipliedAlpha: true,
+    preserveDrawingBuffer: false,
+    powerPreference: "low-power",
+    ...options.contextAttributes,
+  };
+
+  function attempt(remaining: number): void {
+    retryId = null;
+    if (stopped) return;
+    const context = canvas.getContext(
+      contextName,
+      contextAttributes,
+    ) as Context | null;
+    if (context && typeof context.createShader === "function") {
+      const callbacks = create(context);
+      if (!callbacks) return;
+      cleanup = animate(
+        canvas,
+        callbacks,
+        { ...options, maxDpr: options.maxDpr ?? 1 },
+        (width, height, maxDpr) => {
+          const dpr = Math.min(window.devicePixelRatio || 1, maxDpr);
+          const desiredWidth = Math.max(1, Math.floor(width * dpr));
+          const desiredHeight = Math.max(1, Math.floor(height * dpr));
+          const desiredPixels = desiredWidth * desiredHeight;
+          const maxPixels = Math.max(
+            1,
+            options.maxPixels ?? desiredPixels,
+          );
+          const scale = Math.min(
+            1,
+            Math.sqrt(maxPixels / desiredPixels),
+          );
+          canvas.width = Math.max(1, Math.floor(desiredWidth * scale));
+          canvas.height = Math.max(1, Math.floor(desiredHeight * scale));
+          context.viewport(0, 0, canvas.width, canvas.height);
+        },
+      );
+      return;
+    }
+    if (remaining > 0) {
+      retryId = requestAnimationFrame(() => attempt(remaining - 1));
+    }
+  }
+
+  function onContextLost(event: Event): void {
+    event.preventDefault();
+    cleanup?.();
+    cleanup = undefined;
+  }
+
+  function onContextRestored(): void {
+    if (retryId !== null) cancelAnimationFrame(retryId);
+    retryId = null;
+    attempt(CONTEXT_RETRY_FRAMES);
+  }
+
+  canvas.addEventListener("webglcontextlost", onContextLost);
+  canvas.addEventListener("webglcontextrestored", onContextRestored);
+  attempt(CONTEXT_RETRY_FRAMES);
+
+  return () => {
+    stopped = true;
+    if (retryId !== null) cancelAnimationFrame(retryId);
+    cleanup?.();
+    canvas.removeEventListener("webglcontextlost", onContextLost);
+    canvas.removeEventListener("webglcontextrestored", onContextRestored);
+  };
+}
+
 function animate(
   canvas: HTMLCanvasElement,
-  ctx: CanvasRenderingContext2D,
-  create: (ctx: CanvasRenderingContext2D) => CanvasAnimationCallbacks,
+  callbacks: CanvasAnimationCallbacks,
   options: CanvasAnimationOptions,
+  resizeBackingStore: (
+    width: number,
+    height: number,
+    maxDpr: number,
+  ) => void,
 ): () => void {
-  const callbacks = create(ctx);
   const reduced = window.matchMedia?.(REDUCED_MOTION_QUERY) ?? null;
   const frameIntervalMs = 1000 / (options.frameRate ?? DEFAULT_FRAME_RATE);
   const maxDpr = options.maxDpr ?? DEFAULT_MAX_DPR;
@@ -126,10 +251,7 @@ function animate(
   function resize(): void {
     const width = Math.max(1, Math.floor(canvas.clientWidth));
     const height = Math.max(1, Math.floor(canvas.clientHeight));
-    const dpr = Math.min(window.devicePixelRatio || 1, maxDpr);
-    canvas.width = Math.floor(width * dpr);
-    canvas.height = Math.floor(height * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    resizeBackingStore(width, height, maxDpr);
     callbacks.resize(
       width,
       height,
@@ -174,5 +296,6 @@ function animate(
     window.removeEventListener("resize", resize);
     document.removeEventListener("visibilitychange", onVisibilityChange);
     reduced?.removeEventListener?.("change", start);
+    callbacks.destroy?.();
   };
 }

@@ -104,6 +104,11 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Hexagonal Bloom",
     description: "A sixfold rotational lattice breathing around a quiet center.",
   },
+  {
+    id: "turbulent-oculus",
+    name: "Turbulent Oculus",
+    description: "A mirrored turbulent tunnel folding around a dark central eye.",
+  },
 ] as const;
 
 export type EmptyPaneAnimationId =
