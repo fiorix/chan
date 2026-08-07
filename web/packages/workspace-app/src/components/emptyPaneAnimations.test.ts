@@ -38,6 +38,7 @@ describe("empty pane animation catalog", () => {
       "fourteenfold-bloom",
       "hexagonal-bloom",
       "turbulent-oculus",
+      "stellar-outburst",
     ]);
     expect(new Set(ids).size).toBe(ids.length);
     expect(new Set(names).size).toBe(names.length);
@@ -70,7 +71,7 @@ describe("empty pane animation catalog", () => {
       "radial-ribbons",
     );
     expect(stepEmptyPaneAnimation("sixfold-vortex", -1)).toBe(
-      "turbulent-oculus",
+      "stellar-outburst",
     );
     expect(stepEmptyPaneAnimation("dotted-waves", 1)).toBe(
       "spiral-spokes",
@@ -88,6 +89,9 @@ describe("empty pane animation catalog", () => {
       "turbulent-oculus",
     );
     expect(stepEmptyPaneAnimation("turbulent-oculus", 1)).toBe(
+      "stellar-outburst",
+    );
+    expect(stepEmptyPaneAnimation("stellar-outburst", 1)).toBe(
       "sixfold-vortex",
     );
   });
@@ -108,7 +112,7 @@ describe("empty pane animation catalog", () => {
     );
     expect(
       randomEmptyPaneAnimation("sixfold-vortex", () => 0.999),
-    ).toBe("turbulent-oculus");
+    ).toBe("stellar-outburst");
   });
 
   test("picks the initial animation from the full catalog", () => {
@@ -116,7 +120,7 @@ describe("empty pane animation catalog", () => {
       "sixfold-vortex",
     );
     expect(randomEmptyPaneAnimation(undefined, () => 0.999)).toBe(
-      "turbulent-oculus",
+      "stellar-outburst",
     );
   });
 
@@ -128,10 +132,10 @@ describe("empty pane animation catalog", () => {
     };
 
     expect(initialEmptyPaneAnimation(storage, () => 0.999)).toBe(
-      "turbulent-oculus",
+      "stellar-outburst",
     );
     expect(initialEmptyPaneAnimation(storage, () => 0)).toBe(
-      "turbulent-oculus",
+      "stellar-outburst",
     );
 
     persistEmptyPaneAnimation("polar-drift", storage);

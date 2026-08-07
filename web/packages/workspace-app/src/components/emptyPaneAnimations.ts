@@ -109,6 +109,11 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Turbulent Oculus",
     description: "A mirrored turbulent tunnel folding around a dark central eye.",
   },
+  {
+    id: "stellar-outburst",
+    name: "Stellar Outburst",
+    description: "A warm particle field radiating from a brilliant central core.",
+  },
 ] as const;
 
 export type EmptyPaneAnimationId =

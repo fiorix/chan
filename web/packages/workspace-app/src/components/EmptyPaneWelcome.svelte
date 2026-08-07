@@ -34,6 +34,7 @@
   import RippledDuet from "./RippledDuet.svelte";
   import SixfoldVortex from "./SixfoldVortex.svelte";
   import SpiralSpokes from "./SpiralSpokes.svelte";
+  import StellarOutburst from "./StellarOutburst.svelte";
   import StriatedCurrent from "./StriatedCurrent.svelte";
   import ThreefoldVeil from "./ThreefoldVeil.svelte";
   import TurbulentOculus from "./TurbulentOculus.svelte";
@@ -62,6 +63,7 @@
     "fourteenfold-bloom": FourteenfoldBloom,
     "hexagonal-bloom": HexagonalBloom,
     "turbulent-oculus": TurbulentOculus,
+    "stellar-outburst": StellarOutburst,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {
