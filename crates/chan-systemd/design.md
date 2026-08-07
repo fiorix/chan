@@ -14,7 +14,7 @@ The systemd boundary crate: chan's only fd-adoption seam and the single owner of
 Continuous PTY parking is the flow the crate exists for: every windowed terminal parks at spawn, so ANY restart flavor preserves it and only stop ends it.
 
 ```mermaid
-flowchart LR
+flowchart TB
   Spawn["session spawn (windowed)"] --> Up["fdstore chan.pty.<session>.<pid> (FDPOLL=0)"]
   Up --> Bar["notify_barrier (5s): manager picked the submission up"]
   Bar --> Man["maintained restart manifest (0600, committed before the spawn reports success)"]

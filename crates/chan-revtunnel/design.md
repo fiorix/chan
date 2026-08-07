@@ -11,7 +11,7 @@ Reverse port forwarding from a chan devserver to a connected chan-desktop: `cs t
 - **Desktop client** (`client`, a default-on cargo feature chan-server opts out of): `open(ClientConfig)` dials the control socket BEFORE binding the listener so a bind failure is reported to the devserver as `Failed`, sends `Ready{bound}` with the resolved authority, pings every 30s to stay under the gateway's 300s WS idle cut, and owns per-connection bridges in a JoinSet so ending the tunnel aborts in-flight connections.
 
 ```mermaid
-flowchart LR
+flowchart TB
   CS["cs tunnel (devserver terminal)"] -->|"ControlRequest::Tunnel (long-lived)"| SOCK["control socket: validate, mint tunnel_id, register"]
   SOCK -->|"window_command tunnel_open over /ws"| SPA["workspace SPA (the addressed window)"]
   SPA -->|"open_reverse_tunnel IPC"| DT["chan-desktop: bind bind_addr:desktop_port"]
