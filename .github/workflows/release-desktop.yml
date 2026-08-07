@@ -256,9 +256,9 @@ jobs:
           # `chan` (ARGV0 wins over argv[0] -- chan_shell::invoked_arg0). Off
           # unix, `chan open <path>` has no desktop GUI to hand off to, so it
           # serves a normal standalone server -- the headless proof that the
-          # Windows-built embedded server boots and answers. (`serve` was renamed
-          # to `open` in 37e0f62d.) The interactive GUI install is deferred to
-          # @@Alex on real hardware; there is no robust headless GUI smoke.
+          # Windows-built embedded server boots and answers. The interactive
+          # GUI install is deferred to @@Alex on real hardware; there is no
+          # robust headless GUI smoke.
           exe="target/release/chan-desktop.exe"
           ws="$RUNNER_TEMP/chan-smoke-ws"   # outside the checkout: no VCS-parent refusal
           mkdir -p "$ws"

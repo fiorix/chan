@@ -1,14 +1,9 @@
 name: Pages
 
-# Manual-only (phase-13 r2): the marketing-site deploy no longer fires on
-# push to main. release.yml owns the AUTOMATIC site deploy (it rebuilds
-# the marketing site + the /dl release metadata together on every tag),
-# so a push to main can no longer race a release deploy and clobber /dl.
-# (The old `paths` filter included Cargo.toml, so a release version bump
-# auto-fired a marketing deploy concurrent with the release; that deploy's
-# preserve:metadata fetched a transient 404 and wiped /dl; the phase-14
-# incident record is in git history.) Marketing-only updates between
-# releases ship via a deliberate `gh workflow run pages.yml`.
+# Manual-only. release.yml owns the AUTOMATIC site deploy (it rebuilds the
+# marketing site + the /dl release metadata together on every tag), so a push
+# to main cannot race a release deploy and clobber /dl. Marketing-only updates
+# between releases ship via a deliberate `gh workflow run pages.yml`.
 on:
   workflow_dispatch:
     inputs:

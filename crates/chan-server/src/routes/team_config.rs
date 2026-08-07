@@ -107,7 +107,7 @@ pub(crate) fn validate_team_config(config: &TeamConfig) -> Result<(), String> {
     if config.members.iter().any(|m| m.handle.trim().is_empty()) {
         return Err("every member must have a non-empty handle".into());
     }
-    // The submit-encoding agent is no longer a stored field: it is DERIVED
+    // The submit-encoding agent is not a stored field: it is DERIVED
     // from each member's command (+ a `CHAN_AGENT` env override) at use time,
     // so there is nothing to validate here. An unrecognized command simply
     // resolves to a shell member (no chord). See `member_agent`.

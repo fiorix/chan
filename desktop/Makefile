@@ -33,11 +33,13 @@ tauri-cli:
 	        --root "$(TAURI_CLI_ROOT)"; \
 	fi
 
-# Build the embedded web bundle. chan-desktop is fully self-
-# contained: it links chan-drive + chan-server directly and embeds
-# web/dist via rust-embed. There is no `chan` binary at runtime or
-# in the bundle, so the only build-time staging step is the web
-# bundle the Rust crate embeds.
+# Build the embedded web bundles. chan-desktop is fully self-
+# contained: it links chan + chan-server + chan-workspace directly
+# and embeds web/dist plus web-launcher/dist via rust-embed. On
+# macOS/Linux no `chan` binary ships in the bundle (argv[0] dispatch
+# covers it); the Windows NSIS bundle carries chan.exe as a resource.
+# The only build-time staging step is the web bundles the Rust crate
+# embeds.
 web:
 	$(MAKE) -C $(CHAN_REPO) web
 
@@ -108,14 +110,14 @@ check:
 # cargo-xwin cross-compiles to the MSVC target from macOS/Linux by downloading
 # the MSVC CRT + Windows SDK headers on demand (no Windows host, no Wine -- Wine
 # can't run WebView2 anyway). This is the team's FAST local proof that the
-# cfg(windows) arms compile. The AUTHORITATIVE Windows build + NSIS bundle +
-# headless smoke is the windows-latest job in
-# .github/workflows/release-desktop.yml.
+# cfg(windows) arms compile. The AUTHORITATIVE Windows build + NSIS bundle is
+# `make ci-windows` in .github/workflows/ci.yml per pull request, and
+# release.yml's Windows artifacts on the tag path.
 #
 # Crate set is the core (server/shell/workspace): those carry the cfg(windows)
 # transport + terminal arms and must compile before the desktop GUI build can.
 # The chan-desktop crate's full Windows build pulls the whole Tauri + WebView2
-# toolchain and is proven by the windows-latest CI job, not here.
+# toolchain and is proven by those native Windows CI jobs, not here.
 XWIN_TARGET ?= x86_64-pc-windows-msvc
 XWIN_CRATES ?= -p chan-server -p chan-shell -p chan-workspace
 
@@ -335,7 +337,7 @@ app-signed: sign-prereqs tauri-cli web
 # the Finder window over AppleScript/Finder, which no-ops on a headless CI
 # runner and ships a flat default-layout DMG. dmgbuild writes the layout
 # programmatically (no Finder), so local == CI byte-for-byte. The notarize is
-# split from the build (as before): tauri-bundler 2.x only knows the
+# split from the build: tauri-bundler 2.x only knows the
 # APPLE_ID/PASSWORD/TEAM_ID auth shape, not notarytool Keychain profiles, so we
 # unset those env vars during the Tauri build and call `xcrun notarytool submit`
 # ourselves with the right flag set (Keychain profile locally, env vars on CI).

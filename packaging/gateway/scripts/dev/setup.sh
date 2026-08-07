@@ -226,8 +226,8 @@ MAX_DEVSERVERS_PER_USER=100
 RUST_LOG=${RUST_LOG:-info,devserver_control=debug}"
 
 # One env file per proxy node so run.sh can boot a fleet of 1 to 3.
-# p1 keeps the historical 127.0.0.1 ports so the single-proxy default
-# is unchanged; p2/p3 take the same ports on 127.0.0.2/127.0.0.3
+# p1 uses the plain 127.0.0.1 ports so the single-proxy default needs
+# no aliasing; p2/p3 take the same ports on 127.0.0.2/127.0.0.3
 # (loopback aliases) because the origin template cannot express a
 # per-node port.
 rm -f "$SECRETS_DIR/devserver-proxy.env"

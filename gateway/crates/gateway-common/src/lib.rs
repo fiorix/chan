@@ -28,6 +28,10 @@
 //!     fleet holds for the user.
 //!   * `devserver_gate`: Ed25519 entry credentials and exact binding
 //!     validation for the body-only identity-to-proxy handoff.
+//!   * `internal_transport`: the repository-wide rule for internal
+//!     listeners and URLs: HTTPS always, cleartext only to a loopback
+//!     IP literal or under an explicitly declared authenticated
+//!     overlay.
 
 pub mod devserver_control_client;
 pub mod devserver_gate;

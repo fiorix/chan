@@ -1,7 +1,8 @@
 //! Embed identity-service's Svelte SPA at compile time and serve it
 //! via the shared SPA-fallback handler.
 //!
-//! `web/dist/` is the output of `npm run build` in `crates/identity/web/`.
+//! `web/dist/` is the output of `npm run build -w @chan/profile` in
+//! the repo-root `web/` npm workspace (`make gateway-spa`).
 //! On a fresh checkout the directory may not exist yet; the shared
 //! handler returns the "frontend not built" banner so developers see
 //! a clear next step instead of a blank 404.

@@ -352,7 +352,8 @@ pub fn install_bin_shims() -> std::io::Result<u32> {
     };
 
     // Point the shims at the bundled console `chan.exe` when present (real CLI
-    // semantics: foreground + Ctrl-C), else the GUI chan-desktop.exe as before.
+    // semantics: foreground + Ctrl-C), else fall back to the GUI
+    // chan-desktop.exe.
     let target = resolve_cli_target(&exe);
 
     let mut changed = 0u32;

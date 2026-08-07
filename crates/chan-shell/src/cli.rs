@@ -1008,7 +1008,6 @@ pub enum TeamAction {
 }
 
 /// Dispatch a `cs <action>` against the current window's chan-server.
-/// Was `cmd_shell` in the `chan` binary.
 pub async fn dispatch(action: ShellAction) -> Result<()> {
     match action {
         ShellAction::Open { path, destination } => {

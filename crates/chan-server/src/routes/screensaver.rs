@@ -545,7 +545,7 @@ mod tests {
     #[tokio::test]
     async fn screensaver_endpoints_require_auth() {
         // Parity with other settings endpoints -
-        // all routes are gated by the per-launch token.
+        // all routes are gated by the bearer token.
         let app = route_test_app();
         let router = crate::router(app.state);
         let response = router

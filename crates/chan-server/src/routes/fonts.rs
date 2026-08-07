@@ -1,4 +1,5 @@
-//! Source Code Pro download endpoint + `resolve_font` helper.
+//! Source Code Pro download endpoint + the `<user-config>/chan/fonts/`
+//! landing dir.
 //!
 //! Complements the cargo feature `embed-font` and the
 //! user-config-dir fallback on `serve_font` with the user-facing

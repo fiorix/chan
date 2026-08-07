@@ -1328,22 +1328,22 @@ fn merge_language_layer(
     // ranking); only the workspace lens path moves.
     //
     // The file-NODE set comes from the unified tree
-    // layer (the full File Browser namespace), but the language
-    // EDGE set used to come from a scope-restricted report
-    // (`report_for_prefix` / `report_for_files`). In directory and
-    // file scope the tree layer pulls in spine and link-target
-    // files that live OUTSIDE the scoped prefix, so those file
-    // nodes had no language edge and rendered disconnected
-    // (floating) even when they were of a recognized language.
-    // We now drive the language edges off the SAME namespace as the
-    // nodes: take per-file language from the FULL workspace report
-    // (`report.files`, whose `language` is `tokei`'s classification
-    // and is never empty for a tracked file) and emit a `language`
-    // edge for every File node already present in `nodes` that the
-    // report tracks. Media/binary files return no language from the
-    // report (and are separate node kinds), so they never get a
-    // spurious edge. Language-node `files`/`code` counts aggregate
-    // only over the file nodes actually rendered.
+    // layer (the full File Browser namespace), and the language
+    // EDGE set comes from the FULL workspace report -- the SAME
+    // namespace as the nodes. A scope-restricted report
+    // (`report_for_prefix` / `report_for_files`) would miss the
+    // spine and link-target files the tree layer pulls in from
+    // OUTSIDE the scoped prefix in directory and file scope, so
+    // those file nodes would have no language edge and render
+    // disconnected (floating) even when they are of a recognized
+    // language. Per-file language comes from `report.files` (whose
+    // `language` is `tokei`'s classification and is never empty for
+    // a tracked file); a `language` edge is emitted for every File
+    // node already present in `nodes` that the report tracks.
+    // Media/binary files return no language from the report (and
+    // are separate node kinds), so they never get a spurious edge.
+    // Language-node `files`/`code` counts aggregate only over the
+    // file nodes actually rendered.
 
     let report = workspace.report()?;
     let language_by_path: std::collections::HashMap<&str, &str> = report
@@ -1643,9 +1643,9 @@ fn build_graph_view(
     // Also serves as the lookup table for the @@mention -> contact
     // file rewrite below: a contact whose file_stem matches the
     // mention name (case-insensitive) gets its rel_path stamped on
-    // the mention edge's dst, so `@@alice` no longer renders as a
-    // standalone yellow text node alongside the Contacts/alice.md
-    // file node, so the two collapse into one.
+    // the mention edge's dst, so `@@alice` collapses into the
+    // Contacts/alice.md file node instead of rendering as a
+    // standalone yellow text node.
     let contact_rows = workspace.contacts().unwrap_or_default();
     let contact_paths: std::collections::HashSet<String> =
         contact_rows.iter().map(|c| c.rel_path.clone()).collect();
@@ -1840,14 +1840,14 @@ fn build_graph_view(
             },
         );
     }
-    // No ghost nodes. We used to synthesize a muted `File { missing:
-    // true }` per unresolved link target, but on a big tree (e.g.
-    // graphing a source checkout) they were pure clutter, never
-    // navigable. `ghost_set` now ONLY drives the edge drop in
-    // the filter below, so a broken link contributes neither a node nor
-    // a dangling edge. (Indexed files that vanished from disk still
-    // render as `missing` via the `files` loop above; that is a stale-
-    // index signal, distinct from an unresolved link target.)
+    // No ghost nodes: a muted `File { missing: true }` per
+    // unresolved link target is pure clutter on a big tree (e.g.
+    // graphing a source checkout) and never navigable. `ghost_set`
+    // ONLY drives the edge drop in the filter below, so a broken
+    // link contributes neither a node nor a dangling edge. (Indexed
+    // files that vanished from disk still render as `missing` via
+    // the `files` loop above; that is a stale-index signal,
+    // distinct from an unresolved link target.)
 
     // The drafts dir is a real in-root directory now, so it arrives as a
     // normal `directory:<drafts_dir>` node with a `contains` edge from
@@ -1879,8 +1879,8 @@ fn build_graph_view(
             if matches!(e.kind, EdgeKind::Link) && disk_dirs.contains(&e.dst) {
                 return false;
             }
-            // Drop link edges to unresolved targets. We no longer
-            // synthesize ghost nodes for them, so the edge would
+            // Drop link edges to unresolved targets. Nothing
+            // synthesizes ghost nodes for them, so the edge would
             // otherwise dangle against a node we never created (and
             // Cytoscape errors on an edge to a missing node id).
             if matches!(e.kind, EdgeKind::Link) && ghost_set.contains(&e.dst) {
@@ -2413,15 +2413,12 @@ mod tests {
 
     #[test]
     fn link_to_directory_does_not_synthesize_ghost_file_node() {
-        // Regression: a markdown link whose target is
-        // a directory (e.g. `[notes](../notes/)`)
-        // used to fall through `file_set` (graph_files filters to
-        // markdown / contact; disk_files filters `!is_dir`) and land
-        // in ghost_set as `File { missing: true }`. After the fix,
-        // disk_dirs participates in the ghost-set guard so the
-        // directory target is skipped entirely; the corresponding
-        // link edge is dropped by the edge filter so Cytoscape never
-        // sees a dangling target.
+        // A markdown link whose target is a directory (e.g.
+        // `[notes](../notes/)`) must not land in ghost_set as
+        // `File { missing: true }`: disk_dirs participates in the
+        // ghost-set guard so the directory target is skipped
+        // entirely; the corresponding link edge is dropped by the
+        // edge filter so Cytoscape never sees a dangling target.
         let (_cfg, root, workspace) = open_workspace();
         // Source link: bare `some-dir` resolves workspace-rooted under
         // the wiki convention. `some-dir/` exists as a real
@@ -2658,8 +2655,8 @@ mod tests {
 
     #[test]
     fn drafts_dir_appears_as_natural_directory() {
-        // Drafts are now real in-root files under the configured drafts dir
-        // and are no longer special-cased -- the drafts directory is just
+        // Drafts are real in-root files under the configured drafts dir
+        // and are not special-cased: the drafts directory is just
         // another live directory. It arrives as a normal `directory:.Drafts`
         // node anchored by a real `contains` edge from root via the
         // filesystem / tree layers (no synthetic edge kind), and an indexed

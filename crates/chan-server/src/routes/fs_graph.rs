@@ -1848,12 +1848,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn build_fs_graph_rejects_mid_path_symlink_escape() {
-        // syseng's design-snapshot flagged this: an in-workspace symlink
-        // pointing OUTSIDE the workspace root used to be silently
-        // followed when it appeared as a mid-path component, because
-        // `resolve_safe` is lexical only. A request like
-        // `path=alias/inside.md` (alias -> /etc) leaked /etc/inside.md
-        // metadata under a workspace-relative id. ensure_parent_inside_workspace
+        // An in-workspace symlink pointing OUTSIDE the workspace root
+        // must not be followed as a mid-path component: `resolve_safe`
+        // is lexical only, so `path=alias/inside.md` (alias -> /etc)
+        // would leak /etc/inside.md metadata under a
+        // workspace-relative id. ensure_parent_inside_workspace
         // closes that.
         let (_cfg, root, workspace) = open_workspace();
         // Build a symlink whose target is OUTSIDE the workspace root,

@@ -837,8 +837,8 @@ mod tests {
             Some(IndexingDirectoryState::Indexing)
         );
         // A sibling whose files are all committed reads Indexed, not
-        // Indexing: with a matching file the embed sweep no longer
-        // broadens into an all-orange pulse.
+        // Indexing: with a matching file the embed sweep does not
+        // broaden into an all-orange pulse.
         assert_eq!(
             response
                 .nodes

@@ -200,7 +200,7 @@ The token-delivery contract is the load-bearing invariant shared by every superv
 
 App-level state outside chan-workspace is intentionally narrow:
 
-- Per-launch auth and process-scoped MCP/control sockets live with the server lifecycle and are removed on shutdown.
+- Workspace bearer tokens persist under the app's tokens dir (0600, reused across restarts); the process-scoped MCP and control sockets live with the server lifecycle and are removed on shutdown.
 - App/server preferences and update-check throttle live at the application layer and mutate through config APIs.
 - API key storage is optional; environment variables and OS keychain sources take precedence when available.
 - Devserver supervision state carries the reused bearer token and enabled workspace set needed to re-mount after restart.

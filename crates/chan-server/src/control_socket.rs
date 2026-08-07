@@ -1639,8 +1639,7 @@ async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlRespons
         destination,
     } = req;
     // The registry is a set-once cell that may be filled after the socket
-    // starts; resolve it per request, exactly as handle_request's dispatch
-    // arm used to do on this handler's behalf.
+    // starts; resolve it per request.
     let terminal_registry = ctx.terminal_registry.get();
     let workspace_cell = &ctx.workspace_cell;
     let events_tx = &ctx.events_tx;

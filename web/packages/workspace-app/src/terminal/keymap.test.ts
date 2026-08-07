@@ -163,8 +163,8 @@ describe("terminal meta key mapping", () => {
     expect(queryXtermModifierKeys(protocol, [4])).toBe("\x1b[>4;2m");
     disableXtermModifierKeys(protocol, [4]);
     expect(queryXtermModifierKeys(protocol, [4])).toBe("\x1b[>4;0m");
-    // modifyOtherKeys back off -> Shift+Enter drops to the LF fallback
-    // (no longer the `\x1b[27;2;13~` sequence), not a submit `\r`.
+    // modifyOtherKeys back off -> Shift+Enter drops to the LF fallback,
+    // not a submit `\r`.
     expect(terminalMetaKeyBytes(keyEvent({ key: "Enter", shiftKey: true }), protocol)).toBe("\n");
   });
 

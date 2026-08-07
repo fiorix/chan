@@ -2,9 +2,9 @@
 //! serializes a [`ControlRequest`] and deserializes a [`ControlResponse`])
 //! and chan-server's control socket (which deserializes the request and
 //! serializes the response). Defining the two enums once here is what
-//! kills the historical client/server duplication: a tag or field rename
-//! that only landed on one side used to break every `cs` command at
-//! runtime with a green build (the serde tags are the wire format).
+//! keeps them from drifting: a tag or field rename landing on only one
+//! side breaks every `cs` command at runtime with a green build (the
+//! serde tags are the wire format).
 //!
 //! These types carry no transport and no clap surface, so they are always
 //! compiled (no `client` feature gate) and chan-server can depend on

@@ -11,9 +11,9 @@
 
   // Matrix preview for the dashboard About-slot config. Renders the SAME
   // falling rain as the fullscreen screensaver (MatrixRain.svelte) via the
-  // shared engine, scaled into a fixed preview box. It used to draw a static
-  // full grid that looked nothing like the screensaver (the rain is
-  // sparse falling columns over black, not a wall of glyphs).
+  // shared engine, scaled into a fixed preview box, so the preview matches
+  // the screensaver's look: sparse falling columns over black, not a wall
+  // of glyphs.
   //
   // The dashboard back face is latched-mounted and rotated away when the card
   // shows its front, so the animation self-gates to avoid wasted work: it runs

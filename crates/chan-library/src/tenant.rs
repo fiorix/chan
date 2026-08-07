@@ -271,7 +271,7 @@ fn report_join_error(result: Result<(), JoinError>) {
 pub struct TenantArtifacts {
     /// The tenant's axum app, dispatched under its route prefix.
     pub app: axum::Router,
-    /// Per-launch bearer for this tenant (`None` with `--no-token`).
+    /// Persisted bearer for this tenant (`None` with `--no-token`).
     pub token: Option<String>,
     /// The tenant's PTY registry (window-session checks, scrollback, reap).
     pub terminal_sessions: Arc<TerminalRegistry>,

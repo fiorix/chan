@@ -2,11 +2,12 @@
 //
 // Build the launcher web app (the workspace/devserver launcher).
 //
-// Output goes to the repo-root /web-launcher/dist/, which chan-library embeds
-// via rust-embed at compile time and serves from its loopback HTTP server. This
-// package lives at web/packages/launcher under the ./web npm-workspaces root, so
-// the embed-output path is three levels up; the rust-embed input path is frozen
-// (X-2), so the source layout moves and the output path does not. The library
+// Output goes to the repo-root /web-launcher/dist/, which chan-server embeds
+// via rust-embed at compile time and installs into the WorkspaceHost root
+// fallback. This package lives at web/packages/launcher under the ./web
+// npm-workspaces root, so the embed-output path is three levels up; the
+// rust-embed input path is frozen, so the source layout can move while the
+// output path does not. The library
 // serves /api/library/* and the /api/library/windows/watch socket; everything
 // else is this SPA, so base is "./" to keep asset URLs relative. The launcher is
 // a pure HTTP client, so it carries none of the workspace-app's editor
@@ -29,7 +30,7 @@ const svelteClient = join(dirname(require.resolve("svelte/package.json")), "src/
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-// Frozen rust-embed input path (X-2): repo-root web-launcher/dist.
+// Frozen rust-embed input path: repo-root web-launcher/dist.
 const OUT_DIR = join(here, "../../../web-launcher/dist");
 
 // The backend port the vite dev server proxies to. Defaults to 8787 (the local
@@ -41,11 +42,12 @@ const proxyPort = process.env.VITE_PROXY_PORT ?? "8787";
 // HTTP-client SPA (its only runtime dep is lucide-svelte); this budget FAILS the
 // build if an accidental heavy import lands -- a CodeMirror/xterm/cytoscape pull,
 // or a non-tree-shaken import from @chan/web-shared, would multiply the bundle,
-// so the gate catches it here instead of at release. The bundle is ~42 KiB
-// gzipped (the client-side window manager, per-tenant leadership derivation,
-// window URL builder, config-backed per-machine collapse, and the Gateways
-// screen plus the Computers command launcher); the ceiling carries headroom
-// for normal drift while staying far below what any heavy import would produce.
+// so the gate catches it here instead of at release. The bundle (the
+// client-side window manager, per-tenant leadership derivation, window URL
+// builder, config-backed per-machine collapse, and the Gateways screen plus
+// the Computers command launcher) sits near the ceiling; raise the budget
+// deliberately when adding real surface, and treat an unexpected jump as an
+// accidental heavy import.
 const LAUNCHER_GZIP_BUDGET_BYTES = 48 * 1024;
 
 function launcherSizeBudget(): Plugin {
@@ -97,9 +99,8 @@ export default defineConfig({
     },
   },
   build: {
-    // Frozen rust-embed input path (X-2): repo-root web-launcher/dist, three
-    // levels up from this package. crates/chan-server/build.rs +
-    // static_assets.rs are untouched; only the source location moved under ./web.
+    // Frozen rust-embed input path: repo-root web-launcher/dist, three
+    // levels up from this package.
     outDir: "../../../web-launcher/dist",
     emptyOutDir: true,
     target: "es2022",

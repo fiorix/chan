@@ -242,10 +242,10 @@ pub struct HybridSurfaceThemes {
     pub browser: Option<SurfaceThemeChoice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<SurfaceThemeChoice>,
-    // `alias = "infographics"` migrates configs written before this surface
-    // was renamed: an existing `infographics` key still loads, and the next
-    // save flushes the canonical `dashboard` token (the frontend already keys
-    // it `dashboard`). The shim self-erodes, like `line_spacing`'s `tight`.
+    // Configs on disk may spell this key `infographics`; the alias loads
+    // them and the next save flushes the canonical `dashboard` token (the
+    // frontend keys it `dashboard`). The shim self-erodes, like
+    // `line_spacing`'s `tight`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

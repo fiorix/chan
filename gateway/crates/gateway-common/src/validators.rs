@@ -2,10 +2,9 @@
 //!
 //! These rules cross service boundaries: profile-service mints
 //! placeholder usernames and enforces the cap on rename; identity-
-//! service validates rename input before calling profile; devserver-proxy
-//! validates path parameters on its admin tree. Keeping the rules in
-//! one place avoids drift, especially around the `[a-z0-9-]` alphabet
-//! and the lifetime-rename cap.
+//! service validates rename input before calling profile. Keeping the
+//! rules in one place avoids drift, especially around the `[a-z0-9-]`
+//! alphabet and the lifetime-rename cap.
 
 /// Hard cap on lifetime username renames. Counter starts at 0 on
 /// account creation; the API rejects when count == cap. Picked to

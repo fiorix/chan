@@ -1,11 +1,11 @@
 //! HTTP + WebSocket surface for chan.
 //!
 //! Wraps `chan-workspace`'s Library / Workspace handles in axum routes,
-//! gates every `/api/*` route behind a per-launch bearer token,
+//! gates every `/api/*` route behind a persisted bearer token,
 //! exposes a watcher WebSocket, and serves the embedded
 //! frontend.
 //!
-//! Auth: every `/api/*` route is gated by a per-launch token. The
+//! Auth: every `/api/*` route is gated by a bearer token. The
 //! token is persisted at `<state>/tokens/<workspace-key>` (mode 0600 on
 //! Unix) so a `cargo build && chan open` cycle does not invalidate
 //! the browser's cached sessionStorage token. Clients pass it as

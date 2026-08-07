@@ -2495,7 +2495,7 @@ impl WorkspaceHost {
     /// drops its `Arc<Workspace>` at the next per-file cancel check, releasing
     /// the per-workspace flock promptly instead of waiting for the rebuild to
     /// run to completion. Mirrors the single-tenant `indexer.cancel()` in
-    /// `clear_workspace_cell`. Read-only over the map and best-effort per
+    /// `WorkspaceCellHandle::clear`. Read-only over the map and best-effort per
     /// tenant: a poisoned cell or a terminal tenant (no workspace cell) is
     /// skipped.
     pub fn cancel_all_reindex(&self) {
@@ -2912,13 +2912,13 @@ fn display_prefix(prefix: &str) -> &str {
 
 /// Block (bounded) until the last strong `Arc<Workspace>` drops after
 /// teardown, which releases the per-workspace flock. The straggler is an
-/// in-flight reindex on the blocking pool: `clear_workspace_cell` set the
-/// indexer's cancel flag, and the reindex drops its `Arc` at its next
-/// per-file cancel check, on a separate blocking-pool thread that makes
-/// progress regardless of this wait. Close is an infrequent teardown and
-/// the wait is typically a few milliseconds. Bounded so a wedged reindex
-/// cannot hang close: past the deadline the caller sees the same
-/// lingering-flock behavior it would have had without the wait.
+/// in-flight reindex on the blocking pool: `WorkspaceCellHandle::clear`
+/// set the indexer's cancel flag, and the reindex drops its `Arc` at its
+/// next per-file cancel check, on a separate blocking-pool thread that
+/// makes progress regardless of this wait. Close is an infrequent
+/// teardown and the wait is typically a few milliseconds. Bounded so a
+/// wedged reindex cannot hang close: past the deadline the caller sees
+/// the same lingering-flock behavior it would have had without the wait.
 fn wait_for_workspace_release(weak: &Weak<Workspace>, lock_dir: &Path) {
     let deadline = Instant::now() + Duration::from_secs(5);
     // Two conditions, not one: the last strong `Arc` must drop, AND the
@@ -3247,7 +3247,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_canonicalizes_tenant_root_trailing_slash() {
-        // The §7.3-smoke bug: a tenant nests at its slug, and axum's nest serves
+        // A tenant nests at its slug, and axum's nest serves
         // `/blog` and `/blog/<rest>` but 404s the EXACT `/blog/` -- yet `/blog/`
         // is the canonical open URL (the SPA's `base: "./"` needs the trailing
         // slash). host_dispatch fixes it: `/blog/` serves the root, `/blog`
@@ -4090,15 +4090,14 @@ mod tests {
 
     #[tokio::test]
     async fn fresh_in_process_register_opens_without_workspace_not_registered() {
-        // Regression guard for the desktop "workspace not registered" bug:
-        // chan-desktop used to register a brand-new directory by
-        // spawning `chan add` in a SEPARATE process, which mutated only
-        // the on-disk registry. The embedded host's `Library` snapshot
-        // never saw the row, so the immediately-following open returned
-        // WorkspaceNotRegistered. Registering in-process through the SAME
-        // `Library` the host owns makes the row visible at once: this
-        // test registers a never-before-seen dir, then opens it on the
-        // same handle with no intervening reload.
+        // Regression guard for the desktop "workspace not registered" bug.
+        // Registering a brand-new directory must go through the SAME
+        // `Library` the host owns, in-process: mutating only the on-disk
+        // registry (e.g. by spawning `chan add`) leaves the host's
+        // `Library` snapshot without the row, and the immediately-following
+        // open returns WorkspaceNotRegistered. This test registers a
+        // never-before-seen dir, then opens it on the same handle with no
+        // intervening reload.
         let cfg = tempfile::tempdir().expect("config dir");
         let fresh = tempfile::tempdir().expect("fresh workspace dir");
         let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");

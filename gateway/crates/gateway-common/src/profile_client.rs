@@ -4,9 +4,9 @@
 //! lives in the client; callers never deal with auth.
 //!
 //! `ProfileError` is the client's own error enum so this crate has
-//! no axum / IntoResponse dependency. Each consumer (identity,
-//! devserver-proxy) provides a `From<ProfileError>` for its local
-//! request-handler error.
+//! no axum / IntoResponse dependency. Each consumer
+//! (identity-service, the admin CLI) provides a `From<ProfileError>`
+//! for its local request-handler error.
 
 use chrono::{DateTime, Utc};
 use reqwest::{header, StatusCode};

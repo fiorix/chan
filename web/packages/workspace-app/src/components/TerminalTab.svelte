@@ -1162,10 +1162,10 @@
     });
     // This xterm is brand-new and EMPTY, so the attach below carries no
     // byte cursor and the server replays the session's full ring. A
-    // carried-over cursor once made the server skip everything the
-    // PREVIOUS xterm had seen (its buffer died with term.dispose()) -
-    // the previous xterm's buffer was disposed too. Echo dedupe (lastAgentEchoSeq)
-    // is independent of screen content and survives the remount.
+    // carried-over cursor would make the server skip everything the
+    // PREVIOUS xterm had seen, and that buffer died with term.dispose().
+    // Echo dedupe (lastAgentEchoSeq) is independent of screen content
+    // and survives the remount.
     void connect();
     if (focused) queueMicrotask(focusTerminal);
   }

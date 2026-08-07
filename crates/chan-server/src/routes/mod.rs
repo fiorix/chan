@@ -3,7 +3,9 @@
 //! Per-area submodules host the handlers, request / response shapes,
 //! and any helpers specific to that area. Cross-area types (e.g.
 //! `PreferencesView`) live in the module that owns them and are
-//! re-exported here. `lib.rs::router()` wires every endpoint.
+//! re-exported here. Route tables are assembled in four places:
+//! `router_with_extensions` and `terminal_router` in `lib.rs`,
+//! `library::launcher_router`, and `devserver::build_devserver_app`.
 
 mod attachments;
 mod build_info;

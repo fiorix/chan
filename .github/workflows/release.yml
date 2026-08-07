@@ -1,6 +1,6 @@
 name: Release
 
-# Phase 11 release contract:
+# Release contract:
 # - Public tags are vX.Y.Z or vX.Y.Z-rcN.
 # - Workflow dispatch without publish=true is a dry run.
 # - Tag pushes and workflow_dispatch publish=true are release-cut gates.

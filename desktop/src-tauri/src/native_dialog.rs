@@ -1,7 +1,7 @@
 //! Confirm dialogs that honor Return-to-default on macOS.
 //!
-//! Every desktop confirm used to go straight through `tauri_plugin_dialog`
-//! (rfd under the hood). The button ORDER is right, but rfd's async alert
+//! A confirm routed through `tauri_plugin_dialog` (rfd under the hood)
+//! gets the button ORDER right, but rfd's async alert
 //! window never becomes *key*, so a Return keypress is never routed to the
 //! default button -- the user must click. There is no plugin-level setter to
 //! fix it (traced to tauri-plugin-dialog 2.7.1 -> rfd 0.16.0).

@@ -14,11 +14,12 @@
 //! * `POST /disable` -- flip back to BM25-only.
 //!
 //! Whole module gated on `embeddings` -- the surface is meaningless
-//! without the candle stack. `lib.rs::router()` mirrors that gate
-//! when wiring the routes.
+//! without the candle stack. `lib.rs::router_with_extensions` mirrors
+//! that gate when wiring the routes.
 //!
-//! Companion CLI: `chan index download-model | enable-semantic |
-//! disable-semantic | status` (see `crates/chan/src/main.rs`).
+//! Companion CLI: `chan workspace index download-model |
+//! enable-semantic | disable-semantic | status` (see
+//! `crates/chan/src/lib.rs`).
 //! The Settings UI is built against this contract.
 
 #![cfg(feature = "embeddings")]

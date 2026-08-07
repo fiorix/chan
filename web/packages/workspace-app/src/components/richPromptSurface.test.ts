@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import richPromptSrc from "./RichPrompt.svelte?raw";
 import wysiwygSrc from "../editor/Wysiwyg.svelte?raw";
 
-// R7 (wiring shape): the Rich Prompt composer floats over a terminal, so it
+// The Rich Prompt composer floats over a terminal, so it
 // themes on the "terminal" hybrid surface, not the "editor" surface it would
 // inherit from Wysiwyg's default. Only visible in split light/dark hybrid
 // themes; pinned here against an accidental revert to the editor surface.

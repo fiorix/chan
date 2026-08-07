@@ -572,10 +572,10 @@ mod tests {
         // the resources directory must explicitly update this test +
         // the SettingsPanel attribution.
         //
-        // Gated on `embed-font` because the
-        // default build no longer ships the font (uses per-OS native
-        // mono via the SPA's fontFamily fallback chain). The test
-        // still runs on `--features embed-font` builds.
+        // Gated on `embed-font`: the default build does not ship the
+        // font (it uses per-OS native mono via the SPA's fontFamily
+        // fallback chain). The test still runs on `--features
+        // embed-font` builds.
         let font = FontAssets::get("SourceCodePro-Regular.otf.woff2")
             .expect("Source Code Pro Regular woff2 must be bundled");
         assert!(

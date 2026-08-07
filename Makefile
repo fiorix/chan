@@ -61,11 +61,8 @@ REPO_ROOT := $(abspath .)
 
 # Gateway release crate set. Single source for the pre-push gateway
 # build (gateway-build) and the release.yml deb-packaging matrix, which
-# both read it instead of repeating the names. The drive->workspace
-# crate rename drifted release.yml off the real crate names and only
-# surfaced at release-tag time, because nothing local built the gateway.
-# Pointing every consumer here means a future rename breaks the local
-# gate, not just the published release.
+# both read it instead of repeating the names, so a crate rename breaks
+# the local gate rather than only the published release.
 GATEWAY_RELEASE_CRATES := profile identity devserver-proxy devserver-control admin
 
 .PHONY: help
@@ -369,11 +366,9 @@ web-lock-check: ## Verify web/package-lock.json is in sync with every package.js
 	# Every other web target runs `npm install`, which silently REPAIRS a
 	# desynced lockfile in the working tree, so the committed file can be
 	# broken while the whole gate stays green. Only a strict `npm ci` rejects
-	# it, and until now the only strict `npm ci` in the system lived in the Nix
-	# sandbox, which runs after the tag is pushed and checks out the tag: by
-	# then the release cannot be repaired. v0.83.3 lost its Cachix lane exactly
-	# this way, when a version-bump regen dropped the root @chan/workspace-app
-	# workspace link.
+	# it. The only other strict npm ci in the system runs in the Nix sandbox,
+	# which executes after the tag is pushed and checks out the tag: by then
+	# the release cannot be repaired.
 	#
 	# This runs among the static checks, before anything can rewrite the file,
 	# and costs about two seconds. --dry-run resolves and validates without
@@ -395,7 +390,7 @@ web-check: web-launcher ## Run frontend check, vitest, and production build.
 	#
 	# The web-launcher prerequisite only BUILDS the launcher (vite build), which
 	# misses type errors + unit regressions, so gate its svelte-check + vitest
-	# here too (it already ran `npm install`). Both SPAs are now fully gated.
+	# here too (it already ran `npm install`). Both SPAs are fully gated.
 	cd web && $(NPM) install \
 		&& $(NPM) run check -w @chan/launcher && $(NPM) run test -w @chan/launcher \
 		&& $(NPM) run check -w @chan/workspace-app && $(NPM) run test -w @chan/workspace-app \
@@ -458,7 +453,7 @@ clean: ## Remove local build outputs (root workspace, web, gateway, desktop).
 	rm -rf web-launcher/dist web-launcher/node_modules
 	rm -f $(WEB_BUILD_STAMP) $(LAUNCHER_BUILD_STAMP)
 	# gateway/ is its own cargo workspace: root `cargo clean` never
-	# touches gateway/target. The gateway frontend now lives in the ./web
+	# touches gateway/target. The gateway frontend lives in the ./web
 	# npm workspace; only its rust-embed SPA dist remains under gateway/.
 	cd gateway && $(CARGO) clean
 	rm -rf gateway/crates/identity/web/dist

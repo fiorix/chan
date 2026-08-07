@@ -2,7 +2,7 @@
 //!
 //! Each test gets its own throwaway Postgres schema (for api_tokens +
 //! tower-sessions) and a wiremock server standing in for both
-//! profile-service and the devserver-proxy admin API. Exercises the
+//! profile-service and the devserver-control admin API. Exercises the
 //! 404 reason body (`no_devserver` / `devserver_offline` /
 //! `access_denied`), its best-effort degrade when the profile lookup
 //! fails, and the happy path.

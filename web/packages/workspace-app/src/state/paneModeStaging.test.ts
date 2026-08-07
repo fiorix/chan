@@ -33,11 +33,10 @@ describe("paneMode state: stagedDraftEditors field", () => {
 });
 
 describe("paneMode staging: spawn helpers", () => {
-  test("there is no pane-mode Team Work bubble spawn (decoupled to lead-only)", () => {
-    // The Team Work bubble was decoupled from arbitrary terminals: it renders
-    // only on a team LEAD terminal via the Cmd+P workflow. The pane-mode
-    // `paneModeOpenTeamWorkTerminal` spawn (a bare bubble terminal on any pane)
-    // was removed; pane mode spawns plain terminals via paneModeOpenTerminal.
+  test("there is no pane-mode Team Work bubble spawn", () => {
+    // The Team Work bubble renders only on a team LEAD terminal via the
+    // Cmd+P workflow; pane mode spawns plain terminals via
+    // paneModeOpenTerminal, never a bare bubble terminal.
     expect(tabs).not.toMatch(/export function paneModeOpenTeamWorkTerminal\b/);
   });
 

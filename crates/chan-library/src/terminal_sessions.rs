@@ -3004,7 +3004,7 @@ impl Session {
             cmd.env("USERPROFILE", home);
         }
         // Windows: the terminal shell is Git BASH (a hard dependency). Prepend
-        // Prepend the chan bin dir (`%LOCALAPPDATA%\chan\bin`) so the `chan` /
+        // the chan bin dir (`%LOCALAPPDATA%\chan\bin`) so the `chan` /
         // `cs` shims resolve. The shim dir is only ever added to the HKCU PATH
         // registry by `cs_install::ensure_on_user_path`, which never reaches
         // this already-running process's inherited env -- so prepend it here,

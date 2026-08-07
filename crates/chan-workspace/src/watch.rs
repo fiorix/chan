@@ -179,7 +179,7 @@ pub trait WatchCallback: Send + Sync {
 /// paths emitted for events under this root. The workspace root passes
 /// `prefix: None`. The multi-root + prefix machinery is retained for
 /// callers that need to watch an out-of-root tree under a synthetic
-/// keyspace, but drafts no longer use it: they live in-root and emerge
+/// keyspace, but drafts do not use it: they live in-root and emerge
 /// through the single workspace-root watcher like any other file.
 #[derive(Debug, Clone)]
 pub struct WatchRoot {

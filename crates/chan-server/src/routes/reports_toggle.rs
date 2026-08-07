@@ -221,7 +221,7 @@ mod tests {
     #[tokio::test]
     async fn reports_state_endpoint_requires_auth() {
         // Parity with the semantic endpoints -
-        // /state is read-only but still gated by the per-launch
+        // /state is read-only but still gated by the bearer
         // token. Anonymous request gets 401.
         let app = route_test_app();
         let router = crate::router(app.state);

@@ -162,8 +162,8 @@ jobs:
     env:
       PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
     steps:
-      # The probe script lives in the repo, so unlike the old fire-and-forget
-      # trigger this job checks the release out to run it.
+      # The probe script lives in the repo, so this job checks the release out
+      # to run it.
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_sha }}
@@ -454,7 +454,7 @@ jobs:
   # The AUR hosts recipes, not builds. Prove each source package on a
   # clean upstream Arch container before either repository is updated.
   # The package build logic is the same script local sdme validation
-  # runs. This x86_64 job is the v0.73.0 publication gate.
+  # runs. This x86_64 job is the AUR publication gate.
   # Suspended: see the AUR publication note in this file's header.
   aur-validate:
     if: >-
@@ -1032,7 +1032,7 @@ jobs:
           verify_file Formula/chan.rb "download/v$version/"
 
   # ---- container images (Docker Hub) ----------------------------------------
-  # Publishes chan + the three chan-gateway service images to Docker Hub under
+  # Publishes chan + the four chan-gateway service images to Docker Hub under
   # ${{ vars.DOCKERHUB_NAMESPACE }}. Multi-arch is built on NATIVE runners
   # (amd64 on ubuntu-latest, arm64 on ubuntu-24.04-arm, matching the CLI and
   # gateway package jobs): each image runs a full from-scratch cargo build

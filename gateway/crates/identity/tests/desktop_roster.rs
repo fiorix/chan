@@ -1,16 +1,17 @@
 //! Integration tests for `GET /desktop/v1/devservers`.
 //!
 //! Each test gets its own throwaway Postgres schema and a wiremock
-//! server standing in for profile-service and the devserver-proxy
+//! server standing in for profile-service and the devserver-control
 //! admin API. PATs are seeded through the real operator surface
 //! (`POST /admin/v1/tokens`), so the Config carries a non-empty
 //! `identity_admin_token` (unlike the entry-test harness, which
 //! leaves the /admin/v1 tree disabled).
 //!
 //! Pins the Contract B failure semantics: 401 for a wrong-scope PAT,
-//! 502 (never a degraded all-offline 200) when profile or the proxy
-//! admin API fails, ETag/If-None-Match 304 on an unchanged body, and
-//! the no-audit validate (last_used_at bumps, no `used` row).
+//! 502 (never a degraded all-offline 200) when profile or the
+//! devserver-control admin API fails, ETag/If-None-Match 304 on an
+//! unchanged body, and the no-audit validate (last_used_at bumps, no
+//! `used` row).
 
 #[path = "../../../tests-shared/pg_reaper.rs"]
 mod pg_reaper;

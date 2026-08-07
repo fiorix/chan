@@ -2741,9 +2741,8 @@ type SessionPayload = {
     settings?: { open?: boolean };
     search?: { open?: boolean };
   };
-  /// Legacy field from the deleted RecentsSheet bottom drawer.
-  /// Read-but-ignore on restore so older session.json files load
-  /// cleanly.
+  /// Legacy field; read-but-ignore on restore so older session.json
+  /// files load cleanly.
   mobileRecents?: string[];
 };
 

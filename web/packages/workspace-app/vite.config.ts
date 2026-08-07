@@ -34,7 +34,7 @@ const svelteClient = join(dirname(require.resolve("svelte/package.json")), "src/
 // same files from the vite dev server. Filenames must survive the copy since
 // excalidraw composes them itself, so no hashing. Xiaolai (the 12.7M CJK
 // family) is excluded, keeping dist growth near 0.5M; CJK boards fall back
-// to the CDN exactly as before self-hosting.
+// to the CDN.
 function excalidrawFonts(): Plugin {
   const SKIP_FAMILY = "Xiaolai";
   let fontsSrc: string | null = null;
@@ -97,8 +97,9 @@ export default defineConfig({
     fs: {
       allow: [".", ".."],
     },
-    // While iterating, proxy API + WS to a `md serve` instance so we get
-    // the real backend without rebuilding the binary on every change.
+    // While iterating, proxy API + WS to a running `chan open` /
+    // `chan devserver` backend so we get the real backend without
+    // rebuilding the binary on every change.
     proxy: {
       "/api/terminal/ws": { target: "ws://127.0.0.1:8787", ws: true },
       "/api": "http://127.0.0.1:8787",
@@ -106,9 +107,8 @@ export default defineConfig({
     },
   },
   build: {
-    // Frozen rust-embed input path (X-2): repo-root web/dist, two levels up
-    // from this package. crates/chan-server/build.rs + static_assets.rs are
-    // untouched; only the source location moved under ./web.
+    // Frozen rust-embed input path: repo-root web/dist, two levels up
+    // from this package.
     outDir: "../../dist",
     emptyOutDir: true,
     target: "es2022",

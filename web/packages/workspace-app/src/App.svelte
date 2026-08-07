@@ -290,7 +290,7 @@
     void browserSelection.path;
     // The graph + browser surfaces are tabs; their per-tab state
     // (scope/depth/filters/inspector) is tracked by the layout-walking
-    // effect above, so this effect no longer mirrors overlay state.
+    // effect above, so this effect does not mirror overlay state.
     schedulePersistStateToHash();
     scheduleSessionSave();
   });

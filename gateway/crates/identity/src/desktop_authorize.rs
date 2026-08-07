@@ -1242,7 +1242,7 @@ mod tests {
 
     #[test]
     fn pkce_residual_challenge_binding_stays_open_by_design() {
-        // RESIDUAL (plan 1.2): an entry minted under C_V IS redeemable
+        // RESIDUAL: an entry minted under C_V IS redeemable
         // by verifier_V, because SHA256(verifier_V) == C_V by
         // construction. This is the challenge-binding takeover PKCE
         // does NOT close under a shared-host threat model. Codified so

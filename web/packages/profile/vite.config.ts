@@ -1,11 +1,12 @@
-// Build the id.chan.app SPA (@chan/profile).
+// Build the gateway identity SPA (@chan/profile), served on the identity
+// origin gw.{domain}.
 //
 // Output goes to the frozen gateway/crates/identity/web/dist, which the
 // gateway identity crate embeds via rust-embed at compile time. This package
 // lives at web/packages/profile under the ./web npm-workspaces root, so the
-// embed-output path is three levels up; the rust-embed input path is frozen
-// (X-3), so the source lifted into ./web and the output path did not, and the
-// gateway identity crate is untouched. Backend serves /auth/*, /api/*,
+// embed-output path is three levels up; the rust-embed input path is frozen,
+// so the source layout can move while the output path does not. Backend
+// serves /auth/*, /api/*,
 // /healthz; everything else falls back to the SPA, so we keep asset URLs
 // relative.
 
@@ -26,9 +27,9 @@ export default defineConfig({
     },
   },
   build: {
-    // Frozen rust-embed input path (X-2/X-3): the gateway identity crate's
-    // gateway/crates/identity/web/dist, three levels up from this package. The
-    // gateway crate's static_files.rs #[folder = "web/dist/"] is untouched.
+    // Frozen rust-embed input path: the gateway identity crate's
+    // gateway/crates/identity/web/dist, three levels up from this package
+    // (static_files.rs declares #[folder = "web/dist/"]).
     outDir: "../../../gateway/crates/identity/web/dist",
     emptyOutDir: true,
     target: "es2022",

@@ -53,7 +53,7 @@ export function terminalWsPath(opts: TerminalWsPathOpts): string {
     // (a restart resets the ring/seq). Explicit 0 (vs absent) makes the server
     // report ring-overflow loss via `missed_bytes` rather than silently
     // starting at the ring head. A bare cursor with no matching cached content
-    // is what caused the old "only the last line after a split" bug, so the
+    // truncates the replay to the tail the server still holds, so the
     // cursor is only ever sent paired with a restored snapshot + generation.
     params.set("since", String(Math.max(0, Math.floor(opts.since ?? 0))));
     if (opts.generation != null) {
@@ -66,11 +66,10 @@ export function terminalWsPath(opts: TerminalWsPathOpts): string {
   } else {
     const cwd = opts.cwd?.trim();
     if (cwd) params.set("cwd", cwd);
-    // MCP env injection is now governed by the global `terminal.mcp_env`
-    // server config (set from the Terminal Settings panel); the SPA no
-    // longer forces a per-terminal `?mcp_env=` override. The backend
-    // still honours an explicit query for `cs terminal new` / team
-    // spawns.
+    // MCP env injection is governed by the global `terminal.mcp_env`
+    // server config (set from the Terminal Settings panel); the SPA
+    // sends no per-terminal `?mcp_env=` override. The backend still
+    // honours an explicit query for `cs terminal new` / team spawns.
   }
   return `/api/terminal/ws?${params.toString()}`;
 }

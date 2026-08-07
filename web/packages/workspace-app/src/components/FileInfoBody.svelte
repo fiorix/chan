@@ -1003,7 +1003,7 @@
     {/if}
     {#if image}
       <!-- Inline preview. Bytes come from /api/files with the
-           per-launch bearer token appended as a query param so the
+           workspace bearer token appended as a query param so the
            browser's <img> can fetch without a custom Authorization
            header. Object-fit contains so portrait + landscape both
            sit cleanly in the fixed-height frame.

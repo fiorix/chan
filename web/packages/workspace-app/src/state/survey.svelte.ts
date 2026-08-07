@@ -18,9 +18,9 @@
 // follow-up AND a Dismiss. The host can defer (F: a bare "host will follow up
 // later" signal, so the asking agent expects an answer in a separate prompt)
 // or dismiss (a distinct "dismissed" reply, no answer coming, so the asking
-// agent can tell). Both are real replies that unblock the CLI, so a stray
-// Escape/backdrop close is no longer the hang risk it was: Escape now maps to
-// the explicit Dismiss reply rather than a silent close.
+// agent can tell). Both are real replies that unblock the CLI: Escape maps to
+// the explicit Dismiss reply rather than a silent close, so a stray
+// Escape/backdrop close cannot hang the waiting CLI.
 //
 // The server later pushes `close_survey` when that parked request disappears
 // externally (timeout, cancellation, or a first reply from another window).

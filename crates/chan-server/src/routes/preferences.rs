@@ -1,8 +1,7 @@
 //! Unified server and editor preferences through `/api/config`.
 //!
 //! The unified surface joins EditorPrefs, ServerConfig, and the
-//! chan-workspace registry. Agent/assistant preferences were removed with
-//! the assistant overlay; MCP access is configured through the server
+//! chan-workspace registry. MCP access is configured through the server
 //! runtime, not through global user preferences.
 
 use std::collections::BTreeMap;

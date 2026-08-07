@@ -1,4 +1,4 @@
-//! Per-launch bearer token + axum middleware that gates `/api/*` and `/ws`.
+//! Persisted bearer token + axum middleware that gates `/api/*` and `/ws`.
 //!
 //! Token persistence lives at `<paths.tokens>/token` (mode 0600 on Unix)
 //! so a `cargo build && chan open` cycle does not invalidate the
@@ -181,8 +181,8 @@ mod tests {
 
     /// Regression: some on-disk state has `<state>/tokens/<key>` as a
     /// regular file (32-byte token blob) instead of a directory.
-    /// `chan open` used to die with `io: File exists (os error 17)`
-    /// because `create_dir_all` cannot turn a file into a directory.
+    /// `create_dir_all` cannot turn a file into a directory, so `chan
+    /// open` would die with `io: File exists (os error 17)`.
     /// `ensure_tokens_dir` must self-heal: drop the stray file, make
     /// the directory, and let the regular write path produce a fresh
     /// token underneath.

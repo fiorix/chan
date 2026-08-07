@@ -16,7 +16,7 @@ use chan_workspace::SearchAggression;
 #[derive(Debug, Clone)]
 pub struct ServeConfig {
     pub addr: SocketAddr,
-    /// When true, the server skips the per-launch token gate. For
+    /// When true, the server skips the bearer-token gate. For
     /// tests and local dev only. Loopback bind is the only check
     /// left; do not flip this in production.
     pub no_token: bool,

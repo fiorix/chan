@@ -3837,11 +3837,10 @@ mod tests {
 
     #[tokio::test]
     async fn truncation_on_a_never_flushed_session_needs_only_corroboration() {
-        // Emptying a file from a shell used to be refused for the whole
-        // echo window, because the attach seed alone made the ring look
-        // busy. A session that has never written has no in-flight
-        // upload to blame an empty read on, so corroboration is the
-        // only guard it needs. No TTL override here on purpose: the
+        // A session that has never written has no in-flight upload
+        // to blame an empty read on, so corroboration is the only
+        // guard it needs (the attach seed alone must not make the
+        // ring look busy). No TTL override here on purpose: the
         // production windows must already allow this.
         let fx = fixture(&[("a.md", "content")]);
         let (ha, mut rxa) = attach(&fx, "a.md", "w1", None).await;
