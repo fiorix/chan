@@ -245,7 +245,12 @@ pre-push: ## Run the local pre-push gate.
 	RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
 	RUSTFLAGS="-D warnings" $(CARGO) test --all-targets
 	RUSTFLAGS="-D warnings" $(CARGO) build --no-default-features
+	# gateway-lint compiles every gateway test target without executing it;
+	# gateway-test executes the database-free subset and reports the seven
+	# Postgres-backed integration-test files as not run; gateway-build only
+	# compiles the release crates.
 	$(MAKE) gateway-lint
+	RUSTFLAGS="-D warnings" $(MAKE) gateway-test
 	RUSTFLAGS="-D warnings" $(MAKE) gateway-build
 	$(MAKE) web-check
 	$(MAKE) web-marketing-check
@@ -327,18 +332,27 @@ gateway-fmt: ## Check formatting in the separate gateway workspace.
 	cd gateway && $(CARGO) fmt --check
 
 .PHONY: gateway-build
-gateway-build: gateway-spa ## Build the gateway release crates (GATEWAY_CARGO_FLAGS adds cross/release).
+gateway-build: gateway-spa ## Build, but do not test, the gateway release crates (GATEWAY_CARGO_FLAGS adds cross/release).
 	# Depends on gateway-spa: identity embeds web/dist via rust-embed at
 	# compile time, so the bundle must exist or the derive fails to build.
 	cd gateway && $(CARGO) build $(GATEWAY_CARGO_FLAGS) \
 		$(foreach crate,$(GATEWAY_RELEASE_CRATES),-p $(crate))
 
 .PHONY: gateway-lint
-gateway-lint: gateway-spa ## Clippy the gateway workspace with warnings denied.
+gateway-lint: gateway-spa ## Clippy all gateway targets without executing tests.
 	# The gateway is a separate Cargo workspace, so the root clippy run does
 	# not reach it. Depends on gateway-spa for the same rust-embed reason as
 	# gateway-build.
 	cd gateway && RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
+
+.PHONY: gateway-test
+gateway-test: gateway-spa ## Execute gateway tests that do not require Postgres.
+	@printf '%s\n' \
+		'gateway-test: EXECUTE: all gateway library unit tests' \
+		'gateway-test: EXECUTE: devserver-proxy unit, integration, and doc tests' \
+		'gateway-test: NOT RUN: 7 profile/identity integration-test files require TEST_DATABASE_URL'
+	cd gateway && $(CARGO) test --workspace --lib
+	cd gateway && $(CARGO) test -p devserver-proxy
 
 .PHONY: gateway-release-crates
 gateway-release-crates: ## Print the gateway release crate names on one line.
