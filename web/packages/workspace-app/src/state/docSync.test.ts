@@ -1273,3 +1273,40 @@ describe("convergence", () => {
     b.cleanup();
   });
 });
+
+// ---- conflicts --------------------------------------------------------------
+
+describe("conflicts", () => {
+  test("a conflict frame raises tab.diskConflicted; resolution clears it", async () => {
+    const tab = fileTab();
+    resetLayout([tab]);
+    const { sock, cleanup } = await attached(tab);
+    expect(tab.diskConflicted ?? false).toBe(false);
+
+    sock.frame({ type: "conflict", active: true, disk_mtime_ns: MTIME });
+    expect(tab.diskConflicted).toBe(true);
+
+    sock.frame({ type: "conflict", active: false });
+    expect(tab.diskConflicted).toBe(false);
+    cleanup();
+  });
+
+  test("a conflicted snapshot marks the tab on attach", async () => {
+    const tab = fileTab();
+    resetLayout([tab]);
+    const session = acquireDocSession(tab);
+    expect(session).not.toBeNull();
+    const sock = lastSocket();
+    const mounted = mountEditor(tab, session!);
+    await flushMicro();
+    sock.open();
+    sock.frame({ ...snap(tab.content, 0, { dirty: true }), conflicted: true });
+    await flushMicro();
+    expect(tab.diskConflicted).toBe(true);
+    // A later clean snapshot (hard resync after resolution) clears it.
+    sock.frame(snap(tab.content, 0));
+    await flushMicro();
+    expect(tab.diskConflicted).toBe(false);
+    mounted.cleanup();
+  });
+});

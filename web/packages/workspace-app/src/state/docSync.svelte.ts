@@ -63,6 +63,7 @@ import {
   registerDocReleaseHook,
   registerDocSaveDelegate,
   registerDocSavePausedQuery,
+  registerDocUnflushedQuery,
   setTabDocState,
   type DocSyncStatus,
   type FileTab,
@@ -198,6 +199,7 @@ type ServerFrame =
       version: number;
       doc: string;
       dirty: boolean;
+      conflicted?: boolean;
       mtime_ns: string | null;
       cursors: PeerCursorFrame[];
     }
@@ -207,6 +209,7 @@ type ServerFrame =
   | ({ type: "cursor" } & PeerCursorFrame)
   | { type: "cursor-gone"; id: number }
   | { type: "flush"; dirty: boolean; mtime_ns?: string | null; error?: string }
+  | { type: "conflict"; active: boolean; disk_mtime_ns?: string | null }
   | { type: "removed" }
   | { type: "error"; message: string; reason?: string }
   | { type: "closed"; reason?: string };
@@ -351,6 +354,19 @@ export class DocSession {
     if (this.retryStopped || this.closedByUs) return false;
     if (this.status !== "degraded") return false;
     return !(this.ws !== null && this.ws.readyState === WebSocket.OPEN);
+  }
+
+  /// True while the authority holds state the DISK does not:
+  /// unconfirmed local edits, a push on the wire, or confirmed text
+  /// awaiting the ~800ms flush debounce. The force-reload prompt keys
+  /// on this: for an attached tab, `content === saved` only means
+  /// "confirmed by the authority", not "safe on disk".
+  hasUnflushedState(): boolean {
+    if (this.serverDirty || this.pushInFlight) return true;
+    if (this.view && this.collabInstalled) {
+      return sendableUpdates(this.view.state).length > 0;
+    }
+    return lf(this.tab.content) !== this.shadowText.toString();
   }
 
   peers(): number {
@@ -923,6 +939,12 @@ export class DocSession {
       case "flush":
         this.onFlush(f);
         return;
+      case "conflict":
+        // The authority holds retained disk divergence (or just
+        // resolved it). Mirror onto the tab; the conflict banner and
+        // the resolve flow key on this flag.
+        this.tab.diskConflicted = f.active;
+        return;
       case "removed":
         // The backing file vanished on disk. Route into the missing-file
         // machinery; the acquire/release effect releases this session on
@@ -996,6 +1018,7 @@ export class DocSession {
     this.shadowText = Text.of(f.doc.split("\n"));
     this.shadowVersion = f.version;
     this.tab.authorityVersion = f.version;
+    this.tab.diskConflicted = f.conflicted ?? false;
     this.haveSnapshot = true;
     // A snapshot opens a fresh sync epoch: any in-flight push belongs
     // to the pre-resync world and will never be answered on this epoch
@@ -1268,4 +1291,8 @@ registerDocFallbackSavedHook((tabId: string) => {
 
 registerDocSavePausedQuery((tabId: string) => {
   return registry.get(tabId)?.isOutagePaused() ?? false;
+});
+
+registerDocUnflushedQuery((tabId: string) => {
+  return registry.get(tabId)?.hasUnflushedState() ?? false;
 });

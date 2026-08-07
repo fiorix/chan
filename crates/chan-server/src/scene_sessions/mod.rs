@@ -424,6 +424,7 @@ impl SceneSession {
                 authority_version: version,
                 disk_mtime_ns,
                 disk_content: disk_text.clone(),
+                pending: None,
             }),
             RecoveryState::Conflicted { conflict } => {
                 if conflict.baseline_version != baseline_hash
@@ -458,6 +459,7 @@ impl SceneSession {
                         authority_version: version,
                         disk_mtime_ns,
                         disk_content: disk_text.clone(),
+                        pending: None,
                     })
                 }
             }
@@ -850,6 +852,7 @@ impl SceneSession {
             authority_version: st.version,
             disk_mtime_ns,
             disk_content,
+            pending: None,
         });
         st.flush_now = false;
     }

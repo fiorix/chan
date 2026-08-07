@@ -4989,8 +4989,12 @@ export async function reloadConflictedTab(): Promise<void> {
   const found = findFileTabById(tabId);
   if (!found) return;
   if (diskConflicted) {
-    const response = await api.resolveSessionConflict(found.tab.path, "reload");
-    adoptConflictResolution(found.tab, response);
+    try {
+      const response = await api.resolveSessionConflict(found.tab.path, "reload");
+      adoptConflictResolution(found.tab, response);
+    } catch (e) {
+      notify(`Reload failed: ${(e as Error).message}`);
+    }
     return;
   }
   await loadTabContent(found.paneId, found.tab.id, found.tab.path);
@@ -5010,8 +5014,15 @@ export async function overwriteConflictedTab(): Promise<void> {
   const found = findFileTabById(tabId);
   if (!found) return;
   if (diskConflicted) {
-    const response = await api.resolveSessionConflict(found.tab.path, "overwrite");
-    adoptConflictResolution(found.tab, response);
+    try {
+      const response = await api.resolveSessionConflict(
+        found.tab.path,
+        "overwrite",
+      );
+      adoptConflictResolution(found.tab, response);
+    } catch (e) {
+      notify(`Overwrite failed: ${(e as Error).message}`);
+    }
     return;
   }
   found.tab.savedMtime = currentMtime;
@@ -5054,6 +5065,18 @@ export function registerDocReleaseHook(
 const docSavePausedQueries: ((tabId: string) => boolean)[] = [];
 export function registerDocSavePausedQuery(fn: (tabId: string) => boolean): void {
   docSavePausedQueries.push(fn);
+}
+
+/// Query: does `tabId`'s live session hold state the DISK does not
+/// (unconfirmed edits, an in-flight push, or a confirmed-but-unflushed
+/// authority)? The force-reload prompt keys on this; for attached tabs
+/// `content === saved` only means "confirmed", not "on disk".
+const docUnflushedQueries: ((tabId: string) => boolean)[] = [];
+export function registerDocUnflushedQuery(fn: (tabId: string) => boolean): void {
+  docUnflushedQueries.push(fn);
+}
+export function isDocUnflushed(tabId: string): boolean {
+  return docUnflushedQueries.some((q) => q(tabId));
 }
 
 /// Hook: a classic PUT for `tabId` just landed on disk. A session
@@ -7162,6 +7185,73 @@ export async function reloadTabFromDisk(tabId: string): Promise<void> {
   const found = findFileTabById(tabId);
   if (!found) return;
   await loadTabContent(found.paneId, found.tab.id, found.tab.path);
+}
+
+/// Force-adopt the on-disk content for `tabId`, discarding whatever
+/// the buffer or the live authority holds instead. The user-initiated
+/// escape hatch (context-menu "Reload from disk", the conflict
+/// banner): a live doc session must adopt the disk SERVER-side through
+/// the resolve route -- the diverted GET would otherwise serve the
+/// stale authority right back -- while classic tabs simply re-fetch.
+/// Prompts before discarding unsaved edits or a conflict's authority
+/// side.
+export async function forceReloadFromDisk(tabId: string): Promise<void> {
+  const found = findFileTabById(tabId);
+  if (!found) return;
+  const t = found.tab;
+  if (t.content !== t.saved || t.diskConflicted || isDocUnflushed(t.id)) {
+    const ok = await uiConfirm({
+      title: "Reload from disk?",
+      message:
+        "Unsaved changes in this tab will be replaced by the file on disk.",
+      confirmLabel: "Reload",
+      destructive: true,
+    });
+    if (!ok) return;
+  }
+  if (isDocAttached(t) || t.diskConflicted) {
+    try {
+      const response = await api.resolveSessionConflict(t.path, "reload");
+      adoptConflictResolution(t, response);
+      return;
+    } catch (e) {
+      // 404 = no live session after all; the classic re-fetch below is
+      // the honest fallback. Anything else means a LIVE session could
+      // not adopt the disk (unreadable file) -- falling back would hit
+      // the diverted GET and re-serve the stale authority as if it
+      // were a reload, so surface the failure instead.
+      if (!(e instanceof ApiError && e.status === 404)) {
+        notify(`Reload from disk failed: ${(e as Error).message}`);
+        return;
+      }
+    }
+  }
+  await loadTabContent(found.paneId, t.id, t.path);
+}
+
+/// Resolve a retained session conflict in favor of the live authority:
+/// what the user sees overwrites the external edit on disk. Destructive
+/// for the OTHER writer's content, so it confirms like the reload half.
+export async function overwriteDiskConflict(tabId: string): Promise<void> {
+  const found = findFileTabById(tabId);
+  if (!found || !found.tab.diskConflicted) return;
+  const ok = await uiConfirm({
+    title: "Keep your version?",
+    message:
+      "The external changes on disk will be replaced by this tab's content.",
+    confirmLabel: "Keep mine",
+    destructive: true,
+  });
+  if (!ok) return;
+  try {
+    const response = await api.resolveSessionConflict(
+      found.tab.path,
+      "overwrite",
+    );
+    adoptConflictResolution(found.tab, response);
+  } catch (e) {
+    notify(`Keeping your version failed: ${(e as Error).message}`);
+  }
 }
 
 /// Aggregate read-only state across the whole window: true iff

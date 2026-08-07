@@ -42,6 +42,19 @@ pub(crate) struct SessionConflict {
     pub(crate) authority_version: u64,
     pub(crate) disk_mtime_ns: Option<i64>,
     pub(crate) disk_content: String,
+    /// An uncorroborated disk observation diverging from the retained
+    /// disk side. The retained side refreshes only after the
+    /// observation holds unchanged for the corroboration window,
+    /// mirroring the dirty-session fold-in guard, so a lying read can
+    /// never swap the side a user is about to resolve to.
+    pub(crate) pending: Option<ConflictObservation>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ConflictObservation {
+    pub(crate) hash: u64,
+    pub(crate) mtime_ns: Option<i64>,
+    pub(crate) seen: Instant,
 }
 
 /// Three-way merge result consumed by the session state transition.
@@ -172,6 +185,17 @@ impl SessionState {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn conflict_observation_mut(&mut self) -> Option<&mut Instant> {
+        match self {
+            Self::Conflicted(SessionConflict {
+                pending: Some(observation),
+                ..
+            }) => Some(&mut observation.seen),
+            _ => None,
+        }
+    }
+
     pub(crate) fn removal_observation(&self) -> Option<Instant> {
         match self {
             Self::Observing {
@@ -194,7 +218,42 @@ impl SessionState {
     }
 
     pub(crate) fn has_observation(&self) -> bool {
-        matches!(self, Self::Observing { .. })
+        match self {
+            Self::Observing { .. } => true,
+            Self::Conflicted(conflict) => conflict.pending.is_some(),
+            _ => false,
+        }
+    }
+
+    /// The pending conflicted-side observation, if any.
+    pub(crate) fn conflict_observation(&self) -> Option<(u64, Option<i64>, Instant)> {
+        match self {
+            Self::Conflicted(SessionConflict {
+                pending: Some(observation),
+                ..
+            }) => Some((observation.hash, observation.mtime_ns, observation.seen)),
+            _ => None,
+        }
+    }
+
+    /// Record (or restart) the conflicted-side observation clock. Only
+    /// meaningful while conflicted; a no-op elsewhere.
+    pub(crate) fn observe_conflict_content(&mut self, hash: u64, mtime_ns: Option<i64>) {
+        if let Self::Conflicted(conflict) = self {
+            conflict.pending = Some(ConflictObservation {
+                hash,
+                mtime_ns,
+                seen: Instant::now(),
+            });
+        }
+    }
+
+    /// Drop the conflicted-side observation (the disk settled back to
+    /// the retained side, or the conflict is being replaced).
+    pub(crate) fn clear_conflict_observation(&mut self) {
+        if let Self::Conflicted(conflict) = self {
+            conflict.pending = None;
+        }
     }
 
     pub(crate) fn conflict_disk_mtime_ns(&self) -> Option<Option<i64>> {
@@ -274,6 +333,7 @@ pub(crate) mod characterization {
             authority_version: 33,
             disk_mtime_ns: Some(55),
             disk_content: "disk".into(),
+            pending: None,
         });
         state.mark_dirty(44);
         let conflict_is_dirty = state.is_dirty();

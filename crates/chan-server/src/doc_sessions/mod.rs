@@ -406,6 +406,7 @@ fn snapshot_frame(path: &str, st: &DocState) -> String {
         version: st.version,
         doc: st.text.clone(),
         dirty: st.session_state.is_dirty(),
+        conflicted: matches!(st.session_state, SessionState::Conflicted(_)),
         mtime_ns: st.flushed_mtime_ns.map(|n| n.to_string()),
         cursors,
     })
@@ -416,6 +417,13 @@ fn flush_frame(st: &DocState) -> String {
         dirty: st.session_state.is_dirty(),
         mtime_ns: st.flushed_mtime_ns.map(|n| n.to_string()),
         error: None,
+    })
+}
+
+fn conflict_frame(active: bool, disk_mtime_ns: Option<i64>) -> String {
+    serialize(&ServerFrame::Conflict {
+        active,
+        disk_mtime_ns: disk_mtime_ns.map(|n| n.to_string()),
     })
 }
 
@@ -569,6 +577,7 @@ impl DocSession {
                 authority_version: version,
                 disk_mtime_ns,
                 disk_content: disk_text.clone(),
+                pending: None,
             }),
             RecoveryState::Conflicted { conflict } => {
                 if conflict.baseline_version != baseline_hash
@@ -603,6 +612,7 @@ impl DocSession {
                         authority_version: version,
                         disk_mtime_ns,
                         disk_content: disk_text.clone(),
+                        pending: None,
                     })
                 }
             }
@@ -975,13 +985,14 @@ impl DocSession {
         disk_content: String,
     ) {
         let baseline_version = st.baseline.content_hash;
-        let id = match &st.session_state {
+        let reentered = matches!(
+            &st.session_state,
             SessionState::Conflicted(conflict)
                 if conflict.baseline_version == baseline_version
-                    && conflict.disk_version == disk_version =>
-            {
-                conflict.id.clone()
-            }
+                    && conflict.disk_version == disk_version
+        );
+        let id = match &st.session_state {
+            SessionState::Conflicted(conflict) if reentered => conflict.id.clone(),
             _ => format!("doc-{}", NEXT_CONFLICT_ID.fetch_add(1, Ordering::Relaxed)),
         };
         st.session_state = SessionState::Conflicted(SessionConflict {
@@ -991,8 +1002,15 @@ impl DocSession {
             authority_version: st.version,
             disk_mtime_ns,
             disk_content,
+            pending: None,
         });
         st.flush_now = false;
+        // Announce entry (and retained-side refreshes) to every
+        // attachment; an identical re-entry has nothing new to say.
+        if !reentered {
+            let frame = conflict_frame(true, disk_mtime_ns);
+            st.fan(&frame);
+        }
     }
 
     /// Fold clean external disk content into the session. Dirty
@@ -1049,50 +1067,78 @@ impl DocSession {
         st.fan(&serialize(&ServerFrame::Removed));
     }
 
-    /// Resolve a conflict in favor of the retained disk side. Valid
-    /// text becomes a synthetic `$disk` update; a retained removal
-    /// becomes `Removed`. Unreadable disk state cannot be reloaded and
-    /// leaves the conflict intact.
-    pub(crate) fn reload_conflict(&self) -> bool {
-        let mut st = self.lock_state();
-        let (disk_version, disk_mtime_ns, disk_content) = match &st.session_state {
-            SessionState::Conflicted(conflict) => (
-                conflict.disk_version,
-                conflict.disk_mtime_ns,
-                conflict.disk_content.clone(),
-            ),
-            _ => return false,
+    /// Force the authority to adopt the CURRENT on-disk content: the
+    /// explicit "reload from disk", valid in every session state. A
+    /// retained conflict resolves in favor of the live disk (never the
+    /// capture, which may lag further external writes), unflushed
+    /// authority edits are discarded, and the baseline re-roots at the
+    /// adopted read. A vanished file routes into the removed flow when
+    /// a conflict retained a removal; any other unreadable disk leaves
+    /// the session untouched and returns false for an honest error.
+    pub(crate) async fn reload_from_disk(self: &Arc<Self>, workspace: &Arc<Workspace>) -> bool {
+        let _io = self.io_lock.lock().await;
+        let ws = Arc::clone(workspace);
+        let path = self.path.clone();
+        let read = tokio::task::spawn_blocking(move || ws.read_text_with_stat(&path)).await;
+        let Ok(read) = read else { return false };
+        let (disk_text, disk_stat) = match read {
+            Ok(read) => read,
+            Err(_) => {
+                let ws = Arc::clone(workspace);
+                let probe_path = self.path.clone();
+                let exists = tokio::task::spawn_blocking(move || ws.exists(&probe_path))
+                    .await
+                    .unwrap_or(true);
+                if exists {
+                    // Present but unreadable (non-UTF-8, oversized):
+                    // nothing safe to adopt.
+                    return false;
+                }
+                let mut st = self.lock_state();
+                let was_conflicted = matches!(st.session_state, SessionState::Conflicted(_));
+                st.flushed_mtime_ns = None;
+                st.write_budget = TEXT_WRITE_LIMIT;
+                st.session_state = SessionState::Removed;
+                st.flush_now = false;
+                st.flush_failures = 0;
+                if was_conflicted {
+                    let frame = conflict_frame(false, None);
+                    st.fan(&frame);
+                }
+                st.fan(&serialize(&ServerFrame::Removed));
+                return true;
+            }
         };
-        if disk_version == content_hash(REMOVED_DISK_MARKER) {
-            st.flushed_mtime_ns = None;
-            st.session_state = SessionState::Removed;
-            st.flush_now = false;
-            st.flush_failures = 0;
-            st.fan(&serialize(&ServerFrame::Removed));
-            return true;
-        }
-        let disk_content = normalize_lf(disk_content);
-        let disk_hash = content_hash(&disk_content);
-        if disk_version != disk_hash {
-            return false;
-        }
-        let changed = disk_content != st.text;
+        let disk_text = normalize_lf(disk_text);
+        let disk_hash = content_hash(&disk_text);
+        let mut st = self.lock_state();
+        let was_conflicted = matches!(st.session_state, SessionState::Conflicted(_));
+        let changed = disk_text != st.text;
         if changed {
-            self.replace_locked(&mut st, DISK_CLIENT, disk_content.clone());
+            self.replace_locked(&mut st, DISK_CLIENT, disk_text.clone());
         }
         st.disk_echo.note_adopted(disk_hash);
-        st.flushed_mtime_ns = disk_mtime_ns;
+        st.flushed_mtime_ns = disk_stat.mtime_ns;
         st.baseline = DurableBaseline {
-            content: disk_content,
+            content: disk_text,
             content_hash: disk_hash,
-            mtime_ns: disk_mtime_ns,
+            mtime_ns: disk_stat.mtime_ns,
             authority_version: st.version,
         };
-        st.write_budget = semantic_write_budget(Some(st.baseline.content.len() as u64));
+        st.write_budget = semantic_write_budget(Some(disk_stat.size));
         st.session_state = SessionState::Clean;
         st.flush_now = false;
         st.flush_failures = 0;
-        if !changed {
+        if was_conflicted {
+            let frame = conflict_frame(false, disk_stat.mtime_ns);
+            st.fan(&frame);
+        }
+        if changed {
+            // The $disk update already carried the content; the flush
+            // frame lands the clean state and the adopted CAS token.
+            let frame = flush_frame(&st);
+            st.fan(&frame);
+        } else {
             let frame = snapshot_frame(&self.path, &st);
             st.fan(&frame);
         }
@@ -1119,6 +1165,8 @@ impl DocSession {
                 since: Instant::now(),
             };
             st.flush_now = true;
+            let frame = conflict_frame(false, disk_mtime_ns);
+            st.fan(&frame);
         }
         if !flush_session(self, workspace, self_writes).await {
             return false;
@@ -1528,6 +1576,16 @@ impl DocRegistry {
                         version: c.version,
                     }));
                 }
+                // Conflict transitions bump no version and fan only to
+                // the attachments of that moment, so the incremental
+                // path must restate the current conflict state or a
+                // reconnect across a transition re-arms the silent
+                // black hole (missed entry) or wedges the banner on
+                // (missed exit).
+                let _ = tx.send(conflict_frame(
+                    matches!(st.session_state, SessionState::Conflicted(_)),
+                    st.session_state.conflict_disk_mtime_ns().flatten(),
+                ));
                 let _ = tx.send(flush_frame(&st));
             }
             _ => {
@@ -1829,12 +1887,37 @@ async fn reconcile_session_locked(session: &Arc<DocSession>, workspace: &Arc<Wor
                 if st.session_state.removal_observation().is_some() {
                     st.session_state.clear_observation();
                 }
+                st.session_state.clear_conflict_observation();
                 return;
             }
             // Absence must corroborate: a non-atomic replace (FUSE
             // rename as delete + create) vanishes the path for real
             // milliseconds-to-seconds, and firing `removed` at the
             // clients mid-typing tears down their session state.
+            if matches!(st.session_state, SessionState::Conflicted(_)) {
+                // A conflicted session corroborates absence through its
+                // own pending slot (observe_removal is a deliberate
+                // no-op there); once held, mark_removed's dirty path
+                // refreshes the retained side to the removal marker so
+                // resolve stops offering a ghost disk side.
+                let marker = content_hash(REMOVED_DISK_MARKER);
+                let held = matches!(
+                    st.session_state.conflict_observation(),
+                    Some((h, m, seen))
+                        if h == marker && m.is_none() && seen.elapsed() >= CORROBORATE_AFTER
+                );
+                let same = matches!(
+                    st.session_state.conflict_observation(),
+                    Some((h, m, _)) if h == marker && m.is_none()
+                );
+                if held {
+                    drop(st);
+                    session.mark_removed();
+                } else if !same {
+                    st.session_state.observe_conflict_content(marker, None);
+                }
+                return;
+            }
             match st.session_state.removal_observation() {
                 Some(first) if first.elapsed() >= CORROBORATE_AFTER => {
                     drop(st);
@@ -1852,15 +1935,15 @@ async fn reconcile_session_locked(session: &Arc<DocSession>, workspace: &Arc<Wor
         if st.session_state.removal_observation().is_some() {
             st.session_state.clear_observation();
         }
-        if matches!(st.session_state, SessionState::Conflicted(_)) {
-            return;
-        }
         // A matching token normally settles the event as our own flush
         // echo. Not while an observation is pending, though: a refused
         // empty read adopts the token below to keep CAS writes viable,
         // and settling here would end the corroboration that folds an
-        // honest truncation in once the guards lapse.
-        if stat.mtime_ns.is_some()
+        // honest truncation in once the guards lapse. A conflicted
+        // session always reads: its token predates the conflict, and
+        // the retained disk side below must track the live disk.
+        if !matches!(st.session_state, SessionState::Conflicted(_))
+            && stat.mtime_ns.is_some()
             && stat.mtime_ns == st.flushed_mtime_ns
             && st.session_state.content_observation().is_none()
         {
@@ -1873,6 +1956,14 @@ async fn reconcile_session_locked(session: &Arc<DocSession>, workspace: &Arc<Wor
         match tokio::task::spawn_blocking(move || ws.read_text_with_stat(&read_path)).await {
             Ok(Ok(read)) => read,
             Ok(Err(e)) => {
+                let mut st = session.lock_state();
+                if matches!(st.session_state, SessionState::Conflicted(_)) {
+                    // Already conflicted: keep the retained capture. An
+                    // unreadable read must not clobber a good disk side
+                    // (and the size/mtime-stamped marker would churn a
+                    // fresh conflict id per failing read).
+                    return;
+                }
                 tracing::warn!(
                     error = %e,
                     path = %session.path,
@@ -1882,7 +1973,6 @@ async fn reconcile_session_locked(session: &Arc<DocSession>, workspace: &Arc<Wor
                     "{UNREADABLE_DISK_MARKER}:{}:{:?}:{e}",
                     stat.size, stat.mtime_ns
                 );
-                let mut st = session.lock_state();
                 DocSession::enter_conflict_locked(
                     &mut st,
                     content_hash(&marker),
@@ -1897,6 +1987,10 @@ async fn reconcile_session_locked(session: &Arc<DocSession>, workspace: &Arc<Wor
     let hash = content_hash(&disk_text);
     {
         let mut st = session.lock_state();
+        if matches!(st.session_state, SessionState::Conflicted(_)) {
+            reconcile_conflicted_locked(&mut st, disk_text, &disk_stat, hash);
+            return;
+        }
         if st.disk_echo.contains(hash) {
             // Our own bytes under a re-stamped mtime (async-committing
             // fs) or a stale read serving a recent flush back: adopt
@@ -1978,6 +2072,98 @@ async fn reconcile_session_locked(session: &Arc<DocSession>, workspace: &Arc<Wor
     // Clean session, non-empty divergent content: an ordinary external
     // edit; fold it in immediately, as before.
     session.merge_disk(disk_text, &disk_stat);
+}
+
+/// A conflicted session's reconcile: authority, baseline, and flushing
+/// stay frozen until the user resolves, but the RETAINED disk side must
+/// track the live disk or the resolve UI offers a ghost. Divergence
+/// from the retained capture corroborates exactly like the dirty-path
+/// fold-in; once corroborated, a disk that converged on the authority
+/// collapses the conflict to clean, a disk restored to the baseline
+/// collapses it to dirty (the flusher resumes), and anything else
+/// refreshes the retained side in place.
+fn reconcile_conflicted_locked(
+    st: &mut DocState,
+    disk_text: String,
+    disk_stat: &FileStat,
+    hash: u64,
+) {
+    let retained = match &st.session_state {
+        SessionState::Conflicted(conflict) => conflict.disk_version,
+        _ => return,
+    };
+    if hash == retained {
+        // Disk still holds the retained side. Adopt the fresh token
+        // anyway: a same-bytes rewrite (touch, no-op formatter save)
+        // bumps only the mtime, and "Keep mine" CAS-writes against the
+        // retained token, so a stale one turns the overwrite into a
+        // guaranteed first-click 409.
+        if let SessionState::Conflicted(conflict) = &mut st.session_state {
+            conflict.disk_mtime_ns = disk_stat.mtime_ns;
+            conflict.pending = None;
+        }
+        return;
+    }
+    let observation = st.session_state.conflict_observation();
+    let same_observation = matches!(
+        observation,
+        Some((pending_hash, pending_mtime, _))
+            if pending_hash == hash && pending_mtime == disk_stat.mtime_ns
+    );
+    let corroborated = matches!(
+        observation,
+        Some((pending_hash, pending_mtime, seen))
+            if pending_hash == hash
+                && pending_mtime == disk_stat.mtime_ns
+                && seen.elapsed() >= CORROBORATE_AFTER
+    );
+    if !corroborated {
+        if !same_observation {
+            st.session_state
+                .observe_conflict_content(hash, disk_stat.mtime_ns);
+        }
+        return;
+    }
+    if disk_text == st.text {
+        // The external writer converged on the live authority: the
+        // divergence is gone and the conflict evaporates.
+        st.disk_echo.note_adopted(hash);
+        st.flushed_mtime_ns = disk_stat.mtime_ns;
+        st.baseline = DurableBaseline {
+            content: disk_text,
+            content_hash: hash,
+            mtime_ns: disk_stat.mtime_ns,
+            authority_version: st.version,
+        };
+        st.write_budget = semantic_write_budget(Some(disk_stat.size));
+        st.session_state = SessionState::Clean;
+        st.flush_failures = 0;
+        let frame = conflict_frame(false, disk_stat.mtime_ns);
+        st.fan(&frame);
+        let frame = flush_frame(st);
+        st.fan(&frame);
+        return;
+    }
+    if disk_text == st.baseline.content {
+        // The external edit was undone: an ordinary dirty session
+        // again; the flusher resumes writing the authority under the
+        // observed token.
+        st.disk_echo.note_adopted(hash);
+        st.flushed_mtime_ns = disk_stat.mtime_ns;
+        st.session_state = SessionState::Dirty {
+            since: Instant::now(),
+        };
+        st.flush_now = true;
+        st.flush_failures = 0;
+        let frame = conflict_frame(false, disk_stat.mtime_ns);
+        st.fan(&frame);
+        return;
+    }
+    // Still divergent, but the disk moved on: refresh the retained
+    // side so a resolve adopts what is really there. Fans the conflict
+    // frame itself (the disk hash changed, so this is never a silent
+    // re-entry).
+    DocSession::enter_conflict_locked(st, hash, disk_stat.mtime_ns, disk_text);
 }
 
 fn cell_workspace(cell: &Arc<RwLock<Option<WorkspaceCell>>>) -> Option<Arc<Workspace>> {
@@ -2138,7 +2324,7 @@ pub(crate) async fn characterization_http_trace(
     );
     let conflicted_view = view(&session, Some(disk_stat.mtime_ns));
 
-    assert!(session.reload_conflict());
+    assert!(session.reload_from_disk(&workspace).await);
     let reloaded_view = view(&session, None);
 
     session
@@ -2261,6 +2447,20 @@ mod tests {
             .session_state
             .content_observation_mut()
             .expect("a pending fold to age");
+        *pending = Instant::now()
+            .checked_sub(CORROBORATE_AFTER + Duration::from_millis(50))
+            .unwrap();
+    }
+
+    /// Age the pending conflicted-side observation past
+    /// CORROBORATE_AFTER so the next reconcile refreshes the retained
+    /// disk side.
+    fn backdate_conflict_observation(session: &Arc<DocSession>) {
+        let mut st = session.lock_state();
+        let pending = st
+            .session_state
+            .conflict_observation_mut()
+            .expect("a pending conflict observation to age");
         *pending = Instant::now()
             .checked_sub(CORROBORATE_AFTER + Duration::from_millis(50))
             .unwrap();
@@ -2530,18 +2730,262 @@ mod tests {
             assert_eq!(conflict.authority_version, st.version);
             assert_eq!(conflict.disk_content, disk);
         }
-        assert!(drain(&mut rx).is_empty(), "conflict has no silent winner");
+        // No silent winner, but a loud announcement: every attachment
+        // hears the conflict the moment it latches.
+        let frames = drain(&mut rx);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["type"], "conflict");
+        assert_eq!(frames[0]["active"], true);
 
-        assert!(ha.session().reload_conflict());
+        assert!(ha.session().reload_from_disk(&fx.workspace).await);
         assert_eq!(ha.session().authority_view().0, disk);
         assert!(matches!(
             ha.session().lock_state().session_state,
             SessionState::Clean
         ));
         let frames = drain(&mut rx);
-        assert_eq!(frames.len(), 1);
+        assert_eq!(frames.len(), 3);
         assert_eq!(frames[0]["type"], "updates");
         assert_eq!(frames[0]["updates"][0]["clientID"], "$disk");
+        assert_eq!(frames[1]["type"], "conflict");
+        assert_eq!(frames[1]["active"], false);
+        assert_eq!(frames[2]["type"], "flush");
+        assert_eq!(frames[2]["dirty"], false);
+    }
+
+    /// Enter a retained conflict deterministically: local edit, then a
+    /// divergent same-line disk write folded through merge_disk.
+    async fn force_overlap_conflict(fx: &Fixture, ha: &DocAttachHandle, local: &str, disk: &str) {
+        ha.session().apply_replace("c1", local).unwrap();
+        fx.workspace.write_text("a.md", disk).unwrap();
+        let stat = fx.workspace.stat("a.md").unwrap();
+        ha.session().merge_disk(disk.to_string(), &stat);
+        assert!(matches!(
+            ha.session().lock_state().session_state,
+            SessionState::Conflicted(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn conflicted_reconcile_keeps_the_retained_disk_side_fresh() {
+        let baseline = "alpha\nbeta\n";
+        let local = "alpha local\nbeta\n";
+        let disk_one = "alpha disk\nbeta\n";
+        let disk_two = "alpha disk two\nbeta\n";
+        let fx = fixture(&[("a.md", baseline)]);
+        let (ha, mut rx) = attach(&fx, "a.md", "w1", None).await;
+        drain(&mut rx);
+        force_overlap_conflict(&fx, &ha, local, disk_one).await;
+        drain(&mut rx);
+
+        // The disk moves AGAIN while conflicted (the vi edit the old
+        // reconciler ignored): the retained side corroborates and
+        // refreshes; authority and baseline stay frozen.
+        fx.workspace.write_text("a.md", disk_two).unwrap();
+        reconcile_session(ha.session(), &fx.workspace).await;
+        {
+            let st = ha.session().lock_state();
+            let SessionState::Conflicted(conflict) = &st.session_state else {
+                panic!("still conflicted while parked");
+            };
+            assert_eq!(
+                conflict.disk_content, disk_one,
+                "an uncorroborated observation must not swap the retained side"
+            );
+        }
+        backdate_conflict_observation(ha.session());
+        fx.registry.reconcile_pending(&fx.workspace).await;
+        {
+            let st = ha.session().lock_state();
+            let SessionState::Conflicted(conflict) = &st.session_state else {
+                panic!("still divergent, still conflicted");
+            };
+            assert_eq!(conflict.disk_content, disk_two);
+            assert_eq!(st.text, local);
+            assert_eq!(st.baseline.content, baseline);
+        }
+        let frames = drain(&mut rx);
+        assert_eq!(frames.len(), 1, "the refreshed retained side re-announces");
+        assert_eq!(frames[0]["type"], "conflict");
+        assert_eq!(frames[0]["active"], true);
+    }
+
+    #[tokio::test]
+    async fn conflicted_session_collapses_when_disk_converges_on_authority() {
+        let baseline = "alpha\nbeta\n";
+        let local = "alpha local\nbeta\n";
+        let disk = "alpha disk\nbeta\n";
+        let fx = fixture(&[("a.md", baseline)]);
+        let (ha, mut rx) = attach(&fx, "a.md", "w1", None).await;
+        drain(&mut rx);
+        force_overlap_conflict(&fx, &ha, local, disk).await;
+        drain(&mut rx);
+
+        // The external writer converges on the live authority: the
+        // divergence is gone and the conflict must evaporate.
+        fx.workspace.write_text("a.md", local).unwrap();
+        reconcile_session(ha.session(), &fx.workspace).await;
+        backdate_conflict_observation(ha.session());
+        fx.registry.reconcile_pending(&fx.workspace).await;
+        {
+            let st = ha.session().lock_state();
+            assert!(matches!(st.session_state, SessionState::Clean));
+            assert_eq!(st.text, local);
+            assert_eq!(st.baseline.content, local);
+        }
+        let frames = drain(&mut rx);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0]["type"], "conflict");
+        assert_eq!(frames[0]["active"], false);
+        assert_eq!(frames[1]["type"], "flush");
+        assert_eq!(frames[1]["dirty"], false);
+    }
+
+    #[tokio::test]
+    async fn reload_from_disk_adopts_live_disk_over_the_retained_capture() {
+        let baseline = "alpha\nbeta\n";
+        let local = "alpha local\nbeta\n";
+        let disk_one = "alpha disk\nbeta\n";
+        let disk_two = "alpha disk two\nbeta\n";
+        let fx = fixture(&[("a.md", baseline)]);
+        let (ha, mut rx) = attach(&fx, "a.md", "w1", None).await;
+        drain(&mut rx);
+        force_overlap_conflict(&fx, &ha, local, disk_one).await;
+        drain(&mut rx);
+
+        // A further external write the reconciler has NOT seen (no
+        // event, no corroboration): resolve must still adopt the live
+        // bytes, never the retained capture.
+        fx.workspace.write_text("a.md", disk_two).unwrap();
+        assert!(ha.session().reload_from_disk(&fx.workspace).await);
+        assert_eq!(ha.session().authority_view().0, disk_two);
+        {
+            let st = ha.session().lock_state();
+            assert!(matches!(st.session_state, SessionState::Clean));
+            assert_eq!(st.baseline.content, disk_two);
+        }
+        let frames = drain(&mut rx);
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0]["type"], "updates");
+        assert_eq!(frames[0]["updates"][0]["clientID"], "$disk");
+        assert_eq!(frames[1]["type"], "conflict");
+        assert_eq!(frames[1]["active"], false);
+        assert_eq!(frames[2]["type"], "flush");
+    }
+
+    #[tokio::test]
+    async fn incremental_reattach_restates_the_conflict() {
+        let baseline = "alpha\nbeta\n";
+        let local = "alpha local\nbeta\n";
+        let disk = "alpha disk\nbeta\n";
+        let fx = fixture(&[("a.md", baseline)]);
+        let (ha, mut rx) = attach(&fx, "a.md", "w1", None).await;
+        drain(&mut rx);
+        force_overlap_conflict(&fx, &ha, local, disk).await;
+        drain(&mut rx);
+        let version = ha.session().lock_state().version;
+
+        // A reconnect with a usable version (socket blip across the
+        // conflict entry) must still learn about the conflict: the
+        // transition bumped no version, so the catch-up would
+        // otherwise be silent.
+        let (_hb, mut rx2) = attach(&fx, "a.md", "w2", Some(version)).await;
+        let frames = drain(&mut rx2);
+        assert_eq!(frames.len(), 2, "{frames:?}");
+        assert_eq!(frames[0]["type"], "conflict");
+        assert_eq!(frames[0]["active"], true);
+        assert_eq!(frames[1]["type"], "flush");
+    }
+
+    #[tokio::test]
+    async fn same_bytes_rewrite_refreshes_the_retained_token() {
+        let baseline = "alpha\nbeta\n";
+        let local = "alpha local\nbeta\n";
+        let disk = "alpha disk\nbeta\n";
+        let fx = fixture(&[("a.md", baseline)]);
+        let (ha, mut rx) = attach(&fx, "a.md", "w1", None).await;
+        drain(&mut rx);
+        force_overlap_conflict(&fx, &ha, local, disk).await;
+        drain(&mut rx);
+
+        // The external tool re-saves identical bytes: only the mtime
+        // moves. The retained side must adopt the fresh token or the
+        // first "Keep mine" CAS-writes against a dead one and 409s.
+        std::thread::sleep(Duration::from_millis(20));
+        fx.workspace.write_text("a.md", disk).unwrap();
+        let restamped = fx.workspace.stat("a.md").unwrap();
+        reconcile_session(ha.session(), &fx.workspace).await;
+        {
+            let st = ha.session().lock_state();
+            let SessionState::Conflicted(conflict) = &st.session_state else {
+                panic!("same-bytes rewrite must not resolve the conflict");
+            };
+            assert_eq!(conflict.disk_mtime_ns, restamped.mtime_ns);
+        }
+        assert!(
+            ha.session()
+                .overwrite_conflict(&fx.workspace, &fx.self_writes)
+                .await,
+            "keep-mine must land on the first click"
+        );
+        assert_eq!(fx.workspace.read_text("a.md").unwrap(), local);
+    }
+
+    #[tokio::test]
+    async fn external_delete_while_conflicted_refreshes_to_the_removal_marker() {
+        let baseline = "alpha\nbeta\n";
+        let local = "alpha local\nbeta\n";
+        let disk = "alpha disk\nbeta\n";
+        let fx = fixture(&[("a.md", baseline)]);
+        let (ha, mut rx) = attach(&fx, "a.md", "w1", None).await;
+        drain(&mut rx);
+        force_overlap_conflict(&fx, &ha, local, disk).await;
+        drain(&mut rx);
+
+        // The file vanishes while conflicted: after corroboration the
+        // retained side must become the removal marker instead of
+        // offering a ghost disk side forever.
+        std::fs::remove_file(fx.root.path().join("a.md")).unwrap();
+        reconcile_session(ha.session(), &fx.workspace).await;
+        {
+            let st = ha.session().lock_state();
+            let SessionState::Conflicted(conflict) = &st.session_state else {
+                panic!("uncorroborated absence keeps the conflict");
+            };
+            assert_eq!(conflict.disk_content, disk, "retained side not yet swapped");
+        }
+        backdate_conflict_observation(ha.session());
+        fx.registry.reconcile_pending(&fx.workspace).await;
+        {
+            let st = ha.session().lock_state();
+            let SessionState::Conflicted(conflict) = &st.session_state else {
+                panic!("delete versus edit stays a retained conflict");
+            };
+            assert_eq!(conflict.disk_version, content_hash(REMOVED_DISK_MARKER));
+            assert!(conflict.disk_content.is_empty());
+            assert_eq!(st.text, local, "authority untouched");
+        }
+    }
+
+    #[tokio::test]
+    async fn conflicted_snapshot_marks_the_conflict_for_fresh_attaches() {
+        let baseline = "alpha\nbeta\n";
+        let local = "alpha local\nbeta\n";
+        let disk = "alpha disk\nbeta\n";
+        let fx = fixture(&[("a.md", baseline)]);
+        let (ha, mut rx) = attach(&fx, "a.md", "w1", None).await;
+        drain(&mut rx);
+        force_overlap_conflict(&fx, &ha, local, disk).await;
+        drain(&mut rx);
+
+        // "Close and reopen the tab": the fresh attach still serves the
+        // authority text, but the snapshot now says so out loud.
+        let (_hb, mut rx2) = attach(&fx, "a.md", "w2", None).await;
+        let frames = drain(&mut rx2);
+        assert_eq!(frames[0]["type"], "snapshot");
+        assert_eq!(frames[0]["doc"], local);
+        assert_eq!(frames[0]["conflicted"], true);
+        assert_eq!(frames[0]["dirty"], true);
     }
 
     #[tokio::test]
@@ -2557,6 +3001,7 @@ mod tests {
         fx.workspace.write_text("a.md", disk).unwrap();
         let stat = fx.workspace.stat("a.md").unwrap();
         ha.session().merge_disk(disk.to_string(), &stat);
+        drain(&mut rx); // the conflict announcement
 
         assert!(
             ha.session()
@@ -2565,10 +3010,12 @@ mod tests {
         );
         assert_eq!(fx.workspace.read_text("a.md").unwrap(), local);
         let frames = drain(&mut rx);
-        assert_eq!(frames.len(), 2);
-        assert_eq!(frames[0]["type"], "flush");
-        assert_eq!(frames[1]["type"], "snapshot");
-        assert_eq!(frames[1]["doc"], local);
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0]["type"], "conflict");
+        assert_eq!(frames[0]["active"], false);
+        assert_eq!(frames[1]["type"], "flush");
+        assert_eq!(frames[2]["type"], "snapshot");
+        assert_eq!(frames[2]["doc"], local);
     }
 
     #[tokio::test]
@@ -2732,7 +3179,14 @@ mod tests {
             assert_eq!(conflict.disk_mtime_ns, None);
             assert!(conflict.disk_content.is_empty());
         }
-        assert_eq!(drain(&mut rx).len(), 0, "neither side wins");
+        let frames = drain(&mut rx);
+        assert_eq!(
+            frames.len(),
+            1,
+            "neither side wins, but the conflict is announced"
+        );
+        assert_eq!(frames[0]["type"], "conflict");
+        assert_eq!(frames[0]["active"], true);
         drop(ha);
 
         let restarted = Arc::new(DocRegistry::new());
@@ -2774,7 +3228,10 @@ mod tests {
             assert_ne!(conflict.disk_version, content_hash(""));
             assert!(conflict.disk_content.is_empty());
         }
-        assert!(drain(&mut rx).is_empty());
+        let frames = drain(&mut rx);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["type"], "conflict");
+        assert_eq!(frames[0]["active"], true);
         drop(ha);
 
         let restarted = Arc::new(DocRegistry::new());
@@ -2957,15 +3414,17 @@ mod tests {
             .unwrap();
 
         // A reconnect that confirmed v1 gets exactly v1..v3 plus the
-        // flush state, not a snapshot.
+        // conflict + flush state, not a snapshot.
         let (_hb, mut rxb) = attach(&fx, "a.md", "w2", Some(1)).await;
         let frames = drain(&mut rxb);
-        assert_eq!(frames.len(), 2, "{frames:?}");
+        assert_eq!(frames.len(), 3, "{frames:?}");
         assert_eq!(frames[0]["type"], "updates");
         assert_eq!(frames[0]["version"], 1);
         assert_eq!(frames[0]["updates"].as_array().unwrap().len(), 2);
-        assert_eq!(frames[1]["type"], "flush");
-        assert_eq!(frames[1]["dirty"], true);
+        assert_eq!(frames[1]["type"], "conflict");
+        assert_eq!(frames[1]["active"], false);
+        assert_eq!(frames[2]["type"], "flush");
+        assert_eq!(frames[2]["dirty"], true);
 
         // An explicit pull answers the same shape.
         drain(&mut rxa);
@@ -3132,11 +3591,13 @@ mod tests {
 
         // Within grace the session survives, so a versioned reattach
         // takes the incremental path (here: already current, so just
-        // cursors-and-flush, no snapshot).
+        // the conflict/flush state restate, no snapshot).
         let (hb, mut rxb) = attach(&fx, "a.md", "w2", Some(1)).await;
         let frames = drain(&mut rxb);
-        assert_eq!(frames.len(), 1, "{frames:?}");
-        assert_eq!(frames[0]["type"], "flush");
+        assert_eq!(frames.len(), 2, "{frames:?}");
+        assert_eq!(frames[0]["type"], "conflict");
+        assert_eq!(frames[0]["active"], false);
+        assert_eq!(frames[1]["type"], "flush");
         assert!(Arc::ptr_eq(hb.session(), &session), "same session reused");
         drop(hb);
 
@@ -3422,7 +3883,10 @@ mod tests {
         };
         assert_eq!(conflict.disk_content, "external");
         drop(st);
-        assert_eq!(drain(&mut rxa).len(), 0, "no actor silently wins");
+        let frames = drain(&mut rxa);
+        assert_eq!(frames.len(), 1, "no actor silently wins; the conflict fans");
+        assert_eq!(frames[0]["type"], "conflict");
+        assert_eq!(frames[0]["active"], true);
     }
 
     #[tokio::test]
@@ -3933,11 +4397,14 @@ mod tests {
 
         // The observation holds. The merge proves this overlap and
         // retains the local authority for explicit resolution; disk
-        // must never silently win.
+        // must never silently win, and the conflict fans loudly.
         backdate_pending_fold(ha.session());
         fx.registry.reconcile_pending(&fx.workspace).await;
         assert_eq!(ha.session().authority_view().0, "base typed");
-        assert_eq!(drain(&mut rxa).len(), 0, "no actor silently wins");
+        let frames = drain(&mut rxa);
+        assert_eq!(frames.len(), 1, "no actor silently wins; the conflict fans");
+        assert_eq!(frames[0]["type"], "conflict");
+        assert_eq!(frames[0]["active"], true);
     }
 
     #[tokio::test]

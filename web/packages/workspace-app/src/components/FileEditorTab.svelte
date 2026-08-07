@@ -31,6 +31,7 @@
     Folder,
     Link as LinkIcon,
     Pencil,
+    RefreshCw,
     Save,
     Scissors,
     Search as SearchIcon,
@@ -52,8 +53,10 @@
     beginMissingFileReopen,
     closeTab,
     dismissExternalChange,
+    forceReloadFromDisk,
     isDocAttached,
     openFind,
+    overwriteDiskConflict,
     reloadTabFromDisk,
     setMode,
     clearTabCaretCommand,
@@ -133,9 +136,11 @@
     closeTabMenu,
     openTabMenu,
   } from "../state/tabMenu.svelte";
-  // The Editor right-click menu carries no Reload / Open Inspector
-  // entries; Cmd+R handles reload, and the pane chrome context menu
-  // carries reload + inspector.
+  // The Editor right-click menu carries no Open Inspector entry (the
+  // pane chrome context menu has it) and no window-reload entry
+  // (Cmd+R). "Reload from disk" below is different: it force-adopts
+  // the on-disk content over the buffer/authority, the escape hatch
+  // for external writers.
 
   // Keep-alive: Pane.svelte keeps every file tab mounted (terminal
   // precedent) and flips `active` -- true only when this tab is the
@@ -832,6 +837,11 @@
     await reloadTabFromDisk(tab.id);
   }
 
+  async function doForceReload(): Promise<void> {
+    closeTabMenu();
+    await forceReloadFromDisk(tab.id);
+  }
+
   /// Find opens the per-tab find bar via the `openFind(tabId)`
   /// helper that the `app.find.open` chord also routes to.
   function doFind(): void {
@@ -953,7 +963,7 @@
       </button>
     </div>
   {/if}
-  {#if tab.externalChange && !isDocAttached(tab)}
+  {#if tab.externalChange && !isDocAttached(tab) && !tab.diskConflicted}
     <!-- An external (non-self) write to this file landed on disk
          while the tab is open. We never auto-reload (that would
          replace the buffer and snap the caret to 1:1 mid-edit); the
@@ -979,6 +989,32 @@
         onclick={() => dismissExternalChange(tab.id)}
       >
         ✕
+      </button>
+    </div>
+  {/if}
+  {#if tab.diskConflicted}
+    <!-- The live session's authority and an external disk write both
+         changed the same region: the server paused flushing and holds
+         both sides. Not dismissable -- the divergence is real until
+         one side is picked (reload adopts the disk; keep-mine
+         overwrites it). Reuses the recovery-banner palette + layout. -->
+    <div class="recovery-banner" role="alert">
+      <span class="recovery-banner-text">
+        This file changed on disk and conflicts with your edits.
+      </span>
+      <button
+        type="button"
+        class="recovery-banner-btn recovery-banner-restore"
+        onclick={() => void forceReloadFromDisk(tab.id)}
+      >
+        Reload from disk
+      </button>
+      <button
+        type="button"
+        class="recovery-banner-btn"
+        onclick={() => void overwriteDiskConflict(tab.id)}
+      >
+        Keep mine
       </button>
     </div>
   {/if}
@@ -1081,6 +1117,14 @@
               <span class="mbtn-chord">{chordLabel("app.search.toggle")}</span>
             </button>
           {/if}
+          <div class="msep" role="separator"></div>
+          <button class="mbtn" onclick={() => void doForceReload()}>
+            <span class="mbtn-icon">
+              <RefreshCw size={16} strokeWidth={1.75} aria-hidden="true" />
+            </span>
+            <span class="mbtn-label">Reload from disk</span>
+            <span class="mbtn-chord"></span>
+          </button>
         </div>
       {:else}
       <div class="action-list">
@@ -1158,6 +1202,13 @@
           </span>
           <span class="mbtn-label">Duplicate</span>
           <span class="mbtn-chord">{chordLabel("app.file.duplicate")}</span>
+        </button>
+        <button class="mbtn" onclick={() => void doForceReload()}>
+          <span class="mbtn-icon">
+            <RefreshCw size={16} strokeWidth={1.75} aria-hidden="true" />
+          </span>
+          <span class="mbtn-label">Reload from disk</span>
+          <span class="mbtn-chord"></span>
         </button>
         <div class="msep" role="separator"></div>
         <button class="mbtn" onclick={doCloseTab}>

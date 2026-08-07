@@ -37,7 +37,7 @@ describe("menu-top Name input", () => {
 describe("tab-menu foot", () => {
   test("Page width is followed by file actions and Close", () => {
     expect(editor).toMatch(
-      /<div class="page-width-row">[\s\S]{1,900}<\/div>\s*\{\/if\}\s*<div class="msep" role="separator"><\/div>\s*<button class="mbtn" onclick=\{\(\) => void doCopyPathToFile\(\)\}>[\s\S]{1,350}<span class="mbtn-label">Copy path to file<\/span>[\s\S]{1,500}<span class="mbtn-label">Delete<\/span>[\s\S]{1,500}<span class="mbtn-label">Duplicate<\/span>[\s\S]{1,300}<button class="mbtn" onclick=\{doCloseTab\}>[\s\S]{1,300}<span class="mbtn-label">Close<\/span>/,
+      /<div class="page-width-row">[\s\S]{1,900}<\/div>\s*\{\/if\}\s*<div class="msep" role="separator"><\/div>\s*<button class="mbtn" onclick=\{\(\) => void doCopyPathToFile\(\)\}>[\s\S]{1,350}<span class="mbtn-label">Copy path to file<\/span>[\s\S]{1,500}<span class="mbtn-label">Delete<\/span>[\s\S]{1,500}<span class="mbtn-label">Duplicate<\/span>[\s\S]{1,300}<span class="mbtn-label">Reload from disk<\/span>[\s\S]{1,300}<button class="mbtn" onclick=\{doCloseTab\}>[\s\S]{1,300}<span class="mbtn-label">Close<\/span>/,
     );
   });
 

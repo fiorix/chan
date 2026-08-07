@@ -1356,7 +1356,11 @@ pub async fn api_resolve_session_conflict(
 
     if let Some(session) = state.doc_sessions.get(&body.path) {
         let resolved = match body.action {
-            ConflictResolutionAction::Reload => session.reload_conflict(),
+            // Reload deliberately works in EVERY session state, not
+            // just conflicts: it is the editor's "force reload from
+            // disk", and it must adopt the live disk rather than a
+            // retained capture that may lag further external writes.
+            ConflictResolutionAction::Reload => session.reload_from_disk(&workspace).await,
             ConflictResolutionAction::Overwrite => {
                 session
                     .overwrite_conflict(&workspace, &state.self_writes)
@@ -1412,9 +1416,14 @@ pub async fn api_resolve_session_conflict(
         .await;
     }
 
+    // NOT_FOUND, not CONFLICT: the client's fallback decision hinges on
+    // this. With no live session a plain re-fetch reads the disk
+    // honestly; after a failed resolve on a LIVE session the diverted
+    // GET would re-serve the authority, so the client must not fall
+    // back there.
     err(
-        StatusCode::CONFLICT,
-        "path has no live conflicted document or scene session".into(),
+        StatusCode::NOT_FOUND,
+        "path has no live document or scene session".into(),
     )
 }
 
@@ -5596,6 +5605,9 @@ mod doc_divert_tests {
         workspace.write_text("n.md", "disk\n").unwrap();
         let stat = workspace.stat("n.md").unwrap();
         session.test_force_conflict("disk\n".into(), &stat);
+        // Drain the conflict announcement; the assertions below are
+        // about the PUT staying silent.
+        while frames.try_recv().is_ok() {}
         let conflict_token = stat.mtime_ns.expect("conflicting disk token");
         let authority_version = session.http_read_view().authority_version;
 

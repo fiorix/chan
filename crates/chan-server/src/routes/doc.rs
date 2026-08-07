@@ -89,13 +89,16 @@ pub(crate) enum ServerFrame {
     /// `?version=`, and any hard resync. `mtime_ns` is the
     /// flushed-to-disk CAS token as a decimal string (the `/api/files`
     /// convention: nanosecond epoch timestamps overflow JS number
-    /// precision), null when the disk state is unknown.
+    /// precision), null when the disk state is unknown. `conflicted`
+    /// mirrors the retained disk-conflict state so a fresh attach can
+    /// surface the resolve UI immediately.
     #[serde(rename = "snapshot")]
     Snapshot {
         path: String,
         version: u64,
         doc: String,
         dirty: bool,
+        conflicted: bool,
         mtime_ns: Option<String>,
         cursors: Vec<PeerCursor>,
     },
@@ -144,6 +147,20 @@ pub(crate) enum ServerFrame {
         mtime_ns: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+    },
+    /// The session entered (`active: true`) or left (`active: false`)
+    /// retained disk-conflict state: an external disk write and live
+    /// edits diverged irreconcilably, the authority paused flushing,
+    /// and both sides are held for explicit resolution through
+    /// `/api/session-conflicts/resolve`. A retained-side refresh (the
+    /// disk moved again mid-conflict) re-announces with `active: true`.
+    /// `disk_mtime_ns` is the retained disk token, same encoding as
+    /// `mtime_ns` elsewhere.
+    #[serde(rename = "conflict")]
+    Conflict {
+        active: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disk_mtime_ns: Option<String>,
     },
     /// The file vanished on disk. The client routes into its
     /// missing-file machinery; the server keeps the session but stops
@@ -841,6 +858,7 @@ mod tests {
             version: 3,
             doc: "hi".into(),
             dirty: false,
+            conflicted: false,
             mtime_ns: Some("1751234567890123456".into()),
             cursors: vec![PeerCursor {
                 id: 7,
@@ -852,7 +870,7 @@ mod tests {
         };
         assert_eq!(
             enc(&full),
-            r#"{"type":"snapshot","path":"notes/a.md","version":3,"doc":"hi","dirty":false,"mtime_ns":"1751234567890123456","cursors":[{"id":7,"w":"win-1","anchor":2,"head":5,"version":3}]}"#
+            r#"{"type":"snapshot","path":"notes/a.md","version":3,"doc":"hi","dirty":false,"conflicted":false,"mtime_ns":"1751234567890123456","cursors":[{"id":7,"w":"win-1","anchor":2,"head":5,"version":3}]}"#
         );
         // Disk state unknown (e.g. after `removed`): mtime_ns is null, not
         // omitted; the client stamps savedMtimeNs unconditionally.
@@ -861,13 +879,32 @@ mod tests {
             version: 0,
             doc: String::new(),
             dirty: true,
+            conflicted: true,
             mtime_ns: None,
             cursors: vec![],
         };
         assert_eq!(
             enc(&unknown),
-            r#"{"type":"snapshot","path":"a","version":0,"doc":"","dirty":true,"mtime_ns":null,"cursors":[]}"#
+            r#"{"type":"snapshot","path":"a","version":0,"doc":"","dirty":true,"conflicted":true,"mtime_ns":null,"cursors":[]}"#
         );
+    }
+
+    #[test]
+    fn server_conflict_pins_the_wire_shape() {
+        let active = ServerFrame::Conflict {
+            active: true,
+            disk_mtime_ns: Some("1751234567890123456".into()),
+        };
+        assert_eq!(
+            enc(&active),
+            r#"{"type":"conflict","active":true,"disk_mtime_ns":"1751234567890123456"}"#
+        );
+        // A conflict against a vanished/unknown disk side omits the token.
+        let inactive = ServerFrame::Conflict {
+            active: false,
+            disk_mtime_ns: None,
+        };
+        assert_eq!(enc(&inactive), r#"{"type":"conflict","active":false}"#);
     }
 
     #[test]
