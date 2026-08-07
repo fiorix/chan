@@ -23,8 +23,6 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 | item | state | what needs to happen |
 | --- | --- | --- |
-| [notifications](v0.86.0/notifications.md) | deferred from v0.85.0, not implemented on the release ancestry | start from the contract; the earlier implementation is on an abandoned candidate chain and was excluded from the v0.85.0 recovery |
-| [web-marketing-onboarding](v0.86.0/web-marketing-onboarding.md) | deferred from v0.85.0, not specced | turn the product-positioning notes into a focused onboarding page with diagrams and short videos |
 | [web-lock-check-destroys-node-modules](v0.86.0/web-lock-check-destroys-node-modules.md) | accepted, specced | make the lockfile sync check non-destructive on the pinned npm, and correct the comment that says it already is |
 | [editor-widget-tests-are-nondeterministic](v0.86.0/editor-widget-tests-are-nondeterministic.md) | accepted, specced | fix the render race behind three intermittently failing editor tests so the gate stops going red on an unmodified tree |
 | [large-transfer-ceiling-refinements](v0.86.0/large-transfer-ceiling-refinements.md) | accepted, specced | bound archives cumulatively by the ceiling, charge ranged reads by transferred length, and plumb recovery with the reported value |
@@ -33,6 +31,14 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [source-pins-bound-on-sibling-string-literals](v0.86.0/source-pins-bound-on-sibling-string-literals.md) | accepted, specced | fix two defects across four main.rs source pins, end-assertions that can never fire and needles that are not unique |
 | [aur-publication-is-suspended](v0.86.0/aur-publication-is-suspended.md) | accepted, blocked upstream | restore AUR publication once the incident notice is superseded and pushes are permitted, deleting the guard job in the same commit |
 | [cs-terminal-new-cannot-spawn-an-agent-session](v0.86.0/cs-terminal-new-cannot-spawn-an-agent-session.md) | accepted, specced | let cs terminal new set the spawn command and env so a single terminal can derive an agent and be poked |
+
+The web-marketing-onboarding item left the roadmap during v0.86.0 preparation: onboarding-page direction is marketing work and now lives in the chan-mkt repository; see [done/web-marketing-onboarding.md](done/web-marketing-onboarding.md).
+
+### v0.87.0
+
+| item | state | what needs to happen |
+| --- | --- | --- |
+| [notifications](v0.87.0/notifications.md) | deferred from v0.85.0 and v0.86.0, not implemented on the release ancestry | start from the contract; the earlier implementation is on an abandoned candidate chain and was excluded from the v0.85.0 recovery |
 
 ## Completed
 
