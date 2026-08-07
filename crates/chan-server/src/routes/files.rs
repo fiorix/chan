@@ -449,7 +449,16 @@ fn download_path_sync(
         // Pre-flight the tree before streaming so an unreadable entry fails fast
         // with a clear "cannot read X" status instead of truncating a streamed
         // archive mid-flight.
-        verify_readable_workspace_tree(workspace, path).map_err(chan_workspace::ChanError::Io)?;
+        let payload_bytes = verify_readable_workspace_tree(workspace, path)
+            .map_err(chan_workspace::ChanError::Io)?;
+        let limit = workspace.transfer_max_bytes();
+        if payload_bytes > limit {
+            return Err(chan_workspace::ChanError::WriteTooLarge {
+                kind: "archive",
+                size: payload_bytes,
+                limit,
+            });
+        }
         Ok(DownloadPayload::Directory)
     } else {
         binary_plan_sync(workspace, path, range_header).map(DownloadPayload::File)
@@ -491,9 +500,10 @@ enum PlannedWorkspaceDownload {
 /// Submitting them separately would make a single request cost two admissions
 /// against a bound that counts requests.
 ///
-/// A refusal is returned before the job exists, so a declined download has not
-/// opened a file or walked a tree. Past that point every early return drops the
-/// job, which cancels it and releases its slot.
+/// An admission refusal is returned before the job exists, so a declined
+/// download has not opened a file or walked a tree. A plan refusal runs inside
+/// the admitted job but precedes the first response byte. Past that point every
+/// early return drops the job, which cancels it and releases its slot.
 async fn stream_planned_workspace_download_tracked(
     bulk: &crate::bulk_transfer::BulkTransferTenant,
     events: Option<tokio::sync::broadcast::Sender<String>>,
@@ -504,7 +514,7 @@ async fn stream_planned_workspace_download_tracked(
 ) -> Response {
     let (tx, rx) = mpsc::channel::<std::io::Result<Bytes>>(8);
     let (plan_tx, plan_rx) =
-        tokio::sync::oneshot::channel::<Result<PlannedWorkspaceDownload, String>>();
+        tokio::sync::oneshot::channel::<chan_workspace::Result<PlannedWorkspaceDownload>>();
     let archive_name = download_filename(&path);
     // The job takes the request path; headers are built from this copy.
     let header_path = path.clone();
@@ -512,7 +522,7 @@ async fn stream_planned_workspace_download_tracked(
         let payload = match download_path_sync(&workspace, &path, range_header.as_deref()) {
             Ok(payload) => payload,
             Err(e) => {
-                let _ = plan_tx.send(Err(e.to_string()));
+                let _ = plan_tx.send(Err(e));
                 return;
             }
         };
@@ -545,6 +555,7 @@ async fn stream_planned_workspace_download_tracked(
                 send_reader_into(&tx, cancel, reader);
             }
             DownloadPayload::Directory => {
+                let limit = workspace.transfer_max_bytes();
                 let build_ws = workspace;
                 let build_path = path;
                 let build_name = archive_name;
@@ -558,7 +569,7 @@ async fn stream_planned_workspace_download_tracked(
                 }
                 // Builds into this job's channel rather than through
                 // `stream_tar_response_tracked`, which would submit again.
-                crate::routes::transfer::build_tar_into(&tx, cancel, move |builder| {
+                crate::routes::transfer::build_tar_into(&tx, cancel, limit, move |builder| {
                     append_dir_to_archive(builder, &build_ws, &build_path, &build_name)
                         .map_err(|e| std::io::Error::other(e.to_string()))
                 });
@@ -582,7 +593,10 @@ async fn stream_planned_workspace_download_tracked(
         Ok(Ok(planned)) => planned,
         // The plan ran on an admitted job, so a failure here is reported after
         // the transfer genuinely occupied a slot. Returning drops the job.
-        Ok(Err(message)) => return err(StatusCode::BAD_REQUEST, message),
+        Ok(Err(error @ chan_workspace::ChanError::WriteTooLarge { .. })) => {
+            return err_from(&error)
+        }
+        Ok(Err(error)) => return err(StatusCode::BAD_REQUEST, error.to_string()),
         Err(_) => {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -911,25 +925,30 @@ fn bounded_reader_body(
 /// tar is readable before any archive work. Walks via `Workspace::list` so it
 /// visits exactly the entries `append_dir_to_archive` will (same `.chan` /
 /// `.git` filter), and opens each backing file to check read permission without
-/// pulling its bytes (the archive reads them next).
+/// pulling its bytes (the archive reads them next). Returns the member bytes
+/// known at preflight so the plan can refuse a tree already past the ceiling.
 fn verify_readable_workspace_tree(
     workspace: &chan_workspace::Workspace,
     rel: &str,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<u64, String> {
+    let mut payload_bytes = 0u64;
     for child in workspace
         .list(rel)
         .map_err(|e| format!("cannot read directory {rel}: {e}"))?
     {
         let child_rel = join_rel(rel.trim_matches('/'), &child.name);
-        if child.is_dir {
-            verify_readable_workspace_tree(workspace, &child_rel)?;
+        let child_bytes = if child.is_dir {
+            verify_readable_workspace_tree(workspace, &child_rel)?
         } else {
-            std::fs::File::open(workspace.root().join(&child_rel))
-                .map(|_| ())
+            let file = std::fs::File::open(workspace.root().join(&child_rel))
                 .map_err(|e| format!("cannot read {child_rel}: {e}"))?;
-        }
+            file.metadata()
+                .map_err(|e| format!("cannot read metadata for {child_rel}: {e}"))?
+                .len()
+        };
+        payload_bytes = payload_bytes.saturating_add(child_bytes);
     }
-    Ok(())
+    Ok(payload_bytes)
 }
 
 pub(crate) fn download_filename(path: &str) -> String {
@@ -3753,6 +3772,116 @@ mod write_tests {
         lib.register_workspace(root.path()).unwrap();
         let workspace = lib.open_workspace(root.path()).unwrap();
         (cfg, root, workspace)
+    }
+
+    fn admitted_download_workspace_with_cap(
+        cap: u64,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        Arc<chan_workspace::Workspace>,
+    ) {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let config_path = cfg.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            format!("workspaces = []\n[transfer]\nmax_bytes = {cap}\n"),
+        )
+        .unwrap();
+        let lib = chan_workspace::Library::open_at(config_path).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        (cfg, root, workspace)
+    }
+
+    #[tokio::test]
+    async fn a_workspace_archive_refuses_a_tree_known_over_the_ceiling() {
+        const CAP: u64 = 2048;
+        let (_cfg, root, workspace) = admitted_download_workspace_with_cap(CAP);
+        workspace.create_dir("archive").unwrap();
+        std::fs::write(
+            root.path().join("archive/over.bin"),
+            vec![0x7e; CAP as usize + 1],
+        )
+        .unwrap();
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+
+        let response = stream_planned_workspace_download_tracked(
+            &bulk,
+            None,
+            None,
+            workspace,
+            "archive".into(),
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "a tree already known past the ceiling must be refused before streaming"
+        );
+        let message = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            message.contains("2049") && message.contains("2048"),
+            "the refusal must name the known payload and its ceiling: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_workspace_archive_errors_the_body_at_the_ceiling() {
+        const CAP: u64 = 2048;
+        let (_cfg, _root, workspace) = admitted_download_workspace_with_cap(CAP);
+        workspace.create_dir("archive").unwrap();
+        workspace
+            .write_bytes("archive/exact.bin", &vec![0x7e; CAP as usize])
+            .unwrap();
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+
+        let response = stream_planned_workspace_download_tracked(
+            &bulk,
+            None,
+            None,
+            workspace,
+            "archive".into(),
+            None,
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a tree whose payload is at the ceiling cannot be refused before the tar is built"
+        );
+
+        let mut body = response.into_body().into_data_stream();
+        let mut delivered = 0usize;
+        let mut body_error = None;
+        while let Some(next) = body.next().await {
+            match next {
+                Ok(bytes) => delivered += bytes.len(),
+                Err(error) => {
+                    body_error = Some(error.to_string());
+                    break;
+                }
+            }
+        }
+
+        let body_error = body_error.expect("the archive body must fail rather than complete");
+        assert_eq!(
+            delivered, CAP as usize,
+            "the body must stop after exactly the configured number of bytes"
+        );
+        assert!(
+            body_error.contains("ceiling"),
+            "the body error must name the enforced bound: {body_error}"
+        );
     }
 
     #[tokio::test]

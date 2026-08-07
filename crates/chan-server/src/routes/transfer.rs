@@ -17,9 +17,9 @@
 //! `Workspace::ensure_writable`.
 //!
 //! The configured transfer ceiling governs both directions on this tenant.
-//! Single-file reads and writes are bounded by it and refuse past it; a
-//! directory archive is bounded by lane admission and concurrency only, because
-//! its size is not known until it has been built.
+//! Single-file reads and writes are bounded by it. Directory plans refuse when
+//! their member bytes already exceed it, and the tar writer counts the encoded
+//! stream so archive framing or a live change cannot pass it mid-flight.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -53,43 +53,52 @@ fn abs_from_terminal_path(path: &str) -> PathBuf {
 /// every directory is listable. Fails fast on the first inaccessible entry so a
 /// download never starts a tarball it cannot finish. The workspace path uses a
 /// sibling guard in `files.rs` that walks via `Workspace::list` to match the
-/// workspace tarball's `.chan`/`.git` filtering.
-pub(crate) fn verify_readable_fs(abs: &Path) -> Result<(), String> {
+/// workspace tarball's `.chan`/`.git` filtering. Returns the member bytes known
+/// at preflight so the plan can refuse a tree already past the ceiling.
+pub(crate) fn verify_readable_fs(abs: &Path) -> Result<u64, String> {
     let meta = std::fs::symlink_metadata(abs)
         .map_err(|e| format!("cannot access {}: {e}", abs.display()))?;
     if meta.file_type().is_symlink() {
         // The archive stores the link itself; don't follow it (and don't fault
         // on a dangling target).
-        return Ok(());
+        return Ok(0);
     }
     if meta.is_dir() {
         let entries = std::fs::read_dir(abs)
             .map_err(|e| format!("cannot read directory {}: {e}", abs.display()))?;
+        let mut payload_bytes = 0u64;
         for entry in entries {
             let entry =
                 entry.map_err(|e| format!("cannot read directory {}: {e}", abs.display()))?;
-            verify_readable_fs(&entry.path())?;
+            payload_bytes = payload_bytes.saturating_add(verify_readable_fs(&entry.path())?);
         }
-        Ok(())
+        Ok(payload_bytes)
     } else {
         std::fs::File::open(abs)
-            .map(|_| ())
+            .and_then(|file| file.metadata())
+            .map(|metadata| metadata.len())
             .map_err(|e| format!("cannot read {}: {e}", abs.display()))
     }
 }
 
 /// A `std::io::Write` that forwards each tar chunk to a streaming HTTP body
 /// over an mpsc channel. `blocking_send` provides backpressure (it blocks until
-/// the response reader drains) and is also the cancel signal: once the client
-/// disconnects the receiver drops, the send fails, and the tar build stops --
-/// nothing is staged on disk, so a cancelled download leaves no trace.
+/// the response reader drains). The writer stops with a body error after exactly
+/// `limit` bytes, and a dropped receiver stops the build on the next write.
+/// Nothing is staged on disk, so a bounded or cancelled download leaves no
+/// artifact to clean up.
 pub(crate) struct TarChannelWriter {
     tx: mpsc::Sender<std::io::Result<Bytes>>,
     cancel: BulkCancel,
+    limit: u64,
+    written: u64,
 }
 
 impl Write for TarChannelWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
         // Checked per chunk so shutdown and explicit cancellation stop the
         // build promptly. A disconnect alone would also surface below when the
         // receiver is gone, but only once the next chunk is ready, which on a
@@ -100,12 +109,25 @@ impl Write for TarChannelWriter {
                 "transfer cancelled",
             ));
         }
+        let remaining = self.limit.saturating_sub(self.written);
+        if remaining == 0 {
+            return Err(std::io::Error::other(format!(
+                "archive reached the {} byte transfer ceiling before completion",
+                self.limit
+            )));
+        }
+        let allowed = usize::try_from(remaining)
+            .map(|remaining| remaining.min(buf.len()))
+            .unwrap_or(buf.len());
         self.tx
-            .blocking_send(Ok(Bytes::copy_from_slice(buf)))
+            .blocking_send(Ok(Bytes::copy_from_slice(&buf[..allowed])))
             .map_err(|_| {
                 std::io::Error::new(std::io::ErrorKind::BrokenPipe, "client disconnected")
             })?;
-        Ok(buf.len())
+        self.written = self
+            .written
+            .saturating_add(u64::try_from(allowed).unwrap_or(u64::MAX));
+        Ok(allowed)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -149,10 +171,12 @@ impl TransferTracking {
 /// this runs inside, so a caller that already holds a slot can build an archive
 /// without spending a second one. Wrapping this in its own `submit` again is
 /// the one way a single request comes to consume two admissions, and it would
-/// look like ordinary reuse while doing it.
+/// look like ordinary reuse while doing it. `limit` bounds the encoded archive,
+/// including headers, padding, and termination blocks.
 pub(crate) fn build_tar_into<F>(
     tx: &mpsc::Sender<std::io::Result<Bytes>>,
     cancel: &BulkCancel,
+    limit: u64,
     build: F,
 ) where
     F: FnOnce(&mut tar::Builder<TarChannelWriter>) -> std::io::Result<()> + Send + 'static,
@@ -160,6 +184,8 @@ pub(crate) fn build_tar_into<F>(
     let mut builder = tar::Builder::new(TarChannelWriter {
         tx: tx.clone(),
         cancel: cancel.clone(),
+        limit,
+        written: 0,
     });
     let result = build(&mut builder).and_then(|()| builder.finish());
     if let Err(e) = result {
@@ -193,9 +219,9 @@ enum PlannedDownload {
 ///
 /// An admission refusal is returned before the job exists, so a declined
 /// download has not opened a file or walked a tree. A ceiling refusal is the
-/// job's own: it costs one open and no streamed byte, because the size it
-/// refuses against is only knowable from a handle. Every early return past that
-/// point drops the job, which cancels it and releases its slot.
+/// job's own: a file costs one open and an archive costs its preflight walk, but
+/// neither sends a byte. Every early return past that point drops the job, which
+/// cancels it and releases its slot.
 ///
 /// `limit` is the server-reported effective transfer ceiling, handed in for the
 /// same reason the upload arm is handed it: the terminal tenant reads outside
@@ -261,7 +287,7 @@ async fn stream_planned_download_tracked(
                 }
                 // Builds into this job's channel rather than through
                 // `stream_tar_response_tracked`, which would submit again.
-                build_tar_into(&tx, cancel, move |builder| {
+                build_tar_into(&tx, cancel, limit, move |builder| {
                     builder.append_dir_all(&build_name, &build_abs)
                 });
             }
@@ -493,10 +519,12 @@ fn terminal_download_plan(abs: &Path, limit: u64) -> Result<TerminalDownload, Do
         // fails fast with a clear status instead of truncating a streamed
         // archive mid-flight.
         //
-        // No ceiling refusal on this arm: an archive has no size until it has
-        // been built, so bounding it is cumulative accounting during the build
-        // rather than a check the plan can make.
-        verify_readable_fs(abs).map_err(DownloadRefusal::unreadable)?;
+        // Member sizes are the part of the eventual archive size the plan can
+        // know. Tar framing and live file changes are counted by the writer.
+        let payload_bytes = verify_readable_fs(abs).map_err(DownloadRefusal::unreadable)?;
+        if payload_bytes > limit {
+            return Err(DownloadRefusal::over_ceiling(payload_bytes, limit));
+        }
         Ok(TerminalDownload::Directory { name })
     } else {
         // Opening happens before headers are sent. The returned reader keeps
@@ -1460,6 +1488,75 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_terminal_archive_refuses_a_tree_known_over_the_ceiling() {
+        const CAP: u64 = 2048;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("over.bin"), vec![0x7e; CAP as usize + 1]).unwrap();
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+
+        let response =
+            stream_planned_download_tracked(&bulk, None, None, dir.path().to_path_buf(), CAP).await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "a tree already known past the ceiling must be refused before streaming"
+        );
+        let message = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            message.contains("2049") && message.contains("2048"),
+            "the refusal must name the known payload and its ceiling: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_terminal_archive_errors_the_body_at_the_ceiling() {
+        use futures::StreamExt;
+
+        const CAP: u64 = 2048;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("exact.bin"), vec![0x7e; CAP as usize]).unwrap();
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+
+        let response =
+            stream_planned_download_tracked(&bulk, None, None, dir.path().to_path_buf(), CAP).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a tree whose payload is at the ceiling cannot be refused before the tar is built"
+        );
+
+        let mut body = response.into_body().into_data_stream();
+        let mut delivered = 0usize;
+        let mut body_error = None;
+        while let Some(next) = body.next().await {
+            match next {
+                Ok(bytes) => delivered += bytes.len(),
+                Err(error) => {
+                    body_error = Some(error.to_string());
+                    break;
+                }
+            }
+        }
+
+        let body_error = body_error.expect("the archive body must fail rather than complete");
+        assert_eq!(
+            delivered, CAP as usize,
+            "the body must stop after exactly the configured number of bytes"
+        );
+        assert!(
+            body_error.contains("ceiling"),
+            "the body error must name the enforced bound: {body_error}"
+        );
+    }
+
     /// The bound has to survive a file that grows after the plan measured it,
     /// or appending to a file is enough to walk past the ceiling. Opening at the
     /// ceiling and extending before the first pull is exactly the case a
@@ -1535,6 +1632,8 @@ mod tests {
         let mut writer = TarChannelWriter {
             tx,
             cancel: crate::bulk_transfer::test_support::uncancelled(),
+            limit: u64::MAX,
+            written: 0,
         };
         let e = writer.write(b"data").unwrap_err();
         assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe);
@@ -1547,7 +1646,12 @@ mod tests {
         // dependent on the next chunk filling the channel.
         let (tx, mut rx) = mpsc::channel::<std::io::Result<Bytes>>(1);
         let cancel = crate::bulk_transfer::test_support::cancelled();
-        let mut writer = TarChannelWriter { tx, cancel };
+        let mut writer = TarChannelWriter {
+            tx,
+            cancel,
+            limit: u64::MAX,
+            written: 0,
+        };
         let e = writer.write(b"data").unwrap_err();
         assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe);
         assert!(
