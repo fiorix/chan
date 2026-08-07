@@ -95,7 +95,19 @@ export function tableDecorations(): Extension {
       return scanTables(state);
     },
     update(decorations, tr) {
-      if (!tr.docChanged && !tr.selection) return decorations;
+      // The tree-identity check catches async parse progress: the language's
+      // ParseWorker publishes a further-parsed tree through an effects-only
+      // dispatch (no docChanged, no selection), and create() may have scanned
+      // a tree the initial in-budget parse left short of this table. Without
+      // it the widget stays missing until the next edit or caret move
+      // (walker.ts recomputes on the same trigger).
+      if (
+        !tr.docChanged &&
+        !tr.selection &&
+        syntaxTree(tr.state) === syntaxTree(tr.startState)
+      ) {
+        return decorations;
+      }
       return scanTables(tr.state);
     },
     provide: (f) => EditorView.decorations.from(f),
