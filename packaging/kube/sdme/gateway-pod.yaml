@@ -128,7 +128,7 @@ spec:
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: GITHUB_CLIENT_ID } }
         - name: GITHUB_CLIENT_SECRET
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: GITHUB_CLIENT_SECRET } }
-        - { name: BASE_URL, value: "http://id.localtest.me" }
+        - { name: BASE_URL, value: "http://gw.localtest.me" }
         - { name: DEVSERVER_PROXY_ORIGIN, value: "http://usr.localtest.me" }
         - { name: DEVSERVER_TUNNEL_ORIGIN, value: "http://usr.localtest.me" }
         - { name: COOKIE_SECURE, value: "false" }
@@ -183,9 +183,9 @@ spec:
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: DEVSERVER_PROXY_TOKEN } }
         - { name: DEVSERVER_TUNNEL_ORIGIN, value: "http://usr.localtest.me" }
         - { name: DEVSERVER_PROXY_BASE_URL, value: "http://p1.usr.localtest.me" }
-        - { name: DASHBOARD_URL, value: "http://id.localtest.me/workspaces" }
+        - { name: DASHBOARD_URL, value: "http://gw.localtest.me/workspaces" }
         - { name: IDENTITY_URL, value: "http://127.0.0.1:7004" }
-        - { name: IDENTITY_PUBLIC_ORIGIN, value: "http://id.localtest.me" }
+        - { name: IDENTITY_PUBLIC_ORIGIN, value: "http://gw.localtest.me" }
         - { name: DEVSERVER_CONTROL_URL, value: "http://127.0.0.1:7101" }
         - { name: DEVSERVER_PROXY_ID, value: "p1" }
       readinessProbe:

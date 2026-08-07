@@ -17,9 +17,9 @@ data:
   # origin below is a complete scheme://host value. http for this no-TLS
   # example stack. Public traffic terminates TLS before reaching the Services.
   # identity's canonical public origin.
-  BASE_URL: "https://id.localtest.me"
+  BASE_URL: "https://gw.localtest.me"
   # Exact Origin accepted by proxy entry-exchange POSTs.
-  IDENTITY_PUBLIC_ORIGIN: "https://id.localtest.me"
+  IDENTITY_PUBLIC_ORIGIN: "https://gw.localtest.me"
   # Proxy namespace origin advertised by discovery.
   DEVSERVER_PROXY_ORIGIN: "https://usr.localtest.me"
   # Tunnel ingress origin (`chan devserver --tunnel-url` dials its /v1/tunnel).
@@ -32,7 +32,7 @@ data:
   DEVSERVER_PROXY_BASE_URL_TEMPLATE: "https://{proxy_id}.usr.localtest.me"
   # Where the proxy redirects a browser that opens a devserver root
   # without a gate credential.
-  DASHBOARD_URL: "https://id.localtest.me/workspaces"
+  DASHBOARD_URL: "https://gw.localtest.me/workspaces"
   # Session cookie Secure attribute. false so the cookie survives plain http in
   # this example; keep true outside the loopback-only sdme validation pod.
   COOKIE_SECURE: "true"

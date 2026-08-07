@@ -1,4 +1,4 @@
-# identity-service: public OAuth2 sign-in at id.<domain> on :7000 and a
+# identity-service: public OAuth2 sign-in at gw.<domain> on :7000 and a
 # internal token-validation/operator API on :7004. The public Service never exposes
 # the internal listener. Postgres-backed sessions are created by the migration
 # Job. Calls profile over HTTP. Refuses to start with no OAuth provider set.
