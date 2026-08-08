@@ -150,7 +150,12 @@ fi
 # login session, so XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS are otherwise
 # unset; :=default only fills them when a real login session has not. The stock
 # ~/.profile also adds ~/.local/bin for LOGIN shells once the dir exists.
-install -d -o "$USER_NAME" -g "$USER_NAME" -m 755 "$HOME_DIR/.local/bin"
+# Both path components are named explicitly: `install -d a/b` applies the
+# owner/mode only to the final component and leaves the intermediate `a`
+# root-owned with the umask default, which would make ~/.local unwritable
+# by the user (breaking `chan upgrade` and ~/.local/{state,share}).
+install -d -o "$USER_NAME" -g "$USER_NAME" -m 755 \
+  "$HOME_DIR/.local" "$HOME_DIR/.local/bin"
 BASHRC="$HOME_DIR/.bashrc"
 if [ ! -e "$BASHRC" ] || ! grep -qF 'chan-devserver: shell setup' "$BASHRC"; then
   cat >> "$BASHRC" <<'EOF'
@@ -210,6 +215,11 @@ done
 #    used because systemd user units do not expand ~.
 UNIT_DIR="$HOME_DIR/.config/systemd/user"
 UNIT="$UNIT_DIR/chan-devserver.service"
+# Same install -d caveat as ~/.local above: name the parents so they are
+# user-owned (755) rather than left root-owned; only the final unit dir
+# is 700 (it holds the token-bearing unit, later chmod'd 600).
+install -d -o "$USER_NAME" -g "$USER_NAME" -m 755 \
+  "$HOME_DIR/.config" "$HOME_DIR/.config/systemd"
 install -d -o "$USER_NAME" -g "$USER_NAME" -m 700 "$UNIT_DIR"
 
 EXEC="$CHAN_BIN devserver"
