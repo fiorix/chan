@@ -223,7 +223,7 @@ Source: `crates/chan-workspace/src/teams.rs`.
 
 `Member`: `handle: String`, `command: String`, `env: BTreeMap<String, String>`, `is_lead: bool`, `position: Option<Position>`. The submit agent is derived from a case-insensitive whole-word `claude`, `codex`, `gemini`, `kimi`, or `opencode` in `command`; `env.CHAN_AGENT` overrides it and `none` / `shell` forces shell behavior.
 
-`Position`: `row: u32`, `col: u32` (airplane-grid coordinate).
+`Position`: `row: u32`, `col: u32` (airplane-grid coordinate). Consumed by both team surfaces: the Team Work dialog carves its split layout from it, and `cs terminal team new|load` passes it through the `team_spawned` push so the SPA carves the same grid (`--tabs` opts out). Validation caps the derived grid at 9 panes.
 
 ## chan-desktop
 
