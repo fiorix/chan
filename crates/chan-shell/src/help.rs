@@ -1111,6 +1111,16 @@ member's env to force it for an unorthodox launcher. A command matching
 none is a plain shell member: it spawns, but gets no submit chord and
 no identity poke.
 
+A member may also carry `position = { row = R, col = C }`, the grid
+coordinate the Team Work dialog's split layout saves. A positioned
+config surfaces as that pane grid instead of stacking: the target
+window must hold a single pane (the seed the grid carves), or the
+spawn is refused naming the ways out. A member-free grid cell receives
+the seed pane's existing tabs, so the terminal you ran `cs` from keeps
+a pane of its own. `--tabs` ignores positions and stacks every member;
+an explicit `--pane` names the seed pane and skips the single-pane
+requirement.
+
 The generated bootstrap.md is what every member reads. It already
 carries the roster (each peer's handle, launch command, derived agent
 and role), the hold-until-poked rule, the task-file protocol under
@@ -1279,7 +1289,14 @@ bootstrap script for the saved team goes to stdout. Its fixed `sleep 3`
 is an approximation of the server path's PTY readiness gate.
 
 Without `--script`, `--window`, `--pane`, and `--side a|b` place every
-surfaced member tab at one exact live destination.
+surfaced member tab at one exact live destination. Members carrying
+`position` grid coordinates surface as that pane grid instead of
+stacking: the target window must hold a single pane (the seed the grid
+carves), or the load is refused before anything is spawned, naming the
+ways out. A member-free grid cell receives the seed pane's existing
+tabs, so a host terminal that ran the command keeps a pane of its own.
+`--tabs` ignores positions and stacks; an explicit `--pane` names the
+seed pane and skips the single-pane requirement.
 ";
 
 /// `cs terminal team load` examples, side effects, and caveats.
@@ -1300,6 +1317,9 @@ SIDE EFFECTS:
 CAUTIONS:
   - Loading a team that is already running spawns a SECOND copy in the
     next free tab group. Close the old one first.
+  - A positioned config (grid layout) is refused while the target
+    window holds more than one pane. Close the extra panes, pass
+    --tabs, or rerun with --window against a fresh window.
   - Blocks until every agent is poked, its terminal ends, or its
     15-second readiness bound ends. An unready member is named, is not
     poked, and makes the command exit non-zero; ready peers are still
@@ -1342,7 +1362,15 @@ nothing is written or spawned. The script's fixed `sleep 3` is an
 approximation because it cannot observe server-owned PTY state.
 
 Without `--script`, `--window`, `--pane`, and `--side a|b` place every
-surfaced member tab at one exact live destination.
+surfaced member tab at one exact live destination. Members carrying
+`position` grid coordinates surface as that pane grid instead of
+stacking: the target window must hold a single pane (the seed the grid
+carves), or the command is refused before anything is written or
+spawned, naming the ways out. A member-free grid cell receives the
+seed pane's existing tabs, so a host terminal that ran the command
+keeps a pane of its own. `--tabs` ignores positions and stacks; an
+explicit `--pane` names the seed pane and skips the single-pane
+requirement.
 ";
 
 /// `cs terminal team new` examples, side effects, and caveats.
@@ -1381,6 +1409,10 @@ CAUTIONS:
     the server's per-agent PTY readiness state.
   - Overwrites an existing team at {dir}: config.toml is replaced and
     bootstrap.md is regenerated from the config plus `--brief`.
+  - A positioned config (grid layout) is refused while the target
+    window holds more than one pane; nothing is written or spawned.
+    Close the extra panes, pass --tabs, or rerun with --window against
+    a fresh window.
   - Passing both `--config` and `--stdin`, or neither, is an error.
   - `--mcp-env` defaults OFF (codex fails to start on a stray MCP
     descriptor); agents still reach `cs search` and friends with it off.

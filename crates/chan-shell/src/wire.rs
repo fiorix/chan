@@ -465,6 +465,12 @@ pub enum ControlRequest {
         /// outer `window_id` remains the window coordinate.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         destination: Option<TabDestination>,
+        /// `--tabs`: stack every member as a tab in one pane even when the
+        /// config's members carry grid positions. Off, with positions
+        /// present, the server verifies the target window holds a single
+        /// pane and the SPA carves it into the config's grid.
+        #[serde(default)]
+        tabs: bool,
     },
     // Category 5 (process teardown): tear down the server serving `path`,
     // the transport behind `chan close <path>` (and `chan workspace rm`, which
@@ -1500,6 +1506,7 @@ mod survey_wire_tests {
             config_toml: Some("team_name = \"alpha\"\n".into()),
             brief_content: Some("# Brief\n\nRepro first.".into()),
             script: true,
+            tabs: false,
             window_id: Some("window-a".into()),
             destination: Some(TabDestination {
                 pane_id: Some("pane-2".into()),
@@ -1525,6 +1532,7 @@ mod survey_wire_tests {
             config_toml: None,
             brief_content: None,
             script: false,
+            tabs: false,
             window_id: None,
             destination: None,
         };

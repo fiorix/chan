@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`cs terminal team` honors the config's pane layout.** A config whose members carry `position` grid coordinates (what the Team Work dialog's split layout saves) surfaces as that pane grid instead of stacking every member as a tab in one pane, so a team spawned from the CLI comes up with the same screen layout the dialog builds. The target window must hold a single pane, the seed the grid carves; a busier window is refused before anything is written or spawned, naming the ways out: close the extra panes, pass the new `--tabs` flag to stack, or target a fresh window with `--window`. A member-free grid cell receives the seed pane's existing tabs, so the host terminal that ran the command keeps a pane of its own instead of hiding behind the lead; with every cell occupied it stays stacked in cell 0. An explicit `--pane` names the seed and skips the single-pane requirement, a windowless caller spawns unsurfaced as before, and validation caps the derived grid at 9 panes. The surfacing push also carries the registry-settled tab name, so a second copy of a live team titles its tabs `@@Lead-2` exactly as `$CHAN_TAB_NAME` reports them.
+
 ### Changed
 
 - **The gw/usr gateway naming is used everywhere.** Every remaining `id.chan.app` / `devserver.chan.app` reference in docs, package metadata, systemd unit descriptions, test fixtures, and provisioning text uses the identity origin `gw.{domain}` and the tunnel namespace `usr.{domain}`.

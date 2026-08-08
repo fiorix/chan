@@ -107,11 +107,40 @@ pub(crate) fn validate_team_config(config: &TeamConfig) -> Result<(), String> {
     if config.members.iter().any(|m| m.handle.trim().is_empty()) {
         return Err("every member must have a non-empty handle".into());
     }
+    if let Some((rows, cols)) = team_grid_shape(config) {
+        // The cap mirrors the 9-member cap above: the SPA dialog's largest
+        // offered shapes are 3x3 and 1x9 / 9x1, and a stray coordinate like
+        // {row = 9, col = 9} must not carve a 100-pane grid.
+        if u64::from(rows) * u64::from(cols) > 9 {
+            return Err(format!(
+                "member positions span a {rows}x{cols} pane grid ({} panes); the grid is capped at 9 panes",
+                u64::from(rows) * u64::from(cols)
+            ));
+        }
+    }
     // The submit-encoding agent is not a stored field: it is DERIVED
     // from each member's command (+ a `CHAN_AGENT` env override) at use time,
     // so there is nothing to validate here. An unrecognized command simply
     // resolves to a shell member (no chord). See `member_agent`.
     Ok(())
+}
+
+/// The pane grid a positioned config asks for: `(rows, cols)` derived from
+/// the members' maximum coordinates, or `None` when no member is positioned
+/// (tabs mode). Derived, not stored: the config carries only per-member
+/// coordinates, and the SPA reconstructs the same shape (`realEstateFromWire`).
+pub(crate) fn team_grid_shape(config: &TeamConfig) -> Option<(u32, u32)> {
+    config
+        .members
+        .iter()
+        .filter_map(|m| m.position)
+        .fold(None, |shape, p| {
+            let (rows, cols) = shape.unwrap_or((0, 0));
+            Some((
+                rows.max(p.row.saturating_add(1)),
+                cols.max(p.col.saturating_add(1)),
+            ))
+        })
 }
 
 /// The submit-encoding agent a member's terminal uses, derived from its
@@ -1029,6 +1058,34 @@ mod tests {
             .collect();
         let err = validate_team_config(&config).unwrap_err();
         assert!(err.contains("between 1 and 9"), "got: {err}");
+    }
+
+    #[test]
+    fn team_grid_shape_derives_from_the_max_coordinates() {
+        use chan_workspace::Position;
+        let mut config = sample_config();
+        // No positioned member: tabs mode, no grid.
+        assert_eq!(team_grid_shape(&config), None);
+        // One positioned member is enough to define a grid; the shape is
+        // max row/col + 1, holes included.
+        config.members[0].position = Some(Position { row: 0, col: 0 });
+        assert_eq!(team_grid_shape(&config), Some((1, 1)));
+        config.members[1].position = Some(Position { row: 2, col: 1 });
+        assert_eq!(team_grid_shape(&config), Some((3, 2)));
+    }
+
+    #[test]
+    fn validate_caps_the_position_grid_at_nine_panes() {
+        use chan_workspace::Position;
+        let mut config = sample_config();
+        // 3x3 (the largest shape the dialog offers) passes.
+        config.members[0].position = Some(Position { row: 2, col: 2 });
+        assert!(validate_team_config(&config).is_ok());
+        // A stray coordinate would carve a 10x10 grid; refused.
+        config.members[0].position = Some(Position { row: 9, col: 9 });
+        let err = validate_team_config(&config).unwrap_err();
+        assert!(err.contains("10x10"), "got: {err}");
+        assert!(err.contains("capped at 9 panes"), "got: {err}");
     }
 
     #[test]

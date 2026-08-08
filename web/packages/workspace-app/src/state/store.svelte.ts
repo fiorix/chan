@@ -44,6 +44,7 @@ import {
   activeLayout,
   activeTabInPane,
   allPaneTabs,
+  buildSplitGrid,
   closePane,
   closeTab,
   hasBrowserTab,
@@ -1120,7 +1121,7 @@ type WindowCommandFrame =
       window_id: string;
       command: "team_spawned";
       group: string;
-      members: { tab_name: string; session_id: string }[];
+      members: SpawnedTeamMember[];
     } & DestinationWindowCommand)
   | {
       type: "window_command";
@@ -1909,28 +1910,98 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
   }
 }
 
+/// One member of a `team_spawned` push: the registry-settled tab name, the
+/// live session id to attach, and the config's grid coordinate when the CLI
+/// spawn honors a positioned layout (absent in tabs mode and under `--tabs`).
+type SpawnedTeamMember = {
+  tab_name: string;
+  session_id: string;
+  position?: { row: number; col: number };
+};
+
+/// A member's validated grid coordinate, or null for a tabs-mode member (or
+/// a malformed one, which degrades to the cell-0 fallback rather than
+/// refusing the whole team).
+function memberPosition(m: SpawnedTeamMember): { row: number; col: number } | null {
+  const pos = m?.position;
+  if (!pos || typeof pos !== "object") return null;
+  const { row, col } = pos as { row?: unknown; col?: unknown };
+  if (!Number.isInteger(row) || !Number.isInteger(col)) return null;
+  if ((row as number) < 0 || (col as number) < 0) return null;
+  return { row: row as number, col: col as number };
+}
+
+/// Carve the destination pane into the members' R x C grid and return a
+/// cell resolver, mirroring the Team Work dialog's split path
+/// (`resolveWorkerPanes`): the seed pane is cell 0 and unpositioned members
+/// fall back to it. Returns null in tabs mode (no member positioned) and
+/// for an implausible derived grid (past the server's 9-pane cap, e.g. a
+/// frame from a drifted server): stacking beats carving a bad grid.
+///
+/// When the grid has a member-free cell and the seed pane already holds
+/// tabs (the host terminal driving `cs terminal team`), the seed's content
+/// moves to the first free cell so the host keeps a pane of its own
+/// instead of hiding behind the member in cell 0.
+function carveTeamGrid(
+  members: SpawnedTeamMember[],
+  seedPaneId: string,
+): ((position: { row: number; col: number } | null) => string) | null {
+  const positioned = members
+    .map(memberPosition)
+    .filter((p): p is { row: number; col: number } => p !== null);
+  if (positioned.length === 0) return null;
+  const rows = Math.max(...positioned.map((p) => p.row)) + 1;
+  const cols = Math.max(...positioned.map((p) => p.col)) + 1;
+  if (rows * cols > 9) return null;
+  const seed = layout.nodes[seedPaneId];
+  const seedHadTabs =
+    seed?.kind === "leaf" && paneTabs(seed, "a").length + paneTabs(seed, "b").length > 0;
+  const cells = buildSplitGrid(seedPaneId, rows, cols);
+  const occupied = new Set(positioned.map((p) => p.row * cols + p.col));
+  // An unpositioned member in a positioned team shares cell 0 (the
+  // dialog's fallback), so cell 0 counts as occupied for the host move.
+  if (members.some((m) => memberPosition(m) === null)) occupied.add(0);
+  if (seedHadTabs && occupied.has(0)) {
+    const free = cells.findIndex((_, idx) => !occupied.has(idx));
+    if (free > 0) swapPanes(cells[0]!, cells[free]!);
+  }
+  return (position) => cells[position ? position.row * cols + position.col : 0] ?? cells[0]!;
+}
+
 /// Surface a CLI-spawned team. The server already started each PTY; open
 /// a terminal tab ATTACHED to each live `session_id` (not a fresh session),
 /// grouped under the team's group, so a `cs terminal team new|load` from the
-/// CLI shows up in this window instead of only on the next attach. The new
-/// tabs stack in the active pane.
+/// CLI shows up in this window instead of only on the next attach. Members
+/// carrying grid positions carve the destination pane into the config's
+/// pane grid (the same layout the Team Work dialog builds); the rest stack
+/// in the destination pane.
 function surfaceTeamSpawn(
   group: string,
-  members: { tab_name: string; session_id: string }[],
+  members: SpawnedTeamMember[],
   destination: ResolvedTabDestination,
 ): void {
+  const paneForPosition = carveTeamGrid(members, destination.paneId);
   let opened = 0;
+  let leadPaneId: string | null = null;
   for (const m of members) {
     if (!m || typeof m.session_id !== "string" || !m.session_id) continue;
-    openTerminalInPane(destination.paneId, {
+    const paneId = paneForPosition
+      ? paneForPosition(memberPosition(m))
+      : destination.paneId;
+    openTerminalInPane(paneId, {
       sessionId: m.session_id,
       title: typeof m.tab_name === "string" && m.tab_name ? m.tab_name : undefined,
       group: group || undefined,
       side: destination.side,
     });
+    leadPaneId ??= paneId;
     opened += 1;
   }
   if (opened > 0) {
+    // The server pushes lead-first; a grid build walks the active pane to
+    // the bottom-right cell, so land focus back on the lead's pane (the
+    // dialog restores focus to the lead the same way).
+    if (paneForPosition && leadPaneId) focusPane(leadPaneId, destination.side);
     setTransientStatus(`team: opened ${opened} terminal(s)`);
     scheduleSessionSave();
   }

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use base64::Engine;
-use chan_workspace::{TeamConfig, Workspace};
+use chan_workspace::{Position, TeamConfig, Workspace};
 use portable_pty::PtySize;
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -245,12 +245,17 @@ enum SurveyCloseReason {
 }
 
 /// One spawned team member in a [`WindowCommand::TeamSpawned`]: the tab name
-/// (the member handle) and the live `session_id` the SPA attaches its new
-/// terminal tab to.
+/// (the registry-settled member handle, so the surfaced tab title matches the
+/// PTY's $CHAN_TAB_NAME even when a live collision appended `-N`), the live
+/// `session_id` the SPA attaches its new terminal tab to, and the member's
+/// config grid coordinate when the spawn honors the config layout (absent in
+/// tabs mode, where every member stacks in one pane).
 #[derive(Debug, Clone, Serialize)]
 struct SpawnedMember {
     tab_name: String,
     session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    position: Option<Position>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -534,6 +539,7 @@ mod tenant_gate_tests {
                     script,
                     window_id: None,
                     destination: None,
+                    tabs: false,
                 });
             }
         }
@@ -1422,6 +1428,7 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
             script,
             window_id,
             destination,
+            tabs,
         } => {
             if !script {
                 if let Some(window_id) = window_id.as_deref() {
@@ -1443,6 +1450,7 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
                     script,
                     window_id,
                     destination,
+                    tabs,
                 },
                 ctx,
             )
@@ -1629,6 +1637,9 @@ struct TeamRequest {
     /// window receives the `TeamSpawned` surfacing push.
     window_id: Option<String>,
     destination: Option<TabDestination>,
+    /// `--tabs`: stack every member in one pane even when the config's
+    /// members carry grid positions (the layout opt-out).
+    tabs: bool,
 }
 
 /// The `cs terminal team new|load` path. `new` parses the supplied
@@ -1646,8 +1657,8 @@ struct TeamRequest {
 /// terminal readiness before poking its identity prompt.
 async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlResponse {
     use crate::routes::team_config::{
-        ensure_created_at, generate_bootstrap_script, read_team_config, validate_team_config,
-        write_team_config,
+        ensure_created_at, generate_bootstrap_script, read_team_config, team_grid_shape,
+        validate_team_config, write_team_config,
     };
 
     let TeamRequest {
@@ -1658,6 +1669,7 @@ async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlRespons
         script,
         window_id,
         destination,
+        tabs,
     } = req;
     // The registry is a set-once cell that may be filled after the socket
     // starts; resolve it per request.
@@ -1711,6 +1723,22 @@ async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlRespons
                 Ok(workspace) => workspace,
                 Err(message) => return ControlResponse::Error { message },
             };
+            // The grid precondition runs BEFORE the write so a refusal
+            // leaves nothing on disk: the caller cleans up the window (or
+            // opts out) and reruns the same `new`. Skipped without a
+            // registry (nothing will spawn) and with an explicit `--pane`
+            // (the caller named the seed pane to carve).
+            if terminal_registry.is_some()
+                && !tabs
+                && team_grid_shape(&config).is_some()
+                && !explicit_pane(&destination)
+            {
+                if let Some(window_id) = window_id.as_deref() {
+                    if let Err(message) = require_single_pane_window(window_id, ctx).await {
+                        return ControlResponse::Error { message };
+                    }
+                }
+            }
             if let Err(message) =
                 write_team_config(&workspace, dir, &config, brief_content.as_deref())
             {
@@ -1732,6 +1760,7 @@ async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlRespons
                 registry,
                 dir,
                 &config,
+                tabs,
                 window_id.as_deref(),
                 destination,
                 &ctx.session_registry,
@@ -1777,10 +1806,20 @@ async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlRespons
                     ),
                 };
             };
+            // Same grid precondition as `new`; `load` mutates nothing, so
+            // it runs right before the spawn.
+            if !tabs && team_grid_shape(&config).is_some() && !explicit_pane(&destination) {
+                if let Some(window_id) = window_id.as_deref() {
+                    if let Err(message) = require_single_pane_window(window_id, ctx).await {
+                        return ControlResponse::Error { message };
+                    }
+                }
+            }
             spawn_and_poke_team(
                 registry,
                 dir,
                 &config,
+                tabs,
                 window_id.as_deref(),
                 destination,
                 &ctx.session_registry,
@@ -1788,6 +1827,61 @@ async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlRespons
             )
             .await
         }
+    }
+}
+
+/// Whether the caller named the exact seed pane (`--pane`), which replaces
+/// the single-pane precondition: the grid carves the named pane instead of
+/// the window's only one.
+fn explicit_pane(destination: &Option<TabDestination>) -> bool {
+    destination.as_ref().is_some_and(|d| d.pane_id.is_some())
+}
+
+/// The pane-grid precondition for a positioned team config: the target
+/// window must currently hold exactly ONE pane (any number of tabs), the
+/// seed the SPA carves into the config's grid. A busier window is refused
+/// with each way out spelled per remedy, BEFORE anything is written or
+/// spawned, so a refusal never leaves a half-provisioned team. The check
+/// reads the live layout through the same `pane_query` round-trip `cs pane`
+/// uses (the server itself holds no layout state); the carve races a
+/// concurrent layout change only within the push-to-apply window, which the
+/// SPA's own destination validation already bounds.
+async fn require_single_pane_window(window_id: &str, ctx: &ControlSocketCtx) -> Result<(), String> {
+    let response = pane_round_trip(
+        window_id,
+        |request_id| WindowCommand::PaneQuery { request_id },
+        &ctx.events_tx,
+        &ctx.window_bus,
+        &ctx.session_registry,
+    )
+    .await;
+    let payload = match response {
+        ControlResponse::Ok { message } => message,
+        ControlResponse::Error { message } => {
+            return Err(format!(
+                "could not verify window {window_id}'s pane layout: {message}"
+            ))
+        }
+        other => {
+            return Err(format!(
+                "could not verify window {window_id}'s pane layout: unexpected reply {other:?}"
+            ))
+        }
+    };
+    let panes = serde_json::from_str::<serde_json::Value>(&payload)
+        .ok()
+        .and_then(|v| v.get("panes").and_then(|p| p.as_array()).map(Vec::len));
+    match panes {
+        None => Err(format!(
+            "could not verify window {window_id}'s pane layout: malformed pane reply"
+        )),
+        Some(1) => Ok(()),
+        Some(n) => Err(format!(
+            "the team config positions its members into a pane grid, but window {window_id} has \
+             {n} panes; close the extra panes (cs pane list, cs pane close-pane --pane <ID>), \
+             rerun with --tabs to stack the team in the current pane, or rerun with --window <ID> \
+             against a fresh window (cs window new on chan-desktop)"
+        )),
     }
 }
 
@@ -1868,6 +1962,7 @@ fn spawn_team(
     registry: &TerminalRegistry,
     dir: &str,
     config: &TeamConfig,
+    tabs: bool,
     window_id: Option<&str>,
 ) -> TeamSpawn {
     use crate::routes::team_config::{identity_prompt, lead_first_order, team_base_group};
@@ -1917,8 +2012,16 @@ fn spawn_team(
                 // shell members drop it after the spawn record is complete.
                 spawned.push(m.handle.clone());
                 members.push(SpawnedMember {
-                    tab_name: m.handle.clone(),
+                    // The registry may have settled the name away from the
+                    // config handle (`-N` on a live collision); surface the
+                    // settled name so the tab title matches the PTY's
+                    // $CHAN_TAB_NAME (what `cs terminal write --tab-name`
+                    // resolves).
+                    tab_name: handle.spawn_name().unwrap_or(m.handle.as_str()).to_string(),
                     session_id: handle.id().to_string(),
+                    // `--tabs` strips the grid coordinates so the SPA takes
+                    // its stack-in-one-pane path.
+                    position: if tabs { None } else { m.position },
                 });
                 // Derive the submit agent from the command (+ CHAN_AGENT env
                 // override), the single source of truth shared with the SPA;
@@ -1955,16 +2058,18 @@ fn spawn_team(
 /// identity poke as soon as that agent enables bracketed-paste mode. Members
 /// wait concurrently, so one slow client does not delay a ready peer. Returns
 /// only after every agent was poked or reached the readiness bound.
+#[allow(clippy::too_many_arguments)]
 async fn spawn_and_poke_team(
     registry: &Arc<TerminalRegistry>,
     dir: &str,
     config: &TeamConfig,
+    tabs: bool,
     window_id: Option<&str>,
     destination: Option<TabDestination>,
     session_registry: &SessionRegistry,
     events_tx: &broadcast::Sender<String>,
 ) -> ControlResponse {
-    let mut spawn = spawn_team(registry, dir, config, window_id);
+    let mut spawn = spawn_team(registry, dir, config, tabs, window_id);
     let mut surface_error = None;
 
     // Surface the spawned team in the window that owns it (each agent
@@ -6313,6 +6418,7 @@ agent = "codex"
                 script: false,
                 window_id: None,
                 destination: None,
+                tabs: false,
             },
             &ctx,
         )
@@ -6332,6 +6438,7 @@ agent = "codex"
                 script: false,
                 window_id: None,
                 destination: None,
+                tabs: false,
             },
             &ctx,
         )
@@ -6356,6 +6463,7 @@ agent = "codex"
                 script: false,
                 window_id: None,
                 destination: None,
+                tabs: false,
             },
             &ctx,
         )
@@ -6382,6 +6490,7 @@ agent = "codex"
                 script: true,
                 window_id: None,
                 destination: None,
+                tabs: false,
             },
             &ctx,
         )
@@ -6408,6 +6517,7 @@ agent = "codex"
                 script: true,
                 window_id: None,
                 destination: None,
+                tabs: false,
             },
             &ctx,
         )
@@ -6439,6 +6549,7 @@ created_at = "2026-05-29T00:00:00Z"
                 script: true,
                 window_id: None,
                 destination: None,
+                tabs: false,
             },
             &test_ctx(cell, ControlTenant::Workspace),
         )
@@ -6534,7 +6645,7 @@ is_lead = false
     fn spawn_team_brings_up_lead_first_and_pokes_only_agents() {
         let (_root, registry) = empty_registry();
         let config = spawnable_config();
-        let spawn = spawn_team(&registry, "new-team-1", &config, Some("win-spawn"));
+        let spawn = spawn_team(&registry, "new-team-1", &config, false, Some("win-spawn"));
 
         // Lead first, then roster order: @@Lead, @@Alice, @@Shell.
         assert_eq!(spawn.spawned, vec!["@@Lead", "@@Alice", "@@Shell"]);
@@ -6598,7 +6709,7 @@ is_lead = false
             .expect("lead member");
         lead.env.insert("CHAN_AGENT".into(), "opencode".into());
 
-        let spawn = spawn_team(&registry, "new-team-1", &config, None);
+        let spawn = spawn_team(&registry, "new-team-1", &config, false, None);
         let poke = spawn
             .pokes
             .iter()
@@ -7141,7 +7252,7 @@ is_lead = false
         for mcp_env in [true, false] {
             let (_root, registry) = registry_with_mcp_socket();
             let config = probe_team_config(mcp_env);
-            let spawn = spawn_team(&registry, "probe-team", &config, Some("win-probe"));
+            let spawn = spawn_team(&registry, "probe-team", &config, false, Some("win-probe"));
             assert_eq!(spawn.spawned, vec!["@@Probe"], "probe member spawned");
 
             let deadline = Instant::now() + Duration::from_secs(6);
@@ -7197,6 +7308,58 @@ command = ""
 is_lead = false
 "#;
 
+    /// SHELL_TEAM_TOML with grid positions: lead at (0,0), worker at (0,1),
+    /// a 1x2 pane grid.
+    const POSITIONED_TEAM_TOML: &str = r#"
+team_name = "shellsquad"
+host_name = "Neo"
+host_handle = "@@Neo"
+tab_group = "shellsquad"
+created_at = "2026-05-29T00:00:00Z"
+
+[[members]]
+handle = "@@Boss"
+command = ""
+is_lead = true
+position = { row = 0, col = 0 }
+
+[[members]]
+handle = "@@Hand"
+command = ""
+is_lead = false
+position = { row = 0, col = 1 }
+"#;
+
+    /// Answer the next `pane_query` frame on `events_rx` with a reply listing
+    /// `pane_count` panes, through the window bus, standing in for the SPA
+    /// side of the single-pane precondition's round-trip.
+    async fn answer_pane_query(
+        events_rx: &mut broadcast::Receiver<String>,
+        window_bus: &crate::window_bus::WindowBus,
+        window_id: &str,
+        pane_count: usize,
+    ) {
+        let raw = events_rx.recv().await.expect("pane_query frame");
+        let frame: serde_json::Value = serde_json::from_str(&raw).expect("frame json");
+        assert_eq!(frame["command"], "pane_query", "unexpected frame: {frame}");
+        assert_eq!(frame["window_id"], window_id);
+        let id = frame["request_id"]
+            .as_str()
+            .expect("request_id")
+            .to_string();
+        let panes: Vec<serde_json::Value> = (0..pane_count)
+            .map(|i| serde_json::json!({ "id": format!("pane-{i}"), "active": i == 0 }))
+            .collect();
+        assert!(window_bus.complete(
+            &id,
+            serde_json::json!({
+                "windowId": window_id,
+                "activePaneId": "pane-0",
+                "panes": panes,
+            })
+        ));
+    }
+
     #[tokio::test]
     async fn spawn_and_poke_team_with_shell_members_skips_the_poke_wait() {
         let (_root, registry) = empty_registry();
@@ -7206,6 +7369,7 @@ is_lead = false
             &registry,
             "new-team-1",
             &config,
+            false,
             None,
             None,
             &SessionRegistry::new(),
@@ -7234,6 +7398,7 @@ is_lead = false
             &registry,
             "new-team-1",
             &config,
+            false,
             None,
             None,
             &SessionRegistry::new(),
@@ -7279,6 +7444,7 @@ is_lead = false
             &registry,
             "new-team-1",
             &config,
+            false,
             None,
             None,
             &SessionRegistry::new(),
@@ -7313,6 +7479,7 @@ is_lead = false
             &registry,
             "new-team-1",
             &config,
+            false,
             None,
             None,
             &SessionRegistry::new(),
@@ -7349,6 +7516,7 @@ is_lead = false
             &registry,
             "new-team-1",
             &config,
+            false,
             Some("win-s1"),
             Some(TabDestination {
                 pane_id: Some("pane-2".into()),
@@ -7391,6 +7559,7 @@ is_lead = false
             &registry,
             "new-team-1",
             &config,
+            false,
             Some("win-s1"),
             None,
             &session_registry,
@@ -7421,6 +7590,7 @@ is_lead = false
             &registry,
             "new-team-1",
             &config,
+            false,
             None,
             None,
             &SessionRegistry::new(),
@@ -7433,18 +7603,14 @@ is_lead = false
         );
     }
 
-    /// A workspace cell with a SHELL_TEAM_TOML team already written under
-    /// `dir`, for the `handle_team` Load tests. The indexer is real (the cell
-    /// requires one) but never used here; both shell members spawn without an
-    /// agent binary on PATH.
-    fn bound_cell_with_shell_team(
-        dir: &str,
-    ) -> (
+    /// A workspace cell bound over an empty temp workspace, for the
+    /// `handle_team` tests that exercise the write (`new`) path. The indexer
+    /// is real (the cell requires one) but never used here.
+    fn bound_empty_cell() -> (
         tempfile::TempDir,
         tempfile::TempDir,
         Arc<RwLock<Option<WorkspaceCell>>>,
     ) {
-        use crate::routes::team_config::write_team_config;
         let cfg = tempfile::tempdir().expect("config dir");
         let root = tempfile::tempdir().expect("workspace root");
         let lib =
@@ -7452,8 +7618,6 @@ is_lead = false
         lib.register_workspace(root.path())
             .expect("register workspace");
         let workspace = lib.open_workspace(root.path()).expect("open workspace");
-        let config: TeamConfig = toml::from_str(SHELL_TEAM_TOML).expect("valid shell team");
-        write_team_config(&workspace, dir, &config, None).expect("write team");
         let (index_tx, index_rx) = broadcast::channel::<chan_workspace::WatchEvent>(1);
         // Keep the channel open for the indexer's lifetime; the test never
         // sends on it.
@@ -7470,6 +7634,30 @@ is_lead = false
             watch_handle: None,
             indexer,
         })));
+        (cfg, root, cell)
+    }
+
+    /// [`bound_empty_cell`] with a SHELL_TEAM_TOML team already written under
+    /// `dir`, for the `handle_team` Load tests. Both shell members spawn
+    /// without an agent binary on PATH.
+    fn bound_cell_with_shell_team(
+        dir: &str,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        Arc<RwLock<Option<WorkspaceCell>>>,
+    ) {
+        use crate::routes::team_config::write_team_config;
+        let (cfg, root, cell) = bound_empty_cell();
+        let workspace = cell
+            .read()
+            .expect("cell lock")
+            .as_ref()
+            .expect("bound cell")
+            .workspace
+            .clone();
+        let config: TeamConfig = toml::from_str(SHELL_TEAM_TOML).expect("valid shell team");
+        write_team_config(&workspace, dir, &config, None).expect("write team");
         (cfg, root, cell)
     }
 
@@ -7496,6 +7684,7 @@ is_lead = false
                 script: false,
                 window_id: Some("win-load".to_string()),
                 destination: None,
+                tabs: false,
             },
             &ctx,
         )
@@ -7535,6 +7724,7 @@ is_lead = false
                 script: false,
                 window_id: None,
                 destination: None,
+                tabs: false,
             },
             &test_ctx(cell, ControlTenant::Workspace),
         )
@@ -7549,6 +7739,235 @@ is_lead = false
             }
             other => panic!("unexpected non-ok response: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn handle_team_new_grid_refuses_a_multi_pane_window_untouched() {
+        // The single-pane precondition runs BEFORE the write and the spawn: a
+        // refusal leaves no config.toml on disk and no PTY in the registry,
+        // and the message names every way out.
+        let (_cfg, root, cell) = bound_empty_cell();
+        let (_rroot, registry) = empty_registry();
+        let registry = Arc::new(registry);
+        let ctx = test_ctx(cell, ControlTenant::Workspace);
+        let mut events_rx = ctx.events_tx.subscribe();
+        let _window = ctx.session_registry.join("win-grid", true, None).guard;
+        assert!(
+            ctx.terminal_registry.set(registry.clone()).is_ok(),
+            "fresh registry cell"
+        );
+        let team = handle_team(
+            TeamRequest {
+                dir: "grid-team".to_string(),
+                op: TeamOp::New,
+                config_toml: Some(POSITIONED_TEAM_TOML.to_string()),
+                brief_content: None,
+                script: false,
+                window_id: Some("win-grid".to_string()),
+                destination: None,
+                tabs: false,
+            },
+            &ctx,
+        );
+        let reply = answer_pane_query(&mut events_rx, &ctx.window_bus, "win-grid", 2);
+        let (response, ()) = tokio::join!(team, reply);
+        match response {
+            ControlResponse::Error { message } => {
+                assert!(message.contains("has 2 panes"), "{message}");
+                assert!(message.contains("--tabs"), "{message}");
+                assert!(message.contains("cs pane close-pane"), "{message}");
+                assert!(message.contains("cs window new"), "{message}");
+            }
+            other => panic!("unexpected non-error response: {other:?}"),
+        }
+        assert!(
+            registry.session_summaries().is_empty(),
+            "a grid refusal must not spawn"
+        );
+        assert!(
+            !root.path().join("grid-team").exists(),
+            "a grid refusal must not write the team dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_team_new_grid_spawns_after_a_single_pane_check() {
+        // One pane in the window: the precondition passes, the team comes up,
+        // and the surfacing push carries each member's grid coordinate for
+        // the SPA to carve by.
+        let (_cfg, root, cell) = bound_empty_cell();
+        let (_rroot, registry) = empty_registry();
+        let registry = Arc::new(registry);
+        let ctx = test_ctx(cell, ControlTenant::Workspace);
+        let mut events_rx = ctx.events_tx.subscribe();
+        let _window = ctx.session_registry.join("win-grid", true, None).guard;
+        assert!(
+            ctx.terminal_registry.set(registry.clone()).is_ok(),
+            "fresh registry cell"
+        );
+        let team = handle_team(
+            TeamRequest {
+                dir: "grid-team".to_string(),
+                op: TeamOp::New,
+                config_toml: Some(POSITIONED_TEAM_TOML.to_string()),
+                brief_content: None,
+                script: false,
+                window_id: Some("win-grid".to_string()),
+                destination: None,
+                tabs: false,
+            },
+            &ctx,
+        );
+        let reply = answer_pane_query(&mut events_rx, &ctx.window_bus, "win-grid", 1);
+        let (response, ()) = tokio::join!(team, reply);
+        match response {
+            ControlResponse::Ok { message } => {
+                assert!(message.contains("2 member(s) up"), "{message}")
+            }
+            other => panic!("unexpected non-ok response: {other:?}"),
+        }
+        let frame: serde_json::Value =
+            serde_json::from_str(&events_rx.try_recv().expect("team_spawned frame"))
+                .expect("frame json");
+        assert_eq!(frame["command"], "team_spawned");
+        let members = frame["members"].as_array().expect("members array");
+        assert_eq!(
+            members[0]["position"],
+            serde_json::json!({"row": 0, "col": 0})
+        );
+        assert_eq!(
+            members[1]["position"],
+            serde_json::json!({"row": 0, "col": 1})
+        );
+        assert!(
+            root.path().join("grid-team/config.toml").exists(),
+            "the passing path writes the team dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_team_new_tabs_skips_the_grid_check_and_strips_positions() {
+        // `--tabs` opts out of the grid: no pane_query round-trip (the spawn
+        // would deadlock on one here, since nothing answers the bus) and the
+        // push carries no positions, so the SPA takes its stacking path.
+        let (_cfg, _root, cell) = bound_empty_cell();
+        let (_rroot, registry) = empty_registry();
+        let registry = Arc::new(registry);
+        let ctx = test_ctx(cell, ControlTenant::Workspace);
+        let mut events_rx = ctx.events_tx.subscribe();
+        let _window = ctx.session_registry.join("win-grid", true, None).guard;
+        assert!(
+            ctx.terminal_registry.set(registry.clone()).is_ok(),
+            "fresh registry cell"
+        );
+        let response = handle_team(
+            TeamRequest {
+                dir: "grid-team".to_string(),
+                op: TeamOp::New,
+                config_toml: Some(POSITIONED_TEAM_TOML.to_string()),
+                brief_content: None,
+                script: false,
+                window_id: Some("win-grid".to_string()),
+                destination: None,
+                tabs: true,
+            },
+            &ctx,
+        )
+        .await;
+        assert!(
+            matches!(response, ControlResponse::Ok { .. }),
+            "unexpected response: {response:?}"
+        );
+        let frame: serde_json::Value =
+            serde_json::from_str(&events_rx.try_recv().expect("team_spawned frame"))
+                .expect("frame json");
+        assert_eq!(frame["command"], "team_spawned", "no pane_query precedes");
+        let members = frame["members"].as_array().expect("members array");
+        assert!(
+            members.iter().all(|m| m.get("position").is_none()),
+            "--tabs strips positions: {members:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_team_new_explicit_pane_skips_the_grid_check() {
+        // `--pane` names the seed to carve, replacing the single-pane
+        // precondition: no pane_query round-trip, and the push keeps both the
+        // destination and the grid coordinates.
+        let (_cfg, _root, cell) = bound_empty_cell();
+        let (_rroot, registry) = empty_registry();
+        let registry = Arc::new(registry);
+        let ctx = test_ctx(cell, ControlTenant::Workspace);
+        let mut events_rx = ctx.events_tx.subscribe();
+        let _window = ctx.session_registry.join("win-grid", true, None).guard;
+        assert!(
+            ctx.terminal_registry.set(registry.clone()).is_ok(),
+            "fresh registry cell"
+        );
+        let response = handle_team(
+            TeamRequest {
+                dir: "grid-team".to_string(),
+                op: TeamOp::New,
+                config_toml: Some(POSITIONED_TEAM_TOML.to_string()),
+                brief_content: None,
+                script: false,
+                window_id: Some("win-grid".to_string()),
+                destination: Some(TabDestination {
+                    pane_id: Some("pane-7".into()),
+                    side: None,
+                }),
+                tabs: false,
+            },
+            &ctx,
+        )
+        .await;
+        assert!(
+            matches!(response, ControlResponse::Ok { .. }),
+            "unexpected response: {response:?}"
+        );
+        let frame: serde_json::Value =
+            serde_json::from_str(&events_rx.try_recv().expect("team_spawned frame"))
+                .expect("frame json");
+        assert_eq!(frame["command"], "team_spawned", "no pane_query precedes");
+        assert_eq!(frame["destination"]["pane_id"], "pane-7");
+        let members = frame["members"].as_array().expect("members array");
+        assert_eq!(
+            members[0]["position"],
+            serde_json::json!({"row": 0, "col": 0})
+        );
+    }
+
+    #[tokio::test]
+    async fn team_spawned_uses_the_settled_tab_name_on_a_live_collision() {
+        // A second copy of a live team settles "@@Boss" to "@@Boss-2" in the
+        // registry; the push must carry the settled name so the surfaced tab
+        // title matches the PTY's $CHAN_TAB_NAME (what `cs terminal write
+        // --tab-name` resolves).
+        let (_root, registry) = empty_registry();
+        let registry = Arc::new(registry);
+        let config: TeamConfig = toml::from_str(SHELL_TEAM_TOML).expect("valid shell team");
+        let (events_tx, mut rx) = broadcast::channel::<String>(8);
+        let (session_registry, _guard) = live_window("win-s1");
+        for _ in 0..2 {
+            spawn_and_poke_team(
+                &registry,
+                "new-team-1",
+                &config,
+                false,
+                Some("win-s1"),
+                None,
+                &session_registry,
+                &events_tx,
+            )
+            .await;
+        }
+        let first: serde_json::Value =
+            serde_json::from_str(&rx.try_recv().expect("first team_spawned")).expect("json");
+        assert_eq!(first["members"][0]["tab_name"], "@@Boss");
+        let second: serde_json::Value =
+            serde_json::from_str(&rx.try_recv().expect("second team_spawned")).expect("json");
+        assert_eq!(second["group"], "shellsquad-2");
+        assert_eq!(second["members"][0]["tab_name"], "@@Boss-2");
     }
 
     #[test]

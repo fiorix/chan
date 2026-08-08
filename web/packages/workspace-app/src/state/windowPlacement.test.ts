@@ -187,7 +187,11 @@ describe("queued window command placement", () => {
       {
         command: "team_spawned",
         group: "team-1",
-        members: [{ tab_name: "lead", session_id: "session-lead" }],
+        members: [
+          // The position must not carve anything when the destination
+          // refuses: the grid build only runs on a resolved pane.
+          { tab_name: "lead", session_id: "session-lead", position: { row: 0, col: 0 } },
+        ],
         destination,
       },
     ];
@@ -215,6 +219,100 @@ describe("queued window command placement", () => {
       side: "a",
     });
     expect(resolveTabDestination({ paneId: "pane-missing" })).toBeNull();
+  });
+});
+
+describe("team spawn grid placement", () => {
+  function leaves(): LeafNode[] {
+    return Object.values(layout.nodes).filter((n): n is LeafNode => n.kind === "leaf");
+  }
+  function paneHolding(title: string): LeafNode | null {
+    for (const pane of leaves()) {
+      for (const side of ["a", "b"] as const) {
+        if (paneTabs(pane, side).some((tab) => tab.title === title)) return pane;
+      }
+    }
+    return null;
+  }
+  /// The host terminal that ran `cs terminal team`: pre-existing content in
+  /// the seed pane before the team surfaces.
+  function seedHostTerminal(paneId: string): void {
+    const pane = leaf(paneId);
+    const host: TerminalTab = {
+      kind: "terminal",
+      id: "term-host",
+      title: "host",
+      createdAt: 1,
+      broadcastEnabled: false,
+      broadcastTargetIds: [],
+      terminalSessionId: "session-host",
+    };
+    pane.tabs = [host];
+    pane.activeTabId = host.id;
+  }
+
+  test("positions carve the destination pane into the config grid", () => {
+    window.history.replaceState(null, "", "/?w=window-a");
+    seedHostTerminal("pane-reset");
+    dispatch({
+      command: "team_spawned",
+      group: "team-1",
+      members: [
+        { tab_name: "lead", session_id: "s-lead", position: { row: 0, col: 0 } },
+        { tab_name: "w1", session_id: "s-w1", position: { row: 0, col: 1 } },
+        { tab_name: "w2", session_id: "s-w2", position: { row: 1, col: 0 } },
+        { tab_name: "w3", session_id: "s-w3", position: { row: 1, col: 1 } },
+        { tab_name: "w4", session_id: "s-w4", position: { row: 2, col: 0 } },
+      ],
+    });
+    // 5 members positioned over a 3x2 grid: six leaves.
+    expect(leaves()).toHaveLength(6);
+    // Each member sits in its own pane.
+    const memberPanes = ["lead", "w1", "w2", "w3", "w4"].map((t) => paneHolding(t)?.id);
+    expect(new Set(memberPanes).size).toBe(5);
+    // The host terminal moved to the member-free cell instead of hiding
+    // behind the lead in cell 0.
+    const hostPane = paneHolding("host");
+    expect(hostPane).not.toBeNull();
+    expect(memberPanes).not.toContain(hostPane!.id);
+    // Focus lands back on the lead's pane after the grid build walks it
+    // to the bottom-right cell.
+    expect(layout.activePaneId).toBe(paneHolding("lead")!.id);
+  });
+
+  test("a full grid keeps the host stacked with the cell-0 member", () => {
+    window.history.replaceState(null, "", "/?w=window-a");
+    seedHostTerminal("pane-reset");
+    dispatch({
+      command: "team_spawned",
+      group: "team-1",
+      members: [
+        { tab_name: "lead", session_id: "s-lead", position: { row: 0, col: 0 } },
+        { tab_name: "w1", session_id: "s-w1", position: { row: 0, col: 1 } },
+      ],
+    });
+    // No member-free cell: the host has nowhere of its own and stays
+    // stacked in cell 0.
+    expect(leaves()).toHaveLength(2);
+    expect(paneHolding("host")!.id).toBe(paneHolding("lead")!.id);
+    expect(paneHolding("w1")!.id).not.toBe(paneHolding("lead")!.id);
+  });
+
+  test("an implausible grid falls back to stacking", () => {
+    window.history.replaceState(null, "", "/?w=window-a");
+    dispatch({
+      command: "team_spawned",
+      group: "team-1",
+      members: [
+        // A 10x10 coordinate is past the server's 9-pane validation cap;
+        // only a drifted server can push it. Stack instead of carving.
+        { tab_name: "lead", session_id: "s-lead", position: { row: 9, col: 9 } },
+        { tab_name: "w1", session_id: "s-w1" },
+      ],
+    });
+    expect(leaves()).toHaveLength(1);
+    const pane = leaf("pane-reset");
+    expect(paneTabs(pane, paneSide(pane)).map((tab) => tab.title)).toEqual(["lead", "w1"]);
   });
 });
 

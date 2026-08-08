@@ -1008,10 +1008,16 @@ pub enum TeamAction {
         /// writes it explicitly. Overrides any `mcp_env` in the input config.
         #[arg(long = "mcp-env", value_name = "ON_OFF", verbatim_doc_comment)]
         mcp_env: Option<McpEnvToggle>,
+        /// Stack the team as tabs in one pane, ignoring the config's member
+        /// positions. Without it, a config whose members carry `position`
+        /// entries lays the team out as a pane grid and needs the target
+        /// window to hold a single pane.
+        #[arg(long, verbatim_doc_comment)]
+        tabs: bool,
         /// Emit the paste-and-run bootstrap shell script to stdout instead
         /// of writing the team. A pure preview: it mutates nothing.
         #[arg(long, verbatim_doc_comment)]
-        #[arg(conflicts_with_all = ["window", "pane", "side"])]
+        #[arg(conflicts_with_all = ["window", "pane", "side", "tabs"])]
         script: bool,
         #[command(flatten)]
         destination: TabDestinationArgs,
@@ -1022,8 +1028,14 @@ pub enum TeamAction {
     Load {
         /// Workspace-relative team directory to load.
         dir: String,
+        /// Stack the team as tabs in one pane, ignoring the config's member
+        /// positions. Without it, a config whose members carry `position`
+        /// entries lays the team out as a pane grid and needs the target
+        /// window to hold a single pane.
+        #[arg(long, verbatim_doc_comment)]
+        tabs: bool,
         /// Emit the paste-and-run bootstrap shell script to stdout.
-        #[arg(long, conflicts_with_all = ["window", "pane", "side"])]
+        #[arg(long, conflicts_with_all = ["window", "pane", "side", "tabs"])]
         script: bool,
         #[command(flatten)]
         destination: TabDestinationArgs,
@@ -2230,6 +2242,7 @@ async fn cmd_shell_team(action: TeamAction) -> Result<()> {
             stdin,
             brief,
             mcp_env,
+            tabs,
             script,
             destination,
         } => {
@@ -2257,12 +2270,14 @@ async fn cmd_shell_team(action: TeamAction) -> Result<()> {
                     script,
                     window_id: target_window,
                     destination: destination.destination(),
+                    tabs,
                 },
                 script,
             )
         }
         TeamAction::Load {
             dir,
+            tabs,
             script,
             destination,
         } => {
@@ -2281,6 +2296,7 @@ async fn cmd_shell_team(action: TeamAction) -> Result<()> {
                     script,
                     window_id: target_window,
                     destination: destination.destination(),
+                    tabs,
                 },
                 script,
             )
