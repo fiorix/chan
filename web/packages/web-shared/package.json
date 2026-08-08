@@ -9,6 +9,7 @@
     "./command-deck": "./src/command-deck/model.ts",
     "./CommandDeck.svelte": "./src/components/CommandDeck.svelte",
     "./theme.css": "./src/styles/theme.css",
-    "./Topbar.svelte": "./src/components/Topbar.svelte"
+    "./Topbar.svelte": "./src/components/Topbar.svelte",
+    "./window-label": "./src/window-label.ts"
   }
 }

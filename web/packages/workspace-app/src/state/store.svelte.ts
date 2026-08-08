@@ -41,6 +41,7 @@ import { docSyncRosterChanged } from "./docSync.svelte";
 import { refreshExtensions } from "./extensions.svelte";
 import { sceneSyncRosterChanged } from "./sceneSync.svelte";
 import { isWindowEnded, markWindowDiscarded, markWindowHidden } from "./windowLifecycle.svelte";
+import { applyWindowLabel } from "./windowTitle";
 import {
   activeLayout,
   activeTabInPane,
@@ -1171,7 +1172,10 @@ type WindowCommandFrame =
   // The session leader discarded / hid this window from the launcher; the
   // server targets the affected window's own socket. No payload.
   | { type: "window_command"; window_id: string; command: "window_discarded" }
-  | { type: "window_command"; window_id: string; command: "window_hidden" };
+  | { type: "window_command"; window_id: string; command: "window_hidden" }
+  // The caption on this window's library record changed. `label` is the new
+  // text, empty when the user cleared it.
+  | { type: "window_command"; window_id: string; command: "window_labeled"; label: string };
 
 function resolveWindowCommandDestination(
   frame: DestinationWindowCommand,
@@ -1645,6 +1649,14 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     // "hidden by the leader" overlay; web-only for the same reason.
     if (isTauriDesktop()) return;
     markWindowHidden();
+    return;
+  }
+  if (frame.command === "window_labeled" && typeof frame.label === "string") {
+    // The caption changed from the launcher; retitle the browser tab. A desktop
+    // webview has no visible tab title (the OS titlebar is the window's name,
+    // and the window watcher retitles it), so there is nothing to do there.
+    if (isTauriDesktop()) return;
+    applyWindowLabel(frame.label);
     return;
   }
   if (frame.command === "open_file" && typeof frame.path === "string") {

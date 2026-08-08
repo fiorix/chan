@@ -158,6 +158,13 @@ struct TauriNativeSurface {
     /// tenant token in the URL, so an existing webview may need an in-place
     /// rebuild even though it is already "open" to the reconciler.
     remote_launches: Arc<Mutex<HashMap<String, RemoteLaunchKey>>>,
+    /// Native label -> the OS title that window is known to be carrying. The
+    /// reconcile calls `refresh` for every shown window on every feed change
+    /// (which includes every connect/disconnect), and reading a Tauri title
+    /// means a main-thread round trip; this answers the overwhelmingly common
+    /// "nothing changed" case without one. Populated only from an observed or
+    /// applied title, so it cannot claim a title the window does not have.
+    applied_titles: Arc<Mutex<HashMap<String, String>>>,
     /// The watch loop's change signal (remote watchers only): settled
     /// navigation tasks nudge it so a follow-up reconcile validates their
     /// outcome, and failed ones nudge it after a delay as a bounded retry
@@ -268,6 +275,68 @@ impl TauriNativeSurface {
             }
         });
     }
+
+    /// Reconcile one live window's OS title to what its record now says.
+    ///
+    /// The library record's caption is user-editable at any time, and the title
+    /// is otherwise written once at build, so this is what makes a caption edit
+    /// visible in the titlebar, the OS window switcher, and the Window menu's
+    /// Open section (which reads the live title). Idempotent: it compares before
+    /// writing, so the common reconcile -- nothing changed -- touches nothing.
+    fn sync_title(&self, record: &WindowRecord) {
+        let label = native_label(record);
+        let devserver_name = match &self.opener {
+            WindowOpener::Remote { conn } => Some(conn.name.clone()),
+            WindowOpener::Local { .. } => None,
+        };
+        let desired = serve::watched_window_title(record, devserver_name.as_deref());
+        if self.applied_titles.lock().unwrap().get(&label) == Some(&desired) {
+            return;
+        }
+        let kind = serve::watched_window_kind(record).unwrap_or("workspace");
+        let app = self.app.clone();
+        let applied_titles = Arc::clone(&self.applied_titles);
+        // Tauri window mutation (and `title()`) must run on the main thread.
+        let _ = self.app.clone().run_on_main_thread(move || {
+            let Some(window) = app.get_webview_window(&label) else {
+                return;
+            };
+            let state = app.state::<Arc<AppState>>();
+            // An explicit title override owns the titlebar outright; it is not
+            // ours to overwrite.
+            if state.window_title_override(&label).is_some() {
+                return;
+            }
+            // Already correct -- the build path composed it. Record that so the
+            // next reconcile skips this round trip.
+            if window.title().is_ok_and(|current| current == desired) {
+                applied_titles.lock().unwrap().insert(label, desired);
+                return;
+            }
+            if let Err(e) = window.set_title(&desired) {
+                tracing::warn!(window = %label, error = %e, "window watcher: retitling failed");
+                return;
+            }
+            applied_titles
+                .lock()
+                .unwrap()
+                .insert(label.clone(), desired.clone());
+            // Keep the server-visible title map in step, so `GET /api/windows`
+            // and `cs window list` report what the title bar shows.
+            if let Some(embedded) = state.embedded() {
+                embedded.window_titles().set(
+                    &label,
+                    chan_server::WindowMeta {
+                        title: desired.clone(),
+                        kind: Some(kind.to_string()),
+                    },
+                );
+            }
+            // The Open Windows section renders the live title, so it is now
+            // stale.
+            crate::rebuild_window_menu(&app);
+        });
+    }
 }
 
 impl NativeSurface for TauriNativeSurface {
@@ -314,6 +383,10 @@ impl NativeSurface for TauriNativeSurface {
     }
 
     fn refresh(&self, record: &WindowRecord) {
+        // The caption is editable while the window is open, so every reconcile
+        // reconciles the OS title too -- for local windows as well, which have
+        // no other reason to be refreshed.
+        self.sync_title(record);
         if !self.opener.is_remote() {
             return;
         }
@@ -329,6 +402,9 @@ impl NativeSurface for TauriNativeSurface {
         // No longer in-flight (also covers a close before the build landed).
         self.in_flight.lock().unwrap().remove(label);
         self.remote_launches.lock().unwrap().remove(label);
+        // A rebuilt window at this label starts from whatever the build path
+        // composes, so a remembered title must not outlive the window.
+        self.applied_titles.lock().unwrap().remove(label);
         // Destroying a window must run on the Tauri main thread.
         let app = self.app.clone();
         let dispatch = self.app.clone();
@@ -362,6 +438,7 @@ pub(crate) fn spawn_local_window_watcher(app: AppHandle, state: Arc<AppState>) {
         opener: WindowOpener::Local { addr },
         in_flight: Arc::new(Mutex::new(HashSet::new())),
         remote_launches: Arc::new(Mutex::new(HashMap::new())),
+        applied_titles: Arc::new(Mutex::new(HashMap::new())),
         nudge: None,
     };
     let view = Arc::new(WatcherViewState::default());
@@ -945,6 +1022,7 @@ pub(crate) async fn spawn_devserver_window_watcher(
         opener: WindowOpener::Remote { conn },
         in_flight: Arc::new(Mutex::new(HashSet::new())),
         remote_launches: Arc::new(Mutex::new(HashMap::new())),
+        applied_titles: Arc::new(Mutex::new(HashMap::new())),
         nudge: Some(Arc::clone(&change)),
     };
     let feed = DevserverWindowFeed { snapshot, change };

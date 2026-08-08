@@ -78,6 +78,7 @@
   } from "./state/store.svelte";
   import { confirmState } from "./state/confirm.svelte";
   import { windowModeAllowsCommand } from "./state/windowMode";
+  import { initWindowTitle } from "./state/windowTitle";
   import {
     activeTabInPane,
     activeFileTab,
@@ -349,6 +350,10 @@
     // + focus halo in Pane.svelte) when the param is a valid hex; a no-op
     // otherwise, so the `data-focus-color` presets stay in effect.
     applyInitialPaneColor();
+    // Title the browser tab the way the launcher names this window. Fire and
+    // forget: it needs a library capability, and a window that cannot mint one
+    // simply keeps the document's static title.
+    void initWindowTitle();
     // Live per-library focus-colour broadcast. Subscribe ONCE PER
     // WINDOW (the var is per-document; <Pane> is per leaf node, so per-pane would
     // open redundant sockets) to this library's colour watch and recolour

@@ -1511,6 +1511,30 @@ fn outbound_label(outbound: &OutboundWorkspace) -> Option<String> {
     }
 }
 
+/// Window-menu title for a record with no live webview to read a title from (a
+/// hidden watcher window is destroyed, so this is the normal case for the Hidden
+/// section).
+///
+/// A LOCAL record composes exactly what the titlebar would show, so a window
+/// reads the same whether it is listed under Open or under Hidden. A REMOTE
+/// record cannot: the titlebar's base is built from the live connection's
+/// display name (`DevserverConn::name`), which is not the same string as the
+/// menu's `devserver_display` and is not in hand here. Rather than render a
+/// plausible-but-different title, fall back to the library-composed `title` and
+/// append the caption to it -- the pre-existing behaviour for these rows, plus
+/// the caption this is here to surface.
+fn record_menu_title(record: &chan_server::WindowRecord) -> String {
+    if record.library_id == "local" {
+        return serve::watched_window_title(record, None);
+    }
+    let caption = record.label.trim();
+    if caption.is_empty() {
+        record.title.clone()
+    } else {
+        format!("{} [{caption}]", record.title)
+    }
+}
+
 /// Display name for a devserver in the Window menu: its user label, or its
 /// host when unlabelled.
 fn devserver_display(d: &Devserver) -> String {
@@ -6239,7 +6263,7 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle) {
             if !window.is_visible().unwrap_or(false) {
                 continue;
             }
-            let title = window.title().unwrap_or_else(|_| record.title.clone());
+            let title = window.title().unwrap_or_else(|_| record_menu_title(record));
             match devservers.iter().find(|(_, _, labels)| labels.contains(&label)) {
                 Some((ds_id, _, _)) => {
                     open_grouped.entry(ds_id.clone()).or_default().push((label, title))
@@ -6271,9 +6295,33 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle) {
         // Hidden = the in-session buried set UNION the server-persisted hidden
         // records: a window hidden in a PRIOR session (record.hidden)
         // isn't opened on connect (should_show false) and isn't in the local
-        // buried set, so list it here so the user can reopen it. Dedup by label;
-        // a hidden window has no live webview, so fall back to the record title.
-        let mut hidden_rows: Vec<(String, String)> = buried;
+        // buried set, so list it here so the user can reopen it. Dedup by label.
+        //
+        // Title precedence for a hidden row: the live webview when the window
+        // still has one (a standalone terminal keeps its native window when
+        // buried), else the library record, else the title captured at bury
+        // time. The record beats the captured title because the capture freezes
+        // the caption as it was when the window was hidden, so a caption edited
+        // while hidden would otherwise never show. Buried rows keep their
+        // most-recent-first order; server-hidden records follow.
+        let records_by_label: HashMap<String, &chan_server::WindowRecord> = open_records
+            .iter()
+            .map(|record| (window_watcher::native_label(record), record))
+            .collect();
+        let hidden_title = |label: &str, captured: Option<String>| -> String {
+            if let Some(title) = app.get_webview_window(label).and_then(|w| w.title().ok()) {
+                return title;
+            }
+            match records_by_label.get(label) {
+                Some(record) => record_menu_title(record),
+                None => captured.unwrap_or_else(|| label.to_string()),
+            }
+        };
+        let mut hidden_rows: Vec<(String, String)> = Vec::new();
+        for (label, captured) in buried {
+            let title = hidden_title(&label, Some(captured));
+            hidden_rows.push((label, title));
+        }
         for record in &open_records {
             if !record.hidden {
                 continue;
@@ -6282,10 +6330,7 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle) {
             if hidden_rows.iter().any(|(l, _)| l == &label) {
                 continue;
             }
-            let title = app
-                .get_webview_window(&label)
-                .and_then(|w| w.title().ok())
-                .unwrap_or_else(|| record.title.clone());
+            let title = hidden_title(&label, None);
             hidden_rows.push((label, title));
         }
         for (label, title) in hidden_rows {

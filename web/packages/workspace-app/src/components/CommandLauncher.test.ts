@@ -92,13 +92,31 @@ const librarySnapshot = {
       kind: "terminal" as const,
       title: "Control terminal",
       ordinal: 1,
-      label: "devserver",
+      // A control row never carries a caption: the mint leaves it empty
+      // (`WindowRegistry::create_control`) and the label route refuses to set
+      // one on a control window.
+      label: "",
       workspace_path: null,
       connected: true,
       hidden: false,
       control: true,
       can_act: true,
       launch_path: "/api/library/command-capabilities/cap/windows/control-1/launch",
+    },
+    {
+      window_id: "w-captioned",
+      kind: "workspace" as const,
+      // The library composes `title` from its own perspective and the deck
+      // never parses it; the caption is the separate `label`.
+      title: "an intentionally unrelated title",
+      ordinal: 2,
+      label: "release checks",
+      workspace_path: "/work/project-a",
+      connected: true,
+      hidden: false,
+      control: false,
+      can_act: true,
+      launch_path: "/api/library/command-capabilities/cap/windows/w-captioned/launch",
     },
   ],
   workspaces: [
@@ -253,8 +271,18 @@ describe("contextual command deck", () => {
     const target = openLauncher();
     await flush();
     await typeQuery(target, "control terminal");
-    expect(titles(target)[0]).toBe("Control terminal — devserver");
+    expect(titles(target)[0]).toBe("Control terminal");
     expect(target.querySelector(".deck-result-path")?.textContent).toContain("Computers › Focus");
+  });
+
+  // The deck names a window exactly as the launcher and the OS titlebar do:
+  // the generated "Window N" plus the user's caption in brackets, recomposed
+  // from kind/ordinal/label rather than read off the library-composed title.
+  test("names a captioned window the way every other surface spells it", async () => {
+    const target = openLauncher();
+    await flush();
+    await typeQuery(target, "release checks");
+    expect(titles(target)[0]).toBe("Window 2 [release checks]");
   });
 
   test("a new terminal does not inherit the invoking window's open launcher draft", async () => {

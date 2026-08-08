@@ -1829,7 +1829,15 @@ impl WorkspaceHost {
         let registry = self
             .window_registry()
             .ok_or_else(|| Error::Config("window registry not installed".into()))?;
-        Ok(registry.set_label(window_id, label))
+        let matched = registry.set_label(window_id, label.clone());
+        // The window's own SPA titles its browser tab from this text, and it has
+        // no view of the window feed (its library access is the short-lived
+        // command capability), so tell it directly. Native desktop windows are
+        // retitled by the window watcher's reconcile instead and ignore this.
+        if matched {
+            self.emit_window_command(window_id, "window_labeled", Some(&label));
+        }
+        Ok(matched)
     }
 
     /// Reap a control terminal: drop its registry row, forget its tenant
@@ -1927,16 +1935,23 @@ impl WorkspaceHost {
         Ok(removed)
     }
 
-    /// Broadcast a targeted `window_command` teardown frame (see
-    /// [`window_teardown_frame`]) for `window_id`. It rides EVERY mounted
+    /// Broadcast a targeted teardown frame for `window_id`. See
+    /// [`Self::emit_window_command`] for the delivery model.
+    fn emit_window_teardown(&self, window_id: &str, command: &'static str) {
+        self.emit_window_command(window_id, command, None);
+    }
+
+    /// Broadcast a targeted `window_command` frame (see
+    /// [`window_command_frame`]) for `window_id`. It rides EVERY mounted
     /// tenant's `/ws` channel; each tenant's pump forwards it only to the socket
     /// serving `window_id` and drops it otherwise, so a browser follower hears
-    /// its teardown without the host resolving which tenant serves the window
+    /// about its own window without the host resolving which tenant serves it
     /// (which matters for a discard, where the record is already gone). This is
     /// honest-client courtesy, not enforcement: a native desktop window is torn
-    /// down by the window watcher's reconcile instead and ignores the frame.
-    fn emit_window_teardown(&self, window_id: &str, command: &'static str) {
-        let Some(frame) = window_teardown_frame(window_id, command) else {
+    /// down (and retitled) by the window watcher's reconcile instead and ignores
+    /// the frame.
+    fn emit_window_command(&self, window_id: &str, command: &'static str, label: Option<&str>) {
+        let Some(frame) = window_command_frame(window_id, command, label) else {
             return;
         };
         if let Ok(workspaces) = self.workspaces.read() {
@@ -2862,26 +2877,36 @@ fn hosted_from_runtime(runtime: &HostedWorkspaceRuntime) -> HostedWorkspace {
     }
 }
 
-/// Serialize a server-originated window teardown notification as a
-/// `window_command` frame. It rides the same envelope as the control socket's
-/// window commands so the `/ws` pump's fixed-prefix target scan
+/// Serialize a server-originated window notification as a `window_command`
+/// frame. It rides the same envelope as the control socket's window commands so
+/// the `/ws` pump's fixed-prefix target scan
 /// (`{"type":"window_command","window_id":"<id>",`) delivers it to the affected
 /// window's socket only. Built here in the library because the dependency flows
 /// chan-server -> chan-library, so the control socket's `WindowCommand` enum is
-/// unreachable; the byte shape is pinned by `window_teardown_frame_matches_pump_prefix`.
-/// `command` is `"window_discarded"` or `"window_hidden"`.
-fn window_teardown_frame(window_id: &str, command: &'static str) -> Option<String> {
+/// unreachable; the byte shape is pinned by `window_command_frame_matches_pump_prefix`.
+/// `command` is `"window_discarded"`, `"window_hidden"`, or `"window_labeled"`.
+fn window_command_frame(
+    window_id: &str,
+    command: &'static str,
+    label: Option<&str>,
+) -> Option<String> {
     #[derive(serde::Serialize)]
-    struct WindowTeardownFrame<'a> {
+    struct WindowCommandFrame<'a> {
         #[serde(rename = "type")]
         frame_type: &'static str,
         window_id: &'a str,
         command: &'static str,
+        /// Only `window_labeled` carries text, and it carries the empty string
+        /// when the user clears the caption. Skipping the key entirely when
+        /// absent keeps a teardown frame's bytes unchanged.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<&'a str>,
     }
-    serde_json::to_string(&WindowTeardownFrame {
+    serde_json::to_string(&WindowCommandFrame {
         frame_type: "window_command",
         window_id,
         command,
+        label,
     })
     .ok()
 }
@@ -3069,21 +3094,37 @@ mod tests {
     }
 
     #[test]
-    fn window_teardown_frame_matches_pump_prefix() {
+    fn window_command_frame_matches_pump_prefix() {
         // The frame MUST start with the exact prefix the /ws pump scans
         // (routes::ws::window_command_target) or it is not routed to the
         // affected window's socket. Fields serialize in declaration order:
-        // type, window_id, command.
-        let discarded = window_teardown_frame("w-abc", "window_discarded").unwrap();
-        assert!(
-            discarded.starts_with(r#"{"type":"window_command","window_id":"w-abc","#),
-            "frame: {discarded}"
+        // type, window_id, command, label.
+        let discarded = window_command_frame("w-abc", "window_discarded", None).unwrap();
+        assert_eq!(
+            discarded,
+            r#"{"type":"window_command","window_id":"w-abc","command":"window_discarded"}"#,
         );
-        assert!(discarded.contains(r#""command":"window_discarded""#));
 
-        let hidden = window_teardown_frame("w-xyz", "window_hidden").unwrap();
-        assert!(hidden.starts_with(r#"{"type":"window_command","window_id":"w-xyz","#));
-        assert!(hidden.contains(r#""command":"window_hidden""#));
+        let hidden = window_command_frame("w-xyz", "window_hidden", None).unwrap();
+        assert_eq!(
+            hidden,
+            r#"{"type":"window_command","window_id":"w-xyz","command":"window_hidden"}"#,
+        );
+
+        // The caption rides the same envelope, so the same prefix scan targets
+        // it. An empty label is the CLEAR signal and must stay on the wire; only
+        // a teardown omits the key.
+        let labeled =
+            window_command_frame("w-def", "window_labeled", Some("release checks")).unwrap();
+        assert_eq!(
+            labeled,
+            r#"{"type":"window_command","window_id":"w-def","command":"window_labeled","label":"release checks"}"#,
+        );
+        let cleared = window_command_frame("w-def", "window_labeled", Some("")).unwrap();
+        assert_eq!(
+            cleared,
+            r#"{"type":"window_command","window_id":"w-def","command":"window_labeled","label":""}"#,
+        );
     }
 
     fn nest(prefix: &str, inner: Router) -> Router {

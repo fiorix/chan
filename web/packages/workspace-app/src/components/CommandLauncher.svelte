@@ -10,6 +10,7 @@
     type DeckScope,
     type DeckScopeId,
   } from "@chan/web-shared/command-deck";
+  import { windowDisplayName } from "@chan/web-shared/window-label";
   import {
     AppWindow,
     BarChart2,
@@ -273,7 +274,7 @@
   });
 
   function scopedWindowTitle(window: ScopedLibraryWindow): string {
-    return window.label ? `${window.title} — ${window.label}` : window.title;
+    return windowDisplayName(window);
   }
 
   function scopedWindowContext(window: ScopedLibraryWindow): string {
