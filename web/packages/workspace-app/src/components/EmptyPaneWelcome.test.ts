@@ -51,6 +51,8 @@ describe("EmptyPaneWelcome animation names", () => {
     welcome?.dispatchEvent(appShortcut);
     expect(appShortcut.defaultPrevented).toBe(false);
 
+    const markBeforeSwitch = target.querySelector(".welcome-mark");
+    expect(markBeforeSwitch).not.toBeNull();
     welcome?.dispatchEvent(
       new KeyboardEvent("keydown", {
         key: "ArrowRight",
@@ -67,11 +69,9 @@ describe("EmptyPaneWelcome animation names", () => {
     expect(window.sessionStorage.getItem("chan.empty-pane-animation")).toBe(
       "radial-ribbons",
     );
-    expect(
-      target
-        .querySelector(".welcome-mark")
-        ?.classList.contains("welcome-mark-cycle"),
-    ).toBe(true);
+    const markAfterSwitch = target.querySelector(".welcome-mark");
+    expect(markAfterSwitch).not.toBeNull();
+    expect(markAfterSwitch).not.toBe(markBeforeSwitch);
 
     welcome?.dispatchEvent(
       new KeyboardEvent("keydown", {

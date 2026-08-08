@@ -79,7 +79,7 @@
   let animationNameFlash = $state<string | null>(null);
   let animationNameFlashSequence = $state(0);
   // Bumped on every animation switch (not speed changes) to re-key the
-  // mark, replaying its fade dip over the incoming field.
+  // mark, replaying its flash over the incoming field.
   let markCycle = $state(0);
   let ActiveAnimation = $derived(ANIMATION_COMPONENTS[animation]);
 
@@ -175,10 +175,7 @@
 >
   <ActiveAnimation />
   {#key markCycle}
-    <div
-      class="welcome-mark"
-      class:welcome-mark-cycle={markCycle > 0}
-    ></div>
+    <div class="welcome-mark"></div>
   {/key}
   {#if animationNameFlash}
     {#key animationNameFlashSequence}
@@ -223,29 +220,21 @@
     background-color: var(--text-secondary);
     -webkit-mask: url('/chan-mark.png') center / contain no-repeat;
             mask: url('/chan-mark.png') center / contain no-repeat;
-    opacity: 0.45;
-    animation: empty-pane-mark-fade-in 1.3s ease-out;
+    opacity: 0;
+    animation: empty-pane-mark-flash 1.8s ease-in-out;
   }
-  /* Animation switches replay the mark as a dip: fade fully out, then
-     back in over the incoming field. First mount keeps the plain
-     fade-in above. */
-  .welcome-mark-cycle {
-    animation: empty-pane-mark-cycle 1.8s ease-in-out;
-  }
-  @keyframes empty-pane-mark-fade-in {
-    from {
-      opacity: 0;
-    }
-  }
-  @keyframes empty-pane-mark-cycle {
+  /* The mark flashes over the field and stays hidden while the animation
+     runs; a switch re-keys the element, replaying the flash. */
+  @keyframes empty-pane-mark-flash {
     0% {
-      opacity: 0.45;
-    }
-    35% {
       opacity: 0;
+    }
+    30%,
+    55% {
+      opacity: 0.45;
     }
     100% {
-      opacity: 0.45;
+      opacity: 0;
     }
   }
   .animation-name-flash {

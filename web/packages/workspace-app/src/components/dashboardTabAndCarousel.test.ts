@@ -415,7 +415,10 @@ describe("EmptyPaneWelcome empty-pane surface", () => {
     // The surface is the mark over one decorative field and its transient
     // catalog name, with no actions of its own.
     expect(welcome).toMatch(
-      /\{#key markCycle\}[\s\S]{1,120}class="welcome-mark"[\s\S]{1,80}welcome-mark-cycle=\{markCycle > 0\}/,
+      /\{#key markCycle\}[\s\S]{1,80}class="welcome-mark"/,
+    );
+    expect(welcome).toMatch(
+      /opacity: 0;[\s\S]{1,60}animation: empty-pane-mark-flash 1\.8s ease-in-out;/,
     );
     expect(welcome).toMatch(/animation = initialEmptyPaneAnimation\(\)/);
     expect(welcome).toMatch(/persistEmptyPaneAnimation\(next\)/);
