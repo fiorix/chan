@@ -1289,6 +1289,8 @@
         since: resumeSince,
         generation: resumeGeneration,
         cwd: reattaching ? undefined : tab.cwd,
+        command: reattaching ? undefined : tab.spawnCommand,
+        env: reattaching ? undefined : tab.spawnEnv,
       }),
     );
     ws = createSocket(`${proto}//${window.location.host}${path}`);

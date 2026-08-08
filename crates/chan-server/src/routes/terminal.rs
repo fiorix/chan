@@ -32,7 +32,7 @@ const MAX_ROWS: u16 = 200;
 /// re-attach reuses the live one, so reset it here to match.
 const RESET_TERMINAL: &[u8] = b"\x1bc";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct TerminalQuery {
     session: Option<String>,
     since: Option<u64>,
@@ -52,6 +52,10 @@ pub struct TerminalQuery {
     generation: Option<u64>,
     mcp_env: Option<TerminalMcpEnv>,
     cwd: Option<String>,
+    command: Option<String>,
+    /// JSON-encoded spawn environment map. This is an internal SPA transport;
+    /// the public control-socket request carries the map as structured JSON.
+    env: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -344,6 +348,10 @@ pub async fn api_terminal_ws(
             .map(|c| c.terminal.mcp_env)
             .unwrap_or(false),
     };
+    let (command, env) = match terminal_query_spawn_overrides(&query) {
+        Ok(overrides) => overrides,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
     let cwd = if query.session.is_some() {
         None
     } else if let Ok(workspace) = state.try_workspace() {
@@ -382,6 +390,8 @@ pub async fn api_terminal_ws(
         generation: query.generation,
         mcp_env,
         cwd,
+        command,
+        env,
     };
     ws.on_upgrade(move |socket| terminal_ws(socket, state, opts))
         .into_response()
@@ -590,6 +600,8 @@ struct TerminalWsOptions {
     generation: Option<u64>,
     mcp_env: bool,
     cwd: Option<PathBuf>,
+    command: Option<String>,
+    env: BTreeMap<String, String>,
 }
 
 fn normalize_terminal_name(name: &str) -> Option<String> {
@@ -600,7 +612,7 @@ fn normalize_terminal_name(name: &str) -> Option<String> {
     Some(trimmed.chars().take(128).collect())
 }
 
-fn normalize_terminal_command(command: &str) -> Option<String> {
+pub(crate) fn normalize_terminal_command(command: &str) -> Option<String> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return None;
@@ -608,7 +620,7 @@ fn normalize_terminal_command(command: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-fn validate_terminal_env(env: &BTreeMap<String, String>) -> Result<(), String> {
+pub(crate) fn validate_terminal_env(env: &BTreeMap<String, String>) -> Result<(), String> {
     for key in env.keys() {
         if key.trim().is_empty() || key.contains('=') || key.contains('\0') {
             return Err(format!("invalid terminal env key: {key:?}"));
@@ -620,6 +632,31 @@ fn validate_terminal_env(env: &BTreeMap<String, String>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn terminal_query_spawn_overrides(
+    query: &TerminalQuery,
+) -> Result<(Option<String>, BTreeMap<String, String>), String> {
+    // Reattach metadata never changes the live session's spawn identity. The
+    // SPA omits these fields for a reattach; ignoring them here makes the
+    // server-side contract explicit, just like cwd above.
+    if query.session.is_some() {
+        return Ok((None, BTreeMap::new()));
+    }
+    let command = match query.command.as_deref() {
+        Some(command) => Some(
+            normalize_terminal_command(command)
+                .ok_or_else(|| "terminal command is required".to_string())?,
+        ),
+        None => None,
+    };
+    let env = match query.env.as_deref() {
+        Some(env) => serde_json::from_str::<BTreeMap<String, String>>(env)
+            .map_err(|e| format!("invalid terminal env: {e}"))?,
+        None => BTreeMap::new(),
+    };
+    validate_terminal_env(&env)?;
+    Ok((command, env))
 }
 
 async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: TerminalWsOptions) {
@@ -634,8 +671,8 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
         window_id: opts.window_id,
         mcp_env: opts.mcp_env,
         cwd: opts.cwd,
-        command: None,
-        env: Default::default(),
+        command: opts.command,
+        env: opts.env,
     };
     let mut session = match state.terminal_sessions.get_or_create_for_ws(
         opts.session_id.as_deref(),
@@ -1293,6 +1330,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn terminal_query_spawn_overrides_validate_and_ignore_reattach_metadata() {
+        let query = TerminalQuery {
+            command: Some("  sleep 5  ".into()),
+            env: Some(r#"{"CHAN_AGENT":"codex","TOKEN":"a=b"}"#.into()),
+            ..TerminalQuery::default()
+        };
+        let (command, env) = terminal_query_spawn_overrides(&query).unwrap();
+        assert_eq!(command.as_deref(), Some("sleep 5"));
+        assert_eq!(env.get("CHAN_AGENT").map(String::as_str), Some("codex"));
+        assert_eq!(env.get("TOKEN").map(String::as_str), Some("a=b"));
+
+        assert!(terminal_query_spawn_overrides(&TerminalQuery {
+            command: Some("   ".into()),
+            ..TerminalQuery::default()
+        })
+        .unwrap_err()
+        .contains("command is required"));
+        assert!(terminal_query_spawn_overrides(&TerminalQuery {
+            env: Some("not-json".into()),
+            ..TerminalQuery::default()
+        })
+        .unwrap_err()
+        .contains("invalid terminal env"));
+
+        let (command, env) = terminal_query_spawn_overrides(&TerminalQuery {
+            session: Some("existing".into()),
+            command: Some("   ".into()),
+            env: Some("not-json".into()),
+            ..TerminalQuery::default()
+        })
+        .unwrap();
+        assert_eq!(command, None);
+        assert!(env.is_empty());
+    }
+
     // Pins the server -> client `pong` bytes, mirroring ws.rs's
     // `pong_frame_is_the_pinned_wire_shape`: the SPA terminal transport's
     // read-deadline parses this exact object, so the shape must not drift.
@@ -1684,6 +1757,104 @@ mod tests {
         env_state
             .terminal_sessions
             .close(env_handle.id(), CloseReason::Explicit);
+    }
+
+    #[test]
+    fn websocket_spawn_overrides_derive_agent_for_an_unrecognised_launcher() {
+        let query = TerminalQuery {
+            command: Some("sleep 5".into()),
+            env: Some(r#"{"CHAN_AGENT":"codex"}"#.into()),
+            ..TerminalQuery::default()
+        };
+        let (command, env) = terminal_query_spawn_overrides(&query).unwrap();
+        let state = crate::state::test_support::make_test_state(false);
+        let forced = state
+            .terminal_sessions
+            .create(CreateOptions {
+                size: pty_size(None, None),
+                tab_name: Some("forced".into()),
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command,
+                env,
+            })
+            .unwrap();
+        assert_eq!(frame_submit_agent(&forced).as_deref(), Some("codex"));
+        let summary = state
+            .terminal_sessions
+            .session_summaries()
+            .into_iter()
+            .find(|summary| summary.session_id == forced.id())
+            .unwrap();
+        assert_eq!(summary.agent, Some(SubmitAgent::Codex));
+        let submitted = state.terminal_sessions.enqueue_write_matching(
+            Some("forced"),
+            None,
+            "poke",
+            Some(SubmitAgent::Codex),
+        );
+        assert_eq!(submitted.queued, 1);
+        assert_eq!(submitted.position, Some(1));
+        assert!(
+            submitted.diverged.is_empty(),
+            "matching submit must apply its chord"
+        );
+
+        let command_query = TerminalQuery {
+            command: Some("sleep 5 # claude".into()),
+            ..TerminalQuery::default()
+        };
+        let (command, env) = terminal_query_spawn_overrides(&command_query).unwrap();
+        let command_derived = state
+            .terminal_sessions
+            .create(CreateOptions {
+                size: pty_size(None, None),
+                tab_name: Some("command-derived".into()),
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command,
+                env,
+            })
+            .unwrap();
+        assert_eq!(
+            frame_submit_agent(&command_derived).as_deref(),
+            Some("claude")
+        );
+
+        let plain = state
+            .terminal_sessions
+            .create(CreateOptions {
+                size: pty_size(None, None),
+                tab_name: Some("plain".into()),
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: None,
+                env: BTreeMap::new(),
+            })
+            .unwrap();
+        assert_eq!(frame_submit_agent(&plain), None);
+        let summary = state
+            .terminal_sessions
+            .session_summaries()
+            .into_iter()
+            .find(|summary| summary.session_id == plain.id())
+            .unwrap();
+        assert_eq!(summary.agent, None);
+        let refused = state.terminal_sessions.enqueue_write_matching(
+            Some("plain"),
+            None,
+            "poke",
+            Some(SubmitAgent::Codex),
+        );
+        assert_eq!(refused.queued, 1);
+        assert_eq!(refused.diverged.len(), 1, "a shell gets no forced chord");
+        state.terminal_sessions.close_all(CloseReason::Explicit);
     }
 
     #[test]

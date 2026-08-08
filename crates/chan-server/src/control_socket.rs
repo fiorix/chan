@@ -5,6 +5,7 @@
 //! where the command must target one frontend window in the already
 //! running server process.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -21,7 +22,7 @@ use crate::handover_bus::{HandoverBus, HandoverReply};
 use crate::session_presence::{HandoverError, ParticipantState, RenameError, SessionRegistry};
 use crate::state::WorkspaceCell;
 use crate::terminal_sessions::Registry as TerminalRegistry;
-use crate::terminal_sessions::{AttachHandle, CreateOptions};
+use crate::terminal_sessions::{AttachHandle, CreateOptions, RestartOverrides};
 use crate::{WindowKind, WindowRecord};
 
 /// Settable handle to the terminal registry. The registry is built after
@@ -87,6 +88,10 @@ enum WindowCommand {
         tab_name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tab_group: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        spawn_command: Option<String>,
+        #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         destination: Option<TabDestination>,
     },
@@ -476,6 +481,8 @@ mod tenant_gate_tests {
             path: path.map(PathBuf::from),
             tab_name: None,
             tab_group: None,
+            command: None,
+            env: BTreeMap::new(),
             destination: None,
         }
     }
@@ -1099,6 +1106,8 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
             path,
             tab_name,
             tab_group,
+            command,
+            env,
             destination,
         } => {
             if let Err(message) = require_window_id(&window_id) {
@@ -1107,6 +1116,10 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
             if let Err(message) = require_connected_window(session_registry, &window_id) {
                 return ControlResponse::Error { message };
             }
+            let (command, env) = match terminal_spawn_overrides(command, env) {
+                Ok(overrides) => overrides,
+                Err(message) => return ControlResponse::Error { message },
+            };
             // Opening a terminal is window routing, not a workspace operation:
             // the only workspace use is resolving an optional --path cwd. So a
             // standalone terminal tenant CAN open a terminal (no cwd to
@@ -1119,6 +1132,8 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
                     TerminalOpenSpec {
                         tab_name,
                         tab_group,
+                        command,
+                        env,
                         destination,
                     },
                     session_registry,
@@ -1136,6 +1151,8 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
                         TerminalOpenSpec {
                             tab_name,
                             tab_group,
+                            command,
+                            env,
                             destination,
                         },
                         session_registry,
@@ -1246,6 +1263,8 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
         ControlRequest::TermRestart {
             tab_name,
             tab_group,
+            command,
+            env,
         } => {
             let Some(registry) = terminal_registry else {
                 return ControlResponse::Error {
@@ -1256,6 +1275,8 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
                 registry,
                 tab_name.as_deref(),
                 tab_group.as_deref(),
+                command,
+                env,
             ))
         }
         ControlRequest::TermClose {
@@ -3552,6 +3573,8 @@ pub(crate) fn open_graph_link(
 struct TerminalOpenSpec {
     tab_name: Option<String>,
     tab_group: Option<String>,
+    command: Option<String>,
+    env: BTreeMap<String, String>,
     destination: Option<TabDestination>,
 }
 
@@ -3566,6 +3589,8 @@ fn open_term_new(
     let TerminalOpenSpec {
         tab_name,
         tab_group,
+        command,
+        env,
         destination,
     } = spec;
     let cwd = match resolve_optional_rel(workspace, requested)? {
@@ -3583,6 +3608,8 @@ fn open_term_new(
             cwd: cwd.clone(),
             tab_name,
             tab_group,
+            spawn_command: command,
+            env,
             destination,
         },
         events_tx,
@@ -3606,6 +3633,8 @@ fn open_term_new_standalone(
     let TerminalOpenSpec {
         tab_name,
         tab_group,
+        command,
+        env,
         destination,
     } = spec;
     send_window_command_if_live(
@@ -3615,6 +3644,8 @@ fn open_term_new_standalone(
             cwd: None,
             tab_name,
             tab_group,
+            spawn_command: command,
+            env,
             destination,
         },
         events_tx,
@@ -3889,22 +3920,48 @@ fn term_write(
 /// avoids widening that module's surface just for an error string.
 const WRITE_QUEUE_CAP_MSG: usize = 100;
 
+fn terminal_spawn_overrides(
+    command: Option<String>,
+    env: BTreeMap<String, String>,
+) -> Result<(Option<String>, BTreeMap<String, String>), String> {
+    let command = match command {
+        Some(command) => Some(
+            crate::routes::normalize_terminal_command(&command)
+                .ok_or_else(|| "terminal command is required".to_string())?,
+        ),
+        None => None,
+    };
+    crate::routes::validate_terminal_env(&env)?;
+    Ok((command, env))
+}
+
 /// Category 2: restart the matching live PTY sessions, preserving each
-/// session's spawn command + env (so an agent relaunches). At least one
-/// selector is required, mirroring `term_write`. This is the out-of-band
-/// server path the Team Work self-restart needs: the bootstrap script
-/// runs `cs terminal restart` against its own tab, and the server
+/// session's spawn command + env unless this request overrides either. At
+/// least one selector is required, mirroring `term_write`. This is the
+/// out-of-band server path the Team Work self-restart needs: the bootstrap
+/// script runs `cs terminal restart` against its own tab, and the server
 /// respawns that session because a shell cannot restart itself.
 fn term_restart(
     registry: &TerminalRegistry,
     tab_name: Option<&str>,
     tab_group: Option<&str>,
+    command: Option<String>,
+    env: BTreeMap<String, String>,
 ) -> Result<String, String> {
     if tab_name.is_none() && tab_group.is_none() {
         return Err("term restart needs a tab name and/or group selector".into());
     }
+    let (command, env) = terminal_spawn_overrides(command, env)?;
     let restarted = registry
-        .restart_matching(tab_name, tab_group)
+        .restart_matching(
+            tab_name,
+            tab_group,
+            RestartOverrides {
+                command,
+                env: (!env.is_empty()).then_some(env),
+                ..RestartOverrides::default()
+            },
+        )
         .map_err(|e| format!("restart failed: {e}"))?;
     if restarted == 0 {
         return Err("no live terminal session matched".into());
@@ -5018,6 +5075,8 @@ mod tests {
                 path: None,
                 tab_name: None,
                 tab_group: None,
+                command: Some("./run-my-agent.sh".into()),
+                env: [("CHAN_AGENT".into(), "codex".into())].into(),
                 destination: Some(TabDestination {
                     pane_id: Some("pane-2".into()),
                     side: Some(chan_shell::PaneSide::B),
@@ -5038,6 +5097,8 @@ mod tests {
         let frame: Value = serde_json::from_str(&frame).expect("window command json");
         assert_eq!(frame["destination"]["pane_id"], "pane-2");
         assert_eq!(frame["destination"]["side"], "b");
+        assert_eq!(frame["spawn_command"], "./run-my-agent.sh");
+        assert_eq!(frame["env"]["CHAN_AGENT"], "codex");
     }
 
     #[tokio::test]
@@ -5054,6 +5115,8 @@ mod tests {
                 path: Some(std::path::PathBuf::from("notes")),
                 tab_name: None,
                 tab_group: None,
+                command: None,
+                env: BTreeMap::new(),
                 destination: None,
             },
             &ctx,
@@ -5434,6 +5497,8 @@ mod tests {
             TerminalOpenSpec {
                 tab_name: Some("build".into()),
                 tab_group: Some("foobar".into()),
+                command: Some("codex".into()),
+                env: [("MODE".into(), "review".into())].into(),
                 destination: None,
             },
             &session_registry,
@@ -5447,6 +5512,8 @@ mod tests {
         assert_eq!(frame["cwd"], "notes");
         assert_eq!(frame["tab_name"], "build");
         assert_eq!(frame["tab_group"], "foobar");
+        assert_eq!(frame["spawn_command"], "codex");
+        assert_eq!(frame["env"]["MODE"], "review");
     }
 
     #[test]
@@ -6096,15 +6163,110 @@ mod tests {
     #[test]
     fn term_restart_requires_a_selector() {
         let (_root, registry) = empty_registry();
-        let err = term_restart(&registry, None, None).expect_err("no selector");
+        let err =
+            term_restart(&registry, None, None, None, BTreeMap::new()).expect_err("no selector");
         assert!(err.contains("selector"), "got: {err}");
     }
 
     #[test]
     fn term_restart_reports_no_match_on_an_empty_registry() {
         let (_root, registry) = empty_registry();
-        let err = term_restart(&registry, Some("nope"), None).expect_err("no match");
+        let err = term_restart(&registry, Some("nope"), None, None, BTreeMap::new())
+            .expect_err("no match");
         assert!(err.contains("no live terminal session"), "got: {err}");
+    }
+
+    #[test]
+    fn term_restart_overrides_identity_and_no_flags_preserve_it() {
+        let (_root, registry) = empty_registry();
+        let spawn = |name: &str, agent: Option<&str>| {
+            registry
+                .create(CreateOptions {
+                    size: PtySize {
+                        rows: 24,
+                        cols: 80,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    },
+                    tab_name: Some(name.into()),
+                    tab_group: None,
+                    window_id: None,
+                    mcp_env: false,
+                    cwd: None,
+                    command: Some("sleep 5".into()),
+                    env: agent
+                        .map(|agent| [("CHAN_AGENT".into(), agent.into())].into())
+                        .unwrap_or_default(),
+                })
+                .expect("spawn terminal")
+        };
+        let preserved = spawn("preserved", Some("codex"));
+        let repaired = spawn("repaired", None);
+        let command_repaired = spawn("command-repaired", None);
+
+        term_restart(&registry, Some("preserved"), None, None, BTreeMap::new())
+            .expect("restart with original command and env");
+        term_restart(
+            &registry,
+            Some("repaired"),
+            None,
+            None,
+            [("CHAN_AGENT".into(), "codex".into())].into(),
+        )
+        .expect("restart with env override");
+        term_restart(
+            &registry,
+            Some("command-repaired"),
+            None,
+            Some("sleep 5 # claude".into()),
+            BTreeMap::new(),
+        )
+        .expect("restart with command override");
+
+        let list: Value = serde_json::from_str(&term_list(&registry, &[]).unwrap()).unwrap();
+        let entries = list["groups"]["default"].as_array().unwrap();
+        for name in ["preserved", "repaired"] {
+            let entry = entries.iter().find(|entry| entry["name"] == name).unwrap();
+            assert_eq!(entry["agent"], "codex", "entry: {entry}");
+            assert!(matches!(
+                term_write_response(
+                    &registry,
+                    Some(name),
+                    None,
+                    "poke",
+                    Some(SubmitAgent::Codex),
+                ),
+                ControlResponse::Ok { .. }
+            ));
+        }
+        let command_entry = entries
+            .iter()
+            .find(|entry| entry["name"] == "command-repaired")
+            .unwrap();
+        assert_eq!(command_entry["agent"], "claude");
+        assert!(matches!(
+            term_write_response(
+                &registry,
+                Some("command-repaired"),
+                None,
+                "poke",
+                Some(SubmitAgent::Claude),
+            ),
+            ControlResponse::Ok { .. }
+        ));
+
+        registry.close(
+            preserved.id(),
+            crate::terminal_sessions::CloseReason::Explicit,
+        );
+        registry.close(
+            repaired.id(),
+            crate::terminal_sessions::CloseReason::Explicit,
+        );
+        registry.close(
+            command_repaired.id(),
+            crate::terminal_sessions::CloseReason::Explicit,
+        );
     }
 
     // A valid two-member team config TOML for the handle_team tests.

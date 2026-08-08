@@ -9,6 +9,7 @@
 //! drift breaks commands at runtime with a green build. Wire-smoke every
 //! `cs` command after touching this file, not just `cargo build`.
 
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -812,6 +813,16 @@ impl PaneAction {
     }
 }
 
+fn parse_terminal_env(value: &str) -> std::result::Result<(String, String), String> {
+    let Some((key, value)) = value.split_once('=') else {
+        return Err("expected KEY=VALUE".into());
+    };
+    if key.trim().is_empty() {
+        return Err("environment key must not be empty".into());
+    }
+    Ok((key.to_string(), value.to_string()))
+}
+
 #[derive(Subcommand, Debug)]
 pub enum TerminalAction {
     /// Open a new terminal tab in the calling window
@@ -829,6 +840,12 @@ pub enum TerminalAction {
         /// Broadcast group ($CHAN_TAB_GROUP). Defaults to "default".
         #[arg(long = "tab-group")]
         tab_group: Option<String>,
+        /// Command to run instead of the default shell.
+        #[arg(long, value_name = "COMMAND")]
+        command: Option<String>,
+        /// Spawn environment entry. Repeat for multiple entries.
+        #[arg(long, value_name = "KEY=VALUE", value_parser = parse_terminal_env)]
+        env: Vec<(String, String)>,
         #[command(flatten)]
         destination: TabDestinationArgs,
     },
@@ -878,7 +895,7 @@ pub enum TerminalAction {
         #[arg(long)]
         pretty: bool,
     },
-    /// Restart live terminal tabs, preserving command and environment
+    /// Restart live terminal tabs, optionally overriding command and environment
     #[command(long_about = help::CS_TERMINAL_RESTART)]
     #[command(after_long_help = help::CS_TERMINAL_RESTART_AFTER)]
     Restart {
@@ -888,6 +905,12 @@ pub enum TerminalAction {
         /// Restart every session in this group.
         #[arg(long = "tab-group")]
         tab_group: Option<String>,
+        /// Run this command after restart instead of the original command.
+        #[arg(long, value_name = "COMMAND")]
+        command: Option<String>,
+        /// Override a spawn environment entry. Repeat for multiple entries.
+        #[arg(long, value_name = "KEY=VALUE", value_parser = parse_terminal_env)]
+        env: Vec<(String, String)>,
     },
     /// Close live terminal tabs, freeing their tab names
     #[command(long_about = help::CS_TERMINAL_CLOSE)]
@@ -2019,6 +2042,8 @@ async fn cmd_shell_terminal(action: TerminalAction) -> Result<()> {
             path,
             tab_name,
             tab_group,
+            command,
+            env: spawn_env,
             destination,
         } => {
             let env = destination.target_env()?;
@@ -2030,6 +2055,8 @@ async fn cmd_shell_terminal(action: TerminalAction) -> Result<()> {
                     path: abs,
                     tab_name,
                     tab_group,
+                    command,
+                    env: spawn_env.into_iter().collect::<BTreeMap<_, _>>(),
                     destination: destination.destination(),
                 },
             )
@@ -2106,6 +2133,8 @@ async fn cmd_shell_terminal(action: TerminalAction) -> Result<()> {
         TerminalAction::Restart {
             tab_name,
             tab_group,
+            command,
+            env,
         } => {
             if tab_name.is_none() && tab_group.is_none() {
                 anyhow::bail!("cs terminal restart needs --tab-name and/or --tab-group");
@@ -2116,6 +2145,8 @@ async fn cmd_shell_terminal(action: TerminalAction) -> Result<()> {
                 ControlRequest::TermRestart {
                     tab_name,
                     tab_group,
+                    command,
+                    env: env.into_iter().collect(),
                 },
             )
             .await?;
@@ -3241,6 +3272,78 @@ mod tests {
             "cs", "terminal", "team", "load", "alpha", "--script", "--pane", "pane-4",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn terminal_new_and_restart_parse_spawn_overrides() {
+        let expected_env = std::collections::BTreeMap::from([
+            ("CHAN_AGENT".to_string(), "codex".to_string()),
+            ("TOKEN".to_string(), "a=b".to_string()),
+        ]);
+
+        let cli = CsCli::parse_from([
+            "cs",
+            "terminal",
+            "new",
+            "--command",
+            "./run-my-agent.sh",
+            "--env",
+            "CHAN_AGENT=codex",
+            "--env",
+            "TOKEN=a=b",
+        ]);
+        match cli.action {
+            ShellAction::Terminal {
+                action: TerminalAction::New { command, env, .. },
+            } => {
+                assert_eq!(command.as_deref(), Some("./run-my-agent.sh"));
+                assert_eq!(
+                    env.into_iter()
+                        .collect::<std::collections::BTreeMap<_, _>>(),
+                    expected_env
+                );
+            }
+            other => panic!("unexpected terminal new parse: {other:?}"),
+        }
+
+        let cli = CsCli::parse_from([
+            "cs",
+            "terminal",
+            "restart",
+            "--tab-name",
+            "@@Lead",
+            "--command",
+            "codex",
+            "--env",
+            "CHAN_AGENT=codex",
+        ]);
+        match cli.action {
+            ShellAction::Terminal {
+                action:
+                    TerminalAction::Restart {
+                        command,
+                        env,
+                        tab_name,
+                        ..
+                    },
+            } => {
+                assert_eq!(tab_name.as_deref(), Some("@@Lead"));
+                assert_eq!(command.as_deref(), Some("codex"));
+                assert_eq!(
+                    env.into_iter()
+                        .collect::<std::collections::BTreeMap<_, _>>()
+                        .get("CHAN_AGENT")
+                        .map(String::as_str),
+                    Some("codex")
+                );
+            }
+            other => panic!("unexpected terminal restart parse: {other:?}"),
+        }
+
+        assert!(
+            CsCli::try_parse_from(["cs", "terminal", "new", "--env", "MISSING_EQUALS",]).is_err()
+        );
+        assert!(CsCli::try_parse_from(["cs", "terminal", "restart", "--env", "=value"]).is_err());
     }
 
     #[test]
