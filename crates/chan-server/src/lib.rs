@@ -165,6 +165,19 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch};
 use tower_http::trace::TraceLayer;
 
+/// The default make-span records the raw URI, and an extension
+/// capability path carries a bearer credential in it. Both tenant
+/// routers log through the redacting formatter; every other URI is
+/// recorded unchanged.
+fn redacted_request_span(request: &axum::http::Request<axum::body::Body>) -> tracing::Span {
+    tracing::debug_span!(
+        "request",
+        method = %request.method(),
+        uri = %crate::routes::loggable_uri(request.uri()),
+        version = ?request.version(),
+    )
+}
+
 // `ServeConfig` / `ServeHandle` / `sanitize_prefix` live in chan-library (the
 // host lifecycle + tenant builder take them). Re-exported so the route layer,
 // the devserver, and the `chan` binary keep naming them via `crate::` /
@@ -1192,7 +1205,7 @@ fn terminal_router(state: Arc<AppState>) -> Router {
     Router::new()
         .merge(api)
         .fallback(serve_static)
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(redacted_request_span))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -1861,7 +1874,7 @@ fn router_with_extensions(
         .fallback(serve_static)
         .layer(axum::Extension(extension_tenant))
         .layer(axum::Extension(extension_catalog))
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(redacted_request_span))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,

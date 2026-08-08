@@ -515,6 +515,43 @@ fn targets_loopback(url: &url::Url) -> bool {
     }
 }
 
+/// The capability segment is a bearer credential in the path, and
+/// trace spans record request URIs. The tenant routers' make-span logs
+/// through this instead: wherever an extension proxy path carries a
+/// 64-hex capability segment — tenant-prefixed through the tunnel or
+/// bare on loopback — that segment is replaced with a fixed marker;
+/// every other URI passes unchanged.
+pub(crate) fn loggable_uri(uri: &axum::http::Uri) -> String {
+    let path = uri.path();
+    let Some(prefix_at) = path.find(EXTENSION_PROXY_PREFIX) else {
+        return uri.to_string();
+    };
+    let after_prefix = prefix_at + EXTENSION_PROXY_PREFIX.len();
+    let mut segments = path[after_prefix..].splitn(4, '/');
+    let (Some(""), Some(id), Some(capability)) =
+        (segments.next(), segments.next(), segments.next())
+    else {
+        return uri.to_string();
+    };
+    if capability.len() != 64
+        || !capability
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return uri.to_string();
+    }
+    let capability_start = after_prefix + 1 + id.len() + 1;
+    let mut redacted = String::with_capacity(path.len());
+    redacted.push_str(&path[..capability_start]);
+    redacted.push_str("[capability]");
+    redacted.push_str(&path[capability_start + 64..]);
+    if let Some(query) = uri.query() {
+        redacted.push('?');
+        redacted.push_str(query);
+    }
+    redacted
+}
+
 fn apply_extension_response_policy(headers: &mut HeaderMap) {
     strip_hop_by_hop(headers);
     headers.remove(header::SET_COOKIE);
@@ -1002,6 +1039,32 @@ mod tests {
         // Shaped like the gateway session gate's anti-enumeration 404.
         let body = to_bytes(response.into_body(), 1024).await.expect("body");
         assert_eq!(body.as_ref(), br#"{"error":"not found"}"#);
+    }
+
+    #[test]
+    fn loggable_uri_redacts_the_capability_segment_everywhere_it_appears() {
+        let u = |s: &str| s.parse::<axum::http::Uri>().unwrap();
+
+        // Bare loopback form and the tunnel's tenant-prefixed form.
+        assert_eq!(
+            loggable_uri(&u(&format!(
+                "/_chan/extensions/echo/{CAPABILITY}/app.js?v=1"
+            ))),
+            "/_chan/extensions/echo/[capability]/app.js?v=1"
+        );
+        assert_eq!(
+            loggable_uri(&u(&format!("/notes/_chan/extensions/echo/{CAPABILITY}/"))),
+            "/notes/_chan/extensions/echo/[capability]/"
+        );
+
+        // Everything else passes unchanged.
+        for raw in [
+            "/api/extensions",
+            "/notes/api/graph?x=1",
+            "/_chan/extensions/echo/not-a-capability/app.js",
+        ] {
+            assert_eq!(loggable_uri(&u(raw)), raw);
+        }
     }
 
     #[tokio::test]

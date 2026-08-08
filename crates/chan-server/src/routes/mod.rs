@@ -71,6 +71,7 @@ pub use drafts::{
     api_create_diagram, api_create_draft, api_discard_draft, api_inspect_draft, api_promote_draft,
 };
 pub use excluded_dirs::{api_excluded_dirs_get, api_excluded_dirs_put};
+pub(crate) use extensions::loggable_uri;
 pub use extensions::{
     api_extensions, extension_response_policy, proxy_extension, proxy_extension_root,
 };
