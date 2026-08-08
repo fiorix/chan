@@ -45,6 +45,14 @@ use window_watcher_wiring::DevserverWatcherStop;
 
 const CHAN_BUSY_CHANGED: &str = "chan-busy";
 const SYSTEM_NOTICE: &str = "system-notice";
+
+/// The commit this binary was built from, stamped by build.rs ("unknown"
+/// outside a git checkout). The version string alone cannot identify a
+/// build: the version pins bump only at release cut, so a pre-release
+/// branch build and the previous release's bundle carry the same version.
+/// Shown in About, logged at startup, and advertised by
+/// [`native_vocabulary`], the surfaces an acceptance run looks at.
+const CHAN_DESKTOP_BUILD_ID: &str = env!("CHAN_DESKTOP_BUILD_ID");
 #[cfg(target_os = "macos")]
 const DESKTOP_UPDATE_READY_EVENT: &str = "desktop-update-ready";
 
@@ -4625,6 +4633,36 @@ fn focus_library_window(
     }
 }
 
+/// What [`native_vocabulary`] answers: the app command vocabulary this build
+/// grants to gateway-served `lib-*` windows, with the build identity. Field
+/// names are the page-side contract.
+#[derive(serde::Serialize)]
+struct NativeVocabulary {
+    version: String,
+    build: &'static str,
+    commands: &'static [&'static str],
+}
+
+/// Advertise the native command vocabulary and build identity.
+///
+/// A gateway-served page is delivered by the remote devserver while the ACL
+/// gating its invokes belongs to the locally installed app, so the page can
+/// name a command this build has never heard of. This query lets the page
+/// learn what is available up front and report absence as a version
+/// statement, instead of discovering it through a refusal that reads as a
+/// capability defect. The answer is the gateway grant's vocabulary
+/// ([`runtime_capability::GATEWAY_WINDOW_COMMANDS`]), not recomputed per
+/// caller; a locally served caller's grant differs at the edges but cannot
+/// skew from its host, which embeds the bundle it serves.
+#[tauri::command]
+fn native_vocabulary(app: tauri::AppHandle) -> NativeVocabulary {
+    NativeVocabulary {
+        version: app.package_info().version.to_string(),
+        build: CHAN_DESKTOP_BUILD_ID,
+        commands: runtime_capability::GATEWAY_WINDOW_COMMANDS,
+    }
+}
+
 /// Browser-style zoom controls. Step size is
 /// 10 % per Cmd++/Cmd+- press; the clamp range matches Tauri's own
 /// `zoom_hotkeys_enabled` polyfill semantics (0.25-5.0).
@@ -5059,6 +5097,14 @@ fn main() {
     // off Linux/AppImage and once already applied.
     linux_gui_stack::prefer_system_gui_stack();
     init_tracing();
+    // The version alone cannot distinguish a branch build from the previous
+    // release; the build id can, and this line is where a terminal launch
+    // shows it.
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        build = CHAN_DESKTOP_BUILD_ID,
+        "chan-desktop starting"
+    );
     // Best-effort on boot: own `~/.local/bin/{chan,cs}` so a desktop install
     // also provides the `chan` + `cs` CLI without a separate download. Real
     // symlinks / AppImage wrappers / deb-rpm symlinks per package kind,
@@ -5591,6 +5637,9 @@ fn main() {
             // only its own; the ACL decides which windows may invoke at all.
             create_library_window,
             focus_library_window,
+            // The vocabulary + build-identity advertisement a remotely-served
+            // page queries before treating a refusal as a version statement.
+            native_vocabulary,
             restart_desktop_after_update,
             download::download_file_native,
             download::begin_generated_download,
@@ -6627,6 +6676,7 @@ fn open_about_window(app: &tauri::AppHandle) -> Result<(), String> {
         return Ok(());
     }
     let version = app.package_info().version.to_string();
+    let build = CHAN_DESKTOP_BUILD_ID;
     // Inject the launcher's light/dark choice so the About window follows it
     // instead of only the OS media query. `null` follows the OS.
     let theme = app
@@ -6640,7 +6690,7 @@ fn open_about_window(app: &tauri::AppHandle) -> Result<(), String> {
     let win = WebviewWindowBuilder::new(
         app,
         "about",
-        WebviewUrl::App(format!("about.html?v={version}").into()),
+        WebviewUrl::App(format!("about.html?v={version}&b={build}").into()),
     )
     .title("About Chan Desktop")
     // Sized to fit the content with equal top/bottom margin: app head,
@@ -7205,6 +7255,29 @@ fn spawn_terminal_window(app: &tauri::AppHandle) {
 mod tests {
     use super::*;
 
+    /// The bounded region of a source-slice pin: from the end of `start` to
+    /// the beginning of `end`, with both bounds asserted to occur exactly
+    /// once in `src`, so a pin can neither bind a sibling's needle nor
+    /// survive a reordering by silently widening. Bound needles must keep
+    /// their text out of this module's string literals: a line-start
+    /// definition form (leading `\n`) can never match a literal, because a
+    /// literal spells the newline as a two-character escape, and a mid-line
+    /// needle gets the same property from `concat!`-split parts.
+    fn source_region<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        for bound in [start, end] {
+            assert_eq!(
+                src.matches(bound).count(),
+                1,
+                "pin bound {bound:?} must occur exactly once in the sliced source"
+            );
+        }
+        let (_, after) = src.split_once(start).expect("the start bound is present");
+        let stop = after
+            .find(end)
+            .unwrap_or_else(|| panic!("pin end bound {end:?} must follow start bound {start:?}"));
+        &after[..stop]
+    }
+
     /// The ceiling is a construction property, so it is pinned at the
     /// construction seam. Counting live threads would prove nothing: tokio
     /// creates blocking threads lazily, so a run that never needs 32 looks
@@ -7219,10 +7292,14 @@ mod tests {
         // Only the production half: this test names the same call it checks
         // for, so scanning the whole file would match itself and keep passing
         // after the real call was deleted.
-        let production = include_str!("main.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("binary source has a production half");
+        let src = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        assert_eq!(
+            src.matches(boundary).count(),
+            1,
+            "one test-module boundary separates the production half"
+        );
+        let production = &src[..src.find(boundary).expect("the boundary is present")];
         assert!(
             production.contains("fn run_as_chan_if_requested"),
             "the production half must be what was scanned"
@@ -7238,10 +7315,11 @@ mod tests {
 
         // The one that has it is the `chan` CLI runtime, and the excluded
         // builders keep their unbounded defaults.
-        let chan_runtime = production
-            .split("fn run_as_chan_if_requested")
-            .nth(1)
-            .expect("the chan CLI entry point");
+        let chan_runtime = source_region(
+            production,
+            "\nfn run_as_chan_if_requested(",
+            "\nasync fn run_mcp_proxy(",
+        );
         assert!(
             chan_runtime.contains(
                 ".max_blocking_threads(chan_server::bulk_transfer::MAX_BLOCKING_THREADS)"
@@ -7249,18 +7327,21 @@ mod tests {
             "the desktop chan runtime must declare its blocking-thread ceiling"
         );
 
-        for excluded in [
-            "fn run_hidden_mcp_proxy_if_requested",
-            "fn run_as_cs_if_requested",
+        for (excluded, next_fn) in [
+            (
+                "\nfn run_hidden_mcp_proxy_if_requested(",
+                "\nfn run_as_cs_if_requested(",
+            ),
+            (
+                "\nfn run_as_cs_if_requested(",
+                "\nfn run_as_chan_if_requested(",
+            ),
         ] {
-            let body = production
-                .split(excluded)
-                .nth(1)
-                .and_then(|rest| rest.split("\nfn ").next())
-                .unwrap_or_else(|| panic!("{excluded} must exist"));
+            let body = source_region(production, excluded, next_fn);
             assert!(
                 !body.contains("max_blocking_threads"),
-                "{excluded} must keep tokio's default pool"
+                "{} must keep tokio's default pool",
+                excluded.trim_start()
             );
         }
     }
@@ -7544,13 +7625,11 @@ mod tests {
     #[test]
     fn desktop_setup_reaps_old_generated_download_temps() {
         const MAIN_RS: &str = include_str!("main.rs");
-        let setup = MAIN_RS
-            .split(".setup(move |app| {")
-            .nth(1)
-            .expect("Tauri setup closure exists")
-            .split(".invoke_handler")
-            .next()
-            .expect("setup ends before the invoke handler");
+        let setup = source_region(
+            MAIN_RS,
+            concat!(".setup(move |app|", " {"),
+            concat!(".invoke_", "handler"),
+        );
         assert!(setup.contains("tauri::async_runtime::spawn_blocking"));
         assert!(setup.contains("download::reap_orphaned_download_temps("));
         assert!(setup.contains("std::time::Duration::from_secs(60 * 60)"));
@@ -7559,46 +7638,38 @@ mod tests {
     #[test]
     fn control_script_clean_exit_reaps_and_failed_exit_keeps_terminal() {
         const MAIN_RS: &str = include_str!("main.rs");
-        let request_close = MAIN_RS
-            .split("fn request_close_window")
-            .nth(1)
-            .expect("request_close_window exists")
-            .split("let others_remain")
-            .next()
-            .expect("control close branch precedes normal close handling");
+        let request_close = source_region(
+            MAIN_RS,
+            "\nasync fn request_close_window(",
+            concat!("let others", "_remain"),
+        );
         assert!(request_close.contains("close_devserver_control_terminal"));
         assert!(!request_close.contains("devserver-control-closed"));
 
         // Only a status-0 exit counts as clean, and the post-token liveness
         // probe lets a clean (daemonizing) script return through while still
         // failing everything else.
-        let clean = MAIN_RS
-            .split("fn control_script_exit_is_clean")
-            .nth(1)
-            .expect("control_script_exit_is_clean exists")
-            .split("fn ensure_control_run_live")
-            .next()
-            .expect("clean-exit helper precedes ensure_control_run_live");
+        let clean = source_region(
+            MAIN_RS,
+            "\nfn control_script_exit_is_clean(",
+            "\nfn ensure_control_run_live(",
+        );
         assert!(clean.contains("TerminalExit::Code { code: 0 }"));
-        let ensure = MAIN_RS
-            .split("fn ensure_control_run_live")
-            .nth(1)
-            .expect("ensure_control_run_live exists")
-            .split("/// Watch a scripted devserver")
-            .next()
-            .expect("ensure section ends before the exit watcher");
+        let ensure = source_region(
+            MAIN_RS,
+            "\nfn ensure_control_run_live(",
+            "\n/// Watch a scripted devserver",
+        );
         assert!(ensure.contains("control_script_exit_is_clean"));
 
         // The token scrape reads the scrollback BEFORE the exit probe: a
         // daemonizing script prints the token and returns inside one poll
         // window, and the printed token must win over the exit behind it.
-        let scrape = MAIN_RS
-            .split("async fn scrape_control_terminal_token")
-            .nth(1)
-            .expect("scrape_control_terminal_token exists")
-            .split("fn control_run_is_current")
-            .next()
-            .expect("scrape section ends before control_run_is_current");
+        let scrape = source_region(
+            MAIN_RS,
+            "\nasync fn scrape_control_terminal_token(",
+            "\nfn control_run_is_current(",
+        );
         let token_pos = scrape
             .find("scrape_token")
             .expect("scrape reads the scrollback");
@@ -7619,13 +7690,11 @@ mod tests {
         // until the connect resolves, and that deferral must come BEFORE the
         // is_connected gate: reaping mid-connect fails the attempt's own
         // liveness checks.
-        let exit_watcher = MAIN_RS
-            .split("fn spawn_control_terminal_exit_watcher")
-            .nth(1)
-            .expect("exit watcher exists")
-            .split("/// Connect to a configured devserver")
-            .next()
-            .expect("watcher section ends before connect implementation");
+        let exit_watcher = source_region(
+            MAIN_RS,
+            "\nfn spawn_control_terminal_exit_watcher(",
+            "\n/// Connect to a configured devserver",
+        );
         assert!(exit_watcher.contains("control_script_exit_is_clean"));
         assert!(!exit_watcher.contains("control_terminal_dead"));
         assert!(!exit_watcher.contains("devserver-control-closed"));
@@ -7674,13 +7743,11 @@ mod tests {
         // the control terminal and does no window closure of its own (the exit
         // watcher composes that ahead of it), retires the watcher KEEPING the
         // workspace windows, and blocks reconnect via control_terminal_dead.
-        let mark_exited = MAIN_RS
-            .split("fn mark_devserver_control_exited")
-            .nth(1)
-            .expect("mark_devserver_control_exited exists")
-            .split("fn close_devserver_control_terminal")
-            .next()
-            .expect("mark_exited precedes close_devserver_control_terminal");
+        let mark_exited = source_region(
+            MAIN_RS,
+            "\nfn mark_devserver_control_exited(",
+            "\nasync fn close_devserver_control_terminal(",
+        );
         assert!(mark_exited.contains("control_terminal_dead"));
         assert!(mark_exited.contains("RetireKeepWindows"));
         assert!(!mark_exited.contains("reap_devserver_control_terminal"));
@@ -7696,24 +7763,20 @@ mod tests {
         // The connect wait aborts on a FAILING control-script death instead of
         // pinning the launcher's Connect spinner for the full come-up budget
         // (the liveness probe lets a clean return keep dialing).
-        let wait = MAIN_RS
-            .split("async fn wait_for_devserver(")
-            .nth(1)
-            .expect("wait_for_devserver exists")
-            .split("enum ConnectDevserverError")
-            .next()
-            .expect("wait section ends before the error enum");
+        let wait = source_region(
+            MAIN_RS,
+            "\nasync fn wait_for_devserver(",
+            "\nenum ConnectDevserverError",
+        );
         assert!(wait.contains("if let Some(e) = abort()"));
 
         // A dead control terminal blocks a plain connect; closing it clears
         // the block.
-        let connect = MAIN_RS
-            .split("async fn connect_devserver_impl(")
-            .nth(1)
-            .expect("connect_devserver_impl exists")
-            .split("async fn connect_devserver_impl_inner")
-            .next()
-            .expect("connect_devserver_impl precedes its inner");
+        let connect = source_region(
+            MAIN_RS,
+            "\nasync fn connect_devserver_impl(",
+            "\nasync fn connect_devserver_impl_inner(",
+        );
         assert!(connect.contains("control_terminal_dead"));
         // The block is only honored while its terminal exists; a stranded flag
         // (window gone) self-heals at the connect chokepoint instead of walling
@@ -7725,46 +7788,38 @@ mod tests {
         assert!(connect.contains("control_window_live"));
         // A full teardown clears the reconnect block: the block must never
         // outlive the control terminal it tells the user to close.
-        let teardown = MAIN_RS
-            .split("fn teardown_devserver_connection")
-            .nth(1)
-            .expect("teardown_devserver_connection exists")
-            .split("fn mark_devserver_control_exited")
-            .next()
-            .expect("teardown precedes mark_devserver_control_exited");
+        let teardown = source_region(
+            MAIN_RS,
+            "\nasync fn teardown_devserver_connection(",
+            "\nfn mark_devserver_control_exited(",
+        );
         assert!(teardown.contains("control_terminal_dead"));
-        let close = MAIN_RS
-            .split("fn close_devserver_control_terminal")
-            .nth(1)
-            .expect("close_devserver_control_terminal exists")
-            .split("fn persist_window_hidden")
-            .next()
-            .expect("close precedes persist_window_hidden");
+        let close = source_region(
+            MAIN_RS,
+            "\nasync fn close_devserver_control_terminal(",
+            "\nfn persist_window_hidden(",
+        );
         assert!(close.contains("control_terminal_dead"));
 
         // Abandon is kill-then-disconnect: one unconditional teardown, whose
         // control-terminal reap kills a still-running connect script before
         // the connection state and windows drop.
-        let abandon = MAIN_RS
-            .split("fn abandon_devserver_for_window")
-            .nth(1)
-            .expect("abandon_devserver_for_window exists")
-            .split("/// Reconnect the devserver backing")
-            .next()
-            .expect("abandon precedes reconnect_devserver_for_window");
+        let abandon = source_region(
+            MAIN_RS,
+            "\nasync fn abandon_devserver_for_window(",
+            "\n/// Reconnect the devserver backing",
+        );
         assert!(abandon.contains("teardown_devserver_connection"));
 
         // Reconnect is kill-then-disconnect-then-connect: an unconditional
         // teardown (killing a running script and clearing connection state so
         // the dial is not no-opped by the is_connected guard) BEFORE the
         // connect, gated only on no connect already being in flight.
-        let reconnect = MAIN_RS
-            .split("async fn reconnect_devserver_for_window")
-            .nth(1)
-            .expect("reconnect_devserver_for_window exists")
-            .split("fn ")
-            .next()
-            .expect("reconnect body");
+        let reconnect = source_region(
+            MAIN_RS,
+            "\nasync fn reconnect_devserver_for_window(",
+            "\nfn library_id_for_window_label(",
+        );
         assert!(reconnect.contains("devserver_connecting"));
         assert!(!reconnect.contains("close_devserver_control_terminal"));
         let teardown_pos = reconnect
@@ -7782,22 +7837,23 @@ mod tests {
         // stamps a pending wait whose timeout expires only its own attempt
         // (a re-click's fresh wait survives an old timer).
         const GATEWAY_RS: &str = include_str!("gateway.rs");
-        let leg = GATEWAY_RS
-            .split("fn signin_leg")
-            .nth(1)
-            .expect("signin_leg exists");
+        let leg = source_region(
+            GATEWAY_RS,
+            "\nfn signin_leg",
+            "\n/// Resume after a sign-in callback",
+        );
         assert!(leg.contains("GATEWAY_SIGNIN_TIMEOUT"));
         assert!(leg.contains("rt.signin_stamp == stamp"));
         // A rostered row's 401 runs the gateway cascade (which clears the
-        // dead PAT) instead of opening a per-row sign-in.
+        // dead PAT) instead of opening a per-row sign-in. The start bound is
+        // parenless: the definition is generic, so its open paren does not
+        // follow the name directly.
         const MAIN_RS: &str = include_str!("main.rs");
-        let connect = MAIN_RS
-            .split("async fn rostered_conn")
-            .nth(1)
-            .expect("rostered_conn exists")
-            .split("async fn connect_devserver_impl_inner")
-            .next()
-            .expect("rostered head precedes the raw inner");
+        let connect = source_region(
+            MAIN_RS,
+            "\nasync fn rostered_conn",
+            "\nasync fn connect_devserver_impl_inner(",
+        );
         assert!(connect.contains("GatewayEntryError::Unauthorized"));
         assert!(connect.contains("cascade_disconnect"));
     }
@@ -7805,13 +7861,11 @@ mod tests {
     #[test]
     fn workspace_poll_emits_control_attention_while_still_connected() {
         const MAIN_RS: &str = include_str!("main.rs");
-        let poll = MAIN_RS
-            .split("fn spawn_devserver_workspace_poll")
-            .nth(1)
-            .expect("workspace poll exists")
-            .split("/// Merged workspace view")
-            .next()
-            .expect("poll section ends before merged workspace view");
+        let poll = source_region(
+            MAIN_RS,
+            "\nfn spawn_devserver_workspace_poll(",
+            "\n/// Merged workspace view",
+        );
         assert!(poll.contains("DEVSERVER_CONTROL_ATTENTION_EVENT"));
         assert!(poll.contains("DEVSERVER_CONTROL_RESTORED_EVENT"));
         assert!(poll.contains("state.devservers.is_connected(&id)"));
@@ -7861,23 +7915,19 @@ mod tests {
     #[test]
     fn token_rotation_retires_old_watcher_without_closing_windows() {
         const MAIN_RS: &str = include_str!("main.rs");
-        let reconnect = MAIN_RS
-            .split("async fn reconnect_devserver")
-            .nth(1)
-            .expect("reconnect_devserver exists")
-            .split("/// Forget (unmount)")
-            .next()
-            .expect("reconnect section ends before forget implementation");
+        let reconnect = source_region(
+            MAIN_RS,
+            "\nasync fn reconnect_devserver(",
+            "\n/// Forget (unmount)",
+        );
         assert!(reconnect.contains("DevserverWatcherStop::RetireKeepWindows"));
         assert!(!reconnect.contains("DevserverWatcherStop::CloseWindows"));
 
-        let disconnect = MAIN_RS
-            .split("fn remove_devserver_windows")
-            .nth(1)
-            .expect("remove_devserver_windows exists")
-            .split("/// Fully tear down")
-            .next()
-            .expect("disconnect section ends before full teardown");
+        let disconnect = source_region(
+            MAIN_RS,
+            "\nfn remove_devserver_windows(",
+            "\n/// Fully tear down",
+        );
         assert!(disconnect.contains("DevserverWatcherStop::CloseWindows"));
     }
 
@@ -8149,22 +8199,18 @@ mod tests {
         // devservers, so any conn resolution that walks it silently skips
         // them; the close path must resolve through the feed.
         const MAIN_RS: &str = include_str!("main.rs");
-        let close = MAIN_RS
-            .split("fn request_close_window")
-            .nth(1)
-            .expect("request_close_window exists")
-            .split("fn hide_window_from_close_confirm")
-            .next()
-            .expect("close handler precedes the hide callback");
+        let close = source_region(
+            MAIN_RS,
+            "\nasync fn request_close_window(",
+            "\nfn hide_window_from_close_confirm(",
+        );
         assert!(close.contains("record_for_native_label"));
         assert!(!close.contains("cfg.devservers"));
-        let by_id = MAIN_RS
-            .split("async fn discard_devserver_window_by_id(")
-            .nth(1)
-            .expect("discard_devserver_window_by_id exists")
-            .split("const LAUNCHER_WINDOW_TITLE")
-            .next()
-            .expect("by-id discard precedes the launcher constants");
+        let by_id = source_region(
+            MAIN_RS,
+            "\nasync fn discard_devserver_window_by_id(",
+            "\nconst LAUNCHER_WINDOW_TITLE",
+        );
         assert!(by_id.contains("record_for_window_id"));
         assert!(!by_id.contains("cfg.devservers"));
     }
@@ -8172,13 +8218,11 @@ mod tests {
     #[test]
     fn devserver_window_close_records_pending_delete_before_destroy() {
         const MAIN_RS: &str = include_str!("main.rs");
-        let close = MAIN_RS
-            .split("fn request_close_window")
-            .nth(1)
-            .expect("request_close_window exists")
-            .split("fn hide_window_from_close_confirm")
-            .next()
-            .expect("close handler precedes the hide callback");
+        let close = source_region(
+            MAIN_RS,
+            "\nasync fn request_close_window(",
+            "\nfn hide_window_from_close_confirm(",
+        );
         let lib_branch = close
             .split("if closing.starts_with(\"lib-\")")
             .nth(1)
@@ -8200,13 +8244,11 @@ mod tests {
         assert!(attempt < destroy);
         assert!(!lib_branch.contains("view.unbury"));
 
-        let runner = MAIN_RS
-            .split("fn spawn_pending_window_delete_attempt")
-            .nth(1)
-            .expect("pending delete runner exists")
-            .split("async fn discard_devserver_window_by_id")
-            .next()
-            .expect("runner precedes the by-id discard");
+        let runner = source_region(
+            MAIN_RS,
+            "\npub(crate) fn spawn_pending_window_delete_attempt(",
+            "\nasync fn discard_devserver_window_by_id(",
+        );
         assert!(runner.contains("PendingDeleteFinish::Exhausted"));
         assert!(runner.contains("It remains closed for this desktop session."));
     }
@@ -8482,22 +8524,19 @@ mod tests {
             !MAIN_RS.contains(concat!("async fn register_devserver", "_from_handoff")),
             "the handoff registration must not become async"
         );
-        let reg = MAIN_RS
-            .split("fn register_devserver_from_handoff(")
-            .nth(1)
-            .expect("register_devserver_from_handoff exists")
-            .split("/// Open a workspace in a native window")
-            .next()
-            .expect("registration precedes the workspace handoff");
-        assert!(reg.contains("tauri::async_runtime::spawn"));
+        let reg = source_region(
+            MAIN_RS,
+            "\nfn register_devserver_from_handoff(",
+            "\n/// Open a workspace in a native window",
+        );
         assert!(reg.contains("discover_gateway"));
         assert!(reg.contains("convert_devserver_row_to_gateway"));
         // Nothing awaits before the spawn: the probe and the conversion
         // live entirely inside the detached task.
-        let before_spawn = reg
-            .split("tauri::async_runtime::spawn")
-            .next()
-            .expect("region before the spawn");
+        let spawn = reg
+            .find("tauri::async_runtime::spawn")
+            .expect("the registration spawns its detached task");
+        let before_spawn = &reg[..spawn];
         assert!(!before_spawn.contains(".await"));
         assert!(!before_spawn.contains("discover_gateway"));
     }
@@ -8508,10 +8547,11 @@ mod tests {
         // A gw: id must route to the gateway manager BEFORE the persisted
         // vec is consulted: synthesized rows are never in the config, so a
         // lookup-first order would answer "no devserver" for every one.
-        let inner = MAIN_RS
-            .split("async fn connect_devserver_impl_inner")
-            .nth(1)
-            .expect("connect_devserver_impl_inner exists");
+        let inner = source_region(
+            MAIN_RS,
+            "\nasync fn connect_devserver_impl_inner(",
+            "\nasync fn list_devserver_workspaces(",
+        );
         let dispatch = inner
             .find("parse_synthesized_id")
             .expect("gw: dispatch present");

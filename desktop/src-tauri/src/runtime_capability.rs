@@ -65,6 +65,54 @@ pub fn exact_origin_remote_urls(exact_origin: &str) -> Result<Vec<String>, Strin
     Ok(vec![parsed.origin().ascii_serialization()])
 }
 
+/// Every app command the minted gateway grant carries, in the module that
+/// owns the grant so the advertisement cannot drift from the authority: the
+/// ACL parity tests in serve.rs assert this list equals the grant recomputed
+/// from the capability sources. It is what a gateway-served `lib-*` window on
+/// a minted exact origin may invoke; a loopback window's effective grant
+/// differs at the edges (no `gateway_csrf_token`, and `read_dropped_paths`
+/// only where local-drop applies), which cannot mislead because a locally
+/// served page never skews from its host.
+///
+/// `native_vocabulary` is itself a member: an app old enough to lack an
+/// advertised command is also old enough to lack this query, so a page that
+/// cannot ask falls back to interpreting the refusal, and a page that can
+/// ask may trust absence from this list as a version statement.
+pub const GATEWAY_WINDOW_COMMANDS: &[&str] = &[
+    "abandon_devserver_for_window",
+    "append_generated_download",
+    "begin_generated_download",
+    "cancel_generated_download",
+    "cancel_native_transfer",
+    "create_library_window",
+    "download_file_native",
+    "finish_generated_download",
+    "focus_library_window",
+    "gateway_csrf_token",
+    "hide_window_from_close_confirm",
+    "native_transfer_status",
+    "native_vocabulary",
+    "open_devtools",
+    "open_new_window",
+    "open_reverse_tunnel",
+    "platform_os",
+    "probe_url",
+    "read_clipboard_html",
+    "read_clipboard_image",
+    "read_clipboard_text",
+    "reconnect_devserver_for_window",
+    "reload_window",
+    "request_app_quit",
+    "request_close_window",
+    "upload_files_native",
+    "write_clipboard_html",
+    "write_clipboard_image",
+    "write_clipboard_text",
+    "zoom_in",
+    "zoom_out",
+    "zoom_reset",
+];
+
 /// The capability JSON minted for one authenticated exact origin: the existing
 /// devserver native vocabulary, `lib-*` windows only, and one `remote.urls`
 /// entry.

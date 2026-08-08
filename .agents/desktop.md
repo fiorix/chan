@@ -1,5 +1,30 @@
 # chan-desktop notes
 
+## Gateway-surface acceptance
+
+A gateway-served window couples two independently versioned builds: the SPA
+comes from the remote devserver over the tunnel, while the ACL gating its
+invokes belongs to the chan-desktop installed on this machine. The version
+string cannot tell them apart (version pins bump only at release cut), and
+launching from the Dock or `/Applications` runs the previously installed
+bundle regardless of what was just built. So any acceptance run on the
+gateway surface must:
+
+1. Build BOTH ends from the same commit.
+2. Launch the freshly built bundle explicitly (by path), never through the
+   Dock or `/Applications`.
+3. Confirm the running build via its build id, which the version string does
+   not carry: the About window shows it (`build <id>`), the startup log line
+   `chan-desktop starting` carries it, and the `native_vocabulary` command
+   returns it to a served page. A `-dirty` suffix means the checkout had
+   uncommitted changes at compile time; `unknown` means the build ran outside
+   a git checkout.
+
+A one-command ACL refusal on this surface (`Command <name> not allowed by
+ACL`) is what version skew looks like: an older bundle refuses exactly the
+commands added since it was built and serves everything else normally. Check
+the build id before investigating it as a capability defect.
+
 ## Local serving and self-contained runtime
 
 chan-desktop is fully self-contained. It links `chan-workspace` and `chan-server` directly, embeds both web bundles (`web/dist` and the launcher's `web-launcher/dist`) via rust-embed at build time, and links the `chan` CLI, `chan-shell` (`cs`), and `chan-revtunnel` as libraries, dispatching them in-process (`Personality::Desktop`). No separate `chan` binary ships inside the app bundle; a desktop install still provides `chan` and `cs` on the PATH through a shim into the app binary. The `frontendDist` in `tauri.conf.json` is `../src`, a small static shell (the about and connecting pages), not the SPA.

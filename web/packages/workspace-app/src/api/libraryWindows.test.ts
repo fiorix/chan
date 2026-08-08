@@ -6,6 +6,7 @@ import {
   focusLibraryWindow,
   type LibraryWindowBridge,
 } from "./libraryWindows";
+import { resetHostVocabularyForTests } from "./nativeVocabulary";
 import type { ScopedLibraryWindow } from "./libraryCommand";
 
 type W = Window & typeof globalThis & { __TAURI_INTERNALS__?: unknown };
@@ -102,6 +103,7 @@ function scopedWindow(overrides: Partial<ScopedLibraryWindow> = {}): ScopedLibra
 afterEach(() => {
   delete (window as W).__TAURI_INTERNALS__;
   vi.restoreAllMocks();
+  resetHostVocabularyForTests();
 });
 
 /// `window.open` returns null in every chan-desktop webview, gateway-served and
@@ -310,6 +312,108 @@ describe("a chan-desktop whose ACL does not grant the command", () => {
 
     expect(error.message).toMatch(/picked file name is not allowed/);
     expect(error.message).not.toMatch(/update/i);
+  });
+});
+
+/// An app that can say what it grants turns the guesswork off: a command
+/// absent from the advertised vocabulary becomes a version statement made
+/// BEFORE any invoke, and a refusal of a command the app does advertise
+/// becomes an authorization statement, because the two call for different
+/// actions. Apps predating the advertisement are the earlier describe block:
+/// their query fails and every path stays interpretation-based.
+describe("a chan-desktop that advertises its vocabulary", () => {
+  function asDesktopAdvertising(
+    commands: string[],
+    behavior: (cmd: string) => Promise<unknown> = async () => null,
+  ): ReturnType<typeof vi.fn> {
+    const invoke = vi.fn(async (cmd: string) => {
+      if (cmd === "native_vocabulary") {
+        return { version: "0.86.0", build: "0123abcd4567", commands };
+      }
+      return behavior(cmd);
+    });
+    asDesktop(invoke);
+    return invoke;
+  }
+
+  test("a command absent from the vocabulary rejects up front as a version statement", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const invoke = asDesktopAdvertising(["focus_library_window"]);
+    const host = bridge();
+
+    const error = await rejection(createLibraryWindow(host, { action: "new_terminal" }));
+
+    // Absence is known before asking, so the refused invoke never fires.
+    expect(invoke).not.toHaveBeenCalledWith("create_library_window", expect.anything());
+    expect(error.message).toMatch(/does not have/);
+    expect(error.message).toMatch(/update chan-desktop/i);
+    expect(error.message).not.toMatch(/create_library_window|ACL/);
+    // The withheld command still lands in the console for a report.
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining("create_library_window"));
+    expect(host.refresh).not.toHaveBeenCalled();
+  });
+
+  test("an advertised command the ACL still refuses reads as authorization, not version", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    asDesktopAdvertising(["create_library_window"], async (cmd) => {
+      throw new Error(aclRefusal(cmd, "release"));
+    });
+
+    const error = await rejection(createLibraryWindow(bridge(), { action: "new_terminal" }));
+
+    expect(error.message).toMatch(/authorization/);
+    expect(error.message).toMatch(/not a version difference/);
+    expect(error.message).not.toMatch(/older than/);
+    expect(error.message).not.toMatch(/create_library_window|ACL/);
+  });
+
+  test("an advertised command that runs keeps running", async () => {
+    const invoke = asDesktopAdvertising(["create_library_window"]);
+    const host = bridge();
+
+    await createLibraryWindow(host, { action: "new_terminal" });
+
+    expect(invoke).toHaveBeenCalledWith("create_library_window", {
+      kind: "terminal",
+      workspaceId: null,
+    });
+    expect(host.refresh).toHaveBeenCalled();
+  });
+
+  test("the vocabulary is queried once and cached for the page", async () => {
+    const invoke = asDesktopAdvertising(["create_library_window", "focus_library_window"]);
+    const host = bridge();
+
+    await createLibraryWindow(host, { action: "new_terminal" });
+    await focusLibraryWindow(host, scopedWindow());
+
+    const queries = invoke.mock.calls.filter(([cmd]) => cmd === "native_vocabulary");
+    expect(queries).toHaveLength(1);
+  });
+
+  test("a failed vocabulary query is retried on the next action", async () => {
+    // The minted origin grant can land after this window opens, so a refused
+    // query must not pin "cannot say" for the life of the page.
+    let queries = 0;
+    const invoke = vi.fn(async (cmd: string) => {
+      if (cmd === "native_vocabulary") {
+        queries += 1;
+        if (queries === 1) throw new Error(aclRefusal(cmd, "release"));
+        return { version: "0.86.0", build: "0123abcd4567", commands: ["focus_library_window"] };
+      }
+      return null;
+    });
+    asDesktop(invoke);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const host = bridge();
+
+    // First action: the query fails, the invoke proceeds uninformed.
+    await createLibraryWindow(host, { action: "new_terminal" });
+    // Second action: the query succeeds and now suppresses the absent command.
+    const error = await rejection(createLibraryWindow(host, { action: "new_terminal" }));
+
+    expect(queries).toBe(2);
+    expect(error.message).toMatch(/does not have/);
   });
 });
 

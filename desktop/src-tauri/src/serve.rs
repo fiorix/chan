@@ -3882,6 +3882,29 @@ mod tests {
         ));
     }
 
+    /// The advertisement must equal the gateway grant recomputed from the
+    /// capability sources: a page suppresses an affordance because the host
+    /// did not advertise the command, so drift in either direction turns
+    /// into a wrong version statement on a live page.
+    #[test]
+    fn native_vocabulary_advertises_the_gateway_window_grant() {
+        let (granted, _) = effective_grants(
+            "lib-0a1b::w-1",
+            "https://alice--0a1b2c3d4e5f.p1.usr.chan.app",
+        );
+        let granted: std::collections::BTreeSet<&str> =
+            granted.iter().map(String::as_str).collect();
+        let advertised: std::collections::BTreeSet<&str> =
+            crate::runtime_capability::GATEWAY_WINDOW_COMMANDS
+                .iter()
+                .copied()
+                .collect();
+        assert_eq!(
+            advertised, granted,
+            "GATEWAY_WINDOW_COMMANDS must match the recomputed gateway-window grant",
+        );
+    }
+
     /// The real regression proof for item-1-class breakage: for every
     /// window/origin class, every command the SPA can invoke must be
     /// granted by some capability, minus the DELIBERATE_EXCLUSIONS.

@@ -311,6 +311,24 @@ export async function focusNativeLibraryWindow(windowId: string): Promise<void> 
   await tauriInvoke("focus_library_window", { windowId });
 }
 
+/// What the installed app advertises about itself: the command vocabulary its
+/// gateway grant carries and the build it was compiled from. The field names
+/// are the desktop-side contract (`native_vocabulary` in main.rs).
+export type NativeVocabulary = {
+  version: string;
+  build: string;
+  commands: string[];
+};
+
+/// Query the installed app's advertised vocabulary. Throws off-desktop and on
+/// an app old enough to lack the query itself; `hostVocabulary` in
+/// nativeVocabulary.ts owns turning that absence into "interpret the refusal
+/// instead".
+export async function readNativeVocabulary(): Promise<NativeVocabulary> {
+  if (!isTauriDesktop()) throw new Error("not running under Tauri");
+  return await tauriInvoke<NativeVocabulary>("native_vocabulary");
+}
+
 /// Close the current workspace window and return focus to the
 /// launcher (the native-desktop workspace list). Called when the
 /// last tab and then the last empty pane are closed. No-op
