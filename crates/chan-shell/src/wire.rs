@@ -10,6 +10,7 @@
 //! compiled (no `client` feature gate) and chan-server can depend on
 //! chan-shell with `default-features = false` to pull just this module.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -125,6 +126,10 @@ pub enum ControlRequest {
         tab_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tab_group: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         destination: Option<TabDestination>,
     },
@@ -314,6 +319,10 @@ pub enum ControlRequest {
         tab_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tab_group: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
     },
     // Category 2: close (tear down) live session(s) by tab name and/or group,
     // for `cs terminal close`. The explicit teardown partner to `TermRestart`:
@@ -990,6 +999,55 @@ mod survey_wire_tests {
                 "path": "notes/a.md"
             })
         );
+    }
+
+    #[test]
+    fn terminal_spawn_override_wire_is_optional_and_shared() {
+        let legacy: ControlRequest =
+            serde_json::from_str(r#"{"type":"open_term_new","window_id":"win-1"}"#).unwrap();
+        assert!(matches!(
+            legacy,
+            ControlRequest::OpenTermNew {
+                command: None,
+                ref env,
+                ..
+            } if env.is_empty()
+        ));
+
+        let env = BTreeMap::from([("CHAN_AGENT".into(), "codex".into())]);
+        let new = serde_json::to_value(ControlRequest::OpenTermNew {
+            window_id: "win-1".into(),
+            path: None,
+            tab_name: Some("@@Agent".into()),
+            tab_group: None,
+            command: Some("./run-my-agent.sh".into()),
+            env: env.clone(),
+            destination: None,
+        })
+        .unwrap();
+        assert_eq!(new["command"], "./run-my-agent.sh");
+        assert_eq!(new["env"]["CHAN_AGENT"], "codex");
+
+        let restart = serde_json::to_value(ControlRequest::TermRestart {
+            tab_name: Some("@@Agent".into()),
+            tab_group: None,
+            command: Some("codex".into()),
+            env,
+        })
+        .unwrap();
+        assert_eq!(restart["type"], "term_restart");
+        assert_eq!(restart["command"], "codex");
+        assert_eq!(restart["env"]["CHAN_AGENT"], "codex");
+
+        let no_overrides = serde_json::to_value(ControlRequest::TermRestart {
+            tab_name: Some("@@Agent".into()),
+            tab_group: None,
+            command: None,
+            env: BTreeMap::new(),
+        })
+        .unwrap();
+        assert!(no_overrides.get("command").is_none());
+        assert!(no_overrides.get("env").is_none());
     }
 
     #[test]

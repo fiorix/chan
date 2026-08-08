@@ -1044,6 +1044,8 @@ type WindowCommandFrame =
       cwd?: string | null;
       tab_name?: string | null;
       tab_group?: string | null;
+      spawn_command?: string | null;
+      env?: Record<string, string> | null;
     } & DestinationWindowCommand)
   | ({
       type: "window_command";
@@ -1708,6 +1710,12 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
       cwd: typeof frame.cwd === "string" ? frame.cwd : undefined,
       title: typeof frame.tab_name === "string" ? frame.tab_name : undefined,
       group: typeof frame.tab_group === "string" ? frame.tab_group : undefined,
+      spawnCommand:
+        typeof frame.spawn_command === "string" ? frame.spawn_command : undefined,
+      spawnEnv:
+        frame.env && typeof frame.env === "object" && !Array.isArray(frame.env)
+          ? { ...frame.env }
+          : undefined,
       side: destination.side,
     });
     setTransientStatus("opened terminal");

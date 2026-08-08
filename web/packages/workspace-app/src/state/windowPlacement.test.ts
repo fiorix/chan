@@ -15,6 +15,7 @@ import {
   paneSide,
   paneTabs,
   resolveTabDestination,
+  setTerminalSession,
   type DashboardTab,
   type LeafNode,
   type TerminalTab,
@@ -112,6 +113,8 @@ describe("queued window command placement", () => {
       command: "open_term_new",
       tab_name: "build",
       tab_group: "agents",
+      spawn_command: "./run-my-agent.sh",
+      env: { CHAN_AGENT: "codex" },
       destination,
     });
     dispatch({
@@ -150,6 +153,13 @@ describe("queued window command placement", () => {
     expect(browserSelection.path).toBeNull();
     const terminals = paneTabs(target, "b").filter((tab) => tab.kind === "terminal");
     expect(terminals.map((tab) => tab.title)).toEqual(["build", "lead", "worker"]);
+    expect(terminals[0]).toMatchObject({
+      spawnCommand: "./run-my-agent.sh",
+      spawnEnv: { CHAN_AGENT: "codex" },
+    });
+    setTerminalSession(terminals[0]!, "session-build");
+    expect(terminals[0]?.spawnCommand).toBeUndefined();
+    expect(terminals[0]?.spawnEnv).toBeUndefined();
   });
 
   test("refuses an invalid explicit pane for every opener without fallback or mutation", () => {

@@ -871,7 +871,9 @@ what a later `cs terminal write` / restart / close selects on. The
 optional path sets the tab's working directory: workspace-relative,
 or absolute under the workspace root, and a file resolves to its
 parent directory. Pathless `new` also works on a standalone
-terminal; --path is workspace-only.
+terminal; --path is workspace-only. --command runs a command instead
+of the default shell. Repeat --env KEY=VALUE to set its spawn
+environment; CHAN_AGENT can identify an unrecognised agent launcher.
 "#;
 
 /// `cs terminal new` examples, side effects, and caveats.
@@ -887,6 +889,10 @@ pub(crate) const CS_TERMINAL_NEW_AFTER: &str = r#"EXAMPLES:
 
   cs terminal new README.md
     a tab whose cwd is README.md's parent directory
+
+  cs terminal new --tab-name @@Agent --command './run-agent.sh' \
+    --env CHAN_AGENT=codex
+    a codex-derived session even though the launcher name is unrecognised
 
 SIDE EFFECTS:
   Queues a tab in the target window. The one-line ack ("terminal
@@ -911,17 +917,19 @@ SEE ALSO:
 "#;
 
 /// `cs terminal restart` long help (manpage head).
-pub(crate) const CS_TERMINAL_RESTART: &str = r"Restart live terminal session(s), relaunching each with the command
-and environment it was spawned with.
+pub(crate) const CS_TERMINAL_RESTART: &str = r"Restart live terminal session(s), preserving or overriding their spawn command
+and environment.
 
 The server respawns the PTY under the same session id, so an
 attached viewer re-attaches to the relaunched terminal instead of
 losing the tab, and a session started as an agent comes back as
 that agent. Tab name, group and window are preserved, so later
 selectors still find it. At least one of --tab-name / --tab-group
-is required. This is the out-of-band path the Team Work bootstrap
-needs: a shell cannot restart the very shell running its own
-script, but the server can.
+is required. With no --command or --env, command and environment are
+preserved exactly. --command replaces the command; repeated --env
+KEY=VALUE entries override matching variables and preserve the rest.
+This is the out-of-band path the Team Work bootstrap needs: a shell
+cannot restart the very shell running its own script, but the server can.
 ";
 
 /// `cs terminal restart` examples, side effects, and caveats.
@@ -932,6 +940,10 @@ pub(crate) const CS_TERMINAL_RESTART_AFTER: &str = r#"EXAMPLES:
 
   cs terminal restart --tab-group alpha
     recycles every member of that team in one call
+
+  cs terminal restart --tab-name @@Alice --command './run-agent.sh' \
+    --env CHAN_AGENT=codex
+    relaunches @@Alice as a codex-derived agent session
 
 SIDE EFFECTS:
   Kills and respawns each matching PTY. Whatever the old process

@@ -18,6 +18,8 @@ export type TerminalWsPathOpts = {
   /// `since` only when this still matches the live session (a restart bumps it).
   generation?: number | null;
   cwd?: string | null;
+  command?: string | null;
+  env?: Record<string, string> | null;
 };
 
 export function terminalWsPath(opts: TerminalWsPathOpts): string {
@@ -61,6 +63,11 @@ export function terminalWsPath(opts: TerminalWsPathOpts): string {
   } else {
     const cwd = opts.cwd?.trim();
     if (cwd) params.set("cwd", cwd);
+    const command = opts.command?.trim();
+    if (command) params.set("command", command);
+    if (opts.env && Object.keys(opts.env).length > 0) {
+      params.set("env", JSON.stringify(opts.env));
+    }
     // MCP env injection is governed by the global `terminal.mcp_env`
     // server config (set from the Terminal Settings panel); the SPA
     // sends no per-terminal `?mcp_env=` override. The backend still

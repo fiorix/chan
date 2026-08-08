@@ -431,6 +431,11 @@ export type TerminalTab = {
   };
   cwd?: string;
   seedInput?: string;
+  /// One-shot fresh-session spawn overrides from `cs terminal new`. They are
+  /// never serialized, and are cleared after the attach prelude establishes
+  /// the server-owned session identity (env values may be sensitive).
+  spawnCommand?: string;
+  spawnEnv?: Record<string, string>;
   /// Transient marker for a freshly-created unnamed terminal's provisional
   /// `Terminal-N` label. The registry settlement returned by the attach
   /// prelude is authoritative. Never persisted.
@@ -1586,6 +1591,8 @@ function teamWorkLeadTab(req: TeamDialogRequest): TerminalTab | null {
 export type OpenTerminalOptions = {
   cwd?: string;
   seedInput?: string;
+  spawnCommand?: string;
+  spawnEnv?: Record<string, string>;
   title?: string;
   sessionId?: string;
   controlledTerminal?: boolean;
@@ -1607,6 +1614,11 @@ export function openTerminalInPane(
   const tabs = mutablePaneTabs(p, side);
   const cwd = opts.cwd?.trim();
   const seedInput = opts.seedInput?.trim();
+  const spawnCommand = opts.spawnCommand?.trim();
+  const spawnEnv =
+    opts.spawnEnv && Object.keys(opts.spawnEnv).length > 0
+      ? { ...opts.spawnEnv }
+      : undefined;
   const title = opts.title?.trim();
   const group = opts.group?.trim();
   const tab: TerminalTab = {
@@ -1622,6 +1634,8 @@ export function openTerminalInPane(
     controlledTerminal: opts.controlledTerminal || undefined,
     cwd: cwd || undefined,
     seedInput: seedInput || undefined,
+    spawnCommand: spawnCommand || undefined,
+    spawnEnv,
     group: group && group !== DEFAULT_TERMINAL_GROUP ? group : undefined,
   };
   tabs.push(tab);
@@ -2186,6 +2200,10 @@ export function terminalBroadcastReachCount(tab: TerminalTab): number {
 export function setTerminalSession(tab: TerminalTab, sessionId: string): void {
   const wasFresh = !tab.terminalSessionId || tab.terminalSessionId !== sessionId;
   tab.terminalSessionId = sessionId;
+  // The session prelude is authoritative even when this was a known-session
+  // reattach. Drop one-shot spawn data promptly; env values may be sensitive.
+  tab.spawnCommand = undefined;
+  tab.spawnEnv = undefined;
   if (wasFresh) {
     tab.submitAgent = undefined;
     tab.terminalEnvTabName = undefined;
@@ -3584,6 +3602,8 @@ function cloneTab(src: Tab): Tab {
       controlledTerminal: src.controlledTerminal,
       cwd: src.cwd,
       seedInput: src.seedInput,
+      spawnCommand: src.spawnCommand,
+      spawnEnv: src.spawnEnv ? { ...src.spawnEnv } : undefined,
       pendingGlobalName: src.pendingGlobalName,
       group: src.group,
     };

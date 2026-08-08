@@ -136,4 +136,31 @@ describe("terminalWsPath", () => {
       }),
     ).not.toContain("cwd");
   });
+
+  test("adds spawn command and env only for fresh terminal sessions", () => {
+    const fresh = terminalWsPath({
+      cols: 80,
+      rows: 24,
+      tabName: "agent",
+      command: "./run-my-agent.sh",
+      env: { CHAN_AGENT: "codex", TOKEN: "a=b" },
+    });
+    const freshQuery = new URL(fresh, "http://chan.test").searchParams;
+    expect(freshQuery.get("command")).toBe("./run-my-agent.sh");
+    expect(JSON.parse(freshQuery.get("env") ?? "null")).toEqual({
+      CHAN_AGENT: "codex",
+      TOKEN: "a=b",
+    });
+
+    const reattach = terminalWsPath({
+      cols: 80,
+      rows: 24,
+      tabName: "agent",
+      sessionId: "term_abc",
+      command: "codex",
+      env: { CHAN_AGENT: "codex" },
+    });
+    expect(reattach).not.toContain("command=");
+    expect(reattach).not.toContain("env=");
+  });
 });

@@ -117,6 +117,7 @@ pub use terminal::{
     api_create_terminal, api_delete_terminal, api_restart_terminal, api_set_terminal_broadcast,
     api_terminal_next_name, api_terminal_ws, api_terminals_roster, spawn_roster_broadcaster,
 };
+pub(crate) use terminal::{normalize_terminal_command, validate_terminal_env};
 pub use window::api_window_reply;
 pub use windows::api_list_windows;
 pub use workspace::{api_cloud_workspaces, api_get_workspace, api_workspace_bootstrap};

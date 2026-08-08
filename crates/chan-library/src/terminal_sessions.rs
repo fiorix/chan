@@ -439,7 +439,7 @@ pub struct TerminalPlacement {
 /// Optional per-call overrides for [`Registry::restart`], applied onto the
 /// session's own `restart_options()`. `default()` (every field `None`)
 /// restarts the session exactly as it was spawned.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RestartOverrides {
     pub tab_name: Option<String>,
     /// Outer `None` keeps the existing group; `Some(None)` sets the
@@ -2119,17 +2119,18 @@ impl Registry {
     /// `write_input_matching` (a `None` axis matches all; both narrow to
     /// the intersection). Returns how many sessions were restarted.
     ///
-    /// Passing `None` for every `restart()` override preserves each
-    /// session's spawn command + env, so a session launched with an agent
-    /// startup command relaunches that agent. This is the out-of-band
-    /// server path the Team Work self-restart needs: a shell cannot
-    /// restart the very shell running its own bootstrap script, but the
-    /// server can. Ids are collected under the lock and restarted after it
-    /// is dropped, since `restart()` re-locks the registry internally.
+    /// Passing [`RestartOverrides::default`] preserves each session's spawn
+    /// command + env, so a session launched with an agent startup command
+    /// relaunches that agent. This is the out-of-band server path the Team
+    /// Work self-restart needs: a shell cannot restart the very shell running
+    /// its own bootstrap script, but the server can. Ids are collected under
+    /// the lock and restarted after it is dropped, since `restart()` re-locks
+    /// the registry internally.
     pub fn restart_matching(
         &self,
         tab_name: Option<&str>,
         tab_group: Option<&str>,
+        overrides: RestartOverrides,
     ) -> Result<usize, CreateError> {
         let ids: Vec<String> = {
             let sessions = self.sessions.lock().expect("terminal registry poisoned");
@@ -2144,7 +2145,7 @@ impl Registry {
         };
         let mut restarted = 0;
         for id in &ids {
-            if self.restart(id, RestartOverrides::default())? {
+            if self.restart(id, overrides.clone())? {
                 restarted += 1;
             }
         }
@@ -7664,8 +7665,18 @@ mod tests {
         registry
             .update_live_metadata(&first_id, "renamed".into(), Some("workers".into()))
             .unwrap();
-        assert_eq!(registry.restart_matching(Some("lane"), None).unwrap(), 0);
-        assert_eq!(registry.restart_matching(Some("renamed"), None).unwrap(), 1);
+        assert_eq!(
+            registry
+                .restart_matching(Some("lane"), None, RestartOverrides::default())
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            registry
+                .restart_matching(Some("renamed"), None, RestartOverrides::default())
+                .unwrap(),
+            1
+        );
         let renamed = registry.attach(&first_id, None).unwrap();
         assert_eq!(renamed.live_metadata().name.as_deref(), Some("renamed"));
         assert_eq!(renamed.spawn_name(), Some("renamed"));
