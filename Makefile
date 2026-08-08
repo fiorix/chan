@@ -245,7 +245,12 @@ pre-push: ## Run the local pre-push gate.
 	RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
 	RUSTFLAGS="-D warnings" $(CARGO) test --all-targets
 	RUSTFLAGS="-D warnings" $(CARGO) build --no-default-features
+	# gateway-lint compiles every gateway test target without executing it;
+	# gateway-test executes the database-free subset and reports the seven
+	# Postgres-backed integration-test files as not run; gateway-build only
+	# compiles the release crates.
 	$(MAKE) gateway-lint
+	RUSTFLAGS="-D warnings" $(MAKE) gateway-test
 	RUSTFLAGS="-D warnings" $(MAKE) gateway-build
 	$(MAKE) web-check
 	$(MAKE) web-marketing-check
@@ -327,18 +332,27 @@ gateway-fmt: ## Check formatting in the separate gateway workspace.
 	cd gateway && $(CARGO) fmt --check
 
 .PHONY: gateway-build
-gateway-build: gateway-spa ## Build the gateway release crates (GATEWAY_CARGO_FLAGS adds cross/release).
+gateway-build: gateway-spa ## Build, but do not test, the gateway release crates (GATEWAY_CARGO_FLAGS adds cross/release).
 	# Depends on gateway-spa: identity embeds web/dist via rust-embed at
 	# compile time, so the bundle must exist or the derive fails to build.
 	cd gateway && $(CARGO) build $(GATEWAY_CARGO_FLAGS) \
 		$(foreach crate,$(GATEWAY_RELEASE_CRATES),-p $(crate))
 
 .PHONY: gateway-lint
-gateway-lint: gateway-spa ## Clippy the gateway workspace with warnings denied.
+gateway-lint: gateway-spa ## Clippy all gateway targets without executing tests.
 	# The gateway is a separate Cargo workspace, so the root clippy run does
 	# not reach it. Depends on gateway-spa for the same rust-embed reason as
 	# gateway-build.
 	cd gateway && RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
+
+.PHONY: gateway-test
+gateway-test: gateway-spa ## Execute gateway tests that do not require Postgres.
+	@printf '%s\n' \
+		'gateway-test: EXECUTE: all gateway library unit tests' \
+		'gateway-test: EXECUTE: devserver-proxy unit, integration, and doc tests' \
+		'gateway-test: NOT RUN: 7 profile/identity integration-test files require TEST_DATABASE_URL'
+	cd gateway && $(CARGO) test --workspace --lib
+	cd gateway && $(CARGO) test -p devserver-proxy
 
 .PHONY: gateway-release-crates
 gateway-release-crates: ## Print the gateway release crate names on one line.
@@ -371,13 +385,28 @@ web-lock-check: ## Verify web/package-lock.json is in sync with every package.js
 	# the release cannot be repaired.
 	#
 	# This runs among the static checks, before anything can rewrite the file,
-	# and costs about two seconds. --dry-run resolves and validates without
-	# touching node_modules. --ignore-scripts is required, not cosmetic: npm
-	# still runs lifecycle scripts under --dry-run, and this package tree has a
-	# `postinstall: patch-package`, so on a fresh checkout (every CI runner)
-	# the check would exit 127 on a binary that is not installed yet. The
-	# lockfile sync validation happens before any script runs, so skipping
-	# scripts costs the check nothing.
+	# and costs about two seconds. npm 10+ skips the node_modules removal phase
+	# under --dry-run; the recipe enforces that floor before relying on it.
+	# --ignore-scripts is required, not cosmetic: npm still runs lifecycle
+	# scripts under --dry-run. This tree's `postinstall` calls patch-package, so
+	# on a fresh checkout (every CI runner) the check would exit 127 on a binary
+	# that is not installed yet. The lockfile sync
+	# validation happens before any script runs, so skipping scripts costs the
+	# check nothing.
+	@set -eu; \
+		npm_version="$$( $(NPM) --version )"; \
+		npm_major="$${npm_version%%.*}"; \
+		case "$$npm_major" in \
+			''|*[!0-9]*) \
+				printf 'error: web-lock-check could not parse npm version %s\n' \
+					"$$npm_version" >&2; \
+				exit 1 ;; \
+		esac; \
+		if [ "$$npm_major" -lt 10 ]; then \
+			printf '%s\n' \
+				"error: web-lock-check requires npm >= 10; resolved npm version $$npm_version may remove node_modules under --dry-run" >&2; \
+			exit 1; \
+		fi
 	cd web && $(NPM) ci --dry-run --ignore-scripts
 
 .PHONY: web-check
