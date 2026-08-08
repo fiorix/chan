@@ -1,6 +1,6 @@
 # A scene_sessions conflict test fails under host load
 
-Status: REGISTERED 2026-08-08 from a full-gate observation during v0.86.0 preparation; scheduling within the round is the owner's call.
+Status: REGISTERED 2026-08-08 from a full-gate observation during v0.86.0 preparation; deferred to v0.87.0 the same day before the cut.
 
 ## What
 

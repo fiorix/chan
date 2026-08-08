@@ -31,12 +31,9 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [source-pins-bound-on-sibling-string-literals](v0.86.0/source-pins-bound-on-sibling-string-literals.md) | accepted, class boundary ruled 2026-08-07 | fix the dead end-bounds across all 24 main.rs sites and the non-unique pin needles, with the definition-reorder mutation proving the three original pins |
 | [aur-publication-is-suspended](v0.86.0/aur-publication-is-suspended.md) | accepted, blocked upstream | restore AUR publication once the incident notice is superseded and pushes are permitted, deleting the guard job in the same commit |
 | [cs-terminal-new-cannot-spawn-an-agent-session](v0.86.0/cs-terminal-new-cannot-spawn-an-agent-session.md) | accepted, both surfaces ruled 2026-08-07 | let cs terminal new and cs terminal restart set the spawn command and env, sharing the plumbing, so a single terminal can derive an agent and be poked and a live shell tab can be repaired |
-| [desktop-authorize-strands-the-browser-off-origin](v0.86.0/desktop-authorize-strands-the-browser-off-origin.md) | accepted 2026-08-08, specced | land the already-signed-in browser on the profile page with a login-successful notification after desktop authorization, instead of the dead-end loopback page |
-| [scene-conflict-test-is-load-sensitive](v0.86.0/scene-conflict-test-is-load-sensitive.md) | registered 2026-08-08, scheduling open | name and fix the load-sensitive race behind the flush-CAS-conflict test red observed once during the full gate; 20x isolated and 5x full parallel green after |
-| [extension-errors-are-cors-masked](v0.86.0/extension-errors-are-cors-masked.md) | registered 2026-08-08, scheduling open | apply the extension response policy to every proxy error path, server and gateway, so a sandboxed iframe sees true statuses instead of a CORS mask |
-| [extension-capability-staleness-across-restart](v0.86.0/extension-capability-staleness-across-restart.md) | registered 2026-08-08, scheduling open | re-resolve the extension catalog on watch reconnect and reconcile mounted frames, so a page that outlives a devserver restart converges without a manual reload |
-| [devserver-build-identity](v0.86.0/devserver-build-identity.md) | registered 2026-08-08, scheduling open | carry a build id in chan --version and the health surface, the server-side sibling of the shipped desktop build identity |
-| [extensions-unreachable-through-the-gateway](v0.86.0/extensions-unreachable-through-the-gateway.md) | registered 2026-08-08, root-caused live | admit the extension capability path shape through the gateway's session gate so cookieless sandboxed-iframe fetches reach the devserver that authorizes them |
+| [extension-errors-are-cors-masked](v0.86.0/extension-errors-are-cors-masked.md) | accepted 2026-08-08, in flight | apply the extension response policy to every proxy error path, server and gateway, so a sandboxed iframe sees true statuses instead of a CORS mask |
+| [extension-capability-staleness-across-restart](v0.86.0/extension-capability-staleness-across-restart.md) | accepted 2026-08-08, in flight | re-resolve the extension catalog on watch reconnect and reconcile mounted frames, so a page that outlives a devserver restart converges without a manual reload |
+| [extensions-unreachable-through-the-gateway](v0.86.0/extensions-unreachable-through-the-gateway.md) | accepted 2026-08-08, in flight | admit the extension capability path shape through the gateway's session gate so cookieless sandboxed-iframe fetches reach the devserver that authorizes them |
 
 The web-marketing-onboarding item left the roadmap during v0.86.0 preparation: onboarding-page direction is marketing work and now lives in the chan-mkt repository; see [done/web-marketing-onboarding.md](done/web-marketing-onboarding.md).
 
@@ -45,6 +42,9 @@ The web-marketing-onboarding item left the roadmap during v0.86.0 preparation: o
 | item | state | what needs to happen |
 | --- | --- | --- |
 | [notifications](v0.87.0/notifications.md) | deferred from v0.85.0 and v0.86.0, not implemented on the release ancestry | start from the contract; the earlier implementation is on an abandoned candidate chain and was excluded from the v0.85.0 recovery |
+| [desktop-authorize-strands-the-browser-off-origin](v0.87.0/desktop-authorize-strands-the-browser-off-origin.md) | accepted, deferred 2026-08-08 before the v0.86.0 cut | land the already-signed-in browser on the profile page with a login-successful notification after desktop authorization, instead of the dead-end loopback page |
+| [scene-conflict-test-is-load-sensitive](v0.87.0/scene-conflict-test-is-load-sensitive.md) | registered, deferred 2026-08-08 | name and fix the load-sensitive race behind the flush-CAS-conflict test red observed once during the v0.86.0 full gate |
+| [devserver-build-identity](v0.87.0/devserver-build-identity.md) | registered, deferred 2026-08-08 | carry a build id in chan --version and the health surface, the server-side sibling of the desktop build identity that shipped in v0.86.0 |
 
 ## Completed
 

@@ -1,6 +1,6 @@
 # A devserver build is not identifiable at runtime
 
-Status: REGISTERED 2026-08-08; the server-side sibling of the shipped desktop build identity, grounded by the same trap firing again during the v086-integration live test.
+Status: REGISTERED 2026-08-08, deferred to v0.87.0 the same day before the v0.86.0 cut; the server-side sibling of the desktop build identity shipping in v0.86.0, grounded by the same trap firing again during the v086-integration live test.
 
 ## What
 
