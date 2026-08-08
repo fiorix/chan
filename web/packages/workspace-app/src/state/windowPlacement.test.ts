@@ -229,7 +229,9 @@ describe("team spawn grid placement", () => {
   function paneHolding(title: string): LeafNode | null {
     for (const pane of leaves()) {
       for (const side of ["a", "b"] as const) {
-        if (paneTabs(pane, side).some((tab) => tab.title === title)) return pane;
+        if (paneTabs(pane, side).some((tab) => tab.kind === "terminal" && tab.title === title)) {
+          return pane;
+        }
       }
     }
     return null;
@@ -312,7 +314,9 @@ describe("team spawn grid placement", () => {
     });
     expect(leaves()).toHaveLength(1);
     const pane = leaf("pane-reset");
-    expect(paneTabs(pane, paneSide(pane)).map((tab) => tab.title)).toEqual(["lead", "w1"]);
+    expect(
+      paneTabs(pane, paneSide(pane)).map((tab) => (tab.kind === "terminal" ? tab.title : tab.kind)),
+    ).toEqual(["lead", "w1"]);
   });
 });
 
