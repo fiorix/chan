@@ -917,8 +917,8 @@ SEE ALSO:
 "#;
 
 /// `cs terminal restart` long help (manpage head).
-pub(crate) const CS_TERMINAL_RESTART: &str = r"Restart live terminal session(s), preserving or overriding their spawn command
-and environment.
+pub(crate) const CS_TERMINAL_RESTART: &str = r"Restart live terminal session(s), preserving or overriding their spawn
+command and environment.
 
 The server respawns the PTY under the same session id, so an
 attached viewer re-attaches to the relaunched terminal instead of
