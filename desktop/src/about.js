@@ -3,8 +3,9 @@
 //      the launcher's light/dark choice as `window.__CHAN_THEME__` (null =
 //      follow the OS media query), since this window is on the Tauri App origin
 //      and shares no storage with the loopback-served launcher.
-//   2. Show the desktop version, passed in as the `?v=` query param by the
-//      Rust opener (avoids needing an `app`-plugin capability for getVersion).
+//   2. Show the desktop version and build id, passed in as the `?v=` / `?b=`
+//      query params by the Rust opener (avoids needing an `app`-plugin
+//      capability for getVersion).
 //   3. Open external links in the system browser via the opener plugin
 //      (a plain <a> would navigate the About webview itself).
 const { openUrl } = window.__TAURI__.opener;
@@ -17,9 +18,17 @@ if (injectedTheme === 'dark' || injectedTheme === 'light') {
   root.removeAttribute('data-theme');
 }
 
-const version = new URLSearchParams(location.search).get('v');
+const params = new URLSearchParams(location.search);
+const version = params.get('v');
 if (version) {
   document.getElementById('version').textContent = version;
+}
+// The build id (`?b=`, stamped from the commit at compile time) is what
+// tells two builds apart when their version strings match, which is every
+// pre-release branch build against the previous release.
+const build = params.get('b');
+if (build) {
+  document.getElementById('build').textContent = build;
 }
 
 // Route every external link through the opener plugin. preventDefault stops

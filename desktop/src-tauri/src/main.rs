@@ -45,6 +45,14 @@ use window_watcher_wiring::DevserverWatcherStop;
 
 const CHAN_BUSY_CHANGED: &str = "chan-busy";
 const SYSTEM_NOTICE: &str = "system-notice";
+
+/// The commit this binary was built from, stamped by build.rs ("unknown"
+/// outside a git checkout). The version string alone cannot identify a
+/// build: the version pins bump only at release cut, so a pre-release
+/// branch build and the previous release's bundle carry the same version.
+/// Shown in About, logged at startup, and advertised by
+/// [`native_vocabulary`], the surfaces an acceptance run looks at.
+const CHAN_DESKTOP_BUILD_ID: &str = env!("CHAN_DESKTOP_BUILD_ID");
 #[cfg(target_os = "macos")]
 const DESKTOP_UPDATE_READY_EVENT: &str = "desktop-update-ready";
 
@@ -4625,6 +4633,36 @@ fn focus_library_window(
     }
 }
 
+/// What [`native_vocabulary`] answers: the app command vocabulary this build
+/// grants to gateway-served `lib-*` windows, with the build identity. Field
+/// names are the page-side contract.
+#[derive(serde::Serialize)]
+struct NativeVocabulary {
+    version: String,
+    build: &'static str,
+    commands: &'static [&'static str],
+}
+
+/// Advertise the native command vocabulary and build identity.
+///
+/// A gateway-served page is delivered by the remote devserver while the ACL
+/// gating its invokes belongs to the locally installed app, so the page can
+/// name a command this build has never heard of. This query lets the page
+/// learn what is available up front and report absence as a version
+/// statement, instead of discovering it through a refusal that reads as a
+/// capability defect. The answer is the gateway grant's vocabulary
+/// ([`runtime_capability::GATEWAY_WINDOW_COMMANDS`]), not recomputed per
+/// caller; a locally served caller's grant differs at the edges but cannot
+/// skew from its host, which embeds the bundle it serves.
+#[tauri::command]
+fn native_vocabulary(app: tauri::AppHandle) -> NativeVocabulary {
+    NativeVocabulary {
+        version: app.package_info().version.to_string(),
+        build: CHAN_DESKTOP_BUILD_ID,
+        commands: runtime_capability::GATEWAY_WINDOW_COMMANDS,
+    }
+}
+
 /// Browser-style zoom controls. Step size is
 /// 10 % per Cmd++/Cmd+- press; the clamp range matches Tauri's own
 /// `zoom_hotkeys_enabled` polyfill semantics (0.25-5.0).
@@ -5059,6 +5097,14 @@ fn main() {
     // off Linux/AppImage and once already applied.
     linux_gui_stack::prefer_system_gui_stack();
     init_tracing();
+    // The version alone cannot distinguish a branch build from the previous
+    // release; the build id can, and this line is where a terminal launch
+    // shows it.
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        build = CHAN_DESKTOP_BUILD_ID,
+        "chan-desktop starting"
+    );
     // Best-effort on boot: own `~/.local/bin/{chan,cs}` so a desktop install
     // also provides the `chan` + `cs` CLI without a separate download. Real
     // symlinks / AppImage wrappers / deb-rpm symlinks per package kind,
@@ -5591,6 +5637,9 @@ fn main() {
             // only its own; the ACL decides which windows may invoke at all.
             create_library_window,
             focus_library_window,
+            // The vocabulary + build-identity advertisement a remotely-served
+            // page queries before treating a refusal as a version statement.
+            native_vocabulary,
             restart_desktop_after_update,
             download::download_file_native,
             download::begin_generated_download,
@@ -6627,6 +6676,7 @@ fn open_about_window(app: &tauri::AppHandle) -> Result<(), String> {
         return Ok(());
     }
     let version = app.package_info().version.to_string();
+    let build = CHAN_DESKTOP_BUILD_ID;
     // Inject the launcher's light/dark choice so the About window follows it
     // instead of only the OS media query. `null` follows the OS.
     let theme = app
@@ -6640,7 +6690,7 @@ fn open_about_window(app: &tauri::AppHandle) -> Result<(), String> {
     let win = WebviewWindowBuilder::new(
         app,
         "about",
-        WebviewUrl::App(format!("about.html?v={version}").into()),
+        WebviewUrl::App(format!("about.html?v={version}&b={build}").into()),
     )
     .title("About Chan Desktop")
     // Sized to fit the content with equal top/bottom margin: app head,

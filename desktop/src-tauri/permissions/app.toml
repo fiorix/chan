@@ -52,6 +52,7 @@ permissions = [
   "allow-open-reverse-tunnel",
   "allow-create-library-window",
   "allow-focus-library-window",
+  "allow-native-vocabulary",
 ]
 
 [[permission]]
@@ -209,6 +210,11 @@ commands.allow = ["create_library_window"]
 identifier = "allow-focus-library-window"
 description = "Enables the focus_library_window command (raise a window of the caller's own library)."
 commands.allow = ["focus_library_window"]
+
+[[permission]]
+identifier = "allow-native-vocabulary"
+description = "Enables the native_vocabulary command (the granted command list plus build identity, so a remotely-served page can learn what is available instead of discovering absence through a refusal)."
+commands.allow = ["native_vocabulary"]
 
 # Deliberately NOT in the workspace-window set: only an authenticated exact
 # gateway origin needs the native mirror, and the runtime-minted capability is

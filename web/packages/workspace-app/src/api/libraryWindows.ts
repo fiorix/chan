@@ -19,6 +19,7 @@ import {
   focusNativeLibraryWindow,
   isTauriDesktop,
 } from "./desktop";
+import { hostVocabulary, isAclRefusal } from "./nativeVocabulary";
 import type {
   ScopedLibraryAction,
   ScopedLibraryActionResult,
@@ -43,22 +44,6 @@ export interface LibraryWindowBridge {
   currentWindowId: () => string;
 }
 
-/// Whether a rejected invoke was the app's ACL withholding the command rather
-/// than a command that ran and failed.
-///
-/// Tauri rejects an ungranted command before any handler runs, so the text is
-/// Tauri's: a release build reports `Command {cmd} not allowed by ACL` and a
-/// debug build one of several longer diagnostics. Every form names the command
-/// and says it is not allowed or explicitly denied, while the native
-/// library-window handlers report their own failures in other words entirely
-/// (a missing library, a disconnected devserver, an unknown window). Requiring
-/// both conditions is what keeps a handler's real reason from being reported
-/// as a version problem.
-function isAclRefusal(command: string, message: string): boolean {
-  if (!message.includes(command)) return false;
-  return message.includes("not allowed") || message.includes("explicitly denied");
-}
-
 /// Invoke a native library-window command, and describe a withheld one in
 /// terms of the app instead of Tauri's vocabulary.
 ///
@@ -73,17 +58,31 @@ function isAclRefusal(command: string, message: string): boolean {
 /// webview, which is the reason the native path exists at all. So what the
 /// user is told is the entire remedy.
 ///
-/// A release build collapses every rejection shape into one string that says
-/// only that the command was refused, so the message below has to hold for the
-/// whole class: a command the app has never heard of, and one it grants but not
-/// for this window. Version skew is named as the likely cause rather than the
-/// certain one for that reason. What is certain, and worth saying because the
-/// deck offers a retry, is that repeating the action cannot change the answer.
+/// What can be said depends on what the app can say. An app that advertises
+/// its vocabulary (`hostVocabulary`) turns a missing command into a definite
+/// version statement before any invoke, and turns a refusal of a command it
+/// DOES advertise into an authorization statement, because those call for
+/// different actions. An app that cannot say leaves only the thrown refusal,
+/// and a release build collapses every rejection shape into one string, so
+/// that message has to hold for the whole class: a command the app has never
+/// heard of, and one it grants but not for this window. Version skew is named
+/// as the likely cause rather than the certain one for that reason. What is
+/// certain, and worth saying because the deck offers a retry, is that
+/// repeating the action cannot change the answer.
 async function invokeNative(
   command: string,
   attempt: string,
   invoke: () => Promise<void>,
 ): Promise<void> {
+  const vocabulary = await hostVocabulary();
+  if (vocabulary && !vocabulary.has(command)) {
+    console.error(`[chan-desktop] ${command} absent from the app's advertised vocabulary`);
+    throw new Error(
+      `chan-desktop cannot ${attempt}: the installed app does not have this action. ` +
+        "The app and the page it is showing are different builds; update chan-desktop. " +
+        "Retrying will not help.",
+    );
+  }
   try {
     await invoke();
   } catch (error) {
@@ -94,6 +93,14 @@ async function invokeNative(
     // Which command was withheld is the first thing a report of this needs and
     // the last thing the user has any use for, so it goes to the console.
     console.error(`[chan-desktop] ${command} withheld by the app ACL`, message);
+    if (vocabulary?.has(command)) {
+      throw new Error(
+        `chan-desktop cannot ${attempt}: the installed app grants this action but refused ` +
+          "it for this window. That is an authorization problem, not a version " +
+          "difference; updating chan-desktop will not change the answer, and neither " +
+          "will retrying.",
+      );
+    }
     throw new Error(
       `chan-desktop cannot ${attempt}: the installed app refused this action. ` +
         "A window served over the gateway is driven by the chan-desktop installed on this " +
