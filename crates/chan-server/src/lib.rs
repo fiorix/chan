@@ -122,8 +122,9 @@ use routes::{
     api_search_content, api_search_files, api_search_workspace, api_session_handover_reply,
     api_set_terminal_broadcast, api_storage_reset, api_survey_reply, api_team_config_read,
     api_team_config_write, api_terminal_next_name, api_terminal_ws, api_terminals_roster,
-    api_upload_file, api_window_reply, api_workspace_bootstrap, api_write_file, proxy_extension,
-    proxy_extension_root, require_local_mutation, spawn_roster_broadcaster, ws_upgrade,
+    api_upload_file, api_window_reply, api_workspace_bootstrap, api_write_file,
+    extension_response_policy, proxy_extension, proxy_extension_root, require_local_mutation,
+    spawn_roster_broadcaster, ws_upgrade,
 };
 #[cfg(feature = "embeddings")]
 use routes::{
@@ -163,6 +164,19 @@ use chan_workspace::{
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch};
 use tower_http::trace::TraceLayer;
+
+/// The default make-span records the raw URI, and an extension
+/// capability path carries a bearer credential in it. Both tenant
+/// routers log through the redacting formatter; every other URI is
+/// recorded unchanged.
+fn redacted_request_span(request: &axum::http::Request<axum::body::Body>) -> tracing::Span {
+    tracing::debug_span!(
+        "request",
+        method = %request.method(),
+        uri = %crate::routes::loggable_uri(request.uri()),
+        version = ?request.version(),
+    )
+}
 
 // `ServeConfig` / `ServeHandle` / `sanitize_prefix` live in chan-library (the
 // host lifecycle + tenant builder take them). Re-exported so the route layer,
@@ -1191,7 +1205,7 @@ fn terminal_router(state: Arc<AppState>) -> Router {
     Router::new()
         .merge(api)
         .fallback(serve_static)
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(redacted_request_span))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -1848,14 +1862,19 @@ fn router_with_extensions(
             "/_chan/extensions/{id}/{capability}/{*path}",
             any(proxy_extension),
         )
-        .route_layer(middleware::from_fn(require_local_mutation));
+        .route_layer(middleware::from_fn(require_local_mutation))
+        // Outermost on the namespace: every response leaving these
+        // routes, the guest 403 included, carries the extension
+        // response policy so the opaque-origin frame reads true
+        // statuses instead of a CORS mask.
+        .route_layer(middleware::from_fn(extension_response_policy));
     let api = api.merge(extension_proxy);
     Router::new()
         .merge(api)
         .fallback(serve_static)
         .layer(axum::Extension(extension_tenant))
         .layer(axum::Extension(extension_catalog))
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(redacted_request_span))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,

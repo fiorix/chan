@@ -144,7 +144,7 @@ MAX_DEVSERVERS=2
 # Scenario dispatch: "all" (default) = core suite + every registered
 # scenario; "core" = the inline suite only; a registered name = stack
 # bring-up + that scenario only. Lanes append their scenario name here.
-SCENARIOS="sweeper watchdog roster upload windowclose matrix sharedingress movenode ctlrestart proxydown ctloutage ctrlplane"
+SCENARIOS="sweeper watchdog roster upload windowclose matrix sharedingress movenode ctlrestart proxydown ctloutage ctrlplane extension"
 SCENARIO="${1:-all}"
 RUN_CORE=1
 case "$SCENARIO" in all | core) ;; *) RUN_CORE=0 ;; esac
@@ -3199,6 +3199,306 @@ scenario_ctrlplane() {
     else
         assert_fail "ctrlplane: login history and overview diverged: history=$audit_count/$audit_users overview=$history_count/$history_users"
     fi
+}
+
+# Scenario: extension capability lane through the gateway -- the
+# v0.86.0 extension-through-gateway defect class end to end. A
+# devserver declares a node test extension (entry doc + module script
+# behind the process-private upstream token); the exact capability
+# path shape then serves cookieless through a real gateway tenant, a
+# bogus capability answers a CORS-readable 404 shaped like the
+# session gate's, non-extension paths keep today's bare gate 404 byte
+# for byte, the capability never reaches a service log, and a
+# devserver restart re-mints the capability (the stale path dies
+# READABLE, the fresh one serves). A headless-Chrome phase proves the
+# opaque-origin story a curl cannot: a REAL sandboxed iframe boots the
+# module script, reads true statuses, and the tenant watch socket
+# drops on restart -- the client-side trigger the SPA staleness
+# recovery hangs off.
+scenario_extension() {
+    local ext_port=17833
+    free_port "$ext_port"
+    if [ ! -x "$CHROME_BIN" ]; then
+        assert_fail "extension: headless Chrome not found (set E2E_CHROME_BIN)"
+    fi
+
+    # -- the test extension: a node subprocess speaking the v1
+    # handshake. Its entry doc carries two probes that report back to
+    # the embedding page over postMessage: the module-script boot and
+    # a fetch of a sibling bogus-capability path.
+    local home="$WORK/home-ext"
+    rm -rf "$home"
+    mkdir -p "$home/extensions"
+    cat > "$home/extensions/e2e.js" << 'JS'
+const http = require("node:http");
+const crypto = require("node:crypto");
+
+const token = crypto.randomBytes(32).toString("hex");
+const BOGUS = "f".repeat(64);
+const APP_JS = 'parent.postMessage({ kind: "e2e-extension", appModule: true }, "*");\n';
+const PAGE = `<!doctype html><meta charset="utf-8"><title>e2e extension</title>
+<script type="module" src="./app.js"></script>
+<script type="module">
+const report = (r) => parent.postMessage({ kind: "e2e-extension", ...r }, "*");
+try {
+    const app = await fetch("./app.js", { mode: "cors" });
+    const bogus = await fetch("../${BOGUS}/app.js", { mode: "cors" }).then(
+        (r) => ({ bogusStatus: r.status }),
+        (e) => ({ bogusError: String(e) }),
+    );
+    report({ appStatus: app.status, ...bogus });
+} catch (e) {
+    report({ appError: String(e) });
+}
+</script>`;
+
+const server = http.createServer((req, res) => {
+    const url = new URL(req.url, "http://127.0.0.1");
+    if (url.searchParams.get("t") !== token) {
+        res.writeHead(401).end();
+    } else if (url.pathname === "/") {
+        res.writeHead(200, { "content-type": "text/html" }).end(PAGE);
+    } else if (url.pathname === "/app.js") {
+        res.writeHead(200, { "content-type": "text/javascript" }).end(APP_JS);
+    } else {
+        res.writeHead(404).end();
+    }
+});
+server.listen(0, "127.0.0.1", () => {
+    console.log(`CHAN_EXTENSION_V1={"url":"http://127.0.0.1:${server.address().port}/","token":"${token}"}`);
+});
+JS
+    cat > "$home/extensions/e2e.toml" << 'TOML'
+name = "E2E extension"
+command = "node"
+args = ["e2e.js"]
+TOML
+
+    # A fresh user: the per-user live-devserver cap and the account
+    # cuts other scenarios exercise must not interfere with this lane.
+    local EXT_EMAIL="ext-scenario@e2e.chan" EXT_ID EXT_USER EXT_PAT EXT_DS
+    read -r EXT_ID EXT_USER <<< "$(seed_user "$EXT_EMAIL")"
+    { [ -n "$EXT_ID" ] && [ -n "$EXT_USER" ]; } || \
+        assert_fail "extension: seeding the scenario user failed"
+    mint_into "$EXT_EMAIL" e2e-ext EXT_PAT EXT_DS || \
+        assert_fail "extension: PAT mint for the scenario devserver failed"
+    # Tunnel-only devservers keep library mutation loopback-only, so
+    # the workspace is registered in the scenario home BEFORE the dial
+    # (the same order the gateway dev-setup doc prescribes), and the
+    # roster overlay is pre-written so the boot mounts it. The
+    # directory lives outside the repo: `chan` refuses a workspace
+    # nested in a foreign git checkout, and `chan open`'s handoff is
+    # user-global (it would find a REAL devserver on a dev host), so
+    # neither is usable here.
+    local ws_dir="$HOME/.cache/chan-gateway-zone-e2e/ext-ws"
+    rm -rf "$ws_dir"
+    mkdir -p "$ws_dir"
+    env CHAN_HOME="$home" "$CHAN_BIN" workspace add "$ws_dir" \
+        > "$LOGS/ext-workspace-add.log" 2>&1 || \
+        assert_fail "extension: chan workspace add failed (logs/ext-workspace-add.log)"
+    mkdir -p "$home/devserver"
+    printf '[{"path":"%s","on":true,"generation":0}]' "$ws_dir" \
+        > "$home/devserver/workspaces.json"
+    spawn_devserver ext "$ext_port" "$EXT_PAT" "$(node_tunnel_url p1)"
+    local node=""
+    for _ in $(seq 75); do
+        node="$(tunnel_field "$EXT_DS" proxy_id)"
+        [ -n "$node" ] && break
+        sleep 0.4
+    done
+    [ -n "$node" ] || assert_fail "extension: scenario devserver never registered"
+    local host
+    host="$EXT_USER--$(disc "$EXT_DS").$node.$APEX"
+
+    # Session for the catalog read (the same two-hop mint every
+    # scenario uses); the cookieless probes below never carry it.
+    local body hdrs gate csrf
+    body="$(entry_for "$EXT_PAT" "{\"owner_user_id\":\"$EXT_ID\",\"devserver_id\":\"$EXT_DS\"}")"
+    hdrs="$WORK/hdrs-extension.txt"
+    post_entry_exchange "$body" "$node" "$host" "$hdrs" >/dev/null || \
+        assert_fail "extension: entry exchange failed"
+    gate="$(sed -n 's/^[Ss]et-[Cc]ookie: \(__Host-devserver_gate=[^;]*\).*/\1/p' "$hdrs" | head -1)"
+    csrf="$(sed -n 's/^[Ss]et-[Cc]ookie: __Host-devserver_csrf=\([^;]*\).*/\1/p' "$hdrs" | head -1)"
+    { [ -n "$gate" ] && [ -n "$csrf" ]; } || assert_fail "extension: no session cookies minted"
+
+    # The pre-registered workspace's tenant prefix, from the read-only
+    # library surface (bounded poll: the mount follows the dial).
+    local rows prefix=""
+    for _ in $(seq 50); do
+        rows="$(curl_node "$node" "$host" -H "Cookie: $gate" \
+            "https://$host:$PROXY_PORT/api/library/workspaces")"
+        prefix="$(printf %s "$rows" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const v=JSON.parse(d);const rows=Array.isArray(v)?v:(v.workspaces||[]);const row=rows.find(r=>r&&r.prefix);process.stdout.write(row?String(row.prefix).replace(/^\//,""):"")}catch{}})')"
+        [ -n "$prefix" ] && break
+        sleep 0.4
+    done
+    [ -n "$prefix" ] || assert_fail "extension: no workspace prefix visible through the tunnel: $(printf %s "$rows" | head -c 200)"
+
+    ext_entry_path() { # -> the e2e extension's tenant-relative entry path
+        curl_node "$node" "$host" -H "Cookie: $gate" \
+            "https://$host:$PROXY_PORT/$prefix/api/extensions" |
+            node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const row=JSON.parse(d).find(r=>String(r.entry_path||"").startsWith("/_chan/extensions/e2e/"));process.stdout.write(row?row.entry_path:"")}catch{}})'
+    }
+    local entry_path="" cap=""
+    for _ in $(seq 25); do
+        entry_path="$(ext_entry_path)"
+        [ -n "$entry_path" ] && break
+        sleep 0.4
+    done
+    cap="$(printf %s "$entry_path" | grep -oE '[0-9a-f]{64}' | head -1)"
+    if [ -n "$entry_path" ] && [ -n "$cap" ]; then
+        assert_pass "extension: catalog lists the declared extension with a capability entry path"
+    else
+        assert_fail "extension: catalog never listed the e2e extension (entry_path='$entry_path')"
+    fi
+
+    # -- the live defect's exact probes, cookieless --
+    local h code
+    h="$WORK/ext-entry-headers.txt"
+    code="$(curl_node "$node" "$host" -o "$WORK/ext-entry.html" -w '%{http_code}' -D "$h" \
+        -H "Origin: null" -H "Sec-Fetch-Mode: cors" \
+        "https://$host:$PROXY_PORT/$prefix$entry_path")"
+    if [ "$code" = "200" ] && grep -qi '^access-control-allow-origin: null' "$h" &&
+        grep -q 'e2e extension' "$WORK/ext-entry.html"; then
+        assert_pass "extension: cookieless Origin:null entry doc serves through the gateway with ACAO null"
+    else
+        assert_fail "extension: entry doc expected 200 + ACAO null, got $code: $(head -c 120 "$WORK/ext-entry.html")"
+    fi
+
+    h="$WORK/ext-appjs-headers.txt"
+    code="$(curl_node "$node" "$host" -o "$WORK/ext-app.js" -w '%{http_code}' -D "$h" \
+        -H "Origin: null" -H "Sec-Fetch-Mode: cors" \
+        "https://$host:$PROXY_PORT/$prefix${entry_path}app.js")"
+    if [ "$code" = "200" ] && grep -qi '^access-control-allow-origin: null' "$h" &&
+        grep -q 'appModule' "$WORK/ext-app.js"; then
+        assert_pass "extension: cookieless module script app.js serves through the gateway with ACAO null"
+    else
+        assert_fail "extension: app.js expected 200 + ACAO null, got $code"
+    fi
+
+    local bogus
+    bogus="$(printf 'f%.0s' $(seq 1 64))"
+    h="$WORK/ext-bogus-headers.txt"
+    code="$(curl_node "$node" "$host" -o "$WORK/ext-bogus.json" -w '%{http_code}' -D "$h" \
+        -H "Origin: null" -H "Sec-Fetch-Mode: cors" \
+        "https://$host:$PROXY_PORT/$prefix/_chan/extensions/e2e/$bogus/app.js")"
+    if [ "$code" = "404" ] && grep -qi '^access-control-allow-origin: null' "$h" &&
+        grep -q '^{"error":"not found"}$' "$WORK/ext-bogus.json"; then
+        assert_pass "extension: bogus capability answers a CORS-readable 404 shaped like the session gate's"
+    else
+        assert_fail "extension: bogus capability expected readable 404, got $code: $(head -c 120 "$WORK/ext-bogus.json")"
+    fi
+
+    # Non-extension tenant paths keep today's bare anti-enumeration
+    # 404: exact body, NO ACAO. The capability shape without its
+    # trailing slash is not admitted either.
+    local bare
+    for bare in "$prefix/" "$prefix/api/health" "$prefix/_chan/extensions/e2e/$cap"; do
+        h="$WORK/ext-bare-headers.txt"
+        code="$(curl_node "$node" "$host" -o "$WORK/ext-bare.json" -w '%{http_code}' -D "$h" \
+            "https://$host:$PROXY_PORT/$bare")"
+        if [ "$code" = "404" ] && ! grep -qi '^access-control-allow-origin' "$h" &&
+            grep -q '^{"error":"not found"}$' "$WORK/ext-bare.json"; then
+            assert_pass "extension: cookieless /$bare keeps the bare session-gate 404 byte for byte"
+        else
+            assert_fail "extension: /$bare expected today's bare 404, got $code ($(head -c 80 "$WORK/ext-bare.json"))"
+        fi
+    done
+
+    if ! grep -qF "$cap" "$LOGS/proxy-$node.log" && ! grep -qF "$cap" "$LOGS/ds-ext.log"; then
+        assert_pass "extension: capability segment absent from the proxy and devserver logs"
+    else
+        assert_fail "extension: capability segment leaked into a service log"
+    fi
+
+    # -- headless-Chrome phase: the true opaque-origin proof, then the
+    # devserver bounce under an open watch socket --
+    cp "$REPO/scripts/e2e/extension-capability-browser.mjs" "$WORK/"
+    local verdict="$WORK/ext-browser-verdict.json"
+    rm -f "$verdict" "$WORK/ext-browser-stdout.txt"
+    (cd "$WORK" && CHROME_BIN="$CHROME_BIN" TENANT_BASE="https://$host:$PROXY_PORT" \
+        NODE_IP="$(node_ip "$node")" PREFIX="$prefix" ENTRY_PATH="$entry_path" \
+        GATE_COOKIE="${gate#__Host-devserver_gate=}" VERDICT="$verdict" \
+        node extension-capability-browser.mjs \
+        > "$WORK/ext-browser-stdout.txt" 2> "$LOGS/ext-browser.log") &
+    local browser_pid=$!
+    local ws_open=0
+    for _ in $(seq 100); do
+        grep -q '^ws-open' "$WORK/ext-browser-stdout.txt" 2>/dev/null && { ws_open=1; break; }
+        kill -0 "$browser_pid" 2>/dev/null || break
+        sleep 0.3
+    done
+    if [ "$ws_open" != 1 ]; then
+        wait "$browser_pid" 2>/dev/null
+        assert_fail "extension: browser probe never opened the watch socket ($(tail -c 200 "$LOGS/ext-browser.log" 2>/dev/null))"
+    fi
+
+    # Bounce the devserver under the open socket and the mounted path.
+    kill "$(cat "$WORK/pids/ds-ext.pid")" 2>/dev/null
+    spawn_devserver ext "$ext_port" "$EXT_PAT" "$(node_tunnel_url p1)"
+    wait "$browser_pid" 2>/dev/null
+    [ -s "$verdict" ] || assert_fail "extension: browser probe wrote no verdict (see logs/ext-browser.log)"
+    local app_module app_status bogus_status ws_closed
+    read -r app_module app_status bogus_status ws_closed <<< "$(node -e '
+        const v = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+        console.log(`${v.appModule === true} ${v.appStatus ?? ""} ${v.bogusStatus ?? v.bogusError ?? ""} ${v.wsClosed === true}`);
+    ' "$verdict")"
+    if [ "$app_module" = "true" ] && [ "$app_status" = "200" ]; then
+        assert_pass "extension: sandboxed opaque-origin iframe booted its module script through the gateway"
+    else
+        assert_fail "extension: sandboxed iframe boot failed (appModule=$app_module appStatus=$app_status, see $verdict)"
+    fi
+    if [ "$bogus_status" = "404" ]; then
+        assert_pass "extension: the opaque frame reads the bogus-capability status as a true 404 (no CORS mask)"
+    else
+        assert_fail "extension: opaque frame expected a readable 404, got '$bogus_status'"
+    fi
+    if [ "$ws_closed" = "true" ]; then
+        assert_pass "extension: tenant watch socket dropped on devserver restart (the SPA staleness trigger fires over the gateway)"
+    else
+        assert_fail "extension: watch socket SURVIVED the devserver restart -- the SPA staleness recovery has no client trigger over the gateway (route to the host)"
+    fi
+
+    # -- restart convergence, server half: the capability rotates, the
+    # stale path dies READABLE, the fresh one serves cookieless. The
+    # SPA-side convergence is covered by the workspace-app suites and
+    # the owner's hand-smoke; it needs a web-bundled chan binary, which
+    # this harness does not require.
+    local new_entry_path="" new_cap=""
+    for _ in $(seq 100); do
+        new_entry_path="$(ext_entry_path)"
+        new_cap="$(printf %s "$new_entry_path" | grep -oE '[0-9a-f]{64}' | head -1)"
+        [ -n "$new_cap" ] && [ "$new_cap" != "$cap" ] && break
+        sleep 0.4
+    done
+    if [ -n "$new_cap" ] && [ "$new_cap" != "$cap" ]; then
+        assert_pass "extension: restart re-minted the capability (catalog re-resolution yields the fresh path)"
+    else
+        assert_fail "extension: capability did not rotate after the restart (old=$cap new='$new_cap')"
+    fi
+
+    h="$WORK/ext-stale-headers.txt"
+    code="$(curl_node "$node" "$host" -o "$WORK/ext-stale.json" -w '%{http_code}' -D "$h" \
+        -H "Origin: null" -H "Sec-Fetch-Mode: cors" \
+        "https://$host:$PROXY_PORT/$prefix$entry_path")"
+    if [ "$code" = "404" ] && grep -qi '^access-control-allow-origin: null' "$h"; then
+        assert_pass "extension: the pre-restart capability now dies as a CORS-readable 404"
+    else
+        assert_fail "extension: stale capability expected readable 404, got $code"
+    fi
+    h="$WORK/ext-fresh-headers.txt"
+    code="$(curl_node "$node" "$host" -o /dev/null -w '%{http_code}' -D "$h" \
+        -H "Origin: null" -H "Sec-Fetch-Mode: cors" \
+        "https://$host:$PROXY_PORT/$prefix${new_entry_path}app.js")"
+    if [ "$code" = "200" ] && grep -qi '^access-control-allow-origin: null' "$h"; then
+        assert_pass "extension: the fresh capability serves the module script cookieless"
+    else
+        assert_fail "extension: fresh capability expected 200, got $code"
+    fi
+
+    # Leave the stack as found.
+    kill "$(cat "$WORK/pids/ds-ext.pid")" 2>/dev/null
+    rm -f "$WORK/pids/ds-ext.pid"
+    log "extension: scenario devserver stopped"
 }
 
 run_scenarios() { # run_scenarios <all|name>

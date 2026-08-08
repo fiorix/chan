@@ -2331,3 +2331,274 @@ async fn ws_bridge_cuts_both_idle_socket_with_a_close_frame() {
     server.abort();
     app.cleanup().await;
 }
+
+// ---------------------------------------------------------------
+// Extension capability lane
+// ---------------------------------------------------------------
+
+const EXT_CAPABILITY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn ext_path(rest: &str) -> String {
+    format!("/blog/_chan/extensions/echo/{EXT_CAPABILITY}{rest}")
+}
+
+/// The live defect: an opaque-origin extension frame fetches its module
+/// script cookieless, so it can never pass the session gate. The exact
+/// capability shape is admitted without it; the devserver's own
+/// capability check is the authorization. The forwarded request must
+/// carry no cookie and a NON-owner assertion (nil subject), so the
+/// devserver's tunnel lane keeps capability callers read-only.
+#[tokio::test]
+async fn extension_capability_path_admits_cookieless_and_stays_non_owner() {
+    let app = TestApp::new().await;
+    let uid = Uuid::new_v4();
+    let captured = Captured::default();
+    let token = format!("tok-{}", Uuid::new_v4().simple());
+    app.register_tunnel_with_token(
+        &token,
+        "alice",
+        "blog",
+        uid,
+        capturing_router(captured.clone()),
+    )
+    .await;
+
+    let host = host_for("alice");
+    let (status, headers, body) = send_host(
+        &app.router,
+        Method::GET,
+        &host,
+        &ext_path("/app.js"),
+        &[("origin", "null"), ("sec-fetch-mode", "cors")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers.get(header::ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(),
+        "null"
+    );
+    assert_eq!(body.as_ref(), b"ok");
+
+    let upstream_headers = captured.requests.lock().unwrap()[0].headers.clone();
+    assert!(upstream_headers.get(header::COOKIE).is_none());
+    let assertion = upstream_headers
+        .get("x-chan-gateway-assertion")
+        .expect("forwarded request carries the assertion")
+        .to_str()
+        .unwrap();
+    let key = chan_tunnel_proto::gateway_assertion::derive_assertion_key(&token);
+    let claims = chan_tunnel_proto::gateway_assertion::verify(
+        &key,
+        assertion,
+        &host,
+        "blog",
+        &uid.to_string(),
+    )
+    .expect("assertion verifies at the devserver");
+    assert!(!claims.is_owner(), "capability callers must stay non-owner");
+    assert_eq!(claims.sub, Uuid::nil().to_string());
+    app.cleanup().await;
+}
+
+/// A wrong (well-formed) capability forwards to the devserver, whose
+/// miss answers 404; the namespace policy keeps that status readable
+/// from the opaque-origin frame instead of CORS-masking it.
+#[tokio::test]
+async fn extension_capability_miss_404_is_cors_readable() {
+    let app = TestApp::new().await;
+    let uid = Uuid::new_v4();
+    let upstream = Router::new().fallback(|| async { StatusCode::NOT_FOUND.into_response() });
+    app.register_tunnel("alice", "blog", uid, upstream).await;
+
+    let host = host_for("alice");
+    let stale = "f".repeat(64);
+    let (status, headers, _) = send_host(
+        &app.router,
+        Method::GET,
+        &host,
+        &format!("/blog/_chan/extensions/echo/{stale}/app.js"),
+        &[("origin", "null"), ("sec-fetch-mode", "cors")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        headers.get(header::ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(),
+        "null"
+    );
+    app.cleanup().await;
+}
+
+/// Only the exact shape is admitted: near-miss spellings stay behind
+/// the session gate and keep today's bare anti-enumeration 404,
+/// byte-identical to any other unauthenticated tenant path.
+#[tokio::test]
+async fn loose_extension_shapes_stay_behind_the_session_gate() {
+    let app = TestApp::new().await;
+    let uid = Uuid::new_v4();
+    let upstream = Router::new().fallback(|| async { "must never be reached" });
+    app.register_tunnel("alice", "blog", uid, upstream).await;
+
+    let host = host_for("alice");
+    let upper = EXT_CAPABILITY.to_ascii_uppercase();
+    for path in [
+        // No trailing slash after the capability.
+        &format!("/blog/_chan/extensions/echo/{EXT_CAPABILITY}") as &str,
+        // Capability malformed: short, uppercase.
+        "/blog/_chan/extensions/echo/0123abc/",
+        &format!("/blog/_chan/extensions/echo/{upper}/app.js"),
+        // Tenant content around the namespace.
+        "/blog/",
+        "/blog/api/extensions",
+    ] {
+        let (status, headers, body) =
+            send_host(&app.router, Method::GET, &host, path, &[("origin", "null")]).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        assert!(
+            headers.get(header::ACCESS_CONTROL_ALLOW_ORIGIN).is_none(),
+            "{path} must stay CORS-opaque"
+        );
+        assert_eq!(body.as_ref(), br#"{"error":"not found"}"#, "{path}");
+    }
+    app.cleanup().await;
+}
+
+/// The CSRF gate protects cookie-authenticated mutations; the
+/// capability lane is cookieless, so a POST forwards without the CSRF
+/// pair. Authorization for mutations stays with the devserver: its
+/// tunnel lane 403s the non-owner assertion this lane mints.
+#[tokio::test]
+async fn extension_capability_post_skips_the_csrf_gate() {
+    let app = TestApp::new().await;
+    let uid = Uuid::new_v4();
+    let captured = Captured::default();
+    app.register_tunnel("alice", "blog", uid, capturing_router(captured.clone()))
+        .await;
+
+    let host = host_for("alice");
+    let (status, _, body) = send_host_body(
+        &app.router,
+        Method::POST,
+        &host,
+        &ext_path("/state"),
+        &[("origin", "null")],
+        Body::from("{}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_ref(), b"ok");
+    app.cleanup().await;
+}
+
+/// A bare host with several live devservers cannot bind a capability
+/// path to one tunnel. The refusal is still shaped like the session
+/// gate's 404 but carries the namespace policy so the frame can read
+/// it.
+#[tokio::test]
+async fn extension_capability_on_an_ambiguous_bare_host_is_a_readable_404() {
+    let app = TestApp::new().await;
+    let uid = Uuid::new_v4();
+    app.register_tunnel_hello("alice", DS_A, "one", uid, Router::new())
+        .await;
+    app.register_tunnel_hello("alice", DS_B, "two", uid, Router::new())
+        .await;
+
+    let (status, headers, body) = send_host(
+        &app.router,
+        Method::GET,
+        &host_for("alice"),
+        &ext_path("/app.js"),
+        &[("origin", "null")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        headers.get(header::ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(),
+        "null"
+    );
+    assert_eq!(body.as_ref(), br#"{"error":"not found"}"#);
+    app.cleanup().await;
+}
+
+/// A disc host resolves the capability path to its one devserver even
+/// when the user holds several live registrations.
+#[tokio::test]
+async fn extension_capability_resolves_through_a_disc_host() {
+    let app = TestApp::new().await;
+    let uid = Uuid::new_v4();
+    let captured = Captured::default();
+    app.register_tunnel_hello(
+        "alice",
+        DS_A,
+        "blog",
+        uid,
+        capturing_router(captured.clone()),
+    )
+    .await;
+    app.register_tunnel_hello("alice", DS_B, "blog", uid, Router::new())
+        .await;
+
+    let (status, headers, body) = send_host(
+        &app.router,
+        Method::GET,
+        &disc_host_for("alice", DS_A),
+        &ext_path("/app.js"),
+        &[("origin", "null")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers.get(header::ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(),
+        "null"
+    );
+    assert_eq!(body.as_ref(), b"ok");
+    app.cleanup().await;
+}
+
+/// The extension frame's WebSocket connects with `Origin: null` and no
+/// cookies; on the capability lane the tenant-origin check does not
+/// apply and the upgrade bridges.
+#[tokio::test]
+async fn extension_capability_websocket_bridges_with_null_origin() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::Message as TgMessage;
+
+    let app = TestApp::new().await;
+    let uid = Uuid::new_v4();
+
+    async fn echo(ws: axum::extract::WebSocketUpgrade) -> axum::response::Response {
+        ws.on_upgrade(|mut socket| async move {
+            if let Some(Ok(axum::extract::ws::Message::Text(s))) = socket.recv().await {
+                let _ = socket
+                    .send(axum::extract::ws::Message::Text(format!("echo:{s}").into()))
+                    .await;
+            }
+            let _ = socket.close().await;
+        })
+    }
+    let socket_path = ext_path("/socket");
+    let upstream = Router::new().route(&socket_path, axum::routing::get(echo));
+    app.register_tunnel("alice", "blog", uid, upstream).await;
+
+    let host = host_for("alice");
+    let proxy_addr = serve_router_real(app.router.clone()).await;
+    let url = format!("ws://{proxy_addr}{socket_path}");
+    let mut req = url.into_client_request().unwrap();
+    req.headers_mut()
+        .insert(header::HOST, HeaderValue::from_str(&host).unwrap());
+    req.headers_mut()
+        .insert(header::ORIGIN, HeaderValue::from_static("null"));
+
+    let (mut client_ws, _resp) = tokio_tungstenite::connect_async(req).await.unwrap();
+    client_ws
+        .send(TgMessage::Text("doom".into()))
+        .await
+        .unwrap();
+    let echoed = client_ws.next().await.expect("frame").expect("ws ok");
+    match echoed {
+        TgMessage::Text(s) => assert_eq!(s, "echo:doom"),
+        other => panic!("unexpected: {other:?}"),
+    }
+    let _ = client_ws.close(None).await;
+    app.cleanup().await;
+}
