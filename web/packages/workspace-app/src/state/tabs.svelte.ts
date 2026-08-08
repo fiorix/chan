@@ -4350,8 +4350,8 @@ export function openDashboardInActivePane(opts?: OpenDashboardOptions): void {
 }
 
 /// Open a local extension inside the named pane. The caller passes only stable
-/// public metadata; ExtensionTab.svelte resolves the tokened URL from the
-/// in-memory catalog when it mounts.
+/// public metadata; ExtensionTab.svelte resolves the tokened URL from the live
+/// in-memory catalog, so it tracks a catalog refresh.
 export function openExtensionInPane(
   paneId: string,
   extensionId: string,

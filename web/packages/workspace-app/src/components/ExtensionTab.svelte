@@ -42,6 +42,11 @@
   let { tab, paneId, active = true }: Props = $props();
 
   const extension = $derived(extensionFor(tab.extensionId));
+  // Tracks the live catalog: refreshExtensions() after a watch reconnect
+  // flows a re-minted capability path straight into the iframe src (Svelte
+  // rewrites the attribute only when the string changes, so an unchanged
+  // path never re-navigates), and a vanished extension drops the frame to
+  // the unavailable branch below.
   const frameSrc = $derived(extension ? apiPath(extension.entry_path) : undefined);
   const catalogReady = $derived(extensionsReady());
   let frame: HTMLIFrameElement | undefined = $state();
