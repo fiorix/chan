@@ -32,6 +32,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [aur-publication-is-suspended](v0.86.0/aur-publication-is-suspended.md) | accepted, blocked upstream | restore AUR publication once the incident notice is superseded and pushes are permitted, deleting the guard job in the same commit |
 | [cs-terminal-new-cannot-spawn-an-agent-session](v0.86.0/cs-terminal-new-cannot-spawn-an-agent-session.md) | accepted, both surfaces ruled 2026-08-07 | let cs terminal new and cs terminal restart set the spawn command and env, sharing the plumbing, so a single terminal can derive an agent and be poked and a live shell tab can be repaired |
 | [desktop-authorize-strands-the-browser-off-origin](v0.86.0/desktop-authorize-strands-the-browser-off-origin.md) | accepted 2026-08-08, specced | land the already-signed-in browser on the profile page with a login-successful notification after desktop authorization, instead of the dead-end loopback page |
+| [scene-conflict-test-is-load-sensitive](v0.86.0/scene-conflict-test-is-load-sensitive.md) | registered 2026-08-08, scheduling open | name and fix the load-sensitive race behind the flush-CAS-conflict test red observed once during the full gate; 20x isolated and 5x full parallel green after |
 
 The web-marketing-onboarding item left the roadmap during v0.86.0 preparation: onboarding-page direction is marketing work and now lives in the chan-mkt repository; see [done/web-marketing-onboarding.md](done/web-marketing-onboarding.md).
 
