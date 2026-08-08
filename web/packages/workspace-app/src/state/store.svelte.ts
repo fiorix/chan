@@ -30,7 +30,7 @@ import {
   type WatchSubscription,
   type WsStatus,
 } from "../api/client";
-import { isWorkspaceRootMissingError } from "../api/errors";
+import { isTransientApiError, isWorkspaceRootMissingError } from "../api/errors";
 import {
   closeSurveyFromRemote,
   showSurvey,
@@ -38,6 +38,7 @@ import {
 } from "./survey.svelte";
 import { applySessionRoster, isFollower, showHandover, type SessionParticipant } from "./session.svelte";
 import { docSyncRosterChanged } from "./docSync.svelte";
+import { refreshExtensions } from "./extensions.svelte";
 import { sceneSyncRosterChanged } from "./sceneSync.svelte";
 import { isWindowEnded, markWindowDiscarded, markWindowHidden } from "./windowLifecycle.svelte";
 import {
@@ -2032,11 +2033,41 @@ function onWatchReady(): void {
   // A reconnect may mean the server PROCESS was restarted (a remote
   // `chan devserver` bounced); detect that and reload rather than go stale.
   void checkServerInstance();
+  // Independently of the reload decision (a tunnel can answer the socket
+  // while /api/health still lags), re-resolve the extension catalog: a
+  // restart re-mints every per-process entry capability, and the refresh
+  // flows fresh paths into mounted extension frames. Terminal-only
+  // tenants serve no /api/extensions (bootstrap skips the catalog the
+  // same way).
+  if (!ui.terminalOnly) void refreshExtensions();
 }
 
 /// The server instance id seen on the first watch-socket connect.
 /// `null` until the first successful health read.
 let serverInstance: string | null = null;
+
+/// Monotonic id per checkServerInstance call. A reconnect can fire while
+/// an older call is still inside its retry backoff; the older call drops
+/// its (possibly pre-restart) result instead of racing the newer one.
+let instanceCheckGeneration = 0;
+
+/// `/api/health`'s `instance`, with a short bounded retry on transient
+/// failures. Same shape as `workspaceWithRetry` (5 attempts, 250ms
+/// linear step): a devserver coming back behind a tunnel can accept the
+/// watch socket while its HTTP routes still answer 502/504, which is
+/// exactly the moment the caller needs the read to decide a reload.
+/// A non-transient response throws immediately.
+async function healthInstanceWithRetry(): Promise<string | undefined> {
+  const maxAttempts = 5;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return (await api.health()).instance?.trim();
+    } catch (e) {
+      if (attempt >= maxAttempts || !isTransientApiError(e)) throw e;
+      await new Promise((r) => setTimeout(r, 250 * attempt));
+    }
+  }
+}
 
 /// Reload the window when the server process behind it changed.
 ///
@@ -2048,11 +2079,13 @@ let serverInstance: string | null = null;
 /// reload is that Cmd+R, automated. Reported against outbound remotes
 /// (^C + re-run of `chan devserver`); health answers on every tenant
 /// (terminal-only included), so the check applies everywhere.
-/// Best-effort: a transient read failure skips until the next
-/// reconnect.
+/// Best-effort: a read that still fails after the bounded retry waits
+/// for the next reconnect.
 async function checkServerInstance(): Promise<void> {
+  const generation = ++instanceCheckGeneration;
   try {
-    const instance = (await api.health()).instance?.trim();
+    const instance = await healthInstanceWithRetry();
+    if (generation !== instanceCheckGeneration) return;
     if (!instance) return;
     if (serverInstance === null) {
       serverInstance = instance;
@@ -2065,7 +2098,7 @@ async function checkServerInstance(): Promise<void> {
       window.location.reload();
     }
   } catch {
-    // No health answer (workspace-less tenant or transient failure):
+    // No health answer (workspace-less tenant or persistent failure):
     // try again on the next reconnect.
   }
 }
@@ -2092,41 +2125,23 @@ export function reconnectWatcher(): void {
   unwatch = openWatchSocket(onWatchEvent, onWatchStatus, onWatchReady);
 }
 
-/// True when a bootstrap failure is transient and worth retrying:
-/// the loopback server is briefly unreachable rather than returning
-/// a real error. A `fetch` to a refused/dropped socket throws a bare
-/// `TypeError` (not an `ApiError`); our transport maps a timeout to
-/// `ApiError(0)`; a server still spinning up its routes can answer
-/// 502/503/504. A 401 (missing token) or any other 4xx is NOT
-/// transient and must surface immediately (the 401 path workspaces the
-/// missing-token overlay). This matters on chan-desktop: WKWebView
-/// can recycle a workspace window's web-content process under memory or
-/// file-descriptor pressure, which reloads the SPA; if that reload
-/// races the embedded server recovering, a single-shot bootstrap
-/// sticks on "loading..." forever. A short bounded retry lets the
-/// reloaded window heal itself instead.
-function isTransientBootstrapError(e: unknown): boolean {
-  if (e instanceof ApiError) {
-    return e.status === 0 || e.status === 502 || e.status === 503 || e.status === 504;
-  }
-  // A connection-refused / dropped-socket fetch rejects with a
-  // TypeError; treat any non-ApiError throwable as transient.
-  return e instanceof Error;
-}
-
 /// Initial `api.workspace()` with a short bounded retry on transient
-/// loopback failures. Caps at 5 attempts with linear backoff (250ms
-/// step, ~3.75s total) so a wedged-but-recovering server heals the
-/// window without an indefinite spinner, while a genuine error
-/// (401, 404, malformed workspace) still throws out to the bootstrap
-/// catch on the first non-transient response.
+/// loopback failures (`isTransientApiError`). Caps at 5 attempts with
+/// linear backoff (250ms step, ~3.75s total) so a wedged-but-recovering
+/// server heals the window without an indefinite spinner, while a
+/// genuine error (401, 404, malformed workspace) still throws out to
+/// the bootstrap catch on the first non-transient response. This
+/// matters on chan-desktop: WKWebView can recycle a workspace window's
+/// web-content process under memory or file-descriptor pressure, which
+/// reloads the SPA; if that reload races the embedded server
+/// recovering, a single-shot bootstrap sticks on "loading..." forever.
 async function workspaceWithRetry(): ReturnType<typeof api.workspace> {
   const maxAttempts = 5;
   for (let attempt = 1; ; attempt += 1) {
     try {
       return await api.workspace();
     } catch (e) {
-      if (attempt >= maxAttempts || !isTransientBootstrapError(e)) throw e;
+      if (attempt >= maxAttempts || !isTransientApiError(e)) throw e;
       await new Promise((r) => setTimeout(r, 250 * attempt));
     }
   }
@@ -3123,7 +3138,7 @@ export function __testResetSessionDiscarded(): void {
 
 export const __testApplyTreeExpandedReloadSnapshot = applyTreeExpandedReloadSnapshot;
 
-export const __testIsTransientBootstrapError = isTransientBootstrapError;
+export const __testHealthInstanceWithRetry = healthInstanceWithRetry;
 
 /// Fire any pending session save synchronously via `fetch({ keepalive:
 /// true })` so the request survives the page unload. Without this,

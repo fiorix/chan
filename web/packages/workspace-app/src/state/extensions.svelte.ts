@@ -3,6 +3,7 @@
 // stable extension id + display name, never credentials.
 
 import { api } from "../api/client";
+import { isTransientApiError } from "../api/errors";
 import type { ExtensionCommandInfo, ExtensionInfo } from "../api/types";
 import { registerCommands, workspaceOnly } from "./commands";
 import { notify } from "./notify.svelte";
@@ -29,42 +30,52 @@ type ExtensionFrameTarget = {
 let catalog = $state<ExtensionInfo[]>([]);
 let ready = $state(false);
 let loadPromise: Promise<void> | null = null;
+let refreshPromise: Promise<void> | null = null;
 const frameTargets = new Map<string, ExtensionFrameTarget>();
 const commandQueues = new Map<string, PendingExtensionCommand[]>();
 
+/// Fetch + validate the catalog and (re-)register launcher commands.
+/// Throws on a failed fetch; the caller owns failure policy (the initial
+/// load empties the catalog, a refresh retains the current one).
+/// Re-registration is safe: `allCommands()` de-duplicates later-wins.
+async function resolveCatalog(): Promise<void> {
+  const entries = (await api.extensions()).filter(isValidExtensionInfo);
+  catalog = entries;
+  registerCommands(
+    entries.flatMap((extension) => [
+      {
+        id: `extension.${extension.id}`,
+        title: extension.name,
+        category: "Apps" as const,
+        keywords: ["extension", extension.id],
+        available: workspaceOnly,
+        run: () => invokeExtension(extension),
+      },
+      ...(extension.commands ?? []).map((command) => ({
+        id: `extension.${extension.id}.${command.id}`,
+        title: command.title,
+        category: "Apps" as const,
+        keywords: [
+          "extension",
+          extension.id,
+          extension.name,
+          ...(command.keywords ?? []),
+        ],
+        available: workspaceOnly,
+        run: () => invokeExtension(extension, command.id),
+      })),
+    ]),
+  );
+}
+
 /// Load once during workspace bootstrap. A missing/older endpoint is a
-/// non-fatal empty catalog; a server restart reloads the whole SPA and retries.
+/// non-fatal empty catalog. `refreshExtensions` re-resolves after a
+/// watch reconnect; a full page reload starts over here.
 export function loadExtensions(): Promise<void> {
   if (loadPromise) return loadPromise;
   loadPromise = (async () => {
     try {
-      const entries = (await api.extensions()).filter(isValidExtensionInfo);
-      catalog = entries;
-      registerCommands(
-        entries.flatMap((extension) => [
-          {
-            id: `extension.${extension.id}`,
-            title: extension.name,
-            category: "Apps" as const,
-            keywords: ["extension", extension.id],
-            available: workspaceOnly,
-            run: () => invokeExtension(extension),
-          },
-          ...(extension.commands ?? []).map((command) => ({
-            id: `extension.${extension.id}.${command.id}`,
-            title: command.title,
-            category: "Apps" as const,
-            keywords: [
-              "extension",
-              extension.id,
-              extension.name,
-              ...(command.keywords ?? []),
-            ],
-            available: workspaceOnly,
-            run: () => invokeExtension(extension, command.id),
-          })),
-        ]),
-      );
+      await resolveCatalog();
     } catch {
       catalog = [];
     } finally {
@@ -72,6 +83,44 @@ export function loadExtensions(): Promise<void> {
     }
   })();
   return loadPromise;
+}
+
+/// Re-resolve the catalog after a watch-socket reconnect. A devserver
+/// restart re-mints every per-process entry capability, so a surviving
+/// page's catalog points mounted frames at dead URLs; a fresh resolve
+/// flows new entry paths into ExtensionTab's reactive frame `src`,
+/// re-navigating exactly the frames whose capability changed, and drops
+/// tabs whose extension is gone to the unavailable state. Retries
+/// transient failures with the bootstrap shape (5 attempts, 250ms
+/// linear step: the tunnel path can accept the socket before HTTP
+/// settles); a persistent failure retains the current catalog until the
+/// next reconnect. Concurrent calls coalesce into one resolve.
+export function refreshExtensions(): Promise<void> {
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = (async () => {
+    try {
+      if (!loadPromise) {
+        // Initial load never started (the watch socket won the race
+        // with workspace bootstrap): its fetch is fresh by definition.
+        await loadExtensions();
+        return;
+      }
+      await loadPromise;
+      const maxAttempts = 5;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          await resolveCatalog();
+          return;
+        } catch (e) {
+          if (attempt >= maxAttempts || !isTransientApiError(e)) return;
+          await new Promise((r) => setTimeout(r, 250 * attempt));
+        }
+      }
+    } finally {
+      refreshPromise = null;
+    }
+  })();
+  return refreshPromise;
 }
 
 export function extensionFor(id: string): ExtensionInfo | undefined {

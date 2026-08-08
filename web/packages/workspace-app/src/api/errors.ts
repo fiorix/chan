@@ -19,6 +19,25 @@ export class ApiError extends Error {
   }
 }
 
+/// True when a request failure is transient and worth retrying: the
+/// server is briefly unreachable rather than returning a real error.
+/// A `fetch` to a refused/dropped socket throws a bare `TypeError`
+/// (not an `ApiError`); our transport maps a timeout to `ApiError(0)`;
+/// a server still spinning up its routes (or a tunnel gateway whose
+/// upstream is coming back) can answer 502/503/504. A 401 (missing
+/// token) or any other 4xx is NOT transient and must surface
+/// immediately. Shared by bootstrap, the server-instance health check,
+/// and the extension-catalog refresh; lives in this leaf so state
+/// modules agree without importing each other.
+export function isTransientApiError(e: unknown): boolean {
+  if (e instanceof ApiError) {
+    return e.status === 0 || e.status === 502 || e.status === 503 || e.status === 504;
+  }
+  // A connection-refused / dropped-socket fetch rejects with a
+  // TypeError; treat any non-ApiError throwable as transient.
+  return e instanceof Error;
+}
+
 /** A workspace tenant can remain alive long enough to report that its source
  * root was removed externally. Keep this classifier in the transport leaf so
  * File Browser and Graph error paths agree without importing app state. */
