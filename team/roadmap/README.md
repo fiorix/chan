@@ -36,6 +36,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [extension-errors-are-cors-masked](v0.86.0/extension-errors-are-cors-masked.md) | registered 2026-08-08, scheduling open | apply the extension response policy to every proxy error path, server and gateway, so a sandboxed iframe sees true statuses instead of a CORS mask |
 | [extension-capability-staleness-across-restart](v0.86.0/extension-capability-staleness-across-restart.md) | registered 2026-08-08, scheduling open | re-resolve the extension catalog on watch reconnect and reconcile mounted frames, so a page that outlives a devserver restart converges without a manual reload |
 | [devserver-build-identity](v0.86.0/devserver-build-identity.md) | registered 2026-08-08, scheduling open | carry a build id in chan --version and the health surface, the server-side sibling of the shipped desktop build identity |
+| [extensions-unreachable-through-the-gateway](v0.86.0/extensions-unreachable-through-the-gateway.md) | registered 2026-08-08, root-caused live | admit the extension capability path shape through the gateway's session gate so cookieless sandboxed-iframe fetches reach the devserver that authorizes them |
 
 The web-marketing-onboarding item left the roadmap during v0.86.0 preparation: onboarding-page direction is marketing work and now lives in the chan-mkt repository; see [done/web-marketing-onboarding.md](done/web-marketing-onboarding.md).
 
