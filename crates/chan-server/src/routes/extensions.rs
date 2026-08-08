@@ -78,6 +78,26 @@ pub async fn proxy_extension_root(
     .await
 }
 
+/// Namespace-wide response policy. Mounted as the outermost layer on
+/// both proxy routes in `lib.rs` (and mirrored by every test router
+/// here), so each response leaving the extension namespace — proxied
+/// reply, capability miss, proxy error, guest 403, preflight — carries
+/// the policy without per-branch application. The requesting frame is
+/// opaque-origin: any response missing the policy surfaces in its
+/// console as a CORS violation that masks the true status. The WS 101
+/// handshake is exempt because the policy strips hop-by-hop headers,
+/// which would break the upgrade, and no fetch reads a 101's headers.
+pub async fn extension_response_policy(
+    request: Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let mut response = next.run(request).await;
+    if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+        apply_extension_response_policy(response.headers_mut());
+    }
+    response
+}
+
 async fn proxy_extension_request(
     catalog: Arc<ExtensionCatalog>,
     tenant: ExtensionTenantContext,
@@ -88,13 +108,14 @@ async fn proxy_extension_request(
     request: Request<Body>,
 ) -> Response {
     let Some(entry) = catalog.find(&id, &capability).cloned() else {
-        // The frame requesting this is opaque-origin, so a bare 404 reaches it
-        // as a CORS violation and the real status never surfaces. Carry the
-        // same response policy a proxied reply gets, so a stale capability
-        // reads as the 404 it is.
-        let mut response = StatusCode::NOT_FOUND.into_response();
-        apply_extension_response_policy(response.headers_mut());
-        return response;
+        // Same anti-enumeration shape as the gateway session gate's
+        // 404: a wrong capability is indistinguishable from a path
+        // that does not exist at all.
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "not found"})),
+        )
+            .into_response();
     };
 
     if let Some(response) = cors_preflight(request.method(), request.headers()) {
@@ -143,7 +164,6 @@ async fn proxy_extension_request(
         &upstream,
         original_uri.path(),
     );
-    apply_extension_response_policy(&mut response_headers);
     let body = Body::from_stream(idle_timeout_stream(
         upstream_response.bytes_stream(),
         &id,
@@ -544,6 +564,26 @@ mod tests {
         )])
     }
 
+    /// Mirror of the lib.rs mounting: both proxy routes behind the
+    /// guest read-only lane, wrapped by the namespace response policy.
+    fn extension_router(catalog: Arc<ExtensionCatalog>, tenant: ExtensionTenantContext) -> Router {
+        Router::new()
+            .route(
+                "/_chan/extensions/{id}/{capability}/",
+                any(proxy_extension_root),
+            )
+            .route(
+                "/_chan/extensions/{id}/{capability}/{*path}",
+                any(proxy_extension),
+            )
+            .route_layer(axum::middleware::from_fn(
+                crate::routes::require_local_mutation,
+            ))
+            .route_layer(axum::middleware::from_fn(extension_response_policy))
+            .layer(Extension(tenant))
+            .layer(Extension(catalog))
+    }
+
     fn tenant() -> (ExtensionTenantContext, tokio::sync::watch::Sender<bool>) {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         (
@@ -667,17 +707,7 @@ mod tests {
             CAPABILITY,
         )]);
         let (tenant, _shutdown_tx) = tenant();
-        let app = Router::new()
-            .route(
-                "/_chan/extensions/{id}/{capability}/",
-                any(proxy_extension_root),
-            )
-            .route(
-                "/_chan/extensions/{id}/{capability}/{*path}",
-                any(proxy_extension),
-            )
-            .layer(Extension(tenant))
-            .layer(Extension(catalog));
+        let app = extension_router(catalog, tenant);
         let request = Request::builder()
             .uri(format!(
                 "/_chan/extensions/echo/{CAPABILITY}/?q=one&t=browser-secret"
@@ -728,13 +758,9 @@ mod tests {
             CAPABILITY,
         )]);
         let (tenant, _shutdown_tx) = tenant();
-        let proxy = Router::new()
-            .route(
-                "/_chan/extensions/{id}/{capability}/{*path}",
-                any(proxy_extension),
-            )
-            .layer(Extension(tenant))
-            .layer(Extension(catalog));
+        // The namespace policy layer must leave the 101 handshake
+        // untouched; a bridged echo below is the proof.
+        let proxy = extension_router(catalog, tenant);
         let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind proxy");
@@ -897,29 +923,15 @@ mod tests {
     #[tokio::test]
     async fn tunnel_guests_are_read_only_on_the_proxy_routes() {
         let (tenant, _shutdown_tx) = tenant();
-        // Mirror the lib.rs mounting: both proxy routes in one sub-router
-        // behind the shared guest read-only lane.
-        let extension_proxy = Router::new()
-            .route(
-                "/_chan/extensions/{id}/{capability}/",
-                any(proxy_extension_root),
-            )
-            .route(
-                "/_chan/extensions/{id}/{capability}/{*path}",
-                any(proxy_extension),
-            )
-            .route_layer(axum::middleware::from_fn(
-                crate::routes::require_local_mutation,
-            ));
-        let app = Router::new()
-            .merge(extension_proxy)
-            .layer(Extension(tenant))
-            .layer(Extension(catalog()));
+        let app = extension_router(catalog(), tenant);
 
-        // A non-owner TunnelOrigin: mutations 403 before any proxying.
+        // A non-owner TunnelOrigin: mutations 403 before any proxying,
+        // and the namespace policy keeps the 403 readable from the
+        // opaque-origin frame.
         let mut request = Request::builder()
             .method(Method::POST)
             .uri(format!("/_chan/extensions/echo/{CAPABILITY}/state"))
+            .header(header::ORIGIN, "null")
             .body(Body::empty())
             .unwrap();
         request
@@ -927,6 +939,13 @@ mod tests {
             .insert(crate::TunnelOrigin { caller: None });
         let response = app.clone().oneshot(request).await.expect("guest POST");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .expect("ACAO on the guest 403"),
+            "null"
+        );
 
         // GETs — the WebSocket upgrade included — still pass for guests: the
         // refused upstream connect proves the guard did not fire.
@@ -953,13 +972,7 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_capability_404s_with_the_opaque_frame_cors_headers() {
         let (tenant, _shutdown_tx) = tenant();
-        let app = Router::new()
-            .route(
-                "/_chan/extensions/{id}/{capability}/{*path}",
-                any(proxy_extension),
-            )
-            .layer(Extension(tenant))
-            .layer(Extension(catalog()));
+        let app = extension_router(catalog(), tenant);
 
         let stale = "f".repeat(64);
         let request = Request::builder()
@@ -985,6 +998,70 @@ mod tests {
                 .get(header::CACHE_CONTROL)
                 .expect("no-store on the 404"),
             "private, no-store"
+        );
+        // Shaped like the gateway session gate's anti-enumeration 404.
+        let body = to_bytes(response.into_body(), 1024).await.expect("body");
+        assert_eq!(body.as_ref(), br#"{"error":"not found"}"#);
+    }
+
+    #[tokio::test]
+    async fn a_dead_upstream_502_is_cors_readable() {
+        // catalog() points at 127.0.0.1:9 (nothing listens): the proxy
+        // request fails and the handler answers 502. The namespace
+        // policy must make that status readable from the frame — this
+        // is the masked-502 half of the live incident class.
+        let (tenant, _shutdown_tx) = tenant();
+        let app = extension_router(catalog(), tenant);
+
+        let request = Request::builder()
+            .uri(format!("/_chan/extensions/echo/{CAPABILITY}/app.js"))
+            .header(header::ORIGIN, "null")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.expect("dead upstream");
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .expect("ACAO on the 502"),
+            "null"
+        );
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "private, no-store"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_websocket_rejection_is_cors_readable() {
+        // An upgrade request missing its Sec-WebSocket-Key is refused
+        // by the extractor before any proxying; the rejection leaves
+        // the namespace carrying the policy like every other response.
+        let (tenant, _shutdown_tx) = tenant();
+        let app = extension_router(catalog(), tenant);
+
+        let request = Request::builder()
+            .uri(format!("/_chan/extensions/echo/{CAPABILITY}/socket"))
+            .header(header::ORIGIN, "null")
+            .header(header::UPGRADE, "websocket")
+            .header(header::CONNECTION, "Upgrade")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.expect("ws rejection");
+
+        assert!(
+            response.status().is_client_error(),
+            "malformed upgrade must be refused, got {}",
+            response.status()
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .expect("ACAO on the WS rejection"),
+            "null"
         );
     }
 }

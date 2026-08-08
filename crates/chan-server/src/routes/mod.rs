@@ -71,7 +71,9 @@ pub use drafts::{
     api_create_diagram, api_create_draft, api_discard_draft, api_inspect_draft, api_promote_draft,
 };
 pub use excluded_dirs::{api_excluded_dirs_get, api_excluded_dirs_put};
-pub use extensions::{api_extensions, proxy_extension, proxy_extension_root};
+pub use extensions::{
+    api_extensions, extension_response_policy, proxy_extension, proxy_extension_root,
+};
 pub use files::{
     api_create_file, api_delete_file, api_fs_transfer, api_list_files, api_move, api_read_file,
     api_resolve_session_conflict, api_upload_file, api_write_file,
