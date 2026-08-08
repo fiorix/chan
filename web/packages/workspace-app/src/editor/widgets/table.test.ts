@@ -3,6 +3,7 @@
 import { readFileSync } from "node:fs";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { forceParsing, syntaxTree } from "@codemirror/language";
 import { describe, expect, test } from "vitest";
 import { chanMarkdown } from "../markdown/grammar";
 import { tableDecorations } from "./table";
@@ -18,18 +19,31 @@ const TABLE_DOC = [
   "after",
 ].join("\n");
 
+/// Mount an editor over `doc` with the table decorations and force the parse
+/// through the document before returning. The initial parse at state creation
+/// runs under a small wall-clock budget, so on a cold or loaded worker the
+/// tree - and therefore the decoration set scanned from it - can be
+/// incomplete at mount; the tests assert what the widget renders, not how
+/// fast the machine parsed.
+function mountTable(doc: string): { parent: HTMLElement; view: EditorView } {
+  const parent = document.createElement("div");
+  document.body.appendChild(parent);
+  const view = new EditorView({
+    parent,
+    state: EditorState.create({
+      doc,
+      extensions: [chanMarkdown(), tableDecorations()],
+    }),
+  });
+  if (!forceParsing(view, view.state.doc.length, 5000)) {
+    throw new Error("parse did not complete within its budget");
+  }
+  return { parent, view };
+}
+
 describe("tableDecorations", () => {
   test("renders a pipe table as a block widget without throwing", () => {
-    const parent = document.createElement("div");
-    document.body.appendChild(parent);
-
-    const view = new EditorView({
-      parent,
-      state: EditorState.create({
-        doc: TABLE_DOC,
-        extensions: [chanMarkdown(), tableDecorations()],
-      }),
-    });
+    const { parent, view } = mountTable(TABLE_DOC);
 
     expect(parent.querySelector(".cm-md-table")).toBeTruthy();
     expect(parent.textContent).toContain("@@Alice");
@@ -40,19 +54,40 @@ describe("tableDecorations", () => {
   });
 
   test("bold in a cell renders as <strong>", () => {
+    const { parent, view } = mountTable(
+      [
+        "before",
+        "",
+        "| Name | Note |",
+        "|------|------|",
+        "| Alice | **bold** |",
+        "",
+        "after",
+      ].join("\n"),
+    );
+
+    const strong = parent.querySelector(".cm-md-table td strong");
+    expect(strong).toBeTruthy();
+    expect(strong?.textContent).toBe("bold");
+
+    view.destroy();
+    parent.remove();
+  });
+
+  test("a table past the initial parse frontier renders once the parse completes", () => {
+    // The parse run at state creation never covers more than the first 3000
+    // characters, so a table this deep is deterministically absent from the
+    // tree the decoration field first scans. The widget also sits far below
+    // jsdom's rendered viewport, so the assertions read the decoration set
+    // through the public atomicRanges facet instead of the DOM.
+    const atomicCount = (view: EditorView): number =>
+      view.state
+        .facet(EditorView.atomicRanges)
+        .reduce((n, ranges) => n + ranges(view).size, 0);
+
+    const doc = "prose paragraph line\n".repeat(4000) + TABLE_DOC;
     const parent = document.createElement("div");
     document.body.appendChild(parent);
-
-    const doc = [
-      "before",
-      "",
-      "| Name | Note |",
-      "|------|------|",
-      "| Alice | **bold** |",
-      "",
-      "after",
-    ].join("\n");
-
     const view = new EditorView({
       parent,
       state: EditorState.create({
@@ -60,11 +95,14 @@ describe("tableDecorations", () => {
         extensions: [chanMarkdown(), tableDecorations()],
       }),
     });
-
-    const strong = parent.querySelector(".cm-md-table td strong");
-    expect(strong).toBeTruthy();
-    expect(strong?.textContent).toBe("bold");
-
+    expect(syntaxTree(view.state).length).toBeLessThan(view.state.doc.length);
+    expect(atomicCount(view)).toBe(0);
+    // Completing the parse dispatches an effects-only transaction (the async
+    // ParseWorker's shape: no doc change, no selection). The field must
+    // rescan on the new tree, or the table would stay raw source until the
+    // next edit or caret move.
+    expect(forceParsing(view, view.state.doc.length, 5000)).toBe(true);
+    expect(atomicCount(view)).toBe(1);
     view.destroy();
     parent.remove();
   });

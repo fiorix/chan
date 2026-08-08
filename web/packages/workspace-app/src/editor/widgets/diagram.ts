@@ -443,12 +443,20 @@ export function diagramDecorations(config: DiagramConfig): Extension {
   };
   const isDark = config.isDark;
 
+  // Both fields also rescan when the syntax-tree identity changes: the
+  // language's ParseWorker publishes a further-parsed tree through an
+  // effects-only dispatch (no docChanged, no selection), and create() may
+  // have scanned a tree the initial in-budget parse left short of this
+  // block. Without the tree check the widget stays missing until the next
+  // edit or caret move (walker.ts recomputes on the same trigger).
+  const treeUnchanged = (tr: { startState: EditorState; state: EditorState }) =>
+    syntaxTree(tr.state) === syntaxTree(tr.startState);
   const field = StateField.define<DecorationSet>({
     create(state) {
       return scan(state, isDark(), spec);
     },
     update(decorations, tr) {
-      if (!tr.docChanged && !tr.selection) return decorations;
+      if (!tr.docChanged && !tr.selection && treeUnchanged(tr)) return decorations;
       return scan(tr.state, isDark(), spec);
     },
     provide: (f) => EditorView.decorations.from(f),
@@ -461,7 +469,7 @@ export function diagramDecorations(config: DiagramConfig): Extension {
       return scanErrorLines(state, spec);
     },
     update(decorations, tr) {
-      if (!tr.docChanged && !tr.selection) return decorations;
+      if (!tr.docChanged && !tr.selection && treeUnchanged(tr)) return decorations;
       return scanErrorLines(tr.state, spec);
     },
     provide: (f) => EditorView.decorations.from(f),

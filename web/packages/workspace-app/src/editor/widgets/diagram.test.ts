@@ -2,6 +2,7 @@
 
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { forceParsing, syntaxTree } from "@codemirror/language";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { chanMarkdown } from "../markdown/grammar";
 import {
@@ -77,6 +78,14 @@ function mount(
       extensions: [chanMarkdown(), extension],
     }),
   });
+  // The initial parse at state creation runs under a small wall-clock budget,
+  // so on a cold or loaded worker the tree - and therefore the decoration set
+  // scanned from it - can be incomplete at mount. Force the parse through the
+  // document before any assertion: the tests assert what the widget renders,
+  // not how fast the machine parsed.
+  if (!forceParsing(view, view.state.doc.length, 5000)) {
+    throw new Error("parse did not complete within its budget");
+  }
   return { parent, view };
 }
 
@@ -104,6 +113,43 @@ describe("mermaid diagram cursor-render", () => {
   test("an unclosed (mid-typing) block never renders", () => {
     const { parent, view } = mount(deco, UNCLOSED, 0);
     expect(parent.querySelector(".cm-md-diagram-rendered")).toBeNull();
+    view.destroy();
+    parent.remove();
+  });
+});
+
+describe("parse-progress recompute", () => {
+  /// The decoration set the field currently provides, read through the
+  /// public atomicRanges facet (the widget sits far below jsdom's rendered
+  /// viewport in this test, so its DOM never materializes either way).
+  function atomicCount(view: EditorView): number {
+    return view.state
+      .facet(EditorView.atomicRanges)
+      .reduce((n, ranges) => n + ranges(view).size, 0);
+  }
+
+  test("a block past the initial parse frontier renders once the parse completes", () => {
+    // The parse run at state creation never covers more than the first 3000
+    // characters, so a fence this deep is deterministically absent from the
+    // tree the decoration field first scans.
+    const doc = "prose paragraph line\n".repeat(4000) + MERMAID_DOC;
+    const parent = document.createElement("div");
+    document.body.appendChild(parent);
+    const view = new EditorView({
+      parent,
+      state: EditorState.create({
+        doc,
+        extensions: [chanMarkdown(), mermaidDecorations(() => false)],
+      }),
+    });
+    expect(syntaxTree(view.state).length).toBeLessThan(view.state.doc.length);
+    expect(atomicCount(view)).toBe(0);
+    // Completing the parse dispatches an effects-only transaction (the async
+    // ParseWorker's shape: no doc change, no selection). The field must
+    // rescan on the new tree, or the diagram would stay raw source until the
+    // next edit or caret move.
+    expect(forceParsing(view, view.state.doc.length, 5000)).toBe(true);
+    expect(atomicCount(view)).toBe(1);
     view.destroy();
     parent.remove();
   });
