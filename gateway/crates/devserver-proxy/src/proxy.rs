@@ -22,6 +22,12 @@
 //!     Ed25519 credential and exact bindings, atomically consume its `jti`,
 //!     mint an opaque proxy-local session, set host-only gate/CSRF cookies,
 //!     and 303 to the signed clean path
+//!   * the exact extension capability shape
+//!     (`/{tenant}/_chan/extensions/{id}/{64-hex}/...`) -> forwarded
+//!     without the session gate; the devserver's own per-process path
+//!     capability check is the authorization, and every response on
+//!     that namespace carries the extension response policy so the
+//!     opaque-origin frame can read the true status
 //!   * request has a valid opaque `__Host-devserver_gate` cookie (aud + drv bound)
 //!     -> pass through
 //!   * anything else (no cookie, expired, wrong aud, wrong devserver)
@@ -238,11 +244,26 @@ fn connection_listed_headers(headers: &HeaderMap) -> Vec<HeaderName> {
 ///     for (the signed `drv` claim), bounded by the user's live set.
 ///     A single live devserver keeps the pre-disc behavior; no
 ///     verifying credential -> 404.
-pub async fn handle(
+pub async fn handle(state: AppState, user: String, disc: Option<String>, req: Request) -> Response {
+    // Classify the extension capability lane up front: every response
+    // leaving that namespace, from the gate 404s through the proxied
+    // reply and the cancellation paths inside `proxy_http`, must carry
+    // the extension response policy or the opaque-origin frame reads
+    // the true status as a CORS violation.
+    let extension_capability = is_extension_capability_path(req.uri().path());
+    let mut response = handle_gated(state, user, disc, req, extension_capability).await;
+    if extension_capability {
+        apply_extension_capability_response_policy(&mut response);
+    }
+    response
+}
+
+async fn handle_gated(
     state: AppState,
     user: String,
     disc: Option<String>,
     mut req: Request,
+    extension_capability: bool,
 ) -> Response {
     let is_entry_exchange = req.uri().path() == devserver_gate::ENTRY_EXCHANGE_PATH;
     let entry_credential = if is_entry_exchange {
@@ -307,50 +328,82 @@ pub async fn handle(
 
     let is_ws = is_websocket_upgrade(req.headers());
 
-    // The gate always runs: every devserver tunnel is authenticated,
-    // there is no un-gated pass-through. The first candidate whose
-    // credential verifies under (aud, drv) wins.
-    let mut resolved = None;
-    for (devserver_id, entry) in candidates {
-        match resolve_gate(&state, &req, &devserver_id, entry.owner_id, &aud) {
-            Gate::Reject => continue,
-            gate => {
-                resolved = Some((devserver_id, entry, gate));
-                break;
+    let (devserver_id, entry, caller, authorization) = if extension_capability {
+        // Extension capability lane: the 256-bit path segment is the
+        // credential and the devserver's own capability check is the
+        // authorization (a miss produces its 404, CORS-readable under
+        // the extension response policy). The session gate, the CSRF
+        // check, and the WS Origin check all protect cookie-borne
+        // authority; the opaque-origin extension frame can never send
+        // that cookie, so none of them apply on this lane. The
+        // assertion carries a nil subject: capability callers stay
+        // non-owner, so the devserver's tunnel lane keeps them
+        // read-only exactly like any guest.
+        if candidates.len() != 1 {
+            // A bare host with several live devservers cannot bind a
+            // capability path to one tunnel; answer the same
+            // anti-enumeration shape as the session gate.
+            return not_found_response(req.headers());
+        }
+        let (devserver_id, entry) = candidates.into_iter().next().expect("one candidate");
+        let caller = GatewayCaller {
+            sub: Uuid::nil(),
+            owner_user_id: entry.owner_id,
+        };
+        let authorization = SessionRecord::capability_lane(SessionPrincipal {
+            subject_user_id: Uuid::nil(),
+            owner_user_id: entry.owner_id,
+            devserver_id: devserver_id.clone(),
+            audience: aud.clone(),
+        });
+        (devserver_id, entry, caller, authorization)
+    } else {
+        // The gate always runs: every devserver tunnel is authenticated,
+        // there is no un-gated pass-through. The first candidate whose
+        // credential verifies under (aud, drv) wins.
+        let mut resolved = None;
+        for (devserver_id, entry) in candidates {
+            match resolve_gate(&state, &req, &devserver_id, entry.owner_id, &aud) {
+                Gate::Reject => continue,
+                gate => {
+                    resolved = Some((devserver_id, entry, gate));
+                    break;
+                }
             }
         }
-    }
-    let Some((devserver_id, entry, gate)) = resolved else {
-        return not_found_response(req.headers());
+        let Some((devserver_id, entry, gate)) = resolved else {
+            return not_found_response(req.headers());
+        };
+        let (caller, authorization) = match gate {
+            Gate::Pass { record } => (
+                GatewayCaller {
+                    sub: record.principal.subject_user_id,
+                    owner_user_id: record.principal.owner_user_id,
+                },
+                record,
+            ),
+            // The loop above filtered rejects; kept as the safe default.
+            Gate::Reject => return not_found_response(req.headers()),
+        };
+        if is_ws && !websocket_origin_matches(req.headers(), &state.cfg.forwarded_proto, &aud) {
+            tracing::warn!(
+                aud = %aud,
+                devserver_id = %devserver_id,
+                "gateway websocket origin check failed",
+            );
+            return (StatusCode::FORBIDDEN, "forbidden").into_response();
+        }
+        if requires_csrf(req.method()) && !csrf_header_matches_cookie(req.headers()) {
+            tracing::warn!(
+                aud = %aud,
+                devserver_id = %devserver_id,
+                method = %req.method(),
+                "gateway csrf check failed",
+            );
+            return (StatusCode::FORBIDDEN, "forbidden").into_response();
+        }
+        (devserver_id, entry, caller, authorization)
     };
-    let (caller, authorization) = match gate {
-        Gate::Pass { record } => (
-            GatewayCaller {
-                sub: record.principal.subject_user_id,
-                owner_user_id: record.principal.owner_user_id,
-            },
-            record,
-        ),
-        // The loop above filtered rejects; kept as the safe default.
-        Gate::Reject => return not_found_response(req.headers()),
-    };
-    if is_ws && !websocket_origin_matches(req.headers(), &state.cfg.forwarded_proto, &aud) {
-        tracing::warn!(
-            aud = %aud,
-            devserver_id = %devserver_id,
-            "gateway websocket origin check failed",
-        );
-        return (StatusCode::FORBIDDEN, "forbidden").into_response();
-    }
-    if requires_csrf(req.method()) && !csrf_header_matches_cookie(req.headers()) {
-        tracing::warn!(
-            aud = %aud,
-            devserver_id = %devserver_id,
-            method = %req.method(),
-            "gateway csrf check failed",
-        );
-        return (StatusCode::FORBIDDEN, "forbidden").into_response();
-    }
     // Every request entering a devserver tunnel must carry a signed gateway
     // assertion. A registration without a per-tunnel assertion key is an
     // invalid trust state, not a reason to downgrade to an unauthenticated
@@ -834,6 +887,99 @@ fn is_extension_proxy_path(path_and_query: &str) -> bool {
         .split_once('?')
         .map_or(path_and_query, |(path, _)| path)
         .contains("/_chan/extensions/")
+}
+
+/// Exact extension capability shape:
+/// `/{tenant}/_chan/extensions/{id}/{64-hex}/...`. This is the ONLY
+/// path admitted without the session gate; anything looser stays
+/// behind it. The capability segment must be exactly 64 lowercase hex
+/// characters (the devserver mints it that way) and must be followed
+/// by a further `/` — the devserver routes only the slash-terminated
+/// entry root and deeper assets, so a slashless capability URL has
+/// nothing to reach and stays gated.
+fn is_extension_capability_path(path: &str) -> bool {
+    let mut segments = path.split('/');
+    if segments.next() != Some("") {
+        return false;
+    }
+    let Some(tenant) = segments.next() else {
+        return false;
+    };
+    if tenant.is_empty() {
+        return false;
+    }
+    if segments.next() != Some("_chan") || segments.next() != Some("extensions") {
+        return false;
+    }
+    let Some(id) = segments.next() else {
+        return false;
+    };
+    if id.is_empty() {
+        return false;
+    }
+    let Some(capability) = segments.next() else {
+        return false;
+    };
+    if capability.len() != 64
+        || !capability
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return false;
+    }
+    segments.next().is_some()
+}
+
+/// The capability segment is a bearer credential in the path. Trace
+/// spans record the request URI, so the dispatcher logs URIs through
+/// this instead: on the admitted shape the capability segment is
+/// replaced with a fixed marker, every other URI passes unchanged.
+pub(crate) fn loggable_uri(uri: &Uri) -> String {
+    let path = uri.path();
+    if !is_extension_capability_path(path) {
+        return uri.to_string();
+    }
+    let capability_start = path
+        .match_indices('/')
+        .nth(4)
+        .map(|(at, _)| at + 1)
+        .expect("admitted shape has five slashes");
+    let mut redacted = String::with_capacity(uri.to_string().len());
+    redacted.push_str(&path[..capability_start]);
+    redacted.push_str("[capability]");
+    redacted.push_str(&path[capability_start + 64..]);
+    if let Some(query) = uri.query() {
+        redacted.push('?');
+        redacted.push_str(query);
+    }
+    redacted
+}
+
+/// Every response leaving the extension capability namespace must be
+/// readable from the opaque-origin extension frame — the proxied reply
+/// and every gateway-generated error alike — or the frame's console
+/// reports a CORS violation that masks the true status. Hop-by-hop
+/// headers are left alone so the WS 101 handshake survives untouched.
+fn apply_extension_capability_response_policy(response: &mut Response) {
+    let headers = response.headers_mut();
+    headers.remove(header::SET_COOKIE);
+    headers.remove(header::ACCESS_CONTROL_ALLOW_CREDENTIALS);
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("null"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
 }
 
 fn apply_credentialed_response_policy(response: &mut Response, extension_frame: bool) {
@@ -1952,6 +2098,142 @@ mod tests {
         // No upgrade headers.
         let h = HeaderMap::new();
         assert!(!is_websocket_upgrade(&h));
+    }
+
+    const TEST_CAPABILITY: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn extension_capability_shape_is_exact() {
+        let admitted = |path: &str| is_extension_capability_path(path);
+
+        // The admitted shape: entry root and deeper assets.
+        assert!(admitted(&format!(
+            "/notes/_chan/extensions/echo/{TEST_CAPABILITY}/"
+        )));
+        assert!(admitted(&format!(
+            "/notes/_chan/extensions/echo/{TEST_CAPABILITY}/app.js"
+        )));
+        assert!(admitted(&format!(
+            "/notes/_chan/extensions/echo/{TEST_CAPABILITY}/assets/deep/x.wasm"
+        )));
+
+        // Everything looser stays behind the session gate.
+        for path in [
+            // No trailing slash after the capability.
+            &format!("/notes/_chan/extensions/echo/{TEST_CAPABILITY}") as &str,
+            // Capability too short / too long / non-hex / uppercase.
+            "/notes/_chan/extensions/echo/0123abc/",
+            &format!("/notes/_chan/extensions/echo/{TEST_CAPABILITY}0/"),
+            "/notes/_chan/extensions/echo/ZZ23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/",
+            &format!(
+                "/notes/_chan/extensions/echo/{}/",
+                TEST_CAPABILITY.to_ascii_uppercase()
+            ),
+            // Missing pieces of the namespace.
+            &format!("/_chan/extensions/echo/{TEST_CAPABILITY}/"),
+            &format!("/notes/_chan/extension/echo/{TEST_CAPABILITY}/"),
+            &format!("/notes/chan/extensions/echo/{TEST_CAPABILITY}/"),
+            &format!("/notes/_chan/extensions//{TEST_CAPABILITY}/"),
+            // Tenant root and ordinary tenant content.
+            "/",
+            "/notes/",
+            "/notes/api/extensions",
+        ] {
+            assert!(!admitted(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn loggable_uri_redacts_only_the_capability_segment() {
+        let u = |s: &str| s.parse::<Uri>().unwrap();
+
+        let uri = u(&format!(
+            "/notes/_chan/extensions/echo/{TEST_CAPABILITY}/app.js?v=1"
+        ));
+        let logged = loggable_uri(&uri);
+        assert!(!logged.contains(TEST_CAPABILITY));
+        assert_eq!(
+            logged,
+            "/notes/_chan/extensions/echo/[capability]/app.js?v=1"
+        );
+
+        // Ordinary URIs pass through unchanged, query included.
+        for raw in ["/notes/api/graph?x=1", "/", "/blog/assets/app.js"] {
+            assert_eq!(loggable_uri(&u(raw)), raw);
+        }
+    }
+
+    fn test_state() -> AppState {
+        AppState {
+            cfg: std::sync::Arc::new(test_config()),
+            registry: crate::registry::Registry::new(),
+            readiness: tokio::sync::watch::channel(true).1,
+            sessions: crate::session_store::SessionStore::new(
+                4,
+                std::time::Duration::from_secs(60),
+            ),
+            entry_replays: crate::entry_replay::EntryReplayCache::new(4),
+        }
+    }
+
+    fn tenant_request(path: &str) -> Request {
+        Request::builder()
+            .uri(path)
+            .header(header::HOST, "alice--0123456789ab.p1.usr.chan.app")
+            .header(header::ORIGIN, "null")
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    /// With no live devserver both lanes 404, but only the extension
+    /// capability namespace answers CORS-readably; the tenant surface
+    /// keeps today's bare anti-enumeration shape byte for byte.
+    #[tokio::test]
+    async fn extension_namespace_404s_carry_the_policy_and_the_tenant_stays_bare() {
+        let state = test_state();
+        let path = format!("/notes/_chan/extensions/echo/{TEST_CAPABILITY}/app.js");
+        let response = handle(
+            state.clone(),
+            "alice".to_string(),
+            Some("0123456789ab".to_string()),
+            tenant_request(&path),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .expect("ACAO on the extension namespace 404"),
+            "null"
+        );
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "private, no-store"
+        );
+
+        for bare in ["/notes/", "/notes/api/graph"] {
+            let response = handle(
+                state.clone(),
+                "alice".to_string(),
+                Some("0123456789ab".to_string()),
+                tenant_request(bare),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{bare}");
+            assert!(
+                response
+                    .headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .is_none(),
+                "{bare} must stay CORS-opaque"
+            );
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .expect("body");
+            assert_eq!(body.as_ref(), br#"{"error":"not found"}"#);
+        }
     }
 
     #[test]

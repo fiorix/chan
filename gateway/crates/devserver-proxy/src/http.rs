@@ -50,7 +50,19 @@ pub fn router(
         // hands off to the proxy module.
         .fallback(dispatch)
         .with_state(state)
-        .layer(TraceLayer::new_for_http())
+        // The default make-span records the raw URI; the extension
+        // capability lane carries a bearer credential in the path, so
+        // spans go through the redacting formatter instead.
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
+                tracing::debug_span!(
+                    "request",
+                    method = %request.method(),
+                    uri = %crate::proxy::loggable_uri(request.uri()),
+                    version = ?request.version(),
+                )
+            }),
+        )
 }
 
 async fn healthz(State(state): State<AppState>, headers: HeaderMap) -> Response {

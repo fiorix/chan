@@ -187,9 +187,42 @@ impl ActiveOperations {
     }
 }
 
+/// Absolute backstop on one extension-capability transport. The real
+/// bounds on that lane are the route body/deadline policy and the WS
+/// idle timeout; this only guarantees no transport is literally
+/// immortal should both fail to fire.
+const CAPABILITY_LANE_BACKSTOP: Duration = Duration::from_secs(24 * 60 * 60);
+
 impl SessionRecord {
     pub(crate) fn begin_operation(&self) -> Option<ActiveOperation> {
         self.operations.begin()
+    }
+
+    /// Detached authority for one extension-capability request. Never
+    /// registered in the store: the devserver's per-process path
+    /// capability is the credential, so there is no proxy session to
+    /// look up or revoke. The record only supplies the transport
+    /// bookkeeping (deadline anchor, cancellation, operation registry)
+    /// every forwarded request carries; its transports end with the
+    /// request deadline, the WS idle timeout, or the tunnel itself.
+    pub(crate) fn capability_lane(principal: SessionPrincipal) -> Self {
+        let now = Instant::now();
+        let wall_now = Utc::now();
+        Self {
+            admin_session_id: Uuid::nil(),
+            principal,
+            created_at: now,
+            expires_at: now + CAPABILITY_LANE_BACKSTOP,
+            created_at_wall: wall_now,
+            expires_at_wall: wall_now
+                .checked_add_signed(
+                    chrono::Duration::from_std(CAPABILITY_LANE_BACKSTOP)
+                        .unwrap_or(chrono::Duration::MAX),
+                )
+                .unwrap_or(DateTime::<Utc>::MAX_UTC),
+            cancellation: CancellationToken::new(),
+            operations: Arc::new(ActiveOperations::default()),
+        }
     }
 
     fn revoke_authority(&self) {
