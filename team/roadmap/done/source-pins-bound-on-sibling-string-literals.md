@@ -1,6 +1,6 @@
 # String-index source pins in `main.rs` bound their slices on each other's string literals
 
-Status: REGISTERED for v0.86.0, grounded 2026-08-06 during the v0.85.0 delivery round.
+Status: SHIPPED in [v0.86.0](../release/release-v0.86.0.md). All 24 dead end-bounds fixed on unique definition-form needles with a committed mutation probe.
 
 ## What
 

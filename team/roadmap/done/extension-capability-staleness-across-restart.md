@@ -1,6 +1,6 @@
 # A surviving page holds dead extension capabilities after a devserver restart
 
-Status: REGISTERED 2026-08-08 from a live incident on the v086-integration build; scheduling within the round is the owner's call.
+Status: SHIPPED in [v0.86.0](../release/release-v0.86.0.md). Extension tabs converge after a devserver restart via catalog re-resolution and frame reconciliation, with live headless-browser red and green proofs.
 
 ## What
 

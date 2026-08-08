@@ -1,6 +1,6 @@
 # Extension module scripts are unreachable through the gateway
 
-Status: REGISTERED 2026-08-08 from the v086-integration live test; root cause proven by cookieless probes against the live tenant.
+Status: SHIPPED in [v0.86.0](../release/release-v0.86.0.md). The gateway admits the exact extension capability path shape; the devserver's capability check authorizes cookieless sandboxed-iframe fetches, proven by a committed e2e scenario.
 
 ## What
 

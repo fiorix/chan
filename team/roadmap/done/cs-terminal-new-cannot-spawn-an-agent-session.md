@@ -1,6 +1,6 @@
 # `cs terminal new` cannot spawn a session that derives an agent
 
-Status: REGISTERED for v0.86.0, grounded 2026-08-06 from two independent projects.
+Status: SHIPPED in [v0.86.0](../release/release-v0.86.0.md). cs terminal new and restart carry --command/--env on shared plumbing; derivation stays server-owned and refusal keeps exit 69.
 
 ## What
 

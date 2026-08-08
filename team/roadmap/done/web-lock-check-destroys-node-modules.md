@@ -1,6 +1,6 @@
 # `make web-lock-check` deletes `node_modules` while claiming it does not
 
-Status: REGISTERED for v0.86.0, grounded 2026-08-05 by a live incident. Re-verification on 2026-08-07 falsified the grounding's npm attribution, and the item was re-scoped by owner ruling the same day; see the ruling section.
+Status: SHIPPED in [v0.86.0](../release/release-v0.86.0.md). Environment-fixed and re-scoped: the target refuses npm below 10 and the comment states the version dependence.
 
 ## What
 

@@ -1,6 +1,6 @@
 # AUR publication is suspended and needs a deliberate restoration
 
-Status: REGISTERED for v0.86.0, suspended 2026-08-06 during the v0.85.0 delivery round.
+Status: REGISTERED, deferred to v0.87.0 at the v0.86.0 close; suspended 2026-08-06 during the v0.85.0 delivery round, and the restoration condition was still unmet on 2026-08-08.
 
 ## What
 

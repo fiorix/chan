@@ -1,6 +1,6 @@
 # Extension proxy errors reach a sandboxed iframe CORS-masked
 
-Status: REGISTERED 2026-08-08 from a live incident on the v086-integration build; scheduling within the round is the owner's call.
+Status: SHIPPED in [v0.86.0](../release/release-v0.86.0.md). Every response leaving the extension namespace on both binaries carries the response policy, so a sandboxed iframe reads true statuses.
 
 ## What
 

@@ -19,24 +19,6 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-### v0.86.0
-
-| item | state | what needs to happen |
-| --- | --- | --- |
-| [web-lock-check-destroys-node-modules](v0.86.0/web-lock-check-destroys-node-modules.md) | accepted, re-scoped 2026-08-07 | environment-fixed on the host's npm 10.9.8; add an npm >= 10 floor to the target, state the version dependence in the comment, keep the desync red-proof |
-| [editor-widget-tests-are-nondeterministic](v0.86.0/editor-widget-tests-are-nondeterministic.md) | accepted, specced | fix the render race behind three intermittently failing editor tests so the gate stops going red on an unmodified tree |
-| [large-transfer-ceiling-refinements](v0.86.0/large-transfer-ceiling-refinements.md) | accepted, narrowed by ruling 2026-08-07 | bound archives cumulatively on both arms, refusing before the first byte or erroring the body at the bound mid-stream; the Range and recovery gaps are closed by ruling, no code |
-| [gateway-tests-do-not-run-off-main](v0.86.0/gateway-tests-do-not-run-off-main.md) | accepted, specced | execute the gateway's tests on the path that delivers gateway code, not only on a push to main or a gateway-path PR |
-| [gateway-window-skew-presents-as-a-code-defect](v0.86.0/gateway-window-skew-presents-as-a-code-defect.md) | accepted, specced | make a chan-desktop build identifiable at runtime, and let a desktop advertise the command vocabulary it grants a remotely-served page |
-| [source-pins-bound-on-sibling-string-literals](v0.86.0/source-pins-bound-on-sibling-string-literals.md) | accepted, class boundary ruled 2026-08-07 | fix the dead end-bounds across all 24 main.rs sites and the non-unique pin needles, with the definition-reorder mutation proving the three original pins |
-| [aur-publication-is-suspended](v0.86.0/aur-publication-is-suspended.md) | accepted, blocked upstream | restore AUR publication once the incident notice is superseded and pushes are permitted, deleting the guard job in the same commit |
-| [cs-terminal-new-cannot-spawn-an-agent-session](v0.86.0/cs-terminal-new-cannot-spawn-an-agent-session.md) | accepted, both surfaces ruled 2026-08-07 | let cs terminal new and cs terminal restart set the spawn command and env, sharing the plumbing, so a single terminal can derive an agent and be poked and a live shell tab can be repaired |
-| [extension-errors-are-cors-masked](v0.86.0/extension-errors-are-cors-masked.md) | accepted 2026-08-08, in flight | apply the extension response policy to every proxy error path, server and gateway, so a sandboxed iframe sees true statuses instead of a CORS mask |
-| [extension-capability-staleness-across-restart](v0.86.0/extension-capability-staleness-across-restart.md) | accepted 2026-08-08, in flight | re-resolve the extension catalog on watch reconnect and reconcile mounted frames, so a page that outlives a devserver restart converges without a manual reload |
-| [extensions-unreachable-through-the-gateway](v0.86.0/extensions-unreachable-through-the-gateway.md) | accepted 2026-08-08, in flight | admit the extension capability path shape through the gateway's session gate so cookieless sandboxed-iframe fetches reach the devserver that authorizes them |
-
-The web-marketing-onboarding item left the roadmap during v0.86.0 preparation: onboarding-page direction is marketing work and now lives in the chan-mkt repository; see [done/web-marketing-onboarding.md](done/web-marketing-onboarding.md).
-
 ### v0.87.0
 
 | item | state | what needs to happen |
@@ -45,8 +27,26 @@ The web-marketing-onboarding item left the roadmap during v0.86.0 preparation: o
 | [desktop-authorize-strands-the-browser-off-origin](v0.87.0/desktop-authorize-strands-the-browser-off-origin.md) | accepted, deferred 2026-08-08 before the v0.86.0 cut | land the already-signed-in browser on the profile page with a login-successful notification after desktop authorization, instead of the dead-end loopback page |
 | [scene-conflict-test-is-load-sensitive](v0.87.0/scene-conflict-test-is-load-sensitive.md) | registered, deferred 2026-08-08 | name and fix the load-sensitive race behind the flush-CAS-conflict test red observed once during the v0.86.0 full gate |
 | [devserver-build-identity](v0.87.0/devserver-build-identity.md) | registered, deferred 2026-08-08 | carry a build id in chan --version and the health surface, the server-side sibling of the desktop build identity that shipped in v0.86.0 |
+| [aur-publication-is-suspended](v0.87.0/aur-publication-is-suspended.md) | deferred, blocked upstream | restore AUR publication once the Arch incident notice is superseded and pushes are permitted, deleting the guard job in the same commit |
 
 ## Completed
+
+### v0.86.0
+
+Shipped 2026-08-08; see [release-v0.86.0](../release/release-v0.86.0.md). Closed items in [`done/`](done/):
+
+- [extensions-unreachable-through-the-gateway](done/extensions-unreachable-through-the-gateway.md) - the gateway admits the exact extension capability path shape, so cookieless sandboxed-iframe fetches reach the devserver whose per-process capability check authorizes them; extensions boot through the gateway for the first time.
+- [extension-errors-are-cors-masked](done/extension-errors-are-cors-masked.md) - every response leaving the extension namespace on both binaries carries the response policy, and the capability segment is redacted from both binaries' trace spans.
+- [extension-capability-staleness-across-restart](done/extension-capability-staleness-across-restart.md) - extension tabs converge after a devserver restart via catalog re-resolution and frame reconciliation, proven live in a headless browser with the fix withheld and restored.
+- [cs-terminal-new-cannot-spawn-an-agent-session](done/cs-terminal-new-cannot-spawn-an-agent-session.md) - cs terminal new and restart carry --command and --env on shared plumbing, so a single terminal derives an agent and a live shell tab can be repaired.
+- [gateway-window-skew-presents-as-a-code-defect](done/gateway-window-skew-presents-as-a-code-defect.md) - a chan-desktop build is identifiable at runtime and advertises its native vocabulary to remotely-served pages.
+- [editor-widget-tests-are-nondeterministic](done/editor-widget-tests-are-nondeterministic.md) - the fold walker refreshes on tree identity, closing a production staleness path behind three flaky tests, now deterministic.
+- [large-transfer-ceiling-refinements](done/large-transfer-ceiling-refinements.md) - archives bounded by the ceiling on both arms with refuse-before-first-byte semantics; the Range and recovery gaps closed by ruling.
+- [source-pins-bound-on-sibling-string-literals](done/source-pins-bound-on-sibling-string-literals.md) - all 24 dead end-bounds on unique definition-form needles, with a committed mutation probe.
+- [gateway-tests-do-not-run-off-main](done/gateway-tests-do-not-run-off-main.md) - the gate executes the database-free gateway suites and states execute versus compile per step.
+- [web-lock-check-destroys-node-modules](done/web-lock-check-destroys-node-modules.md) - environment-fixed with an npm >= 10 floor; the destructive premise was falsified in re-verification.
+
+The release also carried the owner's team-config pane layout, the empty-pane mark flash, and two cross-branch composition fixups. The web-marketing-onboarding item was withdrawn to the chan-mkt repository during preparation ([done/web-marketing-onboarding.md](done/web-marketing-onboarding.md)), and aur-publication-is-suspended deferred to v0.87.0 still blocked upstream.
 
 ### v0.85.0
 

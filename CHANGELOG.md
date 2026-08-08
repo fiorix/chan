@@ -4,17 +4,33 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.86.0] - 2026-08-08
+
+Extensions boot through the gateway for the first time, CLI terminals can spawn and repair agent-deriving sessions, archives respect the transfer ceiling, and the editor and the gate shed their nondeterminism.
 
 ### Added
 
 - **`cs terminal team` honors the config's pane layout.** A config whose members carry `position` grid coordinates (what the Team Work dialog's split layout saves) surfaces as that pane grid instead of stacking every member as a tab in one pane, so a team spawned from the CLI comes up with the same screen layout the dialog builds. The target window must hold a single pane, the seed the grid carves; a busier window is refused before anything is written or spawned, naming the ways out: close the extra panes, pass the new `--tabs` flag to stack, or target a fresh window with `--window`. A member-free grid cell receives the seed pane's existing tabs, so the host terminal that ran the command keeps a pane of its own instead of hiding behind the lead; with every cell occupied it stays stacked in cell 0. An explicit `--pane` names the seed and skips the single-pane requirement, a windowless caller spawns unsurfaced as before, and validation caps the derived grid at 9 panes. The surfacing push also carries the registry-settled tab name, so a second copy of a live team titles its tabs `@@Lead-2` exactly as `$CHAN_TAB_NAME` reports them.
+
+- **`cs terminal new` and `cs terminal restart` take `--command` and `--env`.** A terminal spawned or relaunched from the CLI can carry the command and environment that derive its submit agent, so a single session is pokeable without provisioning a team, and a live shell tab can be repaired into an agent session by restarting it with overrides. Identity stays fixed at spawn and server-derived; a session without the flags derives nothing, and an ungranted submit still refuses loudly with exit 69.
+- **A chan-desktop build identifies itself.** The About window carries the specific build id alongside the version, so two builds from different commits are distinguishable at runtime; between release bumps the version string alone never distinguishes them.
+- **A desktop advertises its native vocabulary.** A gateway-served page can query which native commands the running desktop grants and suppress affordances the host does not carry, instead of discovering a missing command through a thrown refusal; the refusal interpretation remains the only mechanism for builds predating the query.
+
+### Fixed
+
+- **Extensions boot through the gateway.** The gateway admits the extension capability path shape without the tenant session cookie, so the sandboxed extension iframe's cookieless module-script fetches reach the devserver whose per-process capability check authorizes them; extensions previously rendered their shell and never booted on any gateway-served window. Every response leaving the extension namespace, on both the devserver and the gateway, now carries CORS headers, so a sandboxed iframe reports true statuses instead of masking every failure as a CORS violation, and the capability segment stays out of both binaries' trace logs.
+- **Extension tabs converge after a devserver restart.** The extension catalog re-resolves on watch reconnect and mounted frames re-navigate to the freshly minted capability, so a window that outlives a restart returns to a working extension tab without a manual reload; a failed health probe during recovery retries instead of silently skipping.
+- **Markdown fold ranges stop lying under load.** The fold helper's syntax tree now refreshes on tree identity rather than only on effects, closing a staleness path where a time-budgeted parse could return a fold range ending at the document instead of its real terminator; the three editor widget tests that flaked on this are deterministic, 60 isolated and 5 full-suite runs green on an idle host.
+- **Archives respect the transfer ceiling on both arms.** An archive of a tree above the configured ceiling refuses up front when the plan can already see the bound exceeded and otherwise errors the response body at the bound mid-stream, instead of streaming to completion past the ceiling.
 
 ### Changed
 
 - **The gw/usr gateway naming is used everywhere.** Every remaining `id.chan.app` / `devserver.chan.app` reference in docs, package metadata, systemd unit descriptions, test fixtures, and provisioning text uses the identity origin `gw.{domain}` and the tunnel namespace `usr.{domain}`.
 - **The devserver connect log treats every gateway alike.** The CLI no longer special-cases the maintainer's tunnel terminator: the tunnel-connected line prints the identity-only form for every `--tunnel-url`, and no deployment host is compiled into the binary.
 - **The desktop keychain account follows the identity origin.** Sign-in tokens are stored under `gw.chan.app`; an existing install prompts for one fresh sign-in to re-mint its PAT.
+
+- **The empty-pane mark flashes instead of lingering.** The chan mark flashes in and out over the animation field on mount and on every animation switch, staying hidden while the animation runs; short panes keep dropping it entirely.
+- **The pre-push gate executes gateway tests.** The database-free gateway suites run in every gate with the seven Postgres-backed integration files reported as not run, the gateway steps state which execute and which only compile, and the web lockfile check refuses npm older than 10, whose dry run destroys node_modules.
 
 ## [v0.85.0] - 2026-08-06
 
