@@ -48,6 +48,17 @@ Threading the host's real revision into the sdme path was tried before falling b
 
 ### Acceptance, line by line
 
+**Two builds from different commits are distinguishable via `chan --version` and via the health surface.** Proven live, on two real binaries from the two commits of this lane, each read three ways:
+
+| commit | `chan --version` | devserver-root `/api/health` | tenant `/api/health` |
+| --- | --- | --- | --- |
+| `32520ba2eb70` | `chan 0.86.0 (build git-32520ba2eb70)` | `build=git-32520ba2eb70` | `build=git-32520ba2eb70` |
+| `a6f9e159821c` | `chan 0.86.0 (build git-a6f9e159821c)` | `build=git-a6f9e159821c` | `build=git-a6f9e159821c` |
+
+All three surfaces agree with each other and with the commit, and the second run needed no cache clearing: moving the checkout's HEAD was enough to restamp the binary on its own, which is the `rerun-if-changed` discipline on `HEAD` and `index` doing its job.
+
+One limitation surfaced while running that proof, and it is recorded rather than fixed. If a build happens where git is not reachable AND no override is set, the resulting `unknown` stamp is STICKY: the build script emits its git `rerun-if-changed` paths only when it can resolve a git directory, so if git later becomes reachable, nothing tells Cargo to restamp and the binary keeps saying `unknown` until something else invalidates the build script. The reverse direction is safe, because a git path that disappears reads as changed and forces a rerun. The shipped paths do not hit this: Nix always injects an override, and CI and developer checkouts always have git from the first build. It bit this verification only because the container was deliberately built without a git dir first and gained one afterwards.
+
 **The id survives the release build path (static musl, Nix).** Proven for Nix, and proven for musl with a stated limit.
 
 Nix: a real `make nix-sdme-check` run of the `chan` package produced a store binary reporting `chan 0.86.0 (build nar-531dd8e605dc)`, with `scripts/smoke-nix-package.sh` green. Before this change that same path stamps `unknown`, which is the defect this item exists for.
