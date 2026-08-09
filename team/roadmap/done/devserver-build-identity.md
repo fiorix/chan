@@ -1,5 +1,7 @@
 # A devserver build is not identifiable at runtime
 
+Closed: shipped in [v0.87.0](../release/release-v0.87.0.md).
+
 Status: REGISTERED 2026-08-08, deferred to v0.87.0 the same day before the v0.86.0 cut; the server-side sibling of the desktop build identity shipping in v0.86.0, grounded by the same trap firing again during the v086-integration live test. IMPLEMENTED 2026-08-09 in `32520ba2`, with the gateway-hop half of the first acceptance line deferred to the host's production test rather than proven in the round (see below).
 
 ## What

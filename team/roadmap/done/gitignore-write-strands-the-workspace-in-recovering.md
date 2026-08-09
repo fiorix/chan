@@ -1,5 +1,7 @@
 # A `.gitignore` write strands the workspace in `recovering` with no worker assigned
 
+Closed: shipped in [v0.87.0](../release/release-v0.87.0.md).
+
 Status: DIAGNOSED 2026-08-09 against the owner's live devserver during the v0.87.0 round, from a stuck workspace rather than a test. ACCEPTED into the round the same day on the owner's call, after the root cause was re-verified against the tree host-side. The live workspace was recovered in place without restarting the devserver; the defect is unfixed.
 
 ## What

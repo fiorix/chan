@@ -1,5 +1,7 @@
 # `--submit` cannot override a derivation that is wrong, so a hand-started agent is unreachable
 
+Closed: shipped in [v0.87.0](../release/release-v0.87.0.md).
+
 Status: ACCEPTED 2026-08-09 into the v0.87.0 round on the owner's call, from using the poke path during the round. A contract change, implemented host-side on `v087-submit` rather than in a delivery lane.
 
 ## What
@@ -55,3 +57,17 @@ It is accepted rather than overlooked: such a group is targeted per session inst
 ## Rough size
 
 Small. The decision is four lines; the cost is that the old contract is documented in nine places and every one of them has to move with it.
+
+## Implemented 2026-08-09 (`695f25ab`)
+
+`enqueue_write_matching` resolves the agent the sender named instead of substituting the session's own derivation. The derivation is still computed and compared, and `SubmitDivergence` now carries `derived` rather than `applied`, since what was applied is no longer in question. `term_write_outcome` stops computing a refusal, and `ControlResponse::SubmitRefused` with its exit 69 stays on the wire and in the client for a `cs` speaking to an older devserver; one client test is renamed to say that is what it guards.
+
+The rough size held for the decision and understated the prose. Nine surfaces moved with it: the arg help, the manpage body and its examples and side-effects section, the `cs terminal list` agent-column description, the generated team `bootstrap.md`, `chan-shell/design.md`, both orchestration docs, and the wire and exit-code comments. `crates/chan-shell/src/help.rs` is what `chan dump-skill` renders, so the skill output carries the new contract by construction rather than by a parallel edit.
+
+Validation: fmt and clippy clean, 285 chan-library plus 1064 chan-server plus 123 chan-shell tests green in an sdme container.
+
+Two mutation probes, because this is two claims and not one. Restoring derived-wins reds the four delivered-bytes tests and leaves the no-submit control green. Restoring the refusal reds only the Ok-and-name test.
+
+**The probe found a hole in the tests rather than in the code, and it is the reason to run probes at all.** Under the first mutation, both `control_socket` ack-wording tests stayed green: they pin the message text, not the decision. A suite of only those would have certified reverted behaviour. Only the delivered-PTY-bytes assertions discriminate sender authority.
+
+Not validated: a live poke through a running devserver. The change is proven at the registry and control-socket layers, not by watching a real agent submit.

@@ -1,5 +1,7 @@
 # A tab's own commands are reachable only by guessing a search string
 
+Closed: shipped in [v0.87.0](../release/release-v0.87.0.md).
+
 Status: REGISTERED 2026-08-09 for v0.87.0, from a walk-through of the four surface right-click menus against the command catalog. IMPLEMENTED 2026-08-09 in `979d20d5`, owner-tested on the round build.
 
 ## What
