@@ -8,7 +8,7 @@ Every chan-launched terminal gets `$CHAN_CONTROL_SOCKET` (the control socket `cs
 
 ## Pokes
 
-`cs terminal write [text] --tab-name=<h>|--tab-group=<g> [--submit=<agent>]` is the message primitive. Messages are capped at 4096 bytes, enqueue on the target's per-session FIFO (bound 100), and deliver when the target's PTY goes output-quiet; consecutive same-encoding submitted messages batch into one agent turn. `--submit` names the TARGET's agent so the right submit chord is appended; the server derives the target's real agent from its spawn command (and `CHAN_AGENT`) and corrects a mismatch in the ack. Without `--submit`, the text parks unsubmitted in the target's compose box. Discipline: a poke is a one-line pointer to an append-only section; write the section first, then poke it.
+`cs terminal write [text] --tab-name=<h>|--tab-group=<g> [--submit=<agent>]` is the message primitive. Messages are capped at 4096 bytes, enqueue on the target's per-session FIFO (bound 100), and deliver when the target's PTY goes output-quiet; consecutive same-encoding submitted messages batch into one agent turn. `--submit` names the agent to encode for and that agent's chord is what gets appended; the server reports in the ack when a target's own derivation disagrees but never overrides the request, so a wrong name delivers a wrong chord. Naming an agent for a target that derives none is how you reach an agent started by hand inside a shell session. One chord is encoded per command, so target a mixed-agent group per session. Without `--submit`, the text parks unsubmitted in the target's compose box. Discipline: a poke is a one-line pointer to an append-only section; write the section first, then poke it.
 
 ## Surveys
 

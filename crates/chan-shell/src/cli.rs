@@ -861,17 +861,18 @@ pub enum TerminalAction {
         #[arg(long)]
         stdin: bool,
         /// Submit the input into each target hands-free (the completion-poke
-        /// path). The SERVER picks the actual submit encoding: it derives
-        /// every matched session's agent from that session's own spawn
-        /// command and CHAN_AGENT, so the value here only says what you
-        /// believed the target runs; a mismatch is corrected server-side and
-        /// noted in the ack, and a shell target gets plain text with no
-        /// chord, keeps the raw bytes untouched, and makes the command exit
-        /// 69. A non-empty agent body is normalized to exactly one trailing
-        /// newline before its chord; an empty body stays chord-only. Spawn
-        /// such a session with CHAN_AGENT set or the agent as its command
-        /// instead of typing the agent into a shell. Values: claude | codex
-        /// | gemini | kimi | opencode.
+        /// path), encoded for the AGENT you name. Your value selects the
+        /// chord and the server applies it, including to a session whose own
+        /// spawn command names no agent, which is how you reach an agent you
+        /// started by hand inside a shell session. The server still derives
+        /// each session's agent from its spawn command and CHAN_AGENT, but
+        /// only to report a disagreement in the ack; it never overrides you.
+        /// Naming the wrong agent delivers the wrong chord, and the ack names
+        /// every session that disagreed. A non-empty agent body is normalized
+        /// to exactly one trailing newline before its chord; an empty body
+        /// stays chord-only. ONE chord is encoded per command, so target a
+        /// mixed-agent group per session rather than by group. Values:
+        /// claude | codex | gemini | kimi | opencode.
         /// Omit the flag to write pure bytes: the input parks in the agent's
         /// compose box unsubmitted (a bare newline is a newline to an agent,
         /// not a submit).

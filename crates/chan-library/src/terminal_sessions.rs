@@ -668,15 +668,18 @@ pub struct EnqueueOutcome {
     pub diverged: Vec<SubmitDivergence>,
 }
 
-/// One queued session whose derived agent disagrees with the sender's
-/// requested `--submit` agent. `applied: None` is a shell session: it
-/// received the text with no chord at all.
+/// One queued session whose own derived agent disagrees with the agent the
+/// sender named in `--submit`. The requested chord is applied either way;
+/// this records what the session looks like from the spawn side, so the reply
+/// can surface the disagreement without acting on it. `derived: None` is a
+/// session whose spawn command names no agent, which is precisely the case a
+/// sender overrides when an agent was started by hand inside a shell session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmitDivergence {
     /// The session's tab name, or its session id when unnamed, so the reply
     /// can address the target the way the sender selected it.
     pub tab: String,
-    pub applied: Option<SubmitAgent>,
+    pub derived: Option<SubmitAgent>,
 }
 
 #[derive(Debug)]
@@ -2030,14 +2033,23 @@ impl Registry {
     /// straight to the PTY: the drainer delivers logical messages when the
     /// agent is idle. See [`EnqueueOutcome`] for the return shape.
     ///
-    /// The server is authoritative over the chord. `submit` names the agent
-    /// the SENDER believed the target runs and means only "submit this";
-    /// each matched session's chord is derived HERE from that session's own
-    /// spawn command and `CHAN_AGENT`, and its template resolves in this
-    /// process's environment (env `CHAN_SUBMIT_<AGENT>` > `submit.toml` >
-    /// built-in). A group write onto a mixed-agent team therefore delivers a
-    /// per-session-correct chord, and a session that derives to no agent (a
-    /// shell) gets the plain text with no chord, whatever the sender asked.
+    /// The SENDER is authoritative over which chord applies. `submit` names
+    /// the agent to encode for, and that agent's chord is what every matched
+    /// session receives; its template still resolves in this process's
+    /// environment (env `CHAN_SUBMIT_<AGENT>` > `submit.toml` > built-in).
+    ///
+    /// The per-session derivation from spawn command and `CHAN_AGENT` is
+    /// still computed, but only to report disagreement, never to override the
+    /// request. It cannot be authoritative: it is a sniff of the string a
+    /// session was spawned with, so it is blind to an agent started by hand
+    /// inside a shell session, and there is no way to correct it on a live
+    /// session short of restarting it. A sender who names the wrong agent
+    /// gets the wrong chord and an ack that says which session disagreed,
+    /// which is a better failure than one nobody can override.
+    ///
+    /// A group write onto a mixed-agent team therefore delivers ONE chord to
+    /// every member, so target a mixed group per-session rather than by
+    /// group when the members run different agents.
     pub fn enqueue_write_matching(
         &self,
         tab_name: Option<&str>,
@@ -2056,10 +2068,7 @@ impl Registry {
         let mut outcome = EnqueueOutcome::default();
         for (session, metadata) in matched {
             let derived = session.derived_submit_agent();
-            let resolved = match submit {
-                Some(_) => derived.map(ResolvedSubmit::resolve),
-                None => None,
-            };
+            let resolved = submit.map(ResolvedSubmit::resolve);
             match session.enqueue_cs_write(data.to_string(), resolved) {
                 Some(position) => {
                     outcome.queued += 1;
@@ -2070,7 +2079,7 @@ impl Registry {
                         if derived != Some(requested) {
                             outcome.diverged.push(SubmitDivergence {
                                 tab: metadata.name.unwrap_or_else(|| session.id.clone()),
-                                applied: derived,
+                                derived,
                             });
                         }
                     }
@@ -4673,12 +4682,13 @@ mod tests {
         assert_eq!(delivered_input(&rx), b"body\n\n".to_vec());
     }
 
-    // The server-side chord authority: the sender's `--submit` value never
-    // picks delivery bytes; each matched session's chord derives from that
-    // session's own spawn command + CHAN_AGENT at enqueue.
+    // The sender-side chord authority: the agent named in `--submit` picks the
+    // delivery bytes for every matched session. Each session's own derivation
+    // from spawn command + CHAN_AGENT is still computed, but only to report a
+    // disagreement, never to override the request.
 
     #[test]
-    fn server_overrides_a_wrong_sender_chord_with_the_targets_own() {
+    fn the_senders_chord_wins_over_the_targets_own_derivation() {
         let registry = Registry::new(test_config(1024, 4, 10));
         let (codex, rx) =
             test_agent_session(1024, "s-codex", Some("@@T"), None, Some("codex"), &[]);
@@ -4692,20 +4702,21 @@ mod tests {
             outcome.diverged,
             vec![SubmitDivergence {
                 tab: "@@T".into(),
-                applied: Some(SubmitAgent::Codex),
-            }]
+                derived: Some(SubmitAgent::Codex),
+            }],
+            "the disagreement is reported, naming what the session derives"
         );
 
         drain_now(&codex);
         assert_eq!(
             delivered_input(&rx),
-            b"\x1b[200~poke\n\x1b[201~\r".to_vec(),
-            "the target's codex chord must win over the sender's claude"
+            b"poke\n\x1b[27;9;13~".to_vec(),
+            "the sender's claude chord must win over the target's own codex"
         );
     }
 
     #[test]
-    fn server_corrects_a_wrong_sender_chord_for_a_kimi_target() {
+    fn a_kimi_target_still_receives_the_chord_the_sender_named() {
         let registry = Registry::new(test_config(1024, 4, 10));
         let (kimi, rx) = test_agent_session(
             1024,
@@ -4731,16 +4742,21 @@ mod tests {
         assert_eq!(outcome.queued, 1);
         assert_eq!(outcome.diverged.len(), 1);
         assert_eq!(
-            outcome.diverged[0].applied.map(SubmitAgent::name),
-            Some("kimi")
+            outcome.diverged[0].derived.map(SubmitAgent::name),
+            Some("kimi"),
+            "the ack still tells the sender the target was spawned as kimi"
         );
 
         drain_now(&kimi);
-        assert_eq!(delivered_input(&rx), b"\x1b[200~poke\n\x1b[201~\r".to_vec());
+        assert_eq!(delivered_input(&rx), b"poke\n\x1b[27;9;13~".to_vec());
     }
 
+    // The motivating case for sender authority: a session spawned as a plain
+    // shell whose operator then started an agent inside it derives nothing,
+    // and nothing can correct that derivation while the session is live. The
+    // sender's named chord is the only way to reach it.
     #[test]
-    fn a_shell_target_gets_no_chord_whatever_the_sender_asked() {
+    fn a_target_deriving_no_agent_still_gets_the_requested_chord() {
         let registry = Registry::new(test_config(1024, 4, 10));
         let (shell, rx) =
             test_agent_session(1024, "s-shell", Some("@@Sh"), None, Some("bash"), &[]);
@@ -4757,20 +4773,43 @@ mod tests {
             outcome.diverged,
             vec![SubmitDivergence {
                 tab: "@@Sh".into(),
-                applied: None,
-            }]
+                derived: None,
+            }],
+            "deriving nothing is reported, so the override stays visible"
         );
 
         drain_now(&shell);
         assert_eq!(
             delivered_input(&rx),
-            b"poke\n".to_vec(),
-            "raw text only: no chord, trailing newline untouched"
+            b"poke\n\x1b[27;9;13~".to_vec(),
+            "the requested claude chord is encoded even with no derived agent"
         );
     }
 
     #[test]
-    fn a_mixed_agent_group_broadcast_is_per_session_correct() {
+    fn omitting_submit_still_delivers_raw_text_to_every_target() {
+        let registry = Registry::new(test_config(1024, 4, 10));
+        let (agent, rx) =
+            test_agent_session(1024, "s-claude", Some("@@Raw"), None, Some("claude"), &[]);
+        register_session(&registry, &agent);
+
+        let outcome = registry.enqueue_write_matching(Some("@@Raw"), None, "draft: ", None);
+        assert_eq!(outcome.queued, 1);
+        assert!(
+            outcome.diverged.is_empty(),
+            "no submit request means nothing to disagree about"
+        );
+
+        drain_now(&agent);
+        assert_eq!(
+            delivered_input(&rx),
+            b"draft: ".to_vec(),
+            "without --submit the bytes stay raw and park in the compose box"
+        );
+    }
+
+    #[test]
+    fn a_mixed_agent_group_broadcast_encodes_one_chord_for_everyone() {
         let registry = Registry::new(test_config(1024, 8, 10));
         let (claude, rx_claude) = test_agent_session(
             1024,
@@ -4811,13 +4850,14 @@ mod tests {
             vec![
                 SubmitDivergence {
                     tab: "@@B".into(),
-                    applied: Some(SubmitAgent::Codex),
+                    derived: Some(SubmitAgent::Codex),
                 },
                 SubmitDivergence {
                     tab: "@@C".into(),
-                    applied: None,
+                    derived: None,
                 },
-            ]
+            ],
+            "both mismatched members are named so the cost of one chord is visible"
         );
 
         for session in [&claude, &codex, &shell] {
@@ -4828,12 +4868,13 @@ mod tests {
             delivered_input(&rx_codex),
             delivered_input(&rx_shell),
         ];
-        assert_eq!(delivered[0], b"poke\n\x1b[27;9;13~".to_vec());
-        assert_eq!(delivered[1], b"\x1b[200~poke\n\x1b[201~\r".to_vec());
-        assert_eq!(delivered[2], b"poke".to_vec());
+        let claude_bytes = b"poke\n\x1b[27;9;13~".to_vec();
+        assert_eq!(delivered[0], claude_bytes);
+        assert_eq!(delivered[1], claude_bytes);
+        assert_eq!(delivered[2], claude_bytes);
         assert!(
-            delivered[0] != delivered[1] && delivered[1] != delivered[2],
-            "one broadcast, three per-session byte strings"
+            delivered[0] == delivered[1] && delivered[1] == delivered[2],
+            "one chord per command: a mixed group is targeted per session instead"
         );
     }
 
