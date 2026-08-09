@@ -118,7 +118,11 @@ completeness claim the item exists to prevent:
 > about whether its test is load-sensitive, and a test being load-sensitive does not imply
 > a site here.
 
-The evidence is the three named tests themselves. Only one is in the sleep population:
+The evidence is the whole inventory, not a sample. Of the **nine** load-sensitive tests enumerated below, **exactly one** is in the sleep population — `stable_bind_absorbs_a_transient_lock_holder`, which is also the only one with a mechanism named from source. The other eight carry no sleep to find.
+
+`handoff.rs` makes the point inside a single file: it contributes **six** sites to the sleep population, every one production-legitimate, its test module starts at line 1390, and the load-sensitive test it handed this round (`desktop_liveness_probe_bounds_missing_and_stale_sockets`, 3 red in 15 on unmodified `main`) contains no sleep at all. One file, six audit sites and one flaky test, with no overlap between them.
+
+The three originally sampled:
 
 | named test | file | sleep calls in fn | in population? |
 | --- | --- | --- | --- |
@@ -167,9 +171,9 @@ same shortcut.
 - A recorded classification of all **47** current sleep call sites in `crates/chan-server/src/` (see the amended population above), each marked production-legitimate, test-repaired, defect-registered, or **test-bounded-and-kept**. Both greps and the reason they differ are written into the item so either can be re-run.
 - The fourth bucket, `test-bounded-and-kept`, is for a test wait on a real external thing that no paused clock can advance — a child process exiting, a real socket. Each member states what bounds it. This is continuity, not an escape hatch: `done/timing-test-virtual-clock.md:15` already made the same call, leaving `crates/chan/tests/devserver_resilience.rs` alone because "process-level budgets cannot virtualize because they wait on real child processes". `wait_child_dead` is the textbook member.
 - The audit's coverage bound is stated with what it excludes. The method is lexical and line-based, so it does not see timing sites with no `sleep` at all (`tokio::time::timeout`, `interval()`, bare `Instant::now()` + `elapsed()` assertions), a `sleep(` split across lines, or a sleep reached through a test helper. `devserver.rs:5637` is in the population only because its loop happens to contain a sleep; the same deadline loop written without one would be invisible to both greps.
-- The three named tests repaired under the `timing-test-virtual-clock` ruling, each proven able to go red once and restored.
-- `devserver.rs:6041`, open since v0.82.0, is resolved or explicitly re-deferred with a reason.
-- The audit re-runs clean at the end: the same grep returns no unclassified site.
+- The three named tests repaired under the `timing-test-virtual-clock` ruling, each proven able to go red **under the reproduction rig** — `sdme set --cpus 1` with `--test-threads=32`, cap verified from the host — with the red counted over N runs and the ratio stated, not asserted from a single observation. A mutate-run-observe probe in a quiet container is disqualified by this item's own acceptance-bar finding: a quiet container certifies broken code.
+- The v0.82.0 open follow-up recorded as `devserver.rs:6041` is resolved or explicitly re-deferred with a reason. In this tree it is `devserver.rs:5627-5639` (`wait_child_dead`); the line number moved, the site did not.
+- The audit re-runs clean at the end: **the widened grep above** — not the original 31-site one — returns no unclassified site. Naming it matters: read against the original, this line is satisfiable while `devserver.rs` stays unclassified, which is the exact defect the amended population section exists to fix.
 - Any production defect the triage exposes is registered, not silently fixed inside this item.
 
 ## Boundaries
@@ -180,4 +184,4 @@ The audit runs against the merged state after the four delivery lanes land, not 
 
 ## Rough size
 
-Medium, and mostly triage rather than repair. The construction is already ruled; the work is reading 31 sites and deciding, plus repairing the subset that needs it. The tail risk is that triage exposes further production defects, which is the point of doing it rather than an argument against.
+Medium, and mostly triage rather than repair. The construction is already ruled; the work is reading all 47 sites and deciding, plus repairing the subset that needs it. The tail risk is that triage exposes further production defects, which is the point of doing it rather than an argument against.
