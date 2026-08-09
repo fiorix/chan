@@ -83,3 +83,134 @@ Both were surfaced by this diagnosis and are their own items now. Neither is in 
 
 - [one-stalled-workspace-may-block-the-others](one-stalled-workspace-may-block-the-others.md): with this workspace stuck, the others could not be toggled off from the UI. Registered as an unverified lead with no reproduction attempted, and it stays that way until someone reproduces it.
 - [chan-ps-cannot-answer-what-a-workspace-is-doing](chan-ps-cannot-answer-what-a-workspace-is-doing.md): every fact needed to diagnose this was already computed and already served, and `chan ps` surfaces none of it.
+
+## Implemented 2026-08-09 (`53f8b5e6`)
+
+The class, not the instance. Copying the coordinator poke that `excluded_dirs.rs:114-116`
+already makes would have fixed `.gitignore` and left the poke as something each future
+caller has to remember, which is exactly how `refresh_repository_scope` and
+`set_excluded_dirs` came to differ while sharing a primitive. Instead the announcement is
+structural: `Workspace` carries a `RecoveryDriver` that the executor installs, and every
+path that parks a pass announces it, `request_recovery` and `request_policy_recovery` and
+the requeue branch of `finish_recovery` alike. Installing a driver also announces a pass
+already pending, which is what closes the two routes the item lists beyond the reported
+one: the window between `Workspace::open` and `Indexer::spawn`, and `run_open_recovery`
+returning for good on a failed pass with that pass requeued behind it.
+
+The coordinator executes `Reconcile` and `Replay` rather than refusing them into
+`IndexStatus::Error`. For a served workspace it is the only claimant there is, so its
+refusal was terminal for that generation rather than a deferral. Only `FullRebuild` rides
+the 30 s storm cooldown or stamps `Building`; a reconcile is bounded work that reports no
+per-file progress, and delaying it holds the workspace in `recovering` for no gain.
+
+Preflight tests whether a pass has a claimant ahead of testing readiness. A stalled
+recovery and a running one are both `!is_ready()`, and asking readiness first is precisely
+what made them indistinguishable. An unowned pass now reports `needs_decision` carrying
+the rebuild that clears it, performed by a new `index` arm on
+`POST /api/preflight/decision`. `PreflightOverlay.svelte:299-311` already renders any
+step's decision generically and posts `decide(step.id, choice.id)`, so this needed no
+frontend change.
+
+**Why this satisfies "never presents a locked boot overlay for a recovery pass that has no
+worker assigned to it"**, rather than merely softening it: after the change every parked
+pass is announced to a driver, and `Indexer::spawn` installs one before the server can
+serve a single poll. On a served workspace the antecedent cannot occur, so the line holds
+structurally rather than by mitigation. The decision card is the guard for the case the
+invariant does not cover (a workspace opened with no indexer at all), and it is
+deliberately unreachable on a served workspace. The separate question of whether a pass
+that *does* have a worker should lock the workspace at all is registered as
+[the-boot-overlay-locks-the-workspace-behind-its-own-index-rebuild](the-boot-overlay-locks-the-workspace-behind-its-own-index-rebuild.md);
+it is a product decision about whether indexing blocks entry, and this item's contract does
+not reach it.
+
+One behavior change beyond the defect: the phase derivation now ranks `needs_decision`
+ahead of unready readiness. A recovering workspace with a missing embedding model reports
+`needs_decision` where it previously reported `running`. The overlay locks either way.
+Without the reorder the stall step would be computed and then buried.
+
+### Live proof, both arms
+
+Run on the same script, workspace shape, host and session, with the commit as the only
+variable. Host condition: box otherwise idle, load average 2.6 to 6, the other three lanes
+merged and quiet, and the lead deliberately holding a gate pre-warm so the measurement
+carried no foreign load.
+
+A devserver over a throwaway two-file workspace, settled to `ready`, then one `.gitignore`
+write and nothing else. No `/api/index/rebuild` in either arm.
+
+On `main` at `b9809f31`, held for the full 60 s sample window:
+
+```json
+"readiness": {"state":"recovering","generation":3,"completed_generation":1,
+              "required_action":"reconcile",
+              "active_generation":null,"pending_generation":3}
+"indexer":   {"status":"idle","queue_depth":0}
+```
+
+with `phase: running`, `locked: true`, index step `pending`. That is the diagnosis
+reproduced from scratch: the same fingerprint as the owner's devserver at generation 14 /
+completed 12 / `reconcile` / active null / pending 14 / indexer idle / queue 0, two policy
+bumps and all.
+
+On `53f8b5e6`, same trigger: generation advanced 1 to 3 and readiness returned to
+`state: ready` at generation 3, `phase: ready`, `locked: false`, index step `done`.
+
+The success criterion is the acceptance line, `generation advanced AND readiness returned
+to ready`. An earlier version of the harness also required *sighting* the transient
+`recovering` state and scored a working fix `INCONCLUSIVE`, because a reconcile over two
+files finishes between polls; the generation advance is the guard against a vacuous pass,
+not the sighting. The red arm did observe `recovering` directly, which confirms the
+criterion can see the stall it is asked to detect.
+
+### Tests
+
+13 new, and the previously existing preflight test that asserted a driverless pending pass
+reports `Phase::Running` was rewritten, because it pinned exactly the state this item calls
+the defect.
+
+- `indexer.rs`: the end-to-end `.gitignore` convergence with a real watcher and a real
+  `Indexer::spawn`; the coordinator running a `Reconcile` and a `Replay` without faulting;
+  a pass parked before the indexer exists being claimed when it spawns.
+- `workspace.rs`: the three announcement paths (park, requeue, install-time), completion
+  deliberately not announcing, and `recovery_is_unowned` across all four states.
+- `preflight.rs`: recovery with a claimant versus a stall, distinguished under identical
+  readiness and identical index status; installing a claimant clearing the stall report; an
+  index error outranking a stall.
+
+### Mutation probes
+
+Seven probes, 20 assertions: 13 expect-red and 7 controls that had to stay green. Every
+probe bit, and every expect-red assertion failed the test that claims it:
+
+| Probe | Reverted | Went red |
+| --- | --- | --- |
+| P1 | policy-park does not announce | park test, `.gitignore` end-to-end |
+| P2 | requeue does not announce | requeue test |
+| P3 | install does not announce | install test, indexer-spawn test |
+| P4 | coordinator refuses non-rebuild | reconcile test, replay test |
+| P5 | readiness outranks the stall | stall-report test, install-clears test |
+| P6 | `unowned` ignores the driver | three tests across both crates |
+| P7 | phase buries the decision | stall-report test |
+
+The first run of P1 scored 19 of 20, and the deviation was a control chosen wrongly rather
+than a defect: the control nominated asserts the driver was woken *twice*, once for the
+park and once for the requeue, so it depends on the park announcement and correctly went
+red. Re-run against `recovery_generation_signal_during_active_forces_follow_up`, which
+exercises the same mutated function but asserts generation and pass state rather than
+announcement, P1 is 3 of 3. That control is the sharper one: it shows the mutation is
+narrow within the recovery machinery, not merely survivable by an unrelated crate.
+
+The harness classifies `build-error` and `no-match` apart from red and green, and asserts
+the runner reported `running 1 test` before believing a green. An earlier run of it scored
+0 of 20 as `build-error` when the host disk filled; that is the instrument refusing to
+score a build that never ran, rather than reporting the probes as failing to bite.
+
+### Not proven, stated rather than implied
+
+`recovery_is_unowned` has three terms. Two are covered directly. The third, "the startup
+worker is still running", guards a window of microseconds between the worker being spawned
+and it claiming its pass, and is held by construction rather than by a test: covering it
+needs a timing-sensitive assertion, and this round registered three load-sensitive reds
+already. The guard earns its place by keeping a boot-time poll that lands in that window
+from rendering a false stall card, and on a served workspace the driver is installed before
+the server answers at all.
