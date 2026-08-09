@@ -164,7 +164,7 @@ carry **no timing keyword to grep for**. The instrument that found them was the 
 under a 1-CPU cgroup cap with `--test-threads=32`, not a code read. Institutionalising that
 instrument is a v0.88.0 argument and deliberately not attempted here.
 
-**Workstream 1** classifies the 47 sleep sites. **Workstream 2** repairs the three named
+**Workstream 1** classifies the sleep sites (47 at `b9809f31`, 49 against the merged tree). **Workstream 2** repairs the three named
 tests. They overlap in exactly one site, `control_socket.rs:4940`. Neither completing
 implies anything about the other.
 
@@ -192,7 +192,7 @@ same shortcut.
 
 ## Acceptance
 
-- A recorded classification of all **47** current sleep call sites in `crates/chan-server/src/` (see the amended population above), each marked production-legitimate, test-repaired, defect-registered, or **test-bounded-and-kept**. Both greps and the reason they differ are written into the item so either can be re-run.
+- A recorded classification of all **49** current sleep call sites in `crates/chan-server/src/` (47 when this item was amended pre-merge; see the classification section for the delta) (see the amended population above), each marked production-legitimate, test-repaired, defect-registered, or **test-bounded-and-kept**. Both greps and the reason they differ are written into the item so either can be re-run.
 - The fourth bucket, `test-bounded-and-kept`, is for a test wait on a real external thing that no paused clock can advance — a child process exiting, a real socket. Each member states what bounds it. This is continuity, not an escape hatch: `done/timing-test-virtual-clock.md:15` already made the same call, leaving `crates/chan/tests/devserver_resilience.rs` alone because "process-level budgets cannot virtualize because they wait on real child processes". `wait_child_dead` is the textbook member.
 - The audit's coverage bound is stated with what it excludes. The method is lexical and line-based, so it does not see timing sites with no `sleep` at all (`tokio::time::timeout`, `interval()`, bare `Instant::now()` + `elapsed()` assertions), a `sleep(` split across lines, or a sleep reached through a test helper. `devserver.rs:5637` is in the population only because its loop happens to contain a sleep; the same deadline loop written without one would be invisible to both greps.
 - The three named tests repaired under the `timing-test-virtual-clock` ruling, each proven able to go red **under the reproduction rig** — `sdme set --cpus 1` with `--test-threads=32`, cap verified from the host — with the red counted over N runs and the ratio stated, not asserted from a single observation. A mutate-run-observe probe in a quiet container is disqualified by this item's own acceptance-bar finding: a quiet container certifies broken code.
@@ -208,4 +208,90 @@ The audit runs against the merged state after the four delivery lanes land, not 
 
 ## Rough size
 
-Medium, and mostly triage rather than repair. The construction is already ruled; the work is reading all 47 sites and deciding, plus repairing the subset that needs it. The tail risk is that triage exposes further production defects, which is the point of doing it rather than an argument against.
+Medium, and mostly triage rather than repair. The construction is already ruled; the work is reading all 49 sites and deciding, plus repairing the subset that needs it. The tail risk is that triage exposes further production defects, which is the point of doing it rather than an argument against.
+
+## Method: two rules a re-read must apply
+
+Both were learned by getting them wrong inside this audit.
+
+**A re-read re-derives the justification, not just the bucket.** The contract requires each kept site to be justified in place, and a justification is a claim about the code *around* the sleep rather than about the sleep itself. Carrying one across a rewrite yields a sentence that was true of code which no longer exists, sitting under a bucket that is still correct: it reads as verified and is not. `indexer.rs:413` -> `:436` is the worked example. It stayed production-legitimate across the merge while its justification changed completely: the storm cooldown it implements used to apply to every claimed recovery pass and now applies only when `pass.action == RecoveryAction::FullRebuild`, because the coordinator began executing reconcile and replay passes instead of refusing them. A carried-forward row would have asserted a cooldown policy the code had stopped implementing.
+
+**An added check does not retire the value it checks alongside.** `write_text_if_unchanged` conflicts on `current != Some(m) || !self.disk_still_holds(rel, expected_disk)` (`crates/chan-workspace/src/workspace.rs:1898`) -- an OR, so a moved mtime alone still conflicts whatever the content says. The `FlushJob` content baseline added this round is strictly additional and the mtime token beside it remains load-bearing. The failure mode is predicting from a change's *purpose* rather than its structure: a baseline introduced to fix mtime-driven data loss reads as though it supersedes mtime, and does not. Read the conjunction. This one cost a wrong amendment to a neighbouring item before it was caught.
+
+## Rule: a starvation probe cannot be virtualized
+
+A test whose subject is *whether* a timer fires under contention cannot be virtualized. A paused clock auto-advances once all tasks are idle, so the timer fires by construction and the test passes on a starved runtime -- the repair deletes the assertion it was meant to protect, silently, while looking like modernisation. These are rate-versus-property cases (`done/timing-test-virtual-clock.md`): the failure they detect is "never fires", not "fires slowly", so a generous **named budget** on a real clock keeps every bit of discriminating power and still removes the load sensitivity.
+
+`state.rs:422` is the worked example, and its own comment states the property a paused clock would delete: a blocking read parks the only runtime worker, so the independent timer cannot fire before its deadline. `routes/search.rs:1089` is the same shape. This matters because the obvious move -- apply the standing virtual-clock ruling to a timing test -- is the wrong one here, and this round's charter would have endorsed it.
+
+## Classification, against the merged tree
+
+Derived at `b346b87f` (all four lanes plus `v087-submit` merged). **49 sites in 18 files: 28 production-legitimate, 10 test-repaired, 11 test-bounded-and-kept, 0 defect-registered.**
+
+The pre-merge reading at `b9809f31` was 47 sites and 28/10/9/0. The delta is entirely `indexer.rs`, 7 sites to 9, from the recovery-coordinator rewrite; both new sites are 10 ms polls already inside a timeout budget, so they arrived pre-classified by the standing ruling rather than needing repair. A merge that ADDS correctly-constructed sites is the argument for this list being re-runnable rather than a one-time census.
+
+Eight sites were classified provisionally before the merge because their subject was under active change, and each was re-read after it. Seven kept their bucket with shifted lines. `indexer.rs:436` kept its bucket and needed a rewritten justification (above). `doc_sessions/mod.rs:2914` -> `:2948` was predicted to be mooted by the CAS baseline and was not: the test body is unchanged and the mtime token is still the mechanism, so the row stands.
+
+| site (`crates/chan-server/src/`) | bucket | justification |
+| --- | --- | --- |
+| `control_socket.rs:2133` | production-legitimate | `SUBMIT_SPLIT_GAP` between a submit and its chord |
+| `control_socket.rs:3446` | production-legitimate | idle/shutdown timer arm |
+| `control_socket.rs:4936` | test-repaired | 25 ms sleep raced against the bind retry budget; closes `control-socket-takeover-test-races-a-fixed-sleep` |
+| `control_socket.rs:7272` | test-bounded-and-kept | real PTY scrollback until a marker or a deadline |
+| `control_socket.rs:7416` | test-bounded-and-kept | real PTY scrollback, 1 s deadline |
+| `control_socket.rs:777` | production-legitimate | file-lock `try_lock` retry over `ATTEMPTS` |
+| `control_socket.rs:800` | production-legitimate | control-socket connect retry |
+| `devserver.rs:5666` | test-bounded-and-kept | `try_wait()` on a real `std::process::Child`, 10 s deadline. Resolves the v0.82.0 `devserver.rs:6041` follow-up |
+| `devserver.rs:5968` | test-repaired | sleep-then-assert after a CREATED response |
+| `devserver/fdstore.rs:318` | production-legitimate | `MANIFEST_DEBOUNCE` before a manifest write |
+| `devserver/fdstore.rs:663` | production-legitimate | periodic manifest interval tick |
+| `devserver_handoff.rs:1047` | test-repaired | 30 s hang stub; `std::future::pending()` removes the timing dependence |
+| `devserver_handoff.rs:396` | production-legitimate | handoff poll backoff |
+| `devserver_handoff.rs:477` | production-legitimate | handoff poll backoff |
+| `devserver_handoff.rs:733` | production-legitimate | handoff poll backoff |
+| `doc_sessions/mod.rs:2220` | production-legitimate | `FLUSH_TICK` flusher select arm |
+| `doc_sessions/mod.rs:2948` | test-repaired | 20 ms to move the mtime token; one of three hand-applied workarounds for the mtime collision. Addresses the sleep ONLY; does not close `doc-sessions-tests-stage-external-edits-on-the-filesystem-clock` |
+| `handoff.rs:1063` | production-legitimate | handoff retry backoff |
+| `handoff.rs:1210` | production-legitimate | handoff retry backoff |
+| `handoff.rs:558` | production-legitimate | handoff retry backoff |
+| `handoff.rs:637` | production-legitimate | handoff retry backoff |
+| `handoff.rs:806` | production-legitimate | handoff retry backoff |
+| `handoff.rs:931` | production-legitimate | handoff retry backoff |
+| `indexer.rs:1261` | test-bounded-and-kept | poll inside a timeout budget (`await_ready` helper) |
+| `indexer.rs:1304` | test-bounded-and-kept | poll inside a timeout budget; arrived with the gitignore item |
+| `indexer.rs:1779` | test-bounded-and-kept | poll inside `CONVERGENCE_BUDGET`; `done/timing-test-virtual-clock.md` already ruled this family |
+| `indexer.rs:1796` | test-bounded-and-kept | same |
+| `indexer.rs:1891` | test-bounded-and-kept | same; re-repairing would undo the prior ruling |
+| `indexer.rs:420` | production-legitimate | coordinator waits for an active recovery to clear |
+| `indexer.rs:425` | production-legitimate | coordinator waits for a claimable pass |
+| `indexer.rs:436` | production-legitimate | storm cooldown, now gated on `full_rebuild` only |
+| `indexer.rs:599` | production-legitimate | rebuild retry backoff |
+| `mcp_bridge.rs:256` | production-legitimate | MCP socket connect retry |
+| `routes/extensions.rs:339` | production-legitimate | `UPSTREAM_IDLE_TIMEOUT` idle timer |
+| `routes/metadata.rs:220` | production-legitimate | blocking metadata retry |
+| `routes/search.rs:1089` | test-repaired | starvation probe: keep the real clock, widen the 200 ms rate assertion to a named budget |
+| `routes/storage.rs:184` | production-legitimate | blocking storage retry |
+| `routes/storage.rs:417` | test-repaired | sleep 50 ms after a CONFLICT, then retry |
+| `routes/terminal.rs:1494` | test-bounded-and-kept | real PTY session events, deadline-bounded poll |
+| `routes/terminal.rs:2608` | test-bounded-and-kept | real terminal cwd after a real chdir, deadline-bounded poll |
+| `routes/transfer.rs:1393` | test-bounded-and-kept | bounded 200 attempts; justification already written in place |
+| `scene_sessions/mod.rs:1867` | production-legitimate | `FLUSH_TICK` flusher select arm |
+| `session_roster.rs:74` | production-legitimate | `sleep_until` a roster deadline |
+| `signal.rs:128` | production-legitimate | shutdown grace before force-exit |
+| `signal.rs:184` | test-repaired | sleep-to-sequence, "let the watcher subscribe" |
+| `signal.rs:208` | test-repaired | sleep-to-sequence, "let the accept loop start" |
+| `signal.rs:247` | test-repaired | 60 s hang stub; same construction |
+| `signal.rs:38` | production-legitimate | signal watcher poll tick |
+| `state.rs:422` | test-repaired | starvation probe: keep the real clock, widen the 100 ms rate assertion to a named budget |
+
+On `defect-registered: 0`: no site among the 21 test sites shows evidence of masking a production race. What was looked for -- a sleep standing in for a missing synchronisation point, a wait whose removal changes an assertion's outcome rather than only its timing, and a poll loop tolerating a state the production path should have made unreachable. This states what the reading found; it is not a claim that none exist. This round's chartered flaky test was filed as a test defect and turned out to be a production data-loss path, so a future counterexample should refute this sentence rather than embarrass it.
+
+## Workstream 2, and one deliberate boundary exception
+
+`terminal_sessions::tests::backend_preference_flip_applies_to_direct_create_and_restart_only` lives in **chan-library**, outside this item's chan-server boundary. It was repaired here anyway, as a deliberate exception, because it reds the round's closing gate and no amount of chan-server sweeping reaches it -- which is the two-workstream finding restated as a scheduling fact. The exception is a workstream-2 repair only; the 49-site audit population is unchanged and the boundary has not moved.
+
+Mechanism: `Session::attach` returns `replay`, everything the ring already holds at subscribe time, alongside `rx` for everything after. `Registry::create` attaches only after `Session::spawn` has started the PTY, so a session created with a one-shot `command` can run to completion before the create thread reaches its attach, putting that output solely on the replay side. The test collector drained `rx` alone and so read back the empty string rather than a wrong value -- the reported `did not sample the live preference: ""`. The preference was always sampled correctly at create. The serving path already drains the ring (`chan-server`'s terminal attach iterates `session.replay`, and the fdstore handoff encodes it), so the collector was the only consumer omitting that half and there is no production sibling.
+
+Evidence: 1 red in 20 full-suite runs before, 0 in 40 after, under a 1-CPU cgroup cap with `--test-threads=32`. That ratio alone is roughly 87% confidence, so it is corroboration rather than proof; the proof is a deterministic discriminator, `a_fresh_attach_reads_output_the_ring_already_holds`, which is red 5 of 5 without the replay drain and green 5 of 5 with it because it never has to win the race.
+
+**A second rig reading that lies.** `sdme set --cpus 1` prints "container is running; restart for limits to take effect" while the cap is already live. Both that and the inside-container `/sys/fs/cgroup/cpu.max` fail toward "your cap is not applied", which invites widening the cap and destroying the signal. Measure the cap rather than reading it: one fixed-work job took 0.99 s and eight in parallel took 13.18 s.
