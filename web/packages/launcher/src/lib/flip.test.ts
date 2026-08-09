@@ -86,4 +86,43 @@ describe("pane-flip copy pins", () => {
     expect(shellSource).toContain("520ms cubic-bezier(0.2, 0.7, 0.2, 1)");
     expect(shellSource).toMatch(/prefers-reduced-motion/);
   });
+
+  test("the back face never paints at rest", () => {
+    // Mirrors the pane's own pin. WebKitGTK, the Linux desktop webview,
+    // ignores backface-visibility, so an opaque back face left to that hint
+    // alone covers the whole screen and the launcher renders as a bare
+    // mirrored label. The rest state is a visibility gate, and the handover
+    // sits at the easing's 90deg crossing rather than at half the duration.
+    const backFace =
+      shellSource.match(/\.screen-flip-inner::before \{[\s\S]*?\n  \}/)?.[0] ??
+      "";
+    // Anchored: `backface-visibility: hidden;` ends with the same text, so a
+    // substring check passes on the very declaration this pin outlives.
+    expect(backFace).toMatch(/^\s+visibility: hidden;$/m);
+    expect(shellSource).toMatch(
+      /\.screen-flip\.flipActive \.screen-flip-inner::before \{\s*animation: launcher-back-face-turn 520ms/,
+    );
+    expect(shellSource).toMatch(/@keyframes launcher-back-face-turn/);
+    expect(shellSource).toMatch(/0%,\s*14\.43% \{\s*visibility: visible;/);
+    expect(shellSource).toMatch(/14\.44%,\s*100% \{\s*visibility: hidden;/);
+
+    // Reduced motion drops the turn, so it must drop the handover too or the
+    // back face is left painted with no animation to clear it.
+    const reducedMotion =
+      shellSource.match(
+        /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\n  \}/,
+      )?.[0] ?? "";
+    expect(reducedMotion).toContain(
+      ".screen-flip.flipActive .screen-flip-inner::before",
+    );
+
+    // The animationend cleanup substring-matches the keyframe name, so no
+    // other keyframe may contain it.
+    const keyframes = [...shellSource.matchAll(/@keyframes ([\w-]+)/g)].map(
+      (m) => m[1],
+    );
+    expect(
+      keyframes.filter((name) => name.includes("launcher-screen-flip")),
+    ).toEqual(["launcher-screen-flip"]);
+  });
 });
