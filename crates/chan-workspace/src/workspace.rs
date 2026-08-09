@@ -1857,18 +1857,32 @@ impl Workspace {
     ///   - `None` + existing file: `WriteConflict`. The caller did
     ///     not know a file was there; treating that as a silent
     ///     overwrite would be the bug we're trying to prevent.
-    ///   - `Some(m)` + current mtime_ns == m: write.
+    ///   - `Some(m)` + current mtime_ns == m: write, subject to
+    ///     `expected_disk` below.
     ///   - any other case: `WriteConflict { current_mtime_ns }`.
     ///
-    /// Residual race: between the mtime check and the atomic rename,
-    /// another writer can land. The window is small (no syscalls
-    /// between the two) and the next watcher event will surface the
-    /// foreign change so the editor can re-prompt. Callers that need
-    /// stronger semantics must serialize at a higher level.
+    /// A matching mtime is not on its own proof that the disk is
+    /// untouched. A filesystem timestamp does not advance on every
+    /// write, so an external edit landing inside the window the token
+    /// names carries the token's own value, and the equality test
+    /// reads it as "nothing changed". `expected_disk` closes that:
+    /// callers that know which bytes they last observed pass them, and
+    /// a matching mtime is verified against the disk rather than
+    /// trusted. Bytes that differ, or a disk that cannot be read to
+    /// check, are a `WriteConflict` instead of a silent overwrite.
+    /// Callers holding no such belief pass `None` and get the mtime
+    /// test alone.
+    ///
+    /// Residual race: between the check and the atomic rename, another
+    /// writer can land. The window is small (one read at most between
+    /// the two) and the next watcher event will surface the foreign
+    /// change so the editor can re-prompt. Callers that need stronger
+    /// semantics must serialize at a higher level.
     pub fn write_text_if_unchanged(
         &self,
         rel: &str,
         expected_mtime_ns: Option<i64>,
+        expected_disk: Option<&str>,
         content: &str,
     ) -> Result<()> {
         if !self.editable_text_gate(rel) {
@@ -1881,7 +1895,7 @@ impl Workspace {
         };
         let conflict = match (expected_mtime_ns, exists) {
             (None, false) => false,
-            (Some(m), true) => current != Some(m),
+            (Some(m), true) => current != Some(m) || !self.disk_still_holds(rel, expected_disk),
             _ => true,
         };
         if conflict {
@@ -1893,6 +1907,18 @@ impl Workspace {
             sink.write_chunk(content.as_bytes())
         })
         .map(|_| ())
+    }
+
+    /// Whether the file still carries the bytes a CAS caller last
+    /// observed. No belief to check means nothing to contradict, so
+    /// the mtime stands alone. An unreadable disk answers false: a
+    /// write that cannot be shown to be safe is refused rather than
+    /// risked.
+    fn disk_still_holds(&self, rel: &str, expected_disk: Option<&str>) -> bool {
+        let Some(expected) = expected_disk else {
+            return true;
+        };
+        self.read_text(rel).is_ok_and(|disk| disk == expected)
     }
 
     /// Atomically write raw bytes. Text-class targets still require
@@ -2909,7 +2935,7 @@ impl Workspace {
                 rewrite_href_for_move(link, &src_old_dir, &src_new_dir, &augmented)
             });
             if let Some(new_md) = new_content {
-                match self.write_text_if_unchanged(&src_current, stat.mtime_ns, &new_md) {
+                match self.write_text_if_unchanged(&src_current, stat.mtime_ns, None, &new_md) {
                     Ok(()) => rewritten.push(src_current),
                     Err(_) => conflicts.push(src_current),
                 }
@@ -7247,7 +7273,7 @@ mod tests {
     fn write_text_if_unchanged_creates_when_missing_with_none() {
         let (_cfg, _root, workspace) = fixture();
         workspace
-            .write_text_if_unchanged("a.md", None, "v1")
+            .write_text_if_unchanged("a.md", None, None, "v1")
             .unwrap();
         assert_eq!(workspace.read_text("a.md").unwrap(), "v1");
     }
@@ -7257,7 +7283,7 @@ mod tests {
         let (_cfg, _root, workspace) = fixture();
         workspace.write_text("a.md", "v1").unwrap();
         let err = workspace
-            .write_text_if_unchanged("a.md", None, "v2")
+            .write_text_if_unchanged("a.md", None, None, "v2")
             .unwrap_err();
         assert!(matches!(
             err,
@@ -7272,7 +7298,7 @@ mod tests {
     fn write_text_if_unchanged_conflicts_when_expected_but_missing() {
         let (_cfg, _root, workspace) = fixture();
         let err = workspace
-            .write_text_if_unchanged("a.md", Some(0), "v1")
+            .write_text_if_unchanged("a.md", Some(0), None, "v1")
             .unwrap_err();
         assert!(matches!(
             err,
@@ -7289,7 +7315,7 @@ mod tests {
         workspace.write_text("a.md", "v1").unwrap();
         let (_, stat) = workspace.read_text_with_stat("a.md").unwrap();
         workspace
-            .write_text_if_unchanged("a.md", stat.mtime_ns, "v2")
+            .write_text_if_unchanged("a.md", stat.mtime_ns, None, "v2")
             .unwrap();
         assert_eq!(workspace.read_text("a.md").unwrap(), "v2");
     }
@@ -7300,7 +7326,7 @@ mod tests {
         workspace.write_text("a.md", "v1").unwrap();
         let stale = Some(0i64);
         let err = workspace
-            .write_text_if_unchanged("a.md", stale, "v2")
+            .write_text_if_unchanged("a.md", stale, None, "v2")
             .unwrap_err();
         match err {
             ChanError::WriteConflict { current_mtime_ns } => {
@@ -7344,10 +7370,98 @@ mod tests {
         // stat must conflict. Without ns precision, two same-second
         // writes would collide and let this through.
         let err = workspace
-            .write_text_if_unchanged("a.md", stale_ns, "v3")
+            .write_text_if_unchanged("a.md", stale_ns, None, "v3")
             .unwrap_err();
         assert!(matches!(err, ChanError::WriteConflict { .. }));
         assert_eq!(workspace.read_text("a.md").unwrap(), "v2");
+    }
+
+    /// Stamp `rel`'s mtime to an exact value, so a test can stage the
+    /// collision the CAS has to survive instead of waiting for the
+    /// filesystem to produce one.
+    fn force_mtime_ns(root: &TempDir, rel: &str, mtime_ns: i64) {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.path().join(rel))
+            .unwrap();
+        let stamp = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(mtime_ns as u64);
+        file.set_times(std::fs::FileTimes::new().set_modified(stamp))
+            .unwrap();
+    }
+
+    /// The load-bearing case: a filesystem timestamp does not advance
+    /// on every write, so an external edit can carry the very token
+    /// the caller captured. The mtime test alone reads that as "the
+    /// disk is untouched" and overwrites a file nobody looked at.
+    #[test]
+    fn write_text_if_unchanged_conflicts_when_an_external_edit_kept_the_mtime() {
+        let (_cfg, root, workspace) = fixture();
+        workspace.write_text("a.md", "baseline").unwrap();
+        let token = workspace.stat("a.md").unwrap().mtime_ns;
+
+        workspace.write_text("a.md", "external").unwrap();
+        force_mtime_ns(&root, "a.md", token.unwrap());
+        assert_eq!(
+            workspace.stat("a.md").unwrap().mtime_ns,
+            token,
+            "the collision this test exists for did not stage"
+        );
+
+        let err = workspace
+            .write_text_if_unchanged("a.md", token, Some("baseline"), "mine")
+            .unwrap_err();
+        assert!(matches!(err, ChanError::WriteConflict { .. }));
+        assert_eq!(
+            workspace.read_text("a.md").unwrap(),
+            "external",
+            "the external edit must survive"
+        );
+    }
+
+    /// The same equality, with the disk genuinely untouched, still
+    /// writes. Verification must not turn every save into a conflict.
+    #[test]
+    fn write_text_if_unchanged_writes_when_the_disk_still_holds_the_expected_bytes() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.write_text("a.md", "baseline").unwrap();
+        let token = workspace.stat("a.md").unwrap().mtime_ns;
+        workspace
+            .write_text_if_unchanged("a.md", token, Some("baseline"), "mine")
+            .unwrap();
+        assert_eq!(workspace.read_text("a.md").unwrap(), "mine");
+    }
+
+    /// A caller with no belief about the disk keeps the mtime-only
+    /// contract, since it has nothing to be verified against.
+    #[test]
+    fn write_text_if_unchanged_without_an_expectation_stays_mtime_only() {
+        let (_cfg, root, workspace) = fixture();
+        workspace.write_text("a.md", "baseline").unwrap();
+        let token = workspace.stat("a.md").unwrap().mtime_ns;
+        workspace.write_text("a.md", "external").unwrap();
+        force_mtime_ns(&root, "a.md", token.unwrap());
+
+        workspace
+            .write_text_if_unchanged("a.md", token, None, "mine")
+            .unwrap();
+        assert_eq!(workspace.read_text("a.md").unwrap(), "mine");
+    }
+
+    /// A disk that cannot be read cannot be shown to be safe, so the
+    /// write is refused rather than risked.
+    #[test]
+    fn write_text_if_unchanged_conflicts_when_the_disk_cannot_be_verified() {
+        let (_cfg, root, workspace) = fixture();
+        workspace.write_text("a.md", "baseline").unwrap();
+        let token = workspace.stat("a.md").unwrap().mtime_ns;
+
+        std::fs::write(root.path().join("a.md"), [0xff, 0xfe, 0x00]).unwrap();
+        force_mtime_ns(&root, "a.md", token.unwrap());
+
+        let err = workspace
+            .write_text_if_unchanged("a.md", token, Some("baseline"), "mine")
+            .unwrap_err();
+        assert!(matches!(err, ChanError::WriteConflict { .. }));
     }
 
     #[test]
@@ -8694,16 +8808,18 @@ mod tests {
         let rel = ".Drafts/untitled-1/draft.md";
         // First write: file doesn't exist; expected_mtime=None
         // succeeds.
-        workspace.write_text_if_unchanged(rel, None, "v1").unwrap();
+        workspace
+            .write_text_if_unchanged(rel, None, None, "v1")
+            .unwrap();
         let (_, stat) = workspace.read_text_with_stat(rel).unwrap();
         // Stale-mtime write: rejected.
         let err = workspace
-            .write_text_if_unchanged(rel, Some(stat.mtime_ns.unwrap_or(0) + 1), "v2")
+            .write_text_if_unchanged(rel, Some(stat.mtime_ns.unwrap_or(0) + 1), None, "v2")
             .unwrap_err();
         assert!(matches!(err, ChanError::WriteConflict { .. }));
         // Current-mtime write: accepted.
         workspace
-            .write_text_if_unchanged(rel, stat.mtime_ns, "v2")
+            .write_text_if_unchanged(rel, stat.mtime_ns, None, "v2")
             .unwrap();
         assert_eq!(workspace.read_text(rel).unwrap(), "v2");
     }

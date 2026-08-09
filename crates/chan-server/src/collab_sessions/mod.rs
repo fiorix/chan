@@ -32,6 +32,14 @@ pub(crate) struct DurableBaseline {
     pub(crate) content_hash: u64,
     pub(crate) mtime_ns: Option<i64>,
     pub(crate) authority_version: u64,
+    /// Whether `content` is byte-for-byte what the file holds, rather
+    /// than a canonical rendering of it. A scene baseline is a
+    /// re-serialised scene and a document baseline is newline
+    /// normalised, so neither is safe to compare against raw disk
+    /// bytes unless it happens to match. Only a verbatim baseline can
+    /// answer "is the disk still what we last saw", which is what
+    /// lets the CAS verify a matching mtime instead of trusting it.
+    pub(crate) verbatim: bool,
 }
 
 #[derive(Debug)]

@@ -458,7 +458,7 @@ fn exec_write_file(args: &Json, ctx: &ToolContext) -> Result<Json> {
     let expected_mtime_ns = args.get("expected_mtime_ns").and_then(|v| v.as_i64());
     if let Some(expected) = expected_mtime_ns {
         ctx.workspace
-            .write_text_if_unchanged(path, Some(expected), content)?;
+            .write_text_if_unchanged(path, Some(expected), None, content)?;
     } else {
         // No expected mtime supplied: fall back to a plain write.
         // This is the "the model didn't read first" path and
