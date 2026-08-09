@@ -34,6 +34,19 @@ fn main() {
     // through a worktree's `.git` file to the real git directory. Emitted
     // even when an override won, so removing the override from the
     // environment still lands on a fresh git id rather than a stale one.
+    //
+    // KNOWN LIMITATION, deliberate: these lines are the ONLY thing that makes a
+    // git-derived stamp refresh, and they exist only when git resolved. So a
+    // build that saw no git stamps "unknown" and that stamp is STICKY -- if git
+    // becomes reachable later (a checkout mounted into a container that first
+    // built without one), nothing tells Cargo to rerun this script and the
+    // binary keeps reporting "unknown". `cargo clean -p chan` clears it. The
+    // reverse is safe: a git path that disappears reads as changed and forces a
+    // rerun. Left as is because no shipped path makes that transition -- Nix
+    // always injects CHAN_BUILD_ID, and CI and developer checkouts have git
+    // from the first build -- and both fixes are worse than the defect, being
+    // either a forced rerun on every build or a watch on a path that does not
+    // exist yet.
     if let Some(git_dir) = git(&["rev-parse", "--absolute-git-dir"]) {
         println!("cargo:rerun-if-changed={git_dir}/HEAD");
         println!("cargo:rerun-if-changed={git_dir}/index");
