@@ -12,7 +12,7 @@ own `<style>` block verbatim and rebuilds the DOM skeleton around it, so the
 check follows the component rather than a copy of it.
 
 Usage:
-    python3 scripts/e2e/webview-flip-render.py [--out DIR] [--keep]
+    python3 scripts/e2e/webview-flip-render.py [--out DIR]
 
 Exit status: 0 pass, 1 fail, 2 skipped because the GUI stack is unavailable.
 A skip is not a pass; report it as a skip.
@@ -29,6 +29,12 @@ import re
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
+
+# The specimen's size, which is also the window's. The card is pinned to the
+# viewport's top-left at exactly this size, so its center is a fixed point
+# whatever the window manager does with the rest of the window.
+HOST_W = 400
+HOST_H = 300
 
 # The probe fills the content face. Any pixel of this color at the card's
 # center means the content face is what painted there.
@@ -92,8 +98,8 @@ class Specimen:
     position: absolute;
     left: 0;
     top: 0;
-    width: 400px;
-    height: 300px;
+    width: {HOST_W}px;
+    height: {HOST_H}px;
     display: flex;
   }}
   .host > * {{ flex: 1; }}
@@ -159,7 +165,7 @@ def render(gui, html: str, png: pathlib.Path):
     """Paint one page in a real webview and return its cairo surface."""
     GLib, Gtk, WebKit2 = gui
     window = Gtk.Window()
-    window.set_default_size(400, 300)
+    window.set_default_size(HOST_W, HOST_H)
     view = WebKit2.WebView()
     window.add(view)
     window.show_all()
@@ -184,14 +190,31 @@ def render(gui, html: str, png: pathlib.Path):
             GLib.timeout_add(700, snap)
 
     view.connect("load-changed", on_load)
-    # Bound the wait: a webview that never finishes must fail, not hang.
-    GLib.timeout_add(20000, lambda: (Gtk.main_quit(), False)[1])
+
+    def watchdog():
+        result["timed_out"] = True
+        Gtk.main_quit()
+        return False
+
+    # Bound the wait: a webview that never finishes must fail, not hang. The
+    # source is dropped rather than left to expire, because an armed timeout
+    # outlives the loop it was meant to bound and would quit a later render's
+    # loop before that render had snapshotted anything.
+    watchdog_id = GLib.timeout_add(20000, watchdog)
     Gtk.main()
+    if not result.get("timed_out"):
+        GLib.source_remove(watchdog_id)
     window.destroy()
 
     surface = result.get("surface")
     if surface is None:
         raise RuntimeError("the webview produced no snapshot within 20s")
+    if surface.get_width() < HOST_W or surface.get_height() < HOST_H:
+        raise RuntimeError(
+            f"the webview is {surface.get_width()}x{surface.get_height()},"
+            f" smaller than the {HOST_W}x{HOST_H} specimen; the window manager"
+            " clipped it and the sampled patch would not be the card's center"
+        )
     surface.write_to_png(str(png))
     return surface
 
@@ -259,7 +282,7 @@ def main() -> int:
         for case, frozen_ms, want_probe, why in cases:
             png = out / f"{slug}-{case}.png"
             surface = render(gui, specimen.page(frozen_ms), png)
-            share = probe_share(surface, 200, 150)
+            share = probe_share(surface, HOST_W // 2, HOST_H // 2)
             # A face either owns the card's center or it does not. The wide
             # dead band between the thresholds keeps a partly painted card
             # from reading as either answer.
