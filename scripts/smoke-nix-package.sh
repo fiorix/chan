@@ -63,7 +63,33 @@ esac
     exit 1
 }
 
-"$BIN/chan" --version
+VERSION_OUTPUT="$("$BIN/chan" --version)"
+printf '%s\n' "$VERSION_OUTPUT"
+
+# The Nix path is where a build id is most likely to be lost, and losing it is
+# silent: `flake.nix` passes `src = self`, so the source in the store has no
+# `.git` and the git fallback in crates/chan/build.rs stamps "unknown". The id
+# reaches the compiler only because flake.nix hands it down through
+# CHAN_BUILD_ID, and nothing else here would notice if that stopped happening.
+if [ "$PACKAGE" = chan ]; then
+    BUILD_ID="${VERSION_OUTPUT##*\(build }"
+    BUILD_ID="${BUILD_ID%\)*}"
+    [ "$VERSION_OUTPUT" != "$BUILD_ID" ] || {
+        echo "error: chan --version names no build: $VERSION_OUTPUT" >&2
+        exit 1
+    }
+    # Tagged and well-formed, not merely non-empty: `git-` is a commit an
+    # operator can look up, `nar-` is the content-derived id a revisionless
+    # flake degrades to, and "unknown" is the defect this check exists for.
+    [[ "$BUILD_ID" =~ ^(git-[0-9a-f]{12}(-dirty)?|nar-[0-9a-f]{12})$ ]] || {
+        echo "error: chan --version carries no usable build id: '$BUILD_ID'" >&2
+        exit 1
+    }
+fi
+# chan-desktop is deliberately unchecked: packaging/nix/chan-desktop.nix does
+# not hand a build id down, so its `chan` (a symlink to the desktop binary)
+# still reports "unknown". That gap is registered as its own roadmap item
+# rather than widened into this one.
 
 set +e
 UPGRADE_OUTPUT="$("$BIN/chan" upgrade --check 2>&1)"

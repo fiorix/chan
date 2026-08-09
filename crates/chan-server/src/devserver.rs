@@ -2279,11 +2279,18 @@ async fn handle_info(State(state): State<Arc<DevserverState>>) -> Json<Devserver
 
 /// Liveness shape for `GET /api/health` on the devserver root, mirroring the
 /// per-tenant health route: `instance` carries the stable `library_id` so a
-/// probe can tell one devserver from another across restarts.
+/// probe can tell one devserver from another across restarts, and `build`
+/// names which build of the binary is answering.
+///
+/// The two are independent on purpose. `library_id` is persisted, so it
+/// survives the restart that swaps the binary underneath it -- which is
+/// precisely the supervised-restart skew this reports: the service entry
+/// relaunches whatever binary it names, not the one the operator just built.
 #[derive(Serialize)]
 struct DevserverHealth {
     status: &'static str,
     instance: String,
+    build: &'static str,
 }
 
 /// `GET /api/health` on the devserver root. The `--service` supervisor's
@@ -2292,6 +2299,7 @@ async fn handle_health(State(state): State<Arc<DevserverState>>) -> Json<Devserv
     Json(DevserverHealth {
         status: "ok",
         instance: state.library_id.clone(),
+        build: crate::routes::build_id(),
     })
 }
 
@@ -3902,6 +3910,27 @@ mod tests {
             persist_serial: Mutex::new(()),
             bound_port: AtomicU16::new(0),
         })
+    }
+
+    #[tokio::test]
+    async fn devserver_root_health_names_the_build_that_is_answering() {
+        // The devserver root is what a supervised restart relaunches, so this
+        // is the surface that shows an operator whether the process behind the
+        // tunnel is the binary they just built. Declares the same id as the
+        // tenant health test, deliberately: see TEST_DECLARED_BUILD_ID.
+        crate::routes::set_build_id(crate::routes::TEST_DECLARED_BUILD_ID);
+        let home = tempfile::tempdir().expect("home");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+
+        let Json(health) = handle_health(State(state)).await;
+        assert_eq!(health.build, crate::routes::TEST_DECLARED_BUILD_ID);
+
+        // Wire pin: the field an operator reads through a tunnel is `build`,
+        // and it is independent of the persisted `instance`.
+        let value = serde_json::to_value(&health).expect("health json");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["instance"], "lib-test");
+        assert_eq!(value["build"], crate::routes::TEST_DECLARED_BUILD_ID);
     }
 
     fn test_tunnel_assertion() -> TunnelAssertion {

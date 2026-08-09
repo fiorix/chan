@@ -2,6 +2,10 @@
   lib,
   src,
   version,
+  # Injected build identity. `crates/chan/build.rs` falls back to git, which
+  # sees nothing here: the flake source in the store has no `.git`. `flake.nix`
+  # computes it and this is the only way it reaches the compiler.
+  buildId,
   makeRustPlatform,
   rust-bin,
   fetchNpmDeps,
@@ -41,6 +45,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   env = {
     CHAN_PACKAGED = "nix";
+    CHAN_BUILD_ID = buildId;
     OPENSSL_NO_VENDOR = 1;
   };
 
