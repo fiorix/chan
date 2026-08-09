@@ -818,9 +818,11 @@ The markdown table carries one row per session: name, spawn, agent,
 session id, window, pane, side, tab, window kind, window status,
 queue and cwd. `agent` is the server-derived submit agent (claude
 / codex / gemini / kimi / opencode, `-` for a shell session),
-derived from the session's spawn command and CHAN_AGENT spawn env;
-it is what a `cs terminal write --submit` delivery will actually
-encode for, so read it here instead of guessing a target's chord.
+derived from the session's spawn command and CHAN_AGENT spawn env.
+It is the best default for a `cs terminal write --submit` value, but
+it is a sniff of the spawn command, not a reading of the live
+process: a session showing `-` may be running an agent someone
+started by hand, and --submit encodes what you name regardless.
 `queue` is the number of logical messages still pending in that
 session's write queue: `0` is an idle queue, and a deep queue means
 that session has not seen the latest write yet. The window columns
@@ -1108,8 +1110,9 @@ to 9 [[members]], exactly one of them is_lead. Each member has a handle
 submit-encoding agent is DERIVED from the command by loose whole-word
 match (claude / codex / gemini / kimi / opencode); set CHAN_AGENT in a
 member's env to force it for an unorthodox launcher. A command matching
-none is a plain shell member: it spawns, but gets no submit chord and
-no identity poke.
+none is a plain shell member: it spawns, but gets no identity poke and
+no chord of its own, though a later `cs terminal write --submit` can
+still encode one for it.
 
 A member may also carry `position = { row = R, col = C }`, the grid
 coordinate the Team Work dialog's split layout saves. A positioned
@@ -1426,7 +1429,7 @@ CAVEATS:
     it has 1..=9 members with exactly one `is_lead` and non-empty
     team_name / host_name / host_handle / member handles.
   - A member command matching no known agent spawns as a shell member:
-    no submit chord, no identity poke.
+    no chord of its own, no identity poke.
 
 SEE ALSO:
   cs terminal team load, cs terminal write, cs terminal survey, chan
@@ -1470,20 +1473,26 @@ case is not detected.
 --submit submits the bytes into each target hands-free. A non-empty
 body is delivered as its trailing newlines trimmed, then exactly
 one newline, then the chord; an empty body stays chord-only. The
-SERVER owns the encoding: for every matched session it derives
-that session's agent from the session's own spawn command and
-CHAN_AGENT spawn env, and applies THAT agent's chord, so the value
-you pass only records what you believed the target runs. A
-mismatch is corrected server-side and noted in the ack; a target
-that derives to no agent (a shell) receives the raw bytes
-untouched with no chord, and the command exits 69. Spawn the
-session with CHAN_AGENT set, or spawn the agent as the session's
-command instead of typing it into a shell. The applied encodings:
-claude appends a chord, codex, kimi, and opencode wrap the text in
-bracketed paste plus a CR, gemini takes the CR as its own later
-queue entry, one idle gate after the body. Omit --submit and the
-text parks in the agent's compose box unsubmitted, since a bare
-newline is a newline to an agent, not a submit.
+AGENT YOU NAME owns the encoding: that agent's chord is what every
+matched session receives, including a session whose spawn command
+names no agent. That is how you reach an agent you started by hand
+inside a shell session, which the server cannot see and cannot be
+told about while the session is live.
+
+The server still derives each session's agent from its spawn
+command and CHAN_AGENT spawn env, but only to report a
+disagreement: the ack names every session whose derivation differs
+from what you asked for, and applies your chord anyway. Naming the
+wrong agent therefore delivers the wrong chord rather than being
+corrected, so read the ack. ONE chord is encoded per command, so
+target a mixed-agent group per session rather than by group.
+
+The applied encodings: claude appends a chord, codex, kimi, and
+opencode wrap the text in bracketed paste plus a CR, gemini takes
+the CR as its own later queue entry, one idle gate after the body.
+Omit --submit and the text parks in the agent's compose box
+unsubmitted, since a bare newline is a newline to an agent, not a
+submit.
 
 CHAN_AGENT is read from the TARGET session's spawn environment
 (it overrides the command sniff there); CHAN_MODE is read by
@@ -1509,8 +1518,8 @@ pub(crate) const CS_TERMINAL_WRITE_AFTER: &str = r#"EXAMPLES:
 
   printf 'review %s\n' notes.md \
     | cs te w --tab-group alpha --stdin --submit codex
-    one poke broadcast to every tab of group alpha; each tab
-    gets its own server-derived chord, mixed agents included
+    one poke broadcast to every tab of group alpha; every tab
+    gets the codex chord, so use this on a single-agent group
 
 SIDE EFFECTS:
   Enqueues the bytes onto each matching session's write queue; the
@@ -1518,8 +1527,9 @@ SIDE EFFECTS:
   position N" for a single match, "queued to N terminal session(s)"
   for a fan-out) goes to stderr; stdout stays empty. When a
   target's derived agent is not the one --submit named, the ack
-  appends the correction (e.g. "; @@B runs codex, not claude: the
-  codex chord was applied").
+  appends the disagreement (e.g. "; @@B was spawned as codex: the
+  claude chord was applied as requested"). Your chord still wins;
+  the note exists so a wrong target is visible rather than silent.
 
   --submit gemini is one logical queued message and one ack, but it
   occupies TWO entries: text, then a bare CR after a full idle gate.

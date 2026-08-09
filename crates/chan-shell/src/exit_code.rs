@@ -1,12 +1,16 @@
 //! Named process exit codes for the `cs` client, and the typed error that
 //! carries one up to the dispatch edge.
 //!
-//! A `cs terminal write --submit` that the server cannot encode for at least
-//! one target exits [`SUBMIT_REFUSED`] (69). The bytes remain accepted into
-//! the asynchronous queue, but the server answers with
-//! `ControlResponse::SubmitRefused`; the client carries that as a
+//! A `cs terminal write --submit` answered with `ControlResponse::SubmitRefused`
+//! exits [`SUBMIT_REFUSED`] (69). The bytes remain accepted into the
+//! asynchronous queue; the client carries the refusal as a
 //! [`ControlSubmitRefused`] so the terminal-write dispatch edge can preserve
 //! the acknowledgement and report that the requested submit did not happen.
+//!
+//! A current devserver never sends it: the agent named in `--submit` selects
+//! the chord and is always encoded. This path exists for a `cs` talking to an
+//! OLDER devserver, which derived the chord from the target's spawn command
+//! and refused when that named no agent.
 //!
 //! A bounded blocking request that gets no reply within its window exits
 //! [`CONTROL_TIMEOUT`] (124): a `cs terminal survey` whose `--timeout`
@@ -22,8 +26,9 @@ use std::error::Error;
 use std::fmt;
 
 /// A requested hands-free submit was unavailable for at least one target.
-/// This matches `sysexits.h` `EX_UNAVAILABLE` (69): a shell session with no
-/// derived agent cannot provide the requested submit encoding.
+/// This matches `sysexits.h` `EX_UNAVAILABLE` (69). Only an older devserver
+/// produces it, from back when a target whose spawn command named no agent
+/// could not be submitted to at all.
 pub(crate) const SUBMIT_REFUSED: i32 = 69;
 
 /// A bounded blocking request elapsed with no reply. Matches GNU

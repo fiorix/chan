@@ -1693,10 +1693,14 @@ pub enum ControlResponse {
         message: String,
     },
     /// A `cs terminal write --submit` was queued, but at least one selected
-    /// shell session had no server-derived agent and therefore received no
-    /// submit chord. Distinct from `Ok` so the client can preserve the
-    /// acknowledgement while exiting 69, without inferring the refusal from
-    /// human-readable prose.
+    /// session received no submit chord. Distinct from `Ok` so the client can
+    /// preserve the acknowledgement while exiting 69, without inferring the
+    /// refusal from human-readable prose.
+    ///
+    /// Retained for compatibility, not produced. A current devserver encodes
+    /// the agent the sender named for every target; only an older one refused,
+    /// because it derived the chord from the target's spawn command and had
+    /// nothing to apply when that named no agent.
     SubmitRefused {
         message: String,
     },
