@@ -1,6 +1,6 @@
 # Acting on a window means picking the verb before you can see the windows
 
-Status: REGISTERED 2026-08-09 for v0.87.0, from comparing the command launcher's Computers scope against chan-desktop's own native Window menu.
+Status: REGISTERED 2026-08-09 for v0.87.0, from comparing the command launcher's Computers scope against chan-desktop's own native Window menu. IMPLEMENTED 2026-08-09 in `23ab509f`, owner-tested on the round build.
 
 ## What
 
@@ -28,3 +28,13 @@ The verb-first shape also makes the two decks look more different than they are.
 ## Rough size
 
 Small, and confined to the two deck adapters. The shared `CommandDeck` is unchanged: it already accepts a multi-element navigation path, and it gains no grouping primitive, since open-versus-hidden rides the breadcrumb each row already carries.
+
+## Implemented 2026-08-09 (`23ab509f`)
+
+One `Windows` branch replaces the `Focus` / `Hide` / `Show` / `Close` quartet in both decks. Choosing a window offers the actions that window can take: a hidden window is shown rather than focused where the two would be the same click, a control terminal on the capability surface offers no mutation because `set_window_visibility` and `close_window` both refuse one server-side, and a readonly grantee gets `Focus` alone. The desktop launcher keeps `Show` beside `Focus`, since its `Show` is a plain visibility flip that does not take focus, and it orders the list through the machine tree the Library screen already uses.
+
+Open versus hidden rides each row's breadcrumb rather than a section header: the shared deck is a flat listbox whose arrow keys land on disabled rows, so inert headers would be dead stops in the keyboard path. The window rows are branches now, so the flattened search list carries every window's actions too, keeping a verb query one Enter from acting. A window that closes while its actions are on screen drops the deck back to the list; the workspace app's recovery only fired once a selection was lost, and the launcher had none.
+
+Both decks navigate a two-element path where they only ever wrote one. The draft model already permitted it and `back()` already popped one level at a time, so this changed the readers alone and the shared `CommandDeck` is untouched.
+
+Validation: svelte-check clean on both packages, vitest 3646 + 318 green, production build clean. Six mutation probes, each failing exactly the test that claims it: making control terminals manageable, dropping the hidden-window `Show` swap, giving a readonly role the owner mutations, removing the vanish recovery, detaching the window order from the machine tree, and dropping the action leaves from typed search.

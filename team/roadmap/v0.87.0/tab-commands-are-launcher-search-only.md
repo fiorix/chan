@@ -1,6 +1,6 @@
 # A tab's own commands are reachable only by guessing a search string
 
-Status: REGISTERED 2026-08-09 for v0.87.0, from a walk-through of the four surface right-click menus against the command catalog.
+Status: REGISTERED 2026-08-09 for v0.87.0, from a walk-through of the four surface right-click menus against the command catalog. IMPLEMENTED 2026-08-09 in `979d20d5`, owner-tested on the round build.
 
 ## What
 
@@ -33,3 +33,13 @@ Four actions did not survive the trim at all:
 ## Rough size
 
 Small. Three expressions in the workspace-app launcher component, one field on `CommandContext`, four command registrations, and one `chan:command` listener in `GraphPanel`. No change to the shared command deck.
+
+## Implemented 2026-08-09 (`979d20d5`)
+
+Choosing a scope lists it completely; only the root deck keeps the five-row teaser, and the deck body already scrolled. Inside Tab, the active application's commands sort ahead of the generic `Tabs` commands, which plain category order buried because `Tabs` precedes `Editor`, `Terminal`, `Graph`, and `File Browser` alphabetically. An extension tab's Tab scope holds the commands that extension declares rather than every `Apps` entry, which the uncapped list would otherwise fill with other extensions and app-spawn rows.
+
+All four unreachable actions are registered: `app.editor.syntaxHighlight` (reviving a setter that had zero callers while its flag stayed persisted and honoured), `app.graph.reload` (over the `chan:command` bridge, since the fetch lives in `GraphPanel`), `app.editor.reloadFromDisk`, and `app.terminal.copyCwd` relaxed off its workspace gate because the copy prefers the absolute cwd the PTY reports. `app.terminal.restart` drops its confirm when no live session remains to stop, since it doubles as the old `Start New Session`.
+
+The same five-row cap in the desktop launcher SPA was hiding `Close`, the sixth owner entry in its Computers root; that deck is always inside a scope, so the teaser form never applied there.
+
+Validation: svelte-check clean on both packages, vitest green, production build clean (+1.17 kB; the chunk-size advisory is pre-existing at 1,856 kB on the base). Four mutation probes, each failing exactly the test that claims it. One ordering test did not probe clean on the first attempt and was rewritten onto a terminal fixture, where `Tabs` sorts before `Terminal` and the rank is load-bearing.

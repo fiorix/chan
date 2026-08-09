@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **A window's caption shows everywhere it is named.** The optional per-window caption rendered only in the launcher's own rows; the chan-desktop titlebar, the native Window menu, and the browser tab all dropped it. One shared helper now composes `Window N [caption]` for the launcher rows, both command decks, the OS titlebar, and the new per-window browser tab title. A caption edited while its window is open follows live on both surfaces: the window watcher syncs the OS title, and the library pushes a targeted frame down that window's own socket.
+- **The command launcher lists windows as targets.** Computers had four sibling branches -- Focus, Hide, Show, Close -- each drilling into its own filtered copy of the same roster, so closing a window meant choosing the verb before the launcher would say which windows existed, and one window could appear in four lists. A single Windows branch now lists each window once, carrying whether it is open or hidden, and choosing one offers the actions that window can actually take: a hidden window is shown rather than focused, a control terminal offers no mutation the capability route would refuse, and a readonly grantee gets Focus alone. Typed search still reaches an action in one step.
+- **Four actions the menu trim left unreachable are commands again.** Syntax highlighting can be toggled per tab (its setter had lost every caller while the flag stayed persisted and honoured, so a tab switched off in an older build could never switch back on); a graph reloads without reloading the window; a file reloads from disk; and a standalone terminal window can copy its `$CWD`, which was gated on a workspace root the copy does not need.
+
+### Changed
+
+- **Choosing a launcher scope lists it completely.** The deck's five-row teaser applied inside a chosen scope too, so the Tab orb showed five of the fourteen commands a terminal registers, and category ordering put the generic tab rows ahead of the focused application's own. Toggle outline, Toggle details, Toggle style toolbar, Copy path to `$CWD` and roughly forty more were reachable only by guessing a search string, none of them with a chord. Only the root deck stays a teaser now, and the active application's commands lead its Tab scope. An extension tab contributes the commands that extension declares rather than every app-spawn entry.
+- **Restarting a terminal asks only when there is something to stop.** The confirm is dropped once the shell has exited, where warning that the running process will stop was untrue; the command doubles as the old Start New Session there.
+
 ## [v0.86.0] - 2026-08-08
 
 Extensions boot through the gateway for the first time, CLI terminals can spawn and repair agent-deriving sessions, archives respect the transfer ceiling, and the editor and the gate shed their nondeterminism.
