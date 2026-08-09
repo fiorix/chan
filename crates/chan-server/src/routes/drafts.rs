@@ -585,7 +585,7 @@ mod tests {
             // api_write_file notes BEFORE the blocking write; mirror it.
             self_writes.note(&path);
             workspace
-                .write_text_if_unchanged(&path, token_ns, &body)
+                .write_text_if_unchanged(&path, token_ns, None, &body)
                 .unwrap_or_else(|e| panic!("autosave {i} failed: {e:?}"));
 
             // CAS token must round-trip: the post-write mtime_ns is the
@@ -633,7 +633,7 @@ mod tests {
 
         // A stale CAS token must conflict (lock-step token contract).
         let err = workspace
-            .write_text_if_unchanged(&path, Some(1), "# stale\n")
+            .write_text_if_unchanged(&path, Some(1), None, "# stale\n")
             .unwrap_err();
         assert!(
             matches!(err, chan_workspace::ChanError::WriteConflict { .. }),

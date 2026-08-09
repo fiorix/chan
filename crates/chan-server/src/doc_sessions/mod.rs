@@ -476,6 +476,9 @@ impl DocSession {
             content: text.clone(),
             mtime_ns: stat.mtime_ns,
             authority_version: 0,
+            // The seed is newline normalised; a CRLF file does not
+            // match it byte for byte.
+            verbatim: false,
         };
         // The seed is disk-adopted content: a stale read serving it
         // back later must count as an echo, not an external edit.
@@ -552,6 +555,8 @@ impl DocSession {
             content_hash: baseline_hash,
             mtime_ns: record.baseline.mtime_ns,
             authority_version: record.baseline.authority_version,
+            // A restored record does not carry the raw disk bytes.
+            verbatim: false,
         };
         let session_state = match record.lifecycle {
             RecoveryState::Clean if disk_present => {
@@ -634,6 +639,7 @@ impl DocSession {
                 content_hash: disk_hash,
                 mtime_ns: disk_mtime_ns,
                 authority_version: version,
+                verbatim: true,
             }
         } else {
             baseline
@@ -962,6 +968,7 @@ impl DocSession {
                     content_hash: disk_hash,
                     mtime_ns: stat.mtime_ns,
                     authority_version: st.version,
+                    verbatim: true,
                 };
                 st.write_budget = semantic_write_budget(Some(stat.size));
                 st.session_state = if st.text == st.baseline.content {
@@ -1039,6 +1046,7 @@ impl DocSession {
             content_hash: disk_hash,
             mtime_ns: stat.mtime_ns,
             authority_version: st.version,
+            verbatim: true,
         };
         st.write_budget = semantic_write_budget(Some(stat.size));
         st.session_state = SessionState::Clean;
@@ -1124,6 +1132,7 @@ impl DocSession {
             content_hash: disk_hash,
             mtime_ns: disk_stat.mtime_ns,
             authority_version: st.version,
+            verbatim: true,
         };
         st.write_budget = semantic_write_budget(Some(disk_stat.size));
         st.session_state = SessionState::Clean;
@@ -1161,6 +1170,10 @@ impl DocSession {
                 _ => return false,
             };
             st.flushed_mtime_ns = disk_mtime_ns;
+            // Keep-mine is a deliberate overwrite of whatever the disk
+            // holds, so the session stops claiming to know those bytes
+            // and the forced flush runs on the token alone.
+            st.baseline.verbatim = false;
             st.session_state = SessionState::Dirty {
                 since: Instant::now(),
             };
@@ -1185,9 +1198,19 @@ impl DocSession {
         st.flush_now = false;
         st.session_state.dirty_since()?;
         st.flush_epoch_version = st.version;
+        // The baseline names the bytes last committed to or adopted
+        // from disk, and is what makes a matching mtime verifiable.
+        // Only offer it while it is byte-for-byte the file and its
+        // token still agrees with the session's: the reconcile echo
+        // path adopts a fresh token without moving the baseline, and
+        // claiming stale bytes are on disk would manufacture a
+        // conflict out of nothing.
+        let expected_disk = (st.baseline.verbatim && st.baseline.mtime_ns == st.flushed_mtime_ns)
+            .then(|| st.baseline.content.clone());
         Some(FlushJob {
             text: st.text.clone(),
             expected_mtime_ns: st.flushed_mtime_ns,
+            expected_disk,
             epoch: st.version,
         })
     }
@@ -1207,6 +1230,8 @@ impl DocSession {
             content_hash: flushed_hash,
             mtime_ns: stat.mtime_ns,
             authority_version: epoch,
+            // We wrote exactly these bytes.
+            verbatim: true,
         };
         st.write_budget = semantic_write_budget(Some(stat.size));
         if st.version == epoch {
@@ -1233,6 +1258,9 @@ impl DocSession {
 struct FlushJob {
     text: String,
     expected_mtime_ns: Option<i64>,
+    /// The bytes the session believes are on disk, when it can vouch
+    /// for them; the CAS verifies a matching mtime against these.
+    expected_disk: Option<String>,
     epoch: u64,
 }
 
@@ -1809,7 +1837,12 @@ async fn flush_session_locked(
                 let _ = std::fs::remove_file(&target);
                 let _ = std::fs::create_dir(&target);
             }
-            match ws.write_text_if_unchanged(&path, job.expected_mtime_ns, &job.text) {
+            match ws.write_text_if_unchanged(
+                &path,
+                job.expected_mtime_ns,
+                job.expected_disk.as_deref(),
+                &job.text,
+            ) {
                 Ok(()) => (true, ws.stat(&path)),
                 Err(e) => (false, Err(e)),
             }
@@ -2134,6 +2167,7 @@ fn reconcile_conflicted_locked(
             content_hash: hash,
             mtime_ns: disk_stat.mtime_ns,
             authority_version: st.version,
+            verbatim: true,
         };
         st.write_budget = semantic_write_budget(Some(disk_stat.size));
         st.session_state = SessionState::Clean;
@@ -3556,7 +3590,12 @@ mod tests {
         ha.push(1, vec![update("c1", json!([2, [0, "+"]]))])
             .unwrap();
         fx.workspace
-            .write_text_if_unchanged("a.md", job.expected_mtime_ns, &job.text)
+            .write_text_if_unchanged(
+                "a.md",
+                job.expected_mtime_ns,
+                job.expected_disk.as_deref(),
+                &job.text,
+            )
             .unwrap();
         let stat = fx.workspace.stat("a.md").unwrap();
         ha.session().finish_flush(job.epoch, &stat, &job.text);
