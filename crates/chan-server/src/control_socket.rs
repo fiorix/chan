@@ -3914,12 +3914,14 @@ fn strip_leading_slash(p: &Path) -> String {
 #[derive(Debug)]
 struct TermWriteOutcome {
     message: String,
-    submit_refused: bool,
 }
 
-/// Convert a terminal write outcome into its typed control response. A shell
-/// target that received no submit chord is distinct from an ordinary success
-/// even though its text remains accepted into the asynchronous queue.
+/// Convert a terminal write outcome into its typed control response.
+///
+/// A requested submit is always encoded, so this path no longer produces
+/// `ControlResponse::SubmitRefused`. The variant stays on the wire because a
+/// `cs` client still has to understand one from an older devserver, which
+/// refused whenever the target's spawn command named no agent.
 fn term_write_response(
     registry: &TerminalRegistry,
     tab_name: Option<&str>,
@@ -3928,11 +3930,7 @@ fn term_write_response(
     submit: Option<SubmitAgent>,
 ) -> ControlResponse {
     match term_write_outcome(registry, tab_name, tab_group, data, submit) {
-        Ok(TermWriteOutcome {
-            message,
-            submit_refused: true,
-        }) => ControlResponse::SubmitRefused { message },
-        Ok(TermWriteOutcome { message, .. }) => ControlResponse::Ok { message },
+        Ok(TermWriteOutcome { message }) => ControlResponse::Ok { message },
         Err(message) => ControlResponse::Error { message },
     }
 }
@@ -3944,10 +3942,13 @@ fn term_write_response(
 /// (the serialization the Rich Prompt / poke-chain workflow needs), so
 /// compatible submitted writes can be framed together at drain time.
 ///
-/// `submit` is the sender's request (submit, plus the agent it named); the
-/// registry derives each matched session's real agent and applies THAT
-/// chord. When they disagree, the reply says so next to the queue position,
-/// so a sender learns the correction instead of re-circulating a wrong name.
+/// `submit` is the sender's request, and the agent it names is the chord that
+/// gets encoded. Each matched session's own derivation is still computed and
+/// compared, but only so the reply can report a disagreement next to the queue
+/// position; it never overrides the request. A sender therefore learns that a
+/// target looks like something else from the spawn side while still getting
+/// the chord it asked for, which is the only way to reach an agent started by
+/// hand inside a shell session.
 fn term_write_outcome(
     registry: &TerminalRegistry,
     tab_name: Option<&str>,
@@ -3973,7 +3974,6 @@ fn term_write_outcome(
             Err("no live terminal session matched".into())
         };
     }
-    let submit_refused = outcome.diverged.iter().any(|d| d.applied.is_none());
     let mut message = match outcome.position {
         Some(position) => format!("queued at position {position}"),
         None => format!("queued to {} terminal session(s)", outcome.queued),
@@ -3987,26 +3987,22 @@ fn term_write_outcome(
         let mut diverged = outcome.diverged;
         diverged.sort_by(|a, b| a.tab.cmp(&b.tab));
         for d in diverged {
-            match d.applied {
-                Some(applied) => message.push_str(&format!(
-                    "; {} runs {}, not {}: the {} chord was applied",
+            match d.derived {
+                Some(derived) => message.push_str(&format!(
+                    "; {} was spawned as {}: the {} chord was applied as requested",
                     d.tab,
-                    applied.name(),
+                    derived.name(),
                     requested.name(),
-                    applied.name(),
                 )),
                 None => message.push_str(&format!(
-                    "; {} is a shell session: no {} chord applied",
+                    "; {} derives no agent: the {} chord was applied as requested",
                     d.tab,
                     requested.name(),
                 )),
             }
         }
     }
-    Ok(TermWriteOutcome {
-        message,
-        submit_refused,
-    })
+    Ok(TermWriteOutcome { message })
 }
 
 #[cfg(all(test, unix))]
@@ -5998,7 +5994,7 @@ mod tests {
         .expect("queued");
         assert_eq!(
             reply,
-            "queued at position 1; Watched runs codex, not claude: the codex chord was applied"
+            "queued at position 1; Watched was spawned as codex: the claude chord was applied as requested"
         );
 
         let reply = term_write(
@@ -6021,12 +6017,17 @@ mod tests {
         .expect("queued");
         assert_eq!(
             reply,
-            "queued at position 1; Sh is a shell session: no claude chord applied"
+            "queued at position 1; Sh derives no agent: the claude chord was applied as requested",
+            "a target deriving nothing is still encoded for, and the ack says so"
         );
     }
 
+    // The sender's agent is always encodable, so this path answers Ok even
+    // when a target derives nothing. `ControlResponse::SubmitRefused` stays on
+    // the wire for a `cs` talking to an older devserver, but nothing here
+    // produces one any more.
     #[test]
-    fn term_write_types_only_submit_refusal_as_failure() {
+    fn term_write_answers_ok_and_names_every_disagreement() {
         let (_root, registry) = empty_registry();
         use crate::terminal_sessions::CreateOptions;
         let spawn = |name: &str, agent_env: Option<&str>, group: Option<&str>| {
@@ -6062,11 +6063,12 @@ mod tests {
             Some(SubmitAgent::Claude),
         );
         match response {
-            ControlResponse::SubmitRefused { message } => assert_eq!(
+            ControlResponse::Ok { message } => assert_eq!(
                 message,
-                "queued to 3 terminal session(s); @@B runs codex, not claude: the codex chord was applied; @@C is a shell session: no claude chord applied"
+                "queued to 3 terminal session(s); @@B was spawned as codex: the claude chord was applied as requested; @@C derives no agent: the claude chord was applied as requested",
+                "one chord for the whole group, with both disagreeing members named"
             ),
-            other => panic!("expected typed submit refusal, got {other:?}"),
+            other => panic!("expected Ok, got {other:?}"),
         }
 
         assert!(matches!(

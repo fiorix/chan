@@ -19,12 +19,14 @@
 //!   3. The callback is an ordinary HTTP GET that necessarily lands in
 //!      the process that bound the listener (no OS scheme registration,
 //!      no second-instance spawn). The listener validates the state nonce
-//!      in constant time, answers a neutral page, then swaps
-//!      `{code, code_verifier}` for the PAT (`POST
-//!      /desktop/authorize/redeem` against the identity origin held in
-//!      the slot -- never one named by the callback URL), persists the
-//!      PAT to the OS keychain, and emits `auth-changed`. Errors emit
-//!      `auth-error` with a string body.
+//!      in constant time and answers the browser -- a redirect back to
+//!      the flow origin's profile page, or the neutral page when there is
+//!      no flow to complete, picked WITHOUT consulting that verdict (see
+//!      [`callback_landing`]) -- then swaps `{code, code_verifier}` for
+//!      the PAT (`POST /desktop/authorize/redeem` against the identity
+//!      origin held in the slot -- never one named by the callback URL),
+//!      persists the PAT to the OS keychain, and emits `auth-changed`.
+//!      Errors emit `auth-error` with a string body.
 //!
 //! PKCE (RFC 7636, S256): the `code_verifier` is 32 CSPRNG bytes encoded
 //! base64url-no-pad to a 43-char ASCII string; that STRING is the
@@ -109,7 +111,7 @@ const LISTENER_MAX_INFLIGHT: usize = 8;
 /// so this bounds a slowloris to its own task. It deliberately does NOT
 /// cover the redeem, which owns its own 15s budget (see `serve_callback`):
 /// wrapping the whole handler would cancel a slow-network redeem after the
-/// neutral 200 was already flushed, a silent sign-in failure.
+/// answer was already flushed, a silent sign-in failure.
 const LISTENER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Header read cap. The callback is a bare GET with a handful of
 /// headers; anything larger is not our browser.
@@ -120,6 +122,18 @@ const LISTENER_HEADER_CAP: usize = 8 * 1024;
 /// body.
 const NEUTRAL_PAGE: &str = "<!doctype html><html><head><meta charset=\"utf-8\">\
 <title>chan</title></head><body>You can close this tab.</body></html>";
+
+/// Where a callback that could complete a flow sends the browser, hung
+/// off the flow slot's own origin. The marker is what the profile SPA
+/// reads to raise its sign-in notification before stripping it from the
+/// URL.
+///
+/// No trailing slash before the query: the SPA is built with a relative
+/// asset base (`web/packages/profile/vite.config.ts`), so its assets
+/// resolve against `/` from `/profile` but would resolve under
+/// `/profile/` from `/profile/`, which the gateway's SPA fallback answers
+/// 404 for (it only falls back to `index.html` for extensionless paths).
+const PROFILE_LANDING_PATH: &str = "/profile?desktop_authorized=1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredPat {
@@ -550,10 +564,10 @@ async fn serve_callback<R: tauri::Runtime>(
     mut stream: tokio::net::TcpStream,
     port: u16,
 ) {
-    // Time-box ONLY the header read (the slowloris surface). write_neutral
+    // Time-box ONLY the header read (the slowloris surface). write_response
     // and settle -- which awaits redeem_inner's own 15s budget -- run
     // outside this deadline, so a slow network cannot cancel a redeem after
-    // the neutral 200 has already been flushed.
+    // the answer has already been flushed.
     let head =
         match tokio::time::timeout(LISTENER_READ_TIMEOUT, read_request_head(&mut stream)).await {
             Ok(Some(h)) => h,
@@ -563,17 +577,21 @@ async fn serve_callback<R: tauri::Runtime>(
         };
     match classify_request(&head, port) {
         RequestDecision::BadRequest => {
-            let _ = write_neutral(&mut stream, "400 Bad Request").await;
+            let _ = write_response(&mut stream, &neutral_response("400 Bad Request")).await;
         }
         RequestDecision::Callback(query) => {
-            let action = {
+            let (response, action) = {
                 let mut pending = pending_state().lock().unwrap();
-                classify_callback(&query, &mut pending)
+                // Build the answer BEFORE classifying: a matching state
+                // takes the slot, and both arms must answer the same
+                // bytes.
+                let response = callback_answer(&query, &pending);
+                (response, classify_callback(&query, &mut pending))
             };
-            // Answer the neutral 200 FIRST (before any redeem, so the 15s
-            // redeem never sits inside the request/response), identically
-            // for match and mismatch.
-            let _ = write_neutral(&mut stream, "200 OK").await;
+            // Answer FIRST (before any redeem, so the 15s redeem never
+            // sits inside the request/response), identically for match
+            // and mismatch.
+            let _ = write_response(&mut stream, &response).await;
             let _ = stream.shutdown().await;
             drop(stream);
             settle(app, action).await;
@@ -601,13 +619,22 @@ async fn read_request_head(stream: &mut tokio::net::TcpStream) -> Option<String>
     }
 }
 
-/// The neutral response, verbatim. `no-store` / `no-referrer`; NO
-/// `Access-Control-Allow-*` (CORS stops nothing here: the legitimate
+/// Every callback answer, verbatim: the neutral page under the privacy
+/// headers, optionally carrying a `Location`. `no-store` / `no-referrer`;
+/// NO `Access-Control-Allow-*` (CORS stops nothing here: the legitimate
 /// callback is a top-level navigation not subject to CORS, and the
 /// attacker never reads the response).
-fn neutral_response(status_line: &str) -> String {
+///
+/// `no-referrer` matters more on the landing form than on the neutral
+/// one: the URL being answered carries the one-time code, and the next
+/// hop is the gateway origin.
+fn callback_response(status_line: &str, location: Option<&str>) -> String {
+    let location = location
+        .map(|target| format!("Location: {target}\r\n"))
+        .unwrap_or_default();
     format!(
         "HTTP/1.1 {status_line}\r\n\
+         {location}\
          Content-Type: text/html; charset=utf-8\r\n\
          Referrer-Policy: no-referrer\r\n\
          Cache-Control: no-store\r\n\
@@ -617,12 +644,23 @@ fn neutral_response(status_line: &str) -> String {
     )
 }
 
-async fn write_neutral(
-    stream: &mut tokio::net::TcpStream,
-    status_line: &str,
-) -> std::io::Result<()> {
-    let resp = neutral_response(status_line);
-    stream.write_all(resp.as_bytes()).await?;
+/// The answer for a callback with no flow to complete: today's neutral
+/// page, byte for byte, with no `Location`.
+fn neutral_response(status_line: &str) -> String {
+    callback_response(status_line, None)
+}
+
+/// The answer for a callback that could complete a flow: a 303 back to
+/// the flow origin's profile page. 303 because the browser arrived by a
+/// GET navigation and is being sent to look at a different resource; the
+/// neutral body stays as the terminal page for a client that does not
+/// follow.
+fn landing_response(target: &str) -> String {
+    callback_response("303 See Other", Some(target))
+}
+
+async fn write_response(stream: &mut tokio::net::TcpStream, response: &str) -> std::io::Result<()> {
+    stream.write_all(response.as_bytes()).await?;
     stream.flush().await
 }
 
@@ -678,6 +716,49 @@ impl std::fmt::Debug for CallbackAction {
             CallbackAction::Ignore => f.write_str("Ignore"),
         }
     }
+}
+
+/// The exact bytes a valid callback is answered with. The sole site that
+/// picks between the two forms, so the listener and the neutrality tests
+/// cannot drift apart.
+fn callback_answer(query: &str, pending: &Option<PendingAuth>) -> String {
+    match callback_landing(query, pending) {
+        Some(target) => landing_response(&target),
+        None => neutral_response("200 OK"),
+    }
+}
+
+/// Where to send the browser for this callback, or `None` to answer the
+/// neutral page. The redirect target is the slot's own `identity_origin`
+/// -- the same rule [`redeem_inner`] applies, so a callback can never
+/// steer either hop.
+///
+/// This is the neutrality rule in code, so it is deliberately blind to
+/// the `state` compare. It reads exactly two things: whether a live,
+/// in-date flow slot exists (the listener's own liveness, which is
+/// already implied by the port answering at all), and whether the query
+/// carries a `code` (supplied by the caller, who therefore already knows
+/// it). The secret never reaches the decision, so for any fixed query a
+/// state match and a state mismatch are answered with identical bytes,
+/// and a callback with no slot to complete keeps today's neutral 200.
+///
+/// Gating on `code` rather than on the absence of `error` is what leaves
+/// the deny and blocked arms on the neutral page: only a callback that
+/// could be a success lands on profile.
+fn callback_landing(query: &str, pending: &Option<PendingAuth>) -> Option<String> {
+    let slot = pending.as_ref()?;
+    if slot.created_at.elapsed() >= SLOT_TTL {
+        return None;
+    }
+    let has_code =
+        url::form_urlencoded::parse(query.as_bytes()).any(|(k, v)| k == "code" && !v.is_empty());
+    if !has_code {
+        return None;
+    }
+    Some(format!(
+        "{}{PROFILE_LANDING_PATH}",
+        slot.identity_origin.trim_end_matches('/')
+    ))
 }
 
 /// Classify a loopback callback QUERY against the pending slot. COMPARE-
@@ -1256,14 +1337,142 @@ mod tests {
 
     #[test]
     fn neutral_response_has_the_privacy_headers_and_no_cors() {
-        let resp = neutral_response("200 OK");
-        assert!(resp.contains("Content-Type: text/html; charset=utf-8"));
-        assert!(resp.contains("Referrer-Policy: no-referrer"));
-        assert!(resp.contains("Cache-Control: no-store"));
-        assert!(resp.contains("You can close this tab."));
+        // Both answer forms carry the same privacy headers. `no-referrer`
+        // is load-bearing on the redirect form specifically: the URL being
+        // answered holds the one-time code and the next hop is the gateway.
+        for resp in [
+            neutral_response("200 OK"),
+            neutral_response("400 Bad Request"),
+            landing_response("https://id.example/profile?desktop_authorized=1"),
+        ] {
+            assert!(
+                resp.contains("Content-Type: text/html; charset=utf-8"),
+                "{resp}"
+            );
+            assert!(resp.contains("Referrer-Policy: no-referrer"), "{resp}");
+            assert!(resp.contains("Cache-Control: no-store"), "{resp}");
+            assert!(resp.contains("You can close this tab."), "{resp}");
+            assert!(
+                !resp.to_ascii_lowercase().contains("access-control-allow"),
+                "no callback answer may carry an ACAO header: {resp}"
+            );
+        }
+    }
+
+    #[test]
+    fn landing_response_is_a_303_carrying_the_profile_target() {
+        let resp = landing_response("https://id.example/profile?desktop_authorized=1");
+        assert!(resp.starts_with("HTTP/1.1 303 See Other\r\n"), "{resp}");
         assert!(
-            !resp.to_ascii_lowercase().contains("access-control-allow"),
-            "the neutral page must carry no ACAO header"
+            resp.contains("Location: https://id.example/profile?desktop_authorized=1\r\n"),
+            "{resp}"
+        );
+        assert!(
+            !neutral_response("200 OK")
+                .to_ascii_lowercase()
+                .contains("location:"),
+            "the neutral form carries no Location"
+        );
+    }
+
+    // --- the neutrality invariant, on the bytes the listener writes ---
+
+    #[test]
+    fn the_answer_is_byte_identical_for_a_state_match_and_a_mismatch() {
+        // A local prober must not be able to tell a state-matched callback
+        // from a mismatched one. Same query, a slot whose state matches and
+        // one whose state does not: the listener writes the same bytes.
+        for query in [
+            "code=one-time-abc&state=nonce-1",
+            "error=user_cancelled&state=nonce-1",
+            "code=one-time-abc&error=user_cancelled&state=nonce-1",
+            "state=nonce-1",
+            "",
+        ] {
+            assert_eq!(
+                callback_answer(query, &pending("nonce-1")),
+                callback_answer(query, &pending("nonce-2")),
+                "match and mismatch diverge on {query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_callback_with_no_live_flow_answers_todays_neutral_200_byte_for_byte() {
+        // Pinned as a literal rather than rebuilt from the consts: this is
+        // the response the neutrality rule requires to be unchanged, so the
+        // pin has to fail if a const moves under it.
+        const TODAYS_ANSWER: &str = "HTTP/1.1 200 OK\r\n\
+             Content-Type: text/html; charset=utf-8\r\n\
+             Referrer-Policy: no-referrer\r\n\
+             Cache-Control: no-store\r\n\
+             Content-Length: 118\r\n\
+             Connection: close\r\n\r\n\
+             <!doctype html><html><head><meta charset=\"utf-8\"><title>chan</title>\
+             </head><body>You can close this tab.</body></html>";
+
+        let mut over_age = pending("nonce-1");
+        if let Some(p) = over_age.as_mut() {
+            p.created_at = Instant::now() - (SLOT_TTL + Duration::from_secs(1));
+        }
+        let query = "code=one-time-abc&state=nonce-1";
+        assert_eq!(
+            callback_answer(query, &None),
+            TODAYS_ANSWER,
+            "no slot: nothing to complete and no origin to name"
+        );
+        assert_eq!(
+            callback_answer(query, &over_age),
+            TODAYS_ANSWER,
+            "an over-age slot is treated as absent here too"
+        );
+    }
+
+    #[test]
+    fn only_a_callback_carrying_a_code_lands_on_profile() {
+        // Deny and blocked arrive as `error=` with no code and keep the
+        // neutral page; so does a matching-state callback whose code is
+        // missing or empty. Only the success shape lands on profile.
+        let slot = pending("nonce-1");
+        assert!(callback_landing("code=c1&state=nonce-1", &slot).is_some());
+        for query in [
+            "error=user_cancelled&state=nonce-1",
+            "error=account_blocked&state=nonce-1",
+            "state=nonce-1",
+            "code=&state=nonce-1",
+        ] {
+            assert_eq!(
+                callback_answer(query, &slot),
+                neutral_response("200 OK"),
+                "{query:?} must not land on profile"
+            );
+        }
+    }
+
+    #[test]
+    fn the_landing_target_is_the_slot_origin_never_the_query() {
+        // Same rule redeem_inner applies: the callback names neither hop.
+        assert_eq!(
+            callback_landing(
+                "code=c1&state=nonce-1&identity_origin=https://evil.example",
+                &pending("nonce-1"),
+            )
+            .as_deref(),
+            Some("https://id.example/profile?desktop_authorized=1"),
+        );
+    }
+
+    #[test]
+    fn the_landing_target_has_no_double_slash_before_the_path() {
+        // The SPA's assets are built with a relative base, so the path must
+        // stay a single `/profile` segment for them to resolve.
+        let mut slot = pending("nonce-1");
+        if let Some(p) = slot.as_mut() {
+            p.identity_origin = "https://id.example/".to_string();
+        }
+        assert_eq!(
+            callback_landing("code=c1&state=nonce-1", &slot).as_deref(),
+            Some("https://id.example/profile?desktop_authorized=1"),
         );
     }
 

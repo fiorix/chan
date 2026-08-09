@@ -85,7 +85,9 @@ pub use graph::{
     api_backlinks, api_graph, api_headings, api_language_graph, api_link_targets, api_links,
     api_resolve_link,
 };
-pub use health::api_health;
+#[cfg(test)]
+pub(crate) use health::TEST_DECLARED_BUILD_ID;
+pub use health::{api_health, build_id, set_build_id};
 #[cfg(feature = "embeddings")]
 pub use index::{
     api_semantic_disable, api_semantic_download, api_semantic_enable, api_semantic_model_patch,

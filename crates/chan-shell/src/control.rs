@@ -113,7 +113,9 @@ fn first_response_outcome(response: ControlResponse) -> Result<String> {
         ControlResponse::Error { message } => anyhow::bail!("{message}"),
         // The write was accepted into the asynchronous queue, but at least
         // one target had no submit encoding. Preserve its acknowledgement in
-        // a typed error so only `cs terminal write` maps it to exit 69.
+        // a typed error so only `cs terminal write` maps it to exit 69. Only
+        // an older devserver sends this; a current one encodes the agent the
+        // sender named for every target.
         ControlResponse::SubmitRefused { message } => {
             Err(crate::exit_code::ControlSubmitRefused { message }.into())
         }
@@ -429,9 +431,14 @@ mod tests {
         );
     }
 
+    // Compatibility, not current behaviour: the wire bytes below are what an
+    // OLDER devserver sent when a target's spawn command named no agent. A
+    // current one encodes the agent the sender named and answers Ok, so this
+    // pins that a `cs` pointed at an older server still types the refusal and
+    // reaches exit 69 rather than mis-reporting it as success.
     #[cfg(unix)]
     #[tokio::test]
-    async fn send_control_request_types_a_submit_refusal_for_the_69_edge() {
+    async fn send_control_request_types_an_older_servers_submit_refusal() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let socket = std::env::temp_dir().join(format!(

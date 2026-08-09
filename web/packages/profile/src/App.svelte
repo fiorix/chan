@@ -6,6 +6,7 @@
   import Tokens from "./views/Tokens.svelte";
   import Devservers from "./views/Devservers.svelte";
   import { meStore } from "./state/me.svelte";
+  import { takeDesktopAuthorized } from "./lib/desktopAuthorized";
 
   type Tab = "profile" | "tokens" | "workspaces";
   let tab = $state<Tab>(tabFromHash());
@@ -36,7 +37,18 @@
     return t === "workspaces" && !sharesOn ? "profile" : t;
   }
 
+  // Raised when chan-desktop's loopback listener bounced the browser back
+  // here after a successful authorization.
+  let desktopAuthorized = $state(false);
+
   onMount(() => {
+    const marker = takeDesktopAuthorized(location.href);
+    if (marker.authorized) {
+      desktopAuthorized = true;
+      // Strip before the first setTab: its replaceState preserves the
+      // query, so the marker would otherwise outlive this page load.
+      history.replaceState(null, "", marker.href);
+    }
     void meStore.load();
   });
 </script>
@@ -58,6 +70,14 @@
     {@const sharesOn = !!meStore.me.flags?.share_workspaces}
     {@const activeTab = visibleTab(tab, sharesOn)}
     <Topbar me={meStore.me.user} onSignOut={() => meStore.logout()} />
+    {#if desktopAuthorized}
+      <div class="notice" role="status">
+        <span>Signed in. You can return to chan-desktop.</span>
+        <button class="dismiss" onclick={() => (desktopAuthorized = false)}>
+          Dismiss
+        </button>
+      </div>
+    {/if}
     <nav class="tabs">
       <button
         class:active={activeTab === "profile"}
@@ -110,6 +130,30 @@
   .muted { color: var(--text-secondary); }
   .small { font-size: 13px; }
   .error { color: var(--warn-text); }
+  .notice {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    max-width: 720px;
+    width: 100%;
+    margin: .75rem auto 0;
+    padding: .6rem .9rem;
+    box-sizing: border-box;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 14px;
+  }
+  .notice .dismiss {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font: inherit;
+    padding: 0;
+    cursor: pointer;
+  }
+  .notice .dismiss:hover { color: var(--text); }
   nav.tabs {
     display: flex;
     gap: .25rem;

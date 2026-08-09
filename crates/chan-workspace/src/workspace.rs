@@ -344,6 +344,23 @@ pub enum RecoveryOutcome {
     Retry,
 }
 
+/// Executes the recovery passes a workspace parks.
+///
+/// A parked pass carries no worker of its own. The startup worker drains the
+/// plan the workspace was opened with and then exits, and every other executor
+/// is driven from outside this crate, so a pass requested afterwards is claimed
+/// only if something is listening. Whoever owns that claim installs itself
+/// through [`Workspace::set_recovery_driver`]; a workspace with no driver
+/// reports its unclaimed passes through [`Workspace::recovery_is_unowned`]
+/// instead of parking on them silently.
+pub trait RecoveryDriver: Send + Sync {
+    /// Announce that a pass is pending and `generation` must be reached.
+    ///
+    /// Called from the write paths that park passes, so it must not block or
+    /// re-enter the workspace.
+    fn wake(&self, generation: WorkspaceGeneration);
+}
+
 /// Point-in-time state of the workspace recovery coordinator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveryStatus {
@@ -516,6 +533,16 @@ impl RecoveryWorker {
         Ok(())
     }
 
+    /// True while the startup worker thread is still alive. A pending pass is
+    /// unowned only once this is false: until then the worker is the claimant.
+    fn is_running(&self) -> bool {
+        self.worker
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+    }
+
     fn stop_and_join(&self) {
         self.stop.store(true, Ordering::Release);
         self.join();
@@ -653,6 +680,11 @@ pub struct Workspace {
     /// One owned startup worker. It executes the metadata-derived recovery
     /// plan off the open caller and joins on ordinary workspace teardown.
     recovery_worker: RecoveryWorker,
+    /// Installed by whatever process claims this workspace's recovery passes,
+    /// and woken every time one is parked. The startup worker covers only the
+    /// plan derived at open, so without a driver a pass requested later has no
+    /// claimant at all.
+    recovery_driver: std::sync::RwLock<Option<Arc<dyn RecoveryDriver>>>,
     /// Lazily-initialized SLOC / language / COCOMO report. First
     /// touch (`report()` / `boot()`) does a full scan; further access
     /// reads the cached state, and the watcher fanout keeps it current
@@ -693,7 +725,7 @@ fn run_open_recovery(workspace: std::sync::Weak<Workspace>, plan: RecoveryPlan, 
             tracing::warn!(
                 workspace = %workspace.root().display(),
                 ?error,
-                "startup pending-write replay failed; recovery remains pending",
+                "startup pending-write replay failed; the plan's pass stays pending for the recovery driver",
             );
             return;
         }
@@ -725,12 +757,16 @@ fn run_open_recovery(workspace: std::sync::Weak<Workspace>, plan: RecoveryPlan, 
             return;
         }
         if let Err(error) = result {
+            // The pass was requeued by the `finish_recovery` above, which
+            // announced it to the driver. Bailing here hands the retry over
+            // rather than stranding it: this worker is the wrong place to
+            // retry, since it exists only for the plan derived at open.
             tracing::warn!(
                 workspace = %workspace.root().display(),
                 generation = pass.generation.get(),
                 action = ?pass.action,
                 ?error,
-                "startup recovery pass failed; recovery remains pending",
+                "startup recovery pass failed; handed the requeued pass to the recovery driver",
             );
             return;
         }
@@ -1004,6 +1040,7 @@ impl Workspace {
             dashboard_serial: std::sync::Mutex::new(()),
             recovery: std::sync::Mutex::new(recovery),
             recovery_worker: RecoveryWorker::new(),
+            recovery_driver: std::sync::RwLock::new(None),
             report: Arc::new(std::sync::OnceLock::new()),
             walk_filter,
             scope_policy: Arc::new(std::sync::RwLock::new(scope_policy)),
@@ -1045,20 +1082,64 @@ impl Workspace {
         self.recovery_status().into()
     }
 
+    /// Install the process that claims this workspace's recovery passes.
+    ///
+    /// Replaces any previous driver. A pass that is already pending is
+    /// announced to the new driver immediately, so one parked before the
+    /// driver existed -- by a policy refresh during boot, or by the startup
+    /// worker bailing on a failed pass -- is picked up instead of waiting for
+    /// whatever request happens to come along next.
+    pub fn set_recovery_driver(&self, driver: Arc<dyn RecoveryDriver>) {
+        *self.recovery_driver.write().unwrap() = Some(driver);
+        if let Some(pending) = self.recovery_status().pending {
+            self.wake_recovery_driver(pending.generation);
+        }
+    }
+
+    /// True when a pending pass has no claimant: nothing is executing it, the
+    /// startup worker has exited, and no driver is installed. Such a pass never
+    /// converges, so consumers must report it rather than render it as recovery
+    /// in progress.
+    pub fn recovery_is_unowned(&self) -> bool {
+        let status = self.recovery_status();
+        status.active.is_none()
+            && status.pending.is_some()
+            && !self.recovery_worker.is_running()
+            && self.recovery_driver.read().unwrap().is_none()
+    }
+
+    /// Announce a pending generation to the installed driver.
+    ///
+    /// Never called with the recovery lock held: the driver is foreign code and
+    /// may read the coordinator back.
+    fn wake_recovery_driver(&self, generation: WorkspaceGeneration) {
+        let driver = self.recovery_driver.read().unwrap().clone();
+        if let Some(driver) = driver {
+            driver.wake(generation);
+        }
+    }
+
     /// Request convergence for a lossy signal such as provider overflow.
     ///
     /// Equivalent requests coalesce into the existing pending generation.
     pub fn request_recovery(&self, action: RecoveryAction) -> WorkspaceGeneration {
-        let mut status = self.recovery.lock().unwrap();
-        if let Some(mut pending) = status.pending {
-            pending.action = std::cmp::max(pending.action, action);
-            status.pending = Some(pending);
-            return pending.generation;
-        }
-
-        let generation = status.generation.next();
-        status.generation = generation;
-        status.pending = Some(RecoveryPass { generation, action });
+        let generation = {
+            let mut status = self.recovery.lock().unwrap();
+            match status.pending {
+                Some(mut pending) => {
+                    pending.action = std::cmp::max(pending.action, action);
+                    status.pending = Some(pending);
+                    pending.generation
+                }
+                None => {
+                    let generation = status.generation.next();
+                    status.generation = generation;
+                    status.pending = Some(RecoveryPass { generation, action });
+                    generation
+                }
+            }
+        };
+        self.wake_recovery_driver(generation);
         generation
     }
 
@@ -1067,14 +1148,18 @@ impl Workspace {
     /// Every policy replacement advances the generation. Pending work can
     /// collapse into the newest generation while retaining action dominance.
     pub fn request_policy_recovery(&self, action: RecoveryAction) -> WorkspaceGeneration {
-        let mut status = self.recovery.lock().unwrap();
-        let generation = status.generation.next();
-        status.generation = generation;
-        let action = status
-            .pending
-            .map(|pending| std::cmp::max(pending.action, action))
-            .unwrap_or(action);
-        status.pending = Some(RecoveryPass { generation, action });
+        let generation = {
+            let mut status = self.recovery.lock().unwrap();
+            let generation = status.generation.next();
+            status.generation = generation;
+            let action = status
+                .pending
+                .map(|pending| std::cmp::max(pending.action, action))
+                .unwrap_or(action);
+            status.pending = Some(RecoveryPass { generation, action });
+            generation
+        };
+        self.wake_recovery_driver(generation);
         generation
     }
 
@@ -1095,30 +1180,42 @@ impl Workspace {
         pass: RecoveryPass,
         outcome: RecoveryOutcome,
     ) -> Result<RecoveryStatus> {
-        let mut status = self.recovery.lock().unwrap();
-        if status.active != Some(pass) {
-            return Err(ChanError::Io(format!(
-                "recovery pass is not active: generation {}",
-                pass.generation.get()
-            )));
-        }
-        status.active = None;
-        match outcome {
-            RecoveryOutcome::Complete => {
-                status.completed_generation =
-                    std::cmp::max(status.completed_generation, pass.generation);
+        let status = {
+            let mut status = self.recovery.lock().unwrap();
+            if status.active != Some(pass) {
+                return Err(ChanError::Io(format!(
+                    "recovery pass is not active: generation {}",
+                    pass.generation.get()
+                )));
             }
-            RecoveryOutcome::Retry => {
-                status.pending = Some(match status.pending {
-                    Some(pending) => RecoveryPass {
-                        generation: pending.generation,
-                        action: std::cmp::max(pending.action, pass.action),
-                    },
-                    None => pass,
-                });
+            status.active = None;
+            match outcome {
+                RecoveryOutcome::Complete => {
+                    status.completed_generation =
+                        std::cmp::max(status.completed_generation, pass.generation);
+                }
+                RecoveryOutcome::Retry => {
+                    status.pending = Some(match status.pending {
+                        Some(pending) => RecoveryPass {
+                            generation: pending.generation,
+                            action: std::cmp::max(pending.action, pass.action),
+                        },
+                        None => pass,
+                    });
+                }
+            }
+            *status
+        };
+        // A requeued pass is pending again with nothing holding it. The caller
+        // that just gave it up may be about to exit -- the startup worker does
+        // exactly that on a failed pass -- so the driver has to hear about the
+        // retry or it never runs.
+        if outcome == RecoveryOutcome::Retry {
+            if let Some(pending) = status.pending {
+                self.wake_recovery_driver(pending.generation);
             }
         }
-        Ok(*status)
+        Ok(status)
     }
 
     fn recovery_execution(&self, action: RecoveryAction) -> RecoveryExecutionGuard<'_> {
@@ -1760,18 +1857,32 @@ impl Workspace {
     ///   - `None` + existing file: `WriteConflict`. The caller did
     ///     not know a file was there; treating that as a silent
     ///     overwrite would be the bug we're trying to prevent.
-    ///   - `Some(m)` + current mtime_ns == m: write.
+    ///   - `Some(m)` + current mtime_ns == m: write, subject to
+    ///     `expected_disk` below.
     ///   - any other case: `WriteConflict { current_mtime_ns }`.
     ///
-    /// Residual race: between the mtime check and the atomic rename,
-    /// another writer can land. The window is small (no syscalls
-    /// between the two) and the next watcher event will surface the
-    /// foreign change so the editor can re-prompt. Callers that need
-    /// stronger semantics must serialize at a higher level.
+    /// A matching mtime is not on its own proof that the disk is
+    /// untouched. A filesystem timestamp does not advance on every
+    /// write, so an external edit landing inside the window the token
+    /// names carries the token's own value, and the equality test
+    /// reads it as "nothing changed". `expected_disk` closes that:
+    /// callers that know which bytes they last observed pass them, and
+    /// a matching mtime is verified against the disk rather than
+    /// trusted. Bytes that differ, or a disk that cannot be read to
+    /// check, are a `WriteConflict` instead of a silent overwrite.
+    /// Callers holding no such belief pass `None` and get the mtime
+    /// test alone.
+    ///
+    /// Residual race: between the check and the atomic rename, another
+    /// writer can land. The window is small (one read at most between
+    /// the two) and the next watcher event will surface the foreign
+    /// change so the editor can re-prompt. Callers that need stronger
+    /// semantics must serialize at a higher level.
     pub fn write_text_if_unchanged(
         &self,
         rel: &str,
         expected_mtime_ns: Option<i64>,
+        expected_disk: Option<&str>,
         content: &str,
     ) -> Result<()> {
         if !self.editable_text_gate(rel) {
@@ -1784,7 +1895,7 @@ impl Workspace {
         };
         let conflict = match (expected_mtime_ns, exists) {
             (None, false) => false,
-            (Some(m), true) => current != Some(m),
+            (Some(m), true) => current != Some(m) || !self.disk_still_holds(rel, expected_disk),
             _ => true,
         };
         if conflict {
@@ -1796,6 +1907,18 @@ impl Workspace {
             sink.write_chunk(content.as_bytes())
         })
         .map(|_| ())
+    }
+
+    /// Whether the file still carries the bytes a CAS caller last
+    /// observed. No belief to check means nothing to contradict, so
+    /// the mtime stands alone. An unreadable disk answers false: a
+    /// write that cannot be shown to be safe is refused rather than
+    /// risked.
+    fn disk_still_holds(&self, rel: &str, expected_disk: Option<&str>) -> bool {
+        let Some(expected) = expected_disk else {
+            return true;
+        };
+        self.read_text(rel).is_ok_and(|disk| disk == expected)
     }
 
     /// Atomically write raw bytes. Text-class targets still require
@@ -2812,7 +2935,7 @@ impl Workspace {
                 rewrite_href_for_move(link, &src_old_dir, &src_new_dir, &augmented)
             });
             if let Some(new_md) = new_content {
-                match self.write_text_if_unchanged(&src_current, stat.mtime_ns, &new_md) {
+                match self.write_text_if_unchanged(&src_current, stat.mtime_ns, None, &new_md) {
                     Ok(()) => rewritten.push(src_current),
                     Err(_) => conflicts.push(src_current),
                 }
@@ -3476,6 +3599,11 @@ impl Workspace {
         Ok(())
     }
 
+    /// Rebuild the generated scope after a repository-ignore file changed.
+    ///
+    /// Runs from the watcher fan-out, long after the startup worker has gone,
+    /// so the pass it parks converges only because `request_policy_recovery`
+    /// announces it to the installed driver.
     fn refresh_repository_scope(&self) -> Result<()> {
         let mut current = self.scope_policy.write().unwrap();
         let configured = current.configured().clone();
@@ -7145,7 +7273,7 @@ mod tests {
     fn write_text_if_unchanged_creates_when_missing_with_none() {
         let (_cfg, _root, workspace) = fixture();
         workspace
-            .write_text_if_unchanged("a.md", None, "v1")
+            .write_text_if_unchanged("a.md", None, None, "v1")
             .unwrap();
         assert_eq!(workspace.read_text("a.md").unwrap(), "v1");
     }
@@ -7155,7 +7283,7 @@ mod tests {
         let (_cfg, _root, workspace) = fixture();
         workspace.write_text("a.md", "v1").unwrap();
         let err = workspace
-            .write_text_if_unchanged("a.md", None, "v2")
+            .write_text_if_unchanged("a.md", None, None, "v2")
             .unwrap_err();
         assert!(matches!(
             err,
@@ -7170,7 +7298,7 @@ mod tests {
     fn write_text_if_unchanged_conflicts_when_expected_but_missing() {
         let (_cfg, _root, workspace) = fixture();
         let err = workspace
-            .write_text_if_unchanged("a.md", Some(0), "v1")
+            .write_text_if_unchanged("a.md", Some(0), None, "v1")
             .unwrap_err();
         assert!(matches!(
             err,
@@ -7187,7 +7315,7 @@ mod tests {
         workspace.write_text("a.md", "v1").unwrap();
         let (_, stat) = workspace.read_text_with_stat("a.md").unwrap();
         workspace
-            .write_text_if_unchanged("a.md", stat.mtime_ns, "v2")
+            .write_text_if_unchanged("a.md", stat.mtime_ns, None, "v2")
             .unwrap();
         assert_eq!(workspace.read_text("a.md").unwrap(), "v2");
     }
@@ -7198,7 +7326,7 @@ mod tests {
         workspace.write_text("a.md", "v1").unwrap();
         let stale = Some(0i64);
         let err = workspace
-            .write_text_if_unchanged("a.md", stale, "v2")
+            .write_text_if_unchanged("a.md", stale, None, "v2")
             .unwrap_err();
         match err {
             ChanError::WriteConflict { current_mtime_ns } => {
@@ -7242,10 +7370,98 @@ mod tests {
         // stat must conflict. Without ns precision, two same-second
         // writes would collide and let this through.
         let err = workspace
-            .write_text_if_unchanged("a.md", stale_ns, "v3")
+            .write_text_if_unchanged("a.md", stale_ns, None, "v3")
             .unwrap_err();
         assert!(matches!(err, ChanError::WriteConflict { .. }));
         assert_eq!(workspace.read_text("a.md").unwrap(), "v2");
+    }
+
+    /// Stamp `rel`'s mtime to an exact value, so a test can stage the
+    /// collision the CAS has to survive instead of waiting for the
+    /// filesystem to produce one.
+    fn force_mtime_ns(root: &TempDir, rel: &str, mtime_ns: i64) {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.path().join(rel))
+            .unwrap();
+        let stamp = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(mtime_ns as u64);
+        file.set_times(std::fs::FileTimes::new().set_modified(stamp))
+            .unwrap();
+    }
+
+    /// The load-bearing case: a filesystem timestamp does not advance
+    /// on every write, so an external edit can carry the very token
+    /// the caller captured. The mtime test alone reads that as "the
+    /// disk is untouched" and overwrites a file nobody looked at.
+    #[test]
+    fn write_text_if_unchanged_conflicts_when_an_external_edit_kept_the_mtime() {
+        let (_cfg, root, workspace) = fixture();
+        workspace.write_text("a.md", "baseline").unwrap();
+        let token = workspace.stat("a.md").unwrap().mtime_ns;
+
+        workspace.write_text("a.md", "external").unwrap();
+        force_mtime_ns(&root, "a.md", token.unwrap());
+        assert_eq!(
+            workspace.stat("a.md").unwrap().mtime_ns,
+            token,
+            "the collision this test exists for did not stage"
+        );
+
+        let err = workspace
+            .write_text_if_unchanged("a.md", token, Some("baseline"), "mine")
+            .unwrap_err();
+        assert!(matches!(err, ChanError::WriteConflict { .. }));
+        assert_eq!(
+            workspace.read_text("a.md").unwrap(),
+            "external",
+            "the external edit must survive"
+        );
+    }
+
+    /// The same equality, with the disk genuinely untouched, still
+    /// writes. Verification must not turn every save into a conflict.
+    #[test]
+    fn write_text_if_unchanged_writes_when_the_disk_still_holds_the_expected_bytes() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.write_text("a.md", "baseline").unwrap();
+        let token = workspace.stat("a.md").unwrap().mtime_ns;
+        workspace
+            .write_text_if_unchanged("a.md", token, Some("baseline"), "mine")
+            .unwrap();
+        assert_eq!(workspace.read_text("a.md").unwrap(), "mine");
+    }
+
+    /// A caller with no belief about the disk keeps the mtime-only
+    /// contract, since it has nothing to be verified against.
+    #[test]
+    fn write_text_if_unchanged_without_an_expectation_stays_mtime_only() {
+        let (_cfg, root, workspace) = fixture();
+        workspace.write_text("a.md", "baseline").unwrap();
+        let token = workspace.stat("a.md").unwrap().mtime_ns;
+        workspace.write_text("a.md", "external").unwrap();
+        force_mtime_ns(&root, "a.md", token.unwrap());
+
+        workspace
+            .write_text_if_unchanged("a.md", token, None, "mine")
+            .unwrap();
+        assert_eq!(workspace.read_text("a.md").unwrap(), "mine");
+    }
+
+    /// A disk that cannot be read cannot be shown to be safe, so the
+    /// write is refused rather than risked.
+    #[test]
+    fn write_text_if_unchanged_conflicts_when_the_disk_cannot_be_verified() {
+        let (_cfg, root, workspace) = fixture();
+        workspace.write_text("a.md", "baseline").unwrap();
+        let token = workspace.stat("a.md").unwrap().mtime_ns;
+
+        std::fs::write(root.path().join("a.md"), [0xff, 0xfe, 0x00]).unwrap();
+        force_mtime_ns(&root, "a.md", token.unwrap());
+
+        let err = workspace
+            .write_text_if_unchanged("a.md", token, Some("baseline"), "mine")
+            .unwrap_err();
+        assert!(matches!(err, ChanError::WriteConflict { .. }));
     }
 
     #[test]
@@ -8592,16 +8808,18 @@ mod tests {
         let rel = ".Drafts/untitled-1/draft.md";
         // First write: file doesn't exist; expected_mtime=None
         // succeeds.
-        workspace.write_text_if_unchanged(rel, None, "v1").unwrap();
+        workspace
+            .write_text_if_unchanged(rel, None, None, "v1")
+            .unwrap();
         let (_, stat) = workspace.read_text_with_stat(rel).unwrap();
         // Stale-mtime write: rejected.
         let err = workspace
-            .write_text_if_unchanged(rel, Some(stat.mtime_ns.unwrap_or(0) + 1), "v2")
+            .write_text_if_unchanged(rel, Some(stat.mtime_ns.unwrap_or(0) + 1), None, "v2")
             .unwrap_err();
         assert!(matches!(err, ChanError::WriteConflict { .. }));
         // Current-mtime write: accepted.
         workspace
-            .write_text_if_unchanged(rel, stat.mtime_ns, "v2")
+            .write_text_if_unchanged(rel, stat.mtime_ns, None, "v2")
             .unwrap();
         assert_eq!(workspace.read_text(rel).unwrap(), "v2");
     }
@@ -9546,5 +9764,136 @@ mod tests {
         assert_eq!(split_name_ext("README"), ("README".into(), String::new()));
         // Trailing dot stays part of the stem.
         assert_eq!(split_name_ext("weird."), ("weird.".into(), String::new()));
+    }
+
+    /// Records every generation announced to it, standing in for the server's
+    /// indexer coordinator.
+    #[derive(Default)]
+    struct RecordingDriver {
+        woken: std::sync::Mutex<Vec<WorkspaceGeneration>>,
+    }
+
+    impl RecordingDriver {
+        fn woken(&self) -> Vec<WorkspaceGeneration> {
+            self.woken.lock().unwrap().clone()
+        }
+    }
+
+    impl RecoveryDriver for RecordingDriver {
+        fn wake(&self, generation: WorkspaceGeneration) {
+            self.woken.lock().unwrap().push(generation);
+        }
+    }
+
+    #[test]
+    fn a_parked_pass_is_announced_to_the_driver() {
+        // The defect: `request_policy_recovery` parked a pass and notified
+        // nothing, so a `.gitignore` write left a generation that no worker
+        // was ever told to claim.
+        let (_cfg, _root, workspace) = fixture();
+        let driver = Arc::new(RecordingDriver::default());
+        workspace.set_recovery_driver(driver.clone());
+
+        let policy = workspace.request_policy_recovery(RecoveryAction::Reconcile);
+        assert_eq!(
+            driver.woken(),
+            vec![policy],
+            "a policy-parked pass must reach the driver"
+        );
+
+        let lossy = workspace.request_recovery(RecoveryAction::FullRebuild);
+        assert_eq!(
+            driver.woken(),
+            vec![policy, lossy],
+            "a coalesced request must still announce the generation it landed on"
+        );
+    }
+
+    #[test]
+    fn installing_a_driver_announces_a_pass_parked_before_it() {
+        // Covers the boot window: a pass can be parked between `open` and the
+        // server installing its coordinator, and the wake-up for it would
+        // otherwise have been sent to nobody and lost.
+        let (_cfg, _root, workspace) = fixture();
+        let generation = workspace.request_policy_recovery(RecoveryAction::Reconcile);
+
+        let driver = Arc::new(RecordingDriver::default());
+        workspace.set_recovery_driver(driver.clone());
+
+        assert_eq!(driver.woken(), vec![generation]);
+    }
+
+    #[test]
+    fn a_requeued_pass_is_announced_to_the_driver() {
+        // The startup worker's bail path requeues the failed pass and then
+        // returns for good. The requeue is the last thing it does, so unless
+        // it announces, the pass is left pending with the only thread that
+        // was executing it gone.
+        let (_cfg, _root, workspace) = fixture();
+        let driver = Arc::new(RecordingDriver::default());
+        workspace.set_recovery_driver(driver.clone());
+
+        let generation = workspace.request_policy_recovery(RecoveryAction::Reconcile);
+        let pass = workspace.begin_recovery().expect("pass is claimable");
+        assert!(workspace.recovery_status().pending.is_none());
+
+        let status = workspace
+            .finish_recovery(pass, RecoveryOutcome::Retry)
+            .unwrap();
+
+        assert_eq!(status.pending, Some(pass), "a retry requeues the pass");
+        assert_eq!(
+            driver.woken(),
+            vec![generation, generation],
+            "the requeue must be announced as well as the original request"
+        );
+    }
+
+    #[test]
+    fn a_completed_pass_is_not_announced() {
+        // Waking on completion would hand the driver a generation with nothing
+        // to do, and for the server's coordinator that is a spurious loop.
+        let (_cfg, _root, workspace) = fixture();
+        let driver = Arc::new(RecordingDriver::default());
+        workspace.set_recovery_driver(driver.clone());
+
+        let generation = workspace.request_policy_recovery(RecoveryAction::Reconcile);
+        let pass = workspace.begin_recovery().unwrap();
+        workspace
+            .finish_recovery(pass, RecoveryOutcome::Complete)
+            .unwrap();
+
+        assert_eq!(driver.woken(), vec![generation]);
+    }
+
+    #[test]
+    fn a_pending_pass_is_unowned_only_when_nothing_can_claim_it() {
+        let (_cfg, _root, workspace) = fixture();
+        // The startup worker for this fixture has no plan work, so a ready
+        // workspace has no claimant -- and nothing to claim either.
+        assert!(!workspace.recovery_is_unowned(), "nothing is pending");
+
+        workspace.request_policy_recovery(RecoveryAction::Reconcile);
+        assert!(
+            workspace.recovery_is_unowned(),
+            "pending, nothing active, no driver: this pass converges nowhere"
+        );
+
+        let pass = workspace.begin_recovery().unwrap();
+        assert!(
+            !workspace.recovery_is_unowned(),
+            "an active pass is held by whoever began it"
+        );
+
+        workspace
+            .finish_recovery(pass, RecoveryOutcome::Retry)
+            .unwrap();
+        assert!(workspace.recovery_is_unowned(), "requeued with no driver");
+
+        workspace.set_recovery_driver(Arc::new(RecordingDriver::default()));
+        assert!(
+            !workspace.recovery_is_unowned(),
+            "a driver is exactly what makes the pass claimable"
+        );
     }
 }
