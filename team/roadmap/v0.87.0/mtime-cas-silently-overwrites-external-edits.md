@@ -174,7 +174,21 @@ Four mutation probes, each recorded with what it fails:
 - The echo guard trusting the token alone: fails exactly `external_edit_that_kept_the_mtime_still_fans`.
 - A canonical baseline treated as verbatim: 11 failures across both session suites, including `first_edit_after_crlf_seed_flushes_lf_to_disk`. The `verbatim` distinction is load-bearing, not decoration.
 
-### Owner validation, 2026-08-09, PARTIAL
+### Owner validation, 2026-08-09, both directions live
+
+Superseding the PARTIAL note below, which is kept because its reasoning is why the second test was run at all.
+
+**Convergence.** The owner opened a file and an external `>>` append landed from a shell outside chan. The line appeared in the editor within a second, no banner. An external edit reaches an open editor without inventing a conflict.
+
+**Detection.** With the owner typing continuously so the autosave debounce kept resetting, an external write replaced the whole file while an unflushed edit was pending. **The conflict banner fired.** This is the direction a quiet session cannot evidence, and the reason the item was held: an inert guard and a correct one look identical from the outside until something forces the conflict.
+
+**The autosave window is roughly 750 ms**, measured rather than assumed: the owner's last flush stamped `18:12:31.922` and the external replace landed at `18:12:32.671`. Two earlier attempts at the detection test failed to reach the conflict path at all because the flush beat the external write, turning each into another convergence test. Anyone reproducing this needs continuous typing, not a pause-then-signal.
+
+Incidental, and it answers a standing worry rather than this item: across the session the debounce flushed sub-second and preserved every keystroke in order, with the file growing correctly throughout.
+
+**A false alarm, recorded because the failure mode is instructive.** The first detection attempt appeared to show a flush destroying an external edit. It did not. The helper printing the pre-write disk state used `head -3`, so the content below line three was invisible, and a truncated view was read as deletion. The instrument was fixed to print the whole file before the retry. Three separate readings this session went wrong the same way, all of them mine: a bucket count that included prose, a stale-artifact theory that a rebuild disproved, and this. A partial view stated as a whole one is worth more suspicion than a result that merely looks bad.
+
+### Owner validation, 2026-08-09, PARTIAL (superseded)
 
 Run against merged `main` (`3ecc6e87`) on a standalone host server, after the owner asked whether the editor scenarios had been exercised at all. They had not: no lane journal in the round mentions `browser-smoke`, and `make pre-push` does not invoke it.
 
