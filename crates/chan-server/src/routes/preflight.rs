@@ -12,7 +12,9 @@
 //!     indexing on a ready generation stays non-blocking, but pending or
 //!     active recovery reports `running` and locks the overlay until its
 //!     required generation converges. A genuine index error reports
-//!     `failed`.
+//!     `failed`. Recovery that has no worker assigned to it never converges,
+//!     so it reports as a decision carrying the rebuild that clears it
+//!     rather than as recovery in progress.
 //!   - `model` step (embeddings builds only): when the workspace has
 //!     semantic search enabled but the embedding model is not on disk,
 //!     the user must choose -- download it or fall back to keyword
@@ -139,11 +141,18 @@ struct PreflightError {
 
 /// Map the indexer's status onto the `index` readiness step.
 ///
-/// Recovery readiness dominates healthy progress states: pending or active
-/// derived-state recovery maps to `Pending`, while a ready generation keeps
-/// ordinary build/reindex progress non-blocking. A genuine index error maps
-/// to `Failed` so the shell can surface it.
-fn index_step(status: &IndexStatus, readiness: WorkspaceReadiness) -> PreflightStep {
+/// Precedence, highest first. A genuine index error maps to `Failed` so the
+/// shell can surface it. A recovery pass with no claimant (`unowned`) maps to
+/// `NeedsDecision`: it converges nowhere, so reporting it as recovery in
+/// progress spins the overlay forever, and the decision it carries is the only
+/// escape the product surface offers. Ordinary pending or active recovery maps
+/// to `Pending`, while a ready generation keeps build/reindex progress
+/// non-blocking.
+///
+/// The unowned arm sits ahead of the readiness arm deliberately: a stalled
+/// recovery and a running one are both `!is_ready()`, and testing readiness
+/// first is exactly what made the two indistinguishable.
+fn index_step(status: &IndexStatus, readiness: WorkspaceReadiness, unowned: bool) -> PreflightStep {
     let base = PreflightStep {
         id: "index",
         label: "Build search index",
@@ -153,6 +162,18 @@ fn index_step(status: &IndexStatus, readiness: WorkspaceReadiness) -> PreflightS
     match status {
         IndexStatus::Error { .. } => PreflightStep {
             state: StepState::Failed,
+            ..base
+        },
+        _ if unowned => PreflightStep {
+            state: StepState::NeedsDecision,
+            decision: Some(Decision {
+                prompt: "Workspace recovery is stalled: the pending pass has no worker assigned, \
+                         so it will not clear on its own.",
+                choices: vec![DecisionChoice {
+                    id: "rebuild",
+                    label: "Rebuild the search index",
+                }],
+            }),
             ..base
         },
         _ if !readiness.is_ready() => base,
@@ -230,19 +251,27 @@ fn build_snapshot(
     status: &IndexStatus,
 ) -> PreflightSnapshot {
     let readiness = workspace.readiness();
-    let mut steps = vec![index_step(status, readiness)];
+    let mut steps = vec![index_step(
+        status,
+        readiness,
+        workspace.recovery_is_unowned(),
+    )];
     if let Some(step) = model_step(workspace) {
         steps.push(step);
     }
 
     // Phase precedence: a failure dominates, then a pending decision,
     // then "all done" is ready, otherwise still running.
+    //
+    // A decision outranks unready readiness. A stalled recovery is reported as
+    // a decision precisely because readiness alone cannot clear it, so letting
+    // `!is_ready()` win here would bury the one step that offers a way out.
     let phase = if steps.iter().any(|s| s.state == StepState::Failed) {
         Phase::Failed
-    } else if !readiness.is_ready() {
-        Phase::Running
     } else if steps.iter().any(|s| s.state == StepState::NeedsDecision) {
         Phase::NeedsDecision
+    } else if !readiness.is_ready() {
+        Phase::Running
     } else if steps.iter().all(|s| s.state == StepState::Done) {
         Phase::Ready
     } else {
@@ -349,26 +378,66 @@ pub async fn api_preflight(State(state): State<Arc<AppState>>) -> Response {
 #[derive(Debug, Deserialize)]
 pub struct DecisionBody {
     step: String,
-    /// Only the embeddings build's `model` step reads this; on a
-    /// no-embeddings build there are no decisions, so the field is
-    /// deserialized but unused.
-    #[cfg_attr(not(feature = "embeddings"), allow(dead_code))]
     choice: String,
 }
 
-// `state` is consumed only by the embeddings `model` decision arm; on a
-// no-embeddings build there are no decisions, so the binding is unused.
-#[cfg_attr(not(feature = "embeddings"), allow(unused_variables))]
 pub async fn api_preflight_decision(
     State(state): State<Arc<AppState>>,
     Json(body): Json<DecisionBody>,
 ) -> Response {
     match body.step.as_str() {
+        "index" => index_decision(&state, &body.choice).await,
         #[cfg(feature = "embeddings")]
         "model" => model_decision(&state, &body.choice).await,
         other => err(
             StatusCode::BAD_REQUEST,
             format!("no pending pre-flight decision for step {other:?}"),
+        ),
+    }
+}
+
+/// Apply an `index` step decision, then return the fresh snapshot so the shell
+/// re-renders without a second poll.
+///
+/// The step offers this only when a recovery pass is parked with no claimant.
+/// `rebuild` is the one choice: it raises the parked pass to a full rebuild and
+/// hands it to the indexer, which is the request that always finds a claimant.
+/// This is the escape that previously existed only as an out-of-band
+/// `POST /api/index/rebuild` carrying a token dug out of the devserver config.
+async fn index_decision(state: &Arc<AppState>, choice: &str) -> Response {
+    if choice != "rebuild" {
+        return err(
+            StatusCode::BAD_REQUEST,
+            format!("unknown choice {choice:?} for pre-flight step \"index\""),
+        );
+    }
+    let workspace = match state.try_workspace() {
+        Ok(w) => w,
+        Err(e) => return err_state(&e),
+    };
+    let indexer = match state.try_indexer() {
+        Ok(i) => i,
+        Err(e) => return err_state(&e),
+    };
+    indexer.request_rebuild();
+    let allow_cs = cs_link_allowed(state);
+    let cs_dismissed = cs_dismissed_pref(state);
+    match tokio::task::spawn_blocking(move || {
+        let status = indexer.snapshot();
+        let mut snapshot = build_snapshot(&workspace, &status);
+        snapshot.cs_link = cs_link::detect(allow_cs);
+        snapshot.cs_dismissed = cs_dismissed;
+        if snapshot.phase == Phase::Ready {
+            snapshot.summary = Some(workspace_summary(&workspace));
+        }
+        snapshot
+    })
+    .await
+    {
+        Ok(snapshot) => Json(snapshot).into_response(),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("preflight decision task panicked: {e}"),
         ),
     }
 }
@@ -469,6 +538,15 @@ mod tests {
         }
     }
 
+    /// Stands in for the indexer coordinator: a pass requested with this
+    /// installed has a claimant, which is what separates recovery in progress
+    /// from a stall.
+    struct RecordingDriver;
+
+    impl chan_workspace::RecoveryDriver for RecordingDriver {
+        fn wake(&self, _generation: chan_workspace::WorkspaceGeneration) {}
+    }
+
     #[test]
     fn detect_scm_finds_git_then_none() {
         let dir = TempDir::new().unwrap();
@@ -526,8 +604,9 @@ mod tests {
     }
 
     #[test]
-    fn recovery_is_explicitly_running_and_locks_preflight() {
+    fn recovery_with_a_claimant_is_explicitly_running_and_locks_preflight() {
         let (_c, _r, ws) = workspace();
+        ws.set_recovery_driver(Arc::new(RecordingDriver));
         ws.request_recovery(chan_workspace::RecoveryAction::Reconcile);
 
         let snap = build_snapshot(&ws, &idle());
@@ -538,6 +617,65 @@ mod tests {
             serde_json::to_value(snap.readiness).unwrap()["state"],
             "recovering"
         );
+        let index = snap.steps.iter().find(|step| step.id == "index").unwrap();
+        assert_eq!(index.state, StepState::Pending);
+        assert!(
+            index.decision.is_none(),
+            "recovery that is actually progressing must not ask the user for anything"
+        );
+    }
+
+    #[test]
+    fn a_stalled_recovery_is_reported_and_offers_a_way_out() {
+        // The defect this step exists for: a pass parked with no claimant is
+        // `!is_ready()` exactly like a running one, so the pre-fix ordering
+        // rendered it as an overlay that spins forever. It must instead be
+        // distinguishable from the running case above -- same readiness, same
+        // index status, different step -- and carry the rebuild that clears it.
+        let (_c, _r, ws) = workspace();
+        ws.request_recovery(chan_workspace::RecoveryAction::Reconcile);
+        assert!(
+            ws.recovery_is_unowned(),
+            "no driver installed, so the pass has nothing to claim it"
+        );
+
+        let snap = build_snapshot(&ws, &idle());
+
+        assert_eq!(snap.phase, Phase::NeedsDecision);
+        assert_eq!(
+            serde_json::to_value(snap.readiness).unwrap()["state"],
+            "recovering"
+        );
+        let index = snap.steps.iter().find(|step| step.id == "index").unwrap();
+        assert_eq!(index.state, StepState::NeedsDecision);
+        let decision = index
+            .decision
+            .as_ref()
+            .expect("a stalled recovery must offer the escape");
+        assert!(
+            decision.choices.iter().any(|choice| choice.id == "rebuild"),
+            "the escape is a rebuild: {:?}",
+            decision.choices
+        );
+    }
+
+    #[test]
+    fn installing_a_claimant_clears_the_stall_report() {
+        // The stall report keys on there being no claimant, not on the pass
+        // itself, so it must disappear the moment a driver takes ownership
+        // while the pass is still pending.
+        let (_c, _r, ws) = workspace();
+        ws.request_recovery(chan_workspace::RecoveryAction::Reconcile);
+        assert_eq!(
+            build_snapshot(&ws, &idle()).phase,
+            Phase::NeedsDecision,
+            "unowned pass must report as a decision before a driver exists"
+        );
+
+        ws.set_recovery_driver(Arc::new(RecordingDriver));
+
+        let snap = build_snapshot(&ws, &idle());
+        assert_eq!(snap.phase, Phase::Running);
         let index = snap.steps.iter().find(|step| step.id == "index").unwrap();
         assert_eq!(index.state, StepState::Pending);
     }
@@ -552,9 +690,28 @@ mod tests {
                     file: "note-490.md".into(),
                 },
                 WorkspaceReadiness::default(),
+                false,
             )
             .state,
             StepState::Done
+        );
+    }
+
+    #[test]
+    fn an_index_error_outranks_a_stalled_recovery() {
+        // Both map to a locked overlay, but a failed index carries the real
+        // diagnosis; offering "rebuild the index" over an index that just
+        // failed to build would send the user in a circle.
+        assert_eq!(
+            index_step(
+                &IndexStatus::Error {
+                    message: "boom".into(),
+                },
+                WorkspaceReadiness::default(),
+                true,
+            )
+            .state,
+            StepState::Failed
         );
     }
 
@@ -569,7 +726,7 @@ mod tests {
             file: "a.md".into(),
         };
         assert_eq!(
-            index_step(&building(), WorkspaceReadiness::default()).state,
+            index_step(&building(), WorkspaceReadiness::default(), false).state,
             StepState::Done
         );
     }
