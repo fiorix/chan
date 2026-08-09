@@ -224,7 +224,6 @@ impl Indexer {
         let workspace_weak = Arc::downgrade(&workspace);
         let rebuild_requester = RebuildRequester {
             workspace: workspace_weak.clone(),
-            tx: rebuild_tx,
         };
         let coordinator_task = spawn_coordinator(
             workspace_weak.clone(),
@@ -233,6 +232,11 @@ impl Indexer {
             progress_sink.clone(),
             REBUILD_COOLDOWN,
         );
+        // Install the driver before anything requests work, and before the
+        // first poll can observe readiness. Installing also announces whatever
+        // is already pending, which covers the passes parked between
+        // `Workspace::open` and here.
+        workspace.set_recovery_driver(Arc::new(CoordinatorDriver { tx: rebuild_tx }));
         // Trigger a full rebuild when either side of the index is
         // empty. Checking BM25 alone misses the case where a prior
         // rebuild was killed mid-graph-pass: the graph DB stays
@@ -303,15 +307,37 @@ impl Indexer {
 #[derive(Clone)]
 struct RebuildRequester {
     workspace: Weak<Workspace>,
-    tx: mpsc::UnboundedSender<WorkspaceGeneration>,
 }
 
 impl RebuildRequester {
+    /// Park a full rebuild. The coordinator hears about it through the
+    /// workspace's recovery driver, so this path cannot request work the
+    /// coordinator is never told to claim.
     fn request(&self) {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        let generation = workspace.request_recovery(RecoveryAction::FullRebuild);
+        workspace.request_recovery(RecoveryAction::FullRebuild);
+    }
+}
+
+/// The workspace's recovery driver, installed at spawn.
+///
+/// Every pass the workspace parks arrives here and is forwarded to the
+/// coordinator, which is the only claimant a served workspace has. Routing all
+/// of them through one channel is what stops a pass from being parked by a path
+/// that forgot to poke the coordinator: the poke is no longer the caller's to
+/// remember.
+///
+/// A later `Indexer::spawn` over the same workspace replaces this driver rather
+/// than stacking on it; dropping an indexer leaves the stale sender installed,
+/// whose sends are simply discarded.
+struct CoordinatorDriver {
+    tx: mpsc::UnboundedSender<WorkspaceGeneration>,
+}
+
+impl chan_workspace::RecoveryDriver for CoordinatorDriver {
+    fn wake(&self, generation: WorkspaceGeneration) {
         let _ = self.tx.send(generation);
     }
 }
@@ -353,12 +379,14 @@ fn take_coordinator_retry_failure(root: &std::path::Path) -> bool {
     }
 }
 
-/// Coordinator task: drains rebuild requests to the newest required
-/// workspace generation and keeps running claimed full-rebuild passes
-/// until that generation is complete. Its progress callback updates the
-/// local status mutex AND forwards each tick to the WS fan-out so the
-/// frontend's status pill animates in real time. Without the WS forward
-/// we'd be polling `/api/index/status` at a coarse cadence; with it we
+/// Coordinator task: drains recovery requests to the newest required
+/// workspace generation and keeps claiming and running passes until that
+/// generation is complete. It executes every action the workspace can park
+/// (replay, reconcile, full rebuild), because for a served workspace it is the
+/// only claimant there is: a pass it declines converges nowhere. Its progress
+/// callback updates the local status mutex AND forwards each tick to the WS
+/// fan-out so the frontend's status pill animates in real time. Without the WS
+/// forward we'd be polling `/api/index/status` at a coarse cadence; with it we
 /// get every per-file event.
 fn spawn_coordinator(
     workspace: Weak<Workspace>,
@@ -397,20 +425,16 @@ fn spawn_coordinator(
                     tokio::time::sleep(Duration::from_millis(10)).await;
                     continue;
                 };
-                if pass.action != RecoveryAction::FullRebuild {
-                    let _ = workspace_w.finish_recovery(pass, RecoveryOutcome::Retry);
-                    *shared.status.lock().unwrap() = IndexStatus::Error {
-                        message: format!(
-                            "server rebuild coordinator claimed non-rebuild generation {}",
-                            pass.generation.get()
-                        ),
-                    };
-                    break;
-                }
+                let full_rebuild = pass.action == RecoveryAction::FullRebuild;
                 drop(workspace_w);
-                let delay = next_start_at.saturating_duration_since(Instant::now());
-                if !delay.is_zero() {
-                    tokio::time::sleep(delay).await;
+                // Only full rebuilds ride the storm cooldown. A reconcile or a
+                // replay is bounded work over derived state, and holding one
+                // back keeps the workspace in `recovering` for no gain.
+                if full_rebuild {
+                    let delay = next_start_at.saturating_duration_since(Instant::now());
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
                 }
 
                 let Some(workspace_for_pass) = workspace.upgrade() else {
@@ -421,11 +445,16 @@ fn spawn_coordinator(
                 let progress_w = progress_sink.clone();
                 let bg_embed_w = shared.bg_embed.clone();
                 let aggression = shared.search_aggression;
-                *status_w.lock().unwrap() = IndexStatus::Building {
-                    current: 0,
-                    total: 0,
-                    file: String::new(),
-                };
+                // A reconcile or replay leaves the status alone: neither
+                // reports per-file progress, and readiness already says the
+                // workspace is recovering.
+                if full_rebuild {
+                    *status_w.lock().unwrap() = IndexStatus::Building {
+                        current: 0,
+                        total: 0,
+                        file: String::new(),
+                    };
+                }
                 let workspace_weak = Arc::downgrade(&workspace_for_pass);
                 let result = tokio::task::spawn_blocking(move || {
                     let progress = StatusUpdater {
@@ -441,12 +470,19 @@ fn spawn_coordinator(
                             "injected coordinator retry".to_string(),
                         ));
                     }
-                    workspace_for_pass.run_full_rebuild_pass(
-                        pass,
-                        Some(&cancel_w),
-                        &progress,
-                        aggression,
-                    )
+                    // Every action the workspace can park is executed here.
+                    // Refusing one strands it: the coordinator is the only
+                    // claimant a served workspace has, so a refusal is
+                    // terminal for that pass rather than a deferral.
+                    match pass.action {
+                        RecoveryAction::FullRebuild => workspace_for_pass
+                            .run_full_rebuild_pass(pass, Some(&cancel_w), &progress, aggression)
+                            .map(|_| ()),
+                        RecoveryAction::Reconcile => workspace_for_pass.reconcile().map(|_| ()),
+                        RecoveryAction::Replay => {
+                            workspace_for_pass.replay_pending_writes().map(|_| ())
+                        }
+                    }
                 })
                 .await;
 
@@ -468,7 +504,9 @@ fn spawn_coordinator(
                         break;
                     }
                 };
-                next_start_at = Instant::now() + cooldown;
+                if full_rebuild {
+                    next_start_at = Instant::now() + cooldown;
+                }
                 required_generation = drain_required_generation(&mut rx, required_generation);
 
                 match &result {
@@ -1179,6 +1217,202 @@ mod tests {
         lib.register_workspace(workspace_dir.path()).unwrap();
         let workspace = lib.open_workspace(workspace_dir.path()).unwrap();
         (cfg, workspace_dir, workspace)
+    }
+
+    fn idle_status() -> Arc<Mutex<IndexStatus>> {
+        Arc::new(Mutex::new(IndexStatus::Idle {
+            indexed_docs: 0,
+            indexed_vectors: 0,
+            model: "bm25".to_string(),
+            embedding: None,
+        }))
+    }
+
+    fn test_shared(status: Arc<Mutex<IndexStatus>>) -> IndexerShared {
+        IndexerShared {
+            status,
+            telemetry: Arc::new(Mutex::new(IndexerTelemetry {
+                queue_depth: 0,
+                last_event_at: None,
+                last_settled_at: None,
+                coalesced_rebuild: false,
+            })),
+            bg_embed: Arc::new(Mutex::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            search_aggression: SearchAggression::Conservative,
+        }
+    }
+
+    /// The watcher fan-out needs a downstream callback; nothing in these tests
+    /// reads the events themselves, only the policy refresh they trigger.
+    struct DiscardEvents;
+
+    impl chan_workspace::WatchCallback for DiscardEvents {
+        fn on_event(&self, _event: WatchEvent) {}
+    }
+
+    async fn await_ready(workspace: &Arc<Workspace>, required: WorkspaceGeneration) -> bool {
+        tokio::time::timeout(CONVERGENCE_BUDGET, async {
+            loop {
+                let recovery = workspace.recovery_status();
+                if recovery.is_ready() && recovery.completed_generation >= required {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_gitignore_write_converges_without_an_external_rebuild() {
+        // The reported defect, end to end: writing `.gitignore` in a served
+        // workspace parks a Reconcile from the watcher fan-out. Before the
+        // driver existed nothing was told to claim it, and the workspace sat
+        // in `recovering` until someone called POST /api/index/rebuild by
+        // hand. Nothing in this test calls a rebuild.
+        let (_cfg, dir, workspace) = setup_workspace();
+        fs::write(dir.path().join("a.md"), "# A\nbody\n").unwrap();
+
+        let (_events_tx, events_rx) = broadcast::channel(64);
+        let _indexer = Indexer::spawn(
+            workspace.clone(),
+            events_rx,
+            false,
+            SearchAggression::Conservative,
+            Arc::new(chan_workspace::NoProgress),
+        );
+        let _watch = workspace.watch(Arc::new(DiscardEvents)).unwrap();
+        assert!(
+            workspace.recovery_status().is_ready(),
+            "the workspace must start settled or the convergence below proves nothing: {:?}",
+            workspace.recovery_status()
+        );
+
+        let before = workspace.generation();
+        fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+
+        // First that the write actually reached the policy path: without this
+        // the convergence assert would pass on a workspace that never left
+        // `ready` because the watcher missed the file entirely.
+        let bumped = tokio::time::timeout(CONVERGENCE_BUDGET, async {
+            loop {
+                if workspace.generation() > before {
+                    break workspace.generation();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the .gitignore write never reached the scope-policy path");
+
+        assert!(
+            await_ready(&workspace, bumped).await,
+            "the parked pass never converged; recovery={:?}",
+            workspace.recovery_status()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_coordinator_runs_a_reconcile_instead_of_erroring_on_it() {
+        // The coordinator used to refuse any non-rebuild pass outright: it
+        // requeued the pass and flipped the indexer to Error, which is
+        // terminal for that generation. It is the only claimant a served
+        // workspace has, so refusing is stranding.
+        let (_cfg, dir, workspace) = setup_workspace();
+        fs::write(dir.path().join("a.md"), "# A\nbody\n").unwrap();
+        let status = idle_status();
+        let (tx, rx) = mpsc::unbounded_channel::<WorkspaceGeneration>();
+        let coordinator = spawn_coordinator(
+            Arc::downgrade(&workspace),
+            test_shared(status.clone()),
+            rx,
+            Arc::new(chan_workspace::NoProgress),
+            Duration::from_millis(50),
+        );
+
+        let required = workspace.request_policy_recovery(RecoveryAction::Reconcile);
+        tx.send(required).unwrap();
+
+        assert!(
+            await_ready(&workspace, required).await,
+            "a Reconcile pass did not converge; recovery={:?}, status={:?}",
+            workspace.recovery_status(),
+            status.lock().unwrap()
+        );
+        assert!(
+            !matches!(*status.lock().unwrap(), IndexStatus::Error { .. }),
+            "claiming a Reconcile must not fault the indexer: {:?}",
+            status.lock().unwrap()
+        );
+
+        drop(tx);
+        coordinator.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_coordinator_runs_a_replay_instead_of_erroring_on_it() {
+        // Same branch, the other action that reaches it. A Replay parked by a
+        // crash-recovery path is claimed and executed rather than refused.
+        let (_cfg, _dir, workspace) = setup_workspace();
+        let status = idle_status();
+        let (tx, rx) = mpsc::unbounded_channel::<WorkspaceGeneration>();
+        let coordinator = spawn_coordinator(
+            Arc::downgrade(&workspace),
+            test_shared(status.clone()),
+            rx,
+            Arc::new(chan_workspace::NoProgress),
+            Duration::from_millis(50),
+        );
+
+        let required = workspace.request_recovery(RecoveryAction::Replay);
+        tx.send(required).unwrap();
+
+        assert!(
+            await_ready(&workspace, required).await,
+            "a Replay pass did not converge; recovery={:?}, status={:?}",
+            workspace.recovery_status(),
+            status.lock().unwrap()
+        );
+        assert!(
+            !matches!(*status.lock().unwrap(), IndexStatus::Error { .. }),
+            "claiming a Replay must not fault the indexer: {:?}",
+            status.lock().unwrap()
+        );
+
+        drop(tx);
+        coordinator.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawning_the_indexer_claims_a_pass_parked_before_it() {
+        // The boot window, and the startup worker's bail path with it: a pass
+        // parked before the coordinator exists is announced when the driver
+        // goes in, so no wake-up is lost to a driver that was not there yet.
+        let (_cfg, dir, workspace) = setup_workspace();
+        fs::write(dir.path().join("a.md"), "# A\nbody\n").unwrap();
+        let required = workspace.request_policy_recovery(RecoveryAction::Reconcile);
+        assert!(
+            workspace.recovery_is_unowned(),
+            "the pass must be unowned before the indexer exists: {:?}",
+            workspace.recovery_status()
+        );
+
+        let (_events_tx, events_rx) = broadcast::channel(64);
+        let _indexer = Indexer::spawn(
+            workspace.clone(),
+            events_rx,
+            false,
+            SearchAggression::Conservative,
+            Arc::new(chan_workspace::NoProgress),
+        );
+
+        assert!(
+            await_ready(&workspace, required).await,
+            "the pass parked before spawn was never claimed; recovery={:?}",
+            workspace.recovery_status()
+        );
     }
 
     fn ev(kind: WatchKind, path: Option<&str>, to: Option<&str>) -> WatchEvent {
