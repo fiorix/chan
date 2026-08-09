@@ -2062,6 +2062,39 @@ mod tests {
         }
     }
 
+    impl Fixture {
+        /// Stage an edit made by something other than this session.
+        ///
+        /// Writing the bytes is not enough to stage one. Two atomic
+        /// writes to a path can land on the same `mtime_ns`, and an
+        /// unchanged token is exactly how a session recognises its own
+        /// flush echo: the CAS write commits instead of conflicting
+        /// (`write_text_if_unchanged`) and the reconcile returns
+        /// without folding anything in (the flush-echo guard). Both
+        /// read a stale token as "the disk did not move", so a test
+        /// that only writes is asserting against a divergence the
+        /// session never sees. Moving the token deliberately makes the
+        /// divergence the test's own input rather than a property of
+        /// the filesystem clock.
+        fn external_write(&self, path: &str, content: &str) {
+            self.workspace.write_text(path, content).unwrap();
+            self.advance_mtime(path);
+        }
+
+        /// Move `path`'s mtime strictly forward. Relative to the
+        /// current value, so it outruns whatever the write stamped
+        /// without depending on the clock having advanced at all.
+        fn advance_mtime(&self, path: &str) {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(self.root.path().join(path))
+                .unwrap();
+            let advanced = file.metadata().unwrap().modified().unwrap() + Duration::from_secs(1);
+            file.set_times(std::fs::FileTimes::new().set_modified(advanced))
+                .unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn incompatible_recovered_scene_falls_back_to_fresh_disk_open() {
         let disk = body(json!([]));
@@ -2204,7 +2237,7 @@ mod tests {
         drain(&mut rx);
 
         let disk = body(json!([elem("x", 1, 1, "a1"), elem("z", 1, 3, "a3")]));
-        fx.workspace.write_text("b.excalidraw", &disk).unwrap();
+        fx.external_write("b.excalidraw", &disk);
         let stat = fx.workspace.stat("b.excalidraw").unwrap();
         let merged = body(json!([
             elem("x", 1, 1, "a1"),
@@ -2262,7 +2295,7 @@ mod tests {
         drain(&mut rx);
 
         let disk = body(json!([elem("x", 2, 3, "a1")]));
-        fx.workspace.write_text("b.excalidraw", &disk).unwrap();
+        fx.external_write("b.excalidraw", &disk);
         let stat = fx.workspace.stat("b.excalidraw").unwrap();
         ha.session()
             .apply_merge_outcome(disk.clone(), &stat, MergeOutcome::Conflict);
@@ -2317,7 +2350,7 @@ mod tests {
         drain(&mut rx);
 
         let authority = ha.session().authority_view().0;
-        fx.workspace.write_text("b.excalidraw", &authority).unwrap();
+        fx.external_write("b.excalidraw", &authority);
         ha.session().lock_state().flushed_mtime_ns = None;
         reconcile_session(ha.session(), &fx.workspace).await;
 
@@ -2339,7 +2372,7 @@ mod tests {
         drain(&mut rx);
 
         let disk = body(json!([elem("x", 1, 1, "a1"), elem("z", 1, 3, "a3")]));
-        fx.workspace.write_text("b.excalidraw", &disk).unwrap();
+        fx.external_write("b.excalidraw", &disk);
         ha.session().lock_state().flushed_mtime_ns = None;
         reconcile_session(ha.session(), &fx.workspace).await;
         backdate_pending_fold(ha.session());
@@ -2378,7 +2411,7 @@ mod tests {
         let mut disk_element = elem("x", 2, 3, "a1");
         disk_element["x"] = json!(30);
         let disk = body(json!([disk_element]));
-        fx.workspace.write_text("b.excalidraw", &disk).unwrap();
+        fx.external_write("b.excalidraw", &disk);
         let stat = fx.workspace.stat("b.excalidraw").unwrap();
         ha.session().merge_disk(disk.clone(), &stat);
 
@@ -2423,7 +2456,7 @@ mod tests {
         let mut disk_element = elem("x", 2, 3, "a1");
         disk_element["x"] = json!(30);
         let disk = body(json!([disk_element]));
-        fx.workspace.write_text("b.excalidraw", &disk).unwrap();
+        fx.external_write("b.excalidraw", &disk);
         let stat = fx.workspace.stat("b.excalidraw").unwrap();
         ha.session().merge_disk(disk, &stat);
 
@@ -2465,7 +2498,7 @@ mod tests {
         let mut disk_element = elem("x", 2, 3, "a1");
         disk_element["x"] = json!(30);
         let disk = body(json!([disk_element]));
-        fx.workspace.write_text("b.excalidraw", &disk).unwrap();
+        fx.external_write("b.excalidraw", &disk);
         handle.session().lock_state().flushed_mtime_ns = None;
         reconcile_session(handle.session(), &fx.workspace).await;
         backdate_pending_fold(handle.session());
@@ -2526,7 +2559,7 @@ mod tests {
         let mut disk_element = elem("x", 2, 3, "a1");
         disk_element["x"] = json!(30);
         let disk = body(json!([disk_element]));
-        fx.workspace.write_text("b.excalidraw", &disk).unwrap();
+        fx.external_write("b.excalidraw", &disk);
         handle.session().lock_state().flushed_mtime_ns = None;
         reconcile_session(handle.session(), &fx.workspace).await;
         backdate_pending_fold(handle.session());
@@ -2534,7 +2567,7 @@ mod tests {
         assert!(handle.session().http_read_view().disk_conflicted);
         drop(handle);
 
-        fx.workspace.write_text("b.excalidraw", &authority).unwrap();
+        fx.external_write("b.excalidraw", &authority);
         let restarted = Arc::new(SceneRegistry::new());
         let reopened = restarted
             .attach(&fx.workspace, "b.excalidraw", "w2")
@@ -2583,7 +2616,7 @@ mod tests {
         let mut disk_element = elem("x", 2, 3, "a1");
         disk_element["x"] = json!(30);
         let disk = body(json!([disk_element]));
-        fx.workspace.write_text("b.excalidraw", &disk).unwrap();
+        fx.external_write("b.excalidraw", &disk);
         handle.session().lock_state().flushed_mtime_ns = None;
         reconcile_session(handle.session(), &fx.workspace).await;
         backdate_pending_fold(handle.session());
@@ -2591,7 +2624,7 @@ mod tests {
         assert!(handle.session().http_read_view().disk_conflicted);
         drop(handle);
 
-        fx.workspace.write_text("b.excalidraw", &seed).unwrap();
+        fx.external_write("b.excalidraw", &seed);
         let restarted = Arc::new(SceneRegistry::new());
         let reopened = restarted
             .attach(&fx.workspace, "b.excalidraw", "w2")
@@ -2681,7 +2714,7 @@ mod tests {
         let fx = fixture(&[("b.excalidraw", &seed)]);
         let (ha, mut rx) = attach(&fx, "b.excalidraw", "w1").await;
         drain(&mut rx);
-        fx.workspace.write_text("b.excalidraw", "{oops").unwrap();
+        fx.external_write("b.excalidraw", "{oops");
         ha.session().lock_state().flushed_mtime_ns = None;
 
         reconcile_session(ha.session(), &fx.workspace).await;
@@ -3076,7 +3109,7 @@ mod tests {
             .insert("strokeColor".into(), "#ff0000".into());
         let disk_text = body(json!([edited]));
         let disk_canonical = Scene::parse(&disk_text).unwrap().serialize_file();
-        fx.workspace.write_text("b.excalidraw", &disk_text).unwrap();
+        fx.external_write("b.excalidraw", &disk_text);
         ha.session().lock_state().flushed_mtime_ns = None;
 
         reconcile_session(ha.session(), &fx.workspace).await;
@@ -3120,9 +3153,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .insert("strokeColor".into(), "#ff0000".into());
-        fx.workspace
-            .write_text("b.excalidraw", &body(json!([edited])))
-            .unwrap();
+        fx.external_write("b.excalidraw", &body(json!([edited])));
         fx.registry
             .reconcile_event(
                 &fx.workspace,
@@ -3158,9 +3189,7 @@ mod tests {
         // Rewrite equivalent content: mtime changes, the scene does
         // not (element values identical; envelope formatting differs,
         // which must not matter).
-        fx.workspace
-            .write_text("b.excalidraw", &body(json!([elem("x", 1, 1, "a1")])))
-            .unwrap();
+        fx.external_write("b.excalidraw", &body(json!([elem("x", 1, 1, "a1")])));
         let disk_token = fx.workspace.stat("b.excalidraw").unwrap().mtime_ns;
         reconcile_session(ha.session(), &fx.workspace).await;
 
@@ -3322,9 +3351,7 @@ mod tests {
         // and changes the same element field incompatibly.
         let mut disk = elem("x", 2, 3, "a1");
         disk["x"] = json!(30);
-        fx.workspace
-            .write_text("b.excalidraw", &body(json!([disk])))
-            .unwrap();
+        fx.external_write("b.excalidraw", &body(json!([disk])));
         backdate_dirty(ha.session());
         let settled = flush_session(ha.session(), &fx.workspace, &fx.self_writes).await;
 
@@ -3646,9 +3673,7 @@ mod tests {
         assert!(fx.root.path().join("b.excalidraw").is_dir());
 
         std::fs::remove_dir(fx.root.path().join("b.excalidraw")).unwrap();
-        fx.workspace
-            .write_text("b.excalidraw", &body(json!([])))
-            .unwrap();
+        fx.external_write("b.excalidraw", &body(json!([])));
         ha.session().lock_state().flushed_mtime_ns =
             fx.workspace.stat("b.excalidraw").unwrap().mtime_ns;
         assert!(flush_session(ha.session(), &fx.workspace, &fx.self_writes).await);
@@ -3665,12 +3690,10 @@ mod tests {
 
         // A genuine external edit lands while the session is dirty:
         // not our bytes, so it must corroborate before folding in.
-        fx.workspace
-            .write_text(
-                "b.excalidraw",
-                &body(json!([elem("x", 1, 1, "a1"), elem("z", 1, 1, "a3")])),
-            )
-            .unwrap();
+        fx.external_write(
+            "b.excalidraw",
+            &body(json!([elem("x", 1, 1, "a1"), elem("z", 1, 1, "a3")])),
+        );
         ha.session().lock_state().flushed_mtime_ns = None;
         fx.registry
             .reconcile_event(
