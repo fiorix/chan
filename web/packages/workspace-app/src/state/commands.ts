@@ -56,6 +56,10 @@ export type CommandContext = {
   activeSurface: CommandSurface | null;
   activeSide: PaneSide | null;
   activeTabId: string | null;
+  /// The extension an `extension` surface is running, so the launcher can
+  /// tell that extension's own commands from every other Apps entry. Null on
+  /// every other surface.
+  activeExtensionId: string | null;
 };
 
 export type Command = {
@@ -134,6 +138,7 @@ function activeCommandTarget(): {
   surface: CommandSurface | null;
   side: PaneSide | null;
   tabId: string | null;
+  extensionId: string | null;
 } {
   try {
     const pane = activePane();
@@ -143,11 +148,12 @@ function activeCommandTarget(): {
       surface: tab ? tab.kind : null,
       side,
       tabId: paneActiveTabId(pane, side),
+      extensionId: tab?.kind === "extension" ? tab.extensionId : null,
     };
   } catch {
     // activePane throws when the active node is not a leaf (mid-layout
     // transition); treat that as no active surface.
-    return { surface: null, side: null, tabId: null };
+    return { surface: null, side: null, tabId: null, extensionId: null };
   }
 }
 
@@ -161,6 +167,7 @@ export function commandContext(): CommandContext {
     activeSurface: target.surface,
     activeSide: target.side,
     activeTabId: target.tabId,
+    activeExtensionId: target.extensionId,
   };
 }
 

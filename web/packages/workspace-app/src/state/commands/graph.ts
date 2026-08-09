@@ -1,10 +1,11 @@
 // Graph surface commands: available when a graph tab is the active
 // surface. Net-new actions mutate the active GraphTab directly (its
 // fields are $state, so the graph re-renders reactively, matching the
-// pane's own menu). See state/commands.ts for the Command shape and the
-// onSurface helper.
+// pane's own menu). Reload is the exception: the fetch lives inside
+// GraphPanel, so it arrives there as a chan:command. See
+// state/commands.ts for the Command shape and the onSurface helper.
 
-import { registerCommands, onSurface } from "../commands";
+import { registerCommands, dispatchChanCommand, onSurface } from "../commands";
 import { copyTextToClipboard, setHybridSurfaceTheme } from "../store.svelte";
 import { activeGraphTab, graphLinkFor, type GraphTab } from "../tabs.svelte";
 import { notify } from "../notify.svelte";
@@ -48,6 +49,15 @@ registerCommands([
         onError: () => notify("Couldn't copy graph link"),
       });
     }),
+  },
+  {
+    id: "app.graph.reload",
+    title: "Reload graph",
+    category: "Graph",
+    keywords: ["reload", "refresh", "rebuild", "redraw"],
+    available: (ctx) => onSurface(ctx, "graph"),
+    // Scoped to this graph, unlike app.window.reload which reloads the SPA.
+    run: () => dispatchChanCommand("app.graph.reload"),
   },
   {
     id: "app.graph.depth.increase",

@@ -149,18 +149,27 @@
         return "Dashboard";
       case "graph":
         return "Graph";
-      case "extension":
-        return "Apps";
       default:
+        // No active tab, or an extension tab: extension entries all register
+        // under Apps, so ownsExtensionCommand picks those out by id instead.
         return null;
     }
   }
 
+  /// The tab-specific options of an extension tab are the commands that
+  /// extension declares (`extension.<id>.<cmd>`). The bare `extension.<id>`
+  /// entry opens or focuses the app, a spawn action like the rest of Apps, so
+  /// it stays with the window alongside every other extension's entry.
+  function ownsExtensionCommand(command: Command): boolean {
+    const active = ctx.activeExtensionId;
+    return active !== null && command.id.startsWith(`extension.${active}.`);
+  }
+
   function scopeFor(command: Command): DeckScopeId {
-    const active = surfaceCategory(ctx.activeSurface);
-    if (command.category === active || command.category === "Tabs") return "tab";
+    if (command.category === "Tabs") return "tab";
     if (command.category === "Panes") return "pane";
-    return "window";
+    if (ctx.activeSurface === "extension") return ownsExtensionCommand(command) ? "tab" : "window";
+    return command.category === surfaceCategory(ctx.activeSurface) ? "tab" : "window";
   }
 
   function iconFor(command: Command): IconComponent {
@@ -241,10 +250,19 @@
     return a.localeCompare(b, undefined, { sensitivity: "base" }) || a.localeCompare(b);
   }
 
+  /// Inside Tab, the active application's own commands lead and the generic
+  /// Tabs commands follow: `Tabs` sorts before `Terminal` or `Editor`
+  /// alphabetically, which would otherwise bury the surface's actions.
+  function tabCategoryRank(entry: ContextEntry): number {
+    if (entry.scope !== "tab") return 0;
+    return entry.command.category === "Tabs" ? 1 : 0;
+  }
+
   function contextualOrder(a: ContextEntry, b: ContextEntry): number {
     const weight: Record<DeckScopeId, number> = { tab: 0, pane: 1, window: 2, computers: 3 };
     return (
       weight[a.scope] - weight[b.scope] ||
+      tabCategoryRank(a) - tabCategoryRank(b) ||
       compareText(a.command.category, b.command.category) ||
       compareText(a.title, b.title) ||
       compareText(a.id, b.id)
@@ -486,9 +504,14 @@
       : contextualEntries;
   });
 
-  const visibleEntries = $derived(
-    rankDeckItems(rawEntries, launcherDraft.query).slice(0, launcherDraft.query.trim() ? 9 : 5) as Entry[],
-  );
+  // Only the root deck is a teaser. Picking a scope orb or stepping into a
+  // Computers branch is an explicit "show me everything here", so those views
+  // list in full; the deck body already scrolls and follows the selection.
+  const visibleEntries = $derived.by<Entry[]>(() => {
+    const ranked = rankDeckItems(rawEntries, launcherDraft.query) as Entry[];
+    if (launcherDraft.scope || computerMode) return ranked;
+    return ranked.slice(0, launcherDraft.query.trim() ? 9 : 5);
+  });
 
   const placeholder = $derived(
     launcherDraft.scope

@@ -333,6 +333,7 @@ describe("launcher focus-colour command applies the doc-root var", () => {
       activeSurface: null,
       activeSide: null,
       activeTabId: null,
+      activeExtensionId: null,
     };
     const command = availableCommands(ctx).find(
       (candidate) => candidate.id === "app.pane.focusColor.orange",

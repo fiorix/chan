@@ -157,12 +157,18 @@ registerCommands([
     id: "app.terminal.restart",
     title: "Restart terminal",
     category: "Terminal",
-    keywords: ["restart", "respawn", "reload"],
-    confirm: {
-      title: "Restart this terminal?",
-      message: "The current shell process will stop and a new shell will start.",
-      actionLabel: "Restart",
-      danger: true,
+    keywords: ["restart", "respawn", "reload", "new session"],
+    // This doubles as the old "Start New Session" row on an exited terminal,
+    // where warning about stopping a shell that already died reads as a lie.
+    // A tab with no live session id needs no confirmation at all.
+    get confirm() {
+      if (!activeTerminalTab()?.terminalSessionId) return undefined;
+      return {
+        title: "Restart this terminal?",
+        message: "The current shell process will stop and a new shell will start.",
+        actionLabel: "Restart",
+        danger: true,
+      };
     },
     available: onTerminal,
     run: () => dispatchChanCommand("app.terminal.restart"),
@@ -172,10 +178,10 @@ registerCommands([
     title: "Copy path to $CWD",
     category: "Terminal",
     keywords: ["cwd", "path", "directory", "clipboard"],
-    // Resolve the cwd against the workspace root, so offer it only on a
-    // workspace terminal; a standalone terminal has no root and it can
-    // only fail there.
-    available: onWorkspaceTerminal,
+    // The copy prefers the live absolute cwd the PTY reports and only falls
+    // back to the workspace-relative form, so it works in a standalone
+    // terminal too. The old right-click row had no workspace gate either.
+    available: onTerminal,
     run: () => dispatchChanCommand("app.terminal.copyCwd"),
   },
   {

@@ -26,7 +26,13 @@ import {
   topOverlay,
 } from "../state/store.svelte";
 import { registerCommands } from "../state/commands";
-import { layout, type BrowserTab, type LeafNode } from "../state/tabs.svelte";
+import {
+  layout,
+  type BrowserTab,
+  type ExtensionTab,
+  type LeafNode,
+  type TerminalTab,
+} from "../state/tabs.svelte";
 
 Element.prototype.scrollIntoView = vi.fn();
 
@@ -37,6 +43,10 @@ const runBrowserZoom = vi.fn();
 const runFlip = vi.fn();
 let overlayAtFlipRun: ReturnType<typeof topOverlay> = null;
 let showFlip = false;
+// Off by default so the ordering assertions above keep their small, exact
+// command sets; the scope tests flip it on to fill the Tab scope past the
+// root deck's five rows.
+let showBulk = false;
 
 registerCommands([
   {
@@ -80,6 +90,68 @@ registerCommands([
       overlayAtFlipRun = topOverlay();
       if (overlayAtFlipRun === null) runFlip();
     },
+  },
+]);
+
+const BULK_BROWSER_TITLES = [
+  "Bulk five",
+  "Bulk four",
+  "Bulk one",
+  "Bulk seven",
+  "Bulk six",
+  "Bulk three",
+  "Bulk two",
+];
+
+registerCommands([
+  ...BULK_BROWSER_TITLES.map((title, index) => ({
+    id: `app.browser.bulk${index}`,
+    title,
+    category: "File Browser" as const,
+    available: () => showBulk,
+    run: () => {},
+  })),
+  {
+    id: "app.tab.close",
+    title: "Close tab",
+    category: "Tabs",
+    available: () => showBulk,
+    run: () => {},
+  },
+  {
+    id: "app.terminal.copyCwd",
+    title: "Copy path to $CWD",
+    category: "Terminal",
+    available: () => showBulk,
+    run: () => {},
+  },
+  {
+    id: "app.terminal.restart",
+    title: "Restart terminal",
+    category: "Terminal",
+    available: () => showBulk,
+    run: () => {},
+  },
+  {
+    id: "extension.alpha",
+    title: "Alpha app",
+    category: "Apps",
+    available: () => showBulk,
+    run: () => {},
+  },
+  {
+    id: "extension.alpha.run",
+    title: "Run alpha",
+    category: "Apps",
+    available: () => showBulk,
+    run: () => {},
+  },
+  {
+    id: "extension.beta.run",
+    title: "Run beta",
+    category: "Apps",
+    available: () => showBulk,
+    run: () => {},
   },
 ]);
 
@@ -162,6 +234,34 @@ function setActiveBrowserTab(): void {
   pane.activeTabId = tab.id;
 }
 
+// "Tabs" sorts before "Terminal" alphabetically, so a terminal is the surface
+// that proves the app-first rank rather than plain category order.
+function setActiveTerminalTab(): void {
+  const pane = resetLayout();
+  const tab: TerminalTab = {
+    kind: "terminal",
+    id: "terminal-test",
+    title: "Shell",
+    createdAt: 0,
+    broadcastEnabled: false,
+    broadcastTargetIds: [],
+  };
+  pane.tabs = [tab];
+  pane.activeTabId = tab.id;
+}
+
+function setActiveExtensionTab(): void {
+  const pane = resetLayout();
+  const tab: ExtensionTab = {
+    kind: "extension",
+    id: "extension-test",
+    title: "Alpha app",
+    extensionId: "alpha",
+  };
+  pane.tabs = [tab];
+  pane.activeTabId = tab.id;
+}
+
 async function flush(): Promise<void> {
   await tick();
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -178,6 +278,11 @@ function openLauncher(): HTMLElement {
 
 function dialog(target: HTMLElement): HTMLElement {
   return target.querySelector('[role="dialog"]') as HTMLElement;
+}
+
+async function openTabScope(target: HTMLElement): Promise<void> {
+  (target.querySelector('[aria-label="Tab scope"]') as HTMLButtonElement).click();
+  await tick();
 }
 
 function input(target: HTMLElement): HTMLInputElement {
@@ -227,6 +332,7 @@ beforeEach(() => {
   overlayStack.ids = [];
   overlayAtFlipRun = null;
   showFlip = false;
+  showBulk = false;
   scopedLibrary.load.mockResolvedValue(librarySnapshot);
   scopedLibrary.run.mockResolvedValue(undefined);
 });
@@ -265,6 +371,53 @@ describe("contextual command deck", () => {
     await flush();
     expect(titles(target).slice(0, 2)).toEqual(["Alpha browser", "Zoom browser"]);
     expect(target.querySelector(".deck-result-path")?.textContent).toBe("Tab › File Browser");
+  });
+
+  test("the Tab scope lists every command for the active application", async () => {
+    showBulk = true;
+    setActiveBrowserTab();
+    const target = openLauncher();
+    await flush();
+    // The root deck stays a teaser, so the surface's own actions were only
+    // ever reachable by guessing a search string.
+    expect(titles(target)).toHaveLength(5);
+
+    await openTabScope(target);
+    const shown = titles(target);
+    for (const title of [...BULK_BROWSER_TITLES, "Alpha browser", "Zoom browser", "Close tab"]) {
+      expect(shown).toContain(title);
+    }
+    expect(shown).toHaveLength(10);
+  });
+
+  test("the active application's commands lead the generic tab commands", async () => {
+    showBulk = true;
+    setActiveTerminalTab();
+    const target = openLauncher();
+    await flush();
+    await openTabScope(target);
+    // Plain category order would put "Tabs" above "Terminal" and bury the
+    // terminal's own actions, which is what made them search-only.
+    expect(titles(target)).toEqual([
+      "Copy path to $CWD",
+      "Restart terminal",
+      "Close tab",
+    ]);
+    expect(target.querySelector(".deck-result-path")?.textContent).toBe("Tab › Terminal");
+  });
+
+  test("an extension tab's Tab scope holds only that extension's commands", async () => {
+    showBulk = true;
+    setActiveExtensionTab();
+    const target = openLauncher();
+    await flush();
+    await openTabScope(target);
+    const shown = titles(target);
+    expect(shown).toContain("Run alpha");
+    // Another extension's command, and the entry that merely opens this one,
+    // are spawn actions for the window rather than options of this tab.
+    expect(shown).not.toContain("Run beta");
+    expect(shown).not.toContain("Alpha app");
   });
 
   test("fuzzy search crosses into Computers leaves without opening a submenu", async () => {
@@ -331,7 +484,16 @@ describe("contextual command deck", () => {
     await flush();
     (target.querySelector('[aria-label="Computers scope"]') as HTMLButtonElement).click();
     await tick();
-    expect(titles(target)).toEqual(["New terminal", "New window", "Focus", "Hide", "Show"]);
+    // Six owner branches, all of them: the root deck's five-row teaser does
+    // not apply once a scope is chosen, and truncating here hid Close.
+    expect(titles(target)).toEqual([
+      "New terminal",
+      "New window",
+      "Focus",
+      "Hide",
+      "Show",
+      "Close",
+    ]);
 
     const newWindow = [...target.querySelectorAll<HTMLButtonElement>(".deck-result")].find(
       (row) => row.querySelector(".deck-result-title")?.textContent === "New window",

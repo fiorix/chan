@@ -20,6 +20,7 @@ function ctx(): CommandContext {
     activeSurface: null,
     activeSide: null,
     activeTabId: null,
+    activeExtensionId: null,
   };
 }
 

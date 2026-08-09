@@ -22,6 +22,7 @@ function ctx(partial: Partial<CommandContext> = {}): CommandContext {
     activeSurface: "file",
     activeSide: "a",
     activeTabId: "tab-1",
+    activeExtensionId: null,
     ...partial,
   };
 }

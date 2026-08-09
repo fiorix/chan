@@ -26,6 +26,7 @@
     LanguageGraphResponse,
   } from "../api/types";
   import {
+    activeGraphTab,
     openBrowserInActivePane,
     openGraphInActivePane,
     openInActivePane,
@@ -876,6 +877,20 @@
     graphDirty = false;
     await load();
   }
+
+  // The launcher's `Reload graph` reaches the fetch through the chan:command
+  // bridge, since the /api/graph call and its depth probe live here. Only the
+  // graph the launcher itself targeted responds, so the command's
+  // active-surface gate and the reloading graph agree.
+  $effect(() => {
+    const onLauncherCommand = (e: Event) => {
+      if ((e as CustomEvent).detail?.name !== "app.graph.reload") return;
+      if (activeGraphTab()?.id !== tab.id) return;
+      void reloadGraph();
+    };
+    window.addEventListener("chan:command", onLauncherCommand);
+    return () => window.removeEventListener("chan:command", onLauncherCommand);
+  });
 
   function closeFromMenu(): void {
     closeTabMenu();

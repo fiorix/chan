@@ -22,11 +22,13 @@ import {
 import { editorCommandsFor } from "../mountedEditors";
 import {
   activeFileTab,
+  forceReloadFromDisk,
   openTerminalInActivePane,
   setTabHighlightTrailingWhitespace,
   setTabInspectorOpen,
   setTabOutlineOpen,
   setTabStyleToolbarOpen,
+  setTabSyntaxHighlight,
   type FileTab,
 } from "../tabs.svelte";
 import { notify } from "../notify.svelte";
@@ -228,5 +230,27 @@ registerCommands([
     keywords: ["inspector", "details", "info", "metadata"],
     available: (ctx) => onSurface(ctx, "file"),
     run: onFile((tab) => setTabInspectorOpen(tab, !tab.inspectorOpen)),
+  },
+  {
+    id: "app.editor.syntaxHighlight",
+    title: "Toggle syntax highlighting",
+    category: "Editor",
+    keywords: ["syntax", "highlight", "colors", "source", "code"],
+    available: (ctx) => onSurface(ctx, "file"),
+    // The flag persists per tab and Source mode honours it, so without this
+    // entry a tab switched off in an older build could never switch back on.
+    run: onFile((tab) => setTabSyntaxHighlight(tab, !tab.syntaxHighlight)),
+  },
+  {
+    id: "app.editor.reloadFromDisk",
+    title: "Reload from disk",
+    category: "Editor",
+    keywords: ["reload", "revert", "discard", "disk", "refresh"],
+    available: (ctx) => onSurface(ctx, "file"),
+    // forceReloadFromDisk runs its own confirm when the buffer would lose
+    // unsaved edits, so this needs no launcher-side confirm gate.
+    run: onFile((tab) => {
+      void forceReloadFromDisk(tab.id);
+    }),
   },
 ]);

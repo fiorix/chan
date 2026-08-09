@@ -417,9 +417,10 @@
   const computerEntries = $derived(
     mode ? targetEntries(mode) : draft.query.trim() ? deepEntries : rootEntries,
   );
-  const visibleEntries = $derived(
-    rankDeckItems(computerEntries, draft.query).slice(0, draft.query.trim() ? 9 : 5) as Entry[],
-  );
+  // This deck is always inside the Computers scope, so it never shows the
+  // teaser form: truncating the root to five rows hid `Close`, the sixth
+  // owner entry. The deck body scrolls and follows the selection.
+  const visibleEntries = $derived(rankDeckItems(computerEntries, draft.query) as Entry[]);
   const modeTitle = $derived(
     mode ? rootEntries.find((entry) => entry.next === mode)?.title ?? "Computers" : "Computers",
   );

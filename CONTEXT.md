@@ -9,8 +9,12 @@ Chan's single searchable action surface. It presents actions for the invoking wi
 _Avoid_: Computers command launcher, workspace command launcher
 
 **Contextual deck**:
-The command launcher's empty-query view. It orders actions for the focused tab, focused pane, and invoking window before Computers actions.
+The command launcher's empty-query view. It orders actions for the focused tab, focused pane, and invoking window before Computers actions, and shows only the leading few. Choosing a scope lists that scope completely.
 _Avoid_: Empty state, default results
+
+**Tab scope**:
+The command launcher scope holding the focused tab's actions: the tab-specific options of the application it is running, ordered first, followed by the actions any tab has. An extension tab contributes the commands that extension declares.
+_Avoid_: Surface scope, app scope
 
 **Computers scope**:
 The computers, workspaces, and windows available to the command launcher. Outside Chan Desktop it is the invoking library; inside Chan Desktop it is the desktop's aggregate inventory.

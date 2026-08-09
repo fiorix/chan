@@ -13,6 +13,7 @@ function ctx(partial: Partial<CommandContext>): CommandContext {
     activeSurface: null,
     activeSide: null,
     activeTabId: null,
+    activeExtensionId: null,
     ...partial,
   };
 }

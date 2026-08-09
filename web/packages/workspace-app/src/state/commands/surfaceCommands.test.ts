@@ -23,6 +23,7 @@ function ctx(partial: Partial<CommandContext>): CommandContext {
     activeSurface: null,
     activeSide: null,
     activeTabId: null,
+    activeExtensionId: null,
     ...partial,
   };
 }
@@ -45,6 +46,8 @@ describe("editor surface commands", () => {
       "app.editor.stripTrailingWs",
       "app.editor.toggleCollapse",
       "app.editor.searchSelection",
+      "app.editor.syntaxHighlight",
+      "app.editor.reloadFromDisk",
     ]) {
       expect(onFile.has(id)).toBe(true);
     }
@@ -68,10 +71,12 @@ describe("graph surface commands", () => {
       "app.graph.depth.increase",
       "app.graph.filter.contact",
       "app.graph.filter.media",
+      "app.graph.reload",
     ]) {
       expect(onGraph.has(id)).toBe(true);
     }
     expect(idsIn(ctx({ activeSurface: "file" })).has("app.graph.copyLink")).toBe(false);
+    expect(idsIn(ctx({ activeSurface: "file" })).has("app.graph.reload")).toBe(false);
   });
 });
 
@@ -125,21 +130,35 @@ describe("terminal surface commands", () => {
     expect(idsIn(ctx({ activeSurface: "file" })).has("terminal.richPrompt")).toBe(
       false,
     );
-    // The cwd-resolving commands and Rich Prompt need a workspace root; the
-    // global backend toggle needs the workspace tenant's /api/config route.
-    // A standalone terminal tenant deliberately serves neither surface.
+    // newFsEntry writes through the workspace file API and Rich Prompt drafts
+    // into the workspace drafts dir; the global backend toggle needs the
+    // workspace tenant's /api/config route. A standalone terminal tenant
+    // deliberately serves none of those.
     const inStandalone = idsIn(
       ctx({ terminalOnly: true, activeSurface: "terminal" }),
     );
     for (const id of [
       "terminal.richPrompt",
-      "app.terminal.copyCwd",
       "app.terminal.newFsEntry",
       "app.terminal.backend.toggle",
     ]) {
       expect(inStandalone.has(id)).toBe(false);
     }
     expect(inStandalone.has("app.terminal.secretMasking.toggle")).toBe(true);
+    // Copying the cwd needs no workspace: it prefers the absolute path the
+    // PTY reports. The right-click row it replaced had no workspace gate, so
+    // gating it here left a standalone terminal with no way to reach it.
+    expect(inStandalone.has("app.terminal.copyCwd")).toBe(true);
+  });
+
+  it("restart drops its confirm when no live session is left to stop", () => {
+    const restart = availableCommands(ctx({ activeSurface: "terminal" })).find(
+      (candidate) => candidate.id === "app.terminal.restart",
+    );
+    // No layout is mounted here, so there is no active terminal and no live
+    // session id: the exited-terminal path, where warning about stopping a
+    // running shell would be a lie.
+    expect(restart?.confirm).toBeUndefined();
   });
 
   it("names the current engine and the new-terminal-only contract", () => {
