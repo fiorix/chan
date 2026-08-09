@@ -65,6 +65,27 @@ project.
   keyword, which is the same bound the timing sweep had to state.
 - Any shared assumption found is registered, not silently repaired.
 
+## The question to ask at the dependent site
+
+A workaround comment explains why *that* code is odd. It does not reach the code that
+*relies* on the assumption, and that is where the defect lives. All three mtime workarounds
+carried comments; none of them sat at `write_text_if_unchanged`.
+
+But "the dependent site had no note" is too weak a diagnosis here, because it did. Its
+docstring named the silent-overwrite failure precisely, asserted that nanosecond resolution
+solved it, and called the coarse-mtime remainder a graceful degradation — conflating a
+nanosecond mtime *field* with a nanosecond *clock*. Every later reader arrived at a site that
+said the problem was handled.
+
+So the audit's question at a dependent site is not "is the assumption recorded?" but:
+
+> **Is what is recorded here still true, and was it ever tested?**
+
+An absent note invites a question. A confident wrong one closes it, which is worse, and it is
+the specific reason this defect outlived three workarounds. Where an audited assumption turns
+out to be relied on elsewhere, the deliverable is not only a registered item — it is a
+correction at the dependent site, so the next reader is not reassured by the same sentence.
+
 ## Method note
 
 **Read the comment, not just the line.** Every one of the three mtime workarounds carries a
