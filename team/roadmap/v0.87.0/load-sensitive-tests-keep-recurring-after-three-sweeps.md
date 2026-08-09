@@ -56,6 +56,30 @@ The strongest single argument that this class needs a sweep rather than a fourth
 
 Three independent engineers hit one mechanism, each worked around it locally, and none registered it. The mechanism was finally named in this round, and it was a data-loss path the whole time.
 
+## Independent corroboration, and a method warning for the sweep
+
+**A fifth worktree, an operator not looking.** `flush_cas_conflict_enters_conflicted_after_corroboration`
+was drawn red on a full run and green in isolation from a fifth worktree, on a branch touching
+zero lines under `scene_sessions/`, during unrelated work. Together with the fourth-worktree
+sighting, that is the rotating-cast claim holding up outside the lane that discovered it and
+outside anyone hunting for it.
+
+**Check the assertion, not the message about the assertion.** While gating an unrelated
+change, a mutation probe that reverted that change's core decision left **both**
+`control_socket` ack-wording tests green: they pin the message text, not the decision. Only
+the delivered-PTY-bytes assertions caught it. So when this sweep decides whether a repaired
+test is load-bearing, confirm the assertion touches the **behaviour** rather than a string
+describing the behaviour. That is the 20-isolated-runs finding one level down: a test can be
+perfectly deterministic and still certify nothing.
+
+**On attributing a red to "an untouched crate".** `terminal_sessions::tests::backend_preference_flip_...`
+(item 9) was registered from a run on unmodified `main`. At the time of the round's gate,
+`crates/chan-library/` was untouched by the merged diff — but `submit-cannot-override-a-wrong-derivation`
+later merged into the same module, so the short form stops being true. The attribution rests on
+the record instead: the test was registered before that branch existed, and that change touches
+submit encoding in the enqueue path rather than backend selection. Attribute by provenance and
+mechanism, not by "nothing in this crate moved", which decays.
+
 ## The acceptance bar this class has been using does not work
 
 The single most useful methodological result of the round, and it invalidates how this class has been certified before.
