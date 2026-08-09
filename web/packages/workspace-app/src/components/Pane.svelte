@@ -1875,6 +1875,15 @@
     -webkit-transform-style: preserve-3d;
     transform-style: preserve-3d;
   }
+  /* The back face carries the incoming side's letter, hidden at rest so it
+     only shows mid-flip. WHY the `visibility` gate rather than
+     `backface-visibility` alone: WebKitGTK, the Linux desktop webview,
+     ignores `backface-visibility` on every element, pseudo or not. This face
+     is opaque and sits at z-index 2 over the whole card, so left to the
+     backface hints it covers the pane permanently and a terminal renders as
+     a bare letter on the card background. Painting it only while the turn
+     runs is what keeps it off the screen; the backface hints stay for
+     engines that honor them. */
   .pane-card-inner::before {
     content: attr(data-side-label);
     position: absolute;
@@ -1892,6 +1901,7 @@
     line-height: 1;
     letter-spacing: 0;
     pointer-events: none;
+    visibility: hidden;
     transform: var(--pane-side-flip-back);
     -webkit-backface-visibility: hidden;
     backface-visibility: hidden;
@@ -1915,12 +1925,32 @@
     will-change: transform;
     animation: pane-side-flip 520ms cubic-bezier(0.2, 0.7, 0.2, 1);
   }
+  /* The back face shows for the first stretch of the turn and hands over to
+     the content face as the card passes edge-on. The handover sits at 14.43%
+     of the duration, not at half of it, because that is where the easing
+     above reaches half its progress and the card crosses 90deg; swapping on
+     duration instead leaves the letter facing the viewer mirrored. The name
+     shares no substring with `pane-side-flip` or `pane-wobble-once`, so the
+     `animationend` handler on the pane cannot match this animation. */
+  .pane.sideFlipActive .pane-card-inner::before {
+    animation: pane-back-face-turn 520ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
   @keyframes pane-side-flip {
     0% {
       transform: var(--pane-side-flip-start);
     }
     100% {
       transform: rotateX(0deg) rotateY(0deg);
+    }
+  }
+  @keyframes pane-back-face-turn {
+    0%,
+    14.43% {
+      visibility: visible;
+    }
+    14.44%,
+    100% {
+      visibility: hidden;
     }
   }
   /* iTerm-style strip: a dark bar with no per-tab dividers. The
@@ -2373,7 +2403,8 @@
     .pane.focused.wobble {
       animation: none;
     }
-    .pane.sideFlipActive .pane-card-inner {
+    .pane.sideFlipActive .pane-card-inner,
+    .pane.sideFlipActive .pane-card-inner::before {
       animation: none;
     }
     .tab,

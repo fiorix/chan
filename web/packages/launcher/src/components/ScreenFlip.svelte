@@ -114,7 +114,15 @@
   }
 
   /* The back face: the incoming screen's name on the launcher background,
-     turned away at rest so the hidden backface only shows mid-flip. */
+     hidden at rest so it only shows mid-flip.
+
+     WHY the `visibility` gate rather than `backface-visibility` alone:
+     WebKitGTK, the Linux desktop webview, ignores `backface-visibility` on
+     every element, pseudo or not. This face is opaque and sits at z-index 2
+     over the whole area, so left to the backface hints it covers the
+     launcher permanently and the Computers screen renders as a bare
+     mirrored label. Painting it only while the turn runs is what keeps it
+     off the screen; the backface hints stay for engines that honor them. */
   .screen-flip-inner::before {
     content: attr(data-flip-label);
     position: absolute;
@@ -128,6 +136,7 @@
     font-weight: 700;
     line-height: 1;
     pointer-events: none;
+    visibility: hidden;
     transform: var(--screen-flip-back);
     -webkit-backface-visibility: hidden;
     backface-visibility: hidden;
@@ -151,6 +160,17 @@
     animation: launcher-screen-flip 520ms cubic-bezier(0.2, 0.7, 0.2, 1);
   }
 
+  /* The back face shows for the first stretch of the turn and hands over to
+     the content face as the card passes edge-on. The handover sits at 14.43%
+     of the duration, not at half of it, because that is where the easing
+     above reaches half its progress and the card crosses 90deg; swapping on
+     duration instead leaves the label facing the viewer mirrored. The name
+     shares no substring with `launcher-screen-flip`, so the `animationend`
+     handler that clears the flip class cannot match this animation. */
+  .screen-flip.flipActive .screen-flip-inner::before {
+    animation: launcher-back-face-turn 520ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+
   @keyframes launcher-screen-flip {
     0% {
       transform: var(--screen-flip-start);
@@ -160,8 +180,20 @@
     }
   }
 
+  @keyframes launcher-back-face-turn {
+    0%,
+    14.43% {
+      visibility: visible;
+    }
+    14.44%,
+    100% {
+      visibility: hidden;
+    }
+  }
+
   @media (prefers-reduced-motion: reduce) {
-    .screen-flip.flipActive .screen-flip-inner {
+    .screen-flip.flipActive .screen-flip-inner,
+    .screen-flip.flipActive .screen-flip-inner::before {
       animation: none;
     }
   }

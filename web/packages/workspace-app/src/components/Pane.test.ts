@@ -710,6 +710,50 @@ describe("Pane side flip", () => {
     expect(paneSource).toMatch(/@keyframes pane-side-flip/);
   });
 
+  test("the back face never paints at rest", () => {
+    // WebKitGTK, the Linux desktop webview, ignores backface-visibility, so
+    // an opaque back face left to that hint alone covers the card and every
+    // terminal renders as a bare side letter. The rest state is a visibility
+    // gate, and the handover sits at the easing's 90deg crossing rather than
+    // at half the duration, which would show the letter mirrored.
+    const backFace =
+      paneSource.match(/\.pane-card-inner::before \{[\s\S]*?\n  \}/)?.[0] ?? "";
+    // Anchored: `backface-visibility: hidden;` ends with the same text, so a
+    // substring check passes on the very declaration this pin outlives.
+    expect(backFace).toMatch(/^\s+visibility: hidden;$/m);
+    expect(paneSource).toMatch(
+      /\.pane\.sideFlipActive \.pane-card-inner::before \{\s*animation: pane-back-face-turn 520ms/,
+    );
+    expect(paneSource).toMatch(/@keyframes pane-back-face-turn/);
+    expect(paneSource).toMatch(/0%,\s*14\.43% \{\s*visibility: visible;/);
+    expect(paneSource).toMatch(/14\.44%,\s*100% \{\s*visibility: hidden;/);
+
+    // Reduced motion drops the turn, so it must drop the handover too or the
+    // back face is left painted with no animation to clear it.
+    const reducedMotion =
+      paneSource.match(
+        /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\n  \}/,
+      )?.[0] ?? "";
+    expect(reducedMotion).toContain(
+      ".pane.sideFlipActive .pane-card-inner::before",
+    );
+
+    // The animationend cleanup substring-matches keyframe names, so no other
+    // keyframe may contain one of the names it matches on.
+    const keyframes = [...paneSource.matchAll(/@keyframes ([\w-]+)/g)].map(
+      (m) => m[1],
+    );
+    for (const matched of [
+      "pane-side-flip",
+      "pane-wobble-once",
+      "pane-side-toggle-flash",
+    ]) {
+      expect(keyframes.filter((name) => name.includes(matched))).toEqual([
+        matched,
+      ]);
+    }
+  });
+
   test("tab label fade is gated on measured overflow", () => {
     const basePathBlock =
       paneSource.match(/\.path \{[\s\S]*?\n  \}/)?.[0] ?? "";
