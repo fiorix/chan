@@ -174,6 +174,20 @@ Four mutation probes, each recorded with what it fails:
 - The echo guard trusting the token alone: fails exactly `external_edit_that_kept_the_mtime_still_fans`.
 - A canonical baseline treated as verbatim: 11 failures across both session suites, including `first_edit_after_crlf_seed_flushes_lf_to_disk`. The `verbatim` distinction is load-bearing, not decoration.
 
+### Owner validation, 2026-08-09, PARTIAL
+
+Run against merged `main` (`3ecc6e87`) on a standalone host server, after the owner asked whether the editor scenarios had been exercised at all. They had not: no lane journal in the round mentions `browser-smoke`, and `make pre-push` does not invoke it.
+
+Six browser checks were run first. `50-editor-collab`, `55-external-edit-reopen`, `57-external-restore-converge`, `63-external-shrink-convergence`, and `64-conflict-banner-reload` all pass. `56-external-edit-matrix` fails on a navigation timeout that moves between steps and never on a content assertion; that is registered separately as [browser-smoke-is-unrunnable-and-rate-based](browser-smoke-is-unrunnable-and-rate-based.md) and is a harness defect, not this change. `56`'s own step output records `pill: false` on atomic save, closed-window reopen, and a dirty tab.
+
+The owner then edited files in a live browser session and reported no spurious conflict banner at any point.
+
+**What that does not establish, and why this section says PARTIAL.** A quiet session is consistent with both a correct guard and an inert one: had the CAS stopped detecting conflicts entirely, the same session would have looked identical. The spurious-banner direction is owner-verified. The **detection** direction is proven only by the unit tests, the four mutation probes above, and `64-conflict-banner-reload`, with no owner-observed instance of the banner firing when it should.
+
+Two adversarial cases were offered and not yet run: an external write to a file the owner has open with no competing edit, which must converge without a banner; and an external write against unsaved owner edits, which must raise the banner and offer a working reload from disk. The second is the load-bearing one. Until it runs, this item's live evidence covers the false-positive direction only.
+
+Not covered at all: a cloud-synced directory, where a genuine second writer now produces conflicts the previous mtime-only CAS would have silently overwritten.
+
 ### What this does not close
 
 Four limitations, all narrow and all deliberate. The fix makes the CAS verifiable where a caller can vouch for the disk; it does not make the timestamp trustworthy.
