@@ -46,25 +46,33 @@ the construction for staging an external edit without trusting the filesystem cl
 this is that construction applied to a second module. Doing it before that lands would
 mean inventing the pattern twice.
 
-## The likely fix direction is already being built elsewhere
+## A prediction that was made here, and falsified
 
-Amended 2026-08-09. [mtime-cas-silently-overwrites-external-edits](mtime-cas-silently-overwrites-external-edits.md)
-gives `write_text_if_unchanged` a content baseline alongside the mtime token, and wires it
-through `doc_sessions`' own `FlushJob` (`doc_sessions/mod.rs:~1812`). That changes what
-these tests are staging *against*.
+**Amended 2026-08-09, then corrected the same day. Read the correction, not the prediction.**
 
-The clearest case is `same_bytes_rewrite_refreshes_the_retained_token`
-(`doc_sessions/mod.rs:2914`), whose 20 ms sleep exists so an external re-save of **identical
-bytes** lands a different mtime, so the test can assert the retained side adopted the fresh
-token. Once the CAS keys on content as well as mtime, a same-bytes rewrite is a no-op and
-there may be no stale token left to refresh — so the sleep is not a timing wait to
-virtualise, it is scaffolding for a mechanism that is being replaced.
+When [mtime-cas-silently-overwrites-external-edits](mtime-cas-silently-overwrites-external-edits.md)
+was still being designed, this item was amended to say the CAS work looked like the actual
+fix direction: that once the CAS keyed on content, a same-bytes rewrite would be a no-op,
+`same_bytes_rewrite_refreshes_the_retained_token` would have no stale token left to refresh,
+and its 20 ms sleep would be scaffolding for a replaced mechanism rather than a timing wait
+to virtualise.
 
-Read this item against the landed CAS work before starting. Three outcomes are live for each
-affected test: the wait becomes unnecessary because mtime is no longer the key, the test
-keeps its shape but its assertion changes meaning, or the test is rewritten by the CAS
-change. Repairing a timing wait whose subject is being replaced underneath it is how a sweep
-silently reverts someone else's fix.
+**That did not happen.** The landed CAS *verifies* the mtime against the bytes the caller
+last saw rather than replacing it —
+`workspace.rs:1898`: `(Some(m), true) => current != Some(m) || !self.disk_still_holds(rel, expected_disk)`.
+The content check is an **additional** conflict trigger, not a substitute, so the mtime token
+is still live on every path. `FlushJob` did gain `expected_disk`, and its own doc says "the
+CAS verifies a matching mtime against these".
+
+Confirmed empirically as well as structurally: the test survives the merge with its body and
+its comment unchanged, so the 20 ms sleep is still load-bearing scaffolding and this item's
+premise is untouched. It is not closed, or narrowed, by the CAS work.
+
+The prediction is left on the record rather than deleted, because the reasoning that produced
+it was sound at the time and the correction is the useful part: **a design that adds a check
+alongside an untrusted value does not retire that value.** Anyone reading a "this is probably
+fixed elsewhere" note on an item should check whether the elsewhere replaced the mechanism or
+merely guarded it.
 
 ## Prior art
 
