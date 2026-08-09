@@ -419,10 +419,13 @@ web-check: web-launcher ## Run frontend check, vitest, and production build.
 	#
 	# The web-launcher prerequisite only BUILDS the launcher (vite build), which
 	# misses type errors + unit regressions, so gate its svelte-check + vitest
-	# here too (it already ran `npm install`). Both SPAs are fully gated.
+	# here too (it already ran `npm install`). @chan/profile builds in
+	# gateway-spa, which runs vite build alone, so its check + test belong here
+	# for the same reason. All three SPAs are fully gated.
 	cd web && $(NPM) install \
 		&& $(NPM) run check -w @chan/launcher && $(NPM) run test -w @chan/launcher \
 		&& $(NPM) run check -w @chan/workspace-app && $(NPM) run test -w @chan/workspace-app \
+		&& $(NPM) run check -w @chan/profile && $(NPM) run test -w @chan/profile \
 		&& $(NPM) run build -w @chan/workspace-app
 	@date -u '+%Y-%m-%dT%H:%M:%SZ' > "$(WEB_BUILD_STAMP)"
 

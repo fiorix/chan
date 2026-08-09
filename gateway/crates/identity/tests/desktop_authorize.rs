@@ -562,8 +562,11 @@ async fn full_flow_mints_pat_with_desktop_audit_action() {
     assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
     assert!(csp.contains("img-src 'self'"), "{csp}");
 
-    // Authorize: a 200 handoff page, NOT a redirect (a 3xx off this
-    // form POST would put the loopback hop under form-action).
+    // Authorize: a 200 handoff page, NOT a redirect. The ruling binds
+    // this confirm response specifically -- a 3xx off this form POST
+    // would put the loopback hop under form-action. It does not bind the
+    // desktop's loopback answer, which is a GET outside any form chain
+    // and does redirect, back to this origin's profile page.
     let resp = c
         .post_form(
             "/desktop/authorize/confirm",

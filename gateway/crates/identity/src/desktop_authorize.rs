@@ -34,13 +34,17 @@
 //!     challenge, and answers 200 with a handoff page that navigates
 //!     the browser to `http://127.0.0.1:<port>/auth/callback?code=&state=`
 //!     (`deny` / blocked carry `?error=&state=` instead) via a
-//!     zero-delay meta refresh plus a manual fallback link. A 3xx
-//!     answering the form POST would put the loopback hop inside the
-//!     form submission's redirect chain, which Chrome subjects to the
-//!     page's `form-action` CSP; the handoff page keeps that
-//!     navigation out of any form chain entirely. The PAT secret never
-//!     appears in the query or the page: only the one-time code does,
-//!     and the page itself is `no-store` / `no-referrer`.
+//!     zero-delay meta refresh plus a manual fallback link. The no-3xx
+//!     ruling binds THIS response specifically: a 3xx answering the
+//!     form POST would put the loopback hop inside the form
+//!     submission's redirect chain, which Chrome subjects to the
+//!     page's `form-action` CSP, and the handoff page keeps that
+//!     navigation out of any form chain entirely. It says nothing
+//!     about the desktop's own loopback answer, which replies to a GET
+//!     navigation outside any form chain and does redirect, sending
+//!     the browser back to this origin's profile page. The PAT secret
+//!     never appears in the query or the page: only the one-time code
+//!     does, and the page itself is `no-store` / `no-referrer`.
 //!   * `POST /desktop/authorize/redeem` -- swaps a one-time code plus
 //!     the PKCE verifier for the minted PAT (`{"code": ...,
 //!     "code_verifier": ...}` -> `{id, secret, label, expires_at}`).
@@ -536,10 +540,10 @@ impl Handoff {
 
 /// Render the handoff page `confirm` answers with: a zero-delay meta
 /// refresh to the loopback callback target plus a manual fallback link,
-/// so the navigation to `127.0.0.1` never rides a form-POST redirect
-/// chain (see the module doc). The target appears exactly twice, both
-/// times attribute-escaped; its only user-influenced parts are percent-
-/// encoded by [`success_url`] / [`error_url`].
+/// so the navigation to `127.0.0.1` never rides THIS form POST's
+/// redirect chain (see the module doc). The target appears exactly
+/// twice, both times attribute-escaped; its only user-influenced parts
+/// are percent-encoded by [`success_url`] / [`error_url`].
 fn render_handoff_html(kind: &Handoff, target: &str) -> String {
     let (title, blurb) = kind.copy();
     let url = pages::html_escape(target);
@@ -735,8 +739,8 @@ pub struct ConfirmForm {
 }
 
 /// `POST /desktop/authorize/confirm` -- handles allow / deny. Every
-/// outcome answers 200 with a [`Handoff`] page (see the module doc
-/// for why this is not a redirect).
+/// outcome answers 200 with a [`Handoff`] page (see the module doc for
+/// why THIS response, alone in the flow, is not a redirect).
 pub async fn confirm(
     State(state): State<AppState>,
     session: Session,
