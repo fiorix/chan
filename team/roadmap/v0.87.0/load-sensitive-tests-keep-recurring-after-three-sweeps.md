@@ -232,6 +232,8 @@ The pre-merge reading at `b9809f31` was 47 sites and 28/10/9/0. The delta is ent
 
 Eight sites were classified provisionally before the merge because their subject was under active change, and each was re-read after it. Seven kept their bucket with shifted lines. `indexer.rs:436` kept its bucket and needed a rewritten justification (above). `doc_sessions/mod.rs:2914` -> `:2948` was predicted to be mooted by the CAS baseline and was not: the test body is unchanged and the mtime token is still the mechanism, so the row stands.
 
+**Read `test-repaired` as a disposition, not as work completed.** The bucket says what a site's correct treatment is; it does not assert that the treatment has been applied. As of this classification, **none of the 10 sites in that bucket has been repaired**. Workstream 1 (classify) is complete; workstream 2 (repair) is partial, and the split is recorded under "Workstream 2 status" below. The bucket name comes from this item's own acceptance wording, which is why it is worth saying plainly rather than assuming the reader infers it.
+
 | site (`crates/chan-server/src/`) | bucket | justification |
 | --- | --- | --- |
 | `control_socket.rs:2133` | production-legitimate | `SUBMIT_SPLIT_GAP` between a submit and its chord |
@@ -285,6 +287,20 @@ Eight sites were classified provisionally before the merge because their subject
 | `state.rs:422` | test-repaired | starvation probe: keep the real clock, widen the 100 ms rate assertion to a named budget |
 
 On `defect-registered: 0`: no site among the 21 test sites shows evidence of masking a production race. What was looked for -- a sleep standing in for a missing synchronisation point, a wait whose removal changes an assertion's outcome rather than only its timing, and a poll loop tolerating a state the production path should have made unreachable. This states what the reading found; it is not a claim that none exist. This round's chartered flaky test was filed as a test defect and turned out to be a production data-loss path, so a future counterexample should refute this sentence rather than embarrass it.
+
+## Workstream 2 status: partial
+
+Stated exactly, because `test-repaired` is a bucket name and not a completion claim.
+
+| named test | state |
+| --- | --- |
+| `scene_sessions::tests::flush_cas_conflict_enters_conflicted_after_corroboration` | **repaired**, by the scene lane in `78afddeb`, not by this audit |
+| `control_socket::tests::stable_bind_absorbs_a_transient_lock_holder` | **not repaired**. Classified `test-repaired` at `control_socket.rs:4936`; the 25 ms sleep raced against the bind retry budget is still there |
+| `routes::terminal::tests::api_restart_terminal_updates_chan_tab_name_env` | **not repaired**, and not reachable by this audit: it carries no sleep and is absent from the population (see the two-workstream section) |
+
+One repair was made outside the boundary, on the chan-library test collector, and it is described below. It is not one of the three.
+
+So this item's fourth acceptance line is **not met**. The remaining work is the two unrepaired named tests plus the 10 `test-repaired` sites, each needing the rig-based before/after ratio this item's own bar requires. That is a v0.88.0 carry unless the round chooses to extend, and it should be registered rather than closed by the presence of a classification.
 
 ## Workstream 2, and one deliberate boundary exception
 
