@@ -57,6 +57,11 @@ crates/chan-server/resources/models/
 # serve artifact, not source.
 /.Drafts/
 
+# In-workspace state dir chan creates when the repo itself is served as
+# a chan workspace (editor session documents land under
+# .chan/editor-sessions/). Machine-local serve artifact, not source.
+/.chan/
+
 # Host-local attachment drop (screenshots / images pasted into a
 # session). Local-only working area, never committed.
 /attachments/
