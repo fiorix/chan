@@ -67,6 +67,14 @@ use serde::{Deserialize, Serialize};
 
 mod update;
 
+/// The build script's own rules. `build.rs` pulls this file in with
+/// `include!` and is the only production consumer; mounting it here under
+/// `cfg(test)` is what puts those rules under `cargo test`, which a build
+/// script's own code otherwise never gets.
+#[cfg(test)]
+#[path = "build_id.rs"]
+mod build_id;
+
 /// `chan dump-skill`: the agent-facing skill document, rendered from the
 /// clap trees so it cannot drift from the help it documents.
 mod skill;
@@ -359,11 +367,33 @@ SEE ALSO:
 orientation the skill opens with.
 "#;
 
+/// The build this binary was made from, stamped by `build.rs`.
+///
+/// The release version cannot name a build on its own: the version pins move
+/// only at release cut, so every branch build between two cuts reports the
+/// previous release's version. This is what separates them, and it is the same
+/// value the server's health surfaces carry, so an id read through a tunnel
+/// and an id read from `chan --version` are comparable.
+pub const BUILD_ID: &str = env!("CHAN_BUILD_ID");
+
+/// `--version` output: the release version, then the build that produced it.
+///
+/// Appended rather than substituted, so the packaging consumers that match on
+/// the version substring still match --
+/// `packaging/distros/homebrew/Formula/chan.rb.in:45` asserts it and
+/// `.github/workflows/publish-downstream.yml:905` greps for it.
+const CHAN_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (build ",
+    env!("CHAN_BUILD_ID"),
+    ")"
+);
+
 #[derive(Parser, Debug)]
 // `about` is set here rather than inherited from the Cargo description:
 // the description is package metadata and runs long, while this string is
 // one line of `chan --help`.
-#[command(version, about = CHAN_ABOUT, long_about = CHAN_LONG_ABOUT)]
+#[command(version = CHAN_VERSION, about = CHAN_ABOUT, long_about = CHAN_LONG_ABOUT)]
 #[command(after_long_help = CHAN_AFTER_HELP)]
 struct Cli {
     /// Increase logging. -v = info, -vv = debug, -vvv = trace.
@@ -1433,6 +1463,11 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
+    // Hand the binary's identity to the server library before any subcommand
+    // can start one. chan-server cannot stamp this itself -- it is a library,
+    // and the id belongs to the binary linking it.
+    chan_server::set_build_id(BUILD_ID);
+
     let cli = parse_cli(args);
     init_tracing(cli.verbose);
     let verbose = cli.verbose > 0;
@@ -7695,6 +7730,31 @@ fn print_import_summary(summary: &chan_workspace::ImportSummary) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_names_the_build_beside_the_release_version() {
+        // The acceptance line: two builds from different commits have to be
+        // distinguishable through `chan --version`. Between release cuts the
+        // version alone cannot do it, so the build id is what separates them.
+        let rendered = Cli::command().render_version().to_string();
+        assert!(
+            rendered.contains(&format!("(build {BUILD_ID})")),
+            "--version does not name the build: {rendered}"
+        );
+    }
+
+    #[test]
+    fn version_still_carries_the_bare_release_version() {
+        // The build id is APPENDED, never substituted. Two packaging
+        // consumers match on the bare version substring and would break on a
+        // rewritten line: publish-downstream.yml greps the Homebrew install's
+        // `chan --version`, and the cask formula asserts the same.
+        let rendered = Cli::command().render_version().to_string();
+        assert!(
+            rendered.contains(env!("CARGO_PKG_VERSION")),
+            "--version lost the release version: {rendered}"
+        );
+    }
 
     fn assert_terminal_list(cli: Cli) {
         let Command::Shell { action } = cli.command else {
