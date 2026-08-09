@@ -39,9 +39,25 @@ fi
 # Hermetic, version-pinned dmgbuild in a venv: sidesteps PEP 668 on a
 # system/Homebrew python3 and keeps the tool out of the global environment.
 # Pure-Python wheels (dmgbuild + ds_store + mac_alias), no native compilation.
+# Rebuild from scratch rather than reusing what is there. The venv lives under
+# target/, which CI caches, and a restored one carries absolute paths and a
+# bin/python symlink into whatever interpreter the previous runner had. When
+# that interpreter moves, the venv survives the cache round trip with its
+# scripts broken; `python3 -m venv` over an existing directory then reuses it
+# and skips ensurepip, so bin/pip is never recreated and the install dies with
+# exit 127. Clearing first costs a few seconds on a cold venv and makes the
+# broken-restore case impossible.
 if [ ! -x "$venv/bin/dmgbuild" ]; then
+    rm -rf "$venv"
     python3 -m venv "$venv"
-    "$venv/bin/pip" install --quiet --disable-pip-version-check "$spec"
+    # `python -m pip` rather than the bin/pip console script: the module is
+    # what ensurepip installs, and it works even where the script is missing.
+    if ! "$venv/bin/python" -m pip --version >/dev/null 2>&1; then
+        echo "error: the venv at $venv has no pip; python3 -m venv produced one" >&2
+        echo "hint: the interpreter lacks ensurepip (Debian/Ubuntu: install python3-venv)" >&2
+        exit 1
+    fi
+    "$venv/bin/python" -m pip install --quiet --disable-pip-version-check "$spec"
 fi
 
 mkdir -p "$(dirname "$OUT")"
