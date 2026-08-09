@@ -4920,9 +4920,22 @@ mod tests {
         assert_eq!(delivered_input(&rx_claude), b"poke\n\x1b[27;9;13~".to_vec());
     }
 
+    /// Collect a session's output until `needle` appears or `timeout` elapses.
+    ///
+    /// Reads BOTH halves of the attach contract. [`Session::attach`] subscribes
+    /// `rx` and snapshots whatever the ring already holds into `replay`, so
+    /// output produced before the subscribe exists only in `replay`. A session
+    /// created with a one-shot `command` can run to completion before
+    /// `Registry::create` reaches its `attach`, which puts the whole of that
+    /// command's output on the replay side; draining `rx` alone then reads back
+    /// empty rather than wrong. The serving path honours both halves the same
+    /// way (`chan-server`'s terminal attach replays before streaming).
     async fn collect_until(session: &mut AttachHandle, needle: &str, timeout: Duration) -> String {
         let deadline = tokio::time::Instant::now() + timeout;
         let mut out = String::new();
+        for chunk in session.replay.drain(..) {
+            out.push_str(&String::from_utf8_lossy(&chunk));
+        }
         loop {
             if out.contains(needle) || tokio::time::Instant::now() >= deadline {
                 return out;
@@ -4934,6 +4947,50 @@ mod tests {
                 Ok(Err(_)) | Err(_) => return out,
             }
         }
+    }
+
+    /// Pins the half of the attach contract that is easy to drop: output the
+    /// ring already holds reaches a fresh attach through `replay`, never
+    /// through `rx`.
+    ///
+    /// Ordering is deterministic rather than raced. The first handle drives its
+    /// output with `send_input`, which necessarily follows its own attach, so
+    /// the bytes are provably in the ring before the second handle subscribes.
+    /// The second collect can therefore only succeed by reading `replay`, which
+    /// is exactly what a create whose one-shot command outran its attach
+    /// depends on.
+    #[tokio::test]
+    async fn a_fresh_attach_reads_output_the_ring_already_holds() {
+        let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
+        let mut first = registry
+            .create(CreateOptions {
+                size: test_size(),
+                tab_name: None,
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: None,
+                env: Default::default(),
+            })
+            .unwrap();
+        let id = first.id().to_string();
+
+        first.send_input(b"printf 'RINGED=<%s>\\n' ok\n");
+        let live = collect_until(&mut first, "RINGED=<ok>", Duration::from_secs(5)).await;
+        assert!(
+            live.contains("RINGED=<ok>"),
+            "the shell never produced the marker: {live:?}"
+        );
+
+        let mut second = registry.attach(&id, Some(0)).unwrap();
+        let replayed = collect_until(&mut second, "RINGED=<ok>", Duration::from_secs(2)).await;
+        assert!(
+            replayed.contains("RINGED=<ok>"),
+            "a fresh attach dropped the replay half of the contract: {replayed:?}"
+        );
+
+        registry.close(&id, CloseReason::Explicit);
     }
 
     // LC_ALL is the highest-precedence locale category, so when it is present
