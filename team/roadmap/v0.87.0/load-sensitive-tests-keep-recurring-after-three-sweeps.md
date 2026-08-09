@@ -68,7 +68,7 @@ So the bar does not merely under-detect, it **certifies broken code with confide
 
 Anyone writing acceptance for a load-sensitive defect after this should be required to state **why their bar would have caught this one**. Isolated-run counts do not qualify. What discriminated here was parallel execution under a deliberate CPU cap, plus a mutation probe on the fix itself: reverting `advance_mtime` returned 3 red in 60, proving the repair load-bearing rather than coincidental.
 
-**The most useful artifact this round produced for whoever does the audit is the deterministic reproducer.** It reproduces deterministically: 3 of 3 at `main` under `sdme set --cpus 1` with `--test-threads=32`, in under three seconds of test time per iteration. Every other instance here is a sighting; that one is an instrument. Start with it, because a reliable reproducer is what makes any of this fixable, and it is the difference between reading 31 sites and testing them.
+**The most useful artifact this round produced for whoever does the audit is the deterministic reproducer.** It reproduces deterministically: 3 of 3 at `main` under `sdme set --cpus 1` with `--test-threads=32`, in under three seconds of test time per iteration. Every other instance here is a sighting; that one is an instrument. Start with it, because a reliable reproducer is what makes any of this fixable, and it is the difference between reading 47 sites and testing them.
 
 A note on the rig, paid for once already: read the cap from the **host** at `/sys/fs/cgroup/machine.slice/sdme@<container>.service/cpu.max`. Reading `/sys/fs/cgroup/cpu.max` from inside the container reports `max 100000` and will tell you the cap is not applied when it is.
 

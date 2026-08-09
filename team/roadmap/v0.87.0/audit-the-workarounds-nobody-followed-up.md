@@ -81,6 +81,24 @@ So the audit's question at a dependent site is not "is the assumption recorded?"
 
 > **Is what is recorded here still true, and was it ever tested?**
 
+Make that mechanical rather than a judgement call: for each recorded assumption, ask **"what
+test fails if this sentence is false?"** If no such test exists, the sentence is a hypothesis
+wearing the clothes of a fact. That is the prove-the-instrument-can-fail rule applied to
+prose.
+
+The CAS claim answers that question in the worst possible way. The test named for it,
+`write_text_if_unchanged_detects_subsecond_conflict` (`workspace.rs:7221`), states the hazard
+in its own comment — "Without ns precision, two same-second writes would collide and let this
+through" — and then **structurally excludes it**: it spins until `mtime_ns` advances, and if
+it has not advanced within 200 ms it `return`s and passes green. So on precisely the
+filesystems where the docstring's "degrades gracefully" is false, the guarding test asserts
+nothing and reports success.
+
+It is not a missing test. It is a test built to skip the case it names, with a silent
+early-return rather than an `#[ignore]` or a failure — so the claim it appears to guard was
+never once exercised. When the audit finds an assumption whose only test is shaped like this,
+that is a stronger finding than an untested one.
+
 An absent note invites a question. A confident wrong one closes it, which is worse, and it is
 the specific reason this defect outlived three workarounds. Where an audited assumption turns
 out to be relied on elsewhere, the deliverable is not only a registered item — it is a
