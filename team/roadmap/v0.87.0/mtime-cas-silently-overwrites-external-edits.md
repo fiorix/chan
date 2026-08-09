@@ -40,6 +40,29 @@ It also names a *different*, narrower residual race (another writer landing betw
 check and the rename) and calls its window small. The timestamp-granularity case is
 neither that race nor covered by that reasoning.
 
+### The dependent site was not silent. It was confidently wrong.
+
+The docstring on `write_text_if_unchanged` (`workspace.rs:1740-1756`) already names this
+exact failure:
+
+> Two saves landing within the same wall-clock second produce identical second-resolution
+> mtimes; an editor saving on top of an autosave from a tool a few hundred ms earlier would
+> **silently win**.
+
+It then asserts the fix — "Ns resolution catches that" — and dismisses the remainder: on
+filesystems carrying only seconds, "the check **degrades gracefully**".
+
+Both of those are wrong, and the error is one conflation: **a nanosecond mtime *field* is not
+a nanosecond clock**. Kernel timestamp granularity is typically the timer tick, so two writes
+milliseconds apart share an mtime on ext4 with ns fields — measured at 29-66 collisions per
+5000 write/stat pairs on the development host, rising under CPU pressure. And the
+coarse-mtime case does not degrade gracefully; it is the case where the silent overwrite the
+first paragraph describes is close to guaranteed.
+
+That is why three engineers worked around this collision without anyone joining it up: the
+site that depended on the assumption carried a comment saying the problem was already
+solved. An absent note invites a question; a confident wrong one closes it.
+
 The codebase already contains the counter-argument. `crates/chan-server/src/doc_sessions/mod.rs:25-30`:
 
 > Because a filesystem's mtime and read-after-write cannot be trusted to identify our own
