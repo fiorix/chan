@@ -14,6 +14,7 @@
     Eye,
     EyeOff,
     Focus,
+    Layers3,
     LogOut,
     Monitor,
     MonitorCog,
@@ -30,6 +31,7 @@
   import type { DevserverEntry, WindowRecord, WorkspaceEntry } from "../api/library";
   import { requestDesktopQuit } from "../api/desktop";
   import { basename, LOCAL_LIBRARY_ID, windowRowLabel } from "../lib/windowLabel";
+  import { buildMachineTree } from "../lib/machineTree";
   import { library, clearError, disconnectDevserver } from "../state/library.svelte";
   import {
     canManageWindow,
@@ -59,23 +61,30 @@
   type CommandId =
     | "new-terminal"
     | "new-window"
-    | "focus"
-    | "hide"
-    | "show"
-    | "close"
+    | "windows"
     | "connect"
     | "disconnect"
     | "turn-on"
     | "turn-off";
+  type WindowActionId = "focus" | "hide" | "show" | "close";
 
   interface Entry extends DeckItem {
-    next?: CommandId;
+    /// The deck path this branch navigates to, absolute rather than a single
+    /// step: the tree is three levels deep at `windows > <library>:<window>`.
+    next?: string[];
     run?: () => void | Promise<void>;
   }
 
   let direction: "forward" | "back" | "still" = $state("still");
   const draft = $derived(activeCommandLauncherDraft());
   const mode = $derived((draft.path[0] as CommandId | undefined) ?? null);
+  // A window key is library-qualified: window ids are unique only within the
+  // library that minted them, and this deck aggregates several.
+  const windowMode = $derived(mode === "windows" ? draft.path[1] ?? null : null);
+
+  function windowKey(window: WindowRecord): string {
+    return `${window.library_id}:${window.window_id}`;
+  }
 
   const scopes: DeckScope[] = [{ id: "computers", label: "Computers", icon: MonitorCog }];
 
@@ -107,26 +116,50 @@
     );
   }
 
-  function windowEntry(
-    command: "focus" | "hide" | "show" | "close",
-    window: WindowRecord,
-  ): Entry {
-    const machine = machineNameForLibrary(window.library_id);
+  function windowContext(window: WindowRecord): string {
     const workspace = workspaceForWindow(window);
-    const context =
-      window.kind === "workspace"
-        ? workspace
-          ? workspaceName(workspace)
-          : basename(window.workspace_path ?? "") || "Workspace"
-        : window.control
-          ? "Control terminal"
-          : "Terminal";
+    if (window.kind === "workspace") {
+      return workspace ? workspaceName(workspace) : basename(window.workspace_path ?? "") || "Workspace";
+    }
+    return window.control ? "Control terminal" : "Terminal";
+  }
+
+  /// The actions this particular window can take. Unlike the workspace app,
+  /// Show here is a pure visibility flip that does not steal focus, so a
+  /// hidden window keeps both it and Focus.
+  function windowActions(window: WindowRecord): WindowActionId[] {
+    if (!canManageWindow(window)) return [];
+    return window.hidden ? ["focus", "show", "close"] : ["focus", "hide", "close"];
+  }
+
+  /// One row per window, each a branch into that window's own actions. The
+  /// machine and open-versus-hidden ride the breadcrumb: the deck is a flat
+  /// listbox with no section headers.
+  function windowBranch(window: WindowRecord): Entry {
+    const machine = machineNameForLibrary(window.library_id);
+    const context = windowContext(window);
+    const state = window.hidden ? "Hidden" : "Open";
+    return {
+      id: `computers:window:${windowKey(window)}`,
+      title: windowRowLabel(window),
+      breadcrumb: `Computers › Windows › ${machine} › ${state}`,
+      searchText: [windowRowLabel(window), window.label ?? "", window.title, window.workspace_path ?? "", context, machine, window.kind, state, "window"].join(" "),
+      scope: "computers",
+      icon: window.kind === "terminal" ? SquareTerminal : AppWindow,
+      kind: "branch",
+      next: ["windows", windowKey(window)],
+    };
+  }
+
+  function windowEntry(command: WindowActionId, window: WindowRecord): Entry {
+    const machine = machineNameForLibrary(window.library_id);
+    const context = windowContext(window);
     const verb = command === "focus" ? "Focus" : command === "hide" ? "Hide" : command === "show" ? "Show" : "Close";
     return {
       id: `computers:${command}:${window.library_id}:${window.window_id}`,
-      title: windowRowLabel(window),
-      breadcrumb: `Computers › ${verb} › ${context} › ${machine}`,
-      searchText: [windowRowLabel(window), window.label ?? "", window.title, window.workspace_path ?? "", context, machine, window.kind, verb].join(" "),
+      title: verb,
+      breadcrumb: `Computers › Windows › ${windowRowLabel(window)} › ${machine}`,
+      searchText: [verb, windowRowLabel(window), window.label ?? "", window.title, window.workspace_path ?? "", context, machine, window.kind].join(" "),
       scope: "computers",
       icon: command === "focus" ? Focus : command === "hide" ? EyeOff : command === "show" ? Eye : X,
       awaitResult: true,
@@ -152,6 +185,20 @@
               : () => closeComputerWindow(window),
     };
   }
+
+  /// Every manageable window, in the order the Library screen shows them:
+  /// local machine first, devservers by name, and within each the control
+  /// terminal, then terminals, then workspace windows by ordinal.
+  const orderedWindows = $derived.by<WindowRecord[]>(() => {
+    const tree = buildMachineTree(library.devservers, library.workspaces, library.windows);
+    const ordered = tree.machines.flatMap((machine) => [
+      ...machine.control,
+      ...machine.terminals,
+      ...machine.workspaces.flatMap((workspace) => workspace.windows),
+      ...machine.looseWindows,
+    ]);
+    return [...ordered, ...tree.orphans].filter(canManageWindow);
+  });
 
   function workspacePending(workspace: WorkspaceEntry): boolean {
     return isPending(
@@ -193,7 +240,8 @@
     };
   }
 
-  function targetEntries(command: CommandId): Entry[] {
+  function targetEntries(path: readonly string[]): Entry[] {
+    const [command, key] = path;
     switch (command) {
       case "new-terminal": {
         const local: Entry = {
@@ -235,18 +283,12 @@
               canOpenWorkspaceWindow(workspace),
           )
           .map((workspace) => workspaceTarget(command, workspace));
-      case "focus":
-        return library.windows.filter(canManageWindow).map((window) => windowEntry(command, window));
-      case "hide":
-        return library.windows
-          .filter((window) => !window.hidden && canManageWindow(window))
-          .map((window) => windowEntry(command, window));
-      case "show":
-        return library.windows
-          .filter((window) => !!window.hidden && canManageWindow(window))
-          .map((window) => windowEntry(command, window));
-      case "close":
-        return library.windows.filter(canManageWindow).map((window) => windowEntry(command, window));
+      case "windows": {
+        if (key === undefined) return orderedWindows.map(windowBranch);
+        const window = orderedWindows.find((candidate) => windowKey(candidate) === key);
+        if (!window) return [];
+        return windowActions(window).map((action) => windowEntry(action, window));
+      }
       case "connect":
         return library.devservers
           .filter((devserver) => {
@@ -309,6 +351,8 @@
               workspace.on && workspace.status !== "locked" && !workspacePending(workspace),
           )
           .map((workspace) => workspaceTarget(command, workspace));
+      default:
+        return [];
     }
   }
 
@@ -327,7 +371,7 @@
       scope: "computers",
       icon,
       kind: "branch",
-      next: id,
+      next: [id],
     };
   }
 
@@ -335,10 +379,15 @@
     const entries: Entry[] = [
       commandEntry("new-terminal", "New terminal", "Choose a computer", SquareTerminal, "shell"),
       commandEntry("new-window", "New window", "Choose a workspace", AppWindow, "workspace"),
-      commandEntry("focus", "Focus", "Choose a window", Focus, "activate foreground open control terminal"),
-      commandEntry("hide", "Hide", "Choose a visible window", EyeOff, "bury"),
-      commandEntry("show", "Show", "Choose a hidden window", Eye, "unhide"),
-      commandEntry("close", "Close", "Choose a window", X, "remove quit window"),
+      // One target-first branch instead of a Focus/Hide/Show/Close quartet
+      // that listed the same roster four times over.
+      commandEntry(
+        "windows",
+        "Windows",
+        "Choose a window",
+        Layers3,
+        "focus show hide close activate foreground open bury unhide remove quit control terminal",
+      ),
     ];
     if (hasDesktopBridge) {
       const degraded = library.devservers.some(
@@ -348,7 +397,10 @@
         commandEntry("connect", "Reconnect", "Choose a devserver", Plug, "connect connection"),
         commandEntry("disconnect", "Disconnect", "Choose a devserver", Unplug),
       ];
-      entries.splice(degraded ? 0 : 4, 0, ...connection);
+      // A degraded connection leads; otherwise the pair sits after the spawn
+      // and window branches, which is index 3 now that the four window verbs
+      // have collapsed into one.
+      entries.splice(degraded ? 0 : 3, 0, ...connection);
     }
     entries.push(
       commandEntry("turn-on", "Turn on", "Choose a workspace", Power, "start"),
@@ -399,31 +451,38 @@
     const leaves = ([
       "new-terminal",
       "new-window",
-      "focus",
-      "hide",
-      "show",
-      "close",
+      "windows",
       "connect",
       "disconnect",
       "turn-on",
       "turn-off",
-    ] as const).flatMap(targetEntries);
+    ] as const).flatMap((command) => targetEntries([command]));
     // Keep the branches in typed search as well as their leaves. This lets a
     // terse verb such as `close` jump into that submenu, while a compound
-    // query such as `close release checks` can address the final target.
-    return [...rootEntries, ...leaves];
+    // query such as `close release checks` can address the final target. The
+    // window rows are branches now, so their actions have to be flattened too
+    // or a verb query would only ever descend.
+    const windowLeaves = orderedWindows.flatMap((window) =>
+      windowActions(window).map((action) => windowEntry(action, window)),
+    );
+    return [...rootEntries, ...leaves, ...windowLeaves];
   });
 
   const computerEntries = $derived(
-    mode ? targetEntries(mode) : draft.query.trim() ? deepEntries : rootEntries,
+    draft.path.length ? targetEntries(draft.path) : draft.query.trim() ? deepEntries : rootEntries,
   );
   // This deck is always inside the Computers scope, so it never shows the
   // teaser form: truncating the root to five rows hid `Close`, the sixth
   // owner entry. The deck body scrolls and follows the selection.
   const visibleEntries = $derived(rankDeckItems(computerEntries, draft.query) as Entry[]);
-  const modeTitle = $derived(
-    mode ? rootEntries.find((entry) => entry.next === mode)?.title ?? "Computers" : "Computers",
-  );
+  const modeTitle = $derived.by(() => {
+    if (!mode) return "Computers";
+    if (windowMode) {
+      const window = orderedWindows.find((candidate) => windowKey(candidate) === windowMode);
+      if (window) return windowRowLabel(window);
+    }
+    return rootEntries.find((entry) => entry.next?.[0] === mode)?.title ?? "Computers";
+  });
   const placeholder = $derived(
     draft.scope ? scopes.find((scope) => scope.id === draft.scope)?.label ?? modeTitle : modeTitle,
   );
@@ -431,6 +490,18 @@
   $effect(() => {
     JSON.stringify(draft);
     persistCommandLauncherDraft();
+  });
+
+  // The window feed is pushed, so a window can close from anywhere while its
+  // own actions are on screen. Fall back to the list rather than leaving an
+  // empty body behind.
+  $effect(() => {
+    if (!draft.visible || !windowMode) return;
+    if (orderedWindows.some((window) => windowKey(window) === windowMode)) return;
+    direction = "back";
+    draft.path = ["windows"];
+    draft.selectedId = null;
+    draft.operation = null;
   });
 
   function closeDeck(): void {
@@ -459,7 +530,7 @@
     if (!entry) throw new Error("That command is no longer available");
     if (entry.next) {
       direction = "forward";
-      draft.path = [entry.next];
+      draft.path = entry.next;
       draft.selectedId = null;
       return;
     }

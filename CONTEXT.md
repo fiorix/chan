@@ -20,6 +20,10 @@ _Avoid_: Surface scope, app scope
 The computers, workspaces, and windows available to the command launcher. Outside Chan Desktop it is the invoking library; inside Chan Desktop it is the desktop's aggregate inventory.
 _Avoid_: Global scope, remote desktop library
 
+**Window list**:
+The Computers scope's roster of the windows that exist, each listed once and carrying whether it is open or hidden. Choosing a window offers the actions that window can take, which is not the same set for every window.
+_Avoid_: Window menu, Focus list
+
 **Control terminal**:
 A Desktop-owned terminal that runs a devserver's configured connect script and remains its diagnostic surface while the script is running or has failed.
 _Avoid_: Remote terminal, devserver terminal

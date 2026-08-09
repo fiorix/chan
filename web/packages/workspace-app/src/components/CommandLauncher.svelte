@@ -66,10 +66,13 @@
   } from "../api/libraryWindows";
   import "../state/commands/install";
 
-  type ComputerCommandId = "new-terminal" | "new-window" | "focus" | "hide" | "show" | "close";
+  type ComputerCommandId = "new-terminal" | "new-window" | "windows";
+  type WindowActionId = "focus" | "hide" | "show" | "close";
 
   interface Entry extends DeckItem {
-    next?: ComputerCommandId;
+    /// The deck path this branch navigates to, absolute rather than a single
+    /// step: the Computers tree is three levels deep at `windows > <id>`.
+    next?: string[];
     run?: () => void | Promise<void>;
     command?: Command;
     arg?: string;
@@ -124,7 +127,10 @@
   let deckDraft = $state(launcherDraft);
 
   const ctx = $derived(commandContext());
+  // A non-empty path means the deck is inside a Computers branch. `windows`
+  // carries a second element, the window whose own actions are being shown.
   const computerMode = $derived((launcherDraft.path[0] as ComputerCommandId | undefined) ?? null);
+  const windowMode = $derived(computerMode === "windows" ? launcherDraft.path[1] ?? null : null);
   const scopes = $derived.by<DeckScope[]>(() => [
     { id: "tab", label: "Tab", icon: PanelTop },
     { id: "pane", label: "Pane", icon: PanelsTopLeft },
@@ -337,22 +343,52 @@
       scope: "computers",
       icon,
       kind: "branch",
-      next: id,
+      next: [id],
     };
   }
 
-  function scopedWindowEntry(
-    command: "focus" | "hide" | "show" | "close",
-    window: ScopedLibraryWindow,
-  ): Entry {
+  /// One row per window that exists, each a branch into that window's own
+  /// actions. Open versus hidden rides the breadcrumb because the deck is a
+  /// flat listbox with no section headers.
+  function scopedWindowBranch(window: ScopedLibraryWindow): Entry {
+    const title = scopedWindowTitle(window);
+    const context = scopedWindowContext(window);
+    const state = window.hidden ? "Hidden" : "Open";
+    const here = window.window_id === sessionWindowId() ? `${context} (this window)` : context;
+    return {
+      id: `computers:window:${window.window_id}`,
+      title,
+      breadcrumb: `Computers › Windows › ${state} › ${here}`,
+      searchText: [title, window.title, window.label, window.workspace_path ?? "", context, state, "window"].join(" "),
+      scope: "computers",
+      icon: window.kind === "terminal" ? Terminal : AppWindow,
+      kind: "branch",
+      next: ["windows", window.window_id],
+    };
+  }
+
+  /// The actions this particular window can take. Focus and Show both route
+  /// through focusLibraryWindow, which unhides and raises in one step, so a
+  /// window offers one of the two and never both. Hide and Close are the
+  /// owner-only mutations, and the capability route refuses either on a
+  /// control terminal, so neither is offered there.
+  function scopedWindowActions(window: ScopedLibraryWindow, owner: boolean): WindowActionId[] {
+    const manageable = owner && window.can_act && !window.control;
+    const actions: WindowActionId[] = [window.hidden ? "show" : "focus"];
+    if (manageable && !window.hidden) actions.push("hide");
+    if (manageable) actions.push("close");
+    return actions;
+  }
+
+  function scopedWindowEntry(command: WindowActionId, window: ScopedLibraryWindow): Entry {
     const verb = command === "focus" ? "Focus" : command === "hide" ? "Hide" : command === "show" ? "Show" : "Close";
     const title = scopedWindowTitle(window);
     const context = scopedWindowContext(window);
     return {
       id: `computers:${command}:${window.window_id}`,
-      title,
-      breadcrumb: `Computers › ${verb} › ${context}`,
-      searchText: [title, window.title, window.label, window.workspace_path ?? "", context, verb].join(" "),
+      title: verb,
+      breadcrumb: `Computers › Windows › ${title}`,
+      searchText: [verb, title, window.title, window.label, window.workspace_path ?? "", context].join(" "),
       scope: "computers",
       icon: command === "focus" ? Focus : command === "hide" ? EyeOff : command === "show" ? Eye : X,
       awaitResult: true,
@@ -392,11 +428,12 @@
     };
   }
 
-  function computerTargetEntries(command: ComputerCommandId): Entry[] {
+  function computerTargetEntries(path: readonly string[]): Entry[] {
     const snapshot = scopedLibrary;
     if (!snapshot) return [];
     const owner = snapshot.role === "owner";
-    switch (command) {
+    const [branch, windowId] = path;
+    switch (branch) {
       case "new-terminal":
         return owner
           ? [
@@ -419,26 +456,16 @@
               .filter((workspace) => workspace.can_act && workspace.status === "running")
               .map(scopedWorkspaceEntry)
           : [];
-      case "focus":
-        return snapshot.windows.map((window) => scopedWindowEntry(command, window));
-      case "hide":
-        return owner
-          ? snapshot.windows
-              .filter((window) => window.can_act && !window.control && !window.hidden)
-              .map((window) => scopedWindowEntry(command, window))
-          : [];
-      case "show":
-        return owner
-          ? snapshot.windows
-              .filter((window) => window.can_act && !window.control && window.hidden)
-              .map((window) => scopedWindowEntry(command, window))
-          : [];
-      case "close":
-        return owner
-          ? snapshot.windows
-              .filter((window) => window.can_act && !window.control)
-              .map((window) => scopedWindowEntry(command, window))
-          : [];
+      case "windows": {
+        // The roster order is the server's: this window first, then terminals
+        // before workspaces, then ordinal.
+        if (windowId === undefined) return snapshot.windows.map(scopedWindowBranch);
+        const window = snapshot.windows.find((candidate) => candidate.window_id === windowId);
+        if (!window) return [];
+        return scopedWindowActions(window, owner).map((action) => scopedWindowEntry(action, window));
+      }
+      default:
+        return [];
     }
   }
 
@@ -466,26 +493,41 @@
         computerCommandEntry("new-window", "New window", "Choose a workspace", AppWindow, "workspace"),
       );
     }
-    entries.push(computerCommandEntry("focus", "Focus", "Choose a window", Focus, "open activate control terminal"));
-    if (owner) {
-      entries.push(
-        computerCommandEntry("hide", "Hide", "Choose a visible window", EyeOff, "bury"),
-        computerCommandEntry("show", "Show", "Choose a hidden window", Eye, "unhide"),
-        computerCommandEntry("close", "Close", "Choose a window", X, "remove quit"),
-      );
-    }
+    // One target-first branch instead of a Focus/Hide/Show/Close quartet that
+    // showed the same roster four times. Every role gets it: a grantee's
+    // windows still offer Focus, which is what the old Focus branch gave them.
+    entries.push(
+      computerCommandEntry(
+        "windows",
+        "Windows",
+        "Choose a window",
+        Layers3,
+        "focus show hide close open activate control terminal",
+      ),
+    );
     return entries;
   });
 
-  const computerDeepEntries = $derived.by<Entry[]>(() =>
-    (["new-terminal", "new-window", "focus", "hide", "show", "close"] as const).flatMap(
-      computerTargetEntries,
-    ),
-  );
+  // Typed search crosses every level, so it carries the window rows AND each
+  // window's actions: `focus deploy shell` must still act in one Enter rather
+  // than only descending into that window.
+  const computerDeepEntries = $derived.by<Entry[]>(() => {
+    const snapshot = scopedLibrary;
+    if (!snapshot) return [];
+    const owner = snapshot.role === "owner";
+    return [
+      ...computerTargetEntries(["new-terminal"]),
+      ...computerTargetEntries(["new-window"]),
+      ...computerTargetEntries(["windows"]),
+      ...snapshot.windows.flatMap((window) =>
+        scopedWindowActions(window, owner).map((action) => scopedWindowEntry(action, window)),
+      ),
+    ];
+  });
 
   const computerEntries = $derived(
-    computerMode
-      ? computerTargetEntries(computerMode)
+    launcherDraft.path.length
+      ? computerTargetEntries(launcherDraft.path)
       : launcherDraft.query.trim()
         ? [...computerRootEntries, ...computerDeepEntries]
         : computerRootEntries,
@@ -517,7 +559,7 @@
     launcherDraft.scope
       ? scopes.find((scope) => scope.id === launcherDraft.scope)?.label ?? "Search"
       : computerMode
-        ? computerRootEntries.find((entry) => entry.next === computerMode)?.title ?? "Computers"
+        ? computerRootEntries.find((entry) => entry.next?.[0] === computerMode)?.title ?? "Computers"
         : "Search",
   );
 
@@ -540,6 +582,29 @@
     persistLauncherDraft();
   });
 
+  /// Say why the deck moved under the user, then clear the notice.
+  function flashContextChanged(): void {
+    launcherDraft.contextChanged = true;
+    if (contextNoticeTimer) clearTimeout(contextNoticeTimer);
+    contextNoticeTimer = setTimeout(() => {
+      launcherDraft.contextChanged = false;
+      persistLauncherDraft();
+    }, 2400);
+  }
+
+  // The roster is polled while the deck is open, so a window can close from
+  // somewhere else while its own actions are on screen. Fall back to the list
+  // rather than an empty body; the recovery below only fires once a selection
+  // is lost, which leaves an unselected submenu blank.
+  $effect(() => {
+    if (!launcherDraft.visible || !scopedLibrarySettled || !windowMode) return;
+    if (scopedLibrary?.windows.some((window) => window.window_id === windowMode)) return;
+    launcherDraft.path = ["windows"];
+    launcherDraft.selectedId = null;
+    launcherDraft.operation = null;
+    flashContextChanged();
+  });
+
   // A reloaded draft may reference a command that disappeared with its old tab
   // or pane. Fall to the same scope/root, preserve query, and say why briefly.
   $effect(() => {
@@ -556,12 +621,7 @@
     launcherDraft.selectedId = visibleEntries[0]?.id ?? null;
     launcherDraft.path = [];
     launcherDraft.operation = null;
-    launcherDraft.contextChanged = true;
-    if (contextNoticeTimer) clearTimeout(contextNoticeTimer);
-    contextNoticeTimer = setTimeout(() => {
-      launcherDraft.contextChanged = false;
-      persistLauncherDraft();
-    }, 2400);
+    flashContextChanged();
   });
 
   function back(): void {
@@ -583,7 +643,7 @@
     if (!entry) return;
     if (entry.next) {
       direction = "forward";
-      launcherDraft.path = [entry.next];
+      launcherDraft.path = entry.next;
       launcherDraft.selectedId = null;
       return;
     }

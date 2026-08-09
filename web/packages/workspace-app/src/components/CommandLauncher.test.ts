@@ -280,6 +280,14 @@ function dialog(target: HTMLElement): HTMLElement {
   return target.querySelector('[role="dialog"]') as HTMLElement;
 }
 
+function row(target: HTMLElement, title: string): HTMLButtonElement {
+  const found = [...target.querySelectorAll<HTMLButtonElement>(".deck-result")].find(
+    (candidate) => candidate.querySelector(".deck-result-title")?.textContent === title,
+  );
+  if (!found) throw new Error(`missing row ${title}; visible: ${titles(target).join(", ")}`);
+  return found;
+}
+
 async function openTabScope(target: HTMLElement): Promise<void> {
   (target.querySelector('[aria-label="Tab scope"]') as HTMLButtonElement).click();
   await tick();
@@ -425,7 +433,21 @@ describe("contextual command deck", () => {
     await flush();
     await typeQuery(target, "control terminal");
     expect(titles(target)[0]).toBe("Control terminal");
-    expect(target.querySelector(".deck-result-path")?.textContent).toContain("Computers › Focus");
+    expect(target.querySelector(".deck-result-path")?.textContent).toContain(
+      "Computers › Windows › Open",
+    );
+  });
+
+  test("a verb query still reaches the action itself, not only its window", async () => {
+    const target = openLauncher();
+    await flush();
+    // The window rows are branches now, so the flattened search list has to
+    // carry every window's actions or a verb query would only ever descend.
+    await typeQuery(target, "focus control terminal");
+    expect(titles(target)[0]).toBe("Focus");
+    expect(target.querySelector(".deck-result-path")?.textContent).toContain(
+      "Computers › Windows › Control terminal",
+    );
   });
 
   // The deck names a window exactly as the launcher and the OS titlebar do:
@@ -484,16 +506,9 @@ describe("contextual command deck", () => {
     await flush();
     (target.querySelector('[aria-label="Computers scope"]') as HTMLButtonElement).click();
     await tick();
-    // Six owner branches, all of them: the root deck's five-row teaser does
-    // not apply once a scope is chosen, and truncating here hid Close.
-    expect(titles(target)).toEqual([
-      "New terminal",
-      "New window",
-      "Focus",
-      "Hide",
-      "Show",
-      "Close",
-    ]);
+    // One Windows branch instead of a Focus/Hide/Show/Close quartet that
+    // listed the same roster four times through four filters.
+    expect(titles(target)).toEqual(["New terminal", "New window", "Windows"]);
 
     const newWindow = [...target.querySelectorAll<HTMLButtonElement>(".deck-result")].find(
       (row) => row.querySelector(".deck-result-title")?.textContent === "New window",
@@ -506,6 +521,120 @@ describe("contextual command deck", () => {
     await key(target, "ArrowLeft");
     expect(launcherDraft.path).toEqual([]);
     expect(titles(target)).toContain("New terminal");
+  });
+
+  async function openWindowList(target: HTMLElement): Promise<void> {
+    (target.querySelector('[aria-label="Computers scope"]') as HTMLButtonElement).click();
+    await tick();
+    row(target, "Windows").click();
+    await tick();
+  }
+
+  test("the Windows branch lists every window, open or hidden, as a target", async () => {
+    scopedLibrary.load.mockResolvedValue({
+      ...librarySnapshot,
+      windows: [
+        librarySnapshot.windows[0],
+        { ...librarySnapshot.windows[1], hidden: true },
+      ],
+    });
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    expect(launcherDraft.path).toEqual(["windows"]);
+    expect(titles(target)).toEqual(["Control terminal", "Window 2 [release checks]"]);
+    // Open versus hidden rides the breadcrumb: the deck is a flat listbox
+    // with no section headers to group under.
+    const paths = [...target.querySelectorAll(".deck-result-path")].map((n) => n.textContent ?? "");
+    expect(paths[0]).toContain("Computers › Windows › Open");
+    expect(paths[1]).toContain("Computers › Windows › Hidden");
+  });
+
+  test("a visible window offers Focus, Hide, and Close", async () => {
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    row(target, "Window 2 [release checks]").click();
+    await tick();
+    expect(launcherDraft.path).toEqual(["windows", "w-captioned"]);
+    expect(titles(target)).toEqual(["Focus", "Hide", "Close"]);
+  });
+
+  test("a hidden window shows rather than focuses, and never offers both", async () => {
+    scopedLibrary.load.mockResolvedValue({
+      ...librarySnapshot,
+      windows: [
+        librarySnapshot.windows[0],
+        { ...librarySnapshot.windows[1], hidden: true },
+      ],
+    });
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    row(target, "Window 2 [release checks]").click();
+    await tick();
+    // Show routes through the same focus call, which unhides and raises in one
+    // step, so listing Focus beside it would be the same click twice.
+    expect(titles(target)).toEqual(["Show", "Close"]);
+  });
+
+  test("a control terminal offers Focus alone, matching what the capability route allows", async () => {
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    row(target, "Control terminal").click();
+    await tick();
+    // set_window_visibility and close_window both refuse a control terminal
+    // server-side, so offering either here would only ever fail.
+    expect(titles(target)).toEqual(["Focus"]);
+  });
+
+  test("a readonly grantee gets Focus and no mutation on any window", async () => {
+    scopedLibrary.load.mockResolvedValue({ ...librarySnapshot, role: "readonly" as const });
+    const target = openLauncher();
+    await flush();
+    (target.querySelector('[aria-label="Computers scope"]') as HTMLButtonElement).click();
+    await tick();
+    // No New terminal or New window either: those are owner-only already.
+    expect(titles(target)).toEqual(["Windows"]);
+    row(target, "Windows").click();
+    await tick();
+    row(target, "Window 2 [release checks]").click();
+    await tick();
+    expect(titles(target)).toEqual(["Focus"]);
+  });
+
+  test("ArrowLeft from a window's actions returns to the window list", async () => {
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    row(target, "Window 2 [release checks]").click();
+    await tick();
+    await key(target, "ArrowLeft");
+    expect(launcherDraft.path).toEqual(["windows"]);
+    expect(titles(target)).toContain("Control terminal");
+    await key(target, "ArrowLeft");
+    expect(launcherDraft.path).toEqual([]);
+    expect(titles(target)).toContain("Windows");
+  });
+
+  test("falls back to the window list when that window closes elsewhere", async () => {
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    row(target, "Window 2 [release checks]").click();
+    await tick();
+    // The roster is polled while the deck is open, so the window can go while
+    // its own actions are on screen.
+    scopedLibrary.load.mockResolvedValue({
+      ...librarySnapshot,
+      windows: [librarySnapshot.windows[0]],
+    });
+    await flush();
+    await new Promise((resolve) => setTimeout(resolve, 2600));
+    await flush();
+    expect(launcherDraft.path).toEqual(["windows"]);
+    expect(titles(target)).toEqual(["Control terminal"]);
   });
 
   test("ArrowUp enters the scope rail and horizontal arrows activate adjacent scopes", async () => {

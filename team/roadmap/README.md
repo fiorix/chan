@@ -28,6 +28,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | [devserver-build-identity](v0.87.0/devserver-build-identity.md) | registered, deferred 2026-08-08 | carry a build id in chan --version and the health surface, the server-side sibling of the desktop build identity that shipped in v0.86.0 |
 | [aur-publication-is-suspended](v0.87.0/aur-publication-is-suspended.md) | deferred, blocked upstream | restore AUR publication once the Arch incident notice is superseded and pushes are permitted, deleting the guard job in the same commit |
 | [tab-commands-are-launcher-search-only](v0.87.0/tab-commands-are-launcher-search-only.md) | registered 2026-08-09 | list the Tab scope completely with the focused application's own commands leading it, and register the four actions the menu trim left with no command |
+| [window-list-is-verb-first](v0.87.0/window-list-is-verb-first.md) | registered 2026-08-09 | replace the Focus/Hide/Show/Close quartet with one Windows branch that lists each window once and offers the actions that window can actually take |
 
 The notifications item was abandoned on 2026-08-09 without shipping ([done/notifications.md](done/notifications.md)): delivering a notice out of a devserver session, through the gateway, and onto whatever surface the user is watching is a notification service, and mature ones already exist for an agent to call directly.
 

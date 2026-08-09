@@ -108,6 +108,10 @@ function result(title: string): HTMLButtonElement {
   return row;
 }
 
+function titles(): string[] {
+  return [...target.querySelectorAll(".deck-result-title")].map((node) => node.textContent ?? "");
+}
+
 function input(): HTMLInputElement {
   return target.querySelector(".deck-input") as HTMLInputElement;
 }
@@ -170,9 +174,13 @@ describe("Computers command deck", () => {
     );
     flushSync();
     expect(activeCommandLauncherDraft().visible).toBe(true);
-    for (const title of ["New terminal", "New window", "Focus", "Hide", "Show"]) {
+    // One Windows branch where Focus / Hide / Show / Close used to sit as four
+    // siblings, each listing the same roster through its own filter.
+    for (const title of ["New terminal", "New window", "Windows", "Turn on", "Turn off"]) {
       expect(result(title)).toBeTruthy();
     }
+    expect(titles()).not.toContain("Focus");
+    expect(titles()).not.toContain("Hide");
     expect(target.querySelectorAll(".deck-scope")).toHaveLength(1);
   });
 
@@ -191,41 +199,89 @@ describe("Computers command deck", () => {
     openCommandLauncher("computers");
     flushSync();
     await query("focus deploy shell");
-    result("Control terminal").click();
+    // Typed search still reaches the action itself, not just the window it
+    // belongs to: the flattened list carries every window's leaves.
+    result("Focus").click();
     await settle();
     expect(actions.focus).toHaveBeenCalledWith(expect.objectContaining({ window_id: "w-terminal-2" }));
   });
 
-  it("uses branches for Hide and Show, with ArrowLeft returning to root", async () => {
+  it("lists windows as targets, each branching into its own actions", async () => {
     openCommandLauncher("computers");
     flushSync();
-    result("Hide").click();
+    result("Windows").click();
     await tick();
-    expect(activeCommandLauncherDraft().path).toEqual(["hide"]);
+    expect(activeCommandLauncherDraft().path).toEqual(["windows"]);
+    // The Library screen's order: control terminal, then workspace windows.
+    expect(titles()).toEqual(["Control terminal", "Window 1 [release checks]"]);
+
     result("Window 1 [release checks]").click();
+    await tick();
+    expect(activeCommandLauncherDraft().path).toEqual([
+      "windows",
+      "lib-local-live-shape:w-project-1",
+    ]);
+    expect(titles()).toEqual(["Focus", "Hide", "Close"]);
+
+    result("Hide").click();
     await settle();
     expect(actions.setShown).toHaveBeenCalledWith(
       expect.objectContaining({ window_id: "w-project-1" }),
       false,
     );
+  });
 
+  it("offers Show on a hidden window where a visible one offers Hide", async () => {
     library.windows = [{ ...windowRecord, hidden: true }];
     openCommandLauncher("computers");
     flushSync();
-    result("Show").click();
+    result("Windows").click();
+    await tick();
+    expect(result("Window 1 [release checks]")).toBeTruthy();
+    result("Window 1 [release checks]").click();
+    await tick();
+    // Show here is a plain visibility flip, distinct from Focus, so a hidden
+    // window keeps both.
+    expect(titles()).toEqual(["Focus", "Show", "Close"]);
+  });
+
+  it("ArrowLeft from a window's actions returns to the window list", async () => {
+    openCommandLauncher("computers");
+    flushSync();
+    result("Windows").click();
+    await tick();
+    result("Control terminal").click();
     await tick();
     await key("ArrowLeft");
+    expect(activeCommandLauncherDraft().path).toEqual(["windows"]);
+    expect(result("Window 1 [release checks]")).toBeTruthy();
+    await key("ArrowLeft");
     expect(activeCommandLauncherDraft().path).toEqual([]);
-    expect(result("Show")).toBeTruthy();
+    expect(result("Windows")).toBeTruthy();
+  });
+
+  it("falls back to the window list when that window closes elsewhere", async () => {
+    openCommandLauncher("computers");
+    flushSync();
+    result("Windows").click();
+    await tick();
+    result("Window 1 [release checks]").click();
+    await tick();
+    // The feed is pushed, so the window can go while its actions are on screen.
+    library.windows = [{ ...terminalRecord }];
+    await tick();
+    expect(activeCommandLauncherDraft().path).toEqual(["windows"]);
+    expect(result("Control terminal")).toBeTruthy();
   });
 
   it("keeps destructive Close inside the keyboard-visible confirmation", async () => {
     openCommandLauncher("computers");
     flushSync();
-    await query("close");
-    result("Close").click();
+    result("Windows").click();
     await tick();
     result("Window 1 [release checks]").click();
+    await tick();
+    result("Close").click();
     await tick();
     expect(target.querySelector(".deck-operation")?.textContent).toContain("Close Window 1 [release checks]?");
     expect(actions.close).not.toHaveBeenCalled();
@@ -290,14 +346,18 @@ describe("Computers command deck", () => {
   it("Escape hides and preserves the current submenu until explicitly cleared", async () => {
     openCommandLauncher("computers");
     flushSync();
-    await query("close");
-    result("Close").click();
+    result("Windows").click();
+    await tick();
+    result("Window 1 [release checks]").click();
     await tick();
     await key("Escape");
     expect(activeCommandLauncherDraft().visible).toBe(false);
-    expect(activeCommandLauncherDraft().path).toEqual(["close"]);
+    expect(activeCommandLauncherDraft().path).toEqual([
+      "windows",
+      "lib-local-live-shape:w-project-1",
+    ]);
     openCommandLauncher("computers");
     flushSync();
-    expect(result("Window 1 [release checks]")).toBeTruthy();
+    expect(result("Close")).toBeTruthy();
   });
 });
