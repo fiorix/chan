@@ -344,6 +344,23 @@ pub enum RecoveryOutcome {
     Retry,
 }
 
+/// Executes the recovery passes a workspace parks.
+///
+/// A parked pass carries no worker of its own. The startup worker drains the
+/// plan the workspace was opened with and then exits, and every other executor
+/// is driven from outside this crate, so a pass requested afterwards is claimed
+/// only if something is listening. Whoever owns that claim installs itself
+/// through [`Workspace::set_recovery_driver`]; a workspace with no driver
+/// reports its unclaimed passes through [`Workspace::recovery_is_unowned`]
+/// instead of parking on them silently.
+pub trait RecoveryDriver: Send + Sync {
+    /// Announce that a pass is pending and `generation` must be reached.
+    ///
+    /// Called from the write paths that park passes, so it must not block or
+    /// re-enter the workspace.
+    fn wake(&self, generation: WorkspaceGeneration);
+}
+
 /// Point-in-time state of the workspace recovery coordinator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveryStatus {
@@ -516,6 +533,16 @@ impl RecoveryWorker {
         Ok(())
     }
 
+    /// True while the startup worker thread is still alive. A pending pass is
+    /// unowned only once this is false: until then the worker is the claimant.
+    fn is_running(&self) -> bool {
+        self.worker
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+    }
+
     fn stop_and_join(&self) {
         self.stop.store(true, Ordering::Release);
         self.join();
@@ -653,6 +680,11 @@ pub struct Workspace {
     /// One owned startup worker. It executes the metadata-derived recovery
     /// plan off the open caller and joins on ordinary workspace teardown.
     recovery_worker: RecoveryWorker,
+    /// Installed by whatever process claims this workspace's recovery passes,
+    /// and woken every time one is parked. The startup worker covers only the
+    /// plan derived at open, so without a driver a pass requested later has no
+    /// claimant at all.
+    recovery_driver: std::sync::RwLock<Option<Arc<dyn RecoveryDriver>>>,
     /// Lazily-initialized SLOC / language / COCOMO report. First
     /// touch (`report()` / `boot()`) does a full scan; further access
     /// reads the cached state, and the watcher fanout keeps it current
@@ -693,7 +725,7 @@ fn run_open_recovery(workspace: std::sync::Weak<Workspace>, plan: RecoveryPlan, 
             tracing::warn!(
                 workspace = %workspace.root().display(),
                 ?error,
-                "startup pending-write replay failed; recovery remains pending",
+                "startup pending-write replay failed; the plan's pass stays pending for the recovery driver",
             );
             return;
         }
@@ -725,12 +757,16 @@ fn run_open_recovery(workspace: std::sync::Weak<Workspace>, plan: RecoveryPlan, 
             return;
         }
         if let Err(error) = result {
+            // The pass was requeued by the `finish_recovery` above, which
+            // announced it to the driver. Bailing here hands the retry over
+            // rather than stranding it: this worker is the wrong place to
+            // retry, since it exists only for the plan derived at open.
             tracing::warn!(
                 workspace = %workspace.root().display(),
                 generation = pass.generation.get(),
                 action = ?pass.action,
                 ?error,
-                "startup recovery pass failed; recovery remains pending",
+                "startup recovery pass failed; handed the requeued pass to the recovery driver",
             );
             return;
         }
@@ -1004,6 +1040,7 @@ impl Workspace {
             dashboard_serial: std::sync::Mutex::new(()),
             recovery: std::sync::Mutex::new(recovery),
             recovery_worker: RecoveryWorker::new(),
+            recovery_driver: std::sync::RwLock::new(None),
             report: Arc::new(std::sync::OnceLock::new()),
             walk_filter,
             scope_policy: Arc::new(std::sync::RwLock::new(scope_policy)),
@@ -1045,20 +1082,64 @@ impl Workspace {
         self.recovery_status().into()
     }
 
+    /// Install the process that claims this workspace's recovery passes.
+    ///
+    /// Replaces any previous driver. A pass that is already pending is
+    /// announced to the new driver immediately, so one parked before the
+    /// driver existed -- by a policy refresh during boot, or by the startup
+    /// worker bailing on a failed pass -- is picked up instead of waiting for
+    /// whatever request happens to come along next.
+    pub fn set_recovery_driver(&self, driver: Arc<dyn RecoveryDriver>) {
+        *self.recovery_driver.write().unwrap() = Some(driver);
+        if let Some(pending) = self.recovery_status().pending {
+            self.wake_recovery_driver(pending.generation);
+        }
+    }
+
+    /// True when a pending pass has no claimant: nothing is executing it, the
+    /// startup worker has exited, and no driver is installed. Such a pass never
+    /// converges, so consumers must report it rather than render it as recovery
+    /// in progress.
+    pub fn recovery_is_unowned(&self) -> bool {
+        let status = self.recovery_status();
+        status.active.is_none()
+            && status.pending.is_some()
+            && !self.recovery_worker.is_running()
+            && self.recovery_driver.read().unwrap().is_none()
+    }
+
+    /// Announce a pending generation to the installed driver.
+    ///
+    /// Never called with the recovery lock held: the driver is foreign code and
+    /// may read the coordinator back.
+    fn wake_recovery_driver(&self, generation: WorkspaceGeneration) {
+        let driver = self.recovery_driver.read().unwrap().clone();
+        if let Some(driver) = driver {
+            driver.wake(generation);
+        }
+    }
+
     /// Request convergence for a lossy signal such as provider overflow.
     ///
     /// Equivalent requests coalesce into the existing pending generation.
     pub fn request_recovery(&self, action: RecoveryAction) -> WorkspaceGeneration {
-        let mut status = self.recovery.lock().unwrap();
-        if let Some(mut pending) = status.pending {
-            pending.action = std::cmp::max(pending.action, action);
-            status.pending = Some(pending);
-            return pending.generation;
-        }
-
-        let generation = status.generation.next();
-        status.generation = generation;
-        status.pending = Some(RecoveryPass { generation, action });
+        let generation = {
+            let mut status = self.recovery.lock().unwrap();
+            match status.pending {
+                Some(mut pending) => {
+                    pending.action = std::cmp::max(pending.action, action);
+                    status.pending = Some(pending);
+                    pending.generation
+                }
+                None => {
+                    let generation = status.generation.next();
+                    status.generation = generation;
+                    status.pending = Some(RecoveryPass { generation, action });
+                    generation
+                }
+            }
+        };
+        self.wake_recovery_driver(generation);
         generation
     }
 
@@ -1067,14 +1148,18 @@ impl Workspace {
     /// Every policy replacement advances the generation. Pending work can
     /// collapse into the newest generation while retaining action dominance.
     pub fn request_policy_recovery(&self, action: RecoveryAction) -> WorkspaceGeneration {
-        let mut status = self.recovery.lock().unwrap();
-        let generation = status.generation.next();
-        status.generation = generation;
-        let action = status
-            .pending
-            .map(|pending| std::cmp::max(pending.action, action))
-            .unwrap_or(action);
-        status.pending = Some(RecoveryPass { generation, action });
+        let generation = {
+            let mut status = self.recovery.lock().unwrap();
+            let generation = status.generation.next();
+            status.generation = generation;
+            let action = status
+                .pending
+                .map(|pending| std::cmp::max(pending.action, action))
+                .unwrap_or(action);
+            status.pending = Some(RecoveryPass { generation, action });
+            generation
+        };
+        self.wake_recovery_driver(generation);
         generation
     }
 
@@ -1095,30 +1180,42 @@ impl Workspace {
         pass: RecoveryPass,
         outcome: RecoveryOutcome,
     ) -> Result<RecoveryStatus> {
-        let mut status = self.recovery.lock().unwrap();
-        if status.active != Some(pass) {
-            return Err(ChanError::Io(format!(
-                "recovery pass is not active: generation {}",
-                pass.generation.get()
-            )));
-        }
-        status.active = None;
-        match outcome {
-            RecoveryOutcome::Complete => {
-                status.completed_generation =
-                    std::cmp::max(status.completed_generation, pass.generation);
+        let status = {
+            let mut status = self.recovery.lock().unwrap();
+            if status.active != Some(pass) {
+                return Err(ChanError::Io(format!(
+                    "recovery pass is not active: generation {}",
+                    pass.generation.get()
+                )));
             }
-            RecoveryOutcome::Retry => {
-                status.pending = Some(match status.pending {
-                    Some(pending) => RecoveryPass {
-                        generation: pending.generation,
-                        action: std::cmp::max(pending.action, pass.action),
-                    },
-                    None => pass,
-                });
+            status.active = None;
+            match outcome {
+                RecoveryOutcome::Complete => {
+                    status.completed_generation =
+                        std::cmp::max(status.completed_generation, pass.generation);
+                }
+                RecoveryOutcome::Retry => {
+                    status.pending = Some(match status.pending {
+                        Some(pending) => RecoveryPass {
+                            generation: pending.generation,
+                            action: std::cmp::max(pending.action, pass.action),
+                        },
+                        None => pass,
+                    });
+                }
+            }
+            *status
+        };
+        // A requeued pass is pending again with nothing holding it. The caller
+        // that just gave it up may be about to exit -- the startup worker does
+        // exactly that on a failed pass -- so the driver has to hear about the
+        // retry or it never runs.
+        if outcome == RecoveryOutcome::Retry {
+            if let Some(pending) = status.pending {
+                self.wake_recovery_driver(pending.generation);
             }
         }
-        Ok(*status)
+        Ok(status)
     }
 
     fn recovery_execution(&self, action: RecoveryAction) -> RecoveryExecutionGuard<'_> {
@@ -3502,6 +3599,11 @@ impl Workspace {
         Ok(())
     }
 
+    /// Rebuild the generated scope after a repository-ignore file changed.
+    ///
+    /// Runs from the watcher fan-out, long after the startup worker has gone,
+    /// so the pass it parks converges only because `request_policy_recovery`
+    /// announces it to the installed driver.
     fn refresh_repository_scope(&self) -> Result<()> {
         let mut current = self.scope_policy.write().unwrap();
         let configured = current.configured().clone();
@@ -9662,5 +9764,136 @@ mod tests {
         assert_eq!(split_name_ext("README"), ("README".into(), String::new()));
         // Trailing dot stays part of the stem.
         assert_eq!(split_name_ext("weird."), ("weird.".into(), String::new()));
+    }
+
+    /// Records every generation announced to it, standing in for the server's
+    /// indexer coordinator.
+    #[derive(Default)]
+    struct RecordingDriver {
+        woken: std::sync::Mutex<Vec<WorkspaceGeneration>>,
+    }
+
+    impl RecordingDriver {
+        fn woken(&self) -> Vec<WorkspaceGeneration> {
+            self.woken.lock().unwrap().clone()
+        }
+    }
+
+    impl RecoveryDriver for RecordingDriver {
+        fn wake(&self, generation: WorkspaceGeneration) {
+            self.woken.lock().unwrap().push(generation);
+        }
+    }
+
+    #[test]
+    fn a_parked_pass_is_announced_to_the_driver() {
+        // The defect: `request_policy_recovery` parked a pass and notified
+        // nothing, so a `.gitignore` write left a generation that no worker
+        // was ever told to claim.
+        let (_cfg, _root, workspace) = fixture();
+        let driver = Arc::new(RecordingDriver::default());
+        workspace.set_recovery_driver(driver.clone());
+
+        let policy = workspace.request_policy_recovery(RecoveryAction::Reconcile);
+        assert_eq!(
+            driver.woken(),
+            vec![policy],
+            "a policy-parked pass must reach the driver"
+        );
+
+        let lossy = workspace.request_recovery(RecoveryAction::FullRebuild);
+        assert_eq!(
+            driver.woken(),
+            vec![policy, lossy],
+            "a coalesced request must still announce the generation it landed on"
+        );
+    }
+
+    #[test]
+    fn installing_a_driver_announces_a_pass_parked_before_it() {
+        // Covers the boot window: a pass can be parked between `open` and the
+        // server installing its coordinator, and the wake-up for it would
+        // otherwise have been sent to nobody and lost.
+        let (_cfg, _root, workspace) = fixture();
+        let generation = workspace.request_policy_recovery(RecoveryAction::Reconcile);
+
+        let driver = Arc::new(RecordingDriver::default());
+        workspace.set_recovery_driver(driver.clone());
+
+        assert_eq!(driver.woken(), vec![generation]);
+    }
+
+    #[test]
+    fn a_requeued_pass_is_announced_to_the_driver() {
+        // The startup worker's bail path requeues the failed pass and then
+        // returns for good. The requeue is the last thing it does, so unless
+        // it announces, the pass is left pending with the only thread that
+        // was executing it gone.
+        let (_cfg, _root, workspace) = fixture();
+        let driver = Arc::new(RecordingDriver::default());
+        workspace.set_recovery_driver(driver.clone());
+
+        let generation = workspace.request_policy_recovery(RecoveryAction::Reconcile);
+        let pass = workspace.begin_recovery().expect("pass is claimable");
+        assert!(workspace.recovery_status().pending.is_none());
+
+        let status = workspace
+            .finish_recovery(pass, RecoveryOutcome::Retry)
+            .unwrap();
+
+        assert_eq!(status.pending, Some(pass), "a retry requeues the pass");
+        assert_eq!(
+            driver.woken(),
+            vec![generation, generation],
+            "the requeue must be announced as well as the original request"
+        );
+    }
+
+    #[test]
+    fn a_completed_pass_is_not_announced() {
+        // Waking on completion would hand the driver a generation with nothing
+        // to do, and for the server's coordinator that is a spurious loop.
+        let (_cfg, _root, workspace) = fixture();
+        let driver = Arc::new(RecordingDriver::default());
+        workspace.set_recovery_driver(driver.clone());
+
+        let generation = workspace.request_policy_recovery(RecoveryAction::Reconcile);
+        let pass = workspace.begin_recovery().unwrap();
+        workspace
+            .finish_recovery(pass, RecoveryOutcome::Complete)
+            .unwrap();
+
+        assert_eq!(driver.woken(), vec![generation]);
+    }
+
+    #[test]
+    fn a_pending_pass_is_unowned_only_when_nothing_can_claim_it() {
+        let (_cfg, _root, workspace) = fixture();
+        // The startup worker for this fixture has no plan work, so a ready
+        // workspace has no claimant -- and nothing to claim either.
+        assert!(!workspace.recovery_is_unowned(), "nothing is pending");
+
+        workspace.request_policy_recovery(RecoveryAction::Reconcile);
+        assert!(
+            workspace.recovery_is_unowned(),
+            "pending, nothing active, no driver: this pass converges nowhere"
+        );
+
+        let pass = workspace.begin_recovery().unwrap();
+        assert!(
+            !workspace.recovery_is_unowned(),
+            "an active pass is held by whoever began it"
+        );
+
+        workspace
+            .finish_recovery(pass, RecoveryOutcome::Retry)
+            .unwrap();
+        assert!(workspace.recovery_is_unowned(), "requeued with no driver");
+
+        workspace.set_recovery_driver(Arc::new(RecordingDriver::default()));
+        assert!(
+            !workspace.recovery_is_unowned(),
+            "a driver is exactly what makes the pass claimable"
+        );
     }
 }

@@ -98,6 +98,10 @@ pub use preferences::{
     TerminalCustomColors, ThemeChoice, EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_MIN,
 };
 pub use routes::{build_fs_graph, FsGraphResponse, FsGraphScope};
+/// Build identity for the process. chan-server is a library, so the id belongs
+/// to the binary that links it: that binary's build script stamps it and
+/// declares it here at startup, and every health surface reports it.
+pub use routes::{build_id, set_build_id};
 
 use crate::terminal_sessions::{
     Registry as TerminalRegistry, RegistryConfig as TerminalRegistryConfig, TerminalBackendResolver,
