@@ -45,6 +45,18 @@ This is instance ten of the class [load-sensitive-tests-keep-recurring-after-thr
 
 The two 404s are separately worth a look and are deliberately not made this item's problem. `POST /api/library/command-capabilities` returning 404 on a plain workspace window may be correct or may be a surface that moved; nobody has asked.
 
+## The suite also has a blind spot by construction, 2026-08-09
+
+Found while checking whether `v087-webkit-flip-faces` inherited the environment half of this item. It does, and its harness says why the environment problem is the smaller one.
+
+`scripts/e2e/webview-flip-render.py`, added by that branch, states the case in its own docstring: the desktop webview is WebKitGTK, WebKitGTK ignores `backface-visibility` on every element, and Chrome honours it. So a card whose hidden face is hidden only by that property **renders correctly under `browser-smoke/` and covers the entire window in the shipped app**. Chrome-driven checks cannot see that class of defect at all.
+
+That reframes this item. The environment gap means the Chrome checks do not run; this means running them would not have been sufficient anyway for anything the two engines disagree about. Two different holes, and closing the first does not close the second.
+
+The new harness needs python-gobject with the WebKit2 4.1 typelib and an X or Wayland display. This host has python3 and neither: `gi.require_version("WebKit2", "4.1")` raises, `DISPLAY` and `WAYLAND_DISPLAY` are unset, and there is no `xvfb-run`. So it is unrunnable here for the same reason the Chrome checks are, one stack over.
+
+It handles that better than this item's subject does, and the handling is worth copying: it exits **2** for an unavailable GUI stack, distinct from 0 and 1, and its docstring says plainly that *a skip is not a pass; report it as a skip*. An environment that cannot run a check should say so in a way a caller can act on, rather than being silently absent from the run.
+
 ## Contract
 
 - The browser smokes are runnable in the project's own container workflow, without hand-installing browser dependencies.
@@ -57,6 +69,7 @@ The two 404s are separately worth a look and are deliberately not made this item
 - `56-external-edit-matrix` passes 10 consecutive runs on a loaded host. The load condition is stated with the run, since a green on an idle box is what let this sit unnoticed.
 - The 19 `networkidle2` waits are replaced by, or justified against, a property the page can assert. A wait that stays is justified in place with what bounds it.
 - The gate's relationship to this suite is stated in `.agents/skills/gate/SKILL.md`, whichever way it is decided.
+- A check whose environment is unavailable reports a distinguishable skip rather than being absent from the run, following `webview-flip-render.py`'s exit-2 convention and its rule that a skip is not a pass.
 
 ## Rough size
 
