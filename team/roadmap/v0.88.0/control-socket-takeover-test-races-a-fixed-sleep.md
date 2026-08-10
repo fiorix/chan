@@ -203,6 +203,27 @@ Making the release **observable** removes the timing dependency altogether, whic
 stronger form of the same principle: the ruling's point is that a test should not assert
 against a duration, and this asserts against an event instead.
 
+### What this does not fix
+
+The repair covers the test this item names. A **sibling on the same function** carries the
+same class and is **not** repaired here:
+`stable_bind_takes_over_a_dead_servers_node_and_serves_old_clients` ends with
+`drop(handle)` followed immediately by a rebind on the same path, assuming the flock release
+has completed. Under sufficient contention it has not, and the rebind spends the same
+`ATTEMPTS = 5` / `RETRY_DELAY = 25ms` budget against a lock the test believes is gone.
+
+Observed once, in ARM B, at 1 of 13; zero across 42 runs of three gentler populations. One
+occurrence is an anecdote rather than a rate, and it is recorded because the mechanism is
+legible in the source rather than because the frequency is established.
+
+It is a **different mechanism** from this item's: that one raced an explicit written
+constant, this one races an unwritten assumption about how promptly a resource is released,
+with no timing construct at the site at all. A sweep for sleeps finds the first and not the
+second.
+
+Registered forward as a v0.89.0 candidate rather than folded in, because scope was locked at
+fourteen. **Reading this item as closing the control-socket takeover class would be wrong.**
+
 ### Discrimination
 
 Preserved by construction, and stated in the test's own comment: remove the retry loop and
