@@ -687,6 +687,16 @@ enum Command {
         /// holds the name, the gateway suffixes `-2`, `-3`, ...
         #[arg(long, env = "CHAN_TUNNEL_DEVSERVER_NAME", verbatim_doc_comment)]
         tunnel_devserver_name: Option<String>,
+        /// Run WITHOUT tunnel mode, ignoring any token in scope: the
+        /// --tunnel-token flag, CHAN_TUNNEL_TOKEN in the environment, and
+        /// (under --service=systemd) the PAT persisted in the installed
+        /// unit. This is how a supervised tunnel devserver is converted
+        /// back to a purely local one, and how a shell that inherited a
+        /// token still starts a local devserver. Omit it and a supervised
+        /// --start/--restart/--join keeps the tunnel registration the unit
+        /// already carries.
+        #[arg(long, verbatim_doc_comment)]
+        no_tunnel: bool,
     },
     /// Internal: run the background `--service=chan` daemon child. The parent
     /// process detaches this command, redirects stdout/stderr to the devserver
@@ -1585,6 +1595,7 @@ where
             tunnel_url,
             tunnel_token,
             tunnel_devserver_name,
+            no_tunnel,
         } => {
             cmd_devserver(
                 bind,
@@ -1600,6 +1611,7 @@ where
                 tunnel_url,
                 tunnel_token,
                 tunnel_devserver_name,
+                no_tunnel,
                 verbose,
             )
             .await
@@ -3311,6 +3323,7 @@ async fn cmd_devserver(
     tunnel_url: Option<String>,
     tunnel_token: Option<String>,
     tunnel_devserver_name: Option<String>,
+    no_tunnel: bool,
     verbose: bool,
 ) -> Result<()> {
     // Backend-agnostic: rotation dials whatever devserver persisted its
@@ -3319,13 +3332,17 @@ async fn cmd_devserver(
     if rotate_token {
         return cmd_rotate_devserver_token().await;
     }
-    let tunnel_url = match tunnel_url {
-        Some(url) if !url.trim().is_empty() => url,
-        Some(_) | None if tunnel_token.is_some() => {
-            anyhow::bail!("chan devserver: tunnel mode requires --tunnel-url or CHAN_TUNNEL_URL")
-        }
-        Some(_) | None => String::new(),
-    };
+    // `--no-tunnel` drops the token before anything can read it, so a devserver
+    // spawned from a shell that inherited CHAN_TUNNEL_TOKEN stays local when
+    // asked to. The supervised path takes the flag itself as well, to decline
+    // the PAT persisted in the unit (see [`supervised_tunnel_spec`]).
+    let tunnel_token = tunnel_token.filter(|_| !no_tunnel);
+    // An endpoint is required with a token, but not necessarily HERE: a
+    // supervised verb recovers it from the installed unit, which is the whole
+    // point of a flagless `--restart`. Resolution stays lazy so that path is
+    // reachable at all; the foreground and `chan` backends have nothing
+    // persisted to read, so they demand it at the point of use.
+    let tunnel_url = tunnel_url.filter(|url| !url.trim().is_empty());
     let action = selected_devserver_action(start, stop, restart, status, join);
     // Resolve `--service=auto` (the default) to a concrete backend from the
     // runtime OS, then validate it exactly like an explicit backend. After this
@@ -3349,7 +3366,7 @@ async fn cmd_devserver(
     match plan {
         DevPlan::Foreground(ServiceKind::None) => {
             let tunnel =
-                build_devserver_tunnel(tunnel_token, tunnel_url, tunnel_devserver_name.as_deref());
+                build_devserver_tunnel(tunnel_token, tunnel_url, tunnel_devserver_name.as_deref())?;
             // Tunnel mode defaults to NOT binding the loopback port (the gateway
             // is the surface, and it 404s the management API anyway), but under
             // systemd notify it does bind so `chan devserver --restart` fdstore
@@ -3387,7 +3404,7 @@ async fn cmd_devserver(
                         tunnel_token,
                         tunnel_url,
                         tunnel_devserver_name.as_deref(),
-                    );
+                    )?;
                     devserver_daemon::restart_devserver_chan(addr, force, verbose, tunnel).await
                 }
                 DevAction::Status => devserver_daemon::status_devserver_chan(verbose),
@@ -3397,7 +3414,7 @@ async fn cmd_devserver(
                         tunnel_token,
                         tunnel_url,
                         tunnel_devserver_name.as_deref(),
-                    );
+                    )?;
                     devserver_daemon::run_devserver_as_chan(addr, force, verbose, tunnel).await
                 }
                 DevAction::Join => {
@@ -3406,7 +3423,7 @@ async fn cmd_devserver(
                         tunnel_token,
                         tunnel_url,
                         tunnel_devserver_name.as_deref(),
-                    );
+                    )?;
                     devserver_daemon::join_devserver_chan(addr, force, verbose, tunnel).await
                 }
             }
@@ -3434,10 +3451,11 @@ async fn cmd_devserver(
                 tunnel_url,
                 tunnel_devserver_name.as_deref(),
                 force,
+                no_tunnel,
                 bind,
                 port,
                 read_systemd_unit().as_deref(),
-            );
+            )?;
             run_supervised_devserver(kind, action, addr, force, verbose, tunnel).await
         }
     }
@@ -3459,13 +3477,18 @@ fn warn_non_loopback_bind(addr: SocketAddr) {
 /// Build the foreground tunnel config from `--tunnel-token`, warning when the
 /// secret arrived on the command line (visible in `ps`) rather than via
 /// `CHAN_TUNNEL_TOKEN`. Only the foreground / `chan` paths reach this; the
-/// systemd/launchd refusal lives at the call site.
+/// systemd/launchd refusal lives at the call site. These backends persist no
+/// unit to reuse an endpoint from, so a token with no `--tunnel-url` /
+/// `CHAN_TUNNEL_URL` is an error here -- the same refusal the supervised path
+/// only reaches once the installed unit has come up empty too.
 fn build_devserver_tunnel(
     tunnel_token: Option<String>,
-    tunnel_url: String,
+    tunnel_url: Option<String>,
     tunnel_devserver_name: Option<&str>,
-) -> Option<chan_server::DevserverTunnel> {
-    let token = tunnel_token?;
+) -> Result<Option<chan_server::DevserverTunnel>> {
+    let Some(token) = tunnel_token else {
+        return Ok(None);
+    };
     // clap does not expose the arg source, so compare to the env directly.
     if std::env::var("CHAN_TUNNEL_TOKEN").ok().as_deref() != Some(token.as_str()) {
         eprintln!(
@@ -3473,12 +3496,19 @@ fn build_devserver_tunnel(
              Prefer CHAN_TUNNEL_TOKEN env var instead."
         );
     }
-    Some(chan_server::DevserverTunnel {
+    let tunnel_url = tunnel_url.context(MISSING_TUNNEL_URL)?;
+    Ok(Some(chan_server::DevserverTunnel {
         tunnel_url,
         token,
         name: resolve_tunnel_devserver_name(tunnel_devserver_name),
-    })
+    }))
 }
+
+/// The refusal when tunnel mode is asked for with no endpoint to dial. Shared
+/// so the unsupervised backends and the supervised one (which reaches it only
+/// after the installed unit yields no endpoint either) read identically.
+const MISSING_TUNNEL_URL: &str =
+    "chan devserver: tunnel mode requires --tunnel-url or CHAN_TUNNEL_URL";
 
 /// Hidden daemon child tunnel config. The token is never accepted as an argv
 /// field here; the parent passes it through CHAN_TUNNEL_TOKEN only. The name
@@ -3577,44 +3607,62 @@ struct SystemdTunnel {
     pinned_name: Option<String>,
 }
 
-/// Build the tunnel spec for a systemd unit from the CLI `--tunnel-token` /
-/// `--tunnel-url`, resolving the endpoint as "reuse the first-run value, refresh
-/// on --force": a flagless restart reuses the `--tunnel-url` already persisted in
-/// the unit's ExecStart (`persisted_unit`), while `--force` (or a first start
-/// with no unit) takes the CLI value. The address pins follow the `--port` help
-/// contract instead (omit = preserve, so `--force` does not drop them): an
-/// explicit CLI flag pins, else a pin persisted in a TUNNEL unit carries over
-/// (see [`persisted_tunnel_pins`]). The display name follows the same
-/// pin rule via `CHAN_TUNNEL_DEVSERVER_NAME` in the unit environment.
-/// Returns None when there is no token (non-tunnel) or the backend is
-/// not systemd (launchd tunnel mode is refused upstream).
+/// Build the tunnel spec for a systemd unit, resolving every field as "the
+/// explicit value wins, else what the installed unit already carries". A
+/// flagless `--restart` therefore comes back as the same registration it went
+/// down as, which is the contract the `--restart` help states.
+///
+/// The PAT is the load-bearing case: the unit's 0600 `Environment=` is its ONLY
+/// store, so a management verb run from a shell that cannot see
+/// `CHAN_TUNNEL_TOKEN` must read it back out ([`persisted_tunnel_token`]).
+/// Dropping it would rewrite the unit as a plain local devserver and destroy
+/// the credential in the same write. An explicit token still wins, which is how
+/// a rotated PAT is installed, and `--no-tunnel` declines both -- the deliberate
+/// way back to a local devserver.
+///
+/// The endpoint keeps its own rule, "reuse the first-run value, refresh on
+/// --force": a flagless restart prefers the endpoint already in the unit and
+/// `--force` prefers the CLI one, each falling back to the other so a restart
+/// never fails over an endpoint one of the two can supply. The address pins
+/// follow the `--port` help contract instead (omit = preserve, so `--force`
+/// does not drop them): an explicit CLI flag pins, else a pin persisted in a
+/// TUNNEL unit carries over (see [`persisted_tunnel_pins`]). The display name
+/// follows the same pin rule via `CHAN_TUNNEL_DEVSERVER_NAME`.
+///
+/// Returns None when nothing selects tunnel mode (no token from either source,
+/// or `--no-tunnel`) or the backend is not systemd (launchd tunnel mode is
+/// refused upstream). Errs only when a token IS in play and neither the CLI nor
+/// the unit names an endpoint for it.
 #[allow(clippy::too_many_arguments)]
 fn supervised_tunnel_spec(
     kind: ServiceKind,
     tunnel_token: Option<String>,
-    tunnel_url: String,
+    tunnel_url: Option<String>,
     tunnel_devserver_name: Option<&str>,
     force: bool,
+    no_tunnel: bool,
     bind: Option<IpAddr>,
     port: Option<u16>,
     persisted_unit: Option<&str>,
-) -> Option<SystemdTunnel> {
-    if kind != ServiceKind::Systemd {
-        return None;
+) -> Result<Option<SystemdTunnel>> {
+    if kind != ServiceKind::Systemd || no_tunnel {
+        return Ok(None);
     }
-    let token = tunnel_token?;
-    let url = if force {
-        tunnel_url
-    } else {
-        persisted_unit
-            .and_then(|unit| persisted_flag_value(unit, "--tunnel-url="))
-            .map(str::to_owned)
-            .unwrap_or(tunnel_url)
+    let Some(token) = tunnel_token.or_else(|| persisted_unit.and_then(persisted_tunnel_token))
+    else {
+        return Ok(None);
     };
+    let persisted_url = persisted_unit.and_then(persisted_tunnel_url);
+    let url = if force {
+        tunnel_url.or(persisted_url)
+    } else {
+        persisted_url.or(tunnel_url)
+    }
+    .context(MISSING_TUNNEL_URL)?;
     let (persisted_bind, persisted_port) = persisted_unit
         .map(persisted_tunnel_pins)
         .unwrap_or((None, None));
-    Some(SystemdTunnel {
+    Ok(Some(SystemdTunnel {
         token,
         url,
         pinned_bind: bind.or(persisted_bind),
@@ -3622,7 +3670,7 @@ fn supervised_tunnel_spec(
         pinned_name: tunnel_devserver_name
             .and_then(normalize_tunnel_devserver_name)
             .or_else(|| persisted_unit.and_then(persisted_tunnel_name)),
-    })
+    }))
 }
 
 /// The `--bind`/`--port` pins a persisted TUNNEL unit carries in its
@@ -3633,7 +3681,7 @@ fn supervised_tunnel_spec(
 /// its address, so carrying that over into a tunnel unit would fossilize a
 /// default as if the user picked it.
 fn persisted_tunnel_pins(unit: &str) -> (Option<IpAddr>, Option<u16>) {
-    if persisted_flag_value(unit, "--tunnel-url=").is_none() {
+    if persisted_tunnel_url(unit).is_none() {
         return (None, None);
     }
     (
@@ -3646,18 +3694,48 @@ fn persisted_tunnel_pins(unit: &str) -> (Option<IpAddr>, Option<u16>) {
 /// `Environment="CHAN_TUNNEL_DEVSERVER_NAME=..."` line, if any. Same
 /// explicitness record as [`persisted_tunnel_pins`]: the unit carries
 /// the variable only when the user chose a name, and a non-tunnel unit
-/// (no `--tunnel-url=`) yields nothing. The value is read up to the
-/// closing quote, so names with spaces survive the round trip
-/// ([`devserver_systemd_unit_spec`] strips quotes/backslashes on write),
-/// and the `%%` specifier escaping the write site applies is undone
-/// here so a `%`-containing name round-trips literally.
+/// yields nothing. The `%%` specifier escaping the write site applies is
+/// undone here so a `%`-containing name round-trips literally.
 fn persisted_tunnel_name(unit: &str) -> Option<String> {
-    persisted_flag_value(unit, "--tunnel-url=")?;
-    let marker = "Environment=\"CHAN_TUNNEL_DEVSERVER_NAME=";
-    let start = unit.find(marker)? + marker.len();
-    let rest = &unit[start..];
-    let value = rest[..rest.find('"')?].replace("%%", "%");
+    persisted_tunnel_url(unit)?;
+    let value = persisted_unit_environment(unit, "CHAN_TUNNEL_DEVSERVER_NAME")?.replace("%%", "%");
     (!value.is_empty()).then_some(value)
+}
+
+/// The gateway endpoint a persisted unit records. The `ExecStart` flag is what
+/// the service actually dials, so it wins; `CHAN_TUNNEL_URL` in the unit
+/// environment -- the copy the devserver's child sessions inherit -- is read as
+/// a fallback, so a unit provisioned with only the variable still restarts.
+/// Presence of either is what marks a unit as a tunnel unit.
+fn persisted_tunnel_url(unit: &str) -> Option<String> {
+    if let Some(flag) = persisted_flag_value(unit, "--tunnel-url=").filter(|v| !v.is_empty()) {
+        return Some(flag.to_owned());
+    }
+    let value = persisted_unit_environment(unit, "CHAN_TUNNEL_URL")?.replace("%%", "%");
+    (!value.is_empty()).then_some(value)
+}
+
+/// The PAT a persisted tunnel unit carries in its 0600 `Environment=`. Read
+/// back verbatim: the write site does not escape the token (a `chan_pat_` is
+/// base64url, so it has no `%` for systemd to expand and no quote to strip),
+/// and a credential must survive the round trip byte for byte or the restart
+/// re-registers with a corrupted PAT. Deliberately ungated on the endpoint: a
+/// unit carrying a token IS a tunnel unit, and one with no resolvable endpoint
+/// must fail loudly rather than silently rewrite itself local and take the only
+/// copy of the credential with it.
+fn persisted_tunnel_token(unit: &str) -> Option<String> {
+    let token = persisted_unit_environment(unit, "CHAN_TUNNEL_TOKEN")?;
+    (!token.is_empty()).then(|| token.to_owned())
+}
+
+/// The value of an `Environment="KEY=value"` line in a persisted unit, read up
+/// to the closing quote so values containing spaces survive the round trip.
+/// Callers undo whatever escaping their own write site applies.
+fn persisted_unit_environment<'a>(unit: &'a str, key: &str) -> Option<&'a str> {
+    let marker = format!("Environment=\"{key}=");
+    let start = unit.find(&marker)? + marker.len();
+    let rest = &unit[start..];
+    Some(&rest[..rest.find('"')?])
 }
 
 /// Dispatch a `systemd`/`launchd` action verb: `--start` (create + enable +
@@ -5077,6 +5155,16 @@ fn devserver_systemd_unit_spec(
     let exec = match tunnel {
         Some(tunnel) => {
             environment.push(format!("CHAN_TUNNEL_TOKEN={}", tunnel.token));
+            // The endpoint rides the environment as well as the ExecStart flag.
+            // The flag is what THIS service dials; the variable is what the
+            // terminals it spawns inherit, so a `chan devserver --restart` typed
+            // inside the workspace resolves the same gateway the unit already
+            // uses instead of refusing for want of an endpoint. Both are
+            // written from one resolved value, so they cannot disagree.
+            environment.push(format!(
+                "CHAN_TUNNEL_URL={}",
+                tunnel.url.replace(['"', '\\'], "").replace('%', "%%")
+            ));
             // Pinned only when the user chose a name (explicit or
             // preserved-explicit); omitted, the service resolves its
             // hostname default at runtime. Quotes and backslashes are
@@ -9822,6 +9910,15 @@ mod tests {
 
     fn normalized_devserver_systemd_unit(unit: &str) -> String {
         unit.lines()
+            // A shell template may prefix a line with a conditional expansion,
+            // for an environment line that only some configurations carry.
+            // Environment content is already outside the contract, so strip the
+            // prefix before deciding what the line is; a line that is nothing
+            // but an expansion normalizes to empty and drops out below.
+            .map(|line| match line.strip_prefix("${") {
+                Some(rest) => rest.split_once('}').map_or(line, |(_, tail)| tail),
+                None => line,
+            })
             .filter(|line| !line.is_empty())
             .filter(|line| !line.starts_with('#'))
             .filter(|line| !line.starts_with("Environment="))
@@ -10694,8 +10791,11 @@ mod tests {
         ));
         assert!(!unit.contains("--bind="));
         assert!(!unit.contains("--port="));
-        // The PAT rides in an Environment= line (the unit is written 0600).
+        // The PAT rides in an Environment= line (the unit is written 0600),
+        // and the endpoint rides one too, so the terminals this service spawns
+        // inherit it and can run their own `chan devserver` verbs.
         assert!(unit.contains("Environment=\"CHAN_TUNNEL_TOKEN=chan_pat_abc123\"\n"));
+        assert!(unit.contains("Environment=\"CHAN_TUNNEL_URL=https://usr.chan.app/v1/tunnel\"\n"));
         // The systemd fdstore scaffold is unchanged from the non-tunnel unit.
         assert!(unit.contains("Type=notify"));
         assert!(unit.contains("NotifyAccess=main"));
@@ -10769,95 +10869,359 @@ mod tests {
         assert!(token_env < exec);
     }
 
+    /// A systemd tunnel spec reduced to the fields a case is actually about:
+    /// the token/endpoint the CLI supplied, the two mode flags, and the
+    /// installed unit. Address and name pins keep their own tests.
+    fn tunnel_spec_for(
+        token: Option<&str>,
+        url: Option<&str>,
+        force: bool,
+        no_tunnel: bool,
+        unit: Option<&str>,
+    ) -> Result<Option<SystemdTunnel>> {
+        supervised_tunnel_spec(
+            ServiceKind::Systemd,
+            token.map(str::to_owned),
+            url.map(str::to_owned),
+            None,
+            force,
+            no_tunnel,
+            None,
+            None,
+            unit,
+        )
+    }
+
+    /// A tunnel unit as the supervisor writes one: the PAT and the endpoint in
+    /// the 0600 environment, the endpoint also in the ExecStart the service
+    /// dials, and one explicit port pin.
+    const INSTALLED_TUNNEL_UNIT: &str = "Environment=\"CHAN_TUNNEL_TOKEN=chan_pat_installed\"\n\
+         Environment=\"CHAN_TUNNEL_URL=https://first-run.test/v1/tunnel\"\n\
+         ExecStart=/home/dev/.local/bin/chan devserver --port=9000 \
+         --tunnel-url=https://first-run.test/v1/tunnel\n";
+
     #[test]
     fn supervised_tunnel_spec_reuses_persisted_url_unless_forced() {
-        // No token -> no tunnel spec (non-tunnel supervised restart).
-        assert!(supervised_tunnel_spec(
-            ServiceKind::Systemd,
-            None,
-            "https://cli.test".into(),
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
-        .is_none());
+        // Nothing anywhere -> no tunnel spec (non-tunnel supervised restart).
+        assert!(
+            tunnel_spec_for(None, Some("https://cli.test"), false, false, None)
+                .unwrap()
+                .is_none()
+        );
         // launchd never gets a tunnel spec (its tunnel mode is refused upstream).
         assert!(supervised_tunnel_spec(
             ServiceKind::Launchd,
             Some("chan_pat_a".into()),
-            "https://cli.test".into(),
+            Some("https://cli.test".into()),
             None,
+            false,
             false,
             None,
             None,
             None,
         )
+        .unwrap()
         .is_none());
         // With a token, --force takes the CLI URL (a "refresh"); with no unit
         // and no flags there is nothing to pin.
-        let spec = supervised_tunnel_spec(
-            ServiceKind::Systemd,
-            Some("chan_pat_a".into()),
-            "https://cli.test".into(),
-            None,
+        let spec = tunnel_spec_for(
+            Some("chan_pat_a"),
+            Some("https://cli.test"),
             true,
-            None,
-            None,
+            false,
             None,
         )
+        .unwrap()
         .unwrap();
         assert_eq!(spec.token, "chan_pat_a");
         assert_eq!(spec.url, "https://cli.test");
         assert_eq!(spec.pinned_bind, None);
         assert_eq!(spec.pinned_port, None);
         // A flagless restart reuses the persisted unit's URL and pins.
-        let unit = "ExecStart=/home/dev/.local/bin/chan devserver --port=9000 \
-                    --tunnel-url=https://first-run.test/v1/tunnel\n";
-        let spec = supervised_tunnel_spec(
-            ServiceKind::Systemd,
-            Some("chan_pat_a".into()),
-            "https://cli.test".into(),
-            None,
+        let spec = tunnel_spec_for(
+            Some("chan_pat_a"),
+            Some("https://cli.test"),
             false,
-            None,
-            None,
-            Some(unit),
+            false,
+            Some(INSTALLED_TUNNEL_UNIT),
         )
+        .unwrap()
         .unwrap();
         assert_eq!(spec.url, "https://first-run.test/v1/tunnel");
         assert_eq!(spec.pinned_bind, None);
         assert_eq!(spec.pinned_port, Some(9000));
         // --force refreshes the URL from the CLI but keeps the pins: the
         // `--port` help contract is omit = preserve, force or not.
-        let spec = supervised_tunnel_spec(
-            ServiceKind::Systemd,
-            Some("chan_pat_a".into()),
-            "https://cli.test".into(),
-            None,
+        let spec = tunnel_spec_for(
+            Some("chan_pat_a"),
+            Some("https://cli.test"),
             true,
-            None,
-            None,
-            Some(unit),
+            false,
+            Some(INSTALLED_TUNNEL_UNIT),
         )
+        .unwrap()
         .unwrap();
         assert_eq!(spec.url, "https://cli.test");
         assert_eq!(spec.pinned_port, Some(9000));
+        // --force with no CLI endpoint still falls back to the unit's rather
+        // than failing: "refresh" means prefer the CLI, not require it.
+        let spec = tunnel_spec_for(
+            Some("chan_pat_a"),
+            None,
+            true,
+            false,
+            Some(INSTALLED_TUNNEL_UNIT),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(spec.url, "https://first-run.test/v1/tunnel");
         // An explicit CLI flag pins over anything persisted.
         let spec = supervised_tunnel_spec(
             ServiceKind::Systemd,
             Some("chan_pat_a".into()),
-            "https://cli.test".into(),
+            Some("https://cli.test".into()),
             None,
+            false,
             false,
             Some("0.0.0.0".parse().unwrap()),
             Some(9100),
-            Some(unit),
+            Some(INSTALLED_TUNNEL_UNIT),
         )
+        .unwrap()
         .unwrap();
         assert_eq!(spec.pinned_bind, Some("0.0.0.0".parse().unwrap()));
         assert_eq!(spec.pinned_port, Some(9100));
+    }
+
+    #[test]
+    fn supervised_tunnel_spec_recovers_the_pat_from_the_installed_unit() {
+        // The regression this guards: a `--restart` typed in a shell that
+        // carries NEITHER the token nor the endpoint. The unit is the only
+        // store for both, so the restart must come back as the same tunnel
+        // registration -- not as a local devserver whose unit rewrite would
+        // destroy the only copy of the PAT.
+        let spec = tunnel_spec_for(None, None, false, false, Some(INSTALLED_TUNNEL_UNIT))
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.token, "chan_pat_installed");
+        assert_eq!(spec.url, "https://first-run.test/v1/tunnel");
+        assert_eq!(spec.pinned_port, Some(9000));
+        // An explicit token still wins: that is how a rotated PAT is installed.
+        let spec = tunnel_spec_for(
+            Some("chan_pat_rotated"),
+            None,
+            false,
+            false,
+            Some(INSTALLED_TUNNEL_UNIT),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(spec.token, "chan_pat_rotated");
+        // --force is about destructiveness and endpoint refresh; it must NOT
+        // turn a restart into a silent tunnel teardown.
+        let spec = tunnel_spec_for(None, None, true, false, Some(INSTALLED_TUNNEL_UNIT))
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.token, "chan_pat_installed");
+        // --no-tunnel is the deliberate way back to a local devserver, and it
+        // overrides an explicit token as well as the persisted one.
+        assert!(
+            tunnel_spec_for(None, None, false, true, Some(INSTALLED_TUNNEL_UNIT))
+                .unwrap()
+                .is_none()
+        );
+        assert!(tunnel_spec_for(
+            Some("chan_pat_a"),
+            Some("https://cli.test"),
+            false,
+            true,
+            Some(INSTALLED_TUNNEL_UNIT),
+        )
+        .unwrap()
+        .is_none());
+        // A non-tunnel unit stays non-tunnel: there is no token to recover.
+        let local = "ExecStart=/usr/bin/chan devserver --bind=127.0.0.1 --port=8787\n";
+        assert!(tunnel_spec_for(None, None, false, false, Some(local))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn supervised_tunnel_spec_errs_when_no_source_names_an_endpoint() {
+        // A token with no endpoint from either source is the one case that
+        // fails -- loudly, because the alternative is rewriting the unit
+        // without the PAT it is the only store for.
+        let no_url = "Environment=\"CHAN_TUNNEL_TOKEN=chan_pat_installed\"\n\
+                      ExecStart=/usr/bin/chan devserver --bind=127.0.0.1 --port=8787\n";
+        // Matched rather than unwrap_err()'d: SystemdTunnel carries a PAT and
+        // so implements no Debug, which is worth keeping.
+        let Err(error) = tunnel_spec_for(None, None, false, false, Some(no_url)) else {
+            panic!("a persisted token with no resolvable endpoint must fail");
+        };
+        assert_eq!(error.to_string(), MISSING_TUNNEL_URL);
+        // The CLI can supply the endpoint the unit lacks.
+        let spec = tunnel_spec_for(None, Some("https://cli.test"), false, false, Some(no_url))
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.token, "chan_pat_installed");
+        assert_eq!(spec.url, "https://cli.test");
+        // And --no-tunnel converts that unit rather than erroring on it.
+        assert!(tunnel_spec_for(None, None, false, true, Some(no_url))
+            .unwrap()
+            .is_none());
+    }
+
+    /// The whole unit an unpinned tunnel devserver installs, asserted as text
+    /// rather than by `contains`, because this exact byte sequence is the
+    /// contract: a `--restart` that renders something else classifies the
+    /// installed unit as changed and rewrites it. Provisioning that writes a
+    /// unit by hand has to match this to be left alone.
+    #[test]
+    fn devserver_systemd_unit_tunnel_renders_the_whole_unit() {
+        let tunnel = SystemdTunnel {
+            token: "chan_pat_abc123".to_string(),
+            url: "https://usr.chan.app/v1/tunnel".to_string(),
+            pinned_bind: None,
+            pinned_port: None,
+            pinned_name: None,
+        };
+        let unit = devserver_systemd_unit(
+            Path::new("/home/dev/.local/bin/chan"),
+            "127.0.0.1:8787".parse().unwrap(),
+            None,
+            Some(&tunnel),
+        );
+        assert_eq!(
+            unit,
+            "[Unit]\n\
+             Description=chan devserver\n\
+             After=network.target\n\
+             \n\
+             [Service]\n\
+             Type=notify\n\
+             NotifyAccess=main\n\
+             FileDescriptorStoreMax=512\n\
+             KillMode=process\n\
+             Environment=\"CHAN_TUNNEL_TOKEN=chan_pat_abc123\"\n\
+             Environment=\"CHAN_TUNNEL_URL=https://usr.chan.app/v1/tunnel\"\n\
+             ExecStart=/home/dev/.local/bin/chan devserver \
+             --tunnel-url=https://usr.chan.app/v1/tunnel\n\
+             TimeoutStartSec=10min\n\
+             Restart=on-failure\n\
+             WatchdogSec=30\n\
+             \n\
+             [Install]\n\
+             WantedBy=default.target\n"
+        );
+    }
+
+    #[test]
+    fn unsupervised_tunnel_still_demands_an_endpoint_up_front() {
+        // Making the endpoint requirement lazy must not make it optional. The
+        // foreground and `chan` backends persist no unit to recover one from,
+        // so for them the refusal fires exactly where it always did.
+        let Err(error) = build_devserver_tunnel(Some("chan_pat_a".into()), None, None) else {
+            panic!("a token with no endpoint must fail on the unsupervised path");
+        };
+        assert_eq!(error.to_string(), MISSING_TUNNEL_URL);
+        // No token is not tunnel mode, endpoint or not.
+        assert!(build_devserver_tunnel(None, None, None).unwrap().is_none());
+        assert!(
+            build_devserver_tunnel(None, Some("https://cli.test".into()), None)
+                .unwrap()
+                .is_none()
+        );
+        // Token plus endpoint resolves as before.
+        let tunnel = build_devserver_tunnel(
+            Some("chan_pat_a".into()),
+            Some("https://cli.test".into()),
+            Some("office box"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(tunnel.tunnel_url, "https://cli.test");
+        assert_eq!(tunnel.token, "chan_pat_a");
+        assert_eq!(tunnel.name, "office box");
+    }
+
+    #[test]
+    fn persisted_tunnel_readers_round_trip_a_rendered_unit() {
+        // The read side against what the write side actually produces, so the
+        // two cannot drift: every field a flagless restart depends on comes
+        // back out of a rendered unit.
+        let tunnel = SystemdTunnel {
+            token: "chan_pat_round_trip".to_string(),
+            url: "https://usr.chan.app/v1/tunnel".to_string(),
+            pinned_bind: Some("0.0.0.0".parse().unwrap()),
+            pinned_port: Some(9000),
+            pinned_name: Some("office box".to_string()),
+        };
+        let unit = devserver_systemd_unit(
+            Path::new("/home/dev/.local/bin/chan"),
+            "0.0.0.0:9000".parse().unwrap(),
+            None,
+            Some(&tunnel),
+        );
+        assert_eq!(
+            persisted_tunnel_token(&unit),
+            Some("chan_pat_round_trip".to_string())
+        );
+        assert_eq!(
+            persisted_tunnel_url(&unit),
+            Some("https://usr.chan.app/v1/tunnel".to_string())
+        );
+        assert_eq!(
+            persisted_tunnel_pins(&unit),
+            (Some("0.0.0.0".parse().unwrap()), Some(9000))
+        );
+        assert_eq!(persisted_tunnel_name(&unit), Some("office box".to_string()));
+        // Feeding that unit back through the resolver with an empty CLI
+        // reproduces the spec it was rendered from -- the restart round trip.
+        let spec = tunnel_spec_for(None, None, false, false, Some(&unit))
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.token, tunnel.token);
+        assert_eq!(spec.url, tunnel.url);
+        assert_eq!(spec.pinned_bind, tunnel.pinned_bind);
+        assert_eq!(spec.pinned_port, tunnel.pinned_port);
+        assert_eq!(spec.pinned_name, tunnel.pinned_name);
+        // Re-rendering from the recovered spec is byte-identical, so a restart
+        // that changes nothing leaves the unit (and its PAT) untouched.
+        let rerendered = devserver_systemd_unit(
+            Path::new("/home/dev/.local/bin/chan"),
+            "0.0.0.0:9000".parse().unwrap(),
+            None,
+            Some(&spec),
+        );
+        assert_eq!(rerendered, unit);
+    }
+
+    #[test]
+    fn persisted_tunnel_url_falls_back_to_the_environment_copy() {
+        // A unit provisioned with the endpoint only in the environment (no
+        // ExecStart flag) is still a tunnel unit: its pins and name read, and
+        // a flagless restart resolves the endpoint.
+        let env_only = "Environment=\"CHAN_TUNNEL_TOKEN=chan_pat_a\"\n\
+                        Environment=\"CHAN_TUNNEL_URL=https://env.test/v1/tunnel\"\n\
+                        Environment=\"CHAN_TUNNEL_DEVSERVER_NAME=env box\"\n\
+                        ExecStart=/usr/bin/chan devserver --port=9100\n";
+        assert_eq!(
+            persisted_tunnel_url(env_only),
+            Some("https://env.test/v1/tunnel".to_string())
+        );
+        assert_eq!(persisted_tunnel_pins(env_only), (None, Some(9100)));
+        assert_eq!(persisted_tunnel_name(env_only), Some("env box".to_string()));
+        // The ExecStart flag is what the service dials, so it wins when both
+        // are present.
+        let both = "Environment=\"CHAN_TUNNEL_URL=https://env.test/v1/tunnel\"\n\
+                    ExecStart=/usr/bin/chan devserver --tunnel-url=https://exec.test/v1/tunnel\n";
+        assert_eq!(
+            persisted_tunnel_url(both),
+            Some("https://exec.test/v1/tunnel".to_string())
+        );
+        // No endpoint anywhere: not a tunnel unit, so nothing pins.
+        let local = "ExecStart=/usr/bin/chan devserver --bind=127.0.0.1 --port=8787\n";
+        assert_eq!(persisted_tunnel_url(local), None);
     }
 
     #[test]
@@ -11017,43 +11381,41 @@ mod tests {
                     ExecStart=/usr/bin/chan devserver \
                     --tunnel-url=https://first-run.test/v1/tunnel\n";
         // A flagless restart carries the persisted name over.
-        let spec = supervised_tunnel_spec(
-            ServiceKind::Systemd,
-            Some("chan_pat_a".into()),
-            "https://cli.test".into(),
-            None,
+        let spec = tunnel_spec_for(
+            Some("chan_pat_a"),
+            Some("https://cli.test"),
             false,
-            None,
-            None,
+            false,
             Some(unit),
         )
+        .unwrap()
         .unwrap();
         assert_eq!(spec.pinned_name, Some("persisted name".to_string()));
         // An explicit flag (trimmed) pins over the persisted value.
         let spec = supervised_tunnel_spec(
             ServiceKind::Systemd,
             Some("chan_pat_a".into()),
-            "https://cli.test".into(),
+            Some("https://cli.test".into()),
             Some("  new name  "),
+            false,
             false,
             None,
             None,
             Some(unit),
         )
+        .unwrap()
         .unwrap();
         assert_eq!(spec.pinned_name, Some("new name".to_string()));
         // No flag, no unit: nothing pins; the service resolves its
         // hostname default at runtime.
-        let spec = supervised_tunnel_spec(
-            ServiceKind::Systemd,
-            Some("chan_pat_a".into()),
-            "https://cli.test".into(),
-            None,
+        let spec = tunnel_spec_for(
+            Some("chan_pat_a"),
+            Some("https://cli.test"),
+            false,
             false,
             None,
-            None,
-            None,
         )
+        .unwrap()
         .unwrap();
         assert_eq!(spec.pinned_name, None);
     }

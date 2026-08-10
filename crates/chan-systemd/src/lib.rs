@@ -98,7 +98,10 @@ impl DevserverUnit {
                 let (key, _) = value.split_once('=')?;
                 if !matches!(
                     key,
-                    "CHAN_HOME" | "CHAN_TUNNEL_TOKEN" | "CHAN_TUNNEL_DEVSERVER_NAME"
+                    "CHAN_HOME"
+                        | "CHAN_TUNNEL_TOKEN"
+                        | "CHAN_TUNNEL_URL"
+                        | "CHAN_TUNNEL_DEVSERVER_NAME"
                 ) || environment_keys.contains(&key)
                 {
                     return None;

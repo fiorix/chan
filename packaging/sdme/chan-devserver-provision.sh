@@ -222,8 +222,19 @@ install -d -o "$USER_NAME" -g "$USER_NAME" -m 755 \
   "$HOME_DIR/.config" "$HOME_DIR/.config/systemd"
 install -d -o "$USER_NAME" -g "$USER_NAME" -m 700 "$UNIT_DIR"
 
+# The endpoint rides the environment as well as the ExecStart flag, matching
+# what chan's own unit renderer writes: the flag is what this service dials,
+# the variable is what the terminals it spawns inherit, so `chan devserver`
+# verbs typed inside the workspace resolve the same gateway instead of asking
+# for an endpoint. Absent an endpoint neither appears, so the line carries its
+# own trailing newline and expands to nothing at all.
 EXEC="$CHAN_BIN devserver"
-[ -n "$TUNNEL_URL" ] && EXEC="$EXEC --tunnel-url=$TUNNEL_URL"
+TUNNEL_URL_ENV=""
+if [ -n "$TUNNEL_URL" ]; then
+  EXEC="$EXEC --tunnel-url=$TUNNEL_URL"
+  TUNNEL_URL_ENV="Environment=\"CHAN_TUNNEL_URL=$TUNNEL_URL\"
+"
+fi
 
 ( umask 077; cat > "$UNIT" <<EOF
 [Unit]
@@ -236,7 +247,7 @@ NotifyAccess=main
 FileDescriptorStoreMax=512
 KillMode=process
 Environment="CHAN_TUNNEL_TOKEN=$TOKEN"
-ExecStart=$EXEC
+${TUNNEL_URL_ENV}ExecStart=$EXEC
 TimeoutStartSec=10min
 Restart=on-failure
 WatchdogSec=30

@@ -287,6 +287,12 @@ CAVEATS:
   box with no systemd, `auto` errors and points at --service=chan.
   Tunnel mode (--tunnel-token) is refused under --service=launchd,
   because the plist would persist the token at 0644.
+  A --service=systemd tunnel unit is the ONLY store for its PAT, so
+  --start/--restart/--join reuse the token, endpoint and name it
+  already carries; supply a token to rotate it, or --no-tunnel to
+  convert the service back to a local devserver. The unit also
+  exports CHAN_TUNNEL_URL, so the terminals the devserver spawns
+  can run these verbs without naming an endpoint.
   Omitting --bind/--port on --restart/--join preserves the running
   service's address instead of reverting to defaults.
   `chan open <URL>` registers a devserver with chan-desktop and
