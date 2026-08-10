@@ -14,7 +14,7 @@ packaging/desktop/build-dmg.sh: line 44:
 make[1]: *** [app-notarized] Error 127
 ```
 
-`DMG_VENV` defaults to `target/dmg-venv` (`desktop/Makefile:19`) and the job runs `Swatinem/rust-cache@v2` over `target/`, so the venv is cached between runs. The dry run created it fresh and passed; the tagged run restored it and died. Same commit, same workflow, different cache. The guard tested only for `dmgbuild`, and `python3 -m venv` over a directory that already has a `pyvenv.cfg` reuses it and skips `ensurepip`, so `bin/pip` was never recreated.
+`DMG_VENV` defaults to `target/dmg-venv` (its `DMG_VENV ?=` line in `desktop/Makefile`) and the job runs `Swatinem/rust-cache@v2` over `target/`, so the venv is cached between runs. The dry run created it fresh and passed; the tagged run restored it and died. Same commit, same workflow, different cache. The guard tested only for `dmgbuild`, and `python3 -m venv` over a directory that already has a `pyvenv.cfg` reuses it and skips `ensurepip`, so `bin/pip` was never recreated.
 
 ## What was already fixed, and what it does not fix
 
@@ -62,7 +62,7 @@ The shipped guard says "reuse" on the second row. So the class was live at round
 
 ### The enumeration the acceptance asks for
 
-`release.yml` has eight `Swatinem/rust-cache@v2` uses, all caching the `chan` workspace's `target/`: lines 117, 163, 233, 313, 388, 408, 450, 605.
+`release.yml` has eight `Swatinem/rust-cache@v2` uses, all caching the `chan` workspace's `target/`, one in each of the eight jobs named in the table below. The job name is the anchor; the line numbers in that table are indicative and will drift.
 
 Method, so it can be re-run: `grep -rn "Swatinem/rust-cache\|actions/cache" .github/workflows/` for the cache sites, then `grep -rn "target/" .github/workflows/` and `grep -rn "venv\|cargo install\|pip install\|npm install -g\|CARGO_TARGET_DIR" packaging/ scripts/ desktop/Makefile Makefile .github/workflows/` for what is written there. Its blind spot: a tool staged under `target/` by a path assembled at runtime, or by a third-party action, is invisible to a lexical search.
 
@@ -79,8 +79,8 @@ Method, so it can be re-run: `grep -rn "Swatinem/rust-cache\|actions/cache" .git
 
 Two tool paths exist, and only one of them was known:
 
-1. **`target/dmg-venv`** (`desktop/Makefile:19`, `packaging/desktop/build-dmg.sh`) -- the known instance, live as shown above.
-2. **`target/tauri-cli`** (`desktop/Makefile:11`, installed with `cargo install --root` behind a presence check) -- the second instance, and it is **latent rather than live**. Every job that runs a desktop make target installs tauri-cli globally through `taiki-e/install-action@v2` first (`release.yml` 336/472/615, `release-desktop.yml` 71, `ci.yml` 59/95/126), so the Makefile's own install never fires and the directory is never created or cached. What makes it worth fixing anyway is that `TAURI := PATH="$(TAURI_CLI_ROOT)/bin:$$PATH" cargo tauri` prepends that directory unconditionally: it is a no-op only because the directory does not exist. Populated and cached once, a restored copy silently outranks the pinned tool a job just installed, and `TAURI_CLI_VERSION` is applied at install time only, so a restored one is never re-checked. That failure presents as a wrong tauri-cli version rather than a missing file, which is harder to read than the 127 it resembles.
+1. **`target/dmg-venv`** (the `DMG_VENV ?=` line in `desktop/Makefile`, and `packaging/desktop/build-dmg.sh`) -- the known instance, live as shown above.
+2. **`target/tauri-cli`** (the `TAURI_CLI_ROOT :=` line in `desktop/Makefile`, installed with `cargo install --root` behind a presence check) -- the second instance, and it is **latent rather than live**. Every job that runs a desktop make target installs tauri-cli globally through `taiki-e/install-action@v2` first (`release.yml` 336/472/615, `release-desktop.yml` 71, `ci.yml` 59/95/126), so the Makefile's own install never fires and the directory is never created or cached. What makes it worth fixing anyway is that `TAURI := PATH="$(TAURI_CLI_ROOT)/bin:$$PATH" cargo tauri` prepends that directory unconditionally: it is a no-op only because the directory does not exist. Populated and cached once, a restored copy silently outranks the pinned tool a job just installed, and `TAURI_CLI_VERSION` is applied at install time only, so a restored one is never re-checked. That failure presents as a wrong tauri-cli version rather than a missing file, which is harder to read than the 127 it resembles.
 
 ### What changed
 
@@ -101,7 +101,8 @@ Two tool paths exist, and only one of them was known:
 Recorded because it is a real observation about release tooling and it was found by this
 audit, not because it belongs to this item. Registered for v0.89.0 instead.
 
-`packaging/nix/build-with-sdme.sh:205-209` creates its disposable container with neither
+`packaging/nix/build-with-sdme.sh` creates its disposable container, at its
+`"${SDME_CMD[@]}" new --name "$CONTAINER"` invocation, with neither
 `--disk` nor `--storage`. `sdme new --help` gives the mechanism: `--disk <DISK>  Disk cap
 for the container root, **btrfs storage only**`, and `--storage <BACKEND> ... (default:
 auto)`, with its own example pairing them. So the driver's containers are uncapped, and

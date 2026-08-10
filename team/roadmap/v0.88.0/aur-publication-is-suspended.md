@@ -24,7 +24,7 @@ Delete the `false &&` line from each of the three `if:` blocks. Nothing else. Th
 
 ## The check that does not protect this
 
-`scripts/check-build-matrix.py:286` requires the literal string `aur-validate:` to appear in this workflow, and `Makefile:211` runs it inside the gate. `require` is a plain substring test, `if needle not in haystack`.
+`scripts/check-build-matrix.py` requires the literal string `aur-validate:` to appear in this workflow, and the `build-matrix-check` target in `Makefile` runs it inside the gate. `require` is a plain substring test, `if needle not in haystack`.
 
 So a green `make build-matrix-check` is not evidence the AUR chain is intact. Deleting the jobs turns it red, which is the useful half; but commenting them out leaves `# aur-validate:` in the file and the check stays green while the thing it exists to protect is gone. Whoever restores publication should not read that check as confirmation that they restored it correctly.
 
@@ -46,7 +46,7 @@ The mechanism actually chosen was verified independently of that check, and the 
 
 ## Re-verified 2026-08-07
 
-The three guards are intact in their wrapped form (`publish-downstream.yml` lines 403, 461, 502) and `aur-validate` remains a hard `needs` of `aur-publish` (line 510). The restoration condition is not met: the news index shows nothing newer about the incident, and the only follow-up anywhere is a 2026-07-23 community post on aur-requests stating the compromised packages were cleaned, which is exactly the half-notice this item already rules insufficient. The item stays blocked and carries no v0.86.0 round work beyond re-checking the news page.
+The three guards are intact in their wrapped form (the three `false &&` lines in `publish-downstream.yml`, one per AUR job) and `aur-validate` remains a hard `needs` of `aur-publish` (its `needs: [aur-auth, aur-validate]`). The restoration condition is not met: the news index shows nothing newer about the incident, and the only follow-up anywhere is a 2026-07-23 community post on aur-requests stating the compromised packages were cleaned, which is exactly the half-notice this item already rules insufficient. The item stays blocked and carries no v0.86.0 round work beyond re-checking the news page.
 
 ## Re-verified 2026-08-10, during the v0.88.0 delivery round
 

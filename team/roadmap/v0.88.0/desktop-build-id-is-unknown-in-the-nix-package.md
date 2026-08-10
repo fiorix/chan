@@ -9,11 +9,11 @@ crate from the one that lane owns.
 
 `CHAN_DESKTOP_BUILD_ID` shipped in v0.86.0 to make a chan-desktop build identifiable at
 runtime, after the v0.85.0 round lost an acceptance cycle to exactly that ambiguity. It
-is derived in `desktop/src-tauri/build.rs:14-30` from `git rev-parse --short=12 HEAD`
+is derived in `desktop/src-tauri/build.rs` (`emit_build_id`) from `git rev-parse --short=12 HEAD`
 plus a `-dirty` suffix, falling back to the string `"unknown"` when the build happens
 outside a git checkout.
 
-That fallback fires in the Nix path. `flake.nix:48` passes `src = self` to
+That fallback fires in the Nix path. `flake.nix` passes `src = self` to
 `packaging/nix/chan-desktop.nix`, and the flake source in the Nix store has no `.git`, so
 `nix build .#chan-desktop` stamps `unknown` in a package users install.
 
@@ -22,7 +22,7 @@ so `nix run github:fiorix/chan` is the desktop, and the flake's `nixConfig` bloc
 publishes the closure to `chan.cachix.org` for consumers who accept it.
 
 **Scope precision — the other desktop packages are NOT affected.** The AppImage, deb, and
-dmg path builds through `actions/checkout@v6` (`.github/workflows/release-desktop.yml:34`),
+dmg path builds through `actions/checkout@v6` (`.github/workflows/release-desktop.yml`, its `uses: actions/checkout@v6` step),
 which leaves a real `.git`, so the git fallback stamps a true id there. This item is about
 the Nix-built package specifically; a flat "the shipped desktop build id is unknown" would
 be wrong for the packages most users install.
@@ -36,9 +36,9 @@ The Nix desktop package is affected twice, and whoever picks this up should not 
 2. **`bin/chan` in that same package** reports an `unknown` build id too, even after the
    v0.87.0 `devserver-build-identity` work lands. `packaging/nix/chan-desktop.nix` builds
    with `cargoBuildFlags = ["-p" "chan-desktop"]`, which links the `chan` CLI in (the
-   binary is multi-call: `desktop/src-tauri/src/main.rs:4838-4852` dispatches the whole
-   `chan` CLI when argv[0]'s stem is `chan`), and `postInstall:80-81` symlinks
-   `bin/chan` and `bin/cs` at it. Because `chan-desktop.nix` takes no `buildId` argument,
+   binary is multi-call: `desktop/src-tauri/src/main.rs` (`run_as_chan_if_requested`) dispatches the whole
+   `chan` CLI when argv[0]'s stem is `chan`), and its `postInstall` symlinks
+   `bin/chan` and `bin/cs` at it (`ln -s chan-desktop "$out/bin/chan"`). Because `chan-desktop.nix` takes no `buildId` argument,
    the `chan` crate's build script runs with no override inside that derivation and falls
    through to its own `unknown` branch.
 
@@ -63,7 +63,7 @@ Same mechanism, same string, same cause as the server-side gap that item exists 
 
 The container observation on its own proves only that a no-`.git` build stamps `unknown`,
 which is the documented best-effort behaviour rather than a defect. What makes it a
-shipped-package defect is `flake.nix:48` passing `src = self`: the release path is itself
+shipped-package defect is `flake.nix` passing `src = self` in the `chan-desktop` `callPackage`: the release path is itself
 a no-`.git` build. That step, and the `bin/chan` second surface above, are code readings
 rather than executed Nix builds, and should be confirmed by building `.#chan-desktop` and
 reading both ids out of the package before the fix is designed.
@@ -122,7 +122,10 @@ characters, and only one can be looked up in the history. Nothing parses the str
 ### The surface that did not exist
 
 Proving the app's own id needed a headless reader. `CHAN_DESKTOP_BUILD_ID` had exactly
-three consumers (`main.rs` 4685, 5129, 6724): a Tauri IPC command, a `tracing` line
+three consumers, all in `main.rs` and named rather than numbered because this
+item's own change moved two of them: `native_vocabulary`'s `build:` field, the
+`"chan-desktop starting"` tracing line, and `open_about_window`'s `let build =`.
+A Tauri IPC command, a `tracing` line
 emitted once the GUI is up, and the About window. All three need a display; the Nix
 smoke runs in a container. So `chan-desktop --version` now prints the version and id and
 exits, sequenced **after** the `chan` and `cs` stem probes.
