@@ -21,7 +21,7 @@ It is a shipped path, not a corner: `flake.nix` sets `packages.default = chan-de
 so `nix run github:fiorix/chan` is the desktop, and the flake's `nixConfig` block
 publishes the closure to `chan.cachix.org` for consumers who accept it.
 
-**Scope precision — the other desktop packages are NOT affected.** The AppImage, deb, and
+**Scope precision: the other desktop packages are NOT affected.** The AppImage, deb, and
 dmg path builds through `actions/checkout@v6` (`.github/workflows/release-desktop.yml`, its `uses: actions/checkout@v6` step),
 which leaves a real `.git`, so the git fallback stamps a true id there. This item is about
 the Nix-built package specifically; a flat "the shipped desktop build id is unknown" would
@@ -43,7 +43,7 @@ The Nix desktop package is affected twice, and whoever picks this up should not 
    through to its own `unknown` branch.
 
 So after v0.87.0 a user who installs `#chan` gets a real id, while a user who installs the
-desktop package — the flake default — gets `unknown` from both `chan-desktop` and the
+desktop package, the flake default, gets `unknown` from both `chan-desktop` and the
 `chan` it ships. Same argument threaded to a second derivation, but a second surface.
 
 The v0.87.0 fix does not reach either: `CHAN_DESKTOP_BUILD_ID` comes from a separate build
@@ -97,7 +97,7 @@ The Nix smoke deliberately excludes `chan-desktop` from the build-id assertion a
 - `bin/chan` from that same package reports a real build id.
 - Two `.#chan-desktop` builds from different commits are distinguishable by that id.
 - The check is enforced rather than eyeballed once, the way the server-side item wires its
-  assertion into `scripts/smoke-nix-package.sh` — which already smokes both packages, so
+  assertion into `scripts/smoke-nix-package.sh`, which already smokes both packages, so
   the hook exists.
 
 ## Implemented 2026-08-10 (v0.88.0)
