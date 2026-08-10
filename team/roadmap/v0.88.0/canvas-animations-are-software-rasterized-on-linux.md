@@ -116,4 +116,16 @@ A genuine slow arm exits 1 and names the animation and its fps.
 
 ## Rough size
 
-Done, minus that one verification pass. Confirming the point cloud on a real GPU is small: run the four animations it hosts on the same hardware the vortex was measured on and read the frame rate.
+Done, minus that one verification pass, and the pass is now a single command on
+a machine with a GPU.
+
+This paragraph used to read "run the four animations it hosts on the same
+hardware the vortex was measured on and read the frame rate". That is left here
+in corrected form rather than silently rewritten, because it contained the
+error the rest of this item is about: **"the same hardware the vortex was
+measured on" is not a thing the record identifies.** The vortex's hardware is
+recorded as a phrase that a pure-software stack also satisfies, so an
+instruction to reproduce its conditions could not be followed.
+
+What replaces it is not four animations on remembered hardware but seven plus a
+baseline, on a machine the instrument names in its own output.

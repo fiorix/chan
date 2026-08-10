@@ -49,7 +49,7 @@ The [terminal grid rendering](../../../scripts/e2e/scenarios/terminal-grid-rende
 
 ## What remains
 
-The residual is a live defect on the platform chan develops on, and it has a named blocker. WebGL is the only alternative xterm renderer available (`@xterm/addon-canvas` peer-depends on xterm 5 and installing it silently pulls the core back to 5.5.0), and WebGL is off on Linux because of a present stall whose current reproducibility is itself unmeasured: a separate probe found five idle writes out of five presented on WebKitGTK 2.52.5 in a bare webview, which is evidence against the stall but not against an intermittent fault in the Tauri shell.
+The residual is a live defect on the platform chan develops on, and it has a named blocker. WebGL is the only alternative xterm renderer available (`@xterm/addon-canvas` peer-depends on xterm 5 and installing it silently pulls the core back to 5.5.0), and WebGL is off on Linux because of a present stall whose current reproducibility is itself unmeasured: a separate probe found five idle writes out of five presented on WebKitGTK 2.52.5 in a bare webview, which is evidence against the stall but not against an intermittent fault in the Tauri shell. (Weaker than it reads, and for a second reason found later: that probe ran with the dma-buf renderer **on**, which is not the configuration the shipped AppImage uses. See "Every reading so far has an uncontrolled variable in it" below before treating it as evidence of anything.)
 
 So the next move is to establish whether that stall still reproduces, because if it does not, turning WebGL on for the Linux desktop closes the residual outright. This deserves its own item once someone picks it up; it is recorded here rather than split off because the measurement that would settle it is the instrument this item just built.
 
@@ -136,4 +136,16 @@ a verdict from it is a verdict its own failure paths have been tested against.
 
 ## Rough size
 
-Done for the two defects and the instrument. The residual is small if the WebGL present stall has gone away, and unbounded if it has not.
+Done for the two defects and for the pixel instrument this item built.
+
+The residual now splits in two, which it did not when this was written.
+**Answering the question is bounded**: roughly fifteen minutes of machine time
+on a Linux desktop with a GPU and an Xorg session, using an instrument that
+exists and whose every branch has been exercised. It used to be unbounded
+because nobody could tell what it would take to find out.
+
+**Acting on the answer is still unbounded if the stall reproduces.** That has
+not changed and should not be read as having changed by the measurement getting
+cheap. If it does not reproduce, turning WebGL on for the Linux desktop closes
+the residual outright and the whole thing is a one-line change plus whatever
+@@Smokes' browser checks then observe differently.
