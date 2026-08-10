@@ -10,13 +10,13 @@ not lost.
 
 While a recovery pass runs, the boot overlay locks and the workspace is unusable. That is
 correct-by-design for a pass that is progressing, and it was the only sane behaviour while
-a stalled pass and a running pass were indistinguishable — which is the defect the
+a stalled pass and a running pass were indistinguishable -- which is the defect the
 `gitignore-write-strands-the-workspace-in-recovering` item fixes.
 
 Once a stalled pass is distinguishable from a running one, the question reopens: should a
 **running** pass lock the workspace at all? A reconcile over a large tree is not
-instantaneous, and everything the user wants to do meanwhile — read a file, use a terminal,
-edit — needs no index. Only search does.
+instantaneous, and everything the user wants to do meanwhile -- read a file, use a terminal,
+edit -- needs no index. Only search does.
 
 The narrower reading of that item's contract line ("a workspace never presents a locked
 boot overlay for a recovery pass that has no worker assigned to it") is satisfied by making
@@ -33,7 +33,7 @@ in `web/packages/workspace-app/`, which was another lane's surface in that round
 
 What shipped instead is strictly better than the prior behaviour under either reading: the
 stall is stated rather than silent, and it carries a `needs_decision` step offering
-"Rebuild the search index" — an escape that previously existed only as an out-of-band
+"Rebuild the search index" -- an escape that previously existed only as an out-of-band
 `POST /api/index/rebuild` with a token dug out of the devserver config.
 
 ## Contract
@@ -50,7 +50,7 @@ stall is stated rather than silent, and it carries a `needs_decision` step offer
 - With a recovery pass in flight over a workspace large enough for it to be observable, the
   editor, terminal, and file tree are usable and the overlay is not locked.
 - The rebuilding state is visible without opening anything.
-- A stalled pass — one with no claimant — remains distinguishable from a running one, and
+- A stalled pass -- one with no claimant -- remains distinguishable from a running one, and
   does not regress to the pre-v0.87.0 behaviour where the two rendered identically.
 
 ## Rough size
@@ -61,7 +61,7 @@ does while the index is stale, which is the part worth thinking about rather tha
 plumbing.
 
 > **This estimate was wrong on its central claim and is left standing because the error is
-> instructive.** The server side is **not** one field; it is a deletion — see
+> instructive.** The server side is **not** one field; it is a deletion -- see
 > [The server side turned out to be no field at all](#the-server-side-turned-out-to-be-no-field-at-all-it-was-a-deletion).
 > A reader stopping here takes away the opposite of what this item concluded. The rest of
 > the estimate held: it was small-to-medium and mostly frontend, and the search decision
@@ -124,10 +124,8 @@ see it.
 
 Chosen deliberately, and the argument is recorded because it is the durable half.
 
-The behaviour was **already** decline. `routes/search.rs:202` and `:225` both return
-`ready:false, hits:[]` for any `!readiness.is_ready()`, once before the search and once
-after to guard a mid-flight transition, and `web/.../api/client.ts:243-252`
-(`readContentSearch`, the "Contract-5 decision boundary") re-asserts it client-side. The
+The behaviour was **already** decline. In `routes/search.rs`, both `!readiness.is_ready()` guards inside `search_content_with_mode_resolver` return
+`ready:false, hits:[]`, the pre-search one distinguished by its `|| p.q.trim().is_empty()` arm and the post-search one bare, guarding a mid-flight transition; `function readContentSearch(` in `web/packages/workspace-app/src/api/client.ts` (the "Contract-5 decision boundary") re-asserts it client-side. The
 defect this item names was never that the behaviour was wrong; it was that the behaviour
 was **enforced but never stated**, which is exactly the "incidental" the contract
 objects to. Stating it is the fix.
@@ -195,8 +193,8 @@ with a forward pointer, not deleted. The server side is a deletion, not a field.
 > The user can tell, without acting, that the index is rebuilding **and that search
 > results may be incomplete until it finishes.**
 
-"Incomplete" presumes partial results. What shipped **declines** — content search returns
-nothing and says so — so the honest rendering of that line is that the user can tell the
+"Incomplete" presumes partial results. What shipped **declines** -- content search returns
+nothing and says so -- so the honest rendering of that line is that the user can tell the
 index is rebuilding and that **content search is paused** until it finishes. The contract's
 intent is met (the user learns, without acting, that search is affected and that it clears
 itself); its wording anticipated the other branch. The wording is left as written because
@@ -207,9 +205,9 @@ delivered instead.
 
 | line | status |
 | --- | --- |
-| editor, terminal and file tree usable with a pass in flight; overlay not locked | **established by test, NOT yet demonstrated live** — `recovery_with_a_claimant_does_not_lock_the_workspace` asserts `phase: Ready` / `locked: false` under `readiness: recovering`; the human-visible demonstration over a large tree is prepared and has not run |
-| the rebuilding state is visible without opening anything | **by construction, not yet demonstrated live** — the status-bar index pill renders whenever `indexStatus` is non-idle and now names the consequence; no interaction is required to see it |
-| a stalled pass stays distinguishable from a running one | **established** — `a_stall_and_a_running_pass_never_collapse_together`, one test over two workspaces differing only in whether a driver claimed the pass, asserting `phase` **and** `locked` both differ |
+| editor, terminal and file tree usable with a pass in flight; overlay not locked | **established by test, NOT yet demonstrated live** -- `recovery_with_a_claimant_does_not_lock_the_workspace` asserts `phase: Ready` / `locked: false` under `readiness: recovering`; the human-visible demonstration over a large tree is prepared and has not run |
+| the rebuilding state is visible without opening anything | **by construction, not yet demonstrated live** -- the status-bar index pill renders whenever `indexStatus` is non-idle and now names the consequence; no interaction is required to see it |
+| a stalled pass stays distinguishable from a running one | **established** -- `a_stall_and_a_running_pass_never_collapse_together`, one test over two workspaces differing only in whether a driver claimed the pass, asserting `phase` **and** `locked` both differ |
 
 **The first two acceptance lines are the ones this item exists for, and neither has been
 demonstrated against a running workspace at the time of writing.** The code is gated and
@@ -230,27 +228,27 @@ Recorded because a reader assessing the claims above should know what backs them
 because the instrument intended to establish it failed.
 
 The scoped gate ran in a container that bind-mounts this worktree and builds from a
-container-local copy. Its provenance line — `git rev-parse HEAD`, printed so the log
-would name the tree it read — **failed silently in every run**: a linked worktree's
+container-local copy. Its provenance line -- `git rev-parse HEAD`, printed so the log
+would name the tree it read -- **failed silently in every run**: a linked worktree's
 `.git` is a file pointing into the primary checkout's `.git/worktrees/`, that target is
 outside the mount, and the resulting `fatal: not a git repository` scrolled past in a
 log being read for test results.
 
 The endpoint was therefore established by content instead, which needs none of what
 failed: `git archive <sha>` on the host compared against the container's build tree over
-**1,182 tracked files**, identical digests. One file legitimately differs —
+**1,182 tracked files**, identical digests. One file legitimately differs --
 `crates/chan-server/resources/models.tar.zst`, gitignored, which `git archive` cannot
-carry by construction — and it is named here rather than quietly excluded, because "the
+carry by construction -- and it is named here rather than quietly excluded, because "the
 hashes matched except for the parts I dropped" is the failure mode that check exists to
 prevent.
 
 So: the provenance instrument failed, and the tree is established anyway, by a method
 that does not depend on the thing that failed.
 
-**A note on the citations in this item.** They are file-and-line rather than commit
-shas, which survives a rebase but rots differently: a dead sha fails **closed** (`git
-cat-file` errors), while a stale line number fails **open** — it resolves to whatever
-occupies that line now and looks perfectly valid. The three in this item were
-re-verified against the merged tree at close: `routes/search.rs:202` and `:225` are both
-still the `!readiness.is_ready()` guards, and `api/client.ts:243-252` is still
-`readContentSearch`.
+**A note on how this item cites source.** Not by commit sha, and no longer by line number. A sha fails CLOSED: a rebase orphans it and `git cat-file` says so. A line number fails OPEN: it keeps resolving after an edit moves the code, points at whatever occupies that position now, and looks entirely valid. Neither is safe, and only one of them tells you.
+
+So the citations above are unique content needles, each verified unique when written: `|| p.q.trim().is_empty()` and `function readContentSearch(` occur exactly once in their files, and `!readiness.is_ready()` occurs exactly twice in `search.rs`, which is both cited guards and nothing else. Code that moves keeps these correct; code that is deleted makes them absent, and absence is what a grep reports.
+
+The practice is borrowed rather than invented. `done/large-transfer-ceiling-refinements.md` adopted it in v0.86.0 and wrote down why: *"identified by its subject rather than by a line number, because this section has already outlived one such citation."* That reasoning never left the item it was written in. It is a precedent, not a project rule; `.agents/writing-rules.md` says nothing about line references.
+
+The one provenance claim here that cannot rot by either mechanism is the content-hash verification above. A digest over 1,182 files is anchored to the bytes themselves rather than to a name, a position, or a revision that something else can move.
