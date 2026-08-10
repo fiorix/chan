@@ -3,9 +3,9 @@
 Status: REGISTERED 2026-08-09 during the v0.87.0 delivery round, observed incidentally by
 the `scene-conflict-test-is-load-sensitive` lane. **IMPLEMENTED 2026-08-10**: one shared
 harness defect in the terminal test collector, closing all three clustered tests. Verified
-on the shipped tree by two matched 12-run arms under a calibrated cgroup rig: **5 of 8
-cluster-red with the repair reverted, 0 of 13 with it in place**. See "Reproduction and
-validation".
+on the shipped tree by two **condition-matched** arms under a calibrated cgroup rig, the
+same cap and recreated contention in each: **5 of 8 cluster-red with the repair reverted,
+0 of 13 with it in place**. See "Reproduction and validation".
 
 > **Reconciling this item against itself.** Everything above "Implemented" was written
 > when the mechanism was unknown, and several of its statements are now false. They are
