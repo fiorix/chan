@@ -12,17 +12,17 @@ mtime collision in 60 rig runs**, which is what this item predicted of itself.
 > `terminal-restart-env-test-is-load-sensitive` carries a measured 40% -> 0% rate. **This
 > item has no such number and must not be read as sharing one.** Two distinct claims:
 >
-> - *The repaired assertion discriminates*, **proven.** Deterministic mutation: drop the
+> - *The repaired assertion discriminates* -- **proven.** Deterministic mutation: drop the
 >   production retained-token refresh at `doc_sessions/mod.rs`, and
 >   `same_bytes_rewrite_refreshes_the_retained_token` fails in 0.06s on the exact
 >   assertion it guards.
-> - *The staging helper is load-bearing*, **not proven here.** It rests on the
+> - *The staging helper is load-bearing* -- **not proven here.** It rests on the
 >   `scene_sessions` lane's measurement (3 red in 60 with `advance_mtime` dropped) and on
 >   the hand-rolled sleep being standing evidence that someone already hit this.
 >
 > A mutation probe that dropped `advance_mtime` was run and came back **green**, and the
 > reason is instructive rather than reassuring: that probe removes protection against a
-> *probabilistic* event, two writes landing on the same filesystem nanosecond, so a
+> *probabilistic* event -- two writes landing on the same filesystem nanosecond -- so a
 > single run is the wrong instrument. The replacement probe's own output shows the clock
 > advanced naturally by ~1ms on that run, so the hazard simply did not fire. This item's
 > own text already warns of exactly this trap: 400 consecutive isolated runs went green on
@@ -43,7 +43,7 @@ std::thread::sleep(Duration::from_millis(20))
 ```
 
 to force the token to move. That is the hazard, diagnosed once and papered over in place
-rather than removed, and a fixed sleep is the shape the `timing-test-virtual-clock`
+rather than removed -- and a fixed sleep is the shape the `timing-test-virtual-clock`
 ruling exists to reject. It is also a silent 20ms tax on every run of that suite.
 
 No `doc_sessions` test is known to have gone red from this. The hazard is structural: the
@@ -82,7 +82,7 @@ and its 20 ms sleep would be scaffolding for a replaced mechanism rather than a 
 to virtualise.
 
 **That did not happen.** The landed CAS *verifies* the mtime against the bytes the caller
-last saw rather than replacing it,
+last saw rather than replacing it --
 `workspace.rs:1898`: `(Some(m), true) => current != Some(m) || !self.disk_still_holds(rel, expected_disk)`.
 The content check is an **additional** conflict trigger, not a substitute, so the mtime token
 is still live on every path. `FlushJob` did gain `expected_disk`, and its own doc says "the
@@ -104,7 +104,7 @@ merely guarded it.
 work for one test in v0.82.0: `restamped_disk_adopt_keeps_durable_bytes_and_settles_its_echo`
 clears `flushed_mtime_ns` after its disk write so it "cannot take the equal-mtime short
 circuit and does not depend on filesystem timestamp granularity". That is a worked example
-of the construction this item needs, in this codebase, on an adjacent surface, copy it
+of the construction this item needs, in this codebase, on an adjacent surface -- copy it
 rather than reinventing. The same item's injected-instant seam for `DiskEchoRing` is the
 model for removing the sleep.
 
@@ -120,7 +120,7 @@ sleep was already gone.
 through it. The sleep is deleted; no `thread::sleep` remains in the `doc_sessions` tests.
 
 `advance_mtime` moves the mtime forward **relative to its current value**, so it does not
-depend on the clock advancing at all, which is why it replaces a sleep rather than
+depend on the clock advancing at all -- which is why it replaces a sleep rather than
 shortening one.
 
 Three `workspace.write_text` calls are deliberately **left alone**: the two in the
@@ -130,7 +130,7 @@ fixture setup, not external-edit staging, and converting them would have been no
 as thoroughness.
 
 > **Resolving the references in this item.** Source references here anchor on **unique
-> content**, symbol names, distinctive strings, `.expect()` messages, rather than on
+> content** -- symbol names, distinctive strings, `.expect()` messages -- rather than on
 > line positions, because a `file:line` fails **open**: it silently resolves to whatever
 > now occupies that line and reads as correct. A dead sha fails closed and announces
 > itself. Line numbers that do appear are either measured evidence (a recorded panic site)
@@ -141,8 +141,8 @@ as thoroughness.
 Verified that the conversion did not break an intent: the whole `doc_sessions` suite passes
 (196 tests including `control_socket`), and specifically
 `reconcile_adopts_token_silently_on_equal_content`,
-`reconcile_ignores_own_flush_echo` and `stale_prewrite_read_is_recognized_as_own_echo`,
-the tests most likely to depend on a token *not* moving, all pass.
+`reconcile_ignores_own_flush_echo` and `stale_prewrite_read_is_recognized_as_own_echo` --
+the tests most likely to depend on a token *not* moving -- all pass.
 
 ### Three independent arrivals at one construction
 
