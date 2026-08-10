@@ -223,3 +223,34 @@ now *stated*, but the decision to keep declining rather than serve partial resul
 registered separately as a candidate for a later version, and nothing here should be read
 as having settled that question on the merits for all time. It was settled for this round,
 on this surface, for the reasons given above.
+
+### How the gate that certified this was itself certified
+
+Recorded because a reader assessing the claims above should know what backs them, and
+because the instrument intended to establish it failed.
+
+The scoped gate ran in a container that bind-mounts this worktree and builds from a
+container-local copy. Its provenance line — `git rev-parse HEAD`, printed so the log
+would name the tree it read — **failed silently in every run**: a linked worktree's
+`.git` is a file pointing into the primary checkout's `.git/worktrees/`, that target is
+outside the mount, and the resulting `fatal: not a git repository` scrolled past in a
+log being read for test results.
+
+The endpoint was therefore established by content instead, which needs none of what
+failed: `git archive <sha>` on the host compared against the container's build tree over
+**1,182 tracked files**, identical digests. One file legitimately differs —
+`crates/chan-server/resources/models.tar.zst`, gitignored, which `git archive` cannot
+carry by construction — and it is named here rather than quietly excluded, because "the
+hashes matched except for the parts I dropped" is the failure mode that check exists to
+prevent.
+
+So: the provenance instrument failed, and the tree is established anyway, by a method
+that does not depend on the thing that failed.
+
+**A note on the citations in this item.** They are file-and-line rather than commit
+shas, which survives a rebase but rots differently: a dead sha fails **closed** (`git
+cat-file` errors), while a stale line number fails **open** — it resolves to whatever
+occupies that line now and looks perfectly valid. The three in this item were
+re-verified against the merged tree at close: `routes/search.rs:202` and `:225` are both
+still the `!readiness.is_ready()` guards, and `api/client.ts:243-252` is still
+`readContentSearch`.
