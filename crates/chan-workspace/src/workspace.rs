@@ -7338,37 +7338,28 @@ mod tests {
         assert_eq!(workspace.read_text("a.md").unwrap(), "v1");
     }
 
-    /// Two saves landing within the same wall-clock second on a
-    /// nanosecond-resolution filesystem must still produce a conflict
-    /// when the second writer presents the first writer's stat token.
-    /// Filesystems without ns mtime degrade to seconds; on those the
-    /// assertion may not exercise the new precision, so we only run
-    /// it when we can observe distinct ns values from back-to-back
-    /// writes.
+    /// Two saves landing within the same wall-clock second must still
+    /// produce a conflict when the second writer presents the first
+    /// writer's stat token. The sub-second gap is stamped rather than
+    /// waited for, because a mount whose mtime does not advance
+    /// between two writes is the case this claim is about: racing the
+    /// filesystem for one and giving up makes the assertion disappear
+    /// on exactly the systems that need it. A mount too coarse to hold
+    /// the stamp fails here by name instead of passing silently.
     #[test]
     fn write_text_if_unchanged_detects_subsecond_conflict() {
-        let (_cfg, _root, workspace) = fixture();
+        let (_cfg, root, workspace) = fixture();
         workspace.write_text("a.md", "v1").unwrap();
         let stale_ns = workspace.stat("a.md").unwrap().mtime_ns;
-        // Tight loop until mtime_ns advances. On filesystems with
-        // only seconds resolution this would spin until the next
-        // second boundary; cap at 200ms.
-        let start = std::time::Instant::now();
-        loop {
-            workspace.write_text("a.md", "v2").unwrap();
-            let now_ns = workspace.stat("a.md").unwrap().mtime_ns;
-            if now_ns != stale_ns {
-                break;
-            }
-            if start.elapsed() > std::time::Duration::from_millis(200) {
-                // FS likely lacks sub-second resolution; skip rather
-                // than spin into the next wall-clock second.
-                return;
-            }
-        }
-        // Now an attempt to write back with the original (pre-v2)
-        // stat must conflict. Without ns precision, two same-second
-        // writes would collide and let this through.
+
+        workspace.write_text("a.md", "v2").unwrap();
+        force_mtime_ns(&root, "a.md", stale_ns.unwrap() + 1);
+        assert_ne!(
+            workspace.stat("a.md").unwrap().mtime_ns,
+            stale_ns,
+            "the sub-second gap this test exists for did not stage"
+        );
+
         let err = workspace
             .write_text_if_unchanged("a.md", stale_ns, None, "v3")
             .unwrap_err();
