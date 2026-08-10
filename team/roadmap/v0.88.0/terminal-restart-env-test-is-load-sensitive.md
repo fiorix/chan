@@ -238,12 +238,31 @@ Rig, identical on both sides: `sdme` container capped with `--cpus 1`, the chan-
 suite oversubscribed to `--test-threads=32`, host loadavg sampled per run, failures
 classified per-signature.
 
-**Measured at `e239c770`** (baseline) and at `e239c770` plus this repair (post-fix). The
-branch was later rebased forward; the four surfaces this item depends on --
-`routes/terminal.rs`, `chan-library/src/terminal_sessions.rs`, `control_socket.rs`,
-`doc_sessions/mod.rs` -- were verified byte-identical across that move, and the whole
-ten-crate compiled graph of `chan-server` was checked for changes outside `#[cfg(test)]`,
-so the rate describes the shipped binary rather than a tree that no longer exists.
+**Measured at `e239c770`**, both arms: baseline unmodified, post-fix with this repair
+applied. The comparison is internally valid -- one compiled graph, differing only by the
+repair.
+
+> **This rate is qualified, pending re-measurement on the shipped tree.** The branch was
+> rebased onto `b6dd9f22` before merge, and the transfer check over `chan-server`'s
+> ten-crate compiled graph **failed to transfer**: `routes/preflight.rs` and
+> `chan-workspace/src/watch.rs` both changed **outside `#[cfg(test)]`**, so production code
+> in this crate's own test binary moved between the measurement and the merge. My four
+> surfaces are byte-identical across that move, but that is the wrong scope -- a
+> load-sensitive rate depends on everything the binary compiles, not on the files the lane
+> edited.
+>
+> So two claims, separated deliberately:
+>
+> - **The repair causes the change** -- established. 12/30 against 0/30 on one graph.
+> - **The repair holds on the tree we ship** -- a confirmation sweep at `b6dd9f22` is
+>   running; this section will record its result either way. Until it lands, do not read
+>   the 0/30 as measured on shipped code.
+>
+> The distinction that forced this: *"my files did not change"* and *"what I compile did
+> not change"* are different claims, and for any crate with dependencies the second is the
+> one a rate depends on. Deriving the graph mechanically
+> (`cargo tree --edges normal,dev,build`, dev edges included because `cargo test` compiles
+> exactly those) turned a four-file check into a ten-crate one and is what caught this.
 
 ```
                                   BASELINE      POST-FIX
