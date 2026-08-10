@@ -1,6 +1,6 @@
 # A publish=false dry run does not predict the tagged run
 
-Status: REGISTERED 2026-08-10, from the v0.87.0 GA run failing at a step the dry run had passed on the identical tree hours earlier.
+Status: REGISTERED 2026-08-10, from the v0.87.0 GA run failing at a step the dry run had passed on the identical tree hours earlier. IMPLEMENTED in v0.88.0: the eight `Swatinem/rust-cache@v2` jobs in `release.yml` were enumerated and sorted into build artifacts and tooling, `DMG_VENV` and `TAURI_CLI_ROOT` both moved out of the cached `target/` into `.build-tools/`, the venv guard changed from testing a file to running the venv, and the release skill gained this second limitation next to the pin-related one. The audit also falsified this item's own premise: `73a33b9c`, described below as making the failure "impossible", was still reusing a venv whose interpreter had moved, demonstrated on a real venv. Not covered: `build-dmg.sh` needs macOS, so the DMG path itself was exercised by nothing here and is first exercised by the next `publish=false` dry run, which after this change takes the same path the tagged run will.
 
 ## What
 
