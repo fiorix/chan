@@ -2451,9 +2451,31 @@ mod tests {
         assert!(state.terminal_sessions.attach(&session, None).is_none());
     }
 
+    /// Bytes this attach already captured, from before its broadcast
+    /// subscription existed.
+    ///
+    /// An attach delivers output in TWO halves: `replay`, holding
+    /// everything the PTY had already printed, and `rx`, subscribed at
+    /// attach time and carrying only what follows. A collector that
+    /// drains `rx` alone silently loses whatever beat the attach --
+    /// which, when the shell wins that race, is the ENTIRE output, so
+    /// the caller gets `""` rather than something short.
+    ///
+    /// Production honours both halves: `send_attach_prelude` sends
+    /// `session.replay` to the client before streaming live events. A
+    /// test collector that reads one half is asserting against less
+    /// than a real client receives.
+    ///
+    /// TAKEN, not copied, so a second collector on the same handle
+    /// cannot re-deliver bytes an earlier one already returned.
+    fn take_replay(session: &mut AttachHandle) -> String {
+        let replay = std::mem::take(&mut session.replay);
+        String::from_utf8_lossy(&replay.concat()).into_owned()
+    }
+
     async fn collect_until(session: &mut AttachHandle, needle: &str, timeout: Duration) -> String {
         let deadline = Instant::now() + timeout;
-        let mut out = String::new();
+        let mut out = take_replay(session);
         loop {
             if out.contains(needle) || Instant::now() >= deadline {
                 return out;
@@ -2476,7 +2498,10 @@ mod tests {
         idle: Duration,
     ) -> String {
         let deadline = Instant::now() + timeout;
-        let mut out = String::new();
+        // Same two-half attach contract as collect_until: the banner this
+        // is here to drain may already be in `replay` rather than still
+        // in flight on `rx`.
+        let mut out = take_replay(session);
         let mut last_output = Instant::now();
         loop {
             if !out.is_empty() && Instant::now().duration_since(last_output) >= idle {
