@@ -187,3 +187,16 @@ Recorded so a later session does not relitigate them from scratch.
   on Linux still reproduces. A separate probe found five idle writes out of
   five presented on WebKitGTK 2.52.5 in a bare webview, which is evidence
   against it but not against an intermittent fault in the Tauri shell.
+
+  Weaker than that reads, for a reason found afterwards: **that probe ran with
+  the dma-buf renderer on, and the shipped AppImage runs with it off.**
+  `linux_gui_stack.rs` sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` only on an
+  AppImage launch, so the configuration measured and the configuration shipped
+  sit on opposite sides of the switch that controls how WebKit hands GPU
+  buffers to the compositor — which is the handoff a present stall would live
+  in. Five of five says nothing about the shipped side.
+
+  `../webgl-present-stall.py` settles it: it sweeps that variable as an
+  explicit arm, runs a DOM control arm so a harness fault reports as
+  inconclusive rather than as a defect, and needs a GPU and an **Xorg**
+  session. It refuses Wayland rather than approximating it.

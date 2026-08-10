@@ -16,6 +16,15 @@ python-gobject. `--serve-only` prints a URL that any browser on any OS can
 open; the page runs the whole matrix itself and prints its own table. This
 driver adds automation and an exit status for the WebKitGTK case, nothing else.
 
+AND THE DRIVEN MODE CANNOT PRODUCE A READING, deliberately. Running this
+without `--serve-only` opens the harness in WebKitGTK, which spoofs the WebGL
+renderer string -- it reports "Apple GPU" on a Linux box with no GPU at all --
+so the page refuses to certify the run and exits 2 telling you to use Chrome.
+That is correct rather than broken: a number from an engine that will not say
+what it rasterized on cannot carry a hardware claim. The driven mode is for
+exercising the harness and for CI checking that it still runs; `--serve-only`
+plus Chrome is how a measurement is actually taken.
+
 WHAT IT WILL NOT DO: produce a number under software rasterization and call it
 a frame rate. llvmpipe measures llvmpipe. The animation family was ported to
 WebGL2 precisely because a 2D canvas path was being software-rasterized on
