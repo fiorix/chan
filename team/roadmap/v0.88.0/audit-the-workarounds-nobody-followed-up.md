@@ -3,7 +3,7 @@
 Status: REGISTERED 2026-08-09 during the v0.87.0 round, from the mechanism behind that
 round's most consequential defect, and deliberately not run in the round that proposed it.
 RUN in v0.88.0: 53 sites marked including the ones found clean, the fail-open specimen
-repaired, seven findings recorded, nine candidates registered. Complete over the signature
+repaired, seven findings recorded, eight candidates registered. Complete over the signature
 population it declared and explicitly not over the fallback-on-failure axis those
 signatures cannot see, which is registered separately rather than claimed.
 
