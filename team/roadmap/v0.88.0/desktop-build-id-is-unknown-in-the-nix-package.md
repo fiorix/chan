@@ -98,6 +98,89 @@ The Nix smoke deliberately excludes `chan-desktop` from the build-id assertion a
   assertion into `scripts/smoke-nix-package.sh` — which already smokes both packages, so
   the hook exists.
 
+## Implemented 2026-08-10 (v0.88.0)
+
+Both surfaces now carry a real id, from one `buildId` threaded to one derivation that
+compiles two crates.
+
+`flake.nix` hands its existing guarded `buildId` to `chan-desktop.nix`, which sets
+**both** `CHAN_BUILD_ID` (the `chan` crate linked into the multi-call binary and
+symlinked at `bin/chan`) and `CHAN_DESKTOP_BUILD_ID` (the app). Those are read by
+different build scripts, which is why setting one is the half-fix this item warned
+about. `desktop/src-tauri/build.rs` gains the injected override it lacked, with the
+semantics `crates/chan/src/build_id.rs` settled: an override wins, blank counts as
+absent, and a malformed value stops the build rather than falling back, because the id
+is emitted as a `cargo:rustc-env=` line where a newline would forge further directives.
+
+The desktop's git-derived id is now tagged `git-`. That is required rather than
+cosmetic: `nar-` ids reach this same field through the Nix path, both shapes are 12 hex
+characters, and only one can be looked up in the history. Nothing parses the string
+(checked the IPC surface, the About window and `web/`), so no consumer breaks.
+
+### The surface that did not exist
+
+Proving the app's own id needed a headless reader. `CHAN_DESKTOP_BUILD_ID` had exactly
+three consumers (`main.rs` 4685, 5129, 6724): a Tauri IPC command, a `tracing` line
+emitted once the GUI is up, and the About window. All three need a display; the Nix
+smoke runs in a container. So `chan-desktop --version` now prints the version and id and
+exits, sequenced **after** the `chan` and `cs` stem probes.
+
+That ordering is load-bearing and has its own test. `bin/chan` is a symlink at this same
+binary, so a probe running first would answer `chan --version` with the desktop id and
+hide whether the `chan` crate ever received one; and because both ids carry the same
+value, the substitution would be invisible in the output.
+
+Grepping the binary was considered and rejected for the same reason, recorded because it
+is the obvious shortcut: both variables carry the same value, so a match cannot be
+attributed to either one, and the check would pass on exactly the half-fix above.
+
+### Acceptance, line by line
+
+**`.#chan-desktop` built through Nix reports a real build id, and so does its `bin/chan`.**
+Proven on a real Nix output, `make nix-sdme-check NIX_PACKAGE=chan-desktop` equivalent
+(`packaging/nix/build-with-sdme.sh`, `NIX_PACKAGE=chan-desktop`), output
+`/nix/store/rf9cjj6gk5s7rqzyz81g4m27z1k39552-chan-desktop-0.87.0`:
+
+```
+chan 0.87.0 (build nar-0923cd094492)
+chan-desktop 0.87.0 (build nar-0923cd094492)
+built devserver smoke: PASS
+Nix package smoke: PASS (chan-desktop at /nix/store/rf9cjj...-chan-desktop-0.87.0)
+```
+
+Compare the same package at v0.87.0, recorded above: `chan-desktop`'s `bin/chan`
+reported `build unknown`. That is the before-and-after on real artifacts from the same
+path, not a prediction.
+
+The result was read three independent ways rather than from an exit code: the status
+file the guest itself writes (`0`), the driver's exit, and the `PASS` lines in
+`build.log`. This matters because a piped `make` invocation on a host without `make`
+returned exit 0 earlier in this round, from `tail` rather than from the build.
+
+The ids are `nar-` rather than `git-` because the sdme driver evaluates a `path:` flake
+over a `git ls-files` snapshot with no `.git`. That is the documented degradation, and
+it is also the case the flake's guarded chain exists for: an unguarded `self.rev` fails
+evaluation outright on this ref shape rather than falling back.
+
+**Two `.#chan-desktop` builds from different commits are distinguishable.** PENDING a
+second build at the following commit; the first is banked above.
+
+**The check is enforced rather than eyeballed once.** `scripts/smoke-nix-package.sh` now
+asserts a well-formed tagged id from `chan --version` for both packages, asserts the same
+from `chan-desktop --version` for the desktop package, and asserts the two agree, since
+one derivation and one `buildId` mean a disagreement is a stale or mis-fed variable. The
+deliberate exclusion comment is gone because the gap it described is closed.
+
+The assertion was probed against a faked Nix output tree, the method
+`devserver-build-identity` used on this same script, because a check that cannot fail is
+not a check. Ten cases: green for `nar-`, `git-` and `git--dirty`; red for the desktop
+reporting `unknown` (this item's defect), `chan` reporting `unknown` (the v0.87.0
+observed state), the two ids disagreeing (the half-fix), a missing `(build ...)` clause
+on either binary, an untagged bare 12-hex id (the pre-fix desktop format), and an empty
+id. The greens are green only in the sense a fake supports: both id lines parse and
+validate, then the run fails at the devserver smoke, which no fake binary can answer.
+Verified by reading the output rather than by an exit code.
+
 ## Rough size
 
 Small, and the shape is already settled by the server-side sibling: an injectable env

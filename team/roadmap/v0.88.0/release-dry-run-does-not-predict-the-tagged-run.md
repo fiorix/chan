@@ -94,6 +94,38 @@ Two tool paths exist, and only one of them was known:
 - **The release skill gains the second limitation.** Done.
 - **A test or check that would have caught this.** PARTIAL, and deliberately not overclaimed. The guard change makes the failure impossible rather than detected, and the old-versus-new predicate comparison above is reproducible on any host with `python3`. What was NOT done is exercising the DMG path itself twice in one run: `build-dmg.sh` needs `hdiutil` and an `.app` bundle, so it is macOS-only and this round's rig is Linux-only. The mandatory `publish=false` dry run and the tagged run both exercise it, and after this change they exercise the same path, which is what the contract asks for.
 
+### Adjacent finding, NOT one of the fourteen and not fixed here
+
+Recorded because it is a real observation about release tooling and it was found by this
+audit, not because it belongs to this item. Registered for v0.89.0 instead.
+
+`packaging/nix/build-with-sdme.sh:205-209` creates its disposable container with neither
+`--disk` nor `--storage`. `sdme new --help` gives the mechanism: `--disk <DISK>  Disk cap
+for the container root, **btrfs storage only**`, and `--storage <BACKEND> ... (default:
+auto)`, with its own example pairing them. So the driver's containers are uncapped, and
+passing `--disk` alone would have been inert. `auto` resolves to overlay, which also
+means they carry no `btrfs qgroup` entry and are invisible to the accounting other work
+on the same pool is measured by.
+
+Measured rather than asserted, during this item's own verification run, with three other
+lanes building concurrently on a 96G pool:
+
+```
+sudo du -sh /var/lib/sdme/containers/chan-nix-check-<pid>    22G
+```
+
+That is the compressed on-disk figure, since the pool is mounted `compress=zstd:3` and
+host `du` reports allocated blocks. **It is a sample, not the peak**: the last reading
+was taken while cargo was still compiling, and the release-profile LTO link came after
+it, so the true maximum was not observed and is higher by an unknown amount. Whoever
+picks a cap should measure the link, not extrapolate from this number.
+
+Not fixed in this round deliberately. `make nix-sdme-check` is on the GA
+release-verification path, so a cap chosen too low converts a working release check into
+a failure at a tag, while capping only buys hygiene. `--storage btrfs` also changes the
+backend rather than a number, so validating it costs a full driver run. Those stakes are
+not comparable, and the round ends at a GA tag.
+
 ## Rough size
 
 Small for the venv relocation. Medium for the audit, which is a read of the workflow rather than a code change, and whose value is in finding the second instance rather than in re-fixing the first.
