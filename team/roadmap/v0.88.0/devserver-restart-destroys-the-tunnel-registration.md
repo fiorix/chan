@@ -28,7 +28,7 @@ The second branch is the one that matters. A restart is a routine operation a us
 - A restart from a shell with no token preserves the tunnel registration rather than rewriting the unit as local. Met.
 - A token with no resolvable endpoint produces a named failure, not a silent downgrade. Met.
 - A provisioned unit still matches the renderer byte for byte: the unit classifier accepts `CHAN_TUNNEL_URL` and the sdme provisioner (`packaging/sdme/chan-devserver-provision.sh`) writes the same line. Met.
-- Exercised against a live supervised tunnel unit rather than in test: **local half done 2026-08-10, remote half still open.** See [Exercised live, 2026-08-10](#exercised-live-2026-08-10). This closes the local half of the line, the half where the data loss actually happens, and leaves the remote half open: that a real registration survives a restart and the published host serves again.
+- Exercised against a live supervised tunnel unit rather than in test: **local half done 2026-08-10, remote half done the same day against a real gateway, with one clause unverified.** See [Exercised live, 2026-08-10](#exercised-live-2026-08-10) and [The remote half, 2026-08-10](#the-remote-half-2026-08-10). A real registration survives a restart from a token-free shell, proven against a live gateway. The trailing clause "and the published host serves again" is **not** verified, for a structural reason recorded there rather than for lack of trying.
 
 ## Rig built 2026-08-10, and what building it already proved
 
@@ -43,6 +43,8 @@ Standing that rig up was itself the first end-to-end exercise of the two files t
 - Five refusal paths were exercised and every one fails closed **before any network activity**: no token non-interactively, a malformed token, a `chan_pat_` prefix with the wrong body length, an invalid Unix user name, and `--user root`. Each dies with its own named message and exit 1.
 
 What that does **not** establish is the open acceptance line. None of it dials a gateway, and the restart-from-a-token-free-shell case, the branch that destroys the registration, is untouched by it. That line stays open.
+
+> **"That line stays open" expired later the same day.** It describes what standing the rig up proved on its own, which is still accurate, but the line it refers to was subsequently closed: [Exercised live](#exercised-live-2026-08-10) ran the token-free restart locally, and [The remote half](#the-remote-half-2026-08-10) ran it against a real gateway. Left standing with this pointer rather than rewritten, since what the rig-build alone proved is a separate claim from what the round finished with.
 
 One constraint the rig has to respect, recorded because it is easy to miss: the provisioner installs the **released** `chan` from `chan.app/install.sh`, and this fix is not in a release. A rig left to provision itself would exercise the pre-fix binary and prove the opposite of what it was set up to prove. The rig must run a build carrying `fee66884`, copied in, which is a property of the exercise, not a change the provisioner needs.
 
@@ -90,3 +92,36 @@ Both the pre-fix silent downgrade and the deliberate `--no-tunnel` downgrade lan
 ## Rough size
 
 Done. Recorded for the release report and for the invariant it establishes: a command that can rewrite the only copy of a credential must resolve that credential before it decides it cannot.
+
+## The remote half, 2026-08-10
+
+Run against a **real gateway** with a PAT issued for this exercise, on the rig container. The credential was delivered out of band, read into a process environment by way of stdin so it never reached a command line or a file, and deleted once the tunnel stood without it. It survives only where it is supposed to: inside the unit, mode 600.
+
+### What was proven
+
+The tunnel registered, and the round's own defect branch was then run against it:
+
+- `chan devserver --restart` from a **token-free shell**, the branch that used to rewrite the unit as a plain local devserver.
+- Unit sha256 **identical** before and after, `ef762ab5...`, with `CHAN_TUNNEL_TOKEN` and `CHAN_TUNNEL_URL` both intact.
+- The tunnel **re-registered after the restart**: two `tunnel connected` lines in the unit journal, the second following the restart.
+
+So a real registration survives a restart. That is the clause the item was waiting on, and it is now measured rather than reasoned.
+
+### What was not proven, and why it is not a matter of effort
+
+The acceptance line ends "and the published host serves again". **That clause is unverified.** The rig cannot learn its own published hostname: the gateway returns the tenant host as `{owner}--{disc}.{proxy}.usr.{domain}`, and `chan-tunnel-proto`'s `HelloAckOk` documents that the devserver client **ignores** that value, each tenant self-prefixing at its keyed pathspec instead. The `disc` component is never surfaced to the client, so there is no hostname to fetch from inside the rig, and guessing one is not evidence.
+
+Verifying it needs the hostname supplied from outside the devserver, which is a gateway-side fact. Recorded as unverified rather than folded into the proven half.
+
+### The registration name deviates, deliberately
+
+The rig registered under workspace **`devserver-v088rig`**, not `devserver`.
+
+`DEVSERVER_TUNNEL_NAME` is a bare `const` in `crates/chan-server/src/devserver.rs` with no flag, env or config override, so every supervised devserver registers under the same workspace name. The rig therefore dialled **the same gateway and the same registry as a live production tunnel**, and the only thing separating the two registrations was that name, changed in a rig-only build that was never committed.
+
+That separation is a property of the registry rather than a hope: the key is `(user, workspace)` as a nested map, eviction is same-key only, and on cap overflow the newcomer is rejected rather than an incumbent evicted. A future reader repeating this needs to know that it was the key structure that protected the incumbent, not the use of a separate gateway, because there was no separate gateway.
+
+Two things this turned up that are not in this item's scope and register forward:
+
+- **chan's built-in default gateway does not resolve.** `usr.chan.app` returns `No address associated with hostname`. Anyone relying on the default on a fresh install gets a dial failure, which is how this exercise first failed.
+- **Nothing pins reject-not-evict.** No test asserts that registering a new workspace at the per-user cap fails the newcomer rather than evicting an incumbent. The property that protects a live registration from a new one is unpinned.
