@@ -12,7 +12,7 @@ That is the whole observation. Everything below is inference.
 
 ## The hypothesis, and why it fits
 
-Turning a workspace off runs `self.host.close_workspace(prefix, force).await` (`crates/chan-server/src/devserver.rs:970`), and mounts serialize on one global `mount_attempt_lock` (`devserver.rs:789`). A close that blocks inside workspace teardown, either joining the recovery worker or contending on `write_serial`, occupies a tokio worker thread, and the runtime has 8. Enough blocked closes would exhaust them.
+Turning a workspace off runs `self.host.close_workspace(prefix, force).await` (`devserver.rs`, in `set_workspace_on`), and mounts serialize on one global `mount_attempt_lock` (`devserver.rs`, `let _attempt_guard = self.mount_attempt_lock.lock().await`). A close that blocks inside workspace teardown, either joining the recovery worker or contending on `write_serial`, occupies a tokio worker thread, and the runtime has 8. Enough blocked closes would exhaust them.
 
 It fits both halves of what was seen: the in-process UI path stops responding while the out-of-process `chan close` still works, because the latter does not go through the blocked runtime.
 
@@ -52,10 +52,10 @@ The parent item recorded the same thing from the live host, in the sentence dire
 
 ### What the close path actually does
 
-- `mount_attempt_lock` is a `tokio::sync::Mutex` (`devserver.rs:663`). Awaiting it parks the task, not a worker thread, so contending on it cannot exhaust a pool.
-- It is taken on the **mount** path (`devserver.rs:789`). The toggle-off path, `set_workspace_on` (`devserver.rs:970`, `:992`), calls `host.close_workspace` under no cross-workspace lock at all. The observation was about toggling other workspaces **off**.
-- The one genuinely blocking wait runs inside `tokio::task::spawn_blocking` (`host.rs:485` calling `wait_for_workspace_release`, `host.rs:2947`) — its own pool, not the async workers.
-- Both waits are deadline-bounded: the flock verifier gives up after 5s with a named warning (`host.rs:2948`, `:2958`), and `TenantTaskOwner::shutdown` runs against `TENANT_TASK_SHUTDOWN_GRACE = 5s` (`tenant.rs:140`) and then **aborts** stragglers. A close cannot hang; worst case is about ten seconds, once.
+- `mount_attempt_lock` is a `tokio::sync::Mutex` (`devserver.rs`, the `mount_attempt_lock: tokio::sync::Mutex<()>` field). Awaiting it parks the task, not a worker thread, so contending on it cannot exhaust a pool.
+- It is taken on the **mount** path (`devserver.rs`, `let _attempt_guard = self.mount_attempt_lock.lock().await`). The toggle-off path, `set_workspace_on` (`devserver.rs`, its two `self.host.close_workspace(prefix, force)` calls), calls `host.close_workspace` under no cross-workspace lock at all. The observation was about toggling other workspaces **off**.
+- The one genuinely blocking wait runs inside `tokio::task::spawn_blocking` (`host.rs`, the `tokio::task::spawn_blocking` in `HostedWorkspaceRuntime::shutdown`, calling `fn wait_for_workspace_release`) — its own pool, not the async workers.
+- Both waits are deadline-bounded: the flock verifier gives up after 5s with a named warning (`host.rs`, the `Instant::now() + Duration::from_secs(5)` deadline in `wait_for_workspace_release` and its `"workspace flock still held 5s after teardown"` warn), and `TenantTaskOwner::shutdown` runs against `TENANT_TASK_SHUTDOWN_GRACE = 5s` (`tenant.rs`, `const TENANT_TASK_SHUTDOWN_GRACE`) and then **aborts** stragglers. A close cannot hang; worst case is about ten seconds, once.
 
 ### Measured
 
@@ -78,7 +78,7 @@ This item said the competing explanation — that the UI path was blocked on som
 
 **Ruled out: the boot overlay.** This reader first proposed that the pre-v0.87.0 locked overlay blocked the operator client-side — you cannot click a toggle an overlay is covering — and that this explained all three parts of the observation at once. **It does not hold, and the falsification is @@Overlay's.** The toggle was never under the overlay, because the two live in different SPAs in different documents:
 
-- `<PreflightOverlay />` is mounted exactly once in the whole tree, at `web/packages/workspace-app/src/App.svelte:1595`, and has never existed in the launcher in any commit.
+- `<PreflightOverlay />` is mounted exactly once in the whole tree, at its sole `<PreflightOverlay />` mount in `web/packages/workspace-app/src/App.svelte`, and has never existed in the launcher in any commit.
 - Every `setDevserverWorkspaceOn` reference is inside `web/packages/launcher/`. The workspace on/off toggle is a **Launcher** surface.
 - `workspace-app` carries no workspace on/off affordance at all.
 
