@@ -60,6 +60,13 @@ snapshot; the workspace app needs a non-blocking indicator and a decision about 
 does while the index is stale, which is the part worth thinking about rather than the
 plumbing.
 
+> **This estimate was wrong on its central claim and is left standing because the error is
+> instructive.** The server side is **not** one field; it is a deletion — see
+> [The server side turned out to be no field at all](#the-server-side-turned-out-to-be-no-field-at-all-it-was-a-deletion).
+> A reader stopping here takes away the opposite of what this item concluded. The rest of
+> the estimate held: it was small-to-medium and mostly frontend, and the search decision
+> was indeed the part worth thinking about.
+
 ## Implemented 2026-08-10, v0.88.0 round
 
 ### The premise was checked, not assumed
@@ -171,3 +178,48 @@ keep polling **past** unlock until settled, because it previously stopped at
 `phase === "ready"` -- without both halves the nudge would never arrive at all for a
 workspace that booted into recovery. The two changes are a pair; removing either one alone
 reintroduces the bug in a different place.
+
+### End-to-end reconciliation before close
+
+This item accreted its Implemented sections across a round, each written against the
+file's state at that moment and none against the whole. Read end to end at close, three
+things needed reconciling and one needed correcting. Recorded rather than silently
+smoothed, because a reader deserves to know which of these sections were written before
+the answer was known.
+
+**1. "Rough size" asserts a fact this item later disproves.** Corrected in place above
+with a forward pointer, not deleted. The server side is a deletion, not a field.
+
+**2. The Contract's second line presumes the branch that was not taken.** It reads:
+
+> The user can tell, without acting, that the index is rebuilding **and that search
+> results may be incomplete until it finishes.**
+
+"Incomplete" presumes partial results. What shipped **declines** — content search returns
+nothing and says so — so the honest rendering of that line is that the user can tell the
+index is rebuilding and that **content search is paused** until it finishes. The contract's
+intent is met (the user learns, without acting, that search is affected and that it clears
+itself); its wording anticipated the other branch. The wording is left as written because
+it records what was expected at registration, and this paragraph records what was
+delivered instead.
+
+**3. Acceptance status, stated per line rather than as a whole.**
+
+| line | status |
+| --- | --- |
+| editor, terminal and file tree usable with a pass in flight; overlay not locked | **established by test, NOT yet demonstrated live** — `recovery_with_a_claimant_does_not_lock_the_workspace` asserts `phase: Ready` / `locked: false` under `readiness: recovering`; the human-visible demonstration over a large tree is prepared and has not run |
+| the rebuilding state is visible without opening anything | **by construction, not yet demonstrated live** — the status-bar index pill renders whenever `indexStatus` is non-idle and now names the consequence; no interaction is required to see it |
+| a stalled pass stays distinguishable from a running one | **established** — `a_stall_and_a_running_pass_never_collapse_together`, one test over two workspaces differing only in whether a driver claimed the pass, asserting `phase` **and** `locked` both differ |
+
+**The first two acceptance lines are the ones this item exists for, and neither has been
+demonstrated against a running workspace at the time of writing.** The code is gated and
+the behaviour is asserted by unit test; that is not the same as a human seeing an unlocked
+workspace during a live reconcile. If this item closes without that demonstration, its
+status line must say so in those words rather than reporting the tests as if they were the
+demonstration.
+
+**4. What no section of this item establishes.** Search declining during a stale window is
+now *stated*, but the decision to keep declining rather than serve partial results is
+registered separately as a candidate for a later version, and nothing here should be read
+as having settled that question on the merits for all time. It was settled for this round,
+on this surface, for the reasons given above.
