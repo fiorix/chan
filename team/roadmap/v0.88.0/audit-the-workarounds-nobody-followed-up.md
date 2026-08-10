@@ -115,7 +115,7 @@ flagging as its own smell.
 ## Boundaries
 
 `crates/chan-workspace/src/` only, and after
-[load-sensitive-tests-keep-recurring-after-three-sweeps](load-sensitive-tests-keep-recurring-after-three-sweeps.md)
+[load-sensitive-tests-keep-recurring-after-three-sweeps](../done/load-sensitive-tests-keep-recurring-after-three-sweeps.md)
 rather than beside it — the two populations overlap on sleeps, and running both at once
 means two passes editing the same lines. Extending to other crates is a later decision for
 whoever reads the first list.

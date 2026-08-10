@@ -1,6 +1,6 @@
 # Terminal secret masking
 
-Status: SHIPPED in [v0.83.0](../release/release-v0.83.0.md). Secret-shaped values are masked in the terminal, with a malformed suffix no longer able to overwrite the user's server.toml.
+Status: SHIPPED in [v0.83.0](../../release/release-v0.83.0.md). Secret-shaped values are masked in the terminal, with a malformed suffix no longer able to overwrite the user's server.toml.
 
 ## What
 

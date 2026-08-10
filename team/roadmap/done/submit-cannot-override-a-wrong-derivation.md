@@ -1,6 +1,6 @@
 # `--submit` cannot override a derivation that is wrong, so a hand-started agent is unreachable
 
-Closed: shipped in [v0.87.0](../release/release-v0.87.0.md).
+Closed: shipped in [v0.87.0](../../release/release-v0.87.0.md).
 
 Status: ACCEPTED 2026-08-09 into the v0.87.0 round on the owner's call, from using the poke path during the round. A contract change, implemented host-side on `v087-submit` rather than in a delivery lane.
 

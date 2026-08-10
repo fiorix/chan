@@ -50,7 +50,7 @@ mean inventing the pattern twice.
 
 **Amended 2026-08-09, then corrected the same day. Read the correction, not the prediction.**
 
-When [mtime-cas-silently-overwrites-external-edits](mtime-cas-silently-overwrites-external-edits.md)
+When [mtime-cas-silently-overwrites-external-edits](../done/mtime-cas-silently-overwrites-external-edits.md)
 was still being designed, this item was amended to say the CAS work looked like the actual
 fix direction: that once the CAS keyed on content, a same-bytes rewrite would be a no-op,
 `same_bytes_rewrite_refreshes_the_retained_token` would have no stale token left to refresh,
@@ -88,5 +88,5 @@ model for removing the sleep.
 
 Found by the `scene-conflict-test-is-load-sensitive` lane while establishing that its own
 failure was test sequencing rather than a defect in the conflict machinery. Related:
-[mtime-cas-silently-overwrites-external-edits](mtime-cas-silently-overwrites-external-edits.md),
+[mtime-cas-silently-overwrites-external-edits](../done/mtime-cas-silently-overwrites-external-edits.md),
 which is the production-side consequence of the same untrustworthy primitive.

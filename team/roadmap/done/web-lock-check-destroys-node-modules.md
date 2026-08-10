@@ -1,6 +1,6 @@
 # `make web-lock-check` deletes `node_modules` while claiming it does not
 
-Status: SHIPPED in [v0.86.0](../release/release-v0.86.0.md). Environment-fixed and re-scoped: the target refuses npm below 10 and the comment states the version dependence.
+Status: SHIPPED in [v0.86.0](../../release/release-v0.86.0.md). Environment-fixed and re-scoped: the target refuses npm below 10 and the comment states the version dependence.
 
 ## What
 

@@ -1,6 +1,6 @@
 # Extension proxy errors reach a sandboxed iframe CORS-masked
 
-Status: SHIPPED in [v0.86.0](../release/release-v0.86.0.md). Every response leaving the extension namespace on both binaries carries the response policy, so a sandboxed iframe reads true statuses.
+Status: SHIPPED in [v0.86.0](../../release/release-v0.86.0.md). Every response leaving the extension namespace on both binaries carries the response policy, so a sandboxed iframe reads true statuses.
 
 ## What
 

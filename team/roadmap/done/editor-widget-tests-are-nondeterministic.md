@@ -1,6 +1,6 @@
 # Three editor tests fail intermittently and make every gate nondeterministic
 
-Status: SHIPPED in [v0.86.0](../release/release-v0.86.0.md). The three flaky editor widget tests are deterministic: the fold walker refreshes on tree identity, closing a production staleness path, with 60x isolated and 5x full-suite green on an idle host.
+Status: SHIPPED in [v0.86.0](../../release/release-v0.86.0.md). The three flaky editor widget tests are deterministic: the fold walker refreshes on tree identity, closing a production staleness path, with 60x isolated and 5x full-suite green on an idle host.
 
 ## What
 

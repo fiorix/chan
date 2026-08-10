@@ -1,6 +1,6 @@
 # A gateway window's SPA and its native ACL come from two independently versioned builds
 
-Status: SHIPPED in [v0.86.0](../release/release-v0.86.0.md). chan-desktop identifies its build in About and advertises its native vocabulary to remotely-served pages; the live skew reproduction rides the owner's production testing.
+Status: SHIPPED in [v0.86.0](../../release/release-v0.86.0.md). chan-desktop identifies its build in About and advertises its native vocabulary to remotely-served pages; the live skew reproduction rides the owner's production testing.
 
 ## What
 

@@ -36,7 +36,7 @@ promptly the machine schedules two threads, so under scheduling pressure the bud
 expire before the holder's sleep does. Nothing about it is deterministic under load.
 
 This is the same failure class as
-[scene-conflict-test-is-load-sensitive](scene-conflict-test-is-load-sensitive.md) and
+[scene-conflict-test-is-load-sensitive](../done/scene-conflict-test-is-load-sensitive.md) and
 [terminal-restart-env-test-is-load-sensitive](terminal-restart-env-test-is-load-sensitive.md)
 -- a fixed-duration assumption losing to a loaded scheduler -- but a distinct mechanism and
 a distinct surface. The `timing-test-virtual-clock` ruling (virtual clocks over grace

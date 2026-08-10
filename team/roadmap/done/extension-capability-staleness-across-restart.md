@@ -1,6 +1,6 @@
 # A surviving page holds dead extension capabilities after a devserver restart
 
-Status: SHIPPED in [v0.86.0](../release/release-v0.86.0.md). Extension tabs converge after a devserver restart via catalog re-resolution and frame reconciliation, with live headless-browser red and green proofs.
+Status: SHIPPED in [v0.86.0](../../release/release-v0.86.0.md). Extension tabs converge after a devserver restart via catalog re-resolution and frame reconciliation, with live headless-browser red and green proofs.
 
 ## What
 

@@ -1,6 +1,6 @@
 # The mtime-only CAS silently overwrites an external edit written inside the timestamp window
 
-Closed: shipped in [v0.87.0](../release/release-v0.87.0.md).
+Closed: shipped in [v0.87.0](../../release/release-v0.87.0.md).
 
 Status: REGISTERED 2026-08-09 during the v0.87.0 delivery round, from the
 `scene-conflict-test-is-load-sensitive` investigation. Not implemented; registered rather

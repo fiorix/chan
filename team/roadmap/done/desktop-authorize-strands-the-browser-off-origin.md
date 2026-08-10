@@ -1,6 +1,6 @@
 # Desktop authorization strands the signed-in browser on a dead-end loopback page
 
-Closed: shipped in [v0.87.0](../release/release-v0.87.0.md).
+Closed: shipped in [v0.87.0](../../release/release-v0.87.0.md).
 
 Status: ACCEPTED, deferred to v0.87.0 on 2026-08-08 before the v0.86.0 cut; specced from a flow map of the current implementation, not implemented.
 

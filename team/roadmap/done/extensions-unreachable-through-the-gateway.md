@@ -1,6 +1,6 @@
 # Extension module scripts are unreachable through the gateway
 
-Status: SHIPPED in [v0.86.0](../release/release-v0.86.0.md). The gateway admits the exact extension capability path shape; the devserver's capability check authorizes cookieless sandboxed-iframe fetches, proven by a committed e2e scenario.
+Status: SHIPPED in [v0.86.0](../../release/release-v0.86.0.md). The gateway admits the exact extension capability path shape; the devserver's capability check authorizes cookieless sandboxed-iframe fetches, proven by a committed e2e scenario.
 
 ## What
 

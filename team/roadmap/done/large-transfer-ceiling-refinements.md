@@ -1,6 +1,6 @@
 # Three ceiling refinements the v0.85.0 transfer work leaves open
 
-Status: SHIPPED in [v0.86.0](../release/release-v0.86.0.md). Archives are bounded by the ceiling on both arms, refusing before the first byte or erroring the body mid-stream; the Range and recovery gaps closed by ruling.
+Status: SHIPPED in [v0.86.0](../../release/release-v0.86.0.md). Archives are bounded by the ceiling on both arms, refusing before the first byte or erroring the body mid-stream; the Range and recovery gaps closed by ruling.
 
 ## What
 

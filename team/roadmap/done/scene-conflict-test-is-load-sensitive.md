@@ -1,6 +1,6 @@
 # A scene_sessions conflict test fails under host load
 
-Closed: shipped in [v0.87.0](../release/release-v0.87.0.md).
+Closed: shipped in [v0.87.0](../../release/release-v0.87.0.md).
 
 Status: REGISTERED 2026-08-08 from a full-gate observation during v0.86.0 preparation; deferred to v0.87.0 the same day before the cut.
 

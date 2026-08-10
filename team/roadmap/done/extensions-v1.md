@@ -1,6 +1,6 @@
 # Extensions v1: TOML-declared subprocess behind an iframe tab
 
-Status: SHIPPED in [v0.83.0](../release/release-v0.83.0.md). TOML-declared extensions run as supervised subprocesses behind an iframe tab, with host capabilities and declared commands. Its browser-smoke check 122 had never passed at the time the branch was written; the merge notes that tracked that and the remaining loose ends are folded into the release report rather than carried as a second file, since done/ is one file per item.
+Status: SHIPPED in [v0.83.0](../../release/release-v0.83.0.md). TOML-declared extensions run as supervised subprocesses behind an iframe tab, with host capabilities and declared commands. Its browser-smoke check 122 had never passed at the time the branch was written; the merge notes that tracked that and the remaining loose ends are folded into the release report rather than carried as a second file, since done/ is one file per item.
 
 ## What
 

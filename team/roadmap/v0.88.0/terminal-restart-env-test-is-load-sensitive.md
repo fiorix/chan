@@ -63,7 +63,7 @@ around a live PTY — not three separate assertions each racing something of the
 ## The chan-server sleep sweep does not reach this
 
 Established 2026-08-09 by the audit lane of
-[load-sensitive-tests-keep-recurring-after-three-sweeps](load-sensitive-tests-keep-recurring-after-three-sweeps.md):
+[load-sensitive-tests-keep-recurring-after-three-sweeps](../done/load-sensitive-tests-keep-recurring-after-three-sweeps.md):
 `api_restart_terminal_updates_chan_tab_name_env` (`routes/terminal.rs:2392-2435`) contains
 **no timing construct at all** — no `sleep`, `timeout`, `Instant::now`, `elapsed()`, or
 `yield_now`. Its only "sleep" is the string `sleep 1` in a shell command handed to a

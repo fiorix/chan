@@ -1,6 +1,6 @@
 # Load-sensitive tests keep recurring because no sweep was ever exhaustive
 
-Closed: [v0.87.0](../release/release-v0.87.0.md) shipped the classification (workstream 1). Workstream 2, repairing the named tests, is PARTIAL and did not ship: one repaired, one classified but untouched, one not reachable by this audit.
+Closed: [v0.87.0](../../release/release-v0.87.0.md) shipped the classification (workstream 1). Workstream 2, repairing the named tests, is PARTIAL and did not ship: one repaired, one classified but untouched, one not reachable by this audit.
 
 Status: ACCEPTED 2026-08-09 into the v0.87.0 round on the owner's call, raised by @@Lead after the round turned up three load-sensitive tests it was not looking for. The class has been addressed three times before and has recurred every time.
 

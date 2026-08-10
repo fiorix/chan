@@ -1,6 +1,6 @@
 # `chan ps` cannot answer what a workspace is doing
 
-Status: REGISTERED 2026-08-09, from diagnosing the watcher-reconcile stall ([gitignore-write-strands-the-workspace-in-recovering](gitignore-write-strands-the-workspace-in-recovering.md)) against a live devserver.
+Status: REGISTERED 2026-08-09, from diagnosing the watcher-reconcile stall ([gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md)) against a live devserver.
 
 ## What
 
@@ -19,7 +19,7 @@ This is an observability gap, not a defect: nothing is wrong with what the serve
 ## Acceptance
 
 - Per workspace, `chan ps` carries readiness state, `generation` / `completed_generation` / `pending_generation`, `required_action`, indexer status, queue depth, and `last_event_at` / `last_settled_at`.
-- The stall in [gitignore-write-strands-the-workspace-in-recovering](gitignore-write-strands-the-workspace-in-recovering.md) is identifiable from `chan ps` output alone, demonstrated against a workspace held in that state.
+- The stall in [gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md) is identifiable from `chan ps` output alone, demonstrated against a workspace held in that state.
 - A workspace with no indexer renders its indexer columns as absent rather than as zero, following the `cs terminal list` queue-depth ruling from v0.85.0 where an unreported value renders `-` and not `0`.
 
 ## Rough size

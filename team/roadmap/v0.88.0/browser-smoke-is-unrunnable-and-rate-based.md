@@ -41,7 +41,7 @@ Ruled out, rather than assumed: a request loop keeping the page busy. The failin
 
 ## Why this belongs with the timing sweep
 
-This is instance ten of the class [load-sensitive-tests-keep-recurring-after-three-sweeps](load-sensitive-tests-keep-recurring-after-three-sweeps.md) enumerates, and the first outside the Rust suites. It is also the clearest statement of that item's thesis: the sweep's own amendment established that classification finds sites while running under pressure finds tests, and this one was found the same way, by running it under load rather than by reading it.
+This is instance ten of the class [load-sensitive-tests-keep-recurring-after-three-sweeps](../done/load-sensitive-tests-keep-recurring-after-three-sweeps.md) enumerates, and the first outside the Rust suites. It is also the clearest statement of that item's thesis: the sweep's own amendment established that classification finds sites while running under pressure finds tests, and this one was found the same way, by running it under load rather than by reading it.
 
 The two 404s are separately worth a look and are deliberately not made this item's problem. `POST /api/library/command-capabilities` returning 404 on a plain workspace window may be correct or may be a surface that moved; nobody has asked.
 

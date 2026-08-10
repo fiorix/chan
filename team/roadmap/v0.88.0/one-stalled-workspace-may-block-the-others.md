@@ -1,6 +1,6 @@
 # One stalled workspace may block turning off the others
 
-Status: REGISTERED 2026-08-09 as an **unverified lead**, from diagnosing the watcher-reconcile stall ([gitignore-write-strands-the-workspace-in-recovering](gitignore-write-strands-the-workspace-in-recovering.md)). No reproduction was attempted. The cause below is a hypothesis that fits the observation; it is not established, and it must be reproduced before anything is built against it.
+Status: REGISTERED 2026-08-09 as an **unverified lead**, from diagnosing the watcher-reconcile stall ([gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md)). No reproduction was attempted. The cause below is a hypothesis that fits the observation; it is not established, and it must be reproduced before anything is built against it.
 
 ## What was observed
 

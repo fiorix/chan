@@ -1,6 +1,6 @@
 # Gateway tests compile everywhere and execute only on `main`
 
-Status: SHIPPED in [v0.86.0](../release/release-v0.86.0.md). make pre-push executes the database-free gateway suites and reports the seven Postgres-backed files as not run; the gateway steps state execute versus compile.
+Status: SHIPPED in [v0.86.0](../../release/release-v0.86.0.md). make pre-push executes the database-free gateway suites and reports the seven Postgres-backed files as not run; the gateway steps state execute versus compile.
 
 ## What
 

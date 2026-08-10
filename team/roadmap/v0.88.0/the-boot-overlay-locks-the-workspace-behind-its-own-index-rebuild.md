@@ -2,7 +2,7 @@
 
 Status: REGISTERED 2026-08-09 during the v0.87.0 delivery round, as the stricter reading of
 one contract line in
-[gitignore-write-strands-the-workspace-in-recovering](gitignore-write-strands-the-workspace-in-recovering.md).
+[gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md).
 Considered and deliberately not taken inside that item; registered so the alternative is
 not lost.
 

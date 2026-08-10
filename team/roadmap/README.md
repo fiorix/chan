@@ -8,7 +8,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 1. `vX.Y.Z/{item}.md` is accepted active scope for that target version.
 2. Implementation and validation evidence accumulate in the proposal, its candidate report, or the round's artifacts, without replacing the proposal's original rationale.
-3. At GA the item moves to `done/{item}.md` and gains a status line linking to `[vX.Y.Z](../release/release-vX.Y.Z.md)`; the text says `shipped` only when the item actually shipped.
+3. At GA the item moves to `done/{item}.md` and gains a status line linking to `[vX.Y.Z](../../release/release-vX.Y.Z.md)`; the text says `shipped` only when the item actually shipped.
 4. A withdrawn item also moves to `done/`, states plainly that it did not ship, and links to the release report that records the decision.
 5. A deferred item moves to the next active version directory before GA. It is not marked done.
 6. After the GA close commit the released version's directory is gone; every one of its items lives in `done/` or in a later active version.

@@ -1,6 +1,6 @@
 # String-index source pins in `main.rs` bound their slices on each other's string literals
 
-Status: SHIPPED in [v0.86.0](../release/release-v0.86.0.md). All 24 dead end-bounds fixed on unique definition-form needles with a committed mutation probe.
+Status: SHIPPED in [v0.86.0](../../release/release-v0.86.0.md). All 24 dead end-bounds fixed on unique definition-form needles with a committed mutation probe.
 
 ## What
 
