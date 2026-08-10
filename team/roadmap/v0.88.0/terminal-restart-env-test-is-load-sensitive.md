@@ -120,8 +120,16 @@ this item said to look. It is not three races, not a sleep, not a budget, and
 
 ### The mechanism
 
-An attach delivers output in **two halves**. `Session::attach`
-(`chan-library/src/terminal_sessions.rs:3577-3603`) does:
+> **Resolving the references below.** They anchor on **unique content** -- symbol names and
+> distinctive strings -- rather than line positions, because a `file:line` fails **open**:
+> it silently resolves to whatever now occupies that line and reads as correct, where a
+> dead sha fails closed and announces itself. Line numbers that do appear are measured
+> evidence (recorded panic sites), tagged with the commit they were true at. This item's
+> own earlier sections cite `terminal.rs:2428` for a test whose assertion this round
+> recorded panicking at `:2405`, which is the failure mode in miniature.
+
+An attach delivers output in **two halves**. `Session::attach` in
+`chan-library/src/terminal_sessions.rs` does:
 
 ```rust
 let rx = self.output_tx.subscribe();                    // only what follows

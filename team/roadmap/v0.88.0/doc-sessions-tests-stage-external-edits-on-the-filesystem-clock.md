@@ -123,9 +123,20 @@ through it. The sleep is deleted; no `thread::sleep` remains in the `doc_session
 depend on the clock advancing at all -- which is why it replaces a sleep rather than
 shortening one.
 
-Three `workspace.write_text` calls are deliberately **left alone** (`mod.rs:2324`, `2350`,
-`2410`): they are fixture seeding and helper setup, not external-edit staging, and
-converting them would have been noise dressed as thoroughness.
+Three `workspace.write_text` calls are deliberately **left alone**: the two in the
+recovery-record helpers that seed `"a.md"` with `"base"` and `"disk"` (via `.expect("seed")`
+and `.expect("disk side")`), and the seeding loop inside `fn fixture` itself. They are
+fixture setup, not external-edit staging, and converting them would have been noise dressed
+as thoroughness.
+
+> **Resolving the references in this item.** Source references here anchor on **unique
+> content** -- symbol names, distinctive strings, `.expect()` messages -- rather than on
+> line positions, because a `file:line` fails **open**: it silently resolves to whatever
+> now occupies that line and reads as correct. A dead sha fails closed and announces
+> itself. Line numbers that do appear are either measured evidence (a recorded panic site)
+> or are explicitly tagged with the commit they were true at. This item's own "What"
+> section is the cautionary case: it cited `mod.rs:2914`, which by `e239c770` was a string
+> literal, and a reader trusting it would have concluded the sleep was already gone.
 
 Verified that the conversion did not break an intent: the whole `doc_sessions` suite passes
 (196 tests including `control_socket`), and specifically
