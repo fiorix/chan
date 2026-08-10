@@ -105,6 +105,29 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/// What is actually rasterizing, read from the driver rather than assumed.
+///
+/// WHY this decides the whole run: the item this instrument serves exists
+/// because a 2D canvas path was being SOFTWARE-rasterized on Linux while it
+/// was GPU-accelerated on macOS. A frame rate taken from llvmpipe or
+/// SwiftShader therefore measures the exact condition the port was written to
+/// escape, and reporting one as "60 fps on Linux" would restate the defect as
+/// if it were the fix. It also makes the reading self-describing: the sibling
+/// number survives as the words "AMD Radeon 780M through ANGLE" in a status
+/// line, which nobody can re-derive. This prints it.
+function gpuRenderer(): string | null {
+  const canvas = document.createElement("canvas");
+  const gl = canvas.getContext("webgl2") as WebGL2RenderingContext | null;
+  if (!gl) return null;
+  const info = gl.getExtension("WEBGL_debug_renderer_info");
+  const renderer = info
+    ? (gl.getParameter(info.UNMASKED_RENDERER_WEBGL) as string)
+    : gl.getParameter(gl.RENDERER);
+  return typeof renderer === "string" ? renderer : null;
+}
+
+const SOFTWARE_RENDERERS = /swiftshader|llvmpipe|softpipe|lavapipe|software/i;
+
 function quantile(sorted: number[], q: number): number {
   if (!sorted.length) return 0;
   const index = Math.min(sorted.length - 1, Math.floor(sorted.length * q));
@@ -164,7 +187,27 @@ async function runArm(arm: Arm, host: HTMLElement): Promise<Result> {
   };
 }
 
-function verdict(results: Result[]): { code: number; line: string } {
+function verdict(results: Result[], renderer: string | null): { code: number; line: string } {
+  if (!renderer) {
+    return {
+      code: 2,
+      line:
+        "INCONCLUSIVE: no WebGL2 context is available here, so none of these" +
+        " animations can run at all.",
+    };
+  }
+  if (SOFTWARE_RENDERERS.test(renderer)) {
+    return {
+      code: 2,
+      line:
+        `INCONCLUSIVE: this is a software rasterizer (${renderer}). Software` +
+        ` rasterization on Linux is the defect this animation family was` +
+        ` ported to WebGL2 to escape, so a frame rate from it restates the` +
+        ` bug rather than verifying the fix. Run this on the GPU whose number` +
+        ` you intend to record.`,
+    };
+  }
+
   const baseline = results.find((r) => r.id === "baseline");
   if (!baseline) return { code: 2, line: "INCONCLUSIVE: no baseline arm ran" };
 
@@ -213,7 +256,12 @@ function verdict(results: Result[]): { code: number; line: string } {
   };
 }
 
-function render(results: Result[], done: boolean, line: string): void {
+function render(
+  results: Result[],
+  done: boolean,
+  line: string,
+  renderer: string | null,
+): void {
   const rows = results
     .map(
       (r) => `<tr class="${r.family}">
@@ -237,26 +285,30 @@ function render(results: Result[], done: boolean, line: string): void {
       <tbody>${rows}</tbody>
     </table>
     <p class="verdict">${done ? line : "measuring…"}</p>
-    <p class="env">${navigator.userAgent}<br>devicePixelRatio ${window.devicePixelRatio}</p>`;
+    <p class="env">GPU: ${renderer ?? "no WebGL2 context"}<br>${navigator.userAgent}<br>devicePixelRatio ${window.devicePixelRatio}</p>`;
 }
 
 async function main() {
   const host = document.getElementById("stage")!;
   const results: Result[] = [];
-  render(results, false, "");
+  // Read before anything is mounted, so the string describes the machine
+  // rather than whatever context an animation happened to create.
+  const renderer = gpuRenderer();
+  render(results, false, "", renderer);
   for (const arm of ARMS) {
     document.getElementById("now")!.textContent = `running: ${arm.name}`;
     results.push(await runArm(arm, host));
-    render(results, false, "");
+    render(results, false, "", renderer);
   }
   document.getElementById("now")!.textContent = "";
-  const outcome = verdict(results);
-  render(results, true, outcome.line);
+  const outcome = verdict(results, renderer);
+  render(results, true, outcome.line, renderer);
   // The driver reads this; a human reads the table above it. Both see the
   // same numbers because both come from the same array.
   document.title = `animation-fps ${JSON.stringify({
     code: outcome.code,
     line: outcome.line,
+    renderer,
     userAgent: navigator.userAgent,
     devicePixelRatio: window.devicePixelRatio,
     results,

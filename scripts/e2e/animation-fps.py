@@ -168,13 +168,18 @@ def drive(url: str) -> dict:
 
     def watchdog():
         state["error"] = state["error"] or "timed out"
+        state["timed_out"] = True
         Gtk.main_quit()
         return False
 
     # Eight arms at warmup + measure, plus room for the shader compiles.
     watchdog_id = GLib.timeout_add(8 * 9000 + 60000, watchdog)
     Gtk.main()
-    GLib.source_remove(watchdog_id)
+    # Removing an already-fired source raises, and it would raise on the
+    # timeout path -- the one that runs when the harness is already in
+    # trouble, which is where a clear error matters most.
+    if not state.get("timed_out"):
+        GLib.source_remove(watchdog_id)
     window.destroy()
     if state["error"]:
         raise SystemExit(f"the harness failed: {state['error']}")
@@ -193,6 +198,7 @@ def report(payload: dict) -> int:
         for warning in row["warnings"]:
             print(f"      warn: {warning}")
     print()
+    print(f"GPU: {payload.get('renderer') or 'no WebGL2 context'}")
     print(payload["userAgent"])
     print(f"devicePixelRatio {payload['devicePixelRatio']}")
     print()

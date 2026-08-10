@@ -556,12 +556,19 @@ def run_arm(args, arm: Arm) -> dict:
 
     def watchdog():
         state["error"] = state["error"] or "timed out"
+        state["timed_out"] = True
         Gtk.main_quit()
         return False
 
     watchdog_id = GLib.timeout_add(budget_ms, watchdog)
     Gtk.main()
-    GLib.source_remove(watchdog_id)
+    # Only remove a source that is still armed. Removing an already-fired one
+    # raises, and it would raise on the timeout path specifically -- the path
+    # that runs when something has already gone wrong on the measurement host,
+    # which is the worst possible moment to swallow the real error behind a
+    # GLib traceback.
+    if not state.get("timed_out"):
+        GLib.source_remove(watchdog_id)
     window.destroy()
     shutdown()
 
