@@ -68,6 +68,19 @@ a no-`.git` build. That step, and the `bin/chan` second surface above, are code 
 rather than executed Nix builds, and should be confirmed by building `.#chan-desktop` and
 reading both ids out of the package before the fix is designed.
 
+## Confirmed empirically 2026-08-09, at the released version
+
+The item was registered with its second surface flagged as a code reading rather than an executed build, and said it should be confirmed by building `.#chan-desktop` and reading the id out of the package. The v0.87.0 release verification did exactly that, on a full `NIX_PACKAGE=all` run with zero hash mismatches and both packages smoked:
+
+- `.#chan` reports `build nar-34649cccac21`
+- `chan-desktop`'s shipped `bin/chan` reports `build unknown`
+
+So the prediction is now an observation, on a real Nix output at the version being released, and the gap narrows to one hop: `packaging/nix/chan-desktop.nix` does not hand a build id down to the `chan` it ships.
+
+Two things this settles beyond the item. The injectable override works in the packaging path most likely to defeat it, since `.#chan` stamps a nar-derived id rather than falling back to `unknown` where there is no `.git`. And the release-tarball path was independently confirmed from the other direction: the shipped musl binary from the GA run reports `chan 0.87.0 (build git-479c102e2471)`, the GA commit's own sha, which is `devserver-build-identity`'s acceptance criterion met on a real release artifact.
+
+The Nix smoke deliberately excludes `chan-desktop` from the build-id assertion and says so at the exclusion site, naming this item as where the gap lives. That is the shape to keep: a check that skips a known defect and is legible about it, rather than one that is silently absent.
+
 ## Contract
 
 - A chan-desktop build from the **Nix** path is identifiable at runtime as the specific

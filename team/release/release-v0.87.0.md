@@ -28,6 +28,20 @@ Scope grew from six items to nineteen during the window. Every growth was regist
 - The CAS proven live in both directions by the owner: an external append reached an open editor in about a second with no banner, and an external replace against a pending unflushed edit raised the conflict banner. The second is the direction a quiet session cannot evidence.
 - Not run: any cloud-synced directory, where a genuine second writer now produces conflicts the previous CAS would have silently overwritten. Not run: the Postgres-gated identity suite beyond the auth lane's own hand-run.
 
+## Amended after GA: the tag moved, and what verified it
+
+Recorded here rather than left to the git log, because the tag does not point at the commit this report was written in.
+
+The GA commit `479c102e` was tagged and its release run **failed** at `macOS desktop package`. `build-dmg.sh` died on a missing `target/dmg-venv/bin/pip` with exit 127. The venv is cached with `target/`, the dry run had created it fresh and passed, and the tagged run restored a broken one; `python3 -m venv` over an existing `pyvenv.cfg` reuses the directory and skips `ensurepip`, so `bin/pip` was never recreated. Nothing had published: no release, no `/dl` move, no downstream package. `73a33b9c` clears the venv before creating it and turns a missing `ensurepip` into a named error, the tag was deleted and re-pushed there, and the second GA run published. The class this exposed, that a dry run on identical source can take a different path from the tagged run, is registered as [release-dry-run-does-not-predict-the-tagged-run](../roadmap/v0.88.0/release-dry-run-does-not-predict-the-tagged-run.md).
+
+Verified before each tag rather than after:
+
+- On `479c102e`: `release.yml` publish=false green with its artifacts downloaded and inspected (the musl binary reporting `0.87.0 (build git-479c102e2471)`, a real DMG, a 421-byte updater signature), `ci.yml` green including `Nix chan-desktop`, both `publish-downstream` dry dispatches green with docker building four images and cachix building and smoking both Linux arches, `make pre-push` green on the GA tree, and `make windows-cross-check` green.
+- On `73a33b9c`: `ci.yml` green including `Nix chan-desktop`, and a fresh `publish=false` dry run green through `Build, sign, and notarize` and `Verify signature and stapled notarization`, the two steps the failed run never reached. Both re-established on the new commit rather than inherited, since the fix sits inside the tree Nix builds from.
+- A full local `NIX_PACKAGE=all` run with zero hash mismatches and `chan-desktop`'s `vendor.drv` built, so both derivations sharing one `cargoHash` is observed rather than assumed.
+
+The published release carries 20 assets, and `chan.app/dl/cli/latest.json` moved to `0.87.0`.
+
 ## Retrospective
 
 Highlights: a test-flake item became a production data-loss fix, and the same investigation found three engineers had each worked around the identical collision in three files across three releases without registering it. The recovery stall was diagnosed against a live devserver, root-caused to a wired-versus-unwired sibling pair, and recovered in place without restarting the process. The sweep's acceptance was verified by set comparison rather than a count, which catches the two failures a total cannot.
