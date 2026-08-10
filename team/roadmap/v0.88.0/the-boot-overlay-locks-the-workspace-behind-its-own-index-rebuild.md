@@ -6,6 +6,12 @@ one contract line in
 Considered and deliberately not taken inside that item; registered so the alternative is
 not lost.
 
+Closed: shipped in v0.88.0. A recovery or index pass that is progressing reports itself instead of locking the workspace, demonstrated live on a 25,000-file workspace rather than asserted from tests: `GET /api/preflight` returning `locked: false` with `readiness.state: recovering` and an `active_generation` set, 80 of 80 samples unlocked across a 40 second window, and no locked sample during a claimed pass at any corpus size. The server side is a deletion rather than the one field this item predicted, because `Phase::Running` had no producer once the two locking arms went. Content search declines during the stale window and says why on the four surfaces that render it; serving partial results is registered forward rather than taken here.
+
+Two of the three tests this item added asserted a precondition they never established, and the fixture now establishes it. The repair is gated and structurally argued, and not validated by experiment: 18 pre-repair runs under a verified 1-CPU cap did not reproduce the failure. The rig that did reproduce it paired the same cap with a host-side load generator; a cap alone was not sufficient, and `P(0 in 18)` at the originally observed rate is about 0.03. The same 18 runs reproduced a different load-sensitive class twice, so the instrument was working and the absence is about its composition rather than about the defect.
+
+**I did not reproduce their rig; I reproduced its configuration.**
+
 ## What
 
 While a recovery pass runs, the boot overlay locks and the workspace is unusable. That is
