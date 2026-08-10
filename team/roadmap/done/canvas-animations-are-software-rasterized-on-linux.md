@@ -1,5 +1,7 @@
 # The canvas animation family is software-rasterized on Linux
 
+Closed: shipped in [v0.88.0](../../release/release-v0.88.0.md).
+
 Status: REGISTERED 2026-08-10, after the fact. The work was done unplanned, off the roadmap, and is registered here so v0.88.0 carries it as accepted scope. IMPLEMENTED in `aa8955a1` (sixfold vortex and the rotational blooms) and `c89c8bdc` (the point cloud host). **Closed on host acceptance**: the animation family was run on Linux, Windows and macOS on real hardware and works. That is an observation on real hardware, **not a frame-rate measurement**, and it should not be read or restated as one. It settles the two things nothing in this round could reach: the point cloud host, which was this item's single explicit Not met, and macOS, which was recorded as unmeasured entirely. No number was taken for any animation on any platform, and the original 60 fps figure rests on a renderer string that cannot distinguish hardware from software, which is a weakness in how the claim was written rather than a reason to doubt it. What the instrument's construction exposed about writing such an acceptance is carried forward as `v0.89.0/a-frame-rate-acceptance-needs-guards-that-can-fire.md`.
 
 ## What

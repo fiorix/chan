@@ -1,5 +1,7 @@
 # doc_sessions tests stage external edits on the filesystem clock, with one sleep already hand-rolled
 
+Closed: shipped in [v0.88.0](../../release/release-v0.88.0.md).
+
 Status: REGISTERED 2026-08-09 during the v0.87.0 delivery round, from the
 `scene-conflict-test-is-load-sensitive` investigation. **IMPLEMENTED 2026-08-10 as a
 structural hazard, repaired on the strength of the sleep and the precedent, NOT

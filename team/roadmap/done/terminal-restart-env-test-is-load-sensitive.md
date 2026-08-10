@@ -1,5 +1,7 @@
 # A terminal restart-env test goes red under CPU starvation
 
+Closed: shipped in [v0.88.0](../../release/release-v0.88.0.md).
+
 Status: REGISTERED 2026-08-09 during the v0.87.0 delivery round, observed incidentally by
 the `scene-conflict-test-is-load-sensitive` lane. **IMPLEMENTED 2026-08-10**: one shared
 harness defect in the terminal test collector, closing all three clustered tests. Verified

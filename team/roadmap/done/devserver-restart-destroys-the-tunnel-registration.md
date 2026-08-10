@@ -1,5 +1,7 @@
 # `chan devserver --restart` destroys the tunnel registration it cannot read
 
+Closed: shipped in [v0.88.0](../../release/release-v0.88.0.md).
+
 Status: REGISTERED 2026-08-10, after the fact. The work was done unplanned, off the roadmap, and is registered here so v0.88.0 carries it as accepted scope rather than as an unattributed line in the release report. IMPLEMENTED in `fee66884`.
 
 ## What

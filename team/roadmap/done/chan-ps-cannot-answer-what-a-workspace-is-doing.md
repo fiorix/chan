@@ -1,5 +1,7 @@
 # `chan ps` cannot answer what a workspace is doing
 
+Closed: shipped in [v0.88.0](../../release/release-v0.88.0.md).
+
 Status: REGISTERED 2026-08-09, from diagnosing the watcher-reconcile stall ([gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md)) against a live devserver. **IMPLEMENTED 2026-08-10 in `9371a24b`**. See [Implemented](#implemented-2026-08-10-9371a24b). Two acceptance lines met, one **partially** met for a structural reason recorded there.
 
 ## What

@@ -1,5 +1,7 @@
 # The boot overlay locks the workspace behind its own index rebuild
 
+Closed: shipped in [v0.88.0](../../release/release-v0.88.0.md).
+
 Status: REGISTERED 2026-08-09 during the v0.87.0 delivery round, as the stricter reading of
 one contract line in
 [gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md).

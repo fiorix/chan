@@ -1,5 +1,7 @@
 # One stalled workspace may block turning off the others
 
+Closed: shipped in [v0.88.0](../../release/release-v0.88.0.md).
+
 Status: REGISTERED 2026-08-09 as an **unverified lead**, from diagnosing the watcher-reconcile stall ([gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md)). No reproduction was attempted. The cause below is a hypothesis that fits the observation; it is not established, and it must be reproduced before anything is built against it.
 
 **NOT REPRODUCED 2026-08-10.** The reproduction ran (see [Reproduction, 2026-08-10](#reproduction-2026-08-10)) and the stated mechanism is falsified: closes do not serialize, do not exhaust the runtime, and are bounded. No code changed. The observation itself **remains unexplained**: two candidate mechanisms are now ruled out and a third is named but uninvestigated.

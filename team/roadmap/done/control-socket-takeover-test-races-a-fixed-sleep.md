@@ -1,5 +1,7 @@
 # The control-socket takeover test races a hardcoded sleep against a retry budget
 
+Closed: shipped in [v0.88.0](../../release/release-v0.88.0.md).
+
 Status: REGISTERED 2026-08-09 during the v0.87.0 delivery round, observed by the
 `devserver-build-identity` lane during a full `cargo test --all-targets` run.
 **IMPLEMENTED 2026-08-10**: the fixed 25ms sleep is removed, not lengthened; the holder's

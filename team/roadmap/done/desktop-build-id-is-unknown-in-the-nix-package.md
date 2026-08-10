@@ -1,5 +1,7 @@
 # The Nix-built chan-desktop stamps `unknown` as its build id
 
+Closed: shipped in [v0.88.0](../../release/release-v0.88.0.md).
+
 Status: REGISTERED 2026-08-09 during the v0.87.0 delivery round, from an incidental
 observation in the `devserver-build-identity` lane; registered rather than fixed there
 because that round's scope was locked at three items and the fix is a different crate from

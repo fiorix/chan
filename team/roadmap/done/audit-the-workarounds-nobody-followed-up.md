@@ -1,5 +1,7 @@
 # Audit the workarounds nobody followed up
 
+Closed: shipped in [v0.88.0](../../release/release-v0.88.0.md).
+
 Status: REGISTERED 2026-08-09 during the v0.87.0 round, from the mechanism behind that
 round's most consequential defect, and deliberately not run in the round that proposed it.
 RUN in v0.88.0: 53 sites marked including the ones found clean, the fail-open specimen
