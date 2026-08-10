@@ -19,12 +19,25 @@ type GhosttyRendererLike = Pick<CanvasRenderer, "getMetrics" | "resize">;
 
 type GhosttyCellTextRenderer = GhosttyRendererLike & {
   ctx?: CanvasRenderingContext2D;
+  devicePixelRatio?: number;
   renderCellText?: (
     cell: GhosttyCell,
     column: number,
     row: number,
     overrideColor?: string,
   ) => void;
+};
+
+/// A rectangle inside one cell, as fractions of the cell: x0, y0, x1, y1.
+type BlockRect = [number, number, number, number];
+
+type BlockGlyph = {
+  rects: BlockRect[];
+  /// Shade characters paint the same rectangle as a solid block at reduced
+  /// coverage. Alpha rather than a dither pattern: a dither is a texture at
+  /// the cell's own scale, so it moires against the cell grid at some sizes
+  /// and turns into flat colour at others.
+  alpha?: number;
 };
 
 type GhosttyOverlayScrollbarRenderer = GhosttyRendererLike & {
@@ -201,13 +214,13 @@ export function installGhosttyCustomGlyphs(
     row,
     overrideColor,
   ): void => {
-    if (cell.grapheme_len > 0 || !isCustomBoxGlyph(cell.codepoint)) {
+    if (cell.grapheme_len > 0 || !isCustomGlyph(cell.codepoint)) {
       original.call(renderer, cell, column, row, overrideColor);
       return;
     }
 
     // Let Ghostty resolve inverse/selection/cursor colors and text
-    // decorations, but suppress the font's disconnected box glyph.
+    // decorations, but suppress the font's disconnected glyph.
     original.call(
       renderer,
       { ...cell, codepoint: 32, grapheme_len: 0 },
@@ -216,13 +229,20 @@ export function installGhosttyCustomGlyphs(
       overrideColor,
     );
     if ((cell.flags & CELL_FLAG_INVISIBLE) !== 0) return;
-    drawCustomBoxGlyph(
+    const metrics = renderer.getMetrics();
+    const faint = (cell.flags & CELL_FLAG_FAINT) !== 0;
+    if (isCustomBoxGlyph(cell.codepoint)) {
+      drawCustomBoxGlyph(context, metrics, cell.codepoint, column, row, faint);
+      return;
+    }
+    drawCustomBlockGlyph(
       context,
-      renderer.getMetrics(),
+      metrics,
       cell.codepoint,
       column,
       row,
-      (cell.flags & CELL_FLAG_FAINT) !== 0,
+      faint,
+      rendererRatio(mutable),
     );
   };
   customGlyphRenderers.add(renderer);
@@ -392,6 +412,61 @@ function validCellDimensions(cell: CellDimensions): boolean {
   );
 }
 
+// The four quadrants, named so the quadrant characters below read as the
+// shapes they are rather than as four numbers each.
+const UPPER_LEFT: BlockRect = [0, 0, 1 / 2, 1 / 2];
+const UPPER_RIGHT: BlockRect = [1 / 2, 0, 1, 1 / 2];
+const LOWER_LEFT: BlockRect = [0, 1 / 2, 1 / 2, 1];
+const LOWER_RIGHT: BlockRect = [1 / 2, 1 / 2, 1, 1];
+
+/// The block elements, U+2580..U+259F, as the fraction of the cell each one
+/// fills.
+///
+/// WHY these are drawn rather than left to the font: a block element is
+/// defined by the cell, not by a typeface, and every font renders it at the
+/// glyph's own ink height. Under chan's 1.2 line height that leaves an
+/// unpainted strip at each cell boundary, so a bar chart or a progress bar
+/// (btop, gauges, sparklines) comes out banded. Filling the cell rectangle
+/// is the only way the character means what it says.
+const BLOCK_GLYPHS = new Map<number, BlockGlyph>([
+  [0x2580, { rects: [[0, 0, 1, 1 / 2]] }], // upper half
+  [0x2581, { rects: [[0, 7 / 8, 1, 1]] }], // lower one eighth
+  [0x2582, { rects: [[0, 6 / 8, 1, 1]] }], // lower one quarter
+  [0x2583, { rects: [[0, 5 / 8, 1, 1]] }], // lower three eighths
+  [0x2584, { rects: [[0, 4 / 8, 1, 1]] }], // lower half
+  [0x2585, { rects: [[0, 3 / 8, 1, 1]] }], // lower five eighths
+  [0x2586, { rects: [[0, 2 / 8, 1, 1]] }], // lower three quarters
+  [0x2587, { rects: [[0, 1 / 8, 1, 1]] }], // lower seven eighths
+  [0x2588, { rects: [[0, 0, 1, 1]] }], // full block
+  [0x2589, { rects: [[0, 0, 7 / 8, 1]] }], // left seven eighths
+  [0x258a, { rects: [[0, 0, 6 / 8, 1]] }], // left three quarters
+  [0x258b, { rects: [[0, 0, 5 / 8, 1]] }], // left five eighths
+  [0x258c, { rects: [[0, 0, 4 / 8, 1]] }], // left half
+  [0x258d, { rects: [[0, 0, 3 / 8, 1]] }], // left three eighths
+  [0x258e, { rects: [[0, 0, 2 / 8, 1]] }], // left one quarter
+  [0x258f, { rects: [[0, 0, 1 / 8, 1]] }], // left one eighth
+  [0x2590, { rects: [[1 / 2, 0, 1, 1]] }], // right half
+  [0x2591, { alpha: 0.25, rects: [[0, 0, 1, 1]] }], // light shade
+  [0x2592, { alpha: 0.5, rects: [[0, 0, 1, 1]] }], // medium shade
+  [0x2593, { alpha: 0.75, rects: [[0, 0, 1, 1]] }], // dark shade
+  [0x2594, { rects: [[0, 0, 1, 1 / 8]] }], // upper one eighth
+  [0x2595, { rects: [[7 / 8, 0, 1, 1]] }], // right one eighth
+  [0x2596, { rects: [LOWER_LEFT] }],
+  [0x2597, { rects: [LOWER_RIGHT] }],
+  [0x2598, { rects: [UPPER_LEFT] }],
+  [0x2599, { rects: [UPPER_LEFT, LOWER_LEFT, LOWER_RIGHT] }],
+  [0x259a, { rects: [UPPER_LEFT, LOWER_RIGHT] }],
+  [0x259b, { rects: [UPPER_LEFT, UPPER_RIGHT, LOWER_LEFT] }],
+  [0x259c, { rects: [UPPER_LEFT, UPPER_RIGHT, LOWER_RIGHT] }],
+  [0x259d, { rects: [UPPER_RIGHT] }],
+  [0x259e, { rects: [UPPER_RIGHT, LOWER_LEFT] }],
+  [0x259f, { rects: [UPPER_RIGHT, LOWER_LEFT, LOWER_RIGHT] }],
+]);
+
+function isCustomGlyph(codepoint: number): boolean {
+  return isCustomBoxGlyph(codepoint) || BLOCK_GLYPHS.has(codepoint);
+}
+
 function isCustomBoxGlyph(codepoint: number): boolean {
   return (
     codepoint === 0x2500 || // ─
@@ -414,6 +489,65 @@ function isCustomBoxGlyph(codepoint: number): boolean {
     codepoint === 0x2576 || // ╶
     codepoint === 0x2577 // ╷
   );
+}
+
+/// Round to the nearest device pixel.
+///
+/// A cell edge that lands mid-device-pixel antialiases, and the neighbouring
+/// cell antialiases its own copy of the same edge, so a run of solid blocks
+/// grows a seam at every boundary instead of tiling. Snapping both cells to
+/// the same rounded edge is what makes the run solid.
+function snapToDevice(value: number, ratio: number): number {
+  return Math.round(value * ratio) / ratio;
+}
+
+/// The renderer's device-pixel ratio, read per draw because a window moved
+/// between displays changes it under a live renderer.
+function rendererRatio(renderer: GhosttyCellTextRenderer): number {
+  const ratio = renderer.devicePixelRatio;
+  if (typeof ratio === "number" && Number.isFinite(ratio) && ratio > 0) {
+    return ratio;
+  }
+  return window.devicePixelRatio || 1;
+}
+
+function drawCustomBlockGlyph(
+  context: CanvasRenderingContext2D,
+  metrics: FontMetrics,
+  codepoint: number,
+  column: number,
+  row: number,
+  faint: boolean,
+  ratio: number,
+): void {
+  const glyph = BLOCK_GLYPHS.get(codepoint);
+  if (!glyph) return;
+
+  // The cell's own edges are snapped once and then reused for the 0 and 1
+  // fractions, so a full block ends exactly where its neighbour begins.
+  const left = snapToDevice(column * metrics.width, ratio);
+  const right = snapToDevice((column + 1) * metrics.width, ratio);
+  const top = snapToDevice(row * metrics.height, ratio);
+  const bottom = snapToDevice((row + 1) * metrics.height, ratio);
+  const x = (fraction: number) =>
+    fraction === 0
+      ? left
+      : fraction === 1
+        ? right
+        : snapToDevice(left + fraction * metrics.width, ratio);
+  const y = (fraction: number) =>
+    fraction === 0
+      ? top
+      : fraction === 1
+        ? bottom
+        : snapToDevice(top + fraction * metrics.height, ratio);
+
+  context.save();
+  context.globalAlpha = (glyph.alpha ?? 1) * (faint ? 0.5 : 1);
+  for (const [x0, y0, x1, y1] of glyph.rects) {
+    context.fillRect(x(x0), y(y0), x(x1) - x(x0), y(y1) - y(y0));
+  }
+  context.restore();
 }
 
 function drawCustomBoxGlyph(

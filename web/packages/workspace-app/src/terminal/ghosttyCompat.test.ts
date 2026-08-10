@@ -163,6 +163,167 @@ describe("Ghostty custom box glyphs", () => {
   });
 });
 
+describe("Ghostty custom block glyphs", () => {
+  // A block element is defined by the cell, not by a typeface. Every font
+  // draws it at the glyph's own ink height, which under chan's 1.2 line
+  // height leaves an unpainted strip at each cell boundary, so a bar chart
+  // comes out banded. These pin the fill geometry that replaces it.
+  function blockRenderer(cell = { width: 8, height: 19 }, ratio?: number) {
+    const fills: Array<{ rect: number[]; alpha: number }> = [];
+    const context = {
+      beginPath: vi.fn(),
+      bezierCurveTo: vi.fn(),
+      fillRect: vi.fn(),
+      fillStyle: "#aabbcc",
+      globalAlpha: 1,
+      lineCap: "butt",
+      lineJoin: "miter",
+      lineTo: vi.fn(),
+      lineWidth: 1,
+      moveTo: vi.fn(),
+      restore: vi.fn(),
+      save: vi.fn(),
+      stroke: vi.fn(),
+      strokeStyle: "#000000",
+    };
+    // Alpha is state on the context, so it has to be read at the moment of
+    // the fill rather than after the whole cell has been drawn.
+    context.fillRect = vi.fn((x: number, y: number, w: number, h: number) => {
+      fills.push({ alpha: context.globalAlpha, rect: [x, y, w, h] });
+    });
+    const original = vi.fn();
+    const renderer = {
+      ctx: context,
+      devicePixelRatio: ratio,
+      getMetrics: () => ({ ...cell, baseline: 13 }),
+      renderCellText: original,
+      resize: vi.fn(),
+    };
+    return { context, fills, original, renderer };
+  }
+
+  function cell(codepoint: number, flags = 0) {
+    return {
+      bg_b: 0,
+      bg_g: 0,
+      bg_r: 0,
+      codepoint,
+      fg_b: 255,
+      fg_g: 255,
+      fg_r: 255,
+      flags,
+      grapheme_len: 0,
+      hyperlink_id: 0,
+      width: 1,
+    };
+  }
+
+  test("a full block fills its whole cell", () => {
+    const { fills, renderer } = blockRenderer();
+    expect(installGhosttyCustomGlyphs(renderer as never)).toBe(true);
+
+    renderer.renderCellText(cell(0x2588), 2, 3);
+
+    expect(fills).toEqual([{ alpha: 1, rect: [16, 57, 8, 19] }]);
+  });
+
+  test("neighbouring blocks meet on one edge at a fractional cell size", () => {
+    // The seam this fix is about: at 8.4px per cell an unsnapped right edge
+    // lands mid-pixel, the next cell's left edge lands on the same fraction,
+    // and both antialias their own half of it.
+    const { fills, renderer } = blockRenderer({ width: 8.4, height: 20.5 });
+    installGhosttyCustomGlyphs(renderer as never);
+
+    renderer.renderCellText(cell(0x2588), 0, 0);
+    renderer.renderCellText(cell(0x2588), 1, 0);
+    renderer.renderCellText(cell(0x2588), 0, 1);
+
+    const [first, second, below] = fills.map((fill) => fill.rect);
+    expect(first[0] + first[2]).toBe(second[0]);
+    expect(first[1] + first[3]).toBe(below[1]);
+    expect(Number.isInteger(second[0])).toBe(true);
+  });
+
+  test("a device pixel ratio snaps to half a CSS pixel", () => {
+    const { fills, renderer } = blockRenderer({ width: 8.4, height: 19 }, 2);
+    installGhosttyCustomGlyphs(renderer as never);
+
+    renderer.renderCellText(cell(0x2588), 0, 0);
+    renderer.renderCellText(cell(0x2588), 1, 0);
+
+    const [first, second] = fills.map((fill) => fill.rect);
+    expect(first[2]).toBe(8.5);
+    expect(second[0]).toBe(8.5);
+  });
+
+  test("partial blocks fill only their own fraction of the cell", () => {
+    const { fills, renderer } = blockRenderer({ width: 8, height: 16 });
+    installGhosttyCustomGlyphs(renderer as never);
+
+    renderer.renderCellText(cell(0x2581), 0, 0); // lower one eighth
+    renderer.renderCellText(cell(0x258c), 0, 0); // left half
+    renderer.renderCellText(cell(0x2580), 0, 0); // upper half
+
+    expect(fills.map((fill) => fill.rect)).toEqual([
+      [0, 14, 8, 2],
+      [0, 0, 4, 16],
+      [0, 0, 8, 8],
+    ]);
+  });
+
+  test("quadrants fill their own corners", () => {
+    const { fills, renderer } = blockRenderer({ width: 8, height: 16 });
+    installGhosttyCustomGlyphs(renderer as never);
+
+    renderer.renderCellText(cell(0x259a), 0, 0); // upper left + lower right
+
+    expect(fills.map((fill) => fill.rect)).toEqual([
+      [0, 0, 4, 8],
+      [4, 8, 4, 8],
+    ]);
+  });
+
+  test("shades cover the cell at reduced alpha, and faint halves it", () => {
+    const { fills, renderer } = blockRenderer({ width: 8, height: 16 });
+    installGhosttyCustomGlyphs(renderer as never);
+
+    renderer.renderCellText(cell(0x2592), 0, 0);
+    // CELL_FLAG_FAINT
+    renderer.renderCellText(cell(0x2592, 128), 0, 0);
+
+    expect(fills).toEqual([
+      { alpha: 0.5, rect: [0, 0, 8, 16] },
+      { alpha: 0.25, rect: [0, 0, 8, 16] },
+    ]);
+  });
+
+  test("an invisible block paints nothing but still clears its cell", () => {
+    const { fills, original, renderer } = blockRenderer();
+    installGhosttyCustomGlyphs(renderer as never);
+
+    // CELL_FLAG_INVISIBLE
+    renderer.renderCellText(cell(0x2588, 32), 1, 1);
+
+    expect(fills).toEqual([]);
+    // The cell still goes through Ghostty as a space, so its background,
+    // selection and cursor colours are painted like any other cell.
+    expect(original.mock.calls[0][0].codepoint).toBe(32);
+  });
+
+  test("ordinary text and box glyphs keep their own paths", () => {
+    const { context, fills, renderer } = blockRenderer();
+    installGhosttyCustomGlyphs(renderer as never);
+
+    renderer.renderCellText(cell(0x2500), 0, 0);
+    expect(fills).toEqual([]);
+    expect(context.stroke).toHaveBeenCalledOnce();
+
+    renderer.renderCellText(cell("A".codePointAt(0)!), 0, 0);
+    expect(fills).toEqual([]);
+    expect(context.stroke).toHaveBeenCalledOnce();
+  });
+});
+
 // The overlay-scrollbar suites below drive the real CanvasRenderer and the
 // real Terminal from the pinned ghostty-web build. The defect is upstream's
 // own paint order, so a hand-rolled double would go green while the owner
