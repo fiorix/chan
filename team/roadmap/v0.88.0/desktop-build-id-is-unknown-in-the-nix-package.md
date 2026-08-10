@@ -1,9 +1,20 @@
 # The Nix-built chan-desktop stamps `unknown` as its build id
 
 Status: REGISTERED 2026-08-09 during the v0.87.0 delivery round, from an incidental
-observation in the `devserver-build-identity` lane. Not implemented; registered rather
-than fixed because the round's scope was locked at three items and the fix is a different
-crate from the one that lane owns.
+observation in the `devserver-build-identity` lane; registered rather than fixed there
+because that round's scope was locked at three items and the fix is a different crate from
+the one that lane owns. IMPLEMENTED in v0.88.0: `flake.nix` threads its guarded `buildId`
+into `chan-desktop.nix`, which sets both `CHAN_BUILD_ID` and `CHAN_DESKTOP_BUILD_ID`, and
+`chan-desktop --version` was added so the app's own id is readable without a display.
+Three Nix builds report a real id from both the app and the `bin/chan` that package ships,
+agreeing within each build and differing across them (`nar-0923cd094492`,
+`nar-4da689f51e1c`, `nar-aabc995562f4`), asserted from now on by
+`scripts/smoke-nix-package.sh`. Two limits, neither of them a fallback to `unknown`: every
+id observed is `nar-` rather than `git-` because each rig evaluates a `path:` flake over a
+snapshot carrying no `.git`, so the desktop build script's git branch was exercised by no
+build in this round; and that branch now emits a `git-` tag where it previously emitted
+bare hex, a format change the AppImage, deb and dmg path will show on its next release run
+and which nothing here observed.
 
 ## What
 
