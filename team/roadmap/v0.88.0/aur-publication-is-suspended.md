@@ -48,6 +48,22 @@ The mechanism actually chosen was verified independently of that check, and the 
 
 The three guards are intact in their wrapped form (`publish-downstream.yml` lines 403, 461, 502) and `aur-validate` remains a hard `needs` of `aur-publish` (line 510). The restoration condition is not met: the news index shows nothing newer about the incident, and the only follow-up anywhere is a 2026-07-23 community post on aur-requests stating the compromised packages were cleaned, which is exactly the half-notice this item already rules insufficient. The item stays blocked and carries no v0.86.0 round work beyond re-checking the news page.
 
+## Re-verified 2026-08-10, during the v0.88.0 delivery round
+
+Still blocked. Both halves of the condition were tested separately, because either one alone is insufficient and the failure mode is checking only the first.
+
+**Is there a superseding announcement?** No. The news index carries exactly one item newer than the 2026-06-12 incident notice: 2026-07-21, "virtualbox-ext-vnc >= 7.2.12-2 requires manual intervention". It concerns VirtualBox and says nothing about the AUR, the incident, or pushes. There is no candidate announcement to evaluate, so the question of whether it states both conditions does not arise.
+
+**Has the incident notice itself been amended into one?** No. It is unchanged and still describes the restrictions as ongoing: it states the team is "actively working to track down existing malicious commits and attempting to prevent additional malicious commits from being pushed", and still tells users they may see issues pushing package updates. It declares neither that the incident is resolved nor that pushes are permitted.
+
+So this is not the half-notice case the item rules insufficient; it is the no-notice case. Nothing changed since 2026-08-07 beyond one unrelated item.
+
+The workflow was not touched. The three `false &&` guards stay exactly as they are, and no restoration commit exists to cite an announcement in.
+
+`make build-matrix-check` was deliberately not run and is deliberately not cited, per the section above: it is a substring test and would be green either way.
+
+This item carries no other v0.88.0 round work. It closes as **deferred with this re-check date**, not as shipped, and its acceptance lines stay unmet and unchanged. Whoever re-checks next needs only this: open the news index, and if something new about the incident appears, test it against BOTH conditions.
+
 ## Rough size
 
 Very small as a code change, one line per job. The judgement is entirely in reading the Arch announcement and deciding the condition is met.
