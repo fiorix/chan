@@ -28,7 +28,7 @@ The second branch is the one that matters. A restart is a routine operation a us
 - A restart from a shell with no token preserves the tunnel registration rather than rewriting the unit as local. Met.
 - A token with no resolvable endpoint produces a named failure, not a silent downgrade. Met.
 - A provisioned unit still matches the renderer byte for byte: the unit classifier accepts `CHAN_TUNNEL_URL` and the sdme provisioner (`packaging/sdme/chan-devserver-provision.sh`) writes the same line. Met.
-- Not yet done: exercised against a live supervised tunnel unit on a real host rather than in test. Worth doing before the GA close, because the failure this closes is a data-loss path and the recovery is manual.
+- Exercised against a live supervised tunnel unit rather than in test: **local half done 2026-08-10, remote half still open.** See [Exercised live, 2026-08-10](#exercised-live-2026-08-10). This closes the local half of the line — the half where the data loss actually happens — and leaves the remote half open: that a real registration survives a restart and the published host serves again.
 
 ## Rig built 2026-08-10, and what building it already proved
 
@@ -43,6 +43,49 @@ Standing that rig up was itself the first end-to-end exercise of the two files t
 What that does **not** establish is the open acceptance line. None of it dials a gateway, and the restart-from-a-token-free-shell case — the branch that destroys the registration — is untouched by it. That line stays open.
 
 One constraint the rig has to respect, recorded because it is easy to miss: the provisioner installs the **released** `chan` from `chan.app/install.sh`, and this fix is not in a release. A rig left to provision itself would exercise the pre-fix binary and prove the opposite of what it was set up to prove. The rig must run a build carrying `fee66884`, copied in — which is a property of the exercise, not a change the provisioner needs.
+
+## Exercised live, 2026-08-10
+
+Against a **real** supervised unit: systemd `--user`, lingering, written by `packaging/sdme/chan-devserver-provision.sh`, running a build that carries this fix. In an sdme container, not on the development host, because `DEVSERVER_SYSTEMD_UNIT` is the hardcoded constant `"chan-devserver.service"` (`crates/chan/src/lib.rs:4058`) — a user session has exactly one supervised chan devserver, and on the development host that one holds every developer's terminal.
+
+**Why a dead endpoint is the right rig, not a compromise.** What this defect destroys is a line in `~/.config/systemd/user/chan-devserver.service`. Whether a tunnel ever connected has no bearing on whether that line survives the rewrite, so the branch that loses the data is entirely local and testing it against a dead loopback endpoint tests the thing that actually breaks. Values were never read: the assertion compares the presence of `Environment=` variable **names** and a `sha256` of the whole unit.
+
+### The A/B, one variable
+
+Same unit, same token-free shell, only the binary differs. The token-free shell is the branch that mattered, because it is the one that rewrote the unit as a plain local devserver.
+
+| | unit before | unit after | ExecStart after |
+| --- | --- | --- | --- |
+| **pre-fix binary** (v0.87.0, lacks this commit) | `env=[CHAN_TUNNEL_TOKEN]` | **`env=[]`** | `devserver --bind=127.0.0.1 --port=8787` |
+| **with this fix** | `env=[CHAN_TUNNEL_TOKEN]` | `env=[CHAN_TUNNEL_TOKEN CHAN_TUNNEL_URL]` | `devserver --tunnel-url=…` |
+
+The pre-fix row is the data loss, reproduced live: the only copy of the PAT is gone, the service is now a local devserver, and the command **reported success** — `wrote …`, `restarted …`, no error and no warning. That is the silent conversion the item describes, observed rather than argued.
+
+The fixed row not only preserves the token, it rewrites the pre-fix unit into the **canonical current shape**, and the resulting file hashes identically to what the provisioner writes from scratch. That is the byte-for-byte renderer/provisioner agreement, demonstrated from the opposite direction to the test that already covers it.
+
+### The other arms
+
+- `--status` from a **token-inheriting** shell — the case that was refused outright, making an inspection command fail for a mutation's reason. Runs, reports the unit and its command line, unit hash unchanged.
+- `--restart` from a **token-inheriting** shell — unit hash unchanged, both variables intact.
+- `--restart` from a **token-free** shell against a provisioner-written unit — unit hash unchanged, both variables intact.
+- `--no-tunnel` from a token-inheriting shell — the deliberate way back to a local devserver still works, and is the only path here that drops the tunnel.
+- A token with **no endpoint resolvable from either source** — `Error: chan devserver: tunnel mode requires --tunnel-url or CHAN_TUNNEL_URL`. A named failure, and the unit is not converted.
+
+### The classifier change is load-bearing, found by a probe that failed to fire
+
+The first attempt at the red arm did **not** reproduce the destruction. The pre-fix binary refused: *"refusing to overwrite foreign or administrator-edited systemd unit"*.
+
+The reason is that the unit had been written by the **current** provisioner, which carries `CHAN_TUNNEL_URL` — a line added by this same commit. The pre-fix classifier has never seen that line, so it reads the unit as administrator-edited and declines to touch it. The red arm only fires against a unit in the **pre-fix shape**, token only, endpoint solely in the `ExecStart` flag.
+
+That is worth recording for two reasons. It is independent evidence that the classifier half of this fix is doing work rather than being cosmetic. And a probe that fails to fire is not automatically a passing system: had it been accepted as one, this would have been written up as "the pre-fix binary is harmless here", which is the opposite of true.
+
+### Not proven, stated flatly
+
+**The remote half is untested.** Nothing here shows that a real registration survives a restart, that the tunnel re-registers with a live gateway, or that the published host serves again afterwards. That needs a real endpoint and a real PAT, and it remains open. The local result does not soften it.
+
+### One observation for operators
+
+Both the pre-fix silent downgrade and the deliberate `--no-tunnel` downgrade land the service on the default `127.0.0.1:8787`. A box where several chan instances share a network namespace can therefore acquire a second listener on the most collision-prone port as a side effect of a restart, which is a nuisance rather than a defect, and is worth knowing before it is diagnosed as a port problem.
 
 ## Rough size
 
