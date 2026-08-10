@@ -102,6 +102,25 @@ function signal(text) {
   document.title = `stall-probe ${text}`;
 }
 
+/// What is actually rasterizing. Reported so the result says what it ran on
+/// rather than leaving that to whoever writes it down afterwards.
+///
+/// It does not gate the run the way the frame-rate harness's does: a present
+/// stall is a question about the compositor's handling of a GL layer, and a
+/// software rasterizer is a legitimate configuration to ask that question
+/// about. But a "no stall observed" from llvmpipe answers it for llvmpipe
+/// only, and the string is what lets a reader see which run they have.
+function glRenderer() {
+  const probe = document.createElement("canvas");
+  const gl = probe.getContext("webgl2") ?? probe.getContext("webgl");
+  if (!gl) return null;
+  const info = gl.getExtension("WEBGL_debug_renderer_info");
+  const value = info
+    ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL)
+    : gl.getParameter(gl.RENDERER);
+  return typeof value === "string" ? value : null;
+}
+
 async function main() {
   const config = JSON.parse(decodeURIComponent(location.hash.slice(1)));
   const host = document.getElementById("host");
@@ -166,6 +185,7 @@ async function main() {
       originY: rect.y,
       devicePixelRatio: window.devicePixelRatio,
       renderer: config.renderer,
+      glRenderer: glRenderer(),
       webglLoaded,
       marker: {
         row: MARKER_ROW,

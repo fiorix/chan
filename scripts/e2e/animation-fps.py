@@ -154,14 +154,37 @@ def drive(url: str) -> dict:
 
     state = {"payload": None, "error": None}
 
+    def collect(_view, result):
+        """Pull the payload off `window` once the page says it is done.
+
+        WHY a JavaScript evaluation rather than the title: WebKitGTK truncates
+        document.title near a kilobyte, and eight arms of results are several.
+        Reading the title gave a string cut mid-token. Unlike the present-stall
+        probe -- where touching the engine would destroy the measurement --
+        this harness has already finished measuring by the time this runs, so
+        evaluating in the page costs nothing.
+        """
+        try:
+            js = view.evaluate_javascript_finish(result)
+            state["payload"] = json.loads(js.to_string())
+        except Exception as exc:  # noqa: BLE001 - reported, not raised
+            state["error"] = f"could not read the result payload: {exc}"
+        Gtk.main_quit()
+
     def on_title(_view, _param):
         title = view.get_title() or ""
         if title.startswith("animation-fps-error"):
             state["error"] = title
             Gtk.main_quit()
-        elif title.startswith("animation-fps "):
-            state["payload"] = json.loads(title[len("animation-fps ") :])
-            Gtk.main_quit()
+        elif title == "animation-fps done":
+            view.evaluate_javascript(
+                "JSON.stringify(window.__animationFps)",
+                -1,
+                None,
+                None,
+                None,
+                collect,
+            )
 
     view.connect("notify::title", on_title)
     view.load_uri(url)

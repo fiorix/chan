@@ -128,6 +128,26 @@ function gpuRenderer(): string | null {
 
 const SOFTWARE_RENDERERS = /swiftshader|llvmpipe|softpipe|lavapipe|software/i;
 
+/// Strings that mean "this engine will not tell you what it is running on".
+///
+/// WebKitGTK spoofs the renderer as an anti-fingerprinting measure. Measured
+/// on a headless Linux VM whose real stack is `llvmpipe (LLVM 21.1.8)` on a
+/// QEMU Cirrus VGA, WebKitGTK 2.52.3 reported:
+///
+///     UNMASKED_RENDERER_WEBGL  "Apple GPU"
+///     UNMASKED_VENDOR_WEBGL    "Apple Inc."
+///     RENDERER                 "WebKit WebGL"
+///
+/// There is no Apple hardware within a thousand miles of that machine. So in
+/// the engine the Linux desktop actually ships, the software-rasterizer check
+/// above is worthless: it would pass a pure-software run straight through and
+/// report an llvmpipe frame rate as if it were a GPU one -- which is the exact
+/// failure the check exists to prevent. Chrome reports truthfully, which is
+/// why the SwiftShader trip works there.
+///
+/// A guard that cannot see must say so rather than wave the run through.
+const UNIDENTIFIABLE_RENDERERS = /^apple gpu$|^webkit webgl$|^apple inc/i;
+
 function quantile(sorted: number[], q: number): number {
   if (!sorted.length) return 0;
   const index = Math.min(sorted.length - 1, Math.floor(sorted.length * q));
@@ -194,6 +214,18 @@ function verdict(results: Result[], renderer: string | null): { code: number; li
       line:
         "INCONCLUSIVE: no WebGL2 context is available here, so none of these" +
         " animations can run at all.",
+    };
+  }
+  if (UNIDENTIFIABLE_RENDERERS.test(renderer.trim())) {
+    return {
+      code: 2,
+      line:
+        `INCONCLUSIVE: this engine does not report what it is rasterizing on` +
+        ` (it claims "${renderer}"). WebKitGTK spoofs the renderer string, so` +
+        ` a software stack is indistinguishable from a GPU here and these` +
+        ` numbers cannot be certified as a hardware measurement. Run the` +
+        ` harness in Chrome, which reports truthfully, and record that` +
+        ` reading instead.`,
     };
   }
   if (SOFTWARE_RENDERERS.test(renderer)) {
@@ -303,16 +335,25 @@ async function main() {
   document.getElementById("now")!.textContent = "";
   const outcome = verdict(results, renderer);
   render(results, true, outcome.line, renderer);
-  // The driver reads this; a human reads the table above it. Both see the
-  // same numbers because both come from the same array.
-  document.title = `animation-fps ${JSON.stringify({
+  // The payload goes on `window`, and the title carries only a signal.
+  //
+  // WHY not the whole payload in the title, the way terminal-pixels.py does
+  // it: WebKitGTK truncates document.title near a kilobyte. Eight arms of
+  // results run to several, so the driver received a string cut mid-token and
+  // died in json.loads at char 986. The pixels harness gets away with the
+  // title because its payload is small; this one does not, and the failure is
+  // silent enough to look like a harness hang rather than a truncation.
+  //
+  // A human still reads the table above, which is built from this same array.
+  (window as unknown as Record<string, unknown>).__animationFps = {
     code: outcome.code,
     line: outcome.line,
     renderer,
     userAgent: navigator.userAgent,
     devicePixelRatio: window.devicePixelRatio,
     results,
-  })}`;
+  };
+  document.title = "animation-fps done";
 }
 
 main().catch((err) => {

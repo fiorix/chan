@@ -107,6 +107,13 @@ INK_ABSENT = 0.10
 WIN_X = 60
 WIN_Y = 60
 
+# How long to wait for the window's first paint to reach the X server before
+# giving up on the arm. Generous, because this bounds a one-off settle at
+# startup and costs nothing when the window is already up: the first sample
+# succeeds and the loop never runs a second time.
+MARKER_SETTLE_TRIES = 15
+MARKER_SETTLE_MS = 200
+
 
 def linux_font_chain() -> str:
     """The chain TerminalTab hands the renderer on Linux for `os-default`.
@@ -418,12 +425,44 @@ def run_arm(args, arm: Arm) -> dict:
                                    geo["rows"] - 1))
         return cap.rgb(rect[0] + 2, rect[1] + 2)
 
-    def marker_ok():
+    def marker_share():
         geo = state["geometry"]
         cap, rect = grab(cell_rect(geo["marker"]["firstCol"],
                                    geo["marker"]["lastCol"],
                                    geo["marker"]["row"]))
-        return cap.ink_share(rect, state["background"]) > INK_PRESENT
+        return cap.ink_share(rect, state["background"])
+
+    def wait_for_marker():
+        """Wait for the window's first paint to actually be on screen.
+
+        The page signals `ready` as soon as its own write has been drawn, which
+        is earlier than the moment those pixels exist in the X server's copy of
+        the window: mapping, the first expose and the initial paint all settle
+        after that signal. Sampling once at `ready` therefore fails about half
+        the time -- observed alternating across arms under Xvfb at identical
+        geometry, which is the signature of a race rather than of placement.
+
+        This is a readiness wait, not a retry of the measurement. Nothing in
+        the trials themselves is retried: a trial's capture happens at a
+        defined moment and is used as it comes back.
+        """
+        for _ in range(MARKER_SETTLE_TRIES):
+            share = marker_share()
+            if share > INK_PRESENT:
+                return True, share
+            # A GTK main loop is already running here, so the settle has to
+            # pump it rather than block it, or the paint being waited for
+            # cannot arrive.
+            deadline = {"done": False}
+
+            def tick():
+                deadline["done"] = True
+                return False
+
+            GLib.timeout_add(MARKER_SETTLE_MS, tick)
+            while not deadline["done"]:
+                Gtk.main_iteration_do(True)
+        return False, marker_share()
 
     def probe_share(row):
         geo = state["geometry"]
@@ -488,11 +527,19 @@ def run_arm(args, arm: Arm) -> dict:
         if body.startswith("ready "):
             state["geometry"] = json.loads(body[len("ready ") :])
             state["background"] = background_rgb()
-            if not marker_ok():
+            ok, share = wait_for_marker()
+            if not ok:
+                ox, oy = origin()
                 state["error"] = (
-                    "the marker row is not on screen: the window is obscured,"
-                    " off-screen, or the geometry is wrong. Refusing to report"
-                    " a stall from a capture that may not be this window."
+                    "the marker row is not on screen after"
+                    f" {MARKER_SETTLE_TRIES * MARKER_SETTLE_MS}ms: the window is"
+                    " obscured, off-screen, or the geometry is wrong."
+                    " Refusing to report a stall from a capture that may not be"
+                    f" this window. Measured {share:.0%} ink in the marker"
+                    f" region, want >{INK_PRESENT:.0%}; window origin"
+                    f" ({ox}, {oy}), grid origin"
+                    f" ({state['geometry']['originX']:.0f},"
+                    f" {state['geometry']['originY']:.0f})."
                 )
                 Gtk.main_quit()
             return
@@ -614,6 +661,8 @@ def report(results: list[dict]) -> int:
             errors += 1
             print(f"      ERROR: {result['error']}")
         geo = result.get("geometry") or {}
+        if geo.get("glRenderer"):
+            print(f"      GL: {geo['glRenderer']}  (WebKitGTK {result['webkit']})")
         if result["renderer"] == "webgl" and geo and not geo.get("webglLoaded"):
             errors += 1
             print(
@@ -656,6 +705,29 @@ def report(results: list[dict]) -> int:
             f"INCONCLUSIVE: the DOM control arm stalled {control_stalls} time(s)."
             " The DOM renderer has no GL layer to leave unpresented, so this is"
             " the harness or the capture, not the renderer."
+        )
+        return 2
+
+    # A trial that never painted, or that landed between the thresholds, is a
+    # trial that saw nothing -- not a trial that saw no stall. Counting those
+    # as "no stall observed" is the failure mode where silence reads as
+    # success, and it is the one this instrument exists to avoid: it would
+    # report a clean bill for an arm that was blind. Observed for real, on the
+    # webgl/dmabuf-off arm painting nothing across every trial while the run
+    # still printed PASS.
+    blind = [
+        (result["arm"], trial)
+        for result in results
+        for trial in result["trials"]
+        if trial["verdict"] in ("never-painted", "inconclusive")
+    ]
+    if blind:
+        arms = sorted({arm for arm, _ in blind})
+        print(
+            f"INCONCLUSIVE: {len(blind)} trial(s) saw no ink at all, on"
+            f" {', '.join(arms)}. Nothing was measured there, so no statement"
+            " about the stall can be made for those arms -- an arm that"
+            " painted nothing is blind, not clean."
         )
         return 2
 
