@@ -28,6 +28,17 @@ proven able to go red and restored.
 > change. Anchor on the symbol names -- `take_stable_lock`,
 > `stable_bind_absorbs_a_transient_lock_holder` -- rather than on the line numbers, which
 > were true when written and are not now.
+>
+> **This item is the live case for that rule, not a historical one.** The other rotted
+> references this round found had decayed through *someone else's* edits over months. Here
+> the document and the change that invalidates it are the same piece of work: the repair
+> described below is what moved the lines cited above, and both were written in one
+> sitting. A `file:line` can be stale before the commit that introduces it is even merged.
+>
+> That is the argument for content anchors stated at its strongest. A reference scheme that
+> cannot survive its own document's change has no chance of surviving six months of other
+> people's, and it fails **open** -- `:4946` still resolves, to an unrelated line, and reads
+> as correct.
 
 ## What
 
