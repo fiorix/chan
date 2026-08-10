@@ -10,12 +10,12 @@ proven able to go red and restored.
 > **Reconciling this item against itself.** Two statements above were open questions at
 > registration and are now settled; they are kept rather than edited.
 >
-> - *"attribution to a specific change was still open"* -- **settled: pre-existing.** The
+> - *"attribution to a specific change was still open"*, **settled: pre-existing.** The
 >   registration text correctly warned that a single green run at `main` proves nothing
 >   about a probabilistic failure, so it was settled by rate instead: 3 red in 30 runs of
 >   the unmodified suite at `e239c770`. The observing lane's changes are not implicated.
 > - *"Whether that warrants a suite-wide sweep instead of three separate repairs is an open
->   question above this item"* -- answered by the round rather than by this item: the three
+>   question above this item"*, answered by the round rather than by this item: the three
 >   turned out to be **three different mechanisms**, and the terminal cluster's three tests
 >   collapsed to **one** shared cause. A single sweep would have found neither. The
 >   `parallel-suite-flake-hygiene` follow-up's claim that `devserver.rs:6041` was "the
@@ -25,8 +25,8 @@ proven able to go red and restored.
 > **Line numbers above are as of `e239c770`** and this repair moved them. The seam added
 > ahead of `take_stable_lock` shifts the test and its assertion down by roughly 55 lines:
 > the panic site recorded as `control_socket.rs:4946` in Evidence is `:5018` after the
-> change. Anchor on the symbol names -- `take_stable_lock`,
-> `stable_bind_absorbs_a_transient_lock_holder` -- rather than on the line numbers, which
+> change. Anchor on the symbol names, `take_stable_lock`,
+> `stable_bind_absorbs_a_transient_lock_holder`, rather than on the line numbers, which
 > were true when written and are not now.
 >
 > **This item is the live case for that rule, not a historical one.** The other rotted
@@ -37,7 +37,7 @@ proven able to go red and restored.
 >
 > That is the argument for content anchors stated at its strongest. A reference scheme that
 > cannot survive its own document's change has no chance of surviving six months of other
-> people's, and it fails **open** -- `:4946` still resolves, to an unrelated line, and reads
+> people's, and it fails **open**, `:4946` still resolves, to an unrelated line, and reads
 > as correct.
 
 ## What
@@ -72,8 +72,8 @@ expire before the holder's sleep does. Nothing about it is deterministic under l
 
 This is the same failure class as
 [scene-conflict-test-is-load-sensitive](../done/scene-conflict-test-is-load-sensitive.md) and
-[terminal-restart-env-test-is-load-sensitive](terminal-restart-env-test-is-load-sensitive.md)
--- a fixed-duration assumption losing to a loaded scheduler -- but a distinct mechanism and
+[terminal-restart-env-test-is-load-sensitive](terminal-restart-env-test-is-load-sensitive.md),
+a fixed-duration assumption losing to a loaded scheduler, but a distinct mechanism and
 a distinct surface. The `timing-test-virtual-clock` ruling (virtual clocks over grace
 windows) is the project's stated answer to this shape and applies here directly.
 
@@ -106,7 +106,7 @@ mechanical audit that cannot miss a site.
 - **Attribution was still open when this was registered.** The observing lane's changes
   (`routes/health.rs`, `devserver.rs`, `routes/mod.rs`, a one-line `pub use` in `lib.rs`)
   touch no socket binding, flock, or takeover code, and no mechanism connects a health
-  field to a bind race -- but that lane correctly declined to assert independence on the
+  field to a bind race, but that lane correctly declined to assert independence on the
   strength of reading its own diff, and ran the check at `main` instead. Whoever picks this
   up should confirm the attribution outcome rather than assume it: a reproduction at `main`
   settles it as pre-existing, while a single green run at `main` settles nothing, because
@@ -123,7 +123,7 @@ mechanical audit that cannot miss a site.
 
 ## Acceptance
 
-- Reproduce at will under deliberate pressure -- the established rig is `sdme set --cpus 1`
+- Reproduce at will under deliberate pressure, the established rig is `sdme set --cpus 1`
   on the build container with the suite oversubscribed to `--test-threads=32`, which
   reproduces the parallel oversubscription this needs rather than mere host busyness.
 - Show the fix removes it under that same pressure.
@@ -134,8 +134,8 @@ mechanical audit that cannot miss a site.
 
 Small once the mechanism is accepted, since it already is: the sleep-versus-budget race is
 visible in the source and needs no investigation phase. The work is choosing the
-replacement -- a virtual clock over the retry budget, or a synchronization primitive that
-makes the holder's release observable rather than timed -- and proving it under the rig.
+replacement, a virtual clock over the retry budget, or a synchronization primitive that
+makes the holder's release observable rather than timed, and proving it under the rig.
 
 ## Provenance
 
@@ -208,4 +208,4 @@ against a duration, and this asserts against an event instead.
 Preserved by construction, and stated in the test's own comment: remove the retry loop and
 the hook never fires, the holder never releases, and the bind returns `AddrInUse`. The
 neighbouring `stable_bind_refuses_to_clobber_a_live_server` continues to pass, so the seam
-did not weaken the negative case -- a persistent holder is still refused.
+did not weaken the negative case, a persistent holder is still refused.

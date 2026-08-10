@@ -8,16 +8,16 @@ cgroup rig. See "Implemented" below.
 > **Reconciling this item against itself.** Everything above "Implemented" was written
 > when the mechanism was unknown, and several of its statements are now false. They are
 > kept rather than edited, because the reasoning that produced them was sound and the
-> corrections are the useful part -- the same discipline this item's sibling
+> corrections are the useful part, the same discipline this item's sibling
 > `doc-sessions-tests-stage-external-edits-on-the-filesystem-clock` applies to its own
 > falsified prediction. Read the later sections as authoritative where they conflict:
 >
 > - *"Not implemented, and not investigated"* / *"The mechanism is unknown; nobody has
->   looked"* / *"the mechanism is still genuinely unknown"* -- superseded. The mechanism is
+>   looked"* / *"the mechanism is still genuinely unknown"*, superseded. The mechanism is
 >   named, demonstrated, and its repair measured.
-> - *"Rough size: Unknown until someone reproduces it"* -- resolved. One helper function in
+> - *"Rough size: Unknown until someone reproduces it"*, resolved. One helper function in
 >   the test harness, plus its two call sites.
-> - *"if the investigation shows three genuinely different mechanisms, split then"* --
+> - *"if the investigation shows three genuinely different mechanisms, split then"*,
 >   resolved the other way. It is **one** mechanism, and the item stays whole.
 > - What survived intact and deserves saying: this item's guess that *"one shared cause in
 >   the terminal test harness is likelier than three independent races"*, and its
@@ -44,7 +44,7 @@ fires on a run that ships trains the operator to discard the next genuine red.
 
 - The test passes deterministically under parallel execution on a starved host, or the
   behaviour it asserts is covered by a test that does.
-- The fix names the mechanism -- test sequencing versus a real race in the restart path --
+- The fix names the mechanism, test sequencing versus a real race in the restart path,
   rather than making the red go away. A race reachable by the test is presumed reachable
   by production until shown otherwise.
 
@@ -66,7 +66,7 @@ short even if the mechanism is not.
 Amended 2026-08-09 at lane close. The scene lane's rig surfaced two more `routes::terminal`
 tests failing under the same pressure:
 
-- `api_restart_terminal_updates_chan_tab_name_env` (`terminal.rs:2428`) — the original
+- `api_restart_terminal_updates_chan_tab_name_env` (`terminal.rs:2428`), the original
 - `api_restart_terminal_respawns_same_session_command` (`terminal.rs:2372`)
 - `api_create_terminal_spawns_command_and_returns_session` (`terminal.rs:2283`)
 
@@ -77,14 +77,14 @@ three genuinely different mechanisms, split then, with the evidence.
 
 Investigate the shared harness first. All three spawn a real terminal, so the common
 suspects are the spawn path, the readiness wait, and whatever sequencing the tests share
-around a live PTY — not three separate assertions each racing something of their own.
+around a live PTY, not three separate assertions each racing something of their own.
 
 ## The chan-server sleep sweep does not reach this
 
 Established 2026-08-09 by the audit lane of
 [load-sensitive-tests-keep-recurring-after-three-sweeps](../done/load-sensitive-tests-keep-recurring-after-three-sweeps.md):
 `api_restart_terminal_updates_chan_tab_name_env` (`routes/terminal.rs:2392-2435`) contains
-**no timing construct at all** — no `sleep`, `timeout`, `Instant::now`, `elapsed()`, or
+**no timing construct at all**, no `sleep`, `timeout`, `Instant::now`, `elapsed()`, or
 `yield_now`. Its only "sleep" is the string `sleep 1` in a shell command handed to a
 spawned terminal, which is shell rather than Rust.
 
@@ -93,7 +93,7 @@ about it. Do not close this item by adjacency when that one lands. The two sites
 does hold in `routes/terminal.rs` are different functions.
 
 Whatever makes this test load-sensitive is not a sleep, which also means the mechanism is
-still genuinely unknown — reading the function for a timing keyword will not find it. The
+still genuinely unknown, reading the function for a timing keyword will not find it. The
 instrument that surfaced it was the suite under a 1-CPU cgroup cap with
 `--test-threads=32`; start there.
 
@@ -120,8 +120,8 @@ this item said to look. It is not three races, not a sleep, not a budget, and
 
 ### The mechanism
 
-> **Resolving the references below.** They anchor on **unique content** -- symbol names and
-> distinctive strings -- rather than line positions, because a `file:line` fails **open**:
+> **Resolving the references below.** They anchor on **unique content**, symbol names and
+> distinctive strings, rather than line positions, because a `file:line` fails **open**:
 > it silently resolves to whatever now occupies that line and reads as correct, where a
 > dead sha fails closed and announces itself. Line numbers that do appear are measured
 > evidence (recorded panic sites), tagged with the commit they were true at. This item's
@@ -142,8 +142,8 @@ exists only in `replay`.
 
 The test harness read one half. `collect_until` (`routes/terminal.rs`) drained
 `session.rx` and never touched `session.replay`. So when the spawned shell wins the race
-against the test's attach -- which is what a 1-CPU cap with `--test-threads=32` makes
-likely -- the assertion sees **nothing at all**.
+against the test's attach, which is what a 1-CPU cap with `--test-threads=32` makes
+likely, the assertion sees **nothing at all**.
 
 Production honours both halves: `send_attach_prelude` (`routes/terminal.rs`) sends
 `session.replay` to the websocket client before streaming live events. So a real client
@@ -158,7 +158,7 @@ Two ways to get an `AttachHandle` in this module, and only one is exposed:
 - `TestTerminal::spawn` takes the handle `Registry::create` returns **at creation**, so
   the subscription precedes any output. Immune by construction.
 - A separate `attach(id, Some(0))` after the route created the session is a **second,
-  later** subscription. Exposed -- if the test then reads PTY bytes.
+  later** subscription. Exposed, if the test then reads PTY bytes.
 
 All seven `attach(..., Some(0))` sites were enumerated. Two belong to
 `session_frame_omits_unknown_agent_and_resyncs_restarted_identity`, which reads session
@@ -179,7 +179,7 @@ api_restart_terminal_updates_chan_tab_name_env        2405   missing first tab n
 ```
 
 **The collector's buffer is not short, it is empty.** That is the discriminating fact. A
-generic "flaky under load" story predicts whatever the shell managed to emit -- truncated
+generic "flaky under load" story predicts whatever the shell managed to emit, truncated
 output, interleaving, a partial prompt, output from the wrong incarnation. It does not
 predict `""` three times out of three. The attach-replay mechanism predicts `""` and
 nothing else.
@@ -226,7 +226,7 @@ immediately rather than after 30s.
   this cluster from unrelated contamination in the same sweep.
 - **Classify per failure, not per run.** Four runs in the baseline sweep carried an
   unrelated environmental fault, and **all four also carried genuine cluster reds**.
-  Excluding contaminated runs wholesale -- the obvious method -- would have discarded real
+  Excluding contaminated runs wholesale, the obvious method, would have discarded real
   data and understated the rate. Exclude the failures by signature; keep every run in the
   denominator.
 - **A limit read from a file is not a limit demonstrated.** See Reproduction.
@@ -239,7 +239,7 @@ suite oversubscribed to `--test-threads=32`, host loadavg sampled per run, failu
 classified per-signature.
 
 **Measured at `e239c770`**, both arms: baseline unmodified, post-fix with this repair
-applied. The comparison is internally valid -- one compiled graph, differing only by the
+applied. The comparison is internally valid, one compiled graph, differing only by the
 repair.
 
 > **This rate is qualified, pending re-measurement on the shipped tree.** The branch was
@@ -247,14 +247,14 @@ repair.
 > ten-crate compiled graph **failed to transfer**: `routes/preflight.rs` and
 > `chan-workspace/src/watch.rs` both changed **outside `#[cfg(test)]`**, so production code
 > in this crate's own test binary moved between the measurement and the merge. My four
-> surfaces are byte-identical across that move, but that is the wrong scope -- a
+> surfaces are byte-identical across that move, but that is the wrong scope, a
 > load-sensitive rate depends on everything the binary compiles, not on the files the lane
 > edited.
 >
 > So two claims, separated deliberately:
 >
-> - **The repair causes the change** -- established. 12/30 against 0/30 on one graph.
-> - **The repair holds on the tree we ship** -- a confirmation sweep at `b6dd9f22` is
+> - **The repair causes the change**, established. 12/30 against 0/30 on one graph.
+> - **The repair holds on the tree we ship**, a confirmation sweep at `b6dd9f22` is
 >   running; this section will record its result either way. Until it lands, do not read
 >   the 0/30 as measured on shipped code.
 >
@@ -275,9 +275,9 @@ runs with a cluster red             12 (40%)       0 (0%)
 ### The cap is verified twice, because a file is not a demonstration
 
 `sdme set --cpus 1` on a **running** container prints `restart for limits to take effect`
-while the host cgroup **immediately reads the correct `100000 100000`**. So the host file
--- the authority this project's own instructions name, correctly, over the container's
-lying `max 100000` -- reads capped while the limit is unenforced. Following the written
+while the host cgroup **immediately reads the correct `100000 100000`**. So the host file,
+the authority this project's own instructions name, correctly, over the container's
+lying `max 100000`, reads capped while the limit is unenforced. Following the written
 instruction exactly would have produced a rate measured at 8 CPUs and reported as a 1-CPU
 rate.
 
@@ -300,7 +300,7 @@ loadavg when none fired            min 23.7  med 42.6  max 68.4
 ```
 
 Overlapping ranges, near-identical medians. Within 17.8-68.4, host load does not predict
-whether the cluster fires -- which corroborates this class's standing claim that the
+whether the cluster fires, which corroborates this class's standing claim that the
 amplifier is **parallel oversubscription rather than CPU scarcity**.
 
 A round-wide measurement makes the number weaker still: freezing ten containers moved
@@ -321,8 +321,8 @@ post-fix runs at load >= the baseline RED median (47.9)    6         cluster-red
 post-fix runs above the baseline MAXIMUM load (68.41)      1         cluster-red: 0
 ```
 
-And measured directly rather than through loadavg: comparing like with like -- baseline
-runs where the cluster did *not* fire against post-fix runs -- median duration is 74.7s vs
+And measured directly rather than through loadavg: comparing like with like, baseline
+runs where the cluster did *not* fire against post-fix runs, median duration is 74.7s vs
 71.0s, about **5%**. Most of the raw 84.8s -> 71.0s gap is the repair itself, since a
 failing test burns its budget before failing. The spinner ratio puts the effective-CPU
 difference at about **9%** (484% -> 440%).
@@ -343,7 +343,7 @@ surprising result could not be reinterpreted as a pass afterwards.
   where before the repair it reported `""`.
 
   **The repair moved these three tests from detecting a fault to diagnosing one.** For the
-  whole of this defect's life they could report only "nothing arrived" -- which is why the
+  whole of this defect's life they could report only "nothing arrived", which is why the
   empty-string fingerprint was such good evidence, and equally why any *real* regression in
   the restart path would have been undiagnosable from their output.
 - Restored afterwards; all three cluster tests pass.
