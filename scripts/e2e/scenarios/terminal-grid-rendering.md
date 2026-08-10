@@ -104,6 +104,20 @@ and block elements to the font and has no custom-glyph path to switch on.
 The two font preferences produce byte-identical renders on Linux, which is
 TG-06 holding rather than a duplicate scenario.
 
+**Independently reproduced.** The same table came back from a second machine
+sharing nothing with the first: WebKitGTK 2.52.3 under Xvfb on a headless VM
+with llvmpipe and a QEMU Cirrus VGA, no GPU and no display. 96.0% and 95.2% to
+the digit, ghostty clean at 100%, the same 8.00x21.00px cell.
+
+The gap *positions* reproduced too, which is what makes it the same mechanism
+rather than two numbers agreeing: vertical rule gaps at 10+1px, 31+1px, 52+1px,
+73+1px, 94+1px and block gaps at 0+1px, 21+1px, 42+1px, 63+1px -- one unpainted
+pixel row on the 21px cell pitch.
+
+This works without a GPU because what these scenarios measure is glyph
+rasterisation, which is CPU-side. A frame rate would not survive the same
+treatment.
+
 ### Windows
 
 Everything the Windows desktop ships is clean. On WebView2 151.0.4129.72 at
@@ -156,6 +170,13 @@ Recorded so a later session does not relitigate them from scratch.
 ## Unmeasured
 
 - macOS WKWebView. Both tables above are one engine on one OS each.
+- **The `--include-renderers` WebGL arm needs a real GPU.** On a llvmpipe/Xvfb
+  stack the WebGL layer is never composited into the snapshot, so those rows
+  report 0.0% on every measure with gaps spanning the whole region. That is
+  "nothing was captured", not "the renderer paints nothing", and reading it as
+  the latter would file a defect against the one renderer that measures 100%
+  everywhere it can actually be observed. The DOM and ghostty arms are
+  unaffected, because glyph rasterisation is CPU-side.
 - Any device pixel ratio other than each harness host's. The Windows run
   covers a fractional ratio (1.5) and the Linux run covers 1, but neither
   sweeps the ratio, and 1.5 is where the drivers' own rounding starts to show
