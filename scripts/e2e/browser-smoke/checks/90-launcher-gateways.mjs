@@ -97,7 +97,7 @@ export default {
         };
       });
 
-      await page.goto(`${site.url}/manual/`, { waitUntil: "networkidle2", timeout: 60_000 });
+      await page.goto(`${site.url}/manual/`, { waitUntil: "domcontentloaded", timeout: 60_000 });
       await page.waitForSelector("#launcher-demo.mounted", { timeout: 30_000 });
       await page.waitForSelector(".topbar button.title-toggle", { timeout: 30_000 });
 

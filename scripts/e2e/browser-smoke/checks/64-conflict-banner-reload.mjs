@@ -29,7 +29,7 @@ export default {
     const page = await browser.newPage();
     try {
       await page.goto(`${serverUrl}&w=smoke-conflict-w-${STAMP}`, {
-        waitUntil: "networkidle2",
+        waitUntil: "domcontentloaded",
         timeout: 60_000,
       });
       await page.waitForSelector(".pane", { timeout: 30_000 });
@@ -42,6 +42,9 @@ export default {
           "",
       );
       if (!windowId) throw new Error("could not resolve the page's window id");
+      // The pane is mounted; the server does not necessarily know this window
+      // yet, and everything below addresses it by id.
+      await ctx.waitWindowLive(windowId);
       const env = {
         ...process.env,
         CHAN_CONTROL_SOCKET: socket,

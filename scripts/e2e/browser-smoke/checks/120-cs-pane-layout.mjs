@@ -459,11 +459,14 @@ is_lead = false
       await cdp.send("Network.enable");
       await cdp.send("Network.setCacheDisabled", { cacheDisabled: true });
       await page.goto(ownUrl.href, {
-        waitUntil: "networkidle2",
+        waitUntil: "domcontentloaded",
         timeout: 60_000,
       });
       await page.waitForSelector(".pane", { timeout: 30_000 });
       await page.bringToFront();
+      // The pane is mounted; the server does not necessarily know this window
+      // yet, and every `cs pane` call below addresses it by id.
+      await ctx.waitWindowLive(WINDOW_ID);
 
       let snapshot = await pollLayout(
         ctx,
@@ -1529,7 +1532,7 @@ is_lead = false
         page,
         await paneList(ctx, WINDOW_ID),
       );
-      await page.reload({ waitUntil: "networkidle2", timeout: 60_000 });
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
       await page.waitForSelector(".pane", { timeout: 30_000 });
       const restored = await pollValue(
         async () => {

@@ -165,7 +165,7 @@ export default {
     page.on("response", recordHttpFailure);
     try {
       await page.goto(windowUrl.toString(), {
-        waitUntil: "networkidle2",
+        waitUntil: "domcontentloaded",
         timeout: 60_000,
       });
       await page.waitForSelector(".pane", { timeout: 30_000 });
@@ -285,6 +285,9 @@ export default {
           window.sessionStorage.getItem("chan.session.window")?.trim() ||
           "",
       );
+      // The pane is mounted; the server does not necessarily know this window
+      // yet, and the opener below addresses it by id.
+      await ctx.waitWindowLive(windowId);
       await ctx.exec(ctx.chanBin, ["shell", "open", LARGE], {
         cwd: ctx.workspaceDir,
         env: {

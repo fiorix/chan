@@ -139,7 +139,7 @@ export default {
 
       page = await ctx.browser.newPage();
       await page.setViewport({ width: 1400, height: 900 });
-      await page.goto(serverUrl, { waitUntil: "networkidle2", timeout: 60_000 });
+      await page.goto(serverUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
       await page.waitForSelector(".pane", { timeout: 30_000 });
       await runLauncherCommand(page, "Echo test");
 

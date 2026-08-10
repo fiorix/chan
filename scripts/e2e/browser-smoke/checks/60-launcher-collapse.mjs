@@ -90,7 +90,7 @@ export default {
     try {
       const url = await ds.url;
       page = await ctx.browser.newPage();
-      await page.goto(url, { waitUntil: "networkidle2", timeout: 60_000 });
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
       await page.waitForSelector(TOGGLE, { timeout: 30_000 });
 
       const label = await page.$eval(TOGGLE, (el) => el.getAttribute("aria-label"));
@@ -116,7 +116,7 @@ export default {
       await ctx.shot("collapsed", page);
 
       // Reload and assert the collapse survived (localStorage reload path).
-      await page.reload({ waitUntil: "networkidle2", timeout: 60_000 });
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
       await page.waitForSelector(TOGGLE, { timeout: 30_000 });
       const afterReload = await page.$eval(TOGGLE, (el) => el.getAttribute("aria-expanded"));
       if (afterReload !== "false") {

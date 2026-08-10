@@ -72,7 +72,7 @@ export default {
     const openWindow = async (label) => {
       const p = await browser.newPage();
       await p.goto(`${serverUrl}&w=smoke-mat-${label}-${++pageSeq}`, {
-        waitUntil: "networkidle2",
+        waitUntil: "domcontentloaded",
         timeout: 60_000,
       });
       await p.waitForSelector(".pane", { timeout: 30_000 });
@@ -83,6 +83,9 @@ export default {
           "",
       );
       if (!wid) throw new Error(`no window id on ${label}`);
+      // The pane is mounted; the server does not necessarily know this window
+      // yet, and every helper below addresses it by id.
+      await ctx.waitWindowLive(wid);
       const csOpen = (file) =>
         ctx.exec(ctx.chanBin, ["shell", "open", file], {
           cwd: ctx.workspaceDir,

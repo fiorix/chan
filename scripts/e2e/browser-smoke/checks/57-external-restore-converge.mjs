@@ -58,7 +58,7 @@ export default {
     const page = await browser.newPage();
     try {
       await page.goto(`${serverUrl}&w=smoke-restore`, {
-        waitUntil: "networkidle2",
+        waitUntil: "domcontentloaded",
         timeout: 60_000,
       });
       await page.waitForSelector(".pane", { timeout: 30_000 });
@@ -68,6 +68,9 @@ export default {
           window.sessionStorage.getItem("chan.session.window")?.trim() ||
           "",
       );
+      // The pane is mounted; the server does not necessarily know this window
+      // yet, and everything below addresses it by id.
+      await ctx.waitWindowLive(wid);
       const env = {
         ...process.env,
         CHAN_CONTROL_SOCKET: socket,

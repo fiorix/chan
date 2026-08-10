@@ -62,11 +62,14 @@ export default {
 
     try {
       await page.goto(ownUrl.href, {
-        waitUntil: "networkidle2",
+        waitUntil: "domcontentloaded",
         timeout: 60_000,
       });
       await page.waitForSelector(".pane", { timeout: 30_000 });
       await page.bringToFront();
+      // The pane is mounted; the server does not necessarily know this window
+      // yet, and every `cs terminal` call below addresses it by id.
+      await ctx.waitWindowLive(WINDOW_ID);
 
       // A plain terminal tab: its spawn command is the login shell, so the
       // server derives no submit agent for it.

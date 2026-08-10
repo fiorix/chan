@@ -150,7 +150,7 @@ export default {
     const page2 = await browser.newPage();
     try {
       await page2.goto(`${serverUrl}&w=smoke-collab-w2`, {
-        waitUntil: "networkidle2",
+        waitUntil: "domcontentloaded",
         timeout: 60_000,
       });
       await page2.waitForSelector(".pane", { timeout: 30_000 });

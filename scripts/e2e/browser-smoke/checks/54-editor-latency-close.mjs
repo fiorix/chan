@@ -53,7 +53,7 @@ export default {
     const page = await browser.newPage();
     try {
       await page.goto(`${proxy.url}&w=smoke-latency`, {
-        waitUntil: "networkidle2",
+        waitUntil: "domcontentloaded",
         timeout: 120_000,
       });
       await page.waitForSelector(".pane", { timeout: 60_000 });

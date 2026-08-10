@@ -68,11 +68,23 @@ async function dispatchCommand(page, name) {
   }, name);
 }
 
-async function openWindow(page, serverUrl, windowId, waitUntil = "domcontentloaded") {
+async function openWindow(ctx, page, serverUrl, windowId) {
   const url = new URL(serverUrl);
   url.searchParams.set("w", windowId);
-  await page.goto(url.href, { waitUntil, timeout: 60_000 });
+  await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForSelector(".pane", { timeout: 30_000 });
+  // The pane is mounted; the server does not necessarily know this window yet,
+  // and every `cs terminal` call below addresses it by id.
+  await ctx.waitWindowLive(windowId);
+}
+
+/// The pane ids this view currently renders, in document order.
+async function paneIds(page) {
+  return page.evaluate(() =>
+    Array.from(document.querySelectorAll(".pane[data-pane-id]"), (element) =>
+      element.getAttribute("data-pane-id"),
+    ),
+  );
 }
 
 async function waitForTab(page, label) {
@@ -275,11 +287,20 @@ export default {
     let liveNameA = null;
     let liveNameC = null;
     try {
-      // Let both views of the shared window finish their initial empty-layout
-      // reconciliation before either view creates a terminal.
-      await openWindow(pageA, ctx.serverUrl, WINDOW_AB, "networkidle2");
-      await openWindow(pageB, ctx.serverUrl, WINDOW_AB, "networkidle2");
-      await openWindow(pageC, ctx.serverUrl, WINDOW_C);
+      await openWindow(ctx, pageA, ctx.serverUrl, WINDOW_AB);
+      await openWindow(ctx, pageB, ctx.serverUrl, WINDOW_AB);
+      await openWindow(ctx, pageC, ctx.serverUrl, WINDOW_C);
+
+      // Both views of the shared window must finish reconciling its empty
+      // layout before either creates a terminal, or the late one races the
+      // other's mutation. Two views having reconciled the SAME layout is the
+      // property that says so, and the pane ids they render are where it is
+      // observable; a quiet network only correlates with it.
+      await poll(
+        async () => ({ a: await paneIds(pageA), b: await paneIds(pageB) }),
+        ({ a, b }) => a.length > 0 && a.join(",") === b.join(","),
+        "both views of the shared window reconciling one layout",
+      );
 
       await pageA.bringToFront();
       await dispatchCommand(pageA, "app.terminal.toggle");

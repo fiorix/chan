@@ -209,6 +209,39 @@ try {
         await new Promise((r) => setTimeout(r, 300));
       }
     },
+    // A window is addressable from outside the page only once its session has
+    // registered with the server, and that is NOT the same event as the DOM
+    // mounting: `.pane` renders from the client's own state, while `cs` and
+    // `chan shell` reach a window through the server's session registry
+    // (`dispatch_if_live`). A check that opens a window and then drives it by
+    // id has to wait for the second event or it races a `window "..." is not
+    // connected` refusal. `pane list` is a read-only round trip through that
+    // same liveness path, so it succeeds exactly when the window is
+    // addressable, which makes it the property rather than a proxy for it.
+    async waitWindowLive(windowId, timeoutMs = 30_000) {
+      const socket = findControlSocket(server.child.pid);
+      if (!socket) throw new Error("control socket not found for the server pid");
+      const start = Date.now();
+      let lastError = "never attempted";
+      for (;;) {
+        try {
+          await execFileP(chanBin, ["shell", "pane", "list", "--window", windowId, "--json"], {
+            cwd: workspaceDir,
+            env: { ...process.env, CHAN_CONTROL_SOCKET: socket, CHAN_WINDOW_ID: windowId },
+            timeout: 15_000,
+          });
+          return;
+        } catch (e) {
+          lastError = e.stderr?.toString().trim() || e.message;
+        }
+        if (Date.now() - start > timeoutMs) {
+          throw new Error(
+            `window ${windowId} not addressable within ${timeoutMs}ms: ${lastError}`,
+          );
+        }
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    },
     skip(reason) {
       const err = new Error(reason);
       err.smokeSkip = true;

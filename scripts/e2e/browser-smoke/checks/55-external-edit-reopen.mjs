@@ -53,7 +53,7 @@ export default {
     const page = await browser.newPage();
     try {
       await page.goto(`${serverUrl}&w=smoke-ext-w1-${Date.now()}`, {
-        waitUntil: "networkidle2",
+        waitUntil: "domcontentloaded",
         timeout: 60_000,
       });
       await page.waitForSelector(".pane", { timeout: 30_000 });
@@ -66,6 +66,9 @@ export default {
           "",
       );
       if (!windowId) throw new Error("could not resolve the page's window id");
+      // The pane is mounted; the server does not necessarily know this window
+      // yet, and everything below addresses it by id.
+      await ctx.waitWindowLive(windowId);
       const env = {
         ...process.env,
         CHAN_CONTROL_SOCKET: socket,
@@ -160,7 +163,7 @@ export default {
       const page2 = await browser.newPage();
       try {
         await page2.goto(`${serverUrl}&w=smoke-ext-w2`, {
-          waitUntil: "networkidle2",
+          waitUntil: "domcontentloaded",
           timeout: 60_000,
         });
         await page2.waitForSelector(".pane", { timeout: 30_000 });
@@ -170,6 +173,9 @@ export default {
             window.sessionStorage.getItem("chan.session.window")?.trim() ||
             "",
         );
+        // The pane is mounted; the server does not necessarily know this
+        // window yet, and the opener below addresses it by id.
+        await ctx.waitWindowLive(w2);
         await ctx.exec(ctx.chanBin, ["shell", "open", FILE], {
           cwd: ctx.workspaceDir,
           env: { ...env, CHAN_WINDOW_ID: w2 },

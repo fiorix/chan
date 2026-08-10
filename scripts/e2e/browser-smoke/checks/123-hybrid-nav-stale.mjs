@@ -227,11 +227,14 @@ export default {
     try {
       for (const page of [pageA, pageB]) {
         await page.goto(sharedUrl.href, {
-          waitUntil: "networkidle2",
+          waitUntil: "domcontentloaded",
           timeout: 60_000,
         });
         await page.waitForSelector(".pane", { timeout: 30_000 });
       }
+      // The panes are mounted; the server does not necessarily know the window
+      // yet, and the `cs` calls below address it by id.
+      await ctx.waitWindowLive(WINDOW_ID);
 
       // A owns a local transaction with two path-less editor intents.
       await enterHybridNav(pageA);

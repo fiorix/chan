@@ -166,7 +166,7 @@ export default {
     let page = null;
     try {
       page = await ctx.browser.newPage();
-      await page.goto(backend.url, { waitUntil: "networkidle2", timeout: 60_000 });
+      await page.goto(backend.url, { waitUntil: "domcontentloaded", timeout: 60_000 });
       await page.waitForSelector('[aria-label="Connect shared-lab"]', { timeout: 30_000 });
       await ctx.shot("trust-required", page);
 
