@@ -2,8 +2,10 @@
 
 Status: REGISTERED 2026-08-09 during the v0.87.0 delivery round, observed incidentally by
 the `scene-conflict-test-is-load-sensitive` lane. **IMPLEMENTED 2026-08-10**: one shared
-harness defect, reproduced at 40% and repaired to 0% over 30 runs each under a 1-CPU
-cgroup rig. See "Implemented" below.
+harness defect in the terminal test collector, closing all three clustered tests. Verified
+on the shipped tree by two matched 12-run arms under a calibrated cgroup rig: **5 of 8
+cluster-red with the repair reverted, 0 of 13 with it in place**. See "Reproduction and
+validation".
 
 > **Reconciling this item against itself.** Everything above "Implemented" was written
 > when the mechanism was unknown, and several of its statements are now false. They are
@@ -254,9 +256,9 @@ repair.
 > So two claims, separated deliberately:
 >
 > - **The repair causes the change** -- established. 12/30 against 0/30 on one graph.
-> - **The repair holds on the tree we ship** -- a confirmation sweep at `b6dd9f22` is
->   running; this section will record its result either way. Until it lands, do not read
->   the 0/30 as measured on shipped code.
+> - **The repair holds on the tree we ship** -- established, see "The shipped-tree
+>   confirmation" below. The first attempt at this was **void** and is recorded there
+>   rather than deleted, because why it was void is the useful part.
 >
 > The distinction that forced this: *"my files did not change"* and *"what I compile did
 > not change"* are different claims, and for any crate with dependencies the second is the
@@ -329,6 +331,82 @@ difference at about **9%** (484% -> 440%).
 
 Baseline reds occurred across loads 17.8-66.8 and durations 68.8-146.2s and fired
 throughout that whole range. A 5-9% environmental shift does not take a 40% rate to zero.
+
+### The shipped-tree confirmation, and the void attempt that preceded it
+
+The first attempt at this was **void**, and why is worth more than the result.
+
+After rebasing, a confirmation sweep ran green and was nearly reported. It proves nothing:
+
+```
+baseline runs WITH a cluster red   fastest 86.1s   median 93.4s   slowest 110.3s
+that confirmation sweep            fastest 51.8s   median 54.6s   slowest 64.3s
+runs reaching even the fastest contention that ever produced a red:   0 of 13
+```
+
+Other lanes had finished and the box had quieted. A cgroup cap is a **ceiling, not a
+reservation**, so a quiet host means the container receives its *full* share. "1 CPU on a
+busy host" and "1 CPU on a quiet host" are different instruments wearing the same label,
+and only the first had ever detected this defect.
+
+**A confirmation from an instrument not shown to detect the defect is worth nothing.** Such
+a green is indistinguishable from a green produced by the instrument being blunt.
+
+So the sweep was discarded and replaced with two arms, in this order:
+
+```
+ARM A  repair reverted, shipped tree    5 of 8 cluster-red   durations  73-116s
+ARM B  repair in place, shipped tree    0 of 13 cluster-red  durations  88-98s
+```
+
+`P(0 in 13 | still failing at ARM A's observed 62%) = 2.9e-6`. The observed rate is stated
+beside the conclusion deliberately: at a lower true rate the same zero would be far weaker,
+so the number carries its own decisiveness rather than borrowing it.
+
+**ARM A ran first on purpose.** It establishes the rig can still SEE the defect here. Had
+only ARM B run and returned 13 greens, that would have been the void sweep again with a
+tighter cap, and nothing inside the result could have distinguished the two.
+
+ARM A also settles the void question with data rather than argument: with the repair
+**reverted**, runs under 70s produced **0 of 4** cluster reds. The discarded sweep sat
+entirely in that band, where known-broken code passes.
+
+### Matching instruments needs composition, not a scalar
+
+Reproducing ARM A's contention by tightening the cap alone failed, and the failure is
+instructive. At 0.33 and 0.46 CPU the runs hit ARM A's *durations* (160.8s, 120.9s) while
+producing a **novel failure population** ARM A never showed at those same durations:
+`routes::storage::tests::handler_reset_*` and
+`state::test_support::reset_contention_does_not_starve_single_worker_runtime`.
+
+Throttle-induced slowness and contention-induced slowness are different mechanisms: a hard
+cap freezes every thread together each period, while contention interleaves them. Duration
+is a **scalar summary of something that has a shape**, and matching the scalar does not
+match the shape.
+
+The tell needs no theory. If two rigs were equivalent, the **set** of failing tests would be
+the same set, so a novel population is a fingerprint. That is classify-by-signature applied
+to a third axis: which failure, then under what condition, then **which instrument**.
+
+ARM B therefore restored ARM A's exact cap and recreated the *contention* instead, with a
+load generator held to three cores by its own cgroup. Runs landed at 88-98s, stdev 2.3s,
+against ARM A's slow band of 73-116s.
+
+### Populations excluded from the ARM B count, named
+
+ARM B had five red runs and **zero cluster reds**. The exclusions are by signature, not by
+judgement, and are listed so the count can be checked rather than trusted:
+
+```
+routes::preflight::tests::settled_separates_unlocked_from_finished        runs 1, 3
+indexer::tests::*                                                          runs 2, 9
+state::test_support::reset_contention_does_not_starve_single_worker_runtime  run 9
+control_socket::tests::stable_bind_takes_over_a_dead_servers_node_...      run 7
+```
+
+The preflight and indexer tests are another lane's surface. The last one is on this lane's
+surface but is a **different test with a different mechanism**, registered separately rather
+than folded in; see the v0.89.0 candidate on `drop`-release being assumed synchronous.
 
 ### Discrimination: proven able to go red, then restored
 
