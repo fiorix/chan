@@ -255,12 +255,27 @@
     timer = setTimeout(poll, ms);
   }
 
+  // Keep polling until the workspace has SETTLED, not merely until it
+  // unlocks. Those parted company when the boot stopped locking behind a
+  // recovery pass: `phase === "ready"` now arrives while an index rebuild is
+  // still running. Stopping there would freeze the last snapshot mid-rebuild,
+  // and the server attaches `summary` only once settled -- so the first-run
+  // onboarding nudge would never arrive at all for a workspace that booted
+  // into recovery.
+  // The `?.` is load-bearing, not defensive habit: `demo/router.ts` mocks this
+  // route with a hardcoded ready snapshot that carries no `readiness` at all,
+  // and its `json({...})` is untyped so the compiler cannot see the gap. Absent
+  // readiness means the offline demo, which is settled by definition.
+  function settled(snap: PreflightSnapshot): boolean {
+    return snap.phase === "ready" && snap.readiness?.state !== "recovering";
+  }
+
   async function poll(): Promise<void> {
     if (stopped) return;
     try {
       snapshot = await api.preflight();
       errorStreak = 0;
-      if (snapshot.phase !== "ready") schedule();
+      if (!settled(snapshot)) schedule();
     } catch {
       errorStreak += 1;
       if (errorStreak < MAX_ERROR_STREAK) schedule(POLL_MS * 2);
@@ -272,7 +287,7 @@
     deciding = true;
     try {
       snapshot = await api.preflightDecision({ step, choice });
-      if (snapshot.phase !== "ready") schedule();
+      if (!settled(snapshot)) schedule();
     } catch {
       schedule();
     } finally {

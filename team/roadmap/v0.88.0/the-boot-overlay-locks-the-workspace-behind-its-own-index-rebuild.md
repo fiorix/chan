@@ -59,3 +59,115 @@ Small to medium, and mostly frontend. The server side is one field on the prefli
 snapshot; the workspace app needs a non-blocking indicator and a decision about what search
 does while the index is stale, which is the part worth thinking about rather than the
 plumbing.
+
+## Implemented 2026-08-10, v0.88.0 round
+
+### The premise was checked, not assumed
+
+The item asserts that only search needs the index. That is load-bearing for the whole
+change, so it was verified rather than read:
+
+```
+grep -rn "readiness()\|is_ready()" crates/chan-server/src/routes/*.rs
+```
+
+Every hit outside `preflight.rs` lands in `search.rs`. No file, doc, terminal, graph or
+fs route consults `WorkspaceReadiness` at all. Unlocking therefore hands back a genuinely
+usable workspace, and content search is the only degraded surface.
+
+### The server side turned out to be no field at all. It was a deletion.
+
+The item predicted "one field on the preflight snapshot", and the round brief repeated
+the prediction. Both were wrong, and the wrong prediction is recorded here rather than
+quietly matched.
+
+A `blocking: bool` on `PreflightStep` was drafted first and discarded: it would have been
+fully determined by `state` at every call site, for the index step and the model step
+alike, so it carried no information and would have left the next reader believing a
+choice was being made where none was.
+
+What shipped is smaller. `Phase::Running` is **deleted**, and the phase derivation
+collapses to:
+
+```rust
+let phase = if any Failed        { Failed }
+       else if any NeedsDecision { NeedsDecision }
+       else                      { Ready };
+```
+
+The two arms removed from between them -- `!readiness.is_ready() => Running` and
+`all steps Done => Ready, else Running` -- *were* the lock. With them gone `Phase::Running`
+has no producer, so leaving it in the enum would be a lint suppression plus a lie in the
+type; `phase: "running"` disappears from `GET /api/preflight` and from `PreflightPhase` in
+`web/.../api/types.ts`.
+
+This is what makes the contract structural rather than conditional. A flag holds only
+while every call site keeps setting it correctly; with the variant deleted there is no
+phase in which the boot waits on an index pass, so an innocent-looking edit cannot flip
+the contract back. One primitive with two call sites, one wired and one not, is the exact
+failure shape this lineage keeps repeating -- it is how `refresh_repository_scope` and
+`set_excluded_dirs` came to differ in
+[gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md).
+
+The one field that *was* needed is client-side: the server has always serialized
+`readiness` on the snapshot, but `api/types.ts` never modelled it, so the SPA could not
+see it.
+
+### What search does while the index is stale: it declines, and says why
+
+Chosen deliberately, and the argument is recorded because it is the durable half.
+
+The behaviour was **already** decline. `routes/search.rs:202` and `:225` both return
+`ready:false, hits:[]` for any `!readiness.is_ready()`, once before the search and once
+after to guard a mid-flight transition, and `web/.../api/client.ts:243-252`
+(`readContentSearch`, the "Contract-5 decision boundary") re-asserts it client-side. The
+defect this item names was never that the behaviour was wrong; it was that the behaviour
+was **enforced but never stated**, which is exactly the "incidental" the contract
+objects to. Stating it is the fix.
+
+Serving partial results was rejected on its merits, not only on scope. **A reconcile's
+delta is unbounded in both directions**: it drops files that no longer exist and adds
+files that do, so stale hits can point at paths that are gone while real files the pass
+has not reached are missing. "Some results, possibly wrong, with no way to tell which" is
+a worse contract than "no results, and here is why". It would also have meant editing
+`routes/search.rs` and moving a documented boundary other consumers read `ready` from,
+which is not the "small to medium, mostly frontend" this item scoped.
+
+Serving partial BM25 results behind a staleness banner remains the better long-run answer
+for the common case, and is registered separately as a candidate for a later version.
+
+### Saying why, in the place the user is standing
+
+Four surfaces rendered this state and all four named the state rather than its
+consequence, in wording that reads like data loss and says nothing about search. Four
+different sentences for one condition was the actual user-facing bug:
+
+| surface | before | after |
+| --- | --- | --- |
+| `SearchPanel.svelte` | `workspace recovering - content search not ready` | `rebuilding search index - content search is paused until it finishes` |
+| `AppStatusBar.svelte` | `workspace recovering` | `rebuilding search index` + muted `search paused` |
+| `EmptyPaneCarousel.svelte` | `workspace recovering...` | `rebuilding search index...` |
+| `editor/bubbles/empty_state.ts` | `Workspace recovering...` / `search is not ready yet` | `Rebuilding search index...` / `content search is paused until it finishes` |
+
+Each names the cause, the consequence, and that it clears itself without the user acting,
+which is the whole of what the contract's "says why" asks for.
+
+`GraphPanel.svelte` carries a fifth `workspace recovering…` string and was deliberately
+**left alone**: its cue warns that dead-end "missing" graph nodes may simply be unindexed,
+so its consequence is the graph rather than search, and renaming it to talk about search
+would make it wrong. It is noted here so the inconsistency is a recorded decision rather
+than an oversight.
+
+### A named consequence of the phase change, so it is not "simplified" back
+
+`summary` was attached whenever `phase == Ready`, and the first-run onboarding nudge gates
+on `summary.indexed_docs > 0`. Once `Ready` started arriving *during* a rebuild, an
+established workspace mid-full-rebuild could read `indexed_docs: 0` and be shown the
+first-run nudge it dismissed long ago.
+
+So `phase == Ready` is no longer sufficient for the summary; `PreflightSnapshot::is_settled()`
+(`phase == Ready && readiness.is_ready()`) gates it. That in turn forces the overlay to
+keep polling **past** unlock until settled, because it previously stopped at
+`phase === "ready"` -- without both halves the nudge would never arrive at all for a
+workspace that booted into recovery. The two changes are a pair; removing either one alone
+reintroduces the bug in a different place.

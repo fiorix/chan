@@ -151,7 +151,7 @@
             {:else if s.state === "reindexing"}
               reindexing <span class="muted">{s.file}</span>
             {:else if s.state === "recovering"}
-              workspace recovering
+              rebuilding search index <span class="muted">search paused</span>
             {:else if s.state === "error"}
               index error: <span class="muted">{s.message}</span>
             {:else if s.state === "idle" && s.embedding}

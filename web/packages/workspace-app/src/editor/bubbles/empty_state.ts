@@ -31,8 +31,8 @@ export function completionEmptyState(
   if (indexStatus?.state === "recovering") {
     return {
       kind: "indexing",
-      primary: "Workspace recovering...",
-      secondary: "search is not ready yet",
+      primary: "Rebuilding search index...",
+      secondary: "content search is paused until it finishes",
     };
   }
   if (indexInProgress(indexStatus)) {

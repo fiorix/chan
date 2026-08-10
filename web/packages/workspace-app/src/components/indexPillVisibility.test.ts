@@ -118,10 +118,14 @@ describe("AppStatusBar source keeps the idle-hide rule (except embedding)", () =
     expect(statusBar).toMatch(/\{s\.current\}\/\{s\.total\}/);
   });
 
-  test("recovery branch says the workspace is recovering", () => {
+  test("recovery branch names the rebuild AND that search is paused", () => {
+    // The pill is now the primary "why is search quiet" signal for a user who
+    // is INSIDE a working workspace: the boot overlay stopped locking behind a
+    // recovery pass, so nothing else stops them reaching a search box first.
     expect(statusBar).toMatch(
-      /\{:else if s\.state === "recovering"\}[\s\S]{1,120}workspace recovering/,
+      /\{:else if s\.state === "recovering"\}[\s\S]{1,200}rebuilding search index/,
     );
+    expect(statusBar).toMatch(/rebuilding search index[\s\S]{1,80}search paused/);
   });
 
   test("counter hides during the embedding-sentinel sub-phase", () => {

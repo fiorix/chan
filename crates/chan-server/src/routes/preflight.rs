@@ -8,13 +8,16 @@
 //! first-boot flag to persist or reset:
 //!
 //!   - `index` step: the background indexer's `IndexStatus` plus the
-//!     workspace's authoritative `WorkspaceReadiness`. Progress-only
-//!     indexing on a ready generation stays non-blocking, but pending or
-//!     active recovery reports `running` and locks the overlay until its
-//!     required generation converges. A genuine index error reports
-//!     `failed`. Recovery that has no worker assigned to it never converges,
-//!     so it reports as a decision carrying the rebuild that clears it
-//!     rather than as recovery in progress.
+//!     workspace's authoritative `WorkspaceReadiness`. NO index work blocks
+//!     the boot -- not a cold build, not an incremental reindex, and not a
+//!     recovery pass that is progressing. Reading a file, using a terminal
+//!     and editing all need no index; only search does, so a pass in flight
+//!     reports `pending` (the SPA renders it as a passive "rebuilding search
+//!     index" state) and the user is let into the workspace with an index
+//!     that is briefly stale. A genuine index error reports `failed`.
+//!     Recovery that has no worker assigned to it never converges, so it
+//!     reports as a decision carrying the rebuild that clears it -- that DOES
+//!     lock, because a decision is the only thing that clears it.
 //!   - `model` step (embeddings builds only): when the workspace has
 //!     semantic search enabled but the embedding model is not on disk,
 //!     the user must choose -- download it or fall back to keyword
@@ -68,10 +71,27 @@ struct PreflightSnapshot {
     /// Post-open workspace facts for the SPA onboarding surface. Cleanly
     /// SEPARATED from the lock gate: it carries
     /// no readiness signal and never feeds `phase` / `locked`. `build_snapshot`
-    /// leaves it `None`; the route handlers attach it only once the workspace
-    /// is `Ready`, which is exactly when the onboarding card consumes it.
+    /// leaves it `None`; the route handlers attach it only once the workspace is
+    /// SETTLED (see [`PreflightSnapshot::is_settled`]), which is exactly when
+    /// the onboarding card consumes it. Settled, not merely `Ready`: the boot
+    /// now unlocks while a pass is still in flight.
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<Summary>,
+}
+
+impl PreflightSnapshot {
+    /// Boot is done AND the workspace has settled: nothing locked, and no
+    /// recovery or index pass still in flight.
+    ///
+    /// `phase == Ready` alone no longer implies settled -- that is the point of
+    /// this route now -- so the onboarding summary keys on this instead. The
+    /// summary describes a settled workspace, and `indexed_docs` read during a
+    /// full rebuild can be 0 on a workspace that is anything but empty, which
+    /// would show an established library the first-run nudge it dismissed long
+    /// ago.
+    fn is_settled(&self) -> bool {
+        self.phase == Phase::Ready && self.readiness.is_ready()
+    }
 }
 
 /// Workspace facts the onboarding card renders to confirm "this is the folder
@@ -94,10 +114,16 @@ struct Summary {
     reports_enabled: bool,
 }
 
+/// What the boot overlay does with the snapshot.
+///
+/// There is deliberately no `Running`. Boot waits on a user decision or a
+/// failure and on nothing else: an index pass in flight is reported through
+/// `readiness` and the `index` step, never by holding the overlay. Removing
+/// the variant is what makes "a progressing pass does not lock the workspace"
+/// structural rather than a flag someone can flip back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Phase {
-    Running,
     NeedsDecision,
     Ready,
     Failed,
@@ -152,6 +178,11 @@ struct PreflightError {
 /// The unowned arm sits ahead of the readiness arm deliberately: a stalled
 /// recovery and a running one are both `!is_ready()`, and testing readiness
 /// first is exactly what made the two indistinguishable.
+///
+/// `Pending` here means "in flight", not "the boot is waiting". It no longer
+/// feeds the lock at all (see [`build_snapshot`]), so the two cases stay as far
+/// apart as they can be: a claimed pass is `Pending` on an UNLOCKED snapshot, a
+/// stalled one is `NeedsDecision` on a locked one.
 fn index_step(status: &IndexStatus, readiness: WorkspaceReadiness, unowned: bool) -> PreflightStep {
     let base = PreflightStep {
         id: "index",
@@ -260,22 +291,29 @@ fn build_snapshot(
         steps.push(step);
     }
 
-    // Phase precedence: a failure dominates, then a pending decision,
-    // then "all done" is ready, otherwise still running.
+    // Phase precedence: a failure dominates, then a pending decision, and
+    // everything else is ready.
     //
-    // A decision outranks unready readiness. A stalled recovery is reported as
-    // a decision precisely because readiness alone cannot clear it, so letting
-    // `!is_ready()` win here would bury the one step that offers a way out.
+    // The two arms that used to sit between them -- `!readiness.is_ready()` and
+    // "every step is done" -- are gone on purpose, and that deletion IS this
+    // change. A recovery or index pass that is progressing left the workspace
+    // unusable behind an overlay that only search needed: reading a file, using
+    // a terminal and editing need no index. The pass is still reported (through
+    // `readiness`, and through the `index` step's `pending`); it just no longer
+    // holds the door.
+    //
+    // What still locks is what a user has to answer or cannot use: a failed
+    // index, a missing embedding model, and a stalled pass with no claimant.
+    // That last one is the regression to guard -- it converges nowhere, so the
+    // decision it carries is the only escape, and collapsing it back together
+    // with a progressing pass is the pre-v0.87.0 behaviour that
+    // `gitignore-write-strands-the-workspace-in-recovering` shipped to fix.
     let phase = if steps.iter().any(|s| s.state == StepState::Failed) {
         Phase::Failed
     } else if steps.iter().any(|s| s.state == StepState::NeedsDecision) {
         Phase::NeedsDecision
-    } else if !readiness.is_ready() {
-        Phase::Running
-    } else if steps.iter().all(|s| s.state == StepState::Done) {
-        Phase::Ready
     } else {
-        Phase::Running
+        Phase::Ready
     };
 
     PreflightSnapshot {
@@ -360,7 +398,7 @@ pub async fn api_preflight(State(state): State<Arc<AppState>>) -> Response {
         snapshot.cs_dismissed = cs_dismissed;
         // The onboarding summary describes an OPEN workspace, so attach it only
         // once ready (also keeps the per-poll work off the cold-build path).
-        if snapshot.phase == Phase::Ready {
+        if snapshot.is_settled() {
             snapshot.summary = Some(workspace_summary(&workspace));
         }
         snapshot
@@ -427,7 +465,7 @@ async fn index_decision(state: &Arc<AppState>, choice: &str) -> Response {
         let mut snapshot = build_snapshot(&workspace, &status);
         snapshot.cs_link = cs_link::detect(allow_cs);
         snapshot.cs_dismissed = cs_dismissed;
-        if snapshot.phase == Phase::Ready {
+        if snapshot.is_settled() {
             snapshot.summary = Some(workspace_summary(&workspace));
         }
         snapshot
@@ -499,7 +537,7 @@ async fn model_decision(state: &Arc<AppState>, choice: &str) -> Response {
         let mut snapshot = build_snapshot(&workspace, &status);
         snapshot.cs_link = cs_link::detect(allow_cs);
         snapshot.cs_dismissed = cs_dismissed;
-        if snapshot.phase == Phase::Ready {
+        if snapshot.is_settled() {
             snapshot.summary = Some(workspace_summary(&workspace));
         }
         Ok(snapshot)
@@ -604,24 +642,88 @@ mod tests {
     }
 
     #[test]
-    fn recovery_with_a_claimant_is_explicitly_running_and_locks_preflight() {
+    fn recovery_with_a_claimant_does_not_lock_the_workspace() {
+        // The item this replaces the old assertion for: a pass that is
+        // PROGRESSING is reported, not enforced. The workspace is recovering
+        // and the index step says so, but nothing is locked -- reading a file,
+        // using a terminal and editing need no index, and only search does.
         let (_c, _r, ws) = workspace();
         ws.set_recovery_driver(Arc::new(RecordingDriver));
         ws.request_recovery(chan_workspace::RecoveryAction::Reconcile);
 
         let snap = build_snapshot(&ws, &idle());
 
-        assert_eq!(snap.phase, Phase::Running);
-        assert!(snap.locked);
+        assert_eq!(snap.phase, Phase::Ready);
+        assert!(
+            !snap.locked,
+            "a recovery pass with a claimant must not lock the workspace behind its own rebuild"
+        );
         assert_eq!(
             serde_json::to_value(snap.readiness).unwrap()["state"],
-            "recovering"
+            "recovering",
+            "unlocking must not hide the pass: readiness still reports it"
         );
         let index = snap.steps.iter().find(|step| step.id == "index").unwrap();
-        assert_eq!(index.state, StepState::Pending);
+        assert_eq!(
+            index.state,
+            StepState::Pending,
+            "the step stays honest about work in flight even though it no longer blocks"
+        );
         assert!(
             index.decision.is_none(),
             "recovery that is actually progressing must not ask the user for anything"
+        );
+        // Deliberately NOT asserting `summary.is_none()` here: `build_snapshot`
+        // never attaches a summary at all, so it would pass for a reason that
+        // has nothing to do with settledness and read as coverage it is not.
+        // `settled_separates_unlocked_from_finished` carries that check.
+    }
+
+    #[test]
+    fn a_stall_and_a_running_pass_never_collapse_together() {
+        // THE regression guard for this item, written as one test on purpose.
+        //
+        // Both states are `!is_ready()` with an identical index status; the only
+        // difference is whether a driver claimed the pass. Before v0.87.0 they
+        // rendered identically (both locked, both "running"), which is the
+        // defect `gitignore-write-strands-the-workspace-in-recovering` shipped
+        // to fix. Unlocking the progressing case here widens that gap rather
+        // than narrowing it, and this asserts BOTH axes -- phase and locked --
+        // so a future change cannot re-collapse them by matching on one field
+        // while the other silently agrees.
+        let (_c1, _r1, running) = workspace();
+        running.set_recovery_driver(Arc::new(RecordingDriver));
+        running.request_recovery(chan_workspace::RecoveryAction::Reconcile);
+
+        let (_c2, _r2, stalled) = workspace();
+        stalled.request_recovery(chan_workspace::RecoveryAction::Reconcile);
+
+        let running_snap = build_snapshot(&running, &idle());
+        let stalled_snap = build_snapshot(&stalled, &idle());
+
+        // Same readiness tag, same index status: the claimant is the only
+        // variable, so anything that differs below differs BECAUSE of it.
+        assert_eq!(
+            serde_json::to_value(running_snap.readiness).unwrap()["state"],
+            serde_json::to_value(stalled_snap.readiness).unwrap()["state"],
+        );
+        assert!(!running.recovery_is_unowned());
+        assert!(stalled.recovery_is_unowned());
+
+        assert_ne!(
+            running_snap.phase, stalled_snap.phase,
+            "a stalled pass and a running one must not report the same phase"
+        );
+        assert_ne!(
+            running_snap.locked, stalled_snap.locked,
+            "a stalled pass and a running one must not lock the same way"
+        );
+        assert_eq!(running_snap.phase, Phase::Ready);
+        assert!(!running_snap.locked);
+        assert_eq!(stalled_snap.phase, Phase::NeedsDecision);
+        assert!(
+            stalled_snap.locked,
+            "a pass that converges nowhere still holds the boot: the decision is the only escape"
         );
     }
 
@@ -675,9 +777,35 @@ mod tests {
         ws.set_recovery_driver(Arc::new(RecordingDriver));
 
         let snap = build_snapshot(&ws, &idle());
-        assert_eq!(snap.phase, Phase::Running);
+        assert_eq!(snap.phase, Phase::Ready);
+        assert!(
+            !snap.locked,
+            "the pass now has an owner, so it is reported rather than enforced"
+        );
         let index = snap.steps.iter().find(|step| step.id == "index").unwrap();
         assert_eq!(index.state, StepState::Pending);
+        assert!(index.decision.is_none(), "the stall's escape hatch is gone");
+    }
+
+    #[test]
+    fn settled_separates_unlocked_from_finished() {
+        // `phase == Ready` no longer means the workspace stopped working, so
+        // the onboarding summary needs its own gate. A claimed pass is unlocked
+        // but NOT settled; the same workspace with no pass is both.
+        let (_c, _r, ws) = workspace();
+        ws.set_recovery_driver(Arc::new(RecordingDriver));
+        ws.request_recovery(chan_workspace::RecoveryAction::Reconcile);
+        let during = build_snapshot(&ws, &idle());
+        assert_eq!(during.phase, Phase::Ready);
+        assert!(!during.locked);
+        assert!(
+            !during.is_settled(),
+            "a rebuild in flight is unlocked, not finished: indexed_docs is mid-pass here"
+        );
+
+        let (_c2, _r2, quiet) = workspace();
+        let after = build_snapshot(&quiet, &idle());
+        assert!(after.is_settled());
     }
 
     #[test]

@@ -682,7 +682,12 @@ export type FsGraphResponse = {
 // New-workspace pre-flight (GET /api/preflight). chan-server derives the
 // snapshot from live state on every poll; the SPA renders it on a locked
 // surface until `phase === "ready"`.
-export type PreflightPhase = "running" | "needs_decision" | "ready" | "failed";
+//
+// There is deliberately no `"running"`: the boot waits on a user decision or a
+// failure and on nothing else. An index or recovery pass in flight is reported
+// through `readiness` and the `index` step, never by holding the overlay --
+// reading, editing and the terminal need no index, only search does.
+export type PreflightPhase = "needs_decision" | "ready" | "failed";
 export type PreflightStepState = "pending" | "done" | "needs_decision" | "failed";
 
 export type PreflightDecisionChoice = { id: string; label: string };
@@ -732,6 +737,12 @@ export type PreflightSnapshot = {
   /// True until `phase === "ready"`. The single signal the locked surface
   /// keys on: while true it shows with no close affordance and ignores ESC.
   locked: boolean;
+  /// Whether the workspace has SETTLED, which is no longer the same question as
+  /// `locked`. The boot unlocks while a recovery or index pass is still in
+  /// flight, so this is what says "the index is still rebuilding, so search is
+  /// paused and the onboarding summary has not arrived yet". The server has
+  /// always sent it; it was simply never modelled here.
+  readiness: WorkspaceReadiness;
   steps: PreflightStep[];
   error?: PreflightError | null;
   /// Non-blocking `cs` alias offer; rendered as a dismissible card, never
