@@ -2,6 +2,8 @@
 
 Status: REGISTERED 2026-08-09 as an **unverified lead**, from diagnosing the watcher-reconcile stall ([gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md)). No reproduction was attempted. The cause below is a hypothesis that fits the observation; it is not established, and it must be reproduced before anything is built against it.
 
+**NOT REPRODUCED 2026-08-10.** The reproduction ran (see [Reproduction, 2026-08-10](#reproduction-2026-08-10)) and the stated mechanism is falsified: closes do not serialize, do not exhaust the runtime, and are bounded. No code changed. The observation itself remains unexplained by this item's hypothesis, and the likelier explanation is client-side and recorded below.
+
 ## What was observed
 
 While one workspace was parked in the recovery stall, the other workspaces on the same devserver could not be toggled off from the UI. An out-of-process `chan close {path}` did work, after disconnecting from the devserver and reconnecting.
@@ -31,3 +33,47 @@ Deliberately empty until the mechanism is established. Writing a contract now wo
 ## Rough size
 
 Unknown, and it stays unknown until the reproduction lands. The reproduction itself is small.
+
+## Reproduction, 2026-08-10
+
+Run in container `chan-dsrig` against chan `0.87.0 (build git-73a33b9cf12e)`. That build is the `v0.87.0` tag itself, and `git diff 73a33b9c e239c770 -- crates/chan-library/src/host.rs crates/chan-library/src/tenant.rs crates/chan-server/src/devserver.rs` is empty, so the whole close path is byte-identical to this round's baseline. One devserver under a lingering user manager, eleven workspaces, no tunnel.
+
+### The hypothesis needs a load the stall cannot supply
+
+Before any measurement, the mechanism has a hole that does not depend on one. Worker exhaustion requires the stalled workspace to be **occupying** runtime workers. The defining property of this stall is that **no worker is assigned to the pass**: `active_generation: null`, `pending_generation: 14`, indexer idle, queue depth 0. A pass nobody is running consumes nothing, so it cannot exhaust a pool.
+
+The parent item recorded the same thing from the live host, in the sentence directly describing the stalled devserver: *"The server was never deadlocked: it answered HTTP in under a millisecond throughout, having burned 9m03s of CPU in 12h26m with all 52 threads parked on futexes."* Threads parked on futexes are idle, not starved. Evidence against runtime exhaustion was already in the file this lead was extracted from.
+
+### What the close path actually does
+
+- `mount_attempt_lock` is a `tokio::sync::Mutex` (`devserver.rs:663`). Awaiting it parks the task, not a worker thread, so contending on it cannot exhaust a pool.
+- It is taken on the **mount** path (`devserver.rs:789`). The toggle-off path, `set_workspace_on` (`devserver.rs:970`, `:992`), calls `host.close_workspace` under no cross-workspace lock at all. The observation was about toggling other workspaces **off**.
+- The one genuinely blocking wait runs inside `tokio::task::spawn_blocking` (`host.rs:485` calling `wait_for_workspace_release`, `host.rs:2947`) — its own pool, not the async workers.
+- Both waits are deadline-bounded: the flock verifier gives up after 5s with a named warning (`host.rs:2948`, `:2958`), and `TenantTaskOwner::shutdown` runs against `TENANT_TASK_SHUTDOWN_GRACE = 5s` (`tenant.rs:140`) and then **aborts** stragglers. A close cannot hang; worst case is about ten seconds, once.
+
+### Measured
+
+| Condition | Result |
+| --- | --- |
+| Toggle-off, all workspaces healthy, n=5 | min 0.016s, max 0.047s, **median 0.030s** |
+| `.gitignore` write on a served workspace | generation 1→2, readiness stayed `ready`, converged in 0.002s |
+| Toggle-off of B while A is `readiness: recovering` / `indexer: building` over 4000 files, n=8 | min 0.025s, max 0.111s, **median 0.064s** |
+| Closing the busy workspace itself, mid-rebuild, 3 trials | 0.152s, 0.032s, 0.051s |
+| **8 concurrent closes** | wall **0.198s**, slowest single close 0.193s |
+| Authenticated `GET` during that concurrent storm, n=22 | median **0.002s**, max 0.032s, zero non-200 |
+
+The concurrency row is the direct test. Wall clock equal to the slowest single close means the eight ran in parallel; serialization on a shared lock would have produced a wall of roughly their sum. A runtime with no free workers cannot answer an unrelated request in two milliseconds.
+
+### The competing explanation, which this item said was never excluded
+
+Before v0.87.0 a stalled workspace reported `phase: running`, `locked: true`, and the boot overlay never dismissed. A locked overlay blocks the operator **client-side**: you cannot click a toggle the overlay is covering. That fits all three parts of the original observation at once — UI toggles did nothing, an out-of-process `chan close` worked, and it worked *"after disconnecting from the devserver and reconnecting"*, which re-renders the shell. It needs no concurrency mechanism.
+
+That explanation lives on the boot-overlay surface, not this one, and is registered there rather than repaired here: see [the-boot-overlay-locks-the-workspace-behind-its-own-index-rebuild](the-boot-overlay-locks-the-workspace-behind-its-own-index-rebuild.md).
+
+### What was not staged, and why
+
+The literal parked stall was **not** recreated, because `53f8b5e6` closed it structurally: every path that parks a pass announces it to a `RecoveryDriver`, and `Indexer::spawn` installs one before the server answers a poll, so on a served workspace the state is unreachable at this commit. Every reachable busy state was tested instead. Staging the literal antecedent would need a fix-reverted build; it was judged not worth it, because a parked pass owns no worker and therefore cannot be the load this hypothesis requires — the gap it would close is the one the first section above already closes without a build.
+
+### Outcome
+
+Closed as **not reproduced**. No concurrency change was made. Widening the runtime or making the lock finer-grained would have been a change to concurrency structure justified by a story, which is what this item warned against, and the measurements say there is nothing to widen: the close path is already parallel, already bounded, and already fast under every condition reachable at this commit.
