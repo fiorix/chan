@@ -175,19 +175,19 @@ The classifier is therefore built to fail loudly rather than plausibly. Fed a fi
 
 ### Blind spots
 
-The structural one first, because it bounds every number above. **These greps enumerate workarounds; the defect lives at the dependent site, which by construction carries no signature.** `write_text_if_unchanged` matches none of these expressions. It was reached by following an assumption from a workaround, not by matching one. So the population bounds what can be enumerated, never what can be concluded, and the join from each site to its dependents is manual reading.
+**The population has one axis and workarounds have two.** Every signature above is shaped by *time*: a sleep, a spin, a retry budget, a capped wait, a fail-open return. None of them sees the other axis a workaround runs along, which is *what this code does when something fails*. That is not a tuning gap to be closed by widening an expression; it is a category the census never had, and it means "complete over the signature population" and "complete over the workarounds" are much further apart than the first phrase sounds.
+
+It has a confirmed example rather than a theory behind it. `paths.rs:45-47` ends `dirs::home_dir().map(|p| p.join(".chan")).unwrap_or_else(|| PathBuf::from(".chan"))`, which relocates chan's entire home into the working directory when `home_dir()` fails. **None of the six expressions above matches it**, and it was found from outside this audit, by a lane running the suite over a read-only bind mount. F7 is what it turned out to be.
+
+Worse than a miss: **F2 belongs to the same unsearched family.** `target_inside_root`'s canonicalize fallback, the highest-principle finding in this pass, was reached only because a `loop` signature happened to sit directly on top of it. The best result here arrived through a grep looking for something else, which means the family was yielding findings by accident throughout a pass that called itself complete for its declared signatures. Sized rather than asserted: `unwrap_or_else`, `unwrap_or_default` and `unwrap_or(` yield **131 lines** on this surface, `.ok()` a further **53**, none in this population. Closing that axis is the next pass, not a widening of this one.
+
+The second structural bound, because it limits every number above in a different way. **These greps enumerate workarounds; the defect lives at the dependent site, which by construction carries no signature.** `write_text_if_unchanged` matches none of these expressions. It was reached by following an assumption from a workaround, not by matching one. So the population bounds what can be enumerated, never what can be concluded, and the join from each site to its dependents is manual reading.
 
 - `2>/dev/null` and `|| true` yield **0** here. They are shell signatures and this surface is Rust, so that branch of the signature list is inapplicable rather than clean.
 - The Rust analogue of error suppression (`let _ =`, `.ok();`, `unwrap_or_default()`) yields **85** lines and is **not** in this population. It is the largest unexamined lexical class on the surface.
 - `#[allow(` yields 2 and `#[ignore]` yields 2, both examined.
 - A workaround with no keyword is invisible to all of the above: a reordering, an extra defensive read, a widened bound, a coarser unit, an `if` special-casing one filesystem.
 - Surface is `crates/chan-workspace/src/` only. Dependent sites in `crates/chan-server/src/` are named where found but not edited.
-
-**The fallback-on-failure family is the blind spot with a confirmed example, and it is the one to close next.** Every signature above is about *time*: a sleep, a spin, a budget, a capped wait. None of them sees the other axis a workaround runs along, which is *what this code does when something fails*. `unwrap_or_else`, `unwrap_or_default` and `unwrap_or(` yield **131 lines** here and `.ok()` a further **53**, none of them in this population.
-
-That is not a theoretical gap. `crates/chan-workspace/src/paths.rs:45-47` ends `dirs::home_dir().map(|p| p.join(".chan")).unwrap_or_else(|| PathBuf::from(".chan"))`, and **none of the six expressions above matches it**. It was found from the outside, by a lane running the suite over a read-only bind mount, not by this audit. F7 below is what it turned out to be.
-
-It is also how F2 was found, which is the part worth noticing: `target_inside_root`'s canonicalize fallback was reached because a `loop` signature happened to sit directly on top of it. The highest-principle finding in this pass arrived through a grep that was looking for something else. A family that produces a finding by accident deserves its own expressions rather than continued reliance on the accident.
 
 ### The marked population
 
