@@ -252,3 +252,31 @@ So the citations above are unique content needles, each verified unique when wri
 The practice is borrowed rather than invented. `done/large-transfer-ceiling-refinements.md` adopted it in v0.86.0 and wrote down why: *"identified by its subject rather than by a line number, because this section has already outlived one such citation."* That reasoning never left the item it was written in. It is a precedent, not a project rule; `.agents/writing-rules.md` says nothing about line references.
 
 The one provenance claim here that cannot rot by either mechanism is the content-hash verification above. A digest over 1,182 files is anchored to the bytes themselves rather than to a name, a position, or a revision that something else can move.
+
+### The live demonstration, which the reconciliation above predates
+
+The section above records the first two acceptance lines as established by test and not demonstrated against a running workspace. That was true when it was written and is no longer true. The demonstration ran afterwards, and the reconciliation is left standing rather than edited because the sequence is the point: an item written across a round states what was known at each moment, and only an end-to-end read catches the moment that has since passed.
+
+A release `chan` served a 25,000-file workspace standalone. One `.gitignore` write triggered a policy reconcile, and `GET /api/preflight` during it:
+
+```json
+{"phase": "ready", "locked": false,
+ "readiness": {"state": "recovering", "required_action": "reconcile",
+               "active_generation": 30, "pending_generation": null},
+ "steps": [{"id": "index", "label": "Build search index", "state": "pending"}]}
+```
+
+`locked: false` while `state: recovering`, with `active_generation` set and `pending_generation` null. That is the claimed pass, the case that used to lock, and the axis separating it from the v0.87.0 stall fingerprint (`active: null, pending: 14`) is exactly the one this item turns on.
+
+Both remaining acceptance lines are now demonstrated rather than asserted:
+
+| line | how |
+| --- | --- |
+| editor, terminal and file tree usable with a pass in flight; overlay not locked | 80 of 80 samples over a 40 second window reported `recovering`, every one of them unlocked, and **no run at any corpus size ever produced a locked sample during a claimed pass** |
+| the rebuilding state is visible without opening anything | the status pill renders from `/api/index/status` with no interaction; content search during the window returns `ready:false, hits:0` and the SPA states why, while the same query after settling returns exactly one hit |
+
+Two measurements worth keeping, because both contradict what a reader would assume.
+
+**"Large enough to be observable" is a real constraint with a number.** At 4,200 files a reconcile finished in roughly half a second, a forced full rebuild in 945ms, and `--search-aggression conservative` moved that only to 1,224ms. At 25,000 files it is 7,685ms. A demonstration built on the smaller corpus would have been unobservable while appearing to succeed, which is the failure mode the v0.87.0 sibling hit from the other direction when a two-file reconcile finished between polls.
+
+**A reconcile costs what its delta costs, not what the write costs.** Rewriting the same `.gitignore` holds the workspace in recovery 5% of the time, because the second write is a no-op. Cycling the excluded directory, so every pass has 250 real files to add or drop, holds it 100% of the time. Anyone reproducing this needs the second form.
