@@ -2,7 +2,7 @@
 
 Status: REGISTERED 2026-08-09 as an **unverified lead**, from diagnosing the watcher-reconcile stall ([gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md)). No reproduction was attempted. The cause below is a hypothesis that fits the observation; it is not established, and it must be reproduced before anything is built against it.
 
-**NOT REPRODUCED 2026-08-10.** The reproduction ran (see [Reproduction, 2026-08-10](#reproduction-2026-08-10)) and the stated mechanism is falsified: closes do not serialize, do not exhaust the runtime, and are bounded. No code changed. The observation itself remains unexplained by this item's hypothesis, and the likelier explanation is client-side and recorded below.
+**NOT REPRODUCED 2026-08-10.** The reproduction ran (see [Reproduction, 2026-08-10](#reproduction-2026-08-10)) and the stated mechanism is falsified: closes do not serialize, do not exhaust the runtime, and are bounded. No code changed. The observation itself **remains unexplained**: two candidate mechanisms are now ruled out and a third is named but uninvestigated.
 
 ## What was observed
 
@@ -64,11 +64,23 @@ The parent item recorded the same thing from the live host, in the sentence dire
 
 The concurrency row is the direct test. Wall clock equal to the slowest single close means the eight ran in parallel; serialization on a shared lock would have produced a wall of roughly their sum. A runtime with no free workers cannot answer an unrelated request in two milliseconds.
 
-### The competing explanation, which this item said was never excluded
+### The competing explanation is still not established
 
-Before v0.87.0 a stalled workspace reported `phase: running`, `locked: true`, and the boot overlay never dismissed. A locked overlay blocks the operator **client-side**: you cannot click a toggle the overlay is covering. That fits all three parts of the original observation at once — UI toggles did nothing, an out-of-process `chan close` worked, and it worked *"after disconnecting from the devserver and reconnecting"*, which re-renders the shell. It needs no concurrency mechanism.
+This item said the competing explanation — that the UI path was blocked on something entirely unrelated — was never excluded. It still is not established. What has changed is that **two** mechanisms are now ruled out rather than one, and what remains is a named candidate nobody has investigated.
 
-That explanation lives on the boot-overlay surface, not this one, and is registered there rather than repaired here: see [the-boot-overlay-locks-the-workspace-behind-its-own-index-rebuild](the-boot-overlay-locks-the-workspace-behind-its-own-index-rebuild.md).
+**Ruled out: server-side concurrency.** Falsified by the measurements above.
+
+**Ruled out: the boot overlay.** This reader first proposed that the pre-v0.87.0 locked overlay blocked the operator client-side — you cannot click a toggle an overlay is covering — and that this explained all three parts of the observation at once. **It does not hold, and the falsification is @@Overlay's.** The toggle was never under the overlay, because the two live in different SPAs in different documents:
+
+- `<PreflightOverlay />` is mounted exactly once in the whole tree, at `web/packages/workspace-app/src/App.svelte:1595`, and has never existed in the launcher in any commit.
+- Every `setDevserverWorkspaceOn` reference is inside `web/packages/launcher/`. The workspace on/off toggle is a **Launcher** surface.
+- `workspace-app` carries no workspace on/off affordance at all.
+
+The overlay is `position: fixed; inset: 0; z-index: 40000`, which covers its own document. It is not a window-manager layer and cannot occlude a different SPA in a different window. Three steelman readings — an embedded Launcher, a missed workspace-app affordance, the overlay mounted elsewhere in the v0.87.0-era tree — all fail against those greps.
+
+**Named, not claimed: the Launcher's library view.** @@Overlay observes that a library view left stale or wedged after a devserver stall would fit all three parts without needing either ruled-out mechanism, and that the observation's own wording points there: `chan close` worked *"after disconnecting from the devserver and reconnecting"*, and reconnecting is what re-renders and re-fetches the Launcher's library view — the SPA that actually owns the toggle. **Nobody has investigated this**, it is recorded as the next place to look rather than as a cause, and no lane investigates it this round.
+
+The discipline is the point, and it is why this section reads as it does. The original lead was a confident mechanism built by reading an observation without checking the evidence recorded beside it. The overlay explanation repeated that error one level down: it fit the observation and was never checked against which SPA owns the toggle, which a single grep for the mount point would have settled. Replacing it now with a third confident client-side story would repeat it a third time, inside the item that names the failure mode.
 
 ### What was not staged, and why
 
