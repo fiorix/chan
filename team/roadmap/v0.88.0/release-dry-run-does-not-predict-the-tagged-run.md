@@ -41,6 +41,59 @@ It also fits the pattern this project keeps hitting, one level out from where v0
 - The release skill's account of what the dry run cannot see gains this second limitation next to the existing pin-related one.
 - A test or check that would have caught this: the DMG path exercised twice in one run, or once against a deliberately broken venv.
 
+## Audited and implemented 2026-08-10 (v0.88.0)
+
+### The premise this item was registered on was too generous to `73a33b9c`
+
+The item says the venv instance is "already fixed" and that the fix "makes this particular failure impossible". It narrows it; it does not close it.
+
+`73a33b9c` clears and rebuilds only when `[ ! -x "$venv/bin/dmgbuild" ]`. `-x` tests permission bits, not whether the script's shebang resolves. A venv records the ABSOLUTE path of the interpreter that created it, so when that interpreter moves -- the exact scenario the code comment above the guard describes -- `bin/python` dangles while `bin/dmgbuild` remains a present, still-executable script. The guard passes, the rebuild is skipped, and the run dies at the exec.
+
+Demonstrated rather than argued, on a real venv with its interpreter symlink repointed at a missing path:
+
+| venv state | `[ -x bin/dmgbuild ]` | `python -c 'import dmgbuild'` | running it |
+| --- | --- | --- | --- |
+| healthy | present | usable | exit 0 |
+| interpreter moved | present | unusable | **exit 126** |
+
+The shipped guard says "reuse" on the second row. So the class was live at round open, one layer down from where v0.87.0 found it: same step, same job, same passing-dry-run/failing-tag signature, and a bad-interpreter exit rather than the missing-`bin/pip` 127.
+
+### The enumeration the acceptance asks for
+
+`release.yml` has eight `Swatinem/rust-cache@v2` uses, all caching the `chan` workspace's `target/`: lines 117, 163, 233, 313, 388, 408, 450, 605.
+
+Method, so it can be re-run: `grep -rn "Swatinem/rust-cache\|actions/cache" .github/workflows/` for the cache sites, then `grep -rn "target/" .github/workflows/` and `grep -rn "venv\|cargo install\|pip install\|npm install -g\|CARGO_TARGET_DIR" packaging/ scripts/ desktop/Makefile Makefile .github/workflows/` for what is written there. Its blind spot: a tool staged under `target/` by a path assembled at runtime, or by a third-party action, is invisible to a lexical search.
+
+| job | line | what it puts under `target/` | verdict |
+| --- | --- | --- | --- |
+| linux-validate | 117 | compiler output | artifacts |
+| linux-cli-artifacts | 163 | compiler output, musl tarball | artifacts |
+| gateway-linux-packages | 233 | compiler output, debs | artifacts |
+| linux-desktop-artifacts | 313 | compiler output, AppImage bundle | artifacts |
+| macos-validate | 388 | compiler output | artifacts |
+| macos-cli-artifact | 408 | compiler output | artifacts |
+| macos-desktop-artifacts | 450 | compiler output, bundle, **`target/dmg-venv`** | **tooling** |
+| windows-artifacts | 605 | compiler output, NSIS bundle | artifacts |
+
+Two tool paths exist, and only one of them was known:
+
+1. **`target/dmg-venv`** (`desktop/Makefile:19`, `packaging/desktop/build-dmg.sh`) -- the known instance, live as shown above.
+2. **`target/tauri-cli`** (`desktop/Makefile:11`, installed with `cargo install --root` behind a presence check) -- the second instance, and it is **latent rather than live**. Every job that runs a desktop make target installs tauri-cli globally through `taiki-e/install-action@v2` first (`release.yml` 336/472/615, `release-desktop.yml` 71, `ci.yml` 59/95/126), so the Makefile's own install never fires and the directory is never created or cached. What makes it worth fixing anyway is that `TAURI := PATH="$(TAURI_CLI_ROOT)/bin:$$PATH" cargo tauri` prepends that directory unconditionally: it is a no-op only because the directory does not exist. Populated and cached once, a restored copy silently outranks the pinned tool a job just installed, and `TAURI_CLI_VERSION` is applied at install time only, so a restored one is never re-checked. That failure presents as a wrong tauri-cli version rather than a missing file, which is harder to read than the 127 it resembles.
+
+### What changed
+
+- `.build-tools/` is added to `.gitignore` as the home for build-time-only tooling, with the reason recorded at the ignore site so it is not tidied back under `target/`.
+- `DMG_VENV` and `TAURI_CLI_ROOT` both move there. Acceptance line 1 is met by relocation rather than by cache configuration, because a `paths` exclusion lives in the workflow while the default lives in the Makefile, and the two drift apart silently.
+- The venv guard becomes `python -c 'import dmgbuild'` through the venv's own interpreter: the predicate the next line actually depends on, failing on a missing venv, a dangling interpreter, and a missing package alike. This is the "never reused on the strength of a partial presence check" half of the contract.
+- The release skill's account of what the dry run cannot see gains this second limitation next to the pin-related one, with the v0.87.0 failure as its worked example.
+
+### Acceptance, line by line
+
+- **`DMG_VENV` defaults outside `target/`.** Done, and `TAURI_CLI_ROOT` with it. The dry run and the tagged run now take the same path because there is no cached state left for them to differ on.
+- **The other cached-tooling paths are enumerated and checked.** Done, table above, with the method and its blind spot recorded.
+- **The release skill gains the second limitation.** Done.
+- **A test or check that would have caught this.** PARTIAL, and deliberately not overclaimed. The guard change makes the failure impossible rather than detected, and the old-versus-new predicate comparison above is reproducible on any host with `python3`. What was NOT done is exercising the DMG path itself twice in one run: `build-dmg.sh` needs `hdiutil` and an `.app` bundle, so it is macOS-only and this round's rig is Linux-only. The mandatory `publish=false` dry run and the tagged run both exercise it, and after this change they exercise the same path, which is what the contract asks for.
+
 ## Rough size
 
 Small for the venv relocation. Medium for the audit, which is a read of the workflow rather than a code change, and whose value is in finding the second instance rather than in re-fixing the first.

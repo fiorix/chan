@@ -4,6 +4,15 @@
 # dir that the workspace-root /target rule doesn't catch.
 **/target/
 
+# Build-time-only TOOLING (the tauri-cli install root, the dmgbuild venv).
+# Deliberately NOT under target/: CI caches target/ with
+# Swatinem/rust-cache@v2, and a cached tool is restored across runs on a
+# different runner, so a step's behaviour starts depending on cache state
+# rather than on the tree. That is how a publish=false dry run and the tagged
+# run at the SAME commit took different paths and only the tag failed.
+# Build ARTIFACTS belong under target/ and are safe to cache; tools are not.
+/.build-tools/
+
 # Editor swap / backup files
 *.swp
 *.swo

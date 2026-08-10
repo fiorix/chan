@@ -17,7 +17,7 @@
 #
 # Usage: build-dmg.sh <Chan.app> <out.dmg> [volume-name]
 # Env:   DMGBUILD_SPEC (pip spec, default "dmgbuild>=1.6,<2")
-#        DMG_VENV      (venv dir, default <repo>/target/dmg-venv)
+#        DMG_VENV      (venv dir, default <repo>/.build-tools/dmg-venv)
 
 set -euo pipefail
 
@@ -28,8 +28,9 @@ VOLNAME="${3:-Chan}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 settings="$here/dmg_settings.py"
 spec="${DMGBUILD_SPEC:-dmgbuild>=1.6,<2}"
-# Default venv under the repo's target/ (gitignored, reused across runs).
-venv="${DMG_VENV:-$(cd "$here/../.." && pwd)/target/dmg-venv}"
+# Default venv under the repo's .build-tools/ (gitignored, reused across runs).
+# NOT under target/: CI caches target/, and see the provisioning note below.
+venv="${DMG_VENV:-$(cd "$here/../.." && pwd)/.build-tools/dmg-venv}"
 
 if [ ! -d "$APP" ]; then
     echo "error: app bundle not found: $APP" >&2
@@ -39,15 +40,21 @@ fi
 # Hermetic, version-pinned dmgbuild in a venv: sidesteps PEP 668 on a
 # system/Homebrew python3 and keeps the tool out of the global environment.
 # Pure-Python wheels (dmgbuild + ds_store + mac_alias), no native compilation.
-# Rebuild from scratch rather than reusing what is there. The venv lives under
-# target/, which CI caches, and a restored one carries absolute paths and a
-# bin/python symlink into whatever interpreter the previous runner had. When
-# that interpreter moves, the venv survives the cache round trip with its
-# scripts broken; `python3 -m venv` over an existing directory then reuses it
-# and skips ensurepip, so bin/pip is never recreated and the install dies with
-# exit 127. Clearing first costs a few seconds on a cold venv and makes the
-# broken-restore case impossible.
-if [ ! -x "$venv/bin/dmgbuild" ]; then
+# The guard RUNS the venv rather than looking at it. A venv records the
+# absolute path of the interpreter that created it, so when that interpreter
+# moves -- a Homebrew python upgrade locally, a different runner image behind a
+# restored cache -- bin/python dangles while bin/dmgbuild is still a present,
+# still-executable script. Any file test passes there and the run dies at the
+# exec with a bad interpreter. That is the same class of failure this path
+# already shipped once, at a tag, after a dry run on the identical commit had
+# passed; that one surfaced as a missing bin/pip and exit 127, this one as an
+# unusable interpreter, and both come from reusing a venv nobody ran.
+#
+# Importing the module through the venv's own interpreter is the predicate the
+# invocation below actually depends on, and it fails on a missing venv, a
+# dangling interpreter, and a missing package alike. Rebuilding costs a few
+# seconds on a cold venv.
+if ! "$venv/bin/python" -c 'import dmgbuild' >/dev/null 2>&1; then
     rm -rf "$venv"
     python3 -m venv "$venv"
     # `python -m pip` rather than the bin/pip console script: the module is

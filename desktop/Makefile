@@ -8,7 +8,11 @@ CHAN_REPO ?= ..
 CARGO ?= cargo
 NPM ?= npm
 TAURI_CLI_VERSION ?= ^2
-TAURI_CLI_ROOT := $(abspath $(CHAN_REPO)/target/tauri-cli)
+# Under .build-tools/, never target/. CI caches target/, and this root is
+# PREPENDED to PATH below whether or not it exists, so a cached copy would
+# silently outrank the pinned tool a job just installed -- and TAURI_CLI_VERSION
+# is applied at install time only, so a restored one is never re-checked.
+TAURI_CLI_ROOT := $(abspath $(CHAN_REPO)/.build-tools/tauri-cli)
 TAURI_CLI_BIN := $(TAURI_CLI_ROOT)/bin/cargo-tauri
 TAURI := PATH="$(TAURI_CLI_ROOT)/bin:$$PATH" cargo tauri
 
@@ -16,7 +20,10 @@ TAURI := PATH="$(TAURI_CLI_ROOT)/bin:$$PATH" cargo tauri
 # layout is pinned by the settings file, so any dmgbuild 1.x yields the same
 # layout; tighten DMGBUILD_SPEC to an exact `==` for a fully reproducible pin.
 DMGBUILD_SPEC ?= dmgbuild>=1.6,<2
-DMG_VENV ?= $(abspath $(CHAN_REPO))/target/dmg-venv
+# Under .build-tools/, never target/: see TAURI_CLI_ROOT above. A venv is the
+# worst thing to cache, because it stores the absolute path of the interpreter
+# that created it.
+DMG_VENV ?= $(abspath $(CHAN_REPO))/.build-tools/dmg-venv
 BUNDLE_DIR := $(abspath $(CHAN_REPO))/target/release/bundle
 CI_MACOS_CONFIG := tauri.ci.macos.conf.json
 CI_WINDOWS_CONFIG := tauri.ci.windows.conf.json
