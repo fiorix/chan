@@ -1,6 +1,6 @@
 # The canvas animation family is software-rasterized on Linux
 
-Status: REGISTERED 2026-08-10, after the fact. The work was done unplanned, off the roadmap, and is registered here so v0.88.0 carries it as accepted scope. IMPLEMENTED in `aa8955a1` (sixfold vortex and the rotational blooms) and `c89c8bdc` (the point cloud host).
+Status: REGISTERED 2026-08-10, after the fact. The work was done unplanned, off the roadmap, and is registered here so v0.88.0 carries it as accepted scope. IMPLEMENTED in `aa8955a1` (sixfold vortex and the rotational blooms) and `c89c8bdc` (the point cloud host). **Closes on what is known rather than on a met fps line.** The port is done, the shaders validate and the suite passes. The frame rate does not close: the original 60 fps figure was recorded against a renderer string that cannot distinguish hardware from software, so it is unverifiable rather than false, and the point cloud host behind Lorenz Constellation, Rippled Duet, Striated Current and Twin Veil Dance was never measured at all. No host with a GPU was available in v0.88.0. `scripts/e2e/animation-fps.py` measures all seven animations against an empty-page baseline in one pass, refuses to certify a software rasterizer or an engine that will not say what it rasterizes on, and every branch of it has been exercised: one run in Chrome on a GPU settles the point cloud and re-establishes the three siblings together.
 
 ## What
 
@@ -30,10 +30,10 @@ Overlapping points accumulate opacity where a single path fill painted each pixe
 
 ## Acceptance
 
-- The sixfold vortex and both blooms hold 60 fps on Linux. Met: measured on AMD Radeon 780M through ANGLE.
+- The sixfold vortex and both blooms hold 60 fps on Linux. **Not verifiable from what was recorded.** The reading was taken as "AMD Radeon 780M through ANGLE", and ANGLE is a translation layer that sits equally on a real GPU or on a software rasterizer: running this item's own instrument in a container produced `ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)`, which satisfies the phrase end to end and is software throughout. This does not falsify the claim, and the "AMD Radeon 780M" half is a hardware assertion there is no reason to doubt. It makes the claim **unverifiable from the string it rests on**, which is a different and more careful statement. An honest unmeasured beats a met that rests on a non-discriminating string.
 - Shaders are valid rather than assumed valid. Met: validated with `glslangValidator`.
 - The suite, `svelte-check` and the vite build pass. Met at each step (3655 tests at the first commit, 3658 at the second).
-- **Not met**: the point cloud host is unverified against a real GPU. The build host for `c89c8bdc` had no browser, so Lorenz Constellation, Rippled Duet, Striated Current and Twin Veil Dance are correct by construction and by suite, but their frame rate is unmeasured. This is the one open thread, and it is the same measurement the vortex and blooms already passed.
+- **Not met**: the point cloud host is unverified against a real GPU. The build host for `c89c8bdc` had no browser, so Lorenz Constellation, Rippled Duet, Striated Current and Twin Veil Dance are correct by construction and by suite, but their frame rate is unmeasured. This was recorded as "the same measurement the vortex and blooms already passed", which no longer holds: the siblings' row is unverifiable from the string it rests on, so one run settles four unmeasured animations and re-establishes three under-evidenced ones rather than extending a passed bar to a fourth case.
 - **The bar the siblings passed is weaker than it reads.** See below: "through ANGLE" is satisfied by a pure-software stack, so the vortex and bloom row rests on a string that does not distinguish hardware from SwiftShader.
 
 ## The instrument, and what "through ANGLE" does not mean
