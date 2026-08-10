@@ -29,6 +29,8 @@ Small. The data is already served and already authorized; this is a read, a tabl
 ## Implemented 2026-08-10 (`9371a24b`)
 
 > This section first cited `6c57dc33`, which **no longer exists**: the lane rebased before merge and the commit was replayed as `9371a24b`. The dead sha is recorded here rather than silently swapped, because every lane in this round rebased at least once, and any item that cites its own commit sha from before its last rebase is carrying a reference that resolves to nothing in the permanent history.
+>
+> **To a future dead-reference scan: this `6c57dc33` is deliberate and will flag `DEAD` forever. Do not "fix" it.** It is quoted as the example, not used as a citation — the live reference is `9371a24b` in the heading above. A scan cannot tell a recorded dead sha from an accidental one, so `DEAD` is a candidate needing context exactly as `UNRESOLVED` is, and this paragraph is that context.
 
 `chan ps` gains six columns, and `--json` gains an `activity` object per row.
 
