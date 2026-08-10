@@ -1,0 +1,85 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>chan animation fps</title>
+<style>
+  /*
+    The stage is the size an empty pane actually gives an animation. Frame
+    cost scales with the pixels drawn, so a stage that is not pane-sized
+    would produce a number that describes this page rather than the product.
+  */
+  :root {
+    --bg: #1c1c1e;
+    --text: #ebebf0;
+  }
+  html,
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.5 system-ui, sans-serif;
+  }
+  #stage {
+    position: relative;
+    width: 900px;
+    height: 560px;
+    background: var(--bg);
+    overflow: hidden;
+  }
+  #panel {
+    padding: 12px 16px 32px;
+  }
+  table {
+    border-collapse: collapse;
+    margin-top: 8px;
+  }
+  th,
+  td {
+    border: 1px solid #3a3a3e;
+    padding: 3px 9px;
+    text-align: left;
+    white-space: nowrap;
+  }
+  th {
+    background: #262629;
+  }
+  td.n {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  tr.control td {
+    color: #9a9aa2;
+  }
+  tr.point-cloud td:first-child {
+    font-weight: 600;
+  }
+  td.warn {
+    color: #ff8f8f;
+    white-space: normal;
+    max-width: 32ch;
+  }
+  .verdict {
+    font-weight: 600;
+    margin-top: 12px;
+  }
+  .env {
+    color: #9a9aa2;
+    margin-top: 4px;
+  }
+  #now {
+    color: #9a9aa2;
+  }
+</style>
+<div id="stage"></div>
+<div id="panel">
+  <div id="now">starting…</div>
+  <div id="out"></div>
+</div>
+<script>
+  addEventListener("error", (e) => {
+    document.title = `animation-fps-error ${e.message || e.error || e.type}`;
+  });
+  addEventListener("unhandledrejection", (e) => {
+    document.title = `animation-fps-error ${e.reason}`;
+  });
+</script>
+<script type="module" src="./main.ts"></script>

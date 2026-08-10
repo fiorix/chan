@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>chan webgl present stall</title>
+<link rel="stylesheet" href="/vendor/xterm/css/xterm.css" />
+<!--
+  The @font-face block is injected here by the driver, read verbatim out of
+  the app's own fonts.css, for the same reason terminal-pixels/index.html does
+  it: the face the product declares, not a restatement of it. This probe does
+  not measure glyph shape, but a face that fails to decode changes the cell
+  metrics and would move every region the driver samples.
+-->
+<!--CHAN_FONT_FACE-->
+<style>
+  /* TerminalTab's terminalTheme() fallbacks, as in the pixels harness. */
+  :root {
+    --bg: #1c1c1e;
+    --text: #ebebf0;
+    --link: #58a6ff;
+  }
+  html,
+  body {
+    margin: 0;
+    height: 100%;
+    background: #000;
+  }
+  /*
+    Pinned to the viewport's top-left at a fixed size. The driver converts
+    cell coordinates to SCREEN pixels through this element's origin plus the
+    window's origin, so both have to be stable for the whole run.
+  */
+  #host {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 800px;
+    height: 560px;
+    background: var(--bg);
+    overflow: hidden;
+  }
+</style>
+<div id="host"></div>
+<!--
+  A module that fails to load never runs its own catch, so the driver would
+  see only a silent timeout. This classic script turns any such failure into
+  the title the driver watches.
+-->
+<script>
+  addEventListener("error", (e) => {
+    document.title = `stall-probe-error ${e.message || e.error || e.type}`;
+  });
+  addEventListener("unhandledrejection", (e) => {
+    document.title = `stall-probe-error ${e.reason}`;
+  });
+</script>
+<script type="module" src="/probe.mjs"></script>
