@@ -24,15 +24,21 @@ Nothing was measured. No thread dump was taken while the UI was unresponsive, no
 
 Reproduce it. Hold one workspace in the recovery stall, attempt to toggle another off, and establish where the close actually blocks: thread state, the lock it waits on, and whether runtime workers are in fact exhausted. Either the mechanism is confirmed and this becomes a real item with a contract, or it is falsified and this item closes as not reproduced.
 
+> **This instruction could not be followed as written, for the reason this item went on to document.** "Hold one workspace in the recovery stall" assumes that state is reachable; [What was not staged, and why](#what-was-not-staged-and-why) establishes that `53f8b5e6` made it structurally unreachable on a served workspace. Left standing rather than rewritten, because an instruction that expires when a later section answers it is the shape worth seeing. What was done instead, and why the substitute answers the same question, is recorded there.
+
 Do not fix this by widening the runtime or by making the lock finer-grained on the strength of the hypothesis alone. Both would be changes to concurrency structure justified by a story rather than by evidence, and a symptom that pattern-matches a known failure shape may have a different cause.
 
 ## Contract
 
 Deliberately empty until the mechanism is established. Writing a contract now would commit the project to a cause nobody has confirmed.
 
+**Resolved 2026-08-10: it stays empty permanently.** The mechanism was not established, it was falsified, so there is no cause to write a contract against. The emptiness is now the conclusion rather than a placeholder.
+
 ## Rough size
 
 Unknown, and it stays unknown until the reproduction lands. The reproduction itself is small.
+
+**Answered 2026-08-10.** The reproduction landed and was small, as predicted. The size of the *repair* is **zero**: there is nothing to fix, because the mechanism this item was registered to size does not exist. The one number this section could not carry when it was written was that the answer might be "no work at all".
 
 ## Reproduction, 2026-08-10
 

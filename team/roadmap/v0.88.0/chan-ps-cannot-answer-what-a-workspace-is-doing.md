@@ -1,6 +1,6 @@
 # `chan ps` cannot answer what a workspace is doing
 
-Status: REGISTERED 2026-08-09, from diagnosing the watcher-reconcile stall ([gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md)) against a live devserver.
+Status: REGISTERED 2026-08-09, from diagnosing the watcher-reconcile stall ([gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md)) against a live devserver. **IMPLEMENTED 2026-08-10 in `9371a24b`** — see [Implemented](#implemented-2026-08-10-9371a24b). Two acceptance lines met, one **partially** met for a structural reason recorded there.
 
 ## What
 
@@ -19,14 +19,16 @@ This is an observability gap, not a defect: nothing is wrong with what the serve
 ## Acceptance
 
 - Per workspace, `chan ps` carries readiness state, `generation` / `completed_generation` / `pending_generation`, `required_action`, indexer status, queue depth, and `last_event_at` / `last_settled_at`.
-- The stall in [gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md) is identifiable from `chan ps` output alone, demonstrated against a workspace held in that state.
+- The stall in [gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md) is identifiable from `chan ps` output alone, demonstrated against a workspace held in that state. **Partially met — read [Acceptance](#acceptance-1) below before taking this line at face value:** the state cannot be held on a served workspace at this commit, so the demonstration is split into what was shown live and what was shown against the incident's own recorded payload.
 - A workspace with no indexer renders its indexer columns as absent rather than as zero, following the `cs terminal list` queue-depth ruling from v0.85.0 where an unreported value renders `-` and not `0`.
 
 ## Rough size
 
 Small. The data is already served and already authorized; this is a read, a table, and the column choices.
 
-## Implemented 2026-08-10 (`6c57dc33`)
+## Implemented 2026-08-10 (`9371a24b`)
+
+> This section first cited `6c57dc33`, which **no longer exists**: the lane rebased before merge and the commit was replayed as `9371a24b`. The dead sha is recorded here rather than silently swapped, because every lane in this round rebased at least once, and any item that cites its own commit sha from before its last rebase is carrying a reference that resolves to nothing in the permanent history.
 
 `chan ps` gains six columns, and `--json` gains an `activity` object per row.
 
