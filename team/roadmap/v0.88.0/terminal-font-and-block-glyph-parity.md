@@ -66,10 +66,13 @@ dma-buf is the mechanism by which WebKit hands GPU buffers to the compositor,
 and the fault under investigation is precisely "drawn into the GL canvas but
 not presented until something wakes the compositor". That is a buffer-handoff
 fault, and this switch controls buffer handoff. The comment at
-`TerminalTab.svelte:784` asserts the `WEBKIT_DISABLE_DMABUF_RENDERER` fix "is
-about webview creation, not this per-layer present stall" — which is plausible,
-is stated without a measurement, and sits on the switch that decides the
-question.
+The comment inside `enableWebglRenderer()` in `TerminalTab.svelte` asserts that
+the `WEBKIT_DISABLE_DMABUF_RENDERER` fix "is about webview creation, not this
+per-layer present stall" — which is plausible, is stated without a measurement,
+and sits on the switch that decides the question. (Anchored on the quoted
+sentence and the enclosing function rather than a line number: this citation
+read `:784` when written and the quoted half had already moved to `:785` by the
+close, without anything about it being wrong.)
 
 The claim is not that the comment is wrong. It is that **nobody has tested it**,
 and that a stall reading which does not say which side of that switch it was
