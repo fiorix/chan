@@ -54,43 +54,41 @@ The parent item recorded the same thing from the live host, in the sentence dire
 
 - `mount_attempt_lock` is a `tokio::sync::Mutex` (`devserver.rs`, the `mount_attempt_lock: tokio::sync::Mutex<()>` field). Awaiting it parks the task, not a worker thread, so contending on it cannot exhaust a pool.
 - It is taken on the **mount** path (`devserver.rs`, `let _attempt_guard = self.mount_attempt_lock.lock().await`). The toggle-off path, `set_workspace_on` (`devserver.rs`, its two `self.host.close_workspace(prefix, force)` calls), calls `host.close_workspace` under no cross-workspace lock at all. The observation was about toggling other workspaces **off**.
-- The one genuinely blocking wait runs inside `tokio::task::spawn_blocking` (`host.rs`, the `tokio::task::spawn_blocking` in `HostedWorkspaceRuntime::shutdown`, calling `fn wait_for_workspace_release`) — its own pool, not the async workers.
+- The one genuinely blocking wait runs inside `tokio::task::spawn_blocking` (`host.rs`, the `tokio::task::spawn_blocking` in `HostedWorkspaceRuntime::shutdown`, calling `fn wait_for_workspace_release`): its own pool, not the async workers.
 - Both waits are deadline-bounded: the flock verifier gives up after 5s with a named warning (`host.rs`, the `Instant::now() + Duration::from_secs(5)` deadline in `wait_for_workspace_release` and its `"workspace flock still held 5s after teardown"` warn), and `TenantTaskOwner::shutdown` runs against `TENANT_TASK_SHUTDOWN_GRACE = 5s` (`tenant.rs`, `const TENANT_TASK_SHUTDOWN_GRACE`) and then **aborts** stragglers. A close cannot hang; worst case is about ten seconds, once.
 
 ### Measured
 
-| Condition | Result |
-| --- | --- |
-| Toggle-off, all workspaces healthy, n=5 | min 0.016s, max 0.047s, **median 0.030s** |
-| `.gitignore` write on a served workspace | generation 1→2, readiness stayed `ready`, converged in 0.002s |
-| Toggle-off of B while A is `readiness: recovering` / `indexer: building` over 4000 files, n=8 | min 0.025s, max 0.111s, **median 0.064s** |
-| Closing the busy workspace itself, mid-rebuild, 3 trials | 0.152s, 0.032s, 0.051s |
-| **8 concurrent closes** | wall **0.198s**, slowest single close 0.193s |
-| Authenticated `GET` during that concurrent storm, n=22 | median **0.002s**, max 0.032s, zero non-200 |
+- Toggle-off, all workspaces healthy, n=5: min 0.016s, max 0.047s, **median 0.030s**.
+- `.gitignore` write on a served workspace: generation 1 to 2, readiness stayed `ready`, converged in 0.002s.
+- Toggle-off of B while A is `readiness: recovering` / `indexer: building` over 4000 files, n=8: min 0.025s, max 0.111s, **median 0.064s**.
+- Closing the busy workspace itself, mid-rebuild, 3 trials: 0.152s, 0.032s, 0.051s.
+- **8 concurrent closes**: wall **0.198s**, slowest single close 0.193s.
+- Authenticated `GET` during that concurrent storm, n=22: median **0.002s**, max 0.032s, zero non-200.
 
 The concurrency row is the direct test. Wall clock equal to the slowest single close means the eight ran in parallel; serialization on a shared lock would have produced a wall of roughly their sum. A runtime with no free workers cannot answer an unrelated request in two milliseconds.
 
 ### The competing explanation is still not established
 
-This item said the competing explanation — that the UI path was blocked on something entirely unrelated — was never excluded. It still is not established. What has changed is that **two** mechanisms are now ruled out rather than one, and what remains is a named candidate nobody has investigated.
+This item said the competing explanation, that the UI path was blocked on something entirely unrelated, was never excluded. It still is not established. What has changed is that **two** mechanisms are now ruled out rather than one, and what remains is a named candidate nobody has investigated.
 
 **Ruled out: server-side concurrency.** Falsified by the measurements above.
 
-**Ruled out: the boot overlay.** This reader first proposed that the pre-v0.87.0 locked overlay blocked the operator client-side — you cannot click a toggle an overlay is covering — and that this explained all three parts of the observation at once. **It does not hold, and the falsification is @@Overlay's.** The toggle was never under the overlay, because the two live in different SPAs in different documents:
+**Ruled out: the boot overlay.** This reader first proposed that the pre-v0.87.0 locked overlay blocked the operator client-side (you cannot click a toggle an overlay is covering), and that this explained all three parts of the observation at once. **It does not hold, and the falsification is @@Overlay's.** The toggle was never under the overlay, because the two live in different SPAs in different documents:
 
 - `<PreflightOverlay />` is mounted exactly once in the whole tree, at its sole `<PreflightOverlay />` mount in `web/packages/workspace-app/src/App.svelte`, and has never existed in the launcher in any commit.
 - Every `setDevserverWorkspaceOn` reference is inside `web/packages/launcher/`. The workspace on/off toggle is a **Launcher** surface.
 - `workspace-app` carries no workspace on/off affordance at all.
 
-The overlay is `position: fixed; inset: 0; z-index: 40000`, which covers its own document. It is not a window-manager layer and cannot occlude a different SPA in a different window. Three steelman readings — an embedded Launcher, a missed workspace-app affordance, the overlay mounted elsewhere in the v0.87.0-era tree — all fail against those greps.
+The overlay is `position: fixed; inset: 0; z-index: 40000`, which covers its own document. It is not a window-manager layer and cannot occlude a different SPA in a different window. Three steelman readings (an embedded Launcher, a missed workspace-app affordance, the overlay mounted elsewhere in the v0.87.0-era tree) all fail against those greps.
 
-**Named, not claimed: the Launcher's library view.** @@Overlay observes that a library view left stale or wedged after a devserver stall would fit all three parts without needing either ruled-out mechanism, and that the observation's own wording points there: `chan close` worked *"after disconnecting from the devserver and reconnecting"*, and reconnecting is what re-renders and re-fetches the Launcher's library view — the SPA that actually owns the toggle. **Nobody has investigated this**, it is recorded as the next place to look rather than as a cause, and no lane investigates it this round.
+**Named, not claimed: the Launcher's library view.** @@Overlay observes that a library view left stale or wedged after a devserver stall would fit all three parts without needing either ruled-out mechanism, and that the observation's own wording points there: `chan close` worked *"after disconnecting from the devserver and reconnecting"*, and reconnecting is what re-renders and re-fetches the Launcher's library view, the SPA that actually owns the toggle. **Nobody has investigated this**, it is recorded as the next place to look rather than as a cause, and no lane investigates it this round.
 
 The discipline is the point, and it is why this section reads as it does. The original lead was a confident mechanism built by reading an observation without checking the evidence recorded beside it. The overlay explanation repeated that error one level down: it fit the observation and was never checked against which SPA owns the toggle, which a single grep for the mount point would have settled. Replacing it now with a third confident client-side story would repeat it a third time, inside the item that names the failure mode.
 
 ### What was not staged, and why
 
-The literal parked stall was **not** recreated, because `53f8b5e6` closed it structurally: every path that parks a pass announces it to a `RecoveryDriver`, and `Indexer::spawn` installs one before the server answers a poll, so on a served workspace the state is unreachable at this commit. Every reachable busy state was tested instead. Staging the literal antecedent would need a fix-reverted build; it was judged not worth it, because a parked pass owns no worker and therefore cannot be the load this hypothesis requires — the gap it would close is the one the first section above already closes without a build.
+The literal parked stall was **not** recreated, because `53f8b5e6` closed it structurally: every path that parks a pass announces it to a `RecoveryDriver`, and `Indexer::spawn` installs one before the server answers a poll, so on a served workspace the state is unreachable at this commit. Every reachable busy state was tested instead. Staging the literal antecedent would need a fix-reverted build; it was judged not worth it, because a parked pass owns no worker and therefore cannot be the load this hypothesis requires: the gap it would close is the one the first section above already closes without a build.
 
 ### Outcome
 

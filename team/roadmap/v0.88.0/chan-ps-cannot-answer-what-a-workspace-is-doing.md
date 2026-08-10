@@ -1,6 +1,6 @@
 # `chan ps` cannot answer what a workspace is doing
 
-Status: REGISTERED 2026-08-09, from diagnosing the watcher-reconcile stall ([gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md)) against a live devserver. **IMPLEMENTED 2026-08-10 in `9371a24b`** — see [Implemented](#implemented-2026-08-10-9371a24b). Two acceptance lines met, one **partially** met for a structural reason recorded there.
+Status: REGISTERED 2026-08-09, from diagnosing the watcher-reconcile stall ([gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md)) against a live devserver. **IMPLEMENTED 2026-08-10 in `9371a24b`**. See [Implemented](#implemented-2026-08-10-9371a24b). Two acceptance lines met, one **partially** met for a structural reason recorded there.
 
 ## What
 
@@ -19,7 +19,7 @@ This is an observability gap, not a defect: nothing is wrong with what the serve
 ## Acceptance
 
 - Per workspace, `chan ps` carries readiness state, `generation` / `completed_generation` / `pending_generation`, `required_action`, indexer status, queue depth, and `last_event_at` / `last_settled_at`.
-- The stall in [gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md) is identifiable from `chan ps` output alone, demonstrated against a workspace held in that state. **Partially met — read [Acceptance](#acceptance-1) below before taking this line at face value:** the state cannot be held on a served workspace at this commit, so the demonstration is split into what was shown live and what was shown against the incident's own recorded payload.
+- The stall in [gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md) is identifiable from `chan ps` output alone, demonstrated against a workspace held in that state. **Partially met, read [Acceptance](#acceptance-1) below before taking this line at face value:** the state cannot be held on a served workspace at this commit, so the demonstration is split into what was shown live and what was shown against the incident's own recorded payload.
 - A workspace with no indexer renders its indexer columns as absent rather than as zero, following the `cs terminal list` queue-depth ruling from v0.85.0 where an unreported value renders `-` and not `0`.
 
 ## Rough size
@@ -30,7 +30,7 @@ Small. The data is already served and already authorized; this is a read, a tabl
 
 > This section first cited `6c57dc33`, which **no longer exists**: the lane rebased before merge and the commit was replayed as `9371a24b`. The dead sha is recorded here rather than silently swapped, because every lane in this round rebased at least once, and any item that cites its own commit sha from before its last rebase is carrying a reference that resolves to nothing in the permanent history.
 >
-> **To a future dead-reference scan: this `6c57dc33` is deliberate and will flag `DEAD` forever. Do not "fix" it.** It is quoted as the example, not used as a citation — the live reference is `9371a24b` in the heading above. A scan cannot tell a recorded dead sha from an accidental one, so `DEAD` is a candidate needing context exactly as `UNRESOLVED` is, and this paragraph is that context.
+> **To a future dead-reference scan: this `6c57dc33` is deliberate and will flag `DEAD` forever. Do not "fix" it.** It is quoted as the example, not used as a citation: the live reference is `9371a24b` in the heading above. A scan cannot tell a recorded dead sha from an accidental one, so `DEAD` is a candidate needing context exactly as `UNRESOLVED` is, and this paragraph is that context.
 
 `chan ps` gains six columns, and `--json` gains an `activity` object per row.
 
@@ -41,22 +41,22 @@ served   devserver   8695  ready       1      -         -          idle         
 free     -              -  -           -      -         -          -               -  /home/rig/ws/d1
 ```
 
-`PASS` is `pending->active`, and it is the column the item exists to put on screen. `14->none` is the stall — a pass is owed and nothing is running it. `none->2` is a pass with a claimant. They are different strings, which is the v0.87.0 distinction this must not collapse.
+`PASS` is `pending->active`, and it is the column the item exists to put on screen. `14->none` is the stall: a pass is owed and nothing is running it. `none->2` is a pass with a claimant. They are different strings, which is the v0.87.0 distinction this must not collapse.
 
 `GEN` is `generation/completed` while recovering and the bare generation when ready, so the lag that says a pass is owed is visible without arithmetic.
 
-**Where the values come from.** `GET {prefix}/api/index/status` for readiness, `GET {prefix}/api/health` for indexer telemetry — the two surfaces the original diagnosis read by hand. Readiness is deserialized into the server's **own** `WorkspaceReadiness` rather than a client-side copy of its shape, so the contract's "cannot report a different truth" holds structurally: a variant or field the server changes stops this compiling rather than silently rendering a stale word. Only the flat indexer telemetry is mirrored client-side, because chan-server declares `mod indexer` privately and making it reachable would mean editing a file this lane does not own.
+**Where the values come from.** `GET {prefix}/api/index/status` for readiness, `GET {prefix}/api/health` for indexer telemetry, the two surfaces the original diagnosis read by hand. Readiness is deserialized into the server's **own** `WorkspaceReadiness` rather than a client-side copy of its shape, so the contract's "cannot report a different truth" holds structurally: a variant or field the server changes stops this compiling rather than silently rendering a stale word. Only the flat indexer telemetry is mirrored client-side, because chan-server declares `mod indexer` privately and making it reachable would mean editing a file this lane does not own.
 
-**Authority.** The bearer is the one already persisted at `~/.chan/devserver/config.json`, which this CLI reads today to *rotate* that same token — a mutating call. Two status reads with it grant nothing new. Per-workspace tokens come from `GET /api/devserver/workspaces`, the same path the original diagnosis used.
+**Authority.** The bearer is the one already persisted at `~/.chan/devserver/config.json`, which this CLI reads today to *rotate* that same token, a mutating call. Two status reads with it grant nothing new. Per-workspace tokens come from `GET /api/devserver/workspaces`, the same path the original diagnosis used.
 
-**Reach.** Only a devserver-served workspace can be enriched: a standalone or desktop serve persists no address/token pair `chan ps` may read, and `Identify` carries no address. Those rows render `-` rather than inventing a way in. An unreachable devserver costs the activity columns, not the command — the listing call is the single gate, so one timeout is spent rather than one per workspace.
+**Reach.** Only a devserver-served workspace can be enriched: a standalone or desktop serve persists no address/token pair `chan ps` may read, and `Identify` carries no address. Those rows render `-` rather than inventing a way in. An unreachable devserver costs the activity columns, not the command: the listing call is the single gate, so one timeout is spent rather than one per workspace.
 
 ### Acceptance
 
 - **Per workspace, the readiness, generation, action, indexer and queue values. Met.** The table carries state, `generation`/`completed_generation`, `pending`/`active`, `required_action`, indexer status and queue depth. `last_event_at` and `last_settled_at` are carried in `--json` rather than the table: eight columns already reach the width of a terminal, and two absolute timestamps are a scripting value rather than a five-second-read value. Verified live in both forms.
 - **A workspace with no indexer renders its columns absent rather than zero. Met**, by test rather than by live demonstration. `/api/health` reports `indexer: null` on a tenant with no indexer, and that payload renders `-` for both INDEXER and QUEUE. The test asserts the two renderings are *different strings*, because the failure worth preventing is a workspace with no indexer reading as the healthy one. No served workspace on the rig could be put into that state, so this is a shape test against the real payload, and is recorded as such rather than as a live result.
-- **The stall is identifiable from `chan ps` output alone, demonstrated against a workspace held in that state. Partially met, and the gap is structural.** `53f8b5e6` closed the stall: every parked pass is announced to a `RecoveryDriver` and `Indexer::spawn` installs one before the server answers a poll, so on a served workspace at this commit the state is **unreachable** — see [one-stalled-workspace-may-block-the-others](one-stalled-workspace-may-block-the-others.md), where the same wall was hit and recorded. What was done instead, stated rather than blurred:
-  - The **recorded live payload** from the owner's stalled devserver in [gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md) — generation 14, completed 12, reconcile owed, active null, pending 14 — is parsed by test and renders `recovering  14/12  14->none  reconcile`. That is the incident's own evidence, read through the new columns.
+- **The stall is identifiable from `chan ps` output alone, demonstrated against a workspace held in that state. Partially met, and the gap is structural.** `53f8b5e6` closed the stall: every parked pass is announced to a `RecoveryDriver` and `Indexer::spawn` installs one before the server answers a poll, so on a served workspace at this commit the state is **unreachable**. See [one-stalled-workspace-may-block-the-others](one-stalled-workspace-may-block-the-others.md), where the same wall was hit and recorded. What was done instead, stated rather than blurred:
+  - The **recorded live payload** from the owner's stalled devserver in [gitignore-write-strands-the-workspace-in-recovering](../done/gitignore-write-strands-the-workspace-in-recovering.md), carrying generation 14, completed 12, reconcile owed, active null and pending 14, is parsed by test and renders `recovering  14/12  14->none  reconcile`. That is the incident's own evidence, read through the new columns.
   - A **live** recovering workspace was demonstrated end to end against a real devserver over 4000 files, rendering `recovering 2/1 none->2 rebuild rebuilding 0`, which proves the path works against a running server and that a claimed pass is not rendered as a stall.
   - What is **not** shown is a live workspace in the unowned-pass state, because no such state can be produced on a served workspace at this commit. Producing one would need a fix-reverted build.
 
