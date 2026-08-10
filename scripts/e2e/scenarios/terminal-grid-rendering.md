@@ -180,7 +180,7 @@ Recorded so a later session does not relitigate them from scratch.
 - Any device pixel ratio other than each harness host's. The Windows run
   covers a fractional ratio (1.5) and the Linux run covers 1, but neither
   sweeps the ratio, and 1.5 is where the drivers' own rounding starts to show
-  -- see the one-device-pixel inset on the block measurement in
+ -- see the one-device-pixel inset on the block measurement in
   `terminal-pixels.mjs`, which the Python driver does not need at a ratio of
   1 and does not have.
 - Whether the WebGL present stall that keeps `shouldUseWebglRenderer` false
@@ -193,7 +193,7 @@ Recorded so a later session does not relitigate them from scratch.
   `linux_gui_stack.rs` sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` only on an
   AppImage launch, so the configuration measured and the configuration shipped
   sit on opposite sides of the switch that controls how WebKit hands GPU
-  buffers to the compositor — which is the handoff a present stall would live
+  buffers to the compositor -- which is the handoff a present stall would live
   in. Five of five says nothing about the shipped side.
 
   `../webgl-present-stall.py` settles it: it sweeps that variable as an

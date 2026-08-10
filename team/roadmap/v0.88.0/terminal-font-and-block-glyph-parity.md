@@ -43,7 +43,7 @@ The [terminal grid rendering](../../../scripts/e2e/scenarios/terminal-grid-rende
 - Block elements reach the cell edges on the shipping ghostty backend. Met: TG-03 at 100% coverage, up from 95.2%.
 - The measurement runs in the real desktop engine on more than one platform. Met on Linux (WebKitGTK 2.52.5) and Windows (WebView2 151.0.4129.72, taken twice, once in Edge and once in the real WebView2 hosted by `chan-desktop.exe`, agreeing to every digit).
 - Everything the Windows desktop ships is clean across the matrix. Met.
-- **Not met, and deliberately recorded rather than fixed**: the xterm DOM renderer the Linux desktop ships still bands rules and blocks, at 96.0% rule continuity and 95.2% block coverage. **Independently reproduced** on a second machine sharing nothing with the first (WebKitGTK 2.52.3 under Xvfb, headless, llvmpipe, QEMU Cirrus VGA), to the digit, with the gap positions matching as well as the totals — so this residual is a twice-measured defect rather than a single-machine observation. It reproduces without a GPU because glyph rasterisation is CPU-side; a frame rate would not survive the same treatment. `shouldUseWebglRenderer` is false only for a Linux desktop, so Linux is the one platform on the failing row. The Windows DOM reference arms report the same defect worse (92.9% and 90.0%, a fractional device pixel ratio turning a one-CSS-pixel seam into two or three), which places the cause in the renderer rather than in WebKitGTK.
+- **Not met, and deliberately recorded rather than fixed**: the xterm DOM renderer the Linux desktop ships still bands rules and blocks, at 96.0% rule continuity and 95.2% block coverage. **Independently reproduced** on a second machine sharing nothing with the first (WebKitGTK 2.52.3 under Xvfb, headless, llvmpipe, QEMU Cirrus VGA), to the digit, with the gap positions matching as well as the totals -- so this residual is a twice-measured defect rather than a single-machine observation. It reproduces without a GPU because glyph rasterisation is CPU-side; a frame rate would not survive the same treatment. `shouldUseWebglRenderer` is false only for a Linux desktop, so Linux is the one platform on the failing row. The Windows DOM reference arms report the same defect worse (92.9% and 90.0%, a fractional device pixel ratio turning a one-CSS-pixel seam into two or three), which places the cause in the renderer rather than in WebKitGTK.
 - Also unmeasured: macOS WKWebView entirely, and any device pixel ratio other than each harness host's.
 - The rendered glyphs are not visually confirmed in a running desktop app, only the served bytes, the emitted chain, and the measured ink.
 
@@ -55,54 +55,21 @@ So the next move is to establish whether that stall still reproduces, because if
 
 ### Every reading so far has an uncontrolled variable in it
 
-`desktop/src-tauri/src/linux_gui_stack.rs` sets
-`WEBKIT_DISABLE_DMABUF_RENDERER=1`, but `prefer_system_gui_stack()` returns
-early when the process is not an AppImage. So the **shipped AppImage runs with
-the dma-buf renderer off, and a `cargo tauri dev` or a directly-run
-`target/release/chan-desktop` runs with it on.** The bare-webview probe that
-found five idle writes of five presented had it on, because nothing set it.
+`desktop/src-tauri/src/linux_gui_stack.rs` sets `WEBKIT_DISABLE_DMABUF_RENDERER=1`, but `prefer_system_gui_stack()` returns early when the process is not an AppImage. So the **shipped AppImage runs with the dma-buf renderer off, and a `cargo tauri dev` or a directly-run `target/release/chan-desktop` runs with it on.** The bare-webview probe that found five idle writes of five presented had it on, because nothing set it.
 
-dma-buf is the mechanism by which WebKit hands GPU buffers to the compositor,
-and the fault under investigation is precisely "drawn into the GL canvas but
-not presented until something wakes the compositor". That is a buffer-handoff
-fault, and this switch controls buffer handoff. The comment at
-The comment inside `enableWebglRenderer()` in `TerminalTab.svelte` asserts that
-the `WEBKIT_DISABLE_DMABUF_RENDERER` fix "is about webview creation, not this
-per-layer present stall" — which is plausible, is stated without a measurement,
-and sits on the switch that decides the question. (Anchored on the quoted
-sentence and the enclosing function rather than a line number: this citation
-read `:784` when written and the quoted half had already moved to `:785` by the
-close, without anything about it being wrong.)
+dma-buf is the mechanism by which WebKit hands GPU buffers to the compositor, and the fault under investigation is precisely "drawn into the GL canvas but not presented until something wakes the compositor". That is a buffer-handoff fault, and this switch controls buffer handoff. The comment at The comment inside `enableWebglRenderer()` in `TerminalTab.svelte` asserts that the `WEBKIT_DISABLE_DMABUF_RENDERER` fix "is about webview creation, not this per-layer present stall" -- which is plausible, is stated without a measurement, and sits on the switch that decides the question. (Anchored on the quoted sentence and the enclosing function rather than a line number: this citation read `:784` when written and the quoted half had already moved to `:785` by the close, without anything about it being wrong.)
 
-The claim is not that the comment is wrong. It is that **nobody has tested it**,
-and that a stall reading which does not say which side of that switch it was
-taken on cannot settle the question. So the shipped configuration and every
-configuration anyone has measured are on opposite sides of it.
+The claim is not that the comment is wrong. It is that **nobody has tested it**, and that a stall reading which does not say which side of that switch it was taken on cannot settle the question. So the shipped configuration and every configuration anyone has measured are on opposite sides of it.
 
 ### The instrument
 
-`scripts/e2e/webgl-present-stall.py` sweeps the dma-buf variable as an explicit
-arm, along with the idle duration, because "while the page is idle" is a claim
-about duration and nobody has established how long idle has to be.
+`scripts/e2e/webgl-present-stall.py` sweeps the dma-buf variable as an explicit arm, along with the idle duration, because "while the page is idle" is a claim about duration and nobody has established how long idle has to be.
 
-Its design follows from one observation: **every convenient way to observe this
-fault is itself an event that can wake the compositor.** `get_snapshot()` asks
-the engine for an image and can force the composite it was called to detect;
-`run_javascript()` runs a task in the page; `readPixels()` reads the drawing
-buffer, which is the half nobody doubts; and a synthetic key or click *is* the
-wake event whose absence defines the fault. So the driver never touches the
-engine after load: the page runs its own schedule off timers, reports through
-`document.title`, and pixels are read with XGetImage on the X root window.
+Its design follows from one observation: **every convenient way to observe this fault is itself an event that can wake the compositor.** `get_snapshot()` asks the engine for an image and can force the composite it was called to detect; `run_javascript()` runs a task in the page; `readPixels()` reads the drawing buffer, which is the half nobody doubts; and a synthetic key or click *is* the wake event whose absence defines the fault. So the driver never touches the engine after load: the page runs its own schedule off timers, reports through `document.title`, and pixels are read with XGetImage on the X root window.
 
-A DOM arm runs as a control, since it has no GL layer to leave unpresented; a
-stall reported on both arms means the harness is wrong and the run says so
-rather than reporting a defect. A trial counts as stalled only if the ink is
-absent while idle *and* present once woken, and "never painted" is kept as its
-own verdict rather than folded in to make a number look decisive.
+A DOM arm runs as a control, since it has no GL layer to leave unpresented; a stall reported on both arms means the harness is wrong and the run says so rather than reporting a defect. A trial counts as stalled only if the ink is absent while idle *and* present once woken, and "never painted" is kept as its own verdict rather than folded in to make a number look decisive.
 
-Wayland is refused rather than approximated, because an approximation of this
-particular measurement is worth less than no measurement: the reason the
-question is still open is that a previous approximation was read as an answer.
+Wayland is refused rather than approximated, because an approximation of this particular measurement is worth less than no measurement: the reason the question is still open is that a previous approximation was read as an answer.
 
 ## How to take the outstanding reading
 
@@ -110,45 +77,22 @@ question is still open is that a previous approximation was read as an answer.
 python3 scripts/e2e/webgl-present-stall.py
 ```
 
-On a Linux desktop with a real GPU, from an **Xorg** session. Roughly fifteen
-minutes for the default sweep: two renderers x dma-buf on/off x idle windows of
-1s, 3s and 8s, twelve trials each. Narrow it with `--trials`, `--idle-ms`,
-`--renderer` and `--dmabuf`.
+On a Linux desktop with a real GPU, from an **Xorg** session. Roughly fifteen minutes for the default sweep: two renderers x dma-buf on/off x idle windows of 1s, 3s and 8s, twelve trials each. Narrow it with `--trials`, `--idle-ms`, `--renderer` and `--dmabuf`.
 
-Xorg specifically. The probe reads pixels with XGetImage on the root window,
-and it refuses a Wayland session rather than approximating one — so a Wayland
-box cannot answer this question at all, whatever its GPU. That is worth
-checking before setting time aside, because most current desktops default to
-Wayland.
+Xorg specifically. The probe reads pixels with XGetImage on the root window, and it refuses a Wayland session rather than approximating one -- so a Wayland box cannot answer this question at all, whatever its GPU. That is worth checking before setting time aside, because most current desktops default to Wayland.
 
 Reading the result:
 
-- **exit 0** — no stall. Every idle write reached the screen before anything
-  woke the compositor, on every arm. That closes the residual: turn WebGL on
-  for the Linux desktop.
-- **exit 1** — the stall reproduces, with the arms and trial counts that saw
-  it. `shouldUseWebglRenderer` stays false and the residual stands, now with a
-  measurement behind it instead of a comment.
-- **exit 2** — nothing was measured. The environment could not run it, an arm
-  painted nothing, or the DOM control arm stalled (which indicts the harness,
-  not the renderer). No statement about the stall either way.
+- **exit 0** -- no stall. Every idle write reached the screen before anything woke the compositor, on every arm. That closes the residual: turn WebGL on for the Linux desktop.
+- **exit 1** -- the stall reproduces, with the arms and trial counts that saw it. `shouldUseWebglRenderer` stays false and the residual stands, now with a measurement behind it instead of a comment.
+- **exit 2** -- nothing was measured. The environment could not run it, an arm painted nothing, or the DOM control arm stalled (which indicts the harness, not the renderer). No statement about the stall either way.
 
-Every one of those branches has been exercised, including exit 1 against a
-fault-injected specimen and exit 2 against a real headless Wayland session, so
-a verdict from it is a verdict its own failure paths have been tested against.
+Every one of those branches has been exercised, including exit 1 against a fault-injected specimen and exit 2 against a real headless Wayland session, so a verdict from it is a verdict its own failure paths have been tested against.
 
 ## Rough size
 
 Done for the two defects and for the pixel instrument this item built.
 
-The residual now splits in two, which it did not when this was written.
-**Answering the question is bounded**: roughly fifteen minutes of machine time
-on a Linux desktop with a GPU and an Xorg session, using an instrument that
-exists and whose every branch has been exercised. It used to be unbounded
-because nobody could tell what it would take to find out.
+The residual now splits in two, which it did not when this was written. **Answering the question is bounded**: roughly fifteen minutes of machine time on a Linux desktop with a GPU and an Xorg session, using an instrument that exists and whose every branch has been exercised. It used to be unbounded because nobody could tell what it would take to find out.
 
-**Acting on the answer is still unbounded if the stall reproduces.** That has
-not changed and should not be read as having changed by the measurement getting
-cheap. If it does not reproduce, turning WebGL on for the Linux desktop closes
-the residual outright and the whole thing is a one-line change plus whatever
-@@Smokes' browser checks then observe differently.
+**Acting on the answer is still unbounded if the stall reproduces.** That has not changed and should not be read as having changed by the measurement getting cheap. If it does not reproduce, turning WebGL on for the Linux desktop closes the residual outright and the whole thing is a one-line change plus whatever @@Smokes' browser checks then observe differently.

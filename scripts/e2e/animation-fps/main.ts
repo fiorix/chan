@@ -279,7 +279,7 @@ function verdict(results: Result[], renderer: string | null): { code: number; li
       line:
         `FAIL: ${slow
           .map((s) => `${s.name} at ${s.fps.toFixed(1)} fps`)
-          .join(", ")} — below the ${TARGET_FPS} fps bar.`,
+          .join(", ")} -- below the ${TARGET_FPS} fps bar.`,
     };
   }
   return {
@@ -303,7 +303,7 @@ function render(
         <td class="n">${r.p95Ms.toFixed(1)}</td>
         <td class="n">${r.worstMs.toFixed(1)}</td>
         <td class="n">${r.frames}</td>
-        <td>${r.drawingBuffer ?? "—"}</td>
+        <td>${r.drawingBuffer ?? " -- "}</td>
         <td class="warn">${r.warnings.join("; ")}</td>
       </tr>`,
     )

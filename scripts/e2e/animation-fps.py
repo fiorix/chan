@@ -225,7 +225,7 @@ def report(payload: dict) -> int:
         print(
             f"{row['name']:<28}{row['fps']:>8.1f}{row['medianMs']:>9.1f}"
             f"{row['p95Ms']:>8.1f}{row['worstMs']:>8.1f}  "
-            f"{row['drawingBuffer'] or '—'}"
+            f"{row['drawingBuffer'] or ' -- '}"
         )
         for warning in row["warnings"]:
             print(f"      warn: {warning}")

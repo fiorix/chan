@@ -38,46 +38,21 @@ Overlapping points accumulate opacity where a single path fill painted each pixe
 
 ## The instrument, and what "through ANGLE" does not mean
 
-`scripts/e2e/animation-fps.py` measures all seven animations plus an empty-page
-baseline in one pass. It was written because neither reading this item records
-has an instrument behind it: the sibling number cannot be re-run by anyone, and
-measuring the point cloud the same way would have produced a second anecdote
-beside the first rather than a verification.
+`scripts/e2e/animation-fps.py` measures all seven animations plus an empty-page baseline in one pass. It was written because neither reading this item records has an instrument behind it: the sibling number cannot be re-run by anyone, and measuring the point cloud the same way would have produced a second anecdote beside the first rather than a verification.
 
-The acceptance above records the siblings as met "on AMD Radeon 780M through
-ANGLE". **ANGLE is a translation layer, and it sits equally happily on a real
-GPU or on a software rasterizer.** Running the instrument in headless Chrome in
-a container produced:
+The acceptance above records the siblings as met "on AMD Radeon 780M through ANGLE". **ANGLE is a translation layer, and it sits equally happily on a real GPU or on a software rasterizer.** Running the instrument in headless Chrome in a container produced:
 
 ```
 ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)
 ```
 
-That string satisfies the phrase "through ANGLE" and is software end to end.
-This is not a claim that the sibling reading was software-rasterized — "AMD
-Radeon 780M" is a hardware claim and there is no reason to doubt it. It is a
-claim that **the recorded evidence cannot distinguish the two**, and that a
-reader taking "through ANGLE" as evidence of acceleration is reading something
-that is not there.
+That string satisfies the phrase "through ANGLE" and is software end to end. This is not a claim that the sibling reading was software-rasterized -- "AMD Radeon 780M" is a hardware claim and there is no reason to doubt it. It is a claim that **the recorded evidence cannot distinguish the two**, and that a reader taking "through ANGLE" as evidence of acceleration is reading something that is not there.
 
-So the instrument prints the full renderer string, and refuses (exit 2) when it
-matches a software rasterizer, rather than leaving the distinction to whoever
-writes the acceptance line afterwards. That refusal is verified rather than
-designed: it was tripped on the SwiftShader string above. A second, independent
-guard would also have caught it, because the empty-page baseline measured
-35.3 fps against a 55 fps bar.
+So the instrument prints the full renderer string, and refuses (exit 2) when it matches a software rasterizer, rather than leaving the distinction to whoever writes the acceptance line afterwards. That refusal is verified rather than designed: it was tripped on the SwiftShader string above. A second, independent guard would also have caught it, because the empty-page baseline measured 35.3 fps against a 55 fps bar.
 
-Two further guards matter because their failure modes are silent.
-`runGpuAnimation` returns early when the renderer cannot be created, so a **dead
-animation costs nothing per frame and reads as a perfect frame rate** — the
-single most important failure mode would otherwise present itself as the best
-possible result. The harness catches the component's own `[chan] ... WebGL
-renderer unavailable` warning and checks the drawing buffer. In the same run
-that guard correctly stayed silent: all seven components mounted and drew.
+Two further guards matter because their failure modes are silent. `runGpuAnimation` returns early when the renderer cannot be created, so a **dead animation costs nothing per frame and reads as a perfect frame rate** -- the single most important failure mode would otherwise present itself as the best possible result. The harness catches the component's own `[chan] ... WebGL renderer unavailable` warning and checks the drawing buffer. In the same run that guard correctly stayed silent: all seven components mounted and drew.
 
-That last claim was an argument until it was measured. Breaking the point
-cloud's fragment shader — one dead animation among six live ones, which is the
-case an all-or-nothing environment failure cannot produce — gives this:
+That last claim was an argument until it was measured. Breaking the point cloud's fragment shader -- one dead animation among six live ones, which is the case an all-or-nothing environment failure cannot produce -- gives this:
 
 ```
   live  baseline (nothing mounted)   37.3 fps
@@ -90,23 +65,13 @@ case an all-or-nothing environment failure cannot produce — gives this:
   DEAD  Twin Veil Dance              37.1 fps    300x150
 ```
 
-**The four dead animations are the four fastest in the run**, at the empty
-page's own rate, while the three that actually rendered sit far below them. A
-harness without this guard would have reported the point cloud family — the
-exact four this item exists to verify — as the best performers in the family.
+**The four dead animations are the four fastest in the run**, at the empty page's own rate, while the three that actually rendered sit far below them. A harness without this guard would have reported the point cloud family -- the exact four this item exists to verify -- as the best performers in the family.
 
-The `300x150` is the HTML canvas default: a drawing buffer never sized because
-no renderer ever claimed it. So the buffer check catches this independently of
-the console warning, which is why both are there.
+The `300x150` is the HTML canvas default: a drawing buffer never sized because no renderer ever claimed it. So the buffer check catches this independently of the console warning, which is why both are there.
 
 Verified as exit 2 naming all four, not as a number.
 
-**The consequence is larger than the residual.** Because the run measures all
-seven arms against one baseline on one clock, executing it on real hardware does
-not only close the point cloud's thread — it converts the vortex and both blooms
-from a recorded phrase into a measurement taken by an instrument that reports
-what it ran on. One run settles four unverified animations and re-establishes
-three under-evidenced ones together.
+**The consequence is larger than the residual.** Because the run measures all seven arms against one baseline on one clock, executing it on real hardware does not only close the point cloud's thread -- it converts the vortex and both blooms from a recorded phrase into a measurement taken by an instrument that reports what it ran on. One run settles four unverified animations and re-establishes three under-evidenced ones together.
 
 ## How to take the outstanding reading
 
@@ -114,44 +79,25 @@ three under-evidenced ones together.
 python3 scripts/e2e/animation-fps.py --serve-only
 ```
 
-Then open the printed URL **in Chrome on the machine whose GPU is being
-recorded**. The page runs all eight arms itself and prints its own table; about
-a minute.
+Then open the printed URL **in Chrome on the machine whose GPU is being recorded**. The page runs all eight arms itself and prints its own table; about a minute.
 
-Chrome specifically, and this is not a preference. WebKitGTK spoofs the WebGL
-renderer string — it reports `Apple GPU` / `Apple Inc.` on a Linux VM with no
-GPU at all — so a run in `chan-desktop`'s webview cannot be certified and the
-harness refuses it. Chrome reports truthfully, which is what lets the run
-attach a hardware claim to its numbers.
+Chrome specifically, and this is not a preference. WebKitGTK spoofs the WebGL renderer string -- it reports `Apple GPU` / `Apple Inc.` on a Linux VM with no GPU at all -- so a run in `chan-desktop`'s webview cannot be certified and the harness refuses it. Chrome reports truthfully, which is what lets the run attach a hardware claim to its numbers.
 
-What a good result looks like: a renderer string naming real hardware, the
-baseline arm at 55+ fps, and all seven animations at 55+.
+What a good result looks like: a renderer string naming real hardware, the baseline arm at 55+ fps, and all seven animations at 55+.
 
-What the failure modes look like, all of which exit 2 rather than producing a
-number:
+What the failure modes look like, all of which exit 2 rather than producing a number:
 
-- a software rasterizer (`SwiftShader`, `llvmpipe`) — run it on the GPU;
-- an unidentifiable renderer — you are in a webview, use Chrome;
-- a baseline below 55 fps — the display cannot present 60, so nothing below it
-  can be read as an animation's cost;
-- any `[chan] ... WebGL renderer unavailable` warning, or a zero-sized drawing
-  buffer — an animation that never started reads as a *perfect* frame rate, so
-  the run refuses rather than reporting one.
+- a software rasterizer (`SwiftShader`, `llvmpipe`) -- run it on the GPU;
+- an unidentifiable renderer -- you are in a webview, use Chrome;
+- a baseline below 55 fps -- the display cannot present 60, so nothing below it can be read as an animation's cost;
+- any `[chan] ... WebGL renderer unavailable` warning, or a zero-sized drawing buffer -- an animation that never started reads as a *perfect* frame rate, so the run refuses rather than reporting one.
 
 A genuine slow arm exits 1 and names the animation and its fps.
 
 ## Rough size
 
-Done, minus that one verification pass, and the pass is now a single command on
-a machine with a GPU.
+Done, minus that one verification pass, and the pass is now a single command on a machine with a GPU.
 
-This paragraph used to read "run the four animations it hosts on the same
-hardware the vortex was measured on and read the frame rate". That is left here
-in corrected form rather than silently rewritten, because it contained the
-error the rest of this item is about: **"the same hardware the vortex was
-measured on" is not a thing the record identifies.** The vortex's hardware is
-recorded as a phrase that a pure-software stack also satisfies, so an
-instruction to reproduce its conditions could not be followed.
+This paragraph used to read "run the four animations it hosts on the same hardware the vortex was measured on and read the frame rate". That is left here in corrected form rather than silently rewritten, because it contained the error the rest of this item is about: **"the same hardware the vortex was measured on" is not a thing the record identifies.** The vortex's hardware is recorded as a phrase that a pure-software stack also satisfies, so an instruction to reproduce its conditions could not be followed.
 
-What replaces it is not four animations on remembered hardware but seven plus a
-baseline, on a machine the instrument names in its own output.
+What replaces it is not four animations on remembered hardware but seven plus a baseline, on a machine the instrument names in its own output.
