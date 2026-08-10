@@ -20,6 +20,8 @@ make[1]: *** [app-notarized] Error 127
 
 `73a33b9c` clears the venv before creating it, installs through `python -m pip` rather than the `bin/pip` console script, and turns an interpreter with no `ensurepip` into a named error instead of exit 127. That makes this particular failure impossible.
 
+**That last sentence is wrong, and it is left standing because being wrong is the point.** The 2026-08-10 audit below found the fix clears the venv only when `[ ! -x "$venv/bin/dmgbuild" ]`, and a cache-restored console script stays present and executable when its interpreter moves. The failure it calls impossible was still reachable at v0.88.0's open. Read this section as the belief the item was registered on, not as a statement of fact, and see "The premise this item was registered on was too generous to `73a33b9c`".
+
 It does not make the dry run predictive. Any step whose result depends on what a cache handed it can still pass in the dry run and fail at the tag, and the next one will present as a different error in a different file. The fix closed an instance; this item is about the class.
 
 ## Why it matters more than one packaging bug
@@ -129,3 +131,5 @@ not comparable, and the round ends at a GA tag.
 ## Rough size
 
 Small for the venv relocation. Medium for the audit, which is a read of the workflow rather than a code change, and whose value is in finding the second instance rather than in re-fixing the first.
+
+**Both halves came out right, and the second sentence's premise did not.** The relocation was small and the audit did find a second instance, `target/tauri-cli`. But "rather than in re-fixing the first" assumed the first instance was closed, and it was not: the same audit found `73a33b9c`'s guard still reusing a venv whose interpreter had moved. So the audit's value was finding a second instance **and** re-opening the first, and a reader planning from this estimate would have skipped the re-read that produced half the result.

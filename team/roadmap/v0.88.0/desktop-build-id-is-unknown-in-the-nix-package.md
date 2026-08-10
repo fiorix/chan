@@ -81,6 +81,8 @@ Two things this settles beyond the item. The injectable override works in the pa
 
 The Nix smoke deliberately excludes `chan-desktop` from the build-id assertion and says so at the exclusion site, naming this item as where the gap lives. That is the shape to keep: a check that skips a known defect and is legible about it, rather than one that is silently absent.
 
+**"The shape to keep" was right about the principle and is now wrong about the code**, and both halves matter. The exclusion is gone as of the implementation below, because a documented skip over a closed gap is just a stale comment; what survives is the reason it was written that way. A silently absent check would have left nobody able to find this item from the smoke, and the legible exclusion is how the gap stayed visible for a release. Keep the principle, not the four lines.
+
 ## Contract
 
 - A chan-desktop build from the **Nix** path is identifiable at runtime as the specific
@@ -210,3 +212,16 @@ derivation, plus a guarded fallback chain because a `path:` flake ref carries no
 `devserver-build-identity` implementation is the template to copy, including whatever
 fallback it settles on, threaded to two derivations instead of one. Doing both crates in
 one pass would have been cheaper; the round's scope lock is why they are split.
+
+**The estimate was right about the packaging and missed a surface.** Threading the id was
+indeed small: three files, and two of them a few lines. What it did not anticipate is that
+the id would be **unreadable** once stamped. `CHAN_DESKTOP_BUILD_ID` had no headless
+consumer, so the acceptance line "`.#chan-desktop` reports a real build id" could not be
+checked by anything that cannot open a display, and closing it needed a new pre-GUI
+`--version` probe in `main.rs` plus a test pinning its position. That is a runtime-surface
+change in a different crate from the one this item names, and it needed a boundary grant to
+make.
+
+The general form, since this round found the same shape elsewhere: **an estimate that sizes
+"make the value correct" has not sized "make the value observable".** Those are separate
+questions and only the first one was asked here.
