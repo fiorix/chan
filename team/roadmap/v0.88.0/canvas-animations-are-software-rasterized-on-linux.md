@@ -75,6 +75,32 @@ possible result. The harness catches the component's own `[chan] ... WebGL
 renderer unavailable` warning and checks the drawing buffer. In the same run
 that guard correctly stayed silent: all seven components mounted and drew.
 
+That last claim was an argument until it was measured. Breaking the point
+cloud's fragment shader — one dead animation among six live ones, which is the
+case an all-or-nothing environment failure cannot produce — gives this:
+
+```
+  live  baseline (nothing mounted)   37.3 fps
+  live  Sixfold Vortex               16.0 fps    900x560
+  live  Hexagonal Bloom              12.4 fps    900x560
+  live  Fourteenfold Bloom            4.2 fps    900x560
+  DEAD  Lorenz Constellation         36.8 fps    300x150
+  DEAD  Rippled Duet                 37.1 fps    300x150
+  DEAD  Striated Current             36.3 fps    300x150
+  DEAD  Twin Veil Dance              37.1 fps    300x150
+```
+
+**The four dead animations are the four fastest in the run**, at the empty
+page's own rate, while the three that actually rendered sit far below them. A
+harness without this guard would have reported the point cloud family — the
+exact four this item exists to verify — as the best performers in the family.
+
+The `300x150` is the HTML canvas default: a drawing buffer never sized because
+no renderer ever claimed it. So the buffer check catches this independently of
+the console warning, which is why both are there.
+
+Verified as exit 2 naming all four, not as a number.
+
 **The consequence is larger than the residual.** Because the run measures all
 seven arms against one baseline on one clock, executing it on real hardware does
 not only close the point cloud's thread — it converts the vortex and both blooms
