@@ -15,7 +15,7 @@ three releases:
 
 | workaround | where | what it assumed |
 | --- | --- | --- |
-| spin until the mtime advances, capped at 200 ms | `crates/chan-workspace/src/workspace.rs:7221` | mtime does not reliably advance |
+| spin until the mtime advances, capped at 200 ms | `crates/chan-workspace/src/workspace.rs:7221` (stale; `:7349` at `e239c770`, and repaired by this audit) | mtime does not reliably advance |
 | `std::thread::sleep(Duration::from_millis(20))` | `crates/chan-server/src/doc_sessions/mod.rs:2914` | same |
 | clear `flushed_mtime_ns` before the reconcile | v0.82.0, `done/parallel-suite-flake-hygiene.md` | same |
 
@@ -43,9 +43,15 @@ constants, `2>/dev/null`, `|| true`, pinned or capped waits, and `safe.directory
 environment patches. Those are greppable. The unjoined set can be enumerated instead of
 waited for.
 
+> **Three of those signatures are shell-shaped and yield zero on a Rust surface.** `2>/dev/null`, `|| true` and `safe.directory` matched nothing in `crates/chan-workspace/src/`, not because it is clean but because they cannot appear there. This list was written from a round that spanned shell tooling, and a zero that means "wrong instrument" is indistinguishable in a table from a zero that means "nothing here". Any re-run on a Rust surface should drop them and say it did.
+
+The prospective form's failure is also now demonstrated rather than argued. During the round that ran this audit, its own author hit a container whose `$HOME` was empty, diagnosed it, worked around it locally, and did not pass it on; another lane then concluded from the same mechanism that a clean container could not run the test suite, which was false. The author had read the paragraph above that morning. If the rule cannot survive contact with the person best primed in the round, it is not a discipline problem, and that is the whole argument for the retrospective form.
+
 A first census over `crates/chan-workspace/src/` gives roughly 43 candidate sites (18
 sleeps, 10 retry/attempt constants, 15 loops), which is a tractable read rather than a
 project.
+
+> **Held up, with one correction and one limit the pass established.** The three class counts were exact; the population is 44 rather than 43, because a `let mut attempt` local binding is invisible to a `const`-oriented expression. "Tractable rather than a project" was true of the declared signatures and the pass finished at 53 sites. What it does not cover is the axis those signatures never had: every expression in this list is shaped by *time*, and the blind-spot section below establishes that a workaround shaped by *failure* matches none of them. That axis is 248 further lines on this same surface.
 
 ## Contract
 
@@ -60,6 +66,7 @@ project.
 
 - A recorded pass over the signature population in `crates/chan-workspace/src/`, each site
   marked: assumption named / assumption named and shared elsewhere / not a workaround.
+  > **The pass used five marks rather than these three**, and the two additions are the item's own question made visible. `named` here does not distinguish an assumption a test would catch from one nothing would, which is precisely what "what test fails if this sentence is false?" asks, so the pass split it into `named` and `named-ut`. `no-cmt` records the smell the method note names. The mapping is exact: `named` and `named-ut` both satisfy "assumption named", `shared` is "named and shared elsewhere", `not-wa` is "not a workaround", and `no-cmt` is orthogonal to all three.
 - The greps that produced the population are written into the item so they can be re-run,
   and their known blind spots are stated — a lexical search cannot see a workaround with no
   keyword, which is the same bound the timing sweep had to state.
@@ -99,6 +106,8 @@ early-return rather than an `#[ignore]` or a failure — so the claim it appears
 never once exercised. When the audit finds an assumption whose only test is shaped like this,
 that is a stronger finding than an untested one.
 
+> **Superseded by the pass below, and left standing because it is the specimen.** Everything in this section is written in the present tense about a test that **no longer exists in this form**: the audit repaired it (`d92ce036`), and it now stamps the sub-second gap with `force_mtime_ns` and fails by name on a mount too coarse to hold it. Two things in this section were also wrong by the time the pass ran, and both are corrected in F4: the citation is `workspace.rs:7349-7377`, not `:7221`, and the deterministic construction that replaces the spin arrived in the *same* change that left the spinning test in place. A reader stopping here takes away a live defect that was closed in the round this section is describing.
+
 An absent note invites a question. A confident wrong one closes it, which is worse, and it is
 the specific reason this defect outlived three workarounds. Where an audited assumption turns
 out to be relied on elsewhere, the deliverable is not only a registered item — it is a
@@ -120,12 +129,18 @@ rather than beside it — the two populations overlap on sleeps, and running bot
 means two passes editing the same lines. Extending to other crates is a later decision for
 whoever reads the first list.
 
+> **This instruction was not followed, and the reason it existed did not bind.** The pass ran *beside* the timing work rather than after it. No collision occurred, because the sleep populations turned out to be disjoint by crate: the timing cluster's repairs are in `chan-server` (`control_socket.rs`, `routes/terminal.rs`, `doc_sessions/`) and this pass's sites are in `chan-workspace`. The two populations overlap as a *class* and not as *lines*, which is the distinction the original boundary missed. Anyone re-running this against a differently-scoped timing sweep should re-check that, rather than inheriting either the instruction or this exemption.
+>
+> **The "later decision" came due and is answered.** The first list has been read, and the class has a confirmed instance in `chan-server` (`build.rs` discards the error on six writes into the source tree). The follow-on registration is scoped to both crates on that basis: an item whose surface knowingly excludes its own confirmed instance is defective.
+
 ## Rough size
 
 Medium, and almost entirely reading. The technique was proposed by a lane that explicitly
 declined to run it, on the grounds that the surface was not theirs — which is the right
 instinct and worth preserving: this audit's value is in the judgement per site, so it should
 go to whoever knows the surface, not to whoever noticed the pattern.
+
+> **Accurate, and the reason it was accurate is worth carrying.** The pass was 53 sites of reading against two Rust changes, one of them a comment. The estimate held because the judgement per site is the cost, exactly as this section says. What it did not anticipate is that the pass would spend as long on its own instrument as on the population: the test/production classifier was wrong on first run, and probing it rather than reading it is what found that. Budget for the instrument, not only for the sites.
 
 ## The recorded pass, 2026-08-10, at `e239c770`
 
@@ -184,7 +199,7 @@ Worse than a miss: **F2 belongs to the same unsearched family.** `target_inside_
 The second structural bound, because it limits every number above in a different way. **These greps enumerate workarounds; the defect lives at the dependent site, which by construction carries no signature.** `write_text_if_unchanged` matches none of these expressions. It was reached by following an assumption from a workaround, not by matching one. So the population bounds what can be enumerated, never what can be concluded, and the join from each site to its dependents is manual reading.
 
 - `2>/dev/null` and `|| true` yield **0** here. They are shell signatures and this surface is Rust, so that branch of the signature list is inapplicable rather than clean.
-- The Rust analogue of error suppression (`let _ =`, `.ok();`, `unwrap_or_default()`) yields **85** lines and is **not** in this population. It is the largest unexamined lexical class on the surface.
+- The Rust analogue of error suppression is **not** in this population and is the largest unexamined lexical class on the surface. **The figure first recorded here was 85 lines and it undercounts**: that set required `.ok();` with a trailing semicolon, so it missed every `.ok()` used as an expression, and it omitted `unwrap_or_else` and `unwrap_or(` entirely. Over the full set (`let _ =`, `.ok()`, `unwrap_or_default()`, `unwrap_or_else`, `unwrap_or(`) the surface carries **248** matching lines. The correction is left visible rather than swapped, because an exclusion justified by a number that was three times too small is a different decision from the one it appears to be.
 - `#[allow(` yields 2 and `#[ignore]` yields 2, both examined.
 - A workaround with no keyword is invisible to all of the above: a reordering, an extra defensive read, a widened bound, a coarser unit, an `if` special-casing one filesystem.
 - Surface is `crates/chan-workspace/src/` only. Dependent sites in `crates/chan-server/src/` are named where found but not edited.
