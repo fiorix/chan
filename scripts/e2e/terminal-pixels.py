@@ -24,6 +24,19 @@ A skip is not a pass; report it as a skip.
 Needs python-gobject with the WebKit2 4.1 typelib, a display, and an
 installed web/node_modules. Under a headless runner, wrap it:
 `xvfb-run -a python3 ...`.
+
+It also needs the cairo foreign-struct converter, which is a SEPARATE package
+from python-gobject (`python3-gi-cairo` on Debian/Ubuntu). Without it
+`get_snapshot_finish` raises TypeError on every scenario. That dependency is
+easy to miss because nothing imports cairo by name here: the converter is what
+lets the snapshot cross the GI boundary at all.
+
+A caution about the WebGL reference arm under software rendering: on a
+llvmpipe/Xvfb stack the WebGL layer is not composited into the snapshot, so
+`--include-renderers` reports 0.0% on every measure for those rows. That is
+"nothing was captured", not "the renderer paints nothing", and it is why the
+webgl arm needs a real GPU to mean anything. The DOM and ghostty arms measure
+correctly there, because glyph rasterisation is CPU-side.
 """
 
 from __future__ import annotations
@@ -224,7 +237,17 @@ def render(gui, url: str, png: pathlib.Path):
     result = {}
 
     def finish(view, res):
-        result["surface"] = view.get_snapshot_finish(res)
+        # An exception raised inside a GLib callback is printed by PyGObject
+        # and then swallowed: the loop keeps running, the watchdog fires, and
+        # the caller is told "no snapshot within 30s" -- a timeout that is not
+        # what happened. Observed for real when the cairo foreign-struct
+        # converter was missing (see the dependency note in the docstring):
+        # get_snapshot_finish raised TypeError immediately and the run still
+        # spent 30 seconds per scenario before reporting the wrong cause.
+        try:
+            result["surface"] = view.get_snapshot_finish(res)
+        except Exception as exc:  # noqa: BLE001 - reported, not raised here
+            result["snapshot_error"] = exc
         Gtk.main_quit()
 
     def snap():
@@ -264,6 +287,10 @@ def render(gui, url: str, png: pathlib.Path):
 
     if "error" in result:
         raise RuntimeError(f"the page failed: {result['error']}")
+    if "snapshot_error" in result:
+        raise RuntimeError(
+            f"the webview could not be snapshotted: {result['snapshot_error']}"
+        )
     surface = result.get("surface")
     if surface is None:
         raise RuntimeError("the webview produced no snapshot within 30s")
