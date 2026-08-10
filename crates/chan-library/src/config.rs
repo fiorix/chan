@@ -54,12 +54,11 @@ pub struct TerminalConfig {
     #[serde(default = "default_terminal_default_term")]
     pub default_term: String,
     /// User's terminal-font preference.
-    /// Default is `os-default` (per-OS native mono -- SF Mono on
-    /// macOS, Cascadia on Windows, DejaVu on Linux). Opt-in
-    /// `source-code-pro` activates Source Code Pro by reordering
-    /// xterm.js's fontFamily chain to put SCP first. Selecting SCP
-    /// on a non-embed-font build triggers the SettingsPanel's
-    /// download flow before the activation completes.
+    /// Default is `os-default`, which leads the SPA's fontFamily chain
+    /// with the OS's native mono: SF Mono on macOS, Cascadia on
+    /// Windows, and the bundled Source Code Pro on Linux, which has no
+    /// single native mono to name. Opt-in `source-code-pro` promotes
+    /// Source Code Pro to the head of that chain on every OS.
     #[serde(default)]
     pub font: TerminalFontChoice,
     /// Renderer font size in pixels. The SPA captures this when it constructs
@@ -114,12 +113,11 @@ pub struct TerminalConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum TerminalFontChoice {
-    /// Per-OS native mono. The lean default.
+    /// Per-OS native mono. The default.
     #[default]
     OsDefault,
-    /// Source Code Pro Regular. Available either via `--features
-    /// embed-font` (rust-embed bundle) or via the user-config-dir
-    /// path written by the font download flow.
+    /// Source Code Pro Regular, shipped as a hashed asset inside the
+    /// SPA bundle, so it is always available with nothing to fetch.
     SourceCodePro,
 }
 

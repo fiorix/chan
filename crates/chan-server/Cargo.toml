@@ -28,16 +28,6 @@ embeddings = ["chan-workspace/embeddings"]
 # per-machine cache on first server launch. Implies `embeddings`:
 # bundling a model is meaningless without the embedding code.
 embed-model = ["embeddings", "dep:zstd"]
-# Bundle Source Code Pro Regular into the binary via rust-embed.
-# Opt-in (default-off) so a plain `cargo build` produces a lean
-# binary that uses the per-OS native mono font (SF Mono / Cascadia
-# / DejaVu) by default. With the feature off `serve_font` falls
-# back to a user-config-dir copy at
-# `<user-config>/chan/fonts/SourceCodePro-Regular.otf.woff2`; the
-# Settings UI's "Source Code Pro" opt-in downloads the woff2 +
-# OFL.txt into that directory on enable.
-# Implies nothing; the bundle is purely additive.
-embed-font = []
 # Pass-throughs for chan-workspace's GPU + CPU-BLAS backends. The chan
 # binary's target-conditional dep wiring auto-flips `metal` + `accelerate`
 # on macOS; `cuda` stays opt-in on Linux.
@@ -74,8 +64,7 @@ notify = { workspace = true }
 open = "5"
 portable-pty = { workspace = true }
 rand = { workspace = true }
-# HTTP client for the Source Code Pro download endpoint
-# (`POST /api/fonts/source-code-pro/download`).
+# HTTP client for the extension reverse proxy (`routes/extensions.rs`).
 # Mirrors chan-tunnel-server / chan binary deps; rustls keeps the
 # build OpenSSL-free.
 reqwest = { workspace = true }

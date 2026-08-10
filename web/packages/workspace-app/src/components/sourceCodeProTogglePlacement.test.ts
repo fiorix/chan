@@ -11,11 +11,12 @@ describe("Source Code Pro toggle placement", () => {
   test("Settings Terminal carries the Source Code Pro option + selectFont wiring", () => {
     expect(terminalSettings).toMatch(/<option value="source-code-pro">Source Code Pro<\/option>/);
     expect(terminalSettings).toMatch(/<option value="os-default">OS default \(mono\)<\/option>/);
-    expect(terminalSettings).toMatch(/async function selectFont\(/);
-    expect(terminalSettings).toMatch(/await api\.fontsSourceCodeProDownload\(\)/);
-    // OS default rollback path so "off" really does fall back to
-    // the system monospace font when the download fails.
-    expect(terminalSettings).toMatch(/font: "os-default"/);
+    expect(terminalSettings).toMatch(/function selectFont\(/);
+    // The face ships in the SPA bundle, so selecting it is a plain
+    // preference write. Nothing to fetch means no state where the
+    // config claims a font the browser cannot load.
+    expect(terminalSettings).not.toMatch(/fontsSourceCodeProDownload/);
+    expect(terminalSettings).toMatch(/terminal: \{ \.\.\.p\.terminal, font: next \}/);
   });
 
   test("Terminal back card does not carry the SCP toggle", () => {

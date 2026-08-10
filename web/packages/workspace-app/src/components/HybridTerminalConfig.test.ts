@@ -36,9 +36,12 @@ describe("Settings owns terminal controls", () => {
     expect(terminalSource).toMatch(/aria-label="Terminal font"/);
   });
 
-  test("Source Code Pro still downloads before persisting terminal.font", () => {
-    expect(terminalSource).toMatch(/api\.fontsSourceCodeProDownload\(\)/);
-    expect(terminalSource).toMatch(/font: "source-code-pro"/);
-    expect(terminalSource).toMatch(/font: "os-default"/);
+  test("terminal.font persists straight from the select", () => {
+    // The face ships in the SPA bundle, so there is no download leg to
+    // sequence the preference write behind.
+    expect(terminalSource).toMatch(/function selectFont\(/);
+    expect(terminalSource).toMatch(/<option value="source-code-pro">/);
+    expect(terminalSource).toMatch(/<option value="os-default">/);
+    expect(terminalSource).not.toMatch(/fontsSourceCodeProDownload/);
   });
 });

@@ -112,23 +112,23 @@ use routes::{
     api_backlinks, api_build_info, api_cloud_workspaces, api_create_diagram, api_create_draft,
     api_create_file, api_create_terminal, api_cs_link_create, api_delete_file, api_delete_session,
     api_delete_terminal, api_discard_draft, api_doc_ws, api_excluded_dirs_get,
-    api_excluded_dirs_put, api_extensions, api_fonts_source_code_pro_download, api_fs_graph,
-    api_fs_transfer, api_get_config, api_get_contacts, api_get_mentions, api_get_session,
-    api_get_workspace, api_graph, api_headings, api_health, api_index_rebuild, api_index_status,
-    api_indexing_state, api_inspect_draft, api_inspector, api_language_graph, api_link_targets,
-    api_links, api_list_files, api_list_sessions, api_list_windows, api_metadata_export,
-    api_metadata_import, api_move, api_open, api_patch_config, api_post_attachment,
-    api_post_contacts_import, api_preflight, api_preflight_decision, api_promote_draft,
-    api_put_session, api_read_file, api_report_dir, api_report_file, api_report_prefix,
-    api_reports_disable, api_reports_enable, api_reports_state, api_resolve_link,
-    api_resolve_session_conflict, api_restart_terminal, api_scene_ws, api_screensaver_clear_pin,
-    api_screensaver_patch, api_screensaver_set_pin, api_screensaver_state, api_screensaver_verify,
-    api_search_content, api_search_files, api_search_workspace, api_session_handover_reply,
-    api_set_terminal_broadcast, api_storage_reset, api_survey_reply, api_team_config_read,
-    api_team_config_write, api_terminal_next_name, api_terminal_ws, api_terminals_roster,
-    api_upload_file, api_window_reply, api_workspace_bootstrap, api_write_file,
-    extension_response_policy, proxy_extension, proxy_extension_root, require_local_mutation,
-    spawn_roster_broadcaster, ws_upgrade,
+    api_excluded_dirs_put, api_extensions, api_fs_graph, api_fs_transfer, api_get_config,
+    api_get_contacts, api_get_mentions, api_get_session, api_get_workspace, api_graph,
+    api_headings, api_health, api_index_rebuild, api_index_status, api_indexing_state,
+    api_inspect_draft, api_inspector, api_language_graph, api_link_targets, api_links,
+    api_list_files, api_list_sessions, api_list_windows, api_metadata_export, api_metadata_import,
+    api_move, api_open, api_patch_config, api_post_attachment, api_post_contacts_import,
+    api_preflight, api_preflight_decision, api_promote_draft, api_put_session, api_read_file,
+    api_report_dir, api_report_file, api_report_prefix, api_reports_disable, api_reports_enable,
+    api_reports_state, api_resolve_link, api_resolve_session_conflict, api_restart_terminal,
+    api_scene_ws, api_screensaver_clear_pin, api_screensaver_patch, api_screensaver_set_pin,
+    api_screensaver_state, api_screensaver_verify, api_search_content, api_search_files,
+    api_search_workspace, api_session_handover_reply, api_set_terminal_broadcast,
+    api_storage_reset, api_survey_reply, api_team_config_read, api_team_config_write,
+    api_terminal_next_name, api_terminal_ws, api_terminals_roster, api_upload_file,
+    api_window_reply, api_workspace_bootstrap, api_write_file, extension_response_policy,
+    proxy_extension, proxy_extension_root, require_local_mutation, spawn_roster_broadcaster,
+    ws_upgrade,
 };
 #[cfg(feature = "embeddings")]
 use routes::{
@@ -137,7 +137,7 @@ use routes::{
 };
 use signal::{graceful_serve, now_unix_secs, spawn_idle_watcher};
 use state::{AppState, WorkspaceCell};
-use static_assets::{serve_font, serve_static};
+use static_assets::serve_static;
 // The terminal-session registry lives in chan-library. Re-export it at the
 // crate root so the route layer reaches it as `crate::terminal_sessions::…`.
 pub(crate) use chan_library::terminal_sessions;
@@ -1641,14 +1641,6 @@ fn router_with_extensions(
         .route("/api/screensaver/state", patch(api_screensaver_patch))
         .route("/api/screensaver/pin", post(api_screensaver_set_pin))
         .route("/api/screensaver/pin", delete(api_screensaver_clear_pin));
-    // Source Code Pro download endpoint.
-    // Settings-gated lane because activating the font is a
-    // preference write + the download mutates the per-machine
-    // user-config dir.
-    let settings_writes = settings_writes.route(
-        "/api/fonts/source-code-pro/download",
-        post(api_fonts_source_code_pro_download),
-    );
     let settings_writes = settings_writes.route("/api/metadata/export", post(api_metadata_export));
     let settings_writes = settings_writes.route(
         "/api/metadata/import",
@@ -1825,14 +1817,7 @@ fn router_with_extensions(
             "/api/terminals/{session}/broadcast",
             post(api_set_terminal_broadcast),
         )
-        .route("/ws", get(ws_upgrade))
-        // Bundled font assets (Source Code Pro Regular + OFL.txt)
-        // served from chan-server's rust-embed.
-        // The SPA's `@font-face` declaration points at this path; a
-        // future expansion (italic / bold weights, additional faces)
-        // drops more entries into `crates/chan-server/resources/fonts/`
-        // and the same `{name}` segment serves them.
-        .route("/static/fonts/{name}", get(serve_font));
+        .route("/ws", get(ws_upgrade));
     // Read-only semantic-search state. Gated on
     // `embeddings` because the SemanticState payload + the
     // `chan-workspace` resolver behind it only exist when the candle

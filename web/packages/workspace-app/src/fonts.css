@@ -1,18 +1,23 @@
 /*
  * fonts.css
  *
- * Declares the bundled Source Code Pro Regular face that chan ships
- * for the in-app terminal. The .woff2 file lives in
- * `crates/chan-server/resources/fonts/`, embedded via rust-embed and
- * served at the absolute path below.
+ * Declares the Source Code Pro Regular face that chan ships for the
+ * in-app terminal. The .woff2 goes through vite's asset pipeline
+ * (`./fonts/` next to this file), so the emitted URL is relative to
+ * the hashed stylesheet and resolves under whatever single-segment
+ * slug `WorkspaceHost` mounted the tenant at. An absolute
+ * `/static/...` src would resolve against the origin root instead,
+ * where the launcher root fallback answers with index.html and the
+ * face fails to decode.
  *
  * The face is loaded with `font-display: swap` so the terminal stays
  * usable while the woff2 is in flight (the fallback chain in
- * TerminalTab.svelte's xterm.js config matches the same family
+ * TerminalTab.svelte's renderer config matches the same family
  * preference, so the swap is visually subtle).
  *
- * License: SIL Open Font License 1.1. The OFL notice ships alongside
- * the font (`/static/fonts/OFL.txt`); the Settings UI links to it.
+ * License: SIL Open Font License 1.1. The OFL notice ships beside the
+ * font in the bundle (`<prefix>/static/fonts/OFL.txt`, copied by
+ * vite.config.ts).
  */
 
 @font-face {
@@ -20,5 +25,5 @@
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  src: url("/static/fonts/SourceCodePro-Regular.otf.woff2") format("woff2");
+  src: url("./fonts/SourceCodePro-Regular.otf.woff2") format("woff2");
 }

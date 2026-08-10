@@ -1371,17 +1371,6 @@ export const api = {
       "/api/screensaver/verify",
       { hash: hash_b64 },
     ),
-  /// Download Source Code Pro Regular + OFL.txt into
-  /// `<user-config>/chan/fonts/`. Idempotent server-side; safe
-  /// to call from a click handler without guarding. Surfaces
-  /// { dir, files: [{ name, bytes }] } so the SPA can reflect
-  /// the post-download state.
-  fontsSourceCodeProDownload: () =>
-    req<{ dir: string; files: { name: string; bytes: number }[] }>(
-      "POST",
-      "/api/fonts/source-code-pro/download",
-    ),
-
   /// Dir-based team-config read/write backing the Team Work dialog's
   /// New/Load flow. The config lives INSIDE the workspace under a
   /// workspace-relative `{dir}/config.toml`, written through the

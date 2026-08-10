@@ -30,10 +30,11 @@ describe("SettingsOverlay config writes (source pins)", () => {
     expect(appearanceSource).toMatch(/clearHybridSurfaceTheme\(/);
   });
 
-  test("the terminal font control downloads Source Code Pro before persist", () => {
-    // The download endpoint is fired so the preference is only committed
-    // after the woff2 lands (matching the terminal card invariant).
-    expect(terminalSource).toMatch(/api\.fontsSourceCodeProDownload\(\)/);
+  test("the terminal font control commits the choice with nothing to fetch", () => {
+    // Source Code Pro ships in the SPA bundle, so the control is a plain
+    // preference write with no download leg to sequence behind.
+    expect(terminalSource).toMatch(/function selectFont\(/);
+    expect(terminalSource).not.toMatch(/fontsSourceCodeProDownload/);
   });
 
   test("appearance size controls clamp and commit on blur or Enter", () => {

@@ -3,7 +3,6 @@
   // are spawn-time, so a change applies to newly spawned terminals. The
   // scrollback slider and the free-text TERM field debounce their writes.
 
-  import { api } from "../../api/client";
   import type { Preferences, TerminalFontChoice } from "../../api/types";
   import { DEFAULT_SECRET_MASK_SUFFIXES } from "../../terminal/secretMasking";
   import type { CommitFn } from "./commit";
@@ -87,45 +86,16 @@
     }, 400);
   }
 
-  // Terminal font. Enabling Source Code Pro downloads the woff2 into the
-  // user config dir first; the preference is persisted only after the
-  // download lands, so the config never claims SCP while the file is
-  // missing (the terminal card holds the same invariant). `pendingFont`
-  // shows the picked value in the select while the download is in flight,
-  // before the buffer slice is committed.
-  let fontDownloading = $state(false);
-  let fontStatus = $state<string | null>(null);
-  let pendingFont = $state<TerminalFontChoice | null>(null);
+  // Terminal font. The Source Code Pro face ships inside the SPA bundle,
+  // so picking it is a plain preference write with nothing to fetch and
+  // no state where the config claims a font the browser cannot load.
   const currentFont = $derived(
     (prefs.terminal.font ?? "os-default") as TerminalFontChoice,
   );
-  const displayFont = $derived(pendingFont ?? currentFont);
 
-  async function selectFont(next: TerminalFontChoice): Promise<void> {
-    if (next === displayFont) return;
-    fontStatus = null;
-    if (next === "source-code-pro") {
-      pendingFont = "source-code-pro";
-      fontDownloading = true;
-      fontStatus = "Downloading Source Code Pro...";
-      try {
-        await api.fontsSourceCodeProDownload();
-        commit((p) => ({
-          ...p,
-          terminal: { ...p.terminal, font: "source-code-pro" },
-        }));
-        fontStatus = "Source Code Pro ready.";
-      } catch (e) {
-        // Leave the preference at os-default; the select reverts when
-        // pendingFont clears, so the SPA never claims SCP is active.
-        fontStatus = `Download failed: ${(e as Error).message}`;
-      } finally {
-        pendingFont = null;
-        fontDownloading = false;
-      }
-    } else {
-      commit((p) => ({ ...p, terminal: { ...p.terminal, font: "os-default" } }));
-    }
+  function selectFont(next: TerminalFontChoice): void {
+    if (next === currentFont) return;
+    commit((p) => ({ ...p, terminal: { ...p.terminal, font: next } }));
   }
 </script>
 
@@ -212,21 +182,17 @@
 
 <SettingField
   label="Terminal font"
-  hint="Font for new terminals. Source Code Pro downloads ~80 KB into your config dir on first enable; existing terminals keep their font until they restart."
+  hint="Font for new terminals. Source Code Pro ships with chan and renders identically on every OS; existing terminals keep their font until they restart."
 >
   <select
-    value={displayFont}
-    disabled={fontDownloading}
+    value={currentFont}
     onchange={(e) =>
-      void selectFont(e.currentTarget.value as TerminalFontChoice)}
+      selectFont(e.currentTarget.value as TerminalFontChoice)}
     aria-label="Terminal font"
   >
     <option value="os-default">OS default (mono)</option>
     <option value="source-code-pro">Source Code Pro</option>
   </select>
-  {#if fontStatus}
-    <span class="font-status" role="status">{fontStatus}</span>
-  {/if}
 </SettingField>
 
 <SettingField
@@ -254,10 +220,6 @@
     font-size: 13px;
     min-width: 4.5em;
     text-align: right;
-  }
-  .font-status {
-    color: var(--text-secondary);
-    font-size: 12px;
   }
   input.font-size {
     width: 6em;

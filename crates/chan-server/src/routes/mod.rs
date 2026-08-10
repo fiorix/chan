@@ -19,7 +19,6 @@ mod drafts;
 mod excluded_dirs;
 mod extensions;
 mod files;
-mod fonts;
 mod fs_graph;
 mod graph;
 mod health;
@@ -79,7 +78,6 @@ pub use files::{
     api_create_file, api_delete_file, api_fs_transfer, api_list_files, api_move, api_read_file,
     api_resolve_session_conflict, api_upload_file, api_write_file,
 };
-pub use fonts::api_fonts_source_code_pro_download;
 pub use fs_graph::{api_fs_graph, build_fs_graph, FsGraphResponse, FsGraphScope};
 pub use graph::{
     api_backlinks, api_graph, api_headings, api_language_graph, api_link_targets, api_links,

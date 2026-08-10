@@ -77,9 +77,27 @@ function excalidrawFonts(): Plugin {
   };
 }
 
+// Ship the SIL OFL notice beside the Source Code Pro face the terminal
+// embeds. The .woff2 itself rides vite's asset pipeline (see fonts.css),
+// which hashes and rewrites it; the licence has no importer to hang off,
+// so copy it verbatim into dist/static/fonts the same way the excalidraw
+// families land. OFL 1.1 permits bundling the face inside chan only while
+// this notice travels with it, so the copy is a licence obligation, not a
+// convenience.
+function sourceCodeProLicense(): Plugin {
+  const src = join(dirname(fileURLToPath(import.meta.url)), "src/fonts/OFL.txt");
+  return {
+    name: "source-code-pro-license",
+    async writeBundle(options) {
+      if (!options.dir) return;
+      await cp(src, join(options.dir, "static/fonts/OFL.txt"));
+    },
+  };
+}
+
 export default defineConfig({
   base: "./",
-  plugins: [svelte(), excalidrawFonts()],
+  plugins: [svelte(), excalidrawFonts(), sourceCodeProLicense()],
   resolve: {
     alias: {
       "@chan/web-shared/command-deck": join(dirname(fileURLToPath(import.meta.url)), "../web-shared/src/command-deck/model.ts"),

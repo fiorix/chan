@@ -108,9 +108,6 @@ beforeEach(() => {
       }
       return jsonResponse(server);
     }
-    if (url.includes("/api/fonts/source-code-pro/download")) {
-      return jsonResponse({ dir: "fonts", files: [] });
-    }
     return new Response(null, { status: 404 });
   });
 });

@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **The terminal's Source Code Pro face loads.** The `@font-face` src was an absolute `/static/fonts/SourceCodePro-Regular.otf.woff2` while every tenant mounts under a single-segment slug, so the request resolved against the origin root instead, where the launcher root fallback answers with `index.html`. The face failed to decode with nothing to see: `font-display: swap` just kept walking the fallback chain, and the terminal came up in a system font that looked close enough to pass. The default build made it unreachable a second way, since the rust-embed bundle behind that path was gated on a cargo feature no build target set, leaving a runtime download from GitHub as the only way to populate it. The woff2 now rides vite's asset pipeline like every other asset, so the emitted URL is relative and resolves under any prefix, and it ships inside the SPA bundle with nothing to fetch and no feature to remember. The SIL OFL notice ships beside it, which is what permits bundling the face at all.
+
+### Changed
+
+- **The os-default terminal font resolves per OS.** One chain served all three platforms and named `"DejaVu Sans Mono"` ahead of the generic fallbacks, so Linux landed on whatever fontconfig installed first while macOS took SF Mono, and the same session rendered in a noticeably wider, squarer face on the two. macOS and Windows keep leading with their native mono. Linux leads with the bundled Source Code Pro, which is the one answer that does not vary by distro. `ui-monospace` sits behind it there: ahead of it, it resolves to the fontconfig monospace and the bundled face can never win. The Source Code Pro setting still promotes that face to the head of the chain on every OS, and no longer downloads anything to do it.
+
 ## [v0.87.0] - 2026-08-09
 
 A flaky test turned out to be a production data-loss path: the write compare-and-swap trusted a filesystem timestamp that does not always advance, so an external edit landing inside that window was silently overwritten. That is fixed, along with a workspace that could park in `recovering` forever after a `.gitignore` write, desktop authorization landing on the profile page, a runtime build id for the devserver, `--submit` naming the chord instead of only asking for one, and the command launcher listing scopes completely and windows as targets.
