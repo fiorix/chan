@@ -11,7 +11,7 @@
 
 import { spawn, execFile } from "node:child_process";
 import { globSync, mkdtempSync, readdirSync, cpSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -137,9 +137,19 @@ export async function teardownServer(chanBin, child, workspaceDir, chanHome, log
   } catch {}
 }
 
+/// Where the Chrome the provisioner installed actually lives. `HOME` is EMPTY,
+/// not unset, under `sdme exec`, so `?? ` does not catch it and the glob
+/// silently becomes relative to the cwd: the browser is found on a developer
+/// shell and missing under exactly the container invocation this suite exists
+/// to support. `||` falls through an empty string, and `homedir()` reads the
+/// passwd database rather than the environment.
+function browserHome() {
+  return process.env.HOME || homedir() || "/root";
+}
+
 export function defaultChrome() {
   const hits = globSync(
-    join(process.env.HOME ?? "", ".cache/puppeteer/chrome/linux-*/chrome-linux64/chrome"),
+    join(browserHome(), ".cache/puppeteer/chrome/linux-*/chrome-linux64/chrome"),
   ).sort();
   return hits[hits.length - 1] ?? null;
 }
