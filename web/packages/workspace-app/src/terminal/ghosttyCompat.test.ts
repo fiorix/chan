@@ -2,7 +2,9 @@ import { CanvasRenderer, Ghostty, Terminal } from "ghostty-web";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   alignGhosttyRendererToXterm,
+  clearGhosttyRecycledGrid,
   gateGhosttyScrollbarClicks,
+  GHOSTTY_RECYCLED_GRID_SCRUB,
   installGhosttyCustomGlyphs,
   installGhosttyOverlayScrollbar,
   xtermCellDimensionsFromMeasurement,
@@ -484,6 +486,72 @@ describe("Ghostty overlay scrollbar", () => {
 
     expect(installGhosttyOverlayScrollbar(renderer as never)).toBe(false);
     expect(renderer.render).toBe(render);
+  });
+});
+
+describe("Ghostty recycled-grid scrub", () => {
+  /// Read a wasm terminal's visible rows as text, blanks trimmed.
+  function screenText(term: {
+    getDimensions(): { cols: number; rows: number };
+    getLine(row: number): Array<{ codepoint: number }> | null;
+  }): string {
+    const { rows } = term.getDimensions();
+    const out: string[] = [];
+    for (let row = 0; row < rows; row++) {
+      const line = term.getLine(row);
+      if (!line) continue;
+      out.push(
+        line
+          .map((cell) => (cell.codepoint ? String.fromCodePoint(cell.codepoint) : " "))
+          .join(""),
+      );
+    }
+    return out.join("\n").trim();
+  }
+
+  test("the pinned build hands a freed terminal's cells to the next one", async () => {
+    // The defect the scrub exists for, measured against the pinned wasm rather
+    // than described: dispose() frees the terminal (ghostty_terminal_free) and
+    // the next createTerminal gets that block back without it being zeroed.
+    // When this test fails because the marker is GONE, upstream has fixed the
+    // allocator and clearGhosttyRecycledGrid can go with it.
+    const ghostty = await Ghostty.load();
+    const marker = "MARKER-FROM-THE-DISPOSED-TERMINAL";
+
+    const disposed = ghostty.createTerminal(80, 24);
+    disposed.write(`${marker}\r\n`);
+    expect(screenText(disposed)).toContain(marker);
+    disposed.free();
+
+    const fresh = ghostty.createTerminal(80, 24);
+    expect(screenText(fresh)).toContain(marker);
+  });
+
+  test("the scrub leaves a recycled terminal blank", async () => {
+    const ghostty = await Ghostty.load();
+    const disposed = ghostty.createTerminal(80, 24);
+    disposed.write("MARKER-FROM-THE-DISPOSED-TERMINAL\r\nand a second row\r\n");
+    disposed.free();
+
+    const fresh = ghostty.createTerminal(80, 24);
+    clearGhosttyRecycledGrid(fresh);
+
+    expect(screenText(fresh)).toBe("");
+  });
+
+  test("the scrub stays narrower than a full reset", () => {
+    const written: string[] = [];
+    clearGhosttyRecycledGrid({ write: (data) => written.push(data) });
+
+    expect(written).toEqual([GHOSTTY_RECYCLED_GRID_SCRUB]);
+    // SGR reset first (ED fills with the current background), then the screen
+    // and scrollback erases.
+    expect(GHOSTTY_RECYCLED_GRID_SCRUB).toBe("\x1b[0m\x1b[H\x1b[2J\x1b[3J");
+    // Not RIS, and no mode resets: the pinned build does NOT inherit alt
+    // screen / mouse / bracketed-paste / DECCKM state, so a broader scrub
+    // would be reaching past the defect into state chan negotiates elsewhere.
+    expect(GHOSTTY_RECYCLED_GRID_SCRUB).not.toContain("\x1bc");
+    expect(GHOSTTY_RECYCLED_GRID_SCRUB).not.toContain("?1049");
   });
 });
 

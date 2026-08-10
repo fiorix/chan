@@ -138,6 +138,7 @@
   } from "../terminal/backend";
   import {
     alignGhosttyRendererToXterm,
+    clearGhosttyRecycledGrid,
     gateGhosttyScrollbarClicks,
     installGhosttyCustomGlyphs,
     installGhosttyOverlayScrollbar,
@@ -1044,6 +1045,10 @@
     term.open(host);
     if (backend === "ghostty") {
       const ghosttyTerm = term as GhosttyTerminal;
+      // open() created the WASM terminal, which may have come back holding a
+      // disposed terminal's screen (see clearGhosttyRecycledGrid). Erase it
+      // before the metrics alignment repaints and before any PTY byte lands.
+      clearGhosttyRecycledGrid(ghosttyTerm);
       const renderer = ghosttyTerm.renderer;
       const targetCell = measureXtermCellDimensions(
         host,
