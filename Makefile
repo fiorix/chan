@@ -171,6 +171,10 @@ windows-cross-check: ## Check the release CLI for Windows GNU in a disposable sd
 		WINDOWS_CROSS_ROOTFS="$(WINDOWS_CROSS_ROOTFS)" SDME="$(SDME)" \
 		scripts/windows-cross-check.sh
 
+.PHONY: browser-smoke-deps
+browser-smoke-deps: ## Install headless Chrome and its libraries for scripts/e2e/browser-smoke.
+	scripts/e2e/browser-smoke/provision.sh
+
 .PHONY: homebrew-check
 homebrew-check: ## Render and syntax-check both Homebrew tap definitions from released assets.
 	packaging/distros/homebrew/make-homebrew-package.sh chan-desktop $(HOMEBREW_VERSION)

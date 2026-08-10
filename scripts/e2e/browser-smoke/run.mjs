@@ -59,11 +59,51 @@ mkdirSync(outDir, { recursive: true });
 const downloadDir = join(outDir, "downloads");
 mkdirSync(downloadDir, { recursive: true });
 
+// Exit 2, distinct from 0 and 1, whenever the environment cannot exercise the
+// suite at all. A caller reading only 0-or-nonzero still sees a failure, and
+// one that tells the two apart learns it has an environment to fix rather than
+// a defect to chase. The absence of a run is never a pass. Every bail below
+// runs before the server is launched, so nothing needs tearing down.
+function unrunnable(...lines) {
+  for (const line of lines) console.error(`SKIP: ${line}`);
+  console.error("SKIP: a skipped check is not a pass");
+  process.exit(2);
+}
+
+// SMOKE_ONLY=50,55 runs just the checks whose filenames start with one of the
+// comma-separated prefixes; everything else still runs in order. Prefix
+// matching and ordinary run order are LEXICAL, not numeric. The destructive
+// workspace-root-loss check is the sole exception and always runs last: see
+// README.md. Resolved before anything is built or started so a filter that
+// selects nothing cannot spend a build and then report an empty green.
+const only = process.env.SMOKE_ONLY?.split(",").map((s) => s.trim()).filter(Boolean);
+const checkFiles = readdirSync(join(HERE, "checks"))
+  .filter((f) => f.endsWith(".mjs"))
+  .filter((f) => !only || only.some((p) => f.startsWith(p)))
+  .sort(compareCheckFiles);
+if (checkFiles.length === 0) {
+  unrunnable(`SMOKE_ONLY=${process.env.SMOKE_ONLY} selected no check`);
+}
+
 const chanBin = process.env.CHAN_BIN ?? join(REPO, "target", "debug", "chan");
 const chromeBin = process.env.CHROME_BIN ?? defaultChrome();
 if (!chromeBin) {
-  console.error("no Chrome found; set CHROME_BIN");
-  process.exit(2);
+  unrunnable("no Chrome found; set CHROME_BIN", "install one: make browser-smoke-deps");
+}
+
+// A Chrome that is present but cannot start is the build container's default
+// state, not an exotic case: the browser links against libnss3 and libasound2
+// and the rootfs carries neither, so the dynamic linker kills it at exec.
+// Probing it here, before any build, keeps that missing environment out of the
+// failure column it would otherwise land in as a puppeteer launch error.
+try {
+  execFileSync(chromeBin, ["--version"], { stdio: "pipe", timeout: 30_000 });
+} catch (e) {
+  const detail = (e.stderr?.toString() || e.message || "").trim();
+  unrunnable(
+    `Chrome at ${chromeBin} will not start: ${detail}`,
+    "install its libraries: make browser-smoke-deps",
+  );
 }
 
 if (process.env.SMOKE_SKIP_BUILD !== "1") {
@@ -78,8 +118,7 @@ if (process.env.SMOKE_SKIP_BUILD !== "1") {
   });
 }
 if (!existsSync(chanBin)) {
-  console.error(`chan binary missing at ${chanBin}; build first or set CHAN_BIN`);
-  process.exit(2);
+  unrunnable(`chan binary missing at ${chanBin}; build first or set CHAN_BIN`);
 }
 
 const results = {
@@ -194,16 +233,6 @@ try {
     },
   };
 
-  // SMOKE_ONLY=50,55 runs just the checks whose filenames start with one
-  // of the comma-separated prefixes; everything else still runs in order.
-  // Prefix matching and ordinary run order are LEXICAL, not numeric. The
-  // destructive workspace-root-loss check is the sole exception and always
-  // runs last: see README.md.
-  const only = process.env.SMOKE_ONLY?.split(",").map((s) => s.trim()).filter(Boolean);
-  const checkFiles = readdirSync(join(HERE, "checks"))
-    .filter((f) => f.endsWith(".mjs"))
-    .filter((f) => !only || only.some((p) => f.startsWith(p)))
-    .sort(compareCheckFiles);
   for (const file of checkFiles) {
     const mod = (await import(pathToFileURL(join(HERE, "checks", file)).href)).default;
     currentCheck = {
@@ -250,7 +279,22 @@ try {
 
 results.finishedAt = new Date().toISOString();
 results.ok = failed === 0;
+// A skipped check did not run, so it cannot have passed. It does not fail the
+// run (its precondition is absent, not broken), but it is named on the verdict
+// line rather than left for whoever thinks to open results.json: "ALL GREEN"
+// over a suite that quietly skipped half of itself is the reading this suite
+// exists to prevent.
+const skipped = results.checks.filter((c) => c.skipped);
+results.skipped = skipped.length;
 writeFileSync(join(outDir, "results.json"), JSON.stringify(results, null, 2));
 console.log(`[smoke] results: ${join(outDir, "results.json")}`);
-console.log(`[smoke] ${results.ok ? "ALL GREEN" : `${failed} FAILURE(S)`}`);
+const verdict = results.ok ? "ALL GREEN" : `${failed} FAILURE(S)`;
+const ran = results.checks.length - skipped.length;
+console.log(
+  skipped.length === 0
+    ? `[smoke] ${verdict} (${ran} ran)`
+    : `[smoke] ${verdict} (${ran} ran, ${skipped.length} SKIPPED: ${skipped
+        .map((c) => c.name)
+        .join(", ")})`,
+);
 process.exit(results.ok ? 0 : 1);
