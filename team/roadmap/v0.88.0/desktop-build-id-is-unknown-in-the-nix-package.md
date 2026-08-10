@@ -158,12 +158,32 @@ file the guest itself writes (`0`), the driver's exit, and the `PASS` lines in
 returned exit 0 earlier in this round, from `tail` rather than from the build.
 
 The ids are `nar-` rather than `git-` because the sdme driver evaluates a `path:` flake
-over a `git ls-files` snapshot with no `.git`. That is the documented degradation, and
-it is also the case the flake's guarded chain exists for: an unguarded `self.rev` fails
-evaluation outright on this ref shape rather than falling back.
+over a `git ls-files` snapshot with no `.git`.
 
-**Two `.#chan-desktop` builds from different commits are distinguishable.** PENDING a
-second build at the following commit; the first is banked above.
+That is worth stating as more than a caveat. The `path:` shape is not a degradation the
+guarded chain tolerates; it is the case the chain **exists for**, and these runs are the
+first to exercise it end to end on the desktop package. `self` carries no `rev` attribute
+at all on a revisionless ref, so an unguarded `self.rev` fails **evaluation** rather than
+falling back, and the build would not have started. Anyone tempted to simplify that chain
+into a bare `self.shortRev` should note that the only builds proving this item are the ones
+that would break first.
+
+**Two `.#chan-desktop` builds from different commits are distinguishable.** Proven on two
+real builds of differing tracked content:
+
+| build | `chan --version` | `chan-desktop --version` |
+| --- | --- | --- |
+| first | `nar-0923cd094492` | `nar-0923cd094492` |
+| second | `nar-4da689f51e1c` | `nar-4da689f51e1c` |
+
+Different ids across the two, identical within each, which is the pair of properties the
+fix has to deliver at once: the package identifies its build, and its two binaries agree
+about which build that is.
+
+The limit of the `nar-` form is the one this item already records and it applies here: a
+content hash distinguishes different source CONTENT, so two commits with identical tracked
+trees would share an id. These two differ in content, so the line is met. A `git+file:`
+build takes the `git-` branch instead and distinguishes commits directly.
 
 **The check is enforced rather than eyeballed once.** `scripts/smoke-nix-package.sh` now
 asserts a well-formed tagged id from `chan --version` for both packages, asserts the same
