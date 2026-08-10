@@ -1,14 +1,15 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import {
-    fitPointCloudCover,
-    type PointCloudBounds,
-  } from "./pointCloudCover";
+  import { type PointCloudBounds } from "./pointCloudCover";
   import {
     canvasCssNumber,
-    canvasCssValue,
-    runCanvasAnimation,
+    canvasCssRgb,
+    runWebgl2Animation,
   } from "./canvasAnimation";
+  import {
+    createYuruyurauPointCloudRenderer,
+    type YuruyurauPointCloudRenderer,
+  } from "./yuruyurauPointCloud";
 
   let {
     buildPoints,
@@ -28,69 +29,43 @@
     if (!canvas) return;
     const host = canvas;
 
-    return runCanvasAnimation(host, (ctx) => {
+    return runWebgl2Animation(host, (gl) => {
+      let renderer: YuruyurauPointCloudRenderer;
+      try {
+        renderer = createYuruyurauPointCloudRenderer(gl);
+      } catch (error) {
+        console.warn(
+          "[chan] Yuruyurau point cloud WebGL renderer unavailable:",
+          error,
+        );
+        return null;
+      }
+
       let width = 0;
       let height = 0;
 
       function draw(sourceTime: number): void {
         if (width <= 0 || height <= 0) return;
 
-        const backgroundColor = canvasCssValue(
-          host,
-          "--yuruyurau-background-rgb",
-          "28, 28, 30",
-        );
-        const pointColor = canvasCssValue(
-          host,
-          "--yuruyurau-point-rgb",
-          "218, 218, 218",
-        );
-        const pointAlpha = canvasCssNumber(
-          host,
-          "--yuruyurau-point-alpha",
-          0.376,
-        );
-        const points = buildPoints(sourceTime);
-        const transform = fitPointCloudCover(width, height, bounds);
-        const pointSize = Math.max(
-          0.75,
-          Math.min(1.25, transform.scale),
-        );
-
-        ctx.globalAlpha = 1;
-        ctx.fillStyle = `rgb(${backgroundColor})`;
-        ctx.fillRect(0, 0, width, height);
-        ctx.beginPath();
-
-        for (let index = 0; index < points.length; index += 2) {
-          const x =
-            transform.centerX +
-            (points[index] - transform.sourceCenterX) * transform.scale;
-          const y =
-            transform.centerY +
-            (points[index + 1] - transform.sourceCenterY) * transform.scale;
-          if (
-            !Number.isFinite(x) ||
-            !Number.isFinite(y) ||
-            x < -pointSize ||
-            x > width + pointSize ||
-            y < -pointSize ||
-            y > height + pointSize
-          ) {
-            continue;
-          }
-          ctx.rect(
-            x - pointSize / 2,
-            y - pointSize / 2,
-            pointSize,
-            pointSize,
-          );
-        }
-
-        ctx.globalAlpha = pointAlpha;
-        ctx.fillStyle = `rgb(${pointColor})`;
-        ctx.fill();
-        ctx.globalAlpha = 1;
+        renderer.draw({
+          points: buildPoints(sourceTime),
+          bounds,
+          backgroundColor: canvasCssRgb(
+            host,
+            "--yuruyurau-background-rgb",
+            "28, 28, 30",
+          ),
+          pointColor: canvasCssRgb(
+            host,
+            "--yuruyurau-point-rgb",
+            "218, 218, 218",
+          ),
+          pointAlpha: canvasCssNumber(
+            host,
+            "--yuruyurau-point-alpha",
+            0.376,
+          ),
+        });
       }
 
       function drawAt(timeMs: number): void {
@@ -106,6 +81,7 @@
         },
         frame: drawAt,
         reducedMotion: () => draw(staticSourceTime),
+        destroy: renderer.destroy,
       };
     });
   });
