@@ -7,7 +7,7 @@ that proposed it.
 ## What
 
 A resolved obstacle stops being information. Someone hits a problem, works around it locally,
-and the workaround closes the matter — so nobody asks the second question: **what else
+and the workaround closes the matter, so nobody asks the second question: **what else
 assumes the thing that was just worked around?**
 
 That is not a hypothesis. It is how `mtime-cas-silently-overwrites-external-edits` survived
@@ -19,8 +19,8 @@ three releases:
 | `std::thread::sleep(Duration::from_millis(20))` | `crates/chan-server/src/doc_sessions/mod.rs:2914` | same |
 | clear `flushed_mtime_ns` before the reconcile | v0.82.0, `done/parallel-suite-flake-hygiene.md` | same |
 
-Three engineers, three surfaces, three releases. Each one **had the finding** — every
-workaround is an author writing down that mtime cannot be trusted — and each treated it as a
+Three engineers, three surfaces, three releases. Each one **had the finding**: every
+workaround is an author writing down that mtime cannot be trusted, and each treated it as a
 local nuisance. The thing that also assumed mtime advances was `write_text_if_unchanged`,
 the compare-and-swap protecting a user's file from being clobbered. It was a silent
 data-loss path the whole time.
@@ -32,7 +32,7 @@ one-entry-in-1867 coverage gap in the check it was silencing.
 
 ## Why an audit rather than a discipline
 
-The prospective form — "when you work around something, ask what else assumes it" — is
+The prospective form ("when you work around something, ask what else assumes it") is
 correct and will be in the playbook, but it fires only if the author remembers at the moment
 of the fix, which is exactly when they are focused on something else. All four instances
 above were committed by people who would have agreed with the rule.
@@ -68,7 +68,7 @@ project.
   marked: assumption named / assumption named and shared elsewhere / not a workaround.
   > **The pass used five marks rather than these three**, and the two additions are the item's own question made visible. `named` here does not distinguish an assumption a test would catch from one nothing would, which is precisely what "what test fails if this sentence is false?" asks, so the pass split it into `named` and `named-ut`. `no-cmt` records the smell the method note names. The mapping is exact: `named` and `named-ut` both satisfy "assumption named", `shared` is "named and shared elsewhere", `not-wa` is "not a workaround", and `no-cmt` is orthogonal to all three.
 - The greps that produced the population are written into the item so they can be re-run,
-  and their known blind spots are stated — a lexical search cannot see a workaround with no
+  and their known blind spots are stated: a lexical search cannot see a workaround with no
   keyword, which is the same bound the timing sweep had to state.
 - Any shared assumption found is registered, not silently repaired.
 
@@ -80,7 +80,7 @@ carried comments; none of them sat at `write_text_if_unchanged`.
 
 But "the dependent site had no note" is too weak a diagnosis here, because it did. Its
 docstring named the silent-overwrite failure precisely, asserted that nanosecond resolution
-solved it, and called the coarse-mtime remainder a graceful degradation — conflating a
+solved it, and called the coarse-mtime remainder a graceful degradation, conflating a
 nanosecond mtime *field* with a nanosecond *clock*. Every later reader arrived at a site that
 said the problem was handled.
 
@@ -95,14 +95,14 @@ prose.
 
 The CAS claim answers that question in the worst possible way. The test named for it,
 `write_text_if_unchanged_detects_subsecond_conflict` (`workspace.rs:7221`), states the hazard
-in its own comment — "Without ns precision, two same-second writes would collide and let this
-through" — and then **structurally excludes it**: it spins until `mtime_ns` advances, and if
+in its own comment, "Without ns precision, two same-second writes would collide and let this
+through", and then **structurally excludes it**: it spins until `mtime_ns` advances, and if
 it has not advanced within 200 ms it `return`s and passes green. So on precisely the
 filesystems where the docstring's "degrades gracefully" is false, the guarding test asserts
 nothing and reports success.
 
 It is not a missing test. It is a test built to skip the case it names, with a silent
-early-return rather than an `#[ignore]` or a failure — so the claim it appears to guard was
+early-return rather than an `#[ignore]` or a failure, so the claim it appears to guard was
 never once exercised. When the audit finds an assumption whose only test is shaped like this,
 that is a stronger finding than an untested one.
 
@@ -110,7 +110,7 @@ that is a stronger finding than an untested one.
 
 An absent note invites a question. A confident wrong one closes it, which is worse, and it is
 the specific reason this defect outlived three workarounds. Where an audited assumption turns
-out to be relied on elsewhere, the deliverable is not only a registered item — it is a
+out to be relied on elsewhere, the deliverable is not only a registered item: it is a
 correction at the dependent site, so the next reader is not reassured by the same sentence.
 
 ## Method note
@@ -125,7 +125,7 @@ flagging as its own smell.
 
 `crates/chan-workspace/src/` only, and after
 [load-sensitive-tests-keep-recurring-after-three-sweeps](../done/load-sensitive-tests-keep-recurring-after-three-sweeps.md)
-rather than beside it — the two populations overlap on sleeps, and running both at once
+rather than beside it: the two populations overlap on sleeps, and running both at once
 means two passes editing the same lines. Extending to other crates is a later decision for
 whoever reads the first list.
 
@@ -136,7 +136,7 @@ whoever reads the first list.
 ## Rough size
 
 Medium, and almost entirely reading. The technique was proposed by a lane that explicitly
-declined to run it, on the grounds that the surface was not theirs — which is the right
+declined to run it, on the grounds that the surface was not theirs, which is the right
 instinct and worth preserving: this audit's value is in the judgement per site, so it should
 go to whoever knows the surface, not to whoever noticed the pattern.
 
