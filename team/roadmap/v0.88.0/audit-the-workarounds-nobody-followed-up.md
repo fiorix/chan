@@ -206,6 +206,8 @@ The second structural bound, because it limits every number above in a different
 
 ### The marked population
 
+**Every line number below is as of `e239c770` and will not survive the file changing.** A dead sha fails closed and announces itself; a stale line number fails open and silently points at whatever moved into its place, which is the more dangerous of the two and the reason this anchor is repeated here rather than left in the section header above. Re-resolve by the enclosing function name, which is in the table for exactly that purpose, and re-run `scripts/census-workarounds.py` rather than navigating these numbers directly. One of them is already known stale and deliberately kept: see the opening table's `:7221`.
+
 Marks: `not-wa` not a workaround; `named` assumption named and a test fails if it is false; `named-ut` assumption named and **no** test fails if it is false; `shared` assumption relied on elsewhere too, registered rather than repaired; `no-cmt` a workaround carrying no comment, which this item flags as its own smell.
 
 ```
