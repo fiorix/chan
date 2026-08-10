@@ -101,6 +101,39 @@ Wayland is refused rather than approximated, because an approximation of this
 particular measurement is worth less than no measurement: the reason the
 question is still open is that a previous approximation was read as an answer.
 
+## How to take the outstanding reading
+
+```
+python3 scripts/e2e/webgl-present-stall.py
+```
+
+On a Linux desktop with a real GPU, from an **Xorg** session. Roughly fifteen
+minutes for the default sweep: two renderers x dma-buf on/off x idle windows of
+1s, 3s and 8s, twelve trials each. Narrow it with `--trials`, `--idle-ms`,
+`--renderer` and `--dmabuf`.
+
+Xorg specifically. The probe reads pixels with XGetImage on the root window,
+and it refuses a Wayland session rather than approximating one — so a Wayland
+box cannot answer this question at all, whatever its GPU. That is worth
+checking before setting time aside, because most current desktops default to
+Wayland.
+
+Reading the result:
+
+- **exit 0** — no stall. Every idle write reached the screen before anything
+  woke the compositor, on every arm. That closes the residual: turn WebGL on
+  for the Linux desktop.
+- **exit 1** — the stall reproduces, with the arms and trial counts that saw
+  it. `shouldUseWebglRenderer` stays false and the residual stands, now with a
+  measurement behind it instead of a comment.
+- **exit 2** — nothing was measured. The environment could not run it, an arm
+  painted nothing, or the DOM control arm stalled (which indicts the harness,
+  not the renderer). No statement about the stall either way.
+
+Every one of those branches has been exercised, including exit 1 against a
+fault-injected specimen and exit 2 against a real headless Wayland session, so
+a verdict from it is a verdict its own failure paths have been tested against.
+
 ## Rough size
 
 Done for the two defects and the instrument. The residual is small if the WebGL present stall has gone away, and unbounded if it has not.

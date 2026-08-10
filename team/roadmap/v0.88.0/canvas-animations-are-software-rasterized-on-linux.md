@@ -82,6 +82,38 @@ from a recorded phrase into a measurement taken by an instrument that reports
 what it ran on. One run settles four unverified animations and re-establishes
 three under-evidenced ones together.
 
+## How to take the outstanding reading
+
+```
+python3 scripts/e2e/animation-fps.py --serve-only
+```
+
+Then open the printed URL **in Chrome on the machine whose GPU is being
+recorded**. The page runs all eight arms itself and prints its own table; about
+a minute.
+
+Chrome specifically, and this is not a preference. WebKitGTK spoofs the WebGL
+renderer string — it reports `Apple GPU` / `Apple Inc.` on a Linux VM with no
+GPU at all — so a run in `chan-desktop`'s webview cannot be certified and the
+harness refuses it. Chrome reports truthfully, which is what lets the run
+attach a hardware claim to its numbers.
+
+What a good result looks like: a renderer string naming real hardware, the
+baseline arm at 55+ fps, and all seven animations at 55+.
+
+What the failure modes look like, all of which exit 2 rather than producing a
+number:
+
+- a software rasterizer (`SwiftShader`, `llvmpipe`) — run it on the GPU;
+- an unidentifiable renderer — you are in a webview, use Chrome;
+- a baseline below 55 fps — the display cannot present 60, so nothing below it
+  can be read as an animation's cost;
+- any `[chan] ... WebGL renderer unavailable` warning, or a zero-sized drawing
+  buffer — an animation that never started reads as a *perfect* frame rate, so
+  the run refuses rather than reporting one.
+
+A genuine slow arm exits 1 and names the animation and its fps.
+
 ## Rough size
 
 Done, minus that one verification pass. Confirming the point cloud on a real GPU is small: run the four animations it hosts on the same hardware the vortex was measured on and read the frame rate.
