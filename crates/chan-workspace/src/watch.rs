@@ -284,6 +284,16 @@ struct WatchRegistrationScope {
 /// full-reconcile trigger downstream; one per second is plenty.
 const DEGRADE_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Spacing between attempts to re-register watch roots after a
+/// registration failure or a provider loss, and, when no retry is
+/// pending, the supervisor's own idle wakeup. It therefore bounds both
+/// how quickly a transient registration failure recovers and how long
+/// the supervisor sits before it next looks at anything.
+///
+/// The figure rests on no recorded measurement. Unlike the spacing
+/// above it, nothing in this tree says why 250ms in particular, so
+/// treat it as an unverified cadence rather than a tuned one and
+/// change it on evidence rather than preserving it out of deference.
 const WATCH_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Throttle state for stream-degradation events, one per WatchHandle.
