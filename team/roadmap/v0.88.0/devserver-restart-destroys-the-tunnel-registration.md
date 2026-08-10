@@ -66,9 +66,9 @@ The fixed row not only preserves the token, it rewrites the pre-fix unit into th
 ### The other arms
 
 - `--status` from a **token-inheriting** shell: the case that was refused outright, making an inspection command fail for a mutation's reason. Runs, reports the unit and its command line, unit hash unchanged.
-- `--restart` from a **token-inheriting** shell, unit hash unchanged, both variables intact.
-- `--restart` from a **token-free** shell against a provisioner-written unit, unit hash unchanged, both variables intact.
-- `--no-tunnel` from a token-inheriting shell, the deliberate way back to a local devserver still works, and is the only path here that drops the tunnel.
+- `--restart` from a **token-inheriting** shell: unit hash unchanged, both variables intact.
+- `--restart` from a **token-free** shell against a provisioner-written unit: unit hash unchanged, both variables intact.
+- `--no-tunnel` from a token-inheriting shell: the deliberate way back to a local devserver still works, and is the only path here that drops the tunnel.
 - A token with **no endpoint resolvable from either source**: `Error: chan devserver: tunnel mode requires --tunnel-url or CHAN_TUNNEL_URL`. A named failure, and the unit is not converted.
 
 ### The classifier change is load-bearing, found by a probe that failed to fire
