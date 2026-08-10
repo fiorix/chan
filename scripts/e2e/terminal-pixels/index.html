@@ -1,0 +1,58 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>chan terminal pixels</title>
+<link rel="stylesheet" href="/vendor/xterm/css/xterm.css" />
+<!--
+  The @font-face block is injected here by the driver, read verbatim out of
+  the app's own fonts.css, so this page loads the face the product declares
+  rather than a restatement of it. Its `./fonts/` src resolves against this
+  document, which is why the served tree mounts the font directory at the
+  root.
+-->
+<!--CHAN_FONT_FACE-->
+<style>
+  /*
+    The theme variables terminalTheme() reads, at the dark-theme values
+    TerminalTab falls back to when the surface sets none.
+  */
+  :root {
+    --bg: #1c1c1e;
+    --text: #ebebf0;
+    --link: #58a6ff;
+  }
+  html,
+  body {
+    margin: 0;
+    height: 100%;
+    background: #000;
+  }
+  /*
+    Pinned to the viewport's top-left at a fixed size: the driver converts
+    cell coordinates to pixels through the grid origin this element gives
+    the terminal, so the window manager cannot shift what gets sampled.
+  */
+  #host {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 800px;
+    height: 560px;
+    background: var(--bg);
+    overflow: hidden;
+  }
+</style>
+<div id="host"></div>
+<!--
+  A module that fails to load never runs its own catch, so the driver would
+  see only a silent timeout and have nothing to look at. This classic script
+  runs first and turns any such failure into the title the driver watches.
+-->
+<script>
+  addEventListener("error", (e) => {
+    document.title = `chan-pixels-error ${e.message || e.error || e.type}`;
+  });
+  addEventListener("unhandledrejection", (e) => {
+    document.title = `chan-pixels-error ${e.reason}`;
+  });
+</script>
+<script type="module" src="/harness.mjs"></script>
