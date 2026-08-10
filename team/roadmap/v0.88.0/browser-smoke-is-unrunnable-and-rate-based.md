@@ -67,6 +67,8 @@ Three findings from closing the environment half that the item did not predict.
 
 **The provisioner shipped with the same class of bug it exists to remove.** Its ALSA package probe ran `apt-cache` before `apt-get update`. A container built from the stock rootfs carries no package lists, so `apt-cache` answered "no such package" for every candidate and the target died with `no ALSA runtime package found`. It passed in the author's own container only because `apt-get update` had been run there by hand during investigation. A genuinely clean container caught it and invalidated the first commit. An environment difference that a dirty box hides is exactly what this item is about, and it reappeared inside the fix.
 
+**The three-value convention is not memorable, and that is a finding about the convention rather than about anyone.** `provision.sh` exits 1 for "tried and failed" and 2 for "this environment cannot be provisioned"; `make` exits 2 for any recipe failure and so erases the distinction at the documented entry point. That pair was written down backwards more than once, in prose, on the day it shipped, by readers who had the correct output pasted directly above their own sentence. Nothing was miswritten in code and no wrong exit code was ever committed. The lesson is that 0/1/2 carries no mnemonic: which of 1 and 2 means "broken" and which means "absent" has to be read off the source or measured, never recalled, and a caller that wraps the script in `make` cannot observe it at all. Anything relying on that distinction states it in place and, where it matters, measures it.
+
 The set costs about 404 MB per container, 398 MB of it Chrome. It is installed by a target rather than baked into the shared rootfs, so a container that never runs the suite pays none of it; baking it in would have grown every container whether or not it opened a browser. Paying the 398 MB once for a whole storage pool instead of once per container is possible by bind-mounting a host-side puppeteer cache, and is blocked by needing `npx` on a host that carries no Node toolchain by policy. Recorded as a known option with its blocker, not proposed.
 
 ## What the waits turned out to be, 2026-08-10
@@ -77,13 +79,13 @@ At 21 of the 23 sites a `waitForSelector` on something real already followed the
 
 **That reads as "the rate wait is redundant", and it is wrong.** Two readers agreed on it, wrote it down, and the suite falsified it.
 
-A `waitForSelector` on the next line proves *a* property held, not *the* property the check depends on. `.pane` is the client rendering its own state. Twelve of these checks then drive the window **from outside the page** with `cs` or `chan shell --window <id>`, and those commands reach a window through the server's session registry (`dispatch_if_live`, `crates/chan-server/src/control_socket.rs:3591`), which a window joins when its session socket registers. The two events are unordered. `networkidle2` had been waiting for the network to go quiet, which implies that registration completed, so it was supplying a barrier **nobody had named** and that no assertion in the suite covered. Removing it costs those checks an intermittent `window "..." is not connected` refusal.
+A `waitForSelector` on the next line proves *a* property held, not *the* property the check depends on. `.pane` is the client rendering its own state. Twelve of these checks then drive the window **from outside the page** with `cs` or `chan shell --window <id>`, and those commands reach a window through the server's session registry (`send_window_command_if_live` in `crates/chan-server/src/control_socket.rs`, which refuses with `is not connected` when `dispatch_if_live` returns `None`), which a window joins when its session socket registers. The two events are unordered. `networkidle2` had been waiting for the network to go quiet, which implies that registration completed, so it was supplying a barrier **nobody had named** and that no assertion in the suite covered. Removing it costs those checks an intermittent `window "..." is not connected` refusal.
 
 The affected checks are `55`, `56`, `57`, `58`, `59`, `63`, `64`, `98`, `107`, `120`, `121` and `123`. The repair is that barrier made explicit as `ctx.waitWindowLive(windowId)`: polling `chan shell pane list --window <id> --json`, a read-only round trip through the same liveness path, so it succeeds exactly when the property holds rather than standing in for it. Shared code because it is one property; per-site in the sense the contract means, because it is the property those particular checks consume.
 
 So this item's "19 sites, each needing a real readiness signal rather than a blanket substitution" was accurate as written, and the first attempt graded it down to a mechanical swap. When auditing a wait, the question is what the next twenty lines consume, not whether an assertion follows.
 
-**What caught it is the acceptance line, not review.** The regression survived a full 42-check suite run in which `56` passed, survived an interleaved A/B across six other checks, and survived two readers agreeing the reasoning was sound. Ten consecutive runs on a loaded host surfaced it on the third attempt. That is the argument for the ten-consecutive bar, and it is the item's own thesis — a check that cannot distinguish two states reports the convenient one — landing on the item's own repair.
+**What caught it is the acceptance line, not review.** The regression survived a full 42-check suite run in which `56` passed, survived an interleaved A/B across six other checks, and survived two readers agreeing the reasoning was sound. Ten consecutive runs on a loaded host surfaced it on the third attempt. That is the argument for the ten-consecutive bar, and it is the item's own thesis, that a check which cannot distinguish two states reports the convenient one, landing on the item's own repair.
 
 `107-terminal-rename-inventory` was the one site where the rate wait was doing visible work: it passed `"networkidle2"` explicitly for two co-viewing pages, under a comment asking for "initial empty-layout reconciliation" to finish before either view creates a terminal. The property the comment describes is directly assertable, so it now holds until both pages render the same pane ids. Its `openWindow` helper carried a `waitUntil` parameter and that parameter is gone; removing the affordance is what stops the rate growing back.
 
@@ -106,3 +108,40 @@ Four more occurrences live in `scripts/e2e/gateway-zone-browser.mjs`. They are d
 ## Rough size
 
 Small for the environment half, one rootfs or target change. Medium for the waits: 19 sites, each needing a real readiness signal rather than a blanket substitution, which is the same trap the timing sweep's classification section describes.
+
+## Reconciliation at close
+
+Read end to end, four of this item's own assertions no longer hold. Each was true when written; the work is what falsified them, and they are corrected here rather than edited away, because what changed is part of the finding.
+
+**"No content assertion has ever failed. Only the navigation wait times out."** False now, and the reversal is the item's most important result. Once the rate waits were gone, the navigation timeouts went with them and a *content* assertion began failing instead: `C-dirty-tab` reads the API as the old version while the file on disk holds the new one, 3 runs in 11 on the tree at close, never converging inside a 60s ceiling when it fails and converging in 516-535ms when it does. That is an intermittent stale read on the editor's external-edit convergence path, it is not this item's to repair, and it is registered separately at its own severity. The sentence above was an accurate summary of a suite whose failures were all masked by one wait.
+
+**"Small for the environment half."** Wrong, and wrong in a way worth recording. That half produced six defects: a package probe that ran before `apt-get update` and only worked on a dirty box; a dependency list correct for one base and silently assumed for every other; a `rm -rf /var/lib/apt/lists/*` that sabotages the next `apt-get` in a live container; release-pinned package names assumed rather than probed; a `make` wrapper that erases the 0/1/2 convention this item exists to establish; and a `HOME` that is empty rather than unset under `sdme exec`, which made the runner report "no Chrome found" and exit 2 in the exact invocation the acceptance line names. A false skip is worse than a false failure, because it sends a caller to fix an environment that is already correct.
+
+**"Medium for the waits: 19 sites, each needing a real readiness signal rather than a blanket substitution."** This was right, and the first attempt graded it down to a mechanical swap on the reasoning that 21 of 23 sites already asserted a property on the next line. Twelve of them consumed a second property nothing asserted. The original sizing understood the item better than its first reader did.
+
+**"`waitUntil: networkidle2` appears in 19 of the suite's checks."** Accurate, and it reads as occurrences. It is 23 occurrences across 19 checks; both numbers are in the later section so a re-run reproduces.
+
+### The ten-run series, measured
+
+Ten consecutive runs of `56-external-edit-matrix`, on merged `main`, invoked the way a container invokes it:
+
+```
+run  1  PASS   46s   load 15.20 -> 15.18      run  6  PASS   39s   load 13.52 -> 10.04
+run  2  PASS   50s   load 15.18 -> 18.09      run  7  PASS   48s   load 10.04 -> 10.97
+run  3  PASS   42s   load 18.09 -> 15.62      run  8  PASS   44s   load 10.97 -> 20.77
+run  4  FAIL  113s   load 15.62 -> 16.49      run  9  PASS   81s   load 20.77 -> 33.17
+run  5  PASS   75s   load 16.49 -> 13.52      run 10  PASS   47s   load 33.17 -> 37.28
+                                              TOTAL  pass=9 fail=1 of 10
+```
+
+Load band 10.04 to 37.28 on eight cores, sampled either side of every run. **The line is unmet: nine of ten, not ten consecutive.**
+
+Three things in that series are worth more than the verdict.
+
+**The failure was not the stale read.** `C-dirty-tab` converged in all ten runs, at loads spanning the same band where it had failed 3 times in 11 earlier the same day. Run 4 failed on `E-subdir` with a different signature entirely: `editor: "no-editor"`, meaning the editor DOM never mounted, while `api` and `disk` both read the new content. The server was correct and the frontend never showed a document. That is a third intermittent failure in this one check, distinct from both the navigation timeouts this item started with and the stale read it uncovered, and it is registered rather than diagnosed here.
+
+**Zero `window ... is not connected` across all ten runs.** That refusal appeared once the rate waits were removed and disappeared once the registration barrier was named, which is what closes that regression.
+
+**A prediction that was right for the wrong reason.** Before the series, this item's author expected it to fail on `C` at roughly 3 in 11. It failed once in ten, on a different scenario, with `C` clean throughout. The forecast outcome was correct and the forecast mechanism was wrong, which is worth recording next to the number: at these rates a ten-run series is a coarse instrument, and reading a single failure as confirmation of an expected cause would have been wrong here.
+
+One acceptance line is unmet and is not being quietly dropped. `56-external-edit-matrix` reached nine of ten, and the intermittent failures that stop it -- a stale read on the external-edit convergence path, and an editor that intermittently does not mount -- are both outside this item and both registered separately. It is reported unmet with those findings attached as the cause. The line was still worth holding: ten consecutive runs on a loaded host is what exposed the missing window-registration barrier, after a single green in a full 42-check suite had concealed it.
