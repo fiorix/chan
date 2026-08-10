@@ -50,6 +50,7 @@
 // invariants (atomic writes, path sandbox, special-file refusal,
 // cross-process writer lock) apply uniformly.
 
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -58,8 +59,8 @@ use anyhow::{Context, Result};
 use chan_server::{EditorPrefs, EditorTheme, LineSpacing, ServeConfig, ServerConfig, ThemeChoice};
 use chan_shell::ShellAction;
 use chan_workspace::{
-    KnownWorkspace, Library, MetadataExportOptions, MetadataImportOptions, SearchAggression,
-    Workspace, WorkspaceReadiness, WorkspaceSearchRequest, WorkspaceSearchResult,
+    KnownWorkspace, Library, MetadataExportOptions, MetadataImportOptions, RecoveryAction,
+    SearchAggression, Workspace, WorkspaceReadiness, WorkspaceSearchRequest, WorkspaceSearchResult,
 };
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
@@ -1832,6 +1833,69 @@ struct PsRow {
     pid: Option<u32>,
     /// RFC3339 lock-acquisition time of the holder.
     since: Option<String>,
+    /// What the workspace is DOING, for a workspace served by a devserver
+    /// this credential can reach. `null` everywhere else -- a standalone or
+    /// desktop serve persists no address/token pair `chan ps` may read, and
+    /// inventing one would be the new authority the item forbids. Rendered
+    /// as `-`, never as `0`.
+    activity: Option<PsActivity>,
+}
+
+/// The answer to "what is this workspace doing", assembled from the two
+/// surfaces that already compute it: `GET {prefix}/api/index/status` for
+/// readiness and `GET {prefix}/api/health` for indexer telemetry.
+///
+/// `readiness` is the server's OWN [`WorkspaceReadiness`], not a copy of its
+/// shape, so `chan ps` cannot drift into reporting a different truth than the
+/// endpoint it read: a variant or field the server changes stops compiling
+/// here rather than silently rendering something stale.
+#[derive(Serialize)]
+struct PsActivity {
+    /// `None` when the status call did not answer.
+    readiness: Option<WorkspaceReadiness>,
+    /// `None` when the tenant carries no indexer AT ALL -- `/api/health`
+    /// reports `indexer: null` on the workspace-less terminal tenant and
+    /// during the storage-reset swap window, and that absence is a fact worth
+    /// showing rather than flattening. Renders `-`, following the v0.85.0
+    /// `cs terminal list` ruling that an unreported value is not a zero.
+    indexer: Option<PsIndexer>,
+}
+
+/// Indexer telemetry as `chan ps` reads it off `/api/health`.
+///
+/// Deliberately a client-side mirror of the server's `IndexerHealth` rather
+/// than that type itself: chan-server declares `mod indexer` privately, so the
+/// type is unreachable from this crate, and making it reachable would mean
+/// editing a file this lane does not own. Every field is optional so a payload
+/// that stops carrying one renders `-` instead of failing the whole row.
+#[derive(Serialize, Deserialize)]
+struct PsIndexer {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    queue_depth: Option<u64>,
+    #[serde(default)]
+    last_event_at: Option<i64>,
+    #[serde(default)]
+    last_settled_at: Option<i64>,
+}
+
+/// `GET {prefix}/api/index/status`: `IndexStatus` flattened, plus readiness.
+/// Only readiness is read here; the flattened index state is already
+/// represented by the indexer's own status on `/api/health`.
+#[derive(Deserialize)]
+struct PsIndexStatus {
+    #[serde(default)]
+    readiness: Option<WorkspaceReadiness>,
+}
+
+/// `GET {prefix}/api/health`, narrowed to the field this command needs.
+#[derive(Deserialize)]
+struct PsHealth {
+    /// `null` on a tenant with no indexer, which is why it is a nested Option
+    /// rather than a defaulted struct.
+    #[serde(default)]
+    indexer: Option<PsIndexer>,
 }
 
 #[derive(Serialize)]
@@ -1847,6 +1911,182 @@ fn ps_by_column(_served: bool, kind: Option<ServedBy>) -> &'static str {
         Some(k) => k.label(),
         None => "-",
     }
+}
+
+/// Every activity column renders this when the value is not reported, never
+/// `0` and never blank. Following the v0.85.0 `cs terminal list` ruling: a
+/// queue depth of zero and an unknown queue depth are different facts, and
+/// showing the second as the first is how an operator concludes "nothing
+/// queued" about a workspace nobody asked.
+const PS_ABSENT: &str = "-";
+
+/// READY column: the readiness state word.
+fn ps_ready_column(readiness: Option<WorkspaceReadiness>) -> &'static str {
+    match readiness {
+        Some(WorkspaceReadiness::Ready { .. }) => "ready",
+        Some(WorkspaceReadiness::Recovering { .. }) => "recovering",
+        None => PS_ABSENT,
+    }
+}
+
+/// GEN column: `generation/completed` while recovering, bare `generation`
+/// when ready. The gap between the two is the lag that says a pass is owed.
+fn ps_gen_column(readiness: Option<WorkspaceReadiness>) -> String {
+    match readiness {
+        Some(WorkspaceReadiness::Ready { generation }) => generation.get().to_string(),
+        Some(WorkspaceReadiness::Recovering {
+            generation,
+            completed_generation,
+            ..
+        }) => format!("{}/{}", generation.get(), completed_generation.get()),
+        None => PS_ABSENT.to_string(),
+    }
+}
+
+/// PASS column: `pending->active`, the pair that distinguishes a recovery
+/// with a worker from one without. `14->none` is the stall fingerprint --
+/// a pass is owed and nothing is running it -- and it is the column this
+/// whole command exists to put on screen.
+fn ps_pass_column(readiness: Option<WorkspaceReadiness>) -> String {
+    match readiness {
+        Some(WorkspaceReadiness::Recovering {
+            active_generation,
+            pending_generation,
+            ..
+        }) => {
+            let render = |g: Option<chan_workspace::WorkspaceGeneration>| {
+                g.map_or_else(|| "none".to_string(), |g| g.get().to_string())
+            };
+            format!(
+                "{}->{}",
+                render(pending_generation),
+                render(active_generation)
+            )
+        }
+        // A ready workspace has no pass in flight and no pass owed; that is
+        // an absence of work, not an unknown, but rendering it `-` keeps the
+        // column honest about carrying no pass rather than implying one.
+        Some(WorkspaceReadiness::Ready { .. }) | None => PS_ABSENT.to_string(),
+    }
+}
+
+/// ACTION column: the recovery action the pass would run.
+fn ps_action_column(readiness: Option<WorkspaceReadiness>) -> &'static str {
+    match readiness {
+        Some(WorkspaceReadiness::Recovering {
+            required_action: Some(action),
+            ..
+        }) => match action {
+            RecoveryAction::Replay => "replay",
+            RecoveryAction::Reconcile => "reconcile",
+            RecoveryAction::FullRebuild => "rebuild",
+        },
+        _ => PS_ABSENT,
+    }
+}
+
+/// INDEXER column: the indexer's own health word, or `-` when the tenant
+/// carries no indexer or the call did not answer.
+fn ps_indexer_column(indexer: Option<&PsIndexer>) -> &str {
+    indexer
+        .and_then(|i| i.status.as_deref())
+        .unwrap_or(PS_ABSENT)
+}
+
+/// QUEUE column. A tenant with no indexer renders `-`, NOT `0`: "nothing is
+/// queued" and "nobody is reporting a queue" are different facts, and a
+/// workspace with no indexer at all reporting `0` reads as the healthy one.
+fn ps_queue_column(indexer: Option<&PsIndexer>) -> String {
+    indexer
+        .and_then(|i| i.queue_depth)
+        .map_or_else(|| PS_ABSENT.to_string(), |q| q.to_string())
+}
+
+/// Ask the local devserver what each of the workspaces it serves is doing.
+///
+/// Returns a map keyed by workspace root path. An empty map is the normal
+/// answer whenever this credential does not reach a devserver -- no persisted
+/// config, nothing listening, a refused bearer -- and every activity column
+/// then renders `-`. `chan ps` reporting where a workspace lives must not
+/// start failing because the thing serving it is unreachable.
+///
+/// Authority note: the bearer is the one already persisted at
+/// `~/.chan/devserver/config.json`, which this CLI reads today to rotate that
+/// same token (a mutating call). Reading two status endpoints with it grants
+/// nothing new.
+async fn devserver_activity(wanted: &HashSet<String>) -> HashMap<String, PsActivity> {
+    let mut out = HashMap::new();
+    if wanted.is_empty() {
+        return out;
+    }
+    let Some(token) = chan_server::persisted_devserver_token() else {
+        return out;
+    };
+    let Some(addr) = running_systemd_devserver_addr().or_else(|| {
+        chan_server::persisted_devserver_port()
+            .map(|port| SocketAddr::new(DEFAULT_DEVSERVER_BIND, port))
+    }) else {
+        return out;
+    };
+    let client = reqwest::Client::new();
+    // One gate for the whole enrichment: if the listing does not answer, we
+    // stop here rather than waiting out a timeout per workspace.
+    let listing = format!("http://{addr}/api/devserver/workspaces");
+    let request = client.get(&listing).bearer_auth(&token).send();
+    let Ok(Ok(response)) = tokio::time::timeout(PS_ACTIVITY_TIMEOUT, request).await else {
+        return out;
+    };
+    if !response.status().is_success() {
+        return out;
+    }
+    let Ok(entries) = response
+        .json::<Vec<chan_server::devserver_api::WorkspaceEntry>>()
+        .await
+    else {
+        return out;
+    };
+    for entry in entries {
+        if !wanted.contains(&entry.path) {
+            continue;
+        }
+        let base = format!("http://{addr}{}", entry.prefix);
+        let readiness = ps_get::<PsIndexStatus>(&client, &base, "/api/index/status", &entry.token)
+            .await
+            .and_then(|status| status.readiness);
+        let indexer = ps_get::<PsHealth>(&client, &base, "/api/health", &entry.token)
+            .await
+            .and_then(|health| health.indexer);
+        out.insert(entry.path, PsActivity { readiness, indexer });
+    }
+    out
+}
+
+/// How long any one `chan ps` enrichment call may take. Short on purpose:
+/// this is decoration on a command whose primary answer (where a workspace
+/// is and whether it is served) is already in hand from the filesystem.
+const PS_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// One authenticated status GET, decoded, with every failure flattened to
+/// `None` -- an unreachable or unparseable endpoint renders `-`, it does not
+/// fail the row or the command.
+async fn ps_get<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    base: &str,
+    path: &str,
+    token: &str,
+) -> Option<T> {
+    let request = client
+        .get(format!("{base}{path}"))
+        .bearer_auth(token)
+        .send();
+    let response = tokio::time::timeout(PS_ACTIVITY_TIMEOUT, request)
+        .await
+        .ok()?
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.json::<T>().await.ok()
 }
 
 /// `chan ps`: report each registered workspace's serving state. Serving
@@ -1880,7 +2120,19 @@ async fn cmd_ps(json: bool) -> Result<()> {
             served_by,
             pid,
             since,
+            activity: None,
         });
+    }
+    // Only a devserver-served workspace can be enriched: a standalone or
+    // desktop serve persists no address/token pair this command may read.
+    let wanted: HashSet<String> = rows
+        .iter()
+        .filter(|r| r.served_by == Some(ServedBy::Devserver))
+        .map(|r| r.path.clone())
+        .collect();
+    let mut activity = devserver_activity(&wanted).await;
+    for row in &mut rows {
+        row.activity = activity.remove(&row.path);
     }
     if json {
         println!(
@@ -1893,12 +2145,31 @@ async fn cmd_ps(json: bool) -> Result<()> {
         println!("(no workspaces registered)");
         return Ok(());
     }
-    println!("{:<7}  {:<11}  {:>8}  WORKSPACE", "STATE", "BY", "PID");
+    println!(
+        "{:<7}  {:<11}  {:>8}  {:<10}  {:<7}  {:<9}  {:<9}  {:<8}  {:>5}  WORKSPACE",
+        "STATE", "BY", "PID", "READY", "GEN", "PASS", "ACTION", "INDEXER", "QUEUE"
+    );
     for r in &rows {
         let state = if r.served { "served" } else { "free" };
         let by = ps_by_column(r.served, r.served_by);
-        let pid = r.pid.map_or_else(|| "-".to_string(), |p| p.to_string());
-        println!("{:<7}  {:<11}  {:>8}  {}", state, by, pid, r.path);
+        let pid = r
+            .pid
+            .map_or_else(|| PS_ABSENT.to_string(), |p| p.to_string());
+        let readiness = r.activity.as_ref().and_then(|a| a.readiness);
+        let indexer = r.activity.as_ref().and_then(|a| a.indexer.as_ref());
+        println!(
+            "{:<7}  {:<11}  {:>8}  {:<10}  {:<7}  {:<9}  {:<9}  {:<8}  {:>5}  {}",
+            state,
+            by,
+            pid,
+            ps_ready_column(readiness),
+            ps_gen_column(readiness),
+            ps_pass_column(readiness),
+            ps_action_column(readiness),
+            ps_indexer_column(indexer),
+            ps_queue_column(indexer),
+            r.path
+        );
     }
     Ok(())
 }
@@ -9062,6 +9333,121 @@ mod tests {
         assert_eq!(ps_by_column(true, Some(ServedBy::Devserver)), "devserver");
         assert_eq!(ps_by_column(true, Some(ServedBy::Standalone)), "standalone");
         assert_eq!(ps_by_column(true, Some(ServedBy::Desktop)), "desktop");
+    }
+
+    /// The payload is the one recorded from the owner's live devserver in
+    /// `gitignore-write-strands-the-workspace-in-recovering`: generation 14,
+    /// completed 12, reconcile owed, nothing active. Parsing the real evidence
+    /// rather than a hand-built value is deliberate -- it pins the wire shape
+    /// this command reads, so a server-side rename fails here instead of
+    /// quietly rendering `-` forever.
+    #[test]
+    fn ps_columns_render_the_stall_fingerprint() {
+        let readiness: WorkspaceReadiness = serde_json::from_str(
+            r#"{"state":"recovering","generation":14,"completed_generation":12,
+                "required_action":"reconcile","active_generation":null,
+                "pending_generation":14}"#,
+        )
+        .expect("the recorded live readiness payload must parse");
+        let readiness = Some(readiness);
+
+        assert_eq!(ps_ready_column(readiness), "recovering");
+        // generation/completed: the lag that says a pass is owed.
+        assert_eq!(ps_gen_column(readiness), "14/12");
+        // pending->active. `14->none` IS the stall: work owed, nobody running
+        // it. This is the column the whole item exists to put on screen.
+        assert_eq!(ps_pass_column(readiness), "14->none");
+        assert_eq!(ps_action_column(readiness), "reconcile");
+    }
+
+    /// A recovery that HAS a claimant must not render like the stall. Same
+    /// state word, same readiness variant, different PASS column -- which is
+    /// the distinction v0.87.0 shipped and that this command must not collapse.
+    #[test]
+    fn ps_pass_column_distinguishes_a_claimed_pass_from_a_stalled_one() {
+        let claimed: WorkspaceReadiness = serde_json::from_str(
+            r#"{"state":"recovering","generation":14,"completed_generation":12,
+                "required_action":"reconcile","active_generation":14,
+                "pending_generation":null}"#,
+        )
+        .unwrap();
+        assert_eq!(ps_ready_column(Some(claimed)), "recovering");
+        assert_eq!(ps_pass_column(Some(claimed)), "none->14");
+
+        let stalled: WorkspaceReadiness = serde_json::from_str(
+            r#"{"state":"recovering","generation":14,"completed_generation":12,
+                "required_action":"reconcile","active_generation":null,
+                "pending_generation":14}"#,
+        )
+        .unwrap();
+        assert_ne!(ps_pass_column(Some(claimed)), ps_pass_column(Some(stalled)));
+    }
+
+    /// A healthy workspace, from a payload captured off a live devserver.
+    #[test]
+    fn ps_columns_render_a_ready_workspace() {
+        let readiness: WorkspaceReadiness =
+            serde_json::from_str(r#"{"state":"ready","generation":3}"#).unwrap();
+        let readiness = Some(readiness);
+        assert_eq!(ps_ready_column(readiness), "ready");
+        assert_eq!(ps_gen_column(readiness), "3");
+        // No pass in flight and none owed.
+        assert_eq!(ps_pass_column(readiness), "-");
+        assert_eq!(ps_action_column(readiness), "-");
+    }
+
+    /// The v0.85.0 `cs terminal list` ruling, applied here: an unreported
+    /// value renders `-`, never `0`. A tenant with no indexer reporting a
+    /// queue depth of `0` would read as the healthy one, which is the exact
+    /// misreading this command exists to prevent.
+    #[test]
+    fn ps_absent_indexer_renders_dash_not_zero() {
+        // `/api/health` reports `indexer: null` on a tenant with no indexer.
+        let health: PsHealth = serde_json::from_str(r#"{"indexer":null}"#).unwrap();
+        assert!(health.indexer.is_none());
+        assert_eq!(ps_indexer_column(health.indexer.as_ref()), "-");
+        assert_eq!(ps_queue_column(health.indexer.as_ref()), "-");
+
+        // A real indexer reporting an empty queue renders `0`, and the two
+        // must not be the same string.
+        let live: PsHealth = serde_json::from_str(
+            r#"{"indexer":{"status":"idle","queue_depth":0,"last_event_at":null,
+                "last_settled_at":1786352908,"coalesced_rebuild":false}}"#,
+        )
+        .unwrap();
+        assert_eq!(ps_indexer_column(live.indexer.as_ref()), "idle");
+        assert_eq!(ps_queue_column(live.indexer.as_ref()), "0");
+        assert_ne!(
+            ps_queue_column(health.indexer.as_ref()),
+            ps_queue_column(live.indexer.as_ref())
+        );
+    }
+
+    /// Every column degrades to `-` when nothing answered, so an unreachable
+    /// devserver costs the operator the activity columns and not the command.
+    #[test]
+    fn ps_columns_render_absent_when_nothing_answered() {
+        assert_eq!(ps_ready_column(None), "-");
+        assert_eq!(ps_gen_column(None), "-");
+        assert_eq!(ps_pass_column(None), "-");
+        assert_eq!(ps_action_column(None), "-");
+        assert_eq!(ps_indexer_column(None), "-");
+        assert_eq!(ps_queue_column(None), "-");
+    }
+
+    /// `/api/index/status` flattens `IndexStatus` alongside `readiness`, so
+    /// the reader must pick readiness out of a payload carrying other keys
+    /// rather than expecting a bare object. Payload captured live.
+    #[test]
+    fn ps_index_status_reads_readiness_out_of_the_flattened_payload() {
+        let status: PsIndexStatus = serde_json::from_str(
+            r#"{"state":"idle","indexed_docs":3,"indexed_vectors":0,
+                "model":"BAAI/bge-small-en-v1.5",
+                "readiness":{"state":"ready","generation":1}}"#,
+        )
+        .unwrap();
+        assert_eq!(ps_ready_column(status.readiness), "ready");
+        assert_eq!(ps_gen_column(status.readiness), "1");
     }
 
     #[cfg(target_os = "macos")]
