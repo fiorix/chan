@@ -1,8 +1,32 @@
 # doc_sessions tests stage external edits on the filesystem clock, with one sleep already hand-rolled
 
 Status: REGISTERED 2026-08-09 during the v0.87.0 delivery round, from the
-`scene-conflict-test-is-load-sensitive` investigation. Not implemented; out of that
-round's locked scope and a different surface from the lane that found it.
+`scene-conflict-test-is-load-sensitive` investigation. **IMPLEMENTED 2026-08-10 as a
+structural hazard, repaired on the strength of the sleep and the precedent, NOT
+reproduced.** The hand-rolled 20ms sleep is gone and fourteen staging sites route through
+the settled `scene_sessions` construction; the repaired assertion is proven able to go red
+for the reason it claims to guard. **No `doc_sessions` test was observed failing from the
+mtime collision in 60 rig runs**, which is what this item predicted of itself.
+
+> **What this status does and does not claim.** Its sibling
+> `terminal-restart-env-test-is-load-sensitive` carries a measured 40% -> 0% rate. **This
+> item has no such number and must not be read as sharing one.** Two distinct claims:
+>
+> - *The repaired assertion discriminates* -- **proven.** Deterministic mutation: drop the
+>   production retained-token refresh at `doc_sessions/mod.rs`, and
+>   `same_bytes_rewrite_refreshes_the_retained_token` fails in 0.06s on the exact
+>   assertion it guards.
+> - *The staging helper is load-bearing* -- **not proven here.** It rests on the
+>   `scene_sessions` lane's measurement (3 red in 60 with `advance_mtime` dropped) and on
+>   the hand-rolled sleep being standing evidence that someone already hit this.
+>
+> A mutation probe that dropped `advance_mtime` was run and came back **green**, and the
+> reason is instructive rather than reassuring: that probe removes protection against a
+> *probabilistic* event -- two writes landing on the same filesystem nanosecond -- so a
+> single run is the wrong instrument. The replacement probe's own output shows the clock
+> advanced naturally by ~1ms on that run, so the hazard simply did not fire. This item's
+> own text already warns of exactly this trap: 400 consecutive isolated runs went green on
+> known-broken code.
 
 ## What
 
@@ -83,6 +107,49 @@ circuit and does not depend on filesystem timestamp granularity". That is a work
 of the construction this item needs, in this codebase, on an adjacent surface -- copy it
 rather than reinventing. The same item's injected-instant seam for `DiskEchoRing` is the
 model for removing the sleep.
+
+## Implemented 2026-08-10
+
+The line reference in "What" had **drifted**: the bare
+`std::thread::sleep(Duration::from_millis(20))` was at `mod.rs:2948` at `e239c770`, not
+`2914`, which is a string literal there. Recorded so the next reader does not conclude the
+sleep was already gone.
+
+`impl Fixture` gains `external_write` and `advance_mtime`, copied from
+`scene_sessions/mod.rs` rather than reinvented, and **fourteen** staging sites route
+through it. The sleep is deleted; no `thread::sleep` remains in the `doc_sessions` tests.
+
+`advance_mtime` moves the mtime forward **relative to its current value**, so it does not
+depend on the clock advancing at all -- which is why it replaces a sleep rather than
+shortening one.
+
+Three `workspace.write_text` calls are deliberately **left alone** (`mod.rs:2324`, `2350`,
+`2410`): they are fixture seeding and helper setup, not external-edit staging, and
+converting them would have been noise dressed as thoroughness.
+
+Verified that the conversion did not break an intent: the whole `doc_sessions` suite passes
+(196 tests including `control_socket`), and specifically
+`reconcile_adopts_token_silently_on_equal_content`,
+`reconcile_ignores_own_flush_echo` and `stale_prewrite_read_is_recognized_as_own_echo` --
+the tests most likely to depend on a token *not* moving -- all pass.
+
+### Three independent arrivals at one construction
+
+This round's `chan-workspace` audit added `force_mtime_ns` to that crate's tests for the
+same hazard, independently, while this repair was in flight.
+
+```
+scene_sessions/mod.rs        advance_mtime          v0.87.0
+chan-workspace/workspace.rs  force_mtime_ns         v0.88.0, another lane
+parallel-suite-flake-hygiene clears flushed_mtime   v0.82.0
+```
+
+Three lanes across three rounds reached **"stamp the timestamp rather than race for it"**
+without coordinating. That is the direct answer to
+[`timing-test-virtual-clock`](../done/timing-test-virtual-clock.md)'s warning that this
+class had been answered three times with three *different* answers: here it has now been
+answered the same way three times, which is a stronger argument for copying the
+construction than for inventing a fourth.
 
 ## Provenance
 

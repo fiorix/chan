@@ -2418,6 +2418,38 @@ mod tests {
         }
     }
 
+    impl Fixture {
+        /// Stage an external edit: write the bytes, then move the file's
+        /// mtime, so the divergence is the test's own input rather than a
+        /// property of the filesystem clock.
+        ///
+        /// `Workspace::write_text` does not reliably move `mtime_ns` --
+        /// two atomic writes to one path can land on the same nanosecond
+        /// -- so a test that writes bytes alone is asserting against a
+        /// divergence the session may never see. This is the construction
+        /// `scene_sessions` settled on in v0.87.0 for the same hazard
+        /// (`scene_sessions/mod.rs`, `external_write` / `advance_mtime`),
+        /// copied rather than reinvented.
+        fn external_write(&self, path: &str, content: &str) {
+            self.workspace.write_text(path, content).unwrap();
+            self.advance_mtime(path);
+        }
+
+        /// Move `path`'s mtime strictly forward. Relative to the current
+        /// value, so it outruns whatever the write stamped without
+        /// depending on the clock having advanced at all -- which is why
+        /// this replaces a sleep rather than shortening one.
+        fn advance_mtime(&self, path: &str) {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(self.root.path().join(path))
+                .unwrap();
+            let advanced = file.metadata().unwrap().modified().unwrap() + Duration::from_secs(1);
+            file.set_times(std::fs::FileTimes::new().set_modified(advanced))
+                .unwrap();
+        }
+    }
+
     async fn attach(
         fx: &Fixture,
         path: &str,
@@ -2687,7 +2719,7 @@ mod tests {
         ha.session().apply_replace("c1", local).unwrap();
         drain(&mut rx);
 
-        fx.workspace.write_text("a.md", disk).unwrap();
+        fx.external_write("a.md", disk);
         let stat = fx.workspace.stat("a.md").unwrap();
         ha.session().merge_disk(disk.to_string(), &stat);
 
@@ -2749,7 +2781,7 @@ mod tests {
         ha.session().apply_replace("c1", local).unwrap();
         drain(&mut rx);
 
-        fx.workspace.write_text("a.md", disk).unwrap();
+        fx.external_write("a.md", disk);
         let stat = fx.workspace.stat("a.md").unwrap();
         ha.session().merge_disk(disk.to_string(), &stat);
         {
@@ -2791,7 +2823,7 @@ mod tests {
     /// divergent same-line disk write folded through merge_disk.
     async fn force_overlap_conflict(fx: &Fixture, ha: &DocAttachHandle, local: &str, disk: &str) {
         ha.session().apply_replace("c1", local).unwrap();
-        fx.workspace.write_text("a.md", disk).unwrap();
+        fx.external_write("a.md", disk);
         let stat = fx.workspace.stat("a.md").unwrap();
         ha.session().merge_disk(disk.to_string(), &stat);
         assert!(matches!(
@@ -2815,7 +2847,7 @@ mod tests {
         // The disk moves AGAIN while conflicted (the vi edit the old
         // reconciler ignored): the retained side corroborates and
         // refreshes; authority and baseline stay frozen.
-        fx.workspace.write_text("a.md", disk_two).unwrap();
+        fx.external_write("a.md", disk_two);
         reconcile_session(ha.session(), &fx.workspace).await;
         {
             let st = ha.session().lock_state();
@@ -2857,7 +2889,7 @@ mod tests {
 
         // The external writer converges on the live authority: the
         // divergence is gone and the conflict must evaporate.
-        fx.workspace.write_text("a.md", local).unwrap();
+        fx.external_write("a.md", local);
         reconcile_session(ha.session(), &fx.workspace).await;
         backdate_conflict_observation(ha.session());
         fx.registry.reconcile_pending(&fx.workspace).await;
@@ -2890,7 +2922,7 @@ mod tests {
         // A further external write the reconciler has NOT seen (no
         // event, no corroboration): resolve must still adopt the live
         // bytes, never the retained capture.
-        fx.workspace.write_text("a.md", disk_two).unwrap();
+        fx.external_write("a.md", disk_two);
         assert!(ha.session().reload_from_disk(&fx.workspace).await);
         assert_eq!(ha.session().authority_view().0, disk_two);
         {
@@ -2945,8 +2977,7 @@ mod tests {
         // The external tool re-saves identical bytes: only the mtime
         // moves. The retained side must adopt the fresh token or the
         // first "Keep mine" CAS-writes against a dead one and 409s.
-        std::thread::sleep(Duration::from_millis(20));
-        fx.workspace.write_text("a.md", disk).unwrap();
+        fx.external_write("a.md", disk);
         let restamped = fx.workspace.stat("a.md").unwrap();
         reconcile_session(ha.session(), &fx.workspace).await;
         {
@@ -3032,7 +3063,7 @@ mod tests {
         drain(&mut rx);
         ha.session().apply_replace("c1", local).unwrap();
         drain(&mut rx);
-        fx.workspace.write_text("a.md", disk).unwrap();
+        fx.external_write("a.md", disk);
         let stat = fx.workspace.stat("a.md").unwrap();
         ha.session().merge_disk(disk.to_string(), &stat);
         drain(&mut rx); // the conflict announcement
@@ -3066,7 +3097,7 @@ mod tests {
             .expect("local edit");
         drain(&mut frames);
 
-        fx.workspace.write_text("a.md", disk).unwrap();
+        fx.external_write("a.md", disk);
         handle.session().lock_state().flushed_mtime_ns = None;
         reconcile_session(handle.session(), &fx.workspace).await;
         backdate_pending_fold(handle.session());
@@ -3115,7 +3146,7 @@ mod tests {
             .expect("local edit");
         drain(&mut frames);
 
-        fx.workspace.write_text("a.md", disk).unwrap();
+        fx.external_write("a.md", disk);
         handle.session().lock_state().flushed_mtime_ns = None;
         reconcile_session(handle.session(), &fx.workspace).await;
         backdate_pending_fold(handle.session());
@@ -3123,7 +3154,7 @@ mod tests {
         assert!(handle.session().http_read_view().disk_conflicted);
         drop(handle);
 
-        fx.workspace.write_text("a.md", authority).unwrap();
+        fx.external_write("a.md", authority);
         let restarted = Arc::new(DocRegistry::new());
         let reopened = restarted
             .attach(&fx.workspace, "a.md", "w2", None)
@@ -3158,7 +3189,7 @@ mod tests {
             .expect("local edit");
         drain(&mut frames);
 
-        fx.workspace.write_text("a.md", disk).unwrap();
+        fx.external_write("a.md", disk);
         handle.session().lock_state().flushed_mtime_ns = None;
         reconcile_session(handle.session(), &fx.workspace).await;
         backdate_pending_fold(handle.session());
@@ -3166,7 +3197,7 @@ mod tests {
         assert!(handle.session().http_read_view().disk_conflicted);
         drop(handle);
 
-        fx.workspace.write_text("a.md", baseline).unwrap();
+        fx.external_write("a.md", baseline);
         let restarted = Arc::new(DocRegistry::new());
         let reopened = restarted
             .attach(&fx.workspace, "a.md", "w2", None)
@@ -4029,7 +4060,7 @@ mod tests {
         // Restore the disk side and its CAS token; the retained
         // authority then commits normally.
         std::fs::remove_dir(fx.root.path().join("a.md")).unwrap();
-        fx.workspace.write_text("a.md", "x").unwrap();
+        fx.external_write("a.md", "x");
         ha.session().lock_state().flushed_mtime_ns = fx.workspace.stat("a.md").unwrap().mtime_ns;
         assert!(flush_session(ha.session(), &fx.workspace, &fx.self_writes).await);
         assert_eq!(fx.workspace.read_text("a.md").unwrap(), "xy");
