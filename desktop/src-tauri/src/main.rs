@@ -4779,6 +4779,45 @@ fn init_tracing() {
         .init();
 }
 
+/// `chan-desktop --version` prints the version and build id and EXITS instead
+/// of launching the GUI.
+///
+/// This is the only headless reader of `CHAN_DESKTOP_BUILD_ID`. The id's other
+/// consumers are a Tauri IPC command, a `tracing` line emitted once the GUI is
+/// up, and the About window, so before this a packaging check with no display
+/// could not ask a binary which build it was -- which is the ambiguity the id
+/// exists to remove, and it left the Nix package's own id unverifiable.
+/// `scripts/smoke-nix-package.sh` is the reader.
+///
+/// Deliberately runs AFTER the `chan` and `cs` stem probes, so a `bin/chan`
+/// symlink at this binary still answers `--version` as the `chan` CLI, with the
+/// `chan` crate's own id, rather than being shadowed by this.
+///
+/// Output matches `chan --version`'s shape so one parser reads either binary.
+fn print_version_if_requested() -> bool {
+    let mut args = std::env::args_os();
+    let _program = args.next();
+    let Some(flag) = args.next() else {
+        return false;
+    };
+    if !matches!(flag.to_str(), Some("--version" | "-V")) {
+        return false;
+    }
+    // A GUI-subsystem exe invoked from a terminal starts with null standard
+    // handles, and `attach_parent_console_for_cli` attaches only for the
+    // `chan` / `cs` stems, so without this the line below is discarded and
+    // `chan-desktop.exe --version` prints nothing. Best-effort and idempotent:
+    // it leaves everything alone when there is no parent console.
+    #[cfg(windows)]
+    win_console::attach_parent();
+    println!(
+        "chan-desktop {} (build {})",
+        env!("CARGO_PKG_VERSION"),
+        CHAN_DESKTOP_BUILD_ID
+    );
+    true
+}
+
 /// Cross-platform MCP-proxy short-circuit: when chan-desktop is invoked as
 /// `<exe> __mcp-proxy <socket>` (the `cs` / `chan` MCP discovery hands this
 /// off), bridge stdio to the chan-server MCP socket and EXIT instead of
@@ -5114,6 +5153,12 @@ fn main() {
             eprintln!("{e}");
             std::process::exit(1);
         }
+    }
+    // `chan-desktop --version`: print the version and build id and exit. Last
+    // of the pre-GUI probes so it cannot shadow `chan --version` reaching the
+    // chan CLI above through a `bin/chan` symlink.
+    if print_version_if_requested() {
+        return;
     }
     // Linux AppImage only: prefer the host GTK/WebKit/EGL stack over the
     // bundled one and re-exec once before the webview is created, so it does
@@ -7665,6 +7710,47 @@ mod tests {
         assert!(MAIN_RS.contains("run_hidden_mcp_proxy_if_requested"));
         assert!(MAIN_RS.contains("run_mcp_proxy(socket)"));
         assert!(MAIN_RS.contains("chan_server::run_mcp_stdio_proxy"));
+    }
+
+    /// The `--version` probe is what makes this binary's build id readable
+    /// without a display, and its POSITION is the behaviour. The Nix package
+    /// symlinks `bin/chan` at this same binary, so a probe that ran before the
+    /// stem dispatch would answer `chan --version` with the desktop id and
+    /// hide whether the `chan` crate ever received one. Both ids come from one
+    /// derivation and carry the same value, so that substitution is invisible
+    /// in the output and would go green on exactly the half-fix the packaging
+    /// item exists to prevent.
+    #[test]
+    fn desktop_version_probe_runs_after_the_cli_stem_probes() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        let main_body = source_region(
+            production,
+            "\nfn main() {",
+            "linux_gui_stack::prefer_system_gui_stack();",
+        );
+
+        let stem_probe = main_body
+            .find("run_as_chan_if_requested()")
+            .expect("main dispatches the chan stem before the GUI");
+        let version_probe = main_body
+            .find("print_version_if_requested()")
+            .expect("main probes --version before the GUI");
+        assert!(
+            version_probe > stem_probe,
+            "the --version probe must run after the chan stem probe"
+        );
+
+        // It must report the DESKTOP id, not the one the linked-in chan crate
+        // carries, and in the shape smoke-nix-package.sh parses.
+        let probe = source_region(
+            production,
+            "\nfn print_version_if_requested()",
+            "\n/// Cross-platform MCP-proxy short-circuit",
+        );
+        assert!(probe.contains("CHAN_DESKTOP_BUILD_ID"));
+        assert!(probe.contains("(build {})"));
     }
 
     #[test]

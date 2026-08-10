@@ -2,6 +2,11 @@
   lib,
   src,
   version,
+  # Injected build identity, for BOTH crates this derivation compiles. The
+  # flake source in the store has no `.git`, so the git fallback in each build
+  # script sees nothing and `flake.nix` is the only way an id reaches either
+  # compiler.
+  buildId,
   makeRustPlatform,
   rust-bin,
   fetchNpmDeps,
@@ -54,6 +59,14 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   env = {
     CHAN_PACKAGED = "nix";
+    # Two ids from one derivation, and both have to be set. `cargoBuildFlags`
+    # below builds `-p chan-desktop`, which links the `chan` CLI in and
+    # symlinks `bin/chan` at it in `postInstall`, so this package answers
+    # `chan --version` as well as identifying the app itself. The two build
+    # scripts read different variables; setting one leaves the other at
+    # `unknown`.
+    CHAN_BUILD_ID = buildId;
+    CHAN_DESKTOP_BUILD_ID = buildId;
     OPENSSL_NO_VENDOR = 1;
   };
 

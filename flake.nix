@@ -32,13 +32,22 @@
       forAllSystems = nixpkgs.lib.genAttrs systems;
       manifest = builtins.fromTOML (builtins.readFile "${self}/Cargo.toml");
 
-      # The build id `chan --version` and the health surfaces report.
+      # The build id `chan --version`, the health surfaces, and the desktop
+      # app report.
       #
-      # `crates/chan/build.rs` derives this from git for an ordinary checkout
-      # build, but `src = self` puts the flake source in the Nix store with no
-      # `.git`, so a git-derived id ALONE would stamp `unknown` in exactly the
-      # release path that has to carry one. The flake hands it down instead,
-      # through `CHAN_BUILD_ID` in the derivation environment.
+      # `crates/chan/build.rs` and `desktop/src-tauri/build.rs` derive this
+      # from git for an ordinary checkout build, but `src = self` puts the
+      # flake source in the Nix store with no `.git`, so a git-derived id ALONE
+      # would stamp `unknown` in exactly the release path that has to carry
+      # one. The flake hands it down instead, through the derivation
+      # environment.
+      #
+      # Both derivations take it. `chan-desktop` needs it TWICE, because that
+      # package ships two identities out of one build: the desktop binary's own
+      # `CHAN_DESKTOP_BUILD_ID`, and the `CHAN_BUILD_ID` of the `chan` CLI
+      # linked into the same multi-call binary and symlinked at `bin/chan`.
+      # Threading it to only one of the two leaves the other stamping
+      # `unknown`, which is the shape this replaced.
       #
       # Guarded rather than a bare `self.shortRev`, because a revisionless
       # flake ref has no `rev` attribute AT ALL: reading it fails EVALUATION
@@ -84,6 +93,7 @@
           chan-desktop = pkgs.callPackage ./packaging/nix/chan-desktop.nix {
             src = self;
             version = manifest.workspace.package.version;
+            inherit buildId;
           };
         in
         {

@@ -63,33 +63,58 @@ esac
     exit 1
 }
 
-VERSION_OUTPUT="$("$BIN/chan" --version)"
-printf '%s\n' "$VERSION_OUTPUT"
-
 # The Nix path is where a build id is most likely to be lost, and losing it is
 # silent: `flake.nix` passes `src = self`, so the source in the store has no
-# `.git` and the git fallback in crates/chan/build.rs stamps "unknown". The id
-# reaches the compiler only because flake.nix hands it down through
-# CHAN_BUILD_ID, and nothing else here would notice if that stopped happening.
-if [ "$PACKAGE" = chan ]; then
-    BUILD_ID="${VERSION_OUTPUT##*\(build }"
+# `.git` and the git fallback in each build script stamps "unknown". The id
+# reaches the compilers only because flake.nix hands it down through the
+# derivation environment, and nothing else here would notice if that stopped.
+#
+# Echo the line, then check it. `$1` names the invocation so a failure says
+# which binary lied. The id is published in BUILD_ID rather than on stdout,
+# which the echoed version line already owns.
+BUILD_ID=
+assert_build_id() {
+    local what="$1" output="$2"
+    printf '%s\n' "$output"
+    BUILD_ID="${output##*\(build }"
     BUILD_ID="${BUILD_ID%\)*}"
-    [ "$VERSION_OUTPUT" != "$BUILD_ID" ] || {
-        echo "error: chan --version names no build: $VERSION_OUTPUT" >&2
+    [ "$output" != "$BUILD_ID" ] || {
+        echo "error: $what names no build: $output" >&2
         exit 1
     }
     # Tagged and well-formed, not merely non-empty: `git-` is a commit an
     # operator can look up, `nar-` is the content-derived id a revisionless
     # flake degrades to, and "unknown" is the defect this check exists for.
     [[ "$BUILD_ID" =~ ^(git-[0-9a-f]{12}(-dirty)?|nar-[0-9a-f]{12})$ ]] || {
-        echo "error: chan --version carries no usable build id: '$BUILD_ID'" >&2
+        echo "error: $what carries no usable build id: '$BUILD_ID'" >&2
+        exit 1
+    }
+}
+
+assert_build_id "chan --version" "$("$BIN/chan" --version)"
+CHAN_BUILD_ID="$BUILD_ID"
+
+# chan-desktop ships TWO identities out of one derivation and needs both
+# checked. `bin/chan` above is a symlink at the desktop binary, so it exercises
+# the `chan` crate's CHAN_BUILD_ID; the app's own CHAN_DESKTOP_BUILD_ID comes
+# from a different build script reading a different variable, and a recipe that
+# set only one of them would pass the line above while still stamping "unknown"
+# in the app users launch.
+#
+# Checking the app cannot be done by grepping the binary: both variables carry
+# the same value, so a match cannot be attributed to either one and would go
+# green on exactly that half-fix. `chan-desktop --version` is the headless
+# reader that makes the app's own id observable.
+if [ "$PACKAGE" = chan-desktop ]; then
+    assert_build_id "chan-desktop --version" "$("$BIN/chan-desktop" --version)"
+    # One derivation, one `buildId`, so a disagreement means the two variables
+    # were fed from different places and one of them is stale.
+    [ "$BUILD_ID" = "$CHAN_BUILD_ID" ] || {
+        echo "error: package ships two build ids:" \
+            "chan says '$CHAN_BUILD_ID', chan-desktop says '$BUILD_ID'" >&2
         exit 1
     }
 fi
-# chan-desktop is deliberately unchecked: packaging/nix/chan-desktop.nix does
-# not hand a build id down, so its `chan` (a symlink to the desktop binary)
-# still reports "unknown". That gap is registered as its own roadmap item
-# rather than widened into this one.
 
 set +e
 UPGRADE_OUTPUT="$("$BIN/chan" upgrade --check 2>&1)"
