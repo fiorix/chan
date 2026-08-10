@@ -558,7 +558,72 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// How many times to re-open a fixture workspace that did not open cleanly.
+    ///
+    /// Bounded by ATTEMPTS, deliberately, not by a clock. There is no duration
+    /// here to tune, none to go stale on a slower host, and nothing that reads
+    /// scheduler pressure as a defect. Three independent draws against a path
+    /// that is rare even under a saturated 1-CPU rig leaves a residue far below
+    /// the rate of any other failure in this suite.
+    const SETTLED_OPEN_ATTEMPTS: u32 = 3;
+
+    /// A workspace that opened CLEANLY, which is what every test here assumes
+    /// and none of them used to establish.
+    ///
+    /// `Workspace::open` probes the persisted graph and index, and a probe that
+    /// fails does not error: it DEGRADES. The failure logs a warning, yields
+    /// `(None, None)`, and lands on the `(None, _) | (_, None) => Inconsistent`
+    /// arm, which seeds a `FullRebuild` and spawns the startup recovery worker.
+    /// That workspace is then legitimately recovering and legitimately owned,
+    /// which is correct behaviour and the exact opposite of the quiescent
+    /// fixture these tests need.
+    ///
+    /// Each open is an INDEPENDENT DRAW against that path, so a test opening two
+    /// workspaces takes two chances to lose it. That is why the two tests here
+    /// that open twice were the only ones that ever went red under a 1-CPU rig
+    /// at `--test-threads=32`, while the fifteen taking one draw never did. They
+    /// asserted a precondition they never established.
+    ///
+    /// Establishing it here rather than asserting readiness at each call site
+    /// keeps the contract assertions unweakened: nothing about `is_settled()`,
+    /// the phase derivation, or the stall guard changes, and a fixture that
+    /// cannot be settled fails as a fixture rather than as a contract.
+    ///
+    /// Two properties of the retry that are not visible from this file:
+    ///
+    /// A discarded attempt does not leak its recovery thread. `RecoveryWorker`
+    /// implements `Drop` as `stop_and_join()`, so each abandoned workspace joins
+    /// its worker before the next attempt begins and three attempts cannot leave
+    /// two workers racing. The cost of that is real and bounded: the worst case
+    /// is three open-and-join cycles rather than three opens.
+    ///
+    /// The writer-lock hazard does NOT apply here, and it is worth saying why
+    /// because the shape looks like it should. `lock::is_free` warns that a
+    /// reopen can lose the lock to an in-flight `Workspace::drop` whose flock
+    /// release has not completed. That is the close-then-reopen handoff on ONE
+    /// path. Every attempt below opens a FRESH pair of `TempDir`s, so attempt
+    /// N+1 takes a different lock file entirely and cannot contend with attempt
+    /// N. A lock failure would also surface as an `Err` from `open_workspace`
+    /// and panic on its own message, never as another silent degraded draw.
     fn workspace() -> (TempDir, TempDir, Arc<chan_workspace::Workspace>) {
+        for _ in 1..SETTLED_OPEN_ATTEMPTS {
+            let opened = open_workspace_once();
+            if opened.2.readiness().is_ready() {
+                return opened;
+            }
+            // Degraded open. Drop it, including its TempDirs, and draw again.
+        }
+        let last = open_workspace_once();
+        assert!(
+            last.2.readiness().is_ready(),
+            "fixture workspace did not open cleanly in {SETTLED_OPEN_ATTEMPTS} attempts: the \
+             graph/index readiness probe degraded every time, seeding a FullRebuild. This is a \
+             FIXTURE failure, not a preflight contract failure."
+        );
+        last
+    }
+
+    fn open_workspace_once() -> (TempDir, TempDir, Arc<chan_workspace::Workspace>) {
         let cfg = TempDir::new().unwrap();
         let root = TempDir::new().unwrap();
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
