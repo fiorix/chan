@@ -24,17 +24,38 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Chrome's direct dynamic dependencies that a stock Ubuntu build container
-# does not carry. Verified by `ldd chrome | grep 'not found'` against the
-# puppeteer download: libnspr4.so, libnss3.so, libnssutil3.so and
-# libsmime3.so all come from libnss3 (which pulls libnspr4), and
-# libasound.so.2 from libasound2t64. unzip is not Chrome's dependency but
-# the downloader's: @puppeteer/browsers extracts with it and fails the
-# install without it, leaving a browser directory holding no executable.
-APT_PACKAGES=(unzip libnss3)
-# Renamed in the 64-bit time_t transition; 24.04 and newer carry the t64
-# name, older releases the bare one.
-APT_ASOUND_CANDIDATES=(libasound2t64 libasound2)
+# How many of Chrome's shared libraries are missing is a property of the BASE
+# IMAGE, not of Chrome, so this list is only ever correct for bases someone has
+# measured. Two are measured, both Ubuntu 26.04: the project's build rootfs
+# needs the NSS and ALSA families (5 sonames), and a stock `ubuntu` needs those
+# plus the X, GTK, cairo, pango, glib, cups and gbm families (23). The union is
+# listed here, so the extra names are a no-op on a base that already carries
+# them. On any third base the `ldd` verification at the end is what holds: it
+# fails loudly with the exact missing sonames rather than leaving a Chrome that
+# cannot start. Treat the list as the fast path and that check as the contract.
+#
+# unzip is not Chrome's dependency but the downloader's: @puppeteer/browsers
+# extracts with it and fails the install without it, leaving a browser
+# directory holding no executable.
+APT_PACKAGES=(
+    unzip
+    libnss3
+    libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2
+    libxkbcommon0
+    libcairo2 libpango-1.0-0 libgbm1
+)
+# The 64-bit time_t transition renamed these: 24.04 and newer carry the t64
+# name, older releases the bare one. Probe for each rather than assuming a
+# release, so one script spans both sides of that split. First name that the
+# package index knows wins.
+APT_RENAMED_CANDIDATES=(
+    "libasound2t64 libasound2"
+    "libatk1.0-0t64 libatk1.0-0"
+    "libatk-bridge2.0-0t64 libatk-bridge2.0-0"
+    "libatspi2.0-0t64 libatspi2.0-0"
+    "libcups2t64 libcups2"
+    "libglib2.0-0t64 libglib2.0-0"
+)
 
 # `stable` tracks whatever Chrome is current, which is what puppeteer-core's
 # floating major expects. Pin CHROME_VERSION to a buildId to freeze a run.
@@ -67,21 +88,28 @@ export DEBIAN_FRONTEND=noninteractive
 # every candidate rather than admitting it has nothing to search.
 apt-get update -qq
 
-asound=""
-for candidate in "${APT_ASOUND_CANDIDATES[@]}"; do
-    if apt-cache show "$candidate" >/dev/null 2>&1; then
-        asound="$candidate"
-        break
+resolved=("${APT_PACKAGES[@]}")
+for candidates in "${APT_RENAMED_CANDIDATES[@]}"; do
+    picked=""
+    for candidate in $candidates; do
+        if apt-cache show "$candidate" >/dev/null 2>&1; then
+            picked="$candidate"
+            break
+        fi
+    done
+    if [ -z "$picked" ]; then
+        echo "error: none of these packages exist here: $candidates" >&2
+        exit 1
     fi
+    resolved+=("$picked")
 done
-if [ -z "$asound" ]; then
-    echo "error: no ALSA runtime package found (tried ${APT_ASOUND_CANDIDATES[*]})" >&2
-    exit 1
-fi
 
-echo ">> browser-smoke deps: ${APT_PACKAGES[*]} $asound" >&2
-apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}" "$asound"
-rm -rf /var/lib/apt/lists/*
+echo ">> browser-smoke deps: ${resolved[*]}" >&2
+apt-get install -y --no-install-recommends "${resolved[@]}"
+# The package lists are deliberately NOT deleted afterwards. Dropping them is a
+# container-image idiom, and this runs against a live container that other work
+# continues in: clearing them leaves the next `apt-get install` in this
+# container failing to find packages that plainly exist.
 
 # The harness reads the newest linux-* build out of the puppeteer cache, so
 # install into that layout rather than somewhere CHROME_BIN would have to
