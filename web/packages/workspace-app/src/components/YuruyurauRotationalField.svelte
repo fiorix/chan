@@ -2,16 +2,13 @@
   import { onMount } from "svelte";
   import {
     canvasCssNumber,
-    canvasCssValue,
-    runCanvasAnimation,
+    canvasCssRgb,
+    runWebgl2Animation,
   } from "./canvasAnimation";
   import {
-    YURUYURAU_ROTATIONAL_SOURCE_SIZE,
-    yuruyurauRotationalRasterScale,
+    createYuruyurauRotationalRenderer,
+    type YuruyurauRotationalRenderer,
   } from "./yuruyurauRotationalField";
-
-  const SOURCE_SIZE = YURUYURAU_ROTATIONAL_SOURCE_SIZE;
-  const SOURCE_CENTER = SOURCE_SIZE / 2;
 
   let {
     buildBasePoints,
@@ -19,7 +16,10 @@
     sourceTimePerMs,
     centerFadeRadius,
   }: {
-    buildBasePoints: (sourceTime: number) => Float32Array;
+    buildBasePoints: (
+      sourceTime: number,
+      target?: Float32Array,
+    ) => Float32Array;
     rotationCount: number;
     sourceTimePerMs: number;
     centerFadeRadius: number;
@@ -30,48 +30,32 @@
   onMount(() => {
     if (!canvas) return;
     const host = canvas;
-    const sourceCanvas = document.createElement("canvas");
-    sourceCanvas.width = SOURCE_SIZE;
-    sourceCanvas.height = SOURCE_SIZE;
-    let sourceContext = sourceCanvas.getContext("2d");
 
-    return runCanvasAnimation(host, (ctx) => {
+    return runWebgl2Animation(host, (gl) => {
+      let renderer: YuruyurauRotationalRenderer;
+      try {
+        renderer = createYuruyurauRotationalRenderer(gl);
+      } catch (error) {
+        console.warn(
+          "[chan] Yuruyurau rotational field WebGL renderer unavailable:",
+          error,
+        );
+        return null;
+      }
+
       let width = 0;
       let height = 0;
-
-      function drawCenterFade(backgroundColor: string): void {
-        const centerX = width / 2;
-        const centerY = height / 2;
-        const innerRadius = Math.min(76, centerFadeRadius * 0.55);
-        const gradient = ctx.createRadialGradient(
-          centerX,
-          centerY,
-          innerRadius,
-          centerX,
-          centerY,
-          centerFadeRadius,
-        );
-        gradient.addColorStop(0, `rgba(${backgroundColor}, 0.96)`);
-        gradient.addColorStop(0.55, `rgba(${backgroundColor}, 0.82)`);
-        gradient.addColorStop(1, `rgba(${backgroundColor}, 0)`);
-        ctx.fillStyle = gradient;
-        ctx.fillRect(
-          centerX - centerFadeRadius,
-          centerY - centerFadeRadius,
-          centerFadeRadius * 2,
-          centerFadeRadius * 2,
-        );
-      }
+      let points: Float32Array | undefined;
 
       function draw(sourceTime: number): void {
         if (width <= 0 || height <= 0) return;
 
-        const backgroundColor = canvasCssValue(
+        const backgroundColor = canvasCssRgb(
           host,
           "--yuruyurau-background-rgb",
           "28, 28, 30",
         );
-        const pointColor = canvasCssValue(
+        const pointColor = canvasCssRgb(
           host,
           "--yuruyurau-point-rgb",
           "218, 218, 218",
@@ -81,71 +65,18 @@
           "--yuruyurau-rotational-point-alpha",
           46 / 255,
         );
-        const points = buildBasePoints(sourceTime);
-        const coverScale = Math.max(width, height) / SOURCE_SIZE;
-        const rasterScale = yuruyurauRotationalRasterScale(
-          width,
-          height,
-          host.width / width,
-        );
-        const rasterSize = Math.ceil(SOURCE_SIZE * rasterScale);
-
-        ctx.globalAlpha = 1;
-        ctx.fillStyle = `rgb(${backgroundColor})`;
-        ctx.fillRect(0, 0, width, height);
-
-        const baseContext = sourceContext ?? sourceCanvas.getContext("2d");
-        if (!baseContext) return;
-        sourceContext = baseContext;
-        if (
-          sourceCanvas.width !== rasterSize ||
-          sourceCanvas.height !== rasterSize
-        ) {
-          sourceCanvas.width = rasterSize;
-          sourceCanvas.height = rasterSize;
-        }
-        baseContext.setTransform(rasterScale, 0, 0, rasterScale, 0, 0);
-        baseContext.clearRect(0, 0, SOURCE_SIZE, SOURCE_SIZE);
-        baseContext.beginPath();
-        for (let index = 0; index < points.length; index += 2) {
-          const x = points[index];
-          const y = points[index + 1];
-          if (
-            !Number.isFinite(x) ||
-            !Number.isFinite(y) ||
-            x < 0 ||
-            x > SOURCE_SIZE ||
-            y < 0 ||
-            y > SOURCE_SIZE
-          ) {
-            continue;
-          }
-          baseContext.rect(x, y, 1, 1);
-        }
-        baseContext.globalAlpha = pointAlpha;
-        baseContext.fillStyle = `rgb(${pointColor})`;
-        baseContext.fill();
-        baseContext.globalAlpha = 1;
-
-        ctx.save();
-        ctx.translate(width / 2, height / 2);
-        ctx.scale(coverScale, coverScale);
-        for (let copy = 0; copy < rotationCount; copy += 1) {
-          ctx.rotate((Math.PI * 2) / rotationCount);
-          ctx.drawImage(
-            sourceCanvas,
-            0,
-            0,
-            rasterSize,
-            rasterSize,
-            -SOURCE_CENTER,
-            -SOURCE_CENTER,
-            SOURCE_SIZE,
-            SOURCE_SIZE,
-          );
-        }
-        ctx.restore();
-        drawCenterFade(backgroundColor);
+        // The build reuses one buffer across frames; the renderer reuses
+        // one upload buffer, so a frame allocates nothing.
+        points = buildBasePoints(sourceTime, points);
+        renderer.draw({
+          points,
+          rotationCount,
+          backgroundColor,
+          pointColor,
+          pointAlpha,
+          fadeInnerRadius: Math.min(76, centerFadeRadius * 0.55),
+          fadeOuterRadius: centerFadeRadius,
+        });
       }
 
       function drawAt(timeMs: number): void {
@@ -161,6 +92,7 @@
         },
         frame: drawAt,
         reducedMotion: () => draw(0),
+        destroy: renderer.destroy,
       };
     });
   });

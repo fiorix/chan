@@ -27,4 +27,14 @@ describe("Fourteenfold Bloom", () => {
     expect(points[0]).toBeCloseTo(205.20724, 4);
     expect(points[1]).toBeCloseTo(376.24322, 4);
   });
+
+  test("reuses a caller-provided buffer without changing the trace", () => {
+    const target = new Float32Array(
+      FOURTEENFOLD_BLOOM_BASE_POINT_COUNT * 2,
+    );
+    const points = buildFourteenfoldBloomBasePoints(0.5, target);
+
+    expect(points).toBe(target);
+    expect([...points]).toEqual([...buildFourteenfoldBloomBasePoints(0.5)]);
+  });
 });

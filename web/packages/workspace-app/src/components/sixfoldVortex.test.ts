@@ -9,6 +9,8 @@ import {
   fitSixfoldVortex,
   isSixfoldVortexPointDrawable,
   SIXFOLD_VORTEX_PARTICLE_COUNT,
+  SIXFOLD_VORTEX_POINT_VERTEX_SHADER,
+  SIXFOLD_VORTEX_SURFACE_FRAGMENT_SHADER,
 } from "./sixfoldVortex";
 
 let mounted: Record<string, unknown> | null = null;
@@ -20,6 +22,100 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
+
+interface FakeDrawCall {
+  mode: number;
+  first: number;
+  count: number;
+}
+
+function createFakeWebgl2(): {
+  gl: WebGL2RenderingContext;
+  draws: FakeDrawCall[];
+  pointsMode: number;
+} {
+  const draws: FakeDrawCall[] = [];
+  const gl = {
+    VERTEX_SHADER: 0x8b31,
+    FRAGMENT_SHADER: 0x8b30,
+    COMPILE_STATUS: 0x8b81,
+    LINK_STATUS: 0x8b82,
+    ARRAY_BUFFER: 0x8892,
+    STATIC_DRAW: 0x88e4,
+    DYNAMIC_DRAW: 0x88e8,
+    FLOAT: 0x1406,
+    POINTS: 0x0000,
+    TRIANGLES: 0x0004,
+    BLEND: 0x0be2,
+    DEPTH_TEST: 0x0b71,
+    SRC_ALPHA: 0x0302,
+    ONE_MINUS_SRC_ALPHA: 0x0303,
+    TEXTURE_2D: 0x0de1,
+    TEXTURE0: 0x84c0,
+    TEXTURE_MIN_FILTER: 0x2801,
+    TEXTURE_MAG_FILTER: 0x2800,
+    TEXTURE_WRAP_S: 0x2802,
+    TEXTURE_WRAP_T: 0x2803,
+    NEAREST: 0x2600,
+    CLAMP_TO_EDGE: 0x812f,
+    RGBA: 0x1908,
+    UNSIGNED_BYTE: 0x1401,
+    FRAMEBUFFER: 0x8d40,
+    COLOR_ATTACHMENT0: 0x8ce0,
+    COLOR_BUFFER_BIT: 0x4000,
+    drawingBufferWidth: 1,
+    drawingBufferHeight: 1,
+    createShader: vi.fn(() => ({})),
+    shaderSource: vi.fn(),
+    compileShader: vi.fn(),
+    getShaderParameter: vi.fn(() => true),
+    getShaderInfoLog: vi.fn(() => ""),
+    deleteShader: vi.fn(),
+    createProgram: vi.fn(() => ({})),
+    attachShader: vi.fn(),
+    linkProgram: vi.fn(),
+    getProgramParameter: vi.fn(() => true),
+    getProgramInfoLog: vi.fn(() => ""),
+    deleteProgram: vi.fn(),
+    getAttribLocation: vi.fn(() => 0),
+    getUniformLocation: vi.fn(() => ({})),
+    createBuffer: vi.fn(() => ({})),
+    bindBuffer: vi.fn(),
+    bufferData: vi.fn(),
+    deleteBuffer: vi.fn(),
+    useProgram: vi.fn(),
+    enableVertexAttribArray: vi.fn(),
+    vertexAttribPointer: vi.fn(),
+    uniform1f: vi.fn(),
+    uniform2f: vi.fn(),
+    uniform3f: vi.fn(),
+    uniform1i: vi.fn(),
+    drawArrays: vi.fn((mode: number, first: number, count: number) => {
+      draws.push({ mode, first, count });
+    }),
+    enable: vi.fn(),
+    disable: vi.fn(),
+    blendFunc: vi.fn(),
+    viewport: vi.fn(),
+    clearColor: vi.fn(),
+    clear: vi.fn(),
+    createTexture: vi.fn(() => ({})),
+    bindTexture: vi.fn(),
+    texImage2D: vi.fn(),
+    texParameteri: vi.fn(),
+    deleteTexture: vi.fn(),
+    createFramebuffer: vi.fn(() => ({})),
+    bindFramebuffer: vi.fn(),
+    framebufferTexture2D: vi.fn(),
+    deleteFramebuffer: vi.fn(),
+    activeTexture: vi.fn(),
+  };
+  return {
+    gl: gl as unknown as WebGL2RenderingContext,
+    draws,
+    pointsMode: gl.POINTS,
+  };
+}
 
 describe("Sixfold Vortex", () => {
   test("keeps the source simulation rate and attribution", async () => {
@@ -37,6 +133,23 @@ describe("Sixfold Vortex", () => {
     );
     expect(motion).toContain(
       "https://x.com/hisadan/status/1974838123864756613",
+    );
+  });
+
+  test("renders through WebGL2 with ping-pong trail surfaces", async () => {
+    const renderer = (await import("./SixfoldVortex.svelte?raw"))
+      .default as string;
+    const motion = (await import("./sixfoldVortex.ts?raw"))
+      .default as string;
+
+    expect(renderer).toContain("runWebgl2Animation");
+    expect(motion).toContain("framebufferTexture2D");
+    expect(motion).toContain("gl.DYNAMIC_DRAW");
+    expect(SIXFOLD_VORTEX_SURFACE_FRAGMENT_SHADER).toContain(
+      "mix(previous, uBackgroundColor, uFade)",
+    );
+    expect(SIXFOLD_VORTEX_POINT_VERTEX_SHADER).toContain(
+      "gl_PointSize = 1.0;",
     );
   });
 
@@ -97,22 +210,10 @@ describe("Sixfold Vortex", () => {
     );
   });
 
-  test("never traces escaped startup particles into the canvas path", async () => {
-    const rect = vi.fn();
-    const context = {
-      beginPath: vi.fn(),
-      clearRect: vi.fn(),
-      fill: vi.fn(),
-      fillRect: vi.fn(),
-      fillStyle: "",
-      globalAlpha: 1,
-      rect,
-      restore: vi.fn(),
-      save: vi.fn(),
-      setTransform: vi.fn(),
-    } as unknown as CanvasRenderingContext2D;
+  test("never traces escaped startup particles into the point upload", async () => {
+    const { gl, draws, pointsMode } = createFakeWebgl2();
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
-      context,
+      gl,
     );
     Object.defineProperty(document, "hidden", {
       configurable: true,
@@ -142,12 +243,19 @@ describe("Sixfold Vortex", () => {
     mounted = mount(SixfoldVortex, { target });
     await tick();
 
-    expect(rect).toHaveBeenCalledTimes(SIXFOLD_VORTEX_PARTICLE_COUNT);
-    rect.mockClear();
+    const firstFramePoints = draws.filter(
+      (draw) => draw.mode === pointsMode,
+    );
+    expect(firstFramePoints).toHaveLength(1);
+    expect(firstFramePoints[0].count).toBe(SIXFOLD_VORTEX_PARTICLE_COUNT);
+    draws.length = 0;
+
     expect(frames).toHaveLength(1);
     frames.shift()?.(performance.now() + 100);
 
-    expect(rect).not.toHaveBeenCalled();
+    expect(
+      draws.filter((draw) => draw.mode === pointsMode),
+    ).toHaveLength(0);
   });
 
   test("fits rectangular panes without distorting the center", () => {

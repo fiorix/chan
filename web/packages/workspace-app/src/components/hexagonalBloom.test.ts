@@ -27,4 +27,12 @@ describe("Hexagonal Bloom", () => {
     expect(points[0]).toBeCloseTo(180.04782, 4);
     expect(points[1]).toBeCloseTo(363.04138, 4);
   });
+
+  test("reuses a caller-provided buffer without changing the trace", () => {
+    const target = new Float32Array(HEXAGONAL_BLOOM_BASE_POINT_COUNT * 2);
+    const points = buildHexagonalBloomBasePoints(0.5, target);
+
+    expect(points).toBe(target);
+    expect([...points]).toEqual([...buildHexagonalBloomBasePoints(0.5)]);
+  });
 });

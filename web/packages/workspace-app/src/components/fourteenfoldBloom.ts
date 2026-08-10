@@ -4,10 +4,12 @@ export const FOURTEENFOLD_BLOOM_BASE_POINT_COUNT = 20_000 - 15;
 
 export function buildFourteenfoldBloomBasePoints(
   phase: number,
+  target?: Float32Array,
 ): Float32Array {
-  const points = new Float32Array(
-    FOURTEENFOLD_BLOOM_BASE_POINT_COUNT * 2,
-  );
+  const points =
+    target && target.length >= FOURTEENFOLD_BLOOM_BASE_POINT_COUNT * 2
+      ? target
+      : new Float32Array(FOURTEENFOLD_BLOOM_BASE_POINT_COUNT * 2);
   let offset = 0;
 
   for (let index = 19_999; index > 14; index -= 1) {

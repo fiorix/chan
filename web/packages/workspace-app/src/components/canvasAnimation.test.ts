@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   canvasCssNumber,
+  canvasCssRgb,
   canvasCssValue,
   runCanvasAnimation,
   runWebgl2Animation,
@@ -324,5 +325,24 @@ describe("canvas animation lifecycle", () => {
 
     expect(getContext).toHaveBeenCalledWith("webgl2", expect.any(Object));
     cleanup();
+  });
+
+  test("reads rgb theme variables as normalized WebGL channels", () => {
+    const host = document.createElement("div");
+    host.style.setProperty("--test-rgb", " 218, 218, 218 ");
+    const canvas = document.createElement("canvas");
+    host.append(canvas);
+    document.body.append(host);
+
+    expect(canvasCssRgb(canvas, "--test-rgb", "0, 0, 0")).toEqual([
+      218 / 255,
+      218 / 255,
+      218 / 255,
+    ]);
+    expect(canvasCssRgb(canvas, "--missing-rgb", "28, 28, 30")).toEqual([
+      28 / 255,
+      28 / 255,
+      30 / 255,
+    ]);
   });
 });

@@ -43,6 +43,24 @@ export function canvasCssNumber(
   return Number.isFinite(raw) ? raw : fallback;
 }
 
+// Reads an "r, g, b" CSS variable (the format 2D canvas animations feed to
+// rgb()) as normalized 0..1 channels for WebGL uniforms.
+export function canvasCssRgb(
+  canvas: HTMLCanvasElement,
+  name: string,
+  fallback: string,
+): [number, number, number] {
+  const channels = canvasCssValue(canvas, name, fallback).split(",");
+  const rgb: [number, number, number] = [0, 0, 0];
+  for (let index = 0; index < 3; index += 1) {
+    const channel = Number.parseFloat(channels[index] ?? "");
+    rgb[index] = Number.isFinite(channel)
+      ? Math.min(1, Math.max(0, channel / 255))
+      : 0;
+  }
+  return rgb;
+}
+
 // WebKit can transiently return a null 2d context under canvas memory
 // pressure (rapid animation switching re-mounts canvases faster than
 // backing stores are reclaimed). One null must not leave the surface

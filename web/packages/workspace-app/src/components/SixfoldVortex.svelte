@@ -3,13 +3,15 @@
   import {
     advanceSixfoldVortexParticles,
     createSixfoldVortexParticles,
+    createSixfoldVortexRenderer,
     fitSixfoldVortex,
     isSixfoldVortexPointDrawable,
+    type SixfoldVortexRenderer,
   } from "./sixfoldVortex";
   import {
     canvasCssNumber,
-    canvasCssValue,
-    runCanvasAnimation,
+    canvasCssRgb,
+    runWebgl2Animation,
   } from "./canvasAnimation";
 
   const SOURCE_TIME_SPEED = 60;
@@ -22,16 +24,28 @@
     if (!canvas) return;
     const host = canvas;
 
-    return runCanvasAnimation(host, (ctx) => {
+    return runWebgl2Animation(host, (gl) => {
+      let renderer: SixfoldVortexRenderer;
+      try {
+        renderer = createSixfoldVortexRenderer(gl);
+      } catch (error) {
+        console.warn(
+          "[chan] Sixfold Vortex WebGL renderer unavailable:",
+          error,
+        );
+        return null;
+      }
+
       let width = 0;
       let height = 0;
       let lastSimulationMs = 0;
       let sourceTime = 0;
       let particles = createSixfoldVortexParticles();
       let paintedBackground = "";
+      const upload = new Float32Array(particles.length);
 
-      function backgroundColor(): string {
-        return canvasCssValue(
+      function backgroundColor(): [number, number, number] {
+        return canvasCssRgb(
           host,
           "--sixfold-vortex-background-rgb",
           "28, 28, 30",
@@ -39,16 +53,13 @@
       }
 
       function resetSurface(): void {
-        paintedBackground = backgroundColor();
-        ctx.save();
-        ctx.globalAlpha = 1;
-        ctx.fillStyle = `rgb(${paintedBackground})`;
-        ctx.fillRect(0, 0, width, height);
-        ctx.restore();
+        const background = backgroundColor();
+        paintedBackground = background.join(",");
+        renderer.resetSurface(background);
       }
 
-      function drawParticles(): void {
-        const pointColor = canvasCssValue(
+      function drawParticles(fade: number): void {
+        const pointColor = canvasCssRgb(
           host,
           "--sixfold-vortex-point-rgb",
           "218, 218, 218",
@@ -60,38 +71,44 @@
         );
         const transform = fitSixfoldVortex(width, height);
 
-        ctx.beginPath();
+        // All particles share one upload. Excluding escaped particles keeps
+        // vortex singularities from inflating the draw beyond the canvas.
+        let pointCount = 0;
         for (let index = 0; index < particles.length; index += 2) {
           const pointX =
             transform.centerX + particles[index] * transform.scale;
           const pointY =
             transform.centerY + particles[index + 1] * transform.scale;
-          // All particles share one path. Excluding escaped particles keeps
-          // vortex singularities from inflating its bounds beyond the canvas.
           if (
             !isSixfoldVortexPointDrawable(pointX, pointY, width, height)
           ) {
             continue;
           }
-          ctx.rect(pointX, pointY, 1, 1);
+          upload[pointCount * 2] = particles[index];
+          upload[pointCount * 2 + 1] = particles[index + 1];
+          pointCount += 1;
         }
-        ctx.globalAlpha = pointAlpha;
-        ctx.fillStyle = `rgb(${pointColor})`;
-        ctx.fill();
-        ctx.globalAlpha = 1;
+
+        renderer.draw({
+          points: upload,
+          pointCount,
+          centerX: transform.centerX,
+          centerY: transform.centerY,
+          scale: transform.scale,
+          backgroundColor: backgroundColor(),
+          pointColor,
+          pointAlpha,
+          fade,
+        });
       }
 
       function draw(frameScale: number): void {
         if (width <= 0 || height <= 0) return;
-        if (backgroundColor() !== paintedBackground) resetSurface();
+        if (backgroundColor().join(",") !== paintedBackground) {
+          resetSurface();
+        }
 
-        ctx.globalAlpha =
-          1 - Math.pow(1 - SOURCE_FADE_ALPHA, frameScale);
-        ctx.fillStyle = `rgb(${backgroundColor()})`;
-        ctx.fillRect(0, 0, width, height);
-        ctx.globalAlpha = 1;
-
-        drawParticles();
+        drawParticles(1 - Math.pow(1 - SOURCE_FADE_ALPHA, frameScale));
         advanceSixfoldVortexParticles(
           particles,
           sourceTime,
@@ -102,7 +119,7 @@
 
       function drawStatic(): void {
         resetSurface();
-        drawParticles();
+        drawParticles(0);
       }
 
       function drawAt(timeMs: number): void {
@@ -132,6 +149,7 @@
         start: () => {
           lastSimulationMs = 0;
         },
+        destroy: renderer.destroy,
       };
     });
   });

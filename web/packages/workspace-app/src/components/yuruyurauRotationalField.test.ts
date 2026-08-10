@@ -3,7 +3,11 @@
 import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import FourteenfoldBloom from "./FourteenfoldBloom.svelte";
-import { yuruyurauRotationalRasterScale } from "./yuruyurauRotationalField";
+import {
+  YURUYURAU_ROTATIONAL_FADE_FRAGMENT_SHADER,
+  YURUYURAU_ROTATIONAL_POINT_VERTEX_SHADER,
+  YURUYURAU_ROTATIONAL_SOURCE_SIZE,
+} from "./yuruyurauRotationalField";
 
 let mounted: Record<string, unknown> | null = null;
 
@@ -15,37 +19,119 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+interface FakeDrawCall {
+  mode: number;
+  first: number;
+  count: number;
+}
+
+function createFakeWebgl2(): {
+  gl: WebGL2RenderingContext;
+  draws: FakeDrawCall[];
+  pointsMode: number;
+  trianglesMode: number;
+} {
+  const draws: FakeDrawCall[] = [];
+  const gl = {
+    VERTEX_SHADER: 0x8b31,
+    FRAGMENT_SHADER: 0x8b30,
+    COMPILE_STATUS: 0x8b81,
+    LINK_STATUS: 0x8b82,
+    ARRAY_BUFFER: 0x8892,
+    STATIC_DRAW: 0x88e4,
+    DYNAMIC_DRAW: 0x88e8,
+    FLOAT: 0x1406,
+    POINTS: 0x0000,
+    TRIANGLES: 0x0004,
+    BLEND: 0x0be2,
+    DEPTH_TEST: 0x0b71,
+    SRC_ALPHA: 0x0302,
+    ONE_MINUS_SRC_ALPHA: 0x0303,
+    COLOR_BUFFER_BIT: 0x4000,
+    drawingBufferWidth: 1,
+    drawingBufferHeight: 1,
+    createShader: vi.fn(() => ({})),
+    shaderSource: vi.fn(),
+    compileShader: vi.fn(),
+    getShaderParameter: vi.fn(() => true),
+    getShaderInfoLog: vi.fn(() => ""),
+    deleteShader: vi.fn(),
+    createProgram: vi.fn(() => ({})),
+    attachShader: vi.fn(),
+    linkProgram: vi.fn(),
+    getProgramParameter: vi.fn(() => true),
+    getProgramInfoLog: vi.fn(() => ""),
+    deleteProgram: vi.fn(),
+    getAttribLocation: vi.fn(() => 0),
+    getUniformLocation: vi.fn(() => ({})),
+    createBuffer: vi.fn(() => ({})),
+    bindBuffer: vi.fn(),
+    bufferData: vi.fn(),
+    deleteBuffer: vi.fn(),
+    useProgram: vi.fn(),
+    enableVertexAttribArray: vi.fn(),
+    vertexAttribPointer: vi.fn(),
+    uniform1f: vi.fn(),
+    uniform2f: vi.fn(),
+    uniform3f: vi.fn(),
+    drawArrays: vi.fn((mode: number, first: number, count: number) => {
+      draws.push({ mode, first, count });
+    }),
+    enable: vi.fn(),
+    disable: vi.fn(),
+    blendFunc: vi.fn(),
+    viewport: vi.fn(),
+    clearColor: vi.fn(),
+    clear: vi.fn(),
+  };
+  return {
+    gl: gl as unknown as WebGL2RenderingContext,
+    draws,
+    pointsMode: gl.POINTS,
+    trianglesMode: gl.TRIANGLES,
+  };
+}
+
 describe("Yuruyurau rotational field", () => {
-  test("rasterizes at pane resolution with a bounded memory ceiling", () => {
-    expect(yuruyurauRotationalRasterScale(1_400, 900, 1)).toBe(3.5);
-    expect(yuruyurauRotationalRasterScale(1_400, 900, 2)).toBe(4);
-    expect(yuruyurauRotationalRasterScale(200, 200, 1)).toBe(1);
+  test("keeps the source space size and rotational WebGL2 rendering", async () => {
+    const renderer = (await import("./YuruyurauRotationalField.svelte?raw"))
+      .default as string;
+
+    expect(YURUYURAU_ROTATIONAL_SOURCE_SIZE).toBe(400);
+    expect(renderer).toContain("runWebgl2Animation");
+    expect(renderer).toContain("46 / 255");
+    expect(YURUYURAU_ROTATIONAL_POINT_VERTEX_SHADER).toContain("uRotation");
+    expect(YURUYURAU_ROTATIONAL_POINT_VERTEX_SHADER).toContain(
+      "uCoverScale",
+    );
+    expect(YURUYURAU_ROTATIONAL_POINT_VERTEX_SHADER).toContain(
+      "gl_PointSize = 1.0;",
+    );
   });
 
-  test("replays the captured trace and fades it behind the chan mark", async () => {
-    const addColorStop = vi.fn();
-    const createRadialGradient = vi.fn(() => ({ addColorStop }));
-    const drawImage = vi.fn();
-    const context = {
-      beginPath: vi.fn(),
-      clearRect: vi.fn(),
-      createRadialGradient,
-      drawImage,
-      fill: vi.fn(),
-      fillRect: vi.fn(),
-      fillStyle: "",
-      globalAlpha: 1,
-      rect: vi.fn(),
-      restore: vi.fn(),
-      rotate: vi.fn(),
-      save: vi.fn(),
-      scale: vi.fn(),
-      setTransform: vi.fn(),
-      translate: vi.fn(),
-    } as unknown as CanvasRenderingContext2D;
-    vi.spyOn(HTMLCanvasElement.prototype, "getContext")
-      .mockImplementationOnce(() => null)
-      .mockReturnValue(context);
+  test("fades the center behind the chan mark with the gradient stops", async () => {
+    const renderer = (await import("./YuruyurauRotationalField.svelte?raw"))
+      .default as string;
+
+    expect(renderer).toContain("Math.min(76, centerFadeRadius * 0.55)");
+    expect(renderer).toMatch(/reducedMotion: \(\) => draw\(0\)/);
+    expect(YURUYURAU_ROTATIONAL_FADE_FRAGMENT_SHADER).toContain("0.192");
+    expect(YURUYURAU_ROTATIONAL_FADE_FRAGMENT_SHADER).toContain("0.164");
+    expect(YURUYURAU_ROTATIONAL_FADE_FRAGMENT_SHADER).toContain("0.55");
+    expect(YURUYURAU_ROTATIONAL_FADE_FRAGMENT_SHADER).toContain("clamp(");
+    expect(YURUYURAU_ROTATIONAL_FADE_FRAGMENT_SHADER).toContain(
+      "uFadeInnerRadius",
+    );
+    expect(YURUYURAU_ROTATIONAL_FADE_FRAGMENT_SHADER).toContain(
+      "uFadeOuterRadius",
+    );
+  });
+
+  test("replays the captured trace once per rotation plus one fade pass", async () => {
+    const { gl, draws, pointsMode, trianglesMode } = createFakeWebgl2();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      gl,
+    );
     Object.defineProperty(document, "hidden", {
       configurable: true,
       value: false,
@@ -58,23 +144,17 @@ describe("Yuruyurau rotational field", () => {
     mounted = mount(FourteenfoldBloom, { target });
     await tick();
 
-    expect(drawImage).toHaveBeenCalledTimes(14);
-    expect(createRadialGradient).toHaveBeenCalledWith(
-      0.5,
-      0.5,
-      76,
-      0.5,
-      0.5,
-      140,
+    const pointDraws = draws.filter((draw) => draw.mode === pointsMode);
+    expect(pointDraws).toHaveLength(14);
+    for (const draw of pointDraws) {
+      expect(draw.count).toBe(pointDraws[0].count);
+      expect(draw.count).toBeGreaterThan(0);
+    }
+
+    const fadeDraws = draws.filter(
+      (draw) => draw.mode === trianglesMode,
     );
-    expect(addColorStop).toHaveBeenNthCalledWith(
-      1,
-      0,
-      "rgba(28, 28, 30, 0.96)",
-    );
-    expect(addColorStop).toHaveBeenLastCalledWith(
-      1,
-      "rgba(28, 28, 30, 0)",
-    );
+    expect(fadeDraws).toHaveLength(1);
+    expect(fadeDraws[0]).toMatchObject({ first: 0, count: 3 });
   });
 });
