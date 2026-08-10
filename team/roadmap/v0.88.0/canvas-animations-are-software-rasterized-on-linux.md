@@ -34,6 +34,53 @@ Overlapping points accumulate opacity where a single path fill painted each pixe
 - Shaders are valid rather than assumed valid. Met: validated with `glslangValidator`.
 - The suite, `svelte-check` and the vite build pass. Met at each step (3655 tests at the first commit, 3658 at the second).
 - **Not met**: the point cloud host is unverified against a real GPU. The build host for `c89c8bdc` had no browser, so Lorenz Constellation, Rippled Duet, Striated Current and Twin Veil Dance are correct by construction and by suite, but their frame rate is unmeasured. This is the one open thread, and it is the same measurement the vortex and blooms already passed.
+- **The bar the siblings passed is weaker than it reads.** See below: "through ANGLE" is satisfied by a pure-software stack, so the vortex and bloom row rests on a string that does not distinguish hardware from SwiftShader.
+
+## The instrument, and what "through ANGLE" does not mean
+
+`scripts/e2e/animation-fps.py` measures all seven animations plus an empty-page
+baseline in one pass. It was written because neither reading this item records
+has an instrument behind it: the sibling number cannot be re-run by anyone, and
+measuring the point cloud the same way would have produced a second anecdote
+beside the first rather than a verification.
+
+The acceptance above records the siblings as met "on AMD Radeon 780M through
+ANGLE". **ANGLE is a translation layer, and it sits equally happily on a real
+GPU or on a software rasterizer.** Running the instrument in headless Chrome in
+a container produced:
+
+```
+ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)
+```
+
+That string satisfies the phrase "through ANGLE" and is software end to end.
+This is not a claim that the sibling reading was software-rasterized — "AMD
+Radeon 780M" is a hardware claim and there is no reason to doubt it. It is a
+claim that **the recorded evidence cannot distinguish the two**, and that a
+reader taking "through ANGLE" as evidence of acceleration is reading something
+that is not there.
+
+So the instrument prints the full renderer string, and refuses (exit 2) when it
+matches a software rasterizer, rather than leaving the distinction to whoever
+writes the acceptance line afterwards. That refusal is verified rather than
+designed: it was tripped on the SwiftShader string above. A second, independent
+guard would also have caught it, because the empty-page baseline measured
+35.3 fps against a 55 fps bar.
+
+Two further guards matter because their failure modes are silent.
+`runGpuAnimation` returns early when the renderer cannot be created, so a **dead
+animation costs nothing per frame and reads as a perfect frame rate** — the
+single most important failure mode would otherwise present itself as the best
+possible result. The harness catches the component's own `[chan] ... WebGL
+renderer unavailable` warning and checks the drawing buffer. In the same run
+that guard correctly stayed silent: all seven components mounted and drew.
+
+**The consequence is larger than the residual.** Because the run measures all
+seven arms against one baseline on one clock, executing it on real hardware does
+not only close the point cloud's thread — it converts the vortex and both blooms
+from a recorded phrase into a measurement taken by an instrument that reports
+what it ran on. One run settles four unverified animations and re-establishes
+three under-evidenced ones together.
 
 ## Rough size
 
