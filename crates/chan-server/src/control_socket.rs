@@ -745,6 +745,61 @@ pub fn start_stable(socket_path: PathBuf, ctx: ControlSocketCtx) -> std::io::Res
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test seam for [`take_stable_lock`]: invoked after each failed lock
+    /// attempt, so a test can make a transient holder's release
+    /// **observable** -- dropped exactly when the takeover is known to be
+    /// retrying -- instead of **timed**, sleeping a constant and hoping
+    /// the retry budget outlives it. A timed holder makes the outcome a
+    /// scheduling race between two threads, which is precisely what made
+    /// `stable_bind_absorbs_a_transient_lock_holder` load-sensitive.
+    ///
+    /// Thread-local rather than a global: `take_stable_lock` retries on
+    /// its caller's thread, so a thread-local reaches the right retry
+    /// loop while staying invisible to the other 31 threads of a parallel
+    /// test binary. A process-global hook would be the same
+    /// shared-mutable-state hazard that makes `std::env::set_var` unsafe.
+    static LOCK_ATTEMPT_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `hook` after every failed attempt in this thread's next
+/// `take_stable_lock`. Returns a guard that clears it on drop, so a
+/// panicking test cannot leak the hook into whatever runs next on this
+/// thread.
+#[cfg(test)]
+pub(crate) fn on_lock_attempt_failed(hook: Box<dyn FnMut()>) -> LockAttemptHookGuard {
+    LOCK_ATTEMPT_HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+    LockAttemptHookGuard
+}
+
+#[cfg(test)]
+pub(crate) struct LockAttemptHookGuard;
+
+#[cfg(test)]
+impl Drop for LockAttemptHookGuard {
+    fn drop(&mut self) {
+        LOCK_ATTEMPT_HOOK.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+fn notify_lock_attempt_failed() {
+    // Take the hook out before calling it so a hook that itself reaches
+    // take_stable_lock cannot re-enter this borrow.
+    let hook = LOCK_ATTEMPT_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(mut hook) = hook {
+        hook();
+        LOCK_ATTEMPT_HOOK.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(hook);
+            }
+        });
+    }
+}
+
 /// Own the takeover right for a stable socket path, or fail `AddrInUse` when
 /// a live process holds it. The flock releases on process death, so a crashed
 /// owner never wedges its successor.
@@ -774,7 +829,11 @@ pub(crate) fn take_stable_lock(socket_path: &Path) -> std::io::Result<std::fs::F
     for _ in 1..ATTEMPTS {
         match lock.try_lock() {
             Ok(()) => return Ok(lock),
-            Err(_) => std::thread::sleep(RETRY_DELAY),
+            Err(_) => {
+                #[cfg(test)]
+                notify_lock_attempt_failed();
+                std::thread::sleep(RETRY_DELAY)
+            }
         }
     }
     match lock.try_lock() {
@@ -4932,15 +4991,31 @@ mod tests {
         holder
             .try_lock()
             .expect("holder flocks before the takeover");
-        let released = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(25));
-            drop(holder);
-        });
+
+        // Release the holder the moment the takeover is OBSERVED to be
+        // retrying, rather than after a fixed 25ms and hoping the retry
+        // budget outlives the sleep. The old form raced a 25ms holder
+        // against a ~100ms budget (5 attempts x 25ms) decided entirely by
+        // how promptly the machine scheduled two threads, so it went red
+        // under load with nothing wrong in the takeover path.
+        //
+        // `Option::take` drops the File -- and so releases the flock --
+        // on the FIRST failed attempt and never again, so the sequence is
+        // fixed on any host: attempt 1 fails, holder vanishes, a later
+        // attempt inside the same budget succeeds.
+        //
+        // This still fails when a takeover does NOT absorb a holder that
+        // vanishes inside the budget: drop the retry loop and the hook
+        // never fires, the holder never releases, and the bind returns
+        // AddrInUse.
+        let mut holder = Some(holder);
+        let _hook = on_lock_attempt_failed(Box::new(move || {
+            holder.take();
+        }));
 
         let cell = Arc::new(RwLock::new(None));
         let _handle = start_stable(path.clone(), test_ctx(cell, ControlTenant::Workspace))
             .expect("takeover absorbs a holder that vanishes within the retry budget");
-        released.join().expect("holder thread");
         assert!(matches!(
             identify_round_trip(&path).await,
             ControlResponse::Ok { .. }

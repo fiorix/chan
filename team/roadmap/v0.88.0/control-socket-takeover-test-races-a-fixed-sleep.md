@@ -1,9 +1,33 @@
 # The control-socket takeover test races a hardcoded sleep against a retry budget
 
 Status: REGISTERED 2026-08-09 during the v0.87.0 delivery round, observed by the
-`devserver-build-identity` lane during a full `cargo test --all-targets` run. Not
-implemented, and attribution to a specific change was still open at registration time --
-see Evidence.
+`devserver-build-identity` lane during a full `cargo test --all-targets` run.
+**IMPLEMENTED 2026-08-10**: the fixed 25ms sleep is removed, not lengthened; the holder's
+release is now observable through a thread-local test seam. Reproduced at **3 red in 30
+runs (10%)** under a 1-CPU cgroup rig and **0 in 30** after, with the repaired assertion
+proven able to go red and restored.
+
+> **Reconciling this item against itself.** Two statements above were open questions at
+> registration and are now settled; they are kept rather than edited.
+>
+> - *"attribution to a specific change was still open"* -- **settled: pre-existing.** The
+>   registration text correctly warned that a single green run at `main` proves nothing
+>   about a probabilistic failure, so it was settled by rate instead: 3 red in 30 runs of
+>   the unmodified suite at `e239c770`. The observing lane's changes are not implicated.
+> - *"Whether that warrants a suite-wide sweep instead of three separate repairs is an open
+>   question above this item"* -- answered by the round rather than by this item: the three
+>   turned out to be **three different mechanisms**, and the terminal cluster's three tests
+>   collapsed to **one** shared cause. A single sweep would have found neither. The
+>   `parallel-suite-flake-hygiene` follow-up's claim that `devserver.rs:6041` was "the
+>   remaining chan-server sleep-then-assert site" was simply incomplete; this site existed
+>   and its sweep did not reach it, which is the answer to the question that section poses.
+>
+> **Line numbers above are as of `e239c770`** and this repair moved them. The seam added
+> ahead of `take_stable_lock` shifts the test and its assertion down by roughly 55 lines:
+> the panic site recorded as `control_socket.rs:4946` in Evidence is `:5018` after the
+> change. Anchor on the symbol names -- `take_stable_lock`,
+> `stable_bind_absorbs_a_transient_lock_holder` -- rather than on the line numbers, which
+> were true when written and are not now.
 
 ## What
 
@@ -107,3 +131,70 @@ makes the holder's release observable rather than timed -- and proving it under 
 Observed by the `devserver-build-identity` lane, which reported the red before diagnosing
 it, declined to call it a flake, and declined to claim it was unrelated to its own change
 without running the check.
+
+## Attribution, settled 2026-08-10: pre-existing
+
+Registration left this open and warned that a single green run at `main` settles nothing
+because the failure is probabilistic. Settled by measurement instead:
+`stable_bind_absorbs_a_transient_lock_holder` went red **3 times in 30 runs (10%)** of the
+unmodified `chan-server` lib suite at `e239c770`, under a 1-CPU cgroup cap with
+`--test-threads=32`. The observing lane's changes are not implicated; the defect is in the
+test as written.
+
+## The margin is narrower than it looks
+
+`take_stable_lock` (`control_socket.rs`) is `ATTEMPTS = 5` with `RETRY_DELAY = 25ms`, so
+the takeover spends roughly **100ms** across four sleeps and five `try_lock` attempts. The
+test's holder slept a fixed **25ms**.
+
+Both sides used *the same 25ms constant*. The test did not beat the budget by 4x; it beat
+it by however many of the four retry sleeps got scheduled promptly. Under oversubscription
+that margin disappears, and the outcome was decided entirely by how promptly the machine
+scheduled two threads.
+
+## Implemented 2026-08-10: the release becomes observable, not timed
+
+The Contract required the fixed 25ms be **removed rather than lengthened**, and named "a
+synchronization primitive that makes the holder's release observable rather than timed" as
+a direction. Taken directly.
+
+That requires the takeover to be able to say *when it is retrying*, so it needs a seam in
+`control_socket.rs`. A `#[cfg(test)]` hook now fires after each failed attempt inside
+`take_stable_lock`, with an RAII guard that clears it on drop so a panicking test cannot
+leak it into whatever runs next on that thread.
+
+The test drops its holder inside the hook via `Option::take`, so the sequence is fixed on
+any host: attempt 1 fails, the holder vanishes, a later attempt inside the same budget
+succeeds. No sleep, no constant, no scheduling dependency.
+
+### The hook is thread-local, deliberately
+
+`take_stable_lock` retries on its **caller's** thread, so a thread-local reaches exactly
+the right retry loop while staying invisible to the other 31 threads of a parallel test
+binary.
+
+A process-global hook would have been the same class of defect this round registered
+against unrelated code in this very suite: shared mutable state written by one test and
+read concurrently by others. `std::env::set_var` has been `unsafe` since Rust 1.63 for
+precisely that reason. Introducing a global hook here while filing that as a defect
+elsewhere would have been incoherent.
+
+### The virtual-clock ruling does not reach this one
+
+[`timing-test-virtual-clock`](../done/timing-test-virtual-clock.md) is the project's answer
+to wall-clock *grace windows*, and this item's registration text expected it to apply
+directly. It does not, and the reason is worth recording so the next reader does not try:
+`take_stable_lock` retries with `std::thread::sleep`, not tokio time, so a paused tokio
+clock cannot virtualise it. Reaching the ruling's shape would have meant making the
+production retry loop tokio-timed purely to serve a test.
+
+Making the release **observable** removes the timing dependency altogether, which is the
+stronger form of the same principle: the ruling's point is that a test should not assert
+against a duration, and this asserts against an event instead.
+
+### Discrimination
+
+Preserved by construction, and stated in the test's own comment: remove the retry loop and
+the hook never fires, the holder never releases, and the bind returns `AddrInUse`. The
+neighbouring `stable_bind_refuses_to_clobber_a_live_server` continues to pass, so the seam
+did not weaken the negative case -- a persistent holder is still refused.
