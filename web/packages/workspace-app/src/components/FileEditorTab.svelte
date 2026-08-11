@@ -39,6 +39,7 @@
     X,
   } from "lucide-svelte";
   import { chordFor, currentOS } from "../state/shortcuts";
+  import { builtInChordSuperseded } from "../state/keymapOverrides.svelte";
   import FindBar from "./FindBar.svelte";
   import Inspector from "./Inspector.svelte";
   import OutlineBody, { type Heading } from "./OutlineBody.svelte";
@@ -440,6 +441,18 @@
     if (!slideShortcutModifierPressed(e)) return;
     if (shouldIgnoreSlideShortcutTarget(e.target)) return;
 
+    // The capture claim covers ONLY the built-in chord shape, and only
+    // while that built-in is still in force: a user assignment for the
+    // deck action supersedes it, and the assigned chord dispatches
+    // through App.svelte's override path into the catalog command and
+    // the mountedEditors seam. Never match by resolved chord here -
+    // that would claim whatever the user assigned in the capture phase,
+    // ahead of CodeMirror, where conflict detection cannot see a single
+    // CM6 binding (assigning Shift+Tab would silently delete list
+    // outdent on every deck).
+    const slideAction = e.shiftKey ? "app.slides.present" : "app.slides.preview";
+    if (builtInChordSuperseded(slideAction)) return;
+
     e.preventDefault();
     e.stopPropagation();
     if (e.shiftKey) playSlides();
@@ -753,13 +766,21 @@
   const bodyCanCopy = $derived(bodyHasSelection || bodyImageMarkdown !== null);
 
   // Expose this editor's imperative surface (code-block fold, live
-  // selection) to the command catalog, keyed by tab id. Every mounted
-  // file tab registers; the catalog reaches the focused one through
-  // activeFileTab().id. Cleared on destroy.
+  // selection, slide-deck actions) to the command catalog, keyed by tab
+  // id. Every mounted file tab registers; the catalog reaches the
+  // focused one through activeFileTab().id. Cleared on destroy. The
+  // deck actions gate on the same slidesSpec the capture handler and the
+  // Outline buttons key off, so a catalog run on a non-deck is a no-op.
   $effect(() => {
     registerEditorCommands(tab.id, {
       toggleCodeBlocks: () => doToggleCodeBlocks(),
       selectionText: () => activeEditorRef()?.selectionText() ?? "",
+      previewSlides: () => {
+        if (slidesSpec && !tab.loading) previewSlides();
+      },
+      playSlides: () => {
+        if (slidesSpec && !tab.loading) playSlides();
+      },
     });
     return () => unregisterEditorCommands(tab.id);
   });
@@ -917,6 +938,12 @@
   function chordLabel(id: string | undefined): string {
     return id ? (chordFor(id) ?? "") : "";
   }
+
+  // The Outline's slide-action buttons advertise the live chord so a
+  // rebind is reflected in the tooltip. Derived (not a plain call) so
+  // the label re-resolves when the override store changes.
+  const slidePreviewChord = $derived(chordLabel("app.slides.preview"));
+  const slidePresentChord = $derived(chordLabel("app.slides.present"));
 
   const showPageWidthMenuRow = $derived(tab.mode !== "canvas");
 
@@ -1293,6 +1320,8 @@
           onSelect={jumpTo}
           onPreview={previewSlides}
           onPlay={playSlides}
+          previewChord={slidePreviewChord}
+          playChord={slidePresentChord}
         />
       </Inspector>
     {/if}

@@ -167,6 +167,8 @@ const KEYBINDINGS_TABLE: &str = "  App
   Show Source Code (toggle rendered/source)    Cmd+E
   Bold                                         Cmd+B
   Italic                                       Cmd+I
+  Preview slide deck                           Cmd+Enter
+  Present slide deck fullscreen                Cmd+Shift+Enter
 
   Terminal
   --------

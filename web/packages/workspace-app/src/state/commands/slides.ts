@@ -7,11 +7,13 @@
 // workspace gate. See state/commands.ts for the Command shape and the
 // workspaceOnly helper.
 
-import { registerCommands, workspaceOnly } from "../commands";
+import { registerCommands, onSurface, workspaceOnly } from "../commands";
 import { api } from "../../api/client";
 import { firstSlideHeadingCaret } from "../../editor/slides";
+import { editorCommandsFor } from "../mountedEditors";
 import { noteDraftCreated, setTransientStatus } from "../store.svelte";
 import {
+  activeFileTab,
   activeTabInPane,
   issueCaretCommand,
   layout,
@@ -63,6 +65,34 @@ registerCommands([
     available: (ctx) => workspaceOnly(ctx),
     run: () => {
       void createSlidesAndOpen();
+    },
+  },
+  // The deck's two chords, rebindable. The run reaches the mounted
+  // editor through the EditorCommands seam (the actions close over
+  // FileEditorTab state); the members themselves no-op on a non-deck
+  // buffer, mirroring the capture handler's slidesSpec gate. Chorded
+  // dispatch routes through App.svelte's override path; the built-in
+  // defaults stay claimed by FileEditorTab's capture handler.
+  {
+    id: "app.slides.preview",
+    title: "Preview slide deck",
+    category: "Editor",
+    keywords: ["slides", "preview", "deck", "presentation"],
+    available: (ctx) => onSurface(ctx, "file"),
+    run: () => {
+      const tab = activeFileTab();
+      if (tab) editorCommandsFor(tab.id)?.previewSlides();
+    },
+  },
+  {
+    id: "app.slides.present",
+    title: "Present slide deck fullscreen",
+    category: "Editor",
+    keywords: ["slides", "present", "deck", "fullscreen", "play"],
+    available: (ctx) => onSurface(ctx, "file"),
+    run: () => {
+      const tab = activeFileTab();
+      if (tab) editorCommandsFor(tab.id)?.playSlides();
     },
   },
 ]);

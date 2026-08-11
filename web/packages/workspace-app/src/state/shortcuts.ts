@@ -58,9 +58,12 @@ export type Shortcut = {
   /// shows the save-page dialog; chan can't preventDefault that on
   /// every browser reliably).
   web?: Chord;
-  /// Chord chan-desktop's init script binds. Omit when the action
-  /// has no native-specific chord (i.e. native and web share the
-  /// same `web` chord).
+  /// Chord chan-desktop's init script binds. ALWAYS set this, repeating
+  /// the `web` chord when both surfaces share one: `osChord` returns
+  /// undefined for a platform whose field is absent, so a `web`-only
+  /// entry silently drops its row from the native help table and
+  /// resolves to null in `chordFor` on the desktop. Omit only when the
+  /// action genuinely has no native chord.
   native?: Chord;
   group: ShortcutGroup;
   /// Optional trailing parenthetical for the table (e.g. "browser
@@ -375,6 +378,31 @@ export const SHORTCUTS: readonly Shortcut[] = [
     label: "Italic",
     native: "Mod+I",
     web: "Mod+I",
+    group: "Editor",
+  },
+  // Slide deck preview / present. Dispatched by FileEditorTab's
+  // `onSlideShortcutKeydown` (a capture-phase handler on the wysiwyg and
+  // source editor hosts), NOT by the App keymap; these entries exist for
+  // cheatsheet / launcher / Settings-grid discoverability and for
+  // conflict detection, on the Bold / Italic precedent above. The same
+  // chord on every platform, so no `osChord` divergence. The capture
+  // claim covers only this built-in shape and goes inert once the action
+  // is rebound (`builtInChordSuperseded`); a user-assigned chord
+  // dispatches through the App-level override path into the
+  // mountedEditors seam. Both fields are set even though they match -
+  // `osChord` drops a row whose platform field is absent.
+  {
+    id: "app.slides.preview",
+    label: "Preview slide deck",
+    native: "Mod+Enter",
+    web: "Mod+Enter",
+    group: "Editor",
+  },
+  {
+    id: "app.slides.present",
+    label: "Present slide deck fullscreen",
+    native: "Mod+Shift+Enter",
+    web: "Mod+Shift+Enter",
     group: "Editor",
   },
   // Terminal copy / paste. The ONE family whose chord can't use the `Mod`

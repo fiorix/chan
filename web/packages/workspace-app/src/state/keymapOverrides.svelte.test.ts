@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { chordFor, shouldEscapeTerminal } from "./shortcuts";
 import type { Command } from "./commands";
+import { keymapConflicts } from "./keymapAssign";
 import {
   assignOverride,
   builtInChordSuperseded,
@@ -222,5 +223,68 @@ describe("per-OS slot resolution (the assignment grid)", () => {
     // Off-mac divergence surfaces in the raw chord (Mod is still Mod here).
     expect(linux.get("app.window.reload")).toBe("Mod+Shift+R");
     expect(linux.get("app.launcher.toggle")).toBe("Ctrl+Alt+K");
+  });
+});
+
+describe("slide deck chords (registry + override layer)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("navigator", { userAgent: "Mac OS X" });
+    tauri(false);
+  });
+  afterEach(() => {
+    hydrateOverrides(null);
+    registerOverridePersist(null);
+    tauri(false);
+    vi.unstubAllGlobals();
+  });
+
+  test("both deck actions resolve their built-in chord on every slot", () => {
+    for (const slot of ["web", "macos", "linux", "windows"] as const) {
+      const entries = new Map(
+        resolvedKeymapEntriesForSlot([], slot).map((e) => [e.id, e.chord]),
+      );
+      // Same chord on every platform: no osChord divergence for decks.
+      expect(entries.get("app.slides.preview")).toBe("Mod+Enter");
+      expect(entries.get("app.slides.present")).toBe("Mod+Shift+Enter");
+    }
+  });
+
+  test("assigning Mod+Enter to another command conflicts, naming deck preview", () => {
+    // Before the deck actions were registered this returned empty: no
+    // registry entry held Enter, so the assign dialog said nothing.
+    const conflicts = keymapConflicts(
+      "Mod+Enter",
+      resolvedKeymapEntriesForSlot([], "web"),
+      "app.search.toggle",
+    );
+    expect(conflicts.map((c) => c.id)).toEqual(["app.slides.preview"]);
+  });
+
+  test("Shift+Tab is assignable to a deck action with no reported conflict", () => {
+    // The containment acceptance line's premise: CodeMirror owns Shift-Tab
+    // (list outdent) and the registry does not, so the dialog accepts it.
+    // What keeps outdent alive on a deck is pinned in
+    // editor/wysiwygModEnter.test.ts, not here.
+    const conflicts = keymapConflicts(
+      "Shift+Tab",
+      resolvedKeymapEntriesForSlot([], "web"),
+      "app.slides.preview",
+    );
+    expect(conflicts).toEqual([]);
+  });
+
+  test("a rebind supersedes the built-in deck chord and reverse-resolves the new one", () => {
+    expect(builtInChordSuperseded("app.slides.preview")).toBe(false);
+    assignOverride("app.slides.preview", "Mod+Alt+P");
+    // The capture handler keys off this to go inert...
+    expect(builtInChordSuperseded("app.slides.preview")).toBe(true);
+    // ...and the App-level override path resolves the assigned chord.
+    expect(commandIdForChord("Mod+Alt+P", [cmd("app.slides.preview")])).toBe(
+      "app.slides.preview",
+    );
+    // The superseded built-in reverse-resolves to nothing.
+    expect(commandIdForChord("Mod+Enter", [cmd("app.slides.preview")])).toBeUndefined();
+    // The sibling action's built-in is untouched.
+    expect(builtInChordSuperseded("app.slides.present")).toBe(false);
   });
 });

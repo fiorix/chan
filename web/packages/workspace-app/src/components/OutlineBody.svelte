@@ -30,6 +30,8 @@
     onSelect,
     onPreview,
     onPlay,
+    previewChord = "",
+    playChord = "",
   }: {
     content: string;
     /// 0-indexed source line the caret sits on. When provided, the
@@ -40,6 +42,11 @@
     onSelect: (h: Heading) => void;
     onPreview?: () => void;
     onPlay?: () => void;
+    /// Live chord labels for the slide-action button tooltips, resolved
+    /// by the caller through `chordFor` so a user rebind is reflected.
+    /// Empty when the action has no chord on this surface.
+    previewChord?: string;
+    playChord?: string;
   } = $props();
 
   const headings = $derived(parseHeadings(content));
@@ -120,7 +127,7 @@
     <button
       type="button"
       class="slide-action"
-      title={`Preview slides (${slidesSpec.aspectRatio})`}
+      title={`Preview slides (${slidesSpec.aspectRatio}${previewChord ? `, ${previewChord}` : ""})`}
       onclick={() => onPreview?.()}
     >
       <Eye size={14} strokeWidth={1.8} aria-hidden="true" />
@@ -129,7 +136,7 @@
     <button
       type="button"
       class="slide-action"
-      title={`Present slides (${slidesSpec.aspectRatio})`}
+      title={`Present slides (${slidesSpec.aspectRatio}${playChord ? `, ${playChord}` : ""})`}
       onclick={() => onPlay?.()}
     >
       <Play size={14} strokeWidth={1.8} aria-hidden="true" />

@@ -2,8 +2,12 @@
 // keyed by tab id. A CodeMirror editor owns state the tab model cannot
 // express: which fenced code blocks are folded, and the live selection
 // (which lives in EditorState and so survives the view losing focus, for
-// example when the launcher takes it). The command catalog reaches the
-// active editor's view through here instead of mutating tab state.
+// example when the launcher takes it). The slide-deck actions live here
+// too: `previewSlides` / `playSlides` close over FileEditorTab component
+// state (the host element, the editor theme, the tab buffer), so the
+// catalog cannot reach them as pure functions either. The command
+// catalog reaches the active editor's view through here instead of
+// mutating tab state.
 //
 // Every file tab is kept mounted (Pane.svelte keep-alive), so each
 // FileEditorTab registers under its own tab id on mount and clears on
@@ -18,6 +22,12 @@ export type EditorCommands = {
   /// selection is collapsed. Read from EditorState, so it is still
   /// present after the launcher takes focus.
   selectionText: () => string;
+  /// Open the slide deck windowed (the Outline Preview button's
+  /// action). A no-op when the tab's buffer is not a slide deck.
+  previewSlides: () => void;
+  /// Open the slide deck fullscreen (the Outline Present button's
+  /// action). A no-op when the tab's buffer is not a slide deck.
+  playSlides: () => void;
 };
 
 const registry = new Map<string, EditorCommands>();
