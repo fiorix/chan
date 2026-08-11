@@ -8,6 +8,7 @@
   import type { CommitFn } from "./commit";
   import SettingField from "./SettingField.svelte";
   import PillRadio from "./PillRadio.svelte";
+  import TextField from "./TextField.svelte";
 
   let { prefs, commit }: { prefs: Preferences; commit: CommitFn } = $props();
 
@@ -17,17 +18,12 @@
     { value: "aggressive", label: "Aggressive" },
   ] as const;
 
-  // Controlled field (value from the buffer); the debounce reads the
-  // live input value so a per-keystroke PATCH is avoided.
-  let attTimer: ReturnType<typeof setTimeout> | null = null;
-  function onAttInput(raw: string): void {
-    if (attTimer) clearTimeout(attTimer);
+  // The path is workspace-relative and rejected empty server-side, so a
+  // cleared field is left uncommitted rather than PATCHed as empty.
+  function commitAttachments(raw: string): void {
     const value = raw.trim();
-    attTimer = setTimeout(() => {
-      attTimer = null;
-      if (!value) return; // empty is rejected server-side; keep the stored path
-      commit((p) => ({ ...p, attachments_dir: value }));
-    }, 400);
+    if (!value) return;
+    commit((p) => ({ ...p, attachments_dir: value }));
   }
 </script>
 
@@ -49,12 +45,10 @@
   label="Attachments folder"
   hint="Workspace-relative folder where pasted and uploaded images are saved."
 >
-  <input
-    type="text"
+  <TextField
     value={prefs.attachments_dir}
-    oninput={(e) => onAttInput(e.currentTarget.value)}
     placeholder="attachments"
-    spellcheck={false}
-    aria-label="Attachments folder"
+    ariaLabel="Attachments folder"
+    oncommit={commitAttachments}
   />
 </SettingField>

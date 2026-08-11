@@ -6,6 +6,7 @@ import overlaySource from "./SettingsOverlay.svelte?raw";
 import appearanceSource from "./settings/AppearanceSection.svelte?raw";
 import terminalSource from "./settings/TerminalSection.svelte?raw";
 import editorSource from "./settings/EditorSection.svelte?raw";
+import numberFieldSource from "./settings/NumberField.svelte?raw";
 
 describe("SettingsOverlay config writes (source pins)", () => {
   test("the default write path routes through updateGlobalConfigSerial", () => {
@@ -38,11 +39,14 @@ describe("SettingsOverlay config writes (source pins)", () => {
   });
 
   test("appearance size controls clamp and commit on blur or Enter", () => {
+    // The clamp-and-commit mechanics live in the NumberField primitive;
+    // the sections hand it their bounds and their commit, including the
+    // editor's nullable use-the-theme path.
     expect(terminalSource).toMatch(/font_size: next/);
-    expect(terminalSource).toMatch(/onblur=\{commitFontSize\}/);
     expect(editorSource).toMatch(/editor_font_size: next/);
-    expect(editorSource).toMatch(/editor_font_size: null/);
-    expect(editorSource).toMatch(/onblur=\{commitFontSize\}/);
+    expect(editorSource).toMatch(/commitFontSize\(null\)/);
+    expect(numberFieldSource).toMatch(/onblur=\{commit\}/);
+    expect(numberFieldSource).toMatch(/onkeydown=\{onKeydown\}/);
   });
 
   test("secret masking is display-only in terminal settings", () => {

@@ -403,11 +403,28 @@ export function effectiveHybridSurfaceTheme(kind: HybridSurfaceKind): SurfaceThe
   return hybridSurfaceThemes[kind] ?? ui.theme;
 }
 
+/// The one merge-versus-delete for a surface's body-theme override:
+/// light/dark sets the key, anything else (the Settings control's
+/// "Inherit") drops it so the surface follows the global theme again.
+/// The store setters apply it to the live state and the Settings
+/// buffer applies it to its optimistic slice, so both persist the
+/// same shape.
+export function withHybridSurfaceTheme(
+  current: HybridSurfaceThemes | undefined,
+  kind: HybridSurfaceKind,
+  choice: string,
+): HybridSurfaceThemes {
+  const next: HybridSurfaceThemes = { ...(current ?? {}) };
+  if (choice === "light" || choice === "dark") next[kind] = choice;
+  else delete next[kind];
+  return next;
+}
+
 export function setHybridSurfaceTheme(
   kind: HybridSurfaceKind,
   choice: SurfaceThemeChoice,
 ): void {
-  hybridSurfaceThemes[kind] = choice;
+  applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, choice));
   void persistHybridSurfaceThemes();
 }
 
@@ -415,7 +432,7 @@ export function setHybridSurfaceTheme(
 /// `theme`. The settings surface's per-surface control offers this as
 /// "Inherit".
 export function clearHybridSurfaceTheme(kind: HybridSurfaceKind): void {
-  delete hybridSurfaceThemes[kind];
+  applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, "inherit"));
   void persistHybridSurfaceThemes();
 }
 

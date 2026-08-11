@@ -23,6 +23,7 @@
     disabled = false,
     ariaLabel,
     oncommit,
+    ...rest
   }: {
     value: number | null;
     min: number;
@@ -34,7 +35,7 @@
     disabled?: boolean;
     ariaLabel: string;
     oncommit: (value: number | null, clampedTo: "min" | "max" | null) => void;
-  } = $props();
+  } & Record<string, unknown> = $props();
 
   // Static placeholder seed; the effect reseeds from `value` on mount
   // and on every external change.
@@ -90,4 +91,5 @@
   onblur={commit}
   onkeydown={onKeydown}
   aria-label={ariaLabel}
+  {...rest}
 />

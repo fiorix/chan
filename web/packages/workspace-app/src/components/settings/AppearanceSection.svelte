@@ -10,7 +10,6 @@
     GraphColorPrefs,
     GraphPalette,
     HybridSurfaceKind,
-    HybridSurfaceThemes,
     LineSpacing,
     Preferences,
     SurfaceThemeChoice,
@@ -23,6 +22,7 @@
     setHybridSurfaceTheme,
     setThemeChoice,
     ui,
+    withHybridSurfaceTheme,
   } from "../../state/store.svelte";
   import type { CommitFn } from "./commit";
   import SettingField from "./SettingField.svelte";
@@ -86,25 +86,16 @@
     { kind: "dashboard", label: "Dashboard body theme" },
   ];
 
-  function nextSurfaceThemes(
-    current: HybridSurfaceThemes | undefined,
-    kind: HybridSurfaceKind,
-    choice: string,
-  ): HybridSurfaceThemes {
-    const next: HybridSurfaceThemes = { ...(current ?? {}) };
-    if (choice === "light" || choice === "dark") next[kind] = choice;
-    else delete next[kind];
-    return next;
-  }
-
   // Reuse the store setters (they apply the skin live and persist through
   // the same serial config chain), mirroring how the app theme reuses
   // setThemeChoice; the optimistic buffer slice keeps the control in sync.
+  // Both sides merge-versus-delete through the store's
+  // withHybridSurfaceTheme, so the buffer and the persist agree.
   function selectSurfaceTheme(kind: HybridSurfaceKind, choice: string): void {
     commit(
       (p) => ({
         ...p,
-        hybrid_surface_themes: nextSurfaceThemes(
+        hybrid_surface_themes: withHybridSurfaceTheme(
           p.hybrid_surface_themes,
           kind,
           choice,

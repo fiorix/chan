@@ -13,9 +13,10 @@
   } from "../../state/pageWidth.svelte";
   import SettingField from "./SettingField.svelte";
   import PillToggle from "./PillToggle.svelte";
+  import SliderField from "./SliderField.svelte";
+  import NumberField from "./NumberField.svelte";
   import {
     applyEditorFontSize,
-    clampEditorFontSize,
     EDITOR_FONT_SIZE_MAX,
     EDITOR_FONT_SIZE_MIN,
     resolvedEditorThemeBodySizePx,
@@ -28,60 +29,22 @@
     return Math.round(clamped * 100);
   }
 
-  // Local slider position so the thumb tracks the drag; the effect
-  // seeds it from the buffer and resyncs when the stored ratio changes.
-  let widthPct = $state(80);
-  $effect(() => {
-    widthPct = ratioToPct(prefs.page_width_ratio);
-  });
-  let widthTimer: ReturnType<typeof setTimeout> | null = null;
-  function onWidthInput(): void {
-    if (widthTimer) clearTimeout(widthTimer);
-    const pct = widthPct;
-    widthTimer = setTimeout(() => {
-      widthTimer = null;
-      commit((p) => ({ ...p, page_width_ratio: pct / 100 }));
-    }, 200);
-  }
-
-  let fontSizeText = $state("");
+  // The placeholder previews the active theme's body size, so it
+  // follows a theme switch even though the field stays empty.
   let themeSizePlaceholder = $state("16 px");
   $effect(() => {
     void prefs.editor_theme;
-    fontSizeText =
-      prefs.editor_font_size === null || prefs.editor_font_size === undefined
-        ? ""
-        : String(clampEditorFontSize(prefs.editor_font_size));
     const themeSize = Math.round(resolvedEditorThemeBodySizePx() * 100) / 100;
     themeSizePlaceholder = `${themeSize} px`;
   });
 
-  function commitFontSize(): void {
-    const trimmed = fontSizeText.trim();
-    if (trimmed === "") {
-      useThemeFontSize();
-      return;
-    }
-    const parsed = Number(trimmed);
-    const next = clampEditorFontSize(Number.isFinite(parsed) ? parsed : 16);
-    fontSizeText = String(next);
+  /// NumberField commits a clamped size, or null when the field was
+  /// cleared ("use the theme"). The side effect applies the size live;
+  /// the commit persists it, and is skipped when nothing changed.
+  function commitFontSize(next: number | null): void {
     applyEditorFontSize(next);
-    if (prefs.editor_font_size === next) return;
+    if ((prefs.editor_font_size ?? null) === next) return;
     commit((p) => ({ ...p, editor_font_size: next }));
-  }
-
-  function useThemeFontSize(): void {
-    fontSizeText = "";
-    applyEditorFontSize(null);
-    if (prefs.editor_font_size === null || prefs.editor_font_size === undefined) return;
-    commit((p) => ({ ...p, editor_font_size: null }));
-  }
-
-  function onFontSizeKeydown(event: KeyboardEvent & { currentTarget: HTMLInputElement }): void {
-    if (event.key !== "Enter") return;
-    event.preventDefault();
-    commitFontSize();
-    event.currentTarget.blur();
   }
 </script>
 
@@ -89,20 +52,23 @@
   label="Editor font size"
   hint="Absolute body size for WYSIWYG, source, document, and slide surfaces. Leave empty to use the active theme."
 >
-  <input
+  <NumberField
     class="font-size"
-    type="number"
+    value={prefs.editor_font_size ?? null}
     min={EDITOR_FONT_SIZE_MIN}
     max={EDITOR_FONT_SIZE_MAX}
-    step="1"
-    value={fontSizeText}
+    nullable
+    invalidFallback={16}
     placeholder={themeSizePlaceholder}
-    oninput={(event) => (fontSizeText = event.currentTarget.value)}
-    onblur={commitFontSize}
-    onkeydown={onFontSizeKeydown}
-    aria-label="Editor font size"
+    ariaLabel="Editor font size"
+    oncommit={(next) => commitFontSize(next)}
   />
-  <button type="button" class="use-theme" onclick={useThemeFontSize}>Use theme</button>
+  <button
+    type="button"
+    class="use-theme"
+    onclick={() => commitFontSize(null)}
+    >Use theme</button
+  >
 </SettingField>
 
 <SettingField
@@ -136,16 +102,15 @@
   label="Editor page width"
   hint="Cap the editor text column as a share of the window width. 100% removes the cap."
 >
-  <input
-    type="range"
+  <SliderField
+    value={ratioToPct(prefs.page_width_ratio)}
     min={PAGE_WIDTH_MIN_PCT}
     max={PAGE_WIDTH_MAX_PCT}
     step={PAGE_WIDTH_STEP_PCT}
-    bind:value={widthPct}
-    oninput={onWidthInput}
-    aria-label="Editor page width percent"
+    format={(v) => `${v}%`}
+    ariaLabel="Editor page width percent"
+    oncommit={(pct) => commit((p) => ({ ...p, page_width_ratio: pct / 100 }))}
   />
-  <span class="value">{widthPct}%</span>
 </SettingField>
 
 <SettingField
@@ -161,13 +126,9 @@
 </SettingField>
 
 <style>
-  .value {
-    color: var(--text-secondary);
-    font-size: 13px;
-    min-width: 3.5em;
-    text-align: right;
-  }
-  input.font-size {
+  /* The number input lives inside NumberField now, so the width
+     reaches it through :global (same trick SettingField uses). */
+  :global(input.font-size) {
     width: 7em;
     min-width: 7em;
   }

@@ -8,7 +8,6 @@
   import {
     SCROLLBACK_MB_MIN,
     SCROLLBACK_MB_MAX,
-    SCROLLBACK_MB_DEFAULT,
     clampScrollbackMb,
   } from "../../terminal/scrollback";
   import {
@@ -18,6 +17,10 @@
   import type { CommitFn } from "./commit";
   import SettingField from "./SettingField.svelte";
   import PillToggle from "./PillToggle.svelte";
+  import SliderField from "./SliderField.svelte";
+  import TextField from "./TextField.svelte";
+  import NumberField from "./NumberField.svelte";
+  import ChipList from "./ChipList.svelte";
 
   let { prefs, commit }: { prefs: Preferences; commit: CommitFn } = $props();
 
@@ -32,65 +35,6 @@
   );
 
   const SCROLLBACK_STEP = 10;
-
-  // Local slider position so the thumb tracks the drag; the effect
-  // seeds it from the buffer and resyncs when the stored value changes.
-  let scrollback = $state(SCROLLBACK_MB_DEFAULT);
-  $effect(() => {
-    scrollback = clampScrollbackMb(prefs.terminal.scrollback_mb);
-  });
-  let scrollbackTimer: ReturnType<typeof setTimeout> | null = null;
-  function onScrollbackInput(): void {
-    if (scrollbackTimer) clearTimeout(scrollbackTimer);
-    const mb = scrollback;
-    scrollbackTimer = setTimeout(() => {
-      scrollbackTimer = null;
-      commit((p) => ({ ...p, terminal: { ...p.terminal, scrollback_mb: mb } }));
-    }, 200);
-  }
-
-  function clampFontSize(value: number): number {
-    return Math.min(
-      TERMINAL_FONT_SIZE_MAX,
-      Math.max(TERMINAL_FONT_SIZE_MIN, Math.round(value)),
-    );
-  }
-
-  let fontSizeText = $state("14");
-  $effect(() => {
-    fontSizeText = String(clampFontSize(prefs.terminal.font_size ?? 14));
-  });
-
-  function commitFontSize(): void {
-    const parsed = fontSizeText.trim() === "" ? 14 : Number(fontSizeText);
-    const next = clampFontSize(Number.isFinite(parsed) ? parsed : 14);
-    fontSizeText = String(next);
-    if ((prefs.terminal.font_size ?? 14) === next) return;
-    commit((p) => ({
-      ...p,
-      terminal: { ...p.terminal, font_size: next },
-    }));
-  }
-
-  function onFontSizeKeydown(event: KeyboardEvent & { currentTarget: HTMLInputElement }): void {
-    if (event.key !== "Enter") return;
-    event.preventDefault();
-    commitFontSize();
-    event.currentTarget.blur();
-  }
-
-  // TERM is a controlled field (value from the buffer); the debounce
-  // reads the live input value so a per-keystroke PATCH is avoided
-  // while an in-flight edit is preserved (the buffer is stable between
-  // commits).
-  let termTimer: ReturnType<typeof setTimeout> | null = null;
-  function onTermInput(value: string): void {
-    if (termTimer) clearTimeout(termTimer);
-    termTimer = setTimeout(() => {
-      termTimer = null;
-      commit((p) => ({ ...p, terminal: { ...p.terminal, default_term: value } }));
-    }, 400);
-  }
 
   // Terminal font. The Source Code Pro face ships inside the SPA bundle,
   // so picking it is a plain preference write with nothing to fetch and
@@ -109,29 +53,28 @@
   label="Scrollback"
   hint="Per-terminal scrollback budget. New terminals only; existing ones keep their scrollback until they restart."
 >
-  <input
-    type="range"
+  <SliderField
+    value={clampScrollbackMb(prefs.terminal.scrollback_mb)}
     min={SCROLLBACK_MB_MIN}
     max={SCROLLBACK_MB_MAX}
     step={SCROLLBACK_STEP}
-    bind:value={scrollback}
-    oninput={onScrollbackInput}
-    aria-label="Terminal scrollback megabytes"
+    format={(v) => `${v} MB`}
+    ariaLabel="Terminal scrollback megabytes"
+    oncommit={(mb) =>
+      commit((p) => ({ ...p, terminal: { ...p.terminal, scrollback_mb: mb } }))}
   />
-  <span class="value">{scrollback} MB</span>
 </SettingField>
 
 <SettingField
   label="TERM"
   hint="TERM environment variable for new terminals. Blank falls back to xterm-256color."
 >
-  <input
-    type="text"
+  <TextField
     value={prefs.terminal.default_term ?? ""}
-    oninput={(e) => onTermInput(e.currentTarget.value)}
     placeholder="xterm-256color"
-    spellcheck={false}
-    aria-label="Terminal TERM value"
+    ariaLabel="Terminal TERM value"
+    oncommit={(value) =>
+      commit((p) => ({ ...p, terminal: { ...p.terminal, default_term: value } }))}
   />
 </SettingField>
 
@@ -178,11 +121,7 @@
   <span class="value">{secretMaskingOn ? "Enabled" : "Disabled"}</span>
   <details class="suffixes">
     <summary>Suffixes ({secretMaskSuffixes.length})</summary>
-    <ul class="chips readonly" aria-label="Secret mask suffixes">
-      {#each secretMaskSuffixes as suffix (suffix)}
-        <li class="chip"><span class="chip-name">{suffix}</span></li>
-      {/each}
-    </ul>
+    <ChipList names={secretMaskSuffixes} readonly ariaLabel="Secret mask suffixes" />
   </details>
 </SettingField>
 
@@ -205,17 +144,16 @@
   label="Terminal font size"
   hint="Font size for newly constructed terminal surfaces. Mounted renderers and their PTY geometry stay unchanged."
 >
-  <input
+  <NumberField
     class="font-size"
-    type="number"
+    value={prefs.terminal.font_size ?? 14}
     min={TERMINAL_FONT_SIZE_MIN}
     max={TERMINAL_FONT_SIZE_MAX}
-    step="1"
-    value={fontSizeText}
-    oninput={(event) => (fontSizeText = event.currentTarget.value)}
-    onblur={commitFontSize}
-    onkeydown={onFontSizeKeydown}
-    aria-label="Terminal font size"
+    invalidFallback={14}
+    ariaLabel="Terminal font size"
+    oncommit={(next) =>
+      next !== null &&
+      commit((p) => ({ ...p, terminal: { ...p.terminal, font_size: next } }))}
   />
   <span class="value">px</span>
 </SettingField>
@@ -227,39 +165,15 @@
     min-width: 4.5em;
     text-align: right;
   }
-  input.font-size {
+  /* The number input lives inside NumberField now, so the width
+     reaches it through :global (same trick SettingField uses). */
+  :global(input.font-size) {
     width: 6em;
     min-width: 6em;
   }
-  /* Read-only value chips, same vocabulary as the workspace settings'
-     excluded-directories baseline list. */
   .suffixes summary {
     cursor: pointer;
     color: var(--text-secondary);
     font-size: 13px;
-  }
-  .chips {
-    list-style: none;
-    margin: 6px 0 0;
-    padding: 0;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .chip {
-    display: inline-flex;
-    align-items: center;
-    background: var(--bg-card, rgba(0, 0, 0, 0.04));
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 2px 10px;
-    font-size: 13px;
-    color: var(--text);
-  }
-  .chips.readonly .chip {
-    color: var(--text-secondary);
-  }
-  .chip-name {
-    font-family: var(--chan-editor-code-family, monospace);
   }
 </style>
