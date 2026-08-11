@@ -55,6 +55,28 @@ The second-operator cell is **not** the implementer's to schedule, but it is the
 
 Small to medium. The commands are known and have been written three times; the work is making the cap verification fail closed, choosing the record format for the result, and proving the refusal path. The risk is scope creep into a general test-harness abstraction, which is not wanted: this wraps one known invocation shape.
 
+## The second-operator replay, 2026-08-11: passed, with one real gap
+
+The acceptance line that "nothing else tests" was run, and it passed. A second operator who had never built or run this rig reproduced the recorded after-rate **exactly, 0 red / 20 runs**, from the checked-in form alone.
+
+The boundary was drawn deliberately, because it decides what the cell means. The operator could read the script, its focused self-test, `scripts/e2e/README.md`, the playbook pointer and any item under `team/roadmap/`. They could not read anything in the round's coordination tree, including either implementing lane's journal, and could not ask either operator or read their terminals. **They derived the pre-repair revision from the repair sha recorded in the watch item using Git**, which is exactly the kind of ordinary work the cell is meant to require.
+
+Their instrument verification was independent of the wrapper's: they read `cpu.max` from the host path before, during and after the series, getting `100000 100000` every time, and confirmed the inside-container value reads the documented misleading `max 100000`. The cap was biting, `nr_throttled` delta 8006.
+
+They also declined to reconcile something, correctly. The absolute `nr_throttled` in their container does not match the absolute figure recorded elsewhere in this round. Different container, different absolute counter, and the **delta** is the meaningful quantity. Recording a mismatch rather than explaining it away is the right handling.
+
+### The gap the replay found, which is the point of having run it
+
+**The wrapper reports one aggregate red/green result per selected `cargo test` process. The watch item records two per-test rates**, 14/20 for the lifecycle test and 19/20 for the policy test.
+
+For the repaired arm that difference is invisible, because every process and every log is green, which is why the replay passed cleanly. For the **pre-repair** arm it is not: reproducing the two recorded per-test rates would require extracting each named test's result from the per-run logs, and that extraction is **neither documented nor implemented**.
+
+So the checked-in form can reproduce an aggregate rate but not, as checked in, the shape in which this round's most-cited result was recorded. That is a stated limitation rather than a failure of the acceptance line, which asks for *a* recorded result and got one. It is recorded here so the next timing item that wants per-test rates knows to add the extraction rather than discovering the gap under deadline.
+
+A smaller documentation gap, worth a line when someone next touches the README: the script runs under `sudo`, so its result directory is root-owned and mode 0700, and every later inspection needs `sudo`. The README says the logs remain on the host without saying that.
+
+**What the replay confirmed positively**, and this is the part that matters most: the fail-closed boundary is discoverable **without reading the source**. The README states the refusal conditions and the exit-2 contract, and the focused self-test names and exercises the missing-cap and uncapped cases. An operator learns the contract from the documentation and uses the source only for the exact refusal ordering.
+
 ## Costed by the lane that built it, 2026-08-11
 
 Registered with a cost estimate rather than without one, because the estimate is what the acceptance decision turned on. It comes from the lane that built and ran this rig during this round, which is the only party in a position to say what capturing it costs.
