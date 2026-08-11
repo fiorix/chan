@@ -82,6 +82,10 @@ cd /src
 rustup target add x86_64-pc-windows-gnu
 status=0
 RUSTFLAGS="-D warnings" cargo check --release -p chan --target x86_64-pc-windows-gnu || status=$?
+if [ "$status" -eq 0 ]; then
+    RUSTFLAGS="-D warnings" cargo test --release -p chan-library -p chan-server \
+        --lib --no-run --target x86_64-pc-windows-gnu || status=$?
+fi
 printf "%s\n" "$status" >"$STATUS_FILE"
 exit 0'
 
