@@ -111,7 +111,9 @@ The draft's stated cost driver does not exist. It said consolidating means movin
 
 ## Boundary, because the draft's contract sentence reached much further than its title
 
-In scope: the four functions in the table, plus `lexical_path_inside_root` in both crates. `resolve_safe_strict` (fs_ops.rs:1227) is evidence, not work; it already answers the way the ruling says.
+In scope: the four functions in the table, plus `lexical_path_inside_root` in both crates, which means `crates/chan-workspace/src/fs_ops.rs` **and `crates/chan-server/src/routes/fs_graph.rs`**. `resolve_safe_strict` (fs_ops.rs:1227) is evidence, not work; it already answers the way the ruling says.
+
+The second file is named explicitly because leaving it implicit is exactly how this item's server half stayed open after the headline repair landed. The lane surface was derived from the item's headline files, the headline repair is entirely in `chan-workspace`, and a reader deriving scope that way finds nothing pointing at `chan-server`. That happened, was caught by reading this acceptance section against the tree rather than by reading the lane's report, and is the third instance of the same shape in this round.
 
 Deliberately out, and named here so the next reader does not reopen it. The draft's phrase "applied at every site that asks" reaches far more than four sites. A crude count over `crates/chan-workspace/src` and `crates/chan-server/src`, classifying each `canonicalize(` call by how the following lines handle failure, gives roughly 31 non-test decision sites (6 `.ok()`, 3 `let Ok`, 4 `map_err`, 9 `match`, 9 `unwrap_or_else`) against 23 `.unwrap()`s in tests. That is roughly five times the surface this item takes, and most of it is off the sandbox path. Two examples of what is out and why: `paths::canonicalize_normalized` (paths.rs:136) falls back to the stripped input, but its job is making the CLI and the devserver agree on a path's spelling for lock records, not answering a containment question; `Workspace::physical_path_to_virtual` (workspace.rs:1324) falls back with `unwrap_or_else(|_| path.to_path_buf())` and then returns `None` when the result is not under the canonical root, so its failure mode is a missing mapping rather than an admitted path.
 
@@ -124,6 +126,29 @@ Auditing the remaining canonicalize-failure sites is a separate item if anyone w
 - The lexical fallback either states in code what weaker guarantee it provides and which callers may accept it, or it is removed in favour of refusal.
 - If the fallback survives, exactly one implementation of it survives, it is covered in both directions by a test on `chan-workspace` rather than only on the crate that consumes it, and its signature does not admit a silent transposition of two same-typed path arguments. If it is removed, the `fs_ops` half of this clause is satisfied by its absence.
 - A reader can tell, from `fs_ops.rs` alone, which answer each site gives and why, without reading `workspace.rs` to discover that a ruling exists.
+
+## Result, recorded 2026-08-11
+
+Landed in two commits, and the split is the finding as much as the repair.
+
+`2e1c1f01` is the headline repair, one file, `crates/chan-workspace/src/fs_ops.rs`. `ensure_parent_inside_root` refuses an uncanonicalizable parent, `target_inside_root` refuses an uncanonicalizable root and every path error except `NotFound`, and `resolve_safe_strict_canon` walks only missing leaves. Missing create targets still resolve against their deepest canonical existing ancestor. The symlink-blind `fs_ops` copy of the lexical fallback was removed rather than annotated, which satisfies the clause above by absence.
+
+`25cd4236` closes the server half, one file, `crates/chan-server/src/routes/fs_graph.rs`. **That half stayed open after the headline repair read as complete**, and it is why the Boundary above now names the file. The surviving helper is now the method `FsGraphWalker::lexical_path_inside_root(&self, path)`: the root comes from the walker whose root defines the answer, so there is no longer a pair of same-typed positional path arguments to transpose. That is the acceptance clause about the signature met **structurally** rather than by convention, and it is proportionate for a private helper with one caller, where a newtype would have cost more than it bought. Its doc comment now states the weaker contract at the site: symlink-blind, cannot prove filesystem containment, acceptable only to `target_is_inside_workspace` when canonicalization is unavailable so that missing in-workspace graph ghosts stay visible, and no write is gated on the result.
+
+Both halves carry adversarial proof taken on the committed sha rather than inherited, and each names the assertion that failed rather than reporting a red exit code:
+
+- Restoring lexical root acceptance failed `canonicalize_failures_refuse_an_unavailable_workspace_root` at `assert!(!target_inside_root(&root, &target));`.
+- Restoring fail-open parent handling failed `canonicalize_failures_refuse_an_unavailable_path_parent` because `ensure_parent_inside_root` returned `Ok(())` instead of `Err(ChanError::Io(_))`.
+- Reversing the `strip_prefix` direction in the surviving helper failed `lexical_fallback_rejects_parent_escape` at its positive inside-path assertion.
+
+Each reverted to green afterwards, so no green in this record precedes the edit it certifies.
+
+One process note worth keeping with the item. The gap between the two commits was not found by reading the lane's report, which was accurate and complete about what it had done. It was found by reading this Acceptance section against the tree. An item whose acceptance has two halves in one sentence can be honestly reported as done when only one half is closed.
+
+```citations
+crates/chan-server/src/routes/fs_graph.rs	FsGraphWalker::lexical_path_inside_root	1	fn lexical_path_inside_root(&self, path: &Path) -> bool {
+crates/chan-workspace/src/fs_ops.rs	canonicalize_failures_refuse_an_unavailable_workspace_root	1	assert!(!target_inside_root(&root, &target));
+```
 
 ## Rough size
 
