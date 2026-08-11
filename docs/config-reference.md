@@ -28,7 +28,7 @@ The CLI serializes these under the canonical `server.*` namespace, so terminal f
 | `terminal.mcp_env` | `bool` | `false` | `chan config get/set` + `PATCH /api/config` + Settings | whether new non-team terminals export `CHAN_MCP_*`; per-request `?mcp_env=on` overrides, team spawns use the team config's own `mcp_env` |
 | `terminal.mouse_capture` | `bool` | `true` | `chan config get/set` + `PATCH /api/config` + Settings | whether full-screen TUIs may capture the mouse; off strips the DECSET mouse-enable sequences in the SPA so click-drag selection keeps working (new terminals only) |
 | `terminal.ghostty` | `bool` | `true` on Linux, `false` elsewhere | `chan config get/set` + `PATCH /api/config` + Settings | new terminals use the ghostty-web backend (Ghostty's WASM VT parser, ~420 KB fetched on first enable) instead of xterm.js; the Linux default is the grid, where xterm.js ships the DOM renderer and box drawing loses a scanline per cell (96.0% rule continuity, 95.2% block coverage) while ghostty measures 100% |
-| `terminal.secret_masking` | `bool` | `false` | `chan config get/set` + `PATCH /api/config` | when enabled, xterm.js visually obscures secret-looking assignment values; the per-tab launcher/context-menu toggle is ephemeral and affects only the mounted tab |
+| `terminal.secret_masking` | `bool` | `false` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → secret masking toggle (xterm.js terminals only; does nothing under the ghostty backend); when enabled, xterm.js visually obscures secret-looking assignment values; the per-tab launcher/context-menu toggle is ephemeral and affects only the mounted tab |
 | `terminal.secret_mask_suffixes` | `Vec<String>` | stock literal suffix list (max 100) | `chan config get/set` + `PATCH /api/config` | case-insensitive suffix matcher for terminal `NAME=value` output; CLI set accepts a JSON string array and rejects invalid or duplicate entries, while TOML load drops invalid entries with a warning and removes duplicates |
 
 `GET /api/config` returns the editor and server preference aggregate with a revision. `PATCH /api/config` accepts one owner-specific partial preferences object plus `expected_revision`; stale revisions return `409 config_conflict` with the current aggregate.
@@ -119,8 +119,8 @@ The CLI prefixes every serialized leaf below with `editor.`. Every scalar leaf i
 | `pane_widths.browser` | `u32` | `chan config get/set` + drag-resize | same |
 | `pane_widths.search` | `u32` | `chan config get/set` + drag-resize | same |
 | `pane_widths.outline` | `u32` | `chan config get/set` + drag-resize | same |
-| `browser_side_panes.left` | `bool` | `chan config get/set` + FB toggle | left side-pane visibility |
-| `browser_side_panes.right` | `bool` | `chan config get/set` + FB toggle | right side-pane visibility |
+| `browser_side_panes.left` | `bool` | `chan config get/set` + FB toggle + Settings | Settings → File browser → side panes; left side-pane visibility |
+| `browser_side_panes.right` | `bool` | `chan config get/set` + FB toggle + Settings | Settings → File browser → side panes; right side-pane visibility |
 | `line_spacing` | `LineSpacing` | `chan config get/set` + Settings | editor line-height |
 | `date_format` | `String` | `chan config get/set` + Settings | date rendering across SPA |
 | `strip_trailing_whitespace_on_save` | `bool` | `chan config get/set` + Settings | editor save hook |

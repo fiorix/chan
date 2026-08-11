@@ -33,15 +33,26 @@
 
   let { prefs, commit }: { prefs: Preferences; commit: CommitFn } = $props();
 
-  // Secret masking is display-only here (hand-edited TOML / PATCH persist
-  // it; the roadmap scopes Settings to visibility). Absent fields on a
-  // pre-field server display the SPA fallback. These are the configured
-  // values, read by terminals at spawn: already-open terminals keep the
-  // flag and suffixes they started with.
+  // Secret masking is editable here and applies to xterm.js terminals
+  // only - under the ghostty backend (the Linux default) it does
+  // nothing, which the hint states. The suffix list stays display-only
+  // (normalize_terminal_secret_mask_suffixes drops, dedupes and
+  // truncates, so a chip editor would have to mirror all three).
+  // Absent fields on a pre-field server display the SPA fallback.
+  // These are the configured values, read by terminals at spawn:
+  // already-open terminals keep the flag and suffixes they started
+  // with.
   const secretMaskingOn = $derived(prefs.terminal.secret_masking ?? false);
   const secretMaskSuffixes = $derived(
     prefs.terminal.secret_mask_suffixes ?? DEFAULT_SECRET_MASK_SUFFIXES,
   );
+
+  function toggleSecretMasking(on: boolean): void {
+    commit((p) => ({
+      ...p,
+      terminal: { ...p.terminal, secret_masking: on },
+    }));
+  }
 
   const SCROLLBACK_STEP = 10;
 
@@ -219,9 +230,13 @@
 
 <SettingField
   label="Secret masking"
-  hint="Masks secret-looking NAME=value values in xterm.js terminals; the buffer stays copyable. Configured in server.toml (terminal.secret_masking, terminal.secret_mask_suffixes); new terminals only. The terminal menu has an ephemeral per-tab toggle."
+  hint="Masks secret-looking NAME=value values in xterm.js terminals only; under the ghostty backend (the Linux default) it does nothing. The buffer stays copyable. New terminals only. The terminal menu has an ephemeral per-tab toggle."
 >
-  <span class="value">{secretMaskingOn ? "Enabled" : "Disabled"}</span>
+  <PillToggle
+    label="Mask secrets in new terminals"
+    checked={secretMaskingOn}
+    ontoggle={toggleSecretMasking}
+  />
   <details class="suffixes">
     <summary>Suffixes ({secretMaskSuffixes.length})</summary>
     <ChipList names={secretMaskSuffixes} readonly ariaLabel="Secret mask suffixes" />

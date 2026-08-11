@@ -479,4 +479,48 @@ describe("settings surface render", () => {
       (last.preferences.terminal as { default_term: string }).default_term,
     ).toBe("xterm-256color");
   });
+
+  test("the File browser section toggles one side pane at a time", async () => {
+    const target = openSurface();
+    await flush();
+    clickTab(target, "File browser");
+    await flush();
+    const pill = [...target.querySelectorAll("label.pill")].find(
+      (e) => e.textContent?.trim() === "Left pane",
+    ) as HTMLLabelElement;
+    expect(pill, "Left pane pill").not.toBeNull();
+    (pill.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
+    await flush();
+    expect(patches[patches.length - 1]!.preferences.browser_side_panes).toEqual({
+      left: true,
+      right: false,
+    });
+  });
+
+  test("secret masking PATCHes terminal.secret_masking with the xterm scope stated", async () => {
+    const target = openSurface();
+    await flush();
+    clickTab(target, "Terminal");
+    await flush();
+    // The row states its xterm.js-only scope (post linux-terminal-grid it
+    // does nothing under the ghostty default).
+    expect(target.textContent).toContain("xterm.js terminals only");
+    const pill = [...target.querySelectorAll("label.pill")].find((e) =>
+      e.textContent?.includes("Mask secrets in new terminals"),
+    ) as HTMLLabelElement;
+    expect(pill, "secret masking pill").not.toBeNull();
+    const checkbox = pill.querySelector(
+      'input[type="checkbox"]',
+    ) as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+    checkbox.click();
+    await flush();
+    const last = patches[patches.length - 1]!;
+    expect(
+      (last.preferences.terminal as { secret_masking: boolean }).secret_masking,
+    ).toBe(true);
+    expect(
+      (last.preferences.terminal as { default_term: string }).default_term,
+    ).toBe("xterm-256color");
+  });
 });

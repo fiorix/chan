@@ -8,6 +8,7 @@
   import type { CommitFn } from "./commit";
   import SettingField from "./SettingField.svelte";
   import TextField from "./TextField.svelte";
+  import PillToggle from "./PillToggle.svelte";
   import SurfaceThemeField from "./SurfaceThemeField.svelte";
 
   let { prefs, commit }: { prefs: Preferences; commit: CommitFn } = $props();
@@ -17,7 +18,30 @@
     if (!value) return;
     commit((p) => ({ ...p, attachments_dir: value }));
   }
+
+  function commitSidePane(side: "left" | "right", on: boolean): void {
+    commit((p) => ({
+      ...p,
+      browser_side_panes: { ...p.browser_side_panes, [side]: on },
+    }));
+  }
 </script>
+
+<SettingField
+  label="Side panes"
+  hint="Show the file browser's left and right side panes. The browser's own stick buttons toggle the same fields."
+>
+  <PillToggle
+    label="Left pane"
+    checked={prefs.browser_side_panes.left}
+    ontoggle={(on) => commitSidePane("left", on)}
+  />
+  <PillToggle
+    label="Right pane"
+    checked={prefs.browser_side_panes.right}
+    ontoggle={(on) => commitSidePane("right", on)}
+  />
+</SettingField>
 
 <SettingField
   label="Attachments folder"

@@ -50,14 +50,15 @@ describe("SettingsOverlay config writes (source pins)", () => {
     expect(numberFieldSource).toMatch(/onkeydown=\{onKeydown\}/);
   });
 
-  test("secret masking is display-only in terminal settings", () => {
-    // The row renders the effective state and suffixes but owns no commit
-    // path; the values persist via hand-edited TOML or PATCH only.
+  test("secret masking is editable with its xterm-only scope stated", () => {
+    // Post linux-terminal-grid the control would do nothing under the
+    // platform default on Linux, so it ships editable only with the
+    // xterm.js scope stated in the row itself. The suffix list stays
+    // read-only: normalize_terminal_secret_mask_suffixes drops, dedupes
+    // and truncates, and a chip editor would have to mirror all three.
     expect(terminalSource).toMatch(/label="Secret masking"/);
-    expect(terminalSource).toMatch(
-      /secretMaskingOn = \$derived\(prefs\.terminal\.secret_masking \?\? false\)/,
-    );
-    expect(terminalSource).not.toMatch(/secret_masking:\s/);
+    expect(terminalSource).toMatch(/xterm\.js terminals only/);
+    expect(terminalSource).toMatch(/secret_masking: on/);
     expect(terminalSource).not.toMatch(/secret_mask_suffixes:\s/);
   });
 });
