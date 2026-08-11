@@ -13,7 +13,8 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chan_workspace::{
-    Library, MetadataExportOptions, MetadataImportOptions, MetadataImportReport, Workspace,
+    Library, MetadataExportOptions, MetadataImportOptions, MetadataImportReport, SearchAggression,
+    WatchCallback, WatchHandle, Workspace,
 };
 
 use crate::bus::{make_progress_broadcast, make_watch_bridge};
@@ -174,6 +175,19 @@ enum MetadataImportError {
     Poisoned(&'static str),
 }
 
+#[derive(Debug)]
+pub(super) enum WorkspaceCellInstallError {
+    Poisoned(&'static str),
+}
+
+impl From<WorkspaceCellInstallError> for MetadataImportError {
+    fn from(error: WorkspaceCellInstallError) -> Self {
+        match error {
+            WorkspaceCellInstallError::Poisoned(what) => Self::Poisoned(what),
+        }
+    }
+}
+
 fn err_from_metadata_import(e: &MetadataImportError) -> Response {
     match e {
         MetadataImportError::Busy => err(
@@ -208,6 +222,7 @@ fn perform_metadata_import(
     std::fs::write(archive.path(), archive_bytes)
         .map_err(|e| MetadataImportError::Core(e.into()))?;
 
+    let search_aggression = workspace_search_aggression(state)?;
     let mut cell = take_workspace_cell(state)?;
     state.terminal_sessions.close_all(CloseReason::Workspace);
     cell.indexer.cancel();
@@ -220,7 +235,7 @@ fn perform_metadata_import(
         std::thread::sleep(Duration::from_millis(25));
     }
     if Arc::strong_count(&workspace_strong) > 1 {
-        install_workspace_cell(state, workspace_strong)?;
+        restore_workspace_cell(state, workspace_strong, search_aggression)?;
         return Err(MetadataImportError::Busy);
     }
     drop(workspace_strong);
@@ -237,7 +252,7 @@ fn perform_metadata_import(
         .library
         .open_workspace(&state.workspace_root)
         .map_err(MetadataImportError::Core)
-        .and_then(|workspace| install_workspace_cell(state, workspace));
+        .and_then(|workspace| restore_workspace_cell(state, workspace, search_aggression));
 
     restore_result?;
     import_result
@@ -251,23 +266,35 @@ fn take_workspace_cell(state: &AppState) -> Result<WorkspaceCell, MetadataImport
     cell_guard.take().ok_or(MetadataImportError::Busy)
 }
 
-fn install_workspace_cell(
+fn restore_workspace_cell(
     state: &AppState,
     workspace: Arc<Workspace>,
+    search_aggression: SearchAggression,
 ) -> Result<(), MetadataImportError> {
-    let cell = build_workspace_cell(state, workspace)?;
     let mut cell_guard = state
         .workspace_cell
         .write()
         .map_err(|_| MetadataImportError::Poisoned("workspace cell lock"))?;
-    *cell_guard = Some(cell);
+    install_workspace_cell(state, &mut cell_guard, workspace, search_aggression);
     Ok(())
 }
 
-fn build_workspace_cell(
+pub(super) fn workspace_search_aggression(
     state: &AppState,
+) -> Result<SearchAggression, WorkspaceCellInstallError> {
+    state
+        .server_config
+        .lock()
+        .map(|config| config.search.aggression)
+        .map_err(|_| WorkspaceCellInstallError::Poisoned("server config lock"))
+}
+
+pub(super) fn install_workspace_cell(
+    state: &AppState,
+    cell_slot: &mut Option<WorkspaceCell>,
     workspace: Arc<Workspace>,
-) -> Result<WorkspaceCell, MetadataImportError> {
+    search_aggression: SearchAggression,
+) {
     let bridge = make_watch_bridge(
         &state.events_tx,
         &state.index_events_tx,
@@ -275,13 +302,20 @@ fn build_workspace_cell(
         &state.scope_registry,
         workspace.root().to_path_buf(),
     );
-    let watch_handle = workspace.watch(bridge).map_err(MetadataImportError::Core)?;
-    let search_aggression = state
-        .server_config
-        .lock()
-        .map_err(|_| MetadataImportError::Poisoned("server config lock"))?
-        .search
-        .aggression;
+    // A watcher is an accelerator, not workspace authority. Boot already
+    // serves without one when the host exhausts its watch limit; a cell swap
+    // must preserve the same degraded-but-serving contract.
+    let watch_handle = match register_workspace_watch(&workspace, bridge) {
+        Ok(handle) => Some(handle),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                path = %workspace.root().display(),
+                "filesystem watcher registration failed after workspace swap"
+            );
+            None
+        }
+    };
     let indexer = Arc::new(Indexer::spawn(
         workspace.clone(),
         state.index_events_tx.subscribe(),
@@ -289,11 +323,42 @@ fn build_workspace_cell(
         search_aggression,
         make_progress_broadcast(&state.events_tx),
     ));
-    Ok(WorkspaceCell {
+    *cell_slot = Some(WorkspaceCell {
         workspace,
-        watch_handle: Some(watch_handle),
+        watch_handle,
         indexer,
-    })
+    });
+}
+
+fn register_workspace_watch(
+    workspace: &Arc<Workspace>,
+    bridge: Arc<dyn WatchCallback>,
+) -> chan_workspace::Result<WatchHandle> {
+    #[cfg(test)]
+    if take_test_watch_registration_failure(workspace.root()) {
+        return Err(chan_workspace::ChanError::Io(
+            "injected watcher registration failure".into(),
+        ));
+    }
+    workspace.watch(bridge)
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_WATCH_REGISTRATION_FAILURES: std::cell::RefCell<std::collections::HashSet<std::path::PathBuf>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+#[cfg(test)]
+pub(super) fn inject_test_watch_registration_failure(root: &Path) {
+    TEST_WATCH_REGISTRATION_FAILURES.with(|roots| {
+        roots.borrow_mut().insert(root.to_path_buf());
+    });
+}
+
+#[cfg(test)]
+fn take_test_watch_registration_failure(root: &Path) -> bool {
+    TEST_WATCH_REGISTRATION_FAILURES.with(|roots| roots.borrow_mut().remove(root))
 }
 
 fn safe_filename_fragment(value: &str) -> String {

@@ -15,14 +15,16 @@ use axum::http::header::RETRY_AFTER;
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use chan_workspace::ResetMode;
+use chan_workspace::{ResetMode, ResetReport, Workspace};
 use serde::{Deserialize, Serialize};
 
-use crate::bus::{make_progress_broadcast, make_watch_bridge};
 use crate::error::{err, err_from, err_state};
-use crate::indexer::Indexer;
-use crate::state::{AppState, WorkspaceCell};
+use crate::state::AppState;
 use crate::terminal_sessions::CloseReason;
+
+use super::metadata::{
+    install_workspace_cell, workspace_search_aggression, WorkspaceCellInstallError,
+};
 
 /// Body of `POST /api/storage/reset`. Two modes mirror the chan-
 /// core enum; the JSON tag is lowercased for the frontend's
@@ -116,6 +118,14 @@ enum ResetError {
     Poisoned(&'static str),
 }
 
+impl From<WorkspaceCellInstallError> for ResetError {
+    fn from(error: WorkspaceCellInstallError) -> Self {
+        match error {
+            WorkspaceCellInstallError::Poisoned(what) => Self::Poisoned(what),
+        }
+    }
+}
+
 fn err_from_reset(e: &ResetError) -> Response {
     match e {
         ResetError::Busy => {
@@ -158,14 +168,52 @@ fn perform_reset(
     state: &AppState,
     mode: ResetMode,
 ) -> Result<chan_workspace::ResetReport, ResetError> {
+    perform_reset_with(state, mode, &LiveResetWorkspaceOps)
+}
+
+trait ResetWorkspaceOps {
+    fn reset_workspace(
+        &self,
+        state: &AppState,
+        mode: ResetMode,
+    ) -> chan_workspace::Result<ResetReport>;
+
+    fn open_workspace(&self, state: &AppState) -> chan_workspace::Result<Arc<Workspace>>;
+}
+
+struct LiveResetWorkspaceOps;
+
+impl ResetWorkspaceOps for LiveResetWorkspaceOps {
+    fn reset_workspace(
+        &self,
+        state: &AppState,
+        mode: ResetMode,
+    ) -> chan_workspace::Result<ResetReport> {
+        state.library.reset_workspace(&state.workspace_root, mode)
+    }
+
+    fn open_workspace(&self, state: &AppState) -> chan_workspace::Result<Arc<Workspace>> {
+        state.library.open_workspace(&state.workspace_root)
+    }
+}
+
+fn perform_reset_with(
+    state: &AppState,
+    mode: ResetMode,
+    ops: &impl ResetWorkspaceOps,
+) -> Result<ResetReport, ResetError> {
+    // Snapshot configuration before entering the destructive window. A
+    // poisoned config lock is a server fault, but it must not also remove the
+    // workspace cell.
+    let search_aggression = workspace_search_aggression(state)?;
     let mut cell_guard = state
         .workspace_cell
         .write()
         .map_err(|_| ResetError::Poisoned("workspace cell lock"))?;
     state.terminal_sessions.close_all(CloseReason::Workspace);
-    let mut cell = cell_guard
-        .take()
-        .expect("workspace cell missing outside reset window");
+    let Some(mut cell) = cell_guard.take() else {
+        return Err(ResetError::Busy);
+    };
     // Nudge the rebuild to bail at its next per-file check so a long
     // cold-boot reindex doesn't pin the workspace past the deadline.
     cell.indexer.cancel();
@@ -189,81 +237,38 @@ fn perform_reset(
         // caller retries the reset. Reusing `workspace_strong` instead
         // of reopening sidesteps chan-workspace's per-workspace flock (which
         // a lingering Arc still holds).
-        let bridge = make_watch_bridge(
-            &state.events_tx,
-            &state.index_events_tx,
-            &state.self_writes,
-            &state.scope_registry,
-            state.workspace_root.clone(),
-        );
-        let watch_handle = workspace_strong.watch(bridge).map_err(ResetError::Core)?;
-        let search_aggression = state
-            .server_config
-            .lock()
-            .map_err(|_| ResetError::Poisoned("server config lock"))?
-            .search
-            .aggression;
-        let indexer = Arc::new(Indexer::spawn(
-            workspace_strong.clone(),
-            state.index_events_tx.subscribe(),
-            true,
-            search_aggression,
-            make_progress_broadcast(&state.events_tx),
-        ));
-        *cell_guard = Some(WorkspaceCell {
-            workspace: workspace_strong,
-            watch_handle: Some(watch_handle),
-            indexer,
-        });
+        install_workspace_cell(state, &mut cell_guard, workspace_strong, search_aggression);
         return Err(ResetError::Busy);
     }
     // Last strong ref is ours. Drop it so chan-workspace's flock releases
     // before `reset_workspace` tries to verify exclusive access.
     drop(workspace_strong);
-    // Clean. Run the actual wipe, reopen, restart watcher + indexer.
-    let report = state
-        .library
-        .reset_workspace(&state.workspace_root, mode)
-        .map_err(ResetError::Core)?;
-    let workspace = state
-        .library
-        .open_workspace(&state.workspace_root)
-        .map_err(ResetError::Core)?;
-    let bridge = make_watch_bridge(
-        &state.events_tx,
-        &state.index_events_tx,
-        &state.self_writes,
-        &state.scope_registry,
-        state.workspace_root.clone(),
-    );
-    let watch_handle = workspace.watch(bridge).map_err(ResetError::Core)?;
-    let search_aggression = state
-        .server_config
-        .lock()
-        .map_err(|_| ResetError::Poisoned("server config lock"))?
-        .search
-        .aggression;
-    // Fresh indexer pinned to the new Workspace Arc. Reset wiped the
-    // index dir if `mode` includes Index, so initial_build=true
-    // will catch zero docs and kick a rebuild.
-    let indexer = Arc::new(Indexer::spawn(
-        workspace.clone(),
-        state.index_events_tx.subscribe(),
-        true,
-        search_aggression,
-        make_progress_broadcast(&state.events_tx),
-    ));
-    *cell_guard = Some(WorkspaceCell {
-        workspace,
-        watch_handle: Some(watch_handle),
-        indexer,
-    });
-    Ok(report)
+    // Compute the wipe and restoration independently. Even a partial wipe
+    // must run through open_workspace so its lazily-created skeleton is
+    // repaired before the operation error is returned.
+    let reset_result = ops.reset_workspace(state, mode);
+    let (workspace, reopen_error) = match ops.open_workspace(state) {
+        Ok(workspace) => (workspace, None),
+        Err(error) => {
+            // A failed reopen is itself one of the states this route has to
+            // recover from. Retry once as restoration work, while preserving
+            // the first error for the response if recovery succeeds.
+            let workspace = ops.open_workspace(state).map_err(ResetError::Core)?;
+            (workspace, Some(error))
+        }
+    };
+    install_workspace_cell(state, &mut cell_guard, workspace, search_aggression);
+
+    match (reset_result, reopen_error) {
+        (Err(error), _) | (Ok(_), Some(error)) => Err(ResetError::Core(error)),
+        (Ok(report), None) => Ok(report),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::collections::HashMap;
     use std::sync::atomic::AtomicU64;
     use std::sync::{Mutex, RwLock};
@@ -272,7 +277,10 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::{broadcast, watch};
 
+    use crate::indexer::Indexer;
+    use crate::routes::metadata::inject_test_watch_registration_failure;
     use crate::self_writes::SelfWrites;
+    use crate::state::WorkspaceCell;
     use crate::terminal_sessions::{Registry as TerminalRegistry, RegistryConfig};
     use crate::{EditorPrefs, ServerConfig};
 
@@ -280,6 +288,65 @@ mod tests {
         _config: TempDir,
         _root: TempDir,
         state: Arc<AppState>,
+    }
+
+    struct FaultingResetWorkspaceOps {
+        fail_reset: bool,
+        open_failures_remaining: Cell<usize>,
+        open_calls: Cell<usize>,
+    }
+
+    impl FaultingResetWorkspaceOps {
+        fn failing_reset() -> Self {
+            Self {
+                fail_reset: true,
+                open_failures_remaining: Cell::new(0),
+                open_calls: Cell::new(0),
+            }
+        }
+
+        fn failing_open_once() -> Self {
+            Self {
+                fail_reset: false,
+                open_failures_remaining: Cell::new(1),
+                open_calls: Cell::new(0),
+            }
+        }
+
+        fn failing_open_twice() -> Self {
+            Self {
+                fail_reset: false,
+                open_failures_remaining: Cell::new(2),
+                open_calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl ResetWorkspaceOps for FaultingResetWorkspaceOps {
+        fn reset_workspace(
+            &self,
+            state: &AppState,
+            mode: ResetMode,
+        ) -> chan_workspace::Result<ResetReport> {
+            if self.fail_reset {
+                return Err(chan_workspace::ChanError::Io(
+                    "injected reset failure".into(),
+                ));
+            }
+            state.library.reset_workspace(&state.workspace_root, mode)
+        }
+
+        fn open_workspace(&self, state: &AppState) -> chan_workspace::Result<Arc<Workspace>> {
+            self.open_calls.set(self.open_calls.get() + 1);
+            let failures = self.open_failures_remaining.get();
+            if failures > 0 {
+                self.open_failures_remaining.set(failures - 1);
+                return Err(chan_workspace::ChanError::Io(
+                    "injected open failure".into(),
+                ));
+            }
+            state.library.open_workspace(&state.workspace_root)
+        }
     }
 
     fn reset_test_state() -> ResetTestState {
@@ -358,6 +425,204 @@ mod tests {
         let status = response.into_response().into_parts().0.status;
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn perform_reset_answers_busy_when_the_cell_is_already_taken() {
+        let test = reset_test_state();
+        test.state
+            .workspace_cell
+            .write()
+            .expect("workspace cell lock")
+            .take()
+            .expect("workspace cell");
+
+        let error = perform_reset(&test.state, ResetMode::State).expect_err("reset must be busy");
+
+        assert!(matches!(error, ResetError::Busy));
+        let response = err_from_reset(&error);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "1");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn poisoned_server_config_does_not_remove_the_workspace_cell() {
+        let test = reset_test_state();
+        let state = test.state.clone();
+        let original = state.try_workspace().expect("workspace");
+        let poison_state = state.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_state.server_config.lock().expect("server config");
+            panic!("poison server config");
+        })
+        .join();
+
+        let result = perform_reset(&state, ResetMode::State);
+
+        assert!(matches!(
+            result,
+            Err(ResetError::Poisoned("server config lock"))
+        ));
+        let restored = state.try_workspace().expect("workspace remains installed");
+        assert!(Arc::ptr_eq(&original, &restored));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn poisoned_server_config_does_not_remove_a_busy_workspace_cell() {
+        let test = reset_test_state();
+        let state = test.state.clone();
+        let external = state.try_workspace().expect("external workspace holder");
+        let poison_state = state.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_state.server_config.lock().expect("server config");
+            panic!("poison server config");
+        })
+        .join();
+
+        let result = perform_reset(&state, ResetMode::State);
+
+        assert!(matches!(
+            result,
+            Err(ResetError::Poisoned("server config lock"))
+        ));
+        let restored = state.try_workspace().expect("workspace remains installed");
+        assert!(Arc::ptr_eq(&external, &restored));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reset_failure_reopens_and_reinstalls_the_workspace() {
+        let test = reset_test_state();
+
+        let result = perform_reset_with(
+            &test.state,
+            ResetMode::State,
+            &FaultingResetWorkspaceOps::failing_reset(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(ResetError::Core(chan_workspace::ChanError::Io(message)))
+                if message == "injected reset failure"
+        ));
+        test.state
+            .try_workspace()
+            .expect("failed reset must reinstall the workspace");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transient_open_failure_retries_and_reinstalls_the_workspace() {
+        let test = reset_test_state();
+        let ops = FaultingResetWorkspaceOps::failing_open_once();
+
+        let result = perform_reset_with(&test.state, ResetMode::State, &ops);
+
+        assert!(matches!(
+            result,
+            Err(ResetError::Core(chan_workspace::ChanError::Io(message)))
+                if message == "injected open failure"
+        ));
+        assert_eq!(ops.open_failures_remaining.get(), 0);
+        assert_eq!(ops.open_calls.get(), 2);
+        test.state
+            .try_workspace()
+            .expect("reopen recovery must reinstall the workspace");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persistent_open_failure_is_permanent_not_retryable() {
+        let test = reset_test_state();
+        let ops = FaultingResetWorkspaceOps::failing_open_twice();
+
+        let result = perform_reset_with(&test.state, ResetMode::State, &ops);
+
+        assert!(matches!(
+            result,
+            Err(ResetError::Core(chan_workspace::ChanError::Io(message)))
+                if message == "injected open failure"
+        ));
+        assert_eq!(ops.open_calls.get(), 2);
+        let access_error = test
+            .state
+            .try_workspace()
+            .expect_err("both reopen attempts failed");
+        let response = err_state(&access_error);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(response.headers().get(RETRY_AFTER).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handler_reports_a_missing_cell_as_a_permanent_fault() {
+        let test = reset_test_state();
+        test.state
+            .workspace_cell
+            .write()
+            .expect("workspace cell lock")
+            .take()
+            .expect("workspace cell");
+
+        let response = api_storage_reset(
+            State(test.state),
+            Json(ResetBody {
+                mode: ResetModeView::Workspace,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(response.headers().get(RETRY_AFTER).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watcher_failure_keeps_a_successful_reset_serving() {
+        let test = reset_test_state();
+        inject_test_watch_registration_failure(&test.state.workspace_root);
+
+        let result = perform_reset(&test.state, ResetMode::State);
+
+        assert!(result.is_ok());
+        test.state
+            .try_workspace()
+            .expect("watcher failure must keep the workspace serving");
+        let cell = test
+            .state
+            .workspace_cell
+            .read()
+            .expect("workspace cell lock");
+        assert!(cell
+            .as_ref()
+            .expect("workspace cell")
+            .watch_handle
+            .is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watcher_failure_keeps_a_busy_reset_serving() {
+        let test = reset_test_state();
+        let external = test
+            .state
+            .try_workspace()
+            .expect("external workspace holder");
+        inject_test_watch_registration_failure(&test.state.workspace_root);
+
+        let result = perform_reset(&test.state, ResetMode::State);
+
+        assert!(matches!(result, Err(ResetError::Busy)));
+        let restored = test
+            .state
+            .try_workspace()
+            .expect("watcher failure must restore the busy workspace");
+        assert!(Arc::ptr_eq(&external, &restored));
+        drop(restored);
+        let cell = test
+            .state
+            .workspace_cell
+            .read()
+            .expect("workspace cell lock");
+        assert!(cell
+            .as_ref()
+            .expect("workspace cell")
+            .watch_handle
+            .is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -40,7 +40,7 @@ pub fn err_settings_locked() -> Response {
 
 pub fn err_state(e: &StateAccessError) -> Response {
     match e {
-        StateAccessError::Busy | StateAccessError::Missing => {
+        StateAccessError::Busy => {
             let mut response = err(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "workspace busy: workspace state is temporarily unavailable; retry in a moment"
@@ -51,6 +51,7 @@ pub fn err_state(e: &StateAccessError) -> Response {
                 .insert(RETRY_AFTER, HeaderValue::from_static("1"));
             response
         }
+        StateAccessError::Missing => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         StateAccessError::Poisoned => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -158,13 +159,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn err_state_maps_missing_workspace_to_retryable_busy() {
+    async fn err_state_maps_missing_workspace_to_permanent_fault() {
         let response = err_state(&StateAccessError::Missing);
-        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "1");
+        assert!(response.headers().get(RETRY_AFTER).is_none());
         let (status, msg) = status_and_error(response).await;
 
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert!(msg.contains("workspace busy"));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(msg.contains("workspace cell missing"));
     }
 
     #[tokio::test]
