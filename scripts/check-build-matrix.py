@@ -280,6 +280,29 @@ def check_workflow_contract() -> None:
             raise ContractError(
                 f"{workflow_path}: must not trust cache settings from the checked-out flake"
             )
+
+    release = read(".github/workflows/release.yml")
+    linux_cli = workflow_job(
+        release,
+        "linux-cli-artifacts",
+        ".github/workflows/release.yml",
+    )
+    for needle in (
+        "name: linux CLI tarball (${{ matrix.musl_target }})",
+        "target: ${{ matrix.musl_target }}",
+        "make linux-chan-tarball LINUX_TARGET=${{ matrix.musl_target }}",
+        "name: release-linux-cli-${{ matrix.musl_target }}",
+    ):
+        require(
+            linux_cli,
+            needle,
+            ".github/workflows/release.yml job linux-cli-artifacts",
+        )
+    if "matrix.target" in linux_cli or "unknown-linux-gnu" in linux_cli:
+        raise ContractError(
+            ".github/workflows/release.yml job linux-cli-artifacts: "
+            "musl build carries a gnu or generic target field"
+        )
     for needle in (
         "copr:",
         "launchpad:",
