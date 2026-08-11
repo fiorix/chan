@@ -8,6 +8,7 @@
   import { onDestroy, onMount, untrack } from "svelte";
   import { api } from "../../../api/client";
   import { indexStatus } from "../../../state/store.svelte";
+  import SettingField from "../SettingField.svelte";
 
   let mounted = $state(false);
   let indexResetting = $state(false);
@@ -75,71 +76,42 @@
   });
 </script>
 
-<section>
-  <h3>Index</h3>
-  <div class="grid">
-    <span class="k">state</span>
-    <span class="v">{indexStatus.value?.state ?? "n/a"}</span>
-    {#if indexStatus.value?.state === "idle"}
-      <span class="k">chunks</span>
-      <span class="v">{fmt(indexStatus.value.indexed_docs)}</span>
-      <span class="k">vectors</span>
-      <span class="v">{fmt(indexStatus.value.indexed_vectors)}</span>
-      <span class="k">model</span>
-      <span class="v mono">{indexStatus.value.model}</span>
-    {:else if indexStatus.value?.state === "building"}
-      <span class="k">progress</span>
-      <span class="v">{fmt(indexStatus.value.current)} / {fmt(indexStatus.value.total)}</span>
-      <span class="k">file</span>
-      <span class="v mono path">{indexStatus.value.file}</span>
-    {:else if indexStatus.value?.state === "reindexing"}
-      <span class="k">file</span>
-      <span class="v mono path">{indexStatus.value.file}</span>
-    {:else if indexStatus.value?.state === "error"}
-      <span class="k">error</span>
-      <span class="v err">{indexStatus.value.message}</span>
+<SettingField label="Index">
+  <div class="stack">
+    <div class="grid">
+      <span class="k">state</span>
+      <span class="v">{indexStatus.value?.state ?? "n/a"}</span>
+      {#if indexStatus.value?.state === "idle"}
+        <span class="k">chunks</span>
+        <span class="v">{fmt(indexStatus.value.indexed_docs)}</span>
+        <span class="k">vectors</span>
+        <span class="v">{fmt(indexStatus.value.indexed_vectors)}</span>
+        <span class="k">model</span>
+        <span class="v mono">{indexStatus.value.model}</span>
+      {:else if indexStatus.value?.state === "building"}
+        <span class="k">progress</span>
+        <span class="v">{fmt(indexStatus.value.current)} / {fmt(indexStatus.value.total)}</span>
+        <span class="k">file</span>
+        <span class="v mono path">{indexStatus.value.file}</span>
+      {:else if indexStatus.value?.state === "reindexing"}
+        <span class="k">file</span>
+        <span class="v mono path">{indexStatus.value.file}</span>
+      {:else if indexStatus.value?.state === "error"}
+        <span class="k">error</span>
+        <span class="v err">{indexStatus.value.message}</span>
+      {/if}
+    </div>
+    <button class="action" onclick={() => void rebuildIndex()} disabled={indexResetting}>
+      {indexResetting ? "Rebuilding..." : "Rebuild index"}
+    </button>
+    {#if indexResetError}
+      <p class="hint err" role="alert">{indexResetError}</p>
     {/if}
   </div>
-  <button class="action" onclick={() => void rebuildIndex()} disabled={indexResetting}>
-    {indexResetting ? "Rebuilding..." : "Rebuild index"}
-  </button>
-  {#if indexResetError}
-    <div class="err-line">{indexResetError}</div>
-  {/if}
-</section>
+</SettingField>
 
 <style>
-  .grid {
-    display: grid;
-    grid-template-columns: 8em minmax(0, 1fr);
-    gap: 4px 10px;
-    font-size: 14px;
-  }
-  .grid .k {
-    color: var(--text-secondary);
-  }
-  .grid .v {
-    color: var(--text);
-    min-width: 0;
-  }
-  .mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
-  .path {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .err,
-  .err-line {
-    color: var(--warn-text);
-  }
-  .err-line {
-    margin-top: 8px;
-    font-size: 13px;
-  }
   .action {
-    margin-top: 12px;
     padding: 5px 10px;
     border: 1px solid var(--btn-border);
     border-radius: 4px;

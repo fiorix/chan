@@ -9,6 +9,8 @@
   import { api } from "../../../api/client";
   import { tree } from "../../../state/store.svelte";
   import type { ExcludedDirsView } from "../../../api/types";
+  import SettingField from "../SettingField.svelte";
+  import ChipList from "../ChipList.svelte";
 
   type SaveStatus = "idle" | "saving" | "saved" | { error: string };
 
@@ -29,6 +31,9 @@
     }
   });
 
+  // Unlike the per-machine debounces (which deliberately outlive their
+  // section), a pending whole-set PUT is cancelled when the tab unmounts;
+  // the next mount re-reads the server state anyway.
   onDestroy(() => {
     if (saveTimer) clearTimeout(saveTimer);
   });
@@ -113,106 +118,73 @@
   );
 </script>
 
-<section>
-  <h3>Excluded directories</h3>
-  <p class="hint">
-    Directory names to skip when indexing and building the graph. Matched by
-    exact name at any depth, case-insensitive. Names only, not paths.
-  </p>
-
-  {#if loadError}
-    <p class="err">Couldn't load the blocklist: {loadError}</p>
-  {:else}
-    <div class="add-row">
-      <input
-        type="text"
-        placeholder="Add a directory name..."
-        list="settings-excluded-dir-suggestions"
-        bind:value={draft}
-        onkeydown={onKeydown}
-        aria-label="Add an excluded directory name"
-      />
-      <datalist id="settings-excluded-dir-suggestions">
-        {#each suggestions as s (s)}
-          <option value={s}></option>
-        {/each}
-      </datalist>
-      <button type="button" class="add-btn" onclick={addDraft} disabled={!draft.trim()}>
-        Add
-      </button>
-      {#if saveLabel}
-        <span class="save-status" class:err={typeof saveStatus === "object"}>
-          {saveLabel}
-        </span>
-      {/if}
-    </div>
-
-    {#if additions.length === 0}
-      <p class="hint muted">No extra directories excluded for this workspace.</p>
+<SettingField
+  label="Excluded directories"
+  hint="Directory names to skip when indexing and building the graph. Matched by exact name at any depth, case-insensitive. Names only, not paths."
+>
+  <div class="stack">
+    {#if loadError}
+      <p class="hint err" role="alert">Couldn't load the blocklist: {loadError}</p>
     {:else}
-      <ul class="chips" aria-label="Excluded directories for this workspace">
-        {#each additions as name (name)}
-          <li class="chip">
-            <span class="chip-name">{name}</span>
-            <button
-              type="button"
-              class="chip-x"
-              onclick={() => remove(name)}
-              aria-label={`Remove ${name}`}
-              title={`Remove ${name}`}>×</button
-            >
-          </li>
-        {/each}
-      </ul>
-    {/if}
-
-    {#if view && view.defaults.length}
-      <details class="defaults">
-        <summary>Always excluded ({view.defaults.length})</summary>
-        <p class="hint muted">
-          These come from the machine-wide baseline and apply to every
-          workspace. They can't be edited here.
-        </p>
-        <ul class="chips readonly">
-          {#each view.defaults as name (name)}
-            <li class="chip"><span class="chip-name">{name}</span></li>
+      <div class="add-row">
+        <input
+          type="text"
+          placeholder="Add a directory name..."
+          list="settings-excluded-dir-suggestions"
+          bind:value={draft}
+          onkeydown={onKeydown}
+          aria-label="Add an excluded directory name"
+        />
+        <datalist id="settings-excluded-dir-suggestions">
+          {#each suggestions as s (s)}
+            <option value={s}></option>
           {/each}
-        </ul>
-      </details>
+        </datalist>
+        <button type="button" class="add-btn" onclick={addDraft} disabled={!draft.trim()}>
+          Add
+        </button>
+        {#if saveLabel}
+          <span class="save-status" class:err={typeof saveStatus === "object"}>
+            {saveLabel}
+          </span>
+        {/if}
+      </div>
+
+      {#if additions.length === 0}
+        <p class="hint muted">No extra directories excluded for this workspace.</p>
+      {:else}
+        <ChipList
+          names={additions}
+          ariaLabel="Excluded directories for this workspace"
+          onremove={remove}
+        />
+      {/if}
+
+      {#if view && view.defaults.length}
+        <details class="defaults">
+          <summary>Always excluded ({view.defaults.length})</summary>
+          <p class="hint muted">
+            These come from the machine-wide baseline and apply to every
+            workspace. They can't be edited here.
+          </p>
+          <ChipList names={view.defaults} readonly />
+        </details>
+      {/if}
     {/if}
-  {/if}
-</section>
+  </div>
+</SettingField>
 
 <style>
-  .hint {
-    margin: 0;
-    color: var(--text-secondary);
-    font-size: 13px;
-    line-height: 1.4;
-  }
-  .hint.muted {
-    font-style: italic;
-  }
-  .err {
-    margin: 0;
-    color: var(--warn-text);
-    font-size: 13px;
-  }
   .add-row {
     display: flex;
     gap: 8px;
     align-items: center;
     flex-wrap: wrap;
+    width: 100%;
   }
   .add-row input {
     flex: 1;
     min-width: 0;
-    background: var(--input-bg, var(--bg-card));
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 5px 8px;
-    font: inherit;
   }
   .add-btn {
     background: var(--btn-bg);
@@ -236,46 +208,6 @@
   }
   .save-status.err {
     color: var(--warn-text);
-  }
-  .chips {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    background: var(--bg-card, rgba(0, 0, 0, 0.04));
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 2px 4px 2px 10px;
-    font-size: 13px;
-    color: var(--text);
-  }
-  .chips.readonly .chip {
-    padding: 2px 10px;
-    color: var(--text-secondary);
-  }
-  .chip-name {
-    font-family: var(--chan-editor-code-family, monospace);
-  }
-  .chip-x {
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    cursor: pointer;
-    font-size: 16px;
-    line-height: 1;
-    padding: 0 4px;
-    border-radius: 50%;
-  }
-  .chip-x:hover {
-    color: var(--text);
-    background: var(--border);
   }
   .defaults {
     margin-top: 4px;

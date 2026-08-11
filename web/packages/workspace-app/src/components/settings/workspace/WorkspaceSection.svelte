@@ -24,15 +24,10 @@
   </p>
 
   <IndexControl />
-  <hr class="divider" />
   <SemanticControl />
-  <hr class="divider" />
   <ExcludedDirsControl />
-  <hr class="divider" />
   <ReportsControl />
-  <hr class="divider" />
   <MetadataControl />
-  <hr class="divider" />
   <ScreenLockControl />
 </div>
 
@@ -40,7 +35,8 @@
   .workspace-settings {
     display: flex;
     flex-direction: column;
-    gap: 1.25rem;
+    /* The SettingField sections carry their own separator (the shared
+       border-bottom), so the container adds no dividers of its own. */
   }
   .scope-note {
     margin: 0;
@@ -52,10 +48,5 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     color: var(--text);
     overflow-wrap: anywhere;
-  }
-  .divider {
-    margin: 0;
-    border: 0;
-    border-top: 1px dashed var(--border);
   }
 </style>

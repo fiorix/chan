@@ -12,6 +12,8 @@
     SemanticModelRegistry,
     SemanticState,
   } from "../../../api/types";
+  import SettingField from "../SettingField.svelte";
+  import PillToggle from "../PillToggle.svelte";
 
   let buildInfo = $state<BuildInfo | null>(null);
   let semanticState = $state<SemanticState | null>(null);
@@ -149,154 +151,97 @@
   });
 </script>
 
-<section>
-  <h3>Semantic search</h3>
-  {#if buildInfo && !buildInfo.features.embeddings}
-    <p class="hint">
-      Semantic search isn't compiled into this binary. Rebuild with
-      <code>--features embed-model</code> (or install a chan release that
-      includes it) to enable Hybrid search.
-    </p>
-  {:else if semanticState === null}
-    <p class="hint muted">Loading semantic-search state...</p>
-  {:else}
-    <p class="hint">
-      Hybrid search blends BM25 keyword scoring with dense-vector similarity
-      from <code>{semanticState.model_name}</code>
-      ({formatModelSize(semanticState.model_size_bytes)}). The model file is
-      shared across workspaces.
-    </p>
-    <label class="pill" class:on={semanticState.semantic_enabled}>
-      <input
-        type="checkbox"
+<SettingField label="Semantic search">
+  <div class="stack">
+    {#if buildInfo && !buildInfo.features.embeddings}
+      <p class="hint">
+        Semantic search isn't compiled into this binary. Rebuild with
+        <code>--features embed-model</code> (or install a chan release that
+        includes it) to enable Hybrid search.
+      </p>
+    {:else if semanticState === null}
+      <p class="hint muted">Loading semantic-search state...</p>
+    {:else}
+      <p class="hint">
+        Hybrid search blends BM25 keyword scoring with dense-vector similarity
+        from <code>{semanticState.model_name}</code>
+        ({formatModelSize(semanticState.model_size_bytes)}). The model file is
+        shared across workspaces.
+      </p>
+      <PillToggle
+        label="Enable semantic search (Hybrid mode)"
         checked={semanticState.semantic_enabled}
         disabled={semanticDownloading || semanticEnabling}
-        onchange={(e) =>
-          void semanticToggle((e.currentTarget as HTMLInputElement).checked)}
+        ontoggle={(on) => void semanticToggle(on)}
       />
-      <span>Enable semantic search (Hybrid mode)</span>
-    </label>
-    {#if semanticDownloading}
-      <p class="hint muted">
-        <span class="spinner" aria-hidden="true"></span>
-        Downloading model... this may take a few minutes.
-      </p>
-    {:else if semanticEnabling}
-      <p class="hint muted">Enabling...</p>
-    {/if}
-    <div class="grid semantic-info">
-      <span class="k">Active</span>
-      <span class="v">
-        {#if semanticState.mode === "hybrid"}
-          <span class="ok">Hybrid (BM25 + semantic)</span>
-        {:else}
-          <span class="muted">BM25</span>
-        {/if}
-      </span>
-      <span class="k">Stored at</span>
-      <span class="v mono" title="Shared across workspaces">{semanticState.model_path}</span>
-    </div>
-    {#if semanticError}
-      <p class="hint err" role="alert">{semanticError}</p>
-    {/if}
-  {/if}
-</section>
-
-<section>
-  <h3>Embedding model</h3>
-  <p class="hint">
-    Pick the workspace-wide embedding model used for dense-vector indexing.
-    Changing it persists immediately; enabling Hybrid search downloads the
-    selected model first when needed.
-  </p>
-  <label class="model-row">
-    <span>Model</span>
-    <select
-      class="config-select"
-      disabled={semanticModels === null ||
-        semanticModelBusy ||
-        semanticDownloading ||
-        semanticEnabling}
-      value={semanticModels?.current_model ?? ""}
-      onchange={changeSemanticModel}
-      aria-label="Embedding model picker"
-    >
-      {#if semanticModels === null}
-        <option value="">Loading models...</option>
-      {:else}
-        {#each semanticModels.models as model (model.id)}
-          <option value={model.id}>
-            {model.label} - {formatModelMeta(model)}
-          </option>
-        {/each}
+      {#if semanticDownloading}
+        <p class="hint muted">
+          <span class="spinner" aria-hidden="true"></span>
+          Downloading model... this may take a few minutes.
+        </p>
+      {:else if semanticEnabling}
+        <p class="hint muted">Enabling...</p>
       {/if}
-    </select>
-  </label>
-  {#if semanticModels !== null && selectedModel()}
-    <p class="hint muted sub-hint">
-      Selected: <code>{selectedModel()!.id}</code>.
-    </p>
-  {/if}
-</section>
+      <div class="grid">
+        <span class="k">Active</span>
+        <span class="v">
+          {#if semanticState.mode === "hybrid"}
+            <span class="ok">Hybrid (BM25 + semantic)</span>
+          {:else}
+            <span class="muted">BM25</span>
+          {/if}
+        </span>
+        <span class="k">Stored at</span>
+        <span class="v mono path" title="Shared across workspaces">{semanticState.model_path}</span>
+      </div>
+      {#if semanticError}
+        <p class="hint err" role="alert">{semanticError}</p>
+      {/if}
+    {/if}
+  </div>
+</SettingField>
+
+<SettingField
+  label="Embedding model"
+  hint="Pick the workspace-wide embedding model used for dense-vector indexing. Changing it persists immediately; enabling Hybrid search downloads the selected model first when needed."
+>
+  <div class="stack">
+    <label class="model-row">
+      <span>Model</span>
+      <select
+        disabled={semanticModels === null ||
+          semanticModelBusy ||
+          semanticDownloading ||
+          semanticEnabling}
+        value={semanticModels?.current_model ?? ""}
+        onchange={changeSemanticModel}
+        aria-label="Embedding model picker"
+      >
+        {#if semanticModels === null}
+          <option value="">Loading models...</option>
+        {:else}
+          {#each semanticModels.models as model (model.id)}
+            <option value={model.id}>
+              {model.label} - {formatModelMeta(model)}
+            </option>
+          {/each}
+        {/if}
+      </select>
+    </label>
+    {#if semanticModels !== null && selectedModel()}
+      <p class="hint muted sub-hint">
+        Selected: <code>{selectedModel()!.id}</code>.
+      </p>
+    {/if}
+  </div>
+</SettingField>
 
 <style>
-  .hint {
-    margin: 0;
-    color: var(--text-secondary);
-    font-size: 13px;
-  }
-  .hint.muted {
-    color: var(--text-secondary);
-    font-style: italic;
-  }
-  .hint.err {
-    color: var(--warn-text);
-  }
-  .hint.sub-hint {
-    font-size: 11.5px;
-  }
-  .hint code {
-    font-family: ui-monospace, monospace;
-    font-size: 12px;
-    background: var(--bg-card);
-    padding: 0 4px;
-    border-radius: 3px;
-  }
-  .pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 10px;
-    border: 1px solid var(--btn-border);
-    border-radius: 4px;
-    background: var(--btn-bg);
-    cursor: pointer;
-    font-size: 14px;
-  }
-  .pill input[type="checkbox"] {
-    width: auto;
-    margin: 0;
-    padding: 0;
-    border: 0;
-    background: transparent;
-  }
-  .pill > span {
-    color: var(--text);
-  }
-  .pill:hover {
-    border-color: var(--btn-hover);
-  }
-  .pill.on {
-    background: var(--hover-bg);
-  }
-  .pill:has(input:disabled) {
-    cursor: not-allowed;
-    opacity: 0.7;
-  }
   .model-row {
     display: flex;
     align-items: center;
     gap: 0.75rem;
+    width: 100%;
   }
   .model-row > span {
     color: var(--text-secondary);
@@ -307,35 +252,8 @@
     flex: 1;
     min-width: 12em;
   }
-  .config-select {
-    background: var(--bg);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 5px 7px;
-    font: inherit;
-  }
-  .grid {
-    display: grid;
-    grid-template-columns: 8em minmax(0, 1fr);
-    gap: 4px 10px;
-    font-size: 14px;
-  }
-  .grid .k {
-    color: var(--text-secondary);
-  }
-  .grid .v {
-    color: var(--text);
-    min-width: 0;
-  }
   .v .ok {
     color: var(--accent);
-  }
-  .mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .muted {
     color: var(--text-secondary);

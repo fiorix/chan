@@ -6,6 +6,7 @@
   import { Download, Upload } from "lucide-svelte";
   import { api } from "../../../api/client";
   import { formatSize } from "../../../state/format";
+  import SettingField from "../SettingField.svelte";
 
   let metadataBusy = $state(false);
   let metadataStatus = $state<string | null>(null);
@@ -92,96 +93,91 @@
   }
 </script>
 
-<section>
-  <h3>Metadata archive</h3>
-  <p class="hint">
-    Export or restore this workspace's index, graph, report, and sessions
-    metadata as a single archive.
-  </p>
-  <div class="metadata-row">
-    <button
-      type="button"
-      class="metadata-action"
-      onclick={exportMetadataArchive}
-      disabled={metadataBusy || metadataImportBusy}
-    >
-      <Download size={16} strokeWidth={1.75} aria-hidden="true" />
-      <span>{metadataBusy ? "Exporting..." : "Export metadata archive"}</span>
-    </button>
-    <input
-      bind:this={importInput}
-      class="metadata-file-input"
-      type="file"
-      accept=".tar.zst,application/zstd"
-      onchange={onMetadataImportFileChange}
-    />
-    <button
-      type="button"
-      class="metadata-action"
-      onclick={chooseMetadataImportFile}
-      disabled={metadataBusy || metadataImportBusy}
-    >
-      <Upload size={16} strokeWidth={1.75} aria-hidden="true" />
-      <span>Import metadata archive</span>
-    </button>
-  </div>
-  {#if metadataImportFile}
-    <div class="metadata-import-panel">
-      <div class="metadata-import-file">{metadataImportFile.name}</div>
-      <p class="metadata-warning">
-        Import replaces index, graph, report, and sessions metadata.
-      </p>
-      <label class="metadata-check">
-        <input
-          type="checkbox"
-          bind:checked={metadataImportRescan}
-          disabled={metadataImportBusy}
-        />
-        <span>Rescan after import</span>
-      </label>
-      <label class="metadata-check">
-        <input
-          type="checkbox"
-          bind:checked={metadataImportForceScm}
-          disabled={metadataImportBusy}
-        />
-        <span>Force SCM mismatch</span>
-      </label>
-      <div class="metadata-import-actions">
-        <button
-          type="button"
-          class="metadata-action"
-          onclick={importMetadataArchive}
-          disabled={metadataImportBusy}
-        >
-          <Upload size={16} strokeWidth={1.75} aria-hidden="true" />
-          <span>{metadataImportBusy ? "Importing..." : "Import"}</span>
-        </button>
-        <button
-          type="button"
-          class="metadata-action subtle"
-          onclick={clearMetadataImport}
-          disabled={metadataImportBusy}
-        >
-          Cancel
-        </button>
-      </div>
+<SettingField
+  label="Metadata archive"
+  hint="Export or restore this workspace's index, graph, report, and sessions metadata as a single archive."
+>
+  <div class="stack">
+    <div class="metadata-row">
+      <button
+        type="button"
+        class="metadata-action"
+        onclick={exportMetadataArchive}
+        disabled={metadataBusy || metadataImportBusy}
+      >
+        <Download size={16} strokeWidth={1.75} aria-hidden="true" />
+        <span>{metadataBusy ? "Exporting..." : "Export metadata archive"}</span>
+      </button>
+      <input
+        bind:this={importInput}
+        class="metadata-file-input"
+        type="file"
+        accept=".tar.zst,application/zstd"
+        onchange={onMetadataImportFileChange}
+      />
+      <button
+        type="button"
+        class="metadata-action"
+        onclick={chooseMetadataImportFile}
+        disabled={metadataBusy || metadataImportBusy}
+      >
+        <Upload size={16} strokeWidth={1.75} aria-hidden="true" />
+        <span>Import metadata archive</span>
+      </button>
     </div>
-  {/if}
-  {#if metadataStatus}
-    <p class="metadata-status ok">{metadataStatus}</p>
-  {/if}
-  {#if metadataError}
-    <p class="metadata-status error">{metadataError}</p>
-  {/if}
-</section>
+    {#if metadataImportFile}
+      <div class="metadata-import-panel">
+        <div class="metadata-import-file">{metadataImportFile.name}</div>
+        <p class="metadata-warning">
+          Import replaces index, graph, report, and sessions metadata.
+        </p>
+        <label class="metadata-check">
+          <input
+            type="checkbox"
+            bind:checked={metadataImportRescan}
+            disabled={metadataImportBusy}
+          />
+          <span>Rescan after import</span>
+        </label>
+        <label class="metadata-check">
+          <input
+            type="checkbox"
+            bind:checked={metadataImportForceScm}
+            disabled={metadataImportBusy}
+          />
+          <span>Force SCM mismatch</span>
+        </label>
+        <div class="metadata-import-actions">
+          <button
+            type="button"
+            class="metadata-action"
+            onclick={importMetadataArchive}
+            disabled={metadataImportBusy}
+          >
+            <Upload size={16} strokeWidth={1.75} aria-hidden="true" />
+            <span>{metadataImportBusy ? "Importing..." : "Import"}</span>
+          </button>
+          <button
+            type="button"
+            class="metadata-action subtle"
+            onclick={clearMetadataImport}
+            disabled={metadataImportBusy}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    {/if}
+    {#if metadataStatus}
+      <p class="metadata-status ok">{metadataStatus}</p>
+    {/if}
+    {#if metadataError}
+      <p class="hint err" role="alert">{metadataError}</p>
+    {/if}
+  </div>
+</SettingField>
 
 <style>
-  .hint {
-    margin: 0 0 4px 0;
-    color: var(--text-secondary);
-    font-size: 13px;
-  }
   .metadata-row {
     display: flex;
     align-items: center;
@@ -219,7 +215,6 @@
     flex-direction: column;
     gap: 8px;
     max-width: 560px;
-    margin-top: 8px;
     padding: 10px;
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -254,13 +249,10 @@
     flex-wrap: wrap;
   }
   .metadata-status {
-    margin: 8px 0 0 0;
+    margin: 0;
     font-size: 12px;
   }
   .metadata-status.ok {
     color: var(--text-secondary);
-  }
-  .metadata-status.error {
-    color: var(--warn-text);
   }
 </style>

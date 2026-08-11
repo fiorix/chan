@@ -2,6 +2,9 @@
   // A checkbox pill, sharing the radio-pill shape. Controlled: `checked`
   // is the current value and `ontoggle` fires the write. `disabled`
   // covers the busy state the per-workspace copies already styled.
+  // The pill CSS lives in SettingField (the one .pill block under
+  // components/settings/); this renders the bare markup and must be
+  // nested in a SettingField.
 
   let {
     checked,
@@ -25,37 +28,3 @@
   />
   <span>{label}</span>
 </label>
-
-<style>
-  .pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 10px;
-    border: 1px solid var(--btn-border);
-    border-radius: 4px;
-    background: var(--btn-bg);
-    cursor: pointer;
-    font-size: 14px;
-  }
-  .pill input[type="checkbox"] {
-    width: auto;
-    margin: 0;
-    padding: 0;
-    border: 0;
-    background: transparent;
-  }
-  .pill > span {
-    color: var(--text);
-  }
-  .pill:hover {
-    border-color: var(--btn-hover);
-  }
-  .pill.on {
-    background: var(--hover-bg);
-  }
-  .pill:has(input:disabled) {
-    cursor: not-allowed;
-    opacity: 0.7;
-  }
-</style>
