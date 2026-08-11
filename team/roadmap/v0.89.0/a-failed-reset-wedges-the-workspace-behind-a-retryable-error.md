@@ -213,6 +213,16 @@ One design decision the extraction forces: `ResetError` (`storage.rs:113`) and `
 
 Out of scope: whether `wipe_dir`'s 200ms budget is the right number, which is the deferred draft; and the drain protocol and its 5s deadline, which is a separate mechanism this item does not touch.
 
+**Amended 2026-08-11: `crates/chan-server/src/error.rs` is in scope.** The Boundaries section as registered named the two route modules and `lib.rs` and omitted the file holding the response mapping, but the accepted permanent-fault behaviour cannot be implemented without changing that mapping, so the omission was in the boundary rather than in the work. Granted to the lane on request rather than taken as a quiet edit.
+
+## The contract change this item ships, stated rather than left to a diff
+
+`StateAccessError::Missing` was grouped with `Busy`, so a permanently empty workspace cell answered **HTTP 503 with `Retry-After: 1`** and a temporary-busy body, which is a promise that retrying can work. It now answers **HTTP 500, with no `Retry-After`**, and exposes the missing-cell fault. `Busy` is unchanged at 503 with `Retry-After: 1`, so the two states are distinguishable for the first time.
+
+This reaches every workspace-facing handler that maps a `try_workspace` or `try_indexer` failure through `err_state`. The route callers at the time of the change: attachments, contacts, drafts, excluded_dirs, files, fs_graph, graph, index, inspector, mentions, open, preflight, report, reports_toggle, screensaver, search, storage, team_config and workspace.
+
+It is written here in prose because a client that has been retrying a permanent failure forever is the whole point of the item, and a release report cannot carry that sentence by inferring it from a diff.
+
 ## Reproduced, 2026-08-11
 
 **The premise held.** The section below is preserved as written, because it is the record of what was known at registration and the lifecycle rule keeps a proposal's original rationale rather than overwriting it. What follows is the evidence that arrived after it.
