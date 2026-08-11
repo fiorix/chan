@@ -92,12 +92,20 @@ describe("CommandChordAssign", () => {
       shortcutEditable: false,
       shortcutIds: ["app.tab.close", "app.window.close"],
     });
-    const target = mountAssign(command, "macos");
-    const chord = target.querySelector(".chord-btn") as HTMLElement;
-    expect(chord.tagName).toBe("SPAN");
-    expect(chord.classList.contains("readonly")).toBe(true);
-    expect(chord.textContent?.trim()).toBe("Cmd+W / Cmd+Shift+W");
-    expect(target.querySelector(".reset")).toBeNull();
+    // The alias pair resolves per slot: Cmd+W / Cmd+Shift+W on macOS;
+    // Ctrl+Shift+W / Ctrl+Alt+W on the Linux and Windows desktop.
+    for (const [slot, expected] of [
+      ["macos", "Cmd+W / Cmd+Shift+W"],
+      ["linux", "Ctrl+Shift+W / Ctrl+Alt+W"],
+      ["windows", "Ctrl+Shift+W / Ctrl+Alt+W"],
+    ] as const) {
+      const target = mountAssign(command, slot);
+      const chord = target.querySelector(".chord-btn") as HTMLElement;
+      expect(chord.tagName, slot).toBe("SPAN");
+      expect(chord.classList.contains("readonly"), slot).toBe(true);
+      expect(chord.textContent?.trim(), slot).toBe(expected);
+      expect(target.querySelector(".reset"), slot).toBeNull();
+    }
   });
 
   test("capturing a free chord assigns it and reveals a reset control", async () => {

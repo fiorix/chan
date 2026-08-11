@@ -67,13 +67,16 @@ describe("shortcut table", () => {
     expect(renderTable("native", "mac")).toMatch(/^Flip pane side\s+Ctrl\+`/m);
   });
 
-  // No-defaults rebind: Cmd+W is the macOS primary; Ctrl+D stays the
-  // alternate on web and the off-mac desktop.
-  test("close-tab: Ctrl+D on web, Cmd+W primary on native mac", () => {
+  // No-defaults rebind: Cmd+W is the macOS primary, Ctrl+Shift+W the
+  // Linux / Windows desktop primary; Ctrl+D stays the alternate on web
+  // and the off-mac desktop.
+  test("close-tab: Ctrl+D on web, Cmd+W on native mac, Ctrl+Shift+W off-mac native", () => {
     const web = renderTable("web", "mac");
     const native = renderTable("native", "mac");
+    const nativeLinux = renderTable("native", "linux");
     expect(web).toMatch(/^Close tab\s+Ctrl\+D/m);
     expect(native).toMatch(/^Close tab\s+Cmd\+W/m);
+    expect(nativeLinux).toMatch(/^Close tab\s+Ctrl\+Shift\+W/m);
   });
 
   // Reopen closed tab rebinds off plain Ctrl+Shift+T (now the off-mac
@@ -88,10 +91,11 @@ describe("shortcut table", () => {
     );
   });
 
-  // Close window is native-only; on macOS it takes Cmd+Shift+W (Cmd+W now
-  // closes the tab).
-  test("close-window is native-only, Cmd+Shift+W on mac", () => {
+  // Close window is native-only: Cmd+Shift+W on macOS (Cmd+W closes the
+  // tab), Ctrl+Alt+W off macOS (Ctrl+Shift+W is tab close there).
+  test("close-window is native-only, Cmd+Shift+W on mac, Ctrl+Alt+W off-mac", () => {
     expect(renderTable("native", "mac")).toMatch(/^Close window\s+Cmd\+Shift\+W/m);
+    expect(renderTable("native", "linux")).toMatch(/^Close window\s+Ctrl\+Alt\+W/m);
     expect(renderTable("web", "mac")).not.toMatch(/^Close window\b/m);
   });
 

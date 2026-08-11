@@ -233,13 +233,14 @@ export const SHORTCUTS: readonly Shortcut[] = [
     escapeTerminal: true,
   },
   // The explicit "close this window" action. Native chord: Cmd+Shift+W on
-  // macOS, Ctrl+Shift+W on Linux / Windows. There is no in-page web chord:
+  // macOS, Ctrl+Alt+W on Linux / Windows (via `osChord`; Ctrl+Shift+W is
+  // tab close there). There is no in-page web chord:
   // on the web a browser tab close IS the discard. chan-desktop binds the
   // native chord and maps the OS close button here when a devserver is NOT
   // connected (when connected the button buries the window instead, serve.rs).
   // Drives the window-discard path (an explicit DELETE of the saved window
-  // blob), distinct from the tab-close chords (Cmd+W on macOS, Ctrl+D
-  // everywhere).
+  // blob), distinct from the tab-close chords (Cmd+W on macOS, Ctrl+Shift+W
+  // on the Linux / Windows desktop via `osChord`, Ctrl+D everywhere).
   {
     id: "app.window.close",
     label: "Close window",
@@ -271,18 +272,19 @@ export const SHORTCUTS: readonly Shortcut[] = [
   },
   // Tab navigation
   //
-  // Close tab: Cmd+W is the primary on macOS; Ctrl+D is the alternate on
-  // every platform (it works everywhere except Excalidraw, which reserves
-  // Ctrl+D for duplicate-object and wins on that tab). The mac Cmd+W primary
-  // lives in `osChord`; the stored Ctrl+D is what web and the off-mac desktop
-  // render. No escapeTerminal: Ctrl+D must still reach a focused shell as EOF.
+  // Close tab: Cmd+W is the primary on macOS and Ctrl+Shift+W the primary
+  // on the Linux / Windows desktop; both live in `osChord`. Ctrl+D is the
+  // alternate on every platform (it works everywhere except Excalidraw,
+  // which reserves Ctrl+D for duplicate-object and wins on that tab). The
+  // stored Ctrl+D is what web renders. No escapeTerminal: Ctrl+D must
+  // still reach a focused shell as EOF.
   {
     id: "app.tab.close",
     label: "Close tab",
     web: "Ctrl+D",
     native: "Ctrl+D",
     group: "Tabs",
-    note: "Cmd+W on macOS",
+    note: "Cmd+W on macOS, Ctrl+Shift+W on the Linux / Windows desktop",
   },
   // Reopen closed tab: Cmd+Shift+T on the macOS desktop; Ctrl+Alt+Shift+T on
   // web and the Linux / Windows desktop, because plain Ctrl+Shift+T is the
@@ -502,6 +504,7 @@ const TERMINAL_PASTE_ID = "terminal.paste";
 const RICH_PROMPT_ID = "terminal.richPrompt";
 const BROADCAST_TOGGLE_ID = "app.terminal.broadcastToggle";
 const TAB_CLOSE_ID = "app.tab.close";
+const WINDOW_CLOSE_ID = "app.window.close";
 const TERMINAL_TOGGLE_ID = "app.terminal.toggle";
 const TAB_REOPEN_ID = "app.tab.reopenClosed";
 const SEARCH_TOGGLE_ID = "app.search.toggle";
@@ -520,8 +523,11 @@ const COMPUTERS_LAUNCHER_ID = "app.launcher.computers";
 ///     help table correct per-OS.
 ///   - Rich Prompt: Cmd+Shift+P (mac) vs Ctrl+Shift+P off-mac (native + web;
 ///     the Win / Super key is ruled out).
-///   - Close tab: Cmd+W is the macOS-native primary; every other surface keeps
-///     the stored Ctrl+D (the alternate that works everywhere but Excalidraw).
+///   - Close tab: Cmd+W (mac native) vs Ctrl+Shift+W (off-mac native;
+///     plain Ctrl+W is readline delete-word in a shell). Web keeps the
+///     stored Ctrl+D, the off-mac alternate everywhere but Excalidraw.
+///   - Close window: Cmd+Shift+W (mac native) vs Ctrl+Alt+W (off-mac
+///     native), so the off-mac tab-close chord never means two things.
 ///   - New terminal: Cmd+T (mac native) vs Ctrl+Shift+T (off-mac native).
 ///   - Reopen closed tab: Cmd+Shift+T (mac native) vs Ctrl+Alt+Shift+T
 ///     (off-mac native; the web set already stores that form).
@@ -553,10 +559,20 @@ export function osChord(
   // Group broadcast: macOS desktop only. Off macOS Ctrl+Shift+I is the
   // webview / browser inspector chord, so no default is minted there.
   if (s.id === BROADCAST_TOGGLE_ID && os !== "mac") return undefined;
-  // Close tab: Cmd+W is the macOS-native primary. Every other surface keeps
-  // the stored Ctrl+D (the alternate that survives everywhere but Excalidraw).
-  if (s.id === TAB_CLOSE_ID && platform === "native" && os === "mac") {
-    return "Mod+W";
+  // Close tab: Cmd+W is the macOS-native primary; Ctrl+Shift+W is the
+  // Linux / Windows desktop primary (plain Ctrl+W stays readline
+  // delete-word in a focused shell, unclaimed). Web keeps the stored
+  // Ctrl+D, which also remains the off-mac desktop alternate (the SPA's
+  // onCtrlDCapture claims it, context-aware).
+  if (s.id === TAB_CLOSE_ID && platform === "native") {
+    return os === "mac" ? "Mod+W" : "Ctrl+Shift+W";
+  }
+  // Close window: Cmd+Shift+W is the macOS primary (the stored native
+  // chord). Off-mac native moves with the launcher accelerator to
+  // Ctrl+Alt+W, the established off-mac substitute family, so
+  // Ctrl+Shift+W never means two things depending on focus.
+  if (s.id === WINDOW_CLOSE_ID && platform === "native" && os !== "mac") {
+    return "Ctrl+Alt+W";
   }
   // New terminal: Cmd+T on the macOS desktop; Ctrl+Shift+T on the Linux /
   // Windows desktop, where bare Ctrl+T is a terminal chord.

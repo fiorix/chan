@@ -1900,7 +1900,8 @@ impl Registry {
     }
 
     /// A window was DISCARDED (its layout blob was DELETEd -- `^W` to empty,
-    /// `^D`, `Ctrl+Shift+W`, or an empty window). Drop it from the persisted
+    /// `^D`, `Ctrl+Shift+W` (off-mac tab close) / `Ctrl+Alt+W` (off-mac window
+    /// close), or an empty window). Drop it from the persisted
     /// set and immediately reap its terminal sessions. This is what frees a
     /// busy detached session the idle pruner deliberately keeps alive, and so
     /// is the discard half of "discard ⇒ reap; persist ⇒ keep". Returns how

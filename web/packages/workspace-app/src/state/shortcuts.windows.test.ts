@@ -54,12 +54,13 @@ describe("Windows shortcut labels are Ctrl-based", () => {
     expect(pick("terminal.richPrompt", "native")).toBe("Ctrl+Shift+P");
     expect(pick("terminal.richPrompt", "web")).toBe("Ctrl+Shift+P");
     // No-defaults rebinds: tab / terminal / window chords diverge on the
-    // Windows desktop. Close tab keeps its universal Ctrl+D (the mac Cmd+W
-    // primary does not apply off-mac).
-    expect(pick("app.window.close", "native")).toBe("Ctrl+Shift+W");
+    // Windows desktop. Close tab takes Ctrl+Shift+W (plain Ctrl+W stays
+    // readline delete-word in a shell); Ctrl+D stays the alternate.
+    // Window close moves to Ctrl+Alt+W so the two never share a chord.
+    expect(pick("app.window.close", "native")).toBe("Ctrl+Alt+W");
     expect(pick("app.terminal.toggle", "native")).toBe("Ctrl+Shift+T");
     expect(pick("app.tab.reopenClosed", "native")).toBe("Ctrl+Alt+Shift+T");
-    expect(pick("app.tab.close", "native")).toBe("Ctrl+D");
+    expect(pick("app.tab.close", "native")).toBe("Ctrl+Shift+W");
   });
 
   test("native (desktop) Windows has ZERO Cmd labels", () => {

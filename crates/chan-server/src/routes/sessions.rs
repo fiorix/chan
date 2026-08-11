@@ -174,7 +174,8 @@ pub async fn api_delete_session(
 
 async fn delete_session_response(state: &Arc<AppState>, key: String, moved: bool) -> Response {
     // A DELETE either DISCARDS the window or signals a cross-window MOVE-OUT:
-    // - `?w=W` (discard: ^W to empty / ^D / Ctrl+Shift+W / an empty window):
+    // - `?w=W` (discard: ^W to empty / ^D / Ctrl+Shift+W (off-mac tab close) /
+    //   Ctrl+Alt+W (off-mac window close) / an empty window):
     //   drop it from the persisted set AND reap its sessions (kill the PTYs,
     //   release the fds) -- the "discard ⇒ reap" half that frees a busy detached
     //   session the pruner keeps alive.

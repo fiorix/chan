@@ -249,6 +249,22 @@ describe("Track C pane shortcut wiring", () => {
     );
   });
 
+  test("the KeyW branch routes every window kind through app.tab.close (no control-terminal special case)", () => {
+    // The ctrl-shift-w ruling: the control terminal takes the same tab
+    // path as every other window kind, which is what gives it the
+    // confirmCloseTabs prompt for free. The deleted special case used to
+    // short-circuit to requestCloseWindow BEFORE the command ran; the
+    // pin is that the branch body goes straight from the chord match to
+    // the metaKey gate.
+    const branch = sourceBetween(
+      'if (meta && !e.altKey && !e.shiftKey && e.code === "KeyW") {',
+      'if (e.altKey && e.shiftKey && !meta) {',
+    );
+    expect(branch).not.toContain("ui.terminalControl");
+    expect(branch).not.toContain("requestCloseWindow");
+    expect(branch).toContain('runCommand("app.tab.close", {})');
+  });
+
   test("empty-pane close is wired through Ctrl+D, app.tab.close, and app.window.close", () => {
     expect(app).toMatch(
       /if \(!active\) \{[\s\S]*?if \(closeActiveEmptyPane\(\)\) \{[\s\S]*?e\.preventDefault\(\);[\s\S]*?e\.stopPropagation\(\);/,

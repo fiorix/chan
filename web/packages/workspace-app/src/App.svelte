@@ -911,21 +911,15 @@
       selectNextPane();
       return;
     }
-    // Cmd+W is the macOS close-tab primary (registry app.tab.close). Preserve
-    // the control-terminal close path: in a control window Cmd+W drives the
-    // window close even while the connect script's PTY is live, and
-    // request_close_window hands that close to the desktop, which reaps the
-    // terminal. Otherwise mac Cmd+W closes the active tab (or the empty pane
-    // when the pane has no tabs, via the app.tab.close command). Off-mac
-    // Ctrl+W is not claimed here (Ctrl+D closes tabs off-mac and the browser
-    // owns Ctrl+W), so it falls through.
+    // Cmd+W is the macOS close-tab primary (registry app.tab.close). The
+    // control terminal takes the same path as every other window kind:
+    // app.tab.close reaches confirmCloseTabs, which prompts when the
+    // connect script's PTY is live, and the terminal-only $effect closes
+    // the window once the last tab is gone. Off-mac Ctrl+W is not
+    // claimed here (off-mac tab close is Ctrl+Shift+W via the desktop
+    // bridge; Ctrl+D is the alternate; the browser owns Ctrl+W), so it
+    // falls through.
     if (meta && !e.altKey && !e.shiftKey && e.code === "KeyW") {
-      if (ui.terminalControl) {
-        e.preventDefault();
-        e.stopPropagation();
-        if (isTauriDesktop()) void requestCloseWindow();
-        return;
-      }
       if (e.metaKey) {
         e.preventDefault();
         e.stopPropagation();
@@ -1336,7 +1330,8 @@
         else closeActiveEmptyPane();
         return;
       }
-      // Explicit "close this window" (native Ctrl+Shift+W via KEY_BRIDGE_JS,
+      // Explicit "close this window" (native Ctrl+Alt+W off-mac via
+      // KEY_BRIDGE_JS, Cmd+Shift+W on macOS,
       // and the OS close button when a devserver is NOT connected). Discard
       // intent: delete this window's saved blob now -- the server reaps its
       // terminal sessions -- then ask the host to close the window. Distinct

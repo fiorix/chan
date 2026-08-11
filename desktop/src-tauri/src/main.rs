@@ -6111,15 +6111,16 @@ fn build_launcher_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>
     let quit = MenuItemBuilder::with_id("chan-quit", "Quit")
         .accelerator("CmdOrCtrl+Q")
         .build(app)?;
-    // Close Window on Linux/Windows rides Ctrl+Shift+W (plain
-    // Ctrl+W stays a terminal readline chord). Same routed handler
+    // Close Window on Linux/Windows rides Ctrl+Alt+W (plain
+    // Ctrl+W stays a terminal readline chord, and Ctrl+Shift+W is
+    // tab close there). Same routed handler
     // as macOS's Cmd+W item: tab-close in SPA windows,
     // cancel-close on the connecting screen, native close
     // elsewhere. On the launcher that means the launcher's own
     // hide-on-close. SPA windows claim the same chord inside
     // KEY_BRIDGE_JS, mirroring the macOS menu/bridge shadow pair.
     let close_window = MenuItemBuilder::with_id("app-close-window", "Close Window")
-        .accelerator("CmdOrCtrl+Shift+W")
+        .accelerator("CmdOrCtrl+Alt+W")
         .build(app)?;
     let file = SubmenuBuilder::new(app, "File")
         .item(&new_terminal)
@@ -7263,15 +7264,16 @@ fn handle_new_terminal(app: &tauri::AppHandle) {
 }
 
 /// Route File ▸ Close Window by the focused window's kind, mirroring
-/// `handle_new_terminal`. macOS binds Cmd+W; Linux/Windows bind Ctrl+Shift+W
-/// (plain Ctrl+W stays a terminal readline chord there).
+/// `handle_new_terminal`. macOS binds Cmd+W; Linux/Windows bind Ctrl+Alt+W
+/// (plain Ctrl+W stays a terminal readline chord there, and Ctrl+Shift+W
+/// is tab close).
 ///
 /// - A focused workspace webview (workspace-* / outbound-* / terminal-*):
 ///   on macOS the menu shares Cmd+W with tab-close, so it dispatches
-///   `app.tab.close` (the active tab, not the window). Off-mac the chord is
-///   the registry's window-close (tab-close is Ctrl+D there, on the SPA), so
-///   it dispatches `app.window.close`, the same CustomEvent the KEY_BRIDGE_JS
-///   KeyW case fires.
+///   `app.tab.close` (the active tab, not the window). Off-mac the menu
+///   chord is the registry's window-close (Ctrl+Alt+W; tab-close is
+///   Ctrl+Shift+W there), so it dispatches `app.window.close`, the same
+///   CustomEvent the KEY_BRIDGE_JS alt KeyW case fires.
 /// - Any other focused window (the launcher `main` / `main-*`, the About
 ///   window) is closed natively. The launcher's `CloseRequested` handler
 ///   intercepts that to hide rather than destroy it, keeping reopen instant.
@@ -7309,8 +7311,8 @@ fn close_spa_or_native_window(app: &tauri::AppHandle, window: tauri::WebviewWind
             let _ = window.destroy();
             return;
         }
-        // macOS Cmd+W is tab-close; off-mac Ctrl+Shift+W is window-close (its
-        // tab-close is Ctrl+D, dispatched from the SPA).
+        // macOS Cmd+W is tab-close; off-mac Ctrl+Alt+W is window-close (its
+        // tab-close is Ctrl+Shift+W, dispatched from the bridge).
         if cfg!(target_os = "macos") {
             eval_chan_command(&window, "app.tab.close");
         } else {

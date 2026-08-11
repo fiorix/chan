@@ -155,7 +155,8 @@ const KEYBINDINGS_TABLE: &str = "  App
 
   Tabs
   ----
-  Close tab                                    Ctrl+D   (Cmd+W on macOS)
+  Close tab                                    Ctrl+D
+      (Cmd+W on macOS, Ctrl+Shift+W on the Linux / Windows desktop)
   Reopen closed tab                            Ctrl+Alt+Shift+T
       (Cmd+Shift+T on macOS desktop)
   Next tab                                     Alt+Shift+]

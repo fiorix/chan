@@ -2205,11 +2205,16 @@ const KEY_BRIDGE_JS: &str = r#"
       // Cmd+Opt+I (macOS) / Ctrl+Alt+I (Linux/Windows) → DevTools.
       // Ctrl+Alt+Shift+T reopens the last closed tab on the Linux /
       // Windows desktop, where Ctrl+Shift+T is the New-terminal chord.
+      // Ctrl+Alt+W closes the window on the Linux / Windows desktop,
+      // where Ctrl+Shift+W is tab close; macOS keeps Cmd+Shift+W (the
+      // shift branch below) so this is gated on !metaKey.
       // Other meta+alt chords are left to the webview defaults.
       if (!shift && code === 'KeyI') {
         invokeIpc(e, 'open_devtools');
       } else if (!e.metaKey && shift && code === 'KeyT') {
         fire(e, 'app.tab.reopenClosed');
+      } else if (!e.metaKey && !shift && code === 'KeyW') {
+        fire(e, 'app.window.close');
       }
       return;
     }
@@ -2256,7 +2261,8 @@ const KEY_BRIDGE_JS: &str = r#"
         // Cmd+W closes the tab
         // on macOS. On Linux the platform mod is Ctrl and Ctrl+W is
         // readline delete-word inside a focused terminal, so DON'T
-        // claim it - let it reach xterm. Linux closes tabs with Ctrl+D
+        // claim it - let it reach xterm. Linux closes tabs with
+        // Ctrl+Shift+W (the shift branch below) or Ctrl+D
         // (context-aware via the SPA's onCtrlDCapture, which leaves a
         // focused terminal to its EOF). Gating on metaKey (Cmd) leaves
         // Linux Ctrl+W untouched (no preventDefault -> reaches xterm).
@@ -2316,18 +2322,24 @@ const KEY_BRIDGE_JS: &str = r#"
         // the !shift branch above); the !metaKey form fires only for the
         // Ctrl+Shift+R that Linux/Windows users press.
         case 'KeyR': if (!e.metaKey) invokeIpc(e, 'reload_window'); return;
-        // Close window: Cmd+Shift+W (macOS) / Ctrl+Shift+W (Linux,
-        // Windows) discards this window (app.window.close). Tab-close is
-        // Cmd+W on macOS (!shift branch above) and Ctrl+D off-mac (the
-        // SPA's onCtrlDCapture), so KeyW here is window-close on both
-        // mods. On the connecting screen the SPA command bus is dead, so
-        // destroy the window directly to cancel the connect.
+        // Cmd+Shift+W (macOS) stays window close (app.window.close).
+        // Ctrl+Shift+W (Linux, Windows) is the chord a user reaches for
+        // to close a TAB, so it fires app.tab.close; window close moved
+        // to Ctrl+Alt+W (the alt branch above). app.tab.close cannot
+        // carry escapeTerminal (the flag is per entry and would also
+        // escape the entry's web Ctrl+D, breaking shell EOF in a
+        // browser), so what stands between Ctrl+Shift+W and a focused
+        // shell is this listener's window-capture
+        // stopImmediatePropagation. On the connecting screen the SPA
+        // command bus is dead, so destroy the window directly to cancel
+        // the connect.
         case 'KeyW':
           if (location.pathname.endsWith('/connecting.html')) {
             invokeIpc(e, 'request_close_window');
             return;
           }
-          fire(e, 'app.window.close');
+          if (e.metaKey) fire(e, 'app.window.close');
+          else fire(e, 'app.tab.close');
           return;
         case 'KeyG':         fire(e, 'app.find.prev');     return;
         // Reopen closed tab: Cmd+Shift+T on macOS. Off-mac Ctrl+Shift+T is
