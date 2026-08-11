@@ -136,6 +136,22 @@ The draft proposed a statistical bound, "a run count large enough to have caught
 - Whether any chan-workspace test has ever written into a real `~/.chan` on a bare host. Not seen here, and the container build path is why this project would not have seen it.
 - Whether the five `devserver::tests` failures are the `:5719` to `:5721` gap specifically rather than some other unguarded moment. That gap is the only unlocked window any of these tests opens on a relative value, and the guarded population narrows it to that, but nobody has instrumented a run to catch a reader inside it. The originating lane recorded the mechanism as an unproven hypothesis at the time, and this item does not upgrade it.
 
+## Tail: three comments this item's contract made false, 2026-08-11
+
+Folded in as a small fix rather than registered as its own item. It is three comment lines with no behaviour change, and it is the natural tail of the sidecar work `6ddd34cc` did here: those comments describe where per-workspace state lives, and this item is what settled that.
+
+The owner asked whether chan still creates a `.chan` directory at the **workspace root**. It does not, and nothing does. `workspace_paths_for_metadata_key_in` builds `chan_home.join("workspaces").join(metadata_key)` and every subdirectory hangs off that root, `sessions` included. The only production `join(".chan")` in the tree is `home.map(|p| p.join(".chan"))` in `paths.rs`, which is the chan home itself. The two places that create `<workspace>/.chan` are **test fixtures asserting the opposite**: they build one so that `list()` and `list_tree()` can be shown to hide it. The production exclusion is worth keeping, since an older version or a user could leave one behind.
+
+Three comments in `crates/chan-library/src/host.rs` state that the durable workspace session blob lives at `<workspace>/.chan/sessions/<id>`, a path that does not exist and never did in this shape. Two of them sit on `reap_discarded_window_state`, which is exactly where a reader goes to understand the discard cleanup path, so the wrong location is in the place most likely to be trusted; the third states it as the thing a test is proving.
+
+The correct resolution is `<chan_home>/workspaces/<metadata_key>/sessions/<id>`.
+
+**The trap in writing the replacement**, which is why this is recorded here rather than left as an obvious edit: do not write it as `~/.chan/workspaces/...`. That would substitute a subtler inaccuracy for a plain one. This item's own work made the home injectable, `6ddd34cc` placed library sidecars under `config_path.parent()`, and `CHAN_HOME` overrides the default besides. The comment must name the library's chan home as a resolved thing rather than pin one instance of it.
+
+A **fourth mention, of lesser severity and deliberately not bundled**: `host.rs` also describes chan-desktop's config as `~/.chan/desktop`. That resolves through `chan_workspace::paths::config_dir().join("desktop")`, so it is the same injectable path, and the comment names its default instance rather than a location that does not exist. That is imprecision rather than falsehood, and the desktop crate's own doc block states the relationship correctly. Recorded so the next reader does not treat the two as the same defect, and left to the implementer's judgement.
+
+Nothing here is a live defect and no user is affected. The cost is a reader's time and their confidence in the surrounding doc block: someone debugging an orphaned session blob would search the workspace root, find nothing, and have no reason to suspect the comment rather than their own understanding.
+
 ## Rough size
 
 Small to medium, and smaller than the draft's "medium, seven call sites, and the design question is what replaces them". Two of the three windows need no design round: absolutize the sentinel at `devserver.rs:5707` and make the restore and the verification one continuous lock hold, then hoist `CHAN_HOME_ENV` (`devserver.rs:2524`) somewhere `doc_sessions` can reach it. The real work is Window 3, which is one home added to two functions in `paths.rs` and threaded through four call sites in `library.rs` and `workspace.rs`.
