@@ -30,12 +30,15 @@ describe("Turbulent Oculus", () => {
     );
   });
 
-  test("doubles only the visible center mass", () => {
+  test("masks a pupil rather than a hole at the center", () => {
+    // The mask is a radius, not a darkening: inside it the pattern is cut
+    // away and the pane's background shows through, so the constant IS how
+    // much of the middle is missing. It shipped at 2.0 and read as a hole.
     expect(TURBULENT_OCULUS_FRAGMENT_SHADER).toContain(
       "const float BASE_CENTER_MASS_RADIUS = 0.08;",
     );
     expect(TURBULENT_OCULUS_FRAGMENT_SHADER).toContain(
-      "const float CENTER_MASS_SCALE = 2.0;",
+      "const float CENTER_MASS_SCALE = 0.4;",
     );
     expect(TURBULENT_OCULUS_FRAGMENT_SHADER).toContain(
       "float alpha = o.r * centerReveal * uOpacity;",

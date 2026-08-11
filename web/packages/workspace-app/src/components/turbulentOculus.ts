@@ -26,8 +26,13 @@ mat2 rotate2D(float r) {
   return mat2(cos(r), sin(r), -sin(r), cos(r));
 }
 
+// The eye's dark pupil: inside this radius the pattern is masked out and the
+// pane's own background shows through. BASE is the source sketch's figure and
+// SCALE is chan's adjustment to it, kept apart so the provenance stays legible.
+// The mass shipped at 2.0, which read as a hole rather than a pupil; a fifth of
+// that radius keeps the eye without swallowing the middle of the pattern.
 const float BASE_CENTER_MASS_RADIUS = 0.08;
-const float CENTER_MASS_SCALE = 2.0;
+const float CENTER_MASS_SCALE = 0.4;
 
 void main() {
   o = vec4(0.0);
