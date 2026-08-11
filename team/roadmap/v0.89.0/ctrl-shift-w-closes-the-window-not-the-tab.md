@@ -107,15 +107,33 @@ The owner ruled the shape of this item. **`Ctrl+Shift+W` off macOS behaves as `C
 3. **Except on web**, where the standalone-terminal case leaves the empty pane.
 4. The launcher accelerator **moves with window close** to `Ctrl+Alt+W`, so `Ctrl+Shift+W` never means two different things depending on which surface has focus.
 
-Three of those were verified against the code before the ruling was accepted, and hold as stated. `isTerminalOnlyWindow()` returns true for both `terminal` and `control`, so a control terminal is terminal-only. The last-tab `$effect` in `App.svelte` fires when a terminal-only window has no terminal tabs left, discards the blob and closes the window, and it is gated on `isTauriDesktop()`, which is exactly why web keeps the empty pane. `app.tab.close` is in `TERMINAL_ONLY_COMMANDS` and is not in `CONTROL_TERMINAL_BLOCKED`.
+All four hold against the code, and the owner's premise is exactly right: **the control terminal is the only terminal that does not prompt.**
 
-**The dialog did not check out, and the owner ruled on it knowing that.** Today the control-terminal arm of the `KeyW` branch calls `requestCloseWindow()` immediately; there is no dialog on that path at all. The three-way overlay lives on `app.window.confirmClose`, which the desktop host evals on an **OS red-dot** rather than on `Cmd+W`. So the model being described is not what macOS does today.
+`isTerminalOnlyWindow()` returns true for both `terminal` and `control`, so a control terminal is terminal-only. The last-tab `$effect` in `App.svelte` fires when a terminal-only window has no terminal tabs left, discards the blob and closes the window, and it is gated on `isTauriDesktop()`, which is exactly why web keeps the empty pane. `app.tab.close` is in `TERMINAL_ONLY_COMMANDS` and is not in `CONTROL_TERMINAL_BLOCKED`, so routing a control terminal through it is already permitted.
 
-The resolution is to **route the control-terminal arm through `app.window.confirmClose` on both platforms**. The consequence, accepted deliberately rather than discovered later: **macOS `Cmd+W` on a control terminal stops closing immediately and starts asking.** That is a behaviour change on a platform that does not have the defect this item exists to fix, and it widens an item whose sizing is "small change, wide verification". The alternative offered was routing through `app.tab.close` like every other window kind, which needs no dialog and leaves macOS untouched; it was declined.
+**The dialog already exists, on the tab path.** There are two confirmations in this codebase and only one is in play:
 
-That trade is the thing a future reader should not have to reconstruct: the dialog was wanted more than the macOS status quo was.
+- `app.window.confirmClose` opens the three-way `CloseConfirmOverlay`. It is **window level**, has one call site, and the desktop host evals it on an **OS red-dot**. It is not reachable from any chord. **Not this one.**
+- `confirmCloseTabs` in `state/tabs.svelte.ts` is **tab level**. When a closing tab has `closeRisk(t) === "live-terminal"` it raises a `uiConfirm` reading "&lt;terminal&gt; is still running. Close anyway?". **This is the dialog.**
 
-One item of the four is recorded as a **working assumption rather than an explicit answer**. The accelerator reading in point 4 was put to the owner as "say so if that is wrong" alongside the decision, and it drew no objection but no separate confirmation either. Proceed on it; it is cheap to correct and expensive only if it is assumed to have been ruled.
+Verified at HEAD: `runCommand("app.tab.close")` reaches `closeTab`, which delegates to `closeTabAsync`, which awaits `confirmCloseTabs([tab], opts)` before removing anything. A standalone terminal's `Cmd+W` therefore already prompts. The control terminal skips it for exactly one reason: its arm in the `KeyW` branch tests `ui.terminalControl` first and calls `requestCloseWindow()` directly, returning before the command ever runs.
+
+**The resolution is to route the control-terminal arm through `app.tab.close`, the same path every other window kind takes.** That one change delivers all four behaviours with no new dialog wiring:
+
+1. **The dialog**, free, via `confirmCloseTabs` on a live PTY.
+2. **The window closes on last tab**, free, via the terminal-only `$effect`, since `isTerminalOnlyWindow()` is true for `kind === "control"`.
+3. **Cohesion**, because it is literally the same code path as a standalone terminal.
+4. **Web unchanged**, because that effect is `isTauriDesktop()`-gated.
+
+**It removes a special case rather than adding one.** macOS `Cmd+W` on a control terminal does change: it gains the prompt every other terminal already raises. That is the intent rather than a cost, because the defect being fixed is precisely that this one window kind diverges.
+
+Two things a lane must verify rather than assume, since this path has never run for a control terminal: that the connect script's PTY registers as `isLiveTerminal` so the prompt actually fires, and that `runTerminalCloseSink` behaves on the singleton PTY. Both are already in the acceptance matrix.
+
+### Correction, recorded rather than quietly amended
+
+An earlier revision of this section recorded the opposite resolution: routing through `app.window.confirmClose` and accepting a macOS behaviour change as a deliberate scope increase. **That was wrong**, and it was wrong because the analysis identified the window-level overlay and never looked for a second confirmation on the tab path. A decision was then taken on that framing.
+
+The error is worth keeping in the record because of its shape. The wrong answer was not a bad judgement about a trade; it was a correct judgement about an incomplete set of options. Nothing in the reasoning was flawed except that `confirmCloseTabs` was never in it, and the resolution that looked like a necessary scope increase turned out to be a special case waiting to be deleted.
 
 ## Contract
 
