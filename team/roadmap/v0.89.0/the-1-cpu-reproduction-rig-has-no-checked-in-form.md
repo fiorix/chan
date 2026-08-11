@@ -40,6 +40,10 @@ So the rig must verify its own cap from the host and **fail loudly when it canno
 - It does not attempt to classify timing sites. That is the indexer item's separate work.
 - It does not need to support macOS or Windows. The rig is a Linux cgroup instrument.
 
+In scope, named explicitly because the acceptance reaches past the obvious surface: `scripts/`, **and the one `.agents/playbook.md` edit** that repoints its prose at the checked-in rig. That file is not `scripts/`, and an implementer deriving scope from this item's headline would not find it, which is how the last acceptance clause of a sibling item in this round stayed open after its headline repair read as complete. It is named here so nobody has to ask.
+
+The second-operator cell is **not** the implementer's to schedule, but it is theirs to make possible: the deliverable is a checked-in form self-sufficient enough that someone who has not read the author's notes can run it.
+
 ## Acceptance
 
 - The rig reproduces a known-red at a stated rate on a known-broken revision, and the same selector on the repaired revision at a stated rate, with N stated for both. The watch item's 14/20 and 19/20 against 0/20 are available as the calibration case.
