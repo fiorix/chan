@@ -26,6 +26,7 @@ EXPECTED_COMMAND_FILES = {
     "packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/zone-isolation-probe.sh",
     "packaging/nix/build-with-sdme.sh",
     "packaging/sdme/build-chan-desktop.sh",
+    "scripts/e2e/README.md",
     "scripts/windows-cross-check.sh",
 }
 BUILD_DRIVER_FILES = {
@@ -35,6 +36,7 @@ BUILD_DRIVER_FILES = {
     "packaging/sdme/build-chan-desktop.sh",
     "scripts/windows-cross-check.sh",
 }
+CAPPED_COMMAND_FILES = BUILD_DRIVER_FILES | {"scripts/e2e/README.md"}
 DOCUMENTED_COMMANDS = {
     "packaging/sdme/chan-devserver.sdme": (
         "sudo sdme create --name chan-ds -r chan-devserver",
@@ -43,6 +45,9 @@ DOCUMENTED_COMMANDS = {
         "sudo sdme create --name chan-build -r ubuntu",
         "sudo sdme create --name chan-devserver-dev -r ubuntu",
         "sudo sdme create --name chan-gw-build -r ubuntu",
+    ),
+    "scripts/e2e/README.md": (
+        "sudo sdme create --name chan-one-cpu -r chan-ann-ubuntu",
     ),
 }
 
@@ -91,7 +96,7 @@ def main() -> int:
                 failures.append(
                     f"{relative}:{line_number}: sdme container omits --storage btrfs"
                 )
-            if relative in BUILD_DRIVER_FILES and "--disk" not in line:
+            if relative in CAPPED_COMMAND_FILES and "--disk" not in line:
                 failures.append(
                     f"{relative}:{line_number}: chan build container omits --disk"
                 )
@@ -104,7 +109,10 @@ def main() -> int:
         )
 
     for relative, commands in DOCUMENTED_COMMANDS.items():
-        lines = (ROOT / relative).read_text(encoding="utf-8").splitlines()
+        lines = [
+            line
+            for _, line in logical_lines((ROOT / relative).read_text(encoding="utf-8"))
+        ]
         for command in commands:
             documented_line = next((line for line in lines if command in line), "")
             if "--storage btrfs" not in documented_line:
@@ -119,8 +127,9 @@ def main() -> int:
 
     print(
         "sdme-storage contract: PASS "
-        "(10 container-creating sites use btrfs; 5 build drivers are capped; "
-        "4 documented examples use btrfs)"
+        f"({len(EXPECTED_COMMAND_FILES)} container-creating sites use btrfs; "
+        f"{len(CAPPED_COMMAND_FILES)} build containers are capped; "
+        f"{sum(map(len, DOCUMENTED_COMMANDS.values()))} documented examples use btrfs)"
     )
     return 0
 
