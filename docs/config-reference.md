@@ -18,18 +18,18 @@ The CLI serializes these under the canonical `server.*` namespace, so terminal f
 |-------|------|---------|--------------|-----------|
 | `attachments_dir` | `String` | `"attachments"` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → File browser → attachments folder (pasting happens in the editor and uploading in the file browser; the field is filed under File browser); `/api/attachments` route + SPA upload UI |
 | `search.aggression` | `SearchAggression` | `Balanced` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Search → search indexing profile; search route default mode |
-| `terminal.idle_timeout_secs` | `u64` | `1800` (30 min) | `chan config get/set` + `PATCH /api/config` | terminal registry idle prune |
-| `terminal.session_cap` | `usize` | `32` | `chan config get/set` + `PATCH /api/config` | terminal registry create-gate |
-| `terminal.ring_bytes` | `usize` | `2 << 20` (2 MB) | `chan config get/set` + `PATCH /api/config` | terminal ring buffer alloc |
-| `terminal.scrollback_mb` | `u32` | `10` (clamped `10..=50`) | `chan config get/set` + `PATCH /api/config` | SPA xterm.js scrollback line cap |
-| `terminal.default_term` | `String` | `"xterm-256color"` | `chan config get/set` + `PATCH /api/config` | PTY spawn `TERM` env |
-| `terminal.font` | `TerminalFontChoice` | `os-default` | `chan config get/set` + `PATCH /api/config` + Settings | xterm.js fontFamily chain; `source-code-pro` opts into the bundled font (download flow on non-embed builds) |
-| `terminal.font_size` | `u32` | `14` (clamped `8..=32`) | `chan config get/set` + `PATCH /api/config` + Settings | captured when xterm.js or ghostty-web constructs a renderer; both backends and ghostty's xterm-compatible cell measurement use the same pixel size |
-| `terminal.mcp_env` | `bool` | `false` | `chan config get/set` + `PATCH /api/config` + Settings | whether new non-team terminals export `CHAN_MCP_*`; per-request `?mcp_env=on` overrides, team spawns use the team config's own `mcp_env` |
-| `terminal.mouse_capture` | `bool` | `true` | `chan config get/set` + `PATCH /api/config` + Settings | whether full-screen TUIs may capture the mouse; off strips the DECSET mouse-enable sequences in the SPA so click-drag selection keeps working (new terminals only) |
-| `terminal.ghostty` | `bool` | `true` on Linux, `false` elsewhere | `chan config get/set` + `PATCH /api/config` + Settings | new terminals use the ghostty-web backend (Ghostty's WASM VT parser, ~420 KB fetched on first enable) instead of xterm.js; the Linux default is the grid, where xterm.js ships the DOM renderer and box drawing loses a scanline per cell (96.0% rule continuity, 95.2% block coverage) while ghostty measures 100% |
+| `terminal.idle_timeout_secs` | `u64` | `1800` (30 min) | `chan config get/set` + `PATCH /api/config` | Not surfaced in Settings (sanitize replaces only a literal 0, so a slider offering 1s would reap live sessions); terminal registry idle prune |
+| `terminal.session_cap` | `usize` | `32` | `chan config get/set` + `PATCH /api/config` | Not surfaced in Settings (sanitize replaces only a literal 0, no clamp); terminal registry create-gate |
+| `terminal.ring_bytes` | `usize` | `2 << 20` (2 MB) | `chan config get/set` + `PATCH /api/config` | Not surfaced in Settings (zero-only sanitize, no user-facing unit); terminal ring buffer alloc |
+| `terminal.scrollback_mb` | `u32` | `10` (clamped `10..=50`) | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → scrollback slider; SPA xterm.js scrollback line cap |
+| `terminal.default_term` | `String` | `"xterm-256color"` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → TERM field; PTY spawn `TERM` env |
+| `terminal.font` | `TerminalFontChoice` | `os-default` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → terminal font; xterm.js fontFamily chain; `source-code-pro` opts into the bundled font (download flow on non-embed builds) |
+| `terminal.font_size` | `u32` | `14` (clamped `8..=32`) | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → font size; captured when xterm.js or ghostty-web constructs a renderer; both backends and ghostty's xterm-compatible cell measurement use the same pixel size |
+| `terminal.mcp_env` | `bool` | `false` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → MCP discovery; whether new non-team terminals export `CHAN_MCP_*`; per-request `?mcp_env=on` overrides, team spawns use the team config's own `mcp_env` |
+| `terminal.mouse_capture` | `bool` | `true` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → mouse capture; whether full-screen TUIs may capture the mouse; off strips the DECSET mouse-enable sequences in the SPA so click-drag selection keeps working (new terminals only) |
+| `terminal.ghostty` | `bool` | `true` on Linux, `false` elsewhere | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → ghostty backend; new terminals use the ghostty-web backend (Ghostty's WASM VT parser, ~420 KB fetched on first enable) instead of xterm.js; the Linux default is the grid, where xterm.js ships the DOM renderer and box drawing loses a scanline per cell (96.0% rule continuity, 95.2% block coverage) while ghostty measures 100% |
 | `terminal.secret_masking` | `bool` | `false` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → secret masking toggle (xterm.js terminals only; does nothing under the ghostty backend); when enabled, xterm.js visually obscures secret-looking assignment values; the per-tab launcher/context-menu toggle is ephemeral and affects only the mounted tab |
-| `terminal.secret_mask_suffixes` | `Vec<String>` | stock literal suffix list (max 100) | `chan config get/set` + `PATCH /api/config` | case-insensitive suffix matcher for terminal `NAME=value` output; CLI set accepts a JSON string array and rejects invalid or duplicate entries, while TOML load drops invalid entries with a warning and removes duplicates |
+| `terminal.secret_mask_suffixes` | `Vec<String>` | stock literal suffix list (max 100) | `chan config get/set` + `PATCH /api/config` | Read-only display in Settings → Terminal (suffix list only; a chip editor would have to mirror the server's drop/dedupe/truncate normalization); case-insensitive suffix matcher for terminal `NAME=value` output; CLI set accepts a JSON string array and rejects invalid or duplicate entries, while TOML load drops invalid entries with a warning and removes duplicates |
 
 `GET /api/config` returns the editor and server preference aggregate with a revision. `PATCH /api/config` accepts one owner-specific partial preferences object plus `expected_revision`; stale revisions return `409 config_conflict` with the current aggregate.
 
@@ -107,51 +107,51 @@ The CLI prefixes every serialized leaf below with `editor.`. Every scalar leaf i
 | Field | Type | Reachability | Consumers |
 |-------|------|--------------|-----------|
 | `editor_theme` | `EditorTheme` | `chan config get/set` + `PATCH /api/config` | Settings → Editor → theme selector |
-| `editor_font_size` | `Option<u32>` | `chan config get/set` + `PATCH /api/config` + Settings | optional absolute editor body size, clamped `10..=32`; unset uses the active theme, while `N` sets body/source to `Npx`/`(N - 2)px` |
-| `terminal_colors.mode` | `TerminalColorMode` | `chan config get/set` + `PATCH /api/config` + Settings | `standard` uses the terminal surface's Inherit/Light/Dark choice; `custom` activates the complete custom payload |
-| `terminal_colors.custom.background` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | optional dormant custom payload; accepts `#rgb` or `#rrggbb` and persists lowercase `#rrggbb` |
-| `terminal_colors.custom.foreground` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | custom terminal foreground, validated with the complete object |
-| `terminal_colors.custom.cursor` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | custom terminal cursor, validated with the complete object |
-| `terminal_colors.custom.contrast` | `TerminalContrast` | `chan config get/set` + `PATCH /api/config` + Settings | `auto`, `dark`, or `light`; auto chooses the existing ANSI palette and chrome from WCAG background luminance at the fixed `0.179` threshold |
-| `theme` | `ThemeChoice` | `chan config get/set` + `PATCH /api/config` | Settings → Global |
-| `pane_widths.inspector` | `u32` | `chan config get/set` + drag-resize | resize handle persistence |
-| `pane_widths.graph` | `u32` | `chan config get/set` + drag-resize | same |
-| `pane_widths.browser` | `u32` | `chan config get/set` + drag-resize | same |
-| `pane_widths.search` | `u32` | `chan config get/set` + drag-resize | same |
-| `pane_widths.outline` | `u32` | `chan config get/set` + drag-resize | same |
+| `editor_font_size` | `Option<u32>` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Editor → font size; optional absolute editor body size, clamped `10..=32`; unset uses the active theme, while `N` sets body/source to `Npx`/`(N - 2)px` |
+| `terminal_colors.mode` | `TerminalColorMode` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → custom terminal colours toggle; `standard` uses the terminal surface's Inherit/Light/Dark choice; `custom` activates the complete custom payload |
+| `terminal_colors.custom.background` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → custom terminal colours; optional dormant custom payload; accepts `#rgb` or `#rrggbb` and persists lowercase `#rrggbb` |
+| `terminal_colors.custom.foreground` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → custom terminal colours; custom terminal foreground, validated with the complete object |
+| `terminal_colors.custom.cursor` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → custom terminal colours; custom terminal cursor, validated with the complete object |
+| `terminal_colors.custom.contrast` | `TerminalContrast` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → ANSI contrast; `auto`, `dark`, or `light`; auto chooses the existing ANSI palette and chrome from WCAG background luminance at the fixed `0.179` threshold |
+| `theme` | `ThemeChoice` | `chan config get/set` + `PATCH /api/config` | Settings → Global → theme |
+| `pane_widths.inspector` | `u32` | `chan config get/set` + drag-resize | Not surfaced in Settings (drag-owned continuous geometry); resize handle persistence |
+| `pane_widths.graph` | `u32` | `chan config get/set` + drag-resize | Not surfaced in Settings (drag-owned continuous geometry); resize handle persistence |
+| `pane_widths.browser` | `u32` | `chan config get/set` + drag-resize | Not surfaced in Settings (drag-owned continuous geometry); resize handle persistence |
+| `pane_widths.search` | `u32` | `chan config get/set` + drag-resize | Not surfaced in Settings (drag-owned continuous geometry); resize handle persistence |
+| `pane_widths.outline` | `u32` | `chan config get/set` + drag-resize | Not surfaced in Settings (drag-owned continuous geometry); resize handle persistence |
 | `browser_side_panes.left` | `bool` | `chan config get/set` + FB toggle + Settings | Settings → File browser → side panes; left side-pane visibility |
 | `browser_side_panes.right` | `bool` | `chan config get/set` + FB toggle + Settings | Settings → File browser → side panes; right side-pane visibility |
-| `line_spacing` | `LineSpacing` | `chan config get/set` + Settings | editor line-height |
-| `date_format` | `String` | `chan config get/set` + Settings | date rendering across SPA |
-| `strip_trailing_whitespace_on_save` | `bool` | `chan config get/set` + Settings | editor save hook |
+| `line_spacing` | `LineSpacing` | `chan config get/set` + Settings | Settings → Editor → line spacing; editor line-height |
+| `date_format` | `String` | `chan config get/set` + Settings | Settings → Editor → date format; date rendering across SPA |
+| `strip_trailing_whitespace_on_save` | `bool` | `chan config get/set` + Settings | Settings → Editor → strip on save; editor save hook |
 | `bubble_overlay_mode` | `BubbleOverlayMode` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Global → watcher bubbles radio; overlay rendering |
-| `hybrid_surface_themes.editor` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | optional Hybrid Editor body-theme override (`light` or `dark`) |
-| `hybrid_surface_themes.terminal` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | optional Terminal body-theme override |
-| `hybrid_surface_themes.browser` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | optional File Browser body-theme override |
-| `hybrid_surface_themes.graph` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | optional Graph body-theme override |
-| `hybrid_surface_themes.dashboard` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | optional Dashboard body-theme override; legacy `infographics` deserializes to this canonical field |
-| `graph_colors.mode` | `GraphColorMode` | `chan config get/set` + `PATCH /api/config` + Settings | `standard` renders the theme graph palette and keeps stored overrides dormant; `custom` applies the per-scheme palettes to the graph surface only |
-| `graph_colors.dark.doc` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | optional `--g-doc` override (markdown nodes); accepts `#rgb` or `#rrggbb` and persists lowercase `#rrggbb` |
-| `graph_colors.dark.source` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | optional `--g-source` override (source / config nodes) |
-| `graph_colors.dark.binary` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | optional `--g-binary` override (opaque-file nodes) |
-| `graph_colors.dark.img` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | optional `--g-img` override (media nodes) |
-| `graph_colors.dark.folder` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | optional `--g-folder` override (directory nodes) |
-| `graph_colors.dark.tag` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | optional `--g-tag` override (hashtag nodes) |
-| `graph_colors.dark.language` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | optional `--g-language` override (tokei language nodes) |
-| `graph_colors.dark.contact` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | optional `--g-contact` override; covers contact AND mention nodes together (one token, defaults to `--warn-text`) |
-| `graph_colors.light.doc` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | same eight optional overrides for the light scheme |
-| `graph_colors.light.source` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | same |
-| `graph_colors.light.binary` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | same |
-| `graph_colors.light.img` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | same |
-| `graph_colors.light.folder` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | same |
-| `graph_colors.light.tag` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | same |
-| `graph_colors.light.language` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | same |
-| `graph_colors.light.contact` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | same |
-| `empty_pane_carousel_cycling` | `bool` | `chan config get/set` + Settings | empty-pane behavior |
-| `page_width_ratio` | `f64` | `chan config get/set` + Settings | editor page-width cap, constrained to `0.25..=1.0` by the CLI |
-| `overlay_maximized` | `bool` | `chan config get/set` + overlay control | global overlay-maximize preference |
-| `cs_dismissed` | `bool` | `chan config get` (read-only) + cs-link prompt | whether the terminal alias offer was dismissed |
-| `shortcuts` | `Map<command-id, {web?,macos?,linux?,windows?}>` | `chan config get` + `PATCH /api/config` | shortcut assignment; keymap override layer (opaque chord strings, sparse); CLI set refuses with the supported edit route |
+| `hybrid_surface_themes.editor` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | Settings → Editor → body theme; optional Hybrid Editor body-theme override (`light` or `dark`) |
+| `hybrid_surface_themes.terminal` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | Settings → Terminal → body theme; optional Terminal body-theme override |
+| `hybrid_surface_themes.browser` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | Settings → File browser → body theme; optional File Browser body-theme override |
+| `hybrid_surface_themes.graph` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | Settings → Graph → body theme; optional Graph body-theme override |
+| `hybrid_surface_themes.dashboard` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | Settings → Dashboard → body theme; optional Dashboard body-theme override; legacy `infographics` deserializes to this canonical field |
+| `graph_colors.mode` | `GraphColorMode` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours toggle; `standard` renders the theme graph palette and keeps stored overrides dormant; `custom` applies the per-scheme palettes to the graph surface only |
+| `graph_colors.dark.doc` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; optional `--g-doc` override (markdown nodes); accepts `#rgb` or `#rrggbb` and persists lowercase `#rrggbb` |
+| `graph_colors.dark.source` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; optional `--g-source` override (source / config nodes) |
+| `graph_colors.dark.binary` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; optional `--g-binary` override (opaque-file nodes) |
+| `graph_colors.dark.img` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; optional `--g-img` override (media nodes) |
+| `graph_colors.dark.folder` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; optional `--g-folder` override (directory nodes) |
+| `graph_colors.dark.tag` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; optional `--g-tag` override (hashtag nodes) |
+| `graph_colors.dark.language` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; optional `--g-language` override (tokei language nodes) |
+| `graph_colors.dark.contact` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; optional `--g-contact` override; covers contact AND mention nodes together (one token, defaults to `--warn-text`) |
+| `graph_colors.light.doc` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; same eight optional overrides for the light scheme |
+| `graph_colors.light.source` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; light-scheme override |
+| `graph_colors.light.binary` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; light-scheme override |
+| `graph_colors.light.img` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; light-scheme override |
+| `graph_colors.light.folder` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; light-scheme override |
+| `graph_colors.light.tag` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; light-scheme override |
+| `graph_colors.light.language` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; light-scheme override |
+| `graph_colors.light.contact` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; light-scheme override |
+| `empty_pane_carousel_cycling` | `bool` | `chan config get/set` + Settings | Settings → Global → empty-pane carousel; empty-pane behavior |
+| `page_width_ratio` | `f64` | `chan config get/set` + Settings | Settings → Editor → page width; editor page-width cap, constrained to `0.25..=1.0` by the CLI |
+| `overlay_maximized` | `bool` | `chan config get/set` + overlay control | Not surfaced as a Settings row (it already has a control: the Settings overlay header's maximize button); global overlay-maximize preference |
+| `cs_dismissed` | `bool` | `chan config get` (read-only) + cs-link prompt | Not surfaced in Settings (read-only, and inert until the next window load once `cs` is on PATH); whether the terminal alias offer was dismissed |
+| `shortcuts` | `Map<command-id, {web?,macos?,linux?,windows?}>` | `chan config get` + `PATCH /api/config` | Settings → Keyboard Shortcuts → assignment grid; keymap override layer (opaque chord strings, sparse); CLI set refuses with the supported edit route |
 
 `editor_font_size` is unset by default. The Settings `Use theme` action clears it, restoring the exact body and source sizes supplied by `editor_theme`. Inline and block code keep the theme's existing `em` ratios. The root override and the document/slide token paths update mounted editor surfaces without a reload.
 

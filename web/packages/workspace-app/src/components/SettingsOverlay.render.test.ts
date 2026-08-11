@@ -13,6 +13,11 @@ import SettingsOverlay from "./SettingsOverlay.svelte";
 import { settingsPanel } from "../state/store.svelte";
 import { tabFocusPulse } from "../state/tabs.svelte";
 import { DATE_FORMATS } from "../editor/dateFormats";
+import {
+  SCROLLBACK_MB_DEFAULT,
+  SCROLLBACK_MB_MAX,
+  SCROLLBACK_MB_MIN,
+} from "../terminal/scrollback";
 
 type Cfg = {
   revision: number;
@@ -55,6 +60,11 @@ function basePrefs(): Record<string, unknown> {
 
 let server: Cfg;
 let patches: Cfg[];
+/// The wire bodies of every PATCH /api/config, as sent. `patches`
+/// records post-merge server state (useful for reconciliation checks),
+/// but an assertion about what a control WRITES belongs on these:
+/// owner checks and "exactly that slice" checks read `patchBodies`.
+let patchBodies: Record<string, unknown>[];
 const mounted: Array<Record<string, unknown>> = [];
 
 function jsonResponse(body: unknown): Response {
@@ -89,9 +99,25 @@ function clickTab(target: HTMLElement, label: string): void {
   tab.click();
 }
 
+/// Mirror of `PreferencesPatch::owner`
+/// (crates/chan-server/src/routes/preferences.rs): `terminal`,
+/// `attachments_dir` and `search_aggression` are Server-owned; every
+/// other field is Editor-owned. A patch carrying both owners is a 400,
+/// which is what the per-section drive below must never produce.
+const SERVER_OWNED = new Set(["terminal", "attachments_dir", "search_aggression"]);
+
+function ownersOf(body: Record<string, unknown>): Set<string> {
+  const owners = new Set<string>();
+  for (const key of Object.keys(body)) {
+    owners.add(SERVER_OWNED.has(key) ? "server" : "editor");
+  }
+  return owners;
+}
+
 beforeEach(() => {
   server = { revision: 1, preferences: basePrefs(), workspaces: [] };
   patches = [];
+  patchBodies = [];
   settingsPanel.open = false;
   document.documentElement.dataset.theme = "dark";
   document.documentElement.style.setProperty("--bg", "#1C1C1E");
@@ -106,6 +132,7 @@ beforeEach(() => {
           expected_revision: number;
           preferences: Record<string, unknown>;
         };
+        patchBodies.push(body.preferences);
         server = {
           ...server,
           revision: server.revision + 1,
@@ -192,14 +219,11 @@ describe("settings surface render", () => {
     expect(wordRadio).not.toBeNull();
     wordRadio.click();
     await flush();
-    expect(patches.length).toBeGreaterThanOrEqual(1);
-    const last = patches[patches.length - 1]!;
-    expect(last.preferences.editor_theme).toBe("word");
-    // The unrelated slice is preserved (single-field overlay, not a
-    // whole-form clobber).
-    expect(
-      (last.preferences.terminal as { default_term: string }).default_term,
-    ).toBe("xterm-256color");
+    expect(patchBodies.length).toBeGreaterThanOrEqual(1);
+    const body = patchBodies[patchBodies.length - 1]!;
+    // The wire body carries exactly the slice, not a whole-form clobber.
+    expect(Object.keys(body)).toEqual(["editor_theme"]);
+    expect(body.editor_theme).toBe("word");
   });
 
   test("switching sections renders the target section's controls", async () => {
@@ -309,10 +333,10 @@ describe("settings surface render", () => {
     input.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
     await flush();
 
-    const terminal = patches[patches.length - 1]!.preferences.terminal as {
-      font_size: number;
-    };
-    expect(terminal.font_size).toBe(32);
+    const body = patchBodies[patchBodies.length - 1]!;
+    // The terminal owner is patched as one composite.
+    expect(Object.keys(body)).toEqual(["terminal"]);
+    expect((body.terminal as { font_size: number }).font_size).toBe(32);
     expect(input.value).toBe("32");
   });
 
@@ -467,17 +491,17 @@ describe("settings surface render", () => {
     expect(checkbox.checked).toBe(true);
     checkbox.click();
     await flush();
-    const last = patches[patches.length - 1]!;
-    expect(
-      (last.preferences.terminal as { mouse_capture: boolean }).mouse_capture,
-    ).toBe(false);
-    // Sibling terminal fields survive the spread.
-    expect((last.preferences.terminal as { mcp_env: boolean }).mcp_env).toBe(
-      false,
-    );
-    expect(
-      (last.preferences.terminal as { default_term: string }).default_term,
-    ).toBe("xterm-256color");
+    const body = patchBodies[patchBodies.length - 1]!;
+    expect(Object.keys(body)).toEqual(["terminal"]);
+    const terminal = body.terminal as {
+      mouse_capture: boolean;
+      mcp_env: boolean;
+      default_term: string;
+    };
+    expect(terminal.mouse_capture).toBe(false);
+    // Sibling terminal fields survive the composite the body carries.
+    expect(terminal.mcp_env).toBe(false);
+    expect(terminal.default_term).toBe("xterm-256color");
   });
 
   test("the File browser section toggles one side pane at a time", async () => {
@@ -491,7 +515,7 @@ describe("settings surface render", () => {
     expect(pill, "Left pane pill").not.toBeNull();
     (pill.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
     await flush();
-    expect(patches[patches.length - 1]!.preferences.browser_side_panes).toEqual({
+    expect(patchBodies[patchBodies.length - 1]!.browser_side_panes).toEqual({
       left: true,
       right: false,
     });
@@ -515,12 +539,145 @@ describe("settings surface render", () => {
     expect(checkbox.checked).toBe(false);
     checkbox.click();
     await flush();
-    const last = patches[patches.length - 1]!;
+    const body = patchBodies[patchBodies.length - 1]!;
+    expect(Object.keys(body)).toEqual(["terminal"]);
+    const terminal = body.terminal as {
+      secret_masking: boolean;
+      default_term: string;
+    };
+    expect(terminal.secret_masking).toBe(true);
+    expect(terminal.default_term).toBe("xterm-256color");
+  });
+
+  test("the scrollback slider renders the server's real ceiling and default", async () => {
+    // Asserted against the rendered DOM, not the source text: before the
+    // reorganisation the slider offered 500 against a server that clamps
+    // to [10, 50], and the absent-field fallback was 50 against a
+    // documented default of 10.
+    const target = openSurface();
+    await flush();
+    clickTab(target, "Terminal");
+    await flush();
+    const slider = target.querySelector(
+      'input[aria-label="Terminal scrollback megabytes"]',
+    ) as HTMLInputElement;
+    expect(slider.max).toBe(String(SCROLLBACK_MB_MAX));
+    expect(slider.min).toBe(String(SCROLLBACK_MB_MIN));
+    expect(slider.value).toBe("50"); // the fixture's stored value
+  });
+
+  test("the scrollback fallback is SCROLLBACK_MB_DEFAULT when the field is absent", async () => {
+    const terminal = server.preferences.terminal as Record<string, unknown>;
+    delete terminal.scrollback_mb;
+    const target = openSurface();
+    await flush();
+    clickTab(target, "Terminal");
+    await flush();
+    const slider = target.querySelector(
+      'input[aria-label="Terminal scrollback megabytes"]',
+    ) as HTMLInputElement;
+    expect(slider.value).toBe(String(SCROLLBACK_MB_DEFAULT));
+  });
+
+  test("one control per section writes a body falling on exactly one owner", async () => {
+    const target = openSurface();
+    await flush();
+
+    // Drive one control in the named section and return its wire body,
+    // asserting the body is single-owner (a mixed-owner patch is a 400
+    // server-side). This holds today because nothing batches; the check
+    // is here so it still holds with one section rendering both owners
+    // (Terminal shows the Server `terminal` composite and the Editor
+    // `terminal_colors` / `hybrid_surface_themes` slices side by side).
+    async function drive(tab: string, act: () => void): Promise<Record<string, unknown>> {
+      clickTab(target, tab);
+      await flush();
+      const before = patchBodies.length;
+      act();
+      await flush();
+      expect(
+        patchBodies.length,
+        `expected a PATCH from the ${tab} drive`,
+      ).toBeGreaterThan(before);
+      const body = patchBodies[patchBodies.length - 1]!;
+      expect(
+        [...ownersOf(body)],
+        `${tab} patch carries a single owner; keys: ${Object.keys(body)}`,
+      ).toHaveLength(1);
+      return body;
+    }
+
     expect(
-      (last.preferences.terminal as { secret_masking: boolean }).secret_masking,
-    ).toBe(true);
+      Object.keys(
+        await drive("Global", () =>
+          (target.querySelector(
+            'input[name="settings-theme"][value="dark"]',
+          ) as HTMLInputElement).click(),
+        ),
+      ),
+    ).toEqual(["theme"]);
+
     expect(
-      (last.preferences.terminal as { default_term: string }).default_term,
-    ).toBe("xterm-256color");
+      Object.keys(
+        await drive("Editor", () =>
+          (target.querySelector(
+            'input[name="settings-line-spacing"][value="compact"]',
+          ) as HTMLInputElement).click(),
+        ),
+      ),
+    ).toEqual(["line_spacing"]);
+
+    expect(
+      Object.keys(
+        await drive("Terminal", () => {
+          const pill = [...target.querySelectorAll("label.pill")].find((e) =>
+            e.textContent?.includes("Allow in new terminals"),
+          ) as HTMLLabelElement;
+          (pill.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
+        }),
+      ),
+    ).toEqual(["terminal"]);
+
+    expect(
+      Object.keys(
+        await drive("File browser", () => {
+          const pill = [...target.querySelectorAll("label.pill")].find(
+            (e) => e.textContent?.trim() === "Right pane",
+          ) as HTMLLabelElement;
+          (pill.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
+        }),
+      ),
+    ).toEqual(["browser_side_panes"]);
+
+    expect(
+      Object.keys(
+        await drive("Graph", () => {
+          const pill = [...target.querySelectorAll("label.pill")].find((e) =>
+            e.textContent?.includes("Custom graph colours"),
+          ) as HTMLLabelElement;
+          (pill.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
+        }),
+      ),
+    ).toEqual(["graph_colors"]);
+
+    expect(
+      Object.keys(
+        await drive("Dashboard", () =>
+          (target.querySelector(
+            'input[name="settings-surface-theme-dashboard"][value="dark"]',
+          ) as HTMLInputElement).click(),
+        ),
+      ),
+    ).toEqual(["hybrid_surface_themes"]);
+
+    expect(
+      Object.keys(
+        await drive("Search", () =>
+          (target.querySelector(
+            'input[name="settings-search"][value="aggressive"]',
+          ) as HTMLInputElement).click(),
+        ),
+      ),
+    ).toEqual(["search_aggression"]);
   });
 });
