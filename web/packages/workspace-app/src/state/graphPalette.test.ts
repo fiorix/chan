@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import app from "../App.svelte?raw";
 import canvas from "../components/GraphCanvas.svelte?raw";
+import graphPanel from "../components/GraphPanel.svelte?raw";
 import tuner from "../graph-tuner/GraphTuner.svelte?raw";
 
 import {
@@ -113,6 +114,18 @@ describe("graph palette defaults: single definition", () => {
     // guard keeps a hue-only colour-picker drag from rebuilding twenty
     // byte-identical images per pointer move.
     expect(canvas).toMatch(/if \(iconKey === lastIconKey\) return;/);
+  });
+
+  test("the override is bound on exactly two elements, both inside the graph surface", () => {
+    // The negative half of the containment contract: changing a graph
+    // colour changes the graph and nothing outside it, and that rests
+    // on .graph-tab and the portaled tab-menu bubble being the ONLY
+    // bind sites. A third bind (or one on :root) must go red here.
+    const binds = graphPanel.match(/style=\{paletteStyle \|\| undefined\}/g);
+    expect(binds).toHaveLength(2);
+    // No other component may bind the palette style block either.
+    expect(app).not.toContain("graphPaletteStyleFor");
+    expect(app).not.toMatch(/style=\{[^}]*--g-/);
   });
 });
 

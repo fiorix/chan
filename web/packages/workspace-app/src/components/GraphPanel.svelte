@@ -326,7 +326,7 @@
     for (const n of fs.nodes) nodeById.set(n.id, n);
     fsNodes = [...nodeById.values()];
     const ekey = (e: FsGraphEdge): string =>
-      `${e.source} ${e.target} ${e.kind}`;
+      `${e.source}\0${e.target}\0${e.kind}`;
     const edgeByKey = new Map(fsEdgesRaw.map((e) => [ekey(e), e]));
     for (const e of fs.edges) edgeByKey.set(ekey(e), e);
     fsEdgesRaw = [...edgeByKey.values()];
