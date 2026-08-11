@@ -99,8 +99,13 @@ describe("Screen lock + Screensaver UI in Settings workspace tab", () => {
   });
 
   test("commit timeout clamps to MIN/MAX + patches + reloads", () => {
+    // The clamp mechanics live in the NumberField primitive, fed the
+    // same bounds; the handler keeps the clamp-then-save-with-message
+    // policy and the reload.
+    expect(screenLock).toMatch(/min=\{SCREENSAVER_MIN_TIMEOUT_SECS\}/);
+    expect(screenLock).toMatch(/max=\{SCREENSAVER_MAX_TIMEOUT_SECS\}/);
     expect(screenLock).toMatch(
-      /async function commitTimeout\(\): Promise<void> \{[\s\S]{1,800}SCREENSAVER_MIN_TIMEOUT_SECS[\s\S]{1,400}SCREENSAVER_MAX_TIMEOUT_SECS[\s\S]{1,400}api\.screensaverPatch\(\{ timeout_secs: screensaverTimeoutSecs \}\);[\s\S]{1,400}await loadScreensaverState\(\);/,
+      /async function commitTimeout\([\s\S]{1,200}clampedTo[\s\S]{1,800}SCREENSAVER_MIN_TIMEOUT_SECS[\s\S]{1,400}SCREENSAVER_MAX_TIMEOUT_SECS[\s\S]{1,400}api\.screensaverPatch\(\{ timeout_secs: next \}\);[\s\S]{1,400}await loadScreensaverState\(\);/,
     );
   });
 
@@ -117,17 +122,13 @@ describe("Screen lock + Screensaver UI in Settings workspace tab", () => {
   });
 
   test("markup renders the screen-lock row with the enable toggle", () => {
-    expect(screenLock).toMatch(
-      /<section class="screen-lock">[\s\S]{1,2000}<h3>Screen lock<\/h3>/,
-    );
-    expect(screenLock).toMatch(
-      /onchange=\{toggleScreensaverEnabled\}/,
-    );
+    expect(screenLock).toMatch(/<SettingField[\s\S]{1,120}label="Screen lock"/);
+    expect(screenLock).toMatch(/<PillToggle[\s\S]{1,400}toggleScreensaverEnabled/);
   });
 
   test("timeout input + PIN buttons gated on enabled=true", () => {
     expect(screenLock).toMatch(
-      /\{#if screensaverEnabled === true\}[\s\S]{1,4000}bind:value=\{screensaverTimeoutSecs\}/,
+      /\{#if screensaverEnabled === true\}[\s\S]{1,4000}<NumberField/,
     );
     expect(screenLock).toMatch(/onclick=\{openPinDialog\}/);
     expect(screenLock).toMatch(/onclick=\{clearPin\}/);
@@ -135,12 +136,12 @@ describe("Screen lock + Screensaver UI in Settings workspace tab", () => {
 
   test("Theme picker renders INSIDE the screen lock enabled gate", () => {
     // The screensaver theme picker must live inside the
-    // `{#if screensaverEnabled === true}` block within
-    // `<section class="screen-lock">`, not as a standalone
-    // `<section class="screensaver">` sibling. Toggling Screen
-    // lock OFF hides the theme picker and timeout/PIN controls together.
+    // `{#if screensaverEnabled === true}` block of the Screen lock
+    // SettingField, not as a standalone section sibling. Toggling
+    // Screen lock OFF hides the theme picker and timeout/PIN controls
+    // together.
     expect(screenLock).toMatch(
-      /<section class="screen-lock">[\s\S]{1,4000}\{#if screensaverEnabled === true\}[\s\S]{1,4000}bind:value=\{screensaverTheme\}[\s\S]{1,4000}\{\/if\}[\s\S]{1,200}<\/section>/,
+      /<SettingField[\s\S]{1,200}label="Screen lock"[\s\S]{1,4000}\{#if screensaverEnabled === true\}[\s\S]{1,4000}bind:value=\{screensaverTheme\}[\s\S]{1,4000}\{\/if\}[\s\S]{1,200}<\/SettingField>/,
     );
     expect(screenLock).not.toMatch(/<section class="screensaver">/);
     expect(screenLock).not.toMatch(/<h3>Screensaver<\/h3>/);
