@@ -104,6 +104,33 @@ It also supplies the sibling rate the closed nine-item inventory never attached:
 - ~~Any rate for the sibling at `watch.rs:2057`.~~ Now 19 red in 20 under the cap, which makes it the louder of the two rather than the quieter one the closed inventory implied by attaching no count to it.
 - **Still open: whether a clobber has ever happened in a real gate run**, as opposed to under a deliberate 1-CPU cap. The window is provable from source and the mechanism is now measured, but every observation of it is from an instrument built to provoke it.
 
+## Repaired, recorded 2026-08-11
+
+Landed at `1ca1b289`, alongside the sibling item's comment-only classification in `indexer.rs`.
+
+The test-only registration-failure slot is now a **path-keyed map**, per the owner's ruling. A test consumes or cleans up only its own exact `PathBuf`, so parallel tests can no longer disarm one another. This is the repair the mechanism called for rather than the one the originating draft proposed: that draft named only the 250ms retry race, and a repair aimed at the race would have left the slot untouched, turning these tests green while the live mechanism stayed in place.
+
+Both racing assertions are repaired, not just the one that happened to go red. `policy_change_during_retry_resets_stale_registrations` and `watch_registration_lifecycle_recovers_and_joins` both assert the monotonic `registration_failures == 1`, and the latter no longer samples the retryable `Degraded` state at all.
+
+**The after-rate is on the same instrument as the baseline**, cap host-verified at `100000 100000`, with `nr_throttled 55701` recorded, which shows the cap was actively biting during the measurement rather than merely being configured:
+
+| test | before red | after red |
+| --- | ---: | ---: |
+| `watch_registration_lifecycle_recovers_and_joins` | 14/20 | 0/20 |
+| `policy_change_during_retry_resets_stale_registrations` | 19/20 | 0/20 |
+
+**The vacuous direction is closed by mutation, which was the half that stays invisible.** The two ignored-subtree tests now remove and inspect their own unconsumed counter before accepting `Healthy`, making the registration claim positive rather than vacuous. Three mutations were each run as an exact test, each returned 101, and each named the value comparison that failed rather than an exit code: removing the injection from `gitignore_only_subtree_is_never_registered_or_dispatched` fails `None` against `Some(1)`; removing it from `policy_change_during_retry_resets_stale_registrations` fails `0` against `1`; removing the first injection from `watch_registration_lifecycle_recovers_and_joins` fails `0` against `1`.
+
+The first of those is the one that matters most. Before the repair that test passed whether registration succeeded or never happened, because both outcomes leave the state `Healthy`, so it could not have failed for the reason it exists.
+
+Nothing here claims more than it measured. The 250ms retry race is **not** ruled impossible, and the bullet above about whether a clobber has fired in an ordinary uncapped gate stays open: every observation of this mechanism still comes from an instrument built to provoke it.
+
+```citations
+crates/chan-workspace/src/watch.rs	INJECTED_REGISTRATION_FAILURES	1	static INJECTED_REGISTRATION_FAILURES
+crates/chan-workspace/src/watch.rs	policy_change_during_retry_resets_stale_registrations	1	assert_eq!(handle.health().registration_failures, 1);
+crates/chan-workspace/src/watch.rs	gitignore_only_subtree_is_never_registered_or_dispatched	1	take_injected_registration_failures(&ignored),
+```
+
 ## Rough size
 
 Small to medium. The assertion repair alone is genuinely small: `registration_failures` is already monotonic (`watch.rs:500`) and `WatchEvent::provider_error` is already dispatched to the test's own receiver (`watch.rs:506`), so an observation-anchored assertion needs no production seam. What pushes it past small is everything the acceptance above demands around it: discriminating the two mechanisms, taking a rate under the host-verified 1-CPU cap, showing each repaired assertion red by construction, and doing the work at `watch.rs:2057` and on the shared slot rather than at the one line that happened to go red.

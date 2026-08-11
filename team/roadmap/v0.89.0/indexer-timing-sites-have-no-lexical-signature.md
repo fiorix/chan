@@ -128,6 +128,28 @@ The source draft asked for a project-wide rule. Two things stop it being written
 
 The rest of the draft, the vitest `hookTimeout` finding, the `routes::terminal` cluster and the class-level argument, stays in `dev/` until that contract exists. Nothing in it was found to be wrong; it is unwritable as a rule, which is a different problem.
 
+## Classified, recorded 2026-08-11: reopened, examined, and kept
+
+Landed at `1ca1b289`. The `indexer.rs` half of that commit is **comments only**, verified mechanically rather than by reading: every changed line is a comment or blank, 18 added and 7 removed. No behaviour changed, and no after-rate is owed as a result, which is the direct consequence of the acceptance line above requiring a ratio only "if anything is changed".
+
+All seven `tokio::time::timeout` sites classify `test-bounded-and-kept`, each by the real work its wait spans rather than by the wait itself: recovery work in `await_ready`; real OS notify and policy delivery at the gitignore convergence bound; an injected rebuild executed through real `spawn_blocking` at the first retry bound; real retry, cooldown, disk and index work at the retry convergence bound; a blocking graph-progress callback at the first bare `started_rx.recv`; pass-one completion plus a real cooldown before pass two's callback at the second; and pass two's blocking work at the final convergence loop.
+
+**That is a conforming outcome, not a failure to change anything.** The owner's ruling was to reopen all three former `test-bounded-and-kept` sleeps evidence-led, and "evidence-led" was recorded as narrower than a licence to rewrite them: a site re-classified with its enclosing bound classified too, and kept, satisfies it. The three are kept together with their enclosing budgets. `CONVERGENCE_BUDGET` stays at 30 seconds, unchanged, and its source comment now records why paused Tokio time cannot substitute: the clock cannot advance notify delivery, `spawn_blocking`, disk, or index work.
+
+Four further sites observed with no timeout construct are recorded as **synchronous invariants at current source rather than implicit waits**: recovery parking before indexer spawn, commit and reader reload in `apply_watch_change`, the downgrade before task creation with no strong workspace reference, and the commit and reload for each rapid-burst apply. Those readings sit beside their enclosing tests, where the next reader meets them.
+
+The pre-edit baseline was 0/30 red for every named indexer target on the capped chan-server lib-suite instrument, including both timeout-owning tests and all four constructless sites. It is reported with its own defect stated: runs 1 to 16 were the surviving shared-tree series and runs 17 to 30 used a frozen clean `6ddd34cc` snapshot, and although `indexer.rs` was byte-identical and the cap and command were identical, unrelated shared work meant the two arms enumerated 1087 and 1083 tests. It is therefore an honest target rate and not a frozen-whole-tree benchmark.
+
+### The blind spot confirmed a third time, from a lane that was not looking
+
+This item's central claim is that the v0.88.0 audit could only see sites carrying a lexical `sleep`. A third independent confirmation arrived during the round: `hosted_terminal_registry_resolves_backend_on_each_spawn` red once in a full 1,083-test run in another lane, and neither that test nor its source file contains `sleep(`, so it cannot be enumerated by the audited population. Measured 0/30 red on the same instrument, so it is a population finding rather than a repair finding.
+
+```citations
+crates/chan-server/src/indexer.rs	tests::CONVERGENCE_BUDGET	1	Tokio clock cannot advance notify delivery,
+crates/chan-server/src/indexer.rs	spawning_the_indexer_claims_a_pass_parked_before_it	1	The request parks synchronously
+crates/chan-server/src/indexer.rs	rapid_modify_burst_indexes_latest_file_body	1	Each apply commits and reloads the index reader synchronously
+```
+
 ## Rough size
 
 Small in code, medium in evidence, and blocked at one point on a decision rather than on work. Classifying seven sites is a day of reading. The rate measurements are the cost: each ratio needs N runs of the chan-server lib suite under a 1-CPU cap, and the round's own numbers show the instrument produces a result roughly one run in ten, so a usable before-and-after is tens of runs on a contended host rather than a quick check. The reopening ruling gates the last third of it and nothing but the owner unblocks that.
