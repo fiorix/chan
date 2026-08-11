@@ -120,6 +120,30 @@ A fourth is smaller but real: the check needs an **explanation channel** for ref
 
 The audit item does the same at `:114` for a test it quotes in the present tense and that no longer exists in that form. A needle check will hit this class on its first run, and a scan that cannot tell a recorded dead reference from an accidental one will either train people to ignore it or get its evidence deleted.
 
+## The record format, ruled 2026-08-11
+
+Open question 1 is settled. A citation record is a line in a ```` ```citations ```` fenced block, tab separated, in the order `path`, `symbol`, `expect`, `needle`, with **the needle last and never split**. The parser splits on tab with a bound of three, so a needle containing tabs, pipes, quotes or any other delimiter survives intact.
+
+That ordering is the whole design, and it is a direct answer to the delimiter trap this item recorded: the earlier dry run split inside the needle `|| p.q.trim().is_empty()` and reported a mismatch for a citation that was correct, which is a failure in the worst direction because it sends a reader hunting a defect that does not exist. Putting the arbitrary field last means no needle can ever be misparsed, without needing NUL separation or length prefixes.
+
+`expect` is an integer, or `DEAD` for a reference that is deliberately dead. That is the answer to the fourth question, the explanation channel: the tree already contains recorded dead references that a scan must not "fix", and `DEAD` is how the record says so. A `DEAD` record whose needle starts matching again is reported as drift, because the record has become wrong in the other direction.
+
+The check is `scripts/citation-check.py`. It compares literally, so regex metacharacters in a needle are data and never pattern. It classifies rather than skips: a record whose file is missing is `UNRESOLVED` and is printed, never silently dropped. A run that finds zero records exits non-zero, because zero failures over zero records examined is exactly the shape that makes a broken gate read green.
+
+This item's own citations, in the form it mandates:
+
+```citations
+crates/chan-server/src/routes/search.rs	search_content_with_mode_resolver	1	|| p.q.trim().is_empty()
+web/packages/workspace-app/src/api/client.ts	readContentSearch	1	function readContentSearch(
+crates/chan-server/src/routes/search.rs	search_content	2	!readiness.is_ready()
+```
+
+Run against the tree at the time of writing, those three report `3 good`, including the deliberate two that rules out an implicit "exactly once". The checker was also shown red once by construction in each failure mode it claims to detect: a drifted count, a needle that no longer resolves, a file that does not exist, a `DEAD` record that started matching again, and a run with no records at all.
+
+## Still open
+
+Questions 2 and 3 are not settled and are the host's: where the check is invoked from, and which files the rule governs. The rule and the checker are written so that answer changes one line of wiring rather than the design. Nothing here is wired into a gate yet, because the item is explicit that defaulting it to CI would be deciding that question by omission.
+
 ## Acceptance
 
 - `.agents/writing-rules.md` states the practice **with the fail-open versus fail-closed reasoning**. The reasoning is the part that survives a rule people disagree with, and its absence is why the practice has been derived three times.
