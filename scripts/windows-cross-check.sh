@@ -7,6 +7,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=packaging/sdme-build-policy.sh
+. "$REPO/packaging/sdme-build-policy.sh"
 SDME="${SDME:-sudo sdme}"
 WINDOWS_CROSS_ROOTFS="${WINDOWS_CROSS_ROOTFS:-ubuntu}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$REPO/target/windows-cross-check}"
@@ -14,6 +16,8 @@ HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
 CONTAINER="chan-windows-cross-check-$$"
 STATUS_NAME=".windows-cross-check-status-$$"
+SOURCE_SNAPSHOT=
+SOURCE_REVISION=
 
 # SDME carries the transport too (for example sudo on a Linux host), so parse
 # it once instead of relying on word splitting at every invocation.
@@ -35,7 +39,7 @@ if ! awk -v name="$WINDOWS_CROSS_ROOTFS" \
     exit 1
 fi
 
-mkdir -p "$CARGO_TARGET_DIR" "$REPO/web/dist" "$REPO/web-launcher/dist"
+mkdir -p "$CARGO_TARGET_DIR"
 CARGO_TARGET_DIR="$(cd "$CARGO_TARGET_DIR" && pwd)"
 STATUS_FILE="$CARGO_TARGET_DIR/$STATUS_NAME"
 rm -f "$STATUS_FILE"
@@ -43,8 +47,23 @@ rm -f "$STATUS_FILE"
 cleanup() {
     rm -f "$STATUS_FILE"
     "${SDME_CMD[@]}" rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    if [ -n "$SOURCE_SNAPSHOT" ]; then
+        case "$SOURCE_SNAPSHOT" in
+            /var/tmp/chan-windows-source.*) rm -rf -- "$SOURCE_SNAPSHOT" ;;
+            *) echo "error: refusing to remove unexpected source snapshot '$SOURCE_SNAPSHOT'" >&2 ;;
+        esac
+    fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+SOURCE_REVISION="$(git -C "$REPO" rev-parse --verify HEAD)"
+SOURCE_SNAPSHOT="$("$REPO/packaging/snapshot-tracked-tree.sh" \
+    "$REPO" chan-windows-source)"
+# rust-embed requires both gitignored directories to exist. Create them in the
+# isolated tree the compiler reads, not in the caller's live worktree.
+mkdir -p "$SOURCE_SNAPSHOT/web/dist" "$SOURCE_SNAPSHOT/web-launcher/dist"
 
 GUEST_RUN='set -euo pipefail
 hand_back_target() {
@@ -66,10 +85,12 @@ RUSTFLAGS="-D warnings" cargo check --release -p chan --target x86_64-pc-windows
 printf "%s\n" "$status" >"$STATUS_FILE"
 exit 0'
 
-echo ">> Windows GNU cross-check: rootfs=$WINDOWS_CROSS_ROOTFS target=$CARGO_TARGET_DIR" >&2
+echo ">> Windows GNU cross-check: rootfs=$WINDOWS_CROSS_ROOTFS disk=$SDME_BUILD_DISK target=$CARGO_TARGET_DIR" >&2
+echo ">> source: base-revision=$SOURCE_REVISION content=tracked-working-tree snapshot=$SOURCE_SNAPSHOT" >&2
 sdme_status=0
 "${SDME_CMD[@]}" new --name "$CONTAINER" -r "$WINDOWS_CROSS_ROOTFS" -t 180 \
-    -b "$REPO:/src:ro" -b "$CARGO_TARGET_DIR:/cargo-target" \
+    --storage btrfs --disk "$SDME_BUILD_DISK" \
+    -b "$SOURCE_SNAPSHOT:/src:ro" -b "$CARGO_TARGET_DIR:/cargo-target" \
     -- /usr/bin/env HOST_UID="$HOST_UID" HOST_GID="$HOST_GID" \
     CARGO_TARGET_DIR=/cargo-target STATUS_FILE="/cargo-target/$STATUS_NAME" \
     /bin/bash -c "$GUEST_RUN" || sdme_status=$?

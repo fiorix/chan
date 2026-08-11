@@ -6,6 +6,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# shellcheck source=packaging/sdme-build-policy.sh
+. "$REPO/packaging/sdme-build-policy.sh"
 REV="${REV:-HEAD}"
 SDME="${SDME:-sudo sdme}"
 # A plain upstream Arch base rootfs, named like the other base imports the
@@ -15,6 +17,7 @@ SDME="${SDME:-sudo sdme}"
 AUR_ROOTFS="${AUR_ROOTFS:-archlinux}"
 OUT="${OUT:-$REPO/target/aur-out}"
 SOURCE_DIR="$REPO/target/aur-source"
+SOURCE_SNAPSHOT=
 HOST_ARCH="$(uname -m)"
 # sdme container names take lowercase letters, digits, and hyphens only, so the
 # underscore in machine names like x86_64 has to go.
@@ -29,11 +32,11 @@ read -r -a SDME_CMD <<<"$SDME"
     exit 1
 }
 
-git -C "$REPO" rev-parse --verify --quiet "$REV^{commit}" >/dev/null || {
+revision="$(git -C "$REPO" rev-parse --verify --quiet "$REV^{commit}")" || {
     echo "error: $REV does not name a commit" >&2
     exit 1
 }
-version="$(git -C "$REPO" show "$REV:Cargo.toml" | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)"
+version="$(git -C "$REPO" show "$revision:Cargo.toml" | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)"
 [ -n "$version" ] || { echo "error: cannot derive version from $REV" >&2; exit 1; }
 
 if ! "${SDME_CMD[@]}" fs ls | awk -v name="$AUR_ROOTFS" \
@@ -45,19 +48,30 @@ fi
 
 mkdir -p "$SOURCE_DIR" "$OUT"
 source_archive="$SOURCE_DIR/chan-$version.tar.gz"
-git -C "$REPO" archive --format=tar.gz --prefix="chan-$version/" -o "$source_archive" "$REV"
+git -C "$REPO" archive --format=tar.gz --prefix="chan-$version/" -o "$source_archive" "$revision"
+SOURCE_SNAPSHOT="$("$REPO/packaging/snapshot-tracked-tree.sh" \
+    "$REPO" chan-aur-source)"
 
 cleanup() {
     "${SDME_CMD[@]}" rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    if [ -n "$SOURCE_SNAPSHOT" ]; then
+        case "$SOURCE_SNAPSHOT" in
+            /var/tmp/chan-aur-source.*) rm -rf -- "$SOURCE_SNAPSHOT" ;;
+            *) echo "error: refusing to remove unexpected source snapshot '$SOURCE_SNAPSHOT'" >&2 ;;
+        esac
+    fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-echo ">> running AUR checks in sdme rootfs '$AUR_ROOTFS'" >&2
+echo ">> running AUR checks in sdme rootfs '$AUR_ROOTFS' disk=$SDME_BUILD_DISK revision=$revision" >&2
 # Pass the build environment to the joined command itself. sdme's `--env`
 # configures the container service, but the auto-join command does not inherit
 # those values.
 "${SDME_CMD[@]}" new --name "$CONTAINER" -r "$AUR_ROOTFS" -t 120 \
-    -b "$REPO:/src:ro" -b "$SOURCE_DIR:/local:ro" -b "$OUT:/out" \
+    --storage btrfs --disk "$SDME_BUILD_DISK" \
+    -b "$SOURCE_SNAPSHOT:/src:ro" -b "$SOURCE_DIR:/local:ro" -b "$OUT:/out" \
     -- env SRC=/src OUT=/out VERSION="$version" \
     HOST_UID="$(id -u)" HOST_GID="$(id -g)" \
     AUR_LOCAL_SOURCE="/local/chan-$version.tar.gz" \

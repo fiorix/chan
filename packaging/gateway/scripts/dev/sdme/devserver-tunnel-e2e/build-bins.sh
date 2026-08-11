@@ -34,7 +34,7 @@ $SDME fs ls 2>/dev/null | grep -qE "^${ROOTFS}[[:space:]]" \
 echo "==> [3/6] ensure build container ${CONTAINER}"
 if ! $SDME ps 2>/dev/null | grep -qE "^${CONTAINER}[[:space:]].*running"; then
   $SDME rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  $SDME create --name "$CONTAINER" -r "$ROOTFS" --started -t 120
+  $SDME create --name "$CONTAINER" -r "$ROOTFS" --storage btrfs --started -t 120
 fi
 
 echo "==> [4/6] seed committed tree (git archive HEAD)"

@@ -47,7 +47,7 @@ CI runs `make ci-linux` on `ubuntu-latest` after installing the Tauri build depe
 
 ```sh
 # create + start a build container from the ubuntu base
-limactl shell default sudo sdme create --name chan-build -r ubuntu
+limactl shell default sudo sdme create --name chan-build -r ubuntu --storage btrfs
 limactl shell default sudo sdme start  chan-build
 
 # seed the repo (tracked files only) into the container
@@ -151,7 +151,7 @@ CI builds these in `release.yml`'s `linux-cli-artifacts` job (zig via `mlugg/set
 The one thing this needs beyond the core gate's container is a **systemd user manager**: `--service=systemd` drives `loginctl enable-linger` and `systemctl --user`, which require a regular (non-root), lingering user with a live user session -- not the root shell `sdme join` drops you into. Stand one up once:
 
 ```sh
-limactl shell default sudo sdme create --name chan-devserver-dev -r ubuntu
+limactl shell default sudo sdme create --name chan-devserver-dev -r ubuntu --storage btrfs
 limactl shell default sudo sdme start  chan-devserver-dev
 
 # a lingering dev user whose `systemctl --user` manager is running
@@ -244,7 +244,7 @@ The gateway ships four `.deb` packages run under systemd. To verify the prod pat
 
 ```sh
 # create a build container and seed the repo (tracked files only)
-limactl shell default sudo sdme create --name chan-gw-build -r ubuntu
+limactl shell default sudo sdme create --name chan-gw-build -r ubuntu --storage btrfs
 limactl shell default sudo sdme start  chan-gw-build
 git archive HEAD -o ~/chan-src.tar
 limactl shell default sudo sdme cp ~/chan-src.tar chan-gw-build:/root/chan.tar

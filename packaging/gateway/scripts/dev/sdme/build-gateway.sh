@@ -87,7 +87,7 @@ if [ "${REBUILD_CONTAINER:-0}" = "1" ] \
     || ! $SDME ps 2>/dev/null | grep -qE "^${CONTAINER}[[:space:]].*running"; then
     echo "==> (re)creating container ${CONTAINER}"
     $SDME rm -f "$CONTAINER" >/dev/null 2>&1 || true
-    $SDME create --name "$CONTAINER" -r "$ROOTFS" --started -t 120
+    $SDME create --name "$CONTAINER" -r "$ROOTFS" --storage btrfs --started -t 120
 else
     echo "==> reusing running container ${CONTAINER} (REBUILD_CONTAINER=1 to reset)"
 fi

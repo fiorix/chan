@@ -30,6 +30,9 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRIVER="$SCRIPT_DIR/build-with-sdme.sh"
+SRPM_DRIVER="$SCRIPT_DIR/build-srpm.sh"
+SNAPSHOT_HELPER="$SCRIPT_DIR/../../snapshot-tracked-tree.sh"
+BUILD_POLICY="$SCRIPT_DIR/../../sdme-build-policy.sh"
 WORK="$(mktemp -d)"
 REPO="$WORK/repo"
 COPR_DIR="$REPO/packaging/distros/copr"
@@ -43,8 +46,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$COPR_DIR" "$WORK/bin" "$STUB_STATE/containers" "$STUB_STATE/shim"
+mkdir -p "$COPR_DIR" "$REPO/packaging" "$WORK/bin" "$STUB_STATE/containers" "$STUB_STATE/shim"
 ln -s "$DRIVER" "$COPR_DIR/build-with-sdme.sh"
+ln -s "$SNAPSHOT_HELPER" "$REPO/packaging/snapshot-tracked-tree.sh"
+ln -s "$BUILD_POLICY" "$REPO/packaging/sdme-build-policy.sh"
 : >"$STUB_STATE/chown.log"
 printf '%s\n' centos-stream-9 centos-stream-10 >"$STUB_STATE/rootfs"
 
@@ -70,16 +75,23 @@ case "$cmd" in
         rm -f "$state/containers/$2"
         ;;
     new)
+        printf '%s\n' "$@" >>"$state/new-args"
         [ "${1:-}" = --name ] || fail "new requires --name"
         name="${2:?stub sdme: no container name}"
         shift 2
         binds=()
         while [ $# -gt 0 ]; do
             case "$1" in
-                -r|-t) shift 2 ;;
+                -r|-t|--storage|--disk) shift 2 ;;
                 -b) binds+=("$2"); shift 2 ;;
                 --) shift; break ;;
                 *) fail "unexpected argument $1" ;;
+            esac
+        done
+        printf '%s\n' "${binds[@]}" >>"$state/binds"
+        for bind in "${binds[@]}"; do
+            case "$bind" in
+                *:/src:ro) printf '%s\n' "${bind%:/src:ro}" >>"$state/sources" ;;
             esac
         done
         [ "${1:-}" = /usr/bin/env ] || fail "guest argv does not start with /usr/bin/env"
@@ -188,6 +200,12 @@ STUB
 chmod +x "$WORK/bin/sdme" "$WORK/bin/sudo" "$STUB_STATE/shim/chown" \
     "$COPR_DIR/build-srpm.sh" "$COPR_DIR/build-in-container.sh"
 
+git init -q "$REPO"
+printf '/target/\n' >"$REPO/.gitignore"
+git -C "$REPO" add -- .
+git -C "$REPO" -c user.name=contract \
+    -c user.email=contract@example.invalid commit -qm baseline
+
 ok() { echo "ok   $1"; }
 bad() {
     echo "FAIL $1"
@@ -219,7 +237,8 @@ run_driver() {
     # run_driver <log name> <results name> [VAR=VALUE ...]
     local name="$1" out="$2"
     shift 2
-    rm -f "$STUB_STATE/started"
+    rm -f "$STUB_STATE/started" "$STUB_STATE/new-args" \
+        "$STUB_STATE/binds" "$STUB_STATE/sources"
     : >"$STUB_STATE/chown.log"
     LOG="$WORK/$name.log"
     OUT_DIR="$WORK/out-$out"
@@ -234,6 +253,18 @@ assert_status 0 $? "clean matrix succeeds"
 assert_grep "PASS el9 chan" "$LOG" "el9 chan reported PASS"
 assert_grep "PASS el10 chan-desktop" "$LOG" "el10 chan-desktop reported PASS"
 assert_status 3 "$(wc -l <"$STUB_STATE/started")" "three targets ran"
+assert_status 3 "$(grep -c '^--storage$' "$STUB_STATE/new-args")" "every target passes an explicit storage backend"
+assert_status 3 "$(grep -c '^btrfs$' "$STUB_STATE/new-args")" "every target selects btrfs storage"
+assert_status 3 "$(grep -c '^--disk$' "$STUB_STATE/new-args")" "every target passes a disk cap"
+assert_status 3 "$(grep -c '^44G$' "$STUB_STATE/new-args")" "every target applies the build disk cap"
+assert_status 0 "$(grep -cF "$REPO:/src:ro" "$STUB_STATE/binds" || true)" "the live worktree is never mounted"
+assert_status 3 "$(grep -cE '^/var/tmp/chan-copr-source\..*:/src:ro$' "$STUB_STATE/binds")" "every target mounts the isolated source snapshot"
+source_snapshot="$(head -1 "$STUB_STATE/sources")"
+if [ -e "$source_snapshot" ]; then
+    bad "the isolated source snapshot survives a normal driver exit"
+else
+    ok "the isolated source snapshot is removed after the run"
+fi
 assert_status 0 "$(ls "$STUB_STATE/containers" | wc -l)" "no container survives a clean run"
 assert_status 3 "$(wc -l <"$STUB_STATE/chown.log")" "every target's wrapper reaches the result handback"
 
@@ -263,6 +294,11 @@ assert_present "$FAIL_DIR/upgrade.out" "the failed target leaves its guest artif
 assert_grep "-R $(id -u):$(id -g) $FAIL_DIR" "$STUB_STATE/chown.log" \
     "the wrapper hands the failed target's whole result tree back"
 rm -f "$STUB_STATE/containers"/*
+kept_source_snapshot="$(head -1 "$STUB_STATE/sources")"
+case "$kept_source_snapshot" in
+    /var/tmp/chan-copr-source.*) rm -rf -- "$kept_source_snapshot" ;;
+    *) bad "retained container source has an unexpected path: $kept_source_snapshot" ;;
+esac
 
 echo "== re-run over a failed run's results"
 run_driver fail2 fail PKG=chan COPR_RELEASE=all REUSE_SRPM=1
@@ -373,6 +409,94 @@ else
     ok "the probe reports the directory without a raw redirection error"
 fi
 chmod 600 "$LOCKED/build.log"
+
+echo "== SRPM container mount boundary"
+SRPM_REPO="$WORK/srpm-repo"
+SRPM_DIR="$SRPM_REPO/packaging/distros/copr"
+mkdir -p "$SRPM_DIR" "$SRPM_REPO/packaging/distros/fedora" \
+    "$SRPM_REPO/packaging" "$WORK/srpm-state"
+ln -s "$SRPM_DRIVER" "$SRPM_DIR/build-srpm.sh"
+ln -s "$SNAPSHOT_HELPER" "$SRPM_REPO/packaging/snapshot-tracked-tree.sh"
+printf 'Name: chan\n' >"$SRPM_REPO/packaging/distros/fedora/chan.spec"
+
+cat >"$SRPM_REPO/packaging/distros/mkdist" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+out=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --repo|--rev) shift 2 ;;
+        --outdir) out="$2"; shift 2 ;;
+        *) exit 64 ;;
+    esac
+done
+mkdir -p "$out"
+tarball="$out/chan-vendored-0.0.0.tar.xz"
+: >"$tarball"
+printf '%s\n' "$tarball"
+STUB
+
+cat >"$SRPM_DIR/make-srpm.sh" <<'STUB'
+#!/usr/bin/env bash
+exit 99
+STUB
+
+cat >"$WORK/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+state="${STUB_SRPM_STATE:?}"
+[ "${1:-}" = run ] || exit 64
+shift
+binds=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --rm) shift ;;
+        -v) binds+=("$2"); shift 2 ;;
+        *) image="$1"; shift; break ;;
+    esac
+done
+printf '%s\n' "${binds[@]}" >"$state/binds"
+printf '%s\n' "$image" >"$state/image"
+printf '%s\n' "$*" >"$state/guest"
+out=
+for bind in "${binds[@]}"; do
+    case "$bind" in
+        *:/src:ro) printf '%s\n' "${bind%:/src:ro}" >"$state/source" ;;
+        *:/out) out="${bind%:/out}" ;;
+    esac
+done
+[ -n "$out" ] || exit 65
+mkdir -p "$out"
+: >"$out/chan-0.0.0-1.src.rpm"
+STUB
+
+chmod +x "$SRPM_REPO/packaging/distros/mkdist" \
+    "$SRPM_DIR/make-srpm.sh" "$WORK/bin/docker"
+git init -q "$SRPM_REPO"
+printf '/target/\n' >"$SRPM_REPO/.gitignore"
+git -C "$SRPM_REPO" add -- .
+git -C "$SRPM_REPO" -c user.name=contract \
+    -c user.email=contract@example.invalid commit -qm baseline
+
+STUB_SRPM_STATE="$WORK/srpm-state" DOCKER="$WORK/bin/docker" \
+    "$SRPM_DIR/build-srpm.sh" chan >"$WORK/srpm.log" 2>&1
+assert_status 0 $? "the SRPM boundary fixture succeeds"
+assert_status 3 "$(wc -l <"$WORK/srpm-state/binds")" "the SRPM container receives exactly three host binds"
+assert_grep ":/src:ro" "$WORK/srpm-state/binds" "the SRPM source bind is read-only"
+assert_grep ":/dist:ro" "$WORK/srpm-state/binds" "the vendored tarball bind is read-only"
+assert_grep ":/out" "$WORK/srpm-state/binds" "the SRPM output is the writable bind"
+if grep -qF "$SRPM_REPO:/src" "$WORK/srpm-state/binds"; then
+    bad "the SRPM container binds its live repository"
+else
+    ok "the SRPM container does not bind its live repository"
+fi
+assert_grep "cp -a /src /work" "$WORK/srpm-state/guest" "the root container writes only to its local source copy"
+srpm_source="$(<"$WORK/srpm-state/source")"
+if [ -e "$srpm_source" ]; then
+    bad "the standalone SRPM source snapshot survives driver exit"
+else
+    ok "the standalone SRPM source snapshot is removed after the run"
+fi
 
 echo
 if [ "$FAILURES" -eq 0 ]; then

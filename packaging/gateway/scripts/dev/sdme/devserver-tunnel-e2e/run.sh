@@ -112,7 +112,7 @@ fi
 info "binaries + helpers present; sdme ok; rootfs '$RFS' present"
 
 mk() {  # name
-  $SDME create --name "$1" -r "$RFS" --network-zone "$ZONE" --started -t 90 >/tmp/e2e-mk.log 2>&1
+  $SDME create --name "$1" -r "$RFS" --storage btrfs --network-zone "$ZONE" --started -t 90 >/tmp/e2e-mk.log 2>&1
   for _ in $(seq 1 15); do $SDME ps 2>/dev/null | grep -qE "^$1[[:space:]].*running" && return 0; sleep 1; done
   cat /tmp/e2e-mk.log; return 1
 }

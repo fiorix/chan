@@ -13,6 +13,8 @@ unset git_local_env_var git_local_env_vars
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRIVER="$SCRIPT_DIR/build-with-sdme.sh"
+SNAPSHOT_HELPER="$SCRIPT_DIR/../snapshot-tracked-tree.sh"
+BUILD_POLICY="$SCRIPT_DIR/../sdme-build-policy.sh"
 TMP_BASE="${TMPDIR:-/var/tmp}"
 case "$TMP_BASE" in
     /tmp|/tmp/*)
@@ -40,6 +42,8 @@ trap cleanup EXIT
 
 mkdir -p "$TEST_REPO/packaging/nix" "$TEST_REPO/scripts" "$STATE" "$BIN"
 ln -s "$DRIVER" "$TEST_REPO/packaging/nix/build-with-sdme.sh"
+ln -s "$SNAPSHOT_HELPER" "$TEST_REPO/packaging/snapshot-tracked-tree.sh"
+ln -s "$BUILD_POLICY" "$TEST_REPO/packaging/sdme-build-policy.sh"
 
 fail() {
     echo "not ok - $*" >&2
@@ -61,6 +65,13 @@ assert_not_grep() {
 assert_status() {
     local expected="$1" actual="$2" message="$3"
     [ "$actual" -eq "$expected" ] || fail "$message (expected $expected, got $actual)"
+}
+
+assert_arg_pair() {
+    local flag="$1" value="$2" file="$3" message="$4"
+    awk -v flag="$flag" -v value="$value" \
+        'previous == flag && $0 == value { found = 1 } { previous = $0 } END { exit !found }' \
+        "$file" || fail "$message"
 }
 
 run_driver() {
@@ -127,6 +138,9 @@ case "${1:-}" in
                     ;;
                 -r)
                     rootfs="$2"
+                    shift 2
+                    ;;
+                --storage|--disk)
                     shift 2
                     ;;
                 -b)
@@ -328,6 +342,8 @@ export STUB_BIN="$BIN"
 run_driver all
 assert_status 0 "$RUN_STATUS" "the default all-package check succeeds"
 assert_grep '^-r$' "$STATE/run/new-args" "sdme new uses explicit -r"
+assert_arg_pair --storage btrfs "$STATE/run/new-args" "sdme new selects btrfs storage"
+assert_arg_pair --disk 44G "$STATE/run/new-args" "sdme new applies the build disk cap"
 assert_grep '^ubuntu$' "$STATE/run/rootfs" "the default imported rootfs is selected"
 case "$RUN_SOURCE" in
     /var/tmp/chan-nix-source.*) ;;
@@ -341,6 +357,7 @@ fi
 assert_not_grep '^/:' "$STATE/run/binds" "host root is never bound"
 assert_not_grep "^$HOME:" "$STATE/run/binds" "host home is never bound"
 assert_grep '^snapshot$' "$STATE/run/source-kind" "the worktree itself is not bound into the guest"
+assert_grep '^>> source: base-revision=[0-9a-f]+ content=tracked-working-tree snapshot=' "$STATE/run/driver.log" "the driver states the snapshotted revision and content mode"
 assert_grep '^working-tree$' "$STATE/run/source-tracked" "modified tracked content reaches the source snapshot"
 assert_grep '^space$' "$STATE/run/source-space-name" "a tracked filename containing spaces reaches the source snapshot"
 assert_grep '^newline$' "$STATE/run/source-newline-name" "a tracked filename containing a newline reaches the source snapshot"

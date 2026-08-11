@@ -23,6 +23,9 @@ REPO="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 COPR_PROJECT="${COPR_PROJECT:-fiorix/chan}"
 FEDORA_IMAGE="${FEDORA_IMAGE:-registry.fedoraproject.org/fedora:latest}"
 DOCKER="${DOCKER:-docker}"
+SOURCE_ROOT="${SOURCE_ROOT:-}"
+SOURCE_REVISION="${SOURCE_REVISION:-}"
+SOURCE_SNAPSHOT=
 
 read -r -a DOCKER_CMD <<<"$DOCKER"
 [ ${#DOCKER_CMD[@]} -gt 0 ] || {
@@ -44,6 +47,47 @@ done
 OUTDIR="$REPO/target/distros/srpm"
 mkdir -p "$OUTDIR"
 
+cleanup() {
+    if [ -n "$SOURCE_SNAPSHOT" ]; then
+        case "$SOURCE_SNAPSHOT" in
+            /var/tmp/chan-copr-srpm-source.*) rm -rf -- "$SOURCE_SNAPSHOT" ;;
+            *) echo "error: refusing to remove unexpected source snapshot '$SOURCE_SNAPSHOT'" >&2 ;;
+        esac
+    fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if ! git -C "$REPO" diff --quiet HEAD; then
+    echo "error: working tree is dirty; commit before building SRPMs" >&2
+    exit 1
+fi
+
+if [ -n "$SOURCE_ROOT" ]; then
+    if ! SOURCE_ROOT="$(cd "$SOURCE_ROOT" && pwd -P)"; then
+        echo "error: could not resolve supplied COPR source snapshot" >&2
+        exit 1
+    fi
+    case "$SOURCE_ROOT" in
+        /var/tmp/chan-copr-source.*) ;;
+        *)
+            echo "error: refusing supplied COPR source outside the driver's snapshot path: $SOURCE_ROOT" >&2
+            exit 1
+            ;;
+    esac
+else
+    SOURCE_SNAPSHOT="$("$REPO/packaging/snapshot-tracked-tree.sh" \
+        "$REPO" chan-copr-srpm-source)"
+    SOURCE_ROOT="$SOURCE_SNAPSHOT"
+fi
+if [ -z "$SOURCE_REVISION" ]; then
+    SOURCE_REVISION="$(git -C "$REPO" rev-parse --verify HEAD)"
+else
+    SOURCE_REVISION="$(git -C "$REPO" rev-parse --verify "$SOURCE_REVISION^{commit}")"
+fi
+echo ">> COPR SRPM source: base-revision=$SOURCE_REVISION content=tracked-working-tree snapshot=$SOURCE_ROOT" >&2
+
 # mkdist runs on the host: a bind-mounted git worktree is unreadable in a
 # container (its .git is a pointer into the main repo), and the container
 # then needs nothing beyond rpm-build.
@@ -52,20 +96,26 @@ mkdir -p "$OUTDIR"
 # the first one kills it with EPIPE once the tarball write is slow
 # enough for the reader to exit first.
 TARBALL="$("$REPO/packaging/distros/mkdist" --repo "$REPO" \
-    --outdir "$REPO/target/distros")"
+    --rev "$SOURCE_REVISION" --outdir "$REPO/target/distros")"
 TARBALL="${TARBALL%%$'\n'*}"
 
 for pkg in "${PKGS[@]}"; do
     echo "==> building SRPM: $pkg"
-    # The container runs as root; chown the outputs back to the invoking
-    # user at the end.
-    "${DOCKER_CMD[@]}" run --rm -v "$REPO:/src" "$FEDORA_IMAGE" bash -ec "
+    # The container gets an immutable source bind and copies it into its own
+    # writable root before make-srpm stages a spec. Only /out is writable on
+    # the host, and it is handed back to the invoking user at the end.
+    "${DOCKER_CMD[@]}" run --rm \
+        -v "$SOURCE_ROOT:/src:ro" \
+        -v "$(dirname "$TARBALL"):/dist:ro" \
+        -v "$OUTDIR:/out" \
+        "$FEDORA_IMAGE" bash -ec "
         dnf -y -q install rpm-build
-        /src/packaging/distros/copr/make-srpm.sh --repo /src \
-            --spec /src/packaging/distros/fedora/$pkg.spec \
-            --outdir /src/target/distros/srpm \
-            --tarball /src/target/distros/$(basename "$TARBALL")
-        chown -R $(id -u):$(id -g) /src/target/distros
+        cp -a /src /work
+        /work/packaging/distros/copr/make-srpm.sh --repo /work \
+            --spec /work/packaging/distros/fedora/$pkg.spec \
+            --outdir /out \
+            --tarball /dist/$(basename "$TARBALL")
+        chown -R $(id -u):$(id -g) /out
     "
 done
 

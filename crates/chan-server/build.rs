@@ -16,11 +16,11 @@
 // the macro succeed and the binary just serves nothing useful
 // until the user runs `cd web && npm install && npm run build`.
 
-use std::path::Path;
+use std::{env, path::Path};
 
 fn main() {
     let dist = Path::new("../../web/dist");
-    let _ = std::fs::create_dir_all(dist);
+    create_required_dir(dist);
     println!("cargo:rerun-if-changed={}", dist.display());
     walk(dist);
 
@@ -32,26 +32,19 @@ fn main() {
     // relinks. The binary serves the launcher only once
     // `cd web-launcher && npm install && npm run build` has run.
     let launcher_dist = Path::new("../../web-launcher/dist");
-    let _ = std::fs::create_dir_all(launcher_dist);
+    create_required_dir(launcher_dist);
     println!("cargo:rerun-if-changed={}", launcher_dist.display());
     walk(launcher_dist);
 
-    // Makefile rewrites this after every frontend build. Tracking
-    // it forces release binaries to relink even when the generated
-    // asset names and contents happen to be unchanged.
+    // Makefile creates and rewrites this after every frontend build. A missing
+    // stamp is valid before the first frontend build; Cargo keeps watching the
+    // path without a build script writing a placeholder into the source tree.
     let web_build_stamp = Path::new("../../web/.chan-build-stamp");
-    if !web_build_stamp.exists() {
-        let _ = std::fs::write(web_build_stamp, b"not-built\n");
-    }
     println!("cargo:rerun-if-changed={}", web_build_stamp.display());
 
-    // The launcher's build stamp, mirroring web/.chan-build-stamp: the
-    // Makefile rewrites it after every launcher build so a release binary
-    // relinks even when the hashed asset names happen to be unchanged.
+    // The launcher's build stamp mirrors web/.chan-build-stamp. Makefile
+    // creates and rewrites it after every launcher build.
     let launcher_build_stamp = Path::new("../../web-launcher/.chan-build-stamp");
-    if !launcher_build_stamp.exists() {
-        let _ = std::fs::write(launcher_build_stamp, b"not-built\n");
-    }
     println!("cargo:rerun-if-changed={}", launcher_build_stamp.display());
 
     // Embedded model bundle. Only consumed when the `embed-model`
@@ -67,13 +60,27 @@ fn main() {
     // rerun-if-changed pins the build to the bundle's mtime so a
     // subsequent `make models` re-links.
     let model_bundle = Path::new("resources/models.tar.zst");
-    if let Some(parent) = model_bundle.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if !model_bundle.exists() {
-        let _ = std::fs::write(model_bundle, []);
+    if env::var_os("CARGO_FEATURE_EMBED_MODEL").is_some() && !model_bundle.exists() {
+        if let Some(parent) = model_bundle.parent() {
+            create_required_dir(parent);
+        }
+        std::fs::write(model_bundle, []).unwrap_or_else(|error| {
+            panic!(
+                "could not create required model bundle stub {}: {error}",
+                model_bundle.display()
+            )
+        });
     }
     println!("cargo:rerun-if-changed={}", model_bundle.display());
+}
+
+fn create_required_dir(path: &Path) {
+    std::fs::create_dir_all(path).unwrap_or_else(|error| {
+        panic!(
+            "could not create required build input directory {}: {error}",
+            path.display()
+        )
+    });
 }
 
 fn walk(dir: &Path) {

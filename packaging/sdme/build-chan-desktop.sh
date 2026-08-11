@@ -38,6 +38,8 @@ if [ -z "${CHAN_REPO:-}" ]; then
     echo "error: CHAN_REPO must be set (the chan repo root)" >&2
     exit 1
 fi
+# shellcheck source=packaging/sdme-build-policy.sh
+. "$CHAN_REPO/packaging/sdme-build-policy.sh"
 
 ROOTFS="chan-desktop-${DISTRO}"
 CONTAINER="chan-desktop-build-${DISTRO}"
@@ -88,7 +90,8 @@ if [ "${REBUILD_CONTAINER:-0}" = "1" ] \
     || ! $SDME ps 2>/dev/null | grep -qE "^${CONTAINER}[[:space:]].*running"; then
     echo "==> (re)creating container ${CONTAINER}"
     $SDME rm -f "$CONTAINER" >/dev/null 2>&1 || true
-    $SDME create --name "$CONTAINER" -r "$ROOTFS" --started -t 120
+    $SDME create --name "$CONTAINER" -r "$ROOTFS" --storage btrfs \
+        --disk "$SDME_BUILD_DISK" --started -t 120
 else
     echo "==> reusing running container ${CONTAINER} (REBUILD_CONTAINER=1 to reset)"
 fi
@@ -96,10 +99,11 @@ fi
 # 3. Seed the committed tree (tracked files only, same as CI's checkout). The
 #    archive is written under target/ so it is reachable from the VM even when
 #    the host home is mounted read-only.
-echo "==> seeding repo (git archive HEAD)"
+SOURCE_REVISION="$(git -C "$CHAN_REPO" rev-parse --verify HEAD)"
+echo "==> seeding repo (revision ${SOURCE_REVISION})"
 SEED_DIR="${CHAN_REPO}/target/linux-desktop"
 mkdir -p "$SEED_DIR"
-git -C "$CHAN_REPO" archive HEAD -o "${SEED_DIR}/chan-src-${DISTRO}.tar"
+git -C "$CHAN_REPO" archive "$SOURCE_REVISION" -o "${SEED_DIR}/chan-src-${DISTRO}.tar"
 $SDME cp "${SEED_DIR}/chan-src-${DISTRO}.tar" "${CONTAINER}:/root/chan.tar"
 $SDME exec "$CONTAINER" /bin/sh -c \
     'mkdir -p /root/chan && tar -xf /root/chan.tar -C /root/chan'

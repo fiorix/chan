@@ -5,6 +5,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
+# shellcheck source=packaging/sdme-build-policy.sh
+. "$REPO/packaging/sdme-build-policy.sh"
 SDME="${SDME:-sudo sdme}"
 NIX_SDME_ROOTFS="${NIX_SDME_ROOTFS:-ubuntu}"
 NIX_PACKAGE="${NIX_PACKAGE:-all}"
@@ -15,6 +17,7 @@ HOST_GID="$(id -g)"
 CONTAINER="chan-nix-check-$$"
 STATUS_NAME="status"
 SOURCE_SNAPSHOT=
+SOURCE_REVISION=
 CONTAINER_STARTED=0
 
 # Selection is deliberately validated before the first sdme invocation.
@@ -120,33 +123,13 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-if ! git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    echo "error: Nix sdme source must be a Git working tree" >&2
-    exit 1
-fi
-if git -C "$REPO" ls-files --stage |
-    awk '$1 == "160000" { found = 1 } END { exit !found }'; then
-    echo "error: Nix sdme source snapshots do not support submodules" >&2
-    exit 1
-fi
-
-SOURCE_SNAPSHOT="$(mktemp -d /var/tmp/chan-nix-source.XXXXXX)"
-SOURCE_SNAPSHOT="$(cd "$SOURCE_SNAPSHOT" && pwd -P)"
+SOURCE_REVISION="$(git -C "$REPO" rev-parse --verify HEAD)"
+SOURCE_SNAPSHOT="$("$REPO/packaging/snapshot-tracked-tree.sh" \
+    "$REPO" chan-nix-source)"
 if [[ "$OUT" == "$SOURCE_SNAPSHOT" || "$OUT" == "$SOURCE_SNAPSHOT/"* || "$SOURCE_SNAPSHOT" == "$OUT/"* ]]; then
     echo "error: source snapshot and output directory must not overlap ($SOURCE_SNAPSHOT, $OUT)" >&2
     exit 1
 fi
-(
-    cd "$REPO"
-    git ls-files -z --cached |
-    while IFS= read -r -d '' path; do
-        if [ -e "$path" ] || [ -L "$path" ]; then
-            printf '%s\0' "$path"
-        fi
-    done |
-    tar -c --null --verbatim-files-from --no-recursion \
-        -T - -f -
-) | tar -x -C "$SOURCE_SNAPSHOT" -f -
 
 GUEST_RUN='set -uo pipefail
 run_check() {
@@ -199,10 +182,12 @@ printf "%s\n" "$status" >/out/status
 chown "$HOST_UID:$HOST_GID" /out/status /out/build.log 2>/dev/null || true
 exit 0'
 
-echo ">> Nix sdme check: package=$NIX_PACKAGE rootfs=$NIX_SDME_ROOTFS out=$OUT" >&2
+echo ">> Nix sdme check: package=$NIX_PACKAGE rootfs=$NIX_SDME_ROOTFS disk=$SDME_BUILD_DISK out=$OUT" >&2
+echo ">> source: base-revision=$SOURCE_REVISION content=tracked-working-tree snapshot=$SOURCE_SNAPSHOT" >&2
 CONTAINER_STARTED=1
 set +e
 "${SDME_CMD[@]}" new --name "$CONTAINER" -r "$NIX_SDME_ROOTFS" -t 180 \
+    --storage btrfs --disk "$SDME_BUILD_DISK" \
     -b "$SOURCE_SNAPSHOT:/src:ro" -b "$OUT:/out" \
     -- /usr/bin/env HOST_UID="$HOST_UID" HOST_GID="$HOST_GID" \
     NIX_PACKAGE="$NIX_PACKAGE" TMPDIR=/var/tmp/chan-nix-tmp \

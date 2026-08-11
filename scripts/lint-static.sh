@@ -191,6 +191,7 @@ run_shell() {
     [ "${#files[@]}" -gt 0 ] || die "found no tracked shell scripts to check"
     echo "==> shellcheck: ${#files[@]} tracked shell scripts" >&2
     (cd "$REPO" && "$SHELLCHECK" "${files[@]}")
+    "$REPO/scripts/check-sdme-storage.py"
 }
 
 # actionlint invokes shellcheck with --norc, so .shellcheckrc has to be

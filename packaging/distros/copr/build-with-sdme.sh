@@ -21,6 +21,8 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# shellcheck source=packaging/sdme-build-policy.sh
+. "$REPO/packaging/sdme-build-policy.sh"
 SDME="${SDME:-sudo sdme}"
 COPR_EL9_ROOTFS="${COPR_EL9_ROOTFS:-centos-stream-9}"
 COPR_EL10_ROOTFS="${COPR_EL10_ROOTFS:-centos-stream-10}"
@@ -36,6 +38,8 @@ HOST_GID="$(id -g)"
 CONTAINERS=()
 RESULTS=()
 FAILED=0
+SOURCE_SNAPSHOT=
+SOURCE_REVISION=
 
 case "$COPR_RELEASE" in
     all) releases=(9 10) ;;
@@ -80,11 +84,19 @@ fi
 # calls this, before it reaches its own exit status.
 # shellcheck disable=SC2329  # runs from the EXIT trap
 cleanup() {
-    [ "$KEEP_CONTAINER" = 1 ] && return 0
-    [ ${#CONTAINERS[@]} -gt 0 ] || return 0
-    for container in "${CONTAINERS[@]}"; do
-        "${SDME_CMD[@]}" rm -f "$container" >/dev/null 2>&1 || true
-    done
+    if [ "$KEEP_CONTAINER" != 1 ] && [ ${#CONTAINERS[@]} -gt 0 ]; then
+        for container in "${CONTAINERS[@]}"; do
+            "${SDME_CMD[@]}" rm -f "$container" >/dev/null 2>&1 || true
+        done
+    fi
+    if [ "$KEEP_CONTAINER" = 1 ] && [ ${#CONTAINERS[@]} -gt 0 ] && [ -n "$SOURCE_SNAPSHOT" ]; then
+        echo ">> keeping source snapshot $SOURCE_SNAPSHOT for retained containers" >&2
+    elif [ -n "$SOURCE_SNAPSHOT" ]; then
+        case "$SOURCE_SNAPSHOT" in
+            /var/tmp/chan-copr-source.*) rm -rf -- "$SOURCE_SNAPSHOT" ;;
+            *) echo "error: refusing to remove unexpected source snapshot '$SOURCE_SNAPSHOT'" >&2 ;;
+        esac
+    fi
 }
 # Capturing each target's status keeps the matrix running past a failure, which
 # would also swallow an interrupt, so interrupts abort here instead.
@@ -159,6 +171,11 @@ if [ "$PKG" = chan-desktop ]; then
     srpm_packages=(chan-desktop)
 fi
 
+SOURCE_REVISION="$(git -C "$REPO" rev-parse --verify HEAD)"
+SOURCE_SNAPSHOT="$("$REPO/packaging/snapshot-tracked-tree.sh" \
+    "$REPO" chan-copr-source)"
+echo ">> source: base-revision=$SOURCE_REVISION content=tracked-working-tree snapshot=$SOURCE_SNAPSHOT" >&2
+
 echo ">> preparing vendored SRPMs: ${srpm_packages[*]}" >&2
 if [ "$REUSE_SRPM" = 1 ]; then
     for package in "${srpm_packages[@]}"; do
@@ -170,7 +187,8 @@ if [ "$REUSE_SRPM" = 1 ]; then
     done
     echo ">> reusing existing SRPMs" >&2
 else
-    "$SCRIPT_DIR/build-srpm.sh" "${srpm_packages[@]}"
+    SOURCE_ROOT="$SOURCE_SNAPSHOT" SOURCE_REVISION="$SOURCE_REVISION" \
+        "$SCRIPT_DIR/build-srpm.sh" "${srpm_packages[@]}"
 fi
 
 # `sdme new` deletes the container when its guest command exits non-zero, which
@@ -225,7 +243,8 @@ for target in "${MATRIX[@]}"; do
     "${SDME_CMD[@]}" rm -f "$container" >/dev/null 2>&1 || true
     sdme_status=0
     "${SDME_CMD[@]}" new --name "$container" -r "$rootfs" -t 180 \
-        -b "$REPO:/src:ro" \
+        --storage btrfs --disk "$SDME_BUILD_DISK" \
+        -b "$SOURCE_SNAPSHOT:/src:ro" \
         -b "$REPO/target/distros/srpm:/srpm:ro" \
         -b "$result_dir:/out" \
         -- /usr/bin/env PKG="$package" EL_RELEASE="$release" \

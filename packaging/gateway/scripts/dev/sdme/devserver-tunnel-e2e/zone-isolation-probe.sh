@@ -24,7 +24,7 @@ set -uo pipefail
 SDME="sudo -n sdme"; RFS=chan-e2e-run
 say(){ printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
 res(){ printf '   %-40s %s\n' "$1" "$2"; }
-mk(){ $SDME create --name "$1" -r $RFS --network-zone "$2" --started -t 90 >/dev/null 2>&1
+mk(){ $SDME create --name "$1" -r $RFS --storage btrfs --network-zone "$2" --started -t 90 >/dev/null 2>&1
   for _ in $(seq 1 20); do $SDME ps 2>/dev/null | grep -qE "^$1[[:space:]].*running" && return 0; sleep 1; done; return 1; }
 ipof(){ for _ in $(seq 1 15); do ip=$($SDME exec "$1" -- /usr/bin/hostname -I 2>/dev/null | awk '{print $1}'); [ -n "$ip" ] && { echo "$ip"; return; }; sleep 1; done; }
 conn(){ $SDME exec "$1" -- /usr/bin/python3 -c "import socket
