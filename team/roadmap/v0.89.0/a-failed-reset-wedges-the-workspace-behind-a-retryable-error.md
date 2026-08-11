@@ -213,6 +213,23 @@ One design decision the extraction forces: `ResetError` (`storage.rs:113`) and `
 
 Out of scope: whether `wipe_dir`'s 200ms budget is the right number, which is the deferred draft; and the drain protocol and its 5s deadline, which is a separate mechanism this item does not touch.
 
+## Reproduced, 2026-08-11
+
+**The premise held.** The section below is preserved as written, because it is the record of what was known at registration and the lifecycle rule keeps a proposal's original rationale rather than overwriting it. What follows is the evidence that arrived after it.
+
+@@Server drove the wedge in-process against the unrepaired control flow at `f9c2878c`, **before** changing any production code:
+
+- A normal route `AppState` with `state.server_config` poisoned from another thread, using the precedent already in `state.rs`, then `perform_reset`.
+- Both config-lock exits exercised: the normal reset/reopen arm, and the `Busy` restoration arm with an external workspace `Arc` held through the drain deadline.
+- Both returned `ResetError::Poisoned("server config lock")`, and after the function returned, `state.try_workspace()` returned `StateAccessError::Missing`. The pre-taken-cell assertion went red separately.
+- The response mapping was confirmed against the existing `error::tests::err_state_maps_missing_workspace_to_retryable_busy`, which passes while asserting `503`, `Retry-After: 1` and a `workspace busy` body for `Missing`.
+
+So the first bullet under "What would settle it" is discharged: a post-take failure outlives the reset window with the cell empty, and the next workspace access presents that permanent state as retryable. The second is discharged by reading rather than by experiment: the process has no route-layer installer outside reset and import, and a retried reset is refused by its own initial `try_workspace()` gate, so no in-process request repairs the cell.
+
+One instrument note worth keeping, because it is the reason the evidence is trustworthy: the first red run failed early for an unrelated reason, a test harness with no Tokio reactor. That was repaired and the run redone, rather than being accepted as the reproduction. A red for the wrong reason is not evidence for the right one.
+
+Still not reproduced: the concurrent-reset panic and the lock poisoning that follows, which the list below already ranks last and which the six leaking exits do not depend on. No repeated-HTTP run against a separately launched server was made either; the transition and the mapping were executed as unit-level route code.
+
 ## Not established
 
 This was found by reading, not by reproducing. Nobody has driven a real reset into an error arm and watched the tenant answer `503` afterwards. Every claim above is a claim about what the code says it does.
