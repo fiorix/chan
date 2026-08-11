@@ -1201,13 +1201,14 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use tempfile::TempDir;
 
-    /// Bound for waits on the coordinator's rebuild pipeline (pass start
-    /// signals and rebuild completions). These waits only detect a lost or
-    /// stuck generation, so the value must absorb rebuild work on a
-    /// contended host -- spawn_blocking scheduling, disk, the index build
-    /// itself -- instead of racing it: a tight bound reads scheduler load as
-    /// a lost generation. 30 s matches the rebuild smoke budget in
-    /// chan-workspace's index facade.
+    /// Bound for waits on real filesystem policy delivery and the coordinator's
+    /// rebuild pipeline (pass start signals and rebuild completions). A paused
+    /// Tokio clock cannot advance notify delivery, `spawn_blocking` scheduling,
+    /// disk work, or the index build itself. These waits only detect a lost or
+    /// stuck generation, so the value must absorb that work on a contended host
+    /// instead of racing it: a tight bound reads scheduler load as a lost
+    /// generation. 30 s matches the rebuild smoke budget in chan-workspace's
+    /// index facade.
     const CONVERGENCE_BUDGET: Duration = Duration::from_secs(30);
 
     fn setup_workspace() -> (TempDir, TempDir, Arc<Workspace>) {
@@ -1393,6 +1394,9 @@ mod tests {
         let (_cfg, dir, workspace) = setup_workspace();
         fs::write(dir.path().join("a.md"), "# A\nbody\n").unwrap();
         let required = workspace.request_policy_recovery(RecoveryAction::Reconcile);
+        // The request parks synchronously, and this cold workspace starts no
+        // recovery worker. This ownership check is not a wait for a spawned
+        // task to release the pass.
         assert!(
             workspace.recovery_is_unowned(),
             "the pass must be unowned before the indexer exists: {:?}",
@@ -2042,6 +2046,8 @@ mod tests {
     fn reconcile_idle_reads_live_stats_when_workspace_present() {
         let (_cfg, dir, workspace) = setup_workspace();
         fs::write(dir.path().join("a.md"), "# A\n\nbody token\n").unwrap();
+        // The apply includes Workspace::index_file's synchronous commit and
+        // reader reload, so the live stats below need no convergence wait.
         apply_watch_change(&workspace, "a.md", false, false).unwrap();
         let status = Arc::new(Mutex::new(IndexStatus::Building {
             current: 0,
@@ -2143,6 +2149,9 @@ mod tests {
             chan_workspace::SearchAggression::Conservative,
             Arc::new(chan_workspace::NoProgress),
         );
+        // Spawn downgrades the workspace before either task is created and the
+        // handle stores no strong workspace reference. This count is a
+        // synchronous ownership invariant, not an eventual-release wait.
         assert_eq!(Arc::strong_count(&workspace), 1);
 
         drop(indexer);
@@ -2248,6 +2257,8 @@ mod tests {
         let (_cfg, dir, workspace) = setup_workspace();
         let path = dir.path().join("rapid.md");
         fs::write(&path, "# Rapid\n\nrapid-token-00\n").unwrap();
+        // Each apply commits and reloads the index reader synchronously, so the
+        // searches after the burst must observe the latest body immediately.
         assert_eq!(
             apply_watch_change(&workspace, "rapid.md", false, false).unwrap(),
             ApplyOutcome::Indexed

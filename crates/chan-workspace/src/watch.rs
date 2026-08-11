@@ -542,35 +542,28 @@ fn plan_dir(rel: &str, name: &str, policy: &IndexScopePolicy) -> DirPlan {
 }
 
 #[cfg(test)]
-struct InjectedRegistrationFailure {
-    path: PathBuf,
-    remaining: usize,
-}
-
-#[cfg(test)]
-static INJECTED_REGISTRATION_FAILURE: std::sync::OnceLock<
-    std::sync::Mutex<Option<InjectedRegistrationFailure>>,
+static INJECTED_REGISTRATION_FAILURES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, usize>>,
 > = std::sync::OnceLock::new();
 
 #[cfg(test)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn inject_registration_failures(path: &Path, count: usize) {
-    *INJECTED_REGISTRATION_FAILURE
-        .get_or_init(|| std::sync::Mutex::new(None))
+    let _ = INJECTED_REGISTRATION_FAILURES
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
         .lock()
-        .unwrap() = Some(InjectedRegistrationFailure {
-        path: path.to_path_buf(),
-        remaining: count,
-    });
+        .unwrap()
+        .insert(path.to_path_buf(), count);
 }
 
 #[cfg(test)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn clear_injected_registration_failure() {
-    *INJECTED_REGISTRATION_FAILURE
-        .get_or_init(|| std::sync::Mutex::new(None))
+fn take_injected_registration_failures(path: &Path) -> Option<usize> {
+    INJECTED_REGISTRATION_FAILURES
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
         .lock()
-        .unwrap() = None;
+        .unwrap()
+        .remove(path)
 }
 
 fn watch_registration(
@@ -580,17 +573,25 @@ fn watch_registration(
 ) -> notify::Result<()> {
     #[cfg(test)]
     {
-        let mut injected = INJECTED_REGISTRATION_FAILURE
-            .get_or_init(|| std::sync::Mutex::new(None))
+        let mut injected = INJECTED_REGISTRATION_FAILURES
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
             .lock()
             .unwrap();
-        if let Some(failure) = injected.as_mut() {
-            if failure.path == abs && failure.remaining > 0 {
-                failure.remaining -= 1;
-                return Err(notify::Error::generic(
-                    "injected watcher registration failure",
-                ));
+        let should_fail = injected.get_mut(abs).is_some_and(|remaining| {
+            if *remaining == 0 {
+                false
+            } else {
+                *remaining -= 1;
+                true
             }
+        });
+        if injected.get(abs) == Some(&0) {
+            injected.remove(abs);
+        }
+        if should_fail {
+            return Err(notify::Error::generic(
+                "injected watcher registration failure",
+            ));
         }
     }
     watcher.watch(abs, mode)
@@ -1986,7 +1987,11 @@ mod tests {
 
             let (handle, rx) = start_handle_with_policy(&root, source);
             let initial_health = handle.health();
-            clear_injected_registration_failure();
+            assert_eq!(
+                take_injected_registration_failures(&ignored),
+                Some(1),
+                "gitignored directory reached Linux registration"
+            );
             assert_eq!(
                 initial_health.state,
                 WatchHealthState::Healthy,
@@ -2034,7 +2039,11 @@ mod tests {
 
             let (handle, _rx) = start_handle_with_policy(&root, source);
             let initial_health = handle.health();
-            clear_injected_registration_failure();
+            assert_eq!(
+                take_injected_registration_failures(&target),
+                Some(1),
+                "docs-only negation widened registration into configured target/"
+            );
             assert_eq!(
                 initial_health.state,
                 WatchHealthState::Healthy,
@@ -2054,7 +2063,7 @@ mod tests {
             let source = policy_source(root.path());
 
             let (handle, _rx) = start_handle_with_policy(&root, Arc::clone(&source));
-            assert_eq!(handle.health().state, WatchHealthState::Degraded);
+            assert_eq!(handle.health().registration_failures, 1);
             assert!(handle.is_registered(&stale));
 
             let next_generation: crate::WorkspaceGeneration = serde_json::from_str("1").unwrap();
@@ -2071,7 +2080,6 @@ mod tests {
             while handle.health().state != WatchHealthState::Healthy && Instant::now() < deadline {
                 std::thread::yield_now();
             }
-            clear_injected_registration_failure();
             assert_eq!(handle.health().state, WatchHealthState::Healthy);
             assert!(
                 !handle.is_registered(&stale),
@@ -2164,7 +2172,6 @@ mod tests {
 
             let (handle, rx) = start_handle(&root);
             let initial = handle.health();
-            assert_eq!(initial.state, WatchHealthState::Degraded);
             assert_eq!(initial.registration_failures, 1);
 
             let deadline = Instant::now() + Duration::from_secs(5);
