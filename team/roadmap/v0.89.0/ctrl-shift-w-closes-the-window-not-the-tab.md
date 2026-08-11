@@ -98,6 +98,25 @@ The draft never raised this. The code already answers it for two of the four off
 
 **The launcher window: open, and it needs a ruling.** The launcher has no tabs, so "close the tab" has no meaning there, and off macOS it is the one window whose accelerator claims `Ctrl+Shift+W`. Either the accelerator moves to `CmdOrCtrl+Alt+W` with the rest of window close, or `Ctrl+Shift+W` means two different things depending on which window has focus. **Open.**
 
+## Ruled 2026-08-11: the behaviour, and the macOS change it knowingly costs
+
+The owner ruled the shape of this item. **`Ctrl+Shift+W` off macOS behaves as `Cmd+W` does on macOS**, which fixes the four open questions at once:
+
+1. On the **control terminal** it behaves like closing a running terminal: **it brings up the dialog** asking whether to close it.
+2. Closing the **last** tab closes the window, as with standalone terminals.
+3. **Except on web**, where the standalone-terminal case leaves the empty pane.
+4. The launcher accelerator **moves with window close** to `Ctrl+Alt+W`, so `Ctrl+Shift+W` never means two different things depending on which surface has focus.
+
+Three of those were verified against the code before the ruling was accepted, and hold as stated. `isTerminalOnlyWindow()` returns true for both `terminal` and `control`, so a control terminal is terminal-only. The last-tab `$effect` in `App.svelte` fires when a terminal-only window has no terminal tabs left, discards the blob and closes the window, and it is gated on `isTauriDesktop()`, which is exactly why web keeps the empty pane. `app.tab.close` is in `TERMINAL_ONLY_COMMANDS` and is not in `CONTROL_TERMINAL_BLOCKED`.
+
+**The dialog did not check out, and the owner ruled on it knowing that.** Today the control-terminal arm of the `KeyW` branch calls `requestCloseWindow()` immediately; there is no dialog on that path at all. The three-way overlay lives on `app.window.confirmClose`, which the desktop host evals on an **OS red-dot** rather than on `Cmd+W`. So the model being described is not what macOS does today.
+
+The resolution is to **route the control-terminal arm through `app.window.confirmClose` on both platforms**. The consequence, accepted deliberately rather than discovered later: **macOS `Cmd+W` on a control terminal stops closing immediately and starts asking.** That is a behaviour change on a platform that does not have the defect this item exists to fix, and it widens an item whose sizing is "small change, wide verification". The alternative offered was routing through `app.tab.close` like every other window kind, which needs no dialog and leaves macOS untouched; it was declined.
+
+That trade is the thing a future reader should not have to reconstruct: the dialog was wanted more than the macOS status quo was.
+
+One item of the four is recorded as a **working assumption rather than an explicit answer**. The accelerator reading in point 4 was put to the owner as "say so if that is wrong" alongside the decision, and it drew no objection but no separate confirmation either. Proceed on it; it is cheap to correct and expensive only if it is assumed to have been ruled.
+
 ## Contract
 
 - The tab-close chord on each platform is the chord a user of that platform reaches for, and window close and tab close never resolve to the same chord on any `(platform, os)` pair.
