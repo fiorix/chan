@@ -238,7 +238,7 @@ pub trait DevserverFeedSource: Send + Sync {
 
 /// The local library's pane-highlight colour, injected onto [`WorkspaceHost`]
 /// like [`DevserverRegistry`]: the value lives in chan-desktop's config
-/// (`~/.chan/desktop`, invisible from chan-library), so the desktop installs an
+/// (`<chan_home>/desktop`, invisible from chan-library), so the desktop installs an
 /// `Arc<dyn LocalColorStore>` and the launcher's local-color routes read/write it
 /// through the host. A host that installs none (the headless devserver / plain
 /// `chan open`) reports `None` (the default accent) and ignores writes -- the
@@ -1999,7 +1999,7 @@ impl WorkspaceHost {
     /// discard (cs-driven, a watcher reconcile, a crashed client) that never
     /// sends the SPA `DELETE /api/session`: the terminal sessions (PTYs + fds)
     /// AND the durable workspace session/layout blob
-    /// (`<workspace>/.chan/sessions/<id>`) AND the standalone terminal window's
+    /// (`<chan_home>/workspaces/<metadata_key>/sessions/<id>`) AND the standalone terminal window's
     /// layout blob (the chan-server `terminal_blob`, reached via the host-
     /// installed `BlobReaper` hook). The id is library-unique, so only its owning
     /// tenant has anything; the rest are no-ops. Handles are cloned out under the
@@ -2033,7 +2033,7 @@ impl WorkspaceHost {
             .sum();
         // Delete the durable workspace session/layout blob too (best-effort; a
         // no-op when this window has none), so a non-SPA discard never orphans
-        // `<workspace>/.chan/sessions/<id>`.
+        // `<chan_home>/workspaces/<metadata_key>/sessions/<id>`.
         for workspace in workspaces {
             let _ = workspace.delete_session(window_id);
         }
@@ -5103,7 +5103,7 @@ mod tests {
         // P1a: a registry discard is the single authoritative cleanup -- it also
         // deletes the durable workspace session/layout blob, so a non-SPA
         // discard (one that never sends `DELETE /api/session`) never orphans
-        // `<workspace>/.chan/sessions/<id>` on disk.
+        // `<chan_home>/workspaces/<metadata_key>/sessions/<id>` on disk.
         let cfg = tempfile::tempdir().expect("config dir");
         let root = tempfile::tempdir().expect("workspace");
         std::fs::write(root.path().join("a.md"), "# A\n").expect("write a");
