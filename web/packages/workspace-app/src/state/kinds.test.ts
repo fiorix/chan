@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import canvas from "../components/GraphCanvas.svelte?raw";
+import kinds from "./kinds.ts?raw";
 
 import {
   chipColorVar,
@@ -73,7 +74,7 @@ describe("chipColorVar (path-aware bubble colour)", () => {
     expect(chipColorVar("media", "photo.png")).toBe("var(--g-img)");
     expect(chipColorVar("media", "paper.pdf")).toBe("var(--g-img)");
     expect(chipColorVar("binary", "archive.zip")).toBe("var(--g-binary)");
-    expect(chipColorVar("contact", "alice.md")).toBe("var(--warn-text)");
+    expect(chipColorVar("contact", "alice.md")).toBe("var(--g-contact, var(--warn-text))");
     // Excalidraw + csv: text wire kind, grey node, grey bubble.
     expect(chipColorVar("text", "board.excalidraw")).toBe("var(--g-binary)");
     expect(chipColorVar("text", "data.csv")).toBe("var(--g-binary)");
@@ -86,7 +87,7 @@ describe("chipColorVar (path-aware bubble colour)", () => {
 
   test("non-file kinds ignore the path and keep the wire-kind colour", () => {
     expect(chipColorVar("tag", "irrelevant.md")).toBe("var(--g-tag)");
-    expect(chipColorVar("mention", "irrelevant.md")).toBe("var(--warn-text)");
+    expect(chipColorVar("mention", "irrelevant.md")).toBe("var(--g-contact, var(--warn-text))");
     expect(chipColorVar("folder", "some/dir")).toBe("var(--g-folder)");
     expect(chipColorVar("date")).toBe("var(--text-secondary)");
   });
@@ -112,7 +113,7 @@ describe("bubble / canvas node-fill parity", () => {
     ["source", /n\.kind === "source" \? theme\.source/, /source: v\("--g-source"/, "var(--g-source)"],
     ["img", /n\.kind === "img" \? theme\.img/, /img: v\("--g-img"/, "var(--g-img)"],
     ["binary", /n\.kind === "binary" \? theme\.binary/, /binary: v\("--g-binary"/, "var(--g-binary)"],
-    ["contact", /n\.kind === "contact" \? theme\.mention/, /mention: v\("--warn-text"/, "var(--warn-text)"],
+    ["contact", /n\.kind === "contact" \? theme\.mention/, /mention: v\("--g-contact", v\("--warn-text"/, "var(--g-contact, var(--warn-text))"],
   ];
 
   for (const [bucket, paintPin, themePin, cssVar] of PARITY) {
@@ -122,4 +123,71 @@ describe("bubble / canvas node-fill parity", () => {
       expect(colorVarForBucket(bucket)).toBe(cssVar);
     });
   }
+});
+
+describe("file-class colour scheme wiring", () => {
+  // Rehomed from the deleted HybridGraphConfig.test.ts (the legend
+  // component it described never mounted; these pins track the canvas /
+  // kinds side of the bucket scheme, not the legend). They pin the
+  // wiring shape so a refactor can't silently drop the bucket split.
+  test("fileBucket returns the 5 buckets (doc/img/contact/source/binary)", () => {
+    expect(kinds).toMatch(
+      /export function fileBucket\([\s\S]*?\): FileBucket/,
+    );
+    expect(kinds).toMatch(
+      /export type FileBucket = "doc" \| "img" \| "contact" \| "source" \| "binary"/,
+    );
+  });
+
+  test("canvas routes file nodes through the shared fileBucket", () => {
+    expect(canvas).toMatch(/import \{ fileBucket \} from "\.\.\/state\/kinds"/);
+    expect(canvas).toMatch(/fileBucket\(n\.path, n\.node_kind\)/);
+  });
+
+  test("markdown extension regex covers .md and .txt", () => {
+    expect(kinds).toMatch(/MARKDOWN_EXT_RE = \/\\\.\(md\|txt\)\$\/i/);
+  });
+
+  test("source extension regex covers common code + config extensions", () => {
+    expect(kinds).toMatch(/SOURCE_EXT_RE\s*=\s*\n?\s*\/\\\.\(rs\|py\|ts\|tsx/);
+    expect(kinds).toMatch(/toml\|yaml\|yml\|json/);
+  });
+
+  test("media extension regex covers image + pdf", () => {
+    expect(kinds).toMatch(/MEDIA_EXT_RE = \/\\\.\(png\|jpe\?g\|gif\|webp\|svg\|avif\|bmp\|pdf\)/);
+  });
+
+  test("fileBucket dispatches MEDIA first, then contact, then markdown, then source, else binary", () => {
+    // Order matters: image extensions on a contact-flagged file
+    // should still bucket as media (existing behaviour). The
+    // function's branch order encodes this. Behaviour is unit-tested
+    // above; this pins the source branch order.
+    expect(kinds).toMatch(/if \(MEDIA_EXT_RE\.test\(path\)\) return "img"/);
+    expect(kinds).toMatch(
+      /if \(nodeKind === "contact"\) return "contact"[\s\S]*?if \(MARKDOWN_EXT_RE\.test\(path\)\) return "doc"/,
+    );
+    expect(kinds).toMatch(/if \(SOURCE_EXT_RE\.test\(path\)\) return "source"/);
+    expect(kinds).toMatch(/return "binary"/);
+  });
+
+  test("ThemeColors carries source + binary slots", () => {
+    expect(canvas).toMatch(/source: string;/);
+    expect(canvas).toMatch(/binary: string;/);
+  });
+
+  test("Theme reader pulls --g-source + --g-binary from CSS", () => {
+    expect(canvas).toMatch(/source: v\("--g-source",/);
+    expect(canvas).toMatch(/binary: v\("--g-binary",/);
+  });
+
+  test("Canvas paint dispatches source + binary kinds to their theme slots", () => {
+    expect(canvas).toMatch(/n\.kind === "source" \? theme\.source/);
+    expect(canvas).toMatch(/n\.kind === "binary" \? theme\.binary/);
+  });
+
+  test("DKind union includes the new source + binary kinds", () => {
+    expect(canvas).toMatch(
+      /type DKind =[\s\S]*?\| "source"[\s\S]*?\| "binary"/,
+    );
+  });
 });

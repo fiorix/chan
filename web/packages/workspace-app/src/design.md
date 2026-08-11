@@ -95,7 +95,7 @@ Concept hues are stable across surfaces: document orange, media purple, tag gree
 
 Graph nodes, file-tree icons, and editor pills read from the same concept palette rather than inventing local hues. Some concepts have no representation on a given surface (for example tags do not have file-tree icons, and folders do not have editor pills).
 
-There is no dedicated `--g-contact` token; the graph reads `--warn-text` directly for contact and mention nodes. Add one only if the graph ever needs to diverge from the warning hue.
+The graph reads `--g-contact` for contact and mention nodes. It defaults to `var(--warn-text)` and is settable per theme mode as part of the graph palette (`editor.graph_colors.*`).
 
 `--chan-color-language` is the source token for the language hue; `--g-language` and `--chan-color-code` alias it.
 

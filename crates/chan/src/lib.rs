@@ -7219,6 +7219,74 @@ const CONFIG_KEYS: &[ConfigKeySpec] = &[
         kind: ConfigValueKind::OptionalEnum(&["light", "dark"]),
     },
     ConfigKeySpec {
+        key: "editor.graph_colors.mode",
+        kind: ConfigValueKind::Enum(&["standard", "custom"]),
+    },
+    ConfigKeySpec {
+        key: "editor.graph_colors.dark.doc",
+        kind: ConfigValueKind::Color,
+    },
+    ConfigKeySpec {
+        key: "editor.graph_colors.dark.source",
+        kind: ConfigValueKind::Color,
+    },
+    ConfigKeySpec {
+        key: "editor.graph_colors.dark.binary",
+        kind: ConfigValueKind::Color,
+    },
+    ConfigKeySpec {
+        key: "editor.graph_colors.dark.img",
+        kind: ConfigValueKind::Color,
+    },
+    ConfigKeySpec {
+        key: "editor.graph_colors.dark.folder",
+        kind: ConfigValueKind::Color,
+    },
+    ConfigKeySpec {
+        key: "editor.graph_colors.dark.tag",
+        kind: ConfigValueKind::Color,
+    },
+    ConfigKeySpec {
+        key: "editor.graph_colors.dark.language",
+        kind: ConfigValueKind::Color,
+    },
+    ConfigKeySpec {
+        key: "editor.graph_colors.dark.contact",
+        kind: ConfigValueKind::Color,
+    },
+    ConfigKeySpec {
+        key: "editor.graph_colors.light.doc",
+        kind: ConfigValueKind::Color,
+    },
+    ConfigKeySpec {
+        key: "editor.graph_colors.light.source",
+        kind: ConfigValueKind::Color,
+    },
+    ConfigKeySpec {
+        key: "editor.graph_colors.light.binary",
+        kind: ConfigValueKind::Color,
+    },
+    ConfigKeySpec {
+        key: "editor.graph_colors.light.img",
+        kind: ConfigValueKind::Color,
+    },
+    ConfigKeySpec {
+        key: "editor.graph_colors.light.folder",
+        kind: ConfigValueKind::Color,
+    },
+    ConfigKeySpec {
+        key: "editor.graph_colors.light.tag",
+        kind: ConfigValueKind::Color,
+    },
+    ConfigKeySpec {
+        key: "editor.graph_colors.light.language",
+        kind: ConfigValueKind::Color,
+    },
+    ConfigKeySpec {
+        key: "editor.graph_colors.light.contact",
+        kind: ConfigValueKind::Color,
+    },
+    ConfigKeySpec {
         key: "editor.empty_pane_carousel_cycling",
         kind: ConfigValueKind::Bool,
     },
@@ -7693,6 +7761,11 @@ fn config_schema_sample() -> Result<serde_json::Value> {
     editor.hybrid_surface_themes.browser = Some(chan_server::SurfaceThemeChoice::Light);
     editor.hybrid_surface_themes.graph = Some(chan_server::SurfaceThemeChoice::Light);
     editor.hybrid_surface_themes.dashboard = Some(chan_server::SurfaceThemeChoice::Light);
+    // Empty per-mode tables: enough schema for `set_config_value` to
+    // materialize `editor.graph_colors.<mode>.<kind>` on a default
+    // config without pre-populating any hue.
+    editor.graph_colors.dark = Some(chan_server::GraphPalette::default());
+    editor.graph_colors.light = Some(chan_server::GraphPalette::default());
     Ok(serde_json::to_value(ConfigOutput {
         editor,
         server: ServerConfig::default(),
@@ -10949,6 +11022,31 @@ mod tests {
                 graph: Some(chan_server::SurfaceThemeChoice::Light),
                 dashboard: Some(chan_server::SurfaceThemeChoice::Dark),
             },
+            // Every palette leaf populated: an optional field left None
+            // never reaches the dump and the coverage walk would skip it.
+            graph_colors: chan_server::GraphColorPrefs {
+                mode: chan_server::GraphColorMode::Custom,
+                dark: Some(chan_server::GraphPalette {
+                    doc: Some("#ff8a3d".into()),
+                    source: Some("#4169e1".into()),
+                    binary: Some("#5e5e62".into()),
+                    img: Some("#b07dff".into()),
+                    folder: Some("#8e8e93".into()),
+                    tag: Some("#6cd07a".into()),
+                    language: Some("#ff4db8".into()),
+                    contact: Some("#e3b341".into()),
+                }),
+                light: Some(chan_server::GraphPalette {
+                    doc: Some("#c25a1f".into()),
+                    source: Some("#2851c4".into()),
+                    binary: Some("#4e4e54".into()),
+                    img: Some("#7a4cd8".into()),
+                    folder: Some("#6c6c70".into()),
+                    tag: Some("#2f9444".into()),
+                    language: Some("#c71585".into()),
+                    contact: Some("#9a6700".into()),
+                }),
+            },
             shortcuts,
             ..Default::default()
         };
@@ -11056,6 +11154,60 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("#rgb or #rrggbb"), "{error:#}");
+    }
+
+    #[test]
+    fn config_graph_colors_set_from_default_materializes_the_subtree() {
+        let mut editor = EditorPrefs::default();
+        // The palette subtree does not exist in a default config; the
+        // schema sample must carry enough of it for the write to land.
+        write_pref_key(&mut editor, "editor.graph_colors.dark.doc", "#FF0000").unwrap();
+        let dark = editor.graph_colors.dark.as_ref().unwrap();
+        assert_eq!(dark.doc.as_deref(), Some("#ff0000"), "hex is normalized");
+        assert_eq!(dark.source, None, "untouched hues stay absent");
+        assert_eq!(
+            editor.graph_colors.mode,
+            chan_server::GraphColorMode::Standard
+        );
+
+        // The leaf reads back through the same key set the dump walks.
+        let server = ServerConfig::default();
+        let value = read_config_key(&editor, &server, "editor.graph_colors.dark.doc").unwrap();
+        assert_eq!(value, serde_json::json!("#ff0000"));
+
+        write_pref_key(&mut editor, "editor.graph_colors.mode", "custom").unwrap();
+        assert_eq!(
+            editor.graph_colors.mode,
+            chan_server::GraphColorMode::Custom
+        );
+        let error = write_pref_key(&mut editor, "editor.graph_colors.mode", "bogus").unwrap_err();
+        assert!(error.to_string().contains("standard|custom"), "{error:#}");
+        let error =
+            write_pref_key(&mut editor, "editor.graph_colors.light.tag", "chartreuse").unwrap_err();
+        assert!(error.to_string().contains("#rgb or #rrggbb"), "{error:#}");
+    }
+
+    #[test]
+    fn config_no_key_dump_validates_with_a_custom_graph_palette() {
+        // `chan config get` with no key runs validate_config_dump on the
+        // live path: a palette leaf without a CONFIG_KEYS row breaks the
+        // command for every user, not only the suite.
+        let (editor, server) = populated_config_for_coverage();
+        assert!(editor.graph_colors.dark.is_some());
+        let dump = serde_json::to_value(ConfigOutput {
+            editor: editor.clone(),
+            server: server.clone(),
+        })
+        .unwrap();
+        validate_config_dump(&dump).unwrap();
+        // The populated fixture must exercise every palette key: count
+        // the leaves under graph_colors so a new hue row can't silently
+        // go uncovered.
+        let palette_leaves = config_leaf_paths(&dump)
+            .into_iter()
+            .filter(|(key, _)| key.starts_with("editor.graph_colors."))
+            .count();
+        assert_eq!(palette_leaves, 17, "mode + 8 hues x 2 modes");
     }
 
     #[test]

@@ -126,6 +126,7 @@ import {
   proposeDefaultFilename,
 } from "./pathValidate";
 import { setNotifyHandler } from "./notify.svelte";
+import { applyGraphColorPrefs } from "./graphPalette.svelte";
 import { defaultScopeId } from "./scope.svelte";
 import {
   allTerminalTabs,
@@ -756,6 +757,7 @@ export function applyServerPreferences(): void {
     browserSidePanes.left = prefs.browser_side_panes.left;
     browserSidePanes.right = prefs.browser_side_panes.right;
   }
+  applyGraphColorPrefs(prefs.graph_colors);
   applyEditorToolPreferences(prefs);
   hydratePageWidthFromPrefs(prefs.page_width_ratio, prefs.overlay_maximized);
   // Load the keymap overrides so chordFor + the dispatch resolve the user's

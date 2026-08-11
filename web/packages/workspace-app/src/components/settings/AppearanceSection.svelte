@@ -7,6 +7,8 @@
   import type {
     BubbleOverlayMode,
     EditorTheme,
+    GraphColorPrefs,
+    GraphPalette,
     HybridSurfaceKind,
     HybridSurfaceThemes,
     LineSpacing,
@@ -20,6 +22,7 @@
     clearHybridSurfaceTheme,
     setHybridSurfaceTheme,
     setThemeChoice,
+    ui,
   } from "../../state/store.svelte";
   import type { CommitFn } from "./commit";
   import SettingField from "./SettingField.svelte";
@@ -29,6 +32,13 @@
     normalizeHexColor,
     readStandardTerminalColors,
   } from "../../state/paneColor";
+  import {
+    GRAPH_COLOR_GROUPS,
+    GRAPH_COLOR_ROWS,
+    GRAPH_PALETTE_DEFAULTS,
+    type GraphColorKind,
+    type GraphColorTheme,
+  } from "../../state/graphPalette.svelte";
 
   let { prefs, commit }: { prefs: Preferences; commit: CommitFn } = $props();
 
@@ -232,6 +242,144 @@
       },
     }));
   }
+
+  // ---- custom graph colours ---------------------------------------------
+  // One row per node-kind hue, per colour scheme; the row grouping and
+  // descriptions carry the deleted HybridGraphConfig legend's layout
+  // (GRAPH_COLOR_ROWS). Every commit replaces the whole `graph_colors`
+  // composite with one hue changed, the same write shape as the
+  // terminal colour control above.
+  const GRAPH_EDIT_MODES = [
+    { value: "dark", label: "Dark" },
+    { value: "light", label: "Light" },
+  ] as const;
+
+  const graphColorsOn = $derived(prefs.graph_colors?.mode === "custom");
+  let graphEditTheme = $state<GraphColorTheme>(ui.theme);
+  // Drafts start from the theme defaults; the $effect below reseeds
+  // from prefs on mount and on every prefs change. (Reading `prefs`
+  // here would only capture the initial value, and svelte-check flags
+  // it.)
+  let graphColorDrafts = $state<Record<GraphColorKind, string>>(
+    graphPaletteDrafts(ui.theme, undefined),
+  );
+  let graphColorErrors = $state<Partial<Record<GraphColorKind, string>>>({});
+  let lastGraphColorState = "";
+
+  function graphPaletteDrafts(
+    theme: GraphColorTheme,
+    palette: GraphPalette | undefined,
+  ): Record<GraphColorKind, string> {
+    const defaults = GRAPH_PALETTE_DEFAULTS[theme];
+    const drafts = {} as Record<GraphColorKind, string>;
+    for (const { kind } of GRAPH_COLOR_ROWS) {
+      drafts[kind] = palette?.[kind] ?? defaults[kind];
+    }
+    return drafts;
+  }
+
+  // Reseed the drafts when the prefs change (commit round-trip or a
+  // cross-window config_changed) or the edited scheme flips. The state
+  // guard keeps a content-identical reassign from re-firing the effect.
+  $effect(() => {
+    const state = `${graphEditTheme}:${JSON.stringify(prefs.graph_colors ?? null)}`;
+    if (state === lastGraphColorState) return;
+    lastGraphColorState = state;
+    graphColorDrafts = graphPaletteDrafts(
+      graphEditTheme,
+      prefs.graph_colors?.[graphEditTheme],
+    );
+    graphColorErrors = {};
+  });
+
+  /// Replace the whole composite with `update` applied, keeping any
+  /// dormant palette for the other scheme.
+  function commitGraphColors(update: (current: GraphColorPrefs) => GraphColorPrefs): void {
+    commit((p) => {
+      const current = p.graph_colors;
+      return {
+        ...p,
+        graph_colors: update({
+          mode: current?.mode ?? "standard",
+          ...(current?.dark ? { dark: current.dark } : {}),
+          ...(current?.light ? { light: current.light } : {}),
+        }),
+      };
+    });
+  }
+
+  function toggleCustomGraphColors(on: boolean): void {
+    // Off keeps the stored palettes dormant (terminal parity), so a
+    // later activation restores them unchanged.
+    commitGraphColors((c) => ({ ...c, mode: on ? "custom" : "standard" }));
+  }
+
+  /// Write or clear one hue in the edited scheme's palette. `hex` null
+  /// clears the override (the hue falls back to the theme palette).
+  function writeGraphColor(kind: GraphColorKind, hex: string | null): void {
+    commitGraphColors((c) => {
+      const palette: GraphPalette = { ...(c[graphEditTheme] ?? {}) };
+      if (hex === null) delete palette[kind];
+      else palette[kind] = hex;
+      // Prune an emptied palette rather than storing `"dark": {}`.
+      const pruned = Object.keys(palette).length === 0 ? undefined : palette;
+      // Explicit per-scheme branches: a computed `[graphEditTheme]` key
+      // widens the literal to a string index and loses GraphColorPrefs.
+      return graphEditTheme === "dark"
+        ? { ...c, mode: "custom", dark: pruned }
+        : { ...c, mode: "custom", light: pruned };
+    });
+  }
+
+  function updateGraphColorDraft(kind: GraphColorKind, value: string): void {
+    graphColorDrafts = { ...graphColorDrafts, [kind]: value };
+  }
+
+  function commitGraphColor(kind: GraphColorKind, value: string): void {
+    const trimmed = value.trim();
+    const existing = prefs.graph_colors?.[graphEditTheme]?.[kind];
+    if (trimmed === "") {
+      // Clearing the field clears the override.
+      if (existing !== undefined) writeGraphColor(kind, null);
+      graphColorErrors = { ...graphColorErrors, [kind]: undefined };
+      graphColorDrafts = {
+        ...graphColorDrafts,
+        [kind]: GRAPH_PALETTE_DEFAULTS[graphEditTheme][kind],
+      };
+      return;
+    }
+    const normalized = normalizeHexColor(trimmed);
+    if (!normalized) {
+      graphColorErrors = {
+        ...graphColorErrors,
+        [kind]: "Enter #rgb or #rrggbb.",
+      };
+      return;
+    }
+    updateGraphColorDraft(kind, normalized);
+    graphColorErrors = { ...graphColorErrors, [kind]: undefined };
+    const defaultHex = GRAPH_PALETTE_DEFAULTS[graphEditTheme][kind];
+    if (normalized === existing) return;
+    // Entering the scheme's default removes the override instead of
+    // storing a redundant one, keeping the palette sparse.
+    writeGraphColor(kind, normalized === defaultHex ? null : normalized);
+  }
+
+  function onGraphColorKeydown(
+    event: KeyboardEvent & { currentTarget: HTMLInputElement },
+    kind: GraphColorKind,
+  ): void {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    commitGraphColor(kind, event.currentTarget.value);
+    event.currentTarget.blur();
+  }
+
+  function resetGraphPalette(): void {
+    commitGraphColors((c) =>
+      graphEditTheme === "dark" ? { ...c, dark: undefined } : { ...c, light: undefined },
+    );
+  }
 </script>
 
 <SettingField label="Theme" hint="App-wide colour theme. System follows your OS setting.">
@@ -360,6 +508,63 @@
   </div>
 {/if}
 
+<SettingField
+  label="Custom graph colours"
+  hint="Override graph node hues, per colour scheme. Applies to the graph surface only; every other surface keeps the theme palette. Clear a field to fall back to the default hue."
+>
+  <PillToggle
+    label="Custom graph colours"
+    checked={graphColorsOn}
+    ontoggle={toggleCustomGraphColors}
+  />
+</SettingField>
+
+{#if graphColorsOn}
+  <div class="terminal-colours">
+    <div class="terminal-contrast-row">
+      <span>Editing palette</span>
+      <PillRadio
+        name="settings-graph-palette-theme"
+        ariaLabel="Graph palette colour scheme"
+        value={graphEditTheme}
+        options={GRAPH_EDIT_MODES}
+        onselect={(v) => (graphEditTheme = v as GraphColorTheme)}
+      />
+    </div>
+    {#each GRAPH_COLOR_GROUPS as group (group)}
+      <div class="graph-palette-group">{group}</div>
+      {#each GRAPH_COLOR_ROWS.filter((row) => row.group === group) as row (row.kind)}
+        {@const committed = prefs.graph_colors?.[graphEditTheme]?.[row.kind]}
+        <div class="terminal-colour-row">
+          <label for={`graph-colour-${row.kind}`}>{row.label}</label>
+          <input
+            type="color"
+            value={committed ?? GRAPH_PALETTE_DEFAULTS[graphEditTheme][row.kind]}
+            aria-label={`${row.label} colour swatch`}
+            oninput={(event) => commitGraphColor(row.kind, event.currentTarget.value)}
+          />
+          <input
+            id={`graph-colour-${row.kind}`}
+            type="text"
+            value={graphColorDrafts[row.kind]}
+            aria-invalid={graphColorErrors[row.kind] ? "true" : undefined}
+            oninput={(event) => updateGraphColorDraft(row.kind, event.currentTarget.value)}
+            onblur={(event) => commitGraphColor(row.kind, event.currentTarget.value)}
+            onkeydown={(event) => onGraphColorKeydown(event, row.kind)}
+          />
+          <span class="graph-colour-desc">{row.description}</span>
+          {#if graphColorErrors[row.kind]}
+            <span class="colour-error" role="alert">{graphColorErrors[row.kind]}</span>
+          {/if}
+        </div>
+      {/each}
+    {/each}
+    <button type="button" class="reset-terminal-colours" onclick={resetGraphPalette}>
+      Reset {graphEditTheme} palette to theme defaults
+    </button>
+  </div>
+{/if}
+
 <style>
   .terminal-colours {
     display: grid;
@@ -402,6 +607,18 @@
   }
   .colour-error {
     color: var(--danger, #ef4444);
+    font-size: 12px;
+  }
+  .graph-palette-group {
+    margin-top: 4px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .graph-colour-desc {
+    color: var(--text-secondary);
     font-size: 12px;
   }
   .reset-terminal-colours {

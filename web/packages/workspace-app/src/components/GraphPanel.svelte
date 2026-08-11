@@ -34,6 +34,7 @@
   } from "../state/tabs.svelte";
   import {
     browserSelection,
+    effectiveHybridSurfaceTheme,
     fbSelectSingle,
     graphReloadSignal,
     indexStatus,
@@ -50,6 +51,7 @@
     tree,
     treeExpanded,
   } from "../state/store.svelte";
+  import { graphPaletteStyleFor } from "../state/graphPalette.svelte";
   import { onDestroy, tick, untrack } from "svelte";
   import {
     fbWatchRegister,
@@ -1846,7 +1848,7 @@
   const EDGE_COLORS: Record<RenderedEdgeKind, string> = {
     link: "var(--text-secondary)",
     tag: "var(--g-tag)",
-    mention: "var(--warn-text)",
+    mention: "var(--g-contact, var(--warn-text))",
     contains: "var(--g-folder)",
     language: "var(--g-language)",
     // Group-scope edges read as the accent so they pop against the
@@ -1892,6 +1894,21 @@
     if (id.startsWith("folder:")) return id.slice("folder:".length);
     return id;
   }
+
+  // ---- custom palette application ------------------------------------------
+
+  /// Inline custom-property block carrying the user's custom graph
+  /// palette, keyed by the graph surface's EFFECTIVE theme (the
+  /// body-theme pin, else the app theme) so a per-mode palette follows
+  /// the pin. Applied on `.graph-tab` below (the canvas reads its theme
+  /// from inside that subtree) and on the portaled tab-menu bubble (its
+  /// filter dots escape the subtree onto document.body and would
+  /// otherwise keep the theme colours while the canvas shows the custom
+  /// ones). Standard mode yields an empty string: no attribute, no
+  /// override, theme palette untouched.
+  const paletteStyle = $derived(
+    tab ? graphPaletteStyleFor(effectiveHybridSurfaceTheme("graph")) : "",
+  );
 
   // ---- canvas glue -------------------------------------------------------
   //
@@ -2633,6 +2650,7 @@
     class="graph-tab"
     class:active
     data-theme={tab ? surfaceThemeOverride("graph") : undefined}
+    style={paletteStyle || undefined}
     oncontextmenu={onGraphContextMenu}
     role="tabpanel"
     aria-hidden={!active}
@@ -2660,6 +2678,7 @@
       role="menu"
       tabindex="-1"
       aria-label="graph tab menu"
+      style={paletteStyle || undefined}
       use:portal
       use:clampMenu={tabMenuPos}
       onmousedown={(e) => e.stopPropagation()}

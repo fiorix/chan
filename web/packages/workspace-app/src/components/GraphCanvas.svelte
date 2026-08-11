@@ -40,6 +40,7 @@
   import type { GraphViewEdge, GraphViewNode } from "../api/types";
   import { draftsDir } from "../state/workspace.svelte";
   import { fileBucket } from "../state/kinds";
+  import { GRAPH_PALETTE_DEFAULTS } from "../state/graphPalette.svelte";
   import { DEFAULT_FORCE, type GraphForce } from "../graph/force";
   import { containmentSpine, spineEdgeKey } from "../graph/containmentSpine";
 
@@ -381,7 +382,17 @@
     bucket[kind] = img;
   }
 
+  /// The rasterised icon set is a function of exactly two theme inputs
+  /// (the page bg the glyphs knock out against, and the ghost stroke),
+  /// so a hue-only palette change must NOT re-rasterise: rebuilding
+  /// twenty byte-identical images per colour-picker pointer move is the
+  /// cost this key exists to skip.
+  let lastIconKey: string | null = null;
+
   function rebuildIcons(bg: string, ghostStroke: string): void {
+    const iconKey = `${bg}\n${ghostStroke}`;
+    if (iconKey === lastIconKey) return;
+    lastIconKey = iconKey;
     // Regular variants - stroked in the page-bg so the icon
     // "knocks out" against the kind-coloured disc. mention reuses
     // the contact silhouette because a fuzzy-resolved @@name IS
@@ -451,6 +462,10 @@
   };
 
   function readTheme(host: HTMLElement): ThemeColors {
+    // Default hexes come from the single palette definition; the
+    // literal-CSS copies in App.svelte / GraphTuner.svelte are asserted
+    // equal to it, so a retune can't land in one place only.
+    const palette = GRAPH_PALETTE_DEFAULTS.dark;
     const cs = getComputedStyle(host);
     const v = (n: string, fb: string) => cs.getPropertyValue(n).trim() || fb;
     return {
@@ -458,29 +473,31 @@
       bgCard: v("--bg-card", "#232325"),
       text: v("--text", "#ebebf0"),
       textSec: v("--text-secondary", "#8e8e93"),
-      doc: v("--g-doc", "#ff8a3d"),
-      img: v("--g-img", "#b07dff"),
-      tag: v("--g-tag", "#6cd07a"),
-      mention: v("--warn-text", "#e3b341"),
-      language: v("--g-language", "#ff4db8"),
+      doc: v("--g-doc", palette.doc),
+      img: v("--g-img", palette.img),
+      tag: v("--g-tag", palette.tag),
+      mention: v("--g-contact", v("--warn-text", "#e3b341")),
+      language: v("--g-language", palette.language),
       accent: v("--accent", "#3fb950"),
-      folder: v("--g-folder", "#8e8e93"),
+      folder: v("--g-folder", palette.folder),
       // Colour scheme: source vs binary split. Markdown is orange
       // (--g-doc); source code royalblue; binary darker grey
       // (distinct from --g-folder); media purple (--g-img).
-      source: v("--g-source", "#4169e1"),
-      binary: v("--g-binary", "#5e5e62"),
+      source: v("--g-source", palette.source),
+      binary: v("--g-binary", palette.binary),
       // Drafts tint pulled from the same CSS variable as the FB row +
       // the inspector chip.
       drafts: v("--fb-drafts-fg", "#e3b341"),
     };
   }
 
+  const paletteSeed = GRAPH_PALETTE_DEFAULTS.dark;
   let theme: ThemeColors = $state({
     bg: "#1c1c1e", bgCard: "#232325", text: "#ebebf0", textSec: "#8e8e93",
-    doc: "#ff8a3d", img: "#b07dff", tag: "#6cd07a", mention: "#e3b341",
-    language: "#ff4db8", accent: "#3fb950", folder: "#8e8e93",
-    source: "#4169e1", binary: "#5e5e62", drafts: "#e3b341",
+    doc: paletteSeed.doc, img: paletteSeed.img, tag: paletteSeed.tag,
+    mention: "#e3b341", language: paletteSeed.language, accent: "#3fb950",
+    folder: paletteSeed.folder, source: paletteSeed.source,
+    binary: paletteSeed.binary, drafts: "#e3b341",
   });
 
   /// Track `prefers-reduced-motion` so the indexing-state pulse can
@@ -1737,7 +1754,9 @@
     resizeObs = new ResizeObserver(() => resize());
     resizeObs.observe(containerEl);
     // Theme tracker: re-read CSS variables when the document's or
-    // graph surface's `data-theme` attribute flips.
+    // graph surface's `data-theme` attribute flips, and when the graph
+    // surface's inline custom-property block changes (a graph-palette
+    // override lands as a `style` attribute on `.graph-tab`).
     const themeObs = new MutationObserver(() => refreshTheme());
     themeObs.observe(document.documentElement, {
       attributes: true, attributeFilter: ["data-theme"],
@@ -1745,7 +1764,7 @@
     const graphEl = containerEl.closest(".graph-tab");
     if (graphEl) {
       themeObs.observe(graphEl, {
-        attributes: true, attributeFilter: ["data-theme"],
+        attributes: true, attributeFilter: ["data-theme", "style"],
       });
     }
     // Track reduced-motion for the indexing pulse. Listener stays

@@ -130,6 +130,23 @@ The CLI prefixes every serialized leaf below with `editor.`. Every scalar leaf i
 | `hybrid_surface_themes.browser` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | optional File Browser body-theme override |
 | `hybrid_surface_themes.graph` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | optional Graph body-theme override |
 | `hybrid_surface_themes.dashboard` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | optional Dashboard body-theme override; legacy `infographics` deserializes to this canonical field |
+| `graph_colors.mode` | `GraphColorMode` | `chan config get/set` + `PATCH /api/config` + Settings | `standard` renders the theme graph palette and keeps stored overrides dormant; `custom` applies the per-scheme palettes to the graph surface only |
+| `graph_colors.dark.doc` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | optional `--g-doc` override (markdown nodes); accepts `#rgb` or `#rrggbb` and persists lowercase `#rrggbb` |
+| `graph_colors.dark.source` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | optional `--g-source` override (source / config nodes) |
+| `graph_colors.dark.binary` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | optional `--g-binary` override (opaque-file nodes) |
+| `graph_colors.dark.img` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | optional `--g-img` override (media nodes) |
+| `graph_colors.dark.folder` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | optional `--g-folder` override (directory nodes) |
+| `graph_colors.dark.tag` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | optional `--g-tag` override (hashtag nodes) |
+| `graph_colors.dark.language` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | optional `--g-language` override (tokei language nodes) |
+| `graph_colors.dark.contact` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | optional `--g-contact` override; covers contact AND mention nodes together (one token, defaults to `--warn-text`) |
+| `graph_colors.light.doc` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | same eight optional overrides for the light scheme |
+| `graph_colors.light.source` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | same |
+| `graph_colors.light.binary` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | same |
+| `graph_colors.light.img` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | same |
+| `graph_colors.light.folder` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | same |
+| `graph_colors.light.tag` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | same |
+| `graph_colors.light.language` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | same |
+| `graph_colors.light.contact` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | same |
 | `empty_pane_carousel_cycling` | `bool` | `chan config get/set` + Settings | empty-pane behavior |
 | `page_width_ratio` | `f64` | `chan config get/set` + Settings | editor page-width cap, constrained to `0.25..=1.0` by the CLI |
 | `overlay_maximized` | `bool` | `chan config get/set` + overlay control | global overlay-maximize preference |
@@ -139,6 +156,8 @@ The CLI prefixes every serialized leaf below with `editor.`. Every scalar leaf i
 `editor_font_size` is unset by default. The Settings `Use theme` action clears it, restoring the exact body and source sizes supplied by `editor_theme`. Inline and block code keep the theme's existing `em` ratios. The root override and the document/slide token paths update mounted editor surfaces without a reload.
 
 `terminal_colors` defaults to `mode = "standard"` with no custom payload. First activation snapshots the currently resolved standard background, foreground, and cursor into one custom owner write with `contrast = "auto"`. Returning to standard mode retains that payload without changing `hybrid_surface_themes.terminal`; later custom activation reuses it. Invalid custom fields reject the whole object, so no partial colour update is persisted or broadcast.
+
+`graph_colors` is sparse: an unconfigured library serializes no `[graph_colors]` table at all, and every hue inside a per-scheme palette is independently optional so overriding one hue does not take ownership of the rest. Overrides apply to the graph surface only (the canvas, legend and filter dots); the file tree, kind chips, inspector refs and every other surface keep the theme palette, because the override lands on the graph subtree and never on `:root`. The Settings control commits the whole composite per change, mirroring `terminal_colors`; an invalid hue rejects the whole object. A hand-edited `preferences.toml` carrying a non-hex value drops that one hue back to the theme default on load, per key, rather than painting a stale colour.
 
 ```toml
 editor_font_size = 20

@@ -89,7 +89,7 @@ describe("GraphPanel threads active + gates load on visibility", () => {
 
   test("root carries the keep-alive contract: class:active + tabpanel + aria-hidden", () => {
     expect(graphPanel).toMatch(
-      /class="graph-tab"\s+class:active\s+data-theme=[\s\S]{1,120}role="tabpanel"\s+aria-hidden=\{!active\}/,
+      /class="graph-tab"\s+class:active\s+data-theme=\{tab \? surfaceThemeOverride\("graph"\) : undefined\}\s+style=\{paletteStyle \|\| undefined\}[\s\S]{1,120}role="tabpanel"\s+aria-hidden=\{!active\}/,
     );
   });
 

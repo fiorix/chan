@@ -21,8 +21,8 @@ use crate::config::{
 };
 use crate::error::{err, Error};
 use crate::preferences::{
-    BubbleOverlayMode, TerminalColorMode, TerminalColorPrefs, EDITOR_FONT_SIZE_MAX,
-    EDITOR_FONT_SIZE_MIN,
+    BubbleOverlayMode, GraphColorPrefs, TerminalColorMode, TerminalColorPrefs,
+    EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_MIN,
 };
 use crate::state::AppState;
 use crate::{
@@ -68,6 +68,11 @@ pub struct PreferencesView {
     /// stores and serves them without parsing (see `ShortcutOverride`).
     #[serde(default)]
     pub shortcuts: BTreeMap<String, ShortcutOverride>,
+    /// Custom graph node palettes. Absent from the wire until a hue is
+    /// overridden or custom mode is switched on; older clients simply
+    /// never see the field.
+    #[serde(default, skip_serializing_if = "GraphColorPrefs::is_empty")]
+    pub graph_colors: GraphColorPrefs,
 }
 
 fn default_empty_pane_carousel_cycling() -> bool {
@@ -108,6 +113,7 @@ pub(super) fn preferences_view(state: &AppState) -> Result<PreferencesView, Erro
         overlay_maximized: editor.overlay_maximized,
         cs_dismissed: editor.cs_dismissed,
         shortcuts: editor.shortcuts.clone(),
+        graph_colors: editor.graph_colors.clone(),
     })
 }
 
@@ -156,6 +162,7 @@ struct PreferencesPatch {
     overlay_maximized: Option<bool>,
     cs_dismissed: Option<bool>,
     shortcuts: Option<BTreeMap<String, ShortcutOverride>>,
+    graph_colors: Option<GraphColorPrefs>,
 
     // ServerConfig owner.
     attachments_dir: Option<String>,
@@ -195,7 +202,8 @@ impl PreferencesPatch {
             || self.page_width_ratio.is_some()
             || self.overlay_maximized.is_some()
             || self.cs_dismissed.is_some()
-            || self.shortcuts.is_some();
+            || self.shortcuts.is_some()
+            || self.graph_colors.is_some();
         let server = self.attachments_dir.is_some()
             || self.search_aggression.is_some()
             || self.terminal.is_some();
@@ -260,6 +268,9 @@ impl PreferencesPatch {
         }
         if let Some(value) = self.shortcuts {
             editor.shortcuts = value;
+        }
+        if let Some(value) = self.graph_colors {
+            editor.graph_colors = sanitize_graph_colors(value)?;
         }
         Ok(())
     }
@@ -501,18 +512,38 @@ fn sanitize_terminal_colors(mut prefs: TerminalColorPrefs) -> Result<TerminalCol
             Ok(prefs)
         };
     };
-    custom.background = normalize_terminal_color("background", &custom.background)?;
-    custom.foreground = normalize_terminal_color("foreground", &custom.foreground)?;
-    custom.cursor = normalize_terminal_color("cursor", &custom.cursor)?;
+    custom.background =
+        normalize_hex_color("terminal_colors.custom.background", &custom.background)?;
+    custom.foreground =
+        normalize_hex_color("terminal_colors.custom.foreground", &custom.foreground)?;
+    custom.cursor = normalize_hex_color("terminal_colors.custom.cursor", &custom.cursor)?;
     Ok(prefs)
 }
 
-fn normalize_terminal_color(field: &str, value: &str) -> Result<String, Error> {
-    let invalid = || {
-        Error::BadRequest(format!(
-            "terminal_colors.custom.{field} must be #rgb or #rrggbb"
-        ))
-    };
+/// Validate + normalize every set hue in a graph palette patch. Unlike
+/// the terminal's complete-payload requirement, every graph hue is
+/// optional and mode `custom` with no palette is vacuous but legal;
+/// any invalid hex rejects the whole object, so no partial palette is
+/// ever persisted or broadcast.
+fn sanitize_graph_colors(mut prefs: GraphColorPrefs) -> Result<GraphColorPrefs, Error> {
+    for (mode, palette) in [("dark", &mut prefs.dark), ("light", &mut prefs.light)] {
+        let Some(palette) = palette.as_mut() else {
+            continue;
+        };
+        for (field, value) in palette.color_fields_mut() {
+            if let Some(raw) = value.take() {
+                *value = Some(normalize_hex_color(
+                    &format!("graph_colors.{mode}.{field}"),
+                    &raw,
+                )?);
+            }
+        }
+    }
+    Ok(prefs)
+}
+
+fn normalize_hex_color(field: &str, value: &str) -> Result<String, Error> {
+    let invalid = || Error::BadRequest(format!("{field} must be #rgb or #rrggbb"));
     let hex = value.strip_prefix('#').ok_or_else(invalid)?;
     if !matches!(hex.len(), 3 | 6) || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(invalid());
@@ -851,6 +882,105 @@ mod tests {
             sanitize_terminal_colors(TerminalColorPrefs::default()).unwrap(),
             TerminalColorPrefs::default()
         );
+    }
+
+    fn custom_graph_colors(doc: &str, source: &str) -> GraphColorPrefs {
+        GraphColorPrefs {
+            mode: crate::preferences::GraphColorMode::Custom,
+            dark: Some(crate::preferences::GraphPalette {
+                doc: Some(doc.into()),
+                source: Some(source.into()),
+                ..Default::default()
+            }),
+            light: None,
+        }
+    }
+
+    #[test]
+    fn sanitize_graph_colors_normalizes_each_set_hue() {
+        let sanitized =
+            sanitize_graph_colors(custom_graph_colors("#ABC", "#DDEEFF")).expect("valid palette");
+        let dark = sanitized.dark.unwrap();
+        assert_eq!(dark.doc.as_deref(), Some("#aabbcc"));
+        assert_eq!(dark.source.as_deref(), Some("#ddeeff"));
+        assert_eq!(dark.tag, None, "unset hues stay absent");
+
+        // Custom mode with no palette is vacuous but legal (unlike the
+        // terminal's complete-payload requirement); standard mode with a
+        // dormant palette passes through untouched.
+        assert_eq!(
+            sanitize_graph_colors(GraphColorPrefs {
+                mode: crate::preferences::GraphColorMode::Custom,
+                dark: None,
+                light: None,
+            })
+            .unwrap()
+            .mode,
+            crate::preferences::GraphColorMode::Custom
+        );
+    }
+
+    #[test]
+    fn invalid_graph_colour_rejects_the_whole_object() {
+        let error = sanitize_graph_colors(custom_graph_colors("#112233", "chartreuse"))
+            .expect_err("invalid hex must reject");
+        let Error::BadRequest(message) = error else {
+            panic!("expected field validation error");
+        };
+        assert!(message.contains("graph_colors.dark.source"), "{message}");
+        assert!(message.contains("#rgb or #rrggbb"), "{message}");
+    }
+
+    #[test]
+    fn graph_colors_patch_is_editor_owned_and_applies_atomically() {
+        let state = make_test_state(false);
+        let view = patch_config_with_saves(
+            &state,
+            patch_body(
+                1,
+                PreferencesPatch {
+                    graph_colors: Some(custom_graph_colors("#ABC", "#ddeeff")),
+                    ..Default::default()
+                },
+            ),
+            noop_save_editor,
+            noop_save_server,
+        )
+        .expect("graph colors patch");
+        let dark = view.preferences.graph_colors.dark.unwrap();
+        assert_eq!(dark.doc.as_deref(), Some("#aabbcc"));
+
+        // A bad hue anywhere rejects the whole patch: state untouched,
+        // no save, no broadcast.
+        let before = state.editor_prefs.lock().unwrap().clone();
+        let editor_saves = AtomicUsize::new(0);
+        let mut events = state.events_tx.subscribe();
+        let error = patch_config_with_saves(
+            &state,
+            patch_body(
+                view.revision,
+                PreferencesPatch {
+                    graph_colors: Some(custom_graph_colors("#112233", "nope")),
+                    ..Default::default()
+                },
+            ),
+            |_| {
+                editor_saves.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+            noop_save_server,
+        )
+        .expect_err("invalid hue must reject the owner write");
+        let PatchConfigError::Error(Error::BadRequest(message)) = error else {
+            panic!("expected field validation error");
+        };
+        assert!(message.contains("graph_colors.dark.source"), "{message}");
+        assert_eq!(*state.editor_prefs.lock().unwrap(), before);
+        assert_eq!(editor_saves.load(Ordering::Relaxed), 0);
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]

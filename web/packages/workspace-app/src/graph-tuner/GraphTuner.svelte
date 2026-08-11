@@ -225,7 +225,7 @@
     { color: "var(--g-source)", label: "source" },
     { color: "var(--g-binary)", label: "binary" },
     { color: "var(--g-img)", label: "media" },
-    { color: "var(--warn-text)", label: "contact / mention" },
+    { color: "var(--g-contact)", label: "contact / mention" },
     { color: "var(--g-tag)", label: "tag" },
     { color: "var(--g-language)", label: "language" },
     { color: "var(--g-folder)", label: "folder" },
@@ -388,6 +388,7 @@
     --g-source: #4169e1;
     --g-binary: #5e5e62;
     --g-folder: #8e8e93;
+    --g-contact: var(--warn-text);
     --fb-drafts-fg: #e3b341;
   }
   :global(:root[data-theme="light"]) {
@@ -407,6 +408,7 @@
     --g-source: #2851c4;
     --g-binary: #4e4e54;
     --g-folder: #6c6c70;
+    --g-contact: var(--warn-text);
     --fb-drafts-fg: #9a6700;
   }
   :global(body) {

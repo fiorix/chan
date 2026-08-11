@@ -203,6 +203,32 @@ export type TerminalColorPrefs = {
   custom?: TerminalCustomColors;
 };
 
+/// One colour scheme's custom graph node overrides. Every hue is
+/// optional; an absent slot keeps the theme palette value. Keys mirror
+/// the eight settable node-kind tokens (`--g-doc` ... `--g-language`,
+/// `--g-contact`). `contact` covers contact AND mention nodes together:
+/// both share the one `--g-contact` token by design.
+export type GraphPalette = {
+  doc?: string;
+  source?: string;
+  binary?: string;
+  img?: string;
+  folder?: string;
+  tag?: string;
+  language?: string;
+  contact?: string;
+};
+
+/// Custom graph node palettes, one per colour scheme. Mirrors the
+/// terminal_colors shape: `standard` renders the theme palette and
+/// leaves stored overrides dormant; `custom` applies them to the graph
+/// surface only (never the app-wide `:root`).
+export type GraphColorPrefs = {
+  mode: "standard" | "custom";
+  dark?: GraphPalette;
+  light?: GraphPalette;
+};
+
 export type BubbleOverlayMode = "stack" | "tray";
 
 export type TerminalSpawnRequest = {
@@ -275,6 +301,10 @@ export type Preferences = {
   /// Optional body-theme overrides for Hybrid element families.
   /// Missing entries inherit the global `theme` above.
   hybrid_surface_themes?: HybridSurfaceThemes;
+  /// Custom graph node palettes, per colour scheme. Optional on the
+  /// wire: absent means standard mode with no overrides (the theme
+  /// palette renders). Applies to the graph surface only.
+  graph_colors?: GraphColorPrefs;
   /// Sidebar widths shared across all panes (file editor inspector,
   /// graph details, file browser). Per-machine.
   pane_widths: PaneWidths;

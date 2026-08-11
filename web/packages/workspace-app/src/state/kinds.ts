@@ -130,7 +130,7 @@ export function labelFor(kind: Kind): string {
 ///
 /// Kind palette:
 ///   document/text    -> orange  (--g-doc)
-///   contact/mention  -> yellow  (--warn-text)
+///   contact/mention  -> yellow  (--g-contact, defaulting to --warn-text)
 ///   media            -> purple  (--g-img)
 ///   tag              -> green   (--g-tag)
 ///   binary           -> grey    (--g-binary)
@@ -138,6 +138,12 @@ export function labelFor(kind: Kind): string {
 ///   date             -> grey    (--text-secondary, low-emphasis neutral)
 /// Flows through every surface (file tree, inspector, search, graph)
 /// via this single switch instead of being hardcoded per component.
+///
+/// The contact/mention mapping reads the user-settable graph token
+/// with a fallback: inside the graph surface a custom palette override
+/// lands on the subtree and the chip follows it; everywhere else
+/// `--g-contact` is the theme alias and the chip resolves to the
+/// warning hue exactly as before the token existed.
 export function colorVarFor(kind: Kind): string {
   switch (kind) {
     case "document":
@@ -145,7 +151,7 @@ export function colorVarFor(kind: Kind): string {
       return "var(--g-doc)";
     case "contact":
     case "mention":
-      return "var(--warn-text)";
+      return "var(--g-contact, var(--warn-text))";
     case "media":
       return "var(--g-img)";
     case "tag":
@@ -165,7 +171,8 @@ export function colorVarFor(kind: Kind): string {
 /// CSS colour var for a graph-canvas file bucket. Mirrors the canvas
 /// paint switch (bucket -> theme slot) composed with `readTheme`
 /// (theme slot -> CSS var): doc -> --g-doc, source -> --g-source,
-/// img -> --g-img, binary -> --g-binary, contact -> --warn-text. This
+/// img -> --g-img, binary -> --g-binary, contact -> --g-contact (which
+/// falls back to --warn-text). This
 /// is the bubble side of the node-fill parity; `state/kinds.test.ts`
 /// asserts it stays equal to the canvas fill for every bucket.
 export function colorVarForBucket(bucket: FileBucket): string {
@@ -179,7 +186,7 @@ export function colorVarForBucket(bucket: FileBucket): string {
     case "binary":
       return "var(--g-binary)";
     case "contact":
-      return "var(--warn-text)";
+      return "var(--g-contact, var(--warn-text))";
   }
 }
 

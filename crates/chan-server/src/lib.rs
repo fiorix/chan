@@ -93,9 +93,10 @@ pub use error::Error;
 pub use extensions::{ExtensionRuntime, EXTENSION_HANDSHAKE_MARKER};
 pub use mcp_bridge::run_stdio_proxy as run_mcp_stdio_proxy;
 pub use preferences::{
-    BrowserSidePanes, EditorPrefs, EditorTheme, HybridSurfaceThemes, LineSpacing, PaneWidths,
-    ShortcutOverride, SurfaceThemeChoice, TerminalColorMode, TerminalColorPrefs, TerminalContrast,
-    TerminalCustomColors, ThemeChoice, EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_MIN,
+    BrowserSidePanes, EditorPrefs, EditorTheme, GraphColorMode, GraphColorPrefs, GraphPalette,
+    HybridSurfaceThemes, LineSpacing, PaneWidths, ShortcutOverride, SurfaceThemeChoice,
+    TerminalColorMode, TerminalColorPrefs, TerminalContrast, TerminalCustomColors, ThemeChoice,
+    EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_MIN,
 };
 pub use routes::{build_fs_graph, FsGraphResponse, FsGraphScope};
 /// Build identity for the process. chan-server is a library, so the id belongs

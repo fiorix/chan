@@ -31,6 +31,9 @@
 //!     migrated from the SPA `chan.csLinkDismissed` localStorage)
 //!   - hybrid_surface_themes (optional body-theme overrides for
 //!     Hybrid Editor / Terminal / File Browser / Graph / Dashboard)
+//!   - graph_colors (optional custom graph node palettes, one per
+//!     colour scheme; same standard/custom + dormant-payload shape as
+//!     terminal_colors)
 //!   - shortcuts (per-command keyboard overrides, keyed by Command id,
 //!     one optional chord per platform; a local-machine part that travels
 //!     with the client, see [`ShortcutOverride`])
@@ -113,6 +116,12 @@ pub struct EditorPrefs {
     /// unconfigured library writes no `[shortcuts]` table.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub shortcuts: BTreeMap<String, ShortcutOverride>,
+    /// Custom graph node palettes, one per colour scheme. Sparse: an
+    /// unconfigured library (standard mode, no stored hues) writes no
+    /// `[graph_colors]` table at all, and each hue inside a palette is
+    /// independently optional so overriding one does not own the rest.
+    #[serde(default, skip_serializing_if = "GraphColorPrefs::is_empty")]
+    pub graph_colors: GraphColorPrefs,
 }
 
 /// One command's shortcut override: an optional chord per platform. The
@@ -165,6 +174,7 @@ impl Default for EditorPrefs {
             overlay_maximized: false,
             cs_dismissed: false,
             shortcuts: BTreeMap::new(),
+            graph_colors: GraphColorPrefs::default(),
         }
     }
 }
@@ -214,6 +224,83 @@ pub enum TerminalContrast {
     Auto,
     Dark,
     Light,
+}
+
+/// Custom graph node palettes, one per colour scheme. Mirrors the
+/// `terminal_colors` shape: `standard` renders the theme's `--g-*`
+/// palette and leaves any stored override dormant; `custom` applies the
+/// per-mode palettes. Both palettes are optional wholesale, and every
+/// hue inside them is optional, so a user overriding one hue does not
+/// take ownership of the rest.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphColorPrefs {
+    #[serde(default)]
+    pub mode: GraphColorMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dark: Option<GraphPalette>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light: Option<GraphPalette>,
+}
+
+impl GraphColorPrefs {
+    /// Sparse-serialization predicate: standard mode with no stored
+    /// hues is indistinguishable from never configured, so nothing
+    /// serializes. `pub(crate)` so the wire view can share it.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.mode == GraphColorMode::Standard && self.dark.is_none() && self.light.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GraphColorMode {
+    #[default]
+    Standard,
+    Custom,
+}
+
+/// One colour scheme's graph node overrides. Every slot holds a
+/// `#rrggbb` hex (validated on PATCH and on `chan config set`); an
+/// absent slot falls back to the theme's `--g-*` value. The slot set
+/// mirrors the eight settable node-kind tokens; `contact` covers
+/// contact and mention nodes together, which share the one
+/// `--g-contact` token (see `web/packages/workspace-app/src/design.md`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphPalette {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub img: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<String>,
+}
+
+impl GraphPalette {
+    /// Every hue slot as `(field name, value)` pairs, so the PATCH
+    /// sanitizer walks one table instead of eight hand-written arms.
+    /// Field names match the CLI key leaf (`editor.graph_colors.<mode>.<name>`).
+    pub(crate) fn color_fields_mut(&mut self) -> [(&'static str, &mut Option<String>); 8] {
+        [
+            ("doc", &mut self.doc),
+            ("source", &mut self.source),
+            ("binary", &mut self.binary),
+            ("img", &mut self.img),
+            ("folder", &mut self.folder),
+            ("tag", &mut self.tag),
+            ("language", &mut self.language),
+            ("contact", &mut self.contact),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -671,6 +758,60 @@ mod tests {
             !raw.contains("shortcuts"),
             "no shortcuts table when empty: {raw}"
         );
+    }
+
+    #[test]
+    fn graph_colors_sparse_round_trip() {
+        // Default: no table at all.
+        let tmp = TempDir::new().unwrap();
+        let p = tmp.path().join("preferences.toml");
+        EditorPrefs::default().save_to(&p).unwrap();
+        let raw = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            !raw.contains("graph_colors"),
+            "no graph_colors table when unconfigured: {raw}"
+        );
+
+        // A single overridden hue serializes alone; dormant mode keeps
+        // the stored palette on disk under standard mode.
+        let prefs = EditorPrefs {
+            graph_colors: GraphColorPrefs {
+                mode: GraphColorMode::Standard,
+                dark: Some(GraphPalette {
+                    doc: Some("#ff0000".into()),
+                    ..Default::default()
+                }),
+                light: None,
+            },
+            ..Default::default()
+        };
+        prefs.save_to(&p).unwrap();
+        let raw = std::fs::read_to_string(&p).unwrap();
+        assert!(raw.contains("[graph_colors.dark]"), "{raw}");
+        assert!(raw.contains("doc = \"#ff0000\""), "{raw}");
+        assert!(!raw.contains("source"), "unset hues stay absent: {raw}");
+        assert!(
+            raw.contains("mode = \"standard\""),
+            "mode always serializes, like terminal_colors: {raw}"
+        );
+        let loaded = EditorPrefs::load_from(&p).unwrap();
+        assert_eq!(loaded, prefs);
+
+        // Custom mode with no palettes is vacuous but must persist
+        // (the toggle state is user data).
+        let custom_empty = EditorPrefs {
+            graph_colors: GraphColorPrefs {
+                mode: GraphColorMode::Custom,
+                dark: None,
+                light: None,
+            },
+            ..Default::default()
+        };
+        custom_empty.save_to(&p).unwrap();
+        let raw = std::fs::read_to_string(&p).unwrap();
+        assert!(raw.contains("mode = \"custom\""), "{raw}");
+        let loaded = EditorPrefs::load_from(&p).unwrap();
+        assert_eq!(loaded.graph_colors.mode, GraphColorMode::Custom);
     }
 
     #[test]

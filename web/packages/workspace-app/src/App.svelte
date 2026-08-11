@@ -1689,6 +1689,11 @@
     --g-source: #4169e1;
     --g-binary: #5e5e62;
     --g-folder: #8e8e93;
+    /* Contact + mention graph nodes read --g-contact, which defaults to
+       the warning hue and is settable per colour scheme as part of the
+       graph palette (editor.graph_colors.*). Surfaces outside the graph
+       read it with a var(--g-contact, var(--warn-text)) fallback. */
+    --g-contact: var(--warn-text);
     /* Drafts folder: distinct yellow tone. The configured Drafts dir
        (default .Drafts) is a real in-workspace directory; this tint
        marks its FB row + graph node as a category without dominating
@@ -1770,6 +1775,8 @@
     --g-source: #2851c4;
     --g-binary: #4e4e54;
     --g-folder: #6c6c70;
+    /* Light-mode --g-contact: same zero-pixel default as dark mode. */
+    --g-contact: var(--warn-text);
     /* Light-mode Drafts folder: deeper yellow for contrast against the bright bg. */
     --fb-drafts-fg: #9a6700;
     --fb-drafts-bg: rgba(154, 103, 0, 0.08);
