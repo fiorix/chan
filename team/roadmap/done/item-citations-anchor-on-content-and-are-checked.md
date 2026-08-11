@@ -1,5 +1,13 @@
 # A line number in a roadmap item keeps resolving after the code moves, and nothing reports it
 
+Status: **WITHDRAWN 2026-08-11 by the owner. It did not ship.** The rule and the checker were built and briefly landed, then removed at the owner's decision: the process cost was judged higher than the problem, and the owner will ask for a citation when adding work that warrants one rather than carrying a rule and a check for it. `.agents/writing-rules.md` is unchanged from its pre-round state and `scripts/citation-check.py` does not exist.
+
+What survives is not process. The citation corrections this item's evidence produced were applied to sibling items and stand as fixed facts: a cited test path that does not exist, a claim of two `Shift-Enter` bindings against a tree with zero, a pill counted three times where there are four, an acceptance line that was unachievable as written, and four bare `design.md` references against twenty-four files by that name. Those were wrong and are now right, independently of whether a rule governs the form.
+
+The reasoning below is kept intact rather than deleted, because the mechanism it documents is real and the next person to propose this should be able to read why it was declined rather than rediscover the argument. The measured evidence is in the round's journals.
+
+Original status line follows.
+
 Status: REGISTERED 2026-08-11, merged from two drafts written at the v0.88.0 close: one proposed the content-anchoring rule, one built the check that makes the rule verifiable, and each declared the other blocking. The owner accepted them as a single v0.89.0 item and cut the conversion pass the rule draft asked for. This item is **forward-only** and does not touch `../done/`.
 
 ## Why the two halves are one item
