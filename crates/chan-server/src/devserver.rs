@@ -5569,7 +5569,7 @@ mod tests {
         /// [`super::CHAN_HOME_ENV`], so no reader resolving `config_dir()`
         /// can observe the rewritten env.
         struct FdstoreEnvGuard {
-            _lock: std::sync::RwLockWriteGuard<'static, ()>,
+            lock: Option<std::sync::RwLockWriteGuard<'static, ()>>,
             prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
         }
 
@@ -5594,18 +5594,32 @@ mod tests {
                 std::env::set_var("CHAN_HOME", home);
                 std::env::remove_var("NOTIFY_SOCKET");
                 std::env::remove_var("FDSTORE");
-                Self { _lock: lock, prev }
+                Self {
+                    lock: Some(lock),
+                    prev,
+                }
             }
-        }
 
-        impl Drop for FdstoreEnvGuard {
-            fn drop(&mut self) {
+            fn restore_env(&mut self) {
                 for (key, value) in self.prev.drain(..) {
                     match value {
                         Some(value) => std::env::set_var(key, value),
                         None => std::env::remove_var(key),
                     }
                 }
+            }
+
+            /// Restore the captured environment and return the still-held lock,
+            /// allowing a caller to verify the restored state before readers run.
+            fn restore(mut self) -> std::sync::RwLockWriteGuard<'static, ()> {
+                self.restore_env();
+                self.lock.take().expect("fdstore env guard owns its lock")
+            }
+        }
+
+        impl Drop for FdstoreEnvGuard {
+            fn drop(&mut self) {
+                self.restore_env();
             }
         }
 
@@ -5696,6 +5710,7 @@ mod tests {
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
             let home = tempfile::tempdir().expect("home");
+            let sentinel_home = tempfile::tempdir().expect("sentinel home");
             let originals: Vec<(&str, Option<std::ffi::OsString>)> =
                 ["CHAN_HOME", "NOTIFY_SOCKET", "FDSTORE"]
                     .into_iter()
@@ -5704,7 +5719,7 @@ mod tests {
 
             // Seed: two PRESENT sentinels and one ABSENT variable, under
             // the same lock acquisition the guard takes over.
-            std::env::set_var("CHAN_HOME", "sentinel-chan-home");
+            std::env::set_var("CHAN_HOME", sentinel_home.path());
             std::env::set_var("NOTIFY_SOCKET", "sentinel-notify");
             std::env::remove_var("FDSTORE");
 
@@ -5716,14 +5731,10 @@ mod tests {
             );
             assert_eq!(std::env::var_os("NOTIFY_SOCKET"), None);
             assert_eq!(std::env::var_os("FDSTORE"), None);
-            drop(guard);
-
-            let _lock = super::CHAN_HOME_ENV
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
+            let _lock = guard.restore();
             assert_eq!(
                 std::env::var_os("CHAN_HOME").as_deref(),
-                Some(std::ffi::OsStr::new("sentinel-chan-home")),
+                Some(sentinel_home.path().as_os_str()),
                 "a present variable must restore to its exact prior value"
             );
             assert_eq!(

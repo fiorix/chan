@@ -50,7 +50,7 @@ pub struct SweepReport {
     pub removed_entries: usize,
 }
 
-/// Per-machine handle to the chan-workspace registry + paths.
+/// Handle to one chan-workspace registry and its co-located sidecar namespace.
 #[derive(Clone)]
 pub struct Library {
     inner: Arc<LibraryInner>,
@@ -58,6 +58,9 @@ pub struct Library {
 
 struct LibraryInner {
     config_path: PathBuf,
+    /// Root for per-workspace sidecars. Derived from `config_path` once so an
+    /// explicitly located Library never falls back to process-global env.
+    chan_home: PathBuf,
     /// Effective transfer cap captured once when this Library opens. Registry
     /// reloads deliberately do not mutate a running process's policy.
     transfer_max_bytes: u64,
@@ -100,9 +103,14 @@ impl Library {
         Self::open_at(paths::global_config_path())
     }
 
-    /// Open a Library against an explicit config path. Used in
-    /// tests and by callers that want a non-default location.
+    /// Open a Library against an explicit config path. Workspace sidecars are
+    /// rooted beside this file, so the Library never consults ambient home
+    /// state after construction.
     pub fn open_at(config_path: PathBuf) -> Result<Self> {
+        let chan_home = config_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
         let mut registry = Registry::load_from(&config_path)?;
         // Stock-default upgrade: a config whose declared exclusions
         // match the pre-v0.76.0 default exactly gets migrated to the
@@ -129,6 +137,7 @@ impl Library {
         Ok(Self {
             inner: Arc::new(LibraryInner {
                 config_path,
+                chan_home,
                 transfer_max_bytes,
                 registry: Mutex::new(registry),
                 live_workspaces: Mutex::new(HashMap::new()),
@@ -234,7 +243,7 @@ impl Library {
             reg.workspaces[idx].display_name = (!name.is_empty()).then(|| name.to_string());
         }
         let entry = reg.workspaces[idx].clone();
-        paths::ensure_workspace_metadata_dirs(&entry.metadata_key)?;
+        paths::ensure_workspace_metadata_dirs_in(&self.inner.chan_home, &entry.metadata_key)?;
         reg.save_to(&self.inner.config_path)?;
         Ok(entry)
     }
@@ -307,8 +316,13 @@ impl Library {
         }
         let filter = Arc::clone(&self.inner.walk_filter.lock().unwrap());
         let drafts_dir = self.drafts_dir();
-        let (workspace, recovery_plan) =
-            Workspace::open(entry, filter, drafts_dir, self.inner.transfer_max_bytes)?;
+        let (workspace, recovery_plan) = Workspace::open(
+            entry,
+            filter,
+            drafts_dir,
+            self.inner.transfer_max_bytes,
+            &self.inner.chan_home,
+        )?;
         self.inner
             .live_workspaces
             .lock()
@@ -398,7 +412,8 @@ impl Library {
         else {
             return Ok(ResetReport { removed_entries: 0 });
         };
-        let workspace_paths = paths::workspace_paths_for_metadata_key(&metadata_key);
+        let workspace_paths =
+            paths::workspace_paths_for_metadata_key_in(&self.inner.chan_home, &metadata_key);
         let _lock = WorkspaceLock::acquire(&workspace_paths.lock, root)?;
         let mut removed = 0;
         let report_dir = workspace_paths
@@ -503,12 +518,14 @@ impl Library {
     pub fn workspace_paths_for(&self, root: &Path) -> Option<paths::WorkspacePaths> {
         let reg = self.inner.registry.lock().unwrap();
         let entry = reg.find(root)?;
-        Some(paths::workspace_paths_for_metadata_key(&entry.metadata_key))
+        Some(paths::workspace_paths_for_metadata_key_in(
+            &self.inner.chan_home,
+            &entry.metadata_key,
+        ))
     }
 
     /// Reclaim metadata directories whose key no longer appears in
-    /// the registry. Walks the metadata parent from
-    /// `paths::workspace_subsystem_dirs` and deletes any immediate
+    /// the registry. Walks the Library's captured metadata parent and deletes any immediate
     /// subdirectory whose name isn't a current metadata key.
     ///
     /// Use cases:
@@ -536,7 +553,10 @@ impl Library {
             .iter()
             .map(|d| d.metadata_key.clone())
             .collect();
-        sweep_orphans_in(&paths::workspace_subsystem_dirs(), &known)
+        sweep_orphans_in(
+            &paths::workspace_subsystem_dirs_in(&self.inner.chan_home),
+            &known,
+        )
     }
 }
 
@@ -671,6 +691,22 @@ mod tests {
             .unwrap()
             .root
             .is_dir());
+    }
+
+    #[test]
+    fn open_at_keeps_workspace_metadata_beside_the_injected_config() {
+        let cfg = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let entry = lib.register_workspace(workspace.path()).unwrap();
+
+        let expected_root = cfg.path().join("workspaces").join(&entry.metadata_key);
+        let paths = lib.workspace_paths_for(workspace.path()).unwrap();
+        assert_eq!(paths.root, expected_root);
+        assert!(paths.sessions.is_dir());
+
+        let opened = lib.open_workspace(workspace.path()).unwrap();
+        assert_eq!(opened.paths().root, expected_root);
     }
 
     #[test]
@@ -1071,45 +1107,32 @@ mod tests {
             .unwrap());
     }
 
-    /// Workspaces `sweep_orphans_in` against an isolated TempDir tree
-    /// so the test never touches the host's real XDG_STATE_HOME /
-    /// XDG_CACHE_HOME. The public `Library::sweep_orphans` is a
-    /// thin wrapper that supplies `paths::workspace_subsystem_dirs()`
-    /// and the registry's metadata-key set; the structural behavior
-    /// we care about lives in the inner fn.
     #[test]
-    fn sweep_orphans_in_reclaims_unknown_metadata_keys() {
-        use std::collections::HashSet;
-        let root = TempDir::new().unwrap();
-        let parents = vec![root.path().join("workspaces")];
-        let known_key = "-tmp-known-feedface";
+    fn sweep_orphans_uses_the_injected_library_home() {
+        let cfg = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let known = lib.register_workspace(workspace.path()).unwrap();
+        let parent = cfg.path().join("workspaces");
         let orphan_key = "-tmp-orphan-01234567";
-        let mut known = HashSet::new();
-        known.insert(known_key.to_string());
 
-        for parent in &parents {
-            std::fs::create_dir_all(parent.join(known_key)).unwrap();
-            std::fs::write(parent.join(known_key).join("keep"), b"keep").unwrap();
-            std::fs::create_dir_all(parent.join(orphan_key)).unwrap();
-            std::fs::write(parent.join(orphan_key).join("junk"), b"junk").unwrap();
-        }
-        let file = parents[0].join("not-a-dir");
+        std::fs::write(parent.join(&known.metadata_key).join("keep"), b"keep").unwrap();
+        std::fs::create_dir_all(parent.join(orphan_key)).unwrap();
+        std::fs::write(parent.join(orphan_key).join("junk"), b"junk").unwrap();
+        let file = parent.join("not-a-dir");
         std::fs::write(&file, b"keep").unwrap();
 
-        let report = sweep_orphans_in(&parents, &known).unwrap();
+        let report = lib.sweep_orphans().unwrap();
         assert_eq!(report.removed_metadata_keys, vec![orphan_key.to_string()]);
         assert!(report.removed_entries >= 1);
-
-        for parent in &parents {
-            assert!(
-                parent.join(known_key).exists(),
-                "known metadata root must survive"
-            );
-            assert!(
-                !parent.join(orphan_key).exists(),
-                "orphan metadata root must be gone"
-            );
-        }
+        assert!(
+            parent.join(&known.metadata_key).exists(),
+            "known metadata root must survive"
+        );
+        assert!(
+            !parent.join(orphan_key).exists(),
+            "orphan metadata root must be gone"
+        );
         assert!(file.exists(), "non-directory entry must survive");
     }
 

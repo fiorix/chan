@@ -35,7 +35,7 @@ Out of scope:
 
 ```mermaid
 flowchart TB
-  Lib["Library -- registry at ~/.chan"] --> WS["Workspace (writer-locked handle)"]
+  Lib["Library: registry and sidecars under one chan home"] --> WS["Workspace (writer-locked handle)"]
   subgraph Subsystems
     FS["Filesystem -- cap-std, CAS, trash, drafts"]
     Search["Search -- tantivy BM25 (+ optional candle embeddings)"]
@@ -60,7 +60,7 @@ flowchart TB
 
 ### Library
 
-Per-machine singleton-in-practice. Owns the `Registry` (`Mutex<Registry>` intra-process), the config-file path, and the directory-name blocklist for indexing walks. `open_workspace` looks up the registry row for the caller's path and constructs a `Workspace` keyed by the row's `metadata_key`, holding the cross-process writer lock for its lifetime.
+Per-machine singleton-in-practice. Owns the `Registry` (`Mutex<Registry>` intra-process), the config-file path, the co-located chan home for workspace sidecars, and the directory-name blocklist for indexing walks. `Library::open_at(config_path)` captures `config_path.parent()` as that home, so an explicitly located registry never places sidecars through ambient `CHAN_HOME`; `Library::open()` keeps the default registry and sidecars together under `paths::config_dir()`. `open_workspace` looks up the registry row for the caller's path and constructs a `Workspace` keyed by the row's `metadata_key`, holding the cross-process writer lock for its lifetime.
 
 Each registry row carries the canonical `root_path`, a stable `metadata_key`, an optional `display_name`, and timestamps. The key is derived from the first registered path as a readable path slug plus an 8-hex sha256 suffix, and is preserved across `Library::move_workspace`. All per-workspace sidecar state (graph DB, search index, sessions, tokens, trash, report) is keyed by that metadata key. `Workspace::canonical_root`, `metadata_key`, and `display_name` expose read-only identity; the effective display name falls back to the root basename. Consequences:
 

@@ -21,7 +21,7 @@ use crate::index::{
 };
 use crate::lock::WorkspaceLock;
 use crate::markdown;
-use crate::paths::{ensure_workspace_metadata_dirs, WorkspacePaths};
+use crate::paths::{ensure_workspace_metadata_dirs_in, WorkspacePaths};
 use crate::registry::KnownWorkspace;
 use crate::report::{ReportFanOut, ReportState};
 use crate::trash::{self, TrashEntry, TRASH_RETENTION_SECS};
@@ -819,6 +819,7 @@ impl Workspace {
         walk_filter: Arc<fs_ops::WalkFilter>,
         drafts_dir: String,
         transfer_max_bytes: u64,
+        chan_home: &Path,
     ) -> Result<(Arc<Self>, RecoveryPlan)> {
         // Defensive check: the registered path must still resolve to
         // a directory. A user (or another tool) could have replaced
@@ -882,7 +883,7 @@ impl Workspace {
                 entry.root_path,
             )));
         }
-        let paths = ensure_workspace_metadata_dirs(&entry.metadata_key)
+        let paths = ensure_workspace_metadata_dirs_in(chan_home, &entry.metadata_key)
             .map_err(|e| ChanError::Io(format!("ensure workspace metadata dirs: {e}")))?;
         let lock = WorkspaceLock::acquire(&paths.lock, &root_canon)?;
         // Lazy GC: reclaim expired trash entries on every open. No
