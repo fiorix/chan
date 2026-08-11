@@ -69,6 +69,19 @@ Every `file:line` in the draft was opened. All of them resolve, and the substant
 
 **Confirmed: there is no registry-wide chord-uniqueness test.** `keymapConflicts` (web/packages/workspace-app/src/state/keymapAssign.ts:31) checks a candidate user assignment against resolved entries, which is a different question. `shortcuts.test.ts:40-42` carries a comment mentioning a duplicate entry, but the assertions it guards are label regexes, not chord uniqueness. So two built-ins resolving to the same chord for some `(platform, os)` pair would ship silently, and this item moves two chords within one letter, which is precisely that case.
 
+**And it has already happened, which was found on 2026-08-11 and is not a prediction.** While building the swap item's registry-uniqueness assertion, that lane wrote absolute uniqueness first and it went red immediately on shipped defaults: `app.find.open` carries a `native` `Mod+F`, and `terminal.find` carries **both** a `web` and a `native` `Mod+F`. Verified independently against the table. So the population this item's test is meant to protect already contains a collision, and the test as this item describes it will be **red on arrival** through no fault of the change that introduces it.
+
+Three consequences for whoever takes this item.
+
+- The uniqueness test cannot be written as a bare assertion and landed green. It either records the existing pair as a known exception, with a reason, or the collision is resolved first, and that is a decision this item has to make rather than discover at the point the suite goes red.
+- The swap item solved the same problem in its own scope by asserting a **delta**, that a swap introduces no new collision in any of the four slots, plus a non-vacuity pin that the swap actually moved both commands. That shape is available here and its cost is that it cannot see a collision that was already there, which is the very thing it just found.
+- The collision may well be **deliberate**: editor find and terminal find are surface-scoped and dispatch in different contexts, so one chord serving both may be correct behaviour. What is not deliberate is that the registry has **no field that says so**. On that reading the defect is a missing declaration rather than a duplicate entry, and a uniqueness test with no way to express a sanctioned exception will keep rediscovering it.
+
+```citations
+web/packages/workspace-app/src/state/shortcuts.ts	SHORTCUTS	1	"app.find.open"
+web/packages/workspace-app/src/state/shortcuts.ts	SHORTCUTS	1	"terminal.find"
+```
+
 The rest of the draft's citations were checked and hold: `store.svelte.ts:3114` is `discardWindowSession`; the generator defaults are `--platform web` and `--os mac` (web/packages/workspace-app/scripts/shortcuts-table.mjs:54-55), which is why `app.window.close` has no row in `KEYBINDINGS_TABLE` at all and why only `app.tab.close`'s `web` chord, `label` or `note` can trip `make shortcuts-check` (Makefile:436-444); the `Close tab` row and its `(Cmd+W on macOS)` note are at crates/chan/src/lib.rs:158; and the `app.pane.kill` alias joins both ids through `shortcutIds: ["app.tab.close", "app.window.close"]` (web/packages/workspace-app/src/state/commands/core.ts:121), whose mac rendering `Cmd+W / Cmd+Shift+W` is pinned at web/packages/workspace-app/src/components/CommandChordAssign.test.ts:98.
 
 One citation drifts: the draft's `ctrlDCloseTab.test.ts:120` is a comment line; the assertion it means is at :123-125, in the test named `does not intercept Ctrl+D inside an Excalidraw canvas tab`. Cite it by name.
