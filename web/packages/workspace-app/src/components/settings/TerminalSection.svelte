@@ -5,6 +5,16 @@
 
   import type { Preferences, TerminalFontChoice } from "../../api/types";
   import { DEFAULT_SECRET_MASK_SUFFIXES } from "../../terminal/secretMasking";
+  import {
+    SCROLLBACK_MB_MIN,
+    SCROLLBACK_MB_MAX,
+    SCROLLBACK_MB_DEFAULT,
+    clampScrollbackMb,
+  } from "../../terminal/scrollback";
+  import {
+    TERMINAL_FONT_SIZE_MIN,
+    TERMINAL_FONT_SIZE_MAX,
+  } from "../../terminal/fontSize";
   import type { CommitFn } from "./commit";
   import SettingField from "./SettingField.svelte";
   import PillToggle from "./PillToggle.svelte";
@@ -21,20 +31,13 @@
     prefs.terminal.secret_mask_suffixes ?? DEFAULT_SECRET_MASK_SUFFIXES,
   );
 
-  const SCROLLBACK_MIN = 10;
-  const SCROLLBACK_MAX = 500;
   const SCROLLBACK_STEP = 10;
-  const FONT_SIZE_MIN = 8;
-  const FONT_SIZE_MAX = 32;
-  function clampScrollback(v: number | undefined): number {
-    return Math.min(SCROLLBACK_MAX, Math.max(SCROLLBACK_MIN, v ?? 50));
-  }
 
   // Local slider position so the thumb tracks the drag; the effect
   // seeds it from the buffer and resyncs when the stored value changes.
-  let scrollback = $state(50);
+  let scrollback = $state(SCROLLBACK_MB_DEFAULT);
   $effect(() => {
-    scrollback = clampScrollback(prefs.terminal.scrollback_mb);
+    scrollback = clampScrollbackMb(prefs.terminal.scrollback_mb);
   });
   let scrollbackTimer: ReturnType<typeof setTimeout> | null = null;
   function onScrollbackInput(): void {
@@ -47,7 +50,10 @@
   }
 
   function clampFontSize(value: number): number {
-    return Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, Math.round(value)));
+    return Math.min(
+      TERMINAL_FONT_SIZE_MAX,
+      Math.max(TERMINAL_FONT_SIZE_MIN, Math.round(value)),
+    );
   }
 
   let fontSizeText = $state("14");
@@ -105,8 +111,8 @@
 >
   <input
     type="range"
-    min={SCROLLBACK_MIN}
-    max={SCROLLBACK_MAX}
+    min={SCROLLBACK_MB_MIN}
+    max={SCROLLBACK_MB_MAX}
     step={SCROLLBACK_STEP}
     bind:value={scrollback}
     oninput={onScrollbackInput}
@@ -202,8 +208,8 @@
   <input
     class="font-size"
     type="number"
-    min={FONT_SIZE_MIN}
-    max={FONT_SIZE_MAX}
+    min={TERMINAL_FONT_SIZE_MIN}
+    max={TERMINAL_FONT_SIZE_MAX}
     step="1"
     value={fontSizeText}
     oninput={(event) => (fontSizeText = event.currentTarget.value)}

@@ -106,7 +106,7 @@ The CLI prefixes every serialized leaf below with `editor.`. Every scalar leaf i
 
 | Field | Type | Reachability | Consumers |
 |-------|------|--------------|-----------|
-| `editor_theme` | `EditorTheme` | `chan config get/set` + `PATCH /api/config` | Settings → Editor → theme selector |
+| `editor_theme` | `EditorTheme` | `chan config get/set` + `PATCH /api/config` | Settings → Appearance → theme selector |
 | `editor_font_size` | `Option<u32>` | `chan config get/set` + `PATCH /api/config` + Settings | optional absolute editor body size, clamped `10..=32`; unset uses the active theme, while `N` sets body/source to `Npx`/`(N - 2)px` |
 | `terminal_colors.mode` | `TerminalColorMode` | `chan config get/set` + `PATCH /api/config` + Settings | `standard` uses the terminal surface's Inherit/Light/Dark choice; `custom` activates the complete custom payload |
 | `terminal_colors.custom.background` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | optional dormant custom payload; accepts `#rgb` or `#rrggbb` and persists lowercase `#rrggbb` |
@@ -124,7 +124,7 @@ The CLI prefixes every serialized leaf below with `editor.`. Every scalar leaf i
 | `line_spacing` | `LineSpacing` | `chan config get/set` + Settings | editor line-height |
 | `date_format` | `String` | `chan config get/set` + Settings | date rendering across SPA |
 | `strip_trailing_whitespace_on_save` | `bool` | `chan config get/set` + Settings | editor save hook |
-| `bubble_overlay_mode` | `BubbleOverlayMode` | `chan config get/set` + Bubble menu | overlay rendering |
+| `bubble_overlay_mode` | `BubbleOverlayMode` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Appearance → bubble overlay radio; overlay rendering |
 | `hybrid_surface_themes.editor` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | optional Hybrid Editor body-theme override (`light` or `dark`) |
 | `hybrid_surface_themes.terminal` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | optional Terminal body-theme override |
 | `hybrid_surface_themes.browser` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | optional File Browser body-theme override |

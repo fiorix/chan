@@ -8,7 +8,7 @@
 // running PTY.
 
 /// Settings slider bounds. Kept in lockstep with the Rust constants in
-/// `crates/chan-server/src/config.rs` (`TERMINAL_SCROLLBACK_MB_MIN` /
+/// `crates/chan-library/src/config.rs` (`TERMINAL_SCROLLBACK_MB_MIN` /
 /// `TERMINAL_SCROLLBACK_MB_MAX`).
 export const SCROLLBACK_MB_MIN = 10;
 export const SCROLLBACK_MB_MAX = 50;

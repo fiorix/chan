@@ -144,7 +144,7 @@ export type TerminalPreferences = {
   /// Per-terminal scrollback budget in MB. Consumed at xterm.js
   /// construction time; spawn-time only (existing terminals keep
   /// their current scrollback until the session restarts). Server
-  /// clamps to [10, 500]; default 50.
+  /// clamps to [10, 50]; default 10.
   scrollback_mb?: number;
   /// Default TERM env var on the spawned PTY. Optional on the wire
   /// so older servers (no field) deserialize cleanly; the SPA
@@ -319,16 +319,16 @@ export type Preferences = {
   /// When true, saves strip trailing spaces and tabs before writing
   /// text buffers to disk.
   strip_trailing_whitespace_on_save: boolean;
-  /// Search indexer resource profile. Not surfaced in Settings yet,
-  /// but included in /api/config so CLI/server config changes remain
-  /// visible to clients.
+  /// Search indexer resource profile. Surfaced in Settings ->
+  /// Files & search; also included in /api/config so CLI/server
+  /// config changes remain visible to clients.
   search_aggression: SearchAggression;
   /// Effective transfer ceiling reported by the server. Read-only and absent
   /// from PreferencesPatch. Optional for older and offline response fixtures;
   /// clients do not derive or default this policy.
   transfer_max_bytes?: number;
-  /// Terminal PTY session retention settings. Not surfaced in
-  /// Settings yet; replaced as one server-owned composite when patched.
+  /// Terminal PTY session retention settings. Surfaced in Settings
+  /// -> Terminal; replaced as one server-owned composite when patched.
   terminal: TerminalPreferences;
   /// Watcher bubbles display mode: show all inline, or collapse
   /// to a count tray until expanded.
