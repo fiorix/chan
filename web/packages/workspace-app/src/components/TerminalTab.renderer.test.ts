@@ -36,15 +36,26 @@ describe("TerminalTab WebGL renderer", () => {
   });
 
   test("skips WebGL on the Linux desktop webview (WebKitGTK), staying on DOM", () => {
-    // WebKitGTK does not composite the WebGL layer while idle, so pasted /
-    // typed text is drawn but not presented until a later event flushes it.
-    // The DOM renderer paints through normal DOM mutation. Scoped to the
-    // Linux desktop only: macOS WKWebView and every browser keep WebGL.
+    // The Linux desktop stays on the DOM renderer while the present-stall
+    // question is open. Scoped to it only: macOS WKWebView and every browser
+    // keep WebGL. The decision is one predicate, taken before the addon is
+    // constructed, so nothing downstream has to re-derive it.
     expect(tab).toMatch(
       /import \{[^}]*\bisTauriDesktop\b[^}]*\} from "\.\.\/api\/desktop"/,
     );
     expect(tab).toMatch(
-      /if \(!shouldUseWebglRenderer\(isTauriDesktop\(\), currentOS\(\)\)\) return;[\s\S]{0,40}try \{/,
+      /shouldUseWebglRenderer\(\s*isTauriDesktop\(\),\s*currentOS\(\),[\s\S]{0,80}?\)\s*\)\s*\{\s*return;[\s\S]{0,80}try \{/,
+    );
+  });
+
+  test("the renderer choice can be overridden per host", () => {
+    // The platform rule keeps Linux on the DOM renderer, and the only way to
+    // settle whether it still needs to is readings from real hosts. The
+    // override is passed INTO the predicate rather than checked beside it, so
+    // there is one answer to "which renderer" rather than two.
+    expect(tab).toMatch(/webglRendererOverride\(\)/);
+    expect(tab).toMatch(
+      /import \{[^}]*\bwebglRendererOverride\b[^}]*\} from "\.\.\/terminal\/renderer"/,
     );
   });
 

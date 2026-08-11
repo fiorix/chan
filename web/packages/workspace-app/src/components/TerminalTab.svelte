@@ -138,6 +138,7 @@
   } from "../terminal/backend";
   import {
     alignGhosttyRendererToXterm,
+    clearGhosttyRecycledGrid,
     gateGhosttyScrollbarClicks,
     installGhosttyCustomGlyphs,
     installGhosttyOverlayScrollbar,
@@ -154,6 +155,7 @@
   import {
     refreshTerminalRows as refreshTerminalRowsImpl,
     shouldUseWebglRenderer,
+    webglRendererOverride,
   } from "../terminal/renderer";
   import {
     createTrailingFitScheduler,
@@ -783,7 +785,15 @@
     // with the lineHeight gap the WebGL customGlyphs path otherwise fills).
     // The env-level WEBKIT_DISABLE_DMABUF_RENDERER fix in linux_gui_stack.rs
     // is about webview creation, not this per-layer present stall.
-    if (!shouldUseWebglRenderer(isTauriDesktop(), currentOS())) return;
+    if (
+      !shouldUseWebglRenderer(
+        isTauriDesktop(),
+        currentOS(),
+        webglRendererOverride(),
+      )
+    ) {
+      return;
+    }
     try {
       const webgl = new WebglAddon();
       webgl.onContextLoss(() => {
@@ -1044,6 +1054,10 @@
     term.open(host);
     if (backend === "ghostty") {
       const ghosttyTerm = term as GhosttyTerminal;
+      // open() created the WASM terminal, which may have come back holding a
+      // disposed terminal's screen (see clearGhosttyRecycledGrid). Erase it
+      // before the metrics alignment repaints and before any PTY byte lands.
+      clearGhosttyRecycledGrid(ghosttyTerm);
       const renderer = ghosttyTerm.renderer;
       const targetCell = measureXtermCellDimensions(
         host,

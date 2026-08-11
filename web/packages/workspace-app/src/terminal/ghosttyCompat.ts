@@ -194,6 +194,36 @@ export function alignGhosttyRendererToXterm(
   return metrics;
 }
 
+/// Erase the cells a freshly created ghostty-web terminal inherits from a
+/// terminal that was disposed earlier.
+///
+/// ghostty-web's `Terminal.dispose()` calls `wasmTerm.free()`
+/// (`ghostty_terminal_free`), which returns that terminal's screen and
+/// scrollback pages to the WASM allocator, and `ghostty.createTerminal()`
+/// hands the same block to the next terminal WITHOUT zeroing it. Every
+/// terminal shares one process-wide WASM instance (backend.ts), so a new tab
+/// opens rendering the last screen of a closed one -- another session's TUI,
+/// its scrollback, and whatever secrets were on it. The fitter's resize does
+/// not clear it either: the inherited rows keep the dead terminal's column
+/// stride, so they stay hard-wrapped at ITS width inside the new grid, and
+/// live output only overwrites the cells it actually writes.
+///
+/// ED (`2J`) plus the scrollback erase (`3J`) is enough -- verified against
+/// the pinned wasm: mode state (alt screen, mouse tracking, bracketed paste,
+/// DECCKM) comes up at defaults and is NOT inherited, so this deliberately
+/// stops short of RIS and leaves the terminal's negotiated state alone. SGR
+/// is reset first because ED fills with the CURRENT background colour.
+///
+/// Must run between `open()` (which creates the WASM terminal) and the first
+/// PTY byte; it is display-only and never reaches the shell.
+export const GHOSTTY_RECYCLED_GRID_SCRUB = "\x1b[0m\x1b[H\x1b[2J\x1b[3J";
+
+export function clearGhosttyRecycledGrid(terminal: {
+  write(data: string): void;
+}): void {
+  terminal.write(GHOSTTY_RECYCLED_GRID_SCRUB);
+}
+
 /// ghostty-web paints every codepoint through the text font. Box-drawing
 /// glyphs then stop short of the cell edges and produce dotted borders,
 /// especially after aligning its wider native cell to xterm's grid. xterm's

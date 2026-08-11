@@ -3,12 +3,14 @@
   import {
     advancePolarDriftParticles,
     createPolarDriftParticles,
-    POLAR_DRIFT_HALF_SIZE,
+    createPolarDriftRenderer,
+    fitPolarDrift,
+    type PolarDriftRenderer,
   } from "./polarDrift";
   import {
     canvasCssNumber,
-    canvasCssValue,
-    runCanvasAnimation,
+    canvasCssRgb,
+    runWebgl2Animation,
   } from "./canvasAnimation";
 
   const PHASE_SPEED = 0.06;
@@ -23,15 +25,23 @@
     if (!canvas) return;
     const host = canvas;
 
-    return runCanvasAnimation(host, (ctx) => {
+    return runWebgl2Animation(host, (gl) => {
+      let renderer: PolarDriftRenderer;
+      try {
+        renderer = createPolarDriftRenderer(gl);
+      } catch (error) {
+        console.warn("[chan] Polar Drift WebGL renderer unavailable:", error);
+        return null;
+      }
+
       let width = 0;
       let height = 0;
       let lastSimulationMs = 0;
       let particles = createPolarDriftParticles();
       let paintedBackground = "";
 
-      function backgroundColor(): string {
-        return canvasCssValue(
+      function backgroundColor(): [number, number, number] {
+        return canvasCssRgb(
           host,
           "--polar-drift-background-rgb",
           "28, 28, 30",
@@ -39,16 +49,21 @@
       }
 
       function resetSurface(): void {
-        paintedBackground = backgroundColor();
-        ctx.save();
-        ctx.globalAlpha = 1;
-        ctx.fillStyle = `rgb(${paintedBackground})`;
-        ctx.fillRect(0, 0, width, height);
-        ctx.restore();
+        const background = backgroundColor();
+        paintedBackground = background.join(",");
+        renderer.resetSurface(background);
       }
 
-      function drawParticles(): void {
-        const pointColor = canvasCssValue(
+      /// One pass of the particle field onto the trail surface. `fade` is the
+      /// frame's decay and belongs to the FIRST pass only: the 2D version faded
+      /// once per frame and then drew every simulation sub-step onto the faded
+      /// surface, so a later sub-step passing 0 reproduces that exactly.
+      ///
+      /// Every particle is uploaded. Unlike the vortex there is no cull to do:
+      /// `advancePolarDriftParticles` respawns anything outside the disc, so
+      /// the field is bounded by construction and the whole array is on-canvas.
+      function drawParticles(fade: number): void {
+        const pointColor = canvasCssRgb(
           host,
           "--polar-drift-point-rgb",
           "105, 105, 112",
@@ -58,45 +73,38 @@
           "--polar-drift-point-alpha",
           0.26,
         );
-        const scaleX = width / (POLAR_DRIFT_HALF_SIZE * 2);
-        const scaleY = height / (POLAR_DRIFT_HALF_SIZE * 2);
+        const transform = fitPolarDrift(width, height);
 
-        ctx.beginPath();
-        for (let index = 0; index < particles.length; index += 2) {
-          ctx.rect(
-            width / 2 + particles[index] * scaleX,
-            height / 2 + particles[index + 1] * scaleY,
-            1,
-            1,
-          );
-        }
-        ctx.globalAlpha = pointAlpha;
-        ctx.fillStyle = `rgb(${pointColor})`;
-        ctx.fill();
-        ctx.globalAlpha = 1;
+        renderer.draw({
+          points: particles,
+          pointCount: particles.length / 2,
+          centerX: transform.centerX,
+          centerY: transform.centerY,
+          scaleX: transform.scaleX,
+          scaleY: transform.scaleY,
+          backgroundColor: backgroundColor(),
+          pointColor,
+          pointAlpha,
+          fade,
+        });
       }
 
       function draw(phase: number, frameScale: number): void {
         if (width <= 0 || height <= 0) return;
-        if (backgroundColor() !== paintedBackground) resetSurface();
+        if (backgroundColor().join(",") !== paintedBackground) resetSurface();
 
-        ctx.globalAlpha =
-          1 - Math.pow(1 - SOURCE_FADE_ALPHA, frameScale);
-        ctx.fillStyle = `rgb(${backgroundColor()})`;
-        ctx.fillRect(0, 0, width, height);
-        ctx.globalAlpha = 1;
-
+        const fade = 1 - Math.pow(1 - SOURCE_FADE_ALPHA, frameScale);
         const steps = Math.max(1, Math.ceil(frameScale));
         const distance = frameScale / steps;
         for (let step = 0; step < steps; step += 1) {
-          drawParticles();
+          drawParticles(step === 0 ? fade : 0);
           advancePolarDriftParticles(particles, phase, distance);
         }
       }
 
       function drawStatic(): void {
         resetSurface();
-        drawParticles();
+        drawParticles(0);
       }
 
       function drawAt(timeMs: number): void {

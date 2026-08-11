@@ -12,7 +12,7 @@ The per-frame cost, by host:
 
 - **Sixfold vortex**: 30k 1x1 rects per path fill, every frame.
 - **Hexagonal and fourteenfold bloom**, through the shared `YuruyurauRotationalField`: roughly 20k point rects plus 6 to 14 rotated full-canvas `drawImage` calls, every frame.
-- **`YuruyurauPointCloud`**, the host behind Lorenz Constellation, Rippled Duet, Striated Current and Twin Veil Dance: Lorenz is the worst case at 30k `ctx.rect()` calls collected into one path and filled every frame. This was the last 2D canvas path left in the family.
+- **`YuruyurauPointCloud`**, the host behind Lorenz Constellation, Rippled Duet, Striated Current and Twin Veil Dance: Lorenz is the worst case at 30k `ctx.rect()` calls collected into one path and filled every frame. This was believed to be the last 2D canvas path left in the family, and was not: Polar Drift, one entry away in the same registry, kept collecting 9,999 `ctx.rect()` calls into a single fill until it was ported after v0.88.0. The omission was not a scope decision; nobody checked the registry against the ported set.
 
 The paint path moves to WebGL2 following the existing `StellarOutburst` pattern. CPU-side geometry and motion are unchanged throughout, so the visual identity of each animation is carried by the same simulation it always had.
 

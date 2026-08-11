@@ -256,13 +256,21 @@ The Linux GUI-stack bootstrap runs before webview creation. It prefers the host 
 - Presence gate: only when BOTH `libgtk-3.so.0` AND `libwebkit2gtk-4.1.so.0` resolve in the host `ldconfig -p` cache does it shadow the bundle (a partial shadow is worse than either stack alone).
 - It discovers the host lib dir from `ldconfig -p` (correct on Arch `/usr/lib`, Fedora `/usr/lib64`, Debian/Ubuntu multiarch, x86_64 and arm64), prepends it to `LD_LIBRARY_PATH`, and re-execs the binary once. A re-exec is required because `libgtk` / `libEGL` are already loaded by the time `main()` runs, so rewriting the loader path only takes effect in a fresh process. The GTK module env the AppImage `AppRun` exported is inherited across the exec, so only the library path is rewritten.
 - A `CHAN_LINUX_SYSTEM_GUI_APPLIED=1` marker set across the re-exec guards against a loop.
-- Independent fallback: under an AppImage it defaults `WEBKIT_DISABLE_DMABUF_RENDERER=1` (the dma-buf renderer is the path that aborts) unless the user already set it, so a host WITHOUT the system stack still launches on the bundle.
+- Independent layer: under an AppImage it defaults `WEBKIT_DISABLE_DMABUF_RENDERER=1` only when the NVIDIA proprietary driver is present (`/proc/driver/nvidia/version` or `/sys/module/nvidia/version`), and never clobbers a value the user already set. dma-buf is how WebKit hands GPU buffers to the compositor, so disabling it drops the whole webview onto the legacy WPE/X11 path: measured on an AMD host, the WebGL layer then paints nothing at all while context creation still succeeds, which costs xterm.js its WebGL renderer and the terminal grid its box drawing. The fault being worked around is the NVIDIA driver's, upstream declined to detect it (WebKit bug 262607, WONTFIX), and Tauri's own guidance is that an unconditional override "disables a faster path for everyone, including users on working setups".
 
 The `CHAN_LINUX_SYSTEM_GUI` env knob selects the policy:
 
 - `auto` (default): prefer the host stack when present, else the bundle.
 - `system`: force the host stack; exit with an error if it is unavailable.
 - `bundled`: keep the bundle-first behavior, for debugging.
+
+The `CHAN_LINUX_DMABUF` env knob selects the dma-buf policy independently:
+
+- `auto` (default): disable dma-buf only for the NVIDIA proprietary driver.
+- `on`: never disable it, whatever the driver. This is the knob for an NVIDIA user who wants to try xterm.js's WebGL renderer, and it is the only way to ask for the accelerated path: WebKit reads `WEBKIT_DISABLE_DMABUF_RENDERER` by PRESENCE rather than value, so setting it to `0` disables dma-buf exactly as `1` does (measured), and the variable can therefore only ever turn the fast path off.
+- `off`: always disable it, the pre-detection behavior, for a host that needs the workaround without the NVIDIA driver loaded.
+
+The renderer half is separate and lives in the SPA: `chan:terminal-webgl` in localStorage (`"1"` on, `"0"` off) overrides the platform rule that keeps the Linux desktop on xterm.js's DOM renderer. Both are needed on an NVIDIA host; elsewhere dma-buf is already on and the localStorage key is enough.
 
 ## 9. Self-upgrade
 
@@ -283,6 +291,7 @@ Maintainer controls stay native:
 - Cmd+R (macOS) / Ctrl+Shift+R (Linux/Windows) reloads the focused workspace webview.
 - Cmd+Opt+I / Ctrl+Alt+I opens webview DevTools (enabled in release builds via the `devtools` Cargo feature).
 - `CHAN_LINUX_SYSTEM_GUI` (`auto` | `system` | `bundled`) selects the Linux AppImage GUI-stack policy; see 8.1.
+- `CHAN_LINUX_DMABUF` (`auto` | `on` | `off`) selects the dma-buf policy; see 8.1.
 
 Future global settings additions are deferred until they have concrete demand. Tunnel publishing belongs in the workspace attachment surface rather than a generic app settings page.
 

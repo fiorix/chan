@@ -37,6 +37,7 @@ import { mount, unmount } from "svelte";
 import FourteenfoldBloom from "@components/FourteenfoldBloom.svelte";
 import HexagonalBloom from "@components/HexagonalBloom.svelte";
 import LorenzConstellation from "@components/LorenzConstellation.svelte";
+import PolarDrift from "@components/PolarDrift.svelte";
 import RippledDuet from "@components/RippledDuet.svelte";
 import SixfoldVortex from "@components/SixfoldVortex.svelte";
 import StriatedCurrent from "@components/StriatedCurrent.svelte";
@@ -71,6 +72,7 @@ const ARMS: Arm[] = [
   { id: "rippled-duet", name: "Rippled Duet", component: RippledDuet, family: "point-cloud" },
   { id: "striated-current", name: "Striated Current", component: StriatedCurrent, family: "point-cloud" },
   { id: "twin-veil-dance", name: "Twin Veil Dance", component: TwinVeilDance, family: "point-cloud" },
+  { id: "polar-drift", name: "Polar Drift", component: PolarDrift, family: "trail" },
 ];
 
 type Result = {

@@ -155,7 +155,7 @@
 
 <SettingField
   label="Ghostty backend"
-  hint="Experimental: parse and render new terminals with Ghostty's WASM engine instead of xterm.js. The engine loads from this server the first time a ghostty terminal opens, and falls back to xterm.js if it cannot. New terminals only."
+  hint="Parse and render new terminals with Ghostty's WASM engine instead of xterm.js. On by default on Linux, where xterm.js falls back to a renderer that leaves a gap at every cell boundary and box drawing comes out dotted; off elsewhere, where xterm.js renders the grid correctly. Secret masking is xterm-only and does nothing here. The engine loads from this server the first time a ghostty terminal opens, and falls back to xterm.js if it cannot. New terminals only."
 >
   <PillToggle
     label="Use ghostty-web in new terminals"

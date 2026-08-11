@@ -85,9 +85,25 @@ pub struct TerminalConfig {
     /// Whether newly opened terminals use the ghostty-web backend
     /// (Ghostty's WASM VT parser) instead of xterm.js. Consumed by the
     /// SPA at terminal start time; the server only persists the value.
-    /// Off by default (xterm.js stays the battle-tested path). Applies
-    /// to newly opened terminals.
-    #[serde(default)]
+    /// Applies to newly opened terminals.
+    ///
+    /// On by default on Linux, off elsewhere. The Linux desktop ships
+    /// xterm.js's DOM renderer, which defers box drawing and block elements
+    /// to the font and so leaves one unpainted scanline at every cell
+    /// boundary: 96.0% rule continuity and 95.2% block coverage against a
+    /// 99.5% bar, measured in the desktop's own webview. Ghostty draws those
+    /// characters itself and measures 100% on every arm, including with the
+    /// dma-buf renderer disabled, which is the one backend that holds on both
+    /// sides of that switch. macOS and Windows ship xterm.js's WebGL
+    /// renderer, which also measures 100%, so they stay on the
+    /// battle-tested path.
+    ///
+    /// Keyed on the SERVER's platform, which is where the terminals run. A
+    /// Linux server reached from a browser on another OS gets the Linux
+    /// default even though that client renders xterm.js correctly; the value
+    /// is a default, not a lock, and over-applying it costs nothing but
+    /// `secret_masking`, which is xterm-only and off by default.
+    #[serde(default = "default_terminal_ghostty")]
     pub ghostty: bool,
     /// Whether xterm.js terminals visually obscure the values of
     /// secret-looking `NAME=value` assignments. The buffer remains
@@ -133,7 +149,7 @@ impl Default for TerminalConfig {
             font_size: default_terminal_font_size(),
             mcp_env: false,
             mouse_capture: default_terminal_mouse_capture(),
-            ghostty: false,
+            ghostty: default_terminal_ghostty(),
             secret_masking: default_terminal_secret_masking(),
             secret_mask_suffixes: default_terminal_secret_mask_suffixes(),
         }
@@ -166,6 +182,10 @@ fn default_terminal_font_size() -> u32 {
 
 fn default_terminal_mouse_capture() -> bool {
     true
+}
+
+fn default_terminal_ghostty() -> bool {
+    cfg!(target_os = "linux")
 }
 
 fn default_terminal_secret_masking() -> bool {
@@ -309,6 +329,31 @@ mod tests {
             config.secret_mask_suffixes,
             vec!["TOKEN".to_string(), "SECRET".to_string()]
         );
+    }
+
+    #[test]
+    fn the_terminal_backend_default_follows_the_platform() {
+        // Linux ships xterm.js's DOM renderer, which cannot draw box drawing
+        // or block elements to the cell edge; ghostty is the backend that
+        // measures 100% there. Everywhere else xterm.js gets its WebGL
+        // renderer and stays the default.
+        assert_eq!(TerminalConfig::default().ghostty, cfg!(target_os = "linux"));
+    }
+
+    #[test]
+    fn an_absent_backend_field_takes_the_platform_default() {
+        // The field is `#[serde(default = ...)]`, not bare `#[serde(default)]`:
+        // a bare one resolves to `bool::default()` and would silently pin
+        // every existing config file to xterm.js whatever the platform.
+        let config: TerminalConfig = serde_json::from_value(json!({})).expect("deserialize");
+        assert_eq!(config.ghostty, cfg!(target_os = "linux"));
+    }
+
+    #[test]
+    fn an_explicit_backend_choice_survives_the_default() {
+        let config: TerminalConfig =
+            serde_json::from_value(json!({ "ghostty": false })).expect("deserialize");
+        assert!(!config.ghostty);
     }
 
     #[test]

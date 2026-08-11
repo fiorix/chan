@@ -38,6 +38,23 @@ describe("TerminalTab ghostty backend wiring", () => {
     );
   });
 
+  test("a recycled ghostty grid is scrubbed before anything paints or arrives", () => {
+    // ghostty-web hands a disposed terminal's screen cells to the next
+    // terminal it creates (one process-wide WASM instance, no zeroing on
+    // reuse), so a new tab opens showing a closed tab's TUI and scrollback.
+    // The scrub has to sit between open() -- which creates the WASM terminal
+    // -- and both the metrics repaint and the first PTY byte, which arrives
+    // no earlier than connect().
+    expect(tab).toContain("clearGhosttyRecycledGrid(ghosttyTerm);");
+    // Measured from open() forward, so the mount path's own connect() is the
+    // one this orders against rather than the wake-recycle or restart dials.
+    const mount = tab.slice(tab.indexOf("term.open(host);"));
+    const scrub = mount.indexOf("clearGhosttyRecycledGrid(ghosttyTerm);");
+    expect(scrub).toBeGreaterThan(0);
+    expect(scrub).toBeLessThan(mount.indexOf("alignGhosttyRendererToXterm("));
+    expect(scrub).toBeLessThan(mount.indexOf("void connect();"));
+  });
+
   test("ghostty installs xterm-style continuous box glyphs", () => {
     expect(tab).toContain("installGhosttyCustomGlyphs(renderer)");
     expect(tab).toContain("using font-rendered box glyphs");
