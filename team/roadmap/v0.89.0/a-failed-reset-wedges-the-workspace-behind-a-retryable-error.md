@@ -260,4 +260,12 @@ Also not established: whether any real deployment has hit this. There is no tele
 
 Small as a change. The reinstall is a handful of lines once the helper is shared, and the shape to copy already exists, working, in a sibling route module.
 
+**The concurrency test was dropped, deliberately, on 2026-08-11.** This section anticipated it and made dropping acceptable on one condition, that the item say so. It says so here.
+
+The reason is structural rather than a shortage of time. The `ResetWorkspaceOps` seam is first consulted only **after** `perform_reset` has acquired the workspace-cell write lock and taken the cell, while the concurrent panic requires two `api_storage_reset` handlers to pass their initial `try_workspace` gates before either orders through that write lock. The seam sits downstream of the ordering the test would need to control, so staging it deterministically would need a new test-only synchronisation hook between the handler gate and the write-lock acquisition, in production-adjacent code.
+
+Without such a hook it is a scheduler race staged with sleeps or repeated attempts, which is flaky evidence. That is worth naming plainly: this round is simultaneously repairing two load-sensitive tests, one of which turned out to be a shared-slot clobber rather than the race it was assumed to be, so manufacturing a fresh sleep-staged race test to close this line would add to exactly the class the same round is paying to remove.
+
+What is not lost is the repaired behaviour. `perform_reset_answers_busy_when_the_cell_is_already_taken` covers it deterministically by constructing the post-gate state directly: it takes the cell, calls `perform_reset`, and asserts `ResetError::Busy` answering 409 with `Retry-After: 1` rather than panicking. So the dropped test would have proven the scheduler interleaving, not an uncovered repair branch.
+
 Medium as a piece of work, and the cost is entirely in the acceptance. Fault-injecting `Library::reset_workspace` and `Workspace::watch` from a route test needs a seam that does not exist yet, and the choice of seam has to survive running as root in the gate's container. The status distinction is cheap. The concurrency test may be the part that gets dropped, and dropping it is acceptable if the item says it was dropped.
