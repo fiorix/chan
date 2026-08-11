@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import settingField from "./settings/SettingField.svelte?raw";
 import pillToggle from "./settings/PillToggle.svelte?raw";
 import pillRadio from "./settings/PillRadio.svelte?raw";
 import reportsControl from "./settings/workspace/ReportsControl.svelte?raw";
@@ -6,13 +7,12 @@ import semanticControl from "./settings/workspace/SemanticControl.svelte?raw";
 
 // Checkbox and radio pills carry the same selected-state contract: shape,
 // spacing, neutral border, and checked background stay, and the selected
-// state does not switch the outer border to blue. Aligning the two controls
-// is an explicit maintainer decision rather than an accident of the CSS, so
-// the radio site is pinned by name alongside the checkbox ones. All four
-// carry a `.pill.on` rule whose selector text is identical, which means
-// nothing in the selector distinguishes them and a sweep across settings
-// could reintroduce the blue border at one site and leave the rest
-// inconsistent.
+// state does not switch the outer border to blue. That contract used to be
+// pinned at four identical `.pill.on` copies (PillToggle, PillRadio,
+// ReportsControl, SemanticControl); the v0.89.0 settings reorganisation
+// collapsed them into ONE block, living in SettingField, which every pill
+// user nests inside. These pins now assert both halves of that: the one
+// block keeps the contract, and the copies stay gone.
 //
 // Pinned against source rather than computed style. The vitest block in
 // vite.config.ts runs jsdom with no `css` option and the svelte plugin emits
@@ -20,133 +20,104 @@ import semanticControl from "./settings/workspace/SemanticControl.svelte?raw";
 // mounted node. getComputedStyle would report an empty border whether or not
 // the rule exists, which is a check that cannot go red.
 
-/// One CSS declaration block, so an assertion can neither be satisfied nor
-/// defeated by an unrelated declaration elsewhere in the same component.
-function ruleBlock(source: string, selector: string): string {
+/// One CSS declaration block inside a :global(...) wrapper, so an assertion
+/// can neither be satisfied nor defeated by an unrelated declaration
+/// elsewhere in the same component. The selector may be one of a
+/// comma-separated list sharing the block.
+function globalRuleBlock(source: string, selector: string): string {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = source.match(new RegExp(`${escaped} \\{[\\s\\S]*?\\}`));
-  if (match === null) throw new Error(`no \`${selector}\` rule in this component`);
+  const match = source.match(
+    new RegExp(`:global\\(${escaped}\\)[^{]*\\{[\\s\\S]*?\\}`),
+  );
+  if (match === null) {
+    throw new Error(`no \`:global(${selector})\` rule in this component`);
+  }
   return match[0];
 }
 
-type PillSite = {
-  name: string;
-  source: string;
-  /// Only the two workspace controls gate a disabled pill; PillToggle has
-  /// no disabled rule and must not gain one.
-  disabledRule: boolean;
-};
-
-const CHECKBOX_SITES: PillSite[] = [
-  { name: "PillToggle", source: pillToggle, disabledRule: false },
-  { name: "ReportsControl", source: reportsControl, disabledRule: true },
-  { name: "SemanticControl", source: semanticControl, disabledRule: true },
-];
-
-describe("checked checkbox pills carry no outer border colour", () => {
-  for (const site of CHECKBOX_SITES) {
-    test(`${site.name}: .pill.on sets no border-color at all`, () => {
-      // Not just `var(--link)`: the checked pill falls back to the base
-      // rule's neutral border, so any border-color here is a regression.
-      expect(ruleBlock(site.source, ".pill.on")).not.toMatch(/border-color:/);
-    });
-
-    test(`${site.name}: .pill.on keeps the checked background`, () => {
-      expect(ruleBlock(site.source, ".pill.on")).toMatch(
-        /background: var\(--hover-bg\);/,
-      );
-    });
-  }
-});
-
-describe("checked radio pills carry no outer border colour either", () => {
-  test("PillRadio: .pill.on sets no border-color at all", () => {
-    // Same standard as the checkbox sites: the selected pill falls back to
-    // the base rule's neutral border, so any border-color here is a
-    // regression, not only `var(--link)`.
-    expect(ruleBlock(pillRadio, ".pill.on")).not.toMatch(/border-color:/);
+describe("the one .pill block carries the contract", () => {
+  test("exactly one .pill.on block survives under components/settings/", () => {
+    // The consolidation acceptance line: the four copies collapsed into
+    // SettingField, so a second declaration anywhere is a fork regrowing.
+    const sources = [settingField, pillToggle, pillRadio, reportsControl, semanticControl];
+    const declarations = sources.flatMap((s) => s.match(/\.pill\.on[)\s]*\{/g) ?? []);
+    expect(declarations).toHaveLength(1);
+    expect(settingField).toMatch(/\.pill\.on/);
   });
 
-  test("PillRadio: .pill.on keeps the checked background", () => {
-    expect(ruleBlock(pillRadio, ".pill.on")).toMatch(
+  test(".pill.on sets no border-color at all", () => {
+    // Not just `var(--link)`: the checked pill falls back to the base
+    // rule's neutral border, so any border-color here is a regression.
+    expect(globalRuleBlock(settingField, ".pill.on")).not.toMatch(/border-color:/);
+  });
+
+  test(".pill.on keeps the checked background", () => {
+    expect(globalRuleBlock(settingField, ".pill.on")).toMatch(
       /background: var\(--hover-bg\);/,
     );
   });
 
-  test("PillRadio is the radio surface, so the rule above is the radio one", () => {
-    expect(pillRadio).toMatch(/type="radio"/);
-    expect(pillRadio).not.toMatch(/type="checkbox"/);
-  });
-});
-
-describe("the surrounding checkbox pill rules are untouched", () => {
-  for (const site of CHECKBOX_SITES) {
-    test(`${site.name}: shape, spacing, and neutral border survive`, () => {
-      const base = ruleBlock(site.source, ".pill");
-      expect(base).toMatch(/padding: 4px 10px;/);
-      expect(base).toMatch(/border: 1px solid var\(--btn-border\);/);
-      expect(base).toMatch(/border-radius: 4px;/);
-      expect(base).toMatch(/background: var\(--btn-bg\);/);
-    });
-
-    test(`${site.name}: the hover border rule survives`, () => {
-      expect(ruleBlock(site.source, ".pill:hover")).toMatch(
-        /border-color: var\(--btn-hover\);/,
-      );
-    });
-
-    test(`${site.name}: the native checkbox reset survives`, () => {
-      // Zeroes the input's own chrome only; the native control keeps its
-      // checked rendering, and the wrapping label keeps focus and Space.
-      expect(ruleBlock(site.source, '.pill input[type="checkbox"]')).toMatch(
-        /border: 0;/,
-      );
-    });
-
-    test(`${site.name}: a label.pill still wraps a native checkbox`, () => {
-      // The item cannot be satisfied by dropping the pill chrome instead.
-      expect(site.source).toMatch(/<label class="pill" class:on=/);
-      expect(site.source).toMatch(/type="checkbox"/);
-    });
-  }
-
-  for (const site of CHECKBOX_SITES.filter((s) => s.disabledRule)) {
-    test(`${site.name}: the disabled pill rule survives`, () => {
-      expect(ruleBlock(site.source, ".pill:has(input:disabled)")).toMatch(
-        /cursor: not-allowed;[\s\S]*?opacity: 0\.7;/,
-      );
-    });
-  }
-});
-
-describe("the surrounding radio pill rules are untouched", () => {
-  test("PillRadio: shape, spacing, and neutral border survive", () => {
-    const base = ruleBlock(pillRadio, ".pill");
+  test(".pill keeps shape, spacing, and the neutral border", () => {
+    const base = globalRuleBlock(settingField, ".pill");
     expect(base).toMatch(/padding: 4px 10px;/);
     expect(base).toMatch(/border: 1px solid var\(--btn-border\);/);
     expect(base).toMatch(/border-radius: 4px;/);
     expect(base).toMatch(/background: var\(--btn-bg\);/);
   });
 
-  test("PillRadio: the hover border rule survives", () => {
-    expect(ruleBlock(pillRadio, ".pill:hover")).toMatch(
+  test("the hover border rule survives", () => {
+    expect(globalRuleBlock(settingField, ".pill:hover")).toMatch(
       /border-color: var\(--btn-hover\);/,
     );
   });
 
-  test("PillRadio: the native radio reset survives", () => {
-    // Zeroes the input's own chrome only. The selected dot and the focus
-    // ring are the native control's, and neither is expressed through
-    // `.pill.on`, so they outlive the border-colour change.
-    expect(ruleBlock(pillRadio, '.pill input[type="radio"]')).toMatch(
+  test("the native input reset survives for checkbox and radio", () => {
+    // Zeroes the input's own chrome only; the native control keeps its
+    // checked rendering, and the wrapping label keeps focus and Space.
+    expect(globalRuleBlock(settingField, '.pill input[type="checkbox"]')).toMatch(
+      /border: 0;/,
+    );
+    expect(globalRuleBlock(settingField, '.pill input[type="radio"]')).toMatch(
       /border: 0;/,
     );
   });
 
+  test("the disabled pill rule survives", () => {
+    // Both workspace toggles gate a disabled pill during their busy write.
+    expect(globalRuleBlock(settingField, ".pill:has(input:disabled)")).toMatch(
+      /cursor: not-allowed;[\s\S]*?opacity: 0\.7;/,
+    );
+  });
+});
+
+describe("the pill components render bare markup and the copies stay gone", () => {
+  test("PillToggle: a label.pill still wraps a native checkbox", () => {
+    // The item cannot be satisfied by dropping the pill chrome instead.
+    expect(pillToggle).toMatch(/<label class="pill" class:on=/);
+    expect(pillToggle).toMatch(/type="checkbox"/);
+    // PillToggle carries the disabled prop the copies implemented.
+    expect(pillToggle).toMatch(/disabled\?: boolean/);
+  });
+
   test("PillRadio: a label.pill still wraps a native radio", () => {
-    // The item cannot be satisfied by dropping the pill chrome instead, and
-    // the label wrapper is what keeps the control keyboard-reachable.
     expect(pillRadio).toMatch(/<label class="pill" class:on=/);
     expect(pillRadio).toMatch(/type="radio"/);
+    expect(pillRadio).not.toMatch(/type="checkbox"/);
+  });
+
+  test("the former copies declare no pill CSS of their own", () => {
+    for (const [name, source] of [
+      ["PillToggle", pillToggle],
+      ["PillRadio", pillRadio],
+      ["ReportsControl", reportsControl],
+      ["SemanticControl", semanticControl],
+    ] as const) {
+      expect(source, `${name} must not redeclare .pill`).not.toMatch(/\.pill \{/);
+    }
+  });
+
+  test("the workspace toggles are PillToggle call sites", () => {
+    expect(reportsControl).toMatch(/<PillToggle/);
+    expect(semanticControl).toMatch(/<PillToggle/);
   });
 });

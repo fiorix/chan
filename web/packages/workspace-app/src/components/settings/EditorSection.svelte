@@ -1,9 +1,9 @@
 <script lang="ts">
-  // Editor settings: the editor-prefs slice for text editing behaviour.
-  // The date format is a plain select; the page-width slider debounces
-  // so a drag does not fire a PATCH per tick.
+  // Editor settings: everything that skins or shapes the editor
+  // surface - its theme, density, font size, page width, date format
+  // and save behaviour, plus its Hybrid body-theme override.
 
-  import type { Preferences } from "../../api/types";
+  import type { EditorTheme, LineSpacing, Preferences } from "../../api/types";
   import type { CommitFn } from "./commit";
   import { DATE_FORMATS } from "../../editor/dateFormats";
   import {
@@ -13,8 +13,10 @@
   } from "../../state/pageWidth.svelte";
   import SettingField from "./SettingField.svelte";
   import PillToggle from "./PillToggle.svelte";
+  import PillRadio from "./PillRadio.svelte";
   import SliderField from "./SliderField.svelte";
   import NumberField from "./NumberField.svelte";
+  import SurfaceThemeField from "./SurfaceThemeField.svelte";
   import {
     applyEditorFontSize,
     EDITOR_FONT_SIZE_MAX,
@@ -23,6 +25,16 @@
   } from "../../state/editorTheme";
 
   let { prefs, commit }: { prefs: Preferences; commit: CommitFn } = $props();
+
+  const EDITOR_THEMES = [
+    { value: "github", label: "GitHub" },
+    { value: "google_docs", label: "Google Docs" },
+    { value: "word", label: "Microsoft Word" },
+  ] as const;
+  const SPACING = [
+    { value: "standard", label: "Standard" },
+    { value: "compact", label: "Compact" },
+  ] as const;
 
   function ratioToPct(r: number | undefined): number {
     const clamped = Math.min(1, Math.max(0.25, r ?? 0.8));
@@ -47,6 +59,32 @@
     commit((p) => ({ ...p, editor_font_size: next }));
   }
 </script>
+
+<SettingField
+  label="Editor theme"
+  hint="Typography and chrome of the markdown editor only."
+>
+  <PillRadio
+    name="settings-editor-theme"
+    ariaLabel="Editor theme"
+    value={prefs.editor_theme}
+    options={EDITOR_THEMES}
+    onselect={(v) => commit((p) => ({ ...p, editor_theme: v as EditorTheme }))}
+  />
+</SettingField>
+
+<SettingField
+  label="Line spacing"
+  hint="Reading density for paragraphs and lists in the editor."
+>
+  <PillRadio
+    name="settings-line-spacing"
+    ariaLabel="Line spacing"
+    value={prefs.line_spacing}
+    options={SPACING}
+    onselect={(v) => commit((p) => ({ ...p, line_spacing: v as LineSpacing }))}
+  />
+</SettingField>
 
 <SettingField
   label="Editor font size"
@@ -113,17 +151,7 @@
   />
 </SettingField>
 
-<SettingField
-  label="Empty-pane carousel"
-  hint="Auto-rotate the welcome carousel shown in an empty single pane."
->
-  <PillToggle
-    label="Auto-rotate"
-    checked={prefs.empty_pane_carousel_cycling ?? true}
-    ontoggle={(on) =>
-      commit((p) => ({ ...p, empty_pane_carousel_cycling: on }))}
-  />
-</SettingField>
+<SurfaceThemeField kind="editor" {prefs} {commit} />
 
 <style>
   /* The number input lives inside NumberField now, so the width

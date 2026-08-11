@@ -3,7 +3,12 @@
   // are spawn-time, so a change applies to newly spawned terminals. The
   // scrollback slider and the free-text TERM field debounce their writes.
 
-  import type { Preferences, TerminalFontChoice } from "../../api/types";
+  import type {
+    Preferences,
+    TerminalContrast,
+    TerminalCustomColors,
+    TerminalFontChoice,
+  } from "../../api/types";
   import { DEFAULT_SECRET_MASK_SUFFIXES } from "../../terminal/secretMasking";
   import {
     SCROLLBACK_MB_MIN,
@@ -14,13 +19,17 @@
     TERMINAL_FONT_SIZE_MIN,
     TERMINAL_FONT_SIZE_MAX,
   } from "../../terminal/fontSize";
+  import { readStandardTerminalColors } from "../../state/paneColor";
   import type { CommitFn } from "./commit";
   import SettingField from "./SettingField.svelte";
   import PillToggle from "./PillToggle.svelte";
+  import PillRadio from "./PillRadio.svelte";
   import SliderField from "./SliderField.svelte";
   import TextField from "./TextField.svelte";
   import NumberField from "./NumberField.svelte";
   import ChipList from "./ChipList.svelte";
+  import ColorField from "./ColorField.svelte";
+  import SurfaceThemeField from "./SurfaceThemeField.svelte";
 
   let { prefs, commit }: { prefs: Preferences; commit: CommitFn } = $props();
 
@@ -46,6 +55,100 @@
   function selectFont(next: TerminalFontChoice): void {
     if (next === currentFont) return;
     commit((p) => ({ ...p, terminal: { ...p.terminal, font: next } }));
+  }
+
+  // ---- custom terminal colours ------------------------------------------
+  // The colour block is atomic: the toggle swaps the whole
+  // `terminal_colors` composite, and each colour commit replaces the
+  // payload with one field changed.
+  const TERMINAL_CONTRAST = [
+    { value: "auto", label: "Auto" },
+    { value: "dark", label: "Dark" },
+    { value: "light", label: "Light" },
+  ] as const;
+  const TERMINAL_COLOR_ROWS = [
+    { key: "background", label: "Background" },
+    { key: "foreground", label: "Foreground" },
+    { key: "cursor", label: "Cursor" },
+  ] as const;
+  type TerminalColorField = (typeof TERMINAL_COLOR_ROWS)[number]["key"];
+
+  const customTerminalColorsOn = $derived(prefs.terminal_colors?.mode === "custom");
+  const customTerminalColors = $derived(prefs.terminal_colors?.custom);
+
+  function standardTerminalTheme(current: Preferences): "dark" | "light" {
+    const surface = current.hybrid_surface_themes?.terminal;
+    if (surface) return surface;
+    if (current.theme === "dark" || current.theme === "light") return current.theme;
+    return document.documentElement.dataset.theme === "light" ? "light" : "dark";
+  }
+
+  function snapshotStandardTerminalColors(current: Preferences): TerminalCustomColors {
+    const theme = standardTerminalTheme(current);
+    const root = document.documentElement;
+    let source: Element = root;
+    let probe: HTMLDivElement | null = null;
+    if (root.dataset.theme !== theme) {
+      probe = document.createElement("div");
+      probe.dataset.theme = theme;
+      probe.style.cssText =
+        "position:fixed;visibility:hidden;pointer-events:none;width:0;height:0;";
+      document.body.appendChild(probe);
+      source = probe;
+    }
+    const colors = readStandardTerminalColors(source);
+    probe?.remove();
+    return { ...colors, contrast: "auto" };
+  }
+
+  function toggleCustomTerminalColors(on: boolean): void {
+    commit((p) => ({
+      ...p,
+      terminal_colors: on
+        ? {
+            mode: "custom",
+            custom: p.terminal_colors?.custom ?? snapshotStandardTerminalColors(p),
+          }
+        : {
+            mode: "standard",
+            ...(p.terminal_colors?.custom ? { custom: p.terminal_colors.custom } : {}),
+          },
+    }));
+  }
+
+  function commitCustomTerminalColors(
+    update: (custom: TerminalCustomColors) => TerminalCustomColors,
+  ): void {
+    commit((p) => {
+      const current = p.terminal_colors?.custom;
+      if (!current) return p;
+      return {
+        ...p,
+        terminal_colors: { mode: "custom", custom: update({ ...current }) },
+      };
+    });
+  }
+
+  /// Write one normalized hex (from ColorField) into the custom payload.
+  function commitTerminalColor(field: TerminalColorField, hex: string): void {
+    commitCustomTerminalColors((custom) => ({ ...custom, [field]: hex }));
+  }
+
+  function setTerminalContrast(contrast: string): void {
+    commitCustomTerminalColors((custom) => ({
+      ...custom,
+      contrast: contrast as TerminalContrast,
+    }));
+  }
+
+  function resetTerminalColors(): void {
+    commit((p) => ({
+      ...p,
+      terminal_colors: {
+        mode: "custom",
+        custom: snapshotStandardTerminalColors(p),
+      },
+    }));
   }
 </script>
 
@@ -158,6 +261,45 @@
   <span class="value">px</span>
 </SettingField>
 
+<SettingField
+  label="Custom terminal colours"
+  hint="Override terminal background, foreground, and cursor colours. The terminal's standard Inherit, Light, or Dark choice remains underneath."
+>
+  <PillToggle
+    label="Custom terminal colours"
+    checked={customTerminalColorsOn}
+    ontoggle={toggleCustomTerminalColors}
+  />
+</SettingField>
+
+{#if customTerminalColorsOn && customTerminalColors}
+  <div class="terminal-colours">
+    {#each TERMINAL_COLOR_ROWS as row (row.key)}
+      <ColorField
+        id={`terminal-colour-${row.key}`}
+        label={row.label}
+        value={customTerminalColors[row.key]}
+        oncommit={(hex) => hex !== null && commitTerminalColor(row.key, hex)}
+      />
+    {/each}
+    <div class="terminal-contrast-row">
+      <span>ANSI contrast</span>
+      <PillRadio
+        name="settings-terminal-contrast"
+        ariaLabel="Terminal ANSI contrast"
+        value={customTerminalColors.contrast}
+        options={TERMINAL_CONTRAST}
+        onselect={setTerminalContrast}
+      />
+    </div>
+    <button type="button" class="reset-terminal-colours" onclick={resetTerminalColors}>
+      Reset to current standard
+    </button>
+  </div>
+{/if}
+
+<SurfaceThemeField kind="terminal" {prefs} {commit} />
+
 <style>
   .value {
     color: var(--text-secondary);
@@ -175,5 +317,35 @@
     cursor: pointer;
     color: var(--text-secondary);
     font-size: 13px;
+  }
+  .terminal-colours {
+    display: grid;
+    gap: 10px;
+    padding: 12px 0 16px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  }
+  .terminal-contrast-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .terminal-contrast-row > span {
+    width: 8em;
+    color: var(--text);
+    font-size: 13px;
+  }
+  .reset-terminal-colours {
+    justify-self: start;
+    padding: 5px 10px;
+    border: 1px solid var(--btn-border);
+    border-radius: 4px;
+    background: var(--btn-bg);
+    color: var(--text);
+    cursor: pointer;
+    font: inherit;
+  }
+  .reset-terminal-colours:hover {
+    border-color: var(--btn-hover);
   }
 </style>

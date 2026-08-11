@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import source from "./HybridEditorConfig.svelte?raw";
 import shell from "./HybridSurfaceConfigShell.svelte?raw";
-import appearanceSource from "./settings/AppearanceSection.svelte?raw";
+import surfaceThemeFieldSource from "./settings/SurfaceThemeField.svelte?raw";
 import editorSource from "./settings/EditorSection.svelte?raw";
 
 describe("HybridEditorConfig back card", () => {
@@ -28,11 +28,12 @@ describe("HybridEditorConfig back card", () => {
 });
 
 describe("Settings owns editor controls", () => {
-  test("Appearance owns editor theme, line spacing, and surface body theme", () => {
-    expect(appearanceSource).toMatch(/name="settings-editor-theme"/);
-    expect(appearanceSource).toMatch(/name="settings-line-spacing"/);
-    expect(appearanceSource).toMatch(/setHybridSurfaceTheme\(/);
-    expect(appearanceSource).toMatch(/clearHybridSurfaceTheme\(/);
+  test("Editor section owns editor theme, line spacing, and surface body theme", () => {
+    expect(editorSource).toMatch(/name="settings-editor-theme"/);
+    expect(editorSource).toMatch(/name="settings-line-spacing"/);
+    expect(editorSource).toMatch(/<SurfaceThemeField kind="editor"/);
+    expect(surfaceThemeFieldSource).toMatch(/setHybridSurfaceTheme\(/);
+    expect(surfaceThemeFieldSource).toMatch(/clearHybridSurfaceTheme\(/);
   });
 
   test("Editor section owns date format and strip-on-save", () => {

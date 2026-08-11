@@ -320,7 +320,7 @@ export type Preferences = {
   /// text buffers to disk.
   strip_trailing_whitespace_on_save: boolean;
   /// Search indexer resource profile. Surfaced in Settings ->
-  /// Files & search; also included in /api/config so CLI/server
+  /// Search; also included in /api/config so CLI/server
   /// config changes remain visible to clients.
   search_aggression: SearchAggression;
   /// Effective transfer ceiling reported by the server. Read-only and absent

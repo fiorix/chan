@@ -27,7 +27,7 @@ describe("HybridFileBrowserConfig back card", () => {
 
 describe("Settings owns excluded directories", () => {
   test("This workspace tab carries the GET/PUT blocklist editor", () => {
-    expect(excludedDirs).toMatch(/<h3>Excluded directories<\/h3>/);
+    expect(excludedDirs).toMatch(/<SettingField[\s\S]{0,80}label="Excluded directories"/);
     expect(excludedDirs).toMatch(/api\.excludedDirs\(\)/);
     expect(excludedDirs).toMatch(/api\.setExcludedDirs\(/);
     expect(excludedDirs).toMatch(/list="settings-excluded-dir-suggestions"/);

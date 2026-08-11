@@ -81,6 +81,14 @@ function openSurface(): HTMLElement {
   return target;
 }
 
+function clickTab(target: HTMLElement, label: string): void {
+  const tab = [...target.querySelectorAll(".section-tab")].find(
+    (e) => e.textContent?.trim() === label,
+  ) as HTMLElement;
+  expect(tab, `section tab ${label}`).not.toBeNull();
+  tab.click();
+}
+
 beforeEach(() => {
   server = { revision: 1, preferences: basePrefs(), workspaces: [] };
   patches = [];
@@ -131,16 +139,18 @@ describe("settings surface render", () => {
     const tabs = [...target.querySelectorAll(".section-tab")].map((e) =>
       e.textContent?.trim(),
     );
-    expect(tabs).toContain("Appearance");
+    expect(tabs).toContain("Global");
     expect(tabs).toContain("Terminal");
+    expect(tabs).toContain("Graph");
+    expect(tabs).toContain("Dashboard");
     expect(tabs).toContain("Keyboard Shortcuts");
-    // Appearance is the default section; its editor-theme pills rendered,
+    // Global is the default section; its app-theme pills rendered,
     // which means the buffer loaded (not the loading/error state).
     expect(target.querySelector(".state")).toBeNull();
     const labels = [...target.querySelectorAll(".pill span")].map((e) =>
       e.textContent,
     );
-    expect(labels).toContain("GitHub");
+    expect(labels).toContain("System");
   });
 
   test("focuses itself on open, roves section focus, and pulses focus on close", async () => {
@@ -151,7 +161,7 @@ describe("settings surface render", () => {
     expect(document.activeElement).toBe(settings);
 
     const first = target.querySelector<HTMLButtonElement>(".section-tab");
-    expect(first?.textContent?.trim()).toBe("Appearance");
+    expect(first?.textContent?.trim()).toBe("Global");
     first?.focus();
     first?.dispatchEvent(
       new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
@@ -173,6 +183,8 @@ describe("settings surface render", () => {
 
   test("changing a field PATCHes exactly that slice", async () => {
     const target = openSurface();
+    await flush();
+    clickTab(target, "Editor");
     await flush();
     const wordRadio = target.querySelector(
       'input[type="radio"][value="word"]',
@@ -224,7 +236,10 @@ describe("settings surface render", () => {
   test("the per-surface body theme sets then clears the override key", async () => {
     const target = openSurface();
     await flush();
-    // Appearance is the default section. Pin the editor body to Dark.
+    // The editor surface row lives in the Editor section. Pin the
+    // editor body to Dark.
+    clickTab(target, "Editor");
+    await flush();
     const darkRadio = target.querySelector(
       'input[name="settings-surface-theme-editor"][value="dark"]',
     ) as HTMLInputElement;
@@ -342,6 +357,8 @@ describe("settings surface render", () => {
 
   test("first custom activation snapshots standard colours atomically", async () => {
     const target = openSurface();
+    await flush();
+    clickTab(target, "Terminal");
     await flush();
     const customPill = [...target.querySelectorAll("label.pill")].find(
       (label) => label.textContent?.trim() === "Custom terminal colours",

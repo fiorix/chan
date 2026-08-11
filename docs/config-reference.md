@@ -16,8 +16,8 @@ The CLI serializes these under the canonical `server.*` namespace, so terminal f
 
 | Field | Type | Default | Reachability | Consumers |
 |-------|------|---------|--------------|-----------|
-| `attachments_dir` | `String` | `"attachments"` | `chan config get/set` + `PATCH /api/config` | `/api/attachments` route + SPA upload UI |
-| `search.aggression` | `SearchAggression` | `Balanced` | `chan config get/set` + `PATCH /api/config` | search route default mode |
+| `attachments_dir` | `String` | `"attachments"` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → File browser → attachments folder (pasting happens in the editor and uploading in the file browser; the field is filed under File browser); `/api/attachments` route + SPA upload UI |
+| `search.aggression` | `SearchAggression` | `Balanced` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Search → search indexing profile; search route default mode |
 | `terminal.idle_timeout_secs` | `u64` | `1800` (30 min) | `chan config get/set` + `PATCH /api/config` | terminal registry idle prune |
 | `terminal.session_cap` | `usize` | `32` | `chan config get/set` + `PATCH /api/config` | terminal registry create-gate |
 | `terminal.ring_bytes` | `usize` | `2 << 20` (2 MB) | `chan config get/set` + `PATCH /api/config` | terminal ring buffer alloc |
@@ -106,14 +106,14 @@ The CLI prefixes every serialized leaf below with `editor.`. Every scalar leaf i
 
 | Field | Type | Reachability | Consumers |
 |-------|------|--------------|-----------|
-| `editor_theme` | `EditorTheme` | `chan config get/set` + `PATCH /api/config` | Settings → Appearance → theme selector |
+| `editor_theme` | `EditorTheme` | `chan config get/set` + `PATCH /api/config` | Settings → Editor → theme selector |
 | `editor_font_size` | `Option<u32>` | `chan config get/set` + `PATCH /api/config` + Settings | optional absolute editor body size, clamped `10..=32`; unset uses the active theme, while `N` sets body/source to `Npx`/`(N - 2)px` |
 | `terminal_colors.mode` | `TerminalColorMode` | `chan config get/set` + `PATCH /api/config` + Settings | `standard` uses the terminal surface's Inherit/Light/Dark choice; `custom` activates the complete custom payload |
 | `terminal_colors.custom.background` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | optional dormant custom payload; accepts `#rgb` or `#rrggbb` and persists lowercase `#rrggbb` |
 | `terminal_colors.custom.foreground` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | custom terminal foreground, validated with the complete object |
 | `terminal_colors.custom.cursor` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | custom terminal cursor, validated with the complete object |
 | `terminal_colors.custom.contrast` | `TerminalContrast` | `chan config get/set` + `PATCH /api/config` + Settings | `auto`, `dark`, or `light`; auto chooses the existing ANSI palette and chrome from WCAG background luminance at the fixed `0.179` threshold |
-| `theme` | `ThemeChoice` | `chan config get/set` + `PATCH /api/config` | Settings → Appearance |
+| `theme` | `ThemeChoice` | `chan config get/set` + `PATCH /api/config` | Settings → Global |
 | `pane_widths.inspector` | `u32` | `chan config get/set` + drag-resize | resize handle persistence |
 | `pane_widths.graph` | `u32` | `chan config get/set` + drag-resize | same |
 | `pane_widths.browser` | `u32` | `chan config get/set` + drag-resize | same |
@@ -124,7 +124,7 @@ The CLI prefixes every serialized leaf below with `editor.`. Every scalar leaf i
 | `line_spacing` | `LineSpacing` | `chan config get/set` + Settings | editor line-height |
 | `date_format` | `String` | `chan config get/set` + Settings | date rendering across SPA |
 | `strip_trailing_whitespace_on_save` | `bool` | `chan config get/set` + Settings | editor save hook |
-| `bubble_overlay_mode` | `BubbleOverlayMode` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Appearance → bubble overlay radio; overlay rendering |
+| `bubble_overlay_mode` | `BubbleOverlayMode` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Global → watcher bubbles radio; overlay rendering |
 | `hybrid_surface_themes.editor` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | optional Hybrid Editor body-theme override (`light` or `dark`) |
 | `hybrid_surface_themes.terminal` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | optional Terminal body-theme override |
 | `hybrid_surface_themes.browser` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | optional File Browser body-theme override |

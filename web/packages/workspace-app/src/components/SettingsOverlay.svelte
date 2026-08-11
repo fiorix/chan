@@ -8,17 +8,7 @@
   // change refreshes workspace.info.preferences), so every open window
   // stays in sync.
 
-  import {
-    FileCog,
-    FolderCog,
-    Keyboard,
-    Maximize2,
-    Minimize2,
-    Palette,
-    SlidersHorizontal,
-    SquareTerminal,
-    X,
-  } from "lucide-svelte";
+  import { Maximize2, Minimize2, X } from "lucide-svelte";
   import { tick } from "svelte";
   import type { Preferences, PreferencesPatch } from "../api/types";
   import { api } from "../api/client";
@@ -35,10 +25,17 @@
   import { DATE_FORMATS } from "../editor/dateFormats";
   import OverlayShell from "./OverlayShell.svelte";
   import type { CommitFn } from "./settings/commit";
-  import AppearanceSection from "./settings/AppearanceSection.svelte";
+  import {
+    SETTINGS_SECTIONS,
+    type SettingsSectionId,
+  } from "./settings/sections";
+  import GlobalSection from "./settings/GlobalSection.svelte";
   import EditorSection from "./settings/EditorSection.svelte";
   import TerminalSection from "./settings/TerminalSection.svelte";
-  import FilesSearchSection from "./settings/FilesSearchSection.svelte";
+  import BrowserSection from "./settings/BrowserSection.svelte";
+  import GraphSection from "./settings/GraphSection.svelte";
+  import DashboardSection from "./settings/DashboardSection.svelte";
+  import SearchSection from "./settings/SearchSection.svelte";
   // The per-OS shortcut-assignment grid is the Keymap lane's; this
   // surface owns only its placement in the section below.
   import KeymapSettings from "./KeymapSettings.svelte";
@@ -187,30 +184,24 @@
     });
   };
 
-  // Per-machine sections are always present. "This workspace" is per-workspace,
-  // so it is shown only when Settings is opened from a workspace context
-  // (workspace.info is null in a launcher / terminal-only window). That
-  // conditional presence keeps the per-machine surface device-global while
-  // giving the per-workspace controls a home scoped to an active workspace.
-  const ALL_SECTIONS = [
-    { id: "appearance", label: "Appearance", icon: Palette },
-    { id: "editor", label: "Editor", icon: SlidersHorizontal },
-    { id: "terminal", label: "Terminal", icon: SquareTerminal },
-    { id: "files", label: "Files & search", icon: FileCog },
-    { id: "shortcuts", label: "Keyboard Shortcuts", icon: Keyboard },
-    { id: "workspace", label: "This workspace", icon: FolderCog },
-  ] as const;
-  type SectionId = (typeof ALL_SECTIONS)[number]["id"];
+  // The rail is derived from the command registry's category set (see
+  // settings/sections.ts): one section per surface, plus the Keyboard
+  // Shortcuts meta section and the conditional per-workspace tab. "This
+  // workspace" is shown only when Settings is opened from a workspace
+  // context (workspace.info is null in a launcher / terminal-only
+  // window). That conditional presence keeps the per-machine surface
+  // device-global while giving the per-workspace controls a home scoped
+  // to an active workspace.
   const sections = $derived(
-    ALL_SECTIONS.filter((s) => s.id !== "workspace" || workspace.info !== null),
+    SETTINGS_SECTIONS.filter((s) => s.id !== "workspace" || workspace.info !== null),
   );
-  let activeSection = $state<SectionId>("appearance");
+  let activeSection = $state<SettingsSectionId>("global");
   // If the workspace tab is active but the workspace goes away (or Settings is
   // reopened in a terminal-only window), fall back so the content pane never
   // points at a hidden tab. Converges: the reset makes the guard false.
   $effect(() => {
     if (activeSection === "workspace" && workspace.info === null) {
-      activeSection = "appearance";
+      activeSection = "global";
     }
   });
 
@@ -322,14 +313,20 @@
           </div>
         {:else}
           <div class="section-scroll">
-            {#if activeSection === "appearance"}
-              <AppearanceSection prefs={editing} {commit} />
+            {#if activeSection === "global"}
+              <GlobalSection prefs={editing} {commit} />
             {:else if activeSection === "editor"}
               <EditorSection prefs={editing} {commit} />
             {:else if activeSection === "terminal"}
               <TerminalSection prefs={editing} {commit} />
-            {:else if activeSection === "files"}
-              <FilesSearchSection prefs={editing} {commit} />
+            {:else if activeSection === "browser"}
+              <BrowserSection prefs={editing} {commit} />
+            {:else if activeSection === "graph"}
+              <GraphSection prefs={editing} {commit} />
+            {:else if activeSection === "dashboard"}
+              <DashboardSection prefs={editing} {commit} />
+            {:else if activeSection === "search"}
+              <SearchSection prefs={editing} {commit} />
             {:else if activeSection === "workspace"}
               <WorkspaceSection />
             {/if}

@@ -3,7 +3,7 @@ import app from "../App.svelte?raw";
 import sourceEditor from "../editor/Source.svelte?raw";
 import wysiwygEditor from "../editor/Wysiwyg.svelte?raw";
 import shell from "./HybridSurfaceConfigShell.svelte?raw";
-import appearance from "./settings/AppearanceSection.svelte?raw";
+import surfaceThemeField from "./settings/SurfaceThemeField.svelte?raw";
 import pane from "./Pane.svelte?raw";
 import fileEditor from "./FileEditorTab.svelte?raw";
 import terminal from "./TerminalTab.svelte?raw";
@@ -49,10 +49,10 @@ describe("Track C: Hybrid surface body themes", () => {
     expect(wysiwygEditor).toContain('effectiveHybridSurfaceTheme(surface)');
   });
 
-  test("Settings Appearance owns per-surface switches", () => {
-    expect(appearance).toContain("setHybridSurfaceTheme(kind");
-    expect(appearance).toContain("clearHybridSurfaceTheme(kind)");
-    expect(appearance).toContain('name={`settings-surface-theme-${row.kind}`}');
+  test("Settings owns one per-surface switch, one section per surface", () => {
+    expect(surfaceThemeField).toContain("setHybridSurfaceTheme(kind");
+    expect(surfaceThemeField).toContain("clearHybridSurfaceTheme(kind)");
+    expect(surfaceThemeField).toContain('name={`settings-surface-theme-${kind}`}');
   });
 
   test("legacy config shell owns only footer OK", () => {
