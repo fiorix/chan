@@ -140,9 +140,38 @@ crates/chan-server/src/routes/search.rs	search_content	2	!readiness.is_ready()
 
 Run against the tree at the time of writing, those three report `3 good`, including the deliberate two that rules out an implicit "exactly once". The checker was also shown red once by construction in each failure mode it claims to detect: a drifted count, a needle that no longer resolves, a file that does not exist, a `DEAD` record that started matching again, and a run with no records at all.
 
+## Where the check runs, ruled 2026-08-11
+
+Open question 2 is settled. The check is a **`Makefile` target that runs on every gate**, including for external contributors who never touch `team/`. The alternative, a release-skill or close-procedure step, was rejected on the ground the item already records: a step that only runs when someone follows a procedure is the failure mode this item was written about, since the practice had been derived three times and propagated zero.
+
+Measuring the candidate scopes before asking the remaining question corrected a number in this item, and the correction matters. The population counts above are of **positional** citations, roughly 300 in active scope. The count of records in the form the rule mandates is **3**, all in this file. At the time of the ruling exactly one file in the repository carried a ```` ```citations ```` block, and `team/roadmap/v0.89.0/`, `team/roadmap/` and `team/` all reported the identical `3 citation(s) in N file(s): 3 good`. So the governed-scope choice is invisible at the moment it is made and decides only the future, which is the opposite of what the counts above imply on a first reading.
+
+That measurement also surfaced an interaction between this ruling and the one still open, which is recorded here so it is not rediscovered later. The check **exits non-zero when it finds zero records**, deliberately, because zero failures over zero records examined is the shape that makes a broken gate read green. Wire that to every gate and govern only the active `vX.Y.Z/` directory, and the day a round closes and its items move to `../done/` the next round opens on an empty directory and the gate goes **red for everyone, including external contributors**, until someone writes the first citation record. Governing all of `team/roadmap/` avoids it without any additional cost, because `../done/` carries zero records and is inert to this check.
+
+## Caught in a live report, 2026-08-11
+
+Every citation defect this item cites was found by auditing items written earlier. This is the first one caught in a **live report**, and it is the case the check is actually for.
+
+@@Server was asked, read-only, whether the `/var/tmp/chan-<uid>` fallback introduced by `8a2987a8` is created with a safe mode and whether a symlink or foreign-owned path is detected. They answered with four content anchors, having been asked to cite by enclosing symbol rather than by line, and they did exactly that. Three resolved at the declared count. The fourth resolved **zero** times: it named `paths::ensure_workspace_metadata_dirs` inside `Library::register_workspace_with_name`, where the tree has the `_in` variant taking an already-resolved `chan_home`.
+
+Three properties make it worth recording rather than merely fixing.
+
+- **The report was careful and the citation still drifted.** The author followed the rule this item introduced. Anchoring on a symbol constrains where a reader looks; it does not verify that the quoted text is there.
+- **It reads as entirely plausible.** The needle names a function that genuinely exists, in a file that genuinely contains it, called by code that genuinely does what the sentence claims. Nothing about it looks wrong until something counts it.
+- **The imprecision was load-bearing in exactly one place.** The wrapper is where `config_dir()` and therefore the fallback selection live, so the corrected route changes which function resolves the fallback. The verdict survived the correction; the description of how the code reaches it did not.
+
+Cost to catch: one `grep -cF`. Run through the checker as submitted, the record set reports `4 citation(s) in 1 file(s): 3 good, 1 missing` and exits 1; with the needle corrected, `4 good` and exits 0. That is the fail-loudly property this item trades a line number for, observed on a fresh case under the conditions the rule will actually be used in.
+
+```citations
+crates/chan-workspace/src/library.rs	Library::register_workspace_with_name	1	paths::ensure_workspace_metadata_dirs_in(&self.inner.chan_home, &entry.metadata_key)?;
+crates/chan-workspace/src/paths.rs	home_unavailable_config_dir	1	"/var/tmp/chan-{}"
+```
+
 ## Still open
 
-Questions 2 and 3 are not settled and are the host's: where the check is invoked from, and which files the rule governs. The rule and the checker are written so that answer changes one line of wiring rather than the design. Nothing here is wired into a gate yet, because the item is explicit that defaulting it to CI would be deciding that question by omission.
+Question 3 is not settled and is the host's: which files the rule governs. Two surveys on it went unanswered, so it is parked rather than defaulted. The rule and the checker are written so that answer changes **one line of wiring**, the target's path argument, rather than the design, and that has held: the target is otherwise ready.
+
+Nothing is wired into a gate yet. Defaulting the governed set while the question is outstanding would decide it by omission, which is the failure this item was written to name, and doing it inside this item specifically would be the worst available place to do it.
 
 ## Acceptance
 
