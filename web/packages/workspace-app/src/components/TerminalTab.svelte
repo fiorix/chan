@@ -155,6 +155,7 @@
   import {
     refreshTerminalRows as refreshTerminalRowsImpl,
     shouldUseWebglRenderer,
+    webglRendererOverride,
   } from "../terminal/renderer";
   import {
     createTrailingFitScheduler,
@@ -784,7 +785,15 @@
     // with the lineHeight gap the WebGL customGlyphs path otherwise fills).
     // The env-level WEBKIT_DISABLE_DMABUF_RENDERER fix in linux_gui_stack.rs
     // is about webview creation, not this per-layer present stall.
-    if (!shouldUseWebglRenderer(isTauriDesktop(), currentOS())) return;
+    if (
+      !shouldUseWebglRenderer(
+        isTauriDesktop(),
+        currentOS(),
+        webglRendererOverride(),
+      )
+    ) {
+      return;
+    }
     try {
       const webgl = new WebglAddon();
       webgl.onContextLoss(() => {

@@ -47,6 +47,10 @@ mod linux {
     /// Loop guard, set across the re-exec so the child does not re-exec again.
     const APPLIED_ENV: &str = "CHAN_LINUX_SYSTEM_GUI_APPLIED";
 
+    /// dma-buf policy knob: `auto` (default, disable only for the NVIDIA
+    /// proprietary driver), `on` (never disable), `off` (always disable).
+    const DMABUF_ENV: &str = "CHAN_LINUX_DMABUF";
+
     // The sonames chan-desktop links. BOTH must be present on the host before
     // we shadow the bundle: a partial shadow (host libgtk against a bundled
     // libwebkit, or the reverse) is worse than either stack on its own.
@@ -172,14 +176,38 @@ mod linux {
     /// host-stack re-exec above is its actual fix. A user who needs the old
     /// behavior sets the variable themselves; the value is never clobbered.
     ///
+    /// `CHAN_LINUX_DMABUF` overrides the detection: `on` keeps the
+    /// accelerated path whatever the driver (the knob for an NVIDIA user who
+    /// wants to try WebGL), `off` restores the old unconditional disable, and
+    /// anything else is `auto`.
+    ///
+    /// A knob is needed because WebKit reads its own variable by PRESENCE,
+    /// not value: measured, `WEBKIT_DISABLE_DMABUF_RENDERER=0` disables
+    /// dma-buf exactly as `=1` does, so "set it yourself" can only ever turn
+    /// the accelerated path OFF. The only way to ask for it back is for chan
+    /// not to set the variable at all, which is a decision only chan can make.
+    ///
     /// WEBKIT_DISABLE_COMPOSITING_MODE is left alone on purpose; forcing it
     /// off degrades rendering on healthy hosts.
     fn set_webkit_env_defaults() {
         if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some() {
             return;
         }
-        if nvidia_proprietary_driver(Path::new("/")) {
+        if dma_buf_disabled(&std::env::var(DMABUF_ENV).unwrap_or_default(), || {
+            nvidia_proprietary_driver(Path::new("/"))
+        }) {
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+    }
+
+    /// Whether to disable dma-buf, given the policy value and a driver probe
+    /// the caller supplies. The probe is lazy so `on` and `off` never touch
+    /// the filesystem.
+    fn dma_buf_disabled(policy: &str, nvidia: impl FnOnce() -> bool) -> bool {
+        match policy.trim() {
+            "on" => false,
+            "off" => true,
+            _ => nvidia(),
         }
     }
 
@@ -212,7 +240,7 @@ mod linux {
 
     #[cfg(test)]
     mod tests {
-        use super::{nvidia_proprietary_driver, NVIDIA_DRIVER_MARKERS};
+        use super::{dma_buf_disabled, nvidia_proprietary_driver, NVIDIA_DRIVER_MARKERS};
         use std::fs;
 
         fn root_with(marker: Option<&str>) -> tempfile::TempDir {
@@ -243,6 +271,24 @@ mod linux {
                     nvidia_proprietary_driver(root.path()),
                     "{marker} should select the workaround"
                 );
+            }
+        }
+
+        #[test]
+        fn the_policy_knob_overrides_the_driver_in_both_directions() {
+            // `on` is the hatch this exists for: WebKit reads its own
+            // variable by presence, so a user cannot ask for the accelerated
+            // path by setting it, only by chan declining to.
+            assert!(!dma_buf_disabled("on", || true));
+            assert!(dma_buf_disabled("off", || false));
+            assert!(dma_buf_disabled(" off ", || false));
+        }
+
+        #[test]
+        fn an_absent_or_unknown_policy_defers_to_the_driver() {
+            for policy in ["", "auto", "yes", "1"] {
+                assert!(dma_buf_disabled(policy, || true), "{policy:?} on nvidia");
+                assert!(!dma_buf_disabled(policy, || false), "{policy:?} elsewhere");
             }
         }
 
