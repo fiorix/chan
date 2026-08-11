@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use portable_pty::{native_pty_system, PtySize};
+use portable_pty::{native_pty_system, Child, PtySize};
 use rand::RngCore;
 #[cfg(target_os = "linux")]
 use serde::Deserialize;
@@ -750,18 +750,14 @@ pub enum TerminalExit {
 
 impl TerminalExit {
     fn from_status(status: &portable_pty::ExitStatus) -> Self {
-        let rendered = status.to_string();
-        if let Some(signal) = rendered.strip_prefix("Terminated by ") {
+        if let Some(signal) = status.signal() {
             return Self::Signal {
                 signal: signal.to_string(),
             };
         }
-        if rendered == "Success" || rendered.starts_with("Exited with code ") {
-            return Self::Code {
-                code: status.exit_code(),
-            };
+        Self::Code {
+            code: status.exit_code(),
         }
-        Self::Unknown
     }
 
     /// The exit code for the terminal `/ws` exit frame, `None` when there is
@@ -3133,7 +3129,6 @@ impl Session {
 
         let mut reader = pair.master.try_clone_reader()?;
         let mut writer = pair.master.take_writer()?;
-        let mut killer = child.clone_killer();
         let (command_tx, command_rx) = std::sync::mpsc::channel::<PtyCommand>();
         let (output_tx, _) = broadcast::channel::<SessionEvent>(BROADCAST_CAP);
         let (write_queue, last_deliver_at, awaiting_gen) = fresh_queue_state();
@@ -3245,7 +3240,7 @@ impl Session {
                                     session.broadcast(SessionEvent::Error(format!(
                                         "terminal write failed: {e}"
                                     )));
-                                    let _ = killer.kill();
+                                    terminate_child(child.as_mut());
                                     return;
                                 }
                             }
@@ -3259,7 +3254,7 @@ impl Session {
                                     session.broadcast(SessionEvent::Error(format!(
                                         "terminal write failed: {e}"
                                     )));
-                                    let _ = killer.kill();
+                                    terminate_child(child.as_mut());
                                     return;
                                 }
                             }
@@ -3290,7 +3285,7 @@ impl Session {
                                 }
                             }
                             PtyCommand::Kill => {
-                                let _ = killer.kill();
+                                terminate_child(child.as_mut());
                                 return;
                             }
                         }
@@ -4408,6 +4403,14 @@ enum PtyCommand {
     Kill,
 }
 
+/// Terminate and reap a child through the owning handle. A cloned killer can
+/// signal from another thread, but only the owner can consume the exit status
+/// and release the process-table entry.
+fn terminate_child(child: &mut dyn Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Write one input plan to the PTY, flushing each part and pausing `gap`
 /// between parts so a following part cannot be coalesced into its predecessor.
 /// Shared by the fresh and fdstore-restored controllers so their delivery
@@ -4450,6 +4453,68 @@ mod tests {
     use super::*;
     use chan_shell::{SubmitAgent, SubmitTemplateSource};
     use std::process::Command;
+
+    #[derive(Debug)]
+    struct RecordingChild {
+        calls: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[derive(Debug)]
+    struct RecordingKiller(Arc<Mutex<Vec<&'static str>>>);
+
+    impl portable_pty::ChildKiller for RecordingKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.0.lock().unwrap().push("clone-kill");
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(Self(self.0.clone()))
+        }
+    }
+
+    impl portable_pty::ChildKiller for RecordingChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.calls.lock().unwrap().push("kill");
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(RecordingKiller(self.calls.clone()))
+        }
+    }
+
+    impl portable_pty::Child for RecordingChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(None)
+        }
+
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            self.calls.lock().unwrap().push("wait");
+            Ok(portable_pty::ExitStatus::with_exit_code(0))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            Some(1)
+        }
+
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    #[test]
+    fn termination_kills_then_waits_on_the_owning_child() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut child = RecordingChild {
+            calls: calls.clone(),
+        };
+
+        terminate_child(&mut child);
+
+        assert_eq!(*calls.lock().unwrap(), ["kill", "wait"]);
+    }
 
     fn built_in_submit(agent: SubmitAgent) -> ResolvedSubmit {
         let template = match agent {
@@ -4535,6 +4600,56 @@ mod tests {
             cols: 80,
             pixel_width: 0,
             pixel_height: 0,
+        }
+    }
+
+    #[cfg(unix)]
+    fn process_exists(pid: u32) -> bool {
+        let Some(pid) = i32::try_from(pid)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+        else {
+            return false;
+        };
+        rustix::process::test_kill_process(pid).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn process_exists(pid: u32) -> bool {
+        let output = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output()
+            .expect("run tasklist");
+        String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
+    }
+
+    #[cfg(any(unix, windows))]
+    fn wait_for_process_to_disappear(pid: u32) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while process_exists(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child pid {pid} still exists after termination"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    fn wait_for_output(handle: &mut AttachHandle, needle: &[u8]) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if handle.rx.try_recv().is_ok_and(|event| {
+                matches!(event, SessionEvent::Output(data) if contains_subslice(&data, needle))
+            }) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "terminal never emitted {:?}",
+                String::from_utf8_lossy(needle)
+            );
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -6663,6 +6778,72 @@ mod tests {
         assert_eq!(registry.close_matching(Some("@@Nobody"), None), 0);
         assert_eq!(registry.len(), 1);
         registry.close_all(CloseReason::Shutdown);
+    }
+
+    #[cfg(any(unix, windows))]
+    fn assert_close_reaps_child() {
+        let registry = Registry::new(test_config(4096, 8, 60));
+        let handle = registry.create(opts_with_window("win-close-reap")).unwrap();
+        let id = handle.id().to_string();
+        let pid = registry.live_child_pids()[0];
+
+        assert!(registry.close(&id, CloseReason::Explicit));
+        wait_for_process_to_disappear(pid);
+    }
+
+    #[cfg(any(unix, windows))]
+    fn assert_restart_reaps_old_child() {
+        let registry = Registry::new(test_config(4096, 8, 60));
+        let handle = registry
+            .create(opts_with_window("win-restart-reap"))
+            .unwrap();
+        let id = handle.id().to_string();
+        let old_pid = registry.live_child_pids()[0];
+
+        assert!(registry.restart(&id, RestartOverrides::default()).unwrap());
+        wait_for_process_to_disappear(old_pid);
+        registry.close_all(CloseReason::Shutdown);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn close_reaps_child_pid_on_unix() {
+        assert_close_reaps_child();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_reaps_old_child_pid_on_unix() {
+        assert_restart_reaps_old_child();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn close_forces_and_reaps_hup_immune_child() {
+        let registry = Registry::new(test_config(4096, 8, 60));
+        let mut opts = opts_with_window("win-hup-immune");
+        opts.command = Some(
+            "trap '' HUP TERM; printf CHAN_HUP_IMMUNE_READY; while :; do sleep 1; done".into(),
+        );
+        let mut handle = registry.create(opts).unwrap();
+        let id = handle.id().to_string();
+        let pid = registry.live_child_pids()[0];
+        wait_for_output(&mut handle, b"CHAN_HUP_IMMUNE_READY");
+
+        assert!(registry.close(&id, CloseReason::Explicit));
+        wait_for_process_to_disappear(pid);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_close_reaps_child_process() {
+        assert_close_reaps_child();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_restart_reaps_old_child_process() {
+        assert_restart_reaps_old_child();
     }
 
     #[test]

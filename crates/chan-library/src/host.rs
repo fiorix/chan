@@ -109,31 +109,20 @@ pub enum WorkspaceLifecycleOutcome {
 pub struct TerminalDrainOutcome {
     /// Sessions drained from the registries.
     pub closed: usize,
-    /// Child processes confirmed dead (ESRCH or zombie) within the wait.
+    /// Child processes whose pid disappeared within the wait.
     pub dead: usize,
     /// Child pids still running at the deadline.
     pub lingering: Vec<u32>,
 }
 
-/// Whether `pid` is still RUNNING: a zombie (dead awaiting reap, holding no
-/// fds and executing nothing) counts as gone. The session Kill path returns
-/// its controller thread before reaping, so SIGKILLed children sit briefly
-/// in Z state.
+/// Whether `pid` still has a process-table entry. Drain completion requires the
+/// owning controller to reap the child, not merely leave a zombie behind.
 #[cfg(target_os = "linux")]
 fn child_process_running(pid: u32) -> bool {
-    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-        return false;
-    };
-    // The state field follows the comm, which may itself contain spaces or
-    // parens: parse after the LAST ')'.
-    let Some(after_comm) = stat.rsplit_once(')').map(|(_, rest)| rest) else {
-        return false;
-    };
-    !matches!(after_comm.trim_start().chars().next(), Some('Z') | None)
+    std::fs::metadata(format!("/proc/{pid}")).is_ok()
 }
 
-/// Non-Linux Unix best effort: signal-0 liveness (no /proc; zombies are
-/// not distinguishable, and the systemd drain path never runs here).
+/// Non-Linux Unix best effort: signal-0 observes zombies until their parent waits.
 #[cfg(all(unix, not(target_os = "linux")))]
 fn child_process_running(pid: u32) -> bool {
     let Ok(raw_pid) = i32::try_from(pid) else {
