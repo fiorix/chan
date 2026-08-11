@@ -77,12 +77,32 @@ An isolated-run count certifies nothing here. The project has already measured w
 - Each repaired assertion is shown red once by construction and restored, at `watch.rs:2167` and at `watch.rs:2057`. One repair that leaves the other line alone does not close this.
 - The vacuous direction is proven, not only the red one: with its injection removed, `gitignore_only_subtree_is_never_registered_or_dispatched` must fail rather than pass. Static reading says it passes today under that mutation, because a registration that succeeds and a registration that never happens both leave the state `Healthy`. That inference has not been run and the mutation is the test of it.
 
+## Measured, 2026-08-11: the slot is the mechanism
+
+The discriminating experiment ran and it is decisive. The section below is preserved as the record of what was open at registration; this is what closed three of its four bullets.
+
+The rig is the playbook's, and the cap was verified from the **host** at `/sys/fs/cgroup/machine.slice/sdme@v089-gate.service/cpu.max`, reading `100000 100000`. Inside the container `/sys/fs/cgroup/cpu.max` reads the misleading `max 100000`, exactly as the playbook warns, so the reading taken from inside would have been worthless. The instrument was proved red on unmodified source first, with both target assertions failing together on `left: Healthy`, `right: Degraded`.
+
+| arm | runs | lifecycle red | policy red |
+| --- | --- | --- | --- |
+| canonical parallel baseline | 20 | 14 | 19 |
+| one injecting test per libtest process | 20 | 0 | 0 |
+
+Forcing the injecting tests apart takes both assertions from a majority-red rate to zero. **The process-global slot clobber is the active mechanism on this rig.**
+
+The claim is bounded exactly as it should be, and this wording is the finding rather than a hedge: this does not establish that the 250ms sample race is impossible. It establishes that the observed capped reds vanish when the tests cannot share the slot. The race remains provable from source as a thing that could happen and is not what was happening here.
+
+That matters for the repair, because the draft this item came from named only the retry race and proposed anchoring on an observation rather than a sample. That repair fixes the race and **leaves the slot exactly as it is**, so it would have left the measured mechanism in place while looking like a fix. This is the acceptance line about naming the mechanism before choosing a repair, paying for itself.
+
+It also supplies the sibling rate the closed nine-item inventory never attached: `policy_change_during_retry_resets_stale_registrations` is 19 red in 20 under the cap, which is the strongest signal of the pair.
+
 ## Not established
 
-- Which of the two mechanisms fired. Both are provable from source as possible; neither has been shown to be the one, and no repair should be chosen before that is settled.
-- The true rate. One red in twelve is a floor measured under uncontrolled load, and no rate has been taken under the cap.
+- ~~Which of the two mechanisms fired.~~ Settled above by measurement: the slot clobber. The 250ms race is not ruled impossible, only ruled out as the cause of the observed reds.
+- ~~The true rate.~~ Taken under the cap on 2026-08-11: 14 red in 20 for this test and 19 in 20 for the sibling. The original one-in-twelve stands as what it was, a floor measured under uncontrolled peer load, and the gap between the two numbers is the argument for the rig rather than a contradiction.
 - Whether a clobber has ever actually happened. The window is provable from source; nothing here observed one, and the vacuous-pass consequence is therefore a demonstrated possibility rather than a demonstrated event.
-- Any rate for the sibling at `watch.rs:2057`. The closed inventory records it as surfaced by the rig on an unmodified tree but attaches no count to it, unlike items 7 and 8 in that same list.
+- ~~Any rate for the sibling at `watch.rs:2057`.~~ Now 19 red in 20 under the cap, which makes it the louder of the two rather than the quieter one the closed inventory implied by attaching no count to it.
+- **Still open: whether a clobber has ever happened in a real gate run**, as opposed to under a deliberate 1-CPU cap. The window is provable from source and the mechanism is now measured, but every observation of it is from an instrument built to provoke it.
 
 ## Rough size
 
