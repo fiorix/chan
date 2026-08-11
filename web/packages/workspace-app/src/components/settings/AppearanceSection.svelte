@@ -28,10 +28,8 @@
   import SettingField from "./SettingField.svelte";
   import PillRadio from "./PillRadio.svelte";
   import PillToggle from "./PillToggle.svelte";
-  import {
-    normalizeHexColor,
-    readStandardTerminalColors,
-  } from "../../state/paneColor";
+  import ColorField from "./ColorField.svelte";
+  import { readStandardTerminalColors } from "../../state/paneColor";
   import {
     GRAPH_COLOR_GROUPS,
     GRAPH_COLOR_ROWS,
@@ -125,25 +123,6 @@
 
   const customTerminalColorsOn = $derived(prefs.terminal_colors?.mode === "custom");
   const customTerminalColors = $derived(prefs.terminal_colors?.custom);
-  let terminalColorDrafts = $state<Record<TerminalColorField, string>>({
-    background: "#1c1c1e",
-    foreground: "#ebebf0",
-    cursor: "#58a6ff",
-  });
-  let terminalColorErrors = $state<Partial<Record<TerminalColorField, string>>>({});
-  let lastTerminalColorState = "";
-  $effect(() => {
-    const payload = prefs.terminal_colors?.custom;
-    const state = `${prefs.terminal_colors?.mode ?? "standard"}:${JSON.stringify(payload ?? null)}`;
-    if (!payload || state === lastTerminalColorState) return;
-    lastTerminalColorState = state;
-    terminalColorDrafts = {
-      background: payload.background,
-      foreground: payload.foreground,
-      cursor: payload.cursor,
-    };
-    terminalColorErrors = {};
-  });
 
   function standardTerminalTheme(current: Preferences): "dark" | "light" {
     const surface = current.hybrid_surface_themes?.terminal;
@@ -198,32 +177,9 @@
     });
   }
 
-  function updateTerminalColorDraft(field: TerminalColorField, value: string): void {
-    terminalColorDrafts = { ...terminalColorDrafts, [field]: value };
-  }
-
-  function commitTerminalColor(field: TerminalColorField, value: string): void {
-    const normalized = normalizeHexColor(value);
-    if (!normalized) {
-      terminalColorErrors = {
-        ...terminalColorErrors,
-        [field]: "Enter #rgb or #rrggbb.",
-      };
-      return;
-    }
-    updateTerminalColorDraft(field, normalized);
-    terminalColorErrors = { ...terminalColorErrors, [field]: undefined };
-    commitCustomTerminalColors((custom) => ({ ...custom, [field]: normalized }));
-  }
-
-  function onTerminalColorKeydown(
-    event: KeyboardEvent & { currentTarget: HTMLInputElement },
-    field: TerminalColorField,
-  ): void {
-    if (event.key !== "Enter") return;
-    event.preventDefault();
-    commitTerminalColor(field, event.currentTarget.value);
-    event.currentTarget.blur();
+  /// Write one normalized hex (from ColorField) into the custom payload.
+  function commitTerminalColor(field: TerminalColorField, hex: string): void {
+    commitCustomTerminalColors((custom) => ({ ...custom, [field]: hex }));
   }
 
   function setTerminalContrast(contrast: string): void {
@@ -256,41 +212,6 @@
 
   const graphColorsOn = $derived(prefs.graph_colors?.mode === "custom");
   let graphEditTheme = $state<GraphColorTheme>(ui.theme);
-  // Drafts start from the theme defaults; the $effect below reseeds
-  // from prefs on mount and on every prefs change. (Reading `prefs`
-  // here would only capture the initial value, and svelte-check flags
-  // it.)
-  let graphColorDrafts = $state<Record<GraphColorKind, string>>(
-    graphPaletteDrafts(ui.theme, undefined),
-  );
-  let graphColorErrors = $state<Partial<Record<GraphColorKind, string>>>({});
-  let lastGraphColorState = "";
-
-  function graphPaletteDrafts(
-    theme: GraphColorTheme,
-    palette: GraphPalette | undefined,
-  ): Record<GraphColorKind, string> {
-    const defaults = GRAPH_PALETTE_DEFAULTS[theme];
-    const drafts = {} as Record<GraphColorKind, string>;
-    for (const { kind } of GRAPH_COLOR_ROWS) {
-      drafts[kind] = palette?.[kind] ?? defaults[kind];
-    }
-    return drafts;
-  }
-
-  // Reseed the drafts when the prefs change (commit round-trip or a
-  // cross-window config_changed) or the edited scheme flips. The state
-  // guard keeps a content-identical reassign from re-firing the effect.
-  $effect(() => {
-    const state = `${graphEditTheme}:${JSON.stringify(prefs.graph_colors ?? null)}`;
-    if (state === lastGraphColorState) return;
-    lastGraphColorState = state;
-    graphColorDrafts = graphPaletteDrafts(
-      graphEditTheme,
-      prefs.graph_colors?.[graphEditTheme],
-    );
-    graphColorErrors = {};
-  });
 
   /// Replace the whole composite with `update` applied, keeping any
   /// dormant palette for the other scheme.
@@ -331,48 +252,14 @@
     });
   }
 
-  function updateGraphColorDraft(kind: GraphColorKind, value: string): void {
-    graphColorDrafts = { ...graphColorDrafts, [kind]: value };
-  }
-
-  function commitGraphColor(kind: GraphColorKind, value: string): void {
-    const trimmed = value.trim();
+  /// Write or clear one hue in the edited scheme's palette (ColorField
+  /// hands over a normalized hex, or null when the row was cleared or
+  /// holds the default). Skips no-op writes.
+  function commitGraphColor(kind: GraphColorKind, hex: string | null): void {
     const existing = prefs.graph_colors?.[graphEditTheme]?.[kind];
-    if (trimmed === "") {
-      // Clearing the field clears the override.
-      if (existing !== undefined) writeGraphColor(kind, null);
-      graphColorErrors = { ...graphColorErrors, [kind]: undefined };
-      graphColorDrafts = {
-        ...graphColorDrafts,
-        [kind]: GRAPH_PALETTE_DEFAULTS[graphEditTheme][kind],
-      };
-      return;
-    }
-    const normalized = normalizeHexColor(trimmed);
-    if (!normalized) {
-      graphColorErrors = {
-        ...graphColorErrors,
-        [kind]: "Enter #rgb or #rrggbb.",
-      };
-      return;
-    }
-    updateGraphColorDraft(kind, normalized);
-    graphColorErrors = { ...graphColorErrors, [kind]: undefined };
-    const defaultHex = GRAPH_PALETTE_DEFAULTS[graphEditTheme][kind];
-    if (normalized === existing) return;
-    // Entering the scheme's default removes the override instead of
-    // storing a redundant one, keeping the palette sparse.
-    writeGraphColor(kind, normalized === defaultHex ? null : normalized);
-  }
-
-  function onGraphColorKeydown(
-    event: KeyboardEvent & { currentTarget: HTMLInputElement },
-    kind: GraphColorKind,
-  ): void {
-    if (event.key !== "Enter") return;
-    event.preventDefault();
-    commitGraphColor(kind, event.currentTarget.value);
-    event.currentTarget.blur();
+    if (hex === null && existing === undefined) return;
+    if (hex !== null && hex === existing) return;
+    writeGraphColor(kind, hex);
   }
 
   function resetGraphPalette(): void {
@@ -470,27 +357,12 @@
 {#if customTerminalColorsOn && customTerminalColors}
   <div class="terminal-colours">
     {#each TERMINAL_COLOR_ROWS as row (row.key)}
-      <div class="terminal-colour-row">
-        <label for={`terminal-colour-${row.key}`}>{row.label}</label>
-        <input
-          type="color"
-          value={customTerminalColors[row.key]}
-          aria-label={`${row.label} colour swatch`}
-          oninput={(event) => commitTerminalColor(row.key, event.currentTarget.value)}
-        />
-        <input
-          id={`terminal-colour-${row.key}`}
-          type="text"
-          value={terminalColorDrafts[row.key]}
-          aria-invalid={terminalColorErrors[row.key] ? "true" : undefined}
-          oninput={(event) => updateTerminalColorDraft(row.key, event.currentTarget.value)}
-          onblur={(event) => commitTerminalColor(row.key, event.currentTarget.value)}
-          onkeydown={(event) => onTerminalColorKeydown(event, row.key)}
-        />
-        {#if terminalColorErrors[row.key]}
-          <span class="colour-error" role="alert">{terminalColorErrors[row.key]}</span>
-        {/if}
-      </div>
+      <ColorField
+        id={`terminal-colour-${row.key}`}
+        label={row.label}
+        value={customTerminalColors[row.key]}
+        oncommit={(hex) => hex !== null && commitTerminalColor(row.key, hex)}
+      />
     {/each}
     <div class="terminal-contrast-row">
       <span>ANSI contrast</span>
@@ -535,28 +407,14 @@
       <div class="graph-palette-group">{group}</div>
       {#each GRAPH_COLOR_ROWS.filter((row) => row.group === group) as row (row.kind)}
         {@const committed = prefs.graph_colors?.[graphEditTheme]?.[row.kind]}
-        <div class="terminal-colour-row">
-          <label for={`graph-colour-${row.kind}`}>{row.label}</label>
-          <input
-            type="color"
-            value={committed ?? GRAPH_PALETTE_DEFAULTS[graphEditTheme][row.kind]}
-            aria-label={`${row.label} colour swatch`}
-            oninput={(event) => commitGraphColor(row.kind, event.currentTarget.value)}
-          />
-          <input
-            id={`graph-colour-${row.kind}`}
-            type="text"
-            value={graphColorDrafts[row.kind]}
-            aria-invalid={graphColorErrors[row.kind] ? "true" : undefined}
-            oninput={(event) => updateGraphColorDraft(row.kind, event.currentTarget.value)}
-            onblur={(event) => commitGraphColor(row.kind, event.currentTarget.value)}
-            onkeydown={(event) => onGraphColorKeydown(event, row.kind)}
-          />
-          <span class="graph-colour-desc">{row.description}</span>
-          {#if graphColorErrors[row.kind]}
-            <span class="colour-error" role="alert">{graphColorErrors[row.kind]}</span>
-          {/if}
-        </div>
+        <ColorField
+          id={`graph-colour-${row.kind}`}
+          label={row.label}
+          description={row.description}
+          value={committed ?? GRAPH_PALETTE_DEFAULTS[graphEditTheme][row.kind]}
+          defaultHex={GRAPH_PALETTE_DEFAULTS[graphEditTheme][row.kind]}
+          oncommit={(hex) => commitGraphColor(row.kind, hex)}
+        />
       {/each}
     {/each}
     <button type="button" class="reset-terminal-colours" onclick={resetGraphPalette}>
@@ -572,42 +430,16 @@
     padding: 12px 0 16px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   }
-  .terminal-colour-row,
   .terminal-contrast-row {
     display: flex;
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
   }
-  .terminal-colour-row > label,
   .terminal-contrast-row > span {
     width: 8em;
     color: var(--text);
     font-size: 13px;
-  }
-  .terminal-colour-row input[type="color"] {
-    width: 34px;
-    height: 30px;
-    padding: 2px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--bg);
-  }
-  .terminal-colour-row input[type="text"] {
-    width: 8em;
-    padding: 5px 8px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--chan-editor-code-family, monospace);
-  }
-  .terminal-colour-row input[aria-invalid="true"] {
-    border-color: var(--danger, #ef4444);
-  }
-  .colour-error {
-    color: var(--danger, #ef4444);
-    font-size: 12px;
   }
   .graph-palette-group {
     margin-top: 4px;
@@ -616,10 +448,6 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-  }
-  .graph-colour-desc {
-    color: var(--text-secondary);
-    font-size: 12px;
   }
   .reset-terminal-colours {
     justify-self: start;
