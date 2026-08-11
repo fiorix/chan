@@ -87,6 +87,12 @@ That silence also runs against the closed item's own general rule at `:225`, whi
 
 **No lane touches `indexer.rs:1779`, `:1796` or `:1891` until the owner rules on the reopening**, because `:268` says in terms that re-repairing them undoes the prior ruling. Reopening a shipped classification is the owner's decision and this item asks for it explicitly rather than presenting it as a consequence.
 
+### The ruling, 2026-08-11
+
+**@@Alex ruled: reopen all three, evidence-led.** Surveyed and answered during the v0.89.0 round, and recorded here before any of the three sites was edited, which is what the acceptance line on the reopening requires.
+
+"Evidence-led" is the operative qualifier, and it is narrower than a licence to rewrite the three. The reopening exists because the kept rows are *silent* about the enclosing budget, not because they are *wrong* about the polls: a site re-classified with its enclosing bound classified too, and kept, is a conforming outcome and should be reported as one. `CONVERGENCE_BUDGET`'s value is unchanged by this ruling, and any site that does change still owes the before-and-after ratio on the same rig with N stated.
+
 ## Contract
 
 - A timing audit of `indexer.rs` states its population by the shape of the wait, not by a keyword. A wait that can report a starved host as a product defect is in the population whether or not any duration literal appears inside it.
