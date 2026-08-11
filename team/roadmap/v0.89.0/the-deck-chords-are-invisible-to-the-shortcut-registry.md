@@ -150,6 +150,28 @@ Also out, and correct as it stands: the handler is mounted on two of the five `.
 - The Outline Preview and Present titles (OutlineBody.svelte:123 and :132) carry the current chord resolved through `chordFor`, so a rebind is reflected. `FileEditorTab` already wraps that lookup as `chordLabel` (:917).
 - `components/slideShortcuts.test.ts` keeps only the claim it is uniquely good at, the two template-shape assertions at :17-22 that pin the capture mount on both hosts. Its two text pins, the handler-body regex at :8-10 and the modifier line at :14-16, describe code this change rewrites; they go rather than growing into new regexes. Renaming `onSlideShortcutKeydown` would also break the two template pins, so either keep the name or update all four.
 
+## Result, recorded 2026-08-11
+
+Landed at `7697443e`, 10 files, +389/-25.
+
+The estimate above was close on shape and the test half did dominate, as predicted.
+
+**The design constraint held, and it was verified rather than assumed.** The acceptance line that exists because "the natural implementation fails it" is the capture handler's claim not widening. The handler claims only the built-in chord shape and bails on `builtInChordSuperseded` for the slide action, so it never matches by resolved chord. Had it matched by resolved chord, a user rebind would have silently taken a CodeMirror chord on every deck with nothing in the app able to mention it. It is pinned by behaviour as well as by reading: a rebind-supersession test in `keymapOverrides.svelte.test.ts` and a deck-claim tripwire in `wysiwygModEnter.test.ts`.
+
+Gate, on a detached worktree at the commit inside a container's own capped volume rather than in the shared tree: `make shortcuts-check`, `cargo fmt --check -p chan`, `cargo clippy -p chan --all-targets -- -D warnings`, `cargo test -p chan`, and `make web-check` all rc=0.
+
+**The mutation probes were re-run on the committed sha rather than inherited**, which matters here specifically. `wysiwygModEnter.test.ts` grew 151 lines in this change, so the tripwire that an earlier session had proved red was not the tripwire that shipped. Removing the capture listener reddened the `deckOpens` assertion; dropping `stopPropagation` reddened the document tripwire; both were reverted and the file is green post-revert, so the green post-dates the last edit rather than preceding it.
+
+Two acceptance cells are **not discharged** and are host-only. Pressing the old chord on a real deck and observing nothing is a live-client check that no test in this suite can settle, and it is unit-pinned but not exercised against a running client. The end-to-end line belongs to this item and the swap item together and cannot complete until the swap item lands.
+
+One process finding came out of this change rather than out of the code. `crates/chan/src/lib.rs` carried this lane's two `KEYBINDINGS_TABLE` rows and another lane's 137 uncommitted lines at the same time. A pathspec commit, which the round's rules prescribed, is file-granular and would have swept the other lane's work in while looking like correct discipline. The lane staged filtered hunks instead and verified the staged diff before committing. The round's standing rule was amended for every lane as a result.
+
+```citations
+web/packages/workspace-app/src/components/FileEditorTab.svelte	onSlideShortcutKeydown	1	builtInChordSuperseded(
+web/packages/workspace-app/src/state/shortcuts.ts	SHORTCUTS	1	app.slides.present
+crates/chan/src/lib.rs	KEYBINDINGS_TABLE	1	Present slide deck fullscreen
+```
+
 ## Rough size
 
 Small, and the production half is smaller than the draft's estimate. The draft's author put it at roughly 120 lines of production change plus roughly 180 lines of test; that is the author's estimate and no part of it was measured. My own reading is that production lands nearer 60 to 80 lines, because every seam already exists and none has to be invented: two array literals in `shortcuts.ts`, two catalog entries next to `app.slides.new`, two members on `EditorCommands` and their registration at FileEditorTab.svelte:760, a `builtInChordSuperseded` gate in the existing handler, two prop threads into `OutlineBody`, and a regenerated Rust const. The test estimate is about right, and it is the majority of the work.

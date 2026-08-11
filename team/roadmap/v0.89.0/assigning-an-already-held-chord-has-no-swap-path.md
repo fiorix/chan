@@ -44,6 +44,19 @@ So "take this chord and leave the other command unbound" cannot be expressed tod
 
 This item does not pre-decide which. It requires that the choice is made and stated, because option 1 is small and option 2 is a persisted format change, and the draft's "small to medium, mostly interaction design" sizing is only true of option 1.
 
+## Resolution chosen: swap only, ruled 2026-08-11
+
+Option 1. Proposed by the lane with its reasoning and ruled before any of it was built, which is the ordering this item asked for.
+
+What decides it is not sizing. Under the shipped defaults the deck item establishes, `app.slides.preview` holds `Mod+Enter` and `app.slides.present` holds `Mod+Shift+Enter`, and **neither carries an override**. Option 3, take-anyway restricted to commands that already carry one, would therefore refuse precisely the exchange this item was widened into scope to enable, because the holding command has no override to clear. That is a disqualifying fact about the owner's own case rather than a preference between designs. Option 2 buys a persisted `KeymapOverridesWire` change and grid rendering work to serve a take-anyway gesture nobody asked for.
+
+One constraint travels with the choice and keeps the unrepresentable state out of reach by construction: **the swap is offered only when the target already holds a chord in the slot being assigned.** A chordless target is the one shape that could leave a command unbound, so no swap is offered for it. Under shipped defaults every registry entry carries a built-in, so the case does not arise today; the guard exists so it cannot arise later.
+
+Consequences for the acceptance below, recorded rather than dropped:
+
+- The line requiring the keymap grid to show an unbound command surviving a reload is **not applicable** to this resolution. Swap-only cannot produce a command with no chord, since both commands hold one before and after, so the state that line describes is unreachable rather than unimplemented. This is the item's own instruction being followed.
+- Every other line stands unchanged, including the registry-uniqueness assertion, which is the one that catches a swap that half-applies.
+
 ## Contract
 
 - A conflict names the command holding the chord and offers at least one way to resolve it without leaving the dialog.
