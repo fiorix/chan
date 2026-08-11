@@ -15,6 +15,28 @@ A scenario graduates into the gate only after it has proven stable across severa
 - **`terminal-pixels.mjs`** is the same suite on Windows, measuring the same page and the same thresholds in WebView2, the engine the Windows desktop app ships on. It is a separate driver rather than a branch in the Python one because that driver reaches WebKitGTK through python-gobject, and neither the typelib nor a system python exists on a Windows box; only the host and the snapshot path differ, and the page, pattern and regions are shared files. It also runs a different shipped arm: `shouldUseWebglRenderer` turns WebGL on for a Windows desktop, so the xterm scenarios carry the WebGL renderer and `--include-renderers` adds the DOM one as the reference. By default it drives Edge, which is the same Chromium build as the WebView2 runtime and can be scripted; `--webview2` instead hosts the page in the real WebView2 of a built `target/{release,debug}/chan-desktop.exe`, which is the only way to measure the shell's own browser arguments, since the runtime refuses to start standalone. Needs Node and an installed `web/node_modules`, no other dependency. Exits 2 when no host is found.
 - **`lp-skip-test.sh`** with `lp-mock.py` covers the PPA publish retry-idempotence offline.
 - **`devserver-fdstore.sh`** proves the terminal-survival contract against a real `systemctl --user` unit: a live PTY survives a bare restart, `chan devserver --restart`, a watchdog kill, and a `kill -9` crash restart; session close, `--stop`, `--restart --force`, and a bare stop end the shells and empty the fd store, with the store count asserted after every phase. It snapshots and restores any pre-existing `chan-devserver.service` state and REFUSES an active unit unless `CHAN_FDSTORE_E2E_ALLOW_TAKEOVER=1`, because taking over a live devserver kills its terminals. Run it inside an sdme container, never on a host serving live terminals: it is the one suite that drives a fixed shared unit rather than only processes it started, so rule 8 below cannot be satisfied by a throwaway `CHAN_HOME` and port, and the takeover variable is for a container where nothing else owns the unit.
+- **`one-cpu-test-series.sh`** measures the red-run rate for one `chan-workspace` test selector under an sdme container whose one-CPU cap it verifies from the host cgroup before and after every run. It refuses an absent, non-one-CPU or changing cap, a non-btrfs or uncapped root, a dirty or moving revision, and a selector that names no tests. Test failures are data, so a completed series exits zero and reports `red=N runs=M rate=N/M`; setup and instrument failures are nonzero. Run `test-one-cpu-test-series.sh` for the focused cap-parser checks.
+
+### One-CPU test series
+
+Prepare a clean detached worktree outside `/tmp`, then create the fixed-shape guest with build output on its capped btrfs volume. The main `.git` bind is read-only and exists only so Git can resolve the detached worktree metadata; `/work/chan` is also read-only, while `CARGO_TARGET_DIR` is fixed by the script at `/var/tmp/chan-target` inside the guest:
+
+```bash
+rig_tree=/var/tmp/chan-one-cpu-source
+git_dir=$(git rev-parse --path-format=absolute --git-common-dir)
+git worktree add --detach "$rig_tree" REVISION
+source packaging/sdme-build-policy.sh
+sudo sdme create --name chan-one-cpu -r chan-ann-ubuntu \
+  --storage btrfs --disk "$SDME_BUILD_DISK" --cpus 1 \
+  --bind "$rig_tree:/work/chan:ro" \
+  --bind "$git_dir:$git_dir:ro" --started
+sudo sdme exec chan-one-cpu -- env HOME=/root \
+  git config --global --add safe.directory /work/chan
+sudo scripts/e2e/one-cpu-test-series.sh --container chan-one-cpu \
+  filtered_registration 20 32
+```
+
+The final stdout line records the container, backend, disk cap, host `cpu.max`, thread count, revision, selector, selected-test count, red-run rate, throttling delta and result directory. Progress goes to stderr. Per-run logs, exit codes and the same summary remain under the printed `/var/tmp/chan-one-cpu-series.*` directory on the host. The script exits 2 before selector validation or test execution when it cannot prove the instrument.
 
 ## Scenario packs
 
