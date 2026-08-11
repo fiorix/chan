@@ -1326,8 +1326,23 @@ impl FsGraphWalker {
             // missing in-workspace targets visible as ghosts when the root
             // cannot be canonicalized, while refusing paths that only
             // appear under the root because they contain `..`.
-            _ => lexical_path_inside_root(target_abs, &self.root),
+            _ => self.lexical_path_inside_root(target_abs),
         }
+    }
+
+    /// Lexically checks whether `path` starts under this walker's root.
+    ///
+    /// This does not resolve symlinks and cannot prove filesystem containment.
+    /// Only `target_is_inside_workspace` may use it when canonicalization is
+    /// unavailable, so missing in-workspace targets remain visible as graph
+    /// ghosts. No write is gated on this result.
+    fn lexical_path_inside_root(&self, path: &Path) -> bool {
+        let Ok(stripped) = path.strip_prefix(&self.root) else {
+            return false;
+        };
+        stripped
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
     }
 
     fn workspace_relative_target(&self, target_abs: &Path) -> Option<String> {
@@ -1340,15 +1355,6 @@ impl FsGraphWalker {
         }
         target_abs.strip_prefix(&self.root).ok().map(posix_rel)
     }
-}
-
-fn lexical_path_inside_root(path: &Path, root: &Path) -> bool {
-    let Ok(stripped) = path.strip_prefix(root) else {
-        return false;
-    };
-    stripped
-        .components()
-        .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
 }
 
 fn posix_rel(stripped: &Path) -> String {
@@ -1456,14 +1462,10 @@ mod tests {
     fn lexical_fallback_rejects_parent_escape() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("missing-root");
-        assert!(lexical_path_inside_root(
-            &root.join("notes/missing.md"),
-            &root
-        ));
-        assert!(!lexical_path_inside_root(
-            &root.join("../outside.md"),
-            &root
-        ));
+        let walker =
+            FsGraphWalker::new(root.clone(), chan_workspace::fs_ops::WalkFilter::default());
+        assert!(walker.lexical_path_inside_root(&root.join("notes/missing.md")));
+        assert!(!walker.lexical_path_inside_root(&root.join("../outside.md")));
     }
 
     #[test]
