@@ -32,20 +32,46 @@ use sha2::{Digest, Sha256};
 /// Checked FIRST, so every delegator (`state_dir`, `cache_dir`,
 /// `global_config_path`, `workspaces_dir`, …) inherits it. This is the SINGLE
 /// authority for the chan home; nothing else resolves `~/.chan` independently.
+/// On Unix, if the OS cannot resolve a home directory, chan uses the absolute
+/// `/var/tmp/chan-<uid>` fallback rather than resolving state against the
+/// process working directory. Windows uses `C:\ProgramData\chan`.
 pub fn config_dir() -> PathBuf {
-    if let Some(dir) = chan_home_override() {
+    config_dir_with_sources(chan_home_override(), dirs::home_dir())
+}
+
+fn config_dir_with_sources(override_dir: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
+    if let Some(dir) = override_dir {
         return dir;
     }
+    config_dir_with_home(home)
+}
+
+/// Resolve the default chan home from an injected OS home. Keeping this input
+/// explicit makes the unavailable-home branch testable without mutating the
+/// process environment.
+fn config_dir_with_home(home: Option<PathBuf>) -> PathBuf {
     #[cfg(any(target_os = "ios", target_os = "android"))]
     {
         return state_dir();
     }
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
-        dirs::home_dir()
-            .map(|p| p.join(".chan"))
-            .unwrap_or_else(|| PathBuf::from(".chan"))
+        home.map(|p| p.join(".chan"))
+            .unwrap_or_else(home_unavailable_config_dir)
     }
+}
+
+#[cfg(all(unix, not(any(target_os = "ios", target_os = "android"))))]
+fn home_unavailable_config_dir() -> PathBuf {
+    PathBuf::from(format!(
+        "/var/tmp/chan-{}",
+        rustix::process::getuid().as_raw()
+    ))
+}
+
+#[cfg(all(windows, not(any(target_os = "ios", target_os = "android"))))]
+fn home_unavailable_config_dir() -> PathBuf {
+    PathBuf::from(r"C:\ProgramData\chan")
 }
 
 /// The `CHAN_HOME` override, if set to a non-empty value: the directory chan
@@ -55,9 +81,11 @@ pub fn config_dir() -> PathBuf {
 /// UTF-8); an empty value is treated as unset so `CHAN_HOME=` does not collapse
 /// the home to the cwd.
 fn chan_home_override() -> Option<PathBuf> {
-    std::env::var_os("CHAN_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
+    chan_home_override_from(std::env::var_os("CHAN_HOME"))
+}
+
+fn chan_home_override_from(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    value.filter(|v| !v.is_empty()).map(PathBuf::from)
 }
 
 /// The dir chan-desktop installs the `chan`/`cs` bin shims into:
@@ -69,8 +97,15 @@ fn chan_home_override() -> Option<PathBuf> {
 /// `$HOME/.chan/...` -- it is the standard user bin dir, so it does NOT route
 /// through `config_dir`. The base is `CHAN_HOME`-or-`$HOME`, then `.local/bin`.
 pub fn local_bin_dir() -> Option<PathBuf> {
-    chan_home_override()
-        .or_else(dirs::home_dir)
+    local_bin_dir_with_sources(chan_home_override(), dirs::home_dir())
+}
+
+fn local_bin_dir_with_sources(
+    override_dir: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    override_dir
+        .or(home)
         .map(|base| base.join(".local").join("bin"))
 }
 
@@ -178,7 +213,7 @@ fn metadata_slug(path: &str) -> String {
 /// Per-workspace global paths. Computed once per Workspace open.
 #[derive(Debug, Clone)]
 pub struct WorkspacePaths {
-    /// Metadata root for this workspace, `~/.chan/workspaces/<metadata_key>/`.
+    /// Metadata root for this workspace, `<chan-home>/workspaces/<metadata_key>/`.
     pub root: PathBuf,
     /// Per-workspace sessions directory. Opaque JSON; chan-workspace does
     /// not interpret. Apps put window/pane layout files here.
@@ -215,14 +250,21 @@ pub struct WorkspacePaths {
     pub report: PathBuf,
 }
 
-/// Resolve the per-workspace global paths for a metadata key. The key is
-/// the workspace's `KnownWorkspace.metadata_key`, assigned at registration
-/// time and preserved across `Library::move_workspace`. Callers that
-/// hold a `&Path` should look the key up through
-/// `Library::workspace_paths_for` rather than recomputing it from the
-/// path, so the registry stays the source of truth after moves.
+/// Resolve the per-workspace paths for a metadata key under the process-wide
+/// chan home. The key is the workspace's `KnownWorkspace.metadata_key`,
+/// assigned at registration time and preserved across `Library::move_workspace`.
+/// Callers that hold a `&Path` should look the key up through
+/// `Library::workspace_paths_for` so an explicitly located Library uses its
+/// own home and the registry remains the source of truth after moves.
 pub fn workspace_paths_for_metadata_key(metadata_key: &str) -> WorkspacePaths {
-    let root = workspaces_dir().join(metadata_key);
+    workspace_paths_for_metadata_key_in(&config_dir(), metadata_key)
+}
+
+pub(crate) fn workspace_paths_for_metadata_key_in(
+    chan_home: &Path,
+    metadata_key: &str,
+) -> WorkspacePaths {
+    let root = chan_home.join("workspaces").join(metadata_key);
     let graph_dir = root.join("graph");
     WorkspacePaths {
         root: root.clone(),
@@ -237,9 +279,17 @@ pub fn workspace_paths_for_metadata_key(metadata_key: &str) -> WorkspacePaths {
     }
 }
 
-/// Create the standard per-workspace metadata directory skeleton.
+/// Create the standard per-workspace metadata directory skeleton under the
+/// process-wide chan home. Library operations use their captured home instead.
 pub fn ensure_workspace_metadata_dirs(metadata_key: &str) -> std::io::Result<WorkspacePaths> {
-    let paths = workspace_paths_for_metadata_key(metadata_key);
+    ensure_workspace_metadata_dirs_in(&config_dir(), metadata_key)
+}
+
+pub(crate) fn ensure_workspace_metadata_dirs_in(
+    chan_home: &Path,
+    metadata_key: &str,
+) -> std::io::Result<WorkspacePaths> {
+    let paths = workspace_paths_for_metadata_key_in(chan_home, metadata_key);
     std::fs::create_dir_all(&paths.sessions)?;
     std::fs::create_dir_all(&paths.trash)?;
     std::fs::create_dir_all(paths.report.parent().expect("report has parent"))?;
@@ -255,7 +305,11 @@ pub fn ensure_workspace_metadata_dirs(metadata_key: &str) -> std::io::Result<Wor
 /// metadata-key set. Returns absolute paths; it may not exist on a
 /// fresh install, callers must handle that.
 pub fn workspace_subsystem_dirs() -> Vec<PathBuf> {
-    vec![workspaces_dir()]
+    workspace_subsystem_dirs_in(&config_dir())
+}
+
+pub(crate) fn workspace_subsystem_dirs_in(chan_home: &Path) -> Vec<PathBuf> {
+    vec![chan_home.join("workspaces")]
 }
 
 /// One cloud-storage provider's root the first-launch picker can
@@ -375,11 +429,26 @@ pub fn detected_cloud_drives() -> Vec<DetectedCloud> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    /// Serializes every `CHAN_HOME`-mutating test -- the env is process-global, so
-    /// two such tests running in parallel would corrupt each other.
-    static CHAN_HOME_ENV_GUARD: Mutex<()> = Mutex::new(());
+    #[cfg(windows)]
+    fn test_home() -> PathBuf {
+        PathBuf::from(r"C:\Users\chan-test")
+    }
+
+    #[cfg(not(windows))]
+    fn test_home() -> PathBuf {
+        PathBuf::from("/home/chan-test")
+    }
+
+    #[cfg(windows)]
+    fn test_override_dir() -> PathBuf {
+        PathBuf::from(r"C:\Temp\chan-home-test")
+    }
+
+    #[cfg(not(windows))]
+    fn test_override_dir() -> PathBuf {
+        PathBuf::from("/tmp/chan-home-test")
+    }
 
     #[test]
     fn global_config_path_ends_in_config_toml() {
@@ -389,78 +458,51 @@ mod tests {
 
     #[test]
     fn config_dir_honors_chan_home_override() {
-        // CHAN_HOME is process-global: serialize + save/restore so this neither
-        // bleeds into nor is corrupted by a concurrent test that reads config_dir.
-        let _serial = CHAN_HOME_ENV_GUARD
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let saved = std::env::var_os("CHAN_HOME");
-
-        // Set: config_dir IS CHAN_HOME (the dir itself, CARGO_HOME-style), and
-        // every delegator inherits it.
-        std::env::set_var("CHAN_HOME", "/tmp/chan-home-test");
-        assert_eq!(config_dir(), PathBuf::from("/tmp/chan-home-test"));
+        let home = test_home();
+        let expected_override = test_override_dir();
+        let override_dir =
+            chan_home_override_from(Some(expected_override.clone().into_os_string()));
         assert_eq!(
-            global_config_path(),
-            PathBuf::from("/tmp/chan-home-test/config.toml")
+            config_dir_with_sources(override_dir, Some(home.clone())),
+            expected_override
         );
-        assert_eq!(
-            workspaces_dir(),
-            PathBuf::from("/tmp/chan-home-test/workspaces")
-        );
-        assert_eq!(state_dir(), PathBuf::from("/tmp/chan-home-test"));
 
-        // Empty is treated as unset: the home-based default, NOT the cwd.
-        std::env::set_var("CHAN_HOME", "");
-        assert_ne!(config_dir(), PathBuf::from(""));
-        assert!(config_dir().ends_with(".chan"));
-
-        // Unset: the home-based default `~/.chan`.
-        std::env::remove_var("CHAN_HOME");
+        // Empty is treated as unset: the absolute home-based default, not cwd.
+        let empty_override = chan_home_override_from(Some("".into()));
+        let default = config_dir_with_sources(empty_override, Some(home.clone()));
         assert!(
-            config_dir().ends_with(".chan"),
-            "default chan home is ~/.chan: {:?}",
-            config_dir()
+            default.is_absolute(),
+            "default chan home is absolute: {default:?}"
         );
+        assert_eq!(default, home.join(".chan"));
+    }
 
-        // Restore the pre-test value so no later test sees a stray CHAN_HOME.
-        match saved {
-            Some(v) => std::env::set_var("CHAN_HOME", v),
-            None => std::env::remove_var("CHAN_HOME"),
-        }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    #[test]
+    fn config_dir_without_os_home_uses_named_absolute_fallback() {
+        let fallback = config_dir_with_sources(None, None);
+        assert!(
+            fallback.is_absolute(),
+            "fallback must be absolute: {fallback:?}"
+        );
+        assert_eq!(fallback, home_unavailable_config_dir());
     }
 
     #[test]
     fn local_bin_dir_honors_chan_home() {
-        let _serial = CHAN_HOME_ENV_GUARD
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let saved = std::env::var_os("CHAN_HOME");
-
         // Set: CHAN_HOME/.local/bin -- an isolated smoke instance's shims.
-        std::env::set_var("CHAN_HOME", "/tmp/chan-home-test");
         assert_eq!(
-            local_bin_dir(),
-            Some(PathBuf::from("/tmp/chan-home-test/.local/bin"))
+            local_bin_dir_with_sources(Some(test_override_dir()), Some(test_home()),),
+            Some(test_override_dir().join(".local").join("bin"))
         );
 
         // Unset: $HOME/.local/bin -- the standard user bin dir, NOT under `.chan`
         // (deliberately different from config_dir's `~/.chan` fallback).
-        std::env::remove_var("CHAN_HOME");
-        let unset = local_bin_dir().expect("home resolves on the test host");
-        assert!(unset.ends_with("bin"), "{unset:?}");
-        assert!(
-            !unset.to_string_lossy().contains("/.chan"),
-            "unset local_bin_dir is $HOME/.local/bin, never under .chan: {unset:?}"
-        );
-        if let Some(home) = dirs::home_dir() {
-            assert_eq!(unset, home.join(".local").join("bin"));
-        }
-
-        match saved {
-            Some(v) => std::env::set_var("CHAN_HOME", v),
-            None => std::env::remove_var("CHAN_HOME"),
-        }
+        let home = test_home();
+        let unset =
+            local_bin_dir_with_sources(None, Some(home.clone())).expect("injected home resolves");
+        assert_eq!(unset, home.join(".local").join("bin"));
+        assert!(!unset.to_string_lossy().contains("/.chan"));
     }
 
     #[test]
