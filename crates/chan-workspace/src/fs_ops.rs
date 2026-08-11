@@ -302,10 +302,11 @@ fn ensure_parent_inside_root(root: &Path, abs: &Path) -> Result<()> {
     if parent == root || parent == root_canon {
         return Ok(());
     }
-    if let Ok(parent_canon) = parent.canonicalize() {
-        if !parent_canon.starts_with(&root_canon) {
-            return Err(ChanError::SymlinkEscape(abs.to_path_buf()));
-        }
+    let parent_canon = parent
+        .canonicalize()
+        .map_err(|e| ChanError::Io(format!("canonicalize path parent: {e}")))?;
+    if !parent_canon.starts_with(&root_canon) {
+        return Err(ChanError::SymlinkEscape(abs.to_path_buf()));
     }
     Ok(())
 }
@@ -321,27 +322,22 @@ fn symlink_target_escapes_workspace(root: &Path, link_abs: &Path, target: &Path)
 
 fn target_inside_root(root: &Path, path: &Path) -> bool {
     let Ok(root_canon) = root.canonicalize() else {
-        return lexical_path_inside_root(root, path);
+        return false;
     };
     let mut probe = path;
     loop {
         match probe.canonicalize() {
             Ok(canon) => return canon.starts_with(&root_canon),
-            Err(_) => match probe.parent() {
+            // A missing leaf is expected for a dangling symlink target. Walking
+            // to its deepest existing ancestor preserves the symlink-aware
+            // guarantee. Other failures leave containment unknown and refuse.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => match probe.parent() {
                 Some(parent) => probe = parent,
                 None => return false,
             },
+            Err(_) => return false,
         }
     }
-}
-
-fn lexical_path_inside_root(root: &Path, path: &Path) -> bool {
-    let Ok(stripped) = path.strip_prefix(root) else {
-        return false;
-    };
-    stripped
-        .components()
-        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
 /// Classify a relative path by extension first, then by basename
@@ -1247,12 +1243,16 @@ pub fn resolve_safe_strict_canon(
     let canon_ancestor = loop {
         match probe.canonicalize() {
             Ok(c) => break c,
-            Err(_) => match probe.parent() {
+            // Non-existent leaves are valid create targets, so check their
+            // deepest existing ancestor. Any other canonicalization error
+            // makes containment unknowable and is refused.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => match probe.parent() {
                 Some(p) => probe = p,
                 // We walked past the workspace root without finding
                 // anything that canonicalizes; treat as escape.
                 None => return Err(ChanError::SymlinkEscape(joined)),
             },
+            Err(_) => return Err(ChanError::SymlinkEscape(joined)),
         }
     };
 
@@ -2062,6 +2062,59 @@ mod tests {
         let outside = classify_path(tmp.path(), "outside.md").unwrap();
         assert_eq!(outside.kind, PathKind::Symlink);
         assert!(outside.target_escapes_workspace);
+    }
+
+    #[test]
+    fn canonicalize_failures_refuse_an_unavailable_workspace_root() {
+        let parent = TempDir::new().unwrap();
+        let root = parent.path().join("missing-root");
+        let target = root.join("inside.md");
+
+        assert!(matches!(
+            ensure_parent_inside_root(&root, &target),
+            Err(ChanError::Io(_))
+        ));
+        assert!(!target_inside_root(&root, &target));
+        assert!(matches!(
+            resolve_safe_strict(&root, "inside.md"),
+            Err(ChanError::Io(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonicalize_failures_refuse_an_unavailable_path_parent() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        symlink("loop", root.path().join("loop")).unwrap();
+        let target = root.path().join("loop/inside.md");
+
+        assert!(matches!(
+            ensure_parent_inside_root(root.path(), &target),
+            Err(ChanError::Io(_))
+        ));
+        assert!(!target_inside_root(root.path(), &target));
+
+        let root_canon = root.path().canonicalize().unwrap();
+        assert!(matches!(
+            resolve_safe_strict_canon(root.path(), &root_canon, "loop/inside.md"),
+            Err(ChanError::SymlinkEscape(_))
+        ));
+    }
+
+    #[test]
+    fn missing_leaf_uses_its_canonical_existing_parent() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir(root.path().join("notes")).unwrap();
+        let target = root.path().join("notes/missing.md");
+
+        ensure_parent_inside_root(root.path(), &target).unwrap();
+        assert!(target_inside_root(root.path(), &target));
+        assert_eq!(
+            resolve_safe_strict(root.path(), "notes/missing.md").unwrap(),
+            target
+        );
     }
 
     #[cfg(unix)]
