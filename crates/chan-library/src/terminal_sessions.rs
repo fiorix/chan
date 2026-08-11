@@ -750,18 +750,14 @@ pub enum TerminalExit {
 
 impl TerminalExit {
     fn from_status(status: &portable_pty::ExitStatus) -> Self {
-        let rendered = status.to_string();
-        if let Some(signal) = rendered.strip_prefix("Terminated by ") {
+        if let Some(signal) = status.signal() {
             return Self::Signal {
                 signal: signal.to_string(),
             };
         }
-        if rendered == "Success" || rendered.starts_with("Exited with code ") {
-            return Self::Code {
-                code: status.exit_code(),
-            };
+        Self::Code {
+            code: status.exit_code(),
         }
-        Self::Unknown
     }
 
     /// The exit code for the terminal `/ws` exit frame, `None` when there is
