@@ -303,6 +303,14 @@ ci-windows: ## Test, build and smoke the native Windows CLI and NSIS package.
 	# arm can execute. This now matches the Linux and macOS arms rather than
 	# being scoped narrower than them, so a `#[cfg(windows)]` path that only
 	# this runner compiles is covered wherever it lives.
+	#
+	# The release CLI is built first because `desktop/src-tauri` is a
+	# workspace member, so `--all-targets` compiles chan-desktop, and its
+	# Windows Tauri config declares `target/release/chan.exe` as a bundled
+	# resource. Only the Windows config declares it, which is why the Linux
+	# and macOS arms run the same test command without this step. The later
+	# `desktop ci-windows` build re-runs this and hits a warm cache.
+	$(CARGO) build --release -p chan
 	RUSTFLAGS="-D warnings" $(CARGO) test --all-targets
 	$(MAKE) -C desktop ci-windows
 	scripts/smoke-built-devserver.sh target/release/chan-desktop.exe
