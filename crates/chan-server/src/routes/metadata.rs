@@ -349,16 +349,34 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
+/// Key both ends of the injection on the canonical path.
+///
+/// The injecting side holds a raw `TempDir` path while the consuming side
+/// asks `Workspace::root()`, which is the registry's already-canonicalized
+/// `root_path`. On Linux a `/tmp` path canonicalizes to itself and the two
+/// agree by accident. On macOS `/var` is a symlink to `/private/var`, so the
+/// same workspace is `/var/folders/...` on one side and `/private/var/folders/...`
+/// on the other, the lookup misses, no failure is injected, and a test that
+/// asserts the watcher did NOT register sees a healthy handle instead.
+///
+/// Falling back to the input when canonicalization fails matches
+/// `Library`'s own `canonical_key`: a root that cannot be resolved still has
+/// to produce a stable key rather than an error.
+#[cfg(test)]
+fn watch_failure_key(root: &Path) -> std::path::PathBuf {
+    std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+}
+
 #[cfg(test)]
 pub(super) fn inject_test_watch_registration_failure(root: &Path) {
     TEST_WATCH_REGISTRATION_FAILURES.with(|roots| {
-        roots.borrow_mut().insert(root.to_path_buf());
+        roots.borrow_mut().insert(watch_failure_key(root));
     });
 }
 
 #[cfg(test)]
 fn take_test_watch_registration_failure(root: &Path) -> bool {
-    TEST_WATCH_REGISTRATION_FAILURES.with(|roots| roots.borrow_mut().remove(root))
+    TEST_WATCH_REGISTRATION_FAILURES.with(|roots| roots.borrow_mut().remove(&watch_failure_key(root)))
 }
 
 fn safe_filename_fragment(value: &str) -> String {
