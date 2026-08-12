@@ -10,6 +10,7 @@
     GRAPH_COLOR_GROUPS,
     GRAPH_COLOR_ROWS,
     GRAPH_PALETTE_DEFAULTS,
+    sanitizeGraphPalette,
     type GraphColorKind,
     type GraphColorTheme,
   } from "../../state/graphPalette.svelte";
@@ -30,17 +31,36 @@
   const graphColorsOn = $derived(prefs.graph_colors?.mode === "custom");
   let graphEditTheme = $state<GraphColorTheme>(ui.theme);
 
+  /// Drop invalid hues from a stored palette before it enters a PATCH
+  /// body, with the same per-key rule the paint path applies. The
+  /// server serves stored hues unvalidated but rejects the whole
+  /// `graph_colors` object with a 400 on any invalid hex, and
+  /// preferences.toml is hand-editable, so spreading a raw stored
+  /// palette lets one bad value silently fail every commit until the
+  /// TOML is fixed out of band. An emptied palette becomes undefined
+  /// so the scheme key is omitted, matching writeGraphColor's prune.
+  function sanitizedStoredPalette(
+    palette: GraphPalette | undefined,
+  ): GraphPalette | undefined {
+    const clean = sanitizeGraphPalette(palette);
+    return Object.keys(clean).length === 0 ? undefined : clean;
+  }
+
   /// Replace the whole composite with `update` applied, keeping any
-  /// dormant palette for the other scheme.
+  /// dormant palette for the other scheme. Stored palettes are
+  /// sanitized on the way in, so `update` and the PATCH body only ever
+  /// see valid hues.
   function commitGraphColors(update: (current: GraphColorPrefs) => GraphColorPrefs): void {
     commit((p) => {
       const current = p.graph_colors;
+      const dark = sanitizedStoredPalette(current?.dark);
+      const light = sanitizedStoredPalette(current?.light);
       return {
         ...p,
         graph_colors: update({
           mode: current?.mode ?? "standard",
-          ...(current?.dark ? { dark: current.dark } : {}),
-          ...(current?.light ? { light: current.light } : {}),
+          ...(dark ? { dark } : {}),
+          ...(light ? { light } : {}),
         }),
       };
     });

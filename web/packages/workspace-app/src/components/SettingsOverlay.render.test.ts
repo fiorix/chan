@@ -736,4 +736,39 @@ describe("settings surface render", () => {
       ),
     ).toEqual(["search_aggression"]);
   });
+
+  test("a stored invalid graph hue is dropped from the PATCH body", async () => {
+    // The server serves stored hues unvalidated but rejects the whole
+    // graph_colors object with a 400 on any invalid hex, and
+    // preferences.toml is hand-editable: without the commit-path
+    // sanitize in GraphSection, one bad stored hue silently fails every
+    // palette write until the TOML is fixed out of band.
+    server.preferences.graph_colors = {
+      mode: "custom",
+      dark: { doc: "chartreuse", tag: "#6cd07a" },
+      light: { source: "#2851c4" },
+    };
+    const target = openSurface();
+    await flush();
+    clickTab(target, "Graph");
+    await flush();
+
+    const img = target.querySelector("#graph-colour-img") as HTMLInputElement;
+    expect(img, "media colour row").not.toBeNull();
+    img.value = "#112233";
+    img.dispatchEvent(new Event("input", { bubbles: true }));
+    img.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+    await flush();
+
+    expect(patchBodies.length).toBeGreaterThanOrEqual(1);
+    const body = patchBodies[patchBodies.length - 1]!;
+    expect(Object.keys(body)).toEqual(["graph_colors"]);
+    // The invalid stored hue (doc) is gone; its valid neighbour, the
+    // dormant light palette and the new edit all survive.
+    expect(body.graph_colors).toEqual({
+      mode: "custom",
+      dark: { tag: "#6cd07a", img: "#112233" },
+      light: { source: "#2851c4" },
+    });
+  });
 });

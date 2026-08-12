@@ -174,7 +174,13 @@ export function applyGraphColorPrefs(prefs: GraphColorPrefs | null | undefined):
   };
 }
 
-function sanitizeGraphPalette(palette: GraphPalette | null | undefined): GraphPalette {
+/// Per-key validity drop: keep hues `normalizeHexColor` accepts, in
+/// canonical form, and drop the rest. Shared with the Settings commit
+/// path (GraphSection), which must apply the same rule before a stored
+/// palette enters a PATCH body.
+export function sanitizeGraphPalette(
+  palette: GraphPalette | null | undefined,
+): GraphPalette {
   const out: GraphPalette = {};
   if (!palette) return out;
   for (const { kind } of GRAPH_COLOR_ROWS) {
