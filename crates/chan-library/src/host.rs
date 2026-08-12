@@ -4732,7 +4732,10 @@ mod tests {
 
         // Poll the exit code the way the desktop scrape loop would. The
         // ceiling is 30 seconds because PowerShell's cold start on a loaded
-        // Windows runner takes several seconds before `exit` even runs.
+        // Windows runner takes several seconds before `exit` even runs. On
+        // timeout the assertion carries the tenant scrollback, which is the
+        // diagnosis: empty means the child never produced output, a shell
+        // banner or prompt means it started and never ran the command.
         let mut exit = None;
         for _ in 0..1200 {
             if let Some(c) = host.terminal_tenant_last_exit("/ctl") {
@@ -4744,7 +4747,8 @@ mod tests {
         assert_eq!(
             exit,
             Some(TerminalExit::Code { code: 7 }),
-            "the failing script's exit code surfaces"
+            "the failing script's exit code surfaces; scrollback: {:?}",
+            String::from_utf8_lossy(&host.terminal_tenant_scrollback("/ctl"))
         );
         assert!(host
             .close_terminal_tenant("/ctl")

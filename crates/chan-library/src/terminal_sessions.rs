@@ -6382,7 +6382,11 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        panic!("terminal exit was not recorded");
+        // The scrollback is the diagnosis: empty means the child never
+        // produced output (a spawn-side failure), a shell banner or prompt
+        // means it started and never ran the command, an error names itself.
+        let output = String::from_utf8_lossy(&registry.all_scrollback()).into_owned();
+        panic!("terminal exit was not recorded; scrollback: {output:?}");
     }
 
     #[tokio::test]
