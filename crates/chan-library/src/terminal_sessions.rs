@@ -3010,9 +3010,10 @@ impl Session {
             #[cfg(windows)]
             cmd.env("USERPROFILE", home);
         }
-        // Windows: the terminal shell is Git BASH (a hard dependency). Prepend
-        // the chan bin dir (`%LOCALAPPDATA%\chan\bin`) so the `chan` /
-        // `cs` shims resolve. The shim dir is only ever added to the HKCU PATH
+        // Windows: prepend the chan bin dir (`%LOCALAPPDATA%\chan\bin`) so
+        // the `chan` / `cs` shims resolve in whichever shell the resolver
+        // picks (CHAN_SHELL, then pwsh, powershell, cmd; see platform.rs).
+        // The shim dir is only ever added to the HKCU PATH
         // registry by `cs_install::ensure_on_user_path`, which never reaches
         // this already-running process's inherited env -- so prepend it here,
         // independent of registry propagation. Must match `cs_install`'s
@@ -5078,6 +5079,8 @@ mod tests {
     /// command's output on the replay side; draining `rx` alone then reads back
     /// empty rather than wrong. The serving path honours both halves the same
     /// way (`chan-server`'s terminal attach replays before streaming).
+    // Gated with every caller: each drives the session through a POSIX shell.
+    #[cfg(unix)]
     async fn collect_until(session: &mut AttachHandle, needle: &str, timeout: Duration) -> String {
         let deadline = tokio::time::Instant::now() + timeout;
         let mut out = String::new();
@@ -5107,6 +5110,10 @@ mod tests {
     /// The second collect can therefore only succeed by reading `replay`, which
     /// is exactly what a create whose one-shot command outran its attach
     /// depends on.
+    // The harness types POSIX printf into the session; the Windows default
+    // shell is PowerShell, so on that runner this tests the shell mismatch
+    // rather than the ring replay.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_fresh_attach_reads_output_the_ring_already_holds() {
         let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
@@ -6367,7 +6374,9 @@ mod tests {
     }
 
     async fn wait_for_last_exit(registry: &Registry) -> TerminalExit {
-        for _ in 0..120 {
+        // A 30 second ceiling: PowerShell's cold start on a loaded Windows
+        // runner takes several seconds before `exit` even runs.
+        for _ in 0..1200 {
             if let Some(exit) = registry.last_exit() {
                 return exit;
             }
@@ -7156,6 +7165,9 @@ mod tests {
         registry.close(third.id(), CloseReason::Explicit);
     }
 
+    // POSIX printf plus parameter expansion; not valid under the Windows
+    // default shell (PowerShell).
+    #[cfg(unix)]
     #[tokio::test]
     async fn spawn_uses_configured_default_term() {
         // TERM env var on the spawned shell honors
@@ -7186,6 +7198,9 @@ mod tests {
         registry.close(handle.id(), CloseReason::Explicit);
     }
 
+    // POSIX printf plus parameter expansion; not valid under the Windows
+    // default shell (PowerShell).
+    #[cfg(unix)]
     #[tokio::test]
     async fn standalone_spawn_exports_configured_terminal_backend() {
         // No workspace window, control socket, or MCP environment participates
@@ -7218,6 +7233,9 @@ mod tests {
         }
     }
 
+    // POSIX printf plus parameter expansion; not valid under the Windows
+    // default shell (PowerShell).
+    #[cfg(unix)]
     #[tokio::test]
     async fn backend_preference_flip_applies_to_direct_create_and_restart_only() {
         let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
@@ -7288,6 +7306,9 @@ mod tests {
         registry.close(&original_id, CloseReason::Explicit);
     }
 
+    // POSIX printf plus parameter expansion; not valid under the Windows
+    // default shell (PowerShell).
+    #[cfg(unix)]
     #[tokio::test]
     async fn spawn_time_backend_resolver_updates_new_children_and_keeps_last_good_value() {
         let resolved = Arc::new(Mutex::new(Some(false)));
@@ -7382,6 +7403,9 @@ mod tests {
         registry.close(&original_id, CloseReason::Explicit);
     }
 
+    // systemd supervision state is a Linux-host concern, and the child half
+    // reads the spawned environment with a POSIX-shell harness.
+    #[cfg(unix)]
     #[test]
     fn session_spawn_scrubs_systemd_notification_env() {
         let output = Command::new(std::env::current_exe().unwrap())
@@ -7403,6 +7427,9 @@ mod tests {
         );
     }
 
+    // Gated with its parent above: only that test's re-invocation of this
+    // binary makes this one do real work.
+    #[cfg(unix)]
     #[tokio::test]
     async fn session_spawn_scrubs_systemd_notification_env_child() {
         if std::env::var_os("CHAN_SYSTEMD_ENV_SCRUB_CHILD").is_none() {
@@ -7436,6 +7463,10 @@ mod tests {
         registry.close(handle.id(), CloseReason::Explicit);
     }
 
+    // POSIX printf command, and its needle appears inside the command banner
+    // echo, so on Windows this passes without the command ever running; run
+    // it where a pass proves execution.
+    #[cfg(unix)]
     #[tokio::test]
     async fn tenant_default_command_runs_when_session_omits_one() {
         // A tenant default command set after construction runs on a session
@@ -7463,6 +7494,9 @@ mod tests {
         registry.close(handle.id(), CloseReason::Explicit);
     }
 
+    // POSIX printf commands; not valid under the Windows default shell
+    // (PowerShell).
+    #[cfg(unix)]
     #[tokio::test]
     async fn explicit_command_overrides_tenant_default() {
         // An explicit per-session command wins over the tenant default.
@@ -7570,6 +7604,9 @@ mod tests {
         );
     }
 
+    // POSIX printf command; not valid under the Windows default shell
+    // (PowerShell).
+    #[cfg(unix)]
     #[tokio::test]
     async fn all_scrollback_returns_session_output() {
         let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
@@ -7615,6 +7652,9 @@ mod tests {
         assert!(registry.attach(&id, None).is_none());
     }
 
+    // The harness types POSIX printf into the session; not valid under the
+    // Windows default shell (PowerShell).
+    #[cfg(unix)]
     #[tokio::test]
     async fn two_attaches_share_io() {
         let registry = Registry::new(test_config(4096, 4, 60));

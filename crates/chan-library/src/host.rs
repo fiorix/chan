@@ -3425,8 +3425,10 @@ mod tests {
         )
         .await;
 
-        let root_a = root_a.path().canonicalize().expect("canonical a");
-        let root_b = root_b.path().canonicalize().expect("canonical b");
+        // Hosted roots carry the crate's normalized canonical form, which
+        // strips the Windows verbatim prefix std's canonicalize returns.
+        let root_a = chan_workspace::paths::canonicalize_normalized(root_a.path());
+        let root_b = chan_workspace::paths::canonicalize_normalized(root_b.path());
         assert_eq!(a["root"], root_a.to_string_lossy().as_ref());
         assert_eq!(b["root"], root_b.to_string_lossy().as_ref());
     }
@@ -4059,7 +4061,8 @@ mod tests {
         let live = host
             .live_workspace(root.path())
             .expect("live workspace present");
-        let canonical = root.path().canonicalize().expect("canonical root");
+        // The crate's normalized canonical form, not std's Windows verbatim.
+        let canonical = chan_workspace::paths::canonicalize_normalized(root.path());
         assert_eq!(live.root(), canonical.as_path());
 
         // A path that no runtime mounts reads as not live.
@@ -4139,7 +4142,8 @@ mod tests {
             .open_registered_workspace(fresh.path(), serve_config("/fresh"))
             .await
             .expect("fresh dir opens immediately after in-process register");
-        let canonical = fresh.path().canonicalize().expect("canonical root");
+        // The crate's normalized canonical form, not std's Windows verbatim.
+        let canonical = chan_workspace::paths::canonicalize_normalized(fresh.path());
         assert_eq!(hosted.root, canonical);
     }
 
@@ -4285,6 +4289,12 @@ mod tests {
         assert!(!row.desired_on, "the serialized close persists off");
     }
 
+    // The removal this simulates cannot be constructed on Windows:
+    // Workspace::open holds an open handle on the writer lock inside the
+    // root, and Windows refuses to delete a tree with open handles, so the
+    // harness's own remove_dir_all fails with a sharing violation before the
+    // scenario exists.
+    #[cfg(unix)]
     #[tokio::test]
     async fn mount_rejects_root_removed_while_tenant_builds() {
         let cfg = tempfile::tempdir().expect("config dir");
@@ -4720,9 +4730,11 @@ mod tests {
             })
             .expect("spawn exiting PTY");
 
-        // Poll the exit code the way the desktop scrape loop would.
+        // Poll the exit code the way the desktop scrape loop would. The
+        // ceiling is 30 seconds because PowerShell's cold start on a loaded
+        // Windows runner takes several seconds before `exit` even runs.
         let mut exit = None;
-        for _ in 0..120 {
+        for _ in 0..1200 {
             if let Some(c) = host.terminal_tenant_last_exit("/ctl") {
                 exit = Some(c);
                 break;
