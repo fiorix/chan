@@ -579,6 +579,62 @@ describe("settings surface render", () => {
     expect(slider.value).toBe(String(SCROLLBACK_MB_DEFAULT));
   });
 
+  test("every pill renders inside a SettingField .control scope", async () => {
+    // The pill CSS lives once in SettingField as :global descendant
+    // rules, so a pill mounted outside a SettingField renders unstyled
+    // (bare radio circles) and nothing reddens: the failure is silent
+    // and visual only. This asserts the ancestor contract the single
+    // block design makes cheap to check, including inside the
+    // expandable colour blocks where the regression shipped.
+    const target = openSurface();
+    await flush();
+
+    function expectPillsScoped(tab: string): void {
+      const pills = target.querySelectorAll("label.pill");
+      expect(pills.length, `${tab} mounts at least one pill`).toBeGreaterThan(0);
+      for (const pill of pills) {
+        expect(
+          pill.closest(".control"),
+          `label.pill "${pill.textContent?.trim()}" in ${tab} sits outside a SettingField`,
+        ).not.toBeNull();
+      }
+    }
+
+    for (const tab of [
+      "Global",
+      "Editor",
+      "Terminal",
+      "File browser",
+      "Graph",
+      "Dashboard",
+      "Search",
+    ]) {
+      clickTab(target, tab);
+      await flush();
+      expectPillsScoped(tab);
+    }
+
+    // Open the two expandable colour blocks and re-check: their
+    // pickers mount only then.
+    clickTab(target, "Terminal");
+    await flush();
+    const termPill = [...target.querySelectorAll("label.pill")].find((e) =>
+      e.textContent?.includes("Custom terminal colours"),
+    ) as HTMLLabelElement;
+    (termPill.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
+    await flush();
+    expectPillsScoped("Terminal (custom colours open)");
+
+    clickTab(target, "Graph");
+    await flush();
+    const graphPill = [...target.querySelectorAll("label.pill")].find((e) =>
+      e.textContent?.includes("Custom graph colours"),
+    ) as HTMLLabelElement;
+    (graphPill.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
+    await flush();
+    expectPillsScoped("Graph (custom colours open)");
+  });
+
   test("one control per section writes a body falling on exactly one owner", async () => {
     const target = openSurface();
     await flush();

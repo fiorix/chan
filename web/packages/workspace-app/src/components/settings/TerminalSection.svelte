@@ -288,6 +288,15 @@
 </SettingField>
 
 {#if customTerminalColorsOn && customTerminalColors}
+  <SettingField label="ANSI contrast">
+    <PillRadio
+      name="settings-terminal-contrast"
+      ariaLabel="Terminal ANSI contrast"
+      value={customTerminalColors.contrast}
+      options={TERMINAL_CONTRAST}
+      onselect={setTerminalContrast}
+    />
+  </SettingField>
   <div class="terminal-colours">
     {#each TERMINAL_COLOR_ROWS as row (row.key)}
       <ColorField
@@ -297,16 +306,6 @@
         oncommit={(hex) => hex !== null && commitTerminalColor(row.key, hex)}
       />
     {/each}
-    <div class="terminal-contrast-row">
-      <span>ANSI contrast</span>
-      <PillRadio
-        name="settings-terminal-contrast"
-        ariaLabel="Terminal ANSI contrast"
-        value={customTerminalColors.contrast}
-        options={TERMINAL_CONTRAST}
-        onselect={setTerminalContrast}
-      />
-    </div>
     <button type="button" class="reset-terminal-colours" onclick={resetTerminalColors}>
       Reset to current standard
     </button>
@@ -338,17 +337,6 @@
     gap: 10px;
     padding: 12px 0 16px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-  }
-  .terminal-contrast-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .terminal-contrast-row > span {
-    width: 8em;
-    color: var(--text);
-    font-size: 13px;
   }
   .reset-terminal-colours {
     justify-self: start;

@@ -98,17 +98,16 @@
 </SettingField>
 
 {#if graphColorsOn}
+  <SettingField label="Editing palette">
+    <PillRadio
+      name="settings-graph-palette-theme"
+      ariaLabel="Graph palette colour scheme"
+      value={graphEditTheme}
+      options={GRAPH_EDIT_MODES}
+      onselect={(v) => (graphEditTheme = v as GraphColorTheme)}
+    />
+  </SettingField>
   <div class="graph-colours">
-    <div class="graph-contrast-row">
-      <span>Editing palette</span>
-      <PillRadio
-        name="settings-graph-palette-theme"
-        ariaLabel="Graph palette colour scheme"
-        value={graphEditTheme}
-        options={GRAPH_EDIT_MODES}
-        onselect={(v) => (graphEditTheme = v as GraphColorTheme)}
-      />
-    </div>
     {#each GRAPH_COLOR_GROUPS as group (group)}
       <div class="graph-palette-group">{group}</div>
       {#each GRAPH_COLOR_ROWS.filter((row) => row.group === group) as row (row.kind)}
@@ -137,17 +136,6 @@
     gap: 10px;
     padding: 12px 0 16px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-  }
-  .graph-contrast-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .graph-contrast-row > span {
-    width: 8em;
-    color: var(--text);
-    font-size: 13px;
   }
   .graph-palette-group {
     margin-top: 4px;
