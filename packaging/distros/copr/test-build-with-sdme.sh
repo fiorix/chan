@@ -31,6 +31,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRIVER="$SCRIPT_DIR/build-with-sdme.sh"
 SRPM_DRIVER="$SCRIPT_DIR/build-srpm.sh"
+MAKE_SRPM="$SCRIPT_DIR/make-srpm.sh"
 SNAPSHOT_HELPER="$SCRIPT_DIR/../../snapshot-tracked-tree.sh"
 BUILD_POLICY="$SCRIPT_DIR/../../sdme-build-policy.sh"
 WORK="$(mktemp -d)"
@@ -409,6 +410,48 @@ else
     ok "the probe reports the directory without a raw redirection error"
 fi
 chmod 600 "$LOCKED/build.log"
+
+echo "== SRPM external tarball staging"
+MAKE_SRPM_REPO="$WORK/make-srpm-repo"
+MAKE_SRPM_DIR="$MAKE_SRPM_REPO/packaging/distros/copr"
+MAKE_SRPM_EXTERNAL="$WORK/make-srpm-external"
+mkdir -p "$MAKE_SRPM_DIR" "$MAKE_SRPM_REPO/packaging/distros/fedora" \
+    "$MAKE_SRPM_EXTERNAL" "$WORK/make-srpm-out"
+ln -s "$MAKE_SRPM" "$MAKE_SRPM_DIR/make-srpm.sh"
+cat >"$MAKE_SRPM_REPO/packaging/distros/fedora/chan.spec" <<'EOF'
+%global upstream_version 0.0.0
+Name: chan
+Source0: chan-vendored-%{upstream_version}.tar.xz
+EOF
+printf 'vendored source\n' >"$MAKE_SRPM_EXTERNAL/chan-vendored-1.2.3.tar.xz"
+
+cat >"$WORK/bin/rpmbuild" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" >"${STUB_MAKE_SRPM_STATE:?}/args"
+: >"$STUB_MAKE_SRPM_STATE/invoked"
+STUB
+chmod +x "$WORK/bin/rpmbuild"
+
+STUB_MAKE_SRPM_STATE="$WORK/make-srpm-out" PATH="$WORK/bin:$PATH" \
+    "$MAKE_SRPM_DIR/make-srpm.sh" \
+    --repo "$MAKE_SRPM_REPO" \
+    --spec "$MAKE_SRPM_REPO/packaging/distros/fedora/chan.spec" \
+    --outdir "$WORK/make-srpm-out" \
+    --tarball "$MAKE_SRPM_EXTERNAL/chan-vendored-1.2.3.tar.xz" \
+    >"$WORK/make-srpm.log" 2>&1
+assert_status 0 $? "an external tarball builds from a fresh tracked-source copy"
+assert_present "$WORK/make-srpm-out/invoked" "rpmbuild runs after external tarball staging"
+assert_grep "%global upstream_version 1.2.3" \
+    "$MAKE_SRPM_REPO/target/distros/chan.spec" \
+    "the container-local spec records the external tarball version"
+assert_grep "_sourcedir $MAKE_SRPM_EXTERNAL" "$WORK/make-srpm-out/args" \
+    "rpmbuild reads Source0 from the external read-only bind"
+if [ -e "$MAKE_SRPM_REPO/target/distros/chan-vendored-1.2.3.tar.xz" ]; then
+    bad "the external tarball is copied into the container-local source tree"
+else
+    ok "the external tarball is not copied into the container-local source tree"
+fi
 
 echo "== SRPM container mount boundary"
 SRPM_REPO="$WORK/srpm-repo"

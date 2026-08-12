@@ -36,13 +36,14 @@ done
 
 SPEC="${SPEC:-$REPO/packaging/distros/fedora/chan.spec}"
 OUTDIR="${OUTDIR:-$REPO/target/distros/srpm}"
-SOURCEDIR="$REPO/target/distros"
+STAGEDIR="$REPO/target/distros"
+mkdir -p "$STAGEDIR" "$OUTDIR"
 
 if [ -z "$TARBALL" ]; then
     # Same EPIPE hazard as build-srpm.sh: read all of mkdist's output,
     # then take its first line.
     TARBALL="$("$REPO/packaging/distros/mkdist" --repo "$REPO" \
-        --outdir "$SOURCEDIR")"
+        --outdir "$STAGEDIR")"
     TARBALL="${TARBALL%%$'\n'*}"
 elif [ ! -f "$TARBALL" ]; then
     echo "error: $TARBALL not found" >&2
@@ -53,12 +54,13 @@ VERSION="$(basename "$TARBALL" .tar.xz)"
 VERSION="${VERSION#chan-vendored-}"
 
 # The committed spec's %upstream_version is a fallback; the tarball just
-# built is the truth. Rewrite a copy next to the sources.
-SPEC_COPY="$SOURCEDIR/$(basename "$SPEC")"
+# built is the truth. Keep the writable spec copy in the local staging tree,
+# while an externally supplied tarball can remain on its read-only bind.
+SOURCE_DIR="$(cd "$(dirname "$TARBALL")" && pwd -P)"
+SPEC_COPY="$STAGEDIR/$(basename "$SPEC")"
 sed "s/^%global upstream_version .*/%global upstream_version $VERSION/" \
     "$SPEC" > "$SPEC_COPY"
 
-mkdir -p "$OUTDIR"
 rpmbuild -bs "$SPEC_COPY" \
-    --define "_sourcedir $SOURCEDIR" \
+    --define "_sourcedir $SOURCE_DIR" \
     --define "_srcrpmdir $OUTDIR"
