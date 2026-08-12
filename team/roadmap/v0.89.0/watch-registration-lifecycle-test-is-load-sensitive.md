@@ -14,7 +14,7 @@ assertion `left == right` failed
 
 The assertion is `assert_eq!(initial.state, WatchHealthState::Degraded);` at `crates/chan-workspace/src/watch.rs:2167`, in `watch_registration_lifecycle_recovers_and_joins` (`watch.rs:2159`), inside `mod filtered_registration` (`watch.rs:1868`, gated `#[cfg(target_os = "linux")]` on the line above). The test injects one registration failure, starts a handle, and asserts the handle reports `Degraded`. Under load it read `Healthy`.
 
-The draft carried this as `watch.rs:2157`. That was correct for the tree that produced the red and points at blank space between two tests today: `cc5b2f5b`, a comment-only commit, added exactly ten lines to the file and nothing else. This item therefore names the test and its enclosing module alongside every line number, and the same drift is why it is worth doing here.
+In the tree that produced the red the assertion sat at `watch.rs:2157`, which points at blank space between two tests today: `cc5b2f5b`, a comment-only commit, added exactly ten lines to the file and nothing else. This item therefore names the test and its enclosing module alongside every line number, and the same drift is why it is worth doing here.
 
 ## The rate is a floor, not an estimate
 
@@ -35,7 +35,7 @@ Twelve runs cannot distinguish 1-in-12 from 1-in-50, and every one of them ran u
 
 **The shared injection slot.** `INJECTED_REGISTRATION_FAILURE` (`watch.rs:551`) is one process-global `OnceLock<Mutex<Option<InjectedRegistrationFailure>>>`. `inject_registration_failures` overwrites it wholesale (`watch.rs:558`) and `clear_injected_registration_failure` nulls it (`watch.rs:570`). Five call sites in one lib-test binary write it, at `watch.rs:1976`, `2024`, `2053`, `2163` and `2187`, with clears at `1989`, `2037` and `2074`, spread across four `#[test]` functions that libtest runs in parallel by default. Nothing serializes them: there is no `serial_test` dependency, no `#[serial]` attribute, and nothing under `crates/`, `.github/` or `scripts/` pins `--test-threads`, the flag's only mention under `crates/` being a comment at `crates/chan-server/src/routes/preflight.rs:584`. It is named outside the code, in [`.agents/playbook.md`](../../../.agents/playbook.md) line 70 and in this item's own rig below, but as `--test-threads=32`, which oversubscribes the suite rather than serializing it. The `Mutex` serializes each individual access and nothing more; it is not held across the window between a test arming the slot and that test's supervisor reading it at `watch.rs:583`. A neighbour clearing or overwriting the slot inside that window leaves the injection disarmed, registration succeeds, and the assertion reads `Healthy` with no deschedule involved at all.
 
-The two are indistinguishable from the red. Both put `left: Healthy` against `right: Degraded` on the same line. The draft named only the first and proposed anchoring on an observation rather than a sample, which repairs the race and leaves the slot exactly as it is. That is why the acceptance line below insisting the mechanism be named from source before a repair is chosen is load-bearing rather than procedural.
+The two are indistinguishable from the red. Both put `left: Healthy` against `right: Degraded` on the same line. Anchoring the assertion on an observation rather than a sample repairs the race and leaves the slot exactly as it is. That is why the acceptance line below insisting the mechanism be named from source before a repair is chosen is load-bearing rather than procedural.
 
 ## The slot's other consequence: a clobber makes neighbours pass vacuously
 
@@ -92,7 +92,7 @@ Forcing the injecting tests apart takes both assertions from a majority-red rate
 
 The claim is bounded exactly as it should be, and this wording is the finding rather than a hedge: this does not establish that the 250ms sample race is impossible. It establishes that the observed capped reds vanish when the tests cannot share the slot. The race remains provable from source as a thing that could happen and is not what was happening here.
 
-That matters for the repair, because the draft this item came from named only the retry race and proposed anchoring on an observation rather than a sample. That repair fixes the race and **leaves the slot exactly as it is**, so it would have left the measured mechanism in place while looking like a fix. This is the acceptance line about naming the mechanism before choosing a repair, paying for itself.
+That matters for the repair. A repair aimed at the retry race alone, anchoring on an observation rather than a sample, fixes the race and **leaves the slot exactly as it is**, so it would leave the measured mechanism in place while looking like a fix. This is the acceptance line about naming the mechanism before choosing a repair, paying for itself.
 
 It also supplies the sibling rate the closed nine-item inventory never attached: `policy_change_during_retry_resets_stale_registrations` is 19 red in 20 under the cap, which is the strongest signal of the pair.
 
@@ -108,7 +108,7 @@ It also supplies the sibling rate the closed nine-item inventory never attached:
 
 Landed at `1ca1b289`, alongside the sibling item's comment-only classification in `indexer.rs`.
 
-The test-only registration-failure slot is now a **path-keyed map**, per the owner's ruling. A test consumes or cleans up only its own exact `PathBuf`, so parallel tests can no longer disarm one another. This is the repair the mechanism called for rather than the one the originating draft proposed: that draft named only the 250ms retry race, and a repair aimed at the race would have left the slot untouched, turning these tests green while the live mechanism stayed in place.
+The test-only registration-failure slot is now a **path-keyed map**, per the owner's ruling. A test consumes or cleans up only its own exact `PathBuf`, so parallel tests can no longer disarm one another. This is the repair the mechanism called for: a repair aimed at the 250ms retry race alone would have left the slot untouched, turning these tests green while the live mechanism stayed in place.
 
 Both racing assertions are repaired, not just the one that happened to go red. `policy_change_during_retry_resets_stale_registrations` and `watch_registration_lifecycle_recovers_and_joins` both assert the monotonic `registration_failures == 1`, and the latter no longer samples the retryable `Degraded` state at all.
 

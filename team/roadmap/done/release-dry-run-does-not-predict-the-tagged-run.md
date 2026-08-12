@@ -100,11 +100,7 @@ Two tool paths exist, and only one of them was known:
 
 ### Adjacent finding, NOT one of the fourteen and not fixed here
 
-Recorded because it is a real observation about release tooling and it was found by this
-audit, not because it belongs to this item. Registered for v0.89.0 instead, as
-[the-sdme-build-drivers-are-uncapped-and-mount-a-live-worktree](../v0.89.0/the-sdme-build-drivers-are-uncapped-and-mount-a-live-worktree.md),
-which accepted this finding on 2026-08-11 together with the live-worktree bind the same
-drivers carry.
+Recorded because it is a real observation about release tooling and it was found by this audit, not because it belongs to this item. Registered for v0.89.0 instead, as [the-sdme-build-drivers-are-uncapped-and-mount-a-live-worktree](../v0.89.0/the-sdme-build-drivers-are-uncapped-and-mount-a-live-worktree.md), which accepted this finding on 2026-08-11 together with the live-worktree bind the same drivers carry.
 
 `packaging/nix/build-with-sdme.sh` creates its disposable container, at its
 `"${SDME_CMD[@]}" new --name "$CONTAINER"` invocation, with neither

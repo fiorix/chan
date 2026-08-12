@@ -1,10 +1,10 @@
 # Chan home is mutated process-globally during a parallel suite, and an isolated library writes to the ambient home anyway
 
-Status: REGISTERED 2026-08-11, carried forward from the v0.88.0 timing lane's draft of the same name, which was raised while that lane classified its own baseline sweep and was deliberately kept outside v0.88.0's locked fourteen. The owner's ruling on acceptance is that scope is the three windows named below and nothing wider: the draft's stated contract, no test anywhere mutating process-global environment state another test reads, is explicitly **out of scope** and is argued against in "Boundaries". Two of the draft's supporting claims were wrong and are corrected here; correcting them makes the item narrower and sharper rather than weaker.
+Status: REGISTERED 2026-08-11, carried forward from the v0.88.0 timing lane's draft of the same name, which was raised while that lane classified its own baseline sweep and was deliberately kept outside v0.88.0's locked fourteen. The owner's ruling on acceptance is that scope is the three windows named below and nothing wider: a wider contract, no test anywhere mutating process-global environment state another test reads, is explicitly **out of scope** and is argued against in "Boundaries".
 
 ## What
 
-`std::env::set_var` mutates state shared by every thread in the process, and has been `unsafe` since Rust 1.63 for that reason. At HEAD there are **eight** `set_var("CHAN_HOME", ...)` sites, not the seven the draft claimed:
+`std::env::set_var` mutates state shared by every thread in the process, and has been `unsafe` since Rust 1.63 for that reason. At HEAD there are **eight** `set_var("CHAN_HOME", ...)` sites:
 
 ```
 crates/chan-server/src/devserver.rs:5594          FdstoreEnvGuard::capture
@@ -15,7 +15,7 @@ crates/chan-workspace/src/paths.rs:414            ""  (empty, treated as unset)
 crates/chan-workspace/src/paths.rs:428, 461       restore-to-saved
 ```
 
-The draft's second wrong claim was that "nothing excludes readers from the window at all". Three exclusion mechanisms already exist, and naming them is what pins this item to a specific hole instead of a general complaint about shared environment:
+Three exclusion mechanisms already exist, and naming them is what pins this item to a specific hole instead of a general complaint about shared environment:
 
 - `crates/chan-server/src/devserver.rs:2524`, `static CHAN_HOME_ENV: std::sync::RwLock<()>`. The write side is taken only by `FdstoreEnvGuard::set` (`devserver.rs:5577`) and by the round-trip test (`devserver.rs:5695`); the read side is held for a full test body by **17** devserver tests through `chan_home_env_read()` (`devserver.rs:2534`).
 - `crates/chan-workspace/src/paths.rs:382`, `static CHAN_HOME_ENV_GUARD: Mutex<()>`, whose own doc comment says it "serializes every `CHAN_HOME`-mutating test".
@@ -23,7 +23,7 @@ The draft's second wrong claim was that "nothing excludes readers from the windo
 
 Both statics are declared inside their own module's `mod tests`, so no other module in the same test binary can name them even deliberately. That is the shape of the first two holes.
 
-A third correction: the draft says "`cargo test` runs one binary with many threads". The eight sites span three crates and therefore three separate test binaries. Only the two `devserver.rs` sites can reach the readers that were observed failing.
+The eight sites span three crates and therefore three separate test binaries. Only the two `devserver.rs` sites can reach the readers that were observed failing.
 
 ## Window 1: a relative chan home is left in the process under no lock
 
@@ -56,7 +56,7 @@ What the window costs depends on the run's ambient environment, and the honest s
 
 ## Window 3: an isolated library sends its metadata to the ambient chan home, and this is the root cause
 
-This is not in the draft at all, and it is the reason the first two windows have anything to bite.
+This is the reason the first two windows have anything to bite.
 
 `Library::open_at(config_path)` (`library.rs:105-138`) exists so a caller can put the registry wherever it wants; the path is stored as `inner.config_path` (`:131`) and every registry read and write goes through it (`:203`, `:238`, `:437`, `:493`). The per-workspace metadata directories do not. In `register_workspace_with_name`, two consecutive lines resolve two different ways:
 
@@ -67,7 +67,7 @@ reg.save_to(&self.inner.config_path)?;                         // library.rs:238
 
 The signature is the whole problem. `pub fn ensure_workspace_metadata_dirs(metadata_key: &str) -> std::io::Result<WorkspacePaths>` (`paths.rs:241`) takes only a key, and resolves through `workspace_paths_for_metadata_key` (`paths.rs:224`) to `workspaces_dir()` (`paths.rs:95`) to `config_dir()` (`paths.rs:35`) to `chan_home_override()` (`paths.rs:57`), which reads the process environment. There is no parameter through which a caller holding an isolated home could pass it.
 
-The second caller is `Workspace::open` (`workspace.rs:817`), at `workspace.rs:885`, whose `map_err` at `:886` formats `ensure workspace metadata dirs: {error}`. That prefix is load-bearing evidence: `library.rs:237` uses `?`, which goes through `From<std::io::Error> for ChanError` (`error.rs:77-81`) and produces the bare `e.to_string()` with no prefix. The recorded panic carried the prefix, so the failing call was `Library::open_workspace` (`library.rs:282`) and not `register_workspace`. The draft attributed it to the register line. Both lines resolve ambiently, so the item is unchanged, but the attribution is corrected. `library.rs:401` and `library.rs:506` resolve `workspace_paths_for_metadata_key` the same ambient way.
+The second caller is `Workspace::open` (`workspace.rs:817`), at `workspace.rs:885`, whose `map_err` at `:886` formats `ensure workspace metadata dirs: {error}`. That prefix is load-bearing evidence: `library.rs:237` uses `?`, which goes through `From<std::io::Error> for ChanError` (`error.rs:77-81`) and produces the bare `e.to_string()` with no prefix. The recorded panic carried the prefix, so the failing call was `Library::open_workspace` (`library.rs:282`) and not `register_workspace`. Both lines resolve ambiently. `library.rs:401` and `library.rs:506` resolve `workspace_paths_for_metadata_key` the same ambient way.
 
 Both fixtures behind the observed failures have exactly this shape:
 
@@ -88,7 +88,7 @@ Five occurrences across two sweeps of 30 runs at `e239c770`, recorded by the v0.
 | baseline 24 | not recorded | doc_sessions::tests |
 | post-fix 5  | 5            | devserver::tests    |
 
-The blank in row four is the draft's and was not recoverable; it is left as recorded rather than filled in.
+The failure count for baseline 24 was not recorded and is not recoverable.
 
 The burst shape rules out a deterministic misresolution. If `dirs::home_dir()` returned `None` and `config_dir()` fell through to the relative `.chan` at `paths.rs:47`, every `register_workspace` in every run would fail. Forty-six, then twenty-six, then seven, then nothing for most runs is a window signature. That is also the cleanest discriminator against the sibling item [`chan-home-collapses-to-the-working-directory`](chan-home-collapses-to-the-working-directory.md), which is about precisely that deterministic fallback.
 
@@ -115,7 +115,7 @@ Note the ordering effect: once the third bullet lands, most readers in both bina
 
 In scope: `crates/chan-server/src/devserver.rs` (the `fdstore_boot` test module and the `CHAN_HOME_ENV` static), `crates/chan-workspace/src/paths.rs`, `crates/chan-workspace/src/library.rs`, `crates/chan-workspace/src/workspace.rs`. `crates/chan/src/test_env.rs` is not touched: it is the shipped answer for its crate and is the model here, not the defect.
 
-Out of scope, explicitly: the draft's contract that no test anywhere mutates process-global environment state another test reads. The evidence names three windows and one missing parameter. Generalizing to every environment variable across three crates implies threading injected configuration through `config_dir()` and all of its delegators, which is a release-sized project that nothing observed requires. A fourth window, if one turns up, gets its own item.
+Out of scope, explicitly: a wider contract that no test anywhere mutates process-global environment state another test reads. The evidence names three windows and one missing parameter. Generalizing to every environment variable across three crates implies threading injected configuration through `config_dir()` and all of its delegators, which is a release-sized project that nothing observed requires. A fourth window, if one turns up, gets its own item.
 
 Also out of scope: any `~/.chan` orphans an earlier bare-host run may already have left. Removing those is a user action, not a code change.
 
@@ -123,7 +123,7 @@ Shared lane: [`chan-home-collapses-to-the-working-directory`](chan-home-collapse
 
 ## Acceptance
 
-The draft proposed a statistical bound, "a run count large enough to have caught the observed rate". That is replaced, because the observed rate was five events in sixty runs and a clean sweep at that rate is weak evidence.
+A statistical bound, a run count large enough to have caught the observed rate, is not an acceptance check here: the observed rate was five events in sixty runs, and a clean sweep at that rate is weak evidence.
 
 1. **Deterministic, and it is the primary check.** Run the chan-server lib suite with `CHAN_HOME` set process-wide to a relative value, from a working directory that is itself read-only, which is what the rig's `/src` bind mount gives. That read-only working directory is a precondition of the check, not incidental: on an ordinary writable checkout the relative home is simply created under the crate directory, the writes succeed, and the check proves nothing. On the current tree this is **predicted** to reproduce the mass failure at `workspace.rs:886` with no scheduling luck required; it has not been run, because the host that registered this item has no Rust toolchain. Showing it red before the repair is therefore part of the check. With the repair in, every fixture that registers or opens a workspace passes, because the metadata resolves from the injected home.
 2. A chan-workspace unit test asserting that a `Library::open_at(tmp/config.toml)` which registers a workspace creates the metadata skeleton under `tmp/workspaces/<key>` and creates nothing under `config_dir()`. It must be shown red on the current tree before the repair.
@@ -154,9 +154,9 @@ Nothing here is a live defect and no user is affected. The cost is a reader's ti
 
 ## Rough size
 
-Small to medium, and smaller than the draft's "medium, seven call sites, and the design question is what replaces them". Two of the three windows need no design round: absolutize the sentinel at `devserver.rs:5707` and make the restore and the verification one continuous lock hold, then hoist `CHAN_HOME_ENV` (`devserver.rs:2524`) somewhere `doc_sessions` can reach it. The real work is Window 3, which is one home added to two functions in `paths.rs` and threaded through four call sites in `library.rs` and `workspace.rs`.
+Small to medium. Two of the three windows need no design round: absolutize the sentinel at `devserver.rs:5707` and make the restore and the verification one continuous lock hold, then hoist `CHAN_HOME_ENV` (`devserver.rs:2524`) somewhere `doc_sessions` can reach it. The real work is Window 3, which is one home added to two functions in `paths.rs` and threaded through four call sites in `library.rs` and `workspace.rs`.
 
-The one design choice that matters is where that home lives. Carrying it on `LibraryInner` beside `config_path` leaves all 127 `register_workspace` / `open_workspace` call sites in the chan-workspace test binary untouched; making it a parameter on the public workspace API does not. The cheaper shape exists, so this is not the design round the draft assumed. What keeps it out of "small" is re-running the 1-CPU rig and writing acceptance check 2 against four ambient resolution sites rather than one.
+The one design choice that matters is where that home lives. Carrying it on `LibraryInner` beside `config_path` leaves all 127 `register_workspace` / `open_workspace` call sites in the chan-workspace test binary untouched; making it a parameter on the public workspace API does not. The cheaper shape exists, so this is not a design round. What keeps it out of "small" is re-running the 1-CPU rig and writing acceptance check 2 against four ambient resolution sites rather than one.
 
 ## Provenance
 

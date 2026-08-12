@@ -296,14 +296,17 @@ ci-macos: ## Run the focused macOS CI validation target.
 .PHONY: ci-windows
 ci-windows: ## Test the Windows-shipped crates, build and smoke the NSIS package.
 	$(MAKE) build-matrix-check
-	# The sweep excludes chan and chan-systemd because their suites assert
-	# contracts that exist only where the standalone CLI ships: systemd and
-	# launchd unit text, sdme provision scripts, and Unix path identity.
-	# chan publishes no standalone Windows CLI, so on this runner those
-	# tests can only pass vacuously or fail on a platform difference the
-	# shipped product never sees. Every crate the Windows desktop app ships
-	# is swept here, including the `#[cfg(windows)]` ConPTY reaping tests
-	# in chan-library that no other arm can execute.
+	# The sweep excludes chan and chan-systemd: their suites assert
+	# contracts that exist only on a Linux host (systemd and launchd unit
+	# text, sdme provision scripts, Unix path identity), which on this
+	# runner can only pass vacuously or fail on a platform difference the
+	# contract does not cover. The exclusion is about those suites, not
+	# the product: chan itself ships on Windows, standalone as the CLI
+	# zip and bundled into the NSIS installer as chan.exe, and its
+	# Windows-only paths are covered by no CI arm. Every other crate the
+	# Windows desktop app ships is swept here, including the
+	# `#[cfg(windows)]` ConPTY reaping tests in chan-library that no
+	# other arm can execute.
 	#
 	# The release CLI is built first because `desktop/src-tauri` is a
 	# workspace member, so the sweep compiles chan-desktop, and its Windows

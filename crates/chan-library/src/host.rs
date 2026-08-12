@@ -5551,8 +5551,8 @@ mod tests {
             registry.close_all(crate::terminal_sessions::CloseReason::Shutdown);
         }
 
-        /// Drain kills a REAL child and only reports it dead once it is
-        /// observably gone (ESRCH or zombie).
+        /// Drain kills a REAL child and only reports it dead once its pid is
+        /// fully reaped; a zombie still counts as running.
         #[tokio::test]
         async fn drain_confirms_a_real_child_death() {
             let (host, registry) = host_with_terminal_runtime();

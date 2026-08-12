@@ -1,6 +1,6 @@
 # Assigning a chord another command already holds refuses, with no way forward
 
-Status: REGISTERED 2026-08-11 as v0.89.0 scope, on the owner's ruling during the round. Promoted from the draft `assigning-an-already-held-chord-has-no-swap-path`, which was raised out of the deck-chord review and was not accepted at triage. It was promoted because [the-deck-chords-are-invisible-to-the-shortcut-registry](the-deck-chords-are-invisible-to-the-shortcut-registry.md) makes the owner's own request *expressible* and then leaves it *refused*, so shipping that item alone delivers a worse state on this path than today. Verification against the tree before promotion corrected the draft on two counts and found one thing the draft did not know, recorded in place below. The second of those changes the item's shape and is the reason this is not a small UI task.
+Status: REGISTERED 2026-08-11 as v0.89.0 scope, on the owner's ruling during the round. Promoted from the draft `assigning-an-already-held-chord-has-no-swap-path`, which was raised out of the deck-chord review and was not accepted at triage. It was promoted because [the-deck-chords-are-invisible-to-the-shortcut-registry](the-deck-chords-are-invisible-to-the-shortcut-registry.md) makes the owner's own request *expressible* and then leaves it *refused*, so shipping that item alone delivers a worse state on this path than today. The unrepresentable unbound state recorded below is the reason this is not a small UI task.
 
 ## What
 
@@ -19,20 +19,17 @@ So exchanging two commands' chords, which is the rebind people actually want, ta
 
 The refusal itself is correct and this item does not remove it. Silently stealing a chord would leave the other command unreachable with no indication. The gap is that refusing is the *only* thing the dialog does.
 
+Every one of the 32 registry ids is affected: `SHORTCUTS` in `state/shortcuts.ts` holds 32 entries, a count the deck item establishes with a per-group breakdown. The conflict block is cited by symbol, `onCaptureKeydown`, rather than by line range: this round is shipping a rule about exactly this, and the file is being edited by the same lane.
+
 ## Why it is in this round rather than the next
 
 The owner asked for `Cmd+Enter` to present a deck. The deck item was accepted on the ruling that the shipped defaults stay and the two actions become rebindable, so the preference lives in the user's own config rather than changing a default under everyone with the muscle memory.
 
 That ruling is only satisfiable if the rebind is reachable. Once the deck item registers deck preview on `Mod+Enter`, that chord is held, and reaching the owner's ask requires exactly the three-assignment dance above, whose second step the dialog refuses. **The work requested to satisfy the ask ends by blocking it.** The deck item says so in its own Rough size section and recommends a lane be given both.
 
-## Corrected from the draft
+## "Unbound" is not a representable state
 
-- **The registry holds 32 entries, not 27.** The draft's "every one of the 27 registry ids is affected" understates the population. `SHORTCUTS` in `state/shortcuts.ts` holds 32, a count the deck item establishes with a per-group breakdown.
-- **The conflict block is at `onCaptureKeydown`, and the draft's line range is slightly off.** Cite it by symbol; the item's own round is shipping a rule about exactly this, and the file is being edited by the same lane.
-
-## The finding the draft did not have: "unbound" is not a representable state
-
-The draft's second acceptance line asks that taking a chord from another command leave that command "visibly unbound rather than silently shadowed". **That state does not exist in the data model**, which the draft did not check and which decides the item's shape.
+The natural resolution to reach for is taking the chord from the other command and leaving it "visibly unbound rather than silently shadowed". **That state does not exist in the data model**, and its absence decides the item's shape.
 
 The override table is keyed by command id, holding a per-slot chord. `assignOverride` writes a chord into a slot. `clearOverride` **deletes** the slot entry, and deletes the command's entry entirely when no slot remains. There is no sentinel and no null: an absent entry means *the built-in default applies*, not *this command has no chord*.
 
@@ -42,7 +39,7 @@ So "take this chord and leave the other command unbound" cannot be expressed tod
 2. **A representable unbound state.** An explicit sentinel in the override map, which is a persisted wire-format change (`KeymapOverridesWire`) and reaches the grid's rendering of a command with no chord.
 3. **Take-anyway restricted to commands that already carry an override**, where clearing genuinely returns them to a built-in rather than to nothing. Narrower than it sounds, and the asymmetry needs explaining in the UI.
 
-This item does not pre-decide which. It requires that the choice is made and stated, because option 1 is small and option 2 is a persisted format change, and the draft's "small to medium, mostly interaction design" sizing is only true of option 1.
+This item does not pre-decide which. It requires that the choice is made and stated, because option 1 is small and option 2 is a persisted format change: a "small to medium, mostly interaction design" sizing is only true of option 1.
 
 ## Resolution chosen: swap only, ruled 2026-08-11
 
@@ -122,4 +119,4 @@ web/packages/workspace-app/src/components/CommandChordAssign.svelte	swap button	
 
 Small to medium, and which one depends entirely on the resolution chosen above. Option 1, swap-only, is genuinely small: `assignOverride` and `clearOverride` already compose into a swap and the work is what the conflict state offers. Option 2 is medium and touches a persisted format.
 
-The draft's sizing assumed option 1 without noticing that its own acceptance line asked for option 2. That is the correction that matters most here.
+The unbound-state acceptance line, read on its own, asks for option 2, which is why the sizing cannot be stated without naming the resolution.

@@ -4,7 +4,7 @@ Status: REGISTERED 2026-08-11, accepted by the owner as v0.89.0 scope. Drafted d
 
 ## What
 
-The instrument that reproduces load-sensitive test failures exists only as prose in [`.agents/playbook.md`](../../.agents/playbook.md) and, each round, as commands in a gitignored coordination tree that is deleted when the round closes. There is no script, no `Makefile` target and no committed record of what any previous round actually ran.
+The instrument that reproduces load-sensitive test failures exists only as prose in [`.agents/playbook.md`](../../../.agents/playbook.md) and, each round, as commands in a gitignored coordination tree that is deleted when the round closes. There is no script, no `Makefile` target and no committed record of what any previous round actually ran.
 
 The consequence is not that the rig is hard to rebuild. It is that **results taken on it are not comparable across rounds**, and the items themselves say so. The v0.89.0 watch item's acceptance requires the rig be "inherited rather than reinvented" and states that a result taken any other way "is not comparable to one that was". That requirement cannot be verified against an instrument with no checked-in form.
 
