@@ -223,8 +223,20 @@ fn perform_metadata_import(
         .map_err(|e| MetadataImportError::Core(e.into()))?;
 
     let search_aggression = workspace_search_aggression(state)?;
-    let mut cell = take_workspace_cell(state)?;
+    // Hold the cell's write guard across the whole import, the same shape
+    // as `perform_reset_with`. A concurrent request then reads the held
+    // lock as Busy (503 with Retry-After) for the life of the drain,
+    // extraction, and reopen; releasing the guard around the empty slot
+    // would instead read as Missing, a permanent-looking 500 for a window
+    // that clears in seconds.
+    let mut cell_guard = state
+        .workspace_cell
+        .write()
+        .map_err(|_| MetadataImportError::Poisoned("workspace cell lock"))?;
     state.terminal_sessions.close_all(CloseReason::Workspace);
+    let Some(mut cell) = cell_guard.take() else {
+        return Err(MetadataImportError::Busy);
+    };
     cell.indexer.cancel();
     cell.watch_handle.take();
     let workspace_strong = cell.workspace.clone();
@@ -235,7 +247,7 @@ fn perform_metadata_import(
         std::thread::sleep(Duration::from_millis(25));
     }
     if Arc::strong_count(&workspace_strong) > 1 {
-        restore_workspace_cell(state, workspace_strong, search_aggression)?;
+        install_workspace_cell(state, &mut cell_guard, workspace_strong, search_aggression);
         return Err(MetadataImportError::Busy);
     }
     drop(workspace_strong);
@@ -252,31 +264,12 @@ fn perform_metadata_import(
         .library
         .open_workspace(&state.workspace_root)
         .map_err(MetadataImportError::Core)
-        .and_then(|workspace| restore_workspace_cell(state, workspace, search_aggression));
+        .map(|workspace| {
+            install_workspace_cell(state, &mut cell_guard, workspace, search_aggression)
+        });
 
     restore_result?;
     import_result
-}
-
-fn take_workspace_cell(state: &AppState) -> Result<WorkspaceCell, MetadataImportError> {
-    let mut cell_guard = state
-        .workspace_cell
-        .write()
-        .map_err(|_| MetadataImportError::Poisoned("workspace cell lock"))?;
-    cell_guard.take().ok_or(MetadataImportError::Busy)
-}
-
-fn restore_workspace_cell(
-    state: &AppState,
-    workspace: Arc<Workspace>,
-    search_aggression: SearchAggression,
-) -> Result<(), MetadataImportError> {
-    let mut cell_guard = state
-        .workspace_cell
-        .write()
-        .map_err(|_| MetadataImportError::Poisoned("workspace cell lock"))?;
-    install_workspace_cell(state, &mut cell_guard, workspace, search_aggression);
-    Ok(())
 }
 
 pub(super) fn workspace_search_aggression(

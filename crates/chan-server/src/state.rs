@@ -208,7 +208,7 @@ pub enum StateAccessError {
     Busy,
     #[error("workspace cell lock poisoned")]
     Poisoned,
-    #[error("workspace cell missing outside reset window")]
+    #[error("workspace cell missing outside a reset or import window")]
     Missing,
 }
 
