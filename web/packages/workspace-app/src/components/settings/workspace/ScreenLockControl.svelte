@@ -67,8 +67,9 @@
   }
 
   /// NumberField hands over the clamped value and which bound clamped
-  /// it; a clamp still saves, with the validation message kept visible
-  /// afterwards, matching the handler this replaces.
+  /// it; a clamp onto a new value saves with the validation message
+  /// kept visible, and a clamp onto the stored value shows the message
+  /// without a redundant patch.
   async function commitTimeout(
     next: number | null,
     clampedTo: "min" | "max" | null,
@@ -80,6 +81,9 @@
         : clampedTo === "max"
           ? `Timeout must be at most ${SCREENSAVER_MAX_TIMEOUT_SECS}s`
           : null;
+    // The clamp message above still stands when the entry lands on the
+    // stored value; an unchanged timeout has nothing to patch.
+    if (next === screensaverTimeoutSecs) return;
     screensaverBusy = true;
     const validationMessage = screensaverError;
     try {

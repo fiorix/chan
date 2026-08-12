@@ -1,7 +1,16 @@
-import { describe, expect, test } from "vitest";
+// @vitest-environment jsdom
+
+import { mount, tick, unmount } from "svelte";
+import { afterEach, describe, expect, test } from "vitest";
 import shortcuts from "./shortcuts.ts?raw";
 import app from "../App.svelte?raw";
 import screenLock from "../components/settings/workspace/ScreenLockControl.svelte?raw";
+import numberField from "../components/settings/NumberField.svelte?raw";
+import NumberField from "../components/settings/NumberField.svelte";
+import {
+  SCREENSAVER_MAX_TIMEOUT_SECS,
+  SCREENSAVER_MIN_TIMEOUT_SECS,
+} from "./screensaver";
 
 // Screensaver settings UI + Hybrid Nav lock chord. Tests pin the ownership:
 // Screen Lock + Screensaver controls live in Settings > This workspace, in
@@ -109,6 +118,17 @@ describe("Screen lock + Screensaver UI in Settings workspace tab", () => {
     );
   });
 
+  test("clamp onto the stored timeout warns without a redundant patch", () => {
+    // NumberField reports a clamp even when the clamped number equals
+    // the committed value, and commitTimeout raises the warning before
+    // its unchanged-value guard, so an out-of-range entry at the bound
+    // shows the message while the PATCH is skipped.
+    expect(numberField).toMatch(/if \(n === value && clampedTo === null\) return;/);
+    expect(screenLock).toMatch(
+      /Timeout must be at most[\s\S]{1,400}if \(next === screensaverTimeoutSecs\) return;[\s\S]{1,400}api\.screensaverPatch\(\{ timeout_secs: next \}\);/,
+    );
+  });
+
   test("commit PIN validates match + hashes with workspace root salt + posts", () => {
     expect(screenLock).toMatch(
       /async function commitPin\(\): Promise<void> \{[\s\S]{1,600}if \(pin1 !== pin2\) \{[\s\S]{1,200}screensaverError = "PINs don't match";[\s\S]{1,400}const salt = workspace\.info\?\.root \?\? "";[\s\S]{1,200}const hash = await hashPin\(pin1, salt\);[\s\S]{1,200}api\.screensaverSetPin\(hash\);[\s\S]{1,400}await loadScreensaverState\(\);/,
@@ -151,5 +171,73 @@ describe("Screen lock + Screensaver UI in Settings workspace tab", () => {
     expect(screenLock).toMatch(
       /\{#if pinDialog === null\}[\s\S]{1,4000}\{:else\}[\s\S]{1,2000}bind:value=\{pinDialog\.pin1\}[\s\S]{1,400}bind:value=\{pinDialog\.pin2\}[\s\S]{1,400}onclick=\{commitPin\}[\s\S]{1,200}onclick=\{cancelPinDialog\}/,
     );
+  });
+});
+
+// The timeout field mounted with the screensaver bounds. The commit
+// contract commitTimeout relies on: an out-of-range entry clamps back
+// onto the stored bound yet still fires with the bound named, so the
+// handler can show its warning and skip the write itself.
+describe("NumberField timeout clamp at the stored bound", () => {
+  let target: HTMLDivElement;
+  let cleanups: (() => void)[] = [];
+
+  afterEach(() => {
+    for (const cleanup of cleanups) cleanup();
+    cleanups = [];
+    target?.remove();
+  });
+
+  function mountTimeoutField(value: number): [number | null, string | null][] {
+    const commits: [number | null, string | null][] = [];
+    target = document.createElement("div");
+    document.body.appendChild(target);
+    const cmp = mount(NumberField, {
+      target,
+      props: {
+        value,
+        min: SCREENSAVER_MIN_TIMEOUT_SECS,
+        max: SCREENSAVER_MAX_TIMEOUT_SECS,
+        ariaLabel: "Inactivity timeout in seconds",
+        oncommit: (v: number | null, c: string | null) => commits.push([v, c]),
+      },
+    });
+    cleanups.push(() => unmount(cmp));
+    return commits;
+  }
+
+  function enterAndBlur(text: string): HTMLInputElement {
+    const input = target.querySelector("input") as HTMLInputElement;
+    input.value = text;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+    return input;
+  }
+
+  test("out-of-range entry with the stored value at the min still reports the clamp", async () => {
+    const commits = mountTimeoutField(SCREENSAVER_MIN_TIMEOUT_SECS);
+    await tick();
+    const input = enterAndBlur(String(SCREENSAVER_MIN_TIMEOUT_SECS - 5));
+    await tick();
+    expect(commits).toEqual([[SCREENSAVER_MIN_TIMEOUT_SECS, "min"]]);
+    expect(input.value).toBe(String(SCREENSAVER_MIN_TIMEOUT_SECS));
+  });
+
+  test("cleared field with the stored value at the min still reports the clamp", async () => {
+    // Not nullable and no invalidFallback: empty text falls back onto
+    // the min bound and is reported as a min clamp.
+    const commits = mountTimeoutField(SCREENSAVER_MIN_TIMEOUT_SECS);
+    await tick();
+    enterAndBlur("");
+    await tick();
+    expect(commits).toEqual([[SCREENSAVER_MIN_TIMEOUT_SECS, "min"]]);
+  });
+
+  test("re-entering the stored in-range value commits nothing", async () => {
+    const commits = mountTimeoutField(300);
+    await tick();
+    enterAndBlur("300");
+    await tick();
+    expect(commits).toEqual([]);
   });
 });

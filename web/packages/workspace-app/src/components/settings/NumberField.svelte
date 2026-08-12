@@ -9,8 +9,10 @@
   // field falls back to `invalidFallback ?? min`; unparseable text
   // does the same. The committed number is clamped to [min, max] and
   // the callback hears which bound clamped it, so a caller that warns
-  // on clamping (the screensaver timeout) keeps its message. Nothing
-  // is committed when the result already equals `value`.
+  // on clamping (the screensaver timeout) keeps its message. An
+  // unchanged, unclamped result commits nothing; a clamped result
+  // always fires, even when the clamp lands on `value`, so the warning
+  // shows when the stored number already sits on the bound.
 
   let {
     value,
@@ -67,7 +69,9 @@
       clampedTo = "min";
     }
     text = String(n);
-    if (n === value) return;
+    // A clamp fires even when it lands on the stored value, so the
+    // caller can still warn on an out-of-range entry at the bound.
+    if (n === value && clampedTo === null) return;
     oncommit(n, clampedTo);
   }
 
