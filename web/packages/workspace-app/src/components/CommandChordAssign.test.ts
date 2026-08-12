@@ -30,10 +30,14 @@ function cmd(id: string, title: string, extra: Partial<Command> = {}): Command {
   };
 }
 
-// A chorded command (real SHORTCUTS id) and a chordless one.
+// A chorded command (real SHORTCUTS id), a chordless one, and the deck
+// preview, which is a catalog command in production too; a swap is only
+// offered for holders whose dispatch resolves through the override layer,
+// which is exactly the catalog.
 registerCommands([
   cmd("app.window.reload", "Reload"),
   cmd("app.custom.demo", "Demo"),
+  cmd("app.slides.preview", "Preview slide deck"),
 ]);
 
 const mounted: Array<Record<string, unknown>> = [];
@@ -212,6 +216,47 @@ describe("CommandChordAssign", () => {
     // vacuous if the swap never happened).
     expect(overrideChordForSlot("app.window.reload", "web")).toBe("Mod+Enter");
     expect(overrideChordForSlot("app.slides.preview", "web")).toBe("Mod+R");
+  });
+
+  test("a chord held by two commands reports the conflict but offers no swap", async () => {
+    // Demo takes an override onto the deck preview's Mod+Enter, so the
+    // captured chord now has TWO holders. A swap exchanges with exactly
+    // one of them, so accepting it would settle one holder and ship a
+    // fresh collision with the other; the offer must not exist.
+    assignOverride("app.custom.demo", "Mod+Enter", "web");
+    const target = mountAssign(cmd("app.window.reload", "Reload"));
+    (target.querySelector(".chord-btn") as HTMLElement).click();
+    await flush();
+
+    key(target, { key: "Enter", metaKey: true });
+    await flush();
+
+    const capture = target.querySelector(".capture") as HTMLElement;
+    expect(capture.classList.contains("conflict")).toBe(true);
+    expect(target.querySelector(".swap")).toBeNull();
+    // Nothing moved: both holders keep the chord, Reload keeps its own.
+    expect(overrideChordForSlot("app.custom.demo", "web")).toBe("Mod+Enter");
+    expect(overrideChordForSlot("app.slides.preview", "web")).toBeUndefined();
+    expect(overrideChordForSlot("app.window.reload", "web")).toBeUndefined();
+  });
+
+  test("a registry-only holder reports the conflict but offers no swap", async () => {
+    // Mod+B belongs to the editor's bold chord, a SHORTCUTS entry with no
+    // catalog command. Its dispatch lives in the editor keymap and never
+    // consults overrides, so a swap would display bold as moved while
+    // Mod+B keeps toggling bold and the swapped-in chord fires nothing.
+    const target = mountAssign(cmd("app.window.reload", "Reload"));
+    (target.querySelector(".chord-btn") as HTMLElement).click();
+    await flush();
+
+    key(target, { key: "b", metaKey: true });
+    await flush();
+
+    const capture = target.querySelector(".capture") as HTMLElement;
+    expect(capture).not.toBeNull();
+    expect(capture.classList.contains("conflict")).toBe(true);
+    expect(target.querySelector(".swap")).toBeNull();
+    expect(overrideChordForSlot("app.window.reload", "web")).toBeUndefined();
   });
 
   test("a free chord pressed after a conflict assigns normally, with no swap", async () => {

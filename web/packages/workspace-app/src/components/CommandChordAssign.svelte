@@ -4,9 +4,11 @@
   // "Assign" prompt when it has none, and on click captures a new chord for
   // the current client's OS slot, checks it against the resolved keymap, and
   // either assigns it or reports the conflict. A conflict names the holding
-  // command and, when this command holds a chord to give, offers a swap that
-  // exchanges the two - never a take, because an unbound command is not a
-  // representable state. A cleared override falls back to the built-in
+  // command and, when the exchange would leave both commands chorded,
+  // dispatchable, and collision-free (the conditions live at the offer
+  // site), offers a swap that exchanges the two - never a take, because an
+  // unbound command is not a representable state. A cleared override falls
+  // back to the built-in
   // chord. Commands can opt into a read-only chord display for aliases such
   // as Close pane inheriting the close-tab/window chords.
   //
@@ -112,8 +114,19 @@
       const holderId = conflicts[0].id;
       conflictLabel = labelForId(holderId);
       // A swap moves the holder onto THIS command's current chord, so it
-      // is only offerable when that chord exists and is free once this
-      // command vacates it (no third command holding it).
+      // is only offerable when the exchange resolves the whole conflict
+      // and both halves actually move:
+      //  - the candidate has exactly one holder; with two, the swap
+      //    settles one and ships a fresh collision with the other;
+      //  - the holder is a catalog command whose dispatch resolves
+      //    through the override layer; a registry-only editor or
+      //    terminal chord is bound by its own surface, so an override
+      //    written for it displays as moved while the old chord keeps
+      //    firing and the new one is dead;
+      //  - this command's chord exists and is free once this command
+      //    vacates it (no third command holding it).
+      const holder = allCommands().find((c) => c.id === holderId);
+      const holderSwappable = holder !== undefined && holder.shortcutEditable !== false;
       const targetChord = entries.find((entry) => entry.id === cmd.id)?.chord;
       const thirdParty = targetChord
         ? keymapConflicts(
@@ -123,7 +136,10 @@
           )
         : [];
       swapOffer =
-        targetChord && thirdParty.length === 0
+        conflicts.length === 1 &&
+        holderSwappable &&
+        targetChord &&
+        thirdParty.length === 0
           ? { holderId, holderLabel: conflictLabel, chord: candidate, targetChord }
           : null;
       return; // hold capture open so the user can pick a free chord
