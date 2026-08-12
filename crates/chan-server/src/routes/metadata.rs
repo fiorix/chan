@@ -376,7 +376,8 @@ pub(super) fn inject_test_watch_registration_failure(root: &Path) {
 
 #[cfg(test)]
 fn take_test_watch_registration_failure(root: &Path) -> bool {
-    TEST_WATCH_REGISTRATION_FAILURES.with(|roots| roots.borrow_mut().remove(&watch_failure_key(root)))
+    TEST_WATCH_REGISTRATION_FAILURES
+        .with(|roots| roots.borrow_mut().remove(&watch_failure_key(root)))
 }
 
 fn safe_filename_fragment(value: &str) -> String {
