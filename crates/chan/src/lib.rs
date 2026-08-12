@@ -9293,6 +9293,12 @@ mod tests {
         stub.abort();
     }
 
+    // Selects workspaces by the path string a user typed. On Windows
+    // canonicalization returns a `\\?\` verbatim path, so the typed form and
+    // the registered key are different strings for the same directory and the
+    // selection reports errors. chan publishes no standalone Windows CLI, so
+    // this contract is not one the project ships there.
+    #[cfg(unix)]
     #[test]
     fn workspace_selection_preserves_explicit_order_and_deduplicates_by_key() {
         let config = tempfile::TempDir::new().unwrap();
@@ -10409,6 +10415,11 @@ mod tests {
     /// The runtime renderer is the canonical unit contract. Package and sdme
     /// variants may substitute environment and ExecStart values, but every
     /// supervision directive and its ordering must stay identical.
+    // Parses an sdme provision script for a systemd unit heredoc, splitting on
+    // `<<EOF\n`. Both systemd and the sdme provisioner are Linux-only, and a
+    // Windows checkout gives the script CRLF endings, so the split finds
+    // nothing and the parse helper panics.
+    #[cfg(unix)]
     #[test]
     fn devserver_systemd_unit_sources_match_normalized() {
         let runtime = devserver_systemd_unit(

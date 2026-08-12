@@ -1459,9 +1459,22 @@ mod tests {
 
     #[test]
     fn test_current_target_supported_pair() {
-        // Only assert the running build's target resolves; the public
-        // release matrix is tested above.
-        let _ = current_target().expect("target supported");
+        // The running build's target resolves only where a standalone chan CLI
+        // is published: Linux x86_64 and aarch64, macOS aarch64. Windows ships
+        // the desktop app and no standalone CLI, so `current_target` refusing
+        // there is the contract rather than a gap, and this asserts both
+        // directions instead of assuming the suite only ever runs where it
+        // resolves.
+        let resolved = current_target();
+        if cfg!(windows) {
+            let message = resolved.unwrap_err().to_string();
+            assert!(
+                message.contains("no published standalone chan CLI release"),
+                "unexpected refusal: {message}"
+            );
+        } else {
+            let _ = resolved.expect("target supported");
+        }
     }
 
     #[test]
