@@ -23,6 +23,7 @@ import { TEAM_DIR_DEFAULT } from "./teamConfigPath";
 /// omits the field entirely (`TeamMemberWire.agent?`).
 export type AgentTarget =
   | "none"
+  | "agy"
   | "claude"
   | "codex"
   | "gemini"
@@ -30,15 +31,16 @@ export type AgentTarget =
   | "opencode";
 
 /// Derive a member's submit-encoding agent from its spawn command. The match
-/// is intentionally LOOSE: it recognizes claude/codex/gemini/kimi/opencode
-/// anywhere in the command as a whole word, not just the first token, so
-/// wrappers like
+/// is intentionally LOOSE: it recognizes agy/claude/codex/gemini/kimi/
+/// opencode anywhere in the command as a whole word, not just the first
+/// token, so wrappers like
 /// `my-claude.sh`, `/usr/local/bin/codex-cli`, or `claude --resume` still
 /// resolve (the `\b` boundaries keep `claudette` from matching). Anything
 /// unrecognized falls back to `"none"` (a shell member, plain Enter); set
 /// `CHAN_AGENT` in the member's env to override (see `agentForMember`).
 export function agentForCommand(command: string): AgentTarget {
   const c = command.toLowerCase();
+  if (/\bagy\b/.test(c)) return "agy";
   if (/\bclaude\b/.test(c)) return "claude";
   if (/\bcodex\b/.test(c)) return "codex";
   if (/\bgemini\b/.test(c)) return "gemini";
@@ -48,8 +50,8 @@ export function agentForCommand(command: string): AgentTarget {
 }
 
 /// A member's submit-encoding agent, replacing the old manual dropdown. An
-/// explicit `CHAN_AGENT=<claude|codex|gemini|kimi|opencode|none|shell>` in
-/// the member's env
+/// explicit `CHAN_AGENT=<agy|claude|codex|gemini|kimi|opencode|none|shell>`
+/// in the member's env
 /// WINS - the escape hatch for unorthodox setups (custom launcher scripts a
 /// command sniff can't recognize). Otherwise derive loosely from the command.
 /// An unrecognized CHAN_AGENT value is ignored (falls through to the command).
@@ -58,6 +60,7 @@ export function agentForMember(command: string, envText: string): AgentTarget {
   if (m) {
     const v = m[1].toLowerCase();
     if (
+      v === "agy" ||
       v === "claude" ||
       v === "codex" ||
       v === "gemini" ||

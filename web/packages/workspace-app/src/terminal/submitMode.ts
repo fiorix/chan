@@ -1,8 +1,16 @@
 import type { TerminalKeyboardProtocolState } from "./keymap";
 
 /// A coding agent whose terminal submit encoding chan knows. The SPA sends
-/// only this identity; the server owns the submit bytes.
-export type SubmitAgent = "claude" | "codex" | "gemini" | "opencode";
+/// only this identity; the server owns the submit bytes. Protocol inference
+/// below can only ever produce claude/codex/gemini; the server identity may
+/// name any known agent.
+export type SubmitAgent =
+  | "agy"
+  | "claude"
+  | "codex"
+  | "gemini"
+  | "kimi"
+  | "opencode";
 
 /// Infer an agent from the keyboard protocol a running TUI announced. This is
 /// only a fallback for old servers and agents launched manually from a shell;

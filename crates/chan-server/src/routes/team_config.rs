@@ -158,14 +158,14 @@ fn member_agent(m: &Member) -> Option<&'static str> {
 /// shared submit map (`chan_shell::apply_submit_chord` / submitMode.ts;
 /// the chord is the agent's DEFAULT template, overridable at runtime):
 /// claude uses the xterm
-/// modifyOtherKeys Cmd+Enter CSI; gemini submits on a bare CR; codex, kimi,
-/// and opencode use bracketed paste followed by CR in one write
+/// modifyOtherKeys Cmd+Enter CSI; gemini submits on a bare CR; agy, codex,
+/// kimi, and opencode use bracketed paste followed by CR in one write
 /// (codex coalesces a single `text + CR` write into a paste burst whose
 /// trailing CR never submits), so a bare CR alone does NOT submit codex.
 fn submit_chord_literal(agent: Option<&str>) -> &'static str {
     match agent {
-        // codex, kimi, and opencode use bracketed paste before the CR.
-        Some("codex" | "kimi" | "opencode") => "bracketed-paste + \\r",
+        // agy, codex, kimi, and opencode use bracketed paste before the CR.
+        Some("agy" | "codex" | "kimi" | "opencode") => "bracketed-paste + \\r",
         Some("gemini") => "\\r",
         // claude is the default chord for any agent member; a shell member
         // (None) is not poked as an agent, so it falls through to the claude
@@ -1164,6 +1164,19 @@ mod tests {
         assert!(
             bootstrap.contains("--submit=kimi (chord bracketed-paste + \\r)"),
             "kimi chord line reflects its own bracketed-paste template"
+        );
+    }
+
+    #[test]
+    fn bootstrap_derives_agy_and_documents_its_submit_encoding() {
+        let mut config = sample_config();
+        config.members[1].command = "/home/fiorix/.local/bin/agy".into();
+        let bootstrap = generate_bootstrap_md("new-team-1", &config, None);
+        assert_eq!(member_agent(&config.members[1]), Some("agy"));
+        assert!(bootstrap.contains("agy"), "agy member in roster");
+        assert!(
+            bootstrap.contains("--submit=agy (chord bracketed-paste + \\r)"),
+            "agy chord line reflects its own bracketed-paste template"
         );
     }
 

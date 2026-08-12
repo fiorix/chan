@@ -2,7 +2,7 @@
 //! bytes live in chan-shell (`SubmitAgent::default_template`); this module
 //! lets a user override them without a rebuild by editing
 //! `<config>/chan/submit.toml`, so a client
-//! (claude/codex/gemini/kimi/opencode) changing its submit behavior is a
+//! (agy/claude/codex/gemini/kimi/opencode) changing its submit behavior is a
 //! config edit, not a release. Env
 //! `CHAN_SUBMIT_<AGENT>` still takes precedence over the file (resolved in
 //! chan-shell at chord-application time).
@@ -10,6 +10,8 @@
 //! File shape (every table + field optional; omit one to keep its built-in):
 //!
 //! ```text
+//! [agy]
+//! template = '\e[200~{}\e[201~\r'
 //! [claude]
 //! template = '{}\e[27;9;13~'      # {} is the text; \e \xHH \r \n \t escapes
 //! [codex]
@@ -31,6 +33,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Default, Deserialize)]
 struct SubmitOverridesFile {
+    agy: Option<AgentChord>,
     claude: Option<AgentChord>,
     codex: Option<AgentChord>,
     gemini: Option<AgentChord>,
@@ -47,6 +50,7 @@ impl SubmitOverridesFile {
     fn into_map(self) -> HashMap<String, String> {
         let mut map = HashMap::new();
         for (name, chord) in [
+            ("agy", self.agy),
             ("claude", self.claude),
             ("codex", self.codex),
             ("gemini", self.gemini),
@@ -95,6 +99,21 @@ template = "\\e[200~{}\\e[201~\\r"
         .expect("valid submit config");
         assert_eq!(
             file.into_map().get("opencode").map(String::as_str),
+            Some("\\e[200~{}\\e[201~\\r")
+        );
+    }
+
+    #[test]
+    fn agy_table_deserializes() {
+        let file: SubmitOverridesFile = toml::from_str(
+            r#"
+[agy]
+template = "\\e[200~{}\\e[201~\\r"
+"#,
+        )
+        .expect("valid submit config");
+        assert_eq!(
+            file.into_map().get("agy").map(String::as_str),
             Some("\\e[200~{}\\e[201~\\r")
         );
     }

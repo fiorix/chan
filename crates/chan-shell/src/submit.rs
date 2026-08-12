@@ -39,6 +39,15 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "client", derive(ValueEnum))]
 #[cfg_attr(feature = "client", value(rename_all = "lower"))]
 pub enum SubmitAgent {
+    // Accepts a CR everywhere: coalesced with raw text, as its own later
+    // write, and after bracketed paste; interior newlines inside a paste stay
+    // editor newlines. The bracketed form is the default because it is the
+    // only shape whose one-message guarantee does not depend on the CLI's
+    // burst-coalescing heuristic, and it is the shape proven for multiline,
+    // blank-line-separated, and 33 KiB paste-sized bodies. Live-probed
+    // 2026-08-12 against Antigravity CLI 1.1.12.
+    /// Google Antigravity: bracketed paste, then CR
+    Agy,
     // Submits on the xterm modifyOtherKeys CSI for Cmd+Enter
     // (`\x1b[27;9;13~`), live-probed 2026-05-20.
     /// Claude Code: the Cmd+Enter modifyOtherKeys CSI
@@ -114,7 +123,8 @@ impl ResolvedSubmit {
         self.source == SubmitTemplateSource::BuiltIn
             && matches!(
                 self.agent,
-                SubmitAgent::Claude
+                SubmitAgent::Agy
+                    | SubmitAgent::Claude
                     | SubmitAgent::Codex
                     | SubmitAgent::Kimi
                     | SubmitAgent::OpenCode
@@ -130,12 +140,13 @@ pub struct PtyInputPlan {
 }
 
 impl SubmitAgent {
-    /// Resolve an agent NAME ("claude" | "codex" | "gemini" | "kimi" |
-    /// "opencode") to its variant without clap's `ValueEnum::from_str` (so a
+    /// Resolve an agent NAME ("agy" | "claude" | "codex" | "gemini" | "kimi"
+    /// | "opencode") to its variant without clap's `ValueEnum::from_str` (so a
     /// caller that only has the string does not have to pull clap in). Returns
     /// `None` for an unknown name.
     pub fn from_agent_name(name: &str) -> Option<Self> {
         match name {
+            "agy" => Some(SubmitAgent::Agy),
             "claude" => Some(SubmitAgent::Claude),
             "codex" => Some(SubmitAgent::Codex),
             "gemini" => Some(SubmitAgent::Gemini),
@@ -148,6 +159,7 @@ impl SubmitAgent {
     /// The agent's lower-case name, the inverse of `from_agent_name`.
     pub fn name(self) -> &'static str {
         match self {
+            SubmitAgent::Agy => "agy",
             SubmitAgent::Claude => "claude",
             SubmitAgent::Codex => "codex",
             SubmitAgent::Gemini => "gemini",
@@ -161,19 +173,20 @@ impl SubmitAgent {
     /// command -> agent mapping, mirrored in `agentForMember`
     /// (teamDialog.svelte.ts).
     ///
-    /// `CHAN_AGENT` wins when it names a known agent ("claude"/"codex"/
+    /// `CHAN_AGENT` wins when it names a known agent ("agy"/"claude"/"codex"/
     /// "gemini"/"kimi"/"opencode") or an explicit shell ("none"/"shell" ->
     /// `None`); an unrecognized value falls through to the command sniff (the
     /// escape hatch is opt-in, a typo should not silently disable submit). The
     /// command match is a LOOSE whole-word sniff:
-    /// claude/codex/gemini/kimi/opencode recognized anywhere in the command as
-    /// a word, so wrappers like
+    /// agy/claude/codex/gemini/kimi/opencode recognized anywhere in the
+    /// command as a word, so wrappers like
     /// `my-claude.sh`, `/usr/local/bin/codex-cli`, or `claude --resume` still
     /// resolve, while `claudette` does not. `None` means a shell member with
     /// no submit chord.
     pub fn derive(command: &str, chan_agent: Option<&str>) -> Option<SubmitAgent> {
         if let Some(raw) = chan_agent {
             match raw.trim().to_ascii_lowercase().as_str() {
+                "agy" => return Some(SubmitAgent::Agy),
                 "claude" => return Some(SubmitAgent::Claude),
                 "codex" => return Some(SubmitAgent::Codex),
                 "gemini" => return Some(SubmitAgent::Gemini),
@@ -185,7 +198,9 @@ impl SubmitAgent {
             }
         }
         let c = command.to_ascii_lowercase();
-        if word_match(&c, "claude") {
+        if word_match(&c, "agy") {
+            Some(SubmitAgent::Agy)
+        } else if word_match(&c, "claude") {
             Some(SubmitAgent::Claude)
         } else if word_match(&c, "codex") {
             Some(SubmitAgent::Codex)
@@ -204,12 +219,13 @@ impl SubmitAgent {
     /// `{}` placeholder for the normalized submit body. These ARE
     /// the live-probed default bytes; an override (env / config file) replaces
     /// the whole template. claude appends the modifyOtherKeys Cmd+Enter CSI;
-    /// gemini a bare CR; codex, kimi, and opencode wrap the text in bracketed
-    /// paste then CR. Codex needs the wrap to keep its paste-burst coalescing
-    /// from eating the submit; kimi and opencode each keep their own measured
-    /// template even where the current bytes agree.
+    /// gemini a bare CR; agy, codex, kimi, and opencode wrap the text in
+    /// bracketed paste then CR. Codex needs the wrap to keep its paste-burst
+    /// coalescing from eating the submit; agy, kimi, and opencode each keep
+    /// their own measured template even where the current bytes agree.
     fn default_template(self) -> &'static str {
         match self {
+            SubmitAgent::Agy => "\x1b[200~{}\x1b[201~\r",
             SubmitAgent::Claude => "{}\x1b[27;9;13~",
             SubmitAgent::Codex => "\x1b[200~{}\x1b[201~\r",
             SubmitAgent::Gemini => "{}\r",
@@ -229,7 +245,7 @@ impl SubmitAgent {
 }
 
 /// Process-global per-agent chord template overrides, keyed by agent name
-/// ("claude"/"codex"/"gemini"/"kimi"/"opencode"). The server loads these
+/// ("agy"/"claude"/"codex"/"gemini"/"kimi"/"opencode"). The server loads these
 /// from `<config>/chan/submit.toml` once at startup via `set_chord_overrides`;
 /// env `CHAN_SUBMIT_<AGENT>` still takes precedence at apply time. Default
 /// `None` means "no file overrides", which every chan-shell-only caller
@@ -520,6 +536,18 @@ mod tests {
     }
 
     #[test]
+    fn agy_is_a_first_class_batchable_submit_agent() {
+        let agy = SubmitAgent::from_agent_name("agy").expect("agy agent");
+        assert_eq!(agy.name(), "agy");
+        assert_eq!(serde_json::to_string(&agy).unwrap(), r#""agy""#);
+        assert_eq!(
+            apply_submit_chord("poke\n".into(), Some(agy)),
+            "\x1b[200~poke\n\x1b[201~\r"
+        );
+        assert!(built_in(agy).is_batchable());
+    }
+
+    #[test]
     fn kimi_is_a_first_class_batchable_submit_agent() {
         let kimi = SubmitAgent::from_agent_name("kimi").expect("kimi agent");
         assert_eq!(kimi.name(), "kimi");
@@ -561,6 +589,12 @@ mod tests {
             vec![b"\x1b[200~batch\n\x1b[201~\r".to_vec()]
         );
 
+        let agy = built_in(SubmitAgent::Agy);
+        assert_eq!(
+            plan_submitted_input("batch\n".into(), Some(&agy), true).parts,
+            vec![b"\x1b[200~batch\n\x1b[201~\r".to_vec()]
+        );
+
         let gemini = built_in(SubmitAgent::Gemini);
         assert_eq!(
             plan_submitted_input("poke\n".into(), Some(&gemini), false).parts,
@@ -575,6 +609,7 @@ mod tests {
     #[test]
     fn built_in_batchable_agents_are_pinned() {
         for agent in [
+            SubmitAgent::Agy,
             SubmitAgent::Claude,
             SubmitAgent::Codex,
             SubmitAgent::Kimi,
@@ -685,6 +720,11 @@ mod tests {
             apply_submit_chord("poke\n".into(), Some(SubmitAgent::Kimi)),
             "\x1b[200~poke\n\x1b[201~\r"
         );
+        // agy -> its own bracketed-paste and CR template.
+        assert_eq!(
+            apply_submit_chord("poke\n".into(), Some(SubmitAgent::Agy)),
+            "\x1b[200~poke\n\x1b[201~\r"
+        );
         // opencode -> bracketed paste and CR in the same PTY write.
         assert_eq!(
             apply_submit_chord("poke\n".into(), Some(SubmitAgent::OpenCode)),
@@ -730,6 +770,10 @@ mod tests {
             submit_writes("poke".into(), Some(SubmitAgent::OpenCode)),
             vec!["\x1b[200~poke\n\x1b[201~\r".to_string()]
         );
+        assert_eq!(
+            submit_writes("poke".into(), Some(SubmitAgent::Agy)),
+            vec!["\x1b[200~poke\n\x1b[201~\r".to_string()]
+        );
         assert_eq!(submit_writes("raw".into(), None), vec!["raw".to_string()]);
         // gemini: TWO writes - the text body, then the bare submit chord -
         // so Return is not converted to Shift+Return with the insertion.
@@ -747,6 +791,7 @@ mod tests {
     #[test]
     fn derive_sniffs_the_command_loosely() {
         let d = |c: &str| SubmitAgent::derive(c, None);
+        assert_eq!(d("agy"), Some(SubmitAgent::Agy));
         assert_eq!(d("claude"), Some(SubmitAgent::Claude));
         assert_eq!(d("codex"), Some(SubmitAgent::Codex));
         assert_eq!(d("gemini"), Some(SubmitAgent::Gemini));
@@ -763,12 +808,20 @@ mod tests {
             Some("kimi")
         );
         assert_eq!(d("kimi --yolo").map(SubmitAgent::name), Some("kimi"));
+        assert_eq!(
+            d("/home/fiorix/.local/bin/agy").map(SubmitAgent::name),
+            Some("agy")
+        );
+        assert_eq!(d("agy --continue").map(SubmitAgent::name), Some("agy"));
         // case-insensitive
         assert_eq!(d("OPENCODE"), Some(SubmitAgent::OpenCode));
         assert_eq!(d("CLAUDE"), Some(SubmitAgent::Claude));
         assert_eq!(d("KIMI").map(SubmitAgent::name), Some("kimi"));
+        assert_eq!(d("AGY").map(SubmitAgent::name), Some("agy"));
         // word boundaries keep near-misses out
         assert_eq!(d("claudette"), None);
+        assert_eq!(d("stagy"), None);
+        assert_eq!(d("agyle"), None);
         assert_eq!(d("codexterous"), None);
         assert_eq!(d("myopencode"), None);
         assert_eq!(d("opencoded"), None);
@@ -796,6 +849,14 @@ mod tests {
         assert_eq!(
             SubmitAgent::derive("kimi", Some("codex")),
             Some(SubmitAgent::Codex)
+        );
+        assert_eq!(
+            SubmitAgent::derive("bash", Some("agy")).map(SubmitAgent::name),
+            Some("agy")
+        );
+        assert_eq!(
+            SubmitAgent::derive("agy", Some("claude")),
+            Some(SubmitAgent::Claude)
         );
         // explicit shell forces None despite an agent command
         assert_eq!(SubmitAgent::derive("claude", Some("none")), None);
@@ -934,12 +995,17 @@ mod tests {
             SubmitAgent::from_str("opencode", true).unwrap(),
             SubmitAgent::OpenCode
         );
+        assert_eq!(
+            SubmitAgent::from_str("agy", true).unwrap(),
+            SubmitAgent::Agy
+        );
         assert!(SubmitAgent::from_str("turbo", true).is_err());
     }
 
     #[test]
     fn from_agent_name_round_trips_with_name() {
         for a in [
+            SubmitAgent::Agy,
             SubmitAgent::Claude,
             SubmitAgent::Codex,
             SubmitAgent::Gemini,

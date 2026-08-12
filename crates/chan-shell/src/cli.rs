@@ -872,7 +872,7 @@ pub enum TerminalAction {
         /// to exactly one trailing newline before its chord; an empty body
         /// stays chord-only. ONE chord is encoded per command, so target a
         /// mixed-agent group per session rather than by group. Values:
-        /// claude | codex | gemini | kimi | opencode.
+        /// agy | claude | codex | gemini | kimi | opencode.
         /// Omit the flag to write pure bytes: the input parks in the agent's
         /// compose box unsubmitted (a bare newline is a newline to an agent,
         /// not a submit).
@@ -3800,6 +3800,20 @@ mod tests {
             ShellAction::Terminal {
                 action: TerminalAction::Write { submit, .. },
             } => assert_eq!(submit.map(SubmitAgent::name), Some("kimi")),
+            other => panic!("unexpected parse: {other:?}"),
+        }
+        let cli = CsCli::parse_from([
+            "cs",
+            "terminal",
+            "write",
+            "hello",
+            "--submit=agy",
+            "--tab-name=@@Lead",
+        ]);
+        match cli.action {
+            ShellAction::Terminal {
+                action: TerminalAction::Write { submit, .. },
+            } => assert_eq!(submit.map(SubmitAgent::name), Some("agy")),
             other => panic!("unexpected parse: {other:?}"),
         }
         assert!(CsCli::try_parse_from([

@@ -99,6 +99,7 @@ describe("TeamDialog component shell", () => {
       /auto-detect[\s\S]{1,160}<code>opencode<\/code>/,
     );
     expect(dialog).toMatch(/auto-detect[\s\S]{1,200}<code>kimi<\/code>/);
+    expect(dialog).toMatch(/auto-detect[\s\S]{1,40}<code>agy<\/code>/);
   });
 
   test("the unassigned chip is relabeled drag-me", () => {

@@ -501,8 +501,9 @@
       <fieldset class="team-members">
         <legend>Members</legend>
         <p class="team-field-hint team-agent-hint">
-          Commands auto-detect <code>claude</code>, <code>codex</code>,
-          <code>gemini</code>, <code>kimi</code>, and <code>opencode</code>. Set
+          Commands auto-detect <code>agy</code>, <code>claude</code>,
+          <code>codex</code>, <code>gemini</code>, <code>kimi</code>, and
+          <code>opencode</code>. Set
           <code>CHAN_AGENT</code> for a custom launcher; <code>none</code> or
           <code>shell</code> forces shell behavior.
         </p>
@@ -535,7 +536,7 @@
               autocomplete="off"
             />
             <!-- Submit-encoding agent is auto-detected from the command
-                 (claude/codex/gemini/kimi/opencode), overridable with
+                 (agy/claude/codex/gemini/kimi/opencode), overridable with
                  CHAN_AGENT in the env below - no manual picker. -->
             <input
               class="team-member-env"

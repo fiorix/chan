@@ -4518,6 +4518,7 @@ mod tests {
 
     fn built_in_submit(agent: SubmitAgent) -> ResolvedSubmit {
         let template = match agent {
+            SubmitAgent::Agy => "\x1b[200~{}\x1b[201~\r",
             SubmitAgent::Claude => "{}\x1b[27;9;13~",
             SubmitAgent::Codex => "\x1b[200~{}\x1b[201~\r",
             SubmitAgent::Gemini => "{}\r",
@@ -4865,6 +4866,37 @@ mod tests {
 
         drain_now(&kimi);
         assert_eq!(delivered_input(&rx), b"poke\n\x1b[27;9;13~".to_vec());
+    }
+
+    #[test]
+    fn an_agy_target_receives_its_bracketed_chord_end_to_end() {
+        let registry = Registry::new(test_config(1024, 4, 10));
+        let (agy, rx) = test_agent_session(
+            1024,
+            "s-agy",
+            Some("@@Agy"),
+            None,
+            Some("/home/fiorix/.local/bin/agy"),
+            &[],
+        );
+        register_session(&registry, &agy);
+        assert_eq!(
+            registry.session_summaries()[0].agent.map(SubmitAgent::name),
+            Some("agy"),
+            "terminal list summaries expose the derived Agy identity"
+        );
+
+        let outcome =
+            registry.enqueue_write_matching(Some("@@Agy"), None, "poke\n", Some(SubmitAgent::Agy));
+        assert_eq!(outcome.queued, 1);
+        assert_eq!(
+            outcome.diverged.len(),
+            0,
+            "a sender naming the derived agent has nothing to diverge from"
+        );
+
+        drain_now(&agy);
+        assert_eq!(delivered_input(&rx), b"\x1b[200~poke\n\x1b[201~\r".to_vec());
     }
 
     // The motivating case for sender authority: a session spawned as a plain

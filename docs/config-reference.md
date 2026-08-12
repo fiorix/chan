@@ -80,6 +80,9 @@ Source: `crates/chan-server/src/submit_config.rs` and `crates/chan-shell/src/sub
 Each optional agent table has one `template` string containing at most one `{}` placeholder for the normalized prompt body: trailing newlines are removed, then one newline is appended when the body is non-empty. An empty body stays chord-only. A template without `{}` is appended as a suffix after that same normalized body. Escapes include `\e`, `\xHH`, `\r`, `\n`, `\t`, `\0`, and `\\`. Resolution is `CHAN_SUBMIT_<AGENT>` environment variable, then this file, then the built-in default.
 
 ```toml
+[agy]
+template = '\e[200~{}\e[201~\r'
+
 [claude]
 template = '{}\e[27;9;13~'
 
@@ -96,7 +99,7 @@ template = '\e[200~{}\e[201~\r'
 template = '\e[200~{}\e[201~\r'
 ```
 
-The environment equivalents are `CHAN_SUBMIT_CLAUDE`, `CHAN_SUBMIT_CODEX`, `CHAN_SUBMIT_GEMINI`, `CHAN_SUBMIT_KIMI`, and `CHAN_SUBMIT_OPENCODE`. Gemini alone splits its normalized body and submit chord into two ordered PTY writes; overriding its template does not change that write-splitting contract.
+The environment equivalents are `CHAN_SUBMIT_AGY`, `CHAN_SUBMIT_CLAUDE`, `CHAN_SUBMIT_CODEX`, `CHAN_SUBMIT_GEMINI`, `CHAN_SUBMIT_KIMI`, and `CHAN_SUBMIT_OPENCODE`. Gemini alone splits its normalized body and submit chord into two ordered PTY writes; overriding its template does not change that write-splitting contract. `agy` is Google Antigravity, gemini's successor, and submits in one write.
 
 ### `~/.chan/preferences.toml` -- `EditorPrefs`
 
@@ -240,7 +243,7 @@ Source: `crates/chan-workspace/src/teams.rs`.
 | `created_at` | `String` (ISO 8601) | required | (set at create time) | sort + display |
 | `members[]` | `Vec<Member>` | empty | (future Settings) | team roster + position grid |
 
-`Member`: `handle: String`, `command: String`, `env: BTreeMap<String, String>`, `is_lead: bool`, `position: Option<Position>`. The submit agent is derived from a case-insensitive whole-word `claude`, `codex`, `gemini`, `kimi`, or `opencode` in `command`; `env.CHAN_AGENT` overrides it and `none` / `shell` forces shell behavior.
+`Member`: `handle: String`, `command: String`, `env: BTreeMap<String, String>`, `is_lead: bool`, `position: Option<Position>`. The submit agent is derived from a case-insensitive whole-word `agy`, `claude`, `codex`, `gemini`, `kimi`, or `opencode` in `command`; `env.CHAN_AGENT` overrides it and `none` / `shell` forces shell behavior.
 
 `Position`: `row: u32`, `col: u32` (airplane-grid coordinate). Consumed by both team surfaces: the Team Work dialog carves its split layout from it, and `cs terminal team new|load` passes it through the `team_spawned` push so the SPA carves the same grid (`--tabs` opts out). Validation caps the derived grid at 9 panes.
 

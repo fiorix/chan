@@ -816,9 +816,10 @@ group.
 
 The markdown table carries one row per session: name, spawn, agent,
 session id, window, pane, side, tab, window kind, window status,
-queue and cwd. `agent` is the server-derived submit agent (claude
-/ codex / gemini / kimi / opencode, `-` for a shell session),
-derived from the session's spawn command and CHAN_AGENT spawn env.
+queue and cwd. `agent` is the server-derived submit agent (agy /
+claude / codex / gemini / kimi / opencode, `-` for a shell
+session), derived from the session's spawn command and CHAN_AGENT
+spawn env.
 It is the best default for a `cs terminal write --submit` value, but
 it is a sniff of the spawn command, not a reading of the live
 process: a session showing `-` may be running an agent someone
@@ -1108,11 +1109,11 @@ The config carries team_name, host_name, host_handle, tab_group and 1
 to 9 [[members]], exactly one of them is_lead. Each member has a handle
 (it becomes the tab's $CHAN_TAB_NAME), a command and optional env. The
 submit-encoding agent is DERIVED from the command by loose whole-word
-match (claude / codex / gemini / kimi / opencode); set CHAN_AGENT in a
-member's env to force it for an unorthodox launcher. A command matching
-none is a plain shell member: it spawns, but gets no identity poke and
-no chord of its own, though a later `cs terminal write --submit` can
-still encode one for it.
+match (agy / claude / codex / gemini / kimi / opencode); set
+CHAN_AGENT in a member's env to force it for an unorthodox launcher.
+A command matching none is a plain shell member: it spawns, but gets
+no identity poke and no chord of its own, though a later
+`cs terminal write --submit` can still encode one for it.
 
 A member may also carry `position = { row = R, col = C }`, the grid
 coordinate the Team Work dialog's split layout saves. A positioned
@@ -1149,12 +1150,13 @@ graphed like any other workspace content.
 pub(crate) const CS_TERMINAL_TEAM_AFTER: &str = r#"EXAMPLES:
 A team is one config.toml (the on-disk `{dir}/config.toml` shape).
 Members are 1..=9, exactly one `is_lead = true`. The submit-encoding
-agent (claude / codex / gemini / kimi / opencode) is DERIVED from each
-member's `command`: a loose whole-word match, so `claude --resume` or
-`/usr/local/bin/codex-cli` resolve. A command that matches none is a
-plain shell member (no submit chord). To force the agent for an
-unorthodox launcher, set `CHAN_AGENT` in the member's env (claude /
-codex / gemini / kimi / opencode, or none / shell to force a shell).
+agent (agy / claude / codex / gemini / kimi / opencode) is DERIVED
+from each member's `command`: a loose whole-word match, so
+`claude --resume` or `/usr/local/bin/codex-cli` resolve. A command
+that matches none is a plain shell member (no submit chord). To force
+the agent for an unorthodox launcher, set `CHAN_AGENT` in the
+member's env (agy / claude / codex / gemini / kimi / opencode, or
+none / shell to force a shell).
 `created_at` is optional: the server stamps the current time when it is
 omitted.
 
@@ -1487,9 +1489,10 @@ wrong agent therefore delivers the wrong chord rather than being
 corrected, so read the ack. ONE chord is encoded per command, so
 target a mixed-agent group per session rather than by group.
 
-The applied encodings: claude appends a chord, codex, kimi, and
-opencode wrap the text in bracketed paste plus a CR, gemini takes
-the CR as its own later queue entry, one idle gate after the body.
+The applied encodings: claude appends a chord, agy, codex, kimi,
+and opencode wrap the text in bracketed paste plus a CR, gemini
+takes the CR as its own later queue entry, one idle gate after the
+body.
 Omit --submit and the text parks in the agent's compose box
 unsubmitted, since a bare newline is a newline to an agent, not a
 submit.

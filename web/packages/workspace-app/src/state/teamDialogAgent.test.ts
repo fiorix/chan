@@ -4,6 +4,7 @@ import { agentForCommand, agentForMember } from "./teamDialog.svelte";
 
 describe("agentForCommand (loose derivation)", () => {
   test("recognizes the bare agent name", () => {
+    expect(agentForCommand("agy")).toBe("agy");
     expect(agentForCommand("claude")).toBe("claude");
     expect(agentForCommand("codex")).toBe("codex");
     expect(agentForCommand("gemini")).toBe("gemini");
@@ -19,12 +20,15 @@ describe("agentForCommand (loose derivation)", () => {
     expect(agentForCommand("/usr/local/bin/opencode-ai")).toBe("opencode");
     expect(agentForCommand("/home/fiorix/.kimi-code/bin/kimi")).toBe("kimi");
     expect(agentForCommand("kimi --yolo")).toBe("kimi");
+    expect(agentForCommand("/home/fiorix/.local/bin/agy")).toBe("agy");
+    expect(agentForCommand("agy --continue")).toBe("agy");
   });
 
   test("is case-insensitive", () => {
     expect(agentForCommand("CLAUDE")).toBe("claude");
     expect(agentForCommand("OPENCODE")).toBe("opencode");
     expect(agentForCommand("KIMI")).toBe("kimi");
+    expect(agentForCommand("AGY")).toBe("agy");
   });
 
   test("word boundaries keep near-misses from matching", () => {
@@ -33,6 +37,8 @@ describe("agentForCommand (loose derivation)", () => {
     expect(agentForCommand("myopencode")).toBe("none");
     expect(agentForCommand("opencoded")).toBe("none");
     expect(agentForCommand("kimiko")).toBe("none");
+    expect(agentForCommand("stagy")).toBe("none");
+    expect(agentForCommand("agyle")).toBe("none");
   });
 
   test("an unrecognized command falls back to none (a shell)", () => {
@@ -51,6 +57,8 @@ describe("agentForMember (CHAN_AGENT override)", () => {
     expect(agentForMember("claude", "CHAN_AGENT=opencode")).toBe("opencode");
     expect(agentForMember("bash", "CHAN_AGENT=kimi")).toBe("kimi");
     expect(agentForMember("kimi", "CHAN_AGENT=codex")).toBe("codex");
+    expect(agentForMember("bash", "CHAN_AGENT=agy")).toBe("agy");
+    expect(agentForMember("agy", "CHAN_AGENT=claude")).toBe("claude");
   });
 
   test("CHAN_AGENT=none / shell forces a shell despite an agent command", () => {

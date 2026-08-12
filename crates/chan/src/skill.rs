@@ -564,12 +564,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dumped_terminal_help_names_kimi_as_a_submit_agent() {
+    fn dumped_terminal_help_names_kimi_and_agy_as_submit_agents() {
         let list = render_topic("cs-terminal-list").expect("terminal list help");
         let team = render_topic("cs-terminal-team").expect("terminal team help");
         let write = render_topic("cs-terminal-write").expect("terminal write help");
         for (name, help) in [("list", list), ("team", team), ("write", write)] {
             assert!(help.contains("kimi"), "{name} help omits kimi");
+            assert!(help.contains("agy"), "{name} help omits agy");
         }
     }
 

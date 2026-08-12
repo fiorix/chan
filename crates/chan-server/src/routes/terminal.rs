@@ -172,8 +172,8 @@ enum ClientFrame {
     /// queue -- the SAME FIFO the control socket's `cs terminal write` feeds
     /// -- so bubble prompts and CLI pokes serialize through one drain and
     /// submit one after another when the agent is idle. The server resolves
-    /// the submit template for `agent` (claude / codex / gemini / kimi /
-    /// opencode)
+    /// the submit template for `agent` (agy / claude / codex / gemini /
+    /// kimi / opencode)
     /// and the queue applies it at drain time; `agent` is optional and
     /// DEFAULTS to claude when the SPA does not know the terminal's launch
     /// command. A Rich Prompt is always its own agent turn: it is a boundary
