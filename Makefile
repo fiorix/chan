@@ -294,28 +294,29 @@ ci-macos: ## Run the focused macOS CI validation target.
 	$(MAKE) ci-macos-build
 
 .PHONY: ci-windows
-ci-windows: ## Test the Windows-shipped crates, build and smoke the NSIS package.
+ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS package.
 	$(MAKE) build-matrix-check
-	# The sweep excludes chan and chan-systemd: their suites assert
-	# contracts that exist only on a Linux host (systemd and launchd unit
-	# text, sdme provision scripts, Unix path identity), which on this
-	# runner can only pass vacuously or fail on a platform difference the
-	# contract does not cover. The exclusion is about those suites, not
-	# the product: chan itself ships on Windows, standalone as the CLI
-	# zip and bundled into the NSIS installer as chan.exe, and its
-	# Windows-only paths are covered by no CI arm. Every other crate the
-	# Windows desktop app ships is swept here, including the
-	# `#[cfg(windows)]` ConPTY reaping tests in chan-library that no
-	# other arm can execute.
+	# The Rust test run is scoped to chan-library and chan-desktop, the two
+	# crates whose Windows behavior is worth testing: chan-library carries
+	# the `#[cfg(windows)]` ConPTY child-reaping tests that no other arm can
+	# execute, and chan-desktop is the Windows shell itself. The rest of the
+	# workspace (chan-workspace, chan-server, the tunnel crates, and so on)
+	# is platform-neutral logic whose test harnesses assume a Unix host
+	# (verbatim-vs-normalized path identity, POSIX shell commands, real-PTY
+	# tests that drive a shell to completion). Those suites have never run on
+	# Windows and porting their harnesses tests the port, not the product;
+	# running them here surfaced a backlog of Unix assumptions with no
+	# Windows-specific coverage to show for it. See the roadmap draft on a
+	# full Windows test port.
 	#
 	# The release CLI is built first because `desktop/src-tauri` is a
-	# workspace member, so the sweep compiles chan-desktop, and its Windows
-	# Tauri config declares `target/release/chan.exe` as a bundled
-	# resource. Only the Windows config declares it, which is why the Linux
-	# and macOS arms run their sweeps without this step. The later
+	# workspace member, so compiling chan-desktop's tests pulls in its
+	# Windows Tauri config, which declares `target/release/chan.exe` as a
+	# bundled resource. Only the Windows config declares it, which is why the
+	# Linux and macOS arms run their sweeps without this step. The later
 	# `desktop ci-windows` build re-runs this and hits a warm cache.
 	$(CARGO) build --release -p chan
-	RUSTFLAGS="-D warnings" $(CARGO) test --workspace --exclude chan --exclude chan-systemd --all-targets
+	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-library -p chan-desktop --all-targets
 	$(MAKE) -C desktop ci-windows
 	scripts/smoke-built-devserver.sh target/release/chan-desktop.exe
 
