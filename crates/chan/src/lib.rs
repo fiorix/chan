@@ -7667,8 +7667,23 @@ fn read_config_key(
         ConfigValueKind::OptionalU32Range(..) | ConfigValueKind::OptionalEnum(..) => {
             Ok(serde_json::Value::Null)
         }
+        // Color leaves sit under `skip_serializing_if` parents (the graph
+        // palettes, the terminal custom colors), so a config that never
+        // set them serializes no leaf at all; absent means unset.
+        ConfigValueKind::Color => Ok(serde_json::Value::Null),
         ConfigValueKind::Collection(_) if key == "editor.shortcuts" => Ok(serde_json::json!({})),
-        _ => anyhow::bail!("supported config key `{key}` is missing from the serialized schema"),
+        _ => {
+            // `skip_serializing_if` can erase a whole subtree from the
+            // dump: `GraphColorPrefs::is_empty` drops `editor.graph_colors`
+            // wholesale, taking its always-serialized `mode` field with
+            // it. The schema sample materializes those subtrees for the
+            // write path, so it holds the serde default this key reads as.
+            let sample = config_schema_sample()?;
+            if let Some(value) = config_value_at(&sample, &key) {
+                return Ok(value.clone());
+            }
+            anyhow::bail!("supported config key `{key}` is missing from the serialized schema")
+        }
     }
 }
 
@@ -11186,6 +11201,36 @@ mod tests {
         let error =
             write_pref_key(&mut editor, "editor.graph_colors.light.tag", "chartreuse").unwrap_err();
         assert!(error.to_string().contains("#rgb or #rrggbb"), "{error:#}");
+    }
+
+    #[test]
+    fn config_read_from_default_covers_skip_serialized_subtrees() {
+        // A never-configured palette serializes no graph_colors subtree
+        // at all (GraphColorPrefs::is_empty skips it wholesale), so the
+        // read path must supply the serde defaults itself: standard mode,
+        // null for every unset hue.
+        let editor = EditorPrefs::default();
+        let server = ServerConfig::default();
+        for spec in CONFIG_KEYS
+            .iter()
+            .filter(|spec| spec.key.starts_with("editor.graph_colors."))
+        {
+            let value = read_config_key(&editor, &server, spec.key).unwrap();
+            let expected = match spec.kind {
+                ConfigValueKind::Enum(..) => serde_json::json!("standard"),
+                _ => serde_json::Value::Null,
+            };
+            assert_eq!(value, expected, "{}", spec.key);
+        }
+        // Terminal custom colors ride the same fallback: the `custom`
+        // table is skipped while unset, so its color leaves read null and
+        // its contrast reads the serde default.
+        let value =
+            read_config_key(&editor, &server, "editor.terminal_colors.custom.background").unwrap();
+        assert_eq!(value, serde_json::Value::Null);
+        let value =
+            read_config_key(&editor, &server, "editor.terminal_colors.custom.contrast").unwrap();
+        assert_eq!(value, serde_json::json!("auto"));
     }
 
     #[test]
