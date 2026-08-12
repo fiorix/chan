@@ -4689,6 +4689,13 @@ mod tests {
         assert!(host.library().list_workspaces().is_empty());
     }
 
+    // Gated to unix: this spawns a PTY that must run `exit 7` to completion,
+    // and the Windows resolver's default shell (pwsh) blocks at startup on a
+    // DSR cursor-position query the headless test reader never answers, so
+    // the command never runs. Production's xterm.js frontend answers the DSR;
+    // the exit-scrape logic under test is platform-neutral. See the roadmap
+    // draft on restoring headless Windows exit coverage.
+    #[cfg(unix)]
     #[tokio::test]
     async fn terminal_tenant_last_exit_reports_the_script_exit_code() {
         let cfg = tempfile::tempdir().expect("config dir");
