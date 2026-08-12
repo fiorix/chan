@@ -1,0 +1,8 @@
+# Every checkout is LF on every platform. The workspace carries 85
+# include_str! sites, and the source-pin tests among them compare against
+# patterns containing \n; an autocrlf checkout hands them \r\n and the pins
+# match nothing.
+* text=auto eol=lf
+
+# PowerShell wants CRLF.
+desktop/src-tauri/scripts/windows/sign.ps1 text eol=crlf
