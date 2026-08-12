@@ -1,5 +1,8 @@
 # A failed reset wedges the workspace behind a retryable error
 
+Closed: shipped in [v0.89.0](../../release/release-v0.89.0.md).
+
+
 Status: REGISTERED 2026-08-11, found during the v0.89.0 scope triage while verifying the `wipe-dir-retry-budget-is-untested` draft, which the owner deferred in the same pass. That draft descends from [audit-the-workarounds-nobody-followed-up](../done/audit-the-workarounds-nobody-followed-up.md) and describes one end of a failure chain: a retry budget resting on an unmeasured claim, whose worst outcome it records as "a visible failure and not a data-loss path". It reaches for the other end in one sentence, that a partial wipe has already happened by the time the budget is exhausted, and stops there. This item is that other end, and the outcome is neither visible nor bounded. The owner accepted it as v0.89.0 scope on that difference, and deferring the `wipe_dir` draft is safe precisely because this item covers the severe half of what it points at.
 
 ## What

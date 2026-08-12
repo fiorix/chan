@@ -1,5 +1,8 @@
 # The Linux CLI release artifacts are labelled gnu and contain musl
 
+Closed: shipped in [v0.89.0](../../release/release-v0.89.0.md).
+
+
 Status: REGISTERED 2026-08-10 by the owner during the v0.88.0 GA, from validating the dry run's artifacts before tagging rather than trusting the green.
 
 ## What

@@ -1,5 +1,8 @@
 # The graph palette has never been configurable, and a dead legend implies it was
 
+Closed: shipped in [v0.89.0](../../release/release-v0.89.0.md).
+
+
 Status: REGISTERED 2026-08-11 as v0.89.0 scope, carried forward from a draft the owner raised on 2026-08-11 after going looking for the graph colour setting he remembered and finding none. The owner accepted it at "~10-12h, SPA + Rust + CLI keys" and scoped it across three surfaces. Every claim below is verified against `f9c2878c`. Two sibling drafts that touch the same CSS are named and dispositioned in the boundary section; neither is being promoted and neither is absorbed here.
 
 ## What

@@ -1,5 +1,8 @@
 # Settings is organised by concern, not by the app being configured
 
+Closed: shipped in [v0.89.0](../../release/release-v0.89.0.md).
+
+
 Status: REGISTERED 2026-08-11 as v0.89.0 scope, proposed by the owner the same day after reviewing the overlay against how the app is actually used, and sized by the owner as large, seven steps, two of them parallelisable. Every claim below is verified against `f9c2878c`. The sharpest constraint is that a hand-typed rail has no home for one of the five surfaces the code already knows about, and three findings shape the plan beyond that: the test harness the central acceptance line leans on cannot observe the thing that line asserts, the mass of the work sits in the per-workspace half rather than the primitives, and the owner's branch turns the cheapest win into a control that does nothing under the platform default. The owner's live branch `origin/feat/linux-terminal-grid` edits one of the files this item rewrites; the ordering ruling for it, and for the graph-palette item promoted alongside this one, each have their own section below.
 
 ## The surface, counted

@@ -1,5 +1,8 @@
 # The sdme build drivers create uncapped containers, and three of them mount the live worktree
 
+Closed: shipped in [v0.89.0](../../release/release-v0.89.0.md).
+
+
 Status: REGISTERED 2026-08-11, merged from three v0.88.0 drafts on the owner's ruling that they are one lane rather than three: the Nix driver's missing disk cap, the live worktree bind the other drivers carry, and the six discarded writes in `crates/chan-server/build.rs`. The owner also ruled the source draft's writable-snapshot design out of scope, on the ground that the repository already contains the arrangement it proposed to invent. A second owner ruling on 2026-08-11 widened the storage half of this item into a standing project rule: **every sdme container this repository creates uses the btrfs backend, and overlay is never used here.** That converts `--storage btrfs` from a means of making `--disk` effective into a requirement in its own right, and it reaches every container-creating invocation in the tree rather than the build drivers alone, which the boundaries below now reflect. Promoting the cap half settles a debt in shipped history: [`release-dry-run-does-not-predict-the-tagged-run`](../done/release-dry-run-does-not-predict-the-tagged-run.md) says at its line 104 that this finding was "Registered for v0.89.0 instead", and until this file existed the repository asserted a registration it had not made.
 
 ## Why one item and not three

@@ -1,5 +1,8 @@
 # Indexer timing sites have no lexical signature, so the audit that classified them could not see the wait that fired
 
+Closed: shipped in [v0.89.0](../../release/release-v0.89.0.md).
+
+
 Status: REGISTERED 2026-08-11, carved out of the v0.88.0 draft `tests-encode-implicit-scheduling-assumptions`, which is not being accepted. The owner took this one finding into v0.89.0 scope and left the draft's project-wide rule, its sizing and its frontend half in `dev/`; the reasons are in the last section. One part of this item, the reopening of three sites a shipped item classified and kept, needs the owner's explicit ruling before a lane starts on it.
 
 ## What

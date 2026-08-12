@@ -1,5 +1,8 @@
 # Off macOS the close chord discards the window where macOS closes the tab, and six layers can claim it
 
+Closed: shipped in [v0.89.0](../../release/release-v0.89.0.md).
+
+
 Status: REGISTERED 2026-08-11 as v0.89.0 scope, carried forward from a draft the owner raised the same day from using the Linux desktop app. The owner's ruling sized it "small change, wide verification", and that shape is the item rather than a note about it: the edit is a handful of lines, and proving it did not break something else on another surface is the deliverable, so the acceptance section below is a matrix over every surface that can claim the chord instead of a list of checks.
 
 ## What

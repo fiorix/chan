@@ -1,5 +1,8 @@
 # The slide deck's two chords are in none of the registry's 32 entries, and the consequence is a rebind that works everywhere except on a deck
 
+Closed: shipped in [v0.89.0](../../release/release-v0.89.0.md).
+
+
 Status: REGISTERED 2026-08-11 as v0.89.0 scope, carried forward from the draft `the-deck-chords-are-invisible-to-the-shortcut-registry`, raised by the owner on 2026-08-11 after asking for `Cmd+Enter` to present and discovering the chord was already bound to preview. The owner ruled that the shipped defaults stay and the two actions become rebindable, so the preference is expressed in the user's own config rather than by changing a default under everyone who has the muscle memory, and sized it at half a day plus a gate run. Every claim below is verified against `f9c2878c`. The siblings section records one finding about a sibling draft that is not being promoted, so the finding is not lost with the draft.
 
 ## What

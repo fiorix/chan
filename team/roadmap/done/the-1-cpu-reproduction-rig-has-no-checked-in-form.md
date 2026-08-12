@@ -1,5 +1,8 @@
 # The 1-CPU reproduction rig has no checked-in form, so every timing item rebuilds it and none can say what the last one ran
 
+Closed: shipped in [v0.89.0](../../release/release-v0.89.0.md).
+
+
 Status: REGISTERED 2026-08-11, accepted by the owner as v0.89.0 scope. Drafted during the round and held rather than self-registered, because the round had already been widened once by ruling and the owner was unreachable at the time. The `watch-registration` item names this work and puts it out of its own scope, saying it "should be registered on its own or picked up by whichever timing item lands first"; this is the registration it asks for, and that item has since been repaired using exactly the uncaptured instrument described below.
 
 ## What

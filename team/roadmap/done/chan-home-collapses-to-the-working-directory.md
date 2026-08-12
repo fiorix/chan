@@ -1,5 +1,8 @@
 # The chan home collapses to the working directory when `home_dir()` returns None, and the test that names the hazard cannot detect it
 
+Closed: shipped in [v0.89.0](../../release/release-v0.89.0.md).
+
+
 Status: REGISTERED 2026-08-11, carried forward from [audit-the-workarounds-nobody-followed-up](../done/audit-the-workarounds-nobody-followed-up.md), which shipped in [v0.88.0](../../release/release-v0.88.0.md) and registered this as its finding F7 rather than repairing it. That item's own header says it is "explicitly not over the fallback-on-failure axis those signatures cannot see, which is registered separately rather than claimed"; this is that separate registration. **The owner has ruled: a defined absolute fallback, not a refusal.** An absent home resolves to a named absolute path, and the repair adds a `config_dir_with_home(Option<PathBuf>)` style test seam. That ruling confines the whole change to `crates/chan-workspace/src/paths.rs`. The reasoning, including the count that decided it, is in "The ruling" below.
 
 ## What

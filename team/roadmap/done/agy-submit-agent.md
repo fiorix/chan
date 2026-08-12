@@ -1,5 +1,8 @@
 # Google Antigravity is a first-class submit agent
 
+Closed: shipped in [v0.89.0](../../release/release-v0.89.0.md).
+
+
 Status: IMPLEMENTED for v0.89.0, live-probed and registered 2026-08-12 on the owner's instruction; suite validation rides the round's CI run.
 
 ## What

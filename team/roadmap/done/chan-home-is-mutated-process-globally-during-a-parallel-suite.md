@@ -1,5 +1,8 @@
 # Chan home is mutated process-globally during a parallel suite, and an isolated library writes to the ambient home anyway
 
+Closed: shipped in [v0.89.0](../../release/release-v0.89.0.md).
+
+
 Status: REGISTERED 2026-08-11, carried forward from the v0.88.0 timing lane's draft of the same name, which was raised while that lane classified its own baseline sweep and was deliberately kept outside v0.88.0's locked fourteen. The owner's ruling on acceptance is that scope is the three windows named below and nothing wider: a wider contract, no test anywhere mutating process-global environment state another test reads, is explicitly **out of scope** and is argued against in "Boundaries".
 
 ## What

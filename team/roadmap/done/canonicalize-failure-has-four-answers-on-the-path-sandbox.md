@@ -1,5 +1,8 @@
 # "Canonicalize failed" is answered four different ways on the path sandbox, and no test holds any of them
 
+Closed: shipped in [v0.89.0](../../release/release-v0.89.0.md).
+
+
 Status: REGISTERED 2026-08-11 as v0.89.0 scope, carried forward from [audit-the-workarounds-nobody-followed-up](../done/audit-the-workarounds-nobody-followed-up.md), which shipped in v0.88.0 and recorded this as finding F2 without repairing it. The owner accepted it merged with a second draft from the same audit, on the lexical containment helper that exists twice; that draft is folded in below as a subordinate section rather than carried as its own item, because its whole surface sits inside this one's and because the ruling this item asks for may delete the code it wants consolidated.
 
 ## What

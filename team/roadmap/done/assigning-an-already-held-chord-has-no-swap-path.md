@@ -1,5 +1,8 @@
 # Assigning a chord another command already holds refuses, with no way forward
 
+Closed: shipped in [v0.89.0](../../release/release-v0.89.0.md).
+
+
 Status: REGISTERED 2026-08-11 as v0.89.0 scope, on the owner's ruling during the round. Promoted from the draft `assigning-an-already-held-chord-has-no-swap-path`, which was raised out of the deck-chord review and was not accepted at triage. It was promoted because [the-deck-chords-are-invisible-to-the-shortcut-registry](the-deck-chords-are-invisible-to-the-shortcut-registry.md) makes the owner's own request *expressible* and then leaves it *refused*, so shipping that item alone delivers a worse state on this path than today. The unrepresentable unbound state recorded below is the reason this is not a small UI task.
 
 ## What

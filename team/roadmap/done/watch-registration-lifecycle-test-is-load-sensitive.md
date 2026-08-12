@@ -1,5 +1,8 @@
 # Two watch-registration health assertions race the retry they injected, over one slot four tests clobber
 
+Closed: shipped in [v0.89.0](../../release/release-v0.89.0.md).
+
+
 Status: REGISTERED 2026-08-11, carried forward from the v0.88.0 round's draft `watch-registration-lifecycle-test-is-load-sensitive`, which recorded a single red observed during the scoped gate of [audit-the-workarounds-nobody-followed-up](../done/audit-the-workarounds-nobody-followed-up.md). The owner's ruling at acceptance widened it from the one failing assertion to three things: both `Degraded` assertions in `mod filtered_registration`, and the process-global injection slot they share with the rest of the module.
 
 ## What was observed
