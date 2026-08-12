@@ -2202,6 +2202,15 @@ const KEY_BRIDGE_JS: &str = r#"
     const alt = e.altKey;
     const code = e.code;
     if (alt) {
+      // Windows delivers an AltGr keydown as ctrlKey+altKey, so on
+      // layouts where AltGr composes text (US-International AltGr+W
+      // types 'å') the chords below would swallow character entry and
+      // KeyW would close the window mid-word. No chord in this branch
+      // can be legitimately formed with AltGr, so bail without
+      // preventDefault and let the key reach the webview. Gated on
+      // ctrlKey so an engine that flags macOS Option as AltGraph
+      // cannot break Cmd+Opt+I.
+      if (e.ctrlKey && e.getModifierState('AltGraph')) return;
       // Cmd+Opt+I (macOS) / Ctrl+Alt+I (Linux/Windows) → DevTools.
       // Ctrl+Alt+Shift+T reopens the last closed tab on the Linux /
       // Windows desktop, where Ctrl+Shift+T is the New-terminal chord.
@@ -2975,6 +2984,38 @@ mod tests {
         // bridge must not map it to Dashboard. Pin the absence so a
         // regression that re-adds the case is caught.
         assert!(!KEY_BRIDGE_JS.contains("app.dashboard.open"));
+    }
+
+    #[test]
+    fn key_bridge_alt_branch_lets_altgr_character_entry_through() {
+        // Windows delivers an AltGr keydown with ctrlKey and altKey both
+        // set, so on layouts where AltGr composes text (US-International
+        // AltGr+W types 'å') the alt-branch chords would swallow
+        // character entry, with Ctrl+Alt+W closing the window and
+        // discarding its session with no confirmation. None of the
+        // alt-branch chords can be legitimately formed with AltGr, so
+        // the branch bails on AltGraph before any chord fires.
+        let alt_branch = KEY_BRIDGE_JS
+            .split("if (alt) {")
+            .nth(1)
+            .expect("alt branch exists")
+            .split("// Zoom chords")
+            .next()
+            .expect("alt branch ends before the zoom chords");
+        assert!(
+            alt_branch.contains("if (e.ctrlKey && e.getModifierState('AltGraph')) return;"),
+            "the alt branch must bail on AltGr without preventDefault",
+        );
+        let guard = alt_branch
+            .find("e.getModifierState('AltGraph')")
+            .expect("alt branch carries the AltGraph guard");
+        let first_chord = alt_branch
+            .find("code === 'KeyI'")
+            .expect("alt branch handles the DevTools chord");
+        assert!(
+            guard < first_chord,
+            "the AltGraph bail must precede every alt-branch chord",
+        );
     }
 
     #[test]
