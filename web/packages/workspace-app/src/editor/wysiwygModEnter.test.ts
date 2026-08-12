@@ -149,7 +149,12 @@ describe("deck capture claim and the Mod-Enter pile-up", () => {
   /// (Ctrl here; jsdom's UA is not a Mac), no Alt -> preventDefault +
   /// stopPropagation + the deck action. Deliberately NOT matching by
   /// resolved chord: the claim covers only this built-in shape, which is
-  /// the containment the second test pins.
+  /// the containment the second test pins. The mirror does NOT carry the
+  /// real handler's other gates (slidesSpec, tab.loading, the single
+  /// OS-resolved Mod, shouldIgnoreSlideShortcutTarget,
+  /// builtInChordSuperseded, the Shift routing to present vs preview);
+  /// those are source-pinned by components/slideShortcuts.test.ts, so
+  /// green here says nothing about them.
   function deckClaim(action: () => void): (e: KeyboardEvent) => void {
     return (e: KeyboardEvent) => {
       if (e.key !== "Enter" || e.altKey || !(e.ctrlKey || e.metaKey)) return;
