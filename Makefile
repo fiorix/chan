@@ -294,24 +294,25 @@ ci-macos: ## Run the focused macOS CI validation target.
 	$(MAKE) ci-macos-build
 
 .PHONY: ci-windows
-ci-windows: ## Test, build and smoke the native Windows CLI and NSIS package.
+ci-windows: ## Test the Windows-shipped crates, build and smoke the NSIS package.
 	$(MAKE) build-matrix-check
-	# Windows previously ran no Rust tests at all: it built the desktop
-	# package and smoked it. That gap mattered most for the PTY layer,
-	# because Windows uses ConPTY rather than the Unix path, so the
-	# `#[cfg(windows)]` reaping tests in chan-library are the ones no other
-	# arm can execute. This now matches the Linux and macOS arms rather than
-	# being scoped narrower than them, so a `#[cfg(windows)]` path that only
-	# this runner compiles is covered wherever it lives.
+	# The sweep excludes chan and chan-systemd because their suites assert
+	# contracts that exist only where the standalone CLI ships: systemd and
+	# launchd unit text, sdme provision scripts, and Unix path identity.
+	# chan publishes no standalone Windows CLI, so on this runner those
+	# tests can only pass vacuously or fail on a platform difference the
+	# shipped product never sees. Every crate the Windows desktop app ships
+	# is swept here, including the `#[cfg(windows)]` ConPTY reaping tests
+	# in chan-library that no other arm can execute.
 	#
 	# The release CLI is built first because `desktop/src-tauri` is a
-	# workspace member, so `--all-targets` compiles chan-desktop, and its
-	# Windows Tauri config declares `target/release/chan.exe` as a bundled
+	# workspace member, so the sweep compiles chan-desktop, and its Windows
+	# Tauri config declares `target/release/chan.exe` as a bundled
 	# resource. Only the Windows config declares it, which is why the Linux
-	# and macOS arms run the same test command without this step. The later
+	# and macOS arms run their sweeps without this step. The later
 	# `desktop ci-windows` build re-runs this and hits a warm cache.
 	$(CARGO) build --release -p chan
-	RUSTFLAGS="-D warnings" $(CARGO) test --all-targets
+	RUSTFLAGS="-D warnings" $(CARGO) test --workspace --exclude chan --exclude chan-systemd --all-targets
 	$(MAKE) -C desktop ci-windows
 	scripts/smoke-built-devserver.sh target/release/chan-desktop.exe
 
