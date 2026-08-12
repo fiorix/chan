@@ -10376,6 +10376,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn normalized_devserver_systemd_unit(unit: &str) -> String {
         unit.lines()
             // A shell template may prefix a line with a conditional expansion,
@@ -10401,6 +10402,7 @@ mod tests {
             .join("\n")
     }
 
+    #[cfg(unix)]
     fn sdme_devserver_systemd_unit(script: &str) -> &str {
         let heredoc = script
             .split_once("cat > \"$UNIT\" <<EOF\n")
