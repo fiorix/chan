@@ -2214,7 +2214,14 @@ const KEY_BRIDGE_JS: &str = r#"
       } else if (!e.metaKey && shift && code === 'KeyT') {
         fire(e, 'app.tab.reopenClosed');
       } else if (!e.metaKey && !shift && code === 'KeyW') {
-        fire(e, 'app.window.close');
+        // On the connecting screen the SPA command bus is dead, so
+        // destroy the window directly to cancel the connect, exactly
+        // as the other two KeyW routings do.
+        if (location.pathname.endsWith('/connecting.html')) {
+          invokeIpc(e, 'request_close_window');
+        } else {
+          fire(e, 'app.window.close');
+        }
       }
       return;
     }
@@ -3501,10 +3508,11 @@ mod tests {
         // the File-menu accelerator, so the bridge itself must route
         // KeyW to request_close_window while on connecting.html -- a
         // page-level chord alone never sees the key (dead Cmd+W).
-        // TWO routings: macOS plain Cmd+W (!shift branch) and the
-        // Linux/Windows Ctrl+Shift+W (shift branch).
+        // THREE routings: macOS plain Cmd+W (!shift branch), the
+        // Linux/Windows Ctrl+Shift+W (shift branch), and the
+        // Linux/Windows Ctrl+Alt+W window close (alt branch).
         let close_invoke = concat!("invokeIpc(e, 'request_close", "_window')");
-        assert_eq!(SERVE_RS.matches(close_invoke).count(), 2);
+        assert_eq!(SERVE_RS.matches(close_invoke).count(), 3);
         assert!(SERVE_RS.contains("location.pathname.endsWith('/connecting.html')"));
         const CONNECTING_JS: &str = include_str!("../../src/connecting.js");
         assert!(CONNECTING_JS.contains("request_close_window"));
