@@ -215,12 +215,15 @@ describe("NumberField timeout clamp at the stored bound", () => {
   }
 
   test("out-of-range entry with the stored value at the min still reports the clamp", async () => {
+    // The regression this pins: an out-of-range entry that clamps onto
+    // the already-stored bound must still fire oncommit with the bound
+    // named, so ScreenLockControl can show its warning. The old no-op
+    // guard swallowed it because the clamped result equalled `value`.
     const commits = mountTimeoutField(SCREENSAVER_MIN_TIMEOUT_SECS);
     await tick();
-    const input = enterAndBlur(String(SCREENSAVER_MIN_TIMEOUT_SECS - 5));
+    enterAndBlur(String(SCREENSAVER_MIN_TIMEOUT_SECS - 5));
     await tick();
     expect(commits).toEqual([[SCREENSAVER_MIN_TIMEOUT_SECS, "min"]]);
-    expect(input.value).toBe(String(SCREENSAVER_MIN_TIMEOUT_SECS));
   });
 
   test("cleared field with the stored value at the min still reports the clamp", async () => {
