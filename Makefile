@@ -296,14 +296,14 @@ ci-macos: ## Run the focused macOS CI validation target.
 .PHONY: ci-windows
 ci-windows: ## Test, build and smoke the native Windows CLI and NSIS package.
 	$(MAKE) build-matrix-check
-	# Windows is the only CI arm that ran no Rust tests at all: it built the
-	# desktop package and smoked it. That gap matters most for the PTY layer,
+	# Windows previously ran no Rust tests at all: it built the desktop
+	# package and smoked it. That gap mattered most for the PTY layer,
 	# because Windows uses ConPTY rather than the Unix path, so the
 	# `#[cfg(windows)]` reaping tests in chan-library are the ones no other
-	# arm can execute. Scoped to the two crates that carry them rather than
-	# `--all-targets`, so this step covers the platform-divergent code without
-	# newly gating Windows CI on suites that have never run on this runner.
-	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-library -p chan-server --lib
+	# arm can execute. This now matches the Linux and macOS arms rather than
+	# being scoped narrower than them, so a `#[cfg(windows)]` path that only
+	# this runner compiles is covered wherever it lives.
+	RUSTFLAGS="-D warnings" $(CARGO) test --all-targets
 	$(MAKE) -C desktop ci-windows
 	scripts/smoke-built-devserver.sh target/release/chan-desktop.exe
 
