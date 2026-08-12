@@ -769,6 +769,10 @@ thread_local! {
 /// panicking test cannot leak the hook into whatever runs next on this
 /// thread.
 #[cfg(test)]
+// Installed only by a `#[cfg(unix)]` test, so a Windows test build compiles
+// this and never calls it. Mirrors the `not(target_os = "linux")` guard the
+// watch injection helpers use for the same reason.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn on_lock_attempt_failed(hook: Box<dyn FnMut()>) -> LockAttemptHookGuard {
     LOCK_ATTEMPT_HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
     LockAttemptHookGuard
@@ -785,6 +789,7 @@ impl Drop for LockAttemptHookGuard {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code))]
 fn notify_lock_attempt_failed() {
     // Take the hook out before calling it so a hook that itself reaches
     // take_stable_lock cannot re-enter this borrow.
