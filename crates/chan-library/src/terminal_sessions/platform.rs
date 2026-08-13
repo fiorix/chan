@@ -2,13 +2,72 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
+use std::time::Duration;
 
-use portable_pty::CommandBuilder;
+use portable_pty::{CommandBuilder, PtyPair, PtySize, PtySystem};
 
 use super::{CreateError, FdPressure};
 
 const TERMINAL_FD_HEADROOM: u64 = 32;
 pub(super) const TERMINAL_SESSION_FD_ESTIMATE: u64 = 8;
+
+/// Attempts per `openpty`, counting the first one. The darwin retries sleep
+/// 10/20/40/80 ms between attempts, so a persistent refusal costs 150 ms
+/// before it surfaces, and a genuinely exhausted pty pool still fails.
+const OPENPTY_ATTEMPTS: u32 = 5;
+const OPENPTY_RETRY_FLOOR: Duration = Duration::from_millis(10);
+
+/// Open the session PTY, absorbing the darwin pty allocator's transient
+/// refusal. On macOS `openpty` fails with ENXIO ("Device not configured")
+/// both when the pool is exhausted (`kern.tty.ptmx_max`) and transiently
+/// under concurrent open/close churn, where the very next attempt succeeds.
+/// The NOFILE guard cannot cover this: it is a kernel pty-table refusal, not
+/// process fd pressure. A bounded retry separates the two honestly: churn is
+/// absorbed within a beat, exhaustion keeps failing and still surfaces as
+/// the spawn error.
+pub(super) fn openpty_absorbing_transient_refusal(
+    pty_system: &dyn PtySystem,
+    size: PtySize,
+) -> anyhow::Result<PtyPair> {
+    retry_transient_openpty(|| pty_system.openpty(size), std::thread::sleep)
+}
+
+fn retry_transient_openpty<T>(
+    mut open: impl FnMut() -> anyhow::Result<T>,
+    mut sleep: impl FnMut(Duration),
+) -> anyhow::Result<T> {
+    let mut delay = OPENPTY_RETRY_FLOOR;
+    for _ in 1..OPENPTY_ATTEMPTS {
+        match open() {
+            Ok(pair) => return Ok(pair),
+            Err(err) if is_transient_openpty_refusal(&err) => {
+                sleep(delay);
+                delay *= 2;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    open()
+}
+
+/// portable-pty formats the errno into the message text
+/// (`bail!("failed to openpty: {:?}", io::Error::last_os_error())`), so ENXIO
+/// is only recoverable from that text; `code: 6` is ENXIO on darwin. A missed
+/// match simply skips the retry and returns the error exactly as before, so
+/// the coupling to portable-pty's wording can only fail toward today's
+/// behavior.
+#[cfg(target_os = "macos")]
+fn is_transient_openpty_refusal(err: &anyhow::Error) -> bool {
+    let message = format!("{err:#}");
+    message.contains("failed to openpty") && message.contains("code: 6,")
+}
+
+/// Only darwin's pty allocator refuses transiently; elsewhere an `openpty`
+/// error is real and retrying it would only delay the report.
+#[cfg(not(target_os = "macos"))]
+fn is_transient_openpty_refusal(_err: &anyhow::Error) -> bool {
+    false
+}
 
 pub(super) fn reject_terminal_spawn_if_fd_pressure() -> Result<(), CreateError> {
     let Some((open, limit)) = fd_snapshot() else {
@@ -338,4 +397,88 @@ pub(crate) fn terminal_home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .or_else(dirs::home_dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exact message shape portable-pty's unix `openpty` produces, which
+    /// is the only place the errno survives (see
+    /// [`is_transient_openpty_refusal`]).
+    fn openpty_error(errno: i32) -> anyhow::Error {
+        anyhow::anyhow!(
+            "failed to openpty: {:?}",
+            std::io::Error::from_raw_os_error(errno)
+        )
+    }
+
+    #[test]
+    fn openpty_first_success_never_sleeps() {
+        let mut slept = Vec::new();
+        let value = retry_transient_openpty(|| Ok(7), |delay| slept.push(delay)).unwrap();
+        assert_eq!(value, 7);
+        assert!(slept.is_empty(), "slept: {slept:?}");
+    }
+
+    #[test]
+    fn openpty_non_transient_failure_reports_on_the_first_attempt() {
+        let mut attempts = 0;
+        let mut slept = Vec::new();
+        // EMFILE is real fd pressure on every platform: never retried.
+        let err = retry_transient_openpty(
+            || -> anyhow::Result<()> {
+                attempts += 1;
+                Err(openpty_error(24))
+            },
+            |delay| slept.push(delay),
+        )
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert!(slept.is_empty(), "slept: {slept:?}");
+        assert!(err.to_string().contains("failed to openpty"), "got: {err}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn openpty_transient_enxio_is_absorbed() {
+        let mut attempts = 0;
+        let mut slept = Vec::new();
+        let value = retry_transient_openpty(
+            || {
+                attempts += 1;
+                if attempts <= 2 {
+                    Err(openpty_error(rustix::io::Errno::NXIO.raw_os_error()))
+                } else {
+                    Ok("pair")
+                }
+            },
+            |delay| slept.push(delay),
+        )
+        .unwrap();
+        assert_eq!(value, "pair");
+        assert_eq!(attempts, 3);
+        assert_eq!(
+            slept,
+            vec![Duration::from_millis(10), Duration::from_millis(20)]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn openpty_persistent_enxio_fails_after_bounded_attempts() {
+        let mut attempts = 0;
+        let mut slept = Vec::new();
+        let err = retry_transient_openpty(
+            || -> anyhow::Result<()> {
+                attempts += 1;
+                Err(openpty_error(rustix::io::Errno::NXIO.raw_os_error()))
+            },
+            |delay| slept.push(delay),
+        )
+        .unwrap_err();
+        assert_eq!(attempts, OPENPTY_ATTEMPTS);
+        assert_eq!(slept.len() as u32, OPENPTY_ATTEMPTS - 1);
+        assert!(err.to_string().contains("code: 6,"), "got: {err}");
+    }
 }

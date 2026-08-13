@@ -44,8 +44,9 @@ pub use platform::prime_windows_shell;
 #[cfg(unix)]
 pub use platform::user_shell;
 use platform::{
-    clear_mcp_env, command_builder, locale_selects_utf8, path_inside_root, process_cwd,
-    reject_terminal_spawn_if_fd_pressure, set_mcp_env, terminal_home_dir,
+    clear_mcp_env, command_builder, locale_selects_utf8, openpty_absorbing_transient_refusal,
+    path_inside_root, process_cwd, reject_terminal_spawn_if_fd_pressure, set_mcp_env,
+    terminal_home_dir,
 };
 #[cfg(test)]
 use platform::{fd_headroom_allows, TERMINAL_SESSION_FD_ESTIMATE};
@@ -2998,7 +2999,7 @@ impl Session {
             anyhow::bail!("injected terminal spawn failure");
         }
         let pty_system = native_pty_system();
-        let pair = pty_system.openpty(opts.size)?;
+        let pair = openpty_absorbing_transient_refusal(&*pty_system, opts.size)?;
         let mut cmd = command_builder(opts.command.as_deref());
         let cwd = opts.cwd.unwrap_or_else(|| config.workspace_root.clone());
         cmd.cwd(&cwd);
