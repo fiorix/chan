@@ -25,6 +25,24 @@ use crate::wire::{ControlFrame, CONN_PARAM, CONN_PATH, CONTROL_PATH, TUNNEL_PARA
 /// keepalive so a gateway-attached tunnel survives a quiet period.
 const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Pause before retrying an accept that failed for a non-connection reason
+/// (fd exhaustion under EMFILE/ENFILE, buffer pressure). Long enough that a
+/// starved process is not spinning on a hot error loop, short enough that a
+/// queued connection is served the moment the pressure clears.
+const ACCEPT_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The accept errors that mean one PEER vanished between SYN and accept
+/// rather than anything about the listener: retried immediately, exactly as
+/// axum's serve loop classifies them.
+fn is_connection_error(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+    )
+}
+
 /// Everything the desktop needs to serve one tunnel.
 pub struct ClientConfig {
     /// The devserver's WebSocket origin, e.g. `ws://127.0.0.1:8787`. The
@@ -158,8 +176,20 @@ async fn run(
                     });
                 }
                 Err(e) => {
+                    // Never fatal to the tunnel: only the foreground command,
+                    // the devserver, or the control socket may end it, and an
+                    // accept error names none of those. A transient EMFILE
+                    // here used to close the control socket, which the
+                    // devserver rightly reported to the blocked `cs tunnel`
+                    // as the desktop dying. The devserver end of this same
+                    // feature rides axum's serve loop, which retries every
+                    // accept error; mirror that policy, paced for the
+                    // resource-pressure class. The pause runs inline, so a
+                    // devserver `close` frame waits out at most one pause.
                     tracing::warn!("revtunnel: accept failed: {e}");
-                    break;
+                    if !is_connection_error(&e) {
+                        tokio::time::sleep(ACCEPT_RETRY_PAUSE).await;
+                    }
                 }
             },
             frame = control.next() => match frame {
