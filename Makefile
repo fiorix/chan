@@ -316,6 +316,14 @@ ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS pack
 	# Linux and macOS arms run their sweeps without this step. The later
 	# `desktop ci-windows` build re-runs this and hits a warm cache.
 	$(CARGO) build --release -p chan
+	# The `chan` crate's own tests run on no Windows arm (see above), and the
+	# standalone chan.exe is a published release artifact. Most of the crate is
+	# covered on the other arms through its injectable pure cores; what is not
+	# is the two Windows-only syscall wrappers. This smoke drives exactly those
+	# -- the DETACHED_PROCESS daemon spawn and the `\\.\pipe\` control-socket
+	# connect -- plus the plain fact that chan.exe reaches `main` at all. It is
+	# a few seconds and is not the deferred full-suite Windows port.
+	scripts/smoke-windows-cli.sh target/release/chan.exe
 	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-library -p chan-desktop --all-targets
 	$(MAKE) -C desktop ci-windows
 	scripts/smoke-built-devserver.sh target/release/chan-desktop.exe
