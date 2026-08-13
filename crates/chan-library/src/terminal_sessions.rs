@@ -140,6 +140,26 @@ const BRACKETED_PASTE_MODE: u16 = 2004;
 /// across PTY reads: a handful of `;`-joined mode numbers. Past this, a dangling
 /// `\e[?…` is not a real mode toggle and is dropped rather than buffered.
 const PRIVATE_MODE_TAIL_CAP: usize = 64;
+/// A DSR cursor-position query. Something has to answer this or the PTY stalls:
+/// on Windows it is ConPTY's OWN startup handshake -- conhost emits it before
+/// it will pump the child's output, so an unanswered query wedges the session
+/// with this 4-byte string as the entire scrollback and the child never runs.
+/// It is not a shell behavior: `powershell.exe` 5.1 and `cmd.exe` both stall
+/// identically. On unix only a foreground program queries, and only when it
+/// wants the answer.
+const DSR_CURSOR_QUERY: &[u8] = b"\x1b[6n";
+/// The minimal CPR the library answers a [`DSR_CURSOR_QUERY`] with when nothing
+/// else did. Row/column 1;1 is a deliberate floor rather than a real reading:
+/// the library has no terminal grid to measure, and every consumer observed
+/// here only needs SOME well-formed answer to proceed. An attached frontend
+/// answers with the true position and takes precedence (see
+/// [`Session::take_due_dsr_answer`]).
+const DSR_CURSOR_REPORT: &[u8] = b"\x1b[1;1R";
+/// How long a [`DSR_CURSOR_QUERY`] is left for an attached frontend to answer
+/// before the library answers it. Long enough that a live xterm.js round trip
+/// wins the race in ordinary interactive use, short enough that a headless
+/// session (tests, a server-side team spawn) is not visibly delayed.
+const DSR_ANSWER_GRACE_MS: i64 = 150;
 #[cfg(target_os = "linux")]
 const FDSTORE_REPLAY_BYTES: usize = 128 * 1024;
 
@@ -2955,6 +2975,18 @@ struct Session {
     /// Carry for a private-mode CSI split across PTY reads (mirrors
     /// `alt_screen_tail`, bounded by [`PRIVATE_MODE_TAIL_CAP`]).
     private_mode_tail: Mutex<Vec<u8>>,
+    /// Millis of the most recent unanswered [`DSR_CURSOR_QUERY`] seen in PTY
+    /// output, or 0 when none is pending. Armed by
+    /// [`Session::note_dsr_query`], consumed by
+    /// [`Session::take_due_dsr_answer`] on a controller tick.
+    dsr_query_at: AtomicI64,
+    /// Millis of the last cursor-position report an attached client forwarded
+    /// INTO the PTY. Compared against `dsr_query_at` so the library only
+    /// answers a query nobody else did.
+    reply_forwarded_at: AtomicI64,
+    /// Carry for a [`DSR_CURSOR_QUERY`] split across PTY reads (mirrors
+    /// `alt_screen_tail`).
+    dsr_tail: Mutex<Vec<u8>>,
     /// This session's broadcast toggle, synced from the SPA via the
     /// `set-broadcast` WS frame on toggle and on (re)connect. Gates the
     /// cross-window input fan (see `broadcast_input_cross_window`) and is
@@ -3186,6 +3218,9 @@ impl Session {
             alt_screen_tail: Mutex::new(Vec::new()),
             private_modes: Mutex::new(BTreeSet::new()),
             private_mode_tail: Mutex::new(Vec::new()),
+            dsr_query_at: AtomicI64::new(0),
+            reply_forwarded_at: AtomicI64::new(0),
+            dsr_tail: Mutex::new(Vec::new()),
             broadcast: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             #[cfg(target_os = "linux")]
@@ -3293,6 +3328,21 @@ impl Session {
                                 terminate_child(child.as_mut());
                                 return;
                             }
+                        }
+                    }
+
+                    // The controller owns the writer, so the DSR fallback rides
+                    // its existing 25 ms tick rather than contending for it.
+                    if let Some(answer) = session.take_due_dsr_answer() {
+                        if let Err(e) = write_input_parts(
+                            writer.as_mut(),
+                            &[answer.to_vec()],
+                            Duration::ZERO,
+                            std::thread::sleep,
+                        ) {
+                            session.broadcast(SessionEvent::Error(format!(
+                                "terminal cursor-report answer failed: {e}"
+                            )));
                         }
                     }
 
@@ -3452,6 +3502,9 @@ impl Session {
             alt_screen_tail: Mutex::new(Vec::new()),
             private_modes: Mutex::new(meta.private_modes.into_iter().collect()),
             private_mode_tail: Mutex::new(Vec::new()),
+            dsr_query_at: AtomicI64::new(0),
+            reply_forwarded_at: AtomicI64::new(0),
+            dsr_tail: Mutex::new(Vec::new()),
             broadcast: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             #[cfg(target_os = "linux")]
@@ -3606,6 +3659,12 @@ impl Session {
     fn send_input(&self, data: &[u8]) {
         self.last_activity
             .store(now_unix_secs() as i64, Ordering::Relaxed);
+        // An attached frontend answering a DSR stands the library's fallback
+        // down; see `take_due_dsr_answer`.
+        if contains_cursor_position_report(data) {
+            self.reply_forwarded_at
+                .store(now_unix_millis(), Ordering::Relaxed);
+        }
         let _ = self.command_tx.send(PtyCommand::Input(data.to_vec()));
     }
 
@@ -4183,6 +4242,7 @@ impl Session {
             .store(now_unix_millis(), Ordering::Relaxed);
         self.update_alt_screen(bytes);
         self.update_private_modes(bytes);
+        self.note_dsr_query(bytes);
         let end_seq = {
             let mut ring = self.ring.lock().expect("terminal ring poisoned");
             ring.push(bytes);
@@ -4208,6 +4268,46 @@ impl Session {
 
     fn broadcast(&self, event: SessionEvent) {
         let _ = self.output_tx.send(event);
+    }
+
+    /// Arm the DSR fallback when PTY output carries a cursor-position query.
+    /// A query split across reads is carried in `dsr_tail`, so the scan cannot
+    /// miss one that straddles a read boundary.
+    fn note_dsr_query(&self, bytes: &[u8]) {
+        let mut tail = self.dsr_tail.lock().expect("terminal dsr tail poisoned");
+        let mut scan = Vec::with_capacity(tail.len() + bytes.len());
+        scan.extend_from_slice(&tail);
+        scan.extend_from_slice(bytes);
+        tail.clear();
+        if contains_subslice(&scan, DSR_CURSOR_QUERY) {
+            self.dsr_query_at
+                .store(now_unix_millis(), Ordering::Relaxed);
+            return;
+        }
+        let keep = scan.len().min(DSR_CURSOR_QUERY.len() - 1);
+        tail.extend_from_slice(&scan[scan.len() - keep..]);
+    }
+
+    /// One controller-tick step of the DSR fallback. Returns the CPR to write
+    /// when a query has gone unanswered past [`DSR_ANSWER_GRACE_MS`], and
+    /// `None` otherwise -- including when an attached frontend answered it,
+    /// whose report carries the real cursor position and wins.
+    ///
+    /// The query is cleared either way, so a frontend-answered query is not
+    /// re-examined every tick. A frontend that answers in the window between
+    /// the grace expiring and this write lands a second CPR at the PTY; that
+    /// race is narrow and costs at most one stray report, where losing the
+    /// answer entirely costs the whole session.
+    fn take_due_dsr_answer(&self) -> Option<&'static [u8]> {
+        let query_at = self.dsr_query_at.load(Ordering::Relaxed);
+        if query_at == 0 || now_unix_millis() - query_at < DSR_ANSWER_GRACE_MS {
+            return None;
+        }
+        self.dsr_query_at.store(0, Ordering::Relaxed);
+        if self.reply_forwarded_at.load(Ordering::Relaxed) >= query_at {
+            return None;
+        }
+        Some(DSR_CURSOR_REPORT)
     }
 
     fn update_alt_screen(&self, bytes: &[u8]) {
@@ -4426,6 +4526,27 @@ fn terminate_child(child: &mut dyn Child) {
 /// reach the child. Continuing would write a submit chord against a body the
 /// agent never received, and the caller's "delivered" acknowledgment would be
 /// a lie. Callers tear the session down on `Err`.
+/// Does this client input carry a cursor-position report (`ESC [ <row> ; <col>
+/// R`)? Used only to notice that an attached frontend has already answered a
+/// DSR query. Deliberately loose: a false positive costs one skipped fallback
+/// answer on a session that already has a live frontend forwarding replies.
+fn contains_cursor_position_report(data: &[u8]) -> bool {
+    let n = data.len();
+    for i in 0..n.saturating_sub(2) {
+        if data[i] != 0x1b || data[i + 1] != b'[' {
+            continue;
+        }
+        let mut j = i + 2;
+        while j < n && (data[j].is_ascii_digit() || data[j] == b';') {
+            j += 1;
+        }
+        if j > i + 2 && j < n && data[j] == b'R' {
+            return true;
+        }
+    }
+    false
+}
+
 fn write_input_parts(
     writer: &mut dyn Write,
     parts: &[Vec<u8>],
@@ -4732,6 +4853,9 @@ mod tests {
             alt_screen_tail: Mutex::new(Vec::new()),
             private_modes: Mutex::new(BTreeSet::new()),
             private_mode_tail: Mutex::new(Vec::new()),
+            dsr_query_at: AtomicI64::new(0),
+            reply_forwarded_at: AtomicI64::new(0),
+            dsr_tail: Mutex::new(Vec::new()),
             broadcast: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             #[cfg(target_os = "linux")]
@@ -6364,9 +6488,6 @@ mod tests {
         }
     }
 
-    // Only the unix-gated exit tests spawn a command that runs to completion;
-    // gate the helper with them so it is not dead code on Windows.
-    #[cfg(unix)]
     fn opts_with_command(command: &str) -> CreateOptions {
         CreateOptions {
             size: test_size(),
@@ -6380,7 +6501,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     async fn wait_for_last_exit(registry: &Registry) -> TerminalExit {
         // A generous ceiling so a loaded host does not flake; the exit
         // lands in well under a second when the child is not wedged.
@@ -6397,17 +6517,10 @@ mod tests {
         panic!("terminal exit was not recorded; scrollback: {output:?}");
     }
 
-    // Gated to unix: the exit path needs the spawned shell to run to
-    // completion, and the Windows resolver's default is an interactive shell
-    // (pwsh) that emits a DSR cursor-position query (`\x1b[6n`) at startup and
-    // blocks until a terminal answers with a CPR. The headless test reader
-    // only drains bytes, so pwsh never runs the command and the exit is never
-    // observed. Production's xterm.js frontend answers the DSR, so real
-    // Windows terminals surface exit codes; the exit-recording logic under
-    // test is platform-neutral and verified here on unix (and confirmed under
-    // Wine with a non-interactive cmd shell). See the roadmap draft on
-    // restoring headless Windows exit coverage.
-    #[cfg(unix)]
+    // Runs on Windows too since the library answers the startup DSR itself
+    // (see `take_due_dsr_answer`). Before that, ConPTY's own cursor-position
+    // query went unanswered in a headless run and the child never started, so
+    // these three were gated to unix.
     #[tokio::test]
     async fn last_exit_zero_is_sticky_after_session_removal() {
         let registry = Registry::new(test_config(1024, 4, 10));
@@ -6422,9 +6535,6 @@ mod tests {
         assert_eq!(registry.last_exit(), Some(TerminalExit::Code { code: 0 }));
     }
 
-    // Gated to unix for the same reason as its sibling above: pwsh under
-    // ConPTY blocks on a startup DSR that the headless reader never answers.
-    #[cfg(unix)]
     #[tokio::test]
     async fn last_exit_nonzero_is_sticky_after_session_removal() {
         let registry = Registry::new(test_config(1024, 4, 10));
@@ -6439,6 +6549,9 @@ mod tests {
         assert_eq!(registry.last_exit(), Some(TerminalExit::Code { code: 7 }));
     }
 
+    // Still unix-only, but for its own reason rather than the DSR one its
+    // siblings above carried: `kill -TERM $$` is a POSIX shell command, and
+    // signal deaths have no Windows analog.
     #[cfg(unix)]
     #[tokio::test]
     async fn unix_signal_exit_is_recorded_as_exit_state() {
@@ -6449,6 +6562,102 @@ mod tests {
             TerminalExit::Signal { signal } => assert!(!signal.is_empty()),
             other => panic!("expected a signal exit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cursor_position_reports_are_recognized_in_client_input() {
+        assert!(contains_cursor_position_report(b"\x1b[1;1R"));
+        assert!(contains_cursor_position_report(b"\x1b[24;80R"));
+        // Real frontends batch the reply with other input.
+        assert!(contains_cursor_position_report(b"ls\r\x1b[7;3R"));
+        // A DSR query is not a report, and neither is other CSI traffic.
+        assert!(!contains_cursor_position_report(b"\x1b[6n"));
+        assert!(!contains_cursor_position_report(b"\x1b[A"));
+        assert!(!contains_cursor_position_report(b"\x1b[R"));
+        assert!(!contains_cursor_position_report(b"plain text"));
+        assert!(!contains_cursor_position_report(b""));
+    }
+
+    /// Shift a session's DSR bookkeeping back past the answer grace instead of
+    /// sleeping through it. Both timestamps move together: what
+    /// [`Session::take_due_dsr_answer`] decides on is the ORDER of query and
+    /// reply, so aging one alone would rewrite the very thing under test.
+    fn age_dsr_past_the_grace(session: &Session) {
+        let shift = DSR_ANSWER_GRACE_MS + 1;
+        session.dsr_query_at.fetch_sub(shift, Ordering::Relaxed);
+        session
+            .reply_forwarded_at
+            .fetch_sub(shift, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn an_unanswered_cursor_query_is_answered_after_the_grace() {
+        let (session, _rx) = test_session_with_commands(1024);
+        assert_eq!(session.take_due_dsr_answer(), None, "nothing armed yet");
+
+        session.record_output(DSR_CURSOR_QUERY);
+        assert_eq!(
+            session.take_due_dsr_answer(),
+            None,
+            "the grace has not elapsed, so the frontend still owns the answer"
+        );
+
+        age_dsr_past_the_grace(&session);
+        assert_eq!(session.take_due_dsr_answer(), Some(DSR_CURSOR_REPORT));
+        assert_eq!(
+            session.take_due_dsr_answer(),
+            None,
+            "the query is consumed, so it is answered exactly once"
+        );
+    }
+
+    #[test]
+    fn a_frontend_answer_stands_the_library_fallback_down() {
+        let (session, _rx) = test_session_with_commands(1024);
+        session.record_output(DSR_CURSOR_QUERY);
+        session.send_input(b"\x1b[12;34R");
+        age_dsr_past_the_grace(&session);
+
+        assert_eq!(
+            session.take_due_dsr_answer(),
+            None,
+            "the attached frontend reported the real cursor position"
+        );
+    }
+
+    #[test]
+    fn a_reply_older_than_the_query_does_not_suppress_the_fallback() {
+        let (session, _rx) = test_session_with_commands(1024);
+        // A CPR answering some earlier query must not cover a later one.
+        session.send_input(b"\x1b[1;1R");
+        std::thread::sleep(Duration::from_millis(2));
+        session.record_output(DSR_CURSOR_QUERY);
+        age_dsr_past_the_grace(&session);
+
+        assert_eq!(session.take_due_dsr_answer(), Some(DSR_CURSOR_REPORT));
+    }
+
+    #[test]
+    fn a_cursor_query_split_across_reads_is_still_seen() {
+        let (session, _rx) = test_session_with_commands(1024);
+        session.record_output(b"prompt\x1b[");
+        assert_eq!(session.dsr_query_at.load(Ordering::Relaxed), 0);
+
+        session.record_output(b"6n");
+        assert_ne!(
+            session.dsr_query_at.load(Ordering::Relaxed),
+            0,
+            "the query straddled the read boundary and must still arm"
+        );
+    }
+
+    #[test]
+    fn ordinary_output_never_arms_the_cursor_fallback() {
+        let (session, _rx) = test_session_with_commands(1024);
+        session.record_output(b"\x1b[31mred\x1b[0m\r\n");
+        session.record_output(b"\x1b[?1049h");
+        session.record_output(b"6n plain text");
+        assert_eq!(session.dsr_query_at.load(Ordering::Relaxed), 0);
     }
 
     #[test]
