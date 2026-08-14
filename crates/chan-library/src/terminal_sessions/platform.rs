@@ -261,17 +261,7 @@ pub fn prime_windows_shell() {
 /// a distro list and exits instead of opening a shell.
 #[cfg(windows)]
 fn classify_windows_shell(program: &Path) -> ShellKind {
-    let stem = program
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    match stem.as_str() {
-        "pwsh" | "powershell" => ShellKind::PowerShell,
-        "cmd" => ShellKind::Cmd,
-        "wsl" => ShellKind::Wsl,
-        _ => ShellKind::Posix,
-    }
+    ShellKind::from_program_stem(program)
 }
 
 /// A default-resolution profile for a bare program path: interactive args come

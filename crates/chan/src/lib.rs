@@ -7365,6 +7365,20 @@ const CONFIG_KEYS: &[ConfigKeySpec] = &[
         key: "server.terminal.secret_mask_suffixes",
         kind: ConfigValueKind::StringList(100),
     },
+    // Array-of-tables with per-entry optional fields, so it takes the same
+    // Collection escape hatch as `editor.shortcuts` rather than a scalar kind:
+    // `chan config get` renders it, and editing goes through the file or the
+    // Settings pane.
+    ConfigKeySpec {
+        key: "server.terminal.profiles",
+        kind: ConfigValueKind::Collection(
+            "edit terminal profiles in server.toml or Settings -> Terminal",
+        ),
+    },
+    ConfigKeySpec {
+        key: "server.terminal.default_profile",
+        kind: ConfigValueKind::String,
+    },
 ];
 
 fn cmd_status(path: Option<PathBuf>, json: bool) -> Result<()> {

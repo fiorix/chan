@@ -32,7 +32,12 @@ use portable_pty::CommandBuilder;
 /// lookup: `wsl.exe -l` means "list distributions", not "login shell", so a
 /// `wsl.exe` classified as [`ShellKind::Posix`] would hand it `-l` and spawn a
 /// listing instead of a shell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Wire shape is `lowercase`, not kebab-case: these are hand-written in a
+/// `server.toml`, and `kind = "powershell"` reads better than
+/// `kind = "power-shell"`. Matches `SubmitAgent`'s spelling convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ShellKind {
     /// `powershell.exe` / `pwsh.exe`: `-NoLogo` interactive, `-NoLogo -Command`
     /// one-shot. No `-NoProfile` -- we want the user's profile/PATH (the `-l`
@@ -49,6 +54,31 @@ pub enum ShellKind {
 }
 
 impl ShellKind {
+    /// Infer the argument convention from a program's file stem.
+    ///
+    /// Unknown stems fall back to POSIX (`-l` / `-lc`), which is the useful
+    /// guess for a `bash`/`sh`/`zsh` a user points at. `wsl` is called out
+    /// explicitly and must never reach that fallback: `-l` to `wsl.exe` means
+    /// "list distributions", so a POSIX-classified WSL entry prints a distro
+    /// list and exits instead of opening a shell.
+    ///
+    /// Cross-platform and pure so the classification is table-tested on every
+    /// CI arm; `platform::classify_windows_shell` delegates here rather than
+    /// keeping a second copy of the match.
+    pub fn from_program_stem(program: &Path) -> ShellKind {
+        let stem = program
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match stem.as_str() {
+            "pwsh" | "powershell" => ShellKind::PowerShell,
+            "cmd" => ShellKind::Cmd,
+            "wsl" => ShellKind::Wsl,
+            _ => ShellKind::Posix,
+        }
+    }
+
     /// The interactive arguments a shell of this kind takes by default. Used
     /// when a profile is derived from a bare program path (a `CHAN_SHELL`
     /// override, or the built-in default resolution) rather than from a
@@ -164,6 +194,144 @@ pub fn shell_profiles() -> &'static [ShellProfile] {
 /// a lazy resolve on a tokio worker would freeze the SPA.
 pub fn prime_shell_profiles() {
     let _ = shell_profiles();
+}
+
+/// Layer the user's declared profiles over the discovered ones.
+///
+/// Precedence, following Windows Terminal: generators propose, the user
+/// disposes. An entry whose `id` matches a discovered profile overrides its
+/// fields or hides it; an entry with a new `id` appends a profile of its own,
+/// after the discovered ones and in file order.
+///
+/// Three deliberate choices:
+///
+/// - `args` **replaces** rather than appends. Appending cannot express "spawn
+///   PowerShell without `-NoLogo`", and a user overriding args wants exactly
+///   the vector they wrote.
+/// - Hiding is honoured even for an id nothing discovered, and costs nothing:
+///   it means a machine that temporarily loses a shell (an uninstalled WSL
+///   distro) does not silently un-hide it when the shell returns.
+/// - A new profile with no `program` is dropped with a warning. There is
+///   nothing to spawn, and surfacing it in a picker would produce a profile
+///   that fails only when clicked.
+pub fn effective_profiles(
+    discovered: &[ShellProfile],
+    user: &[crate::config::TerminalProfile],
+) -> Vec<ShellProfile> {
+    let overrides: std::collections::HashMap<&str, &crate::config::TerminalProfile> = user
+        .iter()
+        .map(|profile| (profile.id.trim(), profile))
+        .collect();
+
+    let mut effective: Vec<ShellProfile> = discovered
+        .iter()
+        .filter_map(|found| match overrides.get(found.id.as_str()) {
+            None => Some(found.clone()),
+            Some(over) if over.hidden => None,
+            Some(over) => Some(apply_override(found.clone(), over)),
+        })
+        .collect();
+
+    // Additions: user ids that matched nothing discovered, in file order.
+    let discovered_ids: std::collections::HashSet<&str> =
+        discovered.iter().map(|p| p.id.as_str()).collect();
+    for over in user {
+        let id = over.id.trim();
+        if discovered_ids.contains(id) || over.hidden {
+            continue;
+        }
+        match new_profile_from_override(over) {
+            Some(profile) => effective.push(profile),
+            None => tracing::warn!(
+                id,
+                "terminal.profiles: entry matches no discovered shell and declares no program; ignoring"
+            ),
+        }
+    }
+    effective
+}
+
+/// Apply a user override onto a discovered profile. Absent fields keep the
+/// discovered value.
+fn apply_override(mut base: ShellProfile, over: &crate::config::TerminalProfile) -> ShellProfile {
+    if let Some(name) = over
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        base.name = name.to_string();
+    }
+    if let Some(program) = over
+        .program
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        base.program = PathBuf::from(program);
+    }
+    if let Some(args) = over.args.as_ref() {
+        base.args = args.clone();
+    }
+    if let Some(kind) = over.kind {
+        base.kind = kind;
+    }
+    base.source = ProfileSource::User;
+    base
+}
+
+/// Build a wholly new profile from a user entry, or `None` when it names no
+/// program to spawn.
+fn new_profile_from_override(over: &crate::config::TerminalProfile) -> Option<ShellProfile> {
+    let program = over
+        .program
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())?;
+    let program = PathBuf::from(program);
+    let kind = over
+        .kind
+        .unwrap_or_else(|| ShellKind::from_program_stem(&program));
+    let id = over.id.trim().to_string();
+    Some(ShellProfile {
+        name: over
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .unwrap_or(&id)
+            .to_string(),
+        args: over
+            .args
+            .clone()
+            .unwrap_or_else(|| kind.default_interactive_args()),
+        id,
+        program,
+        kind,
+        path_prepend: Vec::new(),
+        source: ProfileSource::User,
+    })
+}
+
+/// The profile new terminals should spawn, given the configured default id.
+///
+/// `None` -- either unset, or naming a profile that no longer exists -- means
+/// the caller falls back to the built-in resolution. A configured id that
+/// matches nothing warns rather than failing: deleting a profile must not
+/// strand the terminal with an unspawnable default.
+pub fn resolve_default<'a>(
+    profiles: &'a [ShellProfile],
+    default_id: Option<&str>,
+) -> Option<&'a ShellProfile> {
+    let id = default_id.map(str::trim).filter(|id| !id.is_empty())?;
+    let found = profiles.iter().find(|profile| profile.id == id);
+    if found.is_none() {
+        tracing::warn!(
+            id,
+            "terminal.default_profile names no known profile; using the built-in default shell"
+        );
+    }
+    found
 }
 
 /// Run every generator for this platform, in display order.
@@ -745,6 +913,153 @@ mod tests {
         assert_eq!(p.name, "zsh");
         assert_eq!(p.kind, ShellKind::Posix);
         assert_eq!(p.args, vec!["-l"]);
+    }
+
+    fn discovered(id: &str, name: &str, program: &str, kind: ShellKind) -> ShellProfile {
+        ShellProfile {
+            id: id.into(),
+            name: name.into(),
+            program: PathBuf::from(program),
+            args: kind.default_interactive_args(),
+            kind,
+            path_prepend: Vec::new(),
+            source: ProfileSource::Discovered,
+        }
+    }
+
+    fn user(id: &str) -> crate::config::TerminalProfile {
+        crate::config::TerminalProfile {
+            id: id.into(),
+            name: None,
+            program: None,
+            args: None,
+            kind: None,
+            hidden: false,
+        }
+    }
+
+    fn sample() -> Vec<ShellProfile> {
+        vec![
+            discovered("pwsh", "PowerShell", r"C:\pwsh.exe", ShellKind::PowerShell),
+            discovered("cmd", "Command Prompt", r"C:\cmd.exe", ShellKind::Cmd),
+        ]
+    }
+
+    #[test]
+    fn stem_classification_covers_every_kind() {
+        assert_eq!(
+            ShellKind::from_program_stem(Path::new(r"C:\pwsh.exe")),
+            ShellKind::PowerShell,
+        );
+        assert_eq!(
+            ShellKind::from_program_stem(Path::new(
+                r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe"
+            )),
+            ShellKind::PowerShell,
+        );
+        assert_eq!(
+            ShellKind::from_program_stem(Path::new(r"C:\WINDOWS\system32\cmd.exe")),
+            ShellKind::Cmd,
+        );
+        // The one that must not fall through to Posix.
+        assert_eq!(
+            ShellKind::from_program_stem(Path::new(r"C:\WINDOWS\System32\wsl.exe")),
+            ShellKind::Wsl,
+        );
+        assert_eq!(
+            ShellKind::from_program_stem(Path::new("/usr/bin/zsh")),
+            ShellKind::Posix,
+        );
+        // Unknown stem, and no stem at all.
+        assert_eq!(
+            ShellKind::from_program_stem(Path::new("/opt/weird")),
+            ShellKind::Posix,
+        );
+        assert_eq!(
+            ShellKind::from_program_stem(Path::new("")),
+            ShellKind::Posix
+        );
+    }
+
+    #[test]
+    fn user_override_renames_and_marks_the_profile_as_users() {
+        let mut over = user("pwsh");
+        over.name = Some("My Shell".into());
+        let out = effective_profiles(&sample(), &[over]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].name, "My Shell");
+        assert_eq!(out[0].source, ProfileSource::User);
+        // Untouched fields survive.
+        assert_eq!(out[0].program, PathBuf::from(r"C:\pwsh.exe"));
+        assert_eq!(out[0].args, vec!["-NoLogo"]);
+        // The profile it did not name is untouched.
+        assert_eq!(out[1].source, ProfileSource::Discovered);
+    }
+
+    #[test]
+    fn hidden_removes_a_discovered_profile() {
+        let mut over = user("cmd");
+        over.hidden = true;
+        let out = effective_profiles(&sample(), &[over]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "pwsh");
+    }
+
+    /// Args replace wholesale: appending could never express "drop -NoLogo".
+    #[test]
+    fn user_args_replace_rather_than_append() {
+        let mut over = user("pwsh");
+        over.args = Some(vec!["-NoProfile".into()]);
+        let out = effective_profiles(&sample(), &[over]);
+        assert_eq!(out[0].args, vec!["-NoProfile"]);
+    }
+
+    #[test]
+    fn a_new_id_appends_a_profile_and_infers_its_kind() {
+        let mut over = user("my-wsl");
+        over.program = Some(r"C:\WINDOWS\System32\wsl.exe".into());
+        let out = effective_profiles(&sample(), &[over]);
+        assert_eq!(out.len(), 3);
+        let added = &out[2];
+        assert_eq!(added.id, "my-wsl");
+        // No name given -> falls back to the id rather than being blank.
+        assert_eq!(added.name, "my-wsl");
+        // Kind inferred from the stem, and WSL does not get `-l`.
+        assert_eq!(added.kind, ShellKind::Wsl);
+        assert!(added.args.is_empty());
+        assert_eq!(added.source, ProfileSource::User);
+    }
+
+    #[test]
+    fn a_new_entry_without_a_program_is_dropped() {
+        // Nothing to spawn: surfacing it would make a picker entry that fails
+        // only once clicked.
+        let out = effective_profiles(&sample(), &[user("ghost")]);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|p| p.id != "ghost"));
+    }
+
+    #[test]
+    fn hiding_an_unknown_id_is_harmless_and_adds_nothing() {
+        let mut over = user("not-installed-right-now");
+        over.hidden = true;
+        over.program = Some(r"C:\somewhere.exe".into());
+        let out = effective_profiles(&sample(), &[over]);
+        // Still hidden even though discovery did not find it this boot.
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn default_resolves_by_id_and_tolerates_a_stale_one() {
+        let profiles = sample();
+        assert_eq!(
+            resolve_default(&profiles, Some("cmd")).map(|p| p.id.as_str()),
+            Some("cmd"),
+        );
+        // Unset, blank, and stale all fall back to the built-in default.
+        assert!(resolve_default(&profiles, None).is_none());
+        assert!(resolve_default(&profiles, Some("  ")).is_none());
+        assert!(resolve_default(&profiles, Some("deleted")).is_none());
     }
 
     #[test]

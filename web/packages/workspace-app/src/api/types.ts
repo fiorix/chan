@@ -185,7 +185,39 @@ export type TerminalPreferences = {
   /// Literal, case-insensitive assignment-name suffixes for visual masking.
   /// The server validates `[A-Za-z0-9_]+` entries and caps the list at 100.
   secret_mask_suffixes?: string[];
+  /// User-declared terminal profiles, layered over the shells the server
+  /// discovered on its own machine. An entry whose `id` matches a discovered
+  /// profile overrides its fields or hides it; a new `id` adds a shell. The
+  /// server drops malformed entries, dedupes by `id`, and caps the list at 50.
+  /// Optional on the wire so older servers (no field) deserialize cleanly;
+  /// absent means no customization, not "no profiles".
+  profiles?: TerminalProfile[];
+  /// Id of the profile new terminals spawn with. Optional; absent means the
+  /// server's built-in resolution (`CHAN_SHELL` -> pwsh -> powershell -> cmd on
+  /// Windows, `$SHELL` on unix). An id naming nothing is ignored server-side.
+  default_profile?: string;
 };
+
+/// A user-declared terminal profile. Only `id` is required: the common case is
+/// a small override of something already discovered. A wholly new profile needs
+/// `program`; one that matches no discovered id and names no program is dropped
+/// by the server, since there would be nothing to spawn.
+export type TerminalProfile = {
+  id: string;
+  name?: string;
+  program?: string;
+  /// Interactive arguments. Replaces the discovered vector wholesale rather
+  /// than appending -- appending could not express "drop `-NoLogo`".
+  args?: string[];
+  kind?: ShellKind;
+  /// Hide a discovered profile without deleting the entry, so the hiding
+  /// survives the server rediscovering that shell on its next boot.
+  hidden?: boolean;
+};
+
+/// Argument convention for a shell. `wsl` exists separately because `-l` to
+/// `wsl.exe` means "list distributions", not "login shell".
+export type ShellKind = "powershell" | "cmd" | "posix" | "wsl";
 
 export type TerminalFontChoice = "os-default" | "source-code-pro";
 

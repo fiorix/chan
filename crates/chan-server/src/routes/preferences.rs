@@ -499,6 +499,18 @@ fn sanitize_terminal_config(mut cfg: TerminalConfig) -> TerminalConfig {
     } else {
         trimmed.to_string()
     };
+    // A blank default profile means "no explicit default", not a profile whose
+    // id is the empty string. `profiles` itself is normalized (drop / dedupe /
+    // cap) by its deserializer, which a PATCH body goes through too, so there
+    // is nothing further to do to the list here. The id is deliberately NOT
+    // validated against `profiles`: it may legitimately name a *discovered*
+    // profile the user never declared, and only the merge can see those.
+    cfg.default_profile = cfg
+        .default_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
     cfg
 }
 

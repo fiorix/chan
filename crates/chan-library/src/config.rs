@@ -10,6 +10,8 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::terminal_sessions::shell_profiles::ShellKind;
+
 /// Maximum number of literal suffixes compiled into the terminal secret
 /// assignment matcher.
 pub const TERMINAL_SECRET_MASK_SUFFIX_MAX: usize = 100;
@@ -121,6 +123,62 @@ pub struct TerminalConfig {
         deserialize_with = "deserialize_terminal_secret_mask_suffixes"
     )]
     pub secret_mask_suffixes: Vec<String>,
+    /// User-declared terminal profiles, layered over the shells discovered on
+    /// the machine (`terminal_sessions::shell_profiles`). An entry whose `id`
+    /// matches a discovered profile overrides its fields or hides it; an entry
+    /// with a new `id` declares an additional shell.
+    ///
+    /// Empty by default, and serialized away when empty, so a machine that has
+    /// never customized a profile has no `[[terminal.profiles]]` in its
+    /// `server.toml` at all. Deserialization drops malformed entries with a
+    /// warning rather than failing the load, dedupes by `id`, and caps the
+    /// list.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_terminal_profiles"
+    )]
+    pub profiles: Vec<TerminalProfile>,
+    /// Id of the profile new terminals spawn with. `None` keeps the built-in
+    /// resolution (`CHAN_SHELL` -> pwsh -> powershell -> cmd on Windows,
+    /// `$SHELL` on unix). An id that matches nothing is ignored with a warning
+    /// at merge time, so a profile deleted from the list cannot strand the
+    /// terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_profile: Option<String>,
+}
+
+/// A user-declared terminal profile.
+///
+/// Every field except `id` is optional because the common case is a small
+/// override of something already discovered -- renaming "Ubuntu (WSL)", or
+/// hiding a shell you never use. A wholly new profile supplies `program` (and
+/// usually `kind`); one that supplies neither and matches no discovered id is
+/// dropped at merge time, since there would be nothing to spawn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalProfile {
+    /// Stable key. Matches a discovered profile's id to override it, or names a
+    /// new one.
+    pub id: String,
+    /// Display name override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Executable to spawn. Required for a profile that matches no discovered
+    /// id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+    /// Interactive arguments. Replaces the discovered vector wholesale rather
+    /// than appending -- appending cannot express "drop `-NoLogo`".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    /// Argument convention. Defaults to the discovered profile's kind when
+    /// overriding, or is inferred from the program stem for a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ShellKind>,
+    /// Hide a discovered profile without deleting its entry, so the hiding
+    /// survives the generator rediscovering it on the next boot.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 /// Terminal-font preference. Wire shape kept narrow (string enum)
@@ -152,6 +210,8 @@ impl Default for TerminalConfig {
             ghostty: default_terminal_ghostty(),
             secret_masking: default_terminal_secret_masking(),
             secret_mask_suffixes: default_terminal_secret_mask_suffixes(),
+            profiles: Vec::new(),
+            default_profile: None,
         }
     }
 }
@@ -249,6 +309,67 @@ fn normalize_terminal_secret_mask_suffixes(
     valid
 }
 
+/// Cap on `terminal.profiles`. Generous relative to how many shells a machine
+/// actually has; it exists so a corrupt or generated file cannot make the
+/// picker unusable, not to constrain real use.
+pub const TERMINAL_PROFILE_MAX: usize = 50;
+
+fn deserialize_terminal_profiles<'de, D>(deserializer: D) -> Result<Vec<TerminalProfile>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let profiles = Vec::<TerminalProfile>::deserialize(deserializer)?;
+    Ok(normalize_terminal_profiles(profiles, |entries| {
+        tracing::warn!(
+            entries,
+            limit = TERMINAL_PROFILE_MAX,
+            "terminal.profiles exceeds its limit; ignoring trailing entries"
+        );
+    }))
+}
+
+/// Drop unusable entries, dedupe by id, and cap the list.
+///
+/// Same posture as [`normalize_terminal_secret_mask_suffixes`] and for the same
+/// reason: an `Err` here fails the whole `ServerConfig` load, the server then
+/// runs on in-memory defaults, and the next `/api/config` PATCH writes those
+/// defaults over every other setting in the user's `server.toml`. A malformed
+/// profile costs the user that profile, never the rest of their config.
+///
+/// Only `id` is validated here. Whether a profile is *spawnable* depends on
+/// what discovery found, which this layer cannot see -- that check belongs to
+/// the merge.
+fn normalize_terminal_profiles(
+    profiles: Vec<TerminalProfile>,
+    warn: impl FnOnce(usize),
+) -> Vec<TerminalProfile> {
+    let (mut valid, invalid): (Vec<TerminalProfile>, Vec<TerminalProfile>) = profiles
+        .into_iter()
+        // Trim first so the stored id is exactly what every later lookup keys
+        // on -- the merge, the default resolution, and the SPA all compare it
+        // literally, and a stray space would make `"pwsh "` a silently
+        // different profile from `"pwsh"`.
+        .map(|mut profile| {
+            profile.id = profile.id.trim().to_string();
+            profile
+        })
+        .partition(|profile| !profile.id.is_empty());
+    if !invalid.is_empty() {
+        tracing::warn!(
+            entries = invalid.len(),
+            "terminal.profiles: dropping entries with an empty id"
+        );
+    }
+    // First wins, matching the file's own reading order.
+    let mut seen = std::collections::HashSet::new();
+    valid.retain(|profile| seen.insert(profile.id.clone()));
+    if valid.len() > TERMINAL_PROFILE_MAX {
+        warn(valid.len());
+        valid.truncate(TERMINAL_PROFILE_MAX);
+    }
+    valid
+}
+
 /// Inclusive bounds the Settings UI exposes for the scrollback slider.
 /// Mirrored in `web/packages/workspace-app/src/terminal/scrollback.ts`; keep in lockstep.
 pub const TERMINAL_SCROLLBACK_MB_MIN: u32 = 10;
@@ -257,6 +378,133 @@ pub const TERMINAL_SCROLLBACK_MB_MAX: u32 = 50;
 /// Inclusive terminal renderer font-size bounds mirrored by Settings.
 pub const TERMINAL_FONT_SIZE_MIN: u32 = 8;
 pub const TERMINAL_FONT_SIZE_MAX: u32 = 32;
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    fn entry(id: &str) -> TerminalProfile {
+        TerminalProfile {
+            id: id.into(),
+            name: None,
+            program: None,
+            args: None,
+            kind: None,
+            hidden: false,
+        }
+    }
+
+    /// An older server has no `profiles` key at all, and a machine that never
+    /// customized one must not grow an empty array in its file.
+    #[test]
+    fn profiles_default_empty_and_serialize_away() {
+        let config: TerminalConfig = serde_json::from_str("{}").expect("defaults");
+        assert!(config.profiles.is_empty());
+        assert_eq!(config.default_profile, None);
+
+        let json = serde_json::to_value(&config).expect("serialize");
+        assert!(json.get("profiles").is_none());
+        assert!(json.get("default_profile").is_none());
+    }
+
+    /// Malformed entries cost the user that profile, never the rest of the
+    /// config -- an Err here would fail the whole ServerConfig load and the
+    /// next PATCH would write defaults over everything else.
+    #[test]
+    fn normalize_drops_blank_ids_trims_and_dedupes() {
+        let out = normalize_terminal_profiles(
+            vec![
+                entry("  pwsh  "),
+                entry(""),
+                entry("   "),
+                entry("pwsh"),
+                entry("cmd"),
+            ],
+            |_| panic!("cap warning not expected"),
+        );
+        let ids: Vec<&str> = out.iter().map(|p| p.id.as_str()).collect();
+        // Trimmed, blank-dropped, first-wins on the duplicate.
+        assert_eq!(ids, vec!["pwsh", "cmd"]);
+    }
+
+    #[test]
+    fn normalize_caps_the_list_and_warns_once() {
+        let many: Vec<TerminalProfile> = (0..TERMINAL_PROFILE_MAX + 5)
+            .map(|i| entry(&format!("p{i}")))
+            .collect();
+        let seen = std::cell::Cell::new(0usize);
+        let out = normalize_terminal_profiles(many, |n| seen.set(n));
+        assert_eq!(out.len(), TERMINAL_PROFILE_MAX);
+        assert_eq!(seen.get(), TERMINAL_PROFILE_MAX + 5);
+    }
+
+    /// The normalizer runs on the deserialize path, not just when called
+    /// directly, so a hand-edited server.toml is cleaned on load.
+    #[test]
+    fn deserialization_applies_the_normalizer() {
+        let toml = r#"
+            [[profiles]]
+            id = "  git-bash  "
+            name = "Git BASH"
+
+            [[profiles]]
+            id = ""
+
+            [[profiles]]
+            id = "git-bash"
+            name = "duplicate, ignored"
+        "#;
+        let config: TerminalConfig = toml::from_str(toml).expect("load");
+        assert_eq!(config.profiles.len(), 1);
+        assert_eq!(config.profiles[0].id, "git-bash");
+        assert_eq!(config.profiles[0].name.as_deref(), Some("Git BASH"));
+    }
+
+    #[test]
+    fn a_full_profile_round_trips_through_toml() {
+        let toml = r#"
+            default_profile = "git-bash"
+
+            [[profiles]]
+            id = "git-bash"
+            name = "Git Bash"
+            program = "C:\\Program Files\\Git\\bin\\bash.exe"
+            args = ["-l"]
+            kind = "posix"
+
+            [[profiles]]
+            id = "cmd"
+            hidden = true
+        "#;
+        let config: TerminalConfig = toml::from_str(toml).expect("load");
+        assert_eq!(config.default_profile.as_deref(), Some("git-bash"));
+        assert_eq!(config.profiles[0].kind, Some(ShellKind::Posix));
+        assert_eq!(
+            config.profiles[0].args.as_deref(),
+            Some(&["-l".to_string()][..])
+        );
+        assert!(config.profiles[1].hidden);
+        assert!(!config.profiles[0].hidden);
+
+        // Lowercase on the wire, so every kind is spellable by hand.
+        for (spelling, expected) in [
+            ("powershell", ShellKind::PowerShell),
+            ("cmd", ShellKind::Cmd),
+            ("posix", ShellKind::Posix),
+            ("wsl", ShellKind::Wsl),
+        ] {
+            let parsed: TerminalProfile =
+                toml::from_str(&format!("id = \"w\"\nkind = \"{spelling}\"\n"))
+                    .unwrap_or_else(|e| panic!("kind {spelling} should parse: {e}"));
+            assert_eq!(parsed.kind, Some(expected));
+            // And round-trips back to the same spelling.
+            assert_eq!(
+                serde_json::to_value(expected).unwrap(),
+                serde_json::Value::String(spelling.to_string()),
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
