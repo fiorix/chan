@@ -45,4 +45,10 @@ Compatibility matters here because chan versions coexist on one machine (an inst
 
 Two regression tests were added: `the_record_is_readable_while_the_lock_is_held` (which fails without the sidecar) and `a_legacy_lock_dir_without_a_sidecar_still_reads`.
 
+## Amended at intake, 2026-08-14
+
+The intake review found the sidecar as shipped above could outlive the tenancy that wrote it: nothing removed it, reads preferred it over the lock body, and a build predating the sidecar rewrites only the body on acquire, so after a crash the leftover shadowed a live holder's record, and its dead pid could authorize `try_steal` to unlink a live holder's lock -- two writer locks on one workspace. The branch's own cfg(unix) chan-library host tests caught the shadowing on the suite's first Linux run.
+
+Reads now prefer the body, which every acquirer of every version rewrites inside its own tenure, and consult the sidecar only while the body is unreadable, which is the Windows held case the sidecar exists for. The holder removes the sidecar on release, a steal removes it before unlinking the lock, and a sidecar-sourced record never authorizes a steal. That last rule narrows the third dead behavior in this item's list: on Windows a leaked dead holder's lock is now identified by `chan ps` but still not reclaimed, because a contended lock's body is exactly what `LockFileEx` refuses to serve and a sidecar cannot be tied to the current tenancy; reclaim on unix, where a contended body reads fine, is unchanged. The other four behaviors, and every acceptance line, stand as shipped.
+
 Measured rather than assumed: chan-workspace's suite had 10 failures on Windows before the change and 9 after -- the change fixes one beyond the five above (`reset_workspace_refuses_when_another_handle_in_process_holds_lock`) and breaks none. The 9 that remain are unrelated pre-existing Unix assumptions in the harnesses (path canonicalization, sub-second mtime granularity, removing files still open), which the deferred full-suite Windows port covers.
