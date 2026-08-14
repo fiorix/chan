@@ -42,6 +42,7 @@ pub mod paths;
 pub mod progress;
 pub mod registry;
 mod report;
+pub(crate) mod rooted_fs;
 pub mod teams;
 #[cfg(test)]
 mod test_gate;
