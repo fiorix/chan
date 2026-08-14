@@ -110,7 +110,7 @@
   :global([data-theme="light"]) .yuruyurau-point-cloud {
     --yuruyurau-background-rgb: 255, 255, 255;
     --yuruyurau-point-rgb: 0, 0, 0;
-    --yuruyurau-point-alpha: 0.28;
+    --yuruyurau-point-alpha: 0.3;
   }
   @media (prefers-reduced-motion: reduce) {
     .yuruyurau-point-cloud {

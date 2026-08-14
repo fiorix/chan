@@ -110,7 +110,7 @@
   }
   :global([data-theme="light"]) .amber-recursion {
     --amber-recursion-tone: 0;
-    --amber-recursion-opacity: 0.06;
+    --amber-recursion-opacity: 0.28;
     --amber-recursion-exposure: 1.2;
     background-color: rgb(255, 255, 255);
   }

@@ -20,7 +20,6 @@ describe("empty pane animation catalog", () => {
       "radial-ribbons",
       "polar-drift",
       "concentric-pulse",
-      "penguin-grid",
       "exponential-thread",
       "exponential-echo",
       "quadratic-bloom",

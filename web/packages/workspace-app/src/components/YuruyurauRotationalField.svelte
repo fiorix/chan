@@ -121,7 +121,7 @@
   :global([data-theme="light"]) .yuruyurau-rotational-field {
     --yuruyurau-background-rgb: 255, 255, 255;
     --yuruyurau-point-rgb: 0, 0, 0;
-    --yuruyurau-rotational-point-alpha: 0.14;
+    --yuruyurau-rotational-point-alpha: 0.17;
   }
   @media (prefers-reduced-motion: reduce) {
     .yuruyurau-rotational-field {

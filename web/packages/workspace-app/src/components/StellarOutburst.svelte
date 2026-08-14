@@ -98,7 +98,7 @@
   }
   :global([data-theme="light"]) .stellar-outburst {
     --stellar-outburst-tone: 0;
-    --stellar-outburst-opacity: 0.066;
+    --stellar-outburst-opacity: 0.3;
     background-color: rgb(255, 255, 255);
   }
   :global([data-theme="dark"]) .stellar-outburst {

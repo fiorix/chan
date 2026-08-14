@@ -260,7 +260,16 @@ export function createYuruyurauRotationalRenderer(
       gl.clear(gl.COLOR_BUFFER_BIT);
 
       gl.enable(gl.BLEND);
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      // Blend color only; destination alpha stays 1 (covers the point
+      // copies and the fade overlay). Plain blendFunc erodes it and the
+      // premultiplied canvas composites the page through every drawn
+      // pixel -- invisible on the dark theme, a white washout on light.
+      gl.blendFuncSeparate(
+        gl.SRC_ALPHA,
+        gl.ONE_MINUS_SRC_ALPHA,
+        gl.ZERO,
+        gl.ONE,
+      );
 
       gl.useProgram(pointProgram);
       gl.bindBuffer(gl.ARRAY_BUFFER, pointBuffer);

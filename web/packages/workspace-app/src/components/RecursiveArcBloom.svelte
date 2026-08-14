@@ -135,7 +135,7 @@
   }
   :global([data-theme="light"]) .recursive-arc-bloom {
     --recursive-arc-bloom-rgb: 0, 0, 0;
-    --recursive-arc-bloom-alpha: 0.09;
+    --recursive-arc-bloom-alpha: 0.13;
   }
   :global([data-theme="dark"]) .recursive-arc-bloom {
     --recursive-arc-bloom-rgb: 218, 218, 218;

@@ -27,7 +27,6 @@
   import LorenzConstellation from "./LorenzConstellation.svelte";
   import MutualForceStarburst from "./MutualForceStarburst.svelte";
   import OrbitalRosette from "./OrbitalRosette.svelte";
-  import PenguinGrid from "./PenguinGrid.svelte";
   import PolarDrift from "./PolarDrift.svelte";
   import QuadraticBloom from "./QuadraticBloom.svelte";
   import RadialRibbons from "./RadialRibbons.svelte";
@@ -46,7 +45,6 @@
     "radial-ribbons": RadialRibbons,
     "polar-drift": PolarDrift,
     "concentric-pulse": ConcentricPulse,
-    "penguin-grid": PenguinGrid,
     "exponential-thread": ExponentialThread,
     "exponential-echo": ExponentialEcho,
     "quadratic-bloom": QuadraticBloom,
