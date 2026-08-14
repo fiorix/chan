@@ -20,11 +20,6 @@ export const EMPTY_PANE_ANIMATIONS = [
     description: "Breathing polygonal rings that expand across the pane.",
   },
   {
-    id: "penguin-grid",
-    name: "Penguin Grid",
-    description: "Alternating rows that morph into interlocking penguins.",
-  },
-  {
     id: "exponential-thread",
     name: "Exponential Thread",
     description: "A dim, slowly morphing exponential curve.",
