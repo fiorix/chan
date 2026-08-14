@@ -113,8 +113,8 @@
   }
   :global([data-theme="light"]) .orbital-rosette {
     --orbital-rosette-stroke-rgb: 0, 0, 0;
-    --orbital-rosette-alpha-base: 0.055;
-    --orbital-rosette-alpha-range: 0.14;
+    --orbital-rosette-alpha-base: 0.085;
+    --orbital-rosette-alpha-range: 0.2;
   }
   :global([data-theme="dark"]) .orbital-rosette {
     --orbital-rosette-stroke-rgb: 218, 218, 218;

@@ -130,7 +130,7 @@
     display: block;
   }
   :global([data-theme="light"]) .radial-ribbons {
-    --radial-ribbons-shape-rgb: 235, 235, 239;
+    --radial-ribbons-shape-rgb: 222, 222, 228;
     --radial-ribbons-fill-alpha: 0.72;
     --radial-ribbons-stroke-alpha: 0.78;
   }

@@ -115,7 +115,7 @@
   :global([data-theme="light"]) .threefold-veil {
     --threefold-veil-background-rgb: 255, 255, 255;
     --threefold-veil-point-rgb: 0, 0, 0;
-    --threefold-veil-point-alpha: 0.28;
+    --threefold-veil-point-alpha: 0.4;
   }
   :global([data-theme="dark"]) .threefold-veil {
     --threefold-veil-background-rgb: 28, 28, 30;

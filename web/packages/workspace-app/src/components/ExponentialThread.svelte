@@ -127,8 +127,8 @@
   }
   :global([data-theme="light"]) .exponential-thread {
     --exponential-thread-center-rgb: 0, 0, 0;
-    --exponential-thread-edge-rgb: 150, 150, 150;
-    --exponential-thread-line-alpha: 0.06;
+    --exponential-thread-edge-rgb: 120, 120, 120;
+    --exponential-thread-line-alpha: 0.11;
   }
   :global([data-theme="dark"]) .exponential-thread {
     --exponential-thread-center-rgb: 112, 112, 112;

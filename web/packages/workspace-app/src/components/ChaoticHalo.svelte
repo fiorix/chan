@@ -125,7 +125,7 @@
   }
   :global([data-theme="light"]) .chaotic-halo {
     --chaotic-halo-point-rgb: 0, 0, 0;
-    --chaotic-halo-point-alpha: 0.082;
+    --chaotic-halo-point-alpha: 0.15;
   }
   :global([data-theme="dark"]) .chaotic-halo {
     --chaotic-halo-point-rgb: 218, 218, 218;

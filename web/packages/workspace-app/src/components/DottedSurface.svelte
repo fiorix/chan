@@ -131,8 +131,8 @@
   }
   :global([data-theme="light"]) .dotted-surface {
     --dotted-surface-dot-rgb: 0, 0, 0;
-    --dotted-surface-alpha-base: 0.13;
-    --dotted-surface-alpha-range: 0.32;
+    --dotted-surface-alpha-base: 0.24;
+    --dotted-surface-alpha-range: 0.5;
     --dotted-surface-size-scale: 0.9;
   }
   :global([data-theme="dark"]) .dotted-surface {

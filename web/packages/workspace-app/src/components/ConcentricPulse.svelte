@@ -114,8 +114,8 @@
   }
   :global([data-theme="light"]) .concentric-pulse {
     --concentric-pulse-line-rgb: 0, 0, 0;
-    --concentric-pulse-alpha-base: 0.066;
-    --concentric-pulse-alpha-range: 0.072;
+    --concentric-pulse-alpha-base: 0.12;
+    --concentric-pulse-alpha-range: 0.11;
   }
   :global([data-theme="dark"]) .concentric-pulse {
     --concentric-pulse-line-rgb: 218, 218, 218;

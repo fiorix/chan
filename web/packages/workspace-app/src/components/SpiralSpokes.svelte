@@ -110,7 +110,7 @@
   }
   :global([data-theme="light"]) .spiral-spokes {
     --spiral-spokes-line-rgb: 24, 24, 28;
-    --spiral-spokes-line-alpha: 0.26;
+    --spiral-spokes-line-alpha: 0.38;
   }
   :global([data-theme="dark"]) .spiral-spokes {
     --spiral-spokes-line-rgb: 218, 218, 224;

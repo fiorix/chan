@@ -206,7 +206,17 @@ export function createYuruyurauPointCloudRenderer(
       gl.clear(gl.COLOR_BUFFER_BIT);
 
       gl.enable(gl.BLEND);
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      // Blend color only; destination alpha stays 1. Plain blendFunc
+      // erodes it wherever points land, and the premultiplied canvas
+      // then composites the page through them -- invisible on the dark
+      // theme (page matches the cleared background) but washing every
+      // point toward white on the light theme.
+      gl.blendFuncSeparate(
+        gl.SRC_ALPHA,
+        gl.ONE_MINUS_SRC_ALPHA,
+        gl.ZERO,
+        gl.ONE,
+      );
 
       gl.useProgram(pointProgram);
       gl.bindBuffer(gl.ARRAY_BUFFER, pointBuffer);
