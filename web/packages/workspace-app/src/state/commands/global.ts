@@ -123,6 +123,10 @@ registerCommands([
     id: "app.open.path",
     title: "Open",
     category: "Global",
+    // Open resolves to a file or directory surface; a graph link target
+    // still needs a workspace window to render, and run() reports the
+    // server refusal there.
+    requirement: "files",
     keywords: ["open", "file", "path", "folder", "go to", "goto", "graph link"],
     icon: "folder",
     available: workspaceOnly,
@@ -137,6 +141,7 @@ registerCommands([
     id: "app.theme.system",
     title: "Theme: system",
     category: "Global",
+    requirement: "any",
     keywords: ["appearance", "auto", "dark", "light"],
     available: () => true,
     run: () => setThemeChoice("system"),
@@ -145,6 +150,7 @@ registerCommands([
     id: "app.theme.light",
     title: "Theme: light",
     category: "Global",
+    requirement: "any",
     keywords: ["appearance"],
     available: () => true,
     run: () => setThemeChoice("light"),
@@ -153,6 +159,7 @@ registerCommands([
     id: "app.theme.dark",
     title: "Theme: dark",
     category: "Global",
+    requirement: "any",
     keywords: ["appearance"],
     available: () => true,
     run: () => setThemeChoice("dark"),
@@ -161,6 +168,7 @@ registerCommands([
     id: "app.screensaver.enable",
     title: "Screen lock: on",
     category: "Global",
+    requirement: "any",
     keywords: ["screensaver", "lock", "privacy"],
     available: () => true,
     run: () =>
@@ -174,6 +182,7 @@ registerCommands([
     id: "app.screensaver.disable",
     title: "Screen lock: off",
     category: "Global",
+    requirement: "any",
     keywords: ["screensaver", "lock", "privacy"],
     available: () => true,
     run: () =>
@@ -187,6 +196,7 @@ registerCommands([
     id: "app.screensaver.test",
     title: "Screen lock: test",
     category: "Global",
+    requirement: "any",
     keywords: ["screensaver", "lock", "preview"],
     available: () => true,
     run: () => void testScreenLock(),
@@ -195,6 +205,7 @@ registerCommands([
     id: "app.screensaver.setPin",
     title: "Screen lock: set PIN",
     category: "Global",
+    requirement: "any",
     keywords: ["screensaver", "lock", "password", "passcode"],
     available: () => true,
     run: () => void setScreenLockPin(),
@@ -203,6 +214,7 @@ registerCommands([
     id: "app.screensaver.theme.plain",
     title: "Screen lock theme: default",
     category: "Global",
+    requirement: "any",
     keywords: ["screensaver", "plain"],
     available: () => true,
     run: () =>
@@ -216,6 +228,7 @@ registerCommands([
     id: "app.screensaver.theme.matrix",
     title: "Screen lock theme: matrix",
     category: "Global",
+    requirement: "any",
     keywords: ["screensaver", "matrix", "rain"],
     available: () => true,
     run: () =>
@@ -231,6 +244,7 @@ registerCommands([
     id: "app.window.reload",
     title: "Reload",
     category: "Global",
+    requirement: "any",
     keywords: ["reload", "refresh", "window"],
     available: () => true,
     run: () => void reloadWindow(),
@@ -242,6 +256,7 @@ registerCommands([
     id: "app.window.devtools",
     title: "Open Inspector",
     category: "Global",
+    requirement: "any",
     keywords: ["devtools", "inspector", "console", "javascript", "debug"],
     available: () => isTauriDesktop(),
     run: () => void openWebInspector(),
@@ -255,6 +270,7 @@ registerCommands([
     id: "app.window.hide",
     title: "Hide window",
     category: "Global",
+    requirement: "any",
     keywords: ["hide", "window", "bury", "minimize"],
     available: () => isTauriDesktop(),
     run: () => void hideWindowFromCloseConfirm(),
@@ -266,6 +282,7 @@ registerCommands([
     id: "app.window.new",
     title: "New window",
     category: "Global",
+    requirement: "any",
     keywords: ["new", "window", "open", "create"],
     available: (ctx) =>
       isTauriDesktop() && allowedInWindow("app.window.new", ctx),
@@ -278,6 +295,7 @@ registerCommands([
     id: "app.window.close",
     title: "Close window",
     category: "Global",
+    requirement: "any",
     keywords: ["close", "window", "discard", "destroy"],
     confirm: {
       title: "Close this window?",

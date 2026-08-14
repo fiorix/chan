@@ -82,6 +82,7 @@ registerCommands([
     id: "app.reports.enable",
     title: "Enable chan-reports indexing",
     category: "Workspace",
+    requirement: "workspace",
     keywords: ["reports", "index", "chan-reports"],
     available: (ctx) => workspaceOnly(ctx),
     run: () =>
@@ -95,6 +96,7 @@ registerCommands([
     id: "app.reports.disable",
     title: "Disable chan-reports indexing",
     category: "Workspace",
+    requirement: "workspace",
     keywords: ["reports", "index", "chan-reports"],
     available: (ctx) => workspaceOnly(ctx),
     run: () =>
@@ -108,6 +110,7 @@ registerCommands([
     id: "app.metadata.export",
     title: "Metadata archive: export",
     category: "Workspace",
+    requirement: "workspace",
     keywords: ["metadata", "archive", "backup", "download"],
     available: (ctx) => workspaceOnly(ctx),
     run: () => void exportMetadataArchive(),
@@ -116,6 +119,7 @@ registerCommands([
     id: "app.metadata.import",
     title: "Metadata archive: import",
     category: "Workspace",
+    requirement: "workspace",
     keywords: ["metadata", "archive", "restore", "upload"],
     available: (ctx) => workspaceOnly(ctx),
     run: () => void importMetadataArchive(),

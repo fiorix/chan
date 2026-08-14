@@ -11,14 +11,16 @@ import app from "../App.svelte?raw";
 // unconditional mount/call can't silently creep back. Real behaviour is
 // browser-smoked.
 describe("terminal-only windows skip workspace-concept endpoints", () => {
-  test("PreflightOverlay mounts only outside terminal-only mode", () => {
-    expect(app).toMatch(/\{#if !ui\.terminalOnly\}\s*<PreflightOverlay \/>/);
+  test("PreflightOverlay mounts only in workspace-capable windows", () => {
+    expect(app).toMatch(
+      /\{#if !ui\.terminalOnly && windowCaps\.workspace\}\s*<PreflightOverlay \/>/,
+    );
     expect(app).not.toMatch(/^<PreflightOverlay \/>$/m);
   });
 
-  test("screensaver state loads only outside terminal-only mode", () => {
+  test("screensaver state loads only in workspace-capable windows", () => {
     expect(app).toMatch(
-      /if \(!ui\.terminalOnly\) \{\s*void loadScreensaverState\(\);/,
+      /if \(!ui\.terminalOnly && windowCaps\.workspace\) \{\s*void loadScreensaverState\(\);/,
     );
   });
 

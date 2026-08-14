@@ -814,6 +814,17 @@ export type CsLinkResult = {
 /// store dispatcher reads (it branches on `"Removed"` / `"Renamed"`).
 /// Distinct from the older, narrower `WatchEvent` type below (lowercase
 /// kinds, no rename destination); new code should use `WatchEventWire`.
+/// Response of `GET /api/fs/context`, the Files-mode boot payload: the
+/// filesystem root the wire paths are relative to, the wire-relative
+/// canonical home directory the browser starts in, and the path grammar.
+/// Replaces `/api/workspace` on the standalone Files tenant.
+export type FsContext = {
+  protocol: number;
+  root: string;
+  home: string;
+  path_style: "posix";
+};
+
 export type WatchEventWire = {
   kind: "Created" | "Modified" | "Removed" | "Renamed" | "ProviderError";
   path: string | null;
@@ -843,7 +854,31 @@ export type WsWatchFrame = {
 /// Server -> client: a scoped filesystem frame, delivered only to sockets
 /// subscribed to `dir`. Carries the originating directory so a client that
 /// subscribed to several dirs can route the event to the right pane / node.
-export type WsFsFrame = { type: "fs"; dir: WatchScopeDir; event: WatchEventWire };
+///
+/// `source_w` names the window whose own mutation the standalone Files
+/// tenant is echoing deterministically: that window relists but skips the
+/// external-change marking on its clean buffers; every other receiver (and
+/// every frame without the field, including all workspace-tenant frames)
+/// treats the event as external.
+export type WsFsFrame = {
+  type: "fs";
+  dir: WatchScopeDir;
+  event: WatchEventWire;
+  source_w?: string;
+};
+
+/// Server -> client: a scope needs one authoritative one-level relist. The
+/// standalone Files watch manager emits these when a directory's OS watch
+/// attaches (`subscribed`, closing the initial-list race), fails
+/// (`watch_error`, retried server-side), loses events (`overflow`), or when
+/// the watched directory itself was removed or replaced
+/// (`directory_replaced`). The reason vocabulary is fixed; raw provider
+/// messages never ride this frame.
+export type WsFsResetFrame = {
+  type: "fs_reset";
+  dir: WatchScopeDir;
+  reason: "subscribed" | "watch_error" | "overflow" | "directory_replaced";
+};
 
 /// Client -> server: subscribe / unsubscribe this socket to a directory
 /// scope. `dir: ""` is the workspace root (idempotent no-op refcount the server

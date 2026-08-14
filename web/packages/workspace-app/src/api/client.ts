@@ -52,6 +52,7 @@ import type {
   WorkspaceInfo,
   WorkspaceReadiness,
   BubbleOverlayMode,
+  FsContext,
 } from "./types";
 import { ApiError } from "./errors";
 import { updateGlobalConfigSerial } from "./preferenceWrite";
@@ -146,8 +147,20 @@ export function clientNonce(): string {
   return clientNonceValue;
 }
 
+/// Whether this window is the standalone Files application (`?kind=files`),
+/// read straight off the URL like `?w=` and `?lib=` so the api layer stays
+/// independent of the state modules.
+export function isFilesWindow(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URL(window.location.href).searchParams.get("kind") === "files";
+}
+
 export function sessionPath(): string {
-  return `/api/session?w=${encodeURIComponent(sessionWindowId())}&client=${encodeURIComponent(clientNonceValue)}`;
+  const base = `/api/session?w=${encodeURIComponent(sessionWindowId())}&client=${encodeURIComponent(clientNonceValue)}`;
+  // A Files window's layout lives in its own blob namespace so a client
+  // booted in Terminal-only mode can never restore browser/editor tabs
+  // against routes it does not have.
+  return isFilesWindow() ? `${base}&app=files` : base;
 }
 
 /// The chan-library this window belongs to. The library backend appends
@@ -182,9 +195,14 @@ export function windowLibraryId(): string {
 export function windowDragScope(scope: {
   libraryId: string;
   terminalOnly: boolean;
+  files: boolean;
   workspaceKey: string | null;
 }): string {
   if (scope.terminalOnly) return `lib:${scope.libraryId}|terminal`;
+  // Files windows partition their own scope: tabs (terminals included)
+  // move between same-library Files windows only, never into a Terminal
+  // or Workspace window.
+  if (scope.files) return `lib:${scope.libraryId}|files`;
   return `lib:${scope.libraryId}|workspace:${scope.workspaceKey ?? "unknown"}`;
 }
 
@@ -1106,6 +1124,10 @@ export const api = {
   /// the work but in-app state still references the pre-reset world.
   storageReset: (mode: ResetMode) =>
     req<ResetResponse>("POST", "/api/storage/reset", { mode }),
+  /// Files-mode boot context: the filesystem root, the wire-relative
+  /// canonical home the browser starts in, and the path grammar. Served
+  /// only by tenants that construct the standalone Files state.
+  fsContext: () => req<FsContext>("GET", "/api/fs/context"),
   /// Read the persisted session payload. Server keys by `?w=<id>`;
   /// chan-desktop windows pass their unique window label in the page URL,
   /// while normal browser tabs use `default`. Returns `null` when none exists yet

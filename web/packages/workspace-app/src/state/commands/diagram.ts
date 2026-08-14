@@ -30,6 +30,7 @@ registerCommands([
     id: "app.diagram.new",
     title: "New diagram",
     category: "Apps",
+    requirement: "workspace",
     keywords: ["excalidraw", "draw", "whiteboard", "canvas", "board"],
     available: (ctx) => workspaceOnly(ctx),
     run: () => {

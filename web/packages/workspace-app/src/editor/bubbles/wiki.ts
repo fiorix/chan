@@ -27,7 +27,8 @@ import type { BubbleHandle } from "./types";
 import { createCaretAnchor } from "./anchor";
 import { api } from "../../api/client";
 import type { LinkTarget, TreeEntry } from "../../api/types";
-import { indexStatus } from "../../state/store.svelte";
+import { indexStatus, tree } from "../../state/store.svelte";
+import { windowCaps } from "../../state/windowCaps";
 import { decodePercent, encodeRelPath, relativizePath, wikiLinkToMarkdown } from "../links";
 import { parseInternalLink } from "../widgets/wikilink";
 import {
@@ -303,6 +304,15 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
     const hits = activeHits();
     if (hits.length === 0) {
       if (mode.kind === "file") {
+        if (!windowCaps.workspace) {
+          // No index exists behind this window, so the index-aware empty
+          // states ("Indexing...", "0 documents") would be lies; a plain
+          // no-match line is the truth.
+          status.textContent = "No matching paths";
+          status.classList.remove("md-bubble-status-empty");
+          shell.reposition();
+          return;
+        }
         const empty = completionEmptyState(query, indexStatus.value);
         renderBubbleEmptyState(list, empty);
         status.textContent = "";
@@ -421,6 +431,14 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
 
   function fetchFile(): void {
     if (debounceTimer !== undefined) clearTimeout(debounceTimer);
+    // Without a workspace there is no name/title index behind the picker:
+    // the PATH lane over loaded browser entries is the whole completion
+    // surface, and probing the absent route would only paint errors.
+    if (!windowCaps.workspace) {
+      fileHits = [];
+      render();
+      return;
+    }
     const seq = ++reqSeq;
     debounceTimer = window.setTimeout(() => {
       const term = slotMode ? rawSearchTerm(query) : query;
@@ -448,6 +466,13 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
   /// cache an empty tree so path completion is simply absent rather than
   /// retrying every keystroke.
   function ensureTreeLoaded(): Promise<void> {
+    // A Files window must never request the recursive whole-machine
+    // listing; the loaded browser entries (the sparse per-directory tree
+    // the File Browser already fetched) are the path-completion source.
+    if (!windowCaps.workspace) {
+      allEntries = tree.entries.slice();
+      return Promise.resolve();
+    }
     if (allEntries !== null) return Promise.resolve();
     if (treePromise) return treePromise;
     treePromise = api
@@ -473,6 +498,15 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
   }
 
   function fetchHeadings(target: string): void {
+    // Heading search reads the graph; without a workspace the picker
+    // shows no heading rows rather than probing an absent route.
+    if (!windowCaps.workspace) {
+      headingAll = [];
+      headingHits = [];
+      headingTarget = target;
+      render();
+      return;
+    }
     if (headingTarget === target) {
       // Cache hit; just re-filter.
       filterHeadings();

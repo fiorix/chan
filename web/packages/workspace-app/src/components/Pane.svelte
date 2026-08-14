@@ -116,6 +116,8 @@
   } from "../state/paneMouseSplit";
   import { onDestroy, onMount } from "svelte";
   import { applyPageWidthToElement, pageWidth } from "../state/pageWidth.svelte";
+  import { windowCaps } from "../state/windowCaps";
+  import { dispatchAllowsCommand } from "../state/commands";
 
   let { pane }: { pane: LeafNode } = $props();
 
@@ -745,6 +747,7 @@
     windowDragScope({
       libraryId: windowLibraryId(),
       terminalOnly: ui.terminalOnly,
+      files: windowCaps.files && !windowCaps.workspace,
       workspaceKey: workspace.info?.metadata_key ?? workspace.info?.root ?? null,
     });
 
@@ -1528,9 +1531,11 @@
         {#if !ui.terminalOnly}
           <!-- The app-spawn rows are workspace-window commands; runCommand's
                window-mode gate silently drops most of them in a terminal-only
-               window, so the rows do not render there at all. -->
+               window, so the rows do not render there at all. A Files window
+               renders only the rows its capability set can dispatch, the
+               same requirement table runCommand consults. -->
           <li class="sep" role="separator"></li>
-          {#each appRows as row (row.id)}
+          {#each appRows.filter((row) => dispatchAllowsCommand(row.id, windowCaps)) as row (row.id)}
             {@const Icon = row.icon}
             <li>
               <button role="menuitem" onclick={() => runAppRow(row.id)}>

@@ -26,6 +26,7 @@ import { syntaxTree } from "@codemirror/language";
 import type { EditorState } from "@codemirror/state";
 import { isExcalidrawImageSrc } from "../extensions/image";
 import type { BubbleSpec } from "./types";
+import { windowCaps } from "../../state/windowCaps";
 
 const SKIP_INSIDE = new Set<string>([
   "InlineCode",
@@ -141,7 +142,7 @@ export function computeBubbleSpec(
   // trigger so a typed `@@alice` doesn't double-fire as `@alice`
   // (the contact wikilink form).
   const mention = matchAtTrigger(before, "@@");
-  if (mention !== null) {
+  if (mention !== null && windowCaps.workspace) {
     return {
       kind: "mention",
       triggerStart: line.from + mention.start,
@@ -151,8 +152,11 @@ export function computeBubbleSpec(
   }
   // Contact: `@word` at start-of-word. `\b@` -- but JS \b doesn't
   // include `@`, so we anchor manually.
+  // Contact, mention, and tag pickers read the workspace graph; without
+  // one the trigger stays inert so typing `@name` or `#topic` is plain
+  // text rather than a picker probing absent routes.
   const contact = matchAtTrigger(before, "@");
-  if (contact !== null) {
+  if (contact !== null && windowCaps.workspace) {
     // Reserved macro keywords belong to editor commands which commit
     // on Space / Enter. We only suppress the contact bubble when the
     // typed query EXACTLY matches one of the reserved words; prefixes
@@ -172,7 +176,7 @@ export function computeBubbleSpec(
   // rendered pill; the bubble is only for picker assistance during
   // typing.
   const tag = matchAtTrigger(before, "#");
-  if (tag !== null) {
+  if (tag !== null && windowCaps.workspace) {
     return {
       kind: "tag",
       triggerStart: line.from + tag.start,

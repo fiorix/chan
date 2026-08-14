@@ -24,6 +24,7 @@ function cmd(id: string, title: string, extra: Partial<Command> = {}): Command {
     id,
     title,
     category: "Global",
+    requirement: "any",
     available: () => true,
     run: () => {},
     ...extra,

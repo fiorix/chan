@@ -89,6 +89,7 @@ registerCommands([
     id: "app.terminal.surfaceTheme.light",
     title: "Terminal theme: light",
     category: "Terminal",
+    requirement: "terminal",
     keywords: ["theme", "appearance", "light"],
     available: onTerminal,
     run: () => setHybridSurfaceTheme("terminal", "light"),
@@ -97,6 +98,7 @@ registerCommands([
     id: "app.terminal.surfaceTheme.dark",
     title: "Terminal theme: dark",
     category: "Terminal",
+    requirement: "terminal",
     keywords: ["theme", "appearance", "dark"],
     available: onTerminal,
     run: () => setHybridSurfaceTheme("terminal", "dark"),
@@ -107,6 +109,9 @@ registerCommands([
       return `Terminal engine: ${configuredTerminalBackend()} (toggle; newly opened terminals only)`;
     },
     category: "Terminal",
+    // Persisting the engine preference writes /api/config, which only the
+    // workspace tenant serves.
+    requirement: "workspace",
     keywords: ["backend", "engine", "ghostty", "xterm", "new terminal"],
     // The workspace tenant owns /api/config. Standalone terminal tenants are
     // intentionally slim and cannot persist global preferences themselves.
@@ -117,6 +122,7 @@ registerCommands([
     id: "app.terminal.secretMasking.toggle",
     title: "Toggle secret masking for this terminal",
     category: "Terminal",
+    requirement: "terminal",
     keywords: ["secret", "mask", "credential", "screen share", "demo"],
     available: onTerminal,
     run: () => dispatchChanCommand("app.terminal.secretMasking.toggle"),
@@ -125,6 +131,7 @@ registerCommands([
     id: "app.terminal.broadcastToggle",
     title: "Toggle group broadcast",
     category: "Terminal",
+    requirement: "terminal",
     keywords: ["broadcast", "group", "select all", "input"],
     available: onTerminal,
     run: () => dispatchChanCommand("app.terminal.broadcastToggle"),
@@ -133,6 +140,7 @@ registerCommands([
     id: "app.terminal.setName",
     title: "Set terminal name",
     category: "Terminal",
+    requirement: "terminal",
     keywords: ["rename", "name", "title"],
     available: onTerminal,
     run: () => void renameActiveTerminal(),
@@ -141,6 +149,7 @@ registerCommands([
     id: "app.terminal.setGroup",
     title: "Set terminal group",
     category: "Terminal",
+    requirement: "terminal",
     keywords: ["group", "broadcast"],
     available: onTerminal,
     run: () => void setActiveTerminalGroup(),
@@ -149,6 +158,8 @@ registerCommands([
     id: "terminal.richPrompt",
     title: "Show/Hide Rich Prompt",
     category: "Terminal",
+    // Rich Prompt drafts into the workspace drafts directory.
+    requirement: "workspace",
     keywords: ["rich prompt", "prompt", "composer"],
     available: onWorkspaceTerminal,
     run: () => dispatchChanCommand("terminal.richPrompt"),
@@ -157,6 +168,7 @@ registerCommands([
     id: "app.terminal.restart",
     title: "Restart terminal",
     category: "Terminal",
+    requirement: "terminal",
     keywords: ["restart", "respawn", "reload", "new session"],
     // This doubles as the old "Start New Session" row on an exited terminal,
     // where warning about stopping a shell that already died reads as a lie.
@@ -177,6 +189,7 @@ registerCommands([
     id: "app.terminal.copyCwd",
     title: "Copy path to $CWD",
     category: "Terminal",
+    requirement: "terminal",
     keywords: ["cwd", "path", "directory", "clipboard"],
     // The copy prefers the live absolute cwd the PTY reports and only falls
     // back to the workspace-relative form, so it works in a standalone
@@ -188,6 +201,8 @@ registerCommands([
     id: "app.terminal.newFsEntry",
     title: "New file or directory ($CWD)",
     category: "Terminal",
+    // Creates entries through the file routes, keyed off the live cwd.
+    requirement: "files",
     keywords: ["new", "file", "directory", "folder", "cwd"],
     available: onWorkspaceTerminal,
     run: () => dispatchChanCommand("app.terminal.newFsEntry"),

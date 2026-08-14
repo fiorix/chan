@@ -164,6 +164,8 @@ export {
 } from "./workspace.svelte";
 import { workspace, draftsDir, isDraftPath } from "./workspace.svelte";
 import { clearCaretsUnder } from "./caretIndex";
+import { windowCaps, windowMode } from "./windowCaps";
+import { filesContext, filesContextFrom } from "./fileContext.svelte";
 
 /// Display name for the active workspace. The server computes this from
 /// the path; it is not user-managed registry metadata.
@@ -910,6 +912,16 @@ export function onWatchEvent(e: unknown): void {
     sceneSyncRosterChanged();
     return;
   }
+  if (frameType === "fs_reset") {
+    // A scope needs one authoritative one-level relist: its OS watch just
+    // attached, failed, lost events, or the directory was replaced. Only
+    // the standalone Files watcher emits these.
+    const dir = (e as { dir?: string } | null)?.dir;
+    if (typeof dir === "string") {
+      void relistTreeDir(dir);
+    }
+    return;
+  }
   const kind = (e as { kind?: string } | null)?.kind;
   if (kind === "config_changed") {
     // A sibling window flipped a setting (theme, fonts,
@@ -954,7 +966,7 @@ export function onWatchEvent(e: unknown): void {
     : [innerForScope?.path, innerForScope?.to].filter(
         (p): p is string => typeof p === "string" && p.length > 0,
       );
-  if (rootRemoved || providerLost) {
+  if ((rootRemoved || providerLost) && windowCaps.workspace) {
     void reconcileWorkspaceRootAvailability();
   }
   const scopes = activeFbScopes();
@@ -964,22 +976,27 @@ export function onWatchEvent(e: unknown): void {
       void refreshTreeForPath(p);
     }
   }
-  scheduleWorkspaceRefresh();
-  // Tags / wiki-links / mentions may have changed. Invalidate the
-  // cached graph so the next inspector view sees fresh data, and if
-  // an overlay is currently open re-fetch eagerly so the user sees
-  // updates without re-clicking. The fetch is idempotent and
-  // de-duped via `ensureGraphLoaded`.
-  invalidateGraph();
-  if (hasBrowserTab() || hasGraphTab()) {
-    void ensureGraphLoaded();
-  }
-  if (hasGraphTab()) {
-    // Carry the touched path(s) so each open graph reloads only when the
-    // change is in ITS scope (GraphPanel path-filters the signal). An
-    // empty set means the event carried no path -> reload to stay safe.
-    graphReloadSignal.paths = watchedPaths;
-    graphReloadSignal.nonce += 1;
+  // A Files window has no workspace payload, graph, or index behind its
+  // filesystem events: the sparse tree refresh and the per-tab external
+  // flagging above/below are the whole reaction.
+  if (windowCaps.workspace) {
+    scheduleWorkspaceRefresh();
+    // Tags / wiki-links / mentions may have changed. Invalidate the
+    // cached graph so the next inspector view sees fresh data, and if
+    // an overlay is currently open re-fetch eagerly so the user sees
+    // updates without re-clicking. The fetch is idempotent and
+    // de-duped via `ensureGraphLoaded`.
+    invalidateGraph();
+    if (hasBrowserTab() || hasGraphTab()) {
+      void ensureGraphLoaded();
+    }
+    if (hasGraphTab()) {
+      // Carry the touched path(s) so each open graph reloads only when the
+      // change is in ITS scope (GraphPanel path-filters the signal). An
+      // empty set means the event carried no path -> reload to stay safe.
+      graphReloadSignal.paths = watchedPaths;
+      graphReloadSignal.nonce += 1;
+    }
   }
   const inner = (e as { event?: { kind?: string; path?: string; to?: string } } | null)?.event;
   const paths = [inner?.path, inner?.to].filter(
@@ -990,6 +1007,13 @@ export function onWatchEvent(e: unknown): void {
   // ignore it, and this is the only channel that keeps fsWritable (the
   // locked lamp, the editor's readOnly) in step with OS permissions.
   const frameWritable = (e as { writable?: unknown } | null)?.writable;
+  // The standalone Files tenant attributes its own mutations: a frame whose
+  // source names THIS window is the deterministic echo of a write this
+  // window already accounted for, so its clean buffers are not flagged as
+  // externally changed. Every other window (and every unattributed frame)
+  // keeps the external-edit reaction.
+  const sourceW = (e as { source_w?: unknown } | null)?.source_w;
+  const ownEcho = typeof sourceW === "string" && sourceW === sessionWindowId();
   for (const p of paths) {
     // Skip watcher echoes for paths we're actively renaming: the
     // tab still holds the old path during the move's `await`, and a
@@ -1017,7 +1041,7 @@ export function onWatchEvent(e: unknown): void {
       // external change so the editor shows the dismissable "changed on
       // disk" banner instead.
       cancelMissingFileCheck(tabId);
-      flagExternalChange(tabId);
+      if (!ownEcho) flagExternalChange(tabId);
     }
   }
 }
@@ -2067,10 +2091,10 @@ function onWatchReady(): void {
   // Independently of the reload decision (a tunnel can answer the socket
   // while /api/health still lags), re-resolve the extension catalog: a
   // restart re-mints every per-process entry capability, and the refresh
-  // flows fresh paths into mounted extension frames. Terminal-only
-  // tenants serve no /api/extensions (bootstrap skips the catalog the
-  // same way).
-  if (!ui.terminalOnly) void refreshExtensions();
+  // flows fresh paths into mounted extension frames. Workspace-less
+  // tenants (terminal and Files) serve no /api/extensions (bootstrap
+  // skips the catalog the same way).
+  if (!ui.terminalOnly && windowCaps.workspace) void refreshExtensions();
 }
 
 /// The server instance id seen on the first watch-socket connect.
@@ -2260,7 +2284,94 @@ async function bootstrapTerminalOnly(): Promise<void> {
   ui.terminalArmed = true;
 }
 
+/// Files-window bootstrap (`?kind=files`). The tenant is the shared
+/// standalone terminal tenant plus the Files filesystem surface: no
+/// `/api/workspace`, no index, no graph, no doc/scene authorities. Boot
+/// fetches the machine preferences and the filesystem context, restores
+/// the namespaced layout blob, and lands on a fresh window as one
+/// full-pane File Browser at the canonical home directory.
+async function bootstrapFiles(): Promise<void> {
+  // Machine/editor preferences come from the same route the terminal
+  // tenant serves; failure is non-fatal (defaults apply).
+  await refreshStandalonePreferences();
+  try {
+    const context = await api.fsContext();
+    filesContext.current = filesContextFrom(context.home);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 401 && authToken() === null) {
+      ui.authMissing = true;
+      return;
+    }
+    ui.status = `files context failed: ${(e as Error).message}`;
+    return;
+  }
+  const home = filesContext.current?.homeWire ?? "";
+  bootstrapHydrated = false;
+  let restoredAnything = false;
+  try {
+    const fresh = readAndConsumeFreshFlag();
+    const fromHash = fresh ? null : readLayoutHash();
+    try {
+      const remote = fresh ? null : await api.getSession();
+      const reloadLayout = fresh ? null : readLayoutReloadSnapshot();
+      if (fromHash) {
+        const sessionLayout = remote
+          ? isLegacyLayoutPayload(remote)
+            ? remote
+            : ((remote as SessionPayload).layout ?? null)
+          : reloadLayout;
+        await restoreLayout(fromHash, sessionLayout);
+        restoredAnything = true;
+      } else if (remote) {
+        if (isLegacyLayoutPayload(remote)) {
+          await restoreLayout(remote);
+        } else {
+          await restoreSession(remote as SessionPayload);
+        }
+        restoredAnything = true;
+      } else if (reloadLayout) {
+        await restoreLayout(reloadLayout);
+        restoredAnything = true;
+      }
+      if (!fresh) applyTreeExpandedReloadSnapshot();
+      if (!fresh) {
+        restoreTransfers(
+          (source) => () => fileOps.downloadPathWithProgress(source.path, source.isDir),
+        );
+      }
+    } catch (e) {
+      ui.status = `restore failed: ${(e as Error).message}`;
+    }
+  } finally {
+    bootstrapHydrated = true;
+  }
+  // Load the sparse tree the File Browser renders: the root level plus the
+  // chain down to home, so a fresh window shows home in place under `/`.
+  try {
+    await refreshTree();
+    let acc = "";
+    for (const part of home.split("/").filter(Boolean)) {
+      acc = acc ? `${acc}/${part}` : part;
+      await loadTreeDir(acc);
+    }
+  } catch (e) {
+    ui.status = `listing failed: ${(e as Error).message}`;
+  }
+  // A fresh Files window is exactly one full-pane File Browser at home; a
+  // restored one keeps whatever panes and tabs its blob carried.
+  if (!restoredAnything) {
+    openBrowserInActivePane({ select: home });
+  }
+  if (!unwatch) {
+    unwatch = openWatchSocket(onWatchEvent, onWatchStatus, onWatchReady);
+  }
+}
+
 export async function bootstrap(): Promise<void> {
+  if (windowMode === "files") {
+    await bootstrapFiles();
+    return;
+  }
   if (ui.terminalOnly || isTerminalOnlyWindow()) {
     await bootstrapTerminalOnly();
     return;
@@ -2518,6 +2629,20 @@ export async function refreshTreeForPath(path: string): Promise<void> {
   }
 }
 
+/// Authoritatively relist ONE loaded directory (the `fs_reset` reaction):
+/// the watcher's coverage of `dir` had a gap, so its listing is refetched
+/// wholesale and merged. An unloaded directory needs nothing; its first
+/// expansion lists fresh anyway.
+export async function relistTreeDir(dir: string): Promise<void> {
+  if (!tree.loadedDirs[dir]) return;
+  try {
+    const entries = await api.list(dir);
+    tree.entries = sortTreeEntries(mergeDirEntries(tree.entries, dir, entries));
+  } catch {
+    // Best-effort: the next reset or expansion retries.
+  }
+}
+
 function treeAncestorDirs(path: string): string[] {
   const parts = path.split("/").filter(Boolean);
   const dirs: string[] = [];
@@ -2632,7 +2757,7 @@ export function scheduleWorkspaceRefresh(): void {
   // though, and a `config_changed` frame arrives here, so refresh the same
   // preferences from the route that tenant does serve. Undebounced: this
   // path is driven by settings writes, not by a watcher-event burst.
-  if (ui.terminalOnly) {
+  if (ui.terminalOnly || !windowCaps.workspace) {
     void refreshStandalonePreferences();
     return;
   }
@@ -5470,8 +5595,13 @@ export const fileOps = {
     } else {
       message = `Delete "${name}"?`;
     }
+    // Without a workspace there is no trash behind a delete: say so, and
+    // never imply a recoverable remove.
+    if (!windowCaps.workspace) {
+      message = `Permanently delete "${name}"? This cannot be undone.`;
+    }
     const ok = await uiConfirm({
-      title: "Delete",
+      title: windowCaps.workspace ? "Delete" : "Permanently delete",
       message,
       confirmLabel: "Delete",
       destructive: true,
@@ -5483,7 +5613,11 @@ export const fileOps = {
       // a directory delete) so a later file reusing the path never restores a
       // ghost position.
       clearCaretsUnder(path);
-      await Promise.all([refreshTree(), refreshWorkspace()]);
+      await Promise.all(
+        windowCaps.workspace
+          ? [refreshTree(), refreshWorkspace()]
+          : [refreshTree()],
+      );
       const underDeleted = (p: string) =>
         p === path || p.startsWith(`${path}/`);
       // Snapshot (paneId, tabId) pairs to close BEFORE mutating

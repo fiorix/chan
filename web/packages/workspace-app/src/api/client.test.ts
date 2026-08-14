@@ -88,16 +88,16 @@ describe("windowLibraryId", () => {
 describe("windowDragScope", () => {
   test("a workspace window scopes on its library + stable workspace identity", () => {
     expect(
-      windowDragScope({ libraryId: "local", terminalOnly: false, workspaceKey: "wk-deadbeef" }),
+      windowDragScope({ libraryId: "local", terminalOnly: false, files: false, workspaceKey: "wk-deadbeef" }),
     ).toBe("lib:local|workspace:wk-deadbeef");
   });
 
   test("a terminal window scopes on its library", () => {
     expect(
-      windowDragScope({ libraryId: "local", terminalOnly: true, workspaceKey: null }),
+      windowDragScope({ libraryId: "local", terminalOnly: true, files: false, workspaceKey: null }),
     ).toBe("lib:local|terminal");
     expect(
-      windowDragScope({ libraryId: "lib-abc123", terminalOnly: true, workspaceKey: null }),
+      windowDragScope({ libraryId: "lib-abc123", terminalOnly: true, files: false, workspaceKey: null }),
     ).toBe("lib:lib-abc123|terminal");
   });
 
@@ -106,27 +106,30 @@ describe("windowDragScope", () => {
     const win1 = windowDragScope({
       libraryId: "local",
       terminalOnly: false,
+      files: false,
       workspaceKey: "wk-deadbeef",
     });
     const win2 = windowDragScope({
       libraryId: "local",
       terminalOnly: false,
+      files: false,
       workspaceKey: "wk-deadbeef",
     });
     expect(win1).toBe(win2);
   });
 
   test("different workspaces in the same library get DIFFERENT scopes", () => {
-    const a = windowDragScope({ libraryId: "local", terminalOnly: false, workspaceKey: "wk-aaaa" });
-    const b = windowDragScope({ libraryId: "local", terminalOnly: false, workspaceKey: "wk-bbbb" });
+    const a = windowDragScope({ libraryId: "local", terminalOnly: false, files: false, workspaceKey: "wk-aaaa" });
+    const b = windowDragScope({ libraryId: "local", terminalOnly: false, files: false, workspaceKey: "wk-bbbb" });
     expect(a).not.toBe(b);
   });
 
   test("terminal↔workspace in the same library get DISTINCT scopes", () => {
-    const term = windowDragScope({ libraryId: "local", terminalOnly: true, workspaceKey: null });
+    const term = windowDragScope({ libraryId: "local", terminalOnly: true, files: false, workspaceKey: null });
     const ws = windowDragScope({
       libraryId: "local",
       terminalOnly: false,
+      files: false,
       workspaceKey: "wk-deadbeef",
     });
     expect(term).not.toBe(ws);
@@ -134,16 +137,16 @@ describe("windowDragScope", () => {
 
   test("a workspace window with no identity falls back to a stable sentinel", () => {
     expect(
-      windowDragScope({ libraryId: "local", terminalOnly: false, workspaceKey: null }),
+      windowDragScope({ libraryId: "local", terminalOnly: false, files: false, workspaceKey: null }),
     ).toBe("lib:local|workspace:unknown");
   });
 
   // Rule 1: a standalone terminal accepts a dropped tab only from a terminal in
   // the SAME chan-library.
   test("terminals in the SAME library match; in DIFFERENT libraries do NOT", () => {
-    const a1 = windowDragScope({ libraryId: "local", terminalOnly: true, workspaceKey: null });
-    const a2 = windowDragScope({ libraryId: "local", terminalOnly: true, workspaceKey: null });
-    const b = windowDragScope({ libraryId: "lib-remote", terminalOnly: true, workspaceKey: null });
+    const a1 = windowDragScope({ libraryId: "local", terminalOnly: true, files: false, workspaceKey: null });
+    const a2 = windowDragScope({ libraryId: "local", terminalOnly: true, files: false, workspaceKey: null });
+    const b = windowDragScope({ libraryId: "lib-remote", terminalOnly: true, files: false, workspaceKey: null });
     expect(a1).toBe(a2);
     expect(a1).not.toBe(b);
   });
@@ -155,22 +158,26 @@ describe("windowDragScope", () => {
     const localA = windowDragScope({
       libraryId: "local",
       terminalOnly: false,
+      files: false,
       workspaceKey: "wk-same",
     });
     const localAgain = windowDragScope({
       libraryId: "local",
       terminalOnly: false,
+      files: false,
       workspaceKey: "wk-same",
     });
     const localOther = windowDragScope({
       libraryId: "local",
       terminalOnly: false,
+      files: false,
       workspaceKey: "wk-other",
     });
     // Same key, DIFFERENT library: the collision case that must NOT match.
     const remoteSameKey = windowDragScope({
       libraryId: "lib-remote",
       terminalOnly: false,
+      files: false,
       workspaceKey: "wk-same",
     });
 
@@ -193,6 +200,7 @@ describe("dragScopeMimeToken", () => {
     const scope = windowDragScope({
       libraryId: "local",
       terminalOnly: false,
+      files: false,
       workspaceKey: "wk-deadbeef",
     });
     expect(scope).toMatch(/[:|]/);
@@ -233,18 +241,28 @@ describe("dragScopeMimeToken", () => {
     const mime = (s: {
       libraryId: string;
       terminalOnly: boolean;
+      files: boolean;
       workspaceKey: string | null;
     }): string => SCOPE_DRAG_MIME_PREFIX + dragScopeMimeToken(windowDragScope(s));
 
-    const localTermA = mime({ libraryId: "local", terminalOnly: true, workspaceKey: null });
-    const localTermB = mime({ libraryId: "local", terminalOnly: true, workspaceKey: null });
-    const remoteTerm = mime({ libraryId: "lib-remote", terminalOnly: true, workspaceKey: null });
-    const localWsA = mime({ libraryId: "local", terminalOnly: false, workspaceKey: "wk-same" });
-    const localWsAgain = mime({ libraryId: "local", terminalOnly: false, workspaceKey: "wk-same" });
-    const localWsOther = mime({ libraryId: "local", terminalOnly: false, workspaceKey: "wk-other" });
+    const localTermA = mime({ libraryId: "local", terminalOnly: true, files: false, workspaceKey: null });
+    const localTermB = mime({ libraryId: "local", terminalOnly: true, files: false, workspaceKey: null });
+    const remoteTerm = mime({ libraryId: "lib-remote", terminalOnly: true, files: false, workspaceKey: null });
+    const localWsA = mime({ libraryId: "local", terminalOnly: false, files: false, workspaceKey: "wk-same" });
+    const localWsAgain = mime({ libraryId: "local", terminalOnly: false, files: false, workspaceKey: "wk-same" });
+    const localWsOther = mime({ libraryId: "local", terminalOnly: false, files: false, workspaceKey: "wk-other" });
+    // Files windows partition their own same-library scope.
+    const localFilesA = mime({ libraryId: "local", terminalOnly: false, files: true, workspaceKey: null });
+    const localFilesB = mime({ libraryId: "local", terminalOnly: false, files: true, workspaceKey: null });
+    const remoteFiles = mime({ libraryId: "lib-remote", terminalOnly: false, files: true, workspaceKey: null });
+    expect(localFilesA).toBe(localFilesB);
+    expect(localFilesA).not.toBe(remoteFiles);
+    expect(localFilesA).not.toBe(localTermA);
+    expect(localFilesA).not.toBe(localWsA);
     const remoteWsSameKey = mime({
       libraryId: "lib-remote",
       terminalOnly: false,
+      files: false,
       workspaceKey: "wk-same",
     });
 

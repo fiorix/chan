@@ -47,6 +47,9 @@ async function resolveCatalog(): Promise<void> {
         id: `extension.${extension.id}`,
         title: extension.name,
         category: "Apps" as const,
+        // Extension frames are served by the workspace tenant, so their
+        // launcher entries need a workspace window.
+        requirement: "workspace" as const,
         keywords: ["extension", extension.id],
         available: workspaceOnly,
         run: () => invokeExtension(extension),
@@ -55,6 +58,7 @@ async function resolveCatalog(): Promise<void> {
         id: `extension.${extension.id}.${command.id}`,
         title: command.title,
         category: "Apps" as const,
+        requirement: "workspace" as const,
         keywords: [
           "extension",
           extension.id,

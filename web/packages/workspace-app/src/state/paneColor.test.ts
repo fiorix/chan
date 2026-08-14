@@ -330,6 +330,9 @@ describe("launcher focus-colour command applies the doc-root var", () => {
     const ctx: CommandContext = {
       terminalOnly: false,
       terminalControl: false,
+      // Full caps keep the requirement gate open; the assertion targets
+      // the command's run() body.
+      caps: { workspace: true, files: true, terminal: true },
       activeSurface: null,
       activeSide: null,
       activeTabId: null,

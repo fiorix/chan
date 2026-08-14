@@ -147,7 +147,12 @@
   } from "./api/desktop";
   import { activeTransferCount } from "./state/transfers.svelte";
   import { chordFromEvent, currentOS } from "./state/shortcuts";
-  import { allCommands, commandContext } from "./state/commands";
+  import {
+    allCommands,
+    commandContext,
+    dispatchAllowsCommand,
+  } from "./state/commands";
+  import { windowCaps } from "./state/windowCaps";
   import { loadExtensions } from "./state/extensions.svelte";
   import { createDiagramAndOpen } from "./state/commands/diagram";
   import { createSlidesAndOpen } from "./state/commands/slides";
@@ -411,7 +416,7 @@
     // initial load still flushes any in-flight session changes.
     installSessionFlushHook();
     await bootstrap();
-    if (!ui.terminalOnly) await loadExtensions();
+    if (!ui.terminalOnly && windowCaps.workspace) await loadExtensions();
     // The docked FB default lives in chan-server's
     // `BrowserSidePanes::default()`: a new preferences.toml ships with
     // both docks OFF (`left: false`), so a new workspace opens with just
@@ -425,7 +430,7 @@
     // default disarmed state). Terminal-only windows skip it: the slim
     // terminal tenant has no workspace to hold screensaver config and
     // mounts no /api/screensaver routes, so the tracker stays disarmed.
-    if (!ui.terminalOnly) {
+    if (!ui.terminalOnly && windowCaps.workspace) {
       void loadScreensaverState();
     }
     // Resume hook after the tab (or the whole machine) was dormant. Browsers
@@ -441,10 +446,11 @@
         reconnectWatcher();
         // Workspace + tree refresh hit /api/files + /api/workspace, neither
         // of which the terminal tenant serves; only the watcher reconnect
-        // matters for a terminal-only window.
+        // matters for a terminal-only window. A Files window serves the
+        // listing route but not the workspace payload.
         if (ui.terminalOnly) return;
         void refreshTree();
-        void refreshWorkspace();
+        if (windowCaps.workspace) void refreshWorkspace();
       }, 300);
     }
     function onVisibility(): void {
@@ -1213,6 +1219,12 @@
       })
     )
       return;
+    // A Files window gates on the catalog's requirement table instead of
+    // the terminal allow-list: workspace-only ids (and ids the catalog
+    // does not classify) drop before the dispatch switch, the same
+    // filter the launcher's visibility applies.
+    if (!ui.terminalOnly && !dispatchAllowsCommand(commandName, windowCaps))
+      return;
     switch (commandName) {
       case "app.settings.open":
         openSettings();
@@ -1586,7 +1598,7 @@
 <!-- Preflight is workspace onboarding (index, model, cs link); terminal-only
      windows are served by the slim terminal tenant, which has no workspace
      and mounts no /api/preflight route. -->
-{#if !ui.terminalOnly}
+{#if !ui.terminalOnly && windowCaps.workspace}
   <PreflightOverlay />
 {/if}
 <!-- Survey overlay, WINDOW-WIDE FALLBACK: renders a survey raised by
