@@ -9,7 +9,7 @@
   // the per-row actions. The read-only surface (devserver/gateway) shows the
   // on-state statically with no mutation controls, but keeps the [edit config]
   // view and can still expand a card to read its windows.
-  import {
+  import { Folder,
     AppWindow,
     ChevronRight,
     CircleAlert,
@@ -41,6 +41,7 @@
     newTerminal,
     newWorkspaceWindow,
     setWorkspacePower,
+    newFilesWindow,
   } from "../state/computerActions";
   import { checksVisible, isSelected, toggleSelected } from "../state/selection.svelte";
   import { isPending, servedKey, wsKey, dsKey } from "../state/pending.svelte";
@@ -54,7 +55,10 @@
     type WorkspaceNode,
   } from "../lib/machineTree";
   import { isMachineCollapsed, toggleMachineCollapsed } from "../state/machineCollapse.svelte";
-  import { readOnly, hasDesktopBridge, hostOs } from "../state/capabilities";
+  import { readOnly, hasDesktopBridge, hostOs,
+    localFilesApp,
+    selfManagedWindows,
+  } from "../state/capabilities";
   import { demoState, resetDemo } from "../state/demo.svelte";
   import type { DevserverEntry, WorkspaceEntry } from "../api/library";
 
@@ -326,6 +330,14 @@
         {/each}
       </div>
     {/if}
+    {#if node.files.length}
+      <div class="section-label">Files</div>
+      <div class="term-list">
+        {#each node.files as w (w.window_id)}
+          <WindowRow {w} icon />
+        {/each}
+      </div>
+    {/if}
     {#if node.workspaces.length || node.looseWindows.length}
       <div class="section-label">Workspaces</div>
       {#each node.workspaces as wsNode (wsNode.ws.workspace_id)}
@@ -435,6 +447,16 @@
               onclick={() => run(newTerminal())}>
               <SquareTerminal size={16} />
             </button>
+            {#if localFilesApp && selfManagedWindows}
+              <button
+                class="icon-btn"
+                type="button"
+                title="New files window"
+                aria-label="New local files window"
+                onclick={() => run(newFilesWindow())}>
+                <Folder size={16} />
+              </button>
+            {/if}
             <button
               class="icon-btn"
               type="button"

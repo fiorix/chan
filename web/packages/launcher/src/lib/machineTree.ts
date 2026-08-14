@@ -20,7 +20,9 @@ import { LOCAL_LIBRARY_ID } from "./windowLabel";
  * then standalone terminals before workspace windows, then by ordinal. */
 export function sortWindows(a: WindowRecord, b: WindowRecord): number {
   if (a.control !== b.control) return a.control ? -1 : 1;
-  if (a.kind !== b.kind) return a.kind === "terminal" ? -1 : 1;
+  const rank = (w: WindowRecord): number =>
+    w.kind === "terminal" ? (w.app === "files" ? 1 : 0) : 2;
+  if (rank(a) !== rank(b)) return rank(a) - rank(b);
   return a.ordinal - b.ordinal;
 }
 
@@ -64,6 +66,9 @@ export interface MachineNode {
   libraryId: string | null;
   control: WindowRecord[];
   terminals: WindowRecord[];
+  /** Standalone Files windows (kind=terminal, app=files), between the
+   * terminals block and the workspace cards. */
+  files: WindowRecord[];
   workspaces: WorkspaceNode[];
   /** kind=workspace windows of this machine whose path matched no workspace card
    * (a transient race) -- rendered as loose rows so they never vanish. */
@@ -87,7 +92,12 @@ function machineNode(
 ): MachineNode {
   const windows = (libraryId ? windowsByLibrary.get(libraryId) : undefined) ?? [];
   const control = windows.filter((w) => w.control).sort(sortWindows);
-  const terminals = windows.filter((w) => !w.control && w.kind === "terminal").sort(sortWindows);
+  const terminals = windows
+    .filter((w) => !w.control && w.kind === "terminal" && w.app !== "files")
+    .sort(sortWindows);
+  const files = windows
+    .filter((w) => !w.control && w.kind === "terminal" && w.app === "files")
+    .sort(sortWindows);
   // Consume workspace windows as they are assigned so each lands in exactly one
   // card (or loose), keeping the buckets disjoint even if two cards shared a path.
   const remaining = new Map(
@@ -103,7 +113,7 @@ function machineNode(
     return { ws, windows: wins, count: wins.length };
   });
   const looseWindows = [...remaining.values()].sort(sortWindows);
-  return { kind, devserver, libraryId, control, terminals, workspaces, looseWindows };
+  return { kind, devserver, libraryId, control, terminals, files, workspaces, looseWindows };
 }
 
 /** Total windows a machine owns, summed across its disjoint buckets (control +
@@ -113,6 +123,7 @@ export function machineWindowCount(node: MachineNode): number {
   return (
     node.control.length +
     node.terminals.length +
+    node.files.length +
     node.workspaces.reduce((sum, w) => sum + w.count, 0) +
     node.looseWindows.length
   );

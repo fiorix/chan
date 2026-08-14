@@ -9,7 +9,7 @@
     type DeckScope,
     type DeckScopeId,
   } from "@chan/web-shared/command-deck";
-  import {
+  import { Folder,
     AppWindow,
     Eye,
     EyeOff,
@@ -43,6 +43,7 @@
     newWorkspaceWindow,
     setWindowShown,
     setWorkspacePower,
+    newFilesWindow,
   } from "../state/computerActions";
   import {
     activeCommandLauncherDraft,
@@ -53,7 +54,10 @@
     toggleCommandLauncher,
   } from "../state/commandLauncher.svelte";
   import { openNewDialog } from "../state/dialog.svelte";
-  import { hasDesktopBridge, hostOs, readOnly } from "../state/capabilities";
+  import { hasDesktopBridge, hostOs, readOnly,
+    localFilesApp,
+    selfManagedWindows,
+  } from "../state/capabilities";
   import { dsKey, isPending, servedKey, wsKey } from "../state/pending.svelte";
   import { screen } from "../state/screen.svelte";
   import { themeState, toggleTheme } from "../state/theme.svelte";
@@ -378,6 +382,21 @@
   const rootEntries = $derived.by<Entry[]>(() => {
     const entries: Entry[] = [
       commandEntry("new-terminal", "New terminal", "Choose a computer", SquareTerminal, "shell"),
+      ...(localFilesApp && selfManagedWindows
+        ? [
+            {
+              id: "computers:new-files:local",
+              title: "New files window",
+              breadcrumb: "Computers › New files window",
+              searchText: "files browser editor local this machine",
+              scope: "computers" as const,
+              icon: Folder,
+              awaitResult: true,
+              dismissImmediatelyOnSuccess: true,
+              run: () => newFilesWindow(),
+            } satisfies Entry,
+          ]
+        : []),
       commandEntry("new-window", "New window", "Choose a workspace", AppWindow, "workspace"),
       // One target-first branch instead of a Focus/Hide/Show/Close quartet
       // that listed the same roster four times over.

@@ -13,6 +13,10 @@
 // `workspace_path`.
 
 export type WindowKind = "terminal" | "workspace";
+/** The user-visible application riding a terminal-class tenant. Absent means
+ * the kind's default app (Terminal for a terminal row); "files" marks the
+ * standalone Files application. */
+export type WindowApp = "files";
 export const MAX_WINDOW_LABEL_CHARS = 64;
 
 /** Which surface minted a window: a chan-desktop native window, or a launcher
@@ -26,6 +30,9 @@ export interface WindowRecord {
   /** "local" (the baked-in local-disk library) or "lib-<16hex>" (a devserver). */
   library_id: string;
   kind: WindowKind;
+  /** Terminal-tenant application discriminator; absent for plain Terminal and
+   * Workspace rows. A files row is kind "terminal" plus app "files". */
+  app?: WindowApp;
   /** Library-composed, persisted, auto-derived (local perspective). Never parsed. */
   title: string;
   /** Per-(kind, workspace/library) "Window N"; library-owned, persisted. */
@@ -214,6 +221,10 @@ export interface DevserverEntry {
    * `PRETTY_NAME`); null when unknown.
    */
   pretty_name: string | null;
+  /** Whether this devserver serves the standalone Files application, from its
+   * DevserverInfo self-report at connect; absent/false hides the remote Files
+   * action. */
+  files_app?: boolean;
   /**
    * The owning gateway's registry id for a synthesized gateway roster row;
    * null for a plain (persisted) devserver row. Synthesized rows are
@@ -299,6 +310,10 @@ export interface DevserverInput {
 export interface CreateWindowOptions {
   /** kind=workspace: the workspace root path. Omitted for a terminal. */
   workspacePath?: string;
+  /** Terminal-tenant application to mint ("files"). Only sent to servers that
+   * advertise the capability, so an older server never silently mints a plain
+   * Terminal in its place. */
+  app?: WindowApp;
   /** Client-claimed affinity. The window manager mints "browser"; desktop paths
    * omit it (absent => native), so a browser-minted record never opens a native
    * twin. */
@@ -590,6 +605,7 @@ export const liveApi: LibraryApi = {
   createWindow: (kind, opts) =>
     req("POST", "/api/library/windows", {
       kind,
+      ...(opts?.app ? { app: opts.app } : {}),
       ...(opts?.workspacePath ? { workspace_path: opts.workspacePath } : {}),
       ...(opts?.actingWindowId ? { acting_window_id: opts.actingWindowId } : {}),
       ...(opts?.origin ? { origin: opts.origin } : {}),

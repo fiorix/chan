@@ -17,7 +17,7 @@
   // the devserver identity row's machine icon turned red (Library.svelte), not a
   // pill on this row.
   import { tick } from "svelte";
-  import { AppWindow, ExternalLink, Eye, EyeOff, Focus, SquareTerminal } from "lucide-svelte";
+  import { AppWindow, ExternalLink, Eye, EyeOff, Focus, Folder, SquareTerminal } from "lucide-svelte";
   import {
     focusWindow,
     toggleWindow,
@@ -109,12 +109,12 @@
   <div class="row-main">
     {#if editingLabel}
       <span class="label-editor">
-        <span>{rowLabel(w.kind, w.ordinal)} [</span>
+        <span>{rowLabel(w.kind, w.ordinal, w.app)} [</span>
         <input
           bind:this={labelInput}
           bind:value={labelDraft}
           maxlength={MAX_WINDOW_LABEL_CHARS}
-          aria-label={`Text for ${rowLabel(w.kind, w.ordinal)}`}
+          aria-label={`Text for ${rowLabel(w.kind, w.ordinal, w.app)}`}
           placeholder="label"
           onblur={() => void commitLabelEdit()}
           onkeydown={(event) => {
@@ -144,7 +144,7 @@
   <div class="row">
     {#if icon}
       <span class="row-glyph" class:control={w.control} aria-hidden="true">
-        {#if w.kind === "workspace"}<AppWindow size={15} />{:else}<SquareTerminal size={15} />{/if}
+        {#if w.kind === "workspace"}<AppWindow size={15} />{:else if w.app === "files"}<Folder size={15} />{:else}<SquareTerminal size={15} />{/if}
       </span>
     {/if}
     {@render windowName()}
@@ -188,7 +188,7 @@
   <div class="row">
     {#if icon}
       <span class="row-glyph" class:control={w.control} aria-hidden="true">
-        {#if w.kind === "workspace"}<AppWindow size={15} />{:else}<SquareTerminal size={15} />{/if}
+        {#if w.kind === "workspace"}<AppWindow size={15} />{:else if w.app === "files"}<Folder size={15} />{:else}<SquareTerminal size={15} />{/if}
       </span>
     {/if}
     {@render windowName()}
@@ -230,7 +230,7 @@
   <div class="row">
     {#if icon}
       <span class="row-glyph" class:control={w.control} aria-hidden="true">
-        {#if w.kind === "workspace"}<AppWindow size={15} />{:else}<SquareTerminal size={15} />{/if}
+        {#if w.kind === "workspace"}<AppWindow size={15} />{:else if w.app === "files"}<Folder size={15} />{:else}<SquareTerminal size={15} />{/if}
       </span>
     {/if}
     {@render windowName()}

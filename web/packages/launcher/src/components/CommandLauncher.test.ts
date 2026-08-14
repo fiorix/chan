@@ -33,6 +33,7 @@ vi.mock("../state/computerActions", () => ({
   closeComputerWindow: actions.close,
   connectComputer: vi.fn(),
   focusComputerWindow: actions.focus,
+  newFilesWindow: vi.fn(),
   newTerminal: actions.newTerminal,
   newWorkspaceWindow: actions.newWorkspace,
   setWindowShown: actions.setShown,

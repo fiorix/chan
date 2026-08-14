@@ -67,6 +67,14 @@ export async function newTerminal(devserver?: DevserverEntry): Promise<void> {
   await openTerminal();
 }
 
+/** Open a standalone Files window on the LOCAL machine (the serving host):
+ * a browser-origin mint of a terminal-kind record carrying the files app.
+ * Callers gate the affordance on the host's advertised capability; remote
+ * machines get theirs through the desktop's devserver window plumbing. */
+export async function newFilesWindow(): Promise<void> {
+  await mintWindow("terminal", { app: "files" });
+}
+
 export async function newWorkspaceWindow(workspace: WorkspaceEntry): Promise<void> {
   if (workspace.devserver_id) {
     await openDevserverWorkspace(workspace.devserver_id, workspace.path);

@@ -26,7 +26,12 @@ export function windowUrl(record: WindowRecord, origin: string): string {
   url.pathname = `/${prefix}/`;
   url.searchParams.set("w", record.window_id);
   if (record.kind === "terminal") {
-    url.searchParams.set("kind", record.control ? "control" : "terminal");
+    // The SPA reads ?kind= as its window-mode signal; a Files record must
+    // boot the Files mode, keyed on the app discriminator, never the title.
+    url.searchParams.set(
+      "kind",
+      record.control ? "control" : record.app === "files" ? "files" : "terminal",
+    );
   }
   if (record.library_id) url.searchParams.set("lib", record.library_id);
   if (record.token) url.searchParams.set("t", record.token);

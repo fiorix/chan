@@ -71,13 +71,14 @@ function handleState(id: string): "live" | "closed" | "none" {
  * the leader identity for the per-tenant mint gate. */
 export async function mintWindow(
   kind: WindowKind,
-  opts: { workspacePath?: string; actingWindowId?: string } = {},
+  opts: { app?: "files"; workspacePath?: string; actingWindowId?: string } = {},
 ): Promise<WindowRecord | null> {
   if (demoState.enabled) return null;
   const blank = servingOrigin() ? window.open("", "_blank") : null;
   clearClonedSessionDeckDrafts(blank);
   try {
     const rec = await backend.createWindow(kind, {
+      app: opts.app,
       workspacePath: opts.workspacePath,
       origin: "browser",
       actingWindowId: opts.actingWindowId,
