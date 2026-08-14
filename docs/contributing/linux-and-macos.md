@@ -162,6 +162,14 @@ limactl shell default sudo sdme exec chan-devserver-dev /bin/bash -c '
   loginctl enable-linger dev'
 ```
 
+> `devserver-fdstore.sh` additionally requires `python3` and `node`, and
+> **SKIPs with exit 0** when either is missing -- so a guest without them yields
+> a run that looks green and proves nothing. On a noble (24.04) base, apt's Node
+> is v18 and the suite dies on `node: bad option: --experimental-websocket`;
+> it needs Node 21+. Both observed on a real run; see the table in
+> [`windows-and-linux.md`](windows-and-linux.md#the-systemd-fd-store-suite),
+> which is platform-independent despite living in the Windows doc.
+
 Seed the `chan` binary into the container the way the core gate seeds the tree (`git archive HEAD` + `sdme cp`, then build inside with the aarch64 flag from the build note below), and put it at a stable path such as `/usr/local/bin/chan` -- the unit's `ExecStart` records the binary's resolved path, so a moving target dir would break a restart. Then run the devserver **as the dev user**, exporting that user's runtime dir and bus so `systemctl --user` resolves:
 
 ```sh
