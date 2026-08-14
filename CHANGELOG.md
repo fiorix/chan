@@ -6,7 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+
+- **The penguin-grid empty-pane animation is retired.** A session that had it selected falls back to a random animation from the registry rather than a blank pane.
+
 ### Fixed
+
+- **Empty-pane animations are legible in the light theme.** Two defects stacked. The point renderers behind six animations blended alpha into the destination channel, and the premultiplied canvas then composited the page through every drawn pixel by a term that scales with page brightness: a subtle brightening of dense clusters on the dark theme, a washout toward white on light, which is why those six were the faintest of the family. The renderers now blend color only, pinning destination alpha at 1. Independently, the light-theme intensity variables of eleven animations sat well below their dark counterparts even though ink near white needs more, not less, contrast to read equally; they come up to visual parity, with the dark values untouched, verified by a dark/light screenshot sweep of the whole family.
+
+- **The light terminal darkens under-contrast text to a readable floor.** Agent CLIs print truecolor secondary text tuned for dark backgrounds: hints and summaries at `#999999` (2.85:1 against white), selected menu options at 1.9:1, warnings at 1.6:1, and the 16-colour palette cannot reach truecolor to correct them. The light xterm terminal now sets a minimum contrast ratio of 4.5 (WCAG AA), which darkens only foregrounds under the floor: a measured `#999999` renders as `#6e6e6e` (4.6:1). The dark theme keeps the identity ratio and renders pixel-identically, and the ghostty backend, which has no equivalent option, is unchanged.
 
 - **Windows terminals run their command instead of hanging at startup.** A terminal spawned server-side on Windows could sit forever with a four-byte scrollback, ConPTY's own startup cursor query and nothing else: conhost emits `\x1b[6n` before it pumps the child's output, every Windows shell is gated behind it (powershell.exe and cmd.exe deadlock identically), and nothing in a server-side spawn answers until a frontend attaches. This is exactly the Team Work spawn shape, where the agent shell is created before any frontend exists and the SPA suppresses replayed replies on reattach, and the headless-server and headless-test shapes. The library now answers the query itself: the reader arms a pending query and the controller replies `\x1b[1;1R` on its existing 25 ms tick, after a grace in which an attached frontend's own report wins, so the real cursor position stays authoritative in ordinary interactive use. Verified on real Windows 11 end to end through the same terminal-create call the team dialog makes: v0.89.0 never ran the command in 25 s, this release runs it in 2 s, and a frontend answering with distinctive coordinates is consumed by ConPTY with the library writing nothing.
 
