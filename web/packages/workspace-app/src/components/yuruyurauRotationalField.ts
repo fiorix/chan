@@ -263,7 +263,8 @@ export function createYuruyurauRotationalRenderer(
       // Blend color only; destination alpha stays 1 (covers the point
       // copies and the fade overlay). Plain blendFunc erodes it and the
       // premultiplied canvas composites the page through every drawn
-      // pixel -- invisible on the dark theme, a white washout on light.
+      // pixel by a term that scales with page brightness: a subtle
+      // brightening on the dark theme, a white washout on light.
       gl.blendFuncSeparate(
         gl.SRC_ALPHA,
         gl.ONE_MINUS_SRC_ALPHA,
