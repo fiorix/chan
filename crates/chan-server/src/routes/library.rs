@@ -529,6 +529,10 @@ struct MintedLibraryCommandCapability {
 struct ScopedLibraryWindow {
     window_id: String,
     kind: WindowKind,
+    /// The terminal-tenant application (`files`), absent for plain rows, so
+    /// the command launcher labels a Files window without parsing its title.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    app: Option<chan_library::windows::WindowApp>,
     title: String,
     ordinal: u32,
     label: String,
@@ -634,6 +638,7 @@ fn scoped_window(
         launch_path: scoped_launch_path(&capability.token, &record.window_id),
         window_id: record.window_id,
         kind: record.kind,
+        app: record.app,
         title: record.title,
         ordinal: record.ordinal,
         label: record.label,
@@ -657,13 +662,22 @@ fn scoped_local_windows(
         .map(|record| scoped_window(capability, record))
         .collect();
     rows.sort_by(|a, b| {
-        let kind_rank = |kind: WindowKind| match kind {
-            WindowKind::Terminal => 0,
-            WindowKind::Workspace => 1,
+        // The registry's display order (control, Terminal, Files, Workspace),
+        // re-derived from the wire fields because the scoped row forces the
+        // capability's own window first ahead of it.
+        let app_rank = |row: &ScopedLibraryWindow| {
+            if row.control {
+                return 0;
+            }
+            match chan_library::windows::effective_app_of(row.kind, row.app) {
+                chan_library::windows::EffectiveWindowApp::Terminal => 1,
+                chan_library::windows::EffectiveWindowApp::Files => 2,
+                chan_library::windows::EffectiveWindowApp::Workspace => 3,
+            }
         };
         (a.window_id != capability.window_id)
             .cmp(&(b.window_id != capability.window_id))
-            .then_with(|| kind_rank(a.kind).cmp(&kind_rank(b.kind)))
+            .then_with(|| app_rank(a).cmp(&app_rank(b)))
             .then_with(|| a.ordinal.cmp(&b.ordinal))
             .then_with(|| a.window_id.cmp(&b.window_id))
     });
@@ -817,11 +831,12 @@ async fn handle_library_command_action(
         );
     }
     let record = match action {
-        ScopedLibraryAction::NewTerminal => {
-            state
-                .host
-                .mint_window_with_origin(WindowKind::Terminal, None, WindowOrigin::Browser)
-        }
+        ScopedLibraryAction::NewTerminal => state.host.mint_window_with_origin(
+            WindowKind::Terminal,
+            None,
+            None,
+            WindowOrigin::Browser,
+        ),
         ScopedLibraryAction::NewWorkspaceWindow { workspace_id } => {
             let Some((_, root)) = resolve_workspace(&state.host, &workspace_id) else {
                 return StatusCode::NOT_FOUND.into_response();
@@ -831,6 +846,7 @@ async fn handle_library_command_action(
             }
             state.host.mint_window_with_origin(
                 WindowKind::Workspace,
+                None,
                 Some(root.to_string_lossy().into_owned()),
                 WindowOrigin::Browser,
             )
@@ -922,8 +938,17 @@ async fn handle_library_command_launch(
     query.append_pair("t", &record.token);
     query.append_pair("w", &record.window_id);
     query.append_pair("lib", state.host.library_id());
-    if record.kind == WindowKind::Terminal {
-        query.append_pair("kind", "terminal");
+    // The SPA reads `?kind=` as its window-mode signal; a Files window must
+    // boot the Files mode, not the Terminal one, so the append follows the
+    // effective app rather than the storage kind.
+    match chan_library::windows::effective_app_of(record.kind, record.app) {
+        chan_library::windows::EffectiveWindowApp::Terminal => {
+            query.append_pair("kind", "terminal");
+        }
+        chan_library::windows::EffectiveWindowApp::Files => {
+            query.append_pair("kind", "files");
+        }
+        chan_library::windows::EffectiveWindowApp::Workspace => {}
     }
     let target = format!("{path}?{}", query.finish());
     // The capability was checked above; retaining the binding through this
@@ -1150,8 +1175,12 @@ async fn handle_create_library_window(
     }
     // Stamp the client-claimed affinity at mint so chan-desktop never opens a
     // native twin for a browser-minted window (honest-client input, D4).
-    match host.mint_window_with_origin(req.kind, req.workspace_path, req.origin) {
+    match host.mint_window_with_origin(req.kind, req.app, req.workspace_path, req.origin) {
         Ok(record) => Json(record).into_response(),
+        // An invalid kind/app shape is the caller's error, not a server fault.
+        Err(chan_library::Error::BadRequest(message)) => {
+            (StatusCode::BAD_REQUEST, message).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -2341,6 +2370,7 @@ mod devserver_route_tests {
                     auto_hide_control: false,
                     os: "linux".into(),
                     pretty_name: Some("Debian GNU/Linux 12".into()),
+                    files_app: false,
                     gateway_id: None,
                     gateway_url: String::new(),
                     shared: false,
@@ -2375,6 +2405,7 @@ mod devserver_route_tests {
                 auto_hide_control: input.auto_hide_control,
                 os: String::new(),
                 pretty_name: None,
+                files_app: false,
                 gateway_id: None,
                 gateway_url: String::new(),
                 shared: false,
@@ -3685,6 +3716,7 @@ mod window_op_route_tests {
             window_id: "w-remote".into(),
             library_id: "lib-remote".into(),
             kind: WindowKind::Workspace,
+            app: None,
             title: "⌂ /srv/project Window 1".into(),
             ordinal: 1,
             label: String::new(),

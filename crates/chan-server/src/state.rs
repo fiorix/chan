@@ -145,6 +145,13 @@ pub struct AppState {
     /// window closes and the tenant is torn down. Unused on workspace
     /// tenants, which take the disk path in the session handlers.
     pub ephemeral_sessions: Mutex<HashMap<String, Vec<u8>>>,
+    /// The Files sibling of `ephemeral_sessions`: in-memory layout blobs for
+    /// Files windows on a store-less terminal tenant, addressed with
+    /// `?app=files`. A separate map (and, on disk, a separate `files/` child
+    /// of the terminal blob dir) keeps Files layouts out of the ordinary
+    /// Terminal namespace, so a client booted in Terminal-only mode never
+    /// restores browser/editor tabs against routes it does not have.
+    pub ephemeral_files_sessions: Mutex<HashMap<String, Vec<u8>>>,
     /// On-disk per-window session-blob store for a PERSISTED terminal tenant  --
     /// the desktop's standalone `/terminal` tenant and a standalone devserver
     /// terminal -- so its pane/tab layout survives a relaunch (with fresh shells;
@@ -337,6 +344,7 @@ pub(crate) mod test_support {
             window_bus: Arc::new(crate::window_bus::WindowBus::new()),
             handover_bus: Arc::new(crate::handover_bus::HandoverBus::new()),
             ephemeral_sessions: Mutex::new(HashMap::new()),
+            ephemeral_files_sessions: Mutex::new(HashMap::new()),
             terminal_session_dir: None,
             window_presence: Arc::new(crate::window_presence::WindowPresence::new()),
             session_registry: Arc::new(crate::session_presence::SessionRegistry::new()),

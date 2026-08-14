@@ -638,6 +638,8 @@ fn entry_from_roster_row(
         pending_signin: false,
         os,
         pretty_name,
+        // The feed caches no Files capability yet; no devserver reports one.
+        files_app: false,
         gateway_id: Some(gateway.id.clone()),
         gateway_url: gateway.url.clone(),
         shared: row.shared,
@@ -825,6 +827,8 @@ fn entry_from_devserver(
         // The launcher's machine icon + tooltip, from the devserver's self-report.
         os,
         pretty_name,
+        // The feed caches no Files capability yet; no devserver reports one.
+        files_app: false,
         // Plain configured rows carry no gateway provenance; gateway-roster
         // rows are synthesized with these set, not read from persisted config.
         gateway_id: None,

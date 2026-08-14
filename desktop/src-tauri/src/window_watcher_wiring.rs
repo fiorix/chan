@@ -1056,6 +1056,7 @@ mod tests {
             window_id: "w-1".into(),
             library_id: "lib-test".into(),
             kind: chan_server::WindowKind::Terminal,
+            app: None,
             title: "Terminal".into(),
             ordinal: 1,
             label: String::new(),

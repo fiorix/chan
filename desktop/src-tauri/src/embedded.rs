@@ -593,7 +593,12 @@ impl EmbeddedServer {
         workspace_path: Option<String>,
     ) -> Result<WindowRecord, String> {
         self.host
-            .mint_window_with_origin(kind, workspace_path, chan_server::WindowOrigin::Browser)
+            .mint_window_with_origin(
+                kind,
+                None,
+                workspace_path,
+                chan_server::WindowOrigin::Browser,
+            )
             .map_err(|e| format!("minting a browser window: {e}"))
     }
 
@@ -727,6 +732,7 @@ mod tests {
             window_id: window_id.into(),
             library_id: "local".into(),
             kind: chan_server::WindowKind::Workspace,
+            app: None,
             title: String::new(),
             ordinal: 1,
             label: String::new(),

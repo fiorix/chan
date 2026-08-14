@@ -23,7 +23,7 @@ use crate::session_presence::{HandoverError, ParticipantState, RenameError, Sess
 use crate::state::WorkspaceCell;
 use crate::terminal_sessions::Registry as TerminalRegistry;
 use crate::terminal_sessions::{AttachHandle, CreateOptions, RestartOverrides};
-use crate::{WindowKind, WindowRecord};
+use crate::WindowRecord;
 
 /// Settable handle to the terminal registry. The registry is built after
 /// the control socket starts (it needs the control socket path for
@@ -4197,9 +4197,12 @@ fn term_list(registry: &TerminalRegistry, windows: &[WindowRecord]) -> Result<St
                     let kind = if rec.control {
                         "control"
                     } else {
-                        match rec.kind {
-                            WindowKind::Terminal => "standalone-terminal",
-                            WindowKind::Workspace => "workspace",
+                        match rec.effective_app() {
+                            chan_library::windows::EffectiveWindowApp::Terminal => {
+                                "standalone-terminal"
+                            }
+                            chan_library::windows::EffectiveWindowApp::Files => "files",
+                            chan_library::windows::EffectiveWindowApp::Workspace => "workspace",
                         }
                     };
                     let status = if rec.connected { "alive" } else { "offline" };
@@ -5949,7 +5952,7 @@ mod tests {
 
     fn window_record(
         window_id: &str,
-        kind: WindowKind,
+        kind: crate::WindowKind,
         connected: bool,
         control: bool,
     ) -> WindowRecord {
@@ -5957,6 +5960,7 @@ mod tests {
             window_id: window_id.into(),
             library_id: "local".into(),
             kind,
+            app: None,
             title: String::new(),
             ordinal: 1,
             label: String::new(),
@@ -6204,8 +6208,8 @@ mod tests {
                 .expect("spawn session");
         }
         let records = [
-            window_record("win-alive", WindowKind::Workspace, true, false),
-            window_record("win-offline", WindowKind::Terminal, false, false),
+            window_record("win-alive", crate::WindowKind::Workspace, true, false),
+            window_record("win-offline", crate::WindowKind::Terminal, false, false),
         ];
         let json = term_list(&registry, &records).expect("term list");
         let value: Value = serde_json::from_str(&json).expect("json");

@@ -5040,6 +5040,7 @@ mod doc_divert_tests {
             window_bus: Arc::new(crate::window_bus::WindowBus::new()),
             handover_bus: Arc::new(crate::handover_bus::HandoverBus::new()),
             ephemeral_sessions: Mutex::new(HashMap::new()),
+            ephemeral_files_sessions: Mutex::new(HashMap::new()),
             terminal_session_dir: None,
             window_presence: Arc::new(crate::window_presence::WindowPresence::new()),
             session_registry: Arc::new(crate::session_presence::SessionRegistry::new()),

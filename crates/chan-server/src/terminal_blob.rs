@@ -33,6 +33,14 @@ fn key_path(dir: &Path, key: &str) -> Option<PathBuf> {
     safe_key(key).then(|| dir.join(key))
 }
 
+/// The Files namespace: a child directory of the terminal blob dir holding
+/// Files-window layouts. A separate namespace (not a key prefix) so a client
+/// booted in Terminal-only mode never enumerates or restores a Files layout,
+/// and the ordinary Terminal keys keep their flat shape.
+pub fn files_dir(dir: &Path) -> PathBuf {
+    dir.join("files")
+}
+
 /// Write `content` for `key` atomically (tmp + fsync + rename), creating
 /// `dir`. An invalid key is rejected rather than written.
 pub fn put(dir: &Path, key: &str, content: &[u8]) -> std::io::Result<()> {
@@ -74,12 +82,17 @@ pub fn get(dir: &Path, key: &str) -> std::io::Result<Option<Vec<u8>>> {
 }
 
 /// Sorted flat keys present in `dir` (empty when the dir is absent). Skips
-/// the `.tmp` write file and anything that isn't a valid key.
+/// the `.tmp` write file, anything that isn't a valid key, and non-regular
+/// entries, so the `files/` child namespace never enumerates as a window id.
 pub fn list(dir: &Path) -> std::io::Result<Vec<String>> {
     let mut keys = Vec::new();
     match std::fs::read_dir(dir) {
         Ok(rd) => {
             for entry in rd.flatten() {
+                let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
+                if !is_file {
+                    continue;
+                }
                 if let Some(name) = entry.file_name().to_str() {
                     if safe_key(name) {
                         keys.push(name.to_string());
@@ -264,6 +277,29 @@ mod tests {
             put(d, k, b"x").unwrap_or_else(|e| panic!("should accept {k:?}: {e}"));
             assert_eq!(get(d, k).unwrap().as_deref(), Some(&b"x"[..]), "{k:?}");
         }
+    }
+
+    #[test]
+    fn files_child_namespace_is_separate_and_never_enumerates_as_a_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        put(d, "w-term", b"terminal-layout").unwrap();
+        put(&files_dir(d), "w-files", b"files-layout").unwrap();
+
+        // Each namespace sees only its own keys; the `files` child directory
+        // itself never appears as a Terminal window id.
+        assert_eq!(list(d).unwrap(), vec!["w-term".to_string()]);
+        assert_eq!(list(&files_dir(d)).unwrap(), vec!["w-files".to_string()]);
+        assert_eq!(
+            get(&files_dir(d), "w-files").unwrap().as_deref(),
+            Some(&b"files-layout"[..])
+        );
+        assert!(get(d, "w-files").unwrap().is_none());
+
+        // Deleting from one namespace leaves the other untouched.
+        delete(&files_dir(d), "w-files").unwrap();
+        assert!(list(&files_dir(d)).unwrap().is_empty());
+        assert_eq!(list(d).unwrap(), vec!["w-term".to_string()]);
     }
 
     #[test]

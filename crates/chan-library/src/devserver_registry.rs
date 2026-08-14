@@ -113,6 +113,13 @@ pub struct DevserverEntry {
     /// (uniform with `library_id`, so the launcher wire always carries the key).
     #[serde(default)]
     pub pretty_name: Option<String>,
+    /// Whether this devserver serves the standalone Files application, learned
+    /// from its `DevserverInfo` self-report at connect and cached like `os`.
+    /// The launcher hides the remote "New Files Window" action while false, so
+    /// a mint is never sent to a server that would ignore the `app` field.
+    /// `#[serde(default)]`: a row without the field reads `false`.
+    #[serde(default)]
+    pub files_app: bool,
     /// The id of the gateway this row was synthesized from (`gw-<8hex>`), or
     /// `None` for a plain configured row. The launcher gates row editing off
     /// this: synthesized rows come and go with the gateway's roster and carry

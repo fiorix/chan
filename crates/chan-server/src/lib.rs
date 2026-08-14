@@ -74,7 +74,9 @@ pub use chan_library::terminal_sessions::TerminalExit;
 #[cfg(unix)]
 pub use chan_library::user_shell;
 pub use chan_library::window_titles::{SharedWindowTitles, WindowMeta, WindowTitles};
-pub use chan_library::windows::{CreateWindow, WindowKind, WindowOrigin, WindowRecord, WindowSet};
+pub use chan_library::windows::{
+    CreateWindow, EffectiveWindowApp, WindowApp, WindowKind, WindowOrigin, WindowRecord, WindowSet,
+};
 pub(crate) use chan_library::{
     desktop_window_ops, session_presence, window_presence, window_titles, window_transfers,
 };
@@ -784,6 +786,7 @@ async fn build_app_with_extensions(
         window_bus,
         handover_bus,
         ephemeral_sessions: Mutex::new(std::collections::HashMap::new()),
+        ephemeral_files_sessions: Mutex::new(std::collections::HashMap::new()),
         terminal_session_dir: None,
         window_presence,
         session_registry,
@@ -1032,7 +1035,12 @@ async fn build_terminal_app(
     if let Some(dir) = session_dir.clone() {
         terminal_sessions.install_blob_reaper(terminal_sessions::BlobReaper::new(
             move |window_id: &str| {
+                // A discard is authoritative for the id whichever standalone
+                // namespace stored it, so delete defensively from both the
+                // ordinary Terminal store and its Files child.
                 let _ = crate::terminal_blob::delete(&dir, window_id);
+                let _ =
+                    crate::terminal_blob::delete(&crate::terminal_blob::files_dir(&dir), window_id);
             },
         ));
     }
@@ -1073,6 +1081,7 @@ async fn build_terminal_app(
         window_bus,
         handover_bus,
         ephemeral_sessions: Mutex::new(std::collections::HashMap::new()),
+        ephemeral_files_sessions: Mutex::new(std::collections::HashMap::new()),
         // A persisted devserver terminal sets this (its launcher session
         // store); a control / desktop-local terminal passes None.
         terminal_session_dir: session_dir,

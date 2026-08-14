@@ -48,29 +48,47 @@ pub struct WindowInfo {
     /// desktop registration as `title`; absent under the same conditions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// The standalone application (`"files"`) whose blob namespace holds this
+    /// row's saved layout; absent for ordinary Terminal rows and for
+    /// connected-only rows, whose namespace is unknown at this layer. Lets a
+    /// caller label a saved Files layout without parsing titles.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
 }
 
-/// Join saved blob keys and live socket ids into one sorted list.
-/// BTreeMap so the response order is deterministic (id-sorted).
-/// pub(crate): the `cs window list` control-socket handler serves the
-/// same rows. Rows carry no title/kind here -- see
+/// Join saved blob keys (both standalone namespaces: ordinary Terminal keys
+/// plus Files keys, each Files row stamped `app:"files"`) and live socket ids
+/// into one sorted list. BTreeMap so the response order is deterministic
+/// (id-sorted). Raw ids either way; a window id lives in exactly one
+/// namespace, so a collision (the same id saved in both) keeps the Files stamp
+/// and both saved sources. Rows carry no title/kind here -- see
 /// [`join_windows_with_titles`] for the desktop-enriched variant.
-pub(crate) fn join_windows(saved: Vec<String>, connected: Vec<String>) -> Vec<WindowInfo> {
-    let mut by_id: BTreeMap<String, (bool, bool)> = BTreeMap::new();
+pub(crate) fn join_windows_with_apps(
+    saved: Vec<String>,
+    saved_files: Vec<String>,
+    connected: Vec<String>,
+) -> Vec<WindowInfo> {
+    let mut by_id: BTreeMap<String, (bool, bool, bool)> = BTreeMap::new();
     for id in saved {
-        by_id.entry(id).or_insert((false, false)).1 = true;
+        by_id.entry(id).or_insert((false, false, false)).1 = true;
+    }
+    for id in saved_files {
+        let entry = by_id.entry(id).or_insert((false, false, false));
+        entry.1 = true;
+        entry.2 = true;
     }
     for id in connected {
-        by_id.entry(id).or_insert((false, false)).0 = true;
+        by_id.entry(id).or_insert((false, false, false)).0 = true;
     }
     by_id
         .into_iter()
-        .map(|(id, (connected, saved))| WindowInfo {
+        .map(|(id, (connected, saved, files))| WindowInfo {
             id,
             connected,
             saved,
             title: None,
             kind: None,
+            app: files.then(|| "files".to_string()),
         })
         .collect()
 }
@@ -81,10 +99,11 @@ pub(crate) fn join_windows(saved: Vec<String>, connected: Vec<String>) -> Vec<Wi
 /// dropped carry no title -- correct, there is no live OS title for them.
 pub(crate) fn join_windows_with_titles(
     saved: Vec<String>,
+    saved_files: Vec<String>,
     connected: Vec<String>,
     titles: &crate::window_titles::WindowTitles,
 ) -> Vec<WindowInfo> {
-    let mut rows = join_windows(saved, connected);
+    let mut rows = join_windows_with_apps(saved, saved_files, connected);
     for row in &mut rows {
         if let Some(meta) = titles.get(&row.id) {
             row.title = Some(meta.title);
@@ -103,22 +122,37 @@ pub(crate) fn join_windows_with_titles(
 pub(crate) fn enumerate_windows(state: &AppState) -> Vec<WindowInfo> {
     let connected = state.window_presence.connected_ids();
     let titles = state.window_titles.clone();
-    let saved: Vec<String> = match state.try_workspace() {
-        Ok(workspace) => workspace.list_sessions().unwrap_or_default(),
+    let (saved, saved_files): (Vec<String>, Vec<String>) = match state.try_workspace() {
+        Ok(workspace) => (workspace.list_sessions().unwrap_or_default(), Vec::new()),
         // Workspace-less terminal tenant: a persistent launcher store when one
-        // is configured (a persisted devserver terminal), else in memory.
+        // is configured (a persisted devserver terminal), else in memory. Both
+        // standalone namespaces (Terminal and Files) merge into one id list,
+        // Files rows stamped with their app.
         Err(_) => match &state.terminal_session_dir {
-            Some(dir) => crate::terminal_blob::list(dir).unwrap_or_default(),
-            None => state
-                .ephemeral_sessions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .keys()
-                .cloned()
-                .collect(),
+            Some(dir) => (
+                crate::terminal_blob::list(dir).unwrap_or_default(),
+                crate::terminal_blob::list(&crate::terminal_blob::files_dir(dir))
+                    .unwrap_or_default(),
+            ),
+            None => (
+                state
+                    .ephemeral_sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .keys()
+                    .cloned()
+                    .collect(),
+                state
+                    .ephemeral_files_sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .keys()
+                    .cloned()
+                    .collect(),
+            ),
         },
     };
-    join_windows_with_titles(saved, connected, &titles)
+    join_windows_with_titles(saved, saved_files, connected, &titles)
 }
 
 pub async fn api_list_windows(State(state): State<Arc<AppState>>) -> Response {
@@ -139,8 +173,9 @@ mod tests {
 
     #[test]
     fn join_is_a_sorted_union_with_per_source_flags() {
-        let joined = join_windows(
+        let joined = join_windows_with_apps(
             vec!["w-b".into(), "w-a".into()],
+            Vec::new(),
             vec!["w-c".into(), "w-b".into()],
         );
         let view: Vec<(&str, bool, bool)> = joined
@@ -170,6 +205,7 @@ mod tests {
             saved: false,
             title: None,
             kind: None,
+            app: None,
         })
         .unwrap();
         assert_eq!(
@@ -188,11 +224,32 @@ mod tests {
             saved: false,
             title: Some("Terminal Window 1".into()),
             kind: Some("terminal".into()),
+            app: None,
         })
         .unwrap();
         assert_eq!(
             json,
             r#"{"id":"terminal-win-0","connected":true,"saved":false,"title":"Terminal Window 1","kind":"terminal"}"#,
+        );
+    }
+
+    #[test]
+    fn files_namespace_rows_carry_the_app_stamp() {
+        let rows = join_windows_with_apps(
+            vec!["w-term".into()],
+            vec!["w-files".into()],
+            vec!["w-files".into()],
+        );
+        let by_id = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(by_id("w-term").app, None);
+        assert_eq!(by_id("w-files").app.as_deref(), Some("files"));
+        assert!(by_id("w-files").saved && by_id("w-files").connected);
+        // The wire keeps the base triple for plain rows and adds `app` only
+        // for Files rows.
+        let json = serde_json::to_string(by_id("w-files")).unwrap();
+        assert_eq!(
+            json,
+            r#"{"id":"w-files","connected":true,"saved":true,"app":"files"}"#
         );
     }
 
@@ -206,7 +263,8 @@ mod tests {
                 kind: Some("workspace".into()),
             },
         );
-        let rows = join_windows_with_titles(vec!["w-a".into()], vec!["w-b".into()], &titles);
+        let rows =
+            join_windows_with_titles(vec!["w-a".into()], Vec::new(), vec!["w-b".into()], &titles);
         let by_id = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
         // The closed-but-saved row has no live title.
         assert_eq!(by_id("w-a").title, None);

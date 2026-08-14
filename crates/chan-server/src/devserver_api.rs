@@ -60,6 +60,14 @@ pub struct DevserverInfo {
     /// unknown; the icon is driven by `os` alone, so this is cosmetic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pretty_name: Option<String>,
+    /// Whether this devserver serves the standalone Files application: true
+    /// only when it constructed a supported standalone filesystem state (POSIX,
+    /// resolvable `$HOME`). Capable clients hide the Files action when false,
+    /// so a mint request is never sent to a server that would ignore the `app`
+    /// field and hand back a plain Terminal. `#[serde(default)]`: false from a
+    /// devserver too old to report it.
+    #[serde(default)]
+    pub files_app: bool,
 }
 
 /// One element of `GET /api/devserver/workspaces`, the box's workspace
@@ -203,6 +211,7 @@ mod tests {
             library_id: "lib-0123456789abcdef".into(),
             os: "linux".into(),
             pretty_name: Some("Ubuntu 22.04.3 LTS".into()),
+            files_app: true,
         };
         let v = serde_json::to_value(&info).unwrap();
         assert_eq!(
@@ -214,13 +223,15 @@ mod tests {
                 "library_id": "lib-0123456789abcdef",
                 "os": "linux",
                 "pretty_name": "Ubuntu 22.04.3 LTS",
+                "files_app": true,
             })
         );
         assert_eq!(info, serde_json::from_value(v).unwrap());
 
-        // `os`/`pretty_name` are additive: a payload from a devserver too old
-        // to report them deserializes to the empty family + no pretty name, so
-        // the launcher just shows the neutral icon rather than refusing.
+        // `os`/`pretty_name`/`files_app` are additive: a payload from a
+        // devserver too old to report them deserializes to the empty family, no
+        // pretty name, and no Files support, so the launcher shows the neutral
+        // icon and hides the Files action rather than refusing.
         let old: DevserverInfo = serde_json::from_value(json!({
             "devserver_version": "0.30.0",
             "protocol": 1,
@@ -230,6 +241,7 @@ mod tests {
         .unwrap();
         assert_eq!(old.os, "");
         assert_eq!(old.pretty_name, None);
+        assert!(!old.files_app);
     }
 
     #[test]

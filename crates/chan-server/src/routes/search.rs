@@ -1048,6 +1048,7 @@ mod tests {
             window_bus: std::sync::Arc::new(crate::window_bus::WindowBus::new()),
             handover_bus: std::sync::Arc::new(crate::handover_bus::HandoverBus::new()),
             ephemeral_sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            ephemeral_files_sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
             terminal_session_dir: None,
             window_presence: std::sync::Arc::new(crate::window_presence::WindowPresence::new()),
             session_registry: std::sync::Arc::new(crate::session_presence::SessionRegistry::new()),

@@ -2274,6 +2274,9 @@ async fn handle_info(State(state): State<Arc<DevserverState>>) -> Json<Devserver
         library_id: state.library_id.clone(),
         os,
         pretty_name,
+        // No devserver surface constructs a standalone filesystem state, so
+        // the Files application is not served and clients must hide the action.
+        files_app: false,
     })
 }
 
