@@ -253,6 +253,12 @@ pub enum ControlRequest {
     // window id. The id-bearing verbs act on ANY window by id (the single
     // desktop AppHandle is global), so an id need not belong to this tenant.
     WindowNew,
+    // Open a new standalone Files window. A DISTINCT tag rather than a field
+    // on window_new: an internally-tagged decoder ignores unknown sibling
+    // keys, so an older server receiving a field-carrying window_new would
+    // silently mint a plain Terminal; an unknown tag gets the standard
+    // unknown-request refusal instead, the clear error the caller needs.
+    WindowNewFiles,
     // Focus a live window, or un-hide a buried one; best-effort reopens a
     // closed-but-saved workspace window when its workspace is still running.
     WindowOpen {
@@ -944,6 +950,14 @@ mod survey_wire_tests {
         assert_eq!(v, serde_json::json!({"type": "window_new"}));
         let back: ControlRequest = serde_json::from_str(r#"{"type":"window_new"}"#).unwrap();
         assert!(matches!(back, ControlRequest::WindowNew));
+    }
+
+    #[test]
+    fn window_new_files_request_tag() {
+        let v = serde_json::to_value(ControlRequest::WindowNewFiles).unwrap();
+        assert_eq!(v, serde_json::json!({"type": "window_new_files"}));
+        let back: ControlRequest = serde_json::from_str(r#"{"type":"window_new_files"}"#).unwrap();
+        assert!(matches!(back, ControlRequest::WindowNewFiles));
     }
 
     #[test]

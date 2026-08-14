@@ -691,6 +691,13 @@ pub struct DevserverFeed {
     /// resolves the launcher's machine icon. Like `library_ids`, it survives
     /// disconnect (the OS does not change across a reconnect).
     os: Mutex<HashMap<String, (String, Option<String>)>>,
+    /// Devserver id -> whether it serves the standalone Files application, from
+    /// the same `DevserverInfo` probe. Kept apart from `os` because it is NOT a
+    /// fixed property of the box: a devserver upgrade changes it, so it is
+    /// seeded fresh on every connect and dropped on disconnect rather than
+    /// surviving as `os` does. `entry_from_devserver` hands it to the launcher,
+    /// which offers the remote New-Files action only where it is true.
+    files_app: Mutex<HashMap<String, bool>>,
     /// Native labels of devserver windows the desktop has LOCALLY buried.
     /// `windows()` overrides their `connected` to false so the launcher dot
     /// reflects hidden the moment they're hidden -- the desktop's bury state is the
@@ -747,17 +754,38 @@ impl DevserverFeed {
         self.os.lock().unwrap().get(id).cloned()
     }
 
+    /// Seed a devserver's self-reported Files capability from the connect probe.
+    /// Written on EVERY connect (an upgraded devserver reports a different
+    /// answer), so the launcher's remote New-Files affordance follows the server
+    /// this connection actually talks to.
+    fn seed_files_app(&self, id: String, files_app: bool) {
+        self.files_app.lock().unwrap().insert(id, files_app);
+    }
+
+    /// Whether a devserver reported the standalone Files application on its
+    /// current connect. `false` before the first connect and after a disconnect
+    /// drops the entry -- the capability is only known while connected.
+    fn files_app_of(&self, id: &str) -> bool {
+        self.files_app
+            .lock()
+            .unwrap()
+            .get(id)
+            .copied()
+            .unwrap_or(false)
+    }
+
     /// Drop a disconnected devserver from the per-connection feeds (windows +
-    /// workspace + colour). KEEPS `library_ids` (the same devserver keeps its id
-    /// on reconnect). Clears its buried-label overrides so a reconnect
-    /// doesn't show its reopened windows as hidden. The control terminal is no
-    /// longer a desktop feed record (it is a chan-library registry row
-    /// now); its reap is `reap_control_window` on the connect-script PTY exit /
+    /// workspace + colour + Files capability). KEEPS `library_ids` (the same
+    /// devserver keeps its id on reconnect). Clears its buried-label overrides so
+    /// a reconnect doesn't show its reopened windows as hidden. The control
+    /// terminal is no longer a desktop feed record (it is a chan-library registry
+    /// row now); its reap is `reap_control_window` on the connect-script PTY exit /
     /// teardown, not a `forget` drop.
     fn forget(&self, id: &str) {
         self.windows.lock().unwrap().remove(id);
         self.workspaces.lock().unwrap().remove(id);
         self.colors.lock().unwrap().remove(id);
+        self.files_app.lock().unwrap().remove(id);
         self.down.lock().unwrap().remove(id);
         self.unreachable.lock().unwrap().remove(id);
         if let Some(library_id) = self.library_ids.lock().unwrap().get(id).cloned() {
@@ -2844,6 +2872,13 @@ async fn connect_devserver_impl_inner(
             .devserver_feed
             .seed_os(id.clone(), info.os.clone(), info.pretty_name.clone());
     }
+    // Seed the Files capability from the same probe, unconditionally: this
+    // connect's answer is the one the launcher's remote New-Files affordance
+    // and the mint gate must follow, and a devserver upgrade flips it either
+    // way (so a previous connect's value is never carried forward).
+    state
+        .devserver_feed
+        .seed_files_app(id.clone(), info.files_app);
     // Mint the connect-script control terminal as a chan-library registry row
     // under this devserver's `library_id`. The native window was
     // already opened imperatively by `spawn_control_terminal_window`;
@@ -3001,7 +3036,8 @@ pub(crate) async fn open_devserver_workspace_impl(
         .devservers
         .get(&id)
         .ok_or_else(|| "devserver is not connected".to_string())?;
-    devserver::mint_library_window(&conn, chan_server::WindowKind::Workspace, Some(path)).await?;
+    devserver::mint_library_window(&conn, chan_server::WindowKind::Workspace, None, Some(path))
+        .await?;
     Ok(())
 }
 
@@ -3020,7 +3056,38 @@ pub(crate) async fn open_devserver_terminal_impl(
         .devservers
         .get(&id)
         .ok_or_else(|| format!("devserver {id} is not connected"))?;
-    devserver::mint_library_window(&conn, chan_server::WindowKind::Terminal, None).await?;
+    devserver::mint_library_window(&conn, chan_server::WindowKind::Terminal, None, None).await?;
+    Ok(())
+}
+
+/// Mint a standalone Files window on a connected devserver's library (the
+/// launcher's per-devserver New Files button). Storage kind Terminal plus the
+/// files app, so the remote mints it onto the SAME shared terminal tenant its
+/// standalone terminals ride and the desktop's watcher opens it as a `lib-`
+/// window in files mode. Gated on the capability that devserver reported at
+/// connect: minting Files on a server that cannot serve them would answer 400
+/// there, so refuse here with a message that names the reason. Reached over the
+/// desktop bridge from the launcher's per-devserver `files-window` route.
+pub(crate) async fn open_devserver_files_impl(
+    state: &Arc<AppState>,
+    id: String,
+) -> Result<(), String> {
+    let conn = state
+        .devservers
+        .get(&id)
+        .ok_or_else(|| format!("devserver {id} is not connected"))?;
+    if !state.devserver_feed.files_app_of(&id) {
+        return Err(format!(
+            "devserver {id} does not serve the files application"
+        ));
+    }
+    devserver::mint_library_window(
+        &conn,
+        chan_server::WindowKind::Terminal,
+        Some(chan_server::WindowApp::Files),
+        None,
+    )
+    .await?;
     Ok(())
 }
 
@@ -4620,7 +4687,7 @@ async fn create_library_window(
             Some(devserver_workspace_path(&conn, workspace_id).await?)
         }
     };
-    devserver::mint_library_window(&conn, kind, workspace_path)
+    devserver::mint_library_window(&conn, kind, None, workspace_path)
         .await
         .map(|_| ())
 }
@@ -7013,7 +7080,7 @@ async fn mint_another_devserver_window(
         chan_server::WindowKind::Terminal => None,
         chan_server::WindowKind::Workspace => record.workspace_path.clone(),
     };
-    devserver::mint_library_window(&conn, record.kind, workspace_path)
+    devserver::mint_library_window(&conn, record.kind, None, workspace_path)
         .await
         .map(|_| ())
 }

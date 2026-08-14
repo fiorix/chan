@@ -43,6 +43,7 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
                 NewWindowKind::Terminal => {
                     serve::spawn_local_terminal_window(Arc::clone(&state)).await
                 }
+                NewWindowKind::Files => serve::spawn_local_files_window(Arc::clone(&state)).await,
                 NewWindowKind::Workspace { key } => new_workspace_window(&state, &key).await,
             };
             let _ = reply.send(result);
@@ -107,6 +108,9 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
         }
         DesktopWindowOp::OpenDevserverTerminal { id, reply } => {
             let _ = reply.send(crate::open_devserver_terminal_impl(&state, id).await);
+        }
+        DesktopWindowOp::OpenDevserverFiles { id, reply } => {
+            let _ = reply.send(crate::open_devserver_files_impl(&state, id).await);
         }
         DesktopWindowOp::OpenDevserverWorkspace { id, path, reply } => {
             let _ = reply.send(crate::open_devserver_workspace_impl(&state, id, path).await);

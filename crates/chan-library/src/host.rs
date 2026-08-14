@@ -1693,6 +1693,16 @@ impl WorkspaceHost {
         runtime.artifacts.session_registry.leader()
     }
 
+    /// Whether the mounted shared terminal tenant serves the standalone
+    /// Files application. `None` while that tenant is unmounted (the
+    /// caller falls back to the platform predicate); `Some(bool)` reports
+    /// the constructed state, the authority once a tenant exists.
+    pub fn shared_terminal_files_app(&self) -> Option<bool> {
+        let prefix = self.terminal_tenant_prefix.get()?;
+        let workspaces = self.workspaces.read().ok()?;
+        Some(workspaces.get(prefix)?.artifacts.files_app)
+    }
+
     /// The per-tenant leaders map the window watch feed publishes: tenant route
     /// `prefix` -> that tenant's leader window_id, for every mounted tenant with
     /// a live leader. Keyed by prefix (the value on each [`WindowRecord::prefix`])
@@ -3066,6 +3076,7 @@ mod tests {
         TenantArtifacts {
             app,
             token: None,
+            files_app: false,
             terminal_sessions: fake_registry(),
             tasks: TenantTaskOwner::new(shutdown_tx, Vec::new()),
             prefix: Arc::new(RwLock::new(String::new())),

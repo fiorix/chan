@@ -157,6 +157,10 @@ pub async fn ws_upgrade(
     let last_activity = state.last_activity.clone();
     let shutdown_rx = state.shutdown_rx.clone();
     let scopes = state.scope_registry.clone();
+    let watch_manager = state
+        .standalone_files
+        .as_ref()
+        .map(|files| files.watcher.clone());
     let presence = state.window_presence.clone();
     let transfers = state.window_transfers.clone();
     let session_registry = state.session_registry.clone();
@@ -202,6 +206,7 @@ pub async fn ws_upgrade(
             last_activity,
             shutdown_rx,
             scopes,
+            watch_manager,
             transfer_guard,
             window_id,
         )
@@ -263,12 +268,14 @@ const PONG_FRAME: &str = r#"{"type":"pong"}"#;
 /// on exit (every break path falls through to the `unregister` call), so an
 /// abrupt disconnect drops all of this socket's scope subscriptions and
 /// cannot leak a scope.
+#[allow(clippy::too_many_arguments)]
 async fn ws_pump(
     mut socket: WebSocket,
     mut rx: broadcast::Receiver<String>,
     last_activity: Arc<AtomicU64>,
     mut shutdown_rx: watch::Receiver<bool>,
     scopes: Arc<ScopeRegistry>,
+    watch_manager: Option<Arc<crate::standalone_watch::ScopedWatchManager>>,
     transfer_guard: Option<TransferGuard>,
     window_id: Option<String>,
 ) {
@@ -279,14 +286,20 @@ async fn ws_pump(
         &last_activity,
         &mut shutdown_rx,
         &scopes,
+        watch_manager.as_deref(),
         sub_id,
         scope_rx,
         transfer_guard.as_ref(),
         window_id.as_deref(),
     )
     .await;
-    // Unconditional teardown: drops every scope this socket held.
-    scopes.unregister(sub_id);
+    // Unconditional teardown: drops every scope this socket held. The final
+    // detach transitions feed the standalone watch manager (when this tenant
+    // has one) so an abandoned scope's OS watch is released too.
+    let delta = scopes.unregister(sub_id);
+    if let Some(manager) = watch_manager {
+        manager.apply_delta(delta);
+    }
     // `transfer_guard` drops here too, clearing this socket's transfer count.
 }
 
@@ -297,6 +310,7 @@ async fn pump_loop(
     last_activity: &Arc<AtomicU64>,
     shutdown_rx: &mut watch::Receiver<bool>,
     scopes: &Arc<ScopeRegistry>,
+    watch_manager: Option<&crate::standalone_watch::ScopedWatchManager>,
     sub_id: SubId,
     mut scope_rx: mpsc::UnboundedReceiver<String>,
     transfer_guard: Option<&TransferGuard>,
@@ -360,7 +374,7 @@ async fn pump_loop(
             // the WS-level Ping; the app-level heartbeat is the text `ping`).
             inbound = socket.recv() => match inbound {
                 Some(Ok(Message::Text(text))) => {
-                    if apply_client_frame(scopes, sub_id, &text, transfer_guard)
+                    if apply_client_frame(scopes, watch_manager, sub_id, &text, transfer_guard)
                         == ClientFrameReply::Pong
                         && socket.send(Message::text(PONG_FRAME)).await.is_err()
                     {
@@ -384,17 +398,26 @@ async fn pump_loop(
 /// frame must not tear down the socket).
 fn apply_client_frame(
     scopes: &ScopeRegistry,
+    watch_manager: Option<&crate::standalone_watch::ScopedWatchManager>,
     sub_id: SubId,
     text: &str,
     transfer_guard: Option<&TransferGuard>,
 ) -> ClientFrameReply {
     match serde_json::from_str::<ClientFrame>(text) {
         Ok(ClientFrame::Sub { dir }) => {
-            scopes.subscribe(sub_id, &dir);
+            // The delta reports global 0 -> 1 / 1 -> 0 transitions; only a
+            // tenant with a real per-directory watcher consumes them.
+            let delta = scopes.subscribe(sub_id, &dir);
+            if let Some(manager) = watch_manager {
+                manager.apply_delta(delta);
+            }
             ClientFrameReply::None
         }
         Ok(ClientFrame::Unsub { dir }) => {
-            scopes.unsubscribe(sub_id, &dir);
+            let delta = scopes.unsubscribe(sub_id, &dir);
+            if let Some(manager) = watch_manager {
+                manager.apply_delta(delta);
+            }
             ClientFrameReply::None
         }
         Ok(ClientFrame::Transfers { active }) => {
@@ -422,20 +445,32 @@ mod tests {
 
         // sub/unsub owe the socket no reply.
         assert_eq!(
-            apply_client_frame(&reg, id, r#"{"type":"sub","dir":"notes/recipes"}"#, None),
+            apply_client_frame(
+                &reg,
+                None,
+                id,
+                r#"{"type":"sub","dir":"notes/recipes"}"#,
+                None
+            ),
             ClientFrameReply::None
         );
         assert!(reg.scope_exists("notes/recipes"));
         assert_eq!(reg.subscriber_count("notes/recipes"), 1);
 
         assert_eq!(
-            apply_client_frame(&reg, id, r#"{"type":"unsub","dir":"notes/recipes"}"#, None),
+            apply_client_frame(
+                &reg,
+                None,
+                id,
+                r#"{"type":"unsub","dir":"notes/recipes"}"#,
+                None
+            ),
             ClientFrameReply::None
         );
         assert!(!reg.scope_exists("notes/recipes"));
 
         // The workspace root scope rides the same path.
-        apply_client_frame(&reg, id, r#"{"type":"sub","dir":""}"#, None);
+        apply_client_frame(&reg, None, id, r#"{"type":"sub","dir":""}"#, None);
         assert!(reg.scope_exists(""));
     }
 
@@ -450,7 +485,7 @@ mod tests {
         let (id, _rx) = reg.register();
 
         assert_eq!(
-            apply_client_frame(&reg, id, r#"{"type":"ping"}"#, None),
+            apply_client_frame(&reg, None, id, r#"{"type":"ping"}"#, None),
             ClientFrameReply::Pong
         );
         // A ping must not touch the scope registry.
@@ -563,9 +598,9 @@ mod tests {
         let (id, _rx) = reg.register();
         // Bad JSON, an unmodeled type, and a missing field must all be
         // no-ops (a stray frame cannot tear down or corrupt the socket).
-        apply_client_frame(&reg, id, "not json", None);
-        apply_client_frame(&reg, id, r#"{"type":"bogus","dir":"x"}"#, None);
-        apply_client_frame(&reg, id, r#"{"type":"sub"}"#, None);
+        apply_client_frame(&reg, None, id, "not json", None);
+        apply_client_frame(&reg, None, id, r#"{"type":"bogus","dir":"x"}"#, None);
+        apply_client_frame(&reg, None, id, r#"{"type":"sub"}"#, None);
         assert!(!reg.scope_exists("x"));
         assert_eq!(reg.subscriber_count(""), 0);
     }
@@ -580,14 +615,26 @@ mod tests {
         let transfers = Arc::new(crate::window_transfers::WindowTransfers::new());
         let guard = transfers.register("w1");
 
-        apply_client_frame(&reg, id, r#"{"type":"transfers","active":2}"#, Some(&guard));
+        apply_client_frame(
+            &reg,
+            None,
+            id,
+            r#"{"type":"transfers","active":2}"#,
+            Some(&guard),
+        );
         assert!(transfers.window_has_active_transfer("w1"));
 
-        apply_client_frame(&reg, id, r#"{"type":"transfers","active":0}"#, Some(&guard));
+        apply_client_frame(
+            &reg,
+            None,
+            id,
+            r#"{"type":"transfers","active":0}"#,
+            Some(&guard),
+        );
         assert!(!transfers.window_has_active_transfer("w1"));
 
         // A socket with no `?w=` (no guard) silently ignores the frame.
-        apply_client_frame(&reg, id, r#"{"type":"transfers","active":5}"#, None);
+        apply_client_frame(&reg, None, id, r#"{"type":"transfers","active":5}"#, None);
         assert!(!transfers.window_has_active_transfer("w1"));
     }
 }

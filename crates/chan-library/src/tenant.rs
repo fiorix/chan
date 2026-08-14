@@ -273,6 +273,11 @@ pub struct TenantArtifacts {
     pub app: axum::Router,
     /// Persisted bearer for this tenant (`None` with `--no-token`).
     pub token: Option<String>,
+    /// Whether this tenant constructed a supported standalone Files
+    /// filesystem state. True only on a shared terminal tenant whose host
+    /// platform supports it; the capability the launcher and the Files
+    /// mint validation consult.
+    pub files_app: bool,
     /// The tenant's PTY registry (window-session checks, scrollback, reap).
     pub terminal_sessions: Arc<TerminalRegistry>,
     /// The bounded owner of the existing terminal/session/document/scene tasks

@@ -1559,6 +1559,7 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
             handle_clipboard_paste(window_id, prefer, events_tx, window_bus).await
         }
         ControlRequest::WindowNew => handle_window_new(desktop, workspace_cell, tenant).await,
+        ControlRequest::WindowNewFiles => handle_window_new_files(desktop).await,
         ControlRequest::WindowOpen { id } => into_response(
             desktop
                 .dispatch(|reply| DesktopWindowOp::Open {
@@ -3270,6 +3271,30 @@ async fn handle_window_new(
     into_response(
         desktop
             .dispatch(|reply| DesktopWindowOp::New { kind, reply })
+            .await,
+    )
+}
+
+/// `cs window new --app files`: spawn a standalone Files window. Explicit
+/// rather than tenant-derived (a terminal inside a Files window still sits on
+/// the shared terminal tenant, so inference would mint plain Terminals), and
+/// refused with a clear error on a host that cannot serve the files
+/// application.
+async fn handle_window_new_files(
+    desktop: &crate::desktop_window_ops::DesktopBridge,
+) -> ControlResponse {
+    use crate::desktop_window_ops::{DesktopWindowOp, NewWindowKind};
+    if !crate::standalone_files_supported() {
+        return ControlResponse::Error {
+            message: "this host does not serve the files application".to_string(),
+        };
+    }
+    into_response(
+        desktop
+            .dispatch(|reply| DesktopWindowOp::New {
+                kind: NewWindowKind::Files,
+                reply,
+            })
             .await,
     )
 }

@@ -510,6 +510,16 @@
               onclick={() => run(newTerminal(ds))}>
               <SquareTerminal size={16} />
             </button>
+            {#if ds.files_app}
+              <button
+                class="icon-btn"
+                type="button"
+                title="New files window"
+                aria-label={`New files window on ${devserverName(ds)}`}
+                onclick={() => run(newFilesWindow(ds))}>
+                <Folder size={16} />
+              </button>
+            {/if}
           {/if}
           {#if hasDesktopBridge}
             {#if ds.gateway_id && ds.shared && !ds.native_trust_required}

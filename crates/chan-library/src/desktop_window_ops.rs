@@ -29,6 +29,8 @@ use crate::window_titles::SharedWindowTitles;
 pub enum NewWindowKind {
     /// A standalone terminal window (the shared `/terminal` tenant).
     Terminal,
+    /// A standalone Files window (the same shared tenant, files app).
+    Files,
     /// Another window of the workspace rooted at `key` (its canonical
     /// path), which the desktop matches against its running workspaces.
     Workspace { key: String },
@@ -127,6 +129,15 @@ pub enum DesktopWindowOp {
     /// `Ok(())` once the window is spawning. Inert without a desktop attached  --
     /// the route then answers [`NO_DESKTOP`].
     OpenDevserverTerminal {
+        id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Open a fresh standalone-Files window on a connected devserver by id. The
+    /// launcher's per-devserver New-Files button drives this; the reply is
+    /// `Ok(())` once the window is spawning, or the error string when that
+    /// devserver does not serve the files application. Inert without a desktop
+    /// attached -- the route then answers [`NO_DESKTOP`].
+    OpenDevserverFiles {
         id: String,
         reply: oneshot::Sender<Result<(), String>>,
     },

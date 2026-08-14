@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use chan_server::{WindowKind, WindowRecord, WorkspaceLifecycleOutcome};
+use chan_server::{EffectiveWindowApp, WindowKind, WindowRecord, WorkspaceLifecycleOutcome};
 
 /// Per-process monotonic counter appended to every workspace-window
 /// label so the user can open more than one window for the same
@@ -237,10 +237,14 @@ fn workspace_title(key: &str) -> String {
 /// terminal carries no workspace, so it reads `icon devserver Terminal`. The
 /// full remote path is NOT used (it would read as a meaningless local path --
 /// `workspace_title`'s local house glyph is wrong for a remote box).
+///
+/// Keyed by the record's EFFECTIVE APP, not its storage kind: a Files window
+/// rides the terminal-class tenant and must read `Files`, not `Terminal`.
 fn devserver_window_title(devserver_name: &str, record: &WindowRecord) -> String {
-    match record.kind {
-        WindowKind::Terminal => format!("{ICON_OUTBOUND} {devserver_name} Terminal"),
-        WindowKind::Workspace => {
+    match record.effective_app() {
+        EffectiveWindowApp::Terminal => format!("{ICON_OUTBOUND} {devserver_name} Terminal"),
+        EffectiveWindowApp::Files => format!("{ICON_OUTBOUND} {devserver_name} Files"),
+        EffectiveWindowApp::Workspace => {
             let repo = record
                 .workspace_path
                 .as_deref()
@@ -264,9 +268,10 @@ pub(crate) fn watched_window_base_title(
 ) -> String {
     match devserver_name {
         Some(name) => devserver_window_title(name, record),
-        None => match record.kind {
-            WindowKind::Terminal => "Terminal".to_string(),
-            WindowKind::Workspace => record
+        None => match record.effective_app() {
+            EffectiveWindowApp::Terminal => "Terminal".to_string(),
+            EffectiveWindowApp::Files => "Files".to_string(),
+            EffectiveWindowApp::Workspace => record
                 .workspace_path
                 .as_deref()
                 .map(workspace_title)
@@ -275,13 +280,16 @@ pub(crate) fn watched_window_base_title(
     }
 }
 
-/// The SPA boot mode for a watcher-opened window. Never `control`: a control
-/// row is not `persisted`, so the reconcile's show test excludes it and the
-/// watcher never opens one.
+/// The SPA boot mode for a watcher-opened window, keyed by the record's
+/// EFFECTIVE APP so a Files window (storage kind Terminal, app Files) boots the
+/// files application instead of a terminal. Never `control`: a control row is
+/// not `persisted`, so the reconcile's show test excludes it and the watcher
+/// never opens one.
 pub(crate) fn watched_window_kind(record: &WindowRecord) -> Option<&'static str> {
-    match record.kind {
-        WindowKind::Terminal => Some("terminal"),
-        WindowKind::Workspace => None,
+    match record.effective_app() {
+        EffectiveWindowApp::Terminal => Some("terminal"),
+        EffectiveWindowApp::Files => Some("files"),
+        EffectiveWindowApp::Workspace => None,
     }
 }
 
@@ -441,10 +449,7 @@ pub(crate) fn retarget_watched_remote_window(
     let Some(window) = app.get_webview_window(&label) else {
         return Ok(false);
     };
-    let kind = match record.kind {
-        WindowKind::Terminal => Some("terminal"),
-        WindowKind::Workspace => None,
-    };
+    let kind = watched_window_kind(record);
     let target = workspace_window_target_url(
         app,
         &label,
@@ -532,6 +537,28 @@ pub async fn spawn_local_terminal_window(state: Arc<AppState>) -> Result<String,
     // Mint the window; the watcher opens it. The registry is the sole window
     // authority, so the terminal can never be double-opened and it persists.
     let record = embedded.mint_window(WindowKind::Terminal, None)?;
+    Ok(crate::window_watcher::native_label(&record))
+}
+
+/// Mint a standalone Files window: the same library registry row and the same
+/// ONE shared `/terminal` tenant a standalone terminal rides (the files
+/// application is served by that tenant, so a Files window and a terminal
+/// window are siblings, not separate mounts), differing only in the record's
+/// app -- so the watcher opens it in `?kind=files` mode. Refused when this host
+/// cannot serve the files application: the mounted tenant's own answer where
+/// there is one, else the platform predicate the tenant is built from. Returns
+/// the new window's composite native label.
+pub async fn spawn_local_files_window(state: Arc<AppState>) -> Result<String, String> {
+    let Some(embedded) = state.embedded.get() else {
+        return Err("embedded local server is unavailable".to_string());
+    };
+    // Mount the shared terminal tenant first: it carries the files state, so
+    // its constructed answer is the authority the capability check reads.
+    embedded.open_terminal().await?;
+    if !embedded.files_app_supported() {
+        return Err("this host does not serve the files application".to_string());
+    }
+    let record = embedded.mint_files_window()?;
     Ok(crate::window_watcher::native_label(&record))
 }
 
@@ -971,7 +998,8 @@ struct WindowSpec<'a> {
     connecting: Option<&'a str>,
     /// `Some("terminal")` makes the SPA boot in terminal-only mode (no
     /// workspace fetch); `Some("control")` is the stricter singleton control
-    /// sub-mode (terminal-only + hidden chrome, one PTY); `None` is full
+    /// sub-mode (terminal-only + hidden chrome, one PTY); `Some("files")` boots
+    /// the standalone files application on that same tenant; `None` is full
     /// workspace mode. Also the kind `cs window list` shows.
     kind: Option<&'a str>,
 }
@@ -1475,10 +1503,7 @@ pub(crate) fn browser_window_url(
         "http://{addr}{}/index.html?t={}",
         record.prefix, record.token
     );
-    let kind = match record.kind {
-        WindowKind::Terminal => Some("terminal"),
-        WindowKind::Workspace => None,
-    };
+    let kind = watched_window_kind(record);
     workspace_window_target_url(
         app,
         &label,
@@ -1508,7 +1533,8 @@ fn workspace_window_target_url(
     parsed.query_pairs_mut().append_pair("w", session_id);
     // `kind=terminal` / `kind=control` are the SPA's only signal to enter
     // terminal-only mode (no workspace fetch, terminal panes only);
-    // `control` additionally selects the singleton control sub-mode.
+    // `control` additionally selects the singleton control sub-mode, and
+    // `kind=files` boots the standalone files application on the same tenant.
     // Workspace/outbound windows pass `None` and the SPA stays in full
     // workspace mode.
     if let Some(kind) = kind {
@@ -2417,6 +2443,90 @@ mod tests {
         );
         // The control-window shape is pinned by
         // `control_terminal_titles_do_not_use_window_number_suffix`.
+    }
+
+    fn terminal_record() -> WindowRecord {
+        WindowRecord {
+            window_id: "w-1".into(),
+            library_id: "local".into(),
+            kind: WindowKind::Terminal,
+            app: None,
+            title: "\u{2302} Terminal Window 1".into(),
+            ordinal: 1,
+            label: String::new(),
+            workspace_path: None,
+            prefix: "/terminal".into(),
+            token: "tok".into(),
+            persisted: true,
+            connected: false,
+            active_transfer: false,
+            control: false,
+            hidden: false,
+            origin: chan_server::WindowOrigin::Native,
+        }
+    }
+
+    #[test]
+    fn a_files_record_boots_the_files_app_and_titles_as_files() {
+        // A Files window is a terminal-KIND row (it rides the shared terminal
+        // tenant) carrying the files app, so keying on the kind alone would boot
+        // it as a terminal and title it "Terminal Window N". The kind switch
+        // feeds three surfaces at once -- the webview's `?kind=`, the
+        // WindowTitles kind `cs window list` prints, and the key-bridge chord
+        // routing -- so this is the one place that projection has to hold.
+        let terminal = terminal_record();
+        let mut files = terminal_record();
+        files.app = Some(chan_server::WindowApp::Files);
+
+        assert_eq!(watched_window_kind(&terminal), Some("terminal"));
+        assert_eq!(watched_window_kind(&files), Some("files"));
+        assert_eq!(watched_window_base_title(&files, None), "Files");
+        assert_eq!(watched_window_title(&files, None), "Files Window 1");
+        // A remote Files window reads as the devserver's Files, not its Terminal.
+        assert_eq!(
+            watched_window_title(&files, Some("box")),
+            "\u{2197}\u{FE0E} box Files Window 1",
+        );
+    }
+
+    #[test]
+    fn every_watched_url_reads_the_boot_mode_from_one_switch() {
+        // The open, retarget, and open-in-browser paths must agree on a
+        // record's `?kind=`: a Files window that retargeted (token rotation) or
+        // opened in the browser through a kind-only match would come back as a
+        // terminal.
+        const SERVE_RS: &str = include_str!("serve.rs");
+        for (function, ends_before) in [
+            (
+                "fn retarget_watched_remote_window",
+                "/// Spawn a new outbound URL webview window",
+            ),
+            ("fn browser_window_url", "fn workspace_window_target_url"),
+        ] {
+            let body = SERVE_RS
+                .split(function)
+                .nth(1)
+                .expect("the function exists")
+                .split(ends_before)
+                .next()
+                .expect("the section ends before the next item");
+            assert!(
+                body.contains("watched_window_kind(record)"),
+                "{function} must read the boot mode from watched_window_kind",
+            );
+        }
+        // The watcher stamps the same projection into the title map, so a Files
+        // window reports `kind: files` to `GET /api/windows` and
+        // `cs window list` instead of masquerading as a terminal.
+        const WIRING_RS: &str = include_str!("window_watcher_wiring.rs");
+        let sync = WIRING_RS
+            .split("fn sync_title(&self, record")
+            .nth(1)
+            .expect("sync_title exists")
+            .split("impl NativeSurface")
+            .next()
+            .expect("sync_title section ends before the surface impl");
+        assert!(sync.contains("serve::watched_window_kind(record)"));
     }
 
     #[test]

@@ -63,21 +63,21 @@ enum ReadFileResult {
 /// renders PDFs differently from images (per-page extract, OCR, ...)
 /// can re-distinguish without revisiting the wire shape.
 #[derive(Serialize)]
-struct TreeEntryView {
-    path: String,
-    is_dir: bool,
-    mtime: Option<i64>,
-    size: u64,
+pub(crate) struct TreeEntryView {
+    pub(crate) path: String,
+    pub(crate) is_dir: bool,
+    pub(crate) mtime: Option<i64>,
+    pub(crate) size: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    path_class: Option<chan_workspace::PathClass>,
+    pub(crate) path_class: Option<chan_workspace::PathClass>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    kind: Option<&'static str>,
+    pub(crate) kind: Option<&'static str>,
 }
 
 /// Map a regular-file path (and its contact flag) to the wire kind
 /// string. Returns `None` for directories so the existing serializer
 /// drops the field on dir entries.
-fn project_kind(path: &str, is_dir: bool, is_contact: bool) -> Option<&'static str> {
+pub(crate) fn project_kind(path: &str, is_dir: bool, is_contact: bool) -> Option<&'static str> {
     if is_dir {
         return None;
     }
@@ -114,7 +114,7 @@ pub struct ListFilesQuery {
     /// the legacy recursive listing for callers that still need a
     /// whole-workspace snapshot.
     #[serde(default)]
-    dir: Option<String>,
+    pub(crate) dir: Option<String>,
 }
 
 pub async fn api_list_files(
@@ -223,7 +223,7 @@ fn list_dir_entries(
     Ok(out)
 }
 
-fn normalize_dir_query(dir: &str) -> chan_workspace::Result<String> {
+pub(crate) fn normalize_dir_query(dir: &str) -> chan_workspace::Result<String> {
     let trimmed = dir.trim_matches('/');
     if trimmed.is_empty() || trimmed == "." {
         return Ok(String::new());
@@ -232,7 +232,7 @@ fn normalize_dir_query(dir: &str) -> chan_workspace::Result<String> {
     Ok(trimmed.to_string())
 }
 
-fn join_rel(parent: &str, name: &str) -> String {
+pub(crate) fn join_rel(parent: &str, name: &str) -> String {
     if parent.is_empty() {
         name.to_string()
     } else {
@@ -241,32 +241,32 @@ fn join_rel(parent: &str, name: &str) -> String {
 }
 
 #[derive(Serialize)]
-struct FileResponse {
-    path: String,
-    content: String,
-    mtime: Option<i64>,
+pub(crate) struct FileResponse {
+    pub(crate) path: String,
+    pub(crate) content: String,
+    pub(crate) mtime: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    mtime_ns: Option<String>,
-    authority_version: Option<u64>,
-    disk_conflicted: bool,
+    pub(crate) mtime_ns: Option<String>,
+    pub(crate) authority_version: Option<u64>,
+    pub(crate) disk_conflicted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    path_class: Option<chan_workspace::PathClass>,
+    pub(crate) path_class: Option<chan_workspace::PathClass>,
     /// Filesystem-level writability. False when the path lacks the
     /// user-write bit (e.g. `chmod -w`); the editor uses this to
     /// lock the per-tab read mode regardless of user choice. Sourced
     /// from `metadata().permissions().readonly()` on the resolved
     /// workspace-internal path so symlink escapes are still refused
     /// upstream by chan-workspace.
-    writable: bool,
+    pub(crate) writable: bool,
     /// One server-owned threshold shared by buffered editor reads and the
     /// incremental indexer. The chunked read still reports it so clients can
     /// explain why an oversized file remains streamable but is not indexed.
-    max_editable_bytes: u64,
+    pub(crate) max_editable_bytes: u64,
 }
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
-enum FileStreamEvent<'a> {
+pub(crate) enum FileStreamEvent<'a> {
     Meta {
         path: &'a str,
         size: u64,
@@ -290,7 +290,7 @@ enum FileStreamEvent<'a> {
     },
 }
 
-enum FileStreamMessage {
+pub(crate) enum FileStreamMessage {
     Data(Bytes),
     Error(chan_workspace::ChanError),
 }
@@ -361,13 +361,13 @@ fn read_file_sync(
     }
 }
 
-fn ndjson_bytes(event: &FileStreamEvent<'_>) -> Result<Bytes, serde_json::Error> {
+pub(crate) fn ndjson_bytes(event: &FileStreamEvent<'_>) -> Result<Bytes, serde_json::Error> {
     let mut line = serde_json::to_vec(event)?;
     line.push(b'\n');
     Ok(Bytes::from(line))
 }
 
-fn ndjson_error_bytes(error: String) -> Bytes {
+pub(crate) fn ndjson_error_bytes(error: String) -> Bytes {
     match ndjson_bytes(&FileStreamEvent::Error { error }) {
         Ok(bytes) => bytes,
         Err(e) => Bytes::from(format!(
@@ -426,7 +426,7 @@ where
     }
 }
 
-enum BinaryPlan {
+pub(crate) enum BinaryPlan {
     Full(BoundedFileReader),
     Partial(BoundedFileReader),
     Unsatisfiable(FileStat),
@@ -793,7 +793,7 @@ fn stream_binary_download_with_completion(
     )
 }
 
-fn stream_binary_plan(
+pub(crate) fn stream_binary_plan(
     path: &str,
     plan: BinaryPlan,
     attachment: bool,
@@ -1084,7 +1084,7 @@ impl std::io::Read for BoundedReaderIo {
 
 /// Outcome of resolving a request's `Range` header against a file's size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RangeOutcome {
+pub(crate) enum RangeOutcome {
     /// No header, a non-`bytes` unit, a syntactically invalid value, or
     /// a multi-range request: serve the complete file as a plain 200.
     /// RFC 9110 requires ignoring invalid `Range` headers and allows
@@ -1100,7 +1100,7 @@ enum RangeOutcome {
 /// `bytes=` forms only (`A-B`, `A-`, `-N`); anything else degrades to
 /// `Full`, never to an error, because a range-blind response is always
 /// a correct one.
-fn resolve_range(header: Option<&str>, size: u64) -> RangeOutcome {
+pub(crate) fn resolve_range(header: Option<&str>, size: u64) -> RangeOutcome {
     let Some(value) = header else {
         return RangeOutcome::Full;
     };
@@ -1446,7 +1446,7 @@ pub async fn api_resolve_session_conflict(
     )
 }
 
-fn is_active_content_path(path: &str) -> bool {
+pub(crate) fn is_active_content_path(path: &str) -> bool {
     matches!(
         path.rsplit('.')
             .next()
@@ -1609,16 +1609,16 @@ pub struct WriteBody {
 }
 
 #[derive(Serialize)]
-struct WriteResponse {
+pub(crate) struct WriteResponse {
     /// Mtime after the write. Frontend stores this as the next
     /// CAS token for subsequent saves so the client and disk stay
     /// in lock-step without an extra stat round-trip.
-    mtime: Option<i64>,
+    pub(crate) mtime: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    mtime_ns: Option<String>,
+    pub(crate) mtime_ns: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    authority_version: Option<u64>,
-    disk_conflicted: bool,
+    pub(crate) authority_version: Option<u64>,
+    pub(crate) disk_conflicted: bool,
 }
 
 #[derive(Serialize)]
@@ -1636,7 +1636,7 @@ struct WriteConflictBody {
     disk_conflicted: bool,
 }
 
-fn write_precondition_response(
+pub(crate) fn write_precondition_response(
     status: StatusCode,
     current_mtime_ns: Option<i64>,
     current_authority_version: Option<u64>,
@@ -1667,7 +1667,7 @@ fn session_write_conflict_response(
     )
 }
 
-enum RequestBodyMessage {
+pub(crate) enum RequestBodyMessage {
     Chunk(Bytes),
     Complete,
     Failed(String),
@@ -1688,7 +1688,7 @@ async fn feed_request_body(body: Body, tx: mpsc::Sender<RequestBodyMessage>) {
     let _ = tx.send(RequestBodyMessage::Complete).await;
 }
 
-fn consume_request_body(
+pub(crate) fn consume_request_body(
     rx: &mut mpsc::Receiver<RequestBodyMessage>,
     mut write_chunk: impl FnMut(&[u8]) -> chan_workspace::Result<()>,
 ) -> chan_workspace::Result<()> {
@@ -1807,7 +1807,7 @@ pub(crate) async fn read_multipart_text_field(
     accumulator.finish()
 }
 
-async fn accumulate_text_body(body: Body, limit: u64) -> chan_workspace::Result<String> {
+pub(crate) async fn accumulate_text_body(body: Body, limit: u64) -> chan_workspace::Result<String> {
     let (tx, mut rx) = mpsc::channel(8);
     let consumer = tokio::task::spawn_blocking(move || {
         let mut accumulator = TextAccumulator::new(limit);
@@ -2107,7 +2107,7 @@ async fn write_via_scene_session(
     .into_response()
 }
 
-fn parse_optional_mtime_ns(value: Option<&str>) -> Result<Option<i64>, String> {
+pub(crate) fn parse_optional_mtime_ns(value: Option<&str>) -> Result<Option<i64>, String> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -2149,10 +2149,10 @@ fn write_file_sync(
 
 #[derive(Deserialize)]
 pub struct CreateBody {
-    path: String,
-    is_dir: bool,
+    pub(crate) path: String,
+    pub(crate) is_dir: bool,
     /// Optional initial contents for files. Ignored for directories.
-    content: Option<String>,
+    pub(crate) content: Option<String>,
 }
 
 pub async fn api_create_file(
@@ -2195,9 +2195,9 @@ fn create_target_exists(workspace: &chan_workspace::Workspace, path: &str) -> bo
 }
 
 #[derive(Debug, Serialize)]
-struct UploadFileResponse {
-    path: String,
-    size: u64,
+pub(crate) struct UploadFileResponse {
+    pub(crate) path: String,
+    pub(crate) size: u64,
 }
 
 pub async fn api_upload_file(
@@ -2282,10 +2282,10 @@ pub async fn api_upload_file(
 /// Where one upload lands, as the multipart parts named it and before the
 /// target is resolved. Grouped so the admitted path stays inside clippy's
 /// argument budget without an allow.
-struct UploadDestination {
-    dir: String,
-    replace_path: Option<String>,
-    filename: String,
+pub(crate) struct UploadDestination {
+    pub(crate) dir: String,
+    pub(crate) replace_path: Option<String>,
+    pub(crate) filename: String,
 }
 
 async fn stream_workspace_upload(
@@ -3099,13 +3099,16 @@ mod write_tests {
         let route_table = include_str!("../lib.rs");
         assert_eq!(
             route_table.matches("DefaultBodyLimit::disable()").count(),
-            3
+            4
         );
         assert!(route_table.contains("post(api_upload_file).layer(DefaultBodyLimit::disable())"));
         assert!(route_table.contains(
             "post(crate::routes::transfer::api_terminal_upload_file)\n                .layer(DefaultBodyLimit::disable())"
         ));
         assert!(route_table.contains("put(api_write_file).layer(DefaultBodyLimit::disable())"));
+        assert!(route_table.contains(
+            "put(crate::routes::standalone_fs::api_standalone_write_file)\n                .layer(DefaultBodyLimit::disable())"
+        ));
     }
 
     /// A multipart body naming a destination and one file part, so a test can
@@ -4555,8 +4558,8 @@ pub async fn api_delete_file(
 
 #[derive(Deserialize)]
 pub struct MoveBody {
-    from: String,
-    to: String,
+    pub(crate) from: String,
+    pub(crate) to: String,
 }
 
 pub async fn api_move(State(state): State<Arc<AppState>>, Json(body): Json<MoveBody>) -> Response {
@@ -4603,10 +4606,10 @@ pub async fn api_move(State(state): State<Arc<AppState>>, Json(body): Json<MoveB
 }
 
 #[derive(Serialize)]
-struct MoveResponse {
-    renamed: Vec<(String, String)>,
-    rewritten: Vec<String>,
-    conflicts: Vec<String>,
+pub(crate) struct MoveResponse {
+    pub(crate) renamed: Vec<(String, String)>,
+    pub(crate) rewritten: Vec<String>,
+    pub(crate) conflicts: Vec<String>,
 }
 
 /// Multi-entry move/copy for the File Browser clipboard + multi-drag
@@ -4615,9 +4618,9 @@ struct MoveResponse {
 /// selection; `dest_dir` is the target directory ("" = workspace root).
 #[derive(Deserialize)]
 pub struct TransferBody {
-    op: TransferOp,
-    sources: Vec<String>,
-    dest_dir: String,
+    pub(crate) op: TransferOp,
+    pub(crate) sources: Vec<String>,
+    pub(crate) dest_dir: String,
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -4628,30 +4631,30 @@ pub enum TransferOp {
 }
 
 #[derive(Serialize, Default)]
-struct TransferResponse {
+pub(crate) struct TransferResponse {
     /// Per-source outcome, in request order: the final destination path
     /// each source landed at (after collision suffixing) plus the op.
-    moved: Vec<TransferItem>,
+    pub(crate) moved: Vec<TransferItem>,
     /// Sources skipped because the destination equals the source's
     /// current parent (a no-op move) or the source escaped the workspace.
-    skipped: Vec<String>,
+    pub(crate) skipped: Vec<String>,
     /// Link-rewrite CAS conflicts accumulated across all moved entries.
-    conflicts: Vec<String>,
+    pub(crate) conflicts: Vec<String>,
 }
 
 #[derive(Serialize)]
-struct TransferItem {
-    from: String,
-    to: String,
+pub(crate) struct TransferItem {
+    pub(crate) from: String,
+    pub(crate) to: String,
 }
 
 /// Basename of a workspace-rooted POSIX path.
-fn basename(path: &str) -> &str {
+pub(crate) fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
 /// Parent dir of a workspace-rooted POSIX path ("" for a top-level entry).
-fn parent_dir(path: &str) -> &str {
+pub(crate) fn parent_dir(path: &str) -> &str {
     match path.rfind('/') {
         Some(i) => &path[..i],
         None => "",
@@ -5048,6 +5051,7 @@ mod doc_divert_tests {
             window_titles: Arc::new(crate::window_titles::WindowTitles::new()),
             bulk_transfer: bulk,
             instance_id: "test-instance".to_string(),
+            standalone_files: None,
         });
         (cfg, root, state)
     }

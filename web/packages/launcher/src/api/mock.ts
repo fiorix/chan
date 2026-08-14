@@ -454,6 +454,33 @@ export const mockApi: LibraryApi = {
     return tick(undefined);
   },
 
+  // Open a standalone Files window on a connected devserver: the same remote
+  // terminal-class row carrying the files app, so it buckets and labels as
+  // Files. A real surface drives the bridge.
+  openDevserverFilesWindow: (id) => {
+    const ds = devservers.find((d) => d.id === id);
+    if (ds?.library_id) {
+      const ordinal =
+        windows.filter((w) => w.library_id === ds.library_id && w.app === "files").length + 1;
+      windows.push({
+        window_id: `w-${id}-files-${windows.length + 1}`,
+        library_id: ds.library_id,
+        kind: "terminal",
+        app: "files",
+        title: `🌐 Files Window ${ordinal}`,
+        ordinal,
+        workspace_path: null,
+        prefix: `t/${id}-files-${ordinal}`,
+        token: "tok_remote_files",
+        persisted: true,
+        connected: true,
+        control: false,
+      });
+      notify();
+    }
+    return tick(undefined);
+  },
+
   // Open a terminal window on a connected devserver: mint a remote terminal
   // window in that library and push the feed. A real surface drives the bridge.
   openDevserverTerminal: (id) => {

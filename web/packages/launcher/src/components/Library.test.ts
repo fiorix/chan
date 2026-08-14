@@ -191,6 +191,27 @@ describe("Library: devserver groups", () => {
     expect(target!.querySelector('input[aria-label="Select prod"]')).not.toBeNull();
   });
 
+  it("hides the remote New files window while the devserver reports no files app", () => {
+    // The seeded devserver reports no capability, so the action stays hidden:
+    // the mint lands in that machine's own registry and a server that cannot
+    // serve the files application refuses it.
+    mountList();
+    expect(byAria("New terminal on prod")).toBeTruthy();
+    expect(byAria("New files window on prod")).toBeUndefined();
+  });
+
+  it("offers a remote New files window once the devserver reports the files app", () => {
+    library.devservers = library.devservers.map(
+      (d): DevserverEntry => (d.id === "ds-1" ? { ...d, files_app: true } : d),
+    );
+
+    mountList();
+
+    const newFiles = byAria("New files window on prod");
+    expect(newFiles).toBeTruthy();
+    expect(newFiles!.disabled).toBe(false);
+  });
+
   it("nests the connected devserver's served workspaces as rows with a checkbox and no Forget", () => {
     mountList();
     expect(target!.textContent).toContain("/srv/api");

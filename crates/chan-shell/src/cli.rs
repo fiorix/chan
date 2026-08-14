@@ -543,8 +543,14 @@ pub enum WindowAction {
     ///
     /// From a standalone terminal this spawns another terminal window;
     /// from a workspace it spawns another window of that workspace.
+    /// `--app files` spawns a standalone Files window instead (a file
+    /// browser and editor over this machine, no workspace required).
     #[command(verbatim_doc_comment)]
-    New,
+    New {
+        /// Spawn a specific application window: `files`
+        #[arg(long, value_parser = ["files"], verbatim_doc_comment)]
+        app: Option<String>,
+    },
     /// Focus a window by id, un-hiding it if hidden
     ///
     /// Best-effort reopens a closed-but-saved workspace window when its
@@ -1147,7 +1153,13 @@ pub async fn dispatch(action: ShellAction) -> Result<()> {
         ShellAction::Terminal { action } => cmd_shell_terminal(action).await,
         ShellAction::Window { action } => match action {
             WindowAction::List { json, pretty } => cmd_window_list(json, pretty).await,
-            WindowAction::New => cmd_window_op(ControlRequest::WindowNew).await,
+            WindowAction::New { app } => {
+                let request = match app.as_deref() {
+                    Some("files") => ControlRequest::WindowNewFiles,
+                    _ => ControlRequest::WindowNew,
+                };
+                cmd_window_op(request).await
+            }
             WindowAction::Open { id } => cmd_window_op(ControlRequest::WindowOpen { id }).await,
             WindowAction::Rm { id, force } => {
                 cmd_window_op(ControlRequest::WindowClose { id, force }).await
@@ -3370,7 +3382,7 @@ mod tests {
         assert!(matches!(
             cli.action,
             ShellAction::Window {
-                action: WindowAction::New
+                action: WindowAction::New { app: None }
             }
         ));
 
@@ -3423,7 +3435,7 @@ mod tests {
         type Case = (&'static str, fn(&WindowAction) -> bool);
         let cases: [Case; 5] = [
             ("l", |a| matches!(a, WindowAction::List { .. })),
-            ("n", |a| matches!(a, WindowAction::New)),
+            ("n", |a| matches!(a, WindowAction::New { .. })),
             ("o", |a| matches!(a, WindowAction::Open { .. })),
             ("hi", |a| matches!(a, WindowAction::Hide { .. })),
             ("r", |a| matches!(a, WindowAction::Rm { .. })),

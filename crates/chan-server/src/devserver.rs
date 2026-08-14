@@ -2274,9 +2274,13 @@ async fn handle_info(State(state): State<Arc<DevserverState>>) -> Json<Devserver
         library_id: state.library_id.clone(),
         os,
         pretty_name,
-        // No devserver surface constructs a standalone filesystem state, so
-        // the Files application is not served and clients must hide the action.
-        files_app: false,
+        // The shared terminal tenant is mounted at boot, so its constructed
+        // state answers; a devserver whose mount raced this probe reports
+        // the platform predicate the same construction applies.
+        files_app: state
+            .host
+            .shared_terminal_files_app()
+            .unwrap_or_else(crate::standalone_files_supported),
     })
 }
 

@@ -49,6 +49,8 @@ mod scene_sessions;
 mod self_writes;
 mod session_roster;
 mod signal;
+mod standalone_mutations;
+mod standalone_watch;
 mod state;
 mod static_assets;
 mod store;
@@ -794,6 +796,7 @@ async fn build_app_with_extensions(
         window_titles: desktop.window_titles.clone(),
         bulk_transfer: bulk_transfer.tenant(),
         instance_id: random_token(),
+        standalone_files: None,
     });
     // Doc-session background tasks: the flusher debounces dirty
     // sessions to atomic CAS disk writes and runs the detach-grace
@@ -929,6 +932,18 @@ async fn build_terminal_app(
     let (index_events_tx, _) = broadcast::channel::<WatchEvent>(1024);
     let self_writes = Arc::new(SelfWrites::new());
     let scope_registry = Arc::new(bus::ScopeRegistry::new());
+
+    // The standalone Files application rides the SHARED terminal tenant
+    // (the one with a durable layout store); control tenants and
+    // unsupported platforms serve plain terminals only. Construction
+    // failure degrades to a terminal-only tenant rather than refusing to
+    // serve: the capability advertisement and the mint validation both
+    // read the constructed state, so nothing downstream can assume it.
+    let standalone_files = if session_dir.is_some() {
+        construct_standalone_files(&library, &scope_registry)
+    } else {
+        None
+    };
 
     let last_activity = Arc::new(AtomicU64::new(now_unix_secs()));
     let prefix = Arc::new(RwLock::new(config.prefix.clone()));
@@ -1084,13 +1099,14 @@ async fn build_terminal_app(
         ephemeral_files_sessions: Mutex::new(std::collections::HashMap::new()),
         // A persisted devserver terminal sets this (its launcher session
         // store); a control / desktop-local terminal passes None.
-        terminal_session_dir: session_dir,
+        terminal_session_dir: session_dir.clone(),
         window_presence,
         session_registry,
         window_transfers,
         window_titles: desktop.window_titles.clone(),
         bulk_transfer: bulk_transfer.tenant(),
         instance_id: random_token(),
+        standalone_files: standalone_files.clone(),
     });
 
     // Nest under the prefix exactly like `build_app` so the host's
@@ -1128,6 +1144,87 @@ async fn build_terminal_app(
         state,
         shutdown_tx,
     })
+}
+
+/// Whether this host platform can serve the standalone Files application:
+/// POSIX with a canonical, UTF-8 `$HOME` directory. The same gate
+/// construction applies; every server-side mint path re-validates against
+/// the actually-constructed state where a tenant is mounted.
+pub fn standalone_files_supported() -> bool {
+    #[cfg(not(unix))]
+    {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let Some(home) = dirs::home_dir() else {
+            return false;
+        };
+        let Ok(canon) = home.canonicalize() else {
+            return false;
+        };
+        canon.is_absolute() && canon.to_str().is_some() && canon.is_dir()
+    }
+}
+
+/// Construct the standalone Files bundle for a shared terminal tenant:
+/// the `/`-rooted capability with canonical `$HOME` as the start
+/// directory, the mutation-attribution bus, and the scoped watch manager
+/// producing this tenant's `fs` frames. `None` on unsupported platforms
+/// or any construction failure; the tenant then serves terminals only.
+fn construct_standalone_files(
+    library: &Library,
+    scope_registry: &Arc<bus::ScopeRegistry>,
+) -> Option<Arc<crate::state::StandaloneFilesState>> {
+    if !standalone_files_supported() {
+        return None;
+    }
+    let home = dirs::home_dir()?;
+    let fs = match chan_workspace::MiniWorkspace::open(
+        std::path::Path::new("/"),
+        &home,
+        library.transfer_max_bytes(),
+    ) {
+        Ok(fs) => Arc::new(fs),
+        Err(error) => {
+            tracing::warn!(%error, "standalone files state unavailable; serving terminals only");
+            return None;
+        }
+    };
+    let mutations = Arc::new(crate::standalone_mutations::StandaloneMutationBus::new(
+        scope_registry.clone(),
+    ));
+    let watcher = match crate::standalone_watch::ScopedWatchManager::spawn(
+        Arc::new(MiniScopeResolver(fs.clone())),
+        scope_registry.clone(),
+        mutations.clone(),
+    ) {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            tracing::warn!(%error, "standalone files watcher unavailable; serving terminals only");
+            return None;
+        }
+    };
+    Some(Arc::new(crate::state::StandaloneFilesState {
+        fs,
+        watcher,
+        mutations,
+    }))
+}
+
+/// Watch-scope validation over the standalone capability root: the
+/// registry's raw client strings resolve through `MiniWorkspace` before
+/// any OS watch is attached.
+pub(crate) struct MiniScopeResolver(pub(crate) Arc<chan_workspace::MiniWorkspace>);
+
+impl crate::standalone_watch::WatchScopeResolver for MiniScopeResolver {
+    fn resolve_dir(&self, rel: &str) -> Result<std::path::PathBuf, String> {
+        self.0.resolve_directory(rel).map_err(|e| e.to_string())
+    }
+
+    fn relativize(&self, abs: &std::path::Path) -> Option<String> {
+        self.0.wire_path_from_absolute(abs)
+    }
 }
 
 /// Slim sibling of [`router`] for a workspace-less terminal tenant.
@@ -1171,6 +1268,50 @@ fn terminal_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/files/{*path}",
             get(crate::routes::transfer::api_terminal_read_file),
+        )
+        // Standalone Files application over `state.standalone_files`. Every
+        // handler snapshots that bundle and answers 404 on a tenant that did
+        // not construct it, so the unconditional mounts are safe on control
+        // terminals too. The bare-GET read and the `?app=files` upload are
+        // NOT mounted here: those paths belong to the transfer handlers
+        // above (axum refuses a duplicate method+path at build time), which
+        // dispatch into the Files lanes internally.
+        .route(
+            "/api/fs/context",
+            get(crate::routes::standalone_fs::api_standalone_fs_context),
+        )
+        .route(
+            "/api/files",
+            get(crate::routes::standalone_fs::api_standalone_list_files)
+                .post(crate::routes::standalone_fs::api_standalone_create_file),
+        )
+        // The progressive raw-text sink owns the semantic limit
+        // (max(existing size, TEXT_WRITE_LIMIT)); a fixed framework cap
+        // would reject a valid legacy-file shrink before it reaches that
+        // policy, same as the workspace mount.
+        .route(
+            "/api/files/{*path}",
+            put(crate::routes::standalone_fs::api_standalone_write_file)
+                .layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/api/files/{*path}",
+            delete(crate::routes::standalone_fs::api_standalone_delete_file),
+        )
+        .route(
+            "/api/move",
+            post(crate::routes::standalone_fs::api_standalone_move),
+        )
+        .route(
+            "/api/fs/transfer",
+            post(crate::routes::standalone_fs::api_standalone_fs_transfer),
+        )
+        // Same attachment cap as the workspace mount so an upload passing
+        // the editor's client-side preflight also passes here.
+        .route(
+            "/api/attachments",
+            post(crate::routes::standalone_fs::api_standalone_post_attachment)
+                .layer(DefaultBodyLimit::max(50 * 1024 * 1024)),
         )
         .route("/api/build-info", get(api_build_info))
         .route("/api/health", get(api_health))
@@ -1418,9 +1559,11 @@ fn into_tenant_artifacts(a: AppArtifacts) -> chan_library::TenantArtifacts {
     // targeted window_command teardown frame to a window's socket.
     let events_tx = state.events_tx.clone();
     let cell: Arc<dyn chan_library::WorkspaceCellHandle> = Arc::new(CellHandle(workspace_cell));
+    let files_app = state.standalone_files.is_some();
     chan_library::TenantArtifacts {
         app,
         token,
+        files_app,
         terminal_sessions,
         tasks,
         prefix,

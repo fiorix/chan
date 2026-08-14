@@ -198,6 +198,10 @@ pub fn launcher_router(
             post(handle_devserver_terminal),
         )
         .route(
+            "/api/library/devservers/{id}/files-window",
+            post(handle_devserver_files_window),
+        )
+        .route(
             "/api/library/devservers/{id}/workspaces/open",
             post(handle_open_devserver_workspace),
         )
@@ -1164,6 +1168,21 @@ async fn handle_create_library_window(
                 .into_response();
         }
     }
+    // A Files mint requires a server that can construct the standalone
+    // filesystem state: the mounted shared tenant's answer where one
+    // exists, else the platform predicate the same construction applies.
+    // UI gating (the capability advertisement) is not authority; this is.
+    if req.app == Some(chan_library::windows::WindowApp::Files)
+        && !host
+            .shared_terminal_files_app()
+            .unwrap_or_else(crate::standalone_files_supported)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "this server does not serve the files application",
+        )
+            .into_response();
+    }
     // Leader gate on the TARGET tenant of the mint (workspace path, or the shared
     // terminal tenant for a terminal mint); leaderless establishes leadership at
     // the later /ws connect, so it is allowed.
@@ -1438,6 +1457,21 @@ async fn handle_devserver_terminal(
     AxumPath(id): AxumPath<String>,
 ) -> Response {
     dispatch_window_op(&host, |reply| DesktopWindowOp::OpenDevserverTerminal {
+        id,
+        reply,
+    })
+    .await
+}
+
+/// `POST /api/library/devservers/{id}/files-window`: open a standalone Files
+/// window on a connected devserver through the desktop bridge. The desktop
+/// refuses (409) when that devserver does not serve the files application, so
+/// the launcher's capability gate is an affordance, not the authority. 204/409.
+async fn handle_devserver_files_window(
+    State(host): State<Arc<WorkspaceHost>>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    dispatch_window_op(&host, |reply| DesktopWindowOp::OpenDevserverFiles {
         id,
         reply,
     })

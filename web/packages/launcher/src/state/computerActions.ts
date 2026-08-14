@@ -9,6 +9,7 @@ import {
   connectDevserver,
   focusWindow,
   grantNativeTrustAndConnect,
+  openDevserverFilesWindow,
   openDevserverTerminal,
   openDevserverWorkspace,
   openTerminal,
@@ -67,11 +68,17 @@ export async function newTerminal(devserver?: DevserverEntry): Promise<void> {
   await openTerminal();
 }
 
-/** Open a standalone Files window on the LOCAL machine (the serving host):
- * a browser-origin mint of a terminal-kind record carrying the files app.
- * Callers gate the affordance on the host's advertised capability; remote
- * machines get theirs through the desktop's devserver window plumbing. */
-export async function newFilesWindow(): Promise<void> {
+/** Open a standalone Files window. On a connected devserver the desktop mints
+ * it in that machine's own library and its watcher opens the native window; on
+ * the LOCAL machine (the serving host) it is a browser-origin mint of a
+ * terminal-kind record carrying the files app. Callers gate the affordance on
+ * the capability the target machine advertises: the host meta locally, the
+ * devserver's own report remotely. */
+export async function newFilesWindow(devserver?: DevserverEntry): Promise<void> {
+  if (devserver) {
+    await openDevserverFilesWindow(devserver.id);
+    return;
+  }
   await mintWindow("terminal", { app: "files" });
 }
 

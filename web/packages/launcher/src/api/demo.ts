@@ -479,6 +479,16 @@ export function createLauncherDemoApi(opts: LauncherDemoOptions = {}): LauncherD
       notify();
       return tick(undefined);
     },
+    openDevserverFilesWindow: (id) => {
+      const ds = devservers.find((d) => d.id === id);
+      if (ds?.library_id) {
+        const ordinal = windows.filter((w) => w.library_id === ds.library_id && w.app === "files").length + 1;
+        const row = terminal(`w-${id}-files-${windows.length + 1}`, ds.library_id, `Files Window ${ordinal}`, ordinal, `t/${id}-files-${ordinal}`, true);
+        windows.push({ ...row, app: "files" });
+        notify();
+      }
+      return tick(undefined);
+    },
     openDevserverTerminal: (id) => {
       const ds = devservers.find((d) => d.id === id);
       if (ds?.library_id) {

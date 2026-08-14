@@ -349,6 +349,9 @@ export interface LibraryApi {
   /** Open a terminal window on a connected devserver (desktop action, 409 with
    * no bridge). */
   openDevserverTerminal(id: string): Promise<void>;
+  /** Open a standalone Files window on a connected devserver (desktop action,
+   * 409 with no bridge, and 409 when that devserver serves no files app). */
+  openDevserverFilesWindow(id: string): Promise<void>;
   /** Open a window onto one of a connected devserver's served workspaces by its
    * remote path (desktop action, 409 with no bridge). */
   openDevserverWorkspace(id: string, path: string): Promise<void>;
@@ -521,6 +524,8 @@ export const liveApi: LibraryApi = {
     req("DELETE", `/api/library/devservers/${encodeURIComponent(id)}/native-trust`),
   openDevserverTerminal: (id) =>
     req("POST", `/api/library/devservers/${encodeURIComponent(id)}/terminal`),
+  openDevserverFilesWindow: (id) =>
+    req("POST", `/api/library/devservers/${encodeURIComponent(id)}/files-window`),
   // The devserver-workspace ops carry the remote mount `prefix` / `path` in the
   // JSON body, not a path segment: a mount prefix can hold characters axum's
   // Path extractor + intervening (gateway) proxies mangle. on/off/forget are

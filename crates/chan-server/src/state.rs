@@ -192,6 +192,22 @@ pub struct AppState {
     /// are gone, so the SPA reloads itself instead of sitting on a
     /// stale view with stuck terminals until a manual Cmd+R.
     pub instance_id: String,
+    /// The standalone Files application's state bundle, present only on a
+    /// shared terminal tenant that constructed a supported standalone
+    /// filesystem. Workspace tenants and unsupported terminal tenants carry
+    /// `None`; the Files routes and the `/ws` scope plumbing read it
+    /// directly and never touch `workspace_cell`.
+    pub standalone_files: Option<Arc<StandaloneFilesState>>,
+}
+
+/// Everything the standalone Files tenant owns beyond the plain terminal
+/// surface: the `/`-rooted capability filesystem, the scoped non-recursive
+/// watch manager producing this tenant's `fs` frames, and the mutation bus
+/// attributing its own writes.
+pub struct StandaloneFilesState {
+    pub fs: Arc<chan_workspace::MiniWorkspace>,
+    pub watcher: Arc<crate::standalone_watch::ScopedWatchManager>,
+    pub mutations: Arc<crate::standalone_mutations::StandaloneMutationBus>,
 }
 
 /// Workspace + its notify watcher. Replaced wholesale by /api/storage/
@@ -352,6 +368,7 @@ pub(crate) mod test_support {
             window_titles: Arc::new(crate::window_titles::WindowTitles::new()),
             bulk_transfer: make_test_bulk_transfer_tenant(),
             instance_id: "test-instance".to_string(),
+            standalone_files: None,
         })
     }
 
