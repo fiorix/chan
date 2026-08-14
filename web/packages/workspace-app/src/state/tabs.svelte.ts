@@ -437,6 +437,11 @@ export type TerminalTab = {
   /// the server-owned session identity (env values may be sensitive).
   spawnCommand?: string;
   spawnEnv?: Record<string, string>;
+  /// Shell profile id this tab was opened with (`GET /api/terminal/shells`).
+  /// Unlike `spawnCommand` above this IS persisted: reopening a window must
+  /// restore the tab on the shell the user picked, not silently fall back to
+  /// the default profile. Absent means "the server's default".
+  profile?: string;
   /// Transient marker for a freshly-created unnamed terminal's provisional
   /// `Terminal-N` label. The registry settlement returned by the attach
   /// prelude is authoritative. Never persisted.
@@ -1599,6 +1604,8 @@ export type OpenTerminalOptions = {
   controlledTerminal?: boolean;
   group?: string;
   side?: PaneSide;
+  /// Shell profile id for the new tab. Absent uses the server's default.
+  profile?: string;
 };
 
 export function openTerminalInActivePane(opts: OpenTerminalOptions = {}): TerminalTab | null {
@@ -1637,6 +1644,7 @@ export function openTerminalInPane(
     seedInput: seedInput || undefined,
     spawnCommand: spawnCommand || undefined,
     spawnEnv,
+    profile: opts.profile?.trim() || undefined,
     group: group && group !== DEFAULT_TERMINAL_GROUP ? group : undefined,
   };
   tabs.push(tab);
@@ -5440,6 +5448,11 @@ export type SerTab = {
   /// reattach after reload keeps the terminal in its group (and the
   /// SPA group stays consistent with the server's per-session tab_group).
   tg?: string;
+  /// Shell profile id the terminal was opened with. Emitted only when set, so
+  /// a tab on the default profile keeps the hash short. Deliberately its own
+  /// key rather than riding `spawnCommand`, which is one-shot and never
+  /// serialized: a reload must reopen the tab on the shell the user picked.
+  tp?: string;
   /// Negotiated keyboard-protocol snapshot (modifyOtherKeys / kitty
   /// flags). Emitted only for a live session with non-default state so
   /// Shift+Enter -> newline survives a reload reattaching to a long-lived
@@ -5565,7 +5578,11 @@ export const paneModeConflictFieldSets = {
     },
     t: {
       included: ["k", "a", "n", "tg", "tsid"],
-      excluded: ["tc", "kp", "rpd", "rpc", "rph", "pp", "rpv", "twk"],
+      // `tp` is excluded for the same reason as `tc`: it is spawn provenance,
+      // not identity. Which shell a tab was opened with does not make two
+      // layouts semantically different -- `tsid` already identifies the live
+      // PTY, and a session's shell cannot change without a restart.
+      excluded: ["tc", "tp", "kp", "rpd", "rpc", "rph", "pp", "rpv", "twk"],
     },
     s: { included: ["k", "a"], excluded: [] },
     h: { included: ["k", "a"], excluded: [] },
@@ -5905,6 +5922,7 @@ function serializeTab(
       ...(terminalTabGroup(t) !== DEFAULT_TERMINAL_GROUP
         ? { tg: terminalTabGroup(t) }
         : {}),
+      ...(t.profile ? { tp: t.profile } : {}),
       ...(opts.terminalSessions && t.terminalSessionId
         ? {
             tsid: t.terminalSessionId,
@@ -6176,6 +6194,7 @@ function restoreTerminalTabFromSer(
 ): TerminalTab {
   const terminalSessionId = sertab.tsid ?? savedTerm?.tsid;
   const group = (sertab.tg ?? savedTerm?.tg)?.trim();
+  const profile = (sertab.tp ?? savedTerm?.tp)?.trim();
   // Restore the negotiated keyboard protocol for a reattaching
   // session so Shift+Enter -> newline survives a reload even when
   // the agent's original negotiation has scrolled out of replay.
@@ -6205,6 +6224,7 @@ function restoreTerminalTabFromSer(
     terminalSessionId,
     controlledTerminal: sertab.tc === 1 || savedTerm?.tc === 1,
     group: group && group !== DEFAULT_TERMINAL_GROUP ? group : undefined,
+    profile: profile || undefined,
     keyboardProtocol: kpSnapshot
       ? restoreKeyboardProtocolState(kpSnapshot)
       : undefined,

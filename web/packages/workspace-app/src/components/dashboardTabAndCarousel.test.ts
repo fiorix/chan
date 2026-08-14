@@ -505,8 +505,11 @@ describe("EmptyPaneWelcome empty-pane surface", () => {
       "app.terminal.teamWork",
       "app.terminal.toggle",
     ]);
+    // `...extra` carries per-command payload (the shell picker sends a
+    // `profile`); the pin is that every row still routes through this one
+    // dispatcher rather than reimplementing the action.
     expect(pane).toMatch(
-      /new CustomEvent\("chan:command", \{ detail: \{ name: id \} \}\)/,
+      /new CustomEvent\("chan:command", \{ detail: \{ name: id, \.\.\.extra \} \}\)/,
     );
     expect(pane).toMatch(/\{chordLabel\(row\.id\)\}/);
   });

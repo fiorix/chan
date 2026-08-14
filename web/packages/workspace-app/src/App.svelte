@@ -472,7 +472,11 @@
   /// Each resolves the focused surface's context via `resolveSpawnContext`
   /// so all entry points (chord / Hybrid Nav / hamburger / right-click)
   /// behave identically.
-  function spawnTerminalFromContext(): void {
+  /// `profile` is the shell the picker chose; absent uses the server's default
+  /// profile. It rides this path rather than opening a tab directly so a
+  /// picked shell still gets the rootUnavailable guard, the resolved spawn
+  /// cwd, and the session save that every other entry point gets.
+  function spawnTerminalFromContext(profile?: string): void {
     if (tree.rootUnavailable) {
       setTransientStatus(
         `New terminal failed: ${tree.error ?? "workspace root does not exist"}`,
@@ -480,7 +484,7 @@
       return;
     }
     const ctx = resolveSpawnContext();
-    openTerminalInActivePane({ cwd: ctx.dir });
+    openTerminalInActivePane({ cwd: ctx.dir, profile });
     scheduleSessionSave();
   }
   function spawnBrowserFromContext(): void {
@@ -1268,7 +1272,9 @@
         spawnGraphFromContext();
         return;
       case "app.terminal.toggle":
-        spawnTerminalFromContext();
+        spawnTerminalFromContext(
+          typeof detail.profile === "string" ? detail.profile : undefined,
+        );
         return;
       case "app.terminal.teamWork":
         spawnTeamWorkFromContext();

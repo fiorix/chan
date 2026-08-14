@@ -178,8 +178,11 @@ describe("New terminal web chord + the chan:command bridge", () => {
     // chan-desktop's KEY_BRIDGE_JS fires these commands on native
     // Cmd+T / Cmd+O / Cmd+P / Cmd+Shift+M; they route through the same
     // helpers as the web chords.
+    // Argument-tolerant: the shell picker passes a `profile` through this
+    // case. What is pinned is that it still routes through the context-aware
+    // helper rather than opening a tab directly.
     expect(app).toMatch(
-      /case "app\.terminal\.toggle":\s*\n\s*spawnTerminalFromContext\(\);/,
+      /case "app\.terminal\.toggle":\s*\n\s*spawnTerminalFromContext\(/,
     );
     expect(app).toMatch(
       /case "app\.files\.toggle":\s*\n\s*spawnBrowserFromContext\(\);/,

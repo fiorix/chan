@@ -55,6 +55,7 @@ import {
   openInPane,
   openLinkTarget,
   openFind,
+  openTerminalInActivePane,
   openTerminalInPane,
   overwriteConflictedTab,
   paneActiveTabId,
@@ -1309,6 +1310,43 @@ describe("pane state", () => {
     if (first?.kind !== "dashboard") throw new Error("expected dashboard tab");
     expect(first.title).toBe("Dashboard");
     expect(activePane().activeTabId).toBe(first.id);
+  });
+
+  /// The picked shell must survive a reload. This is why the profile is its
+  /// own persisted `tp` key rather than riding `spawnCommand`, which is
+  /// deliberately one-shot and never serialized.
+  test("round-trips a terminal's shell profile", async () => {
+    resetLayout([]);
+    const opened = openTerminalInActivePane({ profile: "git-bash" });
+    expect(opened?.profile).toBe("git-bash");
+
+    const snapshot = serializeLayout();
+    expect(JSON.stringify(snapshot)).toContain('"tp":"git-bash"');
+    await restoreLayout(snapshot!);
+
+    const restored = activePane().tabs[0];
+    if (restored?.kind !== "terminal") {
+      throw new Error("expected terminal tab after restore");
+    }
+    expect(restored.profile).toBe("git-bash");
+  });
+
+  /// A tab on the server's default profile names no profile, so the hash stays
+  /// short -- the same rule `tg` follows for the default broadcast group.
+  test("omits the profile key for a default-profile terminal", async () => {
+    resetLayout([]);
+    const opened = openTerminalInActivePane();
+    expect(opened?.profile).toBeUndefined();
+
+    const snapshot = serializeLayout();
+    expect(JSON.stringify(snapshot)).not.toContain('"tp"');
+    await restoreLayout(snapshot!);
+
+    const restored = activePane().tabs[0];
+    if (restored?.kind !== "terminal") {
+      throw new Error("expected terminal tab after restore");
+    }
+    expect(restored.profile).toBeUndefined();
   });
 
   test("hash round-trips an Extension tab without an entry URL", async () => {
