@@ -55,14 +55,12 @@
     Blocks,
     Bug,
     Check,
-    ChevronDown,
     FileText,
     Folder,
     Command as CommandIcon,
     LayoutGrid,
     Network,
     Palette,
-    Plus,
     Presentation,
     Radio,
     RefreshCw,
@@ -231,8 +229,6 @@
   /// per-button split / close controls.
   let paneMenu: HamburgerMenu | undefined = $state();
   let paneMenuOpen = $state(false);
-  let profileMenu: HamburgerMenu | undefined = $state();
-  let profileMenuOpen = $state(false);
   // Load the selectable shells once per session; the store caches and
   // de-duplicates concurrent callers, so every pane asking is fine. An empty
   // list (older server, or discovery found nothing) collapses the split button
@@ -640,16 +636,22 @@
   }
 
   /// New terminal on a named shell profile. Routed through the same command
-  /// the "+" button and the Ctrl+Shift+T chord use, so a picked shell still
-  /// gets the workspace-root guard and the resolved spawn cwd.
-  function spawnTerminalWithProfile(profile?: string): void {
-    profileMenu?.close();
-    dispatchCommand("app.terminal.toggle", profile ? { profile } : undefined);
+  /// the plain "New terminal" row and the Ctrl+Shift+T chord use, so a picked
+  /// shell still gets the workspace-root guard and the resolved spawn cwd.
+  function runTerminalProfile(profile: string): void {
+    closePaneHamburgerMenu();
+    dispatchCommand("app.terminal.toggle", { profile });
   }
 
-  function openProfileMenu(event: MouseEvent): void {
-    closePaneContextMenus();
-    profileMenu?.openAtCursor(event.clientX, event.clientY);
+  /// First-placement height estimate for the pane hamburger. The menu
+  /// re-measures itself on rAF, so this only decides the initial above/below
+  /// flip -- but a stale value makes it visibly jump, so count the profile
+  /// rows that render under "New terminal".
+  const PANE_MENU_BASE_HEIGHT = 505;
+  const MENU_ROW_HEIGHT = 30;
+  function paneMenuHeight(): number {
+    const rows = shellProfiles().length;
+    return PANE_MENU_BASE_HEIGHT + (rows > 1 ? rows * MENU_ROW_HEIGHT : 0);
   }
 
   type IconComponent = typeof LayoutGrid;
@@ -1251,6 +1253,37 @@
   }
 </script>
 
+<!--
+  Shell profiles, rendered directly beneath the hamburger's "New terminal" row
+  as indented siblings rather than a submenu: one click to a named shell, and
+  the plain row above still spawns the default.
+
+  A snippet because both window kinds need it -- the workspace window's
+  `appRows` loop and the terminal-only window's hardcoded row. Nothing renders
+  when the server offers fewer than two profiles: with one shell there is
+  nothing to choose, and an empty list means an older server with no
+  `/api/terminal/shells`.
+-->
+{#snippet terminalProfileRows()}
+  {#if shellProfiles().length > 1}
+    {#each shellProfiles() as profile (profile.id)}
+      <li>
+        <button
+          role="menuitem"
+          class="menu-row-indent"
+          onclick={() => runTerminalProfile(profile.id)}
+          title={profile.program}
+        >
+          <span class="menu-row-label">{profile.name}</span>
+          {#if profile.id === defaultShellProfileId()}
+            <span class="menu-row-chord">default</span>
+          {/if}
+        </button>
+      </li>
+    {/each}
+  {/if}
+{/snippet}
+
 <svelte:window onkeydown={onKeyDown} />
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -1519,31 +1552,6 @@
       ondblclick={onDeadZoneDblClick}
     ></div>
     <div class="actions">
-      <!-- New terminal, with a caret for the shell picker when the server
-           offers more than one profile. One shell means nothing to choose, so
-           the caret stays hidden rather than opening a single-row menu. -->
-      <div class="new-term-split">
-        <button
-          class="new-term-main"
-          onclick={() => spawnTerminalWithProfile()}
-          title="New terminal"
-          aria-label="New terminal"
-        >
-          <Plus size={14} strokeWidth={2} aria-hidden="true" />
-        </button>
-        {#if shellProfiles().length > 1}
-          <button
-            class="new-term-caret"
-            onclick={openProfileMenu}
-            title="New terminal with a specific shell"
-            aria-label="Choose a shell for a new terminal"
-            aria-haspopup="menu"
-            aria-expanded={profileMenuOpen}
-          >
-            <ChevronDown size={12} strokeWidth={2} aria-hidden="true" />
-          </button>
-        {/if}
-      </div>
       <button
         class="side-toggle"
         class:side-toggle-flash={sideToggleFlashActive}
@@ -1564,7 +1572,7 @@
         bind:this={paneMenu}
         bind:open={paneMenuOpen}
         width={250}
-        height={505}
+        height={paneMenuHeight()}
         onBeforeOpen={closePaneContextMenus}
       >
         <li>
@@ -1598,6 +1606,9 @@
                 <span class="menu-row-chord">{chordLabel(row.id)}</span>
               </button>
             </li>
+            {#if row.id === "app.terminal.toggle"}
+              {@render terminalProfileRows()}
+            {/if}
           {/each}
         {:else}
           <!-- The one spawn command a terminal-only window CAN run (the
@@ -1612,6 +1623,7 @@
               <span class="menu-row-chord">{chordLabel("app.terminal.toggle")}</span>
             </button>
           </li>
+          {@render terminalProfileRows()}
         {/if}
         <li class="sep" role="separator"></li>
         <li class="menu-label">
@@ -1665,31 +1677,6 @@
             <span>Open Inspector</span>
           </button>
         </li>
-      </HamburgerMenu>
-      <!-- Shell picker. Opened at the caret's cursor rather than from a
-           trigger, so it portals and clamps like the other context menus. -->
-      <HamburgerMenu
-        bind:this={profileMenu}
-        bind:open={profileMenuOpen}
-        showTrigger={false}
-        width={240}
-        height={Math.min(360, 56 + shellProfiles().length * 34)}
-      >
-        {#each shellProfiles() as profile (profile.id)}
-          <li>
-            <button
-              role="menuitem"
-              onclick={() => spawnTerminalWithProfile(profile.id)}
-              title={profile.program}
-            >
-              <Terminal size={16} strokeWidth={1.75} aria-hidden="true" />
-              <span class="menu-row-label">{profile.name}</span>
-              {#if profile.id === defaultShellProfileId()}
-                <span class="menu-row-chord">default</span>
-              {/if}
-            </button>
-          </li>
-        {/each}
       </HamburgerMenu>
     </div>
   </div>
@@ -2278,42 +2265,12 @@
   .side-toggle:hover {
     background: var(--hover-bg);
   }
-  /* New-terminal split button: main action plus an optional caret, sharing a
-     border so they read as one control (the InspectorActionPill pattern). */
-  .new-term-split {
-    display: inline-flex;
-    align-items: center;
-    flex: 0 0 auto;
-  }
-  .new-term-main,
-  .new-term-caret {
-    height: 24px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    border: 1px solid var(--border);
-    background: var(--bg-card);
-    color: var(--text);
-    line-height: 1;
-    cursor: pointer;
-    flex: 0 0 auto;
-  }
-  .new-term-main {
-    width: 24px;
-    border-radius: 4px;
-  }
-  .new-term-caret {
-    width: 16px;
-    border-radius: 0 4px 4px 0;
-    border-left: none;
-  }
-  /* Only square off the main button's right edge when a caret follows it. */
-  .new-term-split:has(.new-term-caret) .new-term-main {
-    border-radius: 4px 0 0 4px;
-  }
-  .new-term-main:hover,
-  .new-term-caret:hover {
-    background: var(--hover-bg);
+  /* Shell profiles listed directly under the hamburger's "New terminal" row.
+     Not a submenu: they are siblings, indented so they read as choices
+     belonging to the row above. 8px padding + a 16px icon + an 8px gap puts a
+     normal row's label at 32px, so 40px sets these one step further in. */
+  .menu-row-indent {
+    padding-left: 40px !important;
   }
   .side-toggle:disabled {
     cursor: not-allowed;

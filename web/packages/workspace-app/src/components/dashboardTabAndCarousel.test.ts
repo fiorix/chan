@@ -514,6 +514,30 @@ describe("EmptyPaneWelcome empty-pane surface", () => {
     expect(pane).toMatch(/\{chordLabel\(row\.id\)\}/);
   });
 
+  test("shell profiles render under New terminal in BOTH window kinds", async () => {
+    const pane = (await import("./Pane.svelte?raw")).default as string;
+
+    // Indented siblings of the "New terminal" row, not a submenu and not a
+    // separate button in the pane's action strip.
+    expect(pane).toMatch(/\{#snippet terminalProfileRows\(\)\}/);
+    expect(pane).toMatch(/class="menu-row-indent"/);
+    expect(pane).not.toMatch(/new-term-split/);
+
+    // Workspace window: rendered inside the appRows loop, keyed off the
+    // terminal row so it stays attached if the table is reordered.
+    expect(pane).toMatch(
+      /row\.id === "app\.terminal\.toggle"\s*\}\s*\n\s*\{@render terminalProfileRows\(\)\}/,
+    );
+
+    // Terminal-only window: the hardcoded row's own render, so a standalone
+    // terminal window gets the same picker.
+    const standalone = pane.slice(pane.indexOf("window-mode gate allows"));
+    expect(standalone).toMatch(/\{@render terminalProfileRows\(\)\}/);
+
+    // Both renders exist; neither was dropped when the other was edited.
+    expect([...pane.matchAll(/\{@render terminalProfileRows\(\)\}/g)]).toHaveLength(2);
+  });
+
   test("chordless Apps spawns route through runCommand for the hamburger menu", () => {
     // The hamburger rows dispatch chan:command for every id; the two
     // catalog-only spawns need their runCommand cases to land anywhere.
