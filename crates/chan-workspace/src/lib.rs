@@ -38,6 +38,7 @@ pub mod library;
 pub mod lock;
 pub mod markdown;
 pub mod metadata_archive;
+pub mod mini_workspace;
 pub mod paths;
 pub mod progress;
 pub mod registry;
@@ -90,6 +91,7 @@ pub use metadata_archive::{
     MetadataExportReport, MetadataImportOptions, MetadataImportReport, MetadataManifest,
     MetadataSchema, ScmIdentity,
 };
+pub use mini_workspace::MiniWorkspace;
 pub use progress::{
     eta_secs_from, progress_fn, NoProgress, ProgressCallback, ProgressEvent, ProgressStage,
 };

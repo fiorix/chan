@@ -9,6 +9,15 @@ use crate::workspace::{
     WorkspacePath, WritableFile,
 };
 
+/// Per-owner listing policy: the workspace hides its top-level control
+/// dirs and tolerates lossy names; a standalone owner shows everything
+/// ordinary and skips names its strict-UTF-8 wire cannot carry.
+#[derive(Clone, Copy)]
+pub(crate) struct ListPolicy {
+    pub(crate) hide_internal_top_level: bool,
+    pub(crate) skip_non_utf8: bool,
+}
+
 /// Crate-private capability-rooted filesystem core shared by `Workspace`
 /// and future root-scoped owners: the display root, its canonical form and
 /// unix identity, the cap-std directory handle every user-path operation
@@ -625,8 +634,20 @@ impl RootedFs {
         })
     }
 
-    /// One-level listing with top-level `.chan` / `.git` hidden.
+    /// One-level listing with the workspace posture: top-level `.chan` /
+    /// `.git` hidden, non-UTF-8 names carried lossily.
     pub(crate) fn list(&self, rel: &str) -> Result<Vec<DirEntry>> {
+        self.list_with(
+            rel,
+            ListPolicy {
+                hide_internal_top_level: true,
+                skip_non_utf8: false,
+            },
+        )
+    }
+
+    /// One-level listing under an explicit owner policy; see [`ListPolicy`].
+    pub(crate) fn list_with(&self, rel: &str, policy: ListPolicy) -> Result<Vec<DirEntry>> {
         let at_root = rel.is_empty() || rel == "." || rel == "/";
         // Drafts are real in-root files under `<drafts_dir_name>/...`,
         // so `.Drafts/<name>` lists through the workspace-root handle
@@ -658,8 +679,18 @@ impl RootedFs {
                     continue;
                 }
             };
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if at_root && (name == ".chan" || name == ".git") {
+            let name = match entry.file_name().to_str() {
+                Some(name) => name.to_owned(),
+                // A lossy alias cannot round-trip through the wire and can
+                // collide with a real UTF-8 name, so an owner that speaks
+                // strict UTF-8 paths skips the entry instead of aliasing it.
+                None if policy.skip_non_utf8 => {
+                    skipped += 1;
+                    continue;
+                }
+                None => entry.file_name().to_string_lossy().into_owned(),
+            };
+            if policy.hide_internal_top_level && at_root && (name == ".chan" || name == ".git") {
                 continue;
             }
             let ft = match entry.file_type() {
