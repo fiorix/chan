@@ -7512,6 +7512,7 @@ mod tests {
                 cwd: None,
                 command: Some("printf 'TERM=<%s>\\n' \"$TERM\"".into()),
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
 
@@ -7545,6 +7546,7 @@ mod tests {
                     cwd: None,
                     command: Some("printf 'CHAN_TERMINAL=<%s>\\n' \"$CHAN_TERMINAL\"".into()),
                     env: Default::default(),
+                    profile: None,
                 })
                 .unwrap();
 
@@ -7603,6 +7605,7 @@ mod tests {
                 cwd: None,
                 command: Some("printf 'CREATED=<%s>\\n' \"$CHAN_TERMINAL\"".into()),
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let created_out =
@@ -7677,6 +7680,7 @@ mod tests {
                 cwd: None,
                 command: Some("printf 'CREATED=<%s>\\n' \"$CHAN_TERMINAL\"".into()),
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let created_out =
@@ -7716,6 +7720,7 @@ mod tests {
                 cwd: None,
                 command: Some("printf 'FALLBACK=<%s>\\n' \"$CHAN_TERMINAL\"".into()),
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let fallback_out =
@@ -7778,6 +7783,7 @@ mod tests {
                         .into(),
                 ),
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
 
@@ -7840,6 +7846,7 @@ mod tests {
                 cwd: None,
                 command: Some("printf 'PICK=<explicit>\\n'".into()),
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let out = collect_until(&mut handle, "PICK=<explicit>", Duration::from_secs(5)).await;
@@ -7948,6 +7955,7 @@ mod tests {
                 cwd: None,
                 command: Some("printf 'SCRAPE=<tok123>\\n'".into()),
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let _ = collect_until(&mut handle, "SCRAPE=<tok123>", Duration::from_secs(5)).await;
@@ -8650,6 +8658,7 @@ mod tests {
                 cwd: None,
                 command: command.map(str::to_string),
                 env: Default::default(),
+                profile: None,
             }
         }
 
@@ -8737,6 +8746,7 @@ mod tests {
                         window_id: None,
                         command: None,
                         env: None,
+                        profile: None,
                     },
                 )
                 .unwrap());

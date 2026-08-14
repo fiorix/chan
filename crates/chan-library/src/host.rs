@@ -5720,6 +5720,7 @@ mod tests {
                 cwd: Some(std::env::temp_dir()),
                 command: command.map(str::to_string),
                 env: Default::default(),
+                profile: None,
             }
         }
 

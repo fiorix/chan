@@ -6235,6 +6235,7 @@ mod tests {
                         cwd: None,
                         command: None,
                         env: Default::default(),
+                        profile: None,
                     })
                     .expect("spawn pty")
             })
@@ -6354,6 +6355,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .expect("spawn session");
         assert_eq!(
@@ -6388,6 +6390,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .expect("spawn session");
         registry
@@ -6477,6 +6480,7 @@ mod tests {
                     env: agent_env
                         .map(|a| [("CHAN_AGENT".to_string(), a.to_string())].into())
                         .unwrap_or_default(),
+                    profile: None,
                 })
                 .expect("spawn session");
         }
@@ -6521,6 +6525,7 @@ mod tests {
                     env: agent_env
                         .map(|a| [("CHAN_AGENT".to_string(), a.to_string())].into())
                         .unwrap_or_default(),
+                    profile: None,
                 })
                 .expect("spawn session")
         };
@@ -6591,6 +6596,7 @@ mod tests {
                     env: agent_env
                         .map(|a| [("CHAN_AGENT".to_string(), a.to_string())].into())
                         .unwrap_or_default(),
+                    profile: None,
                 })
                 .expect("spawn session")
         };
@@ -6663,6 +6669,7 @@ mod tests {
                     cwd: None,
                     command: None,
                     env: Default::default(),
+                    profile: None,
                 })
                 .expect("spawn session");
         }
@@ -7057,6 +7064,7 @@ mod tests {
                     env: agent
                         .map(|agent| [("CHAN_AGENT".into(), agent.into())].into())
                         .unwrap_or_default(),
+                    profile: None,
                 })
                 .expect("spawn terminal")
         };
@@ -7391,6 +7399,7 @@ is_lead = false
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .expect("spawn collision session");
         assert_eq!(resolve_team_group(&registry, "alpha"), "alpha-2");
@@ -7564,6 +7573,7 @@ is_lead = false
                     cwd: None,
                     command: None,
                     env: Default::default(),
+                    profile: None,
                 })
                 .expect("spawn survey target");
         }
@@ -7632,6 +7642,7 @@ is_lead = false
                     cwd: None,
                     command: None,
                     env: Default::default(),
+                    profile: None,
                 })
                 .expect("spawn survey target");
         }
@@ -7721,6 +7732,7 @@ is_lead = false
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .expect("spawn survey target");
         (root, Arc::new(registry))
