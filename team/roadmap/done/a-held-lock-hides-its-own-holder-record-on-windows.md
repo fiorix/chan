@@ -1,5 +1,7 @@
 # A held lock hides its own holder record on Windows
 
+Closed: shipped in [v0.90.0](../../release/release-v0.90.0.md).
+
 Status: REGISTERED 2026-08-14, found and fixed in the same round while writing the `chan.exe` Windows smoke ([the-standalone-windows-cli-ships-untested](the-standalone-windows-cli-ships-untested.md)). Product bug, Windows-only, high severity for the paths it silently disabled. Recorded after the fix rather than before it, so this item carries the evidence rather than a proposal.
 
 ## What

@@ -1,5 +1,7 @@
 # The standalone Windows CLI ships untested
 
+Closed: shipped in [v0.90.0](../../release/release-v0.90.0.md).
+
 Status: REGISTERED 2026-08-12, promoted from a v0.89.0 draft after the close triage confirmed the gap and corrected the draft's overstatement. Small CI-hygiene item.
 
 ## What

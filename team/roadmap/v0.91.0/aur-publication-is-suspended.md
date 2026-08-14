@@ -1,6 +1,6 @@
 # AUR publication is suspended and needs a deliberate restoration
 
-Status: REGISTERED, deferred to v0.87.0 at the v0.86.0 close; suspended 2026-08-06 during the v0.85.0 delivery round. The restoration condition has been re-checked and found unmet on 2026-08-07, 2026-08-08 and **2026-08-10**; the most recent check is the section at the end of this file, and it is the one a reader should start from.
+Status: REGISTERED, deferred to v0.87.0 at the v0.86.0 close; suspended 2026-08-06 during the v0.85.0 delivery round. The restoration condition has been re-checked and found unmet on 2026-08-07, 2026-08-08, 2026-08-10 and **2026-08-14**; the most recent check is the section at the end of this file, and it is the one a reader should start from.
 
 ## What
 
@@ -63,6 +63,10 @@ The workflow was not touched. The three `false &&` guards stay exactly as they a
 `make build-matrix-check` was deliberately not run and is deliberately not cited, per the section above: it is a substring test and would be green either way.
 
 This item carries no other v0.88.0 round work. It closes as **deferred with this re-check date**, not as shipped, and its acceptance lines stay unmet and unchanged. Whoever re-checks next needs only this: open the news index, and if something new about the incident appears, test it against BOTH conditions.
+
+## Re-verified 2026-08-14, at the v0.90.0 close
+
+Still blocked, both halves checked separately per the 2026-08-10 protocol. The news index carries exactly one item newer than the 2026-06-12 incident notice, the 2026-07-21 virtualbox-ext-vnc manual-intervention note, which says nothing about the AUR or the incident, so there is no candidate announcement to evaluate. The incident notice itself is unchanged: it still states the team is actively working to track down malicious commits, still tells users they may see issues pushing package updates, and declares neither resolution nor permitted pushes. The workflow guards were not touched, and the item defers to v0.91.0 with its acceptance lines unmet and unchanged.
 
 ## Rough size
 

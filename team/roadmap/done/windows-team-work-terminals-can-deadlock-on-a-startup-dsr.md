@@ -1,5 +1,7 @@
 # A Windows Team Work terminal can deadlock on a startup DSR
 
+Closed: shipped in [v0.90.0](../../release/release-v0.90.0.md).
+
 Status: REGISTERED 2026-08-12, promoted from a v0.89.0 draft after the round's close triage traced it to a concrete reachable path. Candidate product bug, medium severity, blocked on a real-Windows reproduction before a fix is written.
 
 ## What
