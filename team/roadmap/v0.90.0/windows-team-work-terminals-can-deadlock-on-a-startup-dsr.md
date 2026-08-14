@@ -48,4 +48,19 @@ End to end on a real devserver, through `POST {prefix}/api/terminals` -- the sam
 
 Shipped: the library-side answerer in `crates/chan-library/src/terminal_sessions.rs`. The reader arms a pending query and the controller answers it on its existing 25 ms tick, after a grace in which an attached frontend's own report wins. The three natural-exit tests are un-gated and green on the Windows arm along with the ConPTY reaping tests (273 passing).
 
-Not covered: "no double-CPR when a frontend is also attached" is pinned by unit test (`a_frontend_answer_stands_the_library_fallback_down`) but was not observed against a live attached SPA, which needs the browser e2e harness. The design leaves a narrow residual race -- a frontend answering between the grace expiring and the library's write lands one stray report -- documented at `take_due_dsr_answer`.
+### No double CPR with a frontend attached
+
+Also verified live, against a real devserver, with a client attached over `/ws` that answers DSR the way xterm.js does. It attaches with no session id, so the session is created with the frontend already present -- the ordinary new-tab case. It replies with a deliberately distinctive `\x1b[7;42R` so its report can be told from the library's `\x1b[1;1R`.
+
+ConPTY makes the winner visible: it acts on whichever report it consumed by moving the cursor there, so the echoed CUP names it.
+
+| run | ConPTY's response | shell | stray report |
+| --- | --- | --- | --- |
+| frontend answers `\x1b[7;42R` | `\x1b[7;42H`, the frontend's own coordinates | clean prompt | none |
+| frontend silent (control) | `\x1b[H`, home -- the library's `1;1R` | clean prompt | n/a |
+
+The control matters: it shows the fallback is live in this setup rather than the test being vacuous, and that it is what unwedges the shell when nothing else answers.
+
+In the frontend-answering run the library wrote nothing. ConPTY waits for exactly one report, so a second would not be consumed as a device reply -- it would reach the shell as unsolicited input and echo at the prompt. The prompt is clean and the literal `1;1R` appears nowhere in the transcript.
+
+The narrow residual race remains by design and is unobserved rather than disproven: a frontend answering in the window between the grace expiring and the library's write would land one stray report. It is documented at `take_due_dsr_answer`, and it costs one stray CPR where the alternative costs the whole session.
