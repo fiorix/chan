@@ -4,7 +4,9 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.90.0] - 2026-08-14
+
+The Windows execution release: server-spawned Windows terminals unwedged from ConPTY's own startup handshake, the workspace lock's holder record readable while held, chan.exe executed by CI for the first time, and the light theme made legible in the terminal and the empty-pane animations.
 
 ### Removed
 

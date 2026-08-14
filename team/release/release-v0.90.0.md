@@ -27,8 +27,8 @@ Both intake branches received a multi-agent adversarial review before merging. T
 - The revtunnel fix reproduced and verified under an `ulimit -n` sweep of the e2e suite, with starved runs failing honestly at their named steps.
 - The darwin openpty retry is pinned by tests on attempt and backoff counts through an injected sleeper rather than wall-clock time.
 - The light-theme work carries its own screenshot evidence: a dark/light sweep of the whole animation family confirming parity, and terminal captures measuring the contrast floor (`#999999` rendering as `#6e6e6e`, 4.6:1) with dark pixel-identical before and after. The sweep's raw captures are preserved in the round's `dev/` tree.
-- The full Linux `make pre-push` gate ran green at the close commit in the project's gate container before push.
-- Not run this era: the `release.yml` publish=false dry run and `make windows-cross-check`, which are release-cycle steps ahead of the GA tag, and the browser smokes, which nothing this era touched (no editor, SPA, or reconciler change).
+- The full Linux `make pre-push` gate ran green in the project's gate container at the close commit and again at the GA commit before each push.
+- The release cycle ran without an rc, on the owner's ruling: the `release.yml` publish=false dry run came back green on all twelve jobs, macOS sign and notarize included, with all nine platform artifacts present; the docker and cachix publish=false downstream dry runs both green; and `make windows-cross-check` green at the candidate. Not run: the browser smokes; the era's SPA changes are the animation and terminal-appearance surfaces validated by the screenshot sweeps, not the editor convergence path that suite exists to cover.
 
 ## Retrospective
 
