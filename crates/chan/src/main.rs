@@ -118,9 +118,11 @@ mod tests {
             "the CLI must run on a thread whose stack this binary sizes, not \
              the linker-provided main-thread stack"
         );
-        assert!(
-            super::MAIN_STACK_BYTES >= 8 * 1024 * 1024,
-            "8 MiB is the floor the debug-profile future needs"
-        );
+        const {
+            assert!(
+                super::MAIN_STACK_BYTES >= 8 * 1024 * 1024,
+                "8 MiB is the floor the debug-profile future needs"
+            );
+        }
     }
 }
