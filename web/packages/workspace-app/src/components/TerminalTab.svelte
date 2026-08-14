@@ -651,9 +651,24 @@
     return effectiveTerminalTheme() === "light" ? "#57606a" : "#6c6c70";
   }
 
+  // Agents print truecolor secondary text tuned for dark backgrounds
+  // (#999999 hints and summaries, #b1b9f9 selections, #ffc107 warnings);
+  // on the light theme those land below 3:1 against the white background
+  // and the palette cannot reach truecolor. 4.5 (WCAG AA) has xterm
+  // darken only under-contrast foregrounds; 1 is the identity, keeping
+  // dark rendering untouched. xterm-only: ghostty-web has no equivalent
+  // option.
+  function terminalMinimumContrastRatio(): number {
+    return effectiveTerminalTheme() === "light" ? 4.5 : 1;
+  }
+
   function applyTerminalTheme(): void {
     if (!term) return;
     term.options.theme = terminalTheme();
+    if (backend === "xterm") {
+      (term as Terminal).options.minimumContrastRatio =
+        terminalMinimumContrastRatio();
+    }
     secretMasker?.setColor(terminalSecretMaskColor());
   }
 
@@ -1024,6 +1039,7 @@
         fontSize: rendererFontSize,
         lineHeight: 1.2,
         macOptionIsMeta: true,
+        minimumContrastRatio: terminalMinimumContrastRatio(),
         scrollback: scrollbackLines,
         tabStopWidth: 8,
         theme: terminalTheme(),
