@@ -145,7 +145,11 @@ mkdir -p "$WS"
 
 PS_JSON=
 for ((attempt = 0; attempt < 30; attempt++)); do
-    PS_JSON="$("$BIN" ps --json 2>&1)"
+    # `|| true`: a failing ps is a retry, not the end of the script. Under
+    # `set -e` a bare assignment carries the substitution's exit status, so
+    # one transient non-zero while the daemon settles would kill the loop
+    # and discard the stderr it just captured.
+    PS_JSON="$("$BIN" ps --json 2>&1)" || true
     grep -q '"served_by": *"devserver"' <<<"$PS_JSON" && break
     sleep 1
 done
