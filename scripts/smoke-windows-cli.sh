@@ -117,22 +117,16 @@ done
 }
 echo "windows cli smoke: DETACHED_PROCESS daemon serving on 127.0.0.1:$PORT"
 
-# 3. The `\\.\pipe\` control-socket connect. A devserver publishes one control
-#    socket per mounted tenant rather than one per process, so a workspace has
-#    to be served before any pipe exists.
+# 3. The `\\.\pipe\` control-socket discovery and connect. A devserver
+#    publishes one control socket per mounted tenant rather than one per
+#    process, so a workspace has to be served before any pipe exists.
 #
-#    The pipe is attributed by diffing the namespace around the spawn instead of
-#    by matching a pid: a devserver names its socket from a stable
-#    (identity, prefix) hash (`chan-control-s<hex>`), not the pid-scoped
-#    `chan-control-<pid>-<rand>` form. The diff also keeps the smoke off any
-#    other chan on the box, which matters on a developer machine.
-#
-#    `chan ps` would be the natural driver -- resolving its BY column runs an
-#    `Identify` over the holder's socket -- but it cannot serve as one on
-#    Windows today: `ps` reads the holder pid from the workspace `writer.lock`
-#    record, and while that lock is held Windows refuses the read, so `ps` never
-#    gets a pid to look a socket up for. That is a real defect, tracked
-#    separately; this smoke deliberately does not depend on it.
+#    `chan ps` drives the whole path in one command: it reads the holder pid
+#    from the workspace lock record, enumerates the pipe namespace for that
+#    pid's socket, opens it, and completes an `Identify` round trip to fill the
+#    BY column. A `devserver` answer means every one of those steps ran.
+#    `devserver --status` would prove none of it -- it only reads a pidfile and
+#    never opens a socket.
 WS="$TMP_ROOT/workspace"
 mkdir -p "$WS"
 "$BIN" open --here --devserver="$PORT" --no-browser "$WS" >"$TMP_ROOT/open.log" 2>&1 || {
@@ -141,30 +135,25 @@ mkdir -p "$WS"
     exit 1
 }
 
-PIPE=
-for ((attempt = 0; attempt < 30; attempt++)); do
-    PIPE="$(comm -13 <(printf '%s\n' "$PIPES_BEFORE") <(control_pipes) | head -1)"
-    [ -n "$PIPE" ] && break
-    sleep 1
-done
-[ -n "$PIPE" ] || {
+# A new chan-control pipe in the namespace is the precondition; the diff around
+# the spawn attributes it to OUR daemon and keeps the check off any other chan
+# running on a developer's box.
+[ -n "$(comm -13 <(printf '%s\n' "$PIPES_BEFORE") <(control_pipes))" ] || {
     echo "error: serving a workspace published no new chan-control pipe" >&2
     exit 1
 }
-echo "windows cli smoke: the daemon published \\\\.\\pipe\\$PIPE"
 
-# The round trip is the point: a reply means the pipe was opened and answered,
-# not merely that a name appeared in the namespace.
-# The window roster carries per-window bearer tokens, so the reply is matched
-# but never echoed -- a failing smoke must not print a credential into CI logs.
-REPLY="$(CHAN_CONTROL_SOCKET="\\\\.\\pipe\\$PIPE" "$BIN" shell window list --json 2>&1)" || {
-    echo "error: control request over the named pipe failed (${#REPLY} bytes of reply withheld)" >&2
+PS_JSON=
+for ((attempt = 0; attempt < 30; attempt++)); do
+    PS_JSON="$("$BIN" ps --json 2>&1)"
+    grep -q '"served_by": *"devserver"' <<<"$PS_JSON" && break
+    sleep 1
+done
+grep -q '"served_by": *"devserver"' <<<"$PS_JSON" || {
+    echo "error: ps did not identify the holder over the named-pipe control socket" >&2
+    echo "$PS_JSON" >&2
     exit 1
 }
-grep -q '"window_id"' <<<"$REPLY" || {
-    echo "error: control-socket reply named no window (${#REPLY} bytes withheld)" >&2
-    exit 1
-}
-echo "windows cli smoke: named-pipe control socket answered a window-list request"
+echo "windows cli smoke: ps identified the devserver holder over its named pipe"
 
 echo "windows cli smoke: PASS ($BIN)"

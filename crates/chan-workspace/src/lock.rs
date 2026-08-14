@@ -9,12 +9,16 @@
 // open in writer mode. Reading callers don't take any lock; tantivy
 // and sqlite handle their own multi-reader concurrency.
 //
-// The lock file body carries a JSON [`LockRecord`] -- the holder's pid,
-// canonical path, and start time -- written right after the advisory
-// lock is won. It serves two jobs: a contender can tell a live holder
-// (refuse) from a stale record a dead one left behind (steal), and
-// `chan close` reads it to find the process serving a path. The
-// record shape is a cross-lane contract (`chan close` parses it).
+// A JSON [`LockRecord`] -- the holder's pid, canonical path, and start
+// time -- is written right after the advisory lock is won. It serves two
+// jobs: a contender can tell a live holder (refuse) from a stale record a
+// dead one left behind (steal), and `chan close` reads it to find the
+// process serving a path. The record shape is a cross-lane contract
+// (`chan close` parses it).
+//
+// The record lives in its own file next to the lock, because a Windows
+// `LockFileEx` holder makes the lock file's own body unreadable to everyone
+// else. See [`RECORD_FILE`]. The lock body keeps a copy for older readers.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -25,8 +29,27 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ChanError, Result};
 
-/// Identity written into `writer.lock` by the holder immediately after
-/// it wins the advisory lock.
+/// The advisory lock itself. Its body still carries a copy of the record, so
+/// a chan built before [`RECORD_FILE`] existed can still read one we write.
+const LOCK_FILE: &str = "writer.lock";
+
+/// The holder record, written beside the lock rather than only inside it.
+///
+/// Windows needs the split. `LockFileEx` takes a MANDATORY byte-range lock, so
+/// while a holder owns [`LOCK_FILE`] every other handle -- in any process, and
+/// even in the holder's own -- is refused the read. That turned every record
+/// read on Windows into `None`, silently, and the damage is not cosmetic:
+/// `chan ps` and `chan close` cannot identify a holder, [`WorkspaceLock`]'s
+/// steal path can never confirm a dead one, a second acquire in this process
+/// reports the cross-process `WorkspaceLocked` instead of
+/// `WorkspaceAlreadyOpen`, and [`is_locked_by_foreign_holder`] calls chan's own
+/// lock foreign. Unix flock never blocked reads, which is why the whole class
+/// only ever surfaced here. A plain sidecar carries no lock and reads on both
+/// platforms.
+const RECORD_FILE: &str = "writer.json";
+
+/// Identity written by the holder immediately after it wins the advisory
+/// lock, into both [`RECORD_FILE`] and the body of [`LOCK_FILE`].
 ///
 /// The on-disk shape is a cross-crate contract: `chan close` parses it
 /// to discover the serving process. Keep the field set and
@@ -84,14 +107,14 @@ impl WorkspaceLock {
     /// ever stolen from.
     pub fn acquire(lock_dir: &Path, workspace_root: &Path) -> Result<Self> {
         fs::create_dir_all(lock_dir)?;
-        let path = lock_dir.join("writer.lock");
+        let path = lock_dir.join(LOCK_FILE);
         let file = open_lock_file(&path)?;
         match FileExt::try_lock_exclusive(&file) {
             Ok(()) => {
-                write_record(&file, workspace_root)?;
+                write_record(&file, lock_dir, workspace_root)?;
                 Ok(Self { file })
             }
-            Err(e) if is_contended(&e) => Self::try_steal(&path, workspace_root),
+            Err(e) if is_contended(&e) => Self::try_steal(lock_dir, workspace_root),
             Err(e) => Err(ChanError::Io(e.to_string())),
         }
     }
@@ -99,8 +122,9 @@ impl WorkspaceLock {
     /// Reclaim a contended lock iff the recorded holder is provably
     /// dead. Returns `WorkspaceLocked` whenever the steal isn't provably
     /// safe (the conservative default).
-    fn try_steal(path: &Path, workspace_root: &Path) -> Result<Self> {
-        let record = read_record_at(path);
+    fn try_steal(lock_dir: &Path, workspace_root: &Path) -> Result<Self> {
+        let path = lock_dir.join(LOCK_FILE);
+        let record = read_record_for(lock_dir);
         let our_path = canonical_string(workspace_root);
         // The contended lock is held by US (our own pid, this workspace): a
         // live handle elsewhere in this process, or a mount in flight on
@@ -131,15 +155,15 @@ impl WorkspaceLock {
         // file, and lock the fresh inode. The leaked fd keeps its now-
         // nameless inode; future acquirers contend on the new one.
         let dead_pid = record.as_ref().map_or(0, |r| r.pid);
-        let _ = fs::remove_file(path);
-        let file = open_lock_file(path)?;
+        let _ = fs::remove_file(&path);
+        let file = open_lock_file(&path)?;
         match FileExt::try_lock_exclusive(&file) {
             Ok(()) => {
                 tracing::warn!(
                     stolen_from = dead_pid,
                     "stole writer lock from a dead holder"
                 );
-                write_record(&file, workspace_root)?;
+                write_record(&file, lock_dir, workspace_root)?;
                 Ok(Self { file })
             }
             // Lost a race to break the stale lock; treat as locked.
@@ -159,7 +183,20 @@ impl Drop for WorkspaceLock {
 /// present and well-formed. `chan close` uses this to discover the
 /// process serving a workspace path.
 pub fn read_lock_record(lock_dir: &Path) -> Option<LockRecord> {
-    read_record_at(&lock_dir.join("writer.lock"))
+    read_record_for(lock_dir)
+}
+
+/// The holder record for `lock_dir`, preferring the unlocked sidecar and
+/// falling back to the lock body.
+///
+/// The fallback is what lets this chan read a lock dir last written by a build
+/// that only knew [`LOCK_FILE`]. On Windows that fallback still loses to the
+/// holder's byte-range lock -- there is nothing to be done about an old
+/// holder's file -- but it self-heals the moment a current chan acquires and
+/// writes the sidecar.
+fn read_record_for(lock_dir: &Path) -> Option<LockRecord> {
+    read_record_at(&lock_dir.join(RECORD_FILE))
+        .or_else(|| read_record_at(&lock_dir.join(LOCK_FILE)))
 }
 
 /// Probe whether the writer lock for `lock_dir` is currently free,
@@ -172,7 +209,7 @@ pub fn read_lock_record(lock_dir: &Path) -> Option<LockRecord> {
 /// count reaches zero *before* `Workspace::drop` runs the `_lock` drop,
 /// so "no strong refs" is not the same as "flock free".
 pub fn is_free(lock_dir: &Path) -> bool {
-    let path = lock_dir.join("writer.lock");
+    let path = lock_dir.join(LOCK_FILE);
     let Ok(file) = open_lock_file(&path) else {
         // Can't even open the lockfile → treat as not-free (conservative).
         return false;
@@ -193,14 +230,14 @@ pub fn is_free(lock_dir: &Path) -> bool {
 /// lock, this process's own holder, or a provably-dead holder stays actionable;
 /// a live, unknown, torn, or path-mismatched holder reports foreign-locked.
 pub fn is_locked_by_foreign_holder(lock_dir: &Path, workspace_root: &Path) -> bool {
-    let path = lock_dir.join("writer.lock");
+    let path = lock_dir.join(LOCK_FILE);
     let Ok(file) = open_lock_file(&path) else {
         return true;
     };
     match FileExt::try_lock_exclusive(&file) {
         Ok(()) => false,
         Err(e) if is_contended(&e) => {
-            let Some(record) = read_record_at(&path) else {
+            let Some(record) = read_record_for(lock_dir) else {
                 return true;
             };
             let our_path = canonical_string(workspace_root);
@@ -235,17 +272,30 @@ pub(crate) fn open_lock_file(path: &Path) -> Result<File> {
     opts.open(path).map_err(|e| ChanError::Io(e.to_string()))
 }
 
-fn write_record(mut file: &File, workspace_root: &Path) -> Result<()> {
+/// Publish the holder record to both places: the unlocked [`RECORD_FILE`] that
+/// everyone can actually read, and the [`LOCK_FILE`] body an older chan on the
+/// same box still expects. One record value feeds both, so the two copies can
+/// never disagree about pid or start time.
+///
+/// The sidecar goes through [`crate::fs_ops::atomic_write`] (tmp + fsync +
+/// rename), so a reader racing the write sees either the previous record or
+/// this one, never a torn half.
+fn write_record(file: &File, lock_dir: &Path, workspace_root: &Path) -> Result<()> {
     let record = LockRecord {
         pid: std::process::id(),
         path: canonical_string(workspace_root),
         started_at: chrono::Utc::now().to_rfc3339(),
     };
     let json = serde_json::to_vec(&record).map_err(|e| ChanError::Io(e.to_string()))?;
+    write_record_body(file, &json)?;
+    crate::fs_ops::atomic_write(&lock_dir.join(RECORD_FILE), &json)
+}
+
+fn write_record_body(mut file: &File, json: &[u8]) -> Result<()> {
     file.set_len(0).map_err(|e| ChanError::Io(e.to_string()))?;
     file.seek(SeekFrom::Start(0))
         .map_err(|e| ChanError::Io(e.to_string()))?;
-    file.write_all(&json)
+    file.write_all(json)
         .map_err(|e| ChanError::Io(e.to_string()))?;
     file.flush().map_err(|e| ChanError::Io(e.to_string()))?;
     Ok(())
@@ -439,6 +489,57 @@ mod tests {
         let _l1 = WorkspaceLock::acquire(tmp.path(), &root(&tmp)).unwrap();
         let r2 = WorkspaceLock::acquire(tmp.path(), &root(&tmp));
         assert!(matches!(r2, Err(ChanError::WorkspaceAlreadyOpen)));
+    }
+
+    #[test]
+    fn the_record_is_readable_while_the_lock_is_held() {
+        // The invariant the sidecar exists for, stated on its own so a
+        // regression names itself. On Windows `LockFileEx` is mandatory: while
+        // the holder owns writer.lock, reading THAT file fails for every other
+        // handle, including one in the holder's own process. Every consumer of
+        // the record -- `chan ps`, `chan close`, the steal path, the foreign
+        // probe -- reads it precisely while it is held, so a record that is
+        // only readable once released is a record nobody can ever use.
+        let tmp = TempDir::new().unwrap();
+        let _held = WorkspaceLock::acquire(tmp.path(), &root(&tmp)).unwrap();
+
+        assert!(!is_free(tmp.path()), "precondition: the lock is held");
+        let rec = read_lock_record(tmp.path())
+            .expect("the holder's record must be readable while the lock is held");
+        assert_eq!(rec.pid, std::process::id());
+
+        // And it is the sidecar doing the work, not the lock body.
+        assert!(tmp.path().join(RECORD_FILE).is_file());
+    }
+
+    #[test]
+    fn a_legacy_lock_dir_without_a_sidecar_still_reads() {
+        // A lock dir last written by a chan that only knew writer.lock. The
+        // lock is free (that build exited), so the body is readable and the
+        // fallback must find it rather than reporting no holder at all.
+        let tmp = TempDir::new().unwrap();
+        let legacy = LockRecord {
+            pid: 4242,
+            path: canonical_string(&root(&tmp)),
+            started_at: "2000-01-01T00:00:00Z".to_string(),
+        };
+        fs::write(
+            tmp.path().join(LOCK_FILE),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        assert!(!tmp.path().join(RECORD_FILE).exists());
+
+        assert_eq!(read_lock_record(tmp.path()).unwrap().pid, 4242);
+
+        // Acquiring self-heals the dir: the sidecar appears and both copies
+        // now name this process.
+        let _lock = WorkspaceLock::acquire(tmp.path(), &root(&tmp)).unwrap();
+        assert!(tmp.path().join(RECORD_FILE).is_file());
+        assert_eq!(
+            read_record_at(&tmp.path().join(RECORD_FILE)).unwrap().pid,
+            std::process::id()
+        );
     }
 
     #[test]
