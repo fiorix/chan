@@ -4294,10 +4294,13 @@ impl Session {
     /// whose report carries the real cursor position and wins.
     ///
     /// The query is cleared either way, so a frontend-answered query is not
-    /// re-examined every tick. A frontend that answers in the window between
-    /// the grace expiring and this write lands a second CPR at the PTY; that
-    /// race is narrow and costs at most one stray report, where losing the
-    /// answer entirely costs the whole session.
+    /// re-examined every tick. A frontend that answers after the grace expires
+    /// lands a second CPR at the PTY: on a local attach that window is narrow,
+    /// but a frontend whose round trip exceeds the grace (a tunnel-published
+    /// devserver at high RTT) loses the race on EVERY query its programs emit,
+    /// receiving the library's 1;1 floor first and landing its own report as
+    /// stray input. That standing cost is accepted over the alternative,
+    /// where an unanswered query costs the whole session.
     fn take_due_dsr_answer(&self) -> Option<&'static [u8]> {
         let query_at = self.dsr_query_at.load(Ordering::Relaxed);
         if query_at == 0 || now_unix_millis() - query_at < DSR_ANSWER_GRACE_MS {
@@ -4516,16 +4519,6 @@ fn terminate_child(child: &mut dyn Child) {
     let _ = child.wait();
 }
 
-/// Write one input plan to the PTY, flushing each part and pausing `gap`
-/// between parts so a following part cannot be coalesced into its predecessor.
-/// Shared by the fresh and fdstore-restored controllers so their delivery
-/// cannot drift.
-///
-/// A flush error is as fatal as a write error: the PTY writer is unbuffered,
-/// so a failing flush means the fd is already broken and the bytes did not
-/// reach the child. Continuing would write a submit chord against a body the
-/// agent never received, and the caller's "delivered" acknowledgment would be
-/// a lie. Callers tear the session down on `Err`.
 /// Does this client input carry a cursor-position report (`ESC [ <row> ; <col>
 /// R`)? Used only to notice that an attached frontend has already answered a
 /// DSR query. Deliberately loose: a false positive costs one skipped fallback
@@ -4547,6 +4540,16 @@ fn contains_cursor_position_report(data: &[u8]) -> bool {
     false
 }
 
+/// Write one input plan to the PTY, flushing each part and pausing `gap`
+/// between parts so a following part cannot be coalesced into its predecessor.
+/// Shared by the fresh and fdstore-restored controllers so their delivery
+/// cannot drift.
+///
+/// A flush error is as fatal as a write error: the PTY writer is unbuffered,
+/// so a failing flush means the fd is already broken and the bytes did not
+/// reach the child. Continuing would write a submit chord against a body the
+/// agent never received, and the caller's "delivered" acknowledgment would be
+/// a lie. Callers tear the session down on `Err`.
 fn write_input_parts(
     writer: &mut dyn Write,
     parts: &[Vec<u8>],
