@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
@@ -393,6 +394,111 @@ pub(super) fn clear_mcp_env(cmd: &mut CommandBuilder) {
     }
 }
 
+/// Keys the AppImage runtime and linuxdeploy's GTK hook invent whose value
+/// holds no mount path, so the value scan in [`scrub_var`] cannot see them.
+/// `GDK_BACKEND` pins GTK children to X11, which drops every GTK app launched
+/// from a terminal onto XWayland; `ARGV0` is read ahead of `argv[0]` by
+/// `chan_shell::invoked_arg0`, so an inherited copy misnames a re-exec'd chan.
+const APPIMAGE_OPAQUE_KEYS: &[&str] = &[
+    "APPIMAGE",
+    "APPIMAGE_GTK_THEME",
+    "ARGV0",
+    "GDK_BACKEND",
+    "GTK_THEME",
+    "OWD",
+];
+
+/// Search paths the runtime prepends its own entries to rather than inventing
+/// outright. These are filtered entry by entry, never dropped: removing `PATH`
+/// would leave the shell unable to resolve a command at all.
+const APPIMAGE_PREPENDED_KEYS: &[&str] = &["PATH", "LD_LIBRARY_PATH", "XDG_DATA_DIRS"];
+
+/// What scrubbing one variable does to it.
+#[derive(Debug, PartialEq, Eq)]
+enum Scrub {
+    /// Drop the key: it exists only to point at the bundle.
+    Remove,
+    /// Keep the key, minus the entries that pointed at the bundle.
+    Rewrite(OsString),
+}
+
+/// Whether any `PATH`-style entry of `value` resolves inside the mount.
+/// Splitting before comparing keeps the match component-aware, so a second
+/// AppImage whose mount id merely starts with this one's is not mistaken for
+/// part of this bundle.
+fn entry_in_bundle(appdir: &Path, value: &OsStr) -> bool {
+    std::env::split_paths(value).any(|entry| entry.starts_with(appdir))
+}
+
+/// Plan the scrub for one variable, or `None` to leave it alone. Pure, so the
+/// treatment split is unit-tested without mutating this process's environment.
+///
+/// Matching on the value rather than on a list of names is what keeps this
+/// honest across a Tauri or linuxdeploy bump: a plugin that starts exporting
+/// some new bundle-scoped key is caught the day it appears, with no list here
+/// to forget to update. Only the keys whose value hides the mount need naming.
+fn scrub_var(appdir: &Path, key: &str, value: &OsStr) -> Option<Scrub> {
+    if APPIMAGE_PREPENDED_KEYS.contains(&key) {
+        let mut dropped = false;
+        let kept: Vec<PathBuf> = std::env::split_paths(value)
+            .filter(|entry| {
+                let keep = !entry.starts_with(appdir);
+                dropped |= !keep;
+                keep
+            })
+            .collect();
+        if !dropped {
+            return None;
+        }
+        // Nothing left means the runtime created the variable outright (it
+        // does this for LD_LIBRARY_PATH on hosts that had none), so the host
+        // state to restore is "unset", not "empty" -- an empty LD_LIBRARY_PATH
+        // is not the same thing to the loader.
+        return Some(match std::env::join_paths(kept) {
+            Ok(joined) if !joined.is_empty() => Scrub::Rewrite(joined),
+            _ => Scrub::Remove,
+        });
+    }
+    if APPIMAGE_OPAQUE_KEYS.contains(&key) || entry_in_bundle(appdir, value) {
+        return Some(Scrub::Remove);
+    }
+    None
+}
+
+/// Strip the AppImage bundle environment from a terminal spawn.
+///
+/// The type-2 runtime and linuxdeploy's GTK hook redirect a wide set of
+/// loader and toolkit variables into the ephemeral `/tmp/.mount_*` squashfs.
+/// The GUI process needs them, because WebKit and GTK dlopen out of that mount
+/// long after startup, but a shell must not inherit them: it would run system
+/// binaries against the bundle's older libraries, resolve `xdg-open` out of the
+/// bundle, and hand a `PYTHONHOME` with no stdlib to anything embedding CPython.
+/// AppImage documents no mechanism for recovering what the runtime overwrote,
+/// so the host environment is reconstructed here rather than restored.
+///
+/// No-op off an AppImage: `$APPDIR` and `$APPIMAGE` are set only by that
+/// runtime, so the dev binary, the macOS bundle, and the deb/rpm install never
+/// enter the branch.
+pub(super) fn clear_appimage_env(cmd: &mut CommandBuilder) {
+    let Some(appdir) = std::env::var_os("APPDIR").filter(|dir| !dir.is_empty()) else {
+        return;
+    };
+    if std::env::var_os("APPIMAGE").is_none_or(|path| path.is_empty()) {
+        return;
+    }
+    let appdir = PathBuf::from(appdir);
+    for (key, value) in std::env::vars_os() {
+        let Some(key) = key.to_str() else {
+            continue;
+        };
+        match scrub_var(&appdir, key, &value) {
+            Some(Scrub::Remove) => cmd.env_remove(key),
+            Some(Scrub::Rewrite(filtered)) => cmd.env(key, filtered),
+            None => {}
+        }
+    }
+}
+
 pub(crate) fn terminal_home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -480,5 +586,107 @@ mod tests {
         assert_eq!(attempts, OPENPTY_ATTEMPTS);
         assert_eq!(slept.len() as u32, OPENPTY_ATTEMPTS - 1);
         assert!(err.to_string().contains("code: 6,"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod appimage_env_tests {
+    use super::{scrub_var, Scrub};
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    const APPDIR: &str = "/tmp/.mount_chanAA";
+
+    /// Build a search-path value the way the platform writes one, so these
+    /// cases exercise the real separator instead of a hardcoded colon.
+    fn joined(parts: &[&str]) -> OsString {
+        std::env::join_paths(parts.iter().map(PathBuf::from)).expect("join test paths")
+    }
+
+    fn scrub(key: &str, value: &OsString) -> Option<Scrub> {
+        scrub_var(Path::new(APPDIR), key, value)
+    }
+
+    #[test]
+    fn prepended_key_keeps_host_entries_in_order() {
+        let value = joined(&[
+            "/tmp/.mount_chanAA/usr/bin",
+            "/tmp/.mount_chanAA/usr/sbin",
+            "/usr/local/bin",
+            "/usr/bin",
+        ]);
+        assert_eq!(
+            scrub("PATH", &value),
+            Some(Scrub::Rewrite(joined(&["/usr/local/bin", "/usr/bin"]))),
+        );
+    }
+
+    #[test]
+    fn prepended_key_is_unset_when_every_entry_was_the_bundle() {
+        // The runtime creates LD_LIBRARY_PATH outright on a host that had
+        // none, so the host state to restore is unset rather than empty.
+        let value = joined(&[
+            "/tmp/.mount_chanAA/usr/lib",
+            "/tmp/.mount_chanAA/usr/lib/x86_64-linux-gnu",
+        ]);
+        assert_eq!(scrub("LD_LIBRARY_PATH", &value), Some(Scrub::Remove));
+    }
+
+    #[test]
+    fn prepended_key_without_bundle_entries_is_left_alone() {
+        let value = joined(&["/usr/local/bin", "/usr/bin"]);
+        assert_eq!(scrub("PATH", &value), None);
+    }
+
+    #[test]
+    fn sibling_mount_whose_id_extends_this_one_is_not_the_bundle() {
+        // Mount ids share a prefix whenever two AppImages of related names are
+        // open at once. Matching on path components rather than on the raw
+        // string keeps the other app's entries out of this scrub.
+        let value = joined(&["/tmp/.mount_chanAAB/usr/bin", "/usr/bin"]);
+        assert_eq!(scrub("PATH", &value), None);
+
+        let opaque = OsString::from("/tmp/.mount_chanAAB/usr/lib/loaders.cache");
+        assert_eq!(scrub("GDK_PIXBUF_MODULE_FILE", &opaque), None);
+    }
+
+    #[test]
+    fn unnamed_key_pointing_into_the_bundle_is_removed() {
+        // No list here names GST_PLUGIN_SYSTEM_PATH or whatever a future
+        // linuxdeploy plugin exports; the value is what condemns them.
+        let value = joined(&["/tmp/.mount_chanAA/usr/lib/gstreamer-1.0"]);
+        assert_eq!(scrub("GST_PLUGIN_SYSTEM_PATH", &value), Some(Scrub::Remove));
+
+        let future = OsString::from("/tmp/.mount_chanAA/usr/share/some-new-thing");
+        assert_eq!(
+            scrub("SOME_FUTURE_PLUGIN_DIR", &future),
+            Some(Scrub::Remove)
+        );
+    }
+
+    #[test]
+    fn trailing_separator_does_not_hide_a_bundle_entry() {
+        // PYTHONPATH and PERLLIB are both exported with a trailing separator.
+        let value = joined(&["/tmp/.mount_chanAA/usr/share/pyshared", ""]);
+        assert_eq!(scrub("PYTHONPATH", &value), Some(Scrub::Remove));
+    }
+
+    #[test]
+    fn opaque_key_is_removed_though_its_value_hides_the_mount() {
+        assert_eq!(
+            scrub("GDK_BACKEND", &OsString::from("x11")),
+            Some(Scrub::Remove),
+        );
+        assert_eq!(
+            scrub("GTK_THEME", &OsString::from("Adwaita:light")),
+            Some(Scrub::Remove),
+        );
+    }
+
+    #[test]
+    fn host_variables_survive_untouched() {
+        assert_eq!(scrub("HOME", &OsString::from("/home/user")), None);
+        assert_eq!(scrub("EDITOR", &OsString::from("vim")), None);
+        assert_eq!(scrub("TERM", &OsString::from("xterm-256color")), None);
     }
 }
