@@ -376,13 +376,20 @@ fn format_index_progress(event: &ProgressEvent, verbose: bool) -> String {
 /// server-build time -- before the router accepts any request -- so the
 /// command-builder cache read is instant. A no-op off Windows.
 fn prime_terminal_shell() {
+    // Detached on purpose: the blocking prime runs to completion on the
+    // blocking pool regardless of the dropped handle (spawn_blocking is not
+    // cancellable), and we never need its result -- the warm cache is read
+    // later through the `OnceLock`. `drop` rather than `let _` keeps clippy's
+    // `let_underscore_future` happy.
+
+    // Shell-profile discovery is primed on EVERY platform, not just Windows:
+    // it reads `/etc/shells` on unix and shells out to `where`/`reg`/`git` on
+    // Windows, so the block-the-tokio-worker hazard is the same on both.
+    drop(tokio::task::spawn_blocking(
+        crate::terminal_sessions::shell_profiles::prime_shell_profiles,
+    ));
     #[cfg(windows)]
     {
-        // Detached on purpose: the blocking prime runs to completion on the
-        // blocking pool regardless of the dropped handle (spawn_blocking is not
-        // cancellable), and we never need its result -- the warm cache is read
-        // later through the `OnceLock`. `drop` rather than `let _` keeps clippy's
-        // `let_underscore_future` happy.
         drop(tokio::task::spawn_blocking(
             crate::terminal_sessions::prime_windows_shell,
         ));

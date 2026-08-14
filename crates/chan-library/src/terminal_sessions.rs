@@ -37,6 +37,7 @@ mod bytes;
 mod platform;
 mod redraw;
 mod ring;
+pub mod shell_profiles;
 
 use bytes::{contains_subslice, visible_activity_bytes};
 #[cfg(windows)]
@@ -3032,7 +3033,9 @@ impl Session {
         }
         let pty_system = native_pty_system();
         let pair = openpty_absorbing_transient_refusal(&*pty_system, opts.size)?;
-        let mut cmd = command_builder(opts.command.as_deref());
+        // No profile selected yet: the picker that will pass one is not wired
+        // up, so every spawn still takes the machine default exactly as before.
+        let mut cmd = command_builder(None, opts.command.as_deref());
         let cwd = opts.cwd.unwrap_or_else(|| config.workspace_root.clone());
         cmd.cwd(&cwd);
         // Ahead of the per-session overrides so an explicit `env` entry still
