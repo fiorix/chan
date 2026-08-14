@@ -185,6 +185,7 @@
     hideRichPromptForTab,
   } from "../state/richPrompt.svelte";
   import { surveyFor } from "../state/survey.svelte";
+  import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
 
   let {
     tab,
@@ -2184,6 +2185,12 @@
   function terminalCwdRel(): string | null {
     if (terminalCwdVirtual !== null) return terminalCwdVirtual;
     const abs = terminalCwdAbs;
+    // A Files window has no workspace root; its context translates the
+    // PTY's absolute cwd back to the wire-relative form.
+    const filesCtx = filesContext.current;
+    if (filesCtx && abs) {
+      return wirePathFromAbsolute(filesCtx, abs.replace(/\\/g, "/"));
+    }
     const root = workspace.info?.root;
     if (!abs || !root) return null;
     const normAbs = abs.replace(/\\/g, "/").replace(/\/+$/, "");
