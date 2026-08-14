@@ -30,3 +30,22 @@ The robust fix is a library-side minimal DSR answerer: the reader watches for `\
 
 - A real-Windows reproduction result: the deadlock happens (always / intermittently / under load) or it does not, recorded with the conditions.
 - If it reproduces: the library-side DSR answerer, with the ConPTY reaping and the ungated exit tests green on the Windows arm, and no double-CPR when a frontend is also attached.
+
+## Reproduced and fixed, 2026-08-14 (Windows 11, AX8_PRO)
+
+It reproduces, deterministically, and the cause is narrower than this item assumed.
+
+**It is not a pwsh behavior.** The box that reproduced it has no `pwsh` installed at all: the resolver fell to Windows PowerShell 5.1, which this item listed as an open question, and it deadlocks. Forcing `cmd.exe` through `CHAN_SHELL` deadlocks identically, with the same four-byte scrollback. The `\x1b[6n` is ConPTY's OWN startup handshake -- conhost emits it before it will pump the child's output -- so it gates every Windows shell rather than one interactive shell's prompt setup. The race against the SPA's reattach cursor described above is therefore not the mechanism; there is nothing to race, because nothing in a server-side spawn answers the query at all until a frontend attaches.
+
+Evidence, through the library's own PTY path: a session spawned with `exit 7` recorded no exit within five seconds and its entire scrollback was the lone `\x1b[6n`. With the answerer, the same session exits 7 in 0.38s. Disabling the answerer again makes both un-gated exit tests fail with exactly that original scrollback.
+
+End to end on a real devserver, through `POST {prefix}/api/terminals` -- the same call the team dialog makes, where the session is created server-side and only attached over `/ws` afterwards:
+
+| binary | result |
+| --- | --- |
+| shipped v0.89.0 (`git-0c6fd8dc`) | session created (201), command never ran, no output in 25s |
+| this branch | command ran, marker file written in 2s |
+
+Shipped: the library-side answerer in `crates/chan-library/src/terminal_sessions.rs`. The reader arms a pending query and the controller answers it on its existing 25 ms tick, after a grace in which an attached frontend's own report wins. The three natural-exit tests are un-gated and green on the Windows arm along with the ConPTY reaping tests (273 passing).
+
+Not covered: "no double-CPR when a frontend is also attached" is pinned by unit test (`a_frontend_answer_stands_the_library_fallback_down`) but was not observed against a live attached SPA, which needs the browser e2e harness. The design leaves a narrow residual race -- a frontend answering between the grace expiring and the library's write lands one stray report -- documented at `take_due_dsr_answer`.
