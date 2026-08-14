@@ -24,17 +24,9 @@ A clean Win11 needs the **WebView2 evergreen runtime**. It ships with current Wi
 
 ## Checking the `cfg(target_os = "linux")` code from Windows
 
-The mirror image of `xwin-check`: a Windows host cannot compile the Linux arms,
-and that gap is not theoretical. Adding one field to `CreateOptions` looked
-clean on Windows and broke **15** Linux-only construction sites -- all in
-fd-store and control-socket test code behind `cfg(target_os = "linux")` -- which
-a single WSL run found and CI would otherwise have reported.
+The mirror image of `xwin-check`: a Windows host cannot compile the Linux arms, and that gap is not theoretical. Adding one field to `CreateOptions` looked clean on Windows and broke **15** Linux-only construction sites -- all in fd-store and control-socket test code behind `cfg(target_os = "linux")` -- which a single WSL run found and CI would otherwise have reported.
 
-Reviewing structurally instead does not substitute. Verifying that every
-`FdStoreSessionMeta` literal carried the new field was true and useless: a
-structural sweep only inspects the sites you already know about. For a field
-added to a struct used across `cfg` boundaries, only a real compile on the other
-platform counts.
+Reviewing structurally instead does not substitute. Verifying that every `FdStoreSessionMeta` literal carried the new field was true and useless: a structural sweep only inspects the sites you already know about. For a field added to a struct used across `cfg` boundaries, only a real compile on the other platform counts.
 
 **Setup, once, inside WSL:**
 
@@ -47,9 +39,7 @@ curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path
 sudo apt-get install -y build-essential pkg-config libssl-dev
 ```
 
-**Running it.** Keep the source wherever you work; put `CARGO_TARGET_DIR` on
-WSL's ext4. Build-artifact writes over 9p are what make `/mnt/c` builds
-unusable -- source reads are tolerable:
+**Running it.** Keep the source wherever you work; put `CARGO_TARGET_DIR` on WSL's ext4. Build-artifact writes over 9p are what make `/mnt/c` builds unusable -- source reads are tolerable:
 
 ```sh
 export CARGO_TARGET_DIR=$HOME/.cache/chan-target
@@ -58,14 +48,9 @@ cargo test -p chan-library fdstore          # 18 tests a Windows host cannot bui
 RUSTFLAGS="-D warnings" cargo clippy -p chan-library -p chan-server -p chan --all-targets
 ```
 
-The clippy line matters as much as the compile: CI denies warnings on Linux, and
-a `cfg(linux)` lint finding is invisible from Windows too.
+The clippy line matters as much as the compile: CI denies warnings on Linux, and a `cfg(linux)` lint finding is invisible from Windows too.
 
-Two invocation traps when calling into WSL from Windows tooling: **Git Bash**
-rewrites `/mnt/c/...` arguments into `C:/Program Files/Git/mnt/c/...` (MSYS path
-translation), so drive WSL from PowerShell or from inside WSL; and PowerShell
-expands `$(...)` inside double-quoted arguments before `wsl.exe` sees them, so
-pass a script file rather than an inline command.
+Two invocation traps when calling into WSL from Windows tooling: **Git Bash** rewrites `/mnt/c/...` arguments into `C:/Program Files/Git/mnt/c/...` (MSYS path translation), so drive WSL from PowerShell or from inside WSL; and PowerShell expands `$(...)` inside double-quoted arguments before `wsl.exe` sees them, so pass a script file rather than an inline command.
 
 ## Linux dev loop on a Windows host
 
@@ -111,23 +96,15 @@ make linux-gateway SDME='sudo sdme'
 make linux-chan-tarball LINUX_TARGET=x86_64-unknown-linux-musl
 ```
 
-Run these from inside WSL. Driving them from the Windows shell with
-`SDME='wsl sudo sdme'` is the discouraged path above: each `sdme` call becomes
-its own `wsl.exe` invocation, and the distro can be torn down between them.
+Run these from inside WSL. Driving them from the Windows shell with `SDME='wsl sudo sdme'` is the discouraged path above: each `sdme` call becomes its own `wsl.exe` invocation, and the distro can be torn down between them.
 
 The core gate itself (`make ci-linux`) runs inside an sdme container exactly as in [`linux-and-macos.md`](linux-and-macos.md#core-run-the-ci-gate-in-a-linux-container) -- seed the tree with `git archive HEAD`, install the deps, run the gate. Reuse those instructions; they are not duplicated here.
 
 ### The systemd fd-store suite
 
-`scripts/e2e/devserver-fdstore.sh` drives a real `systemctl --user` unit and so
-must run in a container, never on a host serving live terminals -- the same rule
-as on Linux and macOS. On Windows the container is an sdme guest inside WSL, and
-the whole nested stack works: WSL systemd -> nspawn guest systemd -> a lingering
-per-user manager whose units accept `FileDescriptorStoreMax`.
+`scripts/e2e/devserver-fdstore.sh` drives a real `systemctl --user` unit and so must run in a container, never on a host serving live terminals -- the same rule as on Linux and macOS. On Windows the container is an sdme guest inside WSL, and the whole nested stack works: WSL systemd -> nspawn guest systemd -> a lingering per-user manager whose units accept `FileDescriptorStoreMax`.
 
-Provision the guest per the recipe in
-[`linux-and-macos.md`](linux-and-macos.md), plus the packages the suite itself
-needs:
+Provision the guest per the recipe in [`linux-and-macos.md`](linux-and-macos.md), plus the packages the suite itself needs:
 
 ```sh
 sudo sdme create --name chan-fdstore -r ubuntu \
@@ -137,11 +114,7 @@ sudo sdme create --name chan-fdstore -r ubuntu \
 sudo sdme start chan-fdstore
 ```
 
-Then inside the guest: install `dbus-user-session sudo bash git curl procps
-python3 build-essential pkg-config libssl-dev`, create the `dev` user at **uid
-1000**, `loginctl enable-linger dev`, and run the suite as `dev` with
-`CHAN_FDSTORE_E2E_ALLOW_TAKEOVER=1` -- correct here and only here, because
-nothing else in a throwaway container owns `chan-devserver.service`.
+Then inside the guest: install `dbus-user-session sudo bash git curl procps python3 build-essential pkg-config libssl-dev`, create the `dev` user at **uid 1000**, `loginctl enable-linger dev`, and run the suite as `dev` with `CHAN_FDSTORE_E2E_ALLOW_TAKEOVER=1` -- correct here and only here, because nothing else in a throwaway container owns `chan-devserver.service`.
 
 Six things bite in practice, all found on the first real run:
 
@@ -154,9 +127,7 @@ Six things bite in practice, all found on the first real run:
 | `/repo/target/debug/chan: No such file or directory` | Do **not** set `CARGO_TARGET_DIR`: the suite runs the binary from `$REPO/target/debug/chan`. With `/repo` bound to a WSL clone the target dir is already on ext4. |
 | `fatal: not a git repository: /repo/C:/...` | The Windows linked-worktree `.git` pointer; see the filesystem notes below. Use a WSL clone. |
 
-A passing run prints `PASS: all 8 cases at <sha>` and asserts the fd-store count
-after every phase -- restart, CLI restart, watchdog `SIGSTOP`, `kill -9` crash
-restore, session close, stop, `--restart --force`, and bare stop.
+A passing run prints `PASS: all 8 cases at <sha>` and asserts the fd-store count after every phase -- restart, CLI restart, watchdog `SIGSTOP`, `kill -9` crash restore, session close, stop, `--restart --force`, and bare stop.
 
 ### Filesystem + performance notes
 
