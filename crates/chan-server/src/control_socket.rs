@@ -2182,6 +2182,11 @@ fn spawn_team(
             cwd: None,
             command,
             env: m.env.clone(),
+            // Team members take the configured default profile. A per-member
+            // shell override would be a team-config field and a `cs terminal
+            // team` flag; neither exists yet, and `None` is the same shell
+            // these spawns have always used.
+            profile: None,
         };
         match registry.create(opts) {
             Ok(handle) => {

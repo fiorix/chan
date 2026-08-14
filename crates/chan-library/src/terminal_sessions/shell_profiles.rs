@@ -126,7 +126,8 @@ impl ShellKind {
 /// Where a profile came from. A user-defined profile always wins over a
 /// generated one with the same id, so a hand-authored entry can correct a bad
 /// guess without the generator overwriting it on the next boot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ProfileSource {
     /// Produced by a generator in this module.
     Discovered,

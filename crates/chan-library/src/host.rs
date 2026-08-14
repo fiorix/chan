@@ -4700,6 +4700,7 @@ mod tests {
                 mcp_env: false,
                 cwd: None,
                 command: None,
+                profile: None,
                 env: Default::default(),
             })
             .expect("spawn control PTY");
@@ -4765,6 +4766,7 @@ mod tests {
                 mcp_env: false,
                 cwd: None,
                 command: None,
+                profile: None,
                 env: Default::default(),
             })
             .expect("spawn PTY");
@@ -4805,6 +4807,7 @@ mod tests {
                 mcp_env: false,
                 cwd: None,
                 command: None,
+                profile: None,
                 env: Default::default(),
             })
             .expect("spawn PTY");
@@ -4863,6 +4866,7 @@ mod tests {
                 mcp_env: false,
                 cwd: None,
                 command: None,
+                profile: None,
                 env: Default::default(),
             })
             .expect("spawn PTY");
@@ -4932,6 +4936,7 @@ mod tests {
                 mcp_env: false,
                 cwd: None,
                 command: Some("exit 7".to_string()),
+                profile: None,
                 env: Default::default(),
             })
             .expect("spawn exiting PTY");
@@ -5853,6 +5858,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
                 mcp_env: false,
                 child_pid: Some(4242),
                 size: crate::terminal_sessions::StoredPtySize {

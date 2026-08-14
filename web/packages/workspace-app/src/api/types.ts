@@ -278,6 +278,9 @@ export type TerminalSpawnRequest = {
   /// None and `cs terminal survey` cannot resolve them by window. The Team
   /// Work bootstrap passes the dialog window's sessionWindowId().
   window_id?: string;
+  /// Shell profile for the new session. Absent uses the server's configured
+  /// default profile, then its built-in shell resolution.
+  profile?: string;
 };
 
 export type TerminalSpawnResponse = {
@@ -314,6 +317,30 @@ export type TerminalRestartRequest = {
   /// merged into the restart options' env so per-member env
   /// (e.g. CHAN_TAB_NAME = lead handle) lands before respawn.
   env?: Record<string, string>;
+  /// Switch the tab to a different shell profile. Absent restarts on the
+  /// profile the session was spawned with -- restart means "same shell again".
+  profile?: string;
+};
+
+/// One selectable shell from `GET /api/terminal/shells`.
+export type ShellProfileView = {
+  id: string;
+  name: string;
+  /// Absolute path to the executable, for a tooltip or to disambiguate two
+  /// installs of the same shell.
+  program: string;
+  kind: ShellKind;
+  source: "discovered" | "user";
+};
+
+/// `GET /api/terminal/shells`. Mounted on both the full and the slim
+/// terminal-only router, so a terminal-only window can populate its picker.
+export type TerminalShellsResponse = {
+  profiles: ShellProfileView[];
+  /// Echoed back only when the configured default resolves to a listed
+  /// profile, so the picker shows what will actually happen rather than what
+  /// the config file wishes for.
+  default_profile: string | null;
 };
 
 export type Preferences = {

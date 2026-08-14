@@ -446,6 +446,13 @@ pub struct CreateOptions {
     pub cwd: Option<PathBuf>,
     pub command: Option<String>,
     pub env: BTreeMap<String, String>,
+    /// Id of the shell profile to spawn. `None` uses the configured default
+    /// profile, and failing that the built-in shell resolution -- so a client
+    /// that never names a profile behaves exactly as before profiles existed.
+    ///
+    /// Carried on the session (not just the request) so a restart reproduces
+    /// the shell the tab was opened with.
+    pub profile: Option<String>,
 }
 
 /// Best-effort SPA layout coordinates supplied by a terminal WebSocket
@@ -474,6 +481,11 @@ pub struct RestartOverrides {
     /// spawn command/env.
     pub command: Option<String>,
     pub env: Option<BTreeMap<String, String>>,
+    /// Switch the tab to a different shell profile. `None` restarts with the
+    /// profile the session was spawned with -- restart means "same shell
+    /// again", so changing it has to be asked for explicitly, exactly like
+    /// `command` and `env` above.
+    pub profile: Option<String>,
 }
 
 /// Read-only view of a live terminal session, for the control socket's
@@ -566,6 +578,12 @@ pub struct FdStoreSessionMeta {
     pub cwd: Option<PathBuf>,
     pub command: Option<String>,
     pub env: BTreeMap<String, String>,
+    /// Shell profile the session was spawned with. `#[serde(default)]` so a
+    /// manifest written before profiles existed imports as "no profile", i.e.
+    /// the built-in default -- which is exactly what those sessions were
+    /// spawned with.
+    #[serde(default)]
+    pub profile: Option<String>,
     pub mcp_env: bool,
     pub child_pid: Option<u32>,
     pub size: StoredPtySize,
@@ -1570,6 +1588,7 @@ impl Registry {
             window_id,
             command,
             env,
+            profile,
         } = overrides;
         let old = self
             .sessions
@@ -1600,6 +1619,12 @@ impl Registry {
         }
         if let Some(extra_env) = env {
             opts.env.extend(extra_env);
+        }
+        // Switching the tab's shell. Absent, the session restarts with the
+        // profile it was spawned with, which `restart_options()` carried over --
+        // restart means "same shell again".
+        if profile.is_some() {
+            opts.profile = profile;
         }
         let mut reservation =
             self.reserve_metadata(opts.tab_name.take(), opts.tab_group.take(), Some(id));
@@ -3033,9 +3058,35 @@ impl Session {
         }
         let pty_system = native_pty_system();
         let pair = openpty_absorbing_transient_refusal(&*pty_system, opts.size)?;
-        // No profile selected yet: the picker that will pass one is not wired
-        // up, so every spawn still takes the machine default exactly as before.
-        let mut cmd = command_builder(None, opts.command.as_deref());
+        // Resolve the shell for this spawn: the profile the caller asked for,
+        // else the configured default, else `None` -- which keeps the built-in
+        // resolution, so a client that never names a profile behaves exactly as
+        // it did before profiles existed.
+        //
+        // Both halves are already cached (discovery in a `OnceLock`, the user's
+        // declarations in the loaded config), so this is a merge of two small
+        // vectors on the spawn path, never I/O.
+        let effective = shell_profiles::effective_profiles(
+            shell_profiles::shell_profiles(),
+            &config.terminal.profiles,
+        );
+        let requested = opts.profile.as_deref().and_then(|id| {
+            let found = effective.iter().find(|profile| profile.id == id);
+            if found.is_none() {
+                // A profile can vanish between the picker listing it and the
+                // spawn (config edited, shell uninstalled). Falling back beats
+                // failing to open a terminal.
+                tracing::warn!(
+                    id,
+                    "requested terminal profile not found; using the default shell"
+                );
+            }
+            found
+        });
+        let profile = requested.or_else(|| {
+            shell_profiles::resolve_default(&effective, config.terminal.default_profile.as_deref())
+        });
+        let mut cmd = command_builder(profile, opts.command.as_deref());
         let cwd = opts.cwd.unwrap_or_else(|| config.workspace_root.clone());
         cmd.cwd(&cwd);
         // Ahead of the per-session overrides so an explicit `env` entry still
@@ -3061,6 +3112,13 @@ impl Session {
         #[cfg(windows)]
         {
             let mut prepend: Vec<PathBuf> = Vec::new();
+            // The profile's own PATH needs, ahead of the chan bin dir. Git
+            // BASH is why this exists: without `<root>\usr\bin` and
+            // `<root>\mingw64\bin` the login shell has no coreutils, so even
+            // the `cs` shim we add below would run in a shell with no `ls`.
+            if let Some(profile) = profile {
+                prepend.extend(profile.path_prepend.iter().cloned());
+            }
             if let Some(local) = dirs::data_local_dir() {
                 prepend.push(local.join("chan").join("bin"));
             }
@@ -3199,6 +3257,9 @@ impl Session {
                 cwd: Some(cwd),
                 command: opts.command,
                 env: opts.env,
+                // Retained so a restart reproduces the same shell rather than
+                // silently reverting the tab to the default profile.
+                profile: opts.profile,
             },
             child_pid,
             command_tx,
@@ -3416,6 +3477,10 @@ impl Session {
             cwd: self.cwd().or_else(|| self.spawn_opts.cwd.clone()),
             command: self.spawn_opts.command.clone(),
             env: self.spawn_opts.env.clone(),
+            // Exported so a session that survives a server restart through the
+            // fd store comes back on the shell it was opened with, rather than
+            // silently reverting to the default profile.
+            profile: self.spawn_opts.profile.clone(),
             mcp_env: self.spawn_opts.mcp_env,
             child_pid: self.child_pid,
             size: size.into(),
@@ -3480,6 +3545,10 @@ impl Session {
                 cwd: Some(cwd),
                 command: meta.command.clone(),
                 env: meta.env.clone(),
+                // Restored so a later restart of an fd-store-adopted session
+                // reproduces its original shell. Absent in manifests written
+                // before profiles existed, which is correct for them.
+                profile: meta.profile.clone(),
             },
             child_pid: meta.child_pid,
             master_fd: Some(master_fd),
@@ -4833,6 +4902,7 @@ mod tests {
                 mcp_env: true,
                 cwd: None,
                 command: command.map(str::to_string),
+                profile: None,
                 env: env
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -5261,6 +5331,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let id = first.id().to_string();
@@ -5453,6 +5524,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         // One session owns the tab name; a different name matches none. The
@@ -6230,6 +6302,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         // No drainer runs in this test, so positions are stable.
@@ -6471,6 +6544,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let id = handle.id().to_string();
@@ -6491,6 +6565,7 @@ mod tests {
             cwd: None,
             command: None,
             env: Default::default(),
+            profile: None,
         }
     }
 
@@ -6504,6 +6579,7 @@ mod tests {
             cwd: None,
             command: Some(command.to_string()),
             env: Default::default(),
+            profile: None,
         }
     }
 
@@ -6711,6 +6787,7 @@ mod tests {
             cwd: None,
             command: None,
             env: BTreeMap::new(),
+            profile: None,
             mcp_env: false,
             child_pid: None,
             size: test_size().into(),
@@ -7290,6 +7367,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let err = registry
@@ -7302,6 +7380,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap_err();
         assert!(matches!(err, CreateError::Capped));
@@ -7326,6 +7405,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let first_id = first.id().to_string();
@@ -7343,6 +7423,7 @@ mod tests {
                     cwd: None,
                     command: None,
                     env: Default::default(),
+                    profile: None,
                 },
             )
             .unwrap();
@@ -7366,6 +7447,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let second = registry
@@ -7378,6 +7460,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
 
@@ -7394,6 +7477,7 @@ mod tests {
                     cwd: None,
                     command: None,
                     env: Default::default(),
+                    profile: None,
                 },
             )
             .unwrap();
@@ -7495,6 +7579,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let original_id = original.id().to_string();
@@ -7568,6 +7653,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let original_id = original.id().to_string();
@@ -7725,6 +7811,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let out = collect_until(&mut handle, "DEFAULT=<ran>", Duration::from_secs(5)).await;
@@ -7885,6 +7972,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let id = handle.id().to_string();
@@ -7914,6 +8002,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let mut second = registry.attach(first.id(), Some(first.seq)).unwrap();
@@ -7950,6 +8039,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let mut second = registry.attach(first.id(), Some(first.seq)).unwrap();
@@ -8435,6 +8525,7 @@ mod tests {
             cwd: None,
             command: None,
             env: Default::default(),
+            profile: None,
             mcp_env: false,
             child_pid: None,
             size: test_size().into(),
@@ -8867,6 +8958,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
                 mcp_env: false,
                 child_pid: Some(4242),
                 size: test_size().into(),

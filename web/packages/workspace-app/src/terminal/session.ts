@@ -22,6 +22,10 @@ export type TerminalWsPathOpts = {
   cwd?: string | null;
   command?: string | null;
   env?: Record<string, string> | null;
+  /// Shell profile id from `GET /api/terminal/shells`. Fresh-spawn only, like
+  /// cwd/command/env: reattaching cannot change the shell a live PTY is
+  /// already running, and the server ignores it on that path.
+  profile?: string | null;
 };
 
 export function terminalWsPath(opts: TerminalWsPathOpts): string {
@@ -75,6 +79,10 @@ export function terminalWsPath(opts: TerminalWsPathOpts): string {
     if (opts.env && Object.keys(opts.env).length > 0) {
       params.set("env", JSON.stringify(opts.env));
     }
+    // Absent means "the server's default profile", so an unset picker keeps
+    // today's behaviour and the URL stays short in the common case.
+    const profile = opts.profile?.trim();
+    if (profile) params.set("profile", profile);
     // MCP env injection is governed by the global `terminal.mcp_env`
     // server config (set from the Terminal Settings panel); the SPA
     // sends no per-terminal `?mcp_env=` override. The backend still

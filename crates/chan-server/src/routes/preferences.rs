@@ -720,6 +720,7 @@ mod tests {
                 cwd: None,
                 command: Some("printf 'CHAN_TERMINAL=<%s>\\n' \"$CHAN_TERMINAL\"".into()),
                 env: Default::default(),
+                profile: None,
             })
             .expect("spawn terminal after preference refresh");
         let deadline = Instant::now() + Duration::from_secs(5);

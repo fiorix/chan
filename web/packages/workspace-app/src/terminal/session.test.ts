@@ -137,6 +137,33 @@ describe("terminalWsPath", () => {
     ).not.toContain("cwd");
   });
 
+  test("adds the shell profile only for fresh terminal sessions", () => {
+    const fresh = terminalWsPath({
+      cols: 80,
+      rows: 24,
+      tabName: "git bash",
+      profile: "git-bash",
+    });
+    expect(new URL(fresh, "http://chan.test").searchParams.get("profile")).toBe("git-bash");
+
+    // A reattach adopts the live PTY's shell; it cannot switch it, and the
+    // server ignores the param on that path anyway.
+    const reattach = terminalWsPath({
+      cols: 80,
+      rows: 24,
+      tabName: "git bash",
+      sessionId: "term_abc",
+      profile: "git-bash",
+    });
+    expect(reattach).not.toContain("profile");
+
+    // Unset / blank keeps the URL short and means "the server's default".
+    expect(terminalWsPath({ cols: 80, rows: 24, tabName: "plain" })).not.toContain("profile");
+    expect(
+      terminalWsPath({ cols: 80, rows: 24, tabName: "plain", profile: "   " }),
+    ).not.toContain("profile");
+  });
+
   test("adds spawn command and env only for fresh terminal sessions", () => {
     const fresh = terminalWsPath({
       cols: 80,

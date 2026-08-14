@@ -45,6 +45,7 @@ import type {
   SemanticState,
   SemanticModelRegistry,
   TerminalRestartRequest,
+  TerminalShellsResponse,
   TerminalRosterEntry,
   TerminalSpawnRequest,
   TerminalSpawnResponse,
@@ -1288,6 +1289,20 @@ export const api = {
   /// workspace (that workspace's tenant). A per-window count would restart at
   /// 1 in each new window. The route returns a PLAIN-TEXT body, not JSON, so
   /// we hit fetch directly and read `.text()` rather than the JSON `req()`.
+  /// The shells this server can spawn, for the profile picker. Served by both
+  /// the full and the slim terminal-only router, so a terminal-only window can
+  /// call it too.
+  terminalShells: async (): Promise<TerminalShellsResponse> => {
+    const res = await chanFetch(apiPath("/api/terminal/shells"), {
+      method: "GET",
+      headers: directAuthHeaders(),
+    });
+    if (!res.ok) {
+      await responseTextError(res);
+    }
+    return (await res.json()) as TerminalShellsResponse;
+  },
+
   terminalNextName: async (): Promise<string> => {
     const res = await chanFetch(apiPath("/api/terminal/next-name"), {
       method: "GET",
