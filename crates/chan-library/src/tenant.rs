@@ -52,6 +52,37 @@ pub trait WorkspaceCellHandle: Send + Sync {
 /// The host operations a control-socket connection reaches through a `Weak`
 /// back-reference (`WorkspaceHost` registers itself via `install_self`). Held
 /// as `Weak<dyn HostControl>` so the control socket never names the concrete
+/// A tenant's standalone filesystem surface, as the host reaches it.
+///
+/// The host routes but never resolves: when `cs open` names a path outside its
+/// workspace, the workspace tenant hands the absolute path to the host, and the
+/// host hands it to whichever tenant actually mounted a filesystem. That tenant
+/// resolves it through its own capability root and returns the `/ws` frame to
+/// deliver, pre-serialized -- chan-library owns neither `MiniWorkspace` nor
+/// `WindowCommand`, and does not need to.
+///
+/// Installed on [`TenantArtifacts`] only by a tenant that constructed the
+/// surface, so `Option::is_some` IS the capability answer: no separate probe to
+/// keep in sync with the thing it describes.
+pub trait StandaloneFiles: Send + Sync {
+    /// Resolve `requested` against this tenant's capability root and produce
+    /// the frame that opens it in `window_id`, plus the path to name in the
+    /// acknowledgement. `Err` when the path cannot be expressed there (outside
+    /// the root, unresolvable, non-UTF-8) -- the caller refuses rather than
+    /// opening something other than what was named.
+    fn open_frame(&self, window_id: &str, requested: &Path) -> Result<StandaloneOpenFrame, String>;
+}
+
+/// What [`StandaloneFiles::open_frame`] hands back: the wire frame to deliver
+/// and the resolved path, so the acknowledgement can name what was opened
+/// without the host parsing the frame.
+pub struct StandaloneOpenFrame {
+    /// A serialized `/ws` `window_command` frame addressed to the window.
+    pub frame: String,
+    /// The resolved path, for the acknowledgement text.
+    pub path: String,
+}
+
 /// host type.
 #[async_trait]
 pub trait HostControl: Send + Sync {
@@ -100,6 +131,32 @@ pub trait HostControl: Send + Sync {
     /// host's launcher router; the shared registry is where a tenant-scoped
     /// command and the host-scoped routes meet.
     fn tunnel_registry(&self) -> Arc<chan_revtunnel::server::TunnelRegistry>;
+
+    /// Open `requested` -- an absolute path outside the calling workspace -- in
+    /// a standalone window of this host, reusing a live one and minting one
+    /// when there is none. The workspace tenant calls this INSTEAD of refusing
+    /// an escaping `cs open`, and never resolves the path itself: only the
+    /// tenant that mounted a filesystem knows what that path means.
+    ///
+    /// `Err` when this host serves no filesystem surface, when the path cannot
+    /// be expressed there, or when no window could be minted. Async because
+    /// raising the target window goes through the desktop bridge.
+    async fn open_outside_workspace(&self, requested: &Path) -> Result<OpenOutsideAck, Error>;
+}
+
+/// The outcome of [`HostControl::open_outside_workspace`], for the CLI line.
+pub struct OpenOutsideAck {
+    /// The resolved path, as the standalone surface spells it.
+    pub path: String,
+    /// The window the open went to.
+    pub window_id: String,
+    /// True when that window was minted for this open (so it has no socket yet
+    /// and the frame was parked for its first attach).
+    pub minted: bool,
+    /// The workspace this path belongs to, when the library already serves one
+    /// containing it. Named in the acknowledgement so the user knows an indexed
+    /// view exists; the open still lands on the machine surface.
+    pub inside_workspace: Option<String>,
 }
 
 /// How a control socket's process tears down the workspace named by a
@@ -296,6 +353,11 @@ pub struct TenantArtifacts {
     /// `/ws` handler drains, so the frame reaches the window that was created
     /// for it.
     pub pending_window_commands: Arc<crate::pending_window_commands::PendingWindowCommands>,
+    /// This tenant's standalone filesystem surface, when it mounted one. The
+    /// host routes an escaping `cs open` through it; `None` is the capability
+    /// answer for every tenant that serves terminals alone (and for every
+    /// workspace tenant, whose files are its workspace).
+    pub standalone_files: Option<Arc<dyn StandaloneFiles>>,
     /// The tenant's `/ws` broadcast channel. The host sends targeted
     /// `window_command` teardown frames on it so a discarded / hidden window's
     /// own socket learns its record was torn down and shows the leader-close

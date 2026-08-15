@@ -1571,7 +1571,16 @@ fn into_tenant_artifacts(a: AppArtifacts) -> chan_library::TenantArtifacts {
         window_presence,
         window_transfers,
         session_registry,
-        pending_window_commands: Arc::new(Default::default()),
+        // The SAME map this tenant's `/ws` handler drains, so a frame parked
+        // for a just-minted window reaches the socket that window opens.
+        pending_window_commands: state.pending_window_commands.clone(),
+        // Installed only by a tenant that constructed a filesystem surface, so
+        // its presence is what tells the host this host can route an escaping
+        // `cs open` at all.
+        standalone_files: state.standalone_files.clone().map(|files| {
+            Arc::new(crate::control_socket::StandaloneFilesResolver(files))
+                as Arc<dyn chan_library::StandaloneFiles>
+        }),
         events_tx,
         cell,
         // `bulk_transfer` rides here as the tenant's lane lifetime: the host

@@ -25,7 +25,7 @@ use tower::ServiceExt;
 use crate::desktop_window_ops::DesktopBridge;
 #[cfg(test)]
 use crate::tenant::TenantTaskOwner;
-use crate::tenant::{HostControl, TenantArtifacts, TenantBuilder, UnserveMode};
+use crate::tenant::{HostControl, OpenOutsideAck, TenantArtifacts, TenantBuilder, UnserveMode};
 use crate::terminal_sessions::{CloseReason, TerminalExit};
 #[cfg(target_os = "linux")]
 use crate::terminal_sessions::{
@@ -1901,6 +1901,142 @@ impl WorkspaceHost {
         }
     }
 
+    /// Open an absolute path that lies OUTSIDE the calling workspace, in a
+    /// standalone window of this host. The workspace tenant routes here instead
+    /// of refusing; the path is resolved by the tenant that mounted a
+    /// filesystem, never here.
+    ///
+    /// Reuses a live standalone window when there is one and mints one when
+    /// there is not, so a loop of opens lands in one window rather than a
+    /// window each. A minted window has no socket yet, so its frame is parked
+    /// for its first `/ws` attach.
+    ///
+    /// Lock discipline: every step that follows takes `self.workspaces` again
+    /// (window assembly, the mint's persist), so the surface handles are cloned
+    /// out and the read guard is dropped before anything else runs. Holding it
+    /// across those calls deadlocks against a queued writer from
+    /// `open_workspace` / `close_workspace`.
+    pub async fn open_outside_workspace(&self, requested: &Path) -> Result<OpenOutsideAck, Error> {
+        let (files, pending, session_registry, events_tx) =
+            {
+                let prefix = self.terminal_tenant_prefix.get().ok_or_else(|| {
+                    Error::Config("this host serves no standalone filesystem".into())
+                })?;
+                let workspaces = self
+                    .workspaces
+                    .read()
+                    .map_err(|_| Error::Config("workspace map poisoned".into()))?;
+                let runtime = workspaces.get(prefix).ok_or_else(|| {
+                    Error::Config("this host serves no standalone filesystem".into())
+                })?;
+                let files = runtime.artifacts.standalone_files.clone().ok_or_else(|| {
+                    Error::Config("this host serves no standalone filesystem".into())
+                })?;
+                (
+                    files,
+                    runtime.artifacts.pending_window_commands.clone(),
+                    runtime.artifacts.session_registry.clone(),
+                    runtime.artifacts.events_tx.clone(),
+                )
+            };
+
+        let (window_id, minted) = match self.select_standalone_window() {
+            Some(id) => (id, false),
+            None => (
+                self.mint_window(WindowKind::Terminal, None)?.window_id,
+                true,
+            ),
+        };
+        let open = files
+            .open_frame(&window_id, requested)
+            .map_err(Error::BadRequest)?;
+
+        // Deliver to a live window, or park for the one that is opening. The
+        // re-check after the park closes the window between the liveness test
+        // and the park, where an attach could drain an empty map and then miss
+        // the frame.
+        let delivered = session_registry
+            .dispatch_if_live(&window_id, || events_tx.send(open.frame.clone()))
+            .is_some();
+        if !delivered {
+            pending
+                .park(&window_id, open.frame.clone())
+                .map_err(Error::BadRequest)?;
+            if session_registry
+                .dispatch_if_live(&window_id, || events_tx.send(open.frame.clone()))
+                .is_some()
+            {
+                let _ = pending.take(&window_id);
+            }
+        }
+
+        // Best effort: raise the window that now holds the file. A window the
+        // desktop has not opened yet, or no desktop at all, simply stays where
+        // it is.
+        let _ = self
+            .desktop
+            .dispatch(|reply| crate::desktop_window_ops::DesktopWindowOp::Open {
+                id: window_id.clone(),
+                reply,
+            })
+            .await;
+
+        Ok(OpenOutsideAck {
+            path: open.path,
+            window_id,
+            minted,
+            inside_workspace: self.workspace_containing(requested),
+        })
+    }
+
+    /// The standalone window an escaping open should land in: this library's
+    /// own (never a connected devserver's, whose rows ride the same feed),
+    /// not a control terminal, not hidden, lowest ordinal first so repeated
+    /// opens keep landing in the same one. `None` mints.
+    fn select_standalone_window(&self) -> Option<String> {
+        let mut rows: Vec<WindowRecord> = self
+            .assemble_window_records()
+            .into_iter()
+            .filter(|row| {
+                row.library_id == self.library_id()
+                    && matches!(row.kind, WindowKind::Terminal)
+                    && !row.control
+                    && !row.hidden
+                    && row.connected
+            })
+            .collect();
+        rows.sort_by_key(|row| row.ordinal);
+        rows.into_iter().next().map(|row| row.window_id)
+    }
+
+    /// The registered workspace whose root contains `path`, if any. Named in
+    /// the acknowledgement so a user opening a file that belongs to another
+    /// workspace learns an indexed view of it exists; the open still lands on
+    /// the machine surface, which is the one that can show any path at all.
+    fn workspace_containing(&self, path: &Path) -> Option<String> {
+        let canonical = path.canonicalize().ok()?;
+        self.library
+            .list_workspaces()
+            .into_iter()
+            .filter(|known| {
+                known
+                    .root_path
+                    .canonicalize()
+                    .is_ok_and(|root| canonical.starts_with(root))
+            })
+            // Longest root wins: nested workspaces resolve to the innermost.
+            .max_by_key(|known| known.root_path.as_os_str().len())
+            .map(|known| {
+                known.display_name.clone().unwrap_or_else(|| {
+                    known
+                        .root_path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| known.root_path.to_string_lossy().into_owned())
+                })
+            })
+    }
+
     /// Discard a window: drop its registry row, reap its terminal sessions, and
     /// fire the watch. Returns whether a row existed (a `DELETE` handler maps
     /// `false` to 404). Reaping on discard frees the fds a busy detached session
@@ -2801,6 +2937,10 @@ impl HostControl for WorkspaceHost {
         self.live_terminal_count(window_id)
     }
 
+    async fn open_outside_workspace(&self, requested: &Path) -> Result<OpenOutsideAck, Error> {
+        self.open_outside_workspace(requested).await
+    }
+
     fn tunnel_registry(&self) -> Arc<chan_revtunnel::server::TunnelRegistry> {
         self.tunnel_registry()
     }
@@ -3059,6 +3199,7 @@ mod tests {
             window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
             session_registry: Arc::new(crate::session_presence::SessionRegistry::new()),
             pending_window_commands: Arc::new(Default::default()),
+            standalone_files: None,
             events_tx: tokio::sync::broadcast::channel(16).0,
             cell,
             keepalive: Box::new(()),

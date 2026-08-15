@@ -1181,6 +1181,16 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
                 Ok(workspace) => workspace,
                 Err(message) => return ControlResponse::Error { message },
             };
+            // A path that leaves this workspace is not an error, it is a
+            // routing fact: the machine that owns it is already serving a
+            // surface that can show it. Probed BEFORE the connected-window
+            // check, because the escape goes to a different window than the
+            // caller's, and before any resolution, which is the standalone
+            // tenant's job -- a workspace tenant never learns what a machine
+            // path means.
+            if abs_to_workspace_rel(workspace.root(), &path) == Err(WorkspaceRelError::Escape) {
+                return route_open_outside_workspace(unserve, &path).await;
+            }
             if let Err(message) = require_connected_window(session_registry, &window_id) {
                 return ControlResponse::Error { message };
             }
@@ -3718,18 +3728,25 @@ fn send_window_command(
 // would mean converting openers to blocking round-trips like `cs pane`
 // (`pane_round_trip`, above), which also calls this same function but awaits
 // a reply afterward instead of returning immediately.
+/// Serialize a window command as the `/ws` frame its target reads. Shared by
+/// the live send and by the routed-open path, which parks the same bytes for a
+/// window that has not connected yet.
+fn serialize_window_command(window_id: &str, command: WindowCommand) -> Result<String, String> {
+    let frame = WindowCommandFrame {
+        frame_type: "window_command",
+        window_id: window_id.to_string(),
+        command,
+    };
+    serde_json::to_string(&frame).map_err(|e| format!("encode window command: {e}"))
+}
+
 fn send_window_command_if_live(
     session_registry: &SessionRegistry,
     window_id: &str,
     command: WindowCommand,
     events_tx: &broadcast::Sender<String>,
 ) -> Result<(), String> {
-    let frame = WindowCommandFrame {
-        frame_type: "window_command",
-        window_id: window_id.to_string(),
-        command,
-    };
-    let raw = serde_json::to_string(&frame).map_err(|e| format!("encode window command: {e}"))?;
+    let raw = serialize_window_command(window_id, command)?;
     match session_registry.dispatch_if_live(window_id, || events_tx.send(raw)) {
         None => Err(format!("window {window_id:?} is not connected")),
         Some(Ok(_)) => Ok(()),
@@ -4570,6 +4587,87 @@ pub(crate) fn open_path_standalone(
     let (command, summary) = standalone_open_command(target, destination);
     send_window_command_if_live(session_registry, window_id, command, events_tx)?;
     Ok(format!("open request queued for {summary}"))
+}
+
+/// Hand an escaping `cs open` to the host, which routes it to a standalone
+/// window and answers with what it did.
+///
+/// The refusal survives where there is nothing to route to: a standalone `chan
+/// open` has no host at all, and a host whose terminal tenant mounted no
+/// filesystem has nowhere to put the path. Both keep pointing at `chan open
+/// PATH`, which loads it AS a workspace -- the answer that was always right
+/// when no surface could show it.
+async fn route_open_outside_workspace(unserve: &UnserveScope, path: &Path) -> ControlResponse {
+    let host = match unserve {
+        UnserveScope::Host(weak) => weak.upgrade(),
+        UnserveScope::Standalone { .. } | UnserveScope::Unsupported => None,
+    };
+    let Some(host) = host else {
+        return ControlResponse::Error {
+            message: escape_guidance(path),
+        };
+    };
+    match host.open_outside_workspace(path).await {
+        Ok(ack) => ControlResponse::Ok {
+            message: describe_outside_open(&ack),
+        },
+        Err(chan_library::Error::Config(_)) => ControlResponse::Error {
+            message: escape_guidance(path),
+        },
+        Err(error) => ControlResponse::Error {
+            message: error.to_string(),
+        },
+    }
+}
+
+/// What `cs` prints for a routed open. It names the window, because the file
+/// did NOT land where the command was typed, and says when that window is
+/// still opening, because the user is about to look for it.
+fn describe_outside_open(ack: &chan_library::OpenOutsideAck) -> String {
+    let mut message = format!(
+        "open request queued for {} in standalone window {}",
+        ack.path, ack.window_id
+    );
+    if ack.minted {
+        message.push_str(" (opening)");
+    }
+    if let Some(workspace) = &ack.inside_workspace {
+        message.push_str(&format!(
+            "; that path is in workspace '{workspace}', open a window there for the indexed view"
+        ));
+    }
+    message
+}
+
+/// The refusal for an escaping path with no surface to route it to.
+fn escape_guidance(path: &Path) -> String {
+    format!(
+        "path escapes workspace root, and this host serves no filesystem to open it in. \
+         Run 'chan open {}' to load it as a workspace window.",
+        path.display()
+    )
+}
+
+/// The tenant's standalone filesystem surface, as chan-library reaches it.
+/// Resolving stays HERE, on the tenant that mounted the capability; the host
+/// only routes, and never learns what a machine path means.
+pub(crate) struct StandaloneFilesResolver(pub(crate) Arc<crate::state::StandaloneFilesState>);
+
+impl chan_library::StandaloneFiles for StandaloneFilesResolver {
+    fn open_frame(
+        &self,
+        window_id: &str,
+        requested: &Path,
+    ) -> Result<chan_library::StandaloneOpenFrame, String> {
+        let target = standalone_open_target(&self.0.fs, requested)?;
+        // No destination: the caller's pane and side name geometry in the
+        // window the command came FROM, which is not the window this lands in.
+        let (command, path) = standalone_open_command(target, None);
+        Ok(chan_library::StandaloneOpenFrame {
+            frame: serialize_window_command(window_id, command)?,
+            path,
+        })
+    }
 }
 
 /// Why an absolute path could not be expressed relative to a workspace root.
@@ -6553,6 +6651,9 @@ mod tests {
         live: usize,
         discarded: std::sync::atomic::AtomicBool,
         tunnels: Arc<chan_revtunnel::server::TunnelRegistry>,
+        /// What `open_outside_workspace` answers: `None` stands for a host
+        /// with no filesystem surface to route to.
+        outside: Option<(String, String, bool, Option<String>)>,
     }
 
     impl FakeHost {
@@ -6561,6 +6662,7 @@ mod tests {
                 live,
                 discarded: std::sync::atomic::AtomicBool::new(false),
                 tunnels: chan_revtunnel::server::TunnelRegistry::new(),
+                outside: None,
             }
         }
     }
@@ -6594,6 +6696,24 @@ mod tests {
         }
         fn tunnel_registry(&self) -> Arc<chan_revtunnel::server::TunnelRegistry> {
             Arc::clone(&self.tunnels)
+        }
+        async fn open_outside_workspace(
+            &self,
+            _requested: &std::path::Path,
+        ) -> Result<chan_library::OpenOutsideAck, chan_library::Error> {
+            match &self.outside {
+                Some((path, window_id, minted, inside_workspace)) => {
+                    Ok(chan_library::OpenOutsideAck {
+                        path: path.clone(),
+                        window_id: window_id.clone(),
+                        minted: *minted,
+                        inside_workspace: inside_workspace.clone(),
+                    })
+                }
+                None => Err(chan_library::Error::Config(
+                    "this host serves no standalone filesystem".into(),
+                )),
+            }
         }
     }
 
@@ -6745,6 +6865,88 @@ mod tests {
             StandaloneOpenTarget::Editor("home/user/notes.md".into())
         );
         let _ = link;
+    }
+
+    /// Drive the escaping-open route against a host that answers `outside`.
+    async fn route_escape(outside: Option<(String, String, bool, Option<String>)>) -> String {
+        let host: Arc<dyn chan_library::HostControl> = Arc::new(FakeHost {
+            outside,
+            ..FakeHost::new(0)
+        });
+        let scope = UnserveScope::Host(Arc::downgrade(&host));
+        let response =
+            route_open_outside_workspace(&scope, std::path::Path::new("/etc/hosts")).await;
+        match response {
+            ControlResponse::Ok { message } | ControlResponse::Error { message } => message,
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_escaping_open_names_the_window_it_landed_in() {
+        // The file did not land where the command was typed, so the
+        // acknowledgement has to say where it went.
+        let message = route_escape(Some(("etc/hosts".into(), "w-9f2a".into(), false, None))).await;
+        assert_eq!(
+            message,
+            "open request queued for etc/hosts in standalone window w-9f2a"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_minted_window_says_it_is_still_opening() {
+        // The window has no socket yet: the frame is parked for its first
+        // attach, and the user is about to go looking for a window that is
+        // still coming up.
+        let message = route_escape(Some(("etc/hosts".into(), "w-new".into(), true, None))).await;
+        assert!(
+            message.contains("in standalone window w-new (opening)"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_path_inside_another_workspace_says_so() {
+        // It still opens on the machine surface -- that surface can show any
+        // path -- but the user learns an indexed view of it exists.
+        let message = route_escape(Some((
+            "srv/proj-b/notes.md".into(),
+            "w-1".into(),
+            false,
+            Some("proj-b".into()),
+        )))
+        .await;
+        assert!(
+            message.contains("that path is in workspace 'proj-b'"),
+            "{message}"
+        );
+        assert!(message.contains("indexed view"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_host_with_no_filesystem_still_points_at_chan_open() {
+        // Nothing to route to, so the escape stays an error -- and keeps the
+        // guidance that was always right when no surface could show the path.
+        let message = route_escape(None).await;
+        assert!(message.contains("path escapes workspace root"), "{message}");
+        assert!(message.contains("chan open /etc/hosts"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_standalone_serve_has_no_host_to_route_through() {
+        // `chan open ROOT` mounts one workspace and no library: there is no
+        // host, so the answer is the same guidance rather than a panic.
+        let response = route_open_outside_workspace(
+            &UnserveScope::Unsupported,
+            std::path::Path::new("/tmp/x"),
+        )
+        .await;
+        match response {
+            ControlResponse::Error { message } => {
+                assert!(message.contains("chan open /tmp/x"), "{message}")
+            }
+            other => panic!("expected the guidance, got {other:?}"),
+        }
     }
 
     #[test]
