@@ -2357,10 +2357,13 @@ async function bootstrapFiles(): Promise<void> {
   } catch (e) {
     ui.status = `listing failed: ${(e as Error).message}`;
   }
-  // A fresh Files window is exactly one full-pane File Browser at home; a
-  // restored one keeps whatever panes and tabs its blob carried.
+  // A fresh Files window is exactly one full-pane File Browser opened AT
+  // home (expanded through its ancestors, not merely highlighting it under
+  // a collapsed root), and nothing else: no editor, no terminal, no
+  // inspector. A restored window keeps whatever panes and tabs its blob
+  // carried.
   if (!restoredAnything) {
-    openBrowserInActivePane({ select: home });
+    revealPathInBrowser(home, { enter: true, inspectorOpen: false });
   }
   if (!unwatch) {
     unwatch = openWatchSocket(onWatchEvent, onWatchStatus, onWatchReady);
