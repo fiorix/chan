@@ -458,6 +458,12 @@ pub(crate) fn broadcast_config_changed(state: &AppState) {
         state
             .terminal_sessions
             .set_terminal_backend(config.terminal.ghostty);
+        state.terminal_sessions.set_terminal_profiles(
+            crate::terminal_sessions::TerminalProfilePrefs {
+                profiles: config.terminal.profiles.clone(),
+                default_profile: config.terminal.default_profile.clone(),
+            },
+        );
     }
     let _ = state
         .events_tx

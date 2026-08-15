@@ -108,7 +108,8 @@ pub use routes::{build_fs_graph, FsGraphResponse, FsGraphScope};
 pub use routes::{build_id, set_build_id};
 
 use crate::terminal_sessions::{
-    Registry as TerminalRegistry, RegistryConfig as TerminalRegistryConfig, TerminalBackendResolver,
+    Registry as TerminalRegistry, RegistryConfig as TerminalRegistryConfig,
+    TerminalBackendResolver, TerminalProfilePrefs, TerminalProfilesResolver,
 };
 use auth::{auth_middleware, load_or_create_token, random_token};
 use bus::{make_progress_broadcast, make_watch_bridge};
@@ -1046,6 +1047,18 @@ async fn build_terminal_app(
         ServerConfig::load()
             .ok()
             .map(|config| config.terminal.ghostty)
+    }));
+    // The same pull for the user's declared profiles. Without it this tenant
+    // spawns from the boot-time snapshot while `GET /api/terminal/shells`
+    // answers from the live config, so the picker offers a profile that
+    // clicking it does not open.
+    terminal_sessions.install_terminal_profiles_resolver(TerminalProfilesResolver::new(|| {
+        ServerConfig::load()
+            .ok()
+            .map(|config| TerminalProfilePrefs {
+                profiles: config.terminal.profiles,
+                default_profile: config.terminal.default_profile,
+            })
     }));
     // Hand the live registry to the control socket so cs term
     // write / list can resolve sessions (mirrors build_app).

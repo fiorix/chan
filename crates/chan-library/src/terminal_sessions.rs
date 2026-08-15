@@ -30,7 +30,7 @@ use chan_shell::{
     MAX_TERMINAL_WRITE_BYTES,
 };
 
-use crate::config::TerminalConfig;
+use crate::config::{TerminalConfig, TerminalProfile};
 use crate::time::{now_unix_millis, now_unix_secs};
 
 mod bytes;
@@ -184,6 +184,17 @@ pub struct Registry {
     /// absent on workspace registries, whose config-change path updates the
     /// atomic cell directly.
     terminal_backend_resolver: Mutex<Option<TerminalBackendResolver>>,
+    /// Last known `terminal.profiles` / `terminal.default_profile`, sampled
+    /// once for each PTY spawn. Refreshed by the same push and pull the
+    /// engine preference above rides, and for the same reason: the boot-time
+    /// `config` snapshot cannot answer for a file the user edits later, and
+    /// the endpoint that feeds the picker reads the LIVE config. A cell that
+    /// only one of the two consults is a picker that lists a shell clicking
+    /// it will not open.
+    terminal_profiles: Mutex<TerminalProfilePrefs>,
+    /// Optional spawn-time profile pull, installed alongside
+    /// `terminal_backend_resolver` and absent for the same registries.
+    terminal_profiles_resolver: Mutex<Option<TerminalProfilesResolver>>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     /// Names settled for a create/restart whose PTY is still spawning. A
     /// reservation prevents another caller from receiving the same name
@@ -315,6 +326,36 @@ impl TerminalBackendResolver {
 impl std::fmt::Debug for TerminalBackendResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("TerminalBackendResolver(..)")
+    }
+}
+
+/// The user's declared profiles and their chosen default, as one value so a
+/// refresh cannot land half of the pair.
+#[derive(Debug, Clone, Default)]
+pub struct TerminalProfilePrefs {
+    pub profiles: Vec<TerminalProfile>,
+    pub default_profile: Option<String>,
+}
+
+/// Spawn-time profile pull, the [`TerminalBackendResolver`] analogue for
+/// `terminal.profiles`. `None` asks the registry to retain its last known
+/// value.
+#[derive(Clone)]
+pub struct TerminalProfilesResolver(Arc<dyn Fn() -> Option<TerminalProfilePrefs> + Send + Sync>);
+
+impl TerminalProfilesResolver {
+    pub fn new(f: impl Fn() -> Option<TerminalProfilePrefs> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+
+    fn resolve(&self) -> Option<TerminalProfilePrefs> {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for TerminalProfilesResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TerminalProfilesResolver(..)")
     }
 }
 
@@ -1082,10 +1123,16 @@ impl Drop for MetadataReservation<'_> {
 impl Registry {
     pub fn new(config: RegistryConfig) -> Self {
         let terminal_ghostty = config.terminal.ghostty;
+        let terminal_profiles = TerminalProfilePrefs {
+            profiles: config.terminal.profiles.clone(),
+            default_profile: config.terminal.default_profile.clone(),
+        };
         Self {
             config,
             terminal_ghostty: AtomicBool::new(terminal_ghostty),
             terminal_backend_resolver: Mutex::new(None),
+            terminal_profiles: Mutex::new(terminal_profiles),
+            terminal_profiles_resolver: Mutex::new(None),
             sessions: Mutex::new(HashMap::new()),
             name_reservations: Mutex::new(HashSet::new()),
             last_exit: Arc::new(Mutex::new(None)),
@@ -1116,6 +1163,44 @@ impl Registry {
             .terminal_backend_resolver
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some(resolver);
+    }
+
+    /// Refresh the declared profiles sampled by subsequent PTY spawns. The
+    /// engine preference's push analogue, called from the same place.
+    pub fn set_terminal_profiles(&self, prefs: TerminalProfilePrefs) {
+        *self
+            .terminal_profiles
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = prefs;
+    }
+
+    /// Install the profile pull used by a long-lived terminal-only tenant. A
+    /// later install replaces the prior resolver.
+    pub fn install_terminal_profiles_resolver(&self, resolver: TerminalProfilesResolver) {
+        *self
+            .terminal_profiles_resolver
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(resolver);
+    }
+
+    /// Sample the declared profiles for one PTY spawn, on the same fail-open
+    /// terms as [`Self::resolve_terminal_backend`]: a successful pull refreshes
+    /// the live cell, and an unreadable store keeps the last good value rather
+    /// than dropping the user's profiles back to the boot-time snapshot.
+    fn resolve_terminal_profiles(&self) -> TerminalProfilePrefs {
+        let resolver = self
+            .terminal_profiles_resolver
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(prefs) = resolver.and_then(|resolver| resolver.resolve()) {
+            self.set_terminal_profiles(prefs.clone());
+            return prefs;
+        }
+        self.terminal_profiles
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     /// Sample the configured backend for one PTY spawn. A successful pull also
@@ -1542,6 +1627,9 @@ impl Registry {
         self.wait_at_spawn_barrier();
         let mut config = self.config.clone();
         config.terminal.ghostty = self.resolve_terminal_backend();
+        let profiles = self.resolve_terminal_profiles();
+        config.terminal.profiles = profiles.profiles;
+        config.terminal.default_profile = profiles.default_profile;
         let session = Session::spawn(
             id.clone(),
             config,
@@ -1636,6 +1724,9 @@ impl Registry {
         // the lead's `claude`) is not a single-purpose-tenant launch.
         let mut config = self.config.clone();
         config.terminal.ghostty = self.resolve_terminal_backend();
+        let profiles = self.resolve_terminal_profiles();
+        config.terminal.profiles = profiles.profiles;
+        config.terminal.default_profile = profiles.default_profile;
         let session = Session::spawn(
             id.to_string(),
             config,
@@ -7633,6 +7724,63 @@ mod tests {
 
         registry.close(created.id(), CloseReason::Explicit);
         registry.close(&original_id, CloseReason::Explicit);
+    }
+
+    #[test]
+    fn declared_profiles_refresh_from_both_the_push_and_the_pull() {
+        // The endpoint feeding the shell picker answers from the LIVE server
+        // config. If the spawn kept reading the boot-time snapshot, the picker
+        // would list a profile that clicking it silently ignores, so both of
+        // the engine preference's refresh channels have to carry profiles too.
+        fn profile(id: &str) -> TerminalProfile {
+            TerminalProfile {
+                id: id.into(),
+                name: None,
+                program: Some("/bin/sh".into()),
+                args: None,
+                kind: None,
+                hidden: false,
+            }
+        }
+
+        let registry = Registry::new(test_config(4096, 4, 60));
+        assert!(
+            registry.resolve_terminal_profiles().profiles.is_empty(),
+            "boot snapshot declares none"
+        );
+
+        // The push a workspace server's config-change path makes.
+        registry.set_terminal_profiles(TerminalProfilePrefs {
+            profiles: vec![profile("pushed")],
+            default_profile: Some("pushed".into()),
+        });
+        let prefs = registry.resolve_terminal_profiles();
+        assert_eq!(prefs.profiles.len(), 1);
+        assert_eq!(prefs.profiles[0].id, "pushed");
+        assert_eq!(prefs.default_profile.as_deref(), Some("pushed"));
+
+        // The pull a terminal-only tenant installs, which has no push channel.
+        let pulled = Arc::new(Mutex::new(Some(TerminalProfilePrefs {
+            profiles: vec![profile("pulled")],
+            default_profile: None,
+        })));
+        registry.install_terminal_profiles_resolver(TerminalProfilesResolver::new({
+            let pulled = pulled.clone();
+            move || pulled.lock().unwrap().clone()
+        }));
+        assert_eq!(
+            registry.resolve_terminal_profiles().profiles[0].id,
+            "pulled"
+        );
+
+        // An unreadable store keeps the last good value rather than dropping
+        // the user's profiles back to the boot snapshot, matching the engine
+        // preference's fail-open posture.
+        *pulled.lock().unwrap() = None;
+        assert_eq!(
+            registry.resolve_terminal_profiles().profiles[0].id,
+            "pulled"
+        );
     }
 
     // POSIX printf plus parameter expansion; not valid under the Windows
