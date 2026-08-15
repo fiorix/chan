@@ -25,27 +25,33 @@
 //
 // `terminalOnly` therefore means "terminals and nothing else" (the
 // close-when-empty rule, the Control chrome rules, the narrow command set),
-// which a files-capable standalone window is not. An unknown kind falls back
-// to the workspace mode, matching the historical fall-through.
+// which a files-capable standalone window is not.
 
 export type WindowMode = "workspace" | "terminal" | "control";
 
 export interface WindowCaps {
-  workspace: boolean;
-  files: boolean;
-  terminal: boolean;
+  readonly workspace: boolean;
+  readonly files: boolean;
+  readonly terminal: boolean;
 }
 
 /// Project a raw `?kind=` value onto the window mode. Pure so tests drive
 /// the whole table without a location stub.
+///
+/// No marker at all is a workspace window: the launcher omits `?kind=` for
+/// workspace rows, so absence is that window's spelling. A marker this build
+/// does not know is the opposite case -- a URL from some other build -- and
+/// falls to the NARROWEST mode, because booting the workspace SPA against a
+/// tenant that serves no workspace fails on its first fetch.
 export function windowModeFromKind(kind: string | null): WindowMode {
   switch (kind) {
-    case "terminal":
-      return "terminal";
+    case null:
+    case "":
+      return "workspace";
     case "control":
       return "control";
     default:
-      return "workspace";
+      return "terminal";
   }
 }
 
@@ -87,5 +93,10 @@ export function tenantServesFiles(): boolean {
 /// component mounts (same discipline as the terminal-only flags).
 export const windowMode: WindowMode = windowModeFromKind(currentKind());
 
-/// This window's capabilities, fixed for the page's lifetime.
-export const windowCaps: WindowCaps = capsForMode(windowMode, tenantServesFiles());
+/// This window's capabilities, fixed for the page's lifetime -- frozen, so a
+/// runtime downgrade cannot half-apply here: components read these fields from
+/// plain (non-reactive) markup, and a mutation would change what guards decide
+/// without changing what is rendered.
+export const windowCaps: WindowCaps = Object.freeze(
+  capsForMode(windowMode, tenantServesFiles()),
+);

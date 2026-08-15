@@ -151,13 +151,14 @@ export function clientNonce(): string {
 /// surface -- the shared terminal tenant's, over the server machine's disk --
 /// rather than to a workspace. True in a standalone terminal window whose
 /// tenant mounted that surface, which the served shell declares as
-/// `<meta name="chan-files">`. Read straight off the URL and the document,
-/// like `?w=` and `?lib=`, so the api layer stays independent of the state
-/// modules.
+/// `<meta name="chan-files">`. A control terminal is excluded: it is the
+/// singleton window running a devserver's connect script, one PTY and no file
+/// surface, which is the same answer `capsForMode` gives. Read straight off
+/// the URL and the document, like `?w=` and `?lib=`, so the api layer stays
+/// independent of the state modules.
 export function usesStandaloneFiles(): boolean {
   if (typeof window === "undefined") return false;
-  const kind = new URL(window.location.href).searchParams.get("kind");
-  if (kind !== "terminal" && kind !== "control") return false;
+  if (new URL(window.location.href).searchParams.get("kind") !== "terminal") return false;
   try {
     return document.querySelector('meta[name="chan-files"]') !== null;
   } catch {

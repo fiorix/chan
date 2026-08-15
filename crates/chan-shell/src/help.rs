@@ -403,10 +403,13 @@ CAUTIONS:
 
 CAVEATS:
   A file whose bytes are not text is refused with "cannot open binary
-  file <rel>". A path outside the workspace root is refused. In a
-  standalone terminal the command refuses and points at 'chan open
-  PATH', which loads the path AS a workspace window. --pane and --side
-  default to the target's active pane and visible side at dequeue time.
+  file <rel>". A path outside the workspace root is refused. A
+  standalone terminal opens the path in its own window when its host
+  serves a filesystem (a directory in the file browser, text in the
+  editor, anything else revealed beside its siblings); where it serves
+  none, the command refuses and points at 'chan open PATH', which loads
+  the path AS a workspace window. --pane and --side default to the
+  target's active pane and visible side at dequeue time.
 
 SEE ALSO:
   cs graph, cs search, cs terminal new, chan open; chan dump-skill --topic
@@ -712,13 +715,14 @@ matches both terminal and tunnel.
 
 A standalone terminal (the workspace-less terminal tenant) supports
 ALL of this: tab names, groups, the write queue, restart, close and
-scrollback. Only `terminal new --path` and `terminal team` refuse
-there, both for want of a workspace root. That makes a standalone
-terminal fully automatable and the right place to manage the chan
-library itself (`chan open`, `chan close`, `chan close --remove`,
-`chan ps`), while real work belongs in a workspace window, where the
-launcher, the apps and the workspace-only cs commands (open, graph,
-search, export, session, terminal team) exist.
+scrollback. `terminal new --path` works there too when the host serves
+a filesystem, resolving the path through the same root the window's
+file browser walks; `terminal team` refuses, for want of a workspace
+tree to write into. That makes a standalone terminal fully automatable
+and the right place to manage the chan library itself (`chan open`,
+`chan close`, `chan close --remove`, `chan ps`), while indexed work
+belongs in a workspace window, where the graph, search, export and
+session commands exist.
 "#;
 
 /// `cs terminal` examples, side effects, and caveats.
@@ -760,11 +764,12 @@ CAVEATS:
   name, in which case write / restart / close hit every holder and
   scrollback refuses as ambiguous.
 
-  On a standalone terminal, `cs terminal new --path` and `cs
-  terminal team` refuse with "only available in a workspace window;
-  this is a standalone terminal". There is no env var that tells a
-  workspace window from a standalone terminal, so that refusal is
-  the honest signal.
+  `cs terminal team` refuses on a standalone terminal with "only
+  available in a workspace window; this is a standalone terminal", and
+  so does `cs terminal new --path` on a host that serves no filesystem
+  to resolve the path against. There is no env var that tells a
+  workspace window from a standalone terminal, so that refusal is the
+  honest signal.
 
 SEE ALSO:
   cs terminal survey (ask a human and block), cs terminal team (Team

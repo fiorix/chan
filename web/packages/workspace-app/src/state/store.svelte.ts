@@ -165,7 +165,7 @@ export {
 } from "./workspace.svelte";
 import { workspace, draftsDir, isDraftPath } from "./workspace.svelte";
 import { clearCaretsUnder } from "./caretIndex";
-import { windowCaps } from "./windowCaps";
+import { windowCaps, windowMode } from "./windowCaps";
 import { filesContext, filesContextFrom } from "./fileContext.svelte";
 
 /// Display name for the active workspace. The server computes this from
@@ -318,19 +318,6 @@ export const ui = $state<{
   terminalControl: isControlTerminalWindow(),
 });
 
-/// The window-kind URL marker. The `?kind=` query param (set by the desktop
-/// shell when it opens a standalone terminal window) is the ONLY signal; there
-/// is no server bootstrap marker. Read once at module load so the flag is
-/// stable before any component mounts. Guarded for non-browser (test) contexts
-/// where `location` may be undefined.
-function windowKind(): string | null {
-  try {
-    return new URLSearchParams(location.search).get("kind");
-  } catch {
-    return null;
-  }
-}
-
 /// Detect terminal-only mode: a window with no workspace AND no filesystem
 /// surface, so terminal panes are all it can hold. Both `kind=terminal` (a
 /// regular standalone terminal) and `kind=control` (the singleton control
@@ -347,7 +334,7 @@ export function isTerminalOnlyWindow(): boolean {
 /// exactly one PTY (the connect script), hides the tab strip / pane chrome, and
 /// disables Cmd+T + pane splits so it can never replicate into Terminal 1/2/3.
 export function isControlTerminalWindow(): boolean {
-  return windowKind() === "control";
+  return windowMode === "control";
 }
 
 export const HYBRID_SURFACE_KINDS: readonly HybridSurfaceKind[] = [
@@ -1367,7 +1354,10 @@ async function applyPaneExec(op: PaneExecOp): Promise<PaneExecResult> {
         "after",
       );
       if (!paneId) return { ok: false, summary: "split limit reached", blocked };
-      if (ui.terminalOnly) openTerminalInPane(paneId);
+      // Same rule as the Hybrid Nav split: a window with no workspace has no
+      // welcome surface, so the new pane gets a terminal rather than sitting
+      // blank.
+      if (!windowCaps.workspace) openTerminalInPane(paneId);
       return {
         ok: true,
         summary: `split pane ${p.id} ${op.dir}`,
@@ -2251,12 +2241,15 @@ async function bootstrapStandalone(): Promise<void> {
         ui.authMissing = true;
         return;
       }
-      // The tenant advertised a filesystem it then could not describe. Drop
-      // to the terminals-only window rather than refusing to boot: shells
-      // are what this window is for, and the file surface was the extra.
-      windowCaps.files = false;
-      ui.terminalOnly = true;
+      // The tenant advertised a filesystem it then could not describe. Boot
+      // anyway -- shells are what this window is for and they need nothing
+      // from this call -- and say so persistently rather than revoking the
+      // capability: the tenant's answer is what the layout blob namespace and
+      // every request marker are keyed on, so a window that quietly disagreed
+      // with its own tenant would read its layout from one namespace and
+      // write it to another. The file surfaces report their own failures.
       ui.status = `files context failed: ${(e as Error).message}`;
+      ui.statusKind = "persistent";
     }
   }
   bootstrapHydrated = false;

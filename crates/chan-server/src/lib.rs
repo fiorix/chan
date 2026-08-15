@@ -739,6 +739,7 @@ async fn build_app_with_extensions(
             desktop: desktop.clone(),
             tenant: control_socket::ControlTenant::Workspace,
             unserve: unserve_scope,
+            standalone_files: None,
         },
     );
     prime_terminal_shell();
@@ -1012,6 +1013,7 @@ async fn build_terminal_app(
             desktop: desktop.clone(),
             tenant: control_socket::ControlTenant::TerminalOnly,
             unserve: unserve_scope,
+            standalone_files: standalone_files.clone(),
         },
     );
     prime_terminal_shell();

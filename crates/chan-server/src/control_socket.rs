@@ -407,19 +407,29 @@ pub fn workspace_only_refusal(what: &str, hint: Option<&str>) -> String {
 /// so the policy is table-testable in isolation. A [`ControlTenant::Workspace`]
 /// session runs everything, so this only ever refuses on a standalone terminal.
 ///
-/// The refusals are the workspace-only commands: `cs open`/`graph`/`search`
-/// need a mounted workspace; `cs terminal new --path` needs a workspace root to
-/// resolve the cwd; `cs session *` leads a shared workspace session; and `cs
-/// terminal team *` (including `--script`) writes into a workspace tree. `cs
-/// open PATH` additionally suggests the workspace-load `chan open PATH`.
-/// Everything else runs on a standalone terminal: window routing, pane ops,
-/// pathless `cs terminal new`, and the cwd-scoped `cs upload`/`download`.
-fn terminal_tenant_refusal(req: &ControlRequest, tenant: ControlTenant) -> Option<String> {
+/// The refusals are the workspace-only commands: `cs graph`/`search` need an
+/// index; `cs session *` leads a shared workspace session; and `cs terminal
+/// team *` (including `--script`) writes into a workspace tree. Everything else
+/// runs on a standalone terminal: window routing, pane ops, pathless `cs
+/// terminal new`, and the cwd-scoped `cs upload`/`download`.
+///
+/// `files_served` says whether this tenant mounted the standalone filesystem
+/// surface, which is what makes the two PATH commands answerable here: `cs
+/// open PATH` opens that path in this window's browser or editor, and `cs
+/// terminal new --path` resolves its cwd through the same capability root.
+/// Without that surface there is no filesystem to resolve against, so they are
+/// refused as before -- `cs open PATH` with the guidance to load it as a
+/// workspace instead.
+fn terminal_tenant_refusal(
+    req: &ControlRequest,
+    tenant: ControlTenant,
+    files_served: bool,
+) -> Option<String> {
     if tenant == ControlTenant::Workspace {
         return None;
     }
     match req {
-        ControlRequest::OpenPath { path, .. } => Some(chan_open_guidance(path)),
+        ControlRequest::OpenPath { path, .. } if !files_served => Some(chan_open_guidance(path)),
         ControlRequest::OpenGraphLink { .. } => Some(workspace_only_refusal(
             "open",
             Some("Graph links need a workspace window."),
@@ -430,10 +440,12 @@ fn terminal_tenant_refusal(req: &ControlRequest, tenant: ControlTenant) -> Optio
             "export",
             Some("An open workspace window does the rendering; run cs export from a terminal in one."),
         )),
-        ControlRequest::OpenTermNew { path: Some(_), .. } => Some(workspace_only_refusal(
-            "terminal new --path",
-            Some("Drop --path to open a terminal here."),
-        )),
+        ControlRequest::OpenTermNew { path: Some(_), .. } if !files_served => {
+            Some(workspace_only_refusal(
+                "terminal new --path",
+                Some("Drop --path to open a terminal here."),
+            ))
+        }
         ControlRequest::SessionList => Some(session_refusal("session list")),
         ControlRequest::SessionSelf { .. } => Some(session_refusal("session self")),
         ControlRequest::SessionHandover { .. } => Some(session_refusal("session handover")),
@@ -573,7 +585,7 @@ mod tenant_gate_tests {
         reqs.extend(team_reqs());
         for req in reqs {
             assert_eq!(
-                terminal_tenant_refusal(&req, ControlTenant::Workspace),
+                terminal_tenant_refusal(&req, ControlTenant::Workspace, false),
                 None,
                 "{req:?} runs on a workspace tenant",
             );
@@ -584,8 +596,12 @@ mod tenant_gate_tests {
     fn cs_open_on_a_terminal_tenant_points_at_chan_open() {
         // `cs open PATH` from a standalone terminal is guided to `chan open
         // PATH`, echoing the path, and carries no em-dash (house style).
-        let msg = terminal_tenant_refusal(&open_path("/home/u/notes"), ControlTenant::TerminalOnly)
-            .expect("cs open refuses on a terminal tenant");
+        let msg = terminal_tenant_refusal(
+            &open_path("/home/u/notes"),
+            ControlTenant::TerminalOnly,
+            false,
+        )
+        .expect("cs open refuses on a terminal tenant");
         assert!(msg.contains("chan open /home/u/notes"), "{msg}");
         assert!(!msg.contains('—'), "no em dash in guidance: {msg}");
     }
@@ -612,7 +628,7 @@ mod tenant_gate_tests {
         reqs.extend(session_reqs());
         reqs.extend(team_reqs());
         for req in reqs {
-            let msg = terminal_tenant_refusal(&req, ControlTenant::TerminalOnly)
+            let msg = terminal_tenant_refusal(&req, ControlTenant::TerminalOnly, false)
                 .unwrap_or_else(|| panic!("{req:?} should refuse on a standalone terminal"));
             assert!(
                 msg.contains("is only available in a workspace window")
@@ -626,7 +642,7 @@ mod tenant_gate_tests {
     #[test]
     fn session_refusals_explain_the_missing_shared_session() {
         for req in session_reqs() {
-            let msg = terminal_tenant_refusal(&req, ControlTenant::TerminalOnly)
+            let msg = terminal_tenant_refusal(&req, ControlTenant::TerminalOnly, false)
                 .expect("session commands refuse on a standalone terminal");
             assert!(msg.contains("no shared session to lead"), "{req:?}: {msg}");
         }
@@ -637,14 +653,43 @@ mod tenant_gate_tests {
         // `cs terminal new --path` needs a workspace root; `cs terminal new`
         // with no path is pure window routing and runs on a standalone
         // terminal.
-        assert!(
-            terminal_tenant_refusal(&term_new(Some("sub")), ControlTenant::TerminalOnly)
-                .is_some_and(|m| m.contains("terminal new --path")),
-        );
+        let refusal =
+            terminal_tenant_refusal(&term_new(Some("sub")), ControlTenant::TerminalOnly, false);
+        assert!(refusal.is_some_and(|m| m.contains("terminal new --path")));
         assert_eq!(
-            terminal_tenant_refusal(&term_new(None), ControlTenant::TerminalOnly),
+            terminal_tenant_refusal(&term_new(None), ControlTenant::TerminalOnly, false),
             None,
         );
+    }
+
+    #[test]
+    fn the_path_commands_run_once_the_tenant_serves_a_filesystem() {
+        // A standalone window that browses and edits the machine's disk can
+        // answer `cs open PATH` (open it in THIS window) and `cs terminal new
+        // --path` (resolve the cwd through the same capability root). The
+        // refusals were about the missing filesystem, not about the window.
+        for req in [open_path("/home/u/notes"), term_new(Some("/home/u/src"))] {
+            assert_eq!(
+                terminal_tenant_refusal(&req, ControlTenant::TerminalOnly, true),
+                None,
+                "{req:?} should run on a terminal tenant that serves files",
+            );
+        }
+        // Everything that needs an INDEX still refuses there: a filesystem is
+        // not a workspace.
+        for req in [
+            ControlRequest::OpenGraph {
+                window_id: "w".into(),
+                path: None,
+                destination: None,
+            },
+            workspace_search(),
+        ] {
+            assert!(
+                terminal_tenant_refusal(&req, ControlTenant::TerminalOnly, true).is_some(),
+                "{req:?} still needs a workspace",
+            );
+        }
     }
 
     #[test]
@@ -670,7 +715,7 @@ mod tenant_gate_tests {
             ControlRequest::WindowList,
         ] {
             assert_eq!(
-                terminal_tenant_refusal(&req, ControlTenant::TerminalOnly),
+                terminal_tenant_refusal(&req, ControlTenant::TerminalOnly, false),
                 None,
                 "{req:?} should run on a standalone terminal",
             );
@@ -707,6 +752,11 @@ pub struct ControlSocketCtx {
     pub tenant: ControlTenant,
     /// How `ControlRequest::Close` tears this process's workspace(s) down.
     pub unserve: UnserveScope,
+    /// The standalone filesystem surface this tenant mounted, when it has one.
+    /// `cs open` and `cs terminal new --path` reach the server machine's disk
+    /// through it on a workspace-less tenant; `None` means terminals only, and
+    /// those commands are refused with the guidance they always had.
+    pub standalone_files: Option<Arc<crate::state::StandaloneFilesState>>,
 }
 
 pub fn start(socket_path: PathBuf, ctx: ControlSocketCtx) -> std::io::Result<ControlHandle> {
@@ -1088,6 +1138,7 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
         desktop,
         tenant,
         unserve,
+        standalone_files,
     } = ctx;
     // The registry is a set-once cell that may be filled after the
     // socket starts; resolve it per request, exactly as before.
@@ -1096,7 +1147,7 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
     // Single chokepoint for standalone-terminal gating: refuse the
     // workspace-content commands here (with the friendly `chan open`
     // guidance for `cs open`) before any per-arm workspace resolution.
-    if let Some(message) = terminal_tenant_refusal(&req, tenant) {
+    if let Some(message) = terminal_tenant_refusal(&req, tenant, standalone_files.is_some()) {
         return ControlResponse::Error { message };
     }
     match req {
@@ -1107,6 +1158,24 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
         } => {
             if let Err(message) = require_window_id(&window_id) {
                 return ControlResponse::Error { message };
+            }
+            // A workspace-less tenant resolves the path against the standalone
+            // filesystem instead; the gate above already refused when there is
+            // neither. Each branch resolves ITS surface before checking the
+            // target window, so an unusable surface is reported as such rather
+            // than as a disconnected window.
+            if let Some(files) = standalone_files.as_ref() {
+                if let Err(message) = require_connected_window(session_registry, &window_id) {
+                    return ControlResponse::Error { message };
+                }
+                return into_response(open_path_standalone(
+                    files,
+                    &window_id,
+                    &path,
+                    destination,
+                    session_registry,
+                    events_tx,
+                ));
             }
             let workspace = match workspace_from_cell(workspace_cell) {
                 Ok(workspace) => workspace,
@@ -1191,24 +1260,34 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
                 Err(message) => return ControlResponse::Error { message },
             };
             // Opening a terminal is window routing, not a workspace operation:
-            // the only workspace use is resolving an optional --path cwd. So a
-            // standalone terminal tenant CAN open a terminal (no cwd to
-            // resolve); a `--path` on a standalone terminal is already refused
-            // by `terminal_tenant_refusal`, so this branch never sees one.
-            // This mirrors `WindowList`'s tenant branch.
+            // the only filesystem use is resolving an optional --path cwd,
+            // which a workspace-less tenant does through its standalone
+            // capability root. Without either surface the gate above already
+            // refused a `--path`, so this branch sees one only when it can
+            // resolve it. This mirrors `WindowList`'s tenant branch.
             match tenant {
-                ControlTenant::TerminalOnly => into_response(open_term_new_standalone(
-                    &window_id,
-                    TerminalOpenSpec {
-                        tab_name,
-                        tab_group,
-                        command,
-                        env,
-                        destination,
-                    },
-                    session_registry,
-                    events_tx,
-                )),
+                ControlTenant::TerminalOnly => {
+                    let cwd = match (path.as_deref(), standalone_files.as_ref()) {
+                        (Some(path), Some(files)) => match standalone_term_cwd(files, path) {
+                            Ok(cwd) => Some(cwd),
+                            Err(message) => return ControlResponse::Error { message },
+                        },
+                        _ => None,
+                    };
+                    into_response(open_term_new_standalone(
+                        &window_id,
+                        TerminalOpenSpec {
+                            tab_name,
+                            tab_group,
+                            command,
+                            env,
+                            destination,
+                        },
+                        cwd,
+                        session_registry,
+                        events_tx,
+                    ))
+                }
                 ControlTenant::Workspace => {
                     let workspace = match workspace_from_cell(workspace_cell) {
                         Ok(workspace) => workspace,
@@ -3796,6 +3875,7 @@ fn open_term_new(
 fn open_term_new_standalone(
     window_id: &str,
     spec: TerminalOpenSpec,
+    cwd: Option<String>,
     session_registry: &SessionRegistry,
     events_tx: &broadcast::Sender<String>,
 ) -> Result<String, String> {
@@ -3810,7 +3890,7 @@ fn open_term_new_standalone(
         session_registry,
         window_id,
         WindowCommand::OpenTermNew {
-            cwd: None,
+            cwd,
             tab_name,
             tab_group,
             spawn_command: command,
@@ -3820,6 +3900,37 @@ fn open_term_new_standalone(
         events_tx,
     )?;
     Ok("terminal request queued".into())
+}
+
+/// Resolve a `cs terminal new --path` argument against the standalone
+/// filesystem: the wire form of a real directory under the capability root,
+/// which the window's spawn then sends back as `?app=files&cwd=`. A file, a
+/// missing path, or anything outside the root is a refusal -- a terminal that
+/// silently opened somewhere else would be worse than none.
+fn standalone_term_cwd(
+    files: &crate::state::StandaloneFilesState,
+    requested: &Path,
+) -> Result<String, String> {
+    if !requested.is_absolute() {
+        return Err("control path must be absolute".into());
+    }
+    let canonical = requested
+        .canonicalize()
+        .map_err(|e| format!("canonicalize path: {e}"))?;
+    let rel = files
+        .fs
+        .wire_path_from_absolute(&canonical)
+        .ok_or_else(|| {
+            format!(
+                "path is outside this machine's root: {}",
+                requested.display()
+            )
+        })?;
+    files
+        .fs
+        .resolve_directory(&rel)
+        .map_err(|e| format!("terminal new --path {}: {e}", requested.display()))?;
+    Ok(rel)
 }
 
 /// Category 1: open a Dashboard tab in the originating window.
@@ -4307,6 +4418,144 @@ pub(crate) fn open_path(
     Ok(format!("open request queued for {rel}"))
 }
 
+/// Where `cs open PATH` lands on the standalone filesystem surface. Separated
+/// from the send so the decision tree is testable against a real directory
+/// without a live window.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StandaloneOpenTarget {
+    /// The capability root: the browser, opened at `/`.
+    Root,
+    /// A directory: the browser, entered.
+    Browser(String),
+    /// Text: the editor. Includes a name that did not exist and was created.
+    Editor(String),
+    /// Anything else (an image, an archive): revealed in its parent directory
+    /// rather than opened, the same judgment a workspace makes.
+    Reveal { dir: String, select: String },
+}
+
+/// Resolve `requested` against the standalone capability root and decide what
+/// to open, creating an empty file for a name that does not exist yet (what a
+/// workspace does, bounded by the same editable-text gate).
+///
+/// The path arrives absolute (the CLI absolutizes against the caller's cwd).
+/// Canonicalizing what exists means a path reached through a symlink or `..`
+/// lands where the filesystem really is; a path the capability cannot express
+/// -- outside the root, or non-UTF-8 -- is a refusal rather than a silent
+/// fallback, because the window would otherwise open something other than what
+/// the user named.
+pub(crate) fn standalone_open_target(
+    fs: &chan_workspace::MiniWorkspace,
+    requested: &Path,
+) -> Result<StandaloneOpenTarget, String> {
+    if !requested.is_absolute() {
+        return Err("control path must be absolute".into());
+    }
+    let (canonical, leaf) = if requested.exists() {
+        (
+            requested
+                .canonicalize()
+                .map_err(|e| format!("canonicalize path: {e}"))?,
+            None,
+        )
+    } else {
+        let parent = requested
+            .parent()
+            .ok_or_else(|| "path has no parent".to_string())?;
+        let name = requested
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| "path has no name".to_string())?;
+        (
+            parent
+                .canonicalize()
+                .map_err(|e| format!("canonicalize path: {e}"))?,
+            Some(name.to_string()),
+        )
+    };
+    let base = fs.wire_path_from_absolute(&canonical).ok_or_else(|| {
+        format!(
+            "path is outside this machine's root: {}",
+            requested.display()
+        )
+    })?;
+    let rel = match leaf {
+        None => base,
+        Some(name) if base.is_empty() => name,
+        Some(name) => format!("{base}/{name}"),
+    };
+    if rel.is_empty() {
+        return Ok(StandaloneOpenTarget::Root);
+    }
+    match fs.stat(&rel) {
+        Ok(stat) if stat.is_dir => Ok(StandaloneOpenTarget::Browser(rel)),
+        Ok(_) if chan_workspace::fs_ops::is_editable_text(&rel) || fs.sniff_is_text(&rel) => {
+            Ok(StandaloneOpenTarget::Editor(rel))
+        }
+        Ok(_) => Ok(StandaloneOpenTarget::Reveal {
+            dir: parent_rel(&rel),
+            select: rel,
+        }),
+        Err(_) => {
+            fs.create_file(&rel, "")
+                .map_err(|e| format!("create {rel}: {e}"))?;
+            Ok(StandaloneOpenTarget::Editor(rel))
+        }
+    }
+}
+
+/// [`open_path`] over the standalone filesystem surface: the same decision
+/// tree, resolved through the `/`-rooted capability instead of a workspace
+/// root, then sent to the calling window.
+pub(crate) fn open_path_standalone(
+    files: &crate::state::StandaloneFilesState,
+    window_id: &str,
+    requested: &Path,
+    destination: Option<TabDestination>,
+    session_registry: &SessionRegistry,
+    events_tx: &broadcast::Sender<String>,
+) -> Result<String, String> {
+    let target = standalone_open_target(&files.fs, requested)?;
+    let (command, summary) = match target {
+        StandaloneOpenTarget::Root => (
+            WindowCommand::OpenBrowser {
+                path: String::new(),
+                select: None,
+                enter: true,
+                destination,
+            },
+            "/".to_string(),
+        ),
+        StandaloneOpenTarget::Browser(rel) => (
+            WindowCommand::OpenBrowser {
+                path: rel.clone(),
+                select: None,
+                enter: true,
+                destination,
+            },
+            rel,
+        ),
+        StandaloneOpenTarget::Editor(rel) => (
+            WindowCommand::OpenFile {
+                path: rel.clone(),
+                destination,
+            },
+            rel,
+        ),
+        StandaloneOpenTarget::Reveal { dir, select } => (
+            WindowCommand::OpenBrowser {
+                path: dir,
+                select: Some(select.clone()),
+                enter: false,
+                destination,
+            },
+            select,
+        ),
+    };
+    send_window_command_if_live(session_registry, window_id, command, events_tx)?;
+    Ok(format!("open request queued for {summary}"))
+}
+
 fn abs_to_workspace_rel(root: &Path, requested: &Path) -> Result<String, String> {
     if !requested.is_absolute() {
         return Err("control path must be absolute".into());
@@ -4684,6 +4933,8 @@ mod tests {
             tenant,
             // Unit tests don't exercise unserve; refuse it explicitly.
             unserve: UnserveScope::Unsupported,
+            // No filesystem surface: the tests that need one build it.
+            standalone_files: None,
         }
     }
 
@@ -6345,6 +6596,97 @@ mod tests {
             fake.discarded.load(std::sync::atomic::Ordering::SeqCst),
             "an offline row must be discarded"
         );
+    }
+
+    /// A `/`-rooted capability over a temp tree, standing in for the machine
+    /// filesystem a standalone tenant serves.
+    fn mini_fs() -> (tempfile::TempDir, chan_workspace::MiniWorkspace) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join("home/user/src")).expect("home");
+        std::fs::write(root.join("home/user/notes.md"), "# hi\n").expect("md");
+        std::fs::write(
+            root.join("home/user/photo.png"),
+            [0x89, b'P', b'N', b'G', 0, 1, 2, 3],
+        )
+        .expect("png");
+        let fs = chan_workspace::MiniWorkspace::open(&root, &root.join("home/user"), 1 << 20)
+            .expect("open mini workspace");
+        (dir, fs)
+    }
+
+    #[test]
+    fn cs_open_lands_where_the_path_points_on_a_standalone_filesystem() {
+        // The same decision tree a workspace applies: a directory enters the
+        // browser, text opens in the editor, anything else is revealed beside
+        // its siblings, and the capability root is the browser at `/`.
+        let (dir, fs) = mini_fs();
+        let root = dir.path();
+        assert_eq!(
+            standalone_open_target(&fs, &root.join("home/user")).expect("dir"),
+            StandaloneOpenTarget::Browser("home/user".into())
+        );
+        assert_eq!(
+            standalone_open_target(&fs, &root.join("home/user/notes.md")).expect("text"),
+            StandaloneOpenTarget::Editor("home/user/notes.md".into())
+        );
+        assert_eq!(
+            standalone_open_target(&fs, &root.join("home/user/photo.png")).expect("binary"),
+            StandaloneOpenTarget::Reveal {
+                dir: "home/user".into(),
+                select: "home/user/photo.png".into(),
+            }
+        );
+        assert_eq!(
+            standalone_open_target(&fs, root).expect("root"),
+            StandaloneOpenTarget::Root
+        );
+    }
+
+    #[test]
+    fn cs_open_creates_a_name_that_does_not_exist_yet() {
+        let (dir, fs) = mini_fs();
+        let target = dir.path().join("home/user/fresh.md");
+        assert!(!target.exists());
+        assert_eq!(
+            standalone_open_target(&fs, &target).expect("create"),
+            StandaloneOpenTarget::Editor("home/user/fresh.md".into())
+        );
+        assert!(
+            target.exists(),
+            "the file the window is about to open must exist"
+        );
+    }
+
+    #[test]
+    fn cs_open_refuses_a_path_the_capability_cannot_express() {
+        let (dir, fs) = mini_fs();
+        // Relative input never reaches the filesystem: the CLI absolutizes,
+        // so a relative path here is a caller error, not a cwd guess.
+        let err = standalone_open_target(&fs, std::path::Path::new("home/user")).expect_err("rel");
+        assert!(err.contains("must be absolute"), "{err}");
+        // A real path outside the root is refused rather than clamped.
+        let outside = tempfile::tempdir().expect("outside");
+        let err = standalone_open_target(&fs, outside.path()).expect_err("outside");
+        assert!(err.contains("outside this machine's root"), "{err}");
+        drop(dir);
+    }
+
+    #[test]
+    fn cs_open_follows_a_symlink_to_where_the_file_really_is() {
+        // A path reached through a symlink resolves to its target's wire path,
+        // so the window opens the real file rather than a name the file routes
+        // would refuse (the capability keeps symlinks inert).
+        let (dir, fs) = mini_fs();
+        let link = dir.path().join("home/user/link.md");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.path().join("home/user/notes.md"), &link).expect("symlink");
+        #[cfg(unix)]
+        assert_eq!(
+            standalone_open_target(&fs, &link).expect("symlink"),
+            StandaloneOpenTarget::Editor("home/user/notes.md".into())
+        );
+        let _ = link;
     }
 
     #[test]
