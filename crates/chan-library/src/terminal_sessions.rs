@@ -4931,10 +4931,20 @@ mod tests {
     #[cfg(unix)]
     fn wait_for_output(handle: &mut AttachHandle, needle: &[u8]) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        // Accumulate rather than testing each event on its own. A PTY may split
+        // the marker across two reads, and `try_recv` CONSUMES the event it
+        // returns: a per-event check discards both halves and can then never
+        // match, failing on the deadline with the marker already delivered.
+        // Short reads are exactly what a loaded full-suite run produces, which
+        // is why this only ever failed under the whole gate and never alone.
+        let mut seen: Vec<u8> = Vec::new();
         loop {
-            if handle.rx.try_recv().is_ok_and(|event| {
-                matches!(event, SessionEvent::Output(data) if contains_subslice(&data, needle))
-            }) {
+            while let Ok(event) = handle.rx.try_recv() {
+                if let SessionEvent::Output(data) = event {
+                    seen.extend_from_slice(&data);
+                }
+            }
+            if contains_subslice(&seen, needle) {
                 return;
             }
             assert!(
