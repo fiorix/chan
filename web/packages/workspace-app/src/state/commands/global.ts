@@ -20,6 +20,8 @@ import {
 import { loadScreensaverState, lockNow } from "../screensaver.svelte";
 import { hashPin } from "../screensaver";
 import { api, sessionWindowId } from "../../api/client";
+import { windowCaps } from "../windowCaps";
+import { openBrowserInActivePane, openInActivePane } from "../tabs.svelte";
 import {
   hideWindowFromCloseConfirm,
   isTauriDesktop,
@@ -57,6 +59,21 @@ async function testScreenLock(): Promise<void> {
 /// - the arriving frame's handler already reports; a refusal lands in the
 /// status pill persistently so it survives until the user has seen it.
 async function executeOpen(target: string): Promise<void> {
+  // A Files window has no /api/open behind it (that route applies workspace
+  // semantics: link targets, drafts, create-on-missing). Resolve the plain
+  // path client-side instead: a listable target is a directory and opens in
+  // the browser, anything else opens as a file tab (a missing path lands on
+  // the standard missing-file banner).
+  if (!windowCaps.workspace) {
+    const wire = target.replace(/^\/+/, "").replace(/\/+$/, "");
+    try {
+      await api.list(wire);
+      openBrowserInActivePane({ select: wire });
+    } catch {
+      await openInActivePane(wire);
+    }
+    return;
+  }
   try {
     await api.open({ window_id: sessionWindowId(), target });
   } catch (err) {
