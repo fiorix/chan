@@ -13,7 +13,12 @@ import {
   onSurface,
   type CommandContext,
 } from "../commands";
-import { setHybridSurfaceTheme, setTransientStatus, uiPrompt } from "../store.svelte";
+import {
+  currentPreferences,
+  setHybridSurfaceTheme,
+  setTransientStatus,
+  uiPrompt,
+} from "../store.svelte";
 import { updateGlobalConfigSerial } from "../configWrite";
 import {
   activeTerminalTab,
@@ -49,7 +54,7 @@ async function setActiveTerminalGroup(): Promise<void> {
 }
 
 function configuredTerminalBackend(): "xterm" | "ghostty" {
-  return workspace.info?.preferences.terminal.ghostty ? "ghostty" : "xterm";
+  return currentPreferences()?.terminal.ghostty ? "ghostty" : "xterm";
 }
 
 async function toggleTerminalBackend(): Promise<void> {

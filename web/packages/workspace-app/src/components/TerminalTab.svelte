@@ -99,6 +99,7 @@
   } from "../state/store.svelte";
   import { terminalWsPath } from "../terminal/session";
   import { windowModeAllowsSnapshot } from "../state/windowMode";
+  import { windowCaps } from "../state/windowCaps";
   import {
     readTerminalSnapshot,
     writeTerminalSnapshot,
@@ -2478,9 +2479,10 @@
             <span class="mbtn-label">Copy Scrollback</span>
             <span class="mbtn-chord"></span>
           </button>
-          <!-- Rich Prompt drafts into the workspace drafts dir; not
-               available in a terminal-only window. -->
-          {#if !ui.terminalOnly}
+          <!-- Rich Prompt drafts into the workspace drafts dir, so it needs
+               one: this row calls the toggle directly, past the command gates,
+               and a standalone window's tenant serves no drafts route. -->
+          {#if windowCaps.workspace}
             <button class="mbtn" onclick={toggleRichPromptFromMenu}>
               <span class="mbtn-icon">
                 <MessageSquare size={16} strokeWidth={1.75} aria-hidden="true" />

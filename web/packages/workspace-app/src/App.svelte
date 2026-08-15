@@ -19,7 +19,7 @@
   // never flips a pane hidden behind a dialog. conflictDialog drives
   // ConflictModal; workspaceWarningsDialog drives WorkspaceWarningsModal.
   import { conflictDialog } from "./state/tabs.svelte";
-  import { workspaceWarningsDialog } from "./state/store.svelte";
+  import { currentPreferences, workspaceWarningsDialog } from "./state/store.svelte";
   // Open-count of pane-LOCAL modals (MCP-env info) whose visibility
   // lives in component state App.svelte can't otherwise see.
   import { paneModalGuard } from "./state/paneModalGuard.svelte";
@@ -305,7 +305,7 @@
   // the server-known workspace info changes. The CSS in editor/themes/*
   // keys typography + chrome off this attribute.
   $effect(() => {
-    const theme = workspace.info?.preferences?.editor_theme;
+    const theme = currentPreferences()?.editor_theme;
     applyEditorTheme(theme ?? DEFAULT_EDITOR_THEME);
   });
 

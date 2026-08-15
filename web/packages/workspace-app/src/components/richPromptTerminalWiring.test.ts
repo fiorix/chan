@@ -141,6 +141,21 @@ describe("TerminalTab Rich Prompt wiring", () => {
     );
   });
 
+  test("the menu entry needs a workspace, like every other door to Rich Prompt", () => {
+    // The draft lands in the workspace drafts dir, so the chord
+    // (App.svelte), the catalog entry (requirement: "workspace") and this menu
+    // row must agree. The row calls toggleRichPromptForTab directly, past both
+    // command gates, so its own guard is the only thing standing between a
+    // standalone window and a createDraft against a tenant with no drafts
+    // route.
+    expect(terminal).toMatch(
+      /\{#if windowCaps\.workspace\}[\s\S]{1,120}onclick=\{toggleRichPromptFromMenu\}/,
+    );
+    expect(terminal).toMatch(
+      /import \{ windowCaps \} from "\.\.\/state\/windowCaps"/,
+    );
+  });
+
   test("command launcher exposes the same Rich Prompt toggle", () => {
     expect(terminalCommands).toMatch(
       /id: "terminal\.richPrompt",[\s\S]{1,220}title: "Show\/Hide Rich Prompt",[\s\S]{1,120}category: "Terminal",[\s\S]{1,160}available: onWorkspaceTerminal,[\s\S]{1,120}dispatchChanCommand\("terminal\.richPrompt"\)/,

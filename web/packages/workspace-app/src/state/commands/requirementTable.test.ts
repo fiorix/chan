@@ -13,7 +13,7 @@
 // terminals-only window, and with one it also browses and edits.
 
 import { describe, it, expect } from "vitest";
-import { allCommands, requirementAllows } from "../commands";
+import { allCommands, dispatchAllowsCommand, requirementAllows } from "../commands";
 import { capsForMode, type WindowMode } from "../windowCaps";
 import { TERMINAL_ONLY_COMMANDS } from "../windowMode";
 
@@ -71,6 +71,34 @@ describe("command requirement table", () => {
         command.id,
       ).toBe(true);
     }
+  });
+
+  it("lets every window-level id dispatch in a window that has no workspace", () => {
+    // TERMINAL_ONLY_COMMANDS is the set of ids that need no workspace. Some of
+    // them are dispatch-only: they are fired by chords and by the desktop's
+    // `chan:command` bridge and have no launcher row, so they are NOT catalog
+    // entries -- `app.window.confirmClose` (the OS close button), the find
+    // family, `app.tab.jump`, `app.launcher.toggle`. The dispatch gate runs for
+    // any window that is more than terminals, so it has to allow them there
+    // too; dropping one leaves the desktop holding a close the SPA never
+    // answers.
+    const caps = capsForMode("terminal", true);
+    expect(caps.workspace).toBe(false);
+    for (const id of TERMINAL_ONLY_COMMANDS) {
+      expect(dispatchAllowsCommand(id, caps), id).toBe(true);
+    }
+  });
+
+  it("still fails closed on an id nothing classifies", () => {
+    // The other half of the rule: an id in neither table is a workspace action
+    // as far as a reduced window knows, so it does not run there.
+    const caps = capsForMode("terminal", true);
+    expect(dispatchAllowsCommand("app.graph.toggle", caps)).toBe(false);
+    expect(dispatchAllowsCommand("app.totally.unknown", caps)).toBe(false);
+    // A workspace window runs everything, classified or not.
+    expect(dispatchAllowsCommand("app.totally.unknown", capsForMode("workspace", false))).toBe(
+      true,
+    );
   });
 
   it("pins the per-mode command table", () => {

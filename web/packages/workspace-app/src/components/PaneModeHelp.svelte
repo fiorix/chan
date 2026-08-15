@@ -12,7 +12,7 @@
   // keep the focus / Escape semantics inside App.svelte; this is
   // purely a passive informational panel.
 
-  import { ui } from "../state/store.svelte";
+  import { windowCaps } from "../state/windowCaps";
 
   type Cap = {
     /// Visible label on the kbd-shaped button (e.g. "↑", "W", "Tab").
@@ -25,16 +25,18 @@
     /// Optional aria-label override; defaults to "`label`: `action`".
     aria?: string;
   };
+  /// The capability a row's action needs, matching the guard on the
+  /// corresponding case in App.svelte's handlePaneModeKey. A row whose
+  /// capability this window lacks is not rendered: every cap here is a
+  /// clickable button, so an unfiltered row is an action the user can focus,
+  /// hear announced, and press for nothing.
+  type Needs = "files" | "workspace";
   type Row = {
     caps: Cap[];
     action: string;
-    /// Hidden in terminal-only windows (`?kind=terminal`): the action
-    /// targets a workspace surface (file browser, graph, drafts, search)
-    /// that does not exist there. Mirrors the `ui.terminalOnly` guards
-    /// on the matching cases in App.svelte's handlePaneModeKey.
-    workspaceOnly?: boolean;
+    needs?: Needs;
   };
-  type Group = { title: string; rows: Row[]; workspaceOnly?: boolean };
+  type Group = { title: string; rows: Row[]; needs?: Needs };
 
   function dispatchKey(key: string): void {
     // Synthetic KeyboardEvents are routed through the same document-
@@ -80,11 +82,11 @@
       title: "Stage (Enter to commit, Esc to discard)",
       rows: [
         { caps: [{ label: "t", key: "t" }], action: "Stage Terminal" },
-        { caps: [{ label: "o", key: "o" }], action: "Stage File Browser", workspaceOnly: true },
-        { caps: [{ label: "g", key: "g" }], action: "Stage Graph", workspaceOnly: true },
-        { caps: [{ label: "b", key: "b" }], action: "Stage Dashboard", workspaceOnly: true },
-        { caps: [{ label: "n", key: "n" }], action: "Stage New Draft", workspaceOnly: true },
-        { caps: [{ label: "i", key: "i" }], action: "Stage Diagram", workspaceOnly: true },
+        { caps: [{ label: "o", key: "o" }], action: "Stage File Browser", needs: "files" },
+        { caps: [{ label: "g", key: "g" }], action: "Stage Graph", needs: "workspace" },
+        { caps: [{ label: "b", key: "b" }], action: "Stage Dashboard", needs: "workspace" },
+        { caps: [{ label: "n", key: "n" }], action: "Stage New Draft", needs: "workspace" },
+        { caps: [{ label: "i", key: "i" }], action: "Stage Diagram", needs: "workspace" },
       ],
     },
     {
@@ -99,7 +101,7 @@
       // `<` opens the dock on the right, `>` opens the dock on the
       // left.
       title: "Dock",
-      workspaceOnly: true,
+      needs: "files",
       rows: [
         { caps: [{ label: "<", key: "<" }], action: "Toggle right-side file browser dock" },
         { caps: [{ label: ">", key: ">" }], action: "Toggle left-side file browser dock" },
@@ -147,14 +149,20 @@
     },
   ];
 
-  // Terminal-only windows get the terminal-relevant subset. Pure derived - no
-  // $state mutation - and empty groups drop out entirely (Dock).
+  /// Whether this window can run an action needing `needs`. Undefined means
+  /// the action works anywhere (focus, splits, resize).
+  function have(needs?: Needs): boolean {
+    if (needs === undefined) return true;
+    return needs === "files" ? windowCaps.files : windowCaps.workspace;
+  }
+
+  // Each window sees the keys it can actually run. Pure derived - no $state
+  // mutation - and empty groups drop out entirely (Dock, in a window with no
+  // filesystem).
   const groups = $derived(
-    ui.terminalOnly
-      ? ALL_GROUPS.filter((g) => !g.workspaceOnly)
-          .map((g) => ({ ...g, rows: g.rows.filter((r) => !r.workspaceOnly) }))
-          .filter((g) => g.rows.length > 0)
-      : ALL_GROUPS,
+    ALL_GROUPS.filter((g) => have(g.needs))
+      .map((g) => ({ ...g, rows: g.rows.filter((r) => have(r.needs)) }))
+      .filter((g) => g.rows.length > 0),
   );
 
   function rowKey(row: Row): string {

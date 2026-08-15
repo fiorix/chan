@@ -22,7 +22,7 @@ import {
   type PaneSide,
 } from "./tabs.svelte";
 import { windowCaps, type WindowCaps } from "./windowCaps";
-import { windowModeAllowsCommand } from "./windowMode";
+import { TERMINAL_ONLY_COMMANDS, windowModeAllowsCommand } from "./windowMode";
 
 export type CommandCategory =
   | "Global"
@@ -168,14 +168,20 @@ export function availableCommands(ctx: CommandContext): Command[] {
 }
 
 /// Whether a dispatched command id may run in a window with `caps`.
-/// Mirrors the catalog filter for ids that are registered; an id absent
-/// from the catalog is allowed only where every capability is present (a
-/// workspace window), so a mode with reduced capabilities fails closed on
-/// unclassified ids instead of leaking a workspace action.
+///
+/// Mirrors the catalog filter for ids that are registered. Some dispatchable
+/// ids are NOT catalog entries: they are window-level actions fired by chords
+/// and by the host's `chan:command` bridge with no launcher row to offer --
+/// the find family, `app.tab.jump`, `app.launcher.toggle`, and
+/// `app.window.confirmClose`, which is how the desktop's close button asks the
+/// window whether it may go. [`TERMINAL_ONLY_COMMANDS`] is exactly the set of
+/// ids that need no workspace, so it classifies those; an id in neither table
+/// fails closed, so a window with reduced capabilities never leaks a workspace
+/// action it cannot honour.
 export function dispatchAllowsCommand(id: string, caps: WindowCaps): boolean {
   if (caps.workspace) return true;
   const command = allCommands().find((c) => c.id === id);
-  if (!command) return false;
+  if (!command) return TERMINAL_ONLY_COMMANDS.has(id);
   return requirementAllows(command.requirement, caps);
 }
 
