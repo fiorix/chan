@@ -792,6 +792,7 @@ async fn build_app_with_extensions(
         terminal_session_dir: None,
         window_presence,
         session_registry,
+        pending_window_commands: Arc::new(Default::default()),
         window_transfers,
         window_titles: desktop.window_titles.clone(),
         bulk_transfer: bulk_transfer.tenant(),
@@ -1103,6 +1104,7 @@ async fn build_terminal_app(
         terminal_session_dir: session_dir.clone(),
         window_presence,
         session_registry,
+        pending_window_commands: Arc::new(Default::default()),
         window_transfers,
         window_titles: desktop.window_titles.clone(),
         bulk_transfer: bulk_transfer.tenant(),
@@ -1569,6 +1571,7 @@ fn into_tenant_artifacts(a: AppArtifacts) -> chan_library::TenantArtifacts {
         window_presence,
         window_transfers,
         session_registry,
+        pending_window_commands: Arc::new(Default::default()),
         events_tx,
         cell,
         // `bulk_transfer` rides here as the tenant's lane lifetime: the host

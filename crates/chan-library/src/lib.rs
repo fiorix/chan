@@ -19,6 +19,7 @@ pub mod error;
 pub mod gateway_registry;
 pub mod host;
 pub mod participant_names;
+pub mod pending_window_commands;
 pub mod prefix;
 pub mod serve_config;
 pub mod session_presence;

@@ -172,6 +172,12 @@ pub struct AppState {
     /// Layered over `window_presence` (which still backs the connected
     /// flag); see the `session_presence` module docs.
     pub session_registry: Arc<crate::session_presence::SessionRegistry>,
+    /// Window commands parked for a window that has no socket YET, drained by
+    /// its first `/ws` attach. Only the routed-open path parks (a `cs open`
+    /// whose path belongs to a window the server just minted); every other
+    /// window command still refuses a disconnected target, because there the
+    /// caller named the window and a missing one is the caller's mistake.
+    pub pending_window_commands: Arc<chan_library::pending_window_commands::PendingWindowCommands>,
     /// Per-window in-flight transfer count (refcounted; see the module
     /// docs). Reported by the SPA over `/ws` and read by the desktop close
     /// guard (`WorkspaceHost::tenant_has_active_transfer`).
@@ -367,6 +373,7 @@ pub(crate) mod test_support {
             terminal_session_dir: None,
             window_presence: Arc::new(crate::window_presence::WindowPresence::new()),
             session_registry: Arc::new(crate::session_presence::SessionRegistry::new()),
+            pending_window_commands: std::sync::Arc::new(Default::default()),
             window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
             window_titles: Arc::new(crate::window_titles::WindowTitles::new()),
             bulk_transfer: make_test_bulk_transfer_tenant(),

@@ -165,6 +165,7 @@ pub async fn ws_upgrade(
     let transfers = state.window_transfers.clone();
     let session_registry = state.session_registry.clone();
     let session_events_tx = state.events_tx.clone();
+    let pending_commands = state.pending_window_commands.clone();
     let window_id = q.w.map(|w| w.trim().to_string()).filter(|w| !w.is_empty());
     ws.on_upgrade(move |mut socket| async move {
         // RAII presence ref: held across the pump so EVERY exit path
@@ -198,6 +199,19 @@ pub async fn ws_upgrade(
         if let Some(frame) = crate::session_roster::serialize_session_roster(&session_registry) {
             if socket.send(Message::text(frame)).await.is_err() {
                 return;
+            }
+        }
+        // Window commands parked while this window had no socket: an open the
+        // server routed here (a `cs open` whose path left its workspace) into a
+        // window it had just minted. Delivered straight to THIS socket rather
+        // than broadcast, because the frames were addressed to this window id
+        // and taking them is what makes them not arrive twice. An untagged
+        // observer has no id and drains nothing.
+        if let Some(id) = window_id.as_deref() {
+            for frame in pending_commands.take(id) {
+                if socket.send(Message::text(frame)).await.is_err() {
+                    return;
+                }
             }
         }
         ws_pump(

@@ -5047,6 +5047,7 @@ mod doc_divert_tests {
             terminal_session_dir: None,
             window_presence: Arc::new(crate::window_presence::WindowPresence::new()),
             session_registry: Arc::new(crate::session_presence::SessionRegistry::new()),
+            pending_window_commands: std::sync::Arc::new(Default::default()),
             window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
             window_titles: Arc::new(crate::window_titles::WindowTitles::new()),
             bulk_transfer: bulk,

@@ -203,6 +203,7 @@ mod tests {
             terminal_session_dir: None,
             window_presence: Arc::new(crate::window_presence::WindowPresence::new()),
             session_registry,
+            pending_window_commands: Arc::new(Default::default()),
             window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
             window_titles: Arc::new(crate::window_titles::WindowTitles::new()),
             bulk_transfer: crate::state::test_support::make_test_bulk_transfer_tenant(),

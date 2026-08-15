@@ -3058,6 +3058,7 @@ mod tests {
             window_presence: Arc::new(crate::window_presence::WindowPresence::new()),
             window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
             session_registry: Arc::new(crate::session_presence::SessionRegistry::new()),
+            pending_window_commands: Arc::new(Default::default()),
             events_tx: tokio::sync::broadcast::channel(16).0,
             cell,
             keepalive: Box::new(()),

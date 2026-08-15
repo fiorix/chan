@@ -290,6 +290,12 @@ pub struct TenantArtifacts {
     /// host also installs the aggregate change signal on it so a leader change
     /// wakes that feed.
     pub session_registry: Arc<SessionRegistry>,
+    /// Window commands parked for a window of this tenant that has no socket
+    /// YET, drained by its first `/ws` attach. The host parks here when it
+    /// routes an open into a window it just minted; the same map the tenant's
+    /// `/ws` handler drains, so the frame reaches the window that was created
+    /// for it.
+    pub pending_window_commands: Arc<crate::pending_window_commands::PendingWindowCommands>,
     /// The tenant's `/ws` broadcast channel. The host sends targeted
     /// `window_command` teardown frames on it so a discarded / hidden window's
     /// own socket learns its record was torn down and shows the leader-close
