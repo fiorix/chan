@@ -825,6 +825,9 @@ fn entry_from_devserver(
         // The launcher's machine icon + tooltip, from the devserver's self-report.
         os,
         pretty_name,
+        // The Files capability this devserver reported on its current connect
+        // (false while disconnected, so the launcher offers the remote action
+        // only against a server that answered for it).
         // Plain configured rows carry no gateway provenance; gateway-roster
         // rows are synthesized with these set, not read from persisted config.
         gateway_id: None,

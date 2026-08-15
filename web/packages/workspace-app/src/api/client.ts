@@ -52,6 +52,7 @@ import type {
   WorkspaceInfo,
   WorkspaceReadiness,
   BubbleOverlayMode,
+  FsContext,
 } from "./types";
 import { ApiError } from "./errors";
 import { updateGlobalConfigSerial } from "./preferenceWrite";
@@ -146,8 +147,47 @@ export function clientNonce(): string {
   return clientNonceValue;
 }
 
+/// Whether this window's file operations go to the STANDALONE filesystem
+/// surface -- the shared terminal tenant's, over the server machine's disk --
+/// rather than to a workspace. True in a standalone terminal window whose
+/// tenant mounted that surface, which the served shell declares as
+/// `<meta name="chan-files">`. A control terminal is excluded: it is the
+/// singleton window running a devserver's connect script, one PTY and no file
+/// surface, which is the same answer `capsForMode` gives. Read straight off
+/// the URL and the document, like `?w=` and `?lib=`, so the api layer stays
+/// independent of the state modules.
+export function usesStandaloneFiles(): boolean {
+  if (typeof window === "undefined") return false;
+  if (new URL(window.location.href).searchParams.get("kind") !== "terminal") return false;
+  try {
+    return document.querySelector('meta[name="chan-files"]') !== null;
+  } catch {
+    return false;
+  }
+}
+
+/// Query suffix a mutating call needs on the standalone filesystem surface,
+/// and nothing at all in a workspace. `w` names the writing window so the
+/// server attributes the change back to it (a window must not read its own
+/// save as an external edit), and `app=files` selects the standalone contract
+/// on a route whose path serves two of them.
+export function filesMutationSuffix(
+  existingQuery: boolean,
+  opts: { app?: boolean } = {},
+): string {
+  if (!usesStandaloneFiles()) return "";
+  const params = new URLSearchParams();
+  if (opts.app) params.set("app", "files");
+  params.set("w", sessionWindowId());
+  return `${existingQuery ? "&" : "?"}${params.toString()}`;
+}
+
 export function sessionPath(): string {
-  return `/api/session?w=${encodeURIComponent(sessionWindowId())}&client=${encodeURIComponent(clientNonceValue)}`;
+  const base = `/api/session?w=${encodeURIComponent(sessionWindowId())}&client=${encodeURIComponent(clientNonceValue)}`;
+  // A window holding browser/editor tabs keeps its layout in its own blob
+  // namespace, so the same window booted against a host that serves no
+  // filesystem can never restore tabs whose routes are not there.
+  return usesStandaloneFiles() ? `${base}&app=files` : base;
 }
 
 /// The chan-library this window belongs to. The library backend appends
@@ -168,9 +208,10 @@ export function windowLibraryId(): string {
 /// window KIND, and the WORKSPACE IDENTITY the SPA actually loaded, NOT the
 /// `?w=` window label, which is an opaque per-window id (`w-<hex>`, set by the
 /// desktop window watcher) that differs between two windows of the SAME
-/// workspace. A terminal-only window scopes as `lib:{id}|terminal` (every
-/// standalone terminal in one library shares its `/terminal` tenant, so
-/// terminal-to-terminal moves stay allowed within the same library); a workspace
+/// workspace. A standalone window scopes as `lib:{id}|terminal` (every
+/// standalone window in one library shares its `/terminal` tenant -- and its
+/// filesystem surface, where there is one -- so moves between them stay
+/// allowed within the same library); a workspace
 /// window scopes as `lib:{id}|workspace:{key}` keyed on its stable identity, so
 /// two windows of one workspace share a scope while different workspaces, and
 /// terminal-to-workspace, get distinct scopes. The `library_id` prefix makes both
@@ -181,10 +222,10 @@ export function windowLibraryId(): string {
 /// and the library id because this module is below the workspace store.
 export function windowDragScope(scope: {
   libraryId: string;
-  terminalOnly: boolean;
+  standalone: boolean;
   workspaceKey: string | null;
 }): string {
-  if (scope.terminalOnly) return `lib:${scope.libraryId}|terminal`;
+  if (scope.standalone) return `lib:${scope.libraryId}|terminal`;
   return `lib:${scope.libraryId}|workspace:${scope.workspaceKey ?? "unknown"}`;
 }
 
@@ -366,7 +407,10 @@ function uploadXhrAttempt(
 ): Promise<XhrResponse> {
   return new Promise((resolve, reject) => {
     const xhr = createXhr();
-    xhr.open("POST", apiPath("/api/files/upload"));
+    xhr.open(
+      "POST",
+      apiPath(`/api/files/upload${filesMutationSuffix(false, { app: true })}`),
+    );
     for (const [name, value] of Object.entries(directAuthHeaders())) {
       xhr.setRequestHeader(name, value);
     }
@@ -681,7 +725,11 @@ export const api = {
     form.append("file", file);
     if (dir !== null) form.append("dir", dir);
     const headers = directAuthHeaders();
-    const res = await chanFetch(apiPath("/api/attachments"), { method: "POST", headers, body: form });
+    const res = await chanFetch(apiPath(`/api/attachments${filesMutationSuffix(false)}`), {
+      method: "POST",
+      headers,
+      body: form,
+    });
     if (!res.ok) {
       await responseTextError(res);
     }
@@ -846,6 +894,7 @@ export const api = {
     if (authorityVersion !== undefined && authorityVersion !== null) {
       params.set("authority_version", String(authorityVersion));
     }
+    if (usesStandaloneFiles()) params.set("w", sessionWindowId());
     const suffix = params.size > 0 ? `?${params.toString()}` : "";
     const headers = {
       ...directAuthHeaders(),
@@ -860,7 +909,11 @@ export const api = {
     return (await res.json()) as FileWriteResponse;
   },
   create: (path: string, isDir: boolean, content?: string) =>
-    req<void>("POST", "/api/files", { path, is_dir: isDir, content }),
+    req<void>("POST", `/api/files${filesMutationSuffix(false)}`, {
+      path,
+      is_dir: isDir,
+      content,
+    }),
   uploadFile: (
     file: File,
     dir: string,
@@ -906,16 +959,17 @@ export const api = {
     req<void>("POST", "/api/drafts/discard", { path }),
   promoteDraft: (path: string, target: string) =>
     req<DraftPromoteResponse>("POST", "/api/drafts/promote", { path, target }),
-  remove: (path: string) => req<void>("DELETE", `/api/files/${encPath(path)}`),
+  remove: (path: string) =>
+    req<void>("DELETE", `/api/files/${encPath(path)}${filesMutationSuffix(false)}`),
   downloadUrl: (path: string) => withTokenQuery(`/api/files/${encPath(path)}?download=1`),
   move: (from: string, to: string) =>
-    req<MoveResponse>("POST", "/api/move", { from, to }),
+    req<MoveResponse>("POST", `/api/move${filesMutationSuffix(false)}`, { from, to }),
   /// Multi-entry move/copy for the File Browser clipboard + multi-drag.
   /// `op` move = cut/paste + drag (rename + link rewrite per source);
   /// copy = copy/paste (duplicate). Collisions resolve to a " copy"
   /// suffix server-side; a move into a source's own parent is skipped.
   fsTransfer: (op: TransferOp, sources: string[], destDir: string) =>
-    req<TransferResponse>("POST", "/api/fs/transfer", {
+    req<TransferResponse>("POST", `/api/fs/transfer${filesMutationSuffix(false)}`, {
       op,
       sources,
       dest_dir: destDir,
@@ -1106,6 +1160,10 @@ export const api = {
   /// the work but in-app state still references the pre-reset world.
   storageReset: (mode: ResetMode) =>
     req<ResetResponse>("POST", "/api/storage/reset", { mode }),
+  /// Files-mode boot context: the filesystem root, the wire-relative
+  /// canonical home the browser starts in, and the path grammar. Served
+  /// only by tenants that construct the standalone Files state.
+  fsContext: () => req<FsContext>("GET", "/api/fs/context"),
   /// Read the persisted session payload. Server keys by `?w=<id>`;
   /// chan-desktop windows pass their unique window label in the page URL,
   /// while normal browser tabs use `default`. Returns `null` when none exists yet

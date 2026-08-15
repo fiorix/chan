@@ -36,6 +36,12 @@ pub enum ChanError {
     WriteConflict { current_mtime_ns: Option<i64> },
     #[error("path already exists: {0}")]
     PathAlreadyExists(String),
+    #[error("directory is not empty: {0}")]
+    DirectoryNotEmpty(String),
+    #[error("path is protected: {0}")]
+    ProtectedPath(String),
+    #[error("destination is inside the source tree: {0}")]
+    DestinationInsideSource(String),
     #[error("draft `{name}` is broken: {message}")]
     DraftBroken { name: String, message: String },
     #[error("write too large: {size} bytes exceeds {limit} byte cap for {kind}")]

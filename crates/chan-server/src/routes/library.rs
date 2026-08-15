@@ -657,13 +657,21 @@ fn scoped_local_windows(
         .map(|record| scoped_window(capability, record))
         .collect();
     rows.sort_by(|a, b| {
-        let kind_rank = |kind: WindowKind| match kind {
-            WindowKind::Terminal => 0,
-            WindowKind::Workspace => 1,
+        // The registry's display order (control first, then Terminal before
+        // Workspace), re-derived from the wire fields because the scoped row
+        // forces the capability's own window ahead of it.
+        let kind_rank = |row: &ScopedLibraryWindow| {
+            if row.control {
+                return 0;
+            }
+            match row.kind {
+                WindowKind::Terminal => 1,
+                WindowKind::Workspace => 2,
+            }
         };
         (a.window_id != capability.window_id)
             .cmp(&(b.window_id != capability.window_id))
-            .then_with(|| kind_rank(a.kind).cmp(&kind_rank(b.kind)))
+            .then_with(|| kind_rank(a).cmp(&kind_rank(b)))
             .then_with(|| a.ordinal.cmp(&b.ordinal))
             .then_with(|| a.window_id.cmp(&b.window_id))
     });

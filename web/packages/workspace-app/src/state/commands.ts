@@ -21,7 +21,8 @@ import {
   paneSide,
   type PaneSide,
 } from "./tabs.svelte";
-import { windowModeAllowsCommand } from "./windowMode";
+import { windowCaps, type WindowCaps } from "./windowCaps";
+import { TERMINAL_ONLY_COMMANDS, windowModeAllowsCommand } from "./windowMode";
 
 export type CommandCategory =
   | "Global"
@@ -48,11 +49,38 @@ export type CommandSurface =
   | "dashboard"
   | "extension";
 
+/// The capability a command needs before it may appear or dispatch:
+/// `any` for window/pane/tab/settings plumbing that works everywhere,
+/// `terminal` for terminal lifecycle, `files` for the editor / File
+/// Browser / file-operation family, and `workspace` for graph, search,
+/// dashboard, and every other index-backed surface. One table drives both
+/// the catalog filter and the dispatch gate so they can never disagree.
+export type CommandRequirement = "any" | "terminal" | "files" | "workspace";
+
+/// Whether a window with `caps` satisfies `requirement`.
+export function requirementAllows(
+  requirement: CommandRequirement,
+  caps: WindowCaps,
+): boolean {
+  switch (requirement) {
+    case "any":
+      return true;
+    case "terminal":
+      return caps.terminal;
+    case "files":
+      return caps.files;
+    case "workspace":
+      return caps.workspace;
+  }
+}
+
 /// The runtime context an availability predicate sees: the window-mode
-/// gates (from the `?kind=` URL) plus the active surface.
+/// gates (from the `?kind=` URL), this window's fixed capability set, plus
+/// the active surface.
 export type CommandContext = {
   terminalOnly: boolean;
   terminalControl: boolean;
+  caps: WindowCaps;
   activeSurface: CommandSurface | null;
   activeSide: PaneSide | null;
   activeTabId: string | null;
@@ -69,6 +97,10 @@ export type Command = {
   id: string;
   title: string;
   category: CommandCategory;
+  /// The capability this command needs; see [`CommandRequirement`]. Every
+  /// command declares one explicitly so a window mode can be proven
+  /// against the whole catalog.
+  requirement: CommandRequirement;
   /// Optional shortcut ids to render for this command instead of `id`.
   /// Used when a command is intentionally read-only but should advertise
   /// the same close path as another command.
@@ -127,9 +159,30 @@ export function allCommands(): Command[] {
   return [...byKey.values()];
 }
 
-/// Commands visible in `ctx`. The launcher owns display ordering.
+/// Commands visible in `ctx`: the requirement gate first (the same table
+/// the dispatch gate consults), then the per-command predicate.
 export function availableCommands(ctx: CommandContext): Command[] {
-  return allCommands().filter((c) => c.available(ctx));
+  return allCommands().filter(
+    (c) => requirementAllows(c.requirement, ctx.caps) && c.available(ctx),
+  );
+}
+
+/// Whether a dispatched command id may run in a window with `caps`.
+///
+/// Mirrors the catalog filter for ids that are registered. Some dispatchable
+/// ids are NOT catalog entries: they are window-level actions fired by chords
+/// and by the host's `chan:command` bridge with no launcher row to offer --
+/// the find family, `app.tab.jump`, `app.launcher.toggle`, and
+/// `app.window.confirmClose`, which is how the desktop's close button asks the
+/// window whether it may go. [`TERMINAL_ONLY_COMMANDS`] is exactly the set of
+/// ids that need no workspace, so it classifies those; an id in neither table
+/// fails closed, so a window with reduced capabilities never leaks a workspace
+/// action it cannot honour.
+export function dispatchAllowsCommand(id: string, caps: WindowCaps): boolean {
+  if (caps.workspace) return true;
+  const command = allCommands().find((c) => c.id === id);
+  if (!command) return TERMINAL_ONLY_COMMANDS.has(id);
+  return requirementAllows(command.requirement, caps);
 }
 
 // ---- context -----------------------------------------------------------
@@ -164,6 +217,7 @@ export function commandContext(): CommandContext {
   return {
     terminalOnly: ui.terminalOnly,
     terminalControl: ui.terminalControl,
+    caps: windowCaps,
     activeSurface: target.surface,
     activeSide: target.side,
     activeTabId: target.tabId,

@@ -99,6 +99,7 @@
   } from "../state/store.svelte";
   import { terminalWsPath } from "../terminal/session";
   import { windowModeAllowsSnapshot } from "../state/windowMode";
+  import { windowCaps } from "../state/windowCaps";
   import {
     readTerminalSnapshot,
     writeTerminalSnapshot,
@@ -185,6 +186,7 @@
     hideRichPromptForTab,
   } from "../state/richPrompt.svelte";
   import { surveyFor } from "../state/survey.svelte";
+  import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
 
   let {
     tab,
@@ -2184,6 +2186,12 @@
   function terminalCwdRel(): string | null {
     if (terminalCwdVirtual !== null) return terminalCwdVirtual;
     const abs = terminalCwdAbs;
+    // A standalone window has no workspace root; its file context translates the
+    // PTY's absolute cwd back to the wire-relative form.
+    const filesCtx = filesContext.current;
+    if (filesCtx && abs) {
+      return wirePathFromAbsolute(filesCtx, abs.replace(/\\/g, "/"));
+    }
     const root = workspace.info?.root;
     if (!abs || !root) return null;
     const normAbs = abs.replace(/\\/g, "/").replace(/\/+$/, "");
@@ -2471,9 +2479,10 @@
             <span class="mbtn-label">Copy Scrollback</span>
             <span class="mbtn-chord"></span>
           </button>
-          <!-- Rich Prompt drafts into the workspace drafts dir; not
-               available in a terminal-only window. -->
-          {#if !ui.terminalOnly}
+          <!-- Rich Prompt drafts into the workspace drafts dir, so it needs
+               one: this row calls the toggle directly, past the command gates,
+               and a standalone window's tenant serves no drafts route. -->
+          {#if windowCaps.workspace}
             <button class="mbtn" onclick={toggleRichPromptFromMenu}>
               <span class="mbtn-icon">
                 <MessageSquare size={16} strokeWidth={1.75} aria-hidden="true" />

@@ -191,6 +191,15 @@ describe("Library: devserver groups", () => {
     expect(target!.querySelector('input[aria-label="Select prod"]')).not.toBeNull();
   });
 
+  it("offers no files-window action: a terminal window IS the file window", () => {
+    // There is one standalone window family. A standalone terminal window
+    // browses and edits the machine's filesystem itself, wherever the host
+    // serves one, so the launcher has no separate Files action to offer.
+    mountList();
+    expect(byAria("New terminal on prod")).toBeTruthy();
+    expect(ariaLabels().some((l) => l.toLowerCase().includes("files window"))).toBe(false);
+  });
+
   it("nests the connected devserver's served workspaces as rows with a checkbox and no Forget", () => {
     mountList();
     expect(target!.textContent).toContain("/srv/api");
@@ -428,6 +437,7 @@ describe("Library: devserver groups", () => {
         token: "",
         persisted: true,
         connected: true,
+        active_transfer: false,
         control: true,
       },
     ];

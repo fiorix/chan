@@ -18,7 +18,7 @@
     indentWithTab,
   } from "@codemirror/commands";
   import { markdown } from "@codemirror/lang-markdown";
-  import { workspace, effectiveHybridSurfaceTheme } from "../state/store.svelte";
+  import { currentPreferences, workspace, effectiveHybridSurfaceTheme } from "../state/store.svelte";
   import {
     createValueSync,
     findField,
@@ -45,7 +45,7 @@
     if (value === "compact" || value === "tight") return "compact";
     return "standard";
   }
-  const density = $derived(editorDensity(workspace.info?.preferences?.line_spacing));
+  const density = $derived(editorDensity(currentPreferences()?.line_spacing));
 
   let {
     value = $bindable(""),

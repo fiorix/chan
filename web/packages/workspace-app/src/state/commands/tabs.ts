@@ -7,6 +7,7 @@ function sendToSideCommand(targetSide: PaneSide): Command {
     id: targetSide === "a" ? "app.tab.sendToA" : "app.tab.sendToB",
     title: `Send tab to side ${label}`,
     category: "Tabs",
+    requirement: "any",
     keywords: ["move", "send", "side", label.toLowerCase()],
     available: (ctx) =>
       ctx.activeTabId !== null &&

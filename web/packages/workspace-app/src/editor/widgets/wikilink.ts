@@ -45,6 +45,7 @@ import { decodePercent, normalizeHref } from "../links";
 import { isImagePath, resolveImageSrc } from "../extensions/image";
 import { api } from "../../api/client";
 import { openPreviewPopover } from "../overlays/preview_popover";
+import { windowCaps } from "../../state/windowCaps";
 
 export type LinkKind =
   | "file"
@@ -205,6 +206,11 @@ function getKind(target: string): LinkKind | undefined {
     kindCache.set(target, "image");
     return "image";
   }
+  // Without a workspace there is no resolver behind the probe; a failed
+  // request would cache "broken" and paint every pill red. Pills stay
+  // neutral (undefined kind, uncolored) and clicks still navigate via
+  // the raw-path fallback.
+  if (!windowCaps.workspace) return undefined;
   // Async resolve - only one in-flight request per target.
   if (inflight.has(target)) return undefined;
   inflight.add(target);

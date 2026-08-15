@@ -67,6 +67,7 @@ function controlWindow(
     token: "token",
     persisted: false,
     connected: true,
+    active_transfer: false,
     control: true,
     ...over,
   };

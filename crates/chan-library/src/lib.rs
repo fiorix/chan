@@ -19,6 +19,7 @@ pub mod error;
 pub mod gateway_registry;
 pub mod host;
 pub mod participant_names;
+pub mod pending_window_commands;
 pub mod prefix;
 pub mod serve_config;
 pub mod session_presence;
@@ -45,7 +46,8 @@ pub use host::{
 pub use prefix::{allocate_workspace_prefix, workspace_slug};
 pub use serve_config::{sanitize_prefix, ServeConfig, ServeHandle};
 pub use tenant::{
-    HostControl, TenantArtifacts, TenantBuilder, TenantTaskOwner, UnserveMode, UnserveScope,
+    BrowserWindowTarget, HostControl, OpenOutsideAck, StandaloneFiles, StandaloneOpenFrame,
+    TenantArtifacts, TenantBuilder, TenantTaskOwner, UnserveMode, UnserveScope,
     WorkspaceCellHandle,
 };
 /// The single-sourced shell resolver (`$SHELL` → passwd → `/bin/sh`); unix-only.

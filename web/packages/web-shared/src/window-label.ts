@@ -28,8 +28,7 @@ export interface WindowDisplayParts {
  * machine's, so a row reads the same under any library.
  */
 export function rowLabel(kind: WindowKind, ordinal: number): string {
-  if (kind === "terminal") return `Terminal Window ${ordinal}`;
-  return `Window ${ordinal}`;
+  return kind === "terminal" ? `Terminal Window ${ordinal}` : `Window ${ordinal}`;
 }
 
 /**

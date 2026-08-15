@@ -14,6 +14,7 @@
   import { api } from "../api/client";
   import {
     closeSettings,
+    currentPreferences,
     settingsPanel,
     updateGlobalConfigSerial,
     workspace,
@@ -151,7 +152,7 @@
   // This component stays mounted while Settings is closed, so server boot and
   // config_changed refreshes can apply the persisted override in every window.
   $effect(() => {
-    applyEditorFontSize(workspace.info?.preferences?.editor_font_size);
+    applyEditorFontSize(currentPreferences()?.editor_font_size);
   });
 
   // Keep the editor-tools snapshot in sync so an open editor observes a

@@ -2,7 +2,7 @@
 //
 // Typed verbatim like markdown commands; firing them rewrites the
 // trigger source as a date in the user's default format (from
-// `workspace.info.preferences.date_format`). The freshly-written date is
+// the window's effective `date_format` preference). The freshly-written date is
 // then auto-pilled by the existing matcher (widgets/date.ts), so the
 // end state is "user typed a slash command, sees a date pill".
 //
@@ -25,7 +25,7 @@
 // keep typing".
 
 import type { EditorView } from "@codemirror/view";
-import { workspace, persistDateFormat } from "../../state/store.svelte";
+import { currentPreferences, persistDateFormat } from "../../state/store.svelte";
 import {
   DATE_FORMATS,
   findDateMatches,
@@ -37,9 +37,10 @@ import { openDatePopover } from "../overlays/date_popover";
 /// Resolve the active default format id. Preference field is a free
 /// string; if it doesn't match a known id we fall back to ISO so the
 /// macro always produces a valid match for the auto-pilled
-/// re-detection.
-function defaultFormatId(): DateFormatId {
-  const id = workspace.info?.preferences?.date_format;
+/// re-detection. Reads the window's effective preferences, so a window with
+/// no workspace still honours the machine setting its tenant serves.
+export function defaultDateFormatId(): DateFormatId {
+  const id = currentPreferences()?.date_format;
   if (id && DATE_FORMATS.some((f) => f.id === id)) {
     return id as DateFormatId;
   }
@@ -113,7 +114,7 @@ export function dateAtCaret(view: EditorView): {
   const line = view.state.doc.lineAt(pos);
   const matches = findDateMatches(
     line.text,
-    workspace.info?.preferences?.date_format,
+    currentPreferences()?.date_format,
   );
   for (const m of matches) {
     const from = line.from + m.start;
@@ -165,7 +166,7 @@ export function openDateAtCaret(view: EditorView): boolean {
 export function expandDateMacro(view: EditorView): boolean {
   const hit = detectTrigger(view);
   if (!hit) return false;
-  const formatId = defaultFormatId();
+  const formatId = defaultDateFormatId();
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const formatted = formatDate(today, formatId);

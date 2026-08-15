@@ -1,3 +1,5 @@
+import { usesStandaloneFiles } from "../api/client";
+
 export type TerminalWsPathOpts = {
   cols: number;
   rows: number;
@@ -63,6 +65,11 @@ export function terminalWsPath(opts: TerminalWsPathOpts): string {
   } else {
     const cwd = opts.cwd?.trim();
     if (cwd) params.set("cwd", cwd);
+    // On the standalone filesystem surface a cwd is a wire-relative path the
+    // server must resolve through the standalone capability root, not the
+    // workspace resolver; the marker rides only fresh spawns (a reattach
+    // keeps its PTY cwd).
+    if (usesStandaloneFiles()) params.set("app", "files");
     const command = opts.command?.trim();
     if (command) params.set("command", command);
     if (opts.env && Object.keys(opts.env).length > 0) {

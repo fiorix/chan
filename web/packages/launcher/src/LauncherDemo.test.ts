@@ -44,6 +44,7 @@ const termWindow: WindowRecord = {
   token: "tok_hint",
   persisted: true,
   connected: true,
+  active_transfer: false,
   control: false,
 };
 

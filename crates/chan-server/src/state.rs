@@ -145,6 +145,14 @@ pub struct AppState {
     /// window closes and the tenant is torn down. Unused on workspace
     /// tenants, which take the disk path in the session handlers.
     pub ephemeral_sessions: Mutex<HashMap<String, Vec<u8>>>,
+    /// The filesystem sibling of `ephemeral_sessions`: in-memory layout blobs
+    /// for windows holding browser/editor tabs on a store-less terminal
+    /// tenant, addressed with `?app=files`. A separate map (and, on disk, a
+    /// separate `files/` child of the terminal blob dir) keeps those layouts
+    /// out of the plain namespace, so the same window booted against a host
+    /// that serves no filesystem never restores tabs whose routes are not
+    /// there.
+    pub ephemeral_files_sessions: Mutex<HashMap<String, Vec<u8>>>,
     /// On-disk per-window session-blob store for a PERSISTED terminal tenant  --
     /// the desktop's standalone `/terminal` tenant and a standalone devserver
     /// terminal -- so its pane/tab layout survives a relaunch (with fresh shells;
@@ -164,6 +172,12 @@ pub struct AppState {
     /// Layered over `window_presence` (which still backs the connected
     /// flag); see the `session_presence` module docs.
     pub session_registry: Arc<crate::session_presence::SessionRegistry>,
+    /// Window commands parked for a window that has no socket YET, drained by
+    /// its first `/ws` attach. Only the routed-open path parks (a `cs open`
+    /// whose path belongs to a window the server just minted); every other
+    /// window command still refuses a disconnected target, because there the
+    /// caller named the window and a missing one is the caller's mistake.
+    pub pending_window_commands: Arc<chan_library::pending_window_commands::PendingWindowCommands>,
     /// Per-window in-flight transfer count (refcounted; see the module
     /// docs). Reported by the SPA over `/ws` and read by the desktop close
     /// guard (`WorkspaceHost::tenant_has_active_transfer`).
@@ -185,6 +199,24 @@ pub struct AppState {
     /// are gone, so the SPA reloads itself instead of sitting on a
     /// stale view with stuck terminals until a manual Cmd+R.
     pub instance_id: String,
+    /// The standalone filesystem surface's state bundle, present only on a
+    /// shared terminal tenant that constructed a supported one. Workspace
+    /// tenants and unsupported terminal tenants carry `None`; the file routes
+    /// and the `/ws` scope plumbing read it directly and never touch
+    /// `workspace_cell`. Its presence is also what the served SPA shell
+    /// advertises, so a standalone terminal window knows whether it can offer
+    /// the file browser and the editor.
+    pub standalone_files: Option<Arc<StandaloneFilesState>>,
+}
+
+/// Everything the standalone filesystem surface owns beyond the plain
+/// terminal tenant: the `/`-rooted capability filesystem, the scoped
+/// non-recursive watch manager producing this tenant's `fs` frames, and the
+/// mutation bus attributing its own writes.
+pub struct StandaloneFilesState {
+    pub fs: Arc<chan_workspace::MiniWorkspace>,
+    pub watcher: Arc<crate::standalone_watch::ScopedWatchManager>,
+    pub mutations: Arc<crate::standalone_mutations::StandaloneMutationBus>,
 }
 
 /// Workspace + its notify watcher. Replaced wholesale by /api/storage/
@@ -337,13 +369,16 @@ pub(crate) mod test_support {
             window_bus: Arc::new(crate::window_bus::WindowBus::new()),
             handover_bus: Arc::new(crate::handover_bus::HandoverBus::new()),
             ephemeral_sessions: Mutex::new(HashMap::new()),
+            ephemeral_files_sessions: Mutex::new(HashMap::new()),
             terminal_session_dir: None,
             window_presence: Arc::new(crate::window_presence::WindowPresence::new()),
             session_registry: Arc::new(crate::session_presence::SessionRegistry::new()),
+            pending_window_commands: std::sync::Arc::new(Default::default()),
             window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
             window_titles: Arc::new(crate::window_titles::WindowTitles::new()),
             bulk_transfer: make_test_bulk_transfer_tenant(),
             instance_id: "test-instance".to_string(),
+            standalone_files: None,
         })
     }
 

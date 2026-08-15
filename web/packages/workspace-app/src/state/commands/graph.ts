@@ -25,6 +25,7 @@ registerCommands([
     id: "app.graph.surfaceTheme.light",
     title: "Graph theme: light",
     category: "Graph",
+    requirement: "workspace",
     keywords: ["theme", "light", "appearance"],
     available: (ctx) => onSurface(ctx, "graph"),
     run: () => setHybridSurfaceTheme("graph", "light"),
@@ -33,6 +34,7 @@ registerCommands([
     id: "app.graph.surfaceTheme.dark",
     title: "Graph theme: dark",
     category: "Graph",
+    requirement: "workspace",
     keywords: ["theme", "dark", "appearance"],
     available: (ctx) => onSurface(ctx, "graph"),
     run: () => setHybridSurfaceTheme("graph", "dark"),
@@ -41,6 +43,7 @@ registerCommands([
     id: "app.graph.copyLink",
     title: "Copy link to graph",
     category: "Graph",
+    requirement: "workspace",
     keywords: ["link", "share", "url", "clipboard"],
     available: (ctx) => onSurface(ctx, "graph"),
     run: onGraph((tab) => {
@@ -54,6 +57,7 @@ registerCommands([
     id: "app.graph.reload",
     title: "Reload graph",
     category: "Graph",
+    requirement: "workspace",
     keywords: ["reload", "refresh", "rebuild", "redraw"],
     available: (ctx) => onSurface(ctx, "graph"),
     // Scoped to this graph, unlike app.window.reload which reloads the SPA.
@@ -63,6 +67,7 @@ registerCommands([
     id: "app.graph.depth.increase",
     title: "Graph depth: increase",
     category: "Graph",
+    requirement: "workspace",
     keywords: ["depth", "expand", "more", "neighbors"],
     available: (ctx) => onSurface(ctx, "graph"),
     // The panel's own clamp effect caps depth to the scope's ceiling.
@@ -74,6 +79,7 @@ registerCommands([
     id: "app.graph.depth.decrease",
     title: "Graph depth: decrease",
     category: "Graph",
+    requirement: "workspace",
     keywords: ["depth", "collapse", "less", "neighbors"],
     available: (ctx) => onSurface(ctx, "graph"),
     run: onGraph((tab) => {
@@ -84,6 +90,7 @@ registerCommands([
     id: "app.graph.filter.tag",
     title: "Graph filter: tags",
     category: "Graph",
+    requirement: "workspace",
     keywords: ["filter", "tag", "toggle"],
     available: (ctx) => onSurface(ctx, "graph"),
     run: onGraph((tab) => {
@@ -94,6 +101,7 @@ registerCommands([
     id: "app.graph.filter.contact",
     title: "Graph filter: contacts",
     category: "Graph",
+    requirement: "workspace",
     keywords: ["filter", "contact", "mention", "toggle"],
     available: (ctx) => onSurface(ctx, "graph"),
     run: onGraph((tab) => {
@@ -104,6 +112,7 @@ registerCommands([
     id: "app.graph.filter.language",
     title: "Graph filter: languages",
     category: "Graph",
+    requirement: "workspace",
     keywords: ["filter", "language", "toggle"],
     available: (ctx) => onSurface(ctx, "graph"),
     run: onGraph((tab) => {
@@ -114,6 +123,7 @@ registerCommands([
     id: "app.graph.filter.media",
     title: "Graph filter: media",
     category: "Graph",
+    requirement: "workspace",
     keywords: ["filter", "media", "image", "toggle"],
     available: (ctx) => onSurface(ctx, "graph"),
     run: onGraph((tab) => {
@@ -124,6 +134,7 @@ registerCommands([
     id: "app.graph.filter.markdown",
     title: "Graph filter: markdown",
     category: "Graph",
+    requirement: "workspace",
     keywords: ["filter", "markdown", "document", "toggle"],
     available: (ctx) => onSurface(ctx, "graph"),
     run: onGraph((tab) => {
@@ -134,6 +145,7 @@ registerCommands([
     id: "app.graph.filter.source",
     title: "Graph filter: source",
     category: "Graph",
+    requirement: "workspace",
     keywords: ["filter", "source", "code", "toggle"],
     available: (ctx) => onSurface(ctx, "graph"),
     run: onGraph((tab) => {

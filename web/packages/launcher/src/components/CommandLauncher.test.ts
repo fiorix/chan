@@ -76,6 +76,7 @@ const windowRecord: WindowRecord = {
   token: "token",
   persisted: true,
   connected: true,
+  active_transfer: false,
   control: false,
 };
 
@@ -91,6 +92,7 @@ const terminalRecord: WindowRecord = {
   token: "token",
   persisted: true,
   connected: true,
+  active_transfer: false,
   control: true,
 };
 

@@ -61,7 +61,7 @@ pub fn err_state(e: &StateAccessError) -> Response {
 pub fn err_from(e: &chan_workspace::ChanError) -> Response {
     use chan_workspace::ChanError as C;
     let (status, msg) = match e {
-        C::PathEmpty | C::PathEscape | C::SymlinkEscape(_) => {
+        C::PathEmpty | C::PathEscape | C::SymlinkEscape(_) | C::DestinationInsideSource(_) => {
             (StatusCode::BAD_REQUEST, e.to_string())
         }
         C::NotEditableText(_) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, e.to_string()),

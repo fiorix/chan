@@ -465,25 +465,46 @@ describe("pane command semantics", () => {
     expect(leaf(splitReply.paneId!)).toMatchObject({ tabs: [], activeTabId: null });
   });
 
-  test("new preserves the standalone-terminal no-empty-pane invariant", async () => {
+  test("new preserves the standalone no-empty-pane invariant", async () => {
+    // A window with no workspace has no welcome surface to fill an empty
+    // pane, so a scripted split lands a terminal in it. The shape comes from
+    // the window's capabilities, which are read once at module load -- so this
+    // one runs against a freshly imported registry with `?kind=terminal`
+    // already on the URL, rather than flipping a runtime flag that the
+    // capability set does not follow.
+    vi.resetModules();
     window.history.replaceState(null, "", "/?w=window-a&kind=terminal");
-    __testSetBootstrapHydrated(false);
-    ui.terminalOnly = true;
-    setTwoPaneLayout();
-    const reply = vi.spyOn(api, "windowReply").mockResolvedValue(undefined);
+    const freshStore = await import("./store.svelte");
+    const freshTabs = await import("./tabs.svelte");
+    const freshApi = (await import("../api/client")).api;
+    freshStore.__testSetBootstrapHydrated(false);
+    const left: LeafNode = {
+      kind: "leaf",
+      id: "pane-left",
+      tabs: [],
+      activeTabId: null,
+      side: "a",
+      theme: "light",
+    };
+    freshTabs.layout.nodes = { [left.id]: left };
+    freshTabs.layout.rootId = left.id;
+    freshTabs.layout.activePaneId = left.id;
+    const reply = vi.spyOn(freshApi, "windowReply").mockResolvedValue(undefined);
 
-    dispatch({
+    freshStore.onWatchEvent({
+      type: "window_command",
+      window_id: "window-a",
       command: "pane_exec",
       request_id: "request-terminal-split",
       op: { kind: "split", pane_id: "pane-left", dir: "bottom" },
-    });
+    } as unknown as Parameters<typeof freshStore.onWatchEvent>[0]);
 
     await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(1));
     const result = reply.mock.calls[0]![0].payload as { paneId?: string };
-    const pane = leaf(result.paneId!);
+    const pane = freshTabs.layout.nodes[result.paneId!] as LeafNode;
     expect(pane.tabs).toHaveLength(1);
     expect(pane.tabs[0]?.kind).toBe("terminal");
-    expect(layout.activePaneId).toBe(pane.id);
+    expect(freshTabs.layout.activePaneId).toBe(pane.id);
   });
 
   test("close preflights both sides and leaves the pane unchanged when blocked", async () => {

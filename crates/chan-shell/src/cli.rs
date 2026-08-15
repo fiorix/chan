@@ -3373,6 +3373,9 @@ mod tests {
                 action: WindowAction::New
             }
         ));
+        // `new` takes no application selector: there is one standalone window
+        // family, and the calling tenant decides between it and a workspace.
+        assert!(CsCli::try_parse_from(["cs", "window", "new", "--app", "files"]).is_err());
 
         let cli = CsCli::parse_from(["cs", "window", "open", "terminal-win-2"]);
         match cli.action {

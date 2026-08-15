@@ -441,10 +441,7 @@ pub(crate) fn retarget_watched_remote_window(
     let Some(window) = app.get_webview_window(&label) else {
         return Ok(false);
     };
-    let kind = match record.kind {
-        WindowKind::Terminal => Some("terminal"),
-        WindowKind::Workspace => None,
-    };
+    let kind = watched_window_kind(record);
     let target = workspace_window_target_url(
         app,
         &label,
@@ -969,9 +966,10 @@ struct WindowSpec<'a> {
     /// `capture_window_config`), which is the bug the connecting screen
     /// fixes.
     connecting: Option<&'a str>,
-    /// `Some("terminal")` makes the SPA boot in terminal-only mode (no
-    /// workspace fetch); `Some("control")` is the stricter singleton control
-    /// sub-mode (terminal-only + hidden chrome, one PTY); `None` is full
+    /// `Some("terminal")` makes the SPA boot without a workspace (no
+    /// workspace fetch; the file browser and editor ride the same tenant
+    /// wherever it serves a filesystem); `Some("control")` is the stricter
+    /// singleton control sub-mode (hidden chrome, one PTY); `None` is full
     /// workspace mode. Also the kind `cs window list` shows.
     kind: Option<&'a str>,
 }
@@ -1475,10 +1473,7 @@ pub(crate) fn browser_window_url(
         "http://{addr}{}/index.html?t={}",
         record.prefix, record.token
     );
-    let kind = match record.kind {
-        WindowKind::Terminal => Some("terminal"),
-        WindowKind::Workspace => None,
-    };
+    let kind = watched_window_kind(record);
     workspace_window_target_url(
         app,
         &label,
@@ -1506,11 +1501,13 @@ fn workspace_window_target_url(
     // `?w=`; that is the `session_id`, NOT the Tauri label (they diverge only
     // for watcher-opened windows, where the label is the composite native key).
     parsed.query_pairs_mut().append_pair("w", session_id);
-    // `kind=terminal` / `kind=control` are the SPA's only signal to enter
-    // terminal-only mode (no workspace fetch, terminal panes only);
-    // `control` additionally selects the singleton control sub-mode.
-    // Workspace/outbound windows pass `None` and the SPA stays in full
-    // workspace mode.
+    // `kind=terminal` / `kind=control` are the SPA's only signal that this
+    // window has no workspace (no workspace fetch); `control` additionally
+    // selects the singleton control sub-mode. There is no third spelling: what
+    // a standalone window can reach beyond its terminals -- the file browser
+    // and the editor -- is the serving tenant's answer, declared in the shell
+    // it serves. Workspace/outbound windows pass `None` and the SPA stays in
+    // full workspace mode.
     if let Some(kind) = kind {
         parsed.query_pairs_mut().append_pair("kind", kind);
     }
@@ -2417,6 +2414,46 @@ mod tests {
         );
         // The control-window shape is pinned by
         // `control_terminal_titles_do_not_use_window_number_suffix`.
+    }
+
+    #[test]
+    fn every_watched_url_reads_the_boot_mode_from_one_switch() {
+        // The open, retarget, and open-in-browser paths must agree on a
+        // record's `?kind=`: a window that retargeted (token rotation) or
+        // opened in the browser through its own copy of the switch would drift
+        // from the one the watcher opened it with.
+        const SERVE_RS: &str = include_str!("serve.rs");
+        for (function, ends_before) in [
+            (
+                "fn retarget_watched_remote_window",
+                "/// Spawn a new outbound URL webview window",
+            ),
+            ("fn browser_window_url", "fn workspace_window_target_url"),
+        ] {
+            let body = SERVE_RS
+                .split(function)
+                .nth(1)
+                .expect("the function exists")
+                .split(ends_before)
+                .next()
+                .expect("the section ends before the next item");
+            assert!(
+                body.contains("watched_window_kind(record)"),
+                "{function} must read the boot mode from watched_window_kind",
+            );
+        }
+        // The watcher stamps the same projection into the title map, so
+        // `GET /api/windows` and `cs window list` report the mode the window
+        // actually booted in.
+        const WIRING_RS: &str = include_str!("window_watcher_wiring.rs");
+        let sync = WIRING_RS
+            .split("fn sync_title(&self, record")
+            .nth(1)
+            .expect("sync_title exists")
+            .split("impl NativeSurface")
+            .next()
+            .expect("sync_title section ends before the surface impl");
+        assert!(sync.contains("serve::watched_window_kind(record)"));
     }
 
     #[test]

@@ -80,24 +80,26 @@ describe("Hybrid Nav transactional staging", () => {
     );
   });
 
-  test("o / g / b stage workspace app tabs into the draft", () => {
+  test("o / g / b stage app tabs into the draft, each behind its own capability", () => {
+    // The browser needs a filesystem, which a standalone window has whenever
+    // its tenant serves one; the graph and the dashboard need a workspace.
     expect(app).toMatch(
-      /case "o":\s*\n\s*case "O":\s*\n\s*if \(ui\.terminalOnly\) return;\s*\n\s*paneModeOpenBrowser\(resolveSpawnContext\(\)\);\s*\n\s*return;/,
+      /case "o":\s*\n\s*case "O":\s*\n\s*if \(!windowCaps\.files\) return;\s*\n\s*paneModeOpenBrowser\(resolveSpawnContext\(\)\);\s*\n\s*return;/,
     );
     expect(app).toMatch(
-      /case "g":\s*\n\s*case "G":\s*\n\s*if \(ui\.terminalOnly\) return;\s*\n\s*paneModeOpenGraph\(resolveSpawnContext\(\)\);\s*\n\s*return;/,
+      /case "g":\s*\n\s*case "G":\s*\n\s*if \(!windowCaps\.workspace\) return;\s*\n\s*paneModeOpenGraph\(resolveSpawnContext\(\)\);\s*\n\s*return;/,
     );
     expect(app).toMatch(
-      /case "b":\s*\n\s*case "B":\s*\n\s*if \(ui\.terminalOnly\) return;\s*\n\s*paneModeOpenDashboard\(\);\s*\n\s*return;/,
+      /case "b":\s*\n\s*case "B":\s*\n\s*if \(!windowCaps\.workspace\) return;\s*\n\s*paneModeOpenDashboard\(\);\s*\n\s*return;/,
     );
   });
 
   test("n / i stage draft and diagram editors without committing", () => {
     expect(app).toMatch(
-      /case "n":\s*\n\s*case "N":\s*\n\s*if \(ui\.terminalOnly\) return;\s*\n\s*paneModeStageDraftEditor\(\);\s*\n\s*return;/,
+      /case "n":\s*\n\s*case "N":\s*\n\s*if \(!windowCaps\.workspace\) return;\s*\n\s*paneModeStageDraftEditor\(\);\s*\n\s*return;/,
     );
     expect(app).toMatch(
-      /case "i":\s*\n\s*case "I":\s*\n\s*if \(ui\.terminalOnly\) return;\s*\n\s*paneModeStageDiagramEditor\(\);\s*\n\s*return;/,
+      /case "i":\s*\n\s*case "I":\s*\n\s*if \(!windowCaps\.workspace\) return;\s*\n\s*paneModeStageDiagramEditor\(\);\s*\n\s*return;/,
     );
   });
 
@@ -280,7 +282,7 @@ describe("Track C pane shortcut wiring", () => {
   test("empty visible side flips to hidden tabs, flashes the A/B button, and blocks close", () => {
     const closeActiveEmptyPane = sourceBetween(
       "function closeActiveEmptyPane(): boolean",
-      "// Terminal-only windows never sit empty",
+      "// Standalone windows never sit empty",
     );
     expect(closeActiveEmptyPane).toMatch(
       /function closeActiveEmptyPane\(\): boolean \{[\s\S]*?if \(paneTabs\(p\)\.length !== 0\) return false;[\s\S]*?if \(allPaneTabs\(p\)\.length !== 0\) \{[\s\S]*?requestPaneSideToggleFlash\(p\.id\);[\s\S]*?flipHybrid\(p\.id\);[\s\S]*?return true;/,

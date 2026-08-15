@@ -159,6 +159,7 @@ const windows: WindowRecord[] = [
     token: "tok_local_term",
     persisted: true,
     connected: true,
+    active_transfer: false,
     control: false,
   },
   {
@@ -172,6 +173,7 @@ const windows: WindowRecord[] = [
     token: "tok_local_notes",
     persisted: true,
     connected: true,
+    active_transfer: false,
     control: false,
   },
   {
@@ -187,6 +189,7 @@ const windows: WindowRecord[] = [
     token: "tok_ds1_control",
     persisted: false,
     connected: true,
+    active_transfer: false,
     control: true,
   },
   {
@@ -203,6 +206,7 @@ const windows: WindowRecord[] = [
     token: "",
     persisted: true,
     connected: false,
+    active_transfer: false,
     control: false,
     hidden: true,
   },
@@ -217,6 +221,7 @@ const windows: WindowRecord[] = [
     token: "tok_ds1_api",
     persisted: true,
     connected: true,
+    active_transfer: false,
     control: false,
   },
 ];
@@ -454,8 +459,6 @@ export const mockApi: LibraryApi = {
     return tick(undefined);
   },
 
-  // Open a terminal window on a connected devserver: mint a remote terminal
-  // window in that library and push the feed. A real surface drives the bridge.
   openDevserverTerminal: (id) => {
     const ds = devservers.find((d) => d.id === id);
     if (ds?.library_id) {
@@ -472,6 +475,7 @@ export const mockApi: LibraryApi = {
         token: "tok_remote_term",
         persisted: true,
         connected: true,
+        active_transfer: false,
         control: false,
       });
       notify();
@@ -496,6 +500,7 @@ export const mockApi: LibraryApi = {
         token: "tok_remote_ws",
         persisted: true,
         connected: true,
+        active_transfer: false,
         control: false,
       });
       notify();
@@ -619,6 +624,7 @@ export const mockApi: LibraryApi = {
       token: "tok_local",
       persisted: true,
       connected: true,
+      active_transfer: false,
       control: false,
       ...(opts?.origin ? { origin: opts.origin } : {}),
     };

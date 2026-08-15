@@ -11,6 +11,7 @@ import {
   allowedInWindow,
   type Command,
   type CommandCategory,
+  type CommandRequirement,
 } from "../commands";
 import {
   enterPaneMode,
@@ -27,6 +28,7 @@ function reuse(
   id: string,
   title: string,
   category: CommandCategory,
+  requirement: CommandRequirement,
   keywords: string[],
   options: ReuseOptions = {},
 ): Command {
@@ -34,6 +36,7 @@ function reuse(
     id,
     title,
     category,
+    requirement,
     ...options,
     keywords,
     available: (ctx) => allowedInWindow(id, ctx),
@@ -43,36 +46,52 @@ function reuse(
 
 registerCommands([
   // Global
-  reuse("app.search.toggle", "Search", "Global", ["find", "grep"]),
+  reuse("app.search.toggle", "Search", "Global", "workspace", ["find", "grep"]),
   {
     id: "app.pane.mode",
     title: "Enter hybrid navigation",
     category: "Global",
+    requirement: "any",
     keywords: ["nav", "pane", "keyboard", "wasd"],
     // Hybrid Nav has no terminal-only guard on its chord, so it stays
     // available in every window, standalone terminals included.
     available: () => true,
     run: () => enterPaneMode(),
   },
-  reuse("app.screensaver.lock", "Lock screen now", "Global", [
+  reuse("app.screensaver.lock", "Lock screen now", "Global", "any", [
     "screensaver",
     "lock",
   ]),
 
   // Apps
-  reuse("app.terminal.toggle", "New terminal", "Apps", ["shell", "console"]),
-  reuse("app.terminal.teamWork", "New team", "Apps", ["team work", "agents"]),
-  reuse("app.draft.new", "New draft", "Apps", ["markdown", "note"]),
-  reuse("app.graph.toggle", "New graph", "Apps", ["links", "network"]),
-  reuse("app.files.toggle", "New file browser", "Apps", [
+  reuse("app.terminal.toggle", "New terminal", "Apps", "terminal", [
+    "shell",
+    "console",
+  ]),
+  reuse("app.terminal.teamWork", "New team", "Apps", "workspace", [
+    "team work",
+    "agents",
+  ]),
+  reuse("app.draft.new", "New draft", "Apps", "workspace", [
+    "markdown",
+    "note",
+  ]),
+  reuse("app.graph.toggle", "New graph", "Apps", "workspace", [
+    "links",
+    "network",
+  ]),
+  reuse("app.files.toggle", "New file browser", "Apps", "files", [
     "files",
     "tree",
     "explorer",
   ]),
-  reuse("app.dashboard.open", "New dashboard", "Apps", ["slides", "present"]),
+  reuse("app.dashboard.open", "New dashboard", "Apps", "workspace", [
+    "slides",
+    "present",
+  ]),
 
   // Tabs
-  reuse("app.tab.close", "Close tab", "Tabs", ["close"], {
+  reuse("app.tab.close", "Close tab", "Tabs", "any", ["close"], {
     confirm: {
       title: "Close the active tab?",
       message: "The tab will be removed from this pane.",
@@ -80,8 +99,8 @@ registerCommands([
       danger: true,
     },
   }),
-  reuse("app.tab.next", "Next tab", "Tabs", ["tab", "next", "switch"]),
-  reuse("app.tab.prev", "Previous tab", "Tabs", [
+  reuse("app.tab.next", "Next tab", "Tabs", "any", ["tab", "next", "switch"]),
+  reuse("app.tab.prev", "Previous tab", "Tabs", "any", [
     "tab",
     "previous",
     "switch",
@@ -91,6 +110,9 @@ registerCommands([
     id: "app.tab.reopenClosed",
     title: "Reopen last closed tab",
     category: "Tabs",
+    // Pure client state (the closed-tab stack), so any window can restore
+    // whatever kind of tab it was able to open in the first place.
+    requirement: "any",
     keywords: ["undo", "restore", "tab"],
     // Only offer it when the closed-tab stack has something to restore.
     available: () => canReopenClosedTab(),
@@ -100,23 +122,33 @@ registerCommands([
   },
 
   // Panes
-  reuse("app.pane.splitRight", "Split right", "Panes", ["split", "vertical"]),
-  reuse("app.pane.splitDown", "Split bottom", "Panes", [
+  reuse("app.pane.splitRight", "Split right", "Panes", "any", [
+    "split",
+    "vertical",
+  ]),
+  reuse("app.pane.splitDown", "Split bottom", "Panes", "any", [
     "split",
     "horizontal",
     "down",
   ]),
-  reuse("app.pane.prev", "Previous pane", "Panes", ["focus", "pane"]),
-  reuse("app.pane.next", "Next pane", "Panes", ["focus", "pane"]),
-  reuse("app.pane.closeTabs", "Close all tabs in pane", "Panes", ["close"], {
-    confirm: {
-      title: "Close every tab in this pane?",
-      message: "Unsaved drafts will still keep their normal safety check.",
-      actionLabel: "Close tabs",
-      danger: true,
+  reuse("app.pane.prev", "Previous pane", "Panes", "any", ["focus", "pane"]),
+  reuse("app.pane.next", "Next pane", "Panes", "any", ["focus", "pane"]),
+  reuse(
+    "app.pane.closeTabs",
+    "Close all tabs in pane",
+    "Panes",
+    "any",
+    ["close"],
+    {
+      confirm: {
+        title: "Close every tab in this pane?",
+        message: "Unsaved drafts will still keep their normal safety check.",
+        actionLabel: "Close tabs",
+        danger: true,
+      },
     },
-  }),
-  reuse("app.pane.kill", "Close pane", "Panes", ["close", "kill"], {
+  ),
+  reuse("app.pane.kill", "Close pane", "Panes", "any", ["close", "kill"], {
     shortcutEditable: false,
     shortcutIds: ["app.tab.close", "app.window.close"],
     confirm: {
@@ -126,7 +158,7 @@ registerCommands([
       danger: true,
     },
   }),
-  reuse("app.pane.flip", "Flip pane", "Panes", [
+  reuse("app.pane.flip", "Flip pane", "Panes", "any", [
     "flip",
     "side",
     "a",

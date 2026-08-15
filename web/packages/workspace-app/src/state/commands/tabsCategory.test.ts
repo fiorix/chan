@@ -19,6 +19,9 @@ function ctx(partial: Partial<CommandContext> = {}): CommandContext {
   return {
     terminalOnly: false,
     terminalControl: false,
+    // Full caps keep the requirement gate open; these tests pin the
+    // per-command availability predicates on their own.
+    caps: { workspace: true, files: true, terminal: true },
     activeSurface: "file",
     activeSide: "a",
     activeTabId: "tab-1",
