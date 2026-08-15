@@ -7118,6 +7118,10 @@ enum ConfigValueKind {
     Enum(&'static [&'static str]),
     OptionalU32Range(u32, u32),
     OptionalEnum(&'static [&'static str]),
+    /// A free-form string whose field skip-serializes away while unset, so
+    /// `get` reads it as null rather than failing to find a leaf, and `none`
+    /// clears it. `Enum`'s optional form, without a fixed value set.
+    OptionalString,
     StringList(usize),
     Color,
     ReadOnly(&'static str),
@@ -7385,7 +7389,7 @@ const CONFIG_KEYS: &[ConfigKeySpec] = &[
     },
     ConfigKeySpec {
         key: "server.terminal.default_profile",
-        kind: ConfigValueKind::String,
+        kind: ConfigValueKind::OptionalString,
     },
 ];
 
@@ -7686,14 +7690,20 @@ fn read_config_key(
         return Ok(value.clone());
     }
     match spec.kind {
-        ConfigValueKind::OptionalU32Range(..) | ConfigValueKind::OptionalEnum(..) => {
-            Ok(serde_json::Value::Null)
-        }
+        ConfigValueKind::OptionalU32Range(..)
+        | ConfigValueKind::OptionalEnum(..)
+        | ConfigValueKind::OptionalString => Ok(serde_json::Value::Null),
         // Color leaves sit under `skip_serializing_if` parents (the graph
         // palettes, the terminal custom colors), so a config that never
         // set them serializes no leaf at all; absent means unset.
         ConfigValueKind::Color => Ok(serde_json::Value::Null),
         ConfigValueKind::Collection(_) if key == "editor.shortcuts" => Ok(serde_json::json!({})),
+        // `terminal.profiles` skip-serializes away while empty, so a config
+        // that declares none has no leaf to read. Its empty shape is a list,
+        // not the map `editor.shortcuts` reads as.
+        ConfigValueKind::Collection(_) if key == "server.terminal.profiles" => {
+            Ok(serde_json::json!([]))
+        }
         _ => {
             // `skip_serializing_if` can erase a whole subtree from the
             // dump: `GraphColorPrefs::is_empty` drops `editor.graph_colors`
@@ -7928,6 +7938,13 @@ fn parse_config_scalar(spec: ConfigKeySpec, raw: &str) -> Result<serde_json::Val
                 if !values.contains(&raw) {
                     return Err(invalid_enum(values));
                 }
+                Value::String(raw.to_owned())
+            }
+        }
+        ConfigValueKind::OptionalString => {
+            if matches!(raw, "none" | "null") {
+                Value::Null
+            } else {
                 Value::String(raw.to_owned())
             }
         }
@@ -11275,6 +11292,26 @@ mod tests {
         let value =
             read_config_key(&editor, &server, "editor.terminal_colors.custom.contrast").unwrap();
         assert_eq!(value, serde_json::json!("auto"));
+    }
+
+    #[test]
+    fn terminal_profile_keys_read_empty_rather_than_erroring() {
+        // Both skip-serialize while unset, so on a default config neither has
+        // a leaf in the dump and both fell through to the schema sample, which
+        // does not materialize them either. `chan config get` then failed on
+        // two keys the CLI table and the config reference both advertise.
+        let editor = EditorPrefs::default();
+        let server = ServerConfig::default();
+        assert_eq!(
+            read_config_key(&editor, &server, "server.terminal.profiles").unwrap(),
+            serde_json::json!([]),
+            "an unset profile list reads as the empty list"
+        );
+        assert_eq!(
+            read_config_key(&editor, &server, "server.terminal.default_profile").unwrap(),
+            serde_json::Value::Null,
+            "an unchosen default reads as null"
+        );
     }
 
     #[test]
