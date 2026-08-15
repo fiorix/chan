@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **A standalone terminal window browses and edits the machine's files.** A window opened without a workspace now carries a file browser and the editor, over the server machine's filesystem, with no registry row, no lock, no index and no graph behind it. The surface is deliberately narrower than a workspace: symlinks are inert rather than followed, deletes reach regular files and empty directories only, moves and copies refuse to clobber, and your home directory is protected as the window's start directory. What a window can do is decided by its capabilities on the server, so a workspace window does not gain this and a files window does not reach workspace-only routes.
+
+- **`cs window new` opens another window like the calling one**, and `cs terminal new --path` starts a terminal where the files are.
+
+- **Terminals open on a shell you pick.** The server lists the shells the machine actually has -- on Windows that means PowerShell 7, Windows PowerShell, cmd, Git BASH and every installed WSL distribution; on macOS and Linux, your `$SHELL` plus `/etc/shells` -- and the pane's New terminal menu offers them. Each profile carries its own argument convention, so a login shell, `-NoLogo` and a WSL one-shot are each spawned the way that shell expects. A tab keeps the shell it was opened with across restart, server restart and reload.
+
+- **`[[terminal.profiles]]` in `server.toml`** renames a discovered shell, replaces its arguments, hides one you never use, or adds one discovery cannot find, and `terminal.default_profile` chooses which one new terminals get. A malformed entry costs you that entry and nothing else in the file.
+
+### Changed
+
+- **`cs open` on a path outside your workspace opens it instead of refusing.** The path is routed to a standalone window, reused if one is already open, and a burst of opens fills one window rather than minting one per file.
+
+- **AUR publication is restored.** It was suspended from 2026-08-06 while Arch Linux restricted package pushes during the AUR malicious-packages incident; the AUR re-enabled pushes on 2026-08-11, and a GA release publishes both pkgbases again.
+
+### Fixed
+
+- **`chan open` no longer leaks the Windows `\\?\` verbatim prefix** from the serve root into the desktop window title.
+
 ## [v0.90.0] - 2026-08-14
 
 The Windows execution release: server-spawned Windows terminals unwedged from ConPTY's own startup handshake, the workspace lock's holder record readable while held, chan.exe executed by CI for the first time, and the light theme made legible in the terminal and the empty-pane animations.
