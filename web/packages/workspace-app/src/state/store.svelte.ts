@@ -2632,12 +2632,25 @@ export async function refreshTreeForPath(path: string): Promise<void> {
   }
 }
 
-/// Authoritatively relist ONE loaded directory (the `fs_reset` reaction):
-/// the watcher's coverage of `dir` had a gap, so its listing is refetched
-/// wholesale and merged. An unloaded directory needs nothing; its first
-/// expansion lists fresh anyway.
+/// Authoritatively relist ONE directory (the `fs_reset` reaction): the
+/// watcher's coverage of `dir` had a gap, so its listing is refetched
+/// wholesale and merged. A reset can land before the first listing
+/// resolves (the subscribe and the list race by design, which is exactly
+/// what the reset exists to settle), so a directory that is not loaded yet
+/// is loaded here rather than skipped: dropping the reset would leave the
+/// gap the reset was sent to close.
 export async function relistTreeDir(dir: string): Promise<void> {
-  if (!tree.loadedDirs[dir]) return;
+  // A listing already in flight may have been served before the watch went
+  // live, and its response would land after ours and reinstate the stale
+  // view, so wait for it to settle before refetching. Bounded: a wedged
+  // request must not park this handler forever.
+  for (let waited = 0; tree.loadingDirs[dir] && waited < 2000; waited += 100) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!tree.loadedDirs[dir]) {
+    await loadTreeDir(dir);
+    return;
+  }
   try {
     const entries = await api.list(dir);
     tree.entries = sortTreeEntries(mergeDirEntries(tree.entries, dir, entries));
