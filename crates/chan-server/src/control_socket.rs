@@ -3751,7 +3751,7 @@ fn resolve_optional_rel(
     let Some(requested) = requested else {
         return Ok(None);
     };
-    let rel = abs_to_workspace_rel(workspace.root(), requested)?;
+    let rel = abs_to_workspace_rel(workspace.root(), requested).map_err(|e| e.to_string())?;
     if rel.is_empty() {
         return Ok(None);
     }
@@ -3967,7 +3967,7 @@ fn upload_path(
     requested: &Path,
     events_tx: &broadcast::Sender<String>,
 ) -> Result<String, String> {
-    let rel = abs_to_workspace_rel(workspace.root(), requested)?;
+    let rel = abs_to_workspace_rel(workspace.root(), requested).map_err(|e| e.to_string())?;
     let dir = if rel.is_empty() || workspace.stat(&rel).map(|s| s.is_dir).unwrap_or(false) {
         rel
     } else {
@@ -3996,7 +3996,7 @@ fn download_path(
     requested: &Path,
     events_tx: &broadcast::Sender<String>,
 ) -> Result<String, String> {
-    let rel = abs_to_workspace_rel(workspace.root(), requested)?;
+    let rel = abs_to_workspace_rel(workspace.root(), requested).map_err(|e| e.to_string())?;
     let is_dir = if rel.is_empty() {
         true
     } else {
@@ -4355,7 +4355,7 @@ pub(crate) fn open_path(
     session_registry: &SessionRegistry,
     events_tx: &broadcast::Sender<String>,
 ) -> Result<String, String> {
-    let rel = abs_to_workspace_rel(workspace.root(), requested)?;
+    let rel = abs_to_workspace_rel(workspace.root(), requested).map_err(|e| e.to_string())?;
     if rel.is_empty() {
         send_window_command_if_live(
             session_registry,
@@ -4507,16 +4507,17 @@ pub(crate) fn standalone_open_target(
 /// [`open_path`] over the standalone filesystem surface: the same decision
 /// tree, resolved through the `/`-rooted capability instead of a workspace
 /// root, then sent to the calling window.
-pub(crate) fn open_path_standalone(
-    files: &crate::state::StandaloneFilesState,
-    window_id: &str,
-    requested: &Path,
+/// The window command an already-resolved [`StandaloneOpenTarget`] becomes,
+/// plus the path to name in the acknowledgement. Split from
+/// [`open_path_standalone`] because the escape route from a WORKSPACE window
+/// resolves and sends from a different place, and the two must never drift:
+/// an escaped `cs open` lands exactly as the same command typed inside a
+/// standalone window would.
+fn standalone_open_command(
+    target: StandaloneOpenTarget,
     destination: Option<TabDestination>,
-    session_registry: &SessionRegistry,
-    events_tx: &broadcast::Sender<String>,
-) -> Result<String, String> {
-    let target = standalone_open_target(&files.fs, requested)?;
-    let (command, summary) = match target {
+) -> (WindowCommand, String) {
+    match target {
         StandaloneOpenTarget::Root => (
             WindowCommand::OpenBrowser {
                 path: String::new(),
@@ -4551,43 +4552,86 @@ pub(crate) fn open_path_standalone(
             },
             select,
         ),
-    };
+    }
+}
+
+/// [`open_path`] over the standalone filesystem surface: the same decision
+/// tree, resolved through the `/`-rooted capability instead of a workspace
+/// root, then sent to the calling window.
+pub(crate) fn open_path_standalone(
+    files: &crate::state::StandaloneFilesState,
+    window_id: &str,
+    requested: &Path,
+    destination: Option<TabDestination>,
+    session_registry: &SessionRegistry,
+    events_tx: &broadcast::Sender<String>,
+) -> Result<String, String> {
+    let target = standalone_open_target(&files.fs, requested)?;
+    let (command, summary) = standalone_open_command(target, destination);
     send_window_command_if_live(session_registry, window_id, command, events_tx)?;
     Ok(format!("open request queued for {summary}"))
 }
 
-fn abs_to_workspace_rel(root: &Path, requested: &Path) -> Result<String, String> {
-    if !requested.is_absolute() {
-        return Err("control path must be absolute".into());
+/// Why an absolute path could not be expressed relative to a workspace root.
+///
+/// [`Escape`](Self::Escape) is separated from the rest because it is the one
+/// failure that is not a failure: the path is fine, it just belongs to another
+/// surface, and `cs open` routes it there instead of refusing. Every other
+/// caller renders the whole enum as one string, and `Display` reproduces the
+/// exact messages this returned before it was typed -- `POST /api/open` pins
+/// the escape wording byte for byte.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WorkspaceRelError {
+    /// The CLI absolutizes before sending; a relative path is a caller error.
+    NotAbsolute,
+    /// The path (or its parent, for a name that does not exist yet) is real
+    /// and canonical, and sits outside this workspace root.
+    Escape,
+    /// The path, its parent, or the root itself could not be canonicalized.
+    Unresolvable(String),
+}
+
+impl std::fmt::Display for WorkspaceRelError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAbsolute => formatter.write_str("control path must be absolute"),
+            Self::Escape => formatter.write_str("path escapes workspace root"),
+            Self::Unresolvable(message) => formatter.write_str(message),
+        }
     }
-    let root_canon = root
-        .canonicalize()
-        .map_err(|e| format!("canonicalize workspace root: {e}"))?;
+}
+
+fn abs_to_workspace_rel(root: &Path, requested: &Path) -> Result<String, WorkspaceRelError> {
+    if !requested.is_absolute() {
+        return Err(WorkspaceRelError::NotAbsolute);
+    }
+    let root_canon = root.canonicalize().map_err(|e| {
+        WorkspaceRelError::Unresolvable(format!("canonicalize workspace root: {e}"))
+    })?;
     let existing_or_parent = if requested.exists() {
         requested
     } else {
         requested
             .parent()
-            .ok_or_else(|| "path has no parent".to_string())?
+            .ok_or_else(|| WorkspaceRelError::Unresolvable("path has no parent".to_string()))?
     };
     let canon = existing_or_parent
         .canonicalize()
-        .map_err(|e| format!("canonicalize path: {e}"))?;
+        .map_err(|e| WorkspaceRelError::Unresolvable(format!("canonicalize path: {e}")))?;
     if !canon.starts_with(&root_canon) {
-        return Err("path escapes workspace root".into());
+        return Err(WorkspaceRelError::Escape);
     }
-    let candidate = if requested.exists() {
-        canon
-    } else {
-        canon.join(
-            requested
-                .file_name()
-                .ok_or_else(|| "path has no file name".to_string())?,
-        )
-    };
+    let candidate =
+        if requested.exists() {
+            canon
+        } else {
+            canon.join(requested.file_name().ok_or_else(|| {
+                WorkspaceRelError::Unresolvable("path has no file name".to_string())
+            })?)
+        };
     let rel = candidate
         .strip_prefix(&root_canon)
-        .map_err(|_| "path escapes workspace root".to_string())?;
+        .map_err(|_| WorkspaceRelError::Escape)?;
     Ok(path_to_posix(rel))
 }
 
@@ -5302,10 +5346,24 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret"), b"x").unwrap();
         let err = abs_to_workspace_rel(root.path(), &outside.path().join("secret")).unwrap_err();
-        assert!(err.contains("escapes workspace root"), "{err}");
+        // Typed, so `cs open` can route an escape instead of refusing it -- and
+        // still the exact string every other caller has always sent.
+        assert_eq!(err, WorkspaceRelError::Escape);
+        assert_eq!(err.to_string(), "path escapes workspace root");
 
         // A relative path is refused -- the CLI always absolutizes first.
-        assert!(abs_to_workspace_rel(root.path(), std::path::Path::new("notes/a.md")).is_err());
+        assert_eq!(
+            abs_to_workspace_rel(root.path(), std::path::Path::new("notes/a.md")).unwrap_err(),
+            WorkspaceRelError::NotAbsolute
+        );
+        // A missing PARENT is unresolvable, not an escape: there is nothing to
+        // route, so this stays an error on every surface.
+        let missing =
+            abs_to_workspace_rel(root.path(), &root.path().join("nope/x.md")).unwrap_err();
+        assert!(
+            matches!(missing, WorkspaceRelError::Unresolvable(ref m) if m.contains("canonicalize path")),
+            "{missing:?}"
+        );
     }
 
     #[tokio::test]
