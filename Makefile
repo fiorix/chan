@@ -72,6 +72,7 @@ REUSE_SRPM ?= 0
 BIN := target/release/chan
 WEB_BUILD_STAMP := web/.chan-build-stamp
 LAUNCHER_BUILD_STAMP := web-launcher/.chan-build-stamp
+HYBRID_BUILD_STAMP := web-hybrid/.chan-build-stamp
 REPO_ROOT := $(abspath .)
 
 # Gateway release crate set. Single source for the pre-push gateway
@@ -439,8 +440,17 @@ web-launcher: ## Build the embedded launcher bundle (web-launcher/dist).
 	cd web && $(NPM_INSTALL) && $(NPM) run build -w @chan/launcher
 	@date -u '+%Y-%m-%dT%H:%M:%SZ' > "$(LAUNCHER_BUILD_STAMP)"
 
+.PHONY: web-hybrid
+web-hybrid: ## Build the embedded Hybrid shell bundle (web-hybrid/dist).
+	# The third rust-embed bundle chan-server bakes (HybridAssets, served under
+	# /__hybrid/). Same contract as web-launcher above: a gitignored build
+	# artifact, so it hangs off the single `web` funnel rather than needing an
+	# edit in every consumer that builds the frontend before the cargo step.
+	cd web && $(NPM_INSTALL) && $(NPM) run build -w @chan/hybrid
+	@date -u '+%Y-%m-%dT%H:%M:%SZ' > "$(HYBRID_BUILD_STAMP)"
+
 .PHONY: web
-web: web-launcher ## Build the embedded web bundle.
+web: web-launcher web-hybrid ## Build the embedded web bundle.
 	cd web && $(NPM_INSTALL) && $(NPM) run build -w @chan/workspace-app
 	@date -u '+%Y-%m-%dT%H:%M:%SZ' > "$(WEB_BUILD_STAMP)"
 
@@ -479,7 +489,7 @@ web-lock-check: ## Verify web/package-lock.json is in sync with every package.js
 	cd web && $(NPM) ci --dry-run --ignore-scripts
 
 .PHONY: web-check
-web-check: web-launcher ## Run frontend check, vitest, and production build.
+web-check: web-launcher web-hybrid ## Run frontend check, vitest, and production build.
 	# vitest (npm test == `vitest run`) gates here so the pre-push / ci-linux
 	# path covers the frontend unit tests: CI runs the make ci-* targets, so
 	# anything absent here is ungated. The `web-launcher` prerequisite builds
@@ -490,11 +500,13 @@ web-check: web-launcher ## Run frontend check, vitest, and production build.
 	# misses type errors + unit regressions, so gate its svelte-check + vitest
 	# here too (it already ran `npm install`). @chan/profile builds in
 	# gateway-spa, which runs vite build alone, so its check + test belong here
-	# for the same reason. All three SPAs are fully gated.
+	# for the same reason. All three SPAs are fully gated. @chan/hybrid is plain
+	# JavaScript with no svelte and no types, so it has vitest but no check.
 	cd web && $(NPM) install \
 		&& $(NPM) run check -w @chan/launcher && $(NPM) run test -w @chan/launcher \
 		&& $(NPM) run check -w @chan/workspace-app && $(NPM) run test -w @chan/workspace-app \
 		&& $(NPM) run check -w @chan/profile && $(NPM) run test -w @chan/profile \
+		&& $(NPM) run test -w @chan/hybrid \
 		&& $(NPM) run build -w @chan/workspace-app
 	@date -u '+%Y-%m-%dT%H:%M:%SZ' > "$(WEB_BUILD_STAMP)"
 
@@ -552,7 +564,8 @@ clean: ## Remove local build outputs (root workspace, web, gateway, desktop).
 	$(CARGO) clean
 	rm -rf web/dist web/node_modules web/pkg
 	rm -rf web-launcher/dist web-launcher/node_modules
-	rm -f $(WEB_BUILD_STAMP) $(LAUNCHER_BUILD_STAMP)
+	rm -rf web-hybrid/dist web-hybrid/node_modules
+	rm -f $(WEB_BUILD_STAMP) $(LAUNCHER_BUILD_STAMP) $(HYBRID_BUILD_STAMP)
 	# gateway/ is its own cargo workspace: root `cargo clean` never
 	# touches gateway/target. The gateway frontend lives in the ./web
 	# npm workspace; only its rust-embed SPA dist remains under gateway/.

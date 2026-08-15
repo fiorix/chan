@@ -37,6 +37,21 @@ struct WebAssets;
 #[folder = "../../web-launcher/dist/"]
 struct LauncherAssets;
 
+/// Hybrid shell bundle baked at compile time, mirroring [`LauncherAssets`] but
+/// for `web-hybrid/dist/` -- the internal window manager that hosts chan
+/// windows as frames instead of handing each one to the OS window manager.
+///
+/// It is served under [`HYBRID_PREFIX`] rather than at a root, because being
+/// same-origin with the launcher at `/` and with every tenant at `/{prefix}/`
+/// is what lets the shell reach into the frames it hosts.
+#[derive(RustEmbed)]
+#[folder = "../../web-hybrid/dist/"]
+struct HybridAssets;
+
+/// Where the Hybrid shell mounts. Reserved the same way `/api` is: a tenant
+/// prefix is always `{slug}-{8hex}`, so it can never collide with this.
+pub const HYBRID_PREFIX: &str = "/__hybrid";
+
 const SPA_CACHE_CONTROL: HeaderValue = HeaderValue::from_static("no-store");
 const ASSET_CACHE_CONTROL: HeaderValue =
     HeaderValue::from_static("public, max-age=31536000, immutable");
@@ -249,6 +264,44 @@ pub async fn serve_launcher(uri: axum::http::Uri, surface: LauncherSurface) -> R
         "launcher bundle not built; run `cd web-launcher && npm install && npm run build`",
     )
         .into_response()
+}
+
+/// Serve the Hybrid shell for any path under [`HYBRID_PREFIX`].
+///
+/// Unlike the two SPAs above there is no client-side routing to fall back for:
+/// the shell is one page, and everything else under the prefix is a build
+/// asset. An unknown asset therefore 404s rather than answering the shell,
+/// which keeps a stale asset request from looking like a successful load.
+///
+/// The shell needs no injected meta. It reads the launcher bearer from the
+/// `?t=` its host window is opened with, exactly as the launcher does, and
+/// learns everything else from `/api/library/*`.
+pub async fn serve_hybrid(uri: axum::http::Uri) -> Response {
+    let candidate = uri
+        .path()
+        .strip_prefix(HYBRID_PREFIX)
+        .unwrap_or("")
+        .trim_start_matches('/');
+    let is_index = candidate.is_empty() || candidate == "index.html";
+    let candidate = if is_index { "index.html" } else { candidate };
+    let Some(file) = HybridAssets::get(candidate) else {
+        if is_index {
+            return (
+                StatusCode::NOT_FOUND,
+                "hybrid shell bundle not built; run `cd web && npm install && npm run build`",
+            )
+                .into_response();
+        }
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    with_static_cache_headers(
+        (
+            [(header::CONTENT_TYPE, content_type_for(candidate))],
+            file.data.into_owned(),
+        )
+            .into_response(),
+        is_index,
+    )
 }
 
 fn with_static_cache_headers(mut response: Response, spa_shell: bool) -> Response {

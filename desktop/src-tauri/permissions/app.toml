@@ -55,6 +55,16 @@ permissions = [
   "allow-native-vocabulary",
 ]
 
+[[set]]
+identifier = "hybrid-window"
+description = "Allows the Hybrid host window to act as a window manager for chan windows: report which frames it holds and which one is focused, ask for a window to be closed, and set where the next window opens."
+permissions = [
+  "allow-hybrid-frames",
+  "allow-hybrid-focus",
+  "allow-hybrid-close-requested",
+  "allow-hybrid-set-destination",
+]
+
 [[permission]]
 identifier = "allow-list-workspaces"
 description = "Enables the list_workspaces command."
@@ -321,3 +331,23 @@ commands.allow = ["reconnect_devserver"]
 identifier = "allow-restart-desktop-after-update"
 description = "Enables the restart_desktop_after_update command from the launcher update-ready dialog."
 commands.allow = ["restart_desktop_after_update"]
+
+[[permission]]
+identifier = "allow-hybrid-frames"
+description = "Enables the hybrid_frames command (the Hybrid host reports which window frames it currently holds)."
+commands.allow = ["hybrid_frames"]
+
+[[permission]]
+identifier = "allow-hybrid-focus"
+description = "Enables the hybrid_focus command (the Hybrid host reports which of its frames is focused)."
+commands.allow = ["hybrid_focus"]
+
+[[permission]]
+identifier = "allow-hybrid-close-requested"
+description = "Enables the hybrid_close_requested command (the red dot inside the Hybrid host: bury or discard, through the same authority as a native window's)."
+commands.allow = ["hybrid_close_requested"]
+
+[[permission]]
+identifier = "allow-hybrid-set-destination"
+description = "Enables the hybrid_set_destination command (the destination switch: whether the next window opens inside Hybrid or on the OS window manager)."
+commands.allow = ["hybrid_set_destination"]

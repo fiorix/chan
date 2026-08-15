@@ -36,6 +36,14 @@ fn main() {
     println!("cargo:rerun-if-changed={}", launcher_dist.display());
     walk(launcher_dist);
 
+    // The Hybrid shell bundle (web-hybrid/dist) is baked by `HybridAssets` and
+    // served under /__hybrid/; same gitignored-artifact handling as the two
+    // above.
+    let hybrid_dist = Path::new("../../web-hybrid/dist");
+    create_required_dir(hybrid_dist);
+    println!("cargo:rerun-if-changed={}", hybrid_dist.display());
+    walk(hybrid_dist);
+
     // Makefile creates and rewrites this after every frontend build. A missing
     // stamp is valid before the first frontend build; Cargo keeps watching the
     // path without a build script writing a placeholder into the source tree.
@@ -46,6 +54,10 @@ fn main() {
     // creates and rewrites it after every launcher build.
     let launcher_build_stamp = Path::new("../../web-launcher/.chan-build-stamp");
     println!("cargo:rerun-if-changed={}", launcher_build_stamp.display());
+
+    // The Hybrid shell's build stamp, same contract as the launcher's.
+    let hybrid_build_stamp = Path::new("../../web-hybrid/.chan-build-stamp");
+    println!("cargo:rerun-if-changed={}", hybrid_build_stamp.display());
 
     // Embedded model bundle. Only consumed when the `embed-model`
     // cargo feature is on: the `include_bytes!` in

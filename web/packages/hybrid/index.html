@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#1c1c1e" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#faf9f7" media="(prefers-color-scheme: light)" />
+    <title>Chan Hybrid</title>
+    <link rel="stylesheet" href="./src/hybrid.css" />
+    <script type="module" src="./src/hybrid.js"></script>
+  </head>
+  <body>
+    <aside id="dock">
+      <iframe id="launcher" title="Chan launcher"></iframe>
+    </aside>
+    <main id="desktop" aria-hidden="true"></main>
+    <!-- The seam between the launcher and the windows, and the two controls
+         that collapse either side of it. -->
+    <div id="rail">
+      <button id="dock-toggle" type="button" title="Hide launcher">&lsaquo;</button>
+      <button id="desktop-toggle" type="button" title="Hide windows">&rsaquo;</button>
+    </div>
+    <div id="zoom-menu" class="zoom-menu" hidden></div>
+    <div id="close-prompt" class="close-prompt" hidden></div>
+    <div id="notices"></div>
+    <div id="error" hidden></div>
+  </body>
+</html>

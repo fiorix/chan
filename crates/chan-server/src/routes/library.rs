@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Notify};
 
 use crate::devserver::bytes_eq;
-use crate::static_assets::{serve_launcher, LauncherSurface};
+use crate::static_assets::{serve_hybrid, serve_launcher, LauncherSurface, HYBRID_PREFIX};
 use crate::{
     CreateWindow, DesktopWindowOp, DevserverEntry, DevserverInput, GatewayEntry, GatewayInput,
     LauncherWorkspace, SetWorkspaceOnOutcome, WindowKind, WindowOrigin, WindowRecord, WindowSet,
@@ -392,6 +392,7 @@ pub fn launcher_router(
     // enforces the same role split on the data routes.
     Router::new()
         .merge(api)
+        .merge(hybrid_shell())
         .fallback(move |req: Request<Body>| {
             let effective = if tunnel_owner(&req) {
                 surface
@@ -402,6 +403,36 @@ pub fn launcher_router(
             };
             serve_launcher(req.uri().clone(), effective)
         })
+}
+
+/// The Hybrid shell's static routes, public like the launcher shell: the page
+/// loads before it holds the token, and it carries no secrets of its own.
+///
+/// The bare prefix redirects to the trailing-slash form because the bundle's
+/// asset URLs are relative. Without the slash the browser would resolve them
+/// against `/` and reach the launcher's SPA fallback, which answers HTML for a
+/// script request. The redirect keeps the query so the `?t=` survives it.
+fn hybrid_shell() -> Router {
+    Router::new()
+        .route(
+            HYBRID_PREFIX,
+            get(|req: Request<Body>| async move {
+                let query = req
+                    .uri()
+                    .query()
+                    .map(|q| format!("?{q}"))
+                    .unwrap_or_default();
+                Redirect::temporary(&format!("{HYBRID_PREFIX}/{query}"))
+            }),
+        )
+        .route(
+            &format!("{HYBRID_PREFIX}/"),
+            get(|req: Request<Body>| serve_hybrid(req.uri().clone())),
+        )
+        .route(
+            &format!("{HYBRID_PREFIX}/{{*asset}}"),
+            get(|req: Request<Body>| serve_hybrid(req.uri().clone())),
+        )
 }
 
 /// Gate `/api/library/*` on the surface's launcher token. Tunnel-origin

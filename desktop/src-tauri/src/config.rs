@@ -470,6 +470,11 @@ pub struct Config {
     /// collapses a card. Stale ids are harmless and left unpruned.
     #[serde(default)]
     pub collapsed_machines: Vec<String>,
+    /// Where the next chan window opens: the OS window manager, or a frame
+    /// inside the Hybrid host. Defaults to the OS window manager, so an install
+    /// that never opens the Hybrid window behaves exactly as before.
+    #[serde(default)]
+    pub hybrid_destination: crate::hybrid_surface::Destination,
 }
 
 pub struct ConfigStore {
@@ -1527,6 +1532,39 @@ fn config_path() -> io::Result<PathBuf> {
     Ok(chan_workspace::paths::config_dir()
         .join("desktop")
         .join("config.json"))
+}
+
+/// Read the persisted destination for the next chan window. Falls back to the
+/// default (the OS window manager) when the config cannot be read, which is the
+/// behaviour chan-desktop has always had.
+pub fn hybrid_destination(store: &Arc<Mutex<ConfigStore>>) -> crate::hybrid_surface::Destination {
+    store
+        .lock()
+        .unwrap()
+        .get()
+        .map(|c| c.hybrid_destination)
+        .unwrap_or_default()
+}
+
+/// Persist the destination for the next chan window. Best effort: the live
+/// choice already sits in `AppState`, so a failed write only costs the setting
+/// across a restart.
+pub fn set_hybrid_destination(
+    store: &Arc<Mutex<ConfigStore>>,
+    destination: crate::hybrid_surface::Destination,
+) {
+    let mut store = store.lock().unwrap();
+    match store.get() {
+        Ok(mut cfg) => {
+            cfg.hybrid_destination = destination;
+            if let Err(error) = store.save(&cfg) {
+                tracing::warn!(%error, "persisting the hybrid destination failed");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "reading the config to persist the hybrid destination failed")
+        }
+    }
 }
 
 #[cfg(test)]

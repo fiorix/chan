@@ -1,0 +1,108 @@
+/* The destination switch, injected into the docked launcher's own document.
+   Imported with `?inline` so it reaches hybrid.js as text: the launcher is a
+   separate document, so this cannot ride the shell's stylesheet, and keeping it
+   a real .css file rather than a template literal keeps it formatted and linted
+   like the rest.
+
+   The tokens below are resolved in the LAUNCHER's document, not the shell's,
+   which is the point: the control picks up chan's own button styling and themes
+   with the two buttons it sits beside.
+
+   The control turns over like the launcher's own screen flip (lib/flip.ts): one
+   face, a -180deg turn, and the incoming label on a back face so the card reads
+   right way round as it passes edge-on. */
+
+.hybrid-dest {
+  height: 2rem;
+  min-width: 4.6rem;
+  padding: 0;
+  border: 1px solid var(--btn-border);
+  border-radius: 6px;
+  background: var(--btn-bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  flex-shrink: 0;
+  perspective: 320px;
+  transition: border-color 160ms ease;
+}
+
+.hybrid-dest:hover {
+  border-color: var(--brand);
+}
+
+.hybrid-dest-inner {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  transform-style: preserve-3d;
+}
+
+.hybrid-dest-inner::before {
+  content: attr(data-flip-label);
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  background: var(--btn-bg);
+  color: var(--text);
+  border-radius: 5px;
+  transform: rotateY(-180deg);
+  visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+}
+
+.hybrid-dest-face {
+  position: relative;
+  z-index: 1;
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+}
+
+.hybrid-dest.flipping .hybrid-dest-inner {
+  transform-origin: center center;
+  animation: hybrid-dest-turn 520ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+/* The back face hands over where the easing crosses 90deg, not at half the
+   duration, so the label is never shown mirrored (the same ratio the launcher's
+   screen flip uses). */
+.hybrid-dest.flipping .hybrid-dest-inner::before {
+  visibility: visible;
+  animation: hybrid-dest-face 520ms step-end;
+}
+
+@keyframes hybrid-dest-turn {
+  from {
+    transform: rotateY(-180deg);
+  }
+  to {
+    transform: rotateY(0);
+  }
+}
+
+@keyframes hybrid-dest-face {
+  0% {
+    visibility: visible;
+  }
+  14.43% {
+    visibility: hidden;
+  }
+  100% {
+    visibility: hidden;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hybrid-dest.flipping .hybrid-dest-inner,
+  .hybrid-dest.flipping .hybrid-dest-inner::before {
+    animation: none;
+  }
+}

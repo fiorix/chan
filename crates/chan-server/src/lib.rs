@@ -106,6 +106,9 @@ pub use routes::{build_fs_graph, FsGraphResponse, FsGraphScope};
 /// to the binary that links it: that binary's build script stamps it and
 /// declares it here at startup, and every health surface reports it.
 pub use routes::{build_id, set_build_id};
+/// Where the Hybrid shell mounts on the launcher router. The desktop builds its
+/// host window's URL from it, so the mount point is single-sourced here.
+pub use static_assets::HYBRID_PREFIX;
 
 use crate::terminal_sessions::{
     Registry as TerminalRegistry, RegistryConfig as TerminalRegistryConfig,

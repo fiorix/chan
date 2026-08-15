@@ -389,6 +389,7 @@ pub(crate) fn open_watched_local_window(
             zoom_seed: 1.0,
             connecting: None,
             kind,
+            hybrid_eligible: true,
         },
     )
 }
@@ -424,6 +425,7 @@ pub(crate) fn open_watched_remote_window(
             zoom_seed: 1.0,
             connecting: Some(url),
             kind,
+            hybrid_eligible: true,
         },
     )
 }
@@ -504,6 +506,7 @@ pub fn spawn_remote_workspace_window(
             zoom_seed: restore.zoom,
             connecting: Some(url),
             kind: None,
+            hybrid_eligible: false,
         },
     );
     // An outbound window just appeared: re-poll the remote's window
@@ -585,6 +588,7 @@ pub async fn spawn_control_terminal_window(
             // second tab. It also tags the window kind in `cs window list`,
             // keeping it distinct from persisted standalone terminals.
             kind: Some("control"),
+            hybrid_eligible: false,
         },
     )?;
     Ok(ControlTerminal { prefix })
@@ -626,6 +630,10 @@ pub(crate) fn resolve_window_label(app: &AppHandle, id: &str) -> String {
     let state = app.state::<Arc<AppState>>();
     candidates.extend(state.buried_snapshot().into_iter().map(|(label, _)| label));
     candidates.extend(state.devserver_feed.window_labels());
+    // A window living inside the Hybrid host has no webview of its own to
+    // enumerate, so without its frame set `cs window <id>` would fall through to
+    // the `local::` composite and miss a devserver window entirely.
+    candidates.extend(state.hybrid.frames());
     resolve_label_from(id, &candidates)
 }
 
@@ -715,6 +723,7 @@ pub fn open_window_by_label(
                 zoom_seed: 1.0,
                 connecting: None,
                 kind: None,
+                hybrid_eligible: false,
             },
         )?;
         return Ok(());
@@ -793,6 +802,7 @@ pub fn reopen_remote_window(
             // blank webview).
             connecting: entry.connecting.then_some(entry.url.as_str()),
             kind: None,
+            hybrid_eligible: false,
         },
     )
 }
@@ -972,6 +982,12 @@ struct WindowSpec<'a> {
     /// singleton control sub-mode (hidden chrome, one PTY); `None` is full
     /// workspace mode. Also the kind `cs window list` shows.
     kind: Option<&'a str>,
+    /// Whether this window may open as a frame inside the Hybrid host instead
+    /// of as an OS window. True only for the two window-watcher entry points,
+    /// which are the windows the library owns and the reconcile can account
+    /// for. A control terminal, an outbound URL attachment or an imperative
+    /// reopen is not one of those, so each stays an OS window.
+    hybrid_eligible: bool,
 }
 
 /// Build and show a chan-style workspace webview window on the main
@@ -996,6 +1012,7 @@ fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), S
         zoom_seed,
         connecting,
         kind,
+        hybrid_eligible,
     } = spec;
     if !library_id.is_empty() {
         let pane = app
@@ -1023,6 +1040,38 @@ fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), S
         url_hash_seed,
         kind,
     )?;
+    // The Hybrid fork, taken here because this is where the navigate URL is
+    // finally assembled: a frame and an OS window load the very same page, so
+    // neither surface can drift from the other's URL. A window is placed once
+    // and stays put, so a reconcile that rebuilds it (an un-hide, a workspace
+    // turned back on) finds it on the surface it was already on.
+    //
+    // The connecting screen is deliberately not carried across. It exists
+    // because a direct External load of a DOWN outbound remote paints a blank
+    // WKWebView; an iframe shows the browser's own failure instead, and the
+    // shell rebuilds the frame when the feed says the window is back.
+    if hybrid_eligible {
+        let state = app.state::<Arc<AppState>>();
+        let available = crate::hybrid_surface::host_available(app);
+        if state.hybrid.place(window_label, available) == crate::hybrid_surface::Destination::Hybrid
+        {
+            crate::hybrid_surface::open_frame(
+                app,
+                crate::hybrid_surface::HybridOpen {
+                    label: window_label.to_string(),
+                    url: parsed.to_string(),
+                    title: compose_window_title(
+                        title,
+                        kind.unwrap_or("workspace"),
+                        u64::from(ordinal.unwrap_or(1)),
+                        caption,
+                    ),
+                    kind: kind.unwrap_or("workspace").to_string(),
+                },
+            );
+            return Ok(());
+        }
+    }
     // The connecting page receives its inputs before any page script runs
     // (same mechanism as KEY_BRIDGE_JS). `target` is the fully-assembled
     // navigate URL (remote + ?w=<label> + restored #fragment) so the SPA's
@@ -3159,6 +3208,7 @@ mod tests {
         include_str!("../capabilities/launcher-control.json");
     const ABOUT_CAPABILITY_JSON: &str = include_str!("../capabilities/about.json");
     const LOCAL_UPLOAD_CAPABILITY_JSON: &str = include_str!("../capabilities/local-upload.json");
+    const HYBRID_CAPABILITY_JSON: &str = include_str!("../capabilities/hybrid.json");
     const APP_PERMISSIONS_TOML: &str = include_str!("../permissions/app.toml");
 
     // The SPA side of the IPC bridge: api/desktop.ts is the single
@@ -3805,9 +3855,10 @@ mod tests {
     /// Every capability file, by name. `capability_walk_covers_every_capability_file`
     /// pins this table against the directory listing so a new capability
     /// cannot land without joining the origin-aware walk.
-    const CAPABILITY_FILES: [(&str, &str); 8] = [
+    const CAPABILITY_FILES: [(&str, &str); 9] = [
         ("about.json", ABOUT_CAPABILITY_JSON),
         ("default.json", DEFAULT_CAPABILITY_JSON),
+        ("hybrid.json", HYBRID_CAPABILITY_JSON),
         ("launcher-events.json", LAUNCHER_EVENTS_CAPABILITY_JSON),
         ("launcher-control.json", LAUNCHER_CONTROL_CAPABILITY_JSON),
         ("launcher-update.json", LAUNCHER_UPDATE_CAPABILITY_JSON),

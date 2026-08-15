@@ -1,0 +1,504 @@
+/* Chan Hybrid shell. Palette and idiom mirror the chan launcher/workspace
+   tokens (Apple-Notes grays, dark default, light via prefers-color-scheme). */
+
+:root {
+  --bg: #1c1c1e;
+  --bg-card: #232325;
+  --bg-elev: #2a2a2c;
+  --border: #3a3a3c;
+  --text: #f5f5f7;
+  --text-secondary: #98989d;
+  --btn-bg: #2a2a2c;
+  --btn-border: #3a3a3c;
+  --accent: #3fb950;
+  --brand: #e58c4d;
+  --danger: #f85149;
+  --pane-shadow: 0 1px 6px rgba(255, 255, 255, 0.08);
+  --wm-shadow: 0 14px 44px rgba(0, 0, 0, 0.5);
+  --wm-shadow-idle: 0 4px 14px rgba(0, 0, 0, 0.3);
+  /* Traffic lights go grey together when the window is not focused, as on macOS. */
+  --wm-dot-idle: #4d4d50;
+}
+
+/* The shell mirrors chan's own theme choice: hybrid.js stamps data-theme on
+   the root from the docked launcher's attribute (prefers-color-scheme only
+   seeds the pre-mirror paint), so the tokens key off the attribute alone. */
+:root[data-theme="light"] {
+  --bg: #faf9f7;
+  --bg-card: #ffffff;
+  --bg-elev: #f2f1ee;
+  --border: #e2e0dc;
+  --text: #1a1a1a;
+  --text-secondary: #6a6a6a;
+  --btn-bg: #f2f1ee;
+  --btn-border: #d9d7d2;
+  --accent: #2da44e;
+  --brand: #c25e16;
+  --danger: #d1242f;
+  --pane-shadow: 0 1px 6px rgba(0, 0, 0, 0.14);
+  --wm-shadow: 0 14px 44px rgba(0, 0, 0, 0.22);
+  --wm-shadow-idle: 0 3px 10px rgba(0, 0, 0, 0.1);
+  --wm-dot-idle: #d3d1cd;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-card);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 15px;
+}
+
+/* Shell chrome sits above every WinBox (their z-index counts up from 10). */
+#dock,
+#rail,
+#notices,
+#error {
+  z-index: 2147483000;
+}
+
+/* The window is two panes with a seam between them: the docked launcher, and
+   the window manager's desktop. Either side can be collapsed, never both --
+   the shell has no chrome of its own left to fall back on, so a window with
+   both sides hidden would be an empty one. */
+#dock {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 420px;
+  background: var(--bg);
+  border-right: 1px solid var(--border);
+}
+
+#dock iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+body.collapsed-dock #dock {
+  display: none;
+}
+
+/* Nothing to sit beside: the launcher takes the window. */
+body.collapsed-desktop #dock {
+  width: 100%;
+  border-right: 0;
+}
+
+/* The two collapse controls, stacked on the seam they act on. */
+#rail {
+  position: fixed;
+  top: 50%;
+  left: 420px;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+body.collapsed-dock #rail {
+  left: 16px;
+  transform: translate(0, -50%);
+}
+
+/* The seam has moved to the far edge with the desktop gone. */
+body.collapsed-desktop #rail {
+  left: auto;
+  right: 16px;
+  transform: translate(0, -50%);
+}
+
+#rail button {
+  width: 22px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--btn-border);
+  border-radius: 8px;
+  background: var(--btn-bg);
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 160ms ease, background 160ms ease;
+}
+
+#rail button:hover {
+  color: var(--text);
+}
+
+/* Pressed means "this pane is hidden": the arrow keeps pointing at the pane it
+   governs, so the state has to be carried by the button itself. */
+#rail button.on {
+  border-color: var(--brand);
+  color: var(--text);
+}
+
+#desktop {
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(
+      1200px 700px at 70% 20%,
+      color-mix(in srgb, var(--brand) 4%, transparent),
+      transparent
+    ),
+    var(--bg-card);
+}
+
+body.collapsed-desktop #desktop {
+  display: none;
+}
+
+/* The windows themselves are WinBox's own elements, appended to the body rather
+   than into #desktop, so hiding the backdrop does not hide them. `!important`
+   because WinBox writes `display` inline on its own show/hide, and this is a
+   view-only collapse layered over whatever state each window is already in --
+   the frames stay alive and keep their sessions. */
+body.collapsed-desktop .winbox {
+  display: none !important;
+}
+
+/* The green control's hover menu, and the red control's Hide / Close /
+   Cancel question. Both sit above every window (WinBox z-indexes count up
+   from 10 on each focus). */
+.zoom-menu {
+  position: fixed;
+  z-index: 2147483100;
+  min-width: 148px;
+  padding: 4px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.zoom-menu[hidden] {
+  display: none;
+}
+
+.zoom-menu button {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  text-align: left;
+  padding: 0.35rem 0.6rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.zoom-menu button:hover {
+  background: color-mix(in srgb, var(--brand) 18%, transparent);
+}
+
+.close-prompt {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483200;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.close-prompt[hidden] {
+  display: none;
+}
+
+.close-card {
+  position: fixed;
+  transform: translate(-50%, -50%);
+  min-width: 300px;
+  max-width: 380px;
+  padding: 16px 18px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.close-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.close-body {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.close-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.close-actions button {
+  border: 1px solid var(--btn-border);
+  background: var(--btn-bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 0.35rem 0.8rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.close-actions button:hover {
+  border-color: var(--brand);
+}
+
+.close-actions .primary {
+  background: color-mix(in srgb, var(--brand) 22%, transparent);
+  border-color: color-mix(in srgb, var(--brand) 45%, transparent);
+}
+
+.close-actions .close-discard:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+#notices {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.notice {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.5rem 0.8rem;
+  font-size: 0.82rem;
+  color: var(--text);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+}
+
+#error[hidden] {
+  display: none;
+}
+
+#error {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  text-align: center;
+  background: var(--bg);
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+}
+
+/* ------------------------------------------------------------- WinBox theme */
+
+/* Focus reads as depth, the way macOS separates the key window from the rest:
+   the focused window casts the deeper shadow while the others sit flatter,
+   and both keep the same neutral hairline for definition. The pane focus
+   colour is deliberately not used here; it belongs to panes inside a window,
+   not to the window frame. The dimmed title and the grey traffic lights carry
+   the rest of the distinction. */
+.winbox.chan {
+  background: var(--bg-elev);
+  border-radius: 8px;
+  box-shadow: 0 0 0 1px var(--border), var(--wm-shadow-idle);
+  transition: box-shadow 160ms ease;
+}
+
+.winbox.chan.focus {
+  box-shadow: 0 0 0 1px var(--border), var(--wm-shadow);
+}
+
+.winbox.chan:not(.focus) .wb-title {
+  color: var(--text-secondary);
+}
+
+/* macOS-style titlebar: traffic lights on the left, then the window name.
+   The stock template order is min, max, full, close inside .wb-control, so
+   the row is re-ordered rather than rebuilt, and fullscreen leaves the bar
+   (it lives behind the green control's hover menu). */
+.chan .wb-header {
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  height: 34px;
+  line-height: 34px;
+  border-bottom: 1px solid var(--border);
+  border-radius: 8px 8px 0 0;
+  background: var(--bg-elev);
+}
+
+.chan .wb-control {
+  order: 0;
+  float: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 100%;
+  padding: 0 10px;
+}
+
+.chan .wb-control * {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background-image: none !important;
+  background-color: var(--wm-dot-idle);
+  transition: background-color 160ms ease, filter 120ms ease;
+  position: relative;
+}
+
+.chan .wb-close {
+  order: 0;
+}
+
+.chan .wb-min {
+  order: 1;
+}
+
+.chan .wb-max {
+  order: 2;
+}
+
+/* Fullscreen is offered by the green control's hover menu instead. */
+.chan .wb-full {
+  display: none !important;
+}
+
+.winbox.chan.focus .wb-close {
+  background-color: #ff5f57;
+}
+
+.winbox.chan.focus .wb-min {
+  background-color: #febc2e;
+}
+
+.winbox.chan.focus .wb-max {
+  background-color: #28c840;
+}
+
+.chan .wb-control:hover * {
+  filter: brightness(0.92);
+}
+
+/* The glyphs macOS reveals when the pointer is over the group. */
+.chan .wb-control *::after {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 700;
+  color: rgba(0, 0, 0, 0.55);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.winbox.chan.focus .wb-control:hover *::after {
+  opacity: 1;
+}
+
+.chan .wb-close::after {
+  content: "\00d7";
+  font-size: 11px;
+}
+
+.chan .wb-min::after {
+  content: "\2212";
+}
+
+.chan .wb-max::after {
+  content: "+";
+  font-size: 11px;
+}
+
+.chan .wb-drag {
+  order: 1;
+  flex: 1;
+  min-width: 0;
+  padding-left: 0;
+  padding-right: 12px;
+}
+
+.chan .wb-title {
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.chan .wb-body {
+  margin: 0 1px 1px 1px;
+  background: var(--bg);
+  border-radius: 0 0 7px 7px;
+  overflow: hidden;
+}
+
+.chan .wb-body iframe {
+  background: var(--bg);
+}
+
+.chan .wb-control * {
+  opacity: 0.55;
+  transition: opacity 160ms ease;
+}
+
+.chan .wb-control *:hover {
+  opacity: 1;
+}
+
+.winbox.chan.min {
+  border-radius: 8px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+}
+
+/* A minimised chip offers only the control that brings the window back, plus
+   its name: closing a window you cannot see (and answering a prompt about it)
+   is not a decision worth offering here. WinBox's own handler already
+   restores when the window is minimised, so the yellow dot is the whole
+   affordance; it stays lit and shows its glyph even unfocused, because it is
+   the only thing left to click. */
+.winbox.chan.min .wb-close,
+.winbox.chan.min .wb-max {
+  display: none !important;
+}
+
+.winbox.chan.min .wb-min {
+  display: inline-block !important;
+  background-color: #febc2e;
+}
+
+.winbox.chan.min .wb-min::after {
+  content: "\25b4";
+  font-size: 10px;
+  opacity: 1;
+}
+
+.winbox.chan.max {
+  border-radius: 0;
+}
+
+.winbox.chan.max .wb-body {
+  border-radius: 0;
+  margin: 0;
+}
+
+/* Fullscreen leaves the frame as-is; the fullscreen element is the body. */

@@ -294,6 +294,15 @@ impl TauriNativeSurface {
             return;
         }
         let kind = serve::watched_window_kind(record).unwrap_or("workspace");
+        // A frame's title lives in the shell's own chrome, not an OS titlebar,
+        // so it is pushed rather than set. No main-thread hop and no override
+        // check: the Hybrid host draws the title itself and holds no overrides.
+        let state = self.app.state::<Arc<AppState>>();
+        if state.hybrid.holds(&label) {
+            crate::hybrid_surface::retitle_frame(&self.app, &label, &desired);
+            self.applied_titles.lock().unwrap().insert(label, desired);
+            return;
+        }
         let app = self.app.clone();
         let applied_titles = Arc::clone(&self.applied_titles);
         // Tauri window mutation (and `title()`) must run on the main thread.
@@ -348,6 +357,18 @@ impl NativeSurface for TauriNativeSurface {
             .into_keys()
             .filter(|label| label.starts_with(&prefix))
             .collect();
+        // Windows living as frames inside the Hybrid host have no OS window to
+        // enumerate, so the shell's mirrored frame set is their `webview_windows`.
+        // Without this the reconcile would see every Hybrid window as missing
+        // and open a duplicate on the next feed push.
+        let state = self.app.state::<Arc<crate::AppState>>();
+        labels.extend(
+            state
+                .hybrid
+                .frames()
+                .into_iter()
+                .filter(|label| label.starts_with(&prefix)),
+        );
         // A dispatched build that has now landed in `webview_windows` is no
         // longer in-flight; drop it, then fold the still-pending ones in so the
         // reconcile sees them as open.
@@ -405,6 +426,17 @@ impl NativeSurface for TauriNativeSurface {
         // A rebuilt window at this label starts from whatever the build path
         // composes, so a remembered title must not outlive the window.
         self.applied_titles.lock().unwrap().remove(label);
+        // A window living inside the Hybrid host has no OS window to destroy:
+        // ask the shell to drop the frame instead. The placement is forgotten
+        // here rather than on the shell's answer so a window closed and
+        // immediately reopened is placed afresh by the current switch.
+        let state = self.app.state::<Arc<crate::AppState>>();
+        if state.hybrid.placed(label) == Some(crate::hybrid_surface::Destination::Hybrid) {
+            crate::hybrid_surface::close_frame(&self.app, label);
+            state.hybrid.forget(label);
+            return;
+        }
+        state.hybrid.forget(label);
         // Destroying a window must run on the Tauri main thread.
         let app = self.app.clone();
         let dispatch = self.app.clone();

@@ -8,6 +8,7 @@ mod download;
 mod dropped_paths;
 mod embedded;
 mod gateway;
+mod hybrid_surface;
 mod linux_gui_stack;
 mod native_dialog;
 mod native_transfer;
@@ -167,6 +168,12 @@ pub struct AppState {
     /// close intent survives watcher replacement and suppresses stale records,
     /// but a desktop restart clears it.
     pub(crate) pending_window_deletes: Arc<window_watcher::PendingDeleteState>,
+    /// The Hybrid host's half of the window-placement contract: which windows
+    /// live as frames inside it rather than as OS windows, which of those is
+    /// focused, and where the next window goes. Volatile by design -- only the
+    /// destination is persisted (through `ConfigStore`); placements belong to
+    /// the frames that exist right now.
+    pub hybrid: hybrid_surface::HybridState,
     /// Composite native labels (`{library_id}::{window_id}`) of connected-
     /// devserver windows that currently have an in-flight file transfer, as
     /// reported by each devserver's windows feed (`WindowRecord.active_transfer`).
@@ -273,6 +280,7 @@ impl AppState {
             devserver_watchers: Mutex::new(HashMap::new()),
             devserver_watcher_views: Mutex::new(HashMap::new()),
             pending_window_deletes: Arc::new(window_watcher::PendingDeleteState::default()),
+            hybrid: hybrid_surface::HybridState::default(),
             devserver_active_transfers: Mutex::new(std::collections::HashSet::new()),
             control_terminal_prefixes: Mutex::new(HashMap::new()),
             control_terminal_runs: Mutex::new(HashMap::new()),
@@ -4783,6 +4791,159 @@ fn focus_library_window(
     }
 }
 
+/// Reject an invoke that did not come from the Hybrid host window.
+///
+/// The `hybrid` capability already scopes these commands to that label, so this
+/// is the second gate rather than the first. It is worth having: every one of
+/// them speaks for the whole window manager (which windows exist, which is
+/// focused, close this one), so a caller confusion would be a caller acting on
+/// windows that are not its own.
+fn require_hybrid_host(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == HYBRID_WINDOW_LABEL {
+        return Ok(());
+    }
+    Err(format!("{} is not the Hybrid host window", window.label()))
+}
+
+/// The Hybrid host reports which windows it currently holds frames for.
+///
+/// This is the window watcher's `open_labels` for everything living inside the
+/// host: those windows have no OS window to enumerate, so without this push a
+/// reconcile would see them as missing and open duplicates. The shell sends the
+/// whole set on every change rather than deltas, so a dropped message
+/// self-heals on the next one.
+///
+/// Answers the current destination, which makes the shell's first call a
+/// two-way sync. The shell keeps its own copy of the switch for the surface
+/// that has no host, and the two defaults differ; without an authoritative
+/// answer the switch could read Hybrid while the watcher was still placing
+/// windows on the OS, which is a switch that lies about what it does.
+#[tauri::command]
+fn hybrid_frames(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<AppState>>,
+    labels: Vec<String>,
+) -> Result<&'static str, String> {
+    require_hybrid_host(&window)?;
+    state.hybrid.set_frames(labels.into_iter().collect());
+    Ok(state.hybrid.destination().to_wire())
+}
+
+/// The Hybrid host reports which of its frames has focus, or `None` when none
+/// does. Read by [`focused_workspace_label`] so the New Window chord can answer
+/// for a window the OS window manager cannot see.
+#[tauri::command]
+fn hybrid_focus(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<AppState>>,
+    label: Option<String>,
+) -> Result<(), String> {
+    require_hybrid_host(&window)?;
+    state.hybrid.set_focused(label);
+    Ok(())
+}
+
+/// Discard a watcher-managed window by its native label, without an OS window
+/// to destroy.
+///
+/// Both branches mirror [`request_close_window`]'s: a local window's record is
+/// dropped through the embedded host, which reaps its sessions and fires the
+/// feed; a devserver window's DELETE is queued with the close intent recorded
+/// first, so a stale snapshot keeps treating the label as suppressed until the
+/// server confirms. Neither destroys anything here: the window lives as a frame
+/// inside the Hybrid host, and the watcher's own `close` drops that frame once
+/// the record leaves the feed.
+fn discard_hybrid_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
+    let state = Arc::clone(app.state::<Arc<AppState>>().inner());
+    if let Some(window_id) = label.strip_prefix("local::") {
+        let embedded = state
+            .embedded()
+            .ok_or_else(|| "the embedded server is not running".to_string())?;
+        embedded.discard_window(window_id).map(|_| ())
+    } else if label.starts_with("lib-") {
+        let Some((devserver_id, record)) = state.devserver_feed.record_for_native_label(label)
+        else {
+            return Err(format!("window {label} is absent from the feed"));
+        };
+        state.pending_window_deletes.queue(&devserver_id, &record);
+        if let Some(view) = state
+            .devserver_watcher_views
+            .lock()
+            .unwrap()
+            .get(&devserver_id)
+            .cloned()
+        {
+            view.bury(label);
+        }
+        if let Some(conn) = state.devservers.get(&devserver_id) {
+            if let Some(attempt) = state.pending_window_deletes.begin(label) {
+                spawn_pending_window_delete_attempt(app.clone(), Arc::clone(&state), conn, attempt);
+            }
+        }
+        Ok(())
+    } else {
+        Err(format!("{label} is not a watcher-managed window"))
+    }
+}
+
+/// Act on the red dot of a window the Hybrid host holds a frame for: `hide`
+/// buries it, otherwise the record is discarded.
+///
+/// The shell has already asked the user. It draws its own Hide / Close / Cancel
+/// rather than reusing the SPA's `app.window.confirmClose` overlay, because
+/// that overlay answers back over Tauri IPC, which an iframe does not have.
+/// What the shell cannot see is the active-transfer guard, and that lives here:
+/// a window with an upload or download in flight refuses, and the refusal is
+/// what the shell shows. The desktop never cancels a transfer on the user's
+/// behalf.
+///
+/// Both outcomes route through the same authority as a native window's red dot
+/// ([`serve::bury_window_now`] and the discard above), so a frame and a window
+/// leave exactly the same state behind.
+#[tauri::command]
+fn hybrid_close_requested(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    label: String,
+    hide: bool,
+) -> Result<(), String> {
+    require_hybrid_host(&window)?;
+    let state = Arc::clone(app.state::<Arc<AppState>>().inner());
+    let session_id = label.split_once("::").map(|(_, id)| id).unwrap_or(&label);
+    let transferring = state
+        .embedded()
+        .map(|e| e.window_has_active_transfer(session_id))
+        .unwrap_or(false)
+        || state.devserver_window_has_active_transfer(&label);
+    if transferring {
+        return Err("this window has a transfer in flight; cancel it first".to_string());
+    }
+    if hide {
+        // No config key: the watcher families return before `bury_window_now`
+        // reaches the window-config stack, and a frame has no OS window whose
+        // URL hash could be captured anyway.
+        serve::bury_window_now(&app, &state, &label, "");
+        return Ok(());
+    }
+    discard_hybrid_window(&app, &label)
+}
+
+/// Set where the NEXT window opens. Persisted so the choice survives a restart;
+/// windows already on screen keep the surface they were placed on.
+#[tauri::command]
+fn hybrid_set_destination(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<AppState>>,
+    destination: String,
+) -> Result<(), String> {
+    require_hybrid_host(&window)?;
+    let parsed = hybrid_surface::Destination::from_wire(&destination)
+        .ok_or_else(|| format!("unknown destination {destination:?}"))?;
+    state.hybrid.set_destination(parsed);
+    config::set_hybrid_destination(&state.store, parsed);
+    Ok(())
+}
+
 /// What [`native_vocabulary`] answers: the app command vocabulary this build
 /// grants to gateway-served `lib-*` windows, with the build identity. Field
 /// names are the page-side contract.
@@ -5341,6 +5502,12 @@ fn main() {
     };
     let state = Arc::new(AppState::with_store(store));
     *state.gateway_migration.lock().unwrap() = migration_outcome;
+    // Seed the destination switch from the persisted choice. The placement map
+    // starts empty on purpose: no window is on screen yet, so every one of them
+    // is placed fresh by this destination.
+    state
+        .hybrid
+        .set_destination(config::hybrid_destination(&state.store));
     let state_for_exit = Arc::clone(&state);
     let state_for_setup = Arc::clone(&state);
     let app = tauri::Builder::default()
@@ -5883,6 +6050,13 @@ fn main() {
             // only its own; the ACL decides which windows may invoke at all.
             create_library_window,
             focus_library_window,
+            // The Hybrid host's half of the window-placement contract. Scoped
+            // to that one window by capabilities/hybrid.json and re-checked in
+            // each handler: every one of them speaks for the window manager.
+            hybrid_frames,
+            hybrid_focus,
+            hybrid_close_requested,
+            hybrid_set_destination,
             // The vocabulary + build-identity advertisement a remotely-served
             // page queries before treating a refusal as a version statement.
             native_vocabulary,
@@ -6010,6 +6184,10 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         // bridge script in serve.rs). The menu entry still surfaces the
         // window by name.
         let workspace_manager = MenuItemBuilder::with_id("win-main", "Computers").build(app)?;
+        // The Hybrid host, opened on demand: chan-desktop hands every window to
+        // the OS window manager until this window is open and its destination
+        // switch is flipped.
+        let hybrid_window = MenuItemBuilder::with_id("win-hybrid", "Hybrid Desktop").build(app)?;
         // New Window opens another window of the FOCUSED window's
         // connection (open_new_window_for_focused_workspace): local
         // workspace or outbound remote, or another standalone
@@ -6095,6 +6273,7 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
             let sep = PredefinedMenuItem::separator(app)?;
             window_submenu.prepend_items(&[
                 &workspace_manager,
+                &hybrid_window,
                 &new_window,
                 &open_in_browser,
                 &sep,
@@ -6187,6 +6366,11 @@ fn handle_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
     match id {
         "win-main" => {
             let _ = show_window(app, "main");
+        }
+        "win-hybrid" => {
+            if let Err(e) = open_hybrid_window(app) {
+                tracing::warn!(error = %e, "opening the hybrid window failed");
+            }
         }
         "app-new-window" => {
             if let Err(e) = open_new_window_for_focused_workspace(app) {
@@ -6318,6 +6502,10 @@ fn build_launcher_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>
     // bridge script in serve.rs). The menu entry still surfaces the
     // window by name.
     let workspace_manager = MenuItemBuilder::with_id("win-main", "Computers").build(app)?;
+    // The Hybrid host, opened on demand: chan-desktop hands every window to the
+    // OS window manager until this window is open and its destination switch is
+    // flipped.
+    let hybrid_window = MenuItemBuilder::with_id("win-hybrid", "Hybrid Desktop").build(app)?;
     // New Window opens another window of the FOCUSED window's connection
     // (open_new_window_for_focused_workspace): a standalone terminal
     // from the launcher (or nothing) focused -- the launcher itself is a
@@ -6332,6 +6520,7 @@ fn build_launcher_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>
         MenuItemBuilder::with_id("app-open-in-browser", "Open in Browser").build(app)?;
     let window = SubmenuBuilder::with_id(app, LINUX_WINDOW_SUBMENU_ID, "Window")
         .item(&workspace_manager)
+        .item(&hybrid_window)
         .item(&new_window)
         .item(&open_in_browser)
         .build()?;
@@ -6855,6 +7044,13 @@ fn open_remote_window_from_menu(app: &tauri::AppHandle, label: &str) {
 /// way).
 pub fn unbury_window(app: &tauri::AppHandle, label: &str) -> bool {
     let state = app.state::<Arc<AppState>>();
+    // A window that lives inside the Hybrid host is never buried in the OS
+    // sense: it is on screen, just inside another window. Raising the host and
+    // the frame is the whole action, and it must come first, because the paths
+    // below all reach for a webview this window does not have.
+    if hybrid_surface::focus_frame(app, label) {
+        return true;
+    }
     let removed = state.remove_buried(label);
     // Unbury persists `hidden=false` to the owning registry so the show
     // is durable + mirrored on connect (BOTH the native menu reopen and the SPA
@@ -6988,6 +7184,79 @@ fn open_about_window(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Open (or focus) the Hybrid host: one window running its own window manager
+/// over chan windows, with the launcher docked inside it.
+///
+/// It loads the shell from the embedded loopback rather than from the app's
+/// custom protocol. That is load-bearing twice over: the shell has to be
+/// same-origin with the launcher at `/` and with every tenant at `/{prefix}/`
+/// to reach into the frames it hosts at all, and the configured Tauri CSP
+/// (`frame-src 'self'`), which governs custom-protocol pages only, would
+/// otherwise refuse to frame the loopback.
+///
+/// Singleton, like the About window: a second Hybrid desktop would be two
+/// window managers fighting over the same records.
+fn open_hybrid_window(app: &tauri::AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(HYBRID_WINDOW_LABEL) {
+        let _ = win.show();
+        let _ = win.set_focus();
+        return Ok(());
+    }
+    let state = app.state::<Arc<AppState>>();
+    let embedded = state
+        .embedded()
+        .ok_or_else(|| "the embedded server is not running".to_string())?;
+    // The shell reads this exactly as the launcher does: off the query string
+    // at boot, then out of the address bar.
+    let url = format!(
+        "http://{}{}/?t={}",
+        embedded.addr(),
+        chan_server::HYBRID_PREFIX,
+        embedded.launcher_token()
+    );
+    let url = url
+        .parse::<tauri::Url>()
+        .map_err(|e| format!("bad hybrid window URL {url}: {e}"))?;
+    let geometry_plan = serve::resolve_geometry_plan(app, HYBRID_WINDOW_LABEL);
+    let restored = geometry_plan.builds_hidden();
+    let builder = WebviewWindowBuilder::new(app, HYBRID_WINDOW_LABEL, WebviewUrl::External(url))
+        .title(HYBRID_WINDOW_TITLE)
+        // Remote-served like the launcher, so it skips KEY_BRIDGE_JS and takes
+        // the same minimal reload chord. Its other chords are the shell's own:
+        // the frames it hosts are same-origin, so the shell reaches their
+        // documents directly.
+        .initialization_script(LAUNCHER_RELOAD_BRIDGE_JS)
+        .inner_size(HYBRID_DEFAULT_WIDTH, HYBRID_DEFAULT_HEIGHT)
+        .min_inner_size(HYBRID_MIN_WIDTH, HYBRID_MIN_HEIGHT)
+        .resizable(true);
+    let builder = if restored {
+        builder.visible(false)
+    } else {
+        builder
+    };
+    let win = builder
+        .build()
+        .map_err(|e| format!("building the hybrid window: {e}"))?;
+    let win_for_event = win.clone();
+    let app_for_close = app.clone();
+    win.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            // Hide rather than destroy, like the launcher: the frames inside
+            // are live chan windows, and closing the host must not be a way to
+            // discard them by accident.
+            api.prevent_close();
+            serve::capture_window_geometry(&app_for_close, HYBRID_WINDOW_LABEL);
+            let _ = win_for_event.hide();
+        }
+    });
+    serve::apply_geometry_plan(&win, HYBRID_WINDOW_LABEL, geometry_plan);
+    if !restored {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    Ok(())
+}
+
 /// Open a new window of the workspace that owns the currently
 /// focused window (the Cmd/Ctrl+Shift+N "New Window" semantics).
 ///
@@ -7055,6 +7324,25 @@ fn open_window_in_browser(app: &tauri::AppHandle, label: &str) -> Result<(), Str
         .map_err(|e| format!("opening the browser window URL: {e}"))
 }
 
+/// The chan window a window-scoped action should act on: the focused workspace
+/// webview's label, or `None` when the launcher (or nothing) has focus.
+///
+/// A window living inside the Hybrid host is invisible to `is_focused`: the OS
+/// sees one focused window, the host, and the frames within it are the host's
+/// own business. So when the host is the focused window, its reported frame is
+/// the answer. It reports on every focus change, and reports `None` when its
+/// launcher dock has focus, which is exactly the launcher case below.
+fn focused_workspace_label(app: &tauri::AppHandle) -> Option<String> {
+    let focused = app
+        .webview_windows()
+        .into_values()
+        .find(|w| w.is_focused().unwrap_or(false))?;
+    if focused.label() == HYBRID_WINDOW_LABEL {
+        return app.state::<Arc<AppState>>().hybrid.focused();
+    }
+    serve::is_workspace_webview_label(focused.label()).then(|| focused.label().to_string())
+}
+
 fn open_new_window_for_focused_workspace(app: &tauri::AppHandle) -> Result<(), String> {
     // Buried workspace-/outbound- windows take precedence in their family:
     // Cmd+Shift+N on a window whose family has a hidden sibling REOPENS that
@@ -7062,16 +7350,11 @@ fn open_new_window_for_focused_workspace(app: &tauri::AppHandle) -> Result<(), S
     // `local::` windows are independent registry records -- no family unbury;
     // a focused one mints/opens a fresh window (branched on kind below), and a
     // focused launcher (or nothing) opens a standalone terminal.
-    let Some(focused) = app
-        .webview_windows()
-        .into_values()
-        .find(|w| serve::is_workspace_webview_label(w.label()) && w.is_focused().unwrap_or(false))
-    else {
+    let Some(label) = focused_workspace_label(app) else {
         // Launcher (or nothing) focused: New Window means a standalone terminal.
         spawn_terminal_window(app);
         return Ok(());
     };
-    let label = focused.label().to_string();
     open_new_window_for_label(app, &label)
 }
 
@@ -7282,6 +7565,18 @@ const LAUNCHER_DEFAULT_WIDTH: f64 = 420.0;
 const LAUNCHER_DEFAULT_HEIGHT: f64 = 720.0;
 const LAUNCHER_MIN_WIDTH: f64 = 420.0;
 const LAUNCHER_MIN_HEIGHT: f64 = 420.0;
+
+/// The Hybrid host: one window that runs its own window manager over chan
+/// windows, with the launcher docked inside it. Its own label rather than a
+/// `main-*` one, because the launcher-class paths key on the literal `"main"`
+/// and this window wants none of them.
+pub(crate) const HYBRID_WINDOW_LABEL: &str = "hybrid";
+const HYBRID_WINDOW_TITLE: &str = "Chan Hybrid";
+/// Wide enough for the 420px launcher dock plus a usable desktop beside it.
+const HYBRID_DEFAULT_WIDTH: f64 = 1440.0;
+const HYBRID_DEFAULT_HEIGHT: f64 = 900.0;
+const HYBRID_MIN_WIDTH: f64 = 720.0;
+const HYBRID_MIN_HEIGHT: f64 = 480.0;
 
 fn capture_launcher_geometry(app: &tauri::AppHandle) {
     serve::capture_window_geometry(app, "main");

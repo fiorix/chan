@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "hybrid",
+  "description": "Grants the Hybrid host window (label `hybrid`) the ACL it needs to be a window manager for chan windows. The shell is REMOTELY served from the embedded chan-server loopback (WebviewUrl::External http://127.0.0.1:<port>/__hybrid/), so default.json's permissions -- which carry no `remote` scope -- do not reach it; a Tauri capability applies to remotely-loaded content only when it declares `remote.urls`. `core:event:default` carries the window watcher's open/close/retitle pushes into the shell, and the `hybrid-window` set carries the shell's answers back: which frames it holds (the watcher's open_labels), which one is focused (the New Window resolver), a red-dot close, and the destination switch. `allow-reload-window` matches the reload chord injected into the window. Nothing else: the shell drives the library over plain HTTP with the launcher bearer, exactly as the launcher does, so it needs no more remote IPC than this, and the powerful local-only grants in default.json (updater, process, dialog) deliberately stay off remote content.",
+  "remote": {
+    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+  },
+  "windows": ["hybrid"],
+  "permissions": ["core:event:default", "allow-reload-window", "hybrid-window"]
+}

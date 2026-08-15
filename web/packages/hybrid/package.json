@@ -1,0 +1,12 @@
+{
+  "name": "@chan/hybrid",
+  "version": "0.90.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  }
+}
