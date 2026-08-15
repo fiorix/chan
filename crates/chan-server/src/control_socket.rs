@@ -55,6 +55,24 @@ use chan_shell::{
 // rename the wire command and break the SPA.
 #[allow(clippy::enum_variant_names)]
 enum WindowCommand {
+    /// Open a WINDOW, not a tab: sent to the window that asked for something
+    /// which landed elsewhere, when the surface that has to create that window
+    /// is the browser. chan-desktop ignores it -- its window watcher opens the
+    /// row natively -- so the SPA branches on its own surface, exactly as the
+    /// launcher's own window-mint does.
+    OpenWindow {
+        /// The window that was minted, so the tab can be named for it and a
+        /// second command for the same window finds the tab already open.
+        /// Named `window`, because the frame's own `window_id` is its TARGET:
+        /// the window being told to open one.
+        window: String,
+        /// Route prefix of the tenant serving it.
+        prefix: String,
+        /// That tenant's bearer.
+        token: String,
+        /// What the tab will show, for the message when the browser blocks it.
+        path: String,
+    },
     OpenFile {
         path: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1189,7 +1207,14 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
             // tenant's job -- a workspace tenant never learns what a machine
             // path means.
             if abs_to_workspace_rel(workspace.root(), &path) == Err(WorkspaceRelError::Escape) {
-                return route_open_outside_workspace(unserve, &path).await;
+                return route_open_outside_workspace(
+                    unserve,
+                    &path,
+                    &window_id,
+                    session_registry,
+                    events_tx,
+                )
+                .await;
             }
             if let Err(message) = require_connected_window(session_registry, &window_id) {
                 return ControlResponse::Error { message };
@@ -4597,7 +4622,13 @@ pub(crate) fn open_path_standalone(
 /// filesystem has nowhere to put the path. Both keep pointing at `chan open
 /// PATH`, which loads it AS a workspace -- the answer that was always right
 /// when no surface could show it.
-async fn route_open_outside_workspace(unserve: &UnserveScope, path: &Path) -> ControlResponse {
+async fn route_open_outside_workspace(
+    unserve: &UnserveScope,
+    path: &Path,
+    caller_window_id: &str,
+    session_registry: &SessionRegistry,
+    events_tx: &broadcast::Sender<String>,
+) -> ControlResponse {
     let host = match unserve {
         UnserveScope::Host(weak) => weak.upgrade(),
         UnserveScope::Standalone { .. } | UnserveScope::Unsupported => None,
@@ -4607,10 +4638,30 @@ async fn route_open_outside_workspace(unserve: &UnserveScope, path: &Path) -> Co
             message: escape_guidance(path),
         };
     };
-    match host.open_outside_workspace(path).await {
-        Ok(ack) => ControlResponse::Ok {
-            message: describe_outside_open(&ack),
-        },
+    match host.open_outside_workspace(path, caller_window_id).await {
+        Ok(ack) => {
+            // A browser-origin mint is opened by the page that asked for it: a
+            // tab is what a desktop window is on that surface, and only the
+            // page knows its own origin (behind a gateway the server does
+            // not). Best effort -- the ack already names the window, and the
+            // launcher lists it either way.
+            if let Some(target) = &ack.open_in_browser {
+                let _ = send_window_command_if_live(
+                    session_registry,
+                    caller_window_id,
+                    WindowCommand::OpenWindow {
+                        window: ack.window_id.clone(),
+                        prefix: target.prefix.clone(),
+                        token: target.token.clone(),
+                        path: ack.path.clone(),
+                    },
+                    events_tx,
+                );
+            }
+            ControlResponse::Ok {
+                message: describe_outside_open(&ack),
+            }
+        }
         Err(chan_library::Error::Config(_)) => ControlResponse::Error {
             message: escape_guidance(path),
         },
@@ -6700,6 +6751,7 @@ mod tests {
         async fn open_outside_workspace(
             &self,
             _requested: &std::path::Path,
+            _caller_window_id: &str,
         ) -> Result<chan_library::OpenOutsideAck, chan_library::Error> {
             match &self.outside {
                 Some((path, window_id, minted, inside_workspace)) => {
@@ -6708,6 +6760,7 @@ mod tests {
                         window_id: window_id.clone(),
                         minted: *minted,
                         inside_workspace: inside_workspace.clone(),
+                        open_in_browser: None,
                     })
                 }
                 None => Err(chan_library::Error::Config(
@@ -6874,8 +6927,16 @@ mod tests {
             ..FakeHost::new(0)
         });
         let scope = UnserveScope::Host(Arc::downgrade(&host));
-        let response =
-            route_open_outside_workspace(&scope, std::path::Path::new("/etc/hosts")).await;
+        let session_registry = SessionRegistry::new();
+        let (events_tx, _rx) = broadcast::channel(4);
+        let response = route_open_outside_workspace(
+            &scope,
+            std::path::Path::new("/etc/hosts"),
+            "w-caller",
+            &session_registry,
+            &events_tx,
+        )
+        .await;
         match response {
             ControlResponse::Ok { message } | ControlResponse::Error { message } => message,
             other => panic!("unexpected response: {other:?}"),
@@ -6936,9 +6997,14 @@ mod tests {
     async fn a_standalone_serve_has_no_host_to_route_through() {
         // `chan open ROOT` mounts one workspace and no library: there is no
         // host, so the answer is the same guidance rather than a panic.
+        let session_registry = SessionRegistry::new();
+        let (events_tx, _rx) = broadcast::channel(4);
         let response = route_open_outside_workspace(
             &UnserveScope::Unsupported,
             std::path::Path::new("/tmp/x"),
+            "w-caller",
+            &session_registry,
+            &events_tx,
         )
         .await;
         match response {

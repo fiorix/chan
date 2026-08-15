@@ -141,7 +141,11 @@ pub trait HostControl: Send + Sync {
     /// `Err` when this host serves no filesystem surface, when the path cannot
     /// be expressed there, or when no window could be minted. Async because
     /// raising the target window goes through the desktop bridge.
-    async fn open_outside_workspace(&self, requested: &Path) -> Result<OpenOutsideAck, Error>;
+    async fn open_outside_workspace(
+        &self,
+        requested: &Path,
+        caller_window_id: &str,
+    ) -> Result<OpenOutsideAck, Error>;
 }
 
 /// The outcome of [`HostControl::open_outside_workspace`], for the CLI line.
@@ -157,6 +161,20 @@ pub struct OpenOutsideAck {
     /// containing it. Named in the acknowledgement so the user knows an indexed
     /// view exists; the open still lands on the machine surface.
     pub inside_workspace: Option<String>,
+    /// Where the window the file went to can be reached, when it was MINTED by
+    /// a browser-origin caller: the surface that asked for it is the one that
+    /// has to open it, and a browser tab is what a desktop window is there. The
+    /// tenant prefix and bearer, so the calling page can compose a URL against
+    /// its own origin (which behind a gateway the server cannot know).
+    pub open_in_browser: Option<BrowserWindowTarget>,
+}
+
+/// Enough for a browser tab to be opened onto a freshly minted window.
+pub struct BrowserWindowTarget {
+    /// Route prefix of the tenant serving the window.
+    pub prefix: String,
+    /// That tenant's bearer.
+    pub token: String,
 }
 
 /// How a control socket's process tears down the workspace named by a

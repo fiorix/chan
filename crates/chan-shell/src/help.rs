@@ -403,13 +403,25 @@ CAUTIONS:
 
 CAVEATS:
   A file whose bytes are not text is refused with "cannot open binary
-  file <rel>". A path outside the workspace root is refused. A
-  standalone terminal opens the path in its own window when its host
-  serves a filesystem (a directory in the file browser, text in the
-  editor, anything else revealed beside its siblings); where it serves
-  none, the command refuses and points at 'chan open PATH', which loads
-  the path AS a workspace window. --pane and --side default to the
-  target's active pane and visible side at dequeue time.
+  file <rel>".
+
+  A path OUTSIDE the workspace root is not refused: it is routed. The
+  server hands it to the machine's own filesystem surface and opens it
+  in a standalone window there, reusing one that is already open and
+  creating one when there is none, and the reply names the window it
+  landed in. That window is where a standalone terminal opens paths
+  too, with the same rules: a directory in the file browser, text in
+  the editor, anything else revealed beside its siblings. When the path
+  belongs to another workspace this library serves, the reply says so;
+  the file still opens on the machine surface, which can show any path.
+
+  A host that serves no filesystem has nowhere to route to, so there
+  the command still refuses and points at 'chan open PATH', which loads
+  the path AS a workspace window. A path whose parent does not exist
+  errors either way. --pane and --side default to the target's active
+  pane and visible side at dequeue time, and are dropped on a routed
+  open: they name geometry in the window you typed in, not the one the
+  file went to.
 
 SEE ALSO:
   cs graph, cs search, cs terminal new, chan open; chan dump-skill --topic

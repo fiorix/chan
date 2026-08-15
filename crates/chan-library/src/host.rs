@@ -25,7 +25,9 @@ use tower::ServiceExt;
 use crate::desktop_window_ops::DesktopBridge;
 #[cfg(test)]
 use crate::tenant::TenantTaskOwner;
-use crate::tenant::{HostControl, OpenOutsideAck, TenantArtifacts, TenantBuilder, UnserveMode};
+use crate::tenant::{
+    BrowserWindowTarget, HostControl, OpenOutsideAck, TenantArtifacts, TenantBuilder, UnserveMode,
+};
 use crate::terminal_sessions::{CloseReason, TerminalExit};
 #[cfg(target_os = "linux")]
 use crate::terminal_sessions::{
@@ -1916,7 +1918,11 @@ impl WorkspaceHost {
     /// out and the read guard is dropped before anything else runs. Holding it
     /// across those calls deadlocks against a queued writer from
     /// `open_workspace` / `close_workspace`.
-    pub async fn open_outside_workspace(&self, requested: &Path) -> Result<OpenOutsideAck, Error> {
+    pub async fn open_outside_workspace(
+        &self,
+        requested: &Path,
+        caller_window_id: &str,
+    ) -> Result<OpenOutsideAck, Error> {
         let (files, pending, session_registry, events_tx) =
             {
                 let prefix = self.terminal_tenant_prefix.get().ok_or_else(|| {
@@ -1940,12 +1946,28 @@ impl WorkspaceHost {
                 )
             };
 
-        let (window_id, minted) = match self.select_standalone_window() {
-            Some(id) => (id, false),
-            None => (
-                self.mint_window(WindowKind::Terminal, None)?.window_id,
-                true,
-            ),
+        // A minted window is created by the surface that asked for it: a
+        // browser-origin caller gets a browser-origin row, which the desktop
+        // watcher deliberately never opens a native twin for, and which the
+        // calling page opens as a tab -- the browser's equivalent of a window.
+        // A native caller gets a native row, which the watcher opens for it.
+        let caller_origin = self
+            .assemble_window_records()
+            .into_iter()
+            .find(|row| row.window_id == caller_window_id)
+            .map(|row| row.origin)
+            .unwrap_or_default();
+        let (window_id, minted, browser_target) = match self.select_standalone_window() {
+            Some(id) => (id, false, None),
+            None => {
+                let record =
+                    self.mint_window_with_origin(WindowKind::Terminal, None, caller_origin)?;
+                let target = (!caller_origin.is_native()).then(|| BrowserWindowTarget {
+                    prefix: record.prefix.clone(),
+                    token: record.token.clone(),
+                });
+                (record.window_id, true, target)
+            }
         };
         let open = files
             .open_frame(&window_id, requested)
@@ -1986,6 +2008,7 @@ impl WorkspaceHost {
             window_id,
             minted,
             inside_workspace: self.workspace_containing(requested),
+            open_in_browser: browser_target,
         })
     }
 
@@ -2937,8 +2960,13 @@ impl HostControl for WorkspaceHost {
         self.live_terminal_count(window_id)
     }
 
-    async fn open_outside_workspace(&self, requested: &Path) -> Result<OpenOutsideAck, Error> {
-        self.open_outside_workspace(requested).await
+    async fn open_outside_workspace(
+        &self,
+        requested: &Path,
+        caller_window_id: &str,
+    ) -> Result<OpenOutsideAck, Error> {
+        self.open_outside_workspace(requested, caller_window_id)
+            .await
     }
 
     fn tunnel_registry(&self) -> Arc<chan_revtunnel::server::TunnelRegistry> {

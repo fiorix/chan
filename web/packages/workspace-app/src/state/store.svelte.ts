@@ -26,6 +26,7 @@ import {
   openWatchSocket,
   sessionPath,
   sessionWindowId,
+  windowLibraryId,
   type SurveySpec,
   type WatchSubscription,
   type WsStatus,
@@ -1046,6 +1047,21 @@ type DestinationWindowCommand = {
 };
 
 type WindowCommandFrame =
+  | {
+      // Open a WINDOW, not a tab: a file this window asked for landed in a
+      // standalone window the server had to create, and on a browser surface
+      // the page is what creates windows. chan-desktop never receives it --
+      // its watcher opens the row natively.
+      type: "window_command";
+      window_id: string;
+      command: "open_window";
+      /// The window that was minted, which also names the tab so a second
+      /// routed open reuses it.
+      window: string;
+      prefix: string;
+      token?: string | null;
+      path?: string | null;
+    }
   | ({
       type: "window_command";
       window_id: string;
@@ -1695,6 +1711,14 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     applyWindowLabel(frame.label);
     return;
   }
+  if (frame.command === "open_window") {
+    // A file the server routed OUT of this window landed in a standalone
+    // window it had to create, and on this surface the page is what creates
+    // windows: a tab is here what a native window is on chan-desktop, where
+    // the window watcher opens the row and this command never arrives.
+    await openRoutedWindowTab(frame);
+    return;
+  }
   if (frame.command === "open_file" && typeof frame.path === "string") {
     const destination = resolveWindowCommandDestination(frame);
     if (!destination) return;
@@ -2324,6 +2348,46 @@ async function bootstrapStandalone(): Promise<void> {
   // Arm the close-when-empty watcher (App.svelte) only AFTER the first tab
   // exists, so the transient empty boot layout can't close the window.
   ui.terminalArmed = true;
+}
+
+/// Open a tab onto a window the server minted for a routed `cs open`.
+///
+/// The URL is composed against THIS page's origin: behind a gateway the server
+/// does not know the origin the user reached it on, and the tenant prefix plus
+/// bearer are all a window needs. `window.open` without a user gesture is
+/// blocked by default, and there is no gesture behind a command that arrived
+/// over a socket -- so a blocked tab falls back to asking, which supplies the
+/// gesture the browser wanted. Named windows mean a second routed open reuses
+/// the tab rather than stacking another.
+async function openRoutedWindowTab(frame: {
+  window?: unknown;
+  prefix?: unknown;
+  token?: unknown;
+  path?: unknown;
+}): Promise<void> {
+  if (isTauriDesktop()) return;
+  const windowId = typeof frame.window === "string" ? frame.window : "";
+  const prefix = typeof frame.prefix === "string" ? frame.prefix : "";
+  const token = typeof frame.token === "string" ? frame.token : "";
+  const path = typeof frame.path === "string" ? frame.path : "";
+  if (!windowId || !prefix) return;
+  const url = new URL(`${prefix.replace(/\/$/, "")}/`, window.location.origin);
+  url.searchParams.set("w", windowId);
+  if (token) url.searchParams.set("t", token);
+  url.searchParams.set("kind", "terminal");
+  url.searchParams.set("lib", windowLibraryId());
+  const target = url.toString();
+  if (window.open(target, windowId)) return;
+  const confirmed = await uiConfirm({
+    title: "Open in a new window?",
+    message: `${path || "The file"} opened in another chan window, and this browser blocked the tab.`,
+    confirmLabel: "Open",
+  });
+  // The click IS the gesture the first attempt lacked.
+  if (confirmed && !window.open(target, windowId)) {
+    ui.status = "the browser blocked the new window; allow pop-ups for this site to open it";
+    ui.statusKind = "persistent";
+  }
 }
 
 export async function bootstrap(): Promise<void> {
