@@ -314,11 +314,38 @@ fn normalize_terminal_secret_mask_suffixes(
 /// picker unusable, not to constrain real use.
 pub const TERMINAL_PROFILE_MAX: usize = 50;
 
+/// One entry, or anything at all. A `TerminalProfile` is the only shape with
+/// required fields and a closed enum in this table, so it is the only one that
+/// can fail to DESERIALIZE rather than merely normalize: a missing `id`, an
+/// `args` written as a string, or a `kind` naming a convention that does not
+/// exist. Buffering each entry through this untagged pair keeps that failure
+/// local to the entry, which is what the posture below promises.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum MaybeTerminalProfile {
+    Valid(TerminalProfile),
+    Malformed(serde::de::IgnoredAny),
+}
+
 fn deserialize_terminal_profiles<'de, D>(deserializer: D) -> Result<Vec<TerminalProfile>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let profiles = Vec::<TerminalProfile>::deserialize(deserializer)?;
+    let entries = Vec::<MaybeTerminalProfile>::deserialize(deserializer)?;
+    let read = entries.len();
+    let profiles: Vec<TerminalProfile> = entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            MaybeTerminalProfile::Valid(profile) => Some(profile),
+            MaybeTerminalProfile::Malformed(_) => None,
+        })
+        .collect();
+    if profiles.len() < read {
+        tracing::warn!(
+            entries = read - profiles.len(),
+            "terminal.profiles: dropping entries that do not parse"
+        );
+    }
     Ok(normalize_terminal_profiles(profiles, |entries| {
         tracing::warn!(
             entries,
@@ -458,6 +485,46 @@ mod profile_tests {
         assert_eq!(config.profiles.len(), 1);
         assert_eq!(config.profiles[0].id, "git-bash");
         assert_eq!(config.profiles[0].name.as_deref(), Some("Git BASH"));
+    }
+
+    #[test]
+    fn a_malformed_entry_costs_that_entry_and_not_the_file() {
+        // Each of the three ways an entry can fail to PARSE rather than
+        // normalize, alongside a good one. Before these were buffered per
+        // entry, any one of them failed the whole `ServerConfig` load, the
+        // server ran on in-memory defaults, and the next settings write
+        // persisted those defaults over the rest of the user's server.toml.
+        let toml = r#"
+            scrollback_mb = 42
+
+            [[profiles]]
+            id = "keeper"
+            name = "Keeper"
+
+            [[profiles]]
+            name = "no id at all"
+
+            [[profiles]]
+            id = "args-as-a-string"
+            args = "-l"
+
+            [[profiles]]
+            id = "unknown-kind"
+            kind = "fish"
+        "#;
+        let config: TerminalConfig =
+            toml::from_str(toml).expect("a bad entry never fails the load");
+        assert_eq!(
+            config.profiles.len(),
+            1,
+            "only the parseable entry survives: {:?}",
+            config.profiles
+        );
+        assert_eq!(config.profiles[0].id, "keeper");
+        assert_eq!(
+            config.scrollback_mb, 42,
+            "every other setting in the file is untouched"
+        );
     }
 
     #[test]
