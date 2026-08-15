@@ -5271,6 +5271,16 @@ mod tests {
         let workspace = host
             .mint_window(WindowKind::Workspace, Some("/tmp/fdstore-notes".into()))
             .expect("mint workspace");
+        // A Files window's layout and file tabs outlive its terminals, so
+        // neither fdstore recovery path may reap its row.
+        let files = host
+            .mint_window_with_origin(
+                WindowKind::Terminal,
+                Some(WindowApp::Files),
+                None,
+                WindowOrigin::Native,
+            )
+            .expect("mint files window");
 
         let skipped = vec![
             crate::terminal_sessions::FdStoreSkippedSession {
@@ -5287,6 +5297,13 @@ mod tests {
                 child_pid: Some(4243),
                 reason: "fd was not inherited".into(),
             },
+            crate::terminal_sessions::FdStoreSkippedSession {
+                tenant_prefix: "/api/terminal".into(),
+                session_id: "s-files".into(),
+                window_id: Some(files.window_id.clone()),
+                child_pid: Some(4244),
+                reason: "fd was not inherited".into(),
+            },
         ];
         let cleanup = host.cleanup_skipped_fdstore_sessions(&skipped);
 
@@ -5294,6 +5311,10 @@ mod tests {
         let rows = registry.snapshot();
         assert!(!rows.iter().any(|row| row.window_id == term.window_id));
         assert!(rows.iter().any(|row| row.window_id == workspace.window_id));
+        assert!(
+            rows.iter().any(|row| row.window_id == files.window_id),
+            "a files window survives an fdstore restore skip"
+        );
         assert_eq!(*reaped.lock().unwrap(), vec![term.window_id.clone()]);
 
         let term2 = host
@@ -5304,6 +5325,10 @@ mod tests {
         let rows = registry.snapshot();
         assert!(!rows.iter().any(|row| row.window_id == term2.window_id));
         assert!(rows.iter().any(|row| row.window_id == workspace.window_id));
+        assert!(
+            rows.iter().any(|row| row.window_id == files.window_id),
+            "a files window survives fdstore metadata loss"
+        );
     }
 
     #[tokio::test]
