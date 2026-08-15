@@ -49,6 +49,7 @@ import {
   buildSplitGrid,
   closePane,
   closeTab,
+  hasAnyTab,
   hasBrowserTab,
   cancelMissingFileCheck,
   hasGraphTab,
@@ -164,7 +165,7 @@ export {
 } from "./workspace.svelte";
 import { workspace, draftsDir, isDraftPath } from "./workspace.svelte";
 import { clearCaretsUnder } from "./caretIndex";
-import { windowCaps, windowMode } from "./windowCaps";
+import { windowCaps } from "./windowCaps";
 import { filesContext, filesContextFrom } from "./fileContext.svelte";
 
 /// Display name for the active workspace. The server computes this from
@@ -330,13 +331,15 @@ function windowKind(): string | null {
   }
 }
 
-/// Detect terminal-only mode from the window URL. Both `kind=terminal` (a
+/// Detect terminal-only mode: a window with no workspace AND no filesystem
+/// surface, so terminal panes are all it can hold. Both `kind=terminal` (a
 /// regular standalone terminal) and `kind=control` (the singleton control
-/// terminal that runs a devserver's connect script) boot terminal-only: no
-/// workspace fetch, terminal panes only.
+/// terminal that runs a devserver's connect script) boot without a workspace
+/// fetch; the standalone terminal is more than terminal-only whenever its
+/// tenant serves files, because then the same window also browses and edits
+/// them.
 export function isTerminalOnlyWindow(): boolean {
-  const kind = windowKind();
-  return kind === "terminal" || kind === "control";
+  return !windowCaps.workspace && !windowCaps.files;
 }
 
 /// The control terminal is a stricter sub-mode of terminal-only (`kind=control`,
@@ -976,7 +979,7 @@ export function onWatchEvent(e: unknown): void {
       void refreshTreeForPath(p);
     }
   }
-  // A Files window has no workspace payload, graph, or index behind its
+  // A standalone window has no workspace payload, graph, or index behind its
   // filesystem events: the sparse tree refresh and the per-tab external
   // flagging above/below are the whole reaction.
   if (windowCaps.workspace) {
@@ -2202,44 +2205,72 @@ async function workspaceWithRetry(): ReturnType<typeof api.workspace> {
   }
 }
 
-/// Terminal-only bootstrap. Runs when the window loaded with
-/// `?kind=terminal`: the server tenant is workspace-less and serves only
-/// the terminal/session/build-info routes (no `/api/workspace`,
-/// `/api/files`, `/api/config`, ...), so we MUST NOT hit any
-/// workspace-content endpoint or the SPA would 404 itself into an error.
+/// Standalone-window bootstrap. Runs when the window loaded with
+/// `?kind=terminal` or `?kind=control`: the tenant is the shared
+/// workspace-less one, which serves the terminal / session / build-info
+/// routes and -- where the host could mount it -- the filesystem surface,
+/// but never `/api/workspace`, the index, the graph, or the doc/scene
+/// authorities. Hitting a workspace-content endpoint here would 404 the SPA
+/// into an error, so the boot reaches for exactly what this tenant serves.
 ///
-/// We still restore the persisted window layout (`/api/session`, keyed by
-/// the desktop window label) so panes/tabs of terminals come back, and we
-/// still open the watcher socket (`/ws`) for the broadcast / pane bus that
-/// terminals use. A local standalone terminal follows the launcher's
-/// light/dark choice via the `local-theme` watch (App.svelte subscribes only
-/// in terminal-only windows), falling back to the OS media query wired by
+/// The window is a terminal window either way: it restores its persisted
+/// layout (`/api/session`, keyed by the desktop window label), opens the
+/// watcher socket (`/ws`) the broadcast / pane bus needs, and lands on a
+/// terminal. What the filesystem surface adds is reach, not a different
+/// window: the file context that translates paths without a workspace, the
+/// sparse tree the File Browser renders, and the transfer restore -- so the
+/// user can open a browser or an editor tab in the same window as their
+/// shells. A local standalone terminal follows the launcher's light/dark
+/// choice via the `local-theme` watch (App.svelte subscribes only in
+/// terminal-only windows), falling back to the OS media query wired by
 /// `watchSystemTheme()` when the launcher has set none (or on a devserver /
 /// remote terminal, whose host installs no theme store).
-async function bootstrapTerminalOnly(): Promise<void> {
-  ui.terminalOnly = true;
-  // Force the docked file browsers off: a user may have toggled one on,
-  // and it would fetch `/api/files`, which the terminal tenant does not serve.
-  browserSidePanes.left = false;
-  browserSidePanes.right = false;
+async function bootstrapStandalone(): Promise<void> {
+  // `terminalOnly` means terminals and nothing else -- the narrow command
+  // set, the Control chrome, the close-when-empty rule. A window whose
+  // tenant serves files is not that: it also browses and edits.
+  ui.terminalOnly = !windowCaps.files;
+  if (!windowCaps.files) {
+    // Force the docked file browsers off: a user may have toggled one on,
+    // and it would fetch `/api/files`, which this tenant does not serve.
+    browserSidePanes.left = false;
+    browserSidePanes.right = false;
+  }
   // Settings still apply here: the terminal this window renders reads the same
   // preferences a workspace window's terminal does. The slim tenant serves
   // them from /api/config, since it mounts no /api/workspace. Failure is
   // non-fatal; the terminal falls back to its defaults rather than the window
   // refusing to boot over a settings fetch.
   await refreshStandalonePreferences();
+  if (windowCaps.files) {
+    try {
+      const context = await api.fsContext();
+      filesContext.current = filesContextFrom(context.home);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401 && authToken() === null) {
+        ui.authMissing = true;
+        return;
+      }
+      // The tenant advertised a filesystem it then could not describe. Drop
+      // to the terminals-only window rather than refusing to boot: shells
+      // are what this window is for, and the file surface was the extra.
+      windowCaps.files = false;
+      ui.terminalOnly = true;
+      ui.status = `files context failed: ${(e as Error).message}`;
+    }
+  }
   bootstrapHydrated = false;
   try {
     // The fresh-window marker and the layout hash both apply here: a
-    // standalone terminal window may be opened fresh (empty pane) or
-    // restored from its label-scoped session blob.
+    // standalone window may be opened fresh (empty pane) or restored from
+    // its label-scoped session blob.
     const fresh = readAndConsumeFreshFlag();
     const fromHash = fresh ? null : readLayoutHash();
     try {
       const remote = fresh ? null : await api.getSession();
-      // A standalone terminal window is all-terminal by definition, so its
-      // reattach layout lives in the sessionStorage reload snapshot (no on-disk
-      // blob); fall back to it so Cmd+R re-attaches the surviving PTYs.
+      // A standalone window's reattach layout lives in the sessionStorage
+      // reload snapshot when it holds only terminals (no on-disk blob); fall
+      // back to it so Cmd+R re-attaches the surviving PTYs.
       const reloadLayout = fresh ? null : readLayoutReloadSnapshot();
       if (fromHash) {
         const sessionLayout = remote
@@ -2257,84 +2288,8 @@ async function bootstrapTerminalOnly(): Promise<void> {
       } else if (reloadLayout) {
         await restoreLayout(reloadLayout);
       }
-    } catch (e) {
-      ui.status = `restore failed: ${(e as Error).message}`;
-    }
-  } finally {
-    bootstrapHydrated = true;
-  }
-  // Watcher socket drives the broadcast / pane event bus terminals rely on.
-  // No FB scope resync (no file browser exists in terminal mode); the
-  // onWatchReady resync is a no-op when there are no browser instances.
-  if (!unwatch) {
-    unwatch = openWatchSocket(onWatchEvent, onWatchStatus, onWatchReady);
-  }
-  // No index-status poller (no `/api/index/status` route in this tenant).
-
-  // A terminal-only window always holds at least one terminal: if nothing was
-  // restored (a fresh window), open the first tab so an empty pane never
-  // shows. A Cmd+R reload restores the saved layout instead and re-attaches to
-  // the surviving server-side PTYs, so this only fires on a genuinely fresh
-  // window.
-  if (allTerminalTabs().length === 0) {
-    openTerminalInActivePane({});
-  }
-  // Arm the close-on-last-tab watcher (App.svelte) only AFTER the first
-  // terminal exists, so the transient empty boot layout can't close the window.
-  ui.terminalArmed = true;
-}
-
-/// Files-window bootstrap (`?kind=files`). The tenant is the shared
-/// standalone terminal tenant plus the Files filesystem surface: no
-/// `/api/workspace`, no index, no graph, no doc/scene authorities. Boot
-/// fetches the machine preferences and the filesystem context, restores
-/// the namespaced layout blob, and lands on a fresh window as one
-/// full-pane File Browser at the canonical home directory.
-async function bootstrapFiles(): Promise<void> {
-  // Machine/editor preferences come from the same route the terminal
-  // tenant serves; failure is non-fatal (defaults apply).
-  await refreshStandalonePreferences();
-  try {
-    const context = await api.fsContext();
-    filesContext.current = filesContextFrom(context.home);
-  } catch (e) {
-    if (e instanceof ApiError && e.status === 401 && authToken() === null) {
-      ui.authMissing = true;
-      return;
-    }
-    ui.status = `files context failed: ${(e as Error).message}`;
-    return;
-  }
-  const home = filesContext.current?.homeWire ?? "";
-  bootstrapHydrated = false;
-  let restoredAnything = false;
-  try {
-    const fresh = readAndConsumeFreshFlag();
-    const fromHash = fresh ? null : readLayoutHash();
-    try {
-      const remote = fresh ? null : await api.getSession();
-      const reloadLayout = fresh ? null : readLayoutReloadSnapshot();
-      if (fromHash) {
-        const sessionLayout = remote
-          ? isLegacyLayoutPayload(remote)
-            ? remote
-            : ((remote as SessionPayload).layout ?? null)
-          : reloadLayout;
-        await restoreLayout(fromHash, sessionLayout);
-        restoredAnything = true;
-      } else if (remote) {
-        if (isLegacyLayoutPayload(remote)) {
-          await restoreLayout(remote);
-        } else {
-          await restoreSession(remote as SessionPayload);
-        }
-        restoredAnything = true;
-      } else if (reloadLayout) {
-        await restoreLayout(reloadLayout);
-        restoredAnything = true;
-      }
-      if (!fresh) applyTreeExpandedReloadSnapshot();
-      if (!fresh) {
+      if (windowCaps.files && !fresh) {
+        applyTreeExpandedReloadSnapshot();
         restoreTransfers(
           (source) => () => fileOps.downloadPathWithProgress(source.path, source.isDir),
         );
@@ -2345,38 +2300,43 @@ async function bootstrapFiles(): Promise<void> {
   } finally {
     bootstrapHydrated = true;
   }
-  // Load the sparse tree the File Browser renders: the root level plus the
-  // chain down to home, so a fresh window shows home in place under `/`.
-  try {
-    await refreshTree();
-    let acc = "";
-    for (const part of home.split("/").filter(Boolean)) {
-      acc = acc ? `${acc}/${part}` : part;
-      await loadTreeDir(acc);
+  if (windowCaps.files) {
+    // Load the sparse tree the File Browser renders: the root level plus the
+    // chain down to home, so the first browser tab opens with home in place
+    // under `/` instead of a bare root the user has to walk.
+    try {
+      await refreshTree();
+      let acc = "";
+      for (const part of (filesContext.current?.homeWire ?? "").split("/").filter(Boolean)) {
+        acc = acc ? `${acc}/${part}` : part;
+        await loadTreeDir(acc);
+      }
+    } catch (e) {
+      ui.status = `listing failed: ${(e as Error).message}`;
     }
-  } catch (e) {
-    ui.status = `listing failed: ${(e as Error).message}`;
   }
-  // A fresh Files window is exactly one full-pane File Browser opened AT
-  // home (expanded through its ancestors, not merely highlighting it under
-  // a collapsed root), and nothing else: no editor, no terminal, no
-  // inspector. A restored window keeps whatever panes and tabs its blob
-  // carried.
-  if (!restoredAnything) {
-    revealPathInBrowser(home, { enter: true, inspectorOpen: false });
-  }
+  // Watcher socket drives the broadcast / pane event bus terminals rely on,
+  // and the scoped filesystem watch a File Browser subscribes to.
   if (!unwatch) {
     unwatch = openWatchSocket(onWatchEvent, onWatchStatus, onWatchReady);
   }
+  // No index-status poller (no `/api/index/status` route in this tenant).
+
+  // A standalone window is a terminal window: if nothing was restored (a
+  // fresh window), open the first tab so an empty pane never shows. A Cmd+R
+  // reload restores the saved layout instead and re-attaches to the surviving
+  // server-side PTYs, so this only fires on a genuinely fresh window.
+  if (!hasAnyTab()) {
+    openTerminalInActivePane({});
+  }
+  // Arm the close-when-empty watcher (App.svelte) only AFTER the first tab
+  // exists, so the transient empty boot layout can't close the window.
+  ui.terminalArmed = true;
 }
 
 export async function bootstrap(): Promise<void> {
-  if (windowMode === "files") {
-    await bootstrapFiles();
-    return;
-  }
-  if (ui.terminalOnly || isTerminalOnlyWindow()) {
-    await bootstrapTerminalOnly();
+  if (!windowCaps.workspace) {
+    await bootstrapStandalone();
     return;
   }
   try {

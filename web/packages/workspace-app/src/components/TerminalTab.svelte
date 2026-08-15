@@ -2185,7 +2185,7 @@
   function terminalCwdRel(): string | null {
     if (terminalCwdVirtual !== null) return terminalCwdVirtual;
     const abs = terminalCwdAbs;
-    // A Files window has no workspace root; its context translates the
+    // A standalone window has no workspace root; its file context translates the
     // PTY's absolute cwd back to the wire-relative form.
     const filesCtx = filesContext.current;
     if (filesCtx && abs) {

@@ -55,7 +55,7 @@ pub struct TerminalQuery {
     /// Application marker for the shared standalone tenant: `app=files`
     /// opts the spawn into capability-rooted `cwd` resolution. Absent
     /// keeps the plain Terminal behavior in both tenants.
-    app: Option<chan_library::windows::WindowApp>,
+    app: Option<crate::app_query::AppQuery>,
     command: Option<String>,
     /// JSON-encoded spawn environment map. This is an internal SPA transport;
     /// the public control-socket request carries the map as structured JSON.
@@ -374,11 +374,11 @@ pub async fn api_terminal_ws(
                     .into_response()
             }
         }
-    } else if matches!(query.app, Some(chan_library::windows::WindowApp::Files)) {
+    } else if matches!(query.app, Some(crate::app_query::AppQuery::Files)) {
         match state.standalone_files.clone() {
             Some(files) => {
-                // A Files window spawn lands in the requested browser or
-                // file-tab directory, resolved through the capability root
+                // A spawn from the file browser or an editor tab lands in
+                // the requested directory, resolved through the capability root
                 // (a real, non-symlink directory only). An absent or
                 // invalid cwd falls back to the canonical home because the
                 // spawn gesture must always land somewhere sensible.
@@ -1383,10 +1383,7 @@ mod tests {
     fn terminal_query_parses_the_files_app_marker() {
         let uri: axum::http::Uri = "/api/terminal/ws?app=files&cwd=home/user".parse().unwrap();
         let Query(query) = Query::<TerminalQuery>::try_from_uri(&uri).expect("files marker");
-        assert!(matches!(
-            query.app,
-            Some(chan_library::windows::WindowApp::Files)
-        ));
+        assert!(matches!(query.app, Some(crate::app_query::AppQuery::Files)));
         assert_eq!(query.cwd.as_deref(), Some("home/user"));
 
         // Absent app stays None so plain Terminal spawns keep the

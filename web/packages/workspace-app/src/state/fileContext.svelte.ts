@@ -2,37 +2,39 @@
 // display namespace, independent of a workspace.
 //
 // A workspace window derives this from `workspace.info` (root = the
-// workspace directory); a Files window derives it from `GET /api/fs/context`
-// (root = "/", start = canonical $HOME). Consumers that only translate
-// paths (absolute display strings, breadcrumbs, terminal cwd conversion,
-// drag scope, per-window local-storage keys) read this context instead of
-// reaching for `workspace.info`, so they work identically in both modes.
+// workspace directory); a standalone window whose tenant serves a filesystem
+// derives it from `GET /api/fs/context` (root = "/", start = canonical
+// $HOME). Consumers that only translate paths (absolute display strings,
+// breadcrumbs, terminal cwd conversion, drag scope, per-window local-storage
+// keys) read this context instead of reaching for `workspace.info`, so they
+// work identically in both modes.
 
 import { windowLibraryId } from "../api/client";
 
 export interface FileContext {
-  /// Absolute display prefix for wire paths ("/" in Files mode, the
-  /// workspace root in workspace mode).
+  /// Absolute display prefix for wire paths ("/" on the standalone
+  /// filesystem, the workspace root in a workspace window).
   rootDisplay: string;
   /// The wire form of the root ("" in both modes today).
   rootWire: string;
-  /// Wire-relative directory the window starts in: canonical $HOME in
-  /// Files mode, "" in workspace mode.
+  /// Wire-relative directory the window starts in: canonical $HOME on the
+  /// standalone filesystem, "" in a workspace window.
   homeWire: string;
-  /// Stable identity for caret/local-storage/drag keys. Files windows use
-  /// `lib:<library-id>|files`; workspace windows keep their root-keyed
-  /// identities so nothing persisted moves.
+  /// Stable identity for caret/local-storage/drag keys. A standalone
+  /// window uses `lib:<library-id>|files`; workspace windows keep their
+  /// root-keyed identities so nothing persisted moves.
   identity: string;
 }
 
-/// Files-mode context, set once by the Files bootstrap from
-/// `GET /api/fs/context` and never replaced afterwards. Null in every
-/// other mode.
+/// The standalone filesystem context, set once by the standalone bootstrap
+/// from `GET /api/fs/context` and never replaced afterwards. Null in a
+/// workspace window, and in a standalone window whose tenant serves no
+/// filesystem.
 export const filesContext = $state<{ current: FileContext | null }>({
   current: null,
 });
 
-/// Build the Files-mode context from the server's fs context payload.
+/// Build the standalone filesystem context from the server's payload.
 export function filesContextFrom(home: string): FileContext {
   return {
     rootDisplay: "/",

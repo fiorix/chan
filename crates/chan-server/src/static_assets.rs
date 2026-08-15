@@ -5,10 +5,11 @@
 //! `index.html` for any path that isn't a baked asset and isn't an
 //! `/api`/`/ws` route, so client-side routes work without server-side
 //! awareness of them. The SPA shell gets `<meta name="chan-prefix">`
-//! and (when set) `<meta name="chan-settings-disabled">` tags
-//! injected so the frontend transport layer prepends the prefix to
-//! fetch and WebSocket URLs and the Settings entry point can grey
-//! itself out.
+//! and (when set) `<meta name="chan-settings-disabled">` and
+//! `<meta name="chan-files">` tags injected so the frontend transport
+//! layer prepends the prefix to fetch and WebSocket URLs, the Settings
+//! entry point can grey itself out, and a standalone terminal window
+//! knows whether this tenant serves a filesystem for it to browse.
 
 use std::sync::Arc;
 
@@ -90,9 +91,13 @@ pub async fn serve_static(State(state): State<Arc<AppState>>, uri: axum::http::U
         }
     };
     let settings_disabled = state.settings_disabled;
+    // A workspace tenant's file surface rides its workspace; the shared
+    // standalone terminal tenant carries this one, and only when the host
+    // could construct it.
+    let files = state.standalone_files.is_some();
     if let Some(file) = WebAssets::get(candidate) {
         let body = if is_index {
-            inject_chan_meta(&file.data, &prefix, settings_disabled)
+            inject_chan_meta(&file.data, &prefix, settings_disabled, files)
         } else {
             file.data.into_owned()
         };
@@ -103,7 +108,7 @@ pub async fn serve_static(State(state): State<Arc<AppState>>, uri: axum::http::U
     }
     // SPA fallback: route paths the frontend handles client-side.
     if let Some(file) = WebAssets::get("index.html") {
-        let body = inject_chan_meta(&file.data, &prefix, settings_disabled);
+        let body = inject_chan_meta(&file.data, &prefix, settings_disabled, files);
         return with_static_cache_headers(
             ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response(),
             true,
@@ -233,11 +238,24 @@ fn with_static_cache_headers(mut response: Response, spa_shell: bool) -> Respons
 ///   - `<meta name="chan-settings-disabled" content="1">` when
 ///     `settings_disabled` is true. Greys out the Settings entry
 ///     point in the SPA.
+///   - `<meta name="chan-files" content="1">` when this tenant serves
+///     the filesystem surface. A standalone terminal window then also
+///     offers the file browser and the editor over the server's
+///     filesystem; without the tag it stays terminals-only, which is
+///     what a host with no usable home directory serves. The tenant is
+///     the authority because it is the thing that either mounted that
+///     surface or did not, and the SPA needs the answer before its
+///     first render.
 ///
-/// No-op when neither hint applies, or when `<head>` isn't found in
+/// No-op when no hint applies, or when `<head>` isn't found in
 /// the document (returns the original bytes unchanged).
-pub fn inject_chan_meta(html: &[u8], prefix: &str, settings_disabled: bool) -> Vec<u8> {
-    if prefix.is_empty() && !settings_disabled {
+pub fn inject_chan_meta(
+    html: &[u8],
+    prefix: &str,
+    settings_disabled: bool,
+    files: bool,
+) -> Vec<u8> {
+    if prefix.is_empty() && !settings_disabled && !files {
         return html.to_vec();
     }
     let needle = b"<head>";
@@ -252,6 +270,9 @@ pub fn inject_chan_meta(html: &[u8], prefix: &str, settings_disabled: bool) -> V
     }
     if settings_disabled {
         insert.push_str("<meta name=\"chan-settings-disabled\" content=\"1\">");
+    }
+    if files {
+        insert.push_str("<meta name=\"chan-files\" content=\"1\">");
     }
     let mut out = Vec::with_capacity(html.len() + insert.len());
     let after_head = pos + needle.len();
@@ -345,7 +366,7 @@ mod tests {
     #[test]
     fn inject_chan_meta_inserts_prefix_after_head() {
         let html = b"<!doctype html><html><head><title>x</title></head></html>";
-        let out = inject_chan_meta(html, "/foo", false);
+        let out = inject_chan_meta(html, "/foo", false, false);
         let s = std::str::from_utf8(&out).unwrap();
         assert!(s.contains("<head><meta name=\"chan-prefix\" content=\"/foo\"><title>"));
         assert!(!s.contains("chan-settings-disabled"));
@@ -354,7 +375,7 @@ mod tests {
     #[test]
     fn inject_chan_meta_inserts_settings_disabled_after_head() {
         let html = b"<head><title>x</title></head>";
-        let out = inject_chan_meta(html, "", true);
+        let out = inject_chan_meta(html, "", true, false);
         let s = std::str::from_utf8(&out).unwrap();
         assert!(s.contains("<head><meta name=\"chan-settings-disabled\" content=\"1\"><title>"));
         assert!(!s.contains("chan-prefix"));
@@ -363,7 +384,7 @@ mod tests {
     #[test]
     fn inject_chan_meta_combines_both_tags() {
         let html = b"<head><title>x</title></head>";
-        let out = inject_chan_meta(html, "/foo", true);
+        let out = inject_chan_meta(html, "/foo", true, false);
         let s = std::str::from_utf8(&out).unwrap();
         // Prefix is injected first, settings-disabled second; both
         // sit immediately after the opening <head>.
@@ -374,16 +395,32 @@ mod tests {
     }
 
     #[test]
+    fn inject_chan_meta_advertises_the_file_surface() {
+        // A tenant that mounted the filesystem surface says so, and the SPA
+        // reads it before its first render to decide whether a standalone
+        // terminal window offers the file browser and the editor.
+        let html = b"<head><title>x</title></head>";
+        let out = inject_chan_meta(html, "", false, true);
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.contains("<head><meta name=\"chan-files\" content=\"1\"><title>"));
+        // A tenant without it stays silent, which is what a host with no
+        // usable home directory serves.
+        let out = inject_chan_meta(html, "", false, false);
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(!s.contains("chan-files"));
+    }
+
+    #[test]
     fn inject_chan_meta_noop_when_nothing_set() {
         let html = b"<head></head>";
-        let out = inject_chan_meta(html, "", false);
+        let out = inject_chan_meta(html, "", false, false);
         assert_eq!(out, html);
     }
 
     #[test]
     fn inject_chan_meta_noop_when_head_missing() {
         let html = b"<html></html>";
-        let out = inject_chan_meta(html, "/foo", true);
+        let out = inject_chan_meta(html, "/foo", true, false);
         assert_eq!(out, html);
     }
 

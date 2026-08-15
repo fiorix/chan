@@ -584,32 +584,6 @@ impl EmbeddedServer {
             .map_err(|e| format!("minting a window: {e}"))
     }
 
-    /// Whether this host serves the standalone files application: the mounted
-    /// shared terminal tenant's constructed answer once that tenant exists (the
-    /// authority -- construction can fail on a supported platform), else the
-    /// platform predicate that construction applies.
-    pub fn files_app_supported(&self) -> bool {
-        self.host
-            .shared_terminal_files_app()
-            .unwrap_or_else(chan_server::standalone_files_supported)
-    }
-
-    /// Mint a standalone FILES window into the local library registry: storage
-    /// kind Terminal (it rides the shared terminal tenant, like every
-    /// standalone terminal) plus the files app, so the watcher opens it in
-    /// files mode. Otherwise identical to [`Self::mint_window`]; callers check
-    /// [`Self::files_app_supported`] first.
-    pub fn mint_files_window(&self) -> Result<WindowRecord, String> {
-        self.host
-            .mint_window_with_origin(
-                chan_server::WindowKind::Terminal,
-                Some(chan_server::WindowApp::Files),
-                None,
-                chan_server::WindowOrigin::Native,
-            )
-            .map_err(|e| format!("minting a files window: {e}"))
-    }
-
     /// Mint a BROWSER-affinity window: the watcher never opens a native twin for
     /// it (the origin filter, D4), so the record exists purely for a browser tab
     /// that holds its own `window_id`. Backs the Window menu's "Open in Browser".
@@ -619,12 +593,7 @@ impl EmbeddedServer {
         workspace_path: Option<String>,
     ) -> Result<WindowRecord, String> {
         self.host
-            .mint_window_with_origin(
-                kind,
-                None,
-                workspace_path,
-                chan_server::WindowOrigin::Browser,
-            )
+            .mint_window_with_origin(kind, workspace_path, chan_server::WindowOrigin::Browser)
             .map_err(|e| format!("minting a browser window: {e}"))
     }
 
@@ -758,7 +727,6 @@ mod tests {
             window_id: window_id.into(),
             library_id: "local".into(),
             kind: chan_server::WindowKind::Workspace,
-            app: None,
             title: String::new(),
             ordinal: 1,
             label: String::new(),

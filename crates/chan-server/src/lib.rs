@@ -15,6 +15,7 @@
 
 #![forbid(unsafe_code)]
 
+mod app_query;
 mod atomic_file;
 mod auth;
 pub mod bulk_transfer;
@@ -76,9 +77,7 @@ pub use chan_library::terminal_sessions::TerminalExit;
 #[cfg(unix)]
 pub use chan_library::user_shell;
 pub use chan_library::window_titles::{SharedWindowTitles, WindowMeta, WindowTitles};
-pub use chan_library::windows::{
-    CreateWindow, EffectiveWindowApp, WindowApp, WindowKind, WindowOrigin, WindowRecord, WindowSet,
-};
+pub use chan_library::windows::{CreateWindow, WindowKind, WindowOrigin, WindowRecord, WindowSet};
 pub(crate) use chan_library::{
     desktop_window_ops, session_presence, window_presence, window_titles, window_transfers,
 };
@@ -1559,11 +1558,9 @@ fn into_tenant_artifacts(a: AppArtifacts) -> chan_library::TenantArtifacts {
     // targeted window_command teardown frame to a window's socket.
     let events_tx = state.events_tx.clone();
     let cell: Arc<dyn chan_library::WorkspaceCellHandle> = Arc::new(CellHandle(workspace_cell));
-    let files_app = state.standalone_files.is_some();
     chan_library::TenantArtifacts {
         app,
         token,
-        files_app,
         terminal_sessions,
         tasks,
         prefix,

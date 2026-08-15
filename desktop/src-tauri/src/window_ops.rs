@@ -43,7 +43,6 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
                 NewWindowKind::Terminal => {
                     serve::spawn_local_terminal_window(Arc::clone(&state)).await
                 }
-                NewWindowKind::Files => serve::spawn_local_files_window(Arc::clone(&state)).await,
                 NewWindowKind::Workspace { key } => new_workspace_window(&state, &key).await,
             };
             let _ = reply.send(result);

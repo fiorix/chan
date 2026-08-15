@@ -1,8 +1,8 @@
-//! Deterministic mutation attribution for the standalone Files tenant.
+//! Deterministic mutation attribution for the standalone filesystem surface.
 //!
 //! A tenant-global suppressor like [`crate::self_writes::SelfWrites`] would
-//! hide one Files window's save from every other Files window on the shared
-//! tenant, and those windows must relist. This bus replaces drop-the-echo
+//! hide one window's save from every other window on the shared tenant, and
+//! those windows must relist. This bus replaces drop-the-echo
 //! with tag-and-forward: a mutating route opens a ticket BEFORE touching the
 //! disk, the watch manager suppresses the raw OS echoes matched to that live
 //! ticket, and a successful commit emits deterministic synthetic `fs` frames

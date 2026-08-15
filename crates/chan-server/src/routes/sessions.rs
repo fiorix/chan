@@ -34,7 +34,7 @@ pub struct SessionQuery {
     #[serde(default)]
     client: Option<String>,
     #[serde(default)]
-    app: Option<chan_library::windows::WindowApp>,
+    app: Option<crate::app_query::AppQuery>,
 }
 
 /// `GET /api/sessions` query: `app=files` lists the Files namespace instead of
@@ -42,7 +42,7 @@ pub struct SessionQuery {
 #[derive(Deserialize)]
 pub struct SessionListQuery {
     #[serde(default)]
-    app: Option<chan_library::windows::WindowApp>,
+    app: Option<crate::app_query::AppQuery>,
 }
 
 /// The on-disk blob dir for a standalone namespace: the terminal blob dir
@@ -50,11 +50,11 @@ pub struct SessionListQuery {
 /// no durable store (control / desktop-local terminals).
 fn standalone_blob_dir(
     state: &AppState,
-    app: Option<chan_library::windows::WindowApp>,
+    app: Option<crate::app_query::AppQuery>,
 ) -> Option<std::path::PathBuf> {
     let dir = state.terminal_session_dir.clone()?;
     Some(match app {
-        Some(chan_library::windows::WindowApp::Files) => crate::terminal_blob::files_dir(&dir),
+        Some(crate::app_query::AppQuery::Files) => crate::terminal_blob::files_dir(&dir),
         None => dir,
     })
 }
@@ -63,10 +63,10 @@ fn standalone_blob_dir(
 /// [`standalone_blob_dir`] for store-less tenants.
 fn ephemeral_map_lock(
     state: &AppState,
-    app: Option<chan_library::windows::WindowApp>,
+    app: Option<crate::app_query::AppQuery>,
 ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Vec<u8>>> {
     let map = match app {
-        Some(chan_library::windows::WindowApp::Files) => &state.ephemeral_files_sessions,
+        Some(crate::app_query::AppQuery::Files) => &state.ephemeral_files_sessions,
         None => &state.ephemeral_sessions,
     };
     map.lock().unwrap_or_else(|e| e.into_inner())
@@ -161,7 +161,7 @@ pub async fn api_put_session(
 async fn put_session_response(
     state: &Arc<AppState>,
     key: String,
-    app: Option<chan_library::windows::WindowApp>,
+    app: Option<crate::app_query::AppQuery>,
     body: Bytes,
 ) -> Response {
     // A saved layout blob makes this window PERSISTED: its detached terminal
@@ -208,7 +208,7 @@ pub async fn api_delete_session(
 async fn delete_session_response(
     state: &Arc<AppState>,
     key: String,
-    app: Option<chan_library::windows::WindowApp>,
+    app: Option<crate::app_query::AppQuery>,
     moved: bool,
 ) -> Response {
     // A DELETE either DISCARDS the window or signals a cross-window MOVE-OUT:
@@ -306,14 +306,14 @@ mod tests {
             w: w.to_string(),
             moved: None,
             client: None,
-            app: Some(chan_library::windows::WindowApp::Files),
+            app: Some(crate::app_query::AppQuery::Files),
         })
     }
 
     #[tokio::test]
-    async fn files_app_addresses_a_separate_ephemeral_namespace() {
-        // A Files layout PUT with `app=files` must not land in the ordinary
-        // Terminal map: a Terminal-mode client of the same tenant would
+    async fn the_files_marker_addresses_a_separate_ephemeral_namespace() {
+        // A layout PUT with `app=files` must not land in the plain map: the
+        // same window booted against a host that serves no filesystem would
         // otherwise restore browser/editor tabs against routes it lacks.
         let state = make_test_state(false);
         let resp = api_put_session(
@@ -359,7 +359,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn files_app_addresses_the_files_child_blob_dir() {
+    async fn the_files_marker_addresses_the_files_child_blob_dir() {
         let mut state = make_test_state(false);
         let dir = tempfile::tempdir().expect("tempdir");
         Arc::get_mut(&mut state)

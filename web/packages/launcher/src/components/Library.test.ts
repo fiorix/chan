@@ -191,10 +191,10 @@ describe("Library: devserver groups", () => {
     expect(target!.querySelector('input[aria-label="Select prod"]')).not.toBeNull();
   });
 
-  it("offers no files-window action: a files window is opened from a terminal", () => {
-    // The launcher spawns terminals and workspace windows; a Files window is
-    // opened from inside one (`cs window new` in its own terminal), so no
-    // machine card advertises one.
+  it("offers no files-window action: a terminal window IS the file window", () => {
+    // There is one standalone window family. A standalone terminal window
+    // browses and edits the machine's filesystem itself, wherever the host
+    // serves one, so the launcher has no separate Files action to offer.
     mountList();
     expect(byAria("New terminal on prod")).toBeTruthy();
     expect(ariaLabels().some((l) => l.toLowerCase().includes("files window"))).toBe(false);

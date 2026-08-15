@@ -1844,7 +1844,6 @@ pub async fn mint_library_window(
     if let Some(gw) = &conn.gateway {
         let body = chan_server::CreateWindow {
             kind,
-            app: None,
             workspace_path,
             origin: chan_server::WindowOrigin::Native,
             acting_window_id: None,
@@ -1865,7 +1864,6 @@ pub async fn mint_library_window(
     let url = format!("{}/api/library/windows", base_origin(&conn.host, conn.port));
     let body = chan_server::CreateWindow {
         kind,
-        app: None,
         workspace_path,
         // The desktop mints native windows on a connected devserver.
         origin: chan_server::WindowOrigin::Native,
@@ -3063,7 +3061,6 @@ mod tests {
             window_id: window_id.into(),
             library_id: "lib-1".into(),
             kind: chan_server::WindowKind::Terminal,
-            app: None,
             title: "Terminal Window 1".into(),
             ordinal: 1,
             label: String::new(),

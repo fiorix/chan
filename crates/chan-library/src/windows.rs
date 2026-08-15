@@ -52,92 +52,11 @@ pub const MAX_WINDOW_LABEL_CHARS: usize = 64;
 
 /// Window flavour. `rename_all = "lowercase"` pins the wire tags
 /// `"terminal"` / `"workspace"`.
-///
-/// `kind` identifies the SERVING TENANT CLASS, not the user-visible
-/// application: a Files window is `kind: terminal` (it rides the shared
-/// standalone terminal tenant) plus `app: files`. Keeping the enum closed keeps
-/// every existing row and feed consumer parsing; an older client reads a Files
-/// row as an ordinary Terminal row, which is the intended degrade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WindowKind {
     Terminal,
     Workspace,
-}
-
-/// The user-visible application riding a terminal-class tenant, carried as an
-/// optional discriminator beside `kind`. Absent means the kind's default app
-/// (Terminal for a terminal row, Workspace for a workspace row), so existing
-/// rows keep their exact wire and disk shape. `rename_all = "lowercase"` pins
-/// the wire tag `"files"`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum WindowApp {
-    Files,
-}
-
-/// The user-visible application of a window, projected from `(kind, app,
-/// control)`. Every consumer that cares about the application (ordinals,
-/// titles, sort order, reap rules, launcher buckets) switches on this, never on
-/// scattered `kind == Terminal && app == Some(Files)` tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EffectiveWindowApp {
-    Terminal,
-    Files,
-    Workspace,
-}
-
-/// Project `(kind, app)` onto the effective application. The invariant
-/// validation ([`validate_kind_app`]) rejects the contradictory combinations,
-/// so this projection resolves them conservatively (kind wins) rather than
-/// panicking on a row a future peer might still hand us. Public so wire views
-/// that carry `(kind, app)` without a full row rank and label consistently.
-pub fn effective_app_of(kind: WindowKind, app: Option<WindowApp>) -> EffectiveWindowApp {
-    match (kind, app) {
-        (WindowKind::Terminal, Some(WindowApp::Files)) => EffectiveWindowApp::Files,
-        (WindowKind::Terminal, None) => EffectiveWindowApp::Terminal,
-        (WindowKind::Workspace, _) => EffectiveWindowApp::Workspace,
-    }
-}
-
-/// The `(kind, app, workspace_path, control)` truth table, enforced wherever a
-/// row enters the library (mint requests and durable-row loads):
-///
-///   kind      app    workspace_path  control  valid
-///   --------  -----  --------------  -------  -----
-///   terminal  -      -               any      yes (Terminal)
-///   terminal  files  -               false    yes (Files)
-///   workspace -      present         false    yes (Workspace)
-///   terminal  files  present         any      no
-///   workspace files  any             any      no
-///   terminal  files  -               true     no
-pub fn validate_kind_app(
-    kind: WindowKind,
-    app: Option<WindowApp>,
-    workspace_path: Option<&str>,
-    control: bool,
-) -> Result<(), InvalidWindowShape> {
-    match (kind, app) {
-        (WindowKind::Workspace, Some(_)) => Err(InvalidWindowShape::AppOnWorkspaceKind),
-        (WindowKind::Terminal, Some(WindowApp::Files)) if workspace_path.is_some() => {
-            Err(InvalidWindowShape::FilesWithWorkspacePath)
-        }
-        (WindowKind::Terminal, Some(WindowApp::Files)) if control => {
-            Err(InvalidWindowShape::FilesControl)
-        }
-        _ => Ok(()),
-    }
-}
-
-/// Why a `(kind, app, workspace_path, control)` combination is rejected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum InvalidWindowShape {
-    #[error("a workspace window cannot carry an app discriminator")]
-    AppOnWorkspaceKind,
-    #[error("a files window cannot carry a workspace path")]
-    FilesWithWorkspacePath,
-    #[error("a control terminal cannot be a files window")]
-    FilesControl,
 }
 
 /// Which client surface minted a window. `Native` (a desktop or CLI mint) is
@@ -176,14 +95,8 @@ pub struct WindowRecord {
     /// `lib-<hex>` for a devserver. Routes the attach, groups the per-library
     /// window menu, decorates remote titles, and forms the global key.
     pub library_id: String,
-    /// Window flavour: the serving tenant class, not the user-visible app.
+    /// Window flavour.
     pub kind: WindowKind,
-    /// The user-visible application riding a terminal-class tenant (`files`).
-    /// Absent means the kind's default app; omitted from the wire so existing
-    /// rows and older consumers keep their exact shape (an older client reads a
-    /// Files row as an ordinary Terminal row, the intended degrade).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub app: Option<WindowApp>,
     /// Library-composed and persisted display title, auto-derived (no user
     /// rename). Local perspective (`⌂ Terminal Window N` /
     /// `⌂ {path} Window N`); the desktop re-decorates a remote library's rows
@@ -244,14 +157,6 @@ pub struct WindowRecord {
     pub origin: WindowOrigin,
 }
 
-impl WindowRecord {
-    /// The user-visible application of this record; see
-    /// [`PersistedWindow::effective_app`].
-    pub fn effective_app(&self) -> EffectiveWindowApp {
-        effective_app_of(self.kind, self.app)
-    }
-}
-
 impl std::fmt::Debug for WindowRecord {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -259,7 +164,6 @@ impl std::fmt::Debug for WindowRecord {
             .field("window_id", &self.window_id)
             .field("library_id", &self.library_id)
             .field("kind", &self.kind)
-            .field("app", &self.app)
             .field("title", &self.title)
             .field("ordinal", &self.ordinal)
             .field("label", &self.label)
@@ -301,12 +205,6 @@ pub struct WindowSet {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateWindow {
     pub kind: WindowKind,
-    /// The application to ride a terminal-class tenant: `files` mints a Files
-    /// window. Absent mints the kind's default app; an older server ignores the
-    /// field and mints a plain Terminal, which is why capable launchers gate the
-    /// Files action on the server's advertised capability.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub app: Option<WindowApp>,
     /// Required for `kind == Workspace`; omitted for a terminal window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
@@ -335,12 +233,6 @@ pub struct CreateWindow {
 pub struct PersistedWindow {
     pub window_id: String,
     pub kind: WindowKind,
-    /// The user-visible application riding a terminal-class tenant (`files`).
-    /// Absent on every pre-existing row and on plain Terminal / Workspace rows,
-    /// so their on-disk shape is unchanged; an older binary that rewrites the
-    /// store drops the field and the row durably becomes a plain Terminal.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub app: Option<WindowApp>,
     pub title: String,
     pub ordinal: u32,
     /// User-supplied terminal/workspace-window caption. Empty on legacy rows
@@ -381,12 +273,6 @@ pub struct PersistedWindow {
 }
 
 impl PersistedWindow {
-    /// The user-visible application of this row. Control rows project as
-    /// Terminal here; the `control` flag stays its own orthogonal marker.
-    pub fn effective_app(&self) -> EffectiveWindowApp {
-        effective_app_of(self.kind, self.app)
-    }
-
     /// Assemble the wire [`WindowRecord`] from this durable row plus the live
     /// state the route layer holds: the owning `library_id`, the serving
     /// tenant's `prefix` + `token` (empty when the tenant is off), and whether
@@ -403,7 +289,6 @@ impl PersistedWindow {
             window_id: self.window_id.clone(),
             library_id,
             kind: self.kind,
-            app: self.app,
             title: self.title.clone(),
             ordinal: self.ordinal,
             label: self.label.clone(),
@@ -467,13 +352,10 @@ impl WindowRegistry {
     /// Open the registry at `store_path`, loading any persisted window set plus
     /// the sibling first-open state. An absent or unreadable store degrades to
     /// an empty set / default state rather than refusing to start (the windows
-    /// reappear as clients re-create them). Rows are loaded independently so
-    /// one unknown or malformed row (a future kind, a hand-edit) costs only
-    /// itself, never the rest of the set; skipped rows are not rewritten away
-    /// until the next user mutation saves.
+    /// reappear as clients re-create them).
     pub fn open(store_path: PathBuf) -> Self {
         let windows = match std::fs::read(&store_path) {
-            Ok(bytes) => load_rows_tolerant(&bytes),
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
             Err(_) => Vec::new(),
         };
         let state_path = state_path_for(&store_path);
@@ -530,36 +412,26 @@ impl WindowRegistry {
     /// returns the durable row. Fires the change notification. The desktop and
     /// CLI mint through here; a browser mint uses [`Self::create_with_origin`].
     pub fn create(&self, kind: WindowKind, workspace_path: Option<String>) -> PersistedWindow {
-        self.create_with_origin(kind, None, workspace_path, WindowOrigin::Native)
-            .expect("a plain kind mint is always a valid shape")
+        self.create_with_origin(kind, workspace_path, WindowOrigin::Native)
     }
 
-    /// Mint and persist a new window with an explicit application and client
-    /// `origin`, stamped at creation so a browser-minted row is never briefly
-    /// visible as native to the desktop reconciler. Rejects a contradictory
-    /// `(kind, app, workspace_path)` shape so an invalid row can never enter
-    /// the durable set. Otherwise identical to [`Self::create`].
+    /// Mint and persist a new window with an explicit client `origin`, stamped at
+    /// creation so a browser-minted row is never briefly visible as native to the
+    /// desktop reconciler. Otherwise identical to [`Self::create`].
     pub fn create_with_origin(
         &self,
         kind: WindowKind,
-        app: Option<WindowApp>,
         workspace_path: Option<String>,
         origin: WindowOrigin,
-    ) -> Result<PersistedWindow, InvalidWindowShape> {
-        validate_kind_app(kind, app, workspace_path.as_deref(), false)?;
+    ) -> PersistedWindow {
         let (row, snapshot) = {
             let mut windows = self.lock();
             let window_id = mint_id(&windows);
-            let ordinal = next_ordinal(
-                &windows,
-                effective_app_of(kind, app),
-                workspace_path.as_deref(),
-            );
-            let title = compose_title(kind, app, ordinal, workspace_path.as_deref());
+            let ordinal = next_ordinal(&windows, kind, workspace_path.as_deref());
+            let title = compose_title(kind, ordinal, workspace_path.as_deref());
             let row = PersistedWindow {
                 window_id,
                 kind,
-                app,
                 title,
                 ordinal,
                 label: String::new(),
@@ -574,7 +446,7 @@ impl WindowRegistry {
         };
         self.save_best_effort(&snapshot);
         self.notify.notify_waiters();
-        Ok(row)
+        row
     }
 
     /// Mint a transient devserver CONTROL terminal row: `kind = Terminal`,
@@ -591,7 +463,6 @@ impl WindowRegistry {
         let row = PersistedWindow {
             window_id,
             kind: WindowKind::Terminal,
-            app: None,
             title: "Control Terminal".to_string(),
             ordinal: 0,
             label: String::new(),
@@ -633,21 +504,18 @@ impl WindowRegistry {
         removed
     }
 
-    /// Remove `window_id` ONLY if it is a NON-CONTROL window whose effective
-    /// app is Terminal and whose PTY exited while detached. A workspace window
-    /// (its panes' deaths must not close it), a Files window (its layout and
-    /// file tabs outlive its terminals), and a control window (the desktop
-    /// exit-watcher owns those) are left untouched, so this is safe to fire
-    /// from the shared terminal tenant's reap hook. Returns whether a row was
-    /// removed; fires the change notification when so.
+    /// Remove `window_id` ONLY if it is a NON-CONTROL terminal window whose PTY
+    /// exited while detached. A
+    /// workspace window (its panes' deaths must not close it) and a control
+    /// window (the desktop exit-watcher owns those) are left untouched, so this
+    /// is safe to fire from the shared terminal tenant's reap hook. Returns
+    /// whether a row was removed; fires the change notification when so.
     pub fn remove_terminal(&self, window_id: &str) -> bool {
         let (removed, snapshot) = {
             let mut windows = self.lock();
             let before = windows.len();
             windows.retain(|w| {
-                !(w.window_id == window_id
-                    && matches!(w.effective_app(), EffectiveWindowApp::Terminal)
-                    && !w.control)
+                !(w.window_id == window_id && matches!(w.kind, WindowKind::Terminal) && !w.control)
             });
             (windows.len() != before, windows.clone())
         };
@@ -715,15 +583,14 @@ impl WindowRegistry {
         matched
     }
 
-    /// Snapshot the durable window set, ordered for stable display: control,
-    /// then Terminal, Files, Workspace, then by `(workspace_path, ordinal,
-    /// window_id)`. The route layer maps each row through
-    /// [`PersistedWindow::to_record`].
+    /// Snapshot the durable window set, ordered for stable display: terminals
+    /// before workspaces, then by `(workspace_path, ordinal, window_id)`. The
+    /// route layer maps each row through [`PersistedWindow::to_record`].
     pub fn snapshot(&self) -> Vec<PersistedWindow> {
         let mut windows = self.lock().clone();
         windows.sort_by(|a, b| {
-            display_order(a)
-                .cmp(&display_order(b))
+            kind_order(a.kind)
+                .cmp(&kind_order(b.kind))
                 .then_with(|| a.workspace_path.cmp(&b.workspace_path))
                 .then_with(|| a.ordinal.cmp(&b.ordinal))
                 .then_with(|| a.window_id.cmp(&b.window_id))
@@ -759,53 +626,11 @@ impl WindowRegistry {
     }
 }
 
-/// Parse the persisted window set row by row: keep every row that decodes to a
-/// valid shape, warn and skip the rest. A malformed top-level document reads as
-/// empty, matching the startup-availability posture of the whole-store read.
-/// Rows whose `(kind, app, workspace_path, control)` combination is
-/// contradictory are skipped too, so a hand-edited store cannot smuggle an
-/// invalid row past the mint-time validation.
-fn load_rows_tolerant(bytes: &[u8]) -> Vec<PersistedWindow> {
-    let rows: Vec<serde_json::Value> = match serde_json::from_slice(bytes) {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!("window registry store is not a JSON array: {e}");
-            return Vec::new();
-        }
-    };
-    rows.into_iter()
-        .filter_map(|row| match serde_json::from_value::<PersistedWindow>(row) {
-            Ok(window) => {
-                if let Err(e) = validate_kind_app(
-                    window.kind,
-                    window.app,
-                    window.workspace_path.as_deref(),
-                    window.control,
-                ) {
-                    tracing::warn!(window_id = %window.window_id, "skipping window row: {e}");
-                    return None;
-                }
-                Some(window)
-            }
-            Err(e) => {
-                tracing::warn!("skipping unreadable window row: {e}");
-                None
-            }
-        })
-        .collect()
-}
-
-/// Stable display order by effective application: control terminals, then
-/// Terminal, Files, Workspace. A control row is a Terminal-app row whose
-/// `control` flag sorts it first.
-fn display_order(window: &PersistedWindow) -> u8 {
-    if window.control {
-        return 0;
-    }
-    match window.effective_app() {
-        EffectiveWindowApp::Terminal => 1,
-        EffectiveWindowApp::Files => 2,
-        EffectiveWindowApp::Workspace => 3,
+/// Terminals sort before workspaces in the display order.
+fn kind_order(kind: WindowKind) -> u8 {
+    match kind {
+        WindowKind::Terminal => 0,
+        WindowKind::Workspace => 1,
     }
 }
 
@@ -828,19 +653,17 @@ fn mint_id(windows: &[PersistedWindow]) -> String {
     }
 }
 
-/// Lowest-free "Window N" within the same `(effective app, workspace_path)`
-/// family, so a closed window's number is reused rather than monotonically
-/// climbing (mirrors the terminal-tab lowest-free numbering). Terminal and
-/// Files number independently even though both are storage-kind Terminal.
-/// Starts at 1.
+/// Lowest-free "Window N" within the same `(kind, workspace_path)` family, so a
+/// closed window's number is reused rather than monotonically climbing (mirrors
+/// the terminal-tab lowest-free numbering). Starts at 1.
 fn next_ordinal(
     windows: &[PersistedWindow],
-    app: EffectiveWindowApp,
+    kind: WindowKind,
     workspace_path: Option<&str>,
 ) -> u32 {
     let used: HashSet<u32> = windows
         .iter()
-        .filter(|w| w.effective_app() == app && w.workspace_path.as_deref() == workspace_path)
+        .filter(|w| w.kind == kind && w.workspace_path.as_deref() == workspace_path)
         .map(|w| w.ordinal)
         .collect();
     (1u32..)
@@ -848,22 +671,15 @@ fn next_ordinal(
         .expect("u32 always has a free ordinal for a realistic window count")
 }
 
-/// Compose the persisted, library-perspective title: `⌂ Terminal Window N` /
-/// `⌂ Files Window N` for the terminal-tenant apps; `{icon} {full path}
-/// Window N` for a workspace, where the icon is the house glyph under `$HOME`
-/// else the local-other glyph. The remote decoration (a remote arrow plus the
-/// devserver name) is the desktop's job for a remote library's rows; the
-/// library always composes from its own local view.
-fn compose_title(
-    kind: WindowKind,
-    app: Option<WindowApp>,
-    ordinal: u32,
-    workspace_path: Option<&str>,
-) -> String {
-    match effective_app_of(kind, app) {
-        EffectiveWindowApp::Terminal => format!("{ICON_LOCAL_HOME} Terminal Window {ordinal}"),
-        EffectiveWindowApp::Files => format!("{ICON_LOCAL_HOME} Files Window {ordinal}"),
-        EffectiveWindowApp::Workspace => {
+/// Compose the persisted, library-perspective title: `⌂ Terminal Window N` for
+/// a terminal; `{icon} {full path} Window N` for a workspace, where the icon is
+/// the house glyph under `$HOME` else the local-other glyph. The remote
+/// decoration (a remote arrow plus the devserver name) is the desktop's job for
+/// a remote library's rows; the library always composes from its own local view.
+fn compose_title(kind: WindowKind, ordinal: u32, workspace_path: Option<&str>) -> String {
+    match kind {
+        WindowKind::Terminal => format!("{ICON_LOCAL_HOME} Terminal Window {ordinal}"),
+        WindowKind::Workspace => {
             let path = workspace_path.unwrap_or_default();
             let icon = local_workspace_icon(Path::new(path));
             format!("{icon} {path} Window {ordinal}")
@@ -963,7 +779,6 @@ mod tests {
             window_id: "w-1a2b3c4d5e6f7081".into(),
             library_id: "local".into(),
             kind: WindowKind::Terminal,
-            app: None,
             title: "🏠 Terminal Window 1".into(),
             ordinal: 1,
             label: String::new(),
@@ -1007,7 +822,6 @@ mod tests {
             window_id: "w-99aa88bb77cc66dd".into(),
             library_id: "lib-0f1e2d3c4b5a6978".into(),
             kind: WindowKind::Workspace,
-            app: None,
             title: "🏠 /home/u/notes Window 2".into(),
             ordinal: 2,
             label: "release checks".into(),
@@ -1065,7 +879,6 @@ mod tests {
                 window_id: "w-1a2b3c4d5e6f7081".into(),
                 library_id: "local".into(),
                 kind: WindowKind::Terminal,
-                app: None,
                 title: "🏠 Terminal Window 1".into(),
                 ordinal: 1,
                 label: String::new(),
@@ -1116,7 +929,6 @@ mod tests {
         let row = PersistedWindow {
             window_id: "control-terminal-ds1".into(),
             kind: WindowKind::Terminal,
-            app: None,
             title: "Control Terminal".into(),
             ordinal: 0,
             label: String::new(),
@@ -1149,7 +961,6 @@ mod tests {
     fn create_window_wire() {
         let term = CreateWindow {
             kind: WindowKind::Terminal,
-            app: None,
             workspace_path: None,
             origin: WindowOrigin::Native,
             acting_window_id: None,
@@ -1165,7 +976,6 @@ mod tests {
 
         let ws = CreateWindow {
             kind: WindowKind::Workspace,
-            app: None,
             workspace_path: Some("/home/u/notes".into()),
             origin: WindowOrigin::Native,
             acting_window_id: None,
@@ -1192,7 +1002,6 @@ mod tests {
         // (so an existing client / row stays native).
         let browser = CreateWindow {
             kind: WindowKind::Workspace,
-            app: None,
             workspace_path: Some("/n".into()),
             origin: WindowOrigin::Browser,
             acting_window_id: None,
@@ -1209,7 +1018,6 @@ mod tests {
         let mut rec = PersistedWindow {
             window_id: "w-b".into(),
             kind: WindowKind::Workspace,
-            app: None,
             title: "🏠 /n Window 1".into(),
             ordinal: 1,
             label: String::new(),
@@ -1237,7 +1045,6 @@ mod tests {
         let p = PersistedWindow {
             window_id: "w-deadbeefdeadbeef".into(),
             kind: WindowKind::Workspace,
-            app: None,
             title: "🏠 /n Window 1".into(),
             ordinal: 1,
             label: String::new(),
@@ -1269,7 +1076,6 @@ mod tests {
         let t = PersistedWindow {
             window_id: "w-0".into(),
             kind: WindowKind::Terminal,
-            app: None,
             title: "🏠 Terminal Window 1".into(),
             ordinal: 1,
             label: String::new(),
@@ -1288,7 +1094,6 @@ mod tests {
         let c = PersistedWindow {
             window_id: "control-terminal-ds1".into(),
             kind: WindowKind::Terminal,
-            app: None,
             title: "Control Terminal".into(),
             ordinal: 0,
             label: String::new(),
@@ -1316,7 +1121,6 @@ mod tests {
         let h = PersistedWindow {
             window_id: "w-1".into(),
             kind: WindowKind::Terminal,
-            app: None,
             title: "🏠 Terminal Window 2".into(),
             ordinal: 2,
             label: String::new(),
@@ -1509,19 +1313,14 @@ mod tests {
         // test does not depend on a real registry path.
         let home = dirs::home_dir().expect("home dir");
         let under_home = home.join("notes");
-        let title = compose_title(
-            WindowKind::Workspace,
-            None,
-            1,
-            Some(under_home.to_str().unwrap()),
-        );
+        let title = compose_title(WindowKind::Workspace, 1, Some(under_home.to_str().unwrap()));
         assert!(
             title.starts_with(ICON_LOCAL_HOME),
             "under-home → ⌂: {title}"
         );
         assert!(title.ends_with("Window 1"));
 
-        let elsewhere = compose_title(WindowKind::Workspace, None, 3, Some("/opt/elsewhere"));
+        let elsewhere = compose_title(WindowKind::Workspace, 3, Some("/opt/elsewhere"));
         assert_eq!(
             elsewhere,
             format!("{ICON_LOCAL_OTHER} /opt/elsewhere Window 3")
@@ -1613,7 +1412,6 @@ mod tests {
         let p = PersistedWindow {
             window_id: "w-abc".into(),
             kind: WindowKind::Workspace,
-            app: None,
             title: "🏠 /n Window 1".into(),
             ordinal: 1,
             label: "release checks".into(),
@@ -1644,7 +1442,6 @@ mod tests {
         let c = PersistedWindow {
             window_id: "control-terminal-ds1".into(),
             kind: WindowKind::Terminal,
-            app: None,
             title: "Control Terminal".into(),
             ordinal: 0,
             label: String::new(),
@@ -1696,261 +1493,6 @@ mod tests {
         assert!(ids.contains(&ws.window_id), "workspace survives");
         assert!(ids.contains(&ctrl.window_id), "control survives");
         assert!(!ids.contains(&term.window_id), "terminal gone");
-    }
-
-    // --- files app ----------------------------------------------------------
-
-    #[test]
-    fn files_row_wire_is_terminal_kind_plus_files_app() {
-        let (reg, _d) = registry();
-        let row = reg
-            .create_with_origin(
-                WindowKind::Terminal,
-                Some(WindowApp::Files),
-                None,
-                WindowOrigin::Native,
-            )
-            .expect("files mint");
-        assert_eq!(row.effective_app(), EffectiveWindowApp::Files);
-        assert_eq!(row.title, "⌂ Files Window 1");
-        let v = serde_json::to_value(&row).unwrap();
-        assert_eq!(
-            v,
-            json!({
-                "window_id": row.window_id,
-                "kind": "terminal",
-                "app": "files",
-                "title": "⌂ Files Window 1",
-                "ordinal": 1,
-            })
-        );
-        assert_eq!(row, serde_json::from_value(v).unwrap());
-    }
-
-    #[test]
-    fn plain_rows_keep_their_wire_shape_without_app() {
-        let (reg, _d) = registry();
-        let term = reg.create(WindowKind::Terminal, None);
-        let v = serde_json::to_value(&term).unwrap();
-        assert!(
-            v.get("app").is_none(),
-            "a plain terminal row must not grow an app field"
-        );
-        assert_eq!(term.effective_app(), EffectiveWindowApp::Terminal);
-        let ws = reg.create(WindowKind::Workspace, Some("/n".into()));
-        assert_eq!(ws.effective_app(), EffectiveWindowApp::Workspace);
-        assert!(serde_json::to_value(&ws).unwrap().get("app").is_none());
-    }
-
-    #[test]
-    fn invalid_kind_app_shapes_are_rejected_at_mint() {
-        let (reg, _d) = registry();
-        assert!(matches!(
-            reg.create_with_origin(
-                WindowKind::Terminal,
-                Some(WindowApp::Files),
-                Some("/n".into()),
-                WindowOrigin::Native,
-            ),
-            Err(InvalidWindowShape::FilesWithWorkspacePath)
-        ));
-        assert!(matches!(
-            reg.create_with_origin(
-                WindowKind::Workspace,
-                Some(WindowApp::Files),
-                Some("/n".into()),
-                WindowOrigin::Native,
-            ),
-            Err(InvalidWindowShape::AppOnWorkspaceKind)
-        ));
-        assert!(
-            reg.snapshot().is_empty(),
-            "a rejected mint must not persist a row"
-        );
-        assert!(matches!(
-            validate_kind_app(WindowKind::Terminal, Some(WindowApp::Files), None, true),
-            Err(InvalidWindowShape::FilesControl)
-        ));
-    }
-
-    #[test]
-    fn files_and_terminal_ordinal_families_are_independent() {
-        let (reg, _d) = registry();
-        let t1 = reg.create(WindowKind::Terminal, None);
-        let t2 = reg.create(WindowKind::Terminal, None);
-        let f1 = reg
-            .create_with_origin(
-                WindowKind::Terminal,
-                Some(WindowApp::Files),
-                None,
-                WindowOrigin::Native,
-            )
-            .unwrap();
-        assert_eq!((t1.ordinal, t2.ordinal), (1, 2));
-        assert_eq!(f1.ordinal, 1, "files numbers from 1 beside two terminals");
-        // Closing Files Window 1 frees 1 for the next Files mint without
-        // touching terminal numbering.
-        assert!(reg.remove(&f1.window_id));
-        let f = reg
-            .create_with_origin(
-                WindowKind::Terminal,
-                Some(WindowApp::Files),
-                None,
-                WindowOrigin::Native,
-            )
-            .unwrap();
-        assert_eq!(f.ordinal, 1);
-        let t3 = reg.create(WindowKind::Terminal, None);
-        assert_eq!(t3.ordinal, 3);
-    }
-
-    #[test]
-    fn snapshot_orders_control_terminal_files_workspace() {
-        let (reg, _d) = registry();
-        reg.create(WindowKind::Workspace, Some("/z".into()));
-        reg.create_with_origin(
-            WindowKind::Terminal,
-            Some(WindowApp::Files),
-            None,
-            WindowOrigin::Native,
-        )
-        .unwrap();
-        reg.create(WindowKind::Terminal, None);
-        reg.create_control("ctl".into(), "lib-remote".into());
-        let order: Vec<(bool, EffectiveWindowApp)> = reg
-            .snapshot()
-            .iter()
-            .map(|w| (w.control, w.effective_app()))
-            .collect();
-        assert_eq!(
-            order,
-            vec![
-                (true, EffectiveWindowApp::Terminal),
-                (false, EffectiveWindowApp::Terminal),
-                (false, EffectiveWindowApp::Files),
-                (false, EffectiveWindowApp::Workspace),
-            ]
-        );
-    }
-
-    #[test]
-    fn remove_terminal_spares_a_files_row() {
-        let (reg, _d) = registry();
-        let files = reg
-            .create_with_origin(
-                WindowKind::Terminal,
-                Some(WindowApp::Files),
-                None,
-                WindowOrigin::Native,
-            )
-            .unwrap();
-        assert!(
-            !reg.remove_terminal(&files.window_id),
-            "a files row must survive the last-PTY reap hook"
-        );
-        assert!(reg
-            .snapshot()
-            .iter()
-            .any(|w| w.window_id == files.window_id));
-        assert!(reg.remove(&files.window_id), "explicit discard still works");
-    }
-
-    #[test]
-    fn create_window_files_wire() {
-        let files = CreateWindow {
-            kind: WindowKind::Terminal,
-            app: Some(WindowApp::Files),
-            workspace_path: None,
-            origin: WindowOrigin::Browser,
-            acting_window_id: None,
-        };
-        assert_eq!(
-            serde_json::to_value(&files).unwrap(),
-            json!({ "kind": "terminal", "app": "files", "origin": "browser" })
-        );
-        // A request without the field stays a plain terminal mint.
-        let plain: CreateWindow = serde_json::from_value(json!({ "kind": "terminal" })).unwrap();
-        assert_eq!(plain.app, None);
-    }
-
-    // --- tolerant row loading ----------------------------------------------
-
-    /// A store holding every row shape at once: current rows, a Files row, a
-    /// future app tag, a future kind tag, an invalid kind/app combination, and
-    /// plain garbage. Every currently-valid row must survive the load.
-    #[test]
-    fn tolerant_load_keeps_valid_rows_and_skips_the_rest() {
-        let bytes = serde_json::to_vec(&json!([
-            { "window_id": "w-term", "kind": "terminal", "title": "⌂ Terminal Window 1", "ordinal": 1 },
-            { "window_id": "w-files", "kind": "terminal", "app": "files", "title": "⌂ Files Window 1", "ordinal": 1 },
-            { "window_id": "w-ws", "kind": "workspace", "title": "⌂ /n Window 1", "ordinal": 1, "workspace_path": "/n" },
-            { "window_id": "w-future-app", "kind": "terminal", "app": "holograph", "title": "?", "ordinal": 2 },
-            { "window_id": "w-future-kind", "kind": "portal", "title": "?", "ordinal": 1 },
-            { "window_id": "w-invalid", "kind": "terminal", "app": "files", "workspace_path": "/x", "title": "?", "ordinal": 3 },
-            "not even an object",
-            { "kind": "terminal" }
-        ]))
-        .unwrap();
-        let rows = load_rows_tolerant(&bytes);
-        let ids: Vec<&str> = rows.iter().map(|w| w.window_id.as_str()).collect();
-        assert_eq!(ids, vec!["w-term", "w-files", "w-ws"]);
-        assert_eq!(rows[1].app, Some(WindowApp::Files));
-    }
-
-    #[test]
-    fn tolerant_load_treats_a_malformed_document_as_empty() {
-        assert!(load_rows_tolerant(b"{ not json").is_empty());
-        assert!(load_rows_tolerant(b"{\"an\": \"object\"}").is_empty());
-    }
-
-    /// Skipped rows survive on disk until the next user mutation rewrites the
-    /// store: opening a registry over a mixed store must not rewrite the file.
-    #[test]
-    fn open_does_not_rewrite_a_store_with_skipped_rows() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("windows.json");
-        let bytes = serde_json::to_vec(&json!([
-            { "window_id": "w-term", "kind": "terminal", "title": "⌂ Terminal Window 1", "ordinal": 1 },
-            { "window_id": "w-future-kind", "kind": "portal", "title": "?", "ordinal": 1 }
-        ]))
-        .unwrap();
-        std::fs::write(&path, &bytes).unwrap();
-        let reg = WindowRegistry::open(path.clone());
-        assert_eq!(reg.snapshot().len(), 1);
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            bytes,
-            "open alone must not rewrite the store"
-        );
-        // A user mutation rewrites; the unknown row is dropped only then.
-        reg.create(WindowKind::Terminal, None);
-        let rewritten = std::fs::read_to_string(&path).unwrap();
-        assert!(!rewritten.contains("w-future-kind"));
-    }
-
-    /// The downgrade contract: a decoder without the `app` field (the older
-    /// client's row shape) reads a Files row as an ordinary Terminal row.
-    #[test]
-    fn old_decoder_reads_a_files_row_as_terminal() {
-        #[derive(Deserialize)]
-        struct OldPersistedWindow {
-            window_id: String,
-            kind: WindowKind,
-            #[allow(dead_code)]
-            title: String,
-            ordinal: u32,
-        }
-        let files = json!({
-            "window_id": "w-files",
-            "kind": "terminal",
-            "app": "files",
-            "title": "⌂ Files Window 1",
-            "ordinal": 1,
-        });
-        let old: OldPersistedWindow = serde_json::from_value(files).unwrap();
-        assert_eq!(old.kind, WindowKind::Terminal);
-        assert_eq!(old.window_id, "w-files");
-        assert_eq!(old.ordinal, 1);
     }
 
     // --- change notification (watch broadcaster contract) ------------------

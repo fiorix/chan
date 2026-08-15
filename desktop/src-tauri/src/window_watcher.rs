@@ -467,7 +467,6 @@ mod tests {
             window_id: window_id.into(),
             library_id: library_id.into(),
             kind,
-            app: None,
             title: "🏠 Terminal Window 1".into(),
             ordinal: 1,
             label: String::new(),

@@ -25,7 +25,6 @@ import { loadScopedLibrarySnapshot } from "../api/libraryCommand";
 
 interface WindowNaming {
   kind: WindowKind;
-  app?: "files";
   ordinal: number;
   label: string;
   control: boolean;
@@ -53,7 +52,6 @@ export async function initWindowTitle(): Promise<void> {
     if (!me) return;
     naming = {
       kind: me.kind,
-      app: me.app,
       ordinal: me.ordinal,
       label: me.label ?? "",
       control: me.control,

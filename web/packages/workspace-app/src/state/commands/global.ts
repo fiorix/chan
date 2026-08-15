@@ -59,7 +59,7 @@ async function testScreenLock(): Promise<void> {
 /// - the arriving frame's handler already reports; a refusal lands in the
 /// status pill persistently so it survives until the user has seen it.
 async function executeOpen(target: string): Promise<void> {
-  // A Files window has no /api/open behind it (that route applies workspace
+  // A standalone window has no /api/open behind it (that route applies workspace
   // semantics: link targets, drafts, create-on-missing). Resolve the plain
   // path client-side instead: a listable target is a directory and opens in
   // the browser, anything else opens as a file tab (a missing path lands on

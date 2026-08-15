@@ -21,8 +21,6 @@ export type ScopedWorkspaceStatus =
 export interface ScopedLibraryWindow {
   window_id: string;
   kind: ScopedWindowKind;
-  /** Terminal-tenant application ("files"); absent for plain rows. */
-  app?: "files";
   title: string;
   ordinal: number;
   label: string;

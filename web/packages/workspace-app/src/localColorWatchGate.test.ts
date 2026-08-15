@@ -23,9 +23,12 @@ describe("local-color watch surface gate", () => {
     );
   });
 
-  test("the theme-watch twin keeps its terminal-only gate", () => {
+  test("the theme-watch twin subscribes in every standalone window", () => {
+    // Keyed on "no workspace", not on terminal-only: a standalone window
+    // that also browses files still follows the launcher's light/dark
+    // choice, and a workspace window still never subscribes.
     expect(app).toMatch(
-      /if \(ui\.terminalOnly\) \{[\s\S]{0,300}disposeLocalThemeWatch = openLocalThemeWatch\(/,
+      /if \(!windowCaps\.workspace\) \{[\s\S]{0,300}disposeLocalThemeWatch = openLocalThemeWatch\(/,
     );
   });
 });

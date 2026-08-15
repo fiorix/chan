@@ -1,11 +1,10 @@
 // @vitest-environment jsdom
 //
-// A Files window (`?kind=files`) is the same SPA served by the shared
-// standalone tenant plus the Files filesystem surface. That tenant mounts no
-// `/api/workspace`, no index, no graph, and no live document authority, so
-// the boot has to reach exactly five things: preferences, the filesystem
-// context, the layout blob, the root listing, and the listings down to the
-// window's home directory.
+// The standalone terminal window's boot, with and without a filesystem
+// behind it. Both shapes ride the same shared tenant: it mounts no
+// `/api/workspace`, no index, no graph, and no live document authority, and
+// it mounts the filesystem surface only where the host could build one --
+// which the served shell declares as `<meta name="chan-files">`.
 //
 // The api mock therefore defines ONLY the calls the boot is allowed to make.
 // Any other `api.*` call throws rather than resolving, so a boot that reaches
@@ -86,6 +85,25 @@ function openTabs(): { kind: string; selected?: string | null }[] {
   return out;
 }
 
+/// Declare (or withdraw) the tenant's filesystem surface exactly the way
+/// chan-server injects it into the served shell. Must run before the state
+/// modules are imported: the capability is read once at module load.
+function serveFiles(on: boolean): void {
+  document.head.querySelector('meta[name="chan-files"]')?.remove();
+  if (!on) return;
+  const meta = document.createElement("meta");
+  meta.setAttribute("name", "chan-files");
+  meta.setAttribute("content", "1");
+  document.head.appendChild(meta);
+}
+
+async function boot(withFiles: boolean): Promise<void> {
+  serveFiles(withFiles);
+  store = await import("./store.svelte");
+  tabs = await import("./tabs.svelte");
+  await store.bootstrap();
+}
+
 beforeEach(async () => {
   vi.resetModules();
   vi.resetAllMocks();
@@ -104,16 +122,14 @@ beforeEach(async () => {
     if (dir === HOME) return [entry(`${HOME}/notes.md`, false)];
     return [];
   });
-  window.history.replaceState({}, "", `/?kind=files&w=w-files`);
+  window.history.replaceState({}, "", `/?kind=terminal&w=w-term`);
   sessionStorage.clear();
   localStorage.clear();
-  store = await import("./store.svelte");
-  tabs = await import("./tabs.svelte");
 });
 
-describe("a files window boots against the standalone tenant only", () => {
+describe("a standalone terminal window whose tenant serves files", () => {
   test("it reads the filesystem context and never the workspace payload", async () => {
-    await store.bootstrap();
+    await boot(true);
 
     expect(apiFsContext).toHaveBeenCalled();
     expect(apiWorkspace).not.toHaveBeenCalled();
@@ -123,7 +139,7 @@ describe("a files window boots against the standalone tenant only", () => {
   });
 
   test("it lists the root and the chain down to home, never recursively", async () => {
-    await store.bootstrap();
+    await boot(true);
 
     const dirs = apiList.mock.calls.map(([dir]) => dir);
     expect(dirs).toContain("");
@@ -134,14 +150,18 @@ describe("a files window boots against the standalone tenant only", () => {
     expect(dirs.every((dir) => typeof dir === "string")).toBe(true);
   });
 
-  test("a fresh window is one file browser opened at home, and nothing else", async () => {
-    await store.bootstrap();
+  test("a fresh window is one terminal, the file surface waiting behind it", async () => {
+    await boot(true);
 
+    // This is a terminal window: it opens on a shell, not on a browser. The
+    // browser is a tab the user opens when they want it, which is why the
+    // tree above is primed.
     const open = openTabs();
     expect(open).toHaveLength(1);
-    expect(open[0]?.kind).toBe("browser");
-    // Opened AT home, not merely selecting it under a collapsed root.
-    expect(open[0]?.selected).toBe(HOME);
+    expect(open[0]?.kind).toBe("terminal");
+    // And the window is not the narrow terminals-only one: the file browser
+    // and the editor are dispatchable in it.
+    expect(store.isTerminalOnlyWindow()).toBe(false);
   });
 
   test("the window keeps a file context that translates paths without a workspace", async () => {
@@ -149,7 +169,7 @@ describe("a files window boots against the standalone tenant only", () => {
       "./fileContext.svelte"
     );
 
-    await store.bootstrap();
+    await boot(true);
 
     const ctx = filesContext.current;
     expect(ctx?.homeWire).toBe(HOME);
@@ -159,5 +179,20 @@ describe("a files window boots against the standalone tenant only", () => {
     // into the wire form the file routes take.
     expect(ctx && wirePathFromAbsolute(ctx, `/${HOME}/notes`)).toBe(`${HOME}/notes`);
     expect(ctx && wirePathFromAbsolute(ctx, "/")).toBe("");
+  });
+});
+
+describe("a standalone terminal window whose tenant serves no files", () => {
+  test("it never reaches for the filesystem, and boots on a terminal", async () => {
+    await boot(false);
+
+    expect(apiFsContext).not.toHaveBeenCalled();
+    expect(apiList).not.toHaveBeenCalled();
+    expect(apiWorkspace).not.toHaveBeenCalled();
+    const open = openTabs();
+    expect(open).toHaveLength(1);
+    expect(open[0]?.kind).toBe("terminal");
+    // Terminals are all it can hold, which is what terminal-only means.
+    expect(store.isTerminalOnlyWindow()).toBe(true);
   });
 });

@@ -147,24 +147,34 @@ export function clientNonce(): string {
   return clientNonceValue;
 }
 
-/// Whether this window is the standalone Files application (`?kind=files`),
-/// read straight off the URL like `?w=` and `?lib=` so the api layer stays
-/// independent of the state modules.
-export function isFilesWindow(): boolean {
+/// Whether this window's file operations go to the STANDALONE filesystem
+/// surface -- the shared terminal tenant's, over the server machine's disk --
+/// rather than to a workspace. True in a standalone terminal window whose
+/// tenant mounted that surface, which the served shell declares as
+/// `<meta name="chan-files">`. Read straight off the URL and the document,
+/// like `?w=` and `?lib=`, so the api layer stays independent of the state
+/// modules.
+export function usesStandaloneFiles(): boolean {
   if (typeof window === "undefined") return false;
-  return new URL(window.location.href).searchParams.get("kind") === "files";
+  const kind = new URL(window.location.href).searchParams.get("kind");
+  if (kind !== "terminal" && kind !== "control") return false;
+  try {
+    return document.querySelector('meta[name="chan-files"]') !== null;
+  } catch {
+    return false;
+  }
 }
 
-/// Query suffix a mutating call needs on the standalone Files tenant, and
-/// nothing at all anywhere else. `w` names the writing window so the server
-/// attributes the change back to it (a window must not read its own save as
-/// an external edit), and `app=files` selects the Files contract on a route
-/// whose path serves two of them.
+/// Query suffix a mutating call needs on the standalone filesystem surface,
+/// and nothing at all in a workspace. `w` names the writing window so the
+/// server attributes the change back to it (a window must not read its own
+/// save as an external edit), and `app=files` selects the standalone contract
+/// on a route whose path serves two of them.
 export function filesMutationSuffix(
   existingQuery: boolean,
   opts: { app?: boolean } = {},
 ): string {
-  if (!isFilesWindow()) return "";
+  if (!usesStandaloneFiles()) return "";
   const params = new URLSearchParams();
   if (opts.app) params.set("app", "files");
   params.set("w", sessionWindowId());
@@ -173,10 +183,10 @@ export function filesMutationSuffix(
 
 export function sessionPath(): string {
   const base = `/api/session?w=${encodeURIComponent(sessionWindowId())}&client=${encodeURIComponent(clientNonceValue)}`;
-  // A Files window's layout lives in its own blob namespace so a client
-  // booted in Terminal-only mode can never restore browser/editor tabs
-  // against routes it does not have.
-  return isFilesWindow() ? `${base}&app=files` : base;
+  // A window holding browser/editor tabs keeps its layout in its own blob
+  // namespace, so the same window booted against a host that serves no
+  // filesystem can never restore tabs whose routes are not there.
+  return usesStandaloneFiles() ? `${base}&app=files` : base;
 }
 
 /// The chan-library this window belongs to. The library backend appends
@@ -197,9 +207,10 @@ export function windowLibraryId(): string {
 /// window KIND, and the WORKSPACE IDENTITY the SPA actually loaded, NOT the
 /// `?w=` window label, which is an opaque per-window id (`w-<hex>`, set by the
 /// desktop window watcher) that differs between two windows of the SAME
-/// workspace. A terminal-only window scopes as `lib:{id}|terminal` (every
-/// standalone terminal in one library shares its `/terminal` tenant, so
-/// terminal-to-terminal moves stay allowed within the same library); a workspace
+/// workspace. A standalone window scopes as `lib:{id}|terminal` (every
+/// standalone window in one library shares its `/terminal` tenant -- and its
+/// filesystem surface, where there is one -- so moves between them stay
+/// allowed within the same library); a workspace
 /// window scopes as `lib:{id}|workspace:{key}` keyed on its stable identity, so
 /// two windows of one workspace share a scope while different workspaces, and
 /// terminal-to-workspace, get distinct scopes. The `library_id` prefix makes both
@@ -210,15 +221,10 @@ export function windowLibraryId(): string {
 /// and the library id because this module is below the workspace store.
 export function windowDragScope(scope: {
   libraryId: string;
-  terminalOnly: boolean;
-  files: boolean;
+  standalone: boolean;
   workspaceKey: string | null;
 }): string {
-  if (scope.terminalOnly) return `lib:${scope.libraryId}|terminal`;
-  // Files windows partition their own scope: tabs (terminals included)
-  // move between same-library Files windows only, never into a Terminal
-  // or Workspace window.
-  if (scope.files) return `lib:${scope.libraryId}|files`;
+  if (scope.standalone) return `lib:${scope.libraryId}|terminal`;
   return `lib:${scope.libraryId}|workspace:${scope.workspaceKey ?? "unknown"}`;
 }
 
@@ -887,7 +893,7 @@ export const api = {
     if (authorityVersion !== undefined && authorityVersion !== null) {
       params.set("authority_version", String(authorityVersion));
     }
-    if (isFilesWindow()) params.set("w", sessionWindowId());
+    if (usesStandaloneFiles()) params.set("w", sessionWindowId());
     const suffix = params.size > 0 ? `?${params.toString()}` : "";
     const headers = {
       ...directAuthHeaders(),

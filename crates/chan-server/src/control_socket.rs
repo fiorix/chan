@@ -1558,9 +1558,7 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
         ControlRequest::ClipboardPaste { window_id, prefer } => {
             handle_clipboard_paste(window_id, prefer, events_tx, window_bus).await
         }
-        ControlRequest::WindowNew { window_id } => {
-            handle_window_new(desktop, workspace_cell, unserve, tenant, window_id).await
-        }
+        ControlRequest::WindowNew => handle_window_new(desktop, workspace_cell, tenant).await,
         ControlRequest::WindowOpen { id } => into_response(
             desktop
                 .dispatch(|reply| DesktopWindowOp::Open {
@@ -3252,24 +3250,11 @@ fn handover_error_message(error: HandoverError) -> String {
 async fn handle_window_new(
     desktop: &crate::desktop_window_ops::DesktopBridge,
     workspace_cell: &Arc<RwLock<Option<WorkspaceCell>>>,
-    unserve: &UnserveScope,
     tenant: ControlTenant,
-    window_id: Option<String>,
 ) -> ControlResponse {
     use crate::desktop_window_ops::{DesktopWindowOp, NewWindowKind};
     let kind = match tenant {
-        ControlTenant::TerminalOnly => {
-            // The tenant says "terminal-class", not which app: a Files
-            // window's shells sit on the shared standalone terminal tenant
-            // alongside a plain terminal window's. The caller's window is
-            // what separates them, so a Files window spawns another Files
-            // window and everything else a terminal.
-            if caller_runs_files_app(unserve, window_id.as_deref()) {
-                NewWindowKind::Files
-            } else {
-                NewWindowKind::Terminal
-            }
-        }
+        ControlTenant::TerminalOnly => NewWindowKind::Terminal,
         ControlTenant::Workspace => {
             let workspace = match workspace_from_cell(workspace_cell) {
                 Ok(workspace) => workspace,
@@ -3287,32 +3272,6 @@ async fn handle_window_new(
             .dispatch(|reply| DesktopWindowOp::New { kind, reply })
             .await,
     )
-}
-
-/// Does the window the caller's terminal runs in show the Files application?
-///
-/// The host's own window registry is the authority -- the caller only names an
-/// id, so a wrong or foreign id (a devserver's row, a window this host does
-/// not own, an unset `$CHAN_WINDOW_ID`) simply reads as "not Files" and
-/// `cs window new` falls back to the tenant-derived kind. That degrade is the
-/// point: guessing wrong here costs a plain terminal window, never an error in
-/// the user's face.
-fn caller_runs_files_app(unserve: &UnserveScope, window_id: Option<&str>) -> bool {
-    use crate::EffectiveWindowApp;
-    let Some(window_id) = window_id else {
-        return false;
-    };
-    let host = match unserve {
-        UnserveScope::Host(weak) => weak.upgrade(),
-        UnserveScope::Standalone { .. } | UnserveScope::Unsupported => None,
-    };
-    let Some(host) = host else {
-        return false;
-    };
-    host.assemble_window_records()
-        .iter()
-        .find(|record| record.window_id == window_id)
-        .is_some_and(|record| record.effective_app() == EffectiveWindowApp::Files)
 }
 
 /// `cs window rm`: authoritatively remove the window. The host weak drops the
@@ -4238,12 +4197,9 @@ fn term_list(registry: &TerminalRegistry, windows: &[WindowRecord]) -> Result<St
                     let kind = if rec.control {
                         "control"
                     } else {
-                        match rec.effective_app() {
-                            chan_library::windows::EffectiveWindowApp::Terminal => {
-                                "standalone-terminal"
-                            }
-                            chan_library::windows::EffectiveWindowApp::Files => "files",
-                            chan_library::windows::EffectiveWindowApp::Workspace => "workspace",
+                        match rec.kind {
+                            crate::WindowKind::Terminal => "standalone-terminal",
+                            crate::WindowKind::Workspace => "workspace",
                         }
                     };
                     let status = if rec.connected { "alive" } else { "offline" };
@@ -6001,7 +5957,6 @@ mod tests {
             window_id: window_id.into(),
             library_id: "local".into(),
             kind,
-            app: None,
             title: String::new(),
             ordinal: 1,
             label: String::new(),
@@ -6289,7 +6244,6 @@ mod tests {
         live: usize,
         discarded: std::sync::atomic::AtomicBool,
         tunnels: Arc<chan_revtunnel::server::TunnelRegistry>,
-        records: Vec<WindowRecord>,
     }
 
     impl FakeHost {
@@ -6298,14 +6252,6 @@ mod tests {
                 live,
                 discarded: std::sync::atomic::AtomicBool::new(false),
                 tunnels: chan_revtunnel::server::TunnelRegistry::new(),
-                records: Vec::new(),
-            }
-        }
-
-        fn with_records(records: Vec<WindowRecord>) -> Self {
-            Self {
-                records,
-                ..Self::new(0)
             }
         }
     }
@@ -6327,7 +6273,7 @@ mod tests {
             Ok(chan_library::WorkspaceLifecycleOutcome::NotFound)
         }
         fn assemble_window_records(&self) -> Vec<WindowRecord> {
-            self.records.clone()
+            Vec::new()
         }
         fn discard_window(&self, _window_id: &str) -> Result<bool, chan_library::Error> {
             self.discarded
@@ -6399,112 +6345,6 @@ mod tests {
             fake.discarded.load(std::sync::atomic::Ordering::SeqCst),
             "an offline row must be discarded"
         );
-    }
-
-    /// Run `cs window new` from `caller` on a terminal tenant whose host owns
-    /// `records`, and report the window kind the desktop was asked to spawn.
-    async fn window_new_kind(caller: Option<&str>, records: Vec<WindowRecord>) -> String {
-        let (window_ops, mut ops_rx) = tokio::sync::mpsc::channel(1);
-        let mut ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::TerminalOnly);
-        ctx.desktop.window_ops = Some(window_ops);
-        let host: Arc<dyn chan_library::HostControl> = Arc::new(FakeHost::with_records(records));
-        ctx.unserve = UnserveScope::Host(Arc::downgrade(&host));
-
-        // Stand in for the desktop: take the op, name the kind, answer with an
-        // id so the handler completes.
-        let desktop = tokio::spawn(async move {
-            let Some(DesktopWindowOp::New { kind, reply }) = ops_rx.recv().await else {
-                panic!("expected a New window op");
-            };
-            let kind = format!("{kind:?}");
-            reply.send(Ok("w-new".to_string())).expect("reply");
-            kind
-        });
-
-        let resp = handle_request(
-            ControlRequest::WindowNew {
-                window_id: caller.map(str::to_string),
-            },
-            &ctx,
-        )
-        .await;
-        assert!(matches!(resp, ControlResponse::Ok { .. }), "got: {resp:?}");
-        desktop.await.expect("desktop task")
-    }
-
-    fn files_window(window_id: &str) -> WindowRecord {
-        WindowRecord {
-            app: Some(crate::WindowApp::Files),
-            ..window_record(window_id, crate::WindowKind::Terminal, true, false)
-        }
-    }
-
-    #[tokio::test]
-    async fn window_new_from_a_files_window_spawns_another_files_window() {
-        // The whole point of reading the caller: a Files window's shells sit on
-        // the shared terminal tenant, so tenant-derived inference would hand
-        // the user a bare terminal instead of the app they were using.
-        let kind = window_new_kind(
-            Some("w-files"),
-            vec![
-                window_record("w-term", crate::WindowKind::Terminal, true, false),
-                files_window("w-files"),
-            ],
-        )
-        .await;
-        assert_eq!(kind, "Files");
-    }
-
-    #[tokio::test]
-    async fn window_new_from_a_plain_terminal_window_spawns_a_terminal() {
-        let kind = window_new_kind(
-            Some("w-term"),
-            vec![
-                window_record("w-term", crate::WindowKind::Terminal, true, false),
-                files_window("w-files"),
-            ],
-        )
-        .await;
-        assert_eq!(kind, "Terminal");
-    }
-
-    #[tokio::test]
-    async fn window_new_falls_back_to_a_terminal_when_the_caller_is_unresolvable() {
-        // An unset $CHAN_WINDOW_ID, or an id this host owns no row for (a
-        // devserver's window, a stale env var): the command still works and
-        // opens the tenant's default window rather than failing.
-        assert_eq!(
-            window_new_kind(None, vec![files_window("w-files")]).await,
-            "Terminal"
-        );
-        assert_eq!(
-            window_new_kind(Some("w-gone"), vec![files_window("w-files")]).await,
-            "Terminal"
-        );
-    }
-
-    #[tokio::test]
-    async fn window_new_on_a_workspace_tenant_ignores_the_calling_window() {
-        // A workspace tenant spawns another window of its workspace, whatever
-        // the caller's id says -- so a Files id can never divert it. The empty
-        // cell proves the workspace branch ran.
-        let mut ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace);
-        let host: Arc<dyn chan_library::HostControl> =
-            Arc::new(FakeHost::with_records(vec![files_window("w-files")]));
-        ctx.unserve = UnserveScope::Host(Arc::downgrade(&host));
-        let resp = handle_request(
-            ControlRequest::WindowNew {
-                window_id: Some("w-files".into()),
-            },
-            &ctx,
-        )
-        .await;
-        match resp {
-            ControlResponse::Error { message } => {
-                assert!(message.contains("workspace cell"), "got: {message}")
-            }
-            other => panic!("expected the workspace branch, got {other:?}"),
-        }
     }
 
     #[test]

@@ -427,8 +427,6 @@ export async function openDevserverTerminal(id: string): Promise<void> {
   await backend.openDevserverTerminal(id);
 }
 
-/** Open a standalone Files window on a connected devserver. The window feed
- * updates through the watch subscription, so nothing to refresh here. */
 /** Open a window onto a connected devserver's served workspace by its remote
  * path. The window feed updates through the watch subscription. */
 export async function openDevserverWorkspace(id: string, path: string): Promise<void> {

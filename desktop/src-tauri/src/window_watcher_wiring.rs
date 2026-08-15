@@ -92,10 +92,6 @@ struct RemoteLaunchKey {
     /// NOT retarget (that churn was a per-feed-push reload loop).
     token: String,
     kind: chan_server::WindowKind,
-    /// The record's application: it selects the loaded URL's `?kind=`
-    /// (`terminal` vs `files`) and the title, so a row whose app changed must
-    /// retarget onto the new mode rather than keep the page it booted in.
-    app: Option<chan_server::WindowApp>,
     workspace_path: Option<String>,
     ordinal: u32,
 }
@@ -110,7 +106,6 @@ impl RemoteLaunchKey {
                 record.token.clone()
             },
             kind: record.kind,
-            app: record.app,
             workspace_path: record.workspace_path.clone(),
             ordinal: record.ordinal,
         }
@@ -1061,7 +1056,6 @@ mod tests {
             window_id: "w-1".into(),
             library_id: "lib-test".into(),
             kind: chan_server::WindowKind::Terminal,
-            app: None,
             title: "Terminal".into(),
             ordinal: 1,
             label: String::new(),
@@ -1141,19 +1135,6 @@ mod tests {
             RemoteLaunchKey::from_record(&base, false),
             RemoteLaunchKey::from_record(&workspace, false)
         );
-
-        // A Files row shares the terminal kind AND the terminal tenant's
-        // prefix, so only the app separates the two URLs (`?kind=files` vs
-        // `?kind=terminal`); without it in the key an app change would leave the
-        // window on the page it booted in.
-        let mut files = base.clone();
-        files.app = Some(chan_server::WindowApp::Files);
-        for gateway in [false, true] {
-            assert_ne!(
-                RemoteLaunchKey::from_record(&base, gateway),
-                RemoteLaunchKey::from_record(&files, gateway)
-            );
-        }
     }
 
     #[test]

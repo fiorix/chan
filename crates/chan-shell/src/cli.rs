@@ -539,11 +539,10 @@ pub enum WindowAction {
         #[arg(long, verbatim_doc_comment)]
         pretty: bool,
     },
-    /// Open another window like this one, and print its id
+    /// Open a new window, and print its id
     ///
-    /// Reads the window it runs in ($CHAN_WINDOW_ID): a standalone
-    /// terminal spawns another terminal window, a Files window another
-    /// Files window, a workspace another window of that workspace.
+    /// From a standalone terminal this spawns another terminal window;
+    /// from a workspace it spawns another window of that workspace.
     #[command(verbatim_doc_comment)]
     New,
     /// Focus a window by id, un-hiding it if hidden
@@ -1148,15 +1147,7 @@ pub async fn dispatch(action: ShellAction) -> Result<()> {
         ShellAction::Terminal { action } => cmd_shell_terminal(action).await,
         ShellAction::Window { action } => match action {
             WindowAction::List { json, pretty } => cmd_window_list(json, pretty).await,
-            WindowAction::New => {
-                cmd_window_op(ControlRequest::WindowNew {
-                    window_id: std::env::var("CHAN_WINDOW_ID")
-                        .ok()
-                        .map(|id| id.trim().to_string())
-                        .filter(|id| !id.is_empty()),
-                })
-                .await
-            }
+            WindowAction::New => cmd_window_op(ControlRequest::WindowNew).await,
             WindowAction::Open { id } => cmd_window_op(ControlRequest::WindowOpen { id }).await,
             WindowAction::Rm { id, force } => {
                 cmd_window_op(ControlRequest::WindowClose { id, force }).await
@@ -3382,8 +3373,8 @@ mod tests {
                 action: WindowAction::New
             }
         ));
-        // `new` takes no application selector: the window it runs in is what
-        // decides, so there is nothing to spell out.
+        // `new` takes no application selector: there is one standalone window
+        // family, and the calling tenant decides between it and a workspace.
         assert!(CsCli::try_parse_from(["cs", "window", "new", "--app", "files"]).is_err());
 
         let cli = CsCli::parse_from(["cs", "window", "open", "terminal-win-2"]);

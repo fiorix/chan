@@ -8,10 +8,6 @@
 /** Window flavour, mirroring the Rust `WindowKind` wire tags. */
 export type WindowKind = "terminal" | "workspace";
 
-/** Terminal-tenant application discriminator, mirroring the Rust
- * `WindowApp` wire tag. Absent means the kind's default app. */
-export type WindowApp = "files";
-
 /**
  * The naming fields of a window record. Structural rather than tied to one
  * wire type: the launcher's `WindowRecord` and the workspace app's
@@ -20,7 +16,6 @@ export type WindowApp = "files";
  */
 export interface WindowDisplayParts {
   kind: WindowKind;
-  app?: WindowApp;
   ordinal: number;
   label?: string;
   control?: boolean;
@@ -32,11 +27,8 @@ export interface WindowDisplayParts {
  * "Terminal Window N" for a standalone terminal. No icon: the icon is the
  * machine's, so a row reads the same under any library.
  */
-export function rowLabel(kind: WindowKind, ordinal: number, app?: WindowApp): string {
-  if (kind === "terminal") {
-    return app === "files" ? `Files Window ${ordinal}` : `Terminal Window ${ordinal}`;
-  }
-  return `Window ${ordinal}`;
+export function rowLabel(kind: WindowKind, ordinal: number): string {
+  return kind === "terminal" ? `Terminal Window ${ordinal}` : `Window ${ordinal}`;
 }
 
 /**
@@ -46,7 +38,7 @@ export function rowLabel(kind: WindowKind, ordinal: number, app?: WindowApp): st
  */
 export function windowDisplayName(w: WindowDisplayParts): string {
   if (w.control) return "Control terminal";
-  const generated = rowLabel(w.kind, w.ordinal, w.app);
+  const generated = rowLabel(w.kind, w.ordinal);
   const label = w.label?.trim();
   return label ? `${generated} [${label}]` : generated;
 }

@@ -466,7 +466,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
   /// cache an empty tree so path completion is simply absent rather than
   /// retrying every keystroke.
   function ensureTreeLoaded(): Promise<void> {
-    // A Files window must never request the recursive whole-machine
+    // A standalone window must never request the recursive whole-machine
     // listing; the loaded browser entries (the sparse per-directory tree
     // the File Browser already fetched) are the path-completion source.
     if (!windowCaps.workspace) {

@@ -738,7 +738,7 @@
   const scopeMime = (scope: string): string =>
     SCOPE_DRAG_MIME_PREFIX + dragScopeMimeToken(scope);
   /// This window's drag scope, computed from what the SPA loaded: the owning
-  /// chan-library (`?lib=`), the window kind (terminal-only vs. workspace), and
+  /// chan-library (`?lib=`), the window kind (standalone vs. workspace), and
   /// the active workspace's stable identity (`metadata_key`, falling back to the
   /// absolute `root`). Two windows of the same workspace in the same library
   /// resolve to the same scope; the opaque `?w=w-<hex>` window id is deliberately
@@ -746,8 +746,7 @@
   const currentDragScope = (): string =>
     windowDragScope({
       libraryId: windowLibraryId(),
-      terminalOnly: ui.terminalOnly,
-      files: windowCaps.files && !windowCaps.workspace,
+      standalone: !windowCaps.workspace,
       workspaceKey: workspace.info?.metadata_key ?? workspace.info?.root ?? null,
     });
 
@@ -1529,11 +1528,12 @@
           </button>
         </li>
         {#if !ui.terminalOnly}
-          <!-- The app-spawn rows are workspace-window commands; runCommand's
-               window-mode gate silently drops most of them in a terminal-only
-               window, so the rows do not render there at all. A Files window
-               renders only the rows its capability set can dispatch, the
-               same requirement table runCommand consults. -->
+          <!-- Each window renders only the spawn rows its capabilities can
+               dispatch, off the same requirement table runCommand consults:
+               everything in a workspace window, the file family plus the
+               terminal in a standalone window whose tenant serves a
+               filesystem. A terminals-only window drops to the single
+               hardcoded row below, since its allow-list is the narrow one. -->
           <li class="sep" role="separator"></li>
           {#each appRows.filter((row) => dispatchAllowsCommand(row.id, windowCaps)) as row (row.id)}
             {@const Icon = row.icon}

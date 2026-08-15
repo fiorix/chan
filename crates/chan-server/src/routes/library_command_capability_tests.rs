@@ -20,7 +20,6 @@ impl DevserverFeedSource for RemoteFeed {
             window_id: "remote-window-must-not-leak".into(),
             library_id: "lib-remote".into(),
             kind: WindowKind::Terminal,
-            app: None,
             title: "Remote terminal".into(),
             ordinal: 1,
             label: String::new(),
@@ -78,7 +77,6 @@ async fn fixture() -> Fixture {
     let record = host
         .mint_window_with_origin(
             WindowKind::Workspace,
-            None,
             Some(workspace.path().to_string_lossy().into_owned()),
             WindowOrigin::Browser,
         )
@@ -164,7 +162,6 @@ async fn mint_requires_the_same_tenant_token_and_redacts_snapshot_tokens() {
         .host
         .mint_window_with_origin(
             WindowKind::Workspace,
-            None,
             Some(other.path().to_string_lossy().into_owned()),
             WindowOrigin::Browser,
         )

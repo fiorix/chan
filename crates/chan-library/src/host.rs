@@ -32,9 +32,7 @@ use crate::terminal_sessions::{
     FdStoreManifestEntry, FdStoreParker, FdStoreRestoreReport, FdStoreSessionImport,
     FdStoreSkippedSession,
 };
-use crate::windows::{
-    PersistedWindow, WindowApp, WindowKind, WindowOrigin, WindowRecord, WindowRegistry,
-};
+use crate::windows::{PersistedWindow, WindowKind, WindowOrigin, WindowRecord, WindowRegistry};
 use crate::{
     allocate_workspace_prefix, sanitize_prefix, DevserverRegistry, Error, GatewayRegistry,
     ServeConfig, ServeHandle, WorkspaceOverlay,
@@ -1487,10 +1485,8 @@ impl WorkspaceHost {
 
     /// Cleans all standalone terminal window rows after inherited fdstore FDs
     /// arrive without a readable restart manifest. With no trustworthy
-    /// session-to-window mapping left, ordinary terminal rows are the only safe
-    /// rows to reap; workspace, Files (their layout and file tabs are worth
-    /// more than their dead PTYs), and control windows remain under their
-    /// normal owners.
+    /// session-to-window mapping left, terminal rows are the only safe rows to
+    /// reap; workspace and control windows remain under their normal owners.
     #[cfg(target_os = "linux")]
     pub fn cleanup_fdstore_metadata_loss_terminal_windows(&self) -> Vec<String> {
         let Some(registry) = self.window_registry() else {
@@ -1499,12 +1495,7 @@ impl WorkspaceHost {
         let window_ids: Vec<String> = registry
             .snapshot()
             .into_iter()
-            .filter(|row| {
-                matches!(
-                    row.effective_app(),
-                    crate::windows::EffectiveWindowApp::Terminal
-                ) && !row.control
-            })
+            .filter(|row| matches!(row.kind, WindowKind::Terminal) && !row.control)
             .map(|row| row.window_id)
             .collect();
         let mut removed = Vec::new();
@@ -1693,16 +1684,6 @@ impl WorkspaceHost {
         runtime.artifacts.session_registry.leader()
     }
 
-    /// Whether the mounted shared terminal tenant serves the standalone
-    /// Files application. `None` while that tenant is unmounted (the
-    /// caller falls back to the platform predicate); `Some(bool)` reports
-    /// the constructed state, the authority once a tenant exists.
-    pub fn shared_terminal_files_app(&self) -> Option<bool> {
-        let prefix = self.terminal_tenant_prefix.get()?;
-        let workspaces = self.workspaces.read().ok()?;
-        Some(workspaces.get(prefix)?.artifacts.files_app)
-    }
-
     /// The per-tenant leaders map the window watch feed publishes: tenant route
     /// `prefix` -> that tenant's leader window_id, for every mounted tenant with
     /// a live leader. Keyed by prefix (the value on each [`WindowRecord::prefix`])
@@ -1746,37 +1727,32 @@ impl WorkspaceHost {
         kind: WindowKind,
         workspace_path: Option<String>,
     ) -> Result<WindowRecord, Error> {
-        self.mint_window_with_origin(kind, None, workspace_path, WindowOrigin::Native)
+        self.mint_window_with_origin(kind, workspace_path, WindowOrigin::Native)
     }
 
-    /// Mint a window with an explicit application and client `origin` (stamped
-    /// at creation). A `browser` origin marks a browser-tab mint that
-    /// chan-desktop must not reconcile into a native twin; `app` selects the
-    /// terminal-tenant application (`files`). Otherwise identical to
-    /// [`Self::mint_window`].
+    /// Mint a window with an explicit client `origin` (stamped at creation).
+    /// A `browser` origin marks a browser-tab mint that chan-desktop must not
+    /// reconcile into a native twin. Otherwise identical to [`Self::mint_window`].
     pub fn mint_window_with_origin(
         &self,
         kind: WindowKind,
-        app: Option<WindowApp>,
         workspace_path: Option<String>,
         origin: WindowOrigin,
     ) -> Result<WindowRecord, Error> {
         let registry = self
             .window_registry()
             .ok_or_else(|| Error::Config("window registry not installed".into()))?;
-        let row = registry
-            .create_with_origin(kind, app, workspace_path, origin)
-            .map_err(|e| Error::BadRequest(e.to_string()))?;
-        // A Terminal-tenant window's session lives in the shared terminal tenant
-        // and is auto-opened by the watcher, so the SPA never PUTs a layout blob
-        // to persist it -- without a durable blob it would be orphan-reaped on the
+        let row = registry.create_with_origin(kind, workspace_path, origin);
+        // A Terminal window's session lives in the shared terminal tenant and is
+        // auto-opened by the watcher, so the SPA never PUTs a layout blob to
+        // persist it -- without a durable blob it would be orphan-reaped on the
         // first client disconnect (the window shows but loses its session on
-        // reconnect). Mark every Terminal-kind window (Terminal AND Files apps)
-        // persisted in the shared terminal tenant so the pruner spares its
-        // session -- uniformly across libraries (local and devserver both mount
-        // the shared terminal tenant). A no-op until that tenant is mounted (its
-        // prefix OnceLock is still unset). A workspace window persists through
-        // its own workspace tenant's PUT, not here.
+        // reconnect). Mark every Terminal window persisted in the shared terminal
+        // tenant so the pruner spares its session -- uniformly across libraries
+        // (local and devserver both mount the shared terminal tenant). A no-op
+        // until that tenant is mounted (its prefix OnceLock is still unset). A
+        // workspace window persists through its own workspace tenant's PUT, not
+        // here.
         if matches!(row.kind, WindowKind::Terminal) {
             self.persist_terminal_window(&row.window_id);
         }
@@ -3076,7 +3052,6 @@ mod tests {
         TenantArtifacts {
             app,
             token: None,
-            files_app: false,
             terminal_sessions: fake_registry(),
             tasks: TenantTaskOwner::new(shutdown_tx, Vec::new()),
             prefix: Arc::new(RwLock::new(String::new())),
@@ -5271,17 +5246,6 @@ mod tests {
         let workspace = host
             .mint_window(WindowKind::Workspace, Some("/tmp/fdstore-notes".into()))
             .expect("mint workspace");
-        // A Files window's layout and file tabs outlive its terminals, so
-        // neither fdstore recovery path may reap its row.
-        let files = host
-            .mint_window_with_origin(
-                WindowKind::Terminal,
-                Some(WindowApp::Files),
-                None,
-                WindowOrigin::Native,
-            )
-            .expect("mint files window");
-
         let skipped = vec![
             crate::terminal_sessions::FdStoreSkippedSession {
                 tenant_prefix: "/api/terminal".into(),
@@ -5297,13 +5261,6 @@ mod tests {
                 child_pid: Some(4243),
                 reason: "fd was not inherited".into(),
             },
-            crate::terminal_sessions::FdStoreSkippedSession {
-                tenant_prefix: "/api/terminal".into(),
-                session_id: "s-files".into(),
-                window_id: Some(files.window_id.clone()),
-                child_pid: Some(4244),
-                reason: "fd was not inherited".into(),
-            },
         ];
         let cleanup = host.cleanup_skipped_fdstore_sessions(&skipped);
 
@@ -5311,10 +5268,6 @@ mod tests {
         let rows = registry.snapshot();
         assert!(!rows.iter().any(|row| row.window_id == term.window_id));
         assert!(rows.iter().any(|row| row.window_id == workspace.window_id));
-        assert!(
-            rows.iter().any(|row| row.window_id == files.window_id),
-            "a files window survives an fdstore restore skip"
-        );
         assert_eq!(*reaped.lock().unwrap(), vec![term.window_id.clone()]);
 
         let term2 = host
@@ -5325,10 +5278,6 @@ mod tests {
         let rows = registry.snapshot();
         assert!(!rows.iter().any(|row| row.window_id == term2.window_id));
         assert!(rows.iter().any(|row| row.window_id == workspace.window_id));
-        assert!(
-            rows.iter().any(|row| row.window_id == files.window_id),
-            "a files window survives fdstore metadata loss"
-        );
     }
 
     #[tokio::test]

@@ -48,47 +48,34 @@ pub struct WindowInfo {
     /// desktop registration as `title`; absent under the same conditions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    /// The standalone application (`"files"`) whose blob namespace holds this
-    /// row's saved layout; absent for ordinary Terminal rows and for
-    /// connected-only rows, whose namespace is unknown at this layer. Lets a
-    /// caller label a saved Files layout without parsing titles.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub app: Option<String>,
 }
 
-/// Join saved blob keys (both standalone namespaces: ordinary Terminal keys
-/// plus Files keys, each Files row stamped `app:"files"`) and live socket ids
-/// into one sorted list. BTreeMap so the response order is deterministic
-/// (id-sorted). Raw ids either way; a window id lives in exactly one
-/// namespace, so a collision (the same id saved in both) keeps the Files stamp
-/// and both saved sources. Rows carry no title/kind here -- see
+/// Join saved blob keys and live socket ids into one sorted list. A standalone
+/// window's layout lives in one of two namespaces -- the plain one, or the
+/// `files/` child that holds a layout with browser/editor tabs -- and a row
+/// saved in either is saved, so both are merged here. BTreeMap so the response
+/// order is deterministic (id-sorted). Rows carry no title/kind here -- see
 /// [`join_windows_with_titles`] for the desktop-enriched variant.
-pub(crate) fn join_windows_with_apps(
+pub(crate) fn join_windows(
     saved: Vec<String>,
     saved_files: Vec<String>,
     connected: Vec<String>,
 ) -> Vec<WindowInfo> {
-    let mut by_id: BTreeMap<String, (bool, bool, bool)> = BTreeMap::new();
-    for id in saved {
-        by_id.entry(id).or_insert((false, false, false)).1 = true;
-    }
-    for id in saved_files {
-        let entry = by_id.entry(id).or_insert((false, false, false));
-        entry.1 = true;
-        entry.2 = true;
+    let mut by_id: BTreeMap<String, (bool, bool)> = BTreeMap::new();
+    for id in saved.into_iter().chain(saved_files) {
+        by_id.entry(id).or_insert((false, false)).1 = true;
     }
     for id in connected {
-        by_id.entry(id).or_insert((false, false, false)).0 = true;
+        by_id.entry(id).or_insert((false, false)).0 = true;
     }
     by_id
         .into_iter()
-        .map(|(id, (connected, saved, files))| WindowInfo {
+        .map(|(id, (connected, saved))| WindowInfo {
             id,
             connected,
             saved,
             title: None,
             kind: None,
-            app: files.then(|| "files".to_string()),
         })
         .collect()
 }
@@ -103,7 +90,7 @@ pub(crate) fn join_windows_with_titles(
     connected: Vec<String>,
     titles: &crate::window_titles::WindowTitles,
 ) -> Vec<WindowInfo> {
-    let mut rows = join_windows_with_apps(saved, saved_files, connected);
+    let mut rows = join_windows(saved, saved_files, connected);
     for row in &mut rows {
         if let Some(meta) = titles.get(&row.id) {
             row.title = Some(meta.title);
@@ -173,7 +160,7 @@ mod tests {
 
     #[test]
     fn join_is_a_sorted_union_with_per_source_flags() {
-        let joined = join_windows_with_apps(
+        let joined = join_windows(
             vec!["w-b".into(), "w-a".into()],
             Vec::new(),
             vec!["w-c".into(), "w-b".into()],
@@ -205,7 +192,6 @@ mod tests {
             saved: false,
             title: None,
             kind: None,
-            app: None,
         })
         .unwrap();
         assert_eq!(
@@ -224,7 +210,6 @@ mod tests {
             saved: false,
             title: Some("Terminal Window 1".into()),
             kind: Some("terminal".into()),
-            app: None,
         })
         .unwrap();
         assert_eq!(
@@ -234,23 +219,24 @@ mod tests {
     }
 
     #[test]
-    fn files_namespace_rows_carry_the_app_stamp() {
-        let rows = join_windows_with_apps(
+    fn a_layout_saved_in_either_namespace_reads_as_saved() {
+        // A standalone window's layout lives in the plain namespace or in the
+        // `files/` child, depending on whether it holds file tabs. Either way
+        // the window has a saved layout, and it is ONE row: the merge must not
+        // double-list a window that moved between them.
+        let rows = join_windows(
             vec!["w-term".into()],
             vec!["w-files".into()],
             vec!["w-files".into()],
         );
+        assert_eq!(rows.len(), 2);
         let by_id = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
-        assert_eq!(by_id("w-term").app, None);
-        assert_eq!(by_id("w-files").app.as_deref(), Some("files"));
+        assert!(by_id("w-term").saved && !by_id("w-term").connected);
         assert!(by_id("w-files").saved && by_id("w-files").connected);
-        // The wire keeps the base triple for plain rows and adds `app` only
-        // for Files rows.
+        // The wire keeps the base triple: the namespace is a server-side
+        // storage detail, not something a client reads.
         let json = serde_json::to_string(by_id("w-files")).unwrap();
-        assert_eq!(
-            json,
-            r#"{"id":"w-files","connected":true,"saved":true,"app":"files"}"#
-        );
+        assert_eq!(json, r#"{"id":"w-files","connected":true,"saved":true}"#);
     }
 
     #[test]

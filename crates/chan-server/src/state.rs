@@ -145,12 +145,13 @@ pub struct AppState {
     /// window closes and the tenant is torn down. Unused on workspace
     /// tenants, which take the disk path in the session handlers.
     pub ephemeral_sessions: Mutex<HashMap<String, Vec<u8>>>,
-    /// The Files sibling of `ephemeral_sessions`: in-memory layout blobs for
-    /// Files windows on a store-less terminal tenant, addressed with
-    /// `?app=files`. A separate map (and, on disk, a separate `files/` child
-    /// of the terminal blob dir) keeps Files layouts out of the ordinary
-    /// Terminal namespace, so a client booted in Terminal-only mode never
-    /// restores browser/editor tabs against routes it does not have.
+    /// The filesystem sibling of `ephemeral_sessions`: in-memory layout blobs
+    /// for windows holding browser/editor tabs on a store-less terminal
+    /// tenant, addressed with `?app=files`. A separate map (and, on disk, a
+    /// separate `files/` child of the terminal blob dir) keeps those layouts
+    /// out of the plain namespace, so the same window booted against a host
+    /// that serves no filesystem never restores tabs whose routes are not
+    /// there.
     pub ephemeral_files_sessions: Mutex<HashMap<String, Vec<u8>>>,
     /// On-disk per-window session-blob store for a PERSISTED terminal tenant  --
     /// the desktop's standalone `/terminal` tenant and a standalone devserver
@@ -192,18 +193,20 @@ pub struct AppState {
     /// are gone, so the SPA reloads itself instead of sitting on a
     /// stale view with stuck terminals until a manual Cmd+R.
     pub instance_id: String,
-    /// The standalone Files application's state bundle, present only on a
-    /// shared terminal tenant that constructed a supported standalone
-    /// filesystem. Workspace tenants and unsupported terminal tenants carry
-    /// `None`; the Files routes and the `/ws` scope plumbing read it
-    /// directly and never touch `workspace_cell`.
+    /// The standalone filesystem surface's state bundle, present only on a
+    /// shared terminal tenant that constructed a supported one. Workspace
+    /// tenants and unsupported terminal tenants carry `None`; the file routes
+    /// and the `/ws` scope plumbing read it directly and never touch
+    /// `workspace_cell`. Its presence is also what the served SPA shell
+    /// advertises, so a standalone terminal window knows whether it can offer
+    /// the file browser and the editor.
     pub standalone_files: Option<Arc<StandaloneFilesState>>,
 }
 
-/// Everything the standalone Files tenant owns beyond the plain terminal
-/// surface: the `/`-rooted capability filesystem, the scoped non-recursive
-/// watch manager producing this tenant's `fs` frames, and the mutation bus
-/// attributing its own writes.
+/// Everything the standalone filesystem surface owns beyond the plain
+/// terminal tenant: the `/`-rooted capability filesystem, the scoped
+/// non-recursive watch manager producing this tenant's `fs` frames, and the
+/// mutation bus attributing its own writes.
 pub struct StandaloneFilesState {
     pub fs: Arc<chan_workspace::MiniWorkspace>,
     pub watcher: Arc<crate::standalone_watch::ScopedWatchManager>,

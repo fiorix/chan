@@ -17,16 +17,12 @@ import type { DevserverEntry, WindowRecord, WorkspaceEntry } from "../api/librar
 import { LOCAL_LIBRARY_ID } from "./windowLabel";
 
 /** Order windows within a machine: the connect control terminal pinned FIRST,
- * then standalone terminals before workspace windows, then by ordinal. Plain
- * terminals and Files windows share one list and number independently, so the
- * app breaks the tie between two rows holding the same ordinal. */
+ * then standalone terminals before workspace windows, then by ordinal. */
 export function sortWindows(a: WindowRecord, b: WindowRecord): number {
   if (a.control !== b.control) return a.control ? -1 : 1;
   const rank = (w: WindowRecord): number => (w.kind === "terminal" ? 0 : 1);
   if (rank(a) !== rank(b)) return rank(a) - rank(b);
-  if (a.ordinal !== b.ordinal) return a.ordinal - b.ordinal;
-  const app = (w: WindowRecord): number => (w.app === "files" ? 1 : 0);
-  return app(a) - app(b);
+  return a.ordinal - b.ordinal;
 }
 
 /** Drop a duplicated window_id (defense against Svelte each_key_duplicate, which
@@ -68,8 +64,7 @@ export interface MachineNode {
   /** Host-local library id, or the devserver's library_id (null before first connect). */
   libraryId: string | null;
   control: WindowRecord[];
-  /** Every window of the shared standalone terminal tenant: plain terminals
-   * and Files windows alike, which is what that tenant serves. */
+  /** Every window of the shared standalone terminal tenant. */
   terminals: WindowRecord[];
   workspaces: WorkspaceNode[];
   /** kind=workspace windows of this machine whose path matched no workspace card

@@ -91,7 +91,7 @@ let serverSupportsSceneSync: boolean | null = null;
 
 export function sceneSyncEnabled(): boolean {
   // Live sessions are a workspace-tenant capability. The gate must fire
-  // BEFORE any dial: on a Files window the first failed connect would
+  // BEFORE any dial: on a standalone window the first failed connect would
   // latch the module off, a silently-correct state that masks a real
   // gating bug, so the window mode short-circuits it instead.
   if (!windowCaps.workspace) return false;

@@ -13,10 +13,6 @@
 // `workspace_path`.
 
 export type WindowKind = "terminal" | "workspace";
-/** The user-visible application riding a terminal-class tenant. Absent means
- * the kind's default app (Terminal for a terminal row); "files" marks the
- * standalone Files application. */
-export type WindowApp = "files";
 export const MAX_WINDOW_LABEL_CHARS = 64;
 
 /** Which surface minted a window: a chan-desktop native window, or a launcher
@@ -30,9 +26,6 @@ export interface WindowRecord {
   /** "local" (the baked-in local-disk library) or "lib-<16hex>" (a devserver). */
   library_id: string;
   kind: WindowKind;
-  /** Terminal-tenant application discriminator; absent for plain Terminal and
-   * Workspace rows. A files row is kind "terminal" plus app "files". */
-  app?: WindowApp;
   /** Library-composed, persisted, auto-derived (local perspective). Never parsed. */
   title: string;
   /** Per-(kind, workspace/library) "Window N"; library-owned, persisted. */

@@ -85,7 +85,6 @@
     activePane,
     activeTerminalTab,
     allPaneTabs,
-    allTerminalTabs,
     hasAnyTab,
     closeFind,
     closePane,
@@ -153,6 +152,7 @@
     dispatchAllowsCommand,
   } from "./state/commands";
   import { windowCaps } from "./state/windowCaps";
+  import { filesContext } from "./state/fileContext.svelte";
   import { loadExtensions } from "./state/extensions.svelte";
   import { createDiagramAndOpen } from "./state/commands/diagram";
   import { createSlidesAndOpen } from "./state/commands/slides";
@@ -382,12 +382,14 @@
         syncLiveFocusColorMenu(color, setWindowFocusColor);
       });
     }
-    // A local standalone terminal window follows the launcher's light/dark
-    // choice: subscribe to the local-theme watch (push-on-connect seeds it,
-    // then live on each toggle), applying `null` as OS-follow. Workspace
-    // windows never subscribe; a devserver/remote terminal's host installs no
-    // theme store, so the watch just reports null and the OS query stands.
-    if (ui.terminalOnly) {
+    // A local standalone window follows the launcher's light/dark choice:
+    // subscribe to the local-theme watch (push-on-connect seeds it, then live
+    // on each toggle), applying `null` as OS-follow. Keyed on "no workspace"
+    // rather than terminal-only, so a standalone window that also browses
+    // files keeps following the launcher. Workspace windows never subscribe;
+    // a devserver/remote terminal's host installs no theme store, so the
+    // watch just reports null and the OS query stands.
+    if (!windowCaps.workspace) {
       disposeLocalThemeWatch = openLocalThemeWatch((theme) => {
         applyLocalTheme(theme);
       });
@@ -444,11 +446,10 @@
       resumeTimer = setTimeout(() => {
         resumeTimer = null;
         reconnectWatcher();
-        // Workspace + tree refresh hit /api/files + /api/workspace, neither
-        // of which the terminal tenant serves; only the watcher reconnect
-        // matters for a terminal-only window. A Files window serves the
-        // listing route but not the workspace payload.
-        if (ui.terminalOnly) return;
+        // The tree refresh hits /api/files and the workspace refresh
+        // /api/workspace; a window gets each only where its tenant serves it,
+        // so a terminals-only window takes the watcher reconnect alone.
+        if (!windowCaps.files) return;
         void refreshTree();
         if (windowCaps.workspace) void refreshWorkspace();
       }, 300);
@@ -483,11 +484,15 @@
     scheduleSessionSave();
   }
   function spawnBrowserFromContext(): void {
-    // Terminal-only windows have no file browser surface (the slim server
-    // tenant serves no /api/files); the spawn is a no-op.
-    if (ui.terminalOnly) return;
+    // A window whose tenant serves no filesystem has no browser surface
+    // (there is no /api/files to list); the spawn is a no-op.
+    if (!windowCaps.files) return;
     const ctx = resolveSpawnContext();
-    const select = ctx.file ?? ctx.dir ?? null;
+    // With no context to open at, a workspace window lands on its root -- but
+    // a standalone window's root is `/`, so it lands on the home directory
+    // its tenant reported instead of the whole machine.
+    const rootless = windowCaps.workspace ? null : (filesContext.current?.homeWire ?? null);
+    const select = ctx.file ?? (ctx.dir || rootless);
     // Prime the expanded-dirs map + browserSelection so the new
     // tab's tree opens with the context path visible.
     if (select) revealAndSelect(select);
@@ -504,8 +509,8 @@
   /// pane-mode "P" key spawns a plain Team Work terminal without the dialog.
   function spawnTeamWorkFromContext(): void {
     // Team Work needs a workspace (the lead terminal arms the markdown
-    // editor + drafts dir); not available in terminal-only windows.
-    if (ui.terminalOnly) return;
+    // editor + drafts dir), so it is a workspace-window spawn only.
+    if (!windowCaps.workspace) return;
     const ctx = resolveSpawnContext();
     const lead = createTeamWorkLeadTerminal({ cwd: ctx.dir });
     if (!lead) return;
@@ -513,8 +518,8 @@
     scheduleSessionSave();
   }
   function spawnGraphFromContext(): void {
-    // No graph surface in terminal-only windows (no /api/graph route).
-    if (ui.terminalOnly) return;
+    // No graph surface without a workspace (no /api/graph route).
+    if (!windowCaps.workspace) return;
     const ctx = resolveSpawnContext();
     openGraphWithContext(ctx);
   }
@@ -794,27 +799,27 @@
         return;
       case "o":
       case "O":
-        if (ui.terminalOnly) return;
+        if (!windowCaps.files) return;
         paneModeOpenBrowser(resolveSpawnContext());
         return;
       case "g":
       case "G":
-        if (ui.terminalOnly) return;
+        if (!windowCaps.workspace) return;
         paneModeOpenGraph(resolveSpawnContext());
         return;
       case "b":
       case "B":
-        if (ui.terminalOnly) return;
+        if (!windowCaps.workspace) return;
         paneModeOpenDashboard();
         return;
       case "n":
       case "N":
-        if (ui.terminalOnly) return;
+        if (!windowCaps.workspace) return;
         paneModeStageDraftEditor();
         return;
       case "i":
       case "I":
-        if (ui.terminalOnly) return;
+        if (!windowCaps.workspace) return;
         paneModeStageDiagramEditor();
         return;
       // `h` toggles the Hybrid Nav help cheatsheet without committing the draft;
@@ -830,13 +835,13 @@
       // Same commit-then-act semantics as the other exit keys.
       case "<":
         // Docked file browsers: workspace-only.
-        if (ui.terminalOnly) return;
+        if (!windowCaps.files) return;
         commitPaneMode();
         scheduleSessionSave();
         toggleBrowserSidePane("right");
         return;
       case ">":
-        if (ui.terminalOnly) return;
+        if (!windowCaps.files) return;
         commitPaneMode();
         scheduleSessionSave();
         toggleBrowserSidePane("left");
@@ -877,8 +882,8 @@
           : e.ctrlKey && !e.metaKey && !e.altKey && e.shiftKey;
       if (richPromptChord) {
         e.preventDefault();
-        // Rich Prompt is workspace-only; off in terminal-only windows.
-        if (ui.terminalOnly) return;
+        // Rich Prompt is workspace-only.
+        if (!windowCaps.workspace) return;
         const term = activeTerminalTab();
         if (term) toggleRichPromptForTab(term.id);
         return;
@@ -1121,14 +1126,19 @@
     killActivePane({ force: true });
     return true;
   }
-  // Terminal-only windows never sit empty: when the last terminal tab is
-  // closed (by any path - tab close, Cmd+W, pane close), close the window.
-  // `terminalArmed` is set by bootstrap only AFTER the first terminal exists,
-  // so the transient empty layout during boot can't trip this. No-op in
-  // workspace mode and on the web (requestCloseWindow gates on the desktop).
+  // Standalone windows never sit empty: when the last tab is closed (by any
+  // path - tab close, Cmd+W, pane close), close the window. The rule is
+  // "empty", not "no terminals left": a standalone window whose tenant serves
+  // files may hold a browser or an editor after its shells are gone, and that
+  // window is still showing the user something. Where the tenant serves no
+  // files the two are the same thing, since terminals are the only tab kind
+  // such a window can hold. `terminalArmed` is set by bootstrap only AFTER the
+  // first tab exists, so the transient empty layout during boot can't trip
+  // this. No-op in workspace mode and on the web (requestCloseWindow gates on
+  // the desktop).
   $effect(() => {
-    if (!ui.terminalOnly || !ui.terminalArmed) return;
-    if (allTerminalTabs().length > 0) return;
+    if (windowCaps.workspace || !ui.terminalArmed) return;
+    if (hasAnyTab()) return;
     // Last terminal closed (^W / ^D / Cmd+W): the window is empty, which is a
     // discard -- delete its blob before the host destroys the window so it
     // leaves nothing in `cs window list`. But if the window emptied because its
@@ -1219,10 +1229,10 @@
       })
     )
       return;
-    // A Files window gates on the catalog's requirement table instead of
-    // the terminal allow-list: workspace-only ids (and ids the catalog
-    // does not classify) drop before the dispatch switch, the same
-    // filter the launcher's visibility applies.
+    // Every window that is more than terminals gates on the catalog's
+    // requirement table instead of the terminal allow-list: ids beyond its
+    // capabilities (and ids the catalog does not classify) drop before the
+    // dispatch switch, the same filter the launcher's visibility applies.
     if (!ui.terminalOnly && !dispatchAllowsCommand(commandName, windowCaps))
       return;
     switch (commandName) {
@@ -1518,17 +1528,17 @@
 </script>
 
 <div class="app" class:pane-mode={paneMode.active}>
-  <!-- The docked file browsers never render in a terminal-only window:
-       there is no workspace and the slim server tenant serves no
-       /api/files. The pane layout (terminal splits + Hybrid Nav) is the
-       only surface. -->
-  {#if !ui.terminalOnly && browserSidePanes.left}
+  <!-- The docked file browsers render wherever there is a filesystem to
+       list: a workspace window's workspace, or a standalone window whose
+       tenant serves one. Without either there is no /api/files, and the pane
+       layout (terminal splits + Hybrid Nav) is the only surface. -->
+  {#if windowCaps.files && browserSidePanes.left}
     <FileBrowserSidePane side="left" />
   {/if}
   <main>
     <Workspace />
   </main>
-  {#if !ui.terminalOnly && browserSidePanes.right}
+  {#if windowCaps.files && browserSidePanes.right}
     <FileBrowserSidePane side="right" />
   {/if}
 </div>

@@ -58,26 +58,6 @@ function ds(over: Partial<DevserverEntry> & Pick<DevserverEntry, "id">): Devserv
   };
 }
 
-describe("a files window lists among the standalone terminals", () => {
-  it("shares the terminals bucket and the machine count, in ordinal order", () => {
-    const rows = [
-      win({ window_id: "w-t2", library_id: "local", ordinal: 2 }),
-      win({ window_id: "w-f1", library_id: "local", app: "files", ordinal: 1 }),
-      win({ window_id: "w-t1", library_id: "local", ordinal: 1 }),
-    ];
-    const tree = buildMachineTree([], [], rows);
-    const local = tree.machines[0]!;
-
-    expect(local.terminals.map((w) => w.window_id)).toEqual(["w-t1", "w-f1", "w-t2"]);
-    expect(machineWindowCount(local)).toBe(3);
-    // Every window lands in exactly one bucket: a row that fell out of the
-    // terminals list would silently vanish from the launcher.
-    expect(local.workspaces).toHaveLength(0);
-    expect(local.looseWindows).toHaveLength(0);
-    expect(tree.orphans).toHaveLength(0);
-  });
-});
-
 describe("sortWindows", () => {
   it("pins control first, terminals before workspaces, then by ordinal", () => {
     const control = win({ window_id: "c", library_id: "local", control: true, ordinal: 9 });
