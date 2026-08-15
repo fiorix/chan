@@ -102,21 +102,30 @@ impl MiniWorkspace {
     /// no `..`, not empty. The stricter dialect exists because the root is
     /// the whole machine: an accepted `/etc/hosts` would resolve to the
     /// real file.
-    fn wire_rel<'a>(&self, rel: &'a str) -> Result<&'a str> {
+    fn wire_rel(&self, rel: &str) -> Result<String> {
         if rel.starts_with('/') {
             return Err(ChanError::PathEscape);
         }
         if rel.contains('\0') {
             return Err(ChanError::PathEscape);
         }
-        fs_ops::validate_rel(rel)?;
-        Ok(rel)
+        let validated = fs_ops::validate_rel(rel)?;
+        // Return the CANONICAL form, not the caller's spelling: every
+        // downstream comparison (protected paths above all) would otherwise
+        // read a raw string while the filesystem acts on the normalized one,
+        // so `home/user/` or `home/./user` would slip past a guard keyed on
+        // `home/user` and still resolve to it.
+        let Some(canonical) = validated.to_str() else {
+            return Err(ChanError::PathEscape);
+        };
+        Ok(canonical.to_string())
     }
 
-    /// Validate a wire directory query: `""` and `.` identify the root.
-    fn wire_dir<'a>(&self, rel: &'a str) -> Result<&'a str> {
+    /// Validate a wire directory query into its canonical form: `""` and
+    /// `.` identify the root.
+    fn wire_dir(&self, rel: &str) -> Result<String> {
         if rel.is_empty() || rel == "." {
-            return Ok("");
+            return Ok(String::new());
         }
         self.wire_rel(rel)
     }
@@ -132,6 +141,7 @@ impl MiniWorkspace {
     /// non-UTF-8 names skipped with a server-side warning.
     pub fn list(&self, rel: &str) -> Result<Vec<DirEntry>> {
         let rel = self.wire_dir(rel)?;
+        let rel = rel.as_str();
         self.fs.list_with(
             rel,
             ListPolicy {
@@ -158,12 +168,14 @@ impl MiniWorkspace {
     /// symlink target. `""` classifies the root directory.
     pub fn classify(&self, rel: &str) -> Result<PathClass> {
         let rel = self.wire_dir(rel)?;
+        let rel = rel.as_str();
         fs_ops::classify_path(self.fs.root(), rel)
     }
 
     /// Classify through the capability handle (missing leaf is a value).
     pub fn classify_capability(&self, rel: &str) -> Result<WorkspacePath> {
-        self.wire_rel(rel)?;
+        let rel = self.wire_rel(rel)?;
+        let rel = rel.as_str();
         self.fs.classify_workspace_path(rel)
     }
 
@@ -172,19 +184,21 @@ impl MiniWorkspace {
         let Ok(rel) = self.wire_rel(rel) else {
             return false;
         };
-        self.fs.sniff_is_text(rel)
+        self.fs.sniff_is_text(&rel)
     }
 
     /// Raw byte read of one regular file.
     pub fn read(&self, rel: &str) -> Result<Vec<u8>> {
-        self.wire_rel(rel)?;
+        let rel = self.wire_rel(rel)?;
+        let rel = rel.as_str();
         self.fs.read(rel)
     }
 
     /// Buffered text read with the open-handle stat the CAS token derives
     /// from.
     pub fn read_text_with_stat(&self, rel: &str) -> Result<(String, FileStat)> {
-        self.wire_rel(rel)?;
+        let rel = self.wire_rel(rel)?;
+        let rel = rel.as_str();
         self.fs.read_text_with_stat(rel)
     }
 
@@ -199,14 +213,16 @@ impl MiniWorkspace {
     where
         F: FnMut(TextReadEvent<'_>) -> bool,
     {
-        self.wire_rel(rel)?;
+        let rel = self.wire_rel(rel)?;
+        let rel = rel.as_str();
         self.fs
             .read_text_with_stat_chunked(rel, chunk_size, on_event)
     }
 
     /// Bounded byte stream of one regular file (whole file).
     pub fn read_bytes_bounded(&self, rel: &str) -> Result<BoundedFileReader> {
-        self.wire_rel(rel)?;
+        let rel = self.wire_rel(rel)?;
+        let rel = rel.as_str();
         self.fs.read_bytes_bounded(rel)
     }
 
@@ -217,13 +233,15 @@ impl MiniWorkspace {
         start: u64,
         len: u64,
     ) -> Result<BoundedFileReader> {
-        self.wire_rel(rel)?;
+        let rel = self.wire_rel(rel)?;
+        let rel = rel.as_str();
         self.fs.read_bytes_bounded_slice(rel, start, len)
     }
 
     /// Write preflight: existing targets must be writable regular files.
     pub fn ensure_writable(&self, rel: &str) -> Result<WritableFile> {
-        self.wire_rel(rel)?;
+        let rel = self.wire_rel(rel)?;
+        let rel = rel.as_str();
         self.fs.ensure_writable(rel)
     }
 
@@ -235,14 +253,16 @@ impl MiniWorkspace {
         expected_disk: Option<&str>,
         content: &str,
     ) -> Result<()> {
-        self.wire_rel(rel)?;
+        let rel = self.wire_rel(rel)?;
+        let rel = rel.as_str();
         self.fs
             .write_text_if_unchanged(rel, expected_mtime_ns, expected_disk, content)
     }
 
     /// Unconditional atomic text write.
     pub fn write_text(&self, rel: &str, content: &str) -> Result<()> {
-        self.wire_rel(rel)?;
+        let rel = self.wire_rel(rel)?;
+        let rel = rel.as_str();
         self.fs.write_text(rel, content)
     }
 
@@ -256,7 +276,8 @@ impl MiniWorkspace {
     where
         F: FnOnce(&mut dyn AtomicWriteSink) -> Result<()>,
     {
-        self.wire_rel(rel)?;
+        let rel = self.wire_rel(rel)?;
+        let rel = rel.as_str();
         self.fs.write_atomic_stream(rel, kind, feed)
     }
 
@@ -291,6 +312,7 @@ impl MiniWorkspace {
     /// remove a link itself, never what it points at.
     pub fn remove_safe(&self, rel: &str) -> Result<()> {
         let rel = self.wire_rel(rel)?;
+        let rel = rel.as_str();
         if self.is_protected(rel) {
             return Err(ChanError::ProtectedPath(rel.to_string()));
         }
@@ -324,9 +346,17 @@ impl MiniWorkspace {
     /// cross-device move copies the preflighted tree to a uniquely named
     /// temporary sibling of the destination, renames it into place, and
     /// removes the source only once the destination is complete.
+    ///
+    /// The two lanes differ on one case by construction: a rename relocates
+    /// a directory wholesale, so symlinks inside it ride along untouched,
+    /// while the copy lane refuses a tree containing one because it will
+    /// not create symlinks to reproduce it. A move of such a directory
+    /// therefore succeeds within a filesystem and is refused across one.
     pub fn move_plain(&self, from: &str, to: &str) -> Result<()> {
         let from = self.wire_rel(from)?;
+        let from = from.as_str();
         let to = self.wire_rel(to)?;
+        let to = to.as_str();
         if self.is_protected(from) || self.is_protected(to) {
             return Err(ChanError::ProtectedPath(from.to_string()));
         }
@@ -367,7 +397,9 @@ impl MiniWorkspace {
     /// temporary tree, never a pre-existing destination.
     pub fn copy_plain(&self, from: &str, to: &str) -> Result<()> {
         let from = self.wire_rel(from)?;
+        let from = from.as_str();
         let to = self.wire_rel(to)?;
+        let to = to.as_str();
         if self.is_protected(from) || self.is_protected(to) {
             return Err(ChanError::ProtectedPath(from.to_string()));
         }
@@ -396,6 +428,7 @@ impl MiniWorkspace {
     /// into `dest_dir`.
     pub fn resolve_free_name(&self, dest_dir: &str, name: &str) -> Result<String> {
         let dest_dir = self.wire_dir(dest_dir)?;
+        let dest_dir = dest_dir.as_str();
         self.fs.resolve_free_name(dest_dir, name)
     }
 
@@ -403,6 +436,7 @@ impl MiniWorkspace {
     /// directory. Requires a real, non-symlink directory.
     pub fn resolve_directory(&self, rel: &str) -> Result<PathBuf> {
         let rel = self.wire_dir(rel)?;
+        let rel = rel.as_str();
         if rel.is_empty() {
             return Ok(self.fs.canonical_root().to_path_buf());
         }
@@ -665,6 +699,67 @@ mod tests {
             Err(ChanError::ProtectedPath(_))
         ));
         assert!(fx.mini.remove_safe("").is_err());
+    }
+
+    /// A guard keyed on the canonical path must not be dodged by respelling
+    /// it: the operation would still resolve to the protected directory, so
+    /// every alternate spelling has to hit the same refusal.
+    #[test]
+    fn protection_survives_alternate_spellings_of_the_start_directory() {
+        let fx = fixture();
+        for spelling in [
+            "home/user/",
+            "home/./user",
+            "home//user",
+            "./home/user",
+            "home/user/.",
+        ] {
+            assert!(
+                matches!(
+                    fx.mini.remove_safe(spelling),
+                    Err(ChanError::ProtectedPath(_))
+                ),
+                "remove_safe must refuse the start directory spelled {spelling:?}"
+            );
+            assert!(
+                matches!(
+                    fx.mini.move_plain(spelling, "moved"),
+                    Err(ChanError::ProtectedPath(_))
+                ),
+                "move_plain must refuse the start directory spelled {spelling:?}"
+            );
+            assert!(
+                matches!(
+                    fx.mini.copy_plain(spelling, "copied"),
+                    Err(ChanError::ProtectedPath(_))
+                ),
+                "copy_plain must refuse the start directory spelled {spelling:?}"
+            );
+        }
+        assert!(
+            fx.root.join("home/user").is_dir(),
+            "no spelling may have moved or removed the start directory"
+        );
+    }
+
+    /// The same normalization keeps ordinary paths addressable under any
+    /// spelling instead of erroring or resolving somewhere else.
+    #[test]
+    fn alternate_spellings_address_the_same_ordinary_path() {
+        let fx = fixture();
+        stdfs::write(fx.root.join("home/user/note.md"), "body").unwrap();
+        for spelling in [
+            "home/user/note.md",
+            "home/./user/note.md",
+            "home//user/note.md",
+            "./home/user/note.md",
+        ] {
+            assert_eq!(
+                fx.mini.read_text_with_stat(spelling).unwrap().0,
+                "body",
+                "spelling {spelling:?} must read the same file"
+            );
+        }
     }
 
     #[cfg(unix)]
