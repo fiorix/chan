@@ -1,6 +1,8 @@
 # AUR publication is suspended and needs a deliberate restoration
 
-Status: REGISTERED, deferred to v0.87.0 at the v0.86.0 close; suspended 2026-08-06 during the v0.85.0 delivery round. The restoration condition has been re-checked and found unmet on 2026-08-07, 2026-08-08, 2026-08-10 and **2026-08-14**; the most recent check is the section at the end of this file, and it is the one a reader should start from.
+Status: **RESTORED in the v0.91.0 candidate on 2026-08-15**, on an amended condition; the restriction itself was lifted upstream on 2026-08-11. Suspended 2026-08-06 during the v0.85.0 delivery round, then carried through v0.86.0 to v0.90.0 and re-checked unmet on 2026-08-07, 2026-08-10 and 2026-08-14. Start from the last section of this file: it records the restoration, and why four re-checks read "still blocked" against a page that had stopped tracking the answer. The item stays open until the GA tag, because its acceptance needs a real publication run.
+
+The 2026-08-08 re-check the earlier status line claimed has no section in this file and no other record; the dated sections are 08-07, 08-10 and 08-14.
 
 ## What
 
@@ -71,3 +73,29 @@ Still blocked, both halves checked separately per the 2026-08-10 protocol. The n
 ## Rough size
 
 Very small as a code change, one line per job. The judgement is entirely in reading the Arch announcement and deciding the condition is met.
+
+## Restored 2026-08-15, on an amended condition
+
+The restriction was lifted by the AUR on 2026-08-11 and this item's re-check protocol could not see it. Recorded plainly, because the miss is the more useful half of this entry.
+
+**What happened upstream.** Pushes were not merely degraded during the incident, they were disabled outright: aur-general, "AUR packages adoption disabled", Robin Candau, 2026-08-01, states "We have now disabled pushes altogether as well for the moment, while we handle the situation." They were then re-enabled: aur-general, "aurweb v6.5.0 deployed", Leonidas Spyropoulos, 2026-08-11, <https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/thread/P5C7GZ4C3OJIH4EXJ62JAF6X6PY2BCQ4/>, states "SSH/git push access is re-enabled along with adoption". The same message records the mitigation for the mechanism the incident was about: adoption now files a request for review rather than transferring maintainership immediately.
+
+**Why four re-checks missed it.** Every one of them followed this item's own instruction at the end of the 2026-08-10 section: open the news index. The news index has never carried any of it. It still carries exactly one item newer than the 2026-06-12 incident notice, the 2026-07-21 virtualbox-ext-vnc note, which says nothing about the AUR; and the incident notice itself is unchanged and still describes the restrictions as ongoing. So the 2026-08-14 re-check reported "still blocked, nothing changed" three days after the blocker was gone, and it was right about the page it was told to read. **The operational state of the AUR is announced on aur-general, not on the news index.** A condition that names the wrong surface fails silently and indefinitely, which is worse than one that is merely hard to check.
+
+**The condition, amended.** The original required two halves: that the incident be declared resolved, and that pushes be permitted again. Only the second is met, and the first shows no sign of ever arriving; the incident notice has stood unamended for 64 days while the operational state changed twice underneath it. The condition is therefore amended to its operative half -- **an Arch Linux announcement, on any of its official channels including aur-general, stating that package pushes are permitted again** -- and that half is met by the message above.
+
+The dropped half was a proxy. This item chose its condition to be something "a person can open and read" rather than the uncheckable "when the incident is over", and "incident resolved" was standing in for "pushes are allowed". The thing it was standing in for is now stated directly by the people who operate the AUR, so the proxy is superseded rather than waived.
+
+**What the restoration actually took.** Four edits, not the "one deletion per job" this item promised at line 21:
+
+1. the three `false &&` guards, one per job;
+2. the whole `aur-suspended` job, whose own comment said to delete it in the same commit and which would otherwise fail every `targets=aur` dispatch;
+3. the file header note, and the three per-job suspension comments;
+4. the prose in `packaging/distros/README.md` and `packaging/distros/arch/README.md`, one of which also carried a dead link to this item's long-gone `v0.86.0/` path.
+
+The "Nothing else" instruction at line 21 was wrong and would have produced a red first dispatch. `scripts/check-build-matrix.py` was deliberately not consulted, per this item's own section: it is a substring test for `aur-validate:` and stays green either way.
+
+**What is not yet proven.** The acceptance lines that need a real run are unmet until the GA tag: the three jobs scheduling again, and the RPC check of both pkgbases. Two things to watch on the first restored publication, neither of which this item predicted:
+
+- The credential was registered before aurweb v6.5.0, which changed push and account handling. Prove it with a `publish=false` dispatch, and note what that cannot cover: the "Push to the AUR" step is gated on `PUBLISH == 'true'`, so a dry run exercises the credential probe and the render, never the clone-and-push path.
+- Both pkgbases report a server-side `LastModified` of 2026-08-01T12:33Z with the version unchanged at `0.82.0-1`, the same day pushes were disabled. Nothing in this tree explains what touched them. Read both pkgbases before trusting the first push.
