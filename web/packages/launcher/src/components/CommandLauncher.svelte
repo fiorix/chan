@@ -9,7 +9,7 @@
     type DeckScope,
     type DeckScopeId,
   } from "@chan/web-shared/command-deck";
-  import { Folder,
+  import {
     AppWindow,
     Eye,
     EyeOff,
@@ -43,7 +43,6 @@
     newWorkspaceWindow,
     setWindowShown,
     setWorkspacePower,
-    newFilesWindow,
   } from "../state/computerActions";
   import {
     activeCommandLauncherDraft,
@@ -55,8 +54,6 @@
   } from "../state/commandLauncher.svelte";
   import { openNewDialog } from "../state/dialog.svelte";
   import { hasDesktopBridge, hostOs, readOnly,
-    localFilesApp,
-    selfManagedWindows,
   } from "../state/capabilities";
   import { dsKey, isPending, servedKey, wsKey } from "../state/pending.svelte";
   import { screen } from "../state/screen.svelte";
@@ -64,7 +61,6 @@
 
   type CommandId =
     | "new-terminal"
-    | "new-files"
     | "new-window"
     | "windows"
     | "connect"
@@ -245,48 +241,6 @@
     };
   }
 
-  /** The machines that can open a standalone Files window: this one when the
-   * serving host advertises the app and this launcher owns its windows, plus
-   * every connected devserver reporting the capability. Empty means no target
-   * exists, so the root deck drops the branch entirely rather than leading to
-   * an empty list. */
-  function filesWindowTargets(): Entry[] {
-    const local: Entry[] =
-      localFilesApp && selfManagedWindows
-        ? [
-            {
-              id: "computers:new-files:local",
-              title: "This machine",
-              breadcrumb: "Computers › New files window › Local",
-              searchText: `local this machine ${hostOs} files browser editor`,
-              scope: "computers",
-              icon: Monitor,
-              awaitResult: true,
-              dismissImmediatelyOnSuccess: true,
-              run: () => newFilesWindow(),
-            },
-          ]
-        : [];
-    const remote = hasDesktopBridge
-      ? library.devservers
-          .filter((devserver) => devserver.status === "connected" && devserver.files_app)
-          .map(
-            (devserver): Entry => ({
-              id: `computers:new-files:${devserver.id}`,
-              title: devserverName(devserver),
-              breadcrumb: "Computers › New files window › Remote",
-              searchText: `${devserverName(devserver)} ${devserver.host} ${devserver.port} ${devserver.os} files`,
-              scope: "computers",
-              icon: Server,
-              awaitResult: true,
-              dismissImmediatelyOnSuccess: true,
-              run: () => newFilesWindow(devserver),
-            }),
-          )
-      : [];
-    return [...local, ...remote];
-  }
-
   function targetEntries(path: readonly string[]): Entry[] {
     const [command, key] = path;
     switch (command) {
@@ -321,8 +275,6 @@
           : [];
         return [local, ...remote];
       }
-      case "new-files":
-        return filesWindowTargets();
       case "new-window":
         return library.workspaces
           .filter(
@@ -427,19 +379,6 @@
   const rootEntries = $derived.by<Entry[]>(() => {
     const entries: Entry[] = [
       commandEntry("new-terminal", "New terminal", "Choose a computer", SquareTerminal, "shell"),
-      // Target-first like New terminal, and only while some machine can serve
-      // it (the local host meta, a devserver's own report).
-      ...(filesWindowTargets().length > 0
-        ? [
-            commandEntry(
-              "new-files",
-              "New files window",
-              "Choose a computer",
-              Folder,
-              "files browser editor",
-            ),
-          ]
-        : []),
       commandEntry("new-window", "New window", "Choose a workspace", AppWindow, "workspace"),
       // One target-first branch instead of a Focus/Hide/Show/Close quartet
       // that listed the same roster four times over.
@@ -512,7 +451,6 @@
   const deepEntries = $derived.by<Entry[]>(() => {
     const leaves = ([
       "new-terminal",
-      "new-files",
       "new-window",
       "windows",
       "connect",

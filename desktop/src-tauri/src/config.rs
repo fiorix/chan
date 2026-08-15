@@ -602,8 +602,6 @@ fn entry_from_roster_row(
         })
         .unwrap_or_else(|| (gateway.url.clone(), 443));
     let (os, pretty_name) = feed.os_of(&id).unwrap_or_default();
-    // Read before the literal moves `id`.
-    let files_app = feed.files_app_of(&id);
     DevserverEntry {
         // Three-way mapping for rostered rows: a live conn reports
         // Connected (the window-feed watchdog still owns quiet-conn
@@ -640,10 +638,6 @@ fn entry_from_roster_row(
         pending_signin: false,
         os,
         pretty_name,
-        // The Files capability this devserver reported on its current connect
-        // (false while disconnected, so the launcher offers the remote action
-        // only against a server that answered for it).
-        files_app,
         gateway_id: Some(gateway.id.clone()),
         gateway_url: gateway.url.clone(),
         shared: row.shared,
@@ -834,7 +828,6 @@ fn entry_from_devserver(
         // The Files capability this devserver reported on its current connect
         // (false while disconnected, so the launcher offers the remote action
         // only against a server that answered for it).
-        files_app: feed.files_app_of(&d.id),
         // Plain configured rows carry no gateway provenance; gateway-roster
         // rows are synthesized with these set, not read from persisted config.
         gateway_id: None,

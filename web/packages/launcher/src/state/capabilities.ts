@@ -64,16 +64,6 @@ export const selfManagedWindows = caps.selfManagedWindows;
  * registry-mutation controls gate on this. */
 export const readOnly = surface === "readonly";
 
-/** Whether the LOCAL machine serves the standalone Files application,
- * injected as a <meta> tag by the serving host. Remote machines advertise
- * theirs via `DevserverEntry.files_app`. */
-export const localFilesApp =
-  typeof document === "undefined"
-    ? false
-    : document
-        .querySelector('meta[name="chan-files-app"]')
-        ?.getAttribute("content") === "1";
-
 // The launcher host's OS family, injected by the server as a <meta> tag so the
 // LOCAL machine card shows the same OS icon as a remote devserver does. One of
 // `macos | windows | linux | other`, or "" when the tag is absent (no icon).

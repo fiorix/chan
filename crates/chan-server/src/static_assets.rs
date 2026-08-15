@@ -267,9 +267,6 @@ pub fn inject_chan_meta(html: &[u8], prefix: &str, settings_disabled: bool) -> V
 ///     LOCAL machine card can show the host's OS icon. The value is the OS
 ///     family enum (`macos | windows | linux | other`), which carries no
 ///     HTML-attribute-special bytes.
-///   - `<meta name="chan-files-app" content="1">` when the serving host can
-///     construct the standalone Files filesystem state, gating the local
-///     "New Files Window" affordance.
 ///   - `<meta name="chan-launcher-surface" content="desktop|devserver|readonly">`
 ///     always, the single descriptor the SPA splits its capabilities on
 ///     (registry mutation, desktop bridge, self-managed windows).
@@ -289,12 +286,6 @@ fn inject_launcher_meta(html: &[u8], surface: LauncherSurface) -> Vec<u8> {
         "<meta name=\"chan-launcher-surface\" content=\"{}\">",
         surface.meta_value()
     ));
-    // The LOCAL machine's standalone-Files capability, so the launcher can
-    // offer "New Files Window" without a probe round-trip. Remote machines
-    // advertise theirs through `DevserverInfo.files_app` instead.
-    if crate::standalone_files_supported() {
-        insert.push_str("<meta name=\"chan-files-app\" content=\"1\">");
-    }
     // The PWA manifest link, on every launcher surface (the coherent install
     // targets are the fixed-port devserver loopback and the https gateway; the
     // ephemeral-port desktop loopback simply won't install coherently, which is

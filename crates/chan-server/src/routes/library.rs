@@ -198,10 +198,6 @@ pub fn launcher_router(
             post(handle_devserver_terminal),
         )
         .route(
-            "/api/library/devservers/{id}/files-window",
-            post(handle_devserver_files_window),
-        )
-        .route(
             "/api/library/devservers/{id}/workspaces/open",
             post(handle_open_devserver_workspace),
         )
@@ -1463,21 +1459,6 @@ async fn handle_devserver_terminal(
     .await
 }
 
-/// `POST /api/library/devservers/{id}/files-window`: open a standalone Files
-/// window on a connected devserver through the desktop bridge. The desktop
-/// refuses (409) when that devserver does not serve the files application, so
-/// the launcher's capability gate is an affordance, not the authority. 204/409.
-async fn handle_devserver_files_window(
-    State(host): State<Arc<WorkspaceHost>>,
-    AxumPath(id): AxumPath<String>,
-) -> Response {
-    dispatch_window_op(&host, |reply| DesktopWindowOp::OpenDevserverFiles {
-        id,
-        reply,
-    })
-    .await
-}
-
 /// Body of `POST /api/library/devservers/{id}/workspaces/open`: the remote
 /// workspace root to open a window for.
 #[derive(Deserialize)]
@@ -2404,7 +2385,6 @@ mod devserver_route_tests {
                     auto_hide_control: false,
                     os: "linux".into(),
                     pretty_name: Some("Debian GNU/Linux 12".into()),
-                    files_app: false,
                     gateway_id: None,
                     gateway_url: String::new(),
                     shared: false,
@@ -2439,7 +2419,6 @@ mod devserver_route_tests {
                 auto_hide_control: input.auto_hide_control,
                 os: String::new(),
                 pretty_name: None,
-                files_app: false,
                 gateway_id: None,
                 gateway_url: String::new(),
                 shared: false,

@@ -221,10 +221,6 @@ export interface DevserverEntry {
    * `PRETTY_NAME`); null when unknown.
    */
   pretty_name: string | null;
-  /** Whether this devserver serves the standalone Files application, from its
-   * DevserverInfo self-report at connect; absent/false hides the remote Files
-   * action. */
-  files_app?: boolean;
   /**
    * The owning gateway's registry id for a synthesized gateway roster row;
    * null for a plain (persisted) devserver row. Synthesized rows are
@@ -310,10 +306,6 @@ export interface DevserverInput {
 export interface CreateWindowOptions {
   /** kind=workspace: the workspace root path. Omitted for a terminal. */
   workspacePath?: string;
-  /** Terminal-tenant application to mint ("files"). Only sent to servers that
-   * advertise the capability, so an older server never silently mints a plain
-   * Terminal in its place. */
-  app?: WindowApp;
   /** Client-claimed affinity. The window manager mints "browser"; desktop paths
    * omit it (absent => native), so a browser-minted record never opens a native
    * twin. */
@@ -349,9 +341,6 @@ export interface LibraryApi {
   /** Open a terminal window on a connected devserver (desktop action, 409 with
    * no bridge). */
   openDevserverTerminal(id: string): Promise<void>;
-  /** Open a standalone Files window on a connected devserver (desktop action,
-   * 409 with no bridge, and 409 when that devserver serves no files app). */
-  openDevserverFilesWindow(id: string): Promise<void>;
   /** Open a window onto one of a connected devserver's served workspaces by its
    * remote path (desktop action, 409 with no bridge). */
   openDevserverWorkspace(id: string, path: string): Promise<void>;
@@ -524,8 +513,6 @@ export const liveApi: LibraryApi = {
     req("DELETE", `/api/library/devservers/${encodeURIComponent(id)}/native-trust`),
   openDevserverTerminal: (id) =>
     req("POST", `/api/library/devservers/${encodeURIComponent(id)}/terminal`),
-  openDevserverFilesWindow: (id) =>
-    req("POST", `/api/library/devservers/${encodeURIComponent(id)}/files-window`),
   // The devserver-workspace ops carry the remote mount `prefix` / `path` in the
   // JSON body, not a path segment: a mount prefix can hold characters axum's
   // Path extractor + intervening (gateway) proxies mangle. on/off/forget are
@@ -610,7 +597,6 @@ export const liveApi: LibraryApi = {
   createWindow: (kind, opts) =>
     req("POST", "/api/library/windows", {
       kind,
-      ...(opts?.app ? { app: opts.app } : {}),
       ...(opts?.workspacePath ? { workspace_path: opts.workspacePath } : {}),
       ...(opts?.actingWindowId ? { acting_window_id: opts.actingWindowId } : {}),
       ...(opts?.origin ? { origin: opts.origin } : {}),

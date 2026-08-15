@@ -132,15 +132,6 @@ pub enum DesktopWindowOp {
         id: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
-    /// Open a fresh standalone-Files window on a connected devserver by id. The
-    /// launcher's per-devserver New-Files button drives this; the reply is
-    /// `Ok(())` once the window is spawning, or the error string when that
-    /// devserver does not serve the files application. Inert without a desktop
-    /// attached -- the route then answers [`NO_DESKTOP`].
-    OpenDevserverFiles {
-        id: String,
-        reply: oneshot::Sender<Result<(), String>>,
-    },
     /// Open (or focus) a workspace window on a connected devserver by id, rooted
     /// at the remote workspace `path`. The launcher's devserver-workspace Open
     /// button drives this; the reply is `Ok(())` once the window is spawning.

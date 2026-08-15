@@ -19,7 +19,6 @@ vi.mock("../state/capabilities", () => ({
   canMutateRegistry: true,
   hasDesktopBridge: false,
   selfManagedWindows: true,
-  localFilesApp: true,
   hostOs: "linux",
 }));
 

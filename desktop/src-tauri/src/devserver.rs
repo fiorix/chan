@@ -254,11 +254,6 @@ pub struct DevserverInfo {
     /// Best-effort human OS string for the launcher tooltip; absent when unknown.
     #[serde(default)]
     pub pretty_name: Option<String>,
-    /// Whether this devserver serves the standalone Files application, so the
-    /// launcher only offers its remote New-Files action where a mint would
-    /// take. `#[serde(default)]`: false from a devserver too old to report it.
-    #[serde(default)]
-    pub files_app: bool,
 }
 
 /// One element of `GET /api/devserver/workspaces`: a tenant the desktop
@@ -1844,13 +1839,12 @@ pub async fn fetch_library_windows(
 pub async fn mint_library_window(
     conn: &DevserverConn,
     kind: chan_server::WindowKind,
-    app: Option<chan_server::WindowApp>,
     workspace_path: Option<String>,
 ) -> Result<chan_server::WindowRecord, String> {
     if let Some(gw) = &conn.gateway {
         let body = chan_server::CreateWindow {
             kind,
-            app,
+            app: None,
             workspace_path,
             origin: chan_server::WindowOrigin::Native,
             acting_window_id: None,
@@ -1871,7 +1865,7 @@ pub async fn mint_library_window(
     let url = format!("{}/api/library/windows", base_origin(&conn.host, conn.port));
     let body = chan_server::CreateWindow {
         kind,
-        app,
+        app: None,
         workspace_path,
         // The desktop mints native windows on a connected devserver.
         origin: chan_server::WindowOrigin::Native,
