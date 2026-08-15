@@ -39,6 +39,6 @@ The pre-push hook (`./scripts/install-hooks` to install) runs `make pre-push`, t
 
 ## Documentation
 
-- **Design and architecture**: [`design.md`](../design.md), the whole-system reference. The full per-crate design-doc index, by category, is in the root [`README.md`](../README.md).
+- **Design and architecture**: [`design.md`](../design.md), the whole-system reference. Update it in the same commit as any change that affects crate boundaries, server contracts, state ownership, window capabilities, or the frontend embed / serve story. That rule lives here rather than in the document itself: `design.md` is the first file most readers open, and it opens as a description of the system, not as instructions to the people editing it. The full per-crate design-doc index, by category, is in the root [`README.md`](../README.md).
 - **chan-workspace design**: [`crates/chan-workspace/design.md`](../crates/chan-workspace/design.md). Read before proposing chan-workspace changes.
 - **Issue tracker**: GitHub repo `fiorix/chan`.
