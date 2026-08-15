@@ -391,6 +391,11 @@ pub struct WorkspaceHost {
     /// resolves a terminal window's `(prefix, token)` to it (the terminal
     /// analogue of a workspace tenant). Unset until the tenant mounts.
     terminal_tenant_prefix: OnceLock<String>,
+    /// The standalone window this host last routed an escaping `cs open` to.
+    /// Read before liveness so a burst of opens fills one window instead of
+    /// minting one per file, since the first window is still opening when the
+    /// second call arrives.
+    last_routed_standalone: Mutex<Option<String>>,
     /// Control-terminal window_id → its LOCAL `/control-N` tenant prefix. A
     /// devserver control row runs on its OWN command tenant (not the shared
     /// terminal tenant), so [`control_window_live`](Self::control_window_live)
@@ -531,6 +536,7 @@ impl WorkspaceHost {
             #[cfg(target_os = "linux")]
             terminal_fd_parker: OnceLock::new(),
             terminal_tenant_prefix: OnceLock::new(),
+            last_routed_standalone: Mutex::new(None),
             control_tenants: RwLock::new(HashMap::new()),
             library_change_notify: Arc::new(Notify::new()),
             local_color_notify: Arc::new(Notify::new()),
@@ -1969,6 +1975,7 @@ impl WorkspaceHost {
                 (record.window_id, true, target)
             }
         };
+        self.remember_routed_standalone(&window_id);
         let open = files
             .open_frame(&window_id, requested)
             .map_err(Error::BadRequest)?;
@@ -2013,11 +2020,17 @@ impl WorkspaceHost {
     }
 
     /// The standalone window an escaping open should land in: this library's
-    /// own (never a connected devserver's, whose rows ride the same feed),
-    /// not a control terminal, not hidden, lowest ordinal first so repeated
-    /// opens keep landing in the same one. `None` mints.
+    /// own (never a connected devserver's, whose rows ride the same feed), not
+    /// a control terminal, not hidden. `None` mints.
+    ///
+    /// The window this host last routed to wins even while it is still
+    /// OPENING, which is what keeps `for f in *; do cs open "$f"; done` in one
+    /// window: the second call arrives long before the first window's webview
+    /// connects, and a liveness-only rule would mint a window per file.
+    /// Otherwise the lowest-ordinal connected window takes it, so repeated
+    /// opens keep landing in the same place.
     fn select_standalone_window(&self) -> Option<String> {
-        let mut rows: Vec<WindowRecord> = self
+        let rows: Vec<WindowRecord> = self
             .assemble_window_records()
             .into_iter()
             .filter(|row| {
@@ -2025,11 +2038,31 @@ impl WorkspaceHost {
                     && matches!(row.kind, WindowKind::Terminal)
                     && !row.control
                     && !row.hidden
-                    && row.connected
             })
             .collect();
-        rows.sort_by_key(|row| row.ordinal);
-        rows.into_iter().next().map(|row| row.window_id)
+        let sticky = self
+            .last_routed_standalone
+            .lock()
+            .ok()
+            .and_then(|last| last.clone());
+        if let Some(sticky) = sticky {
+            if rows.iter().any(|row| row.window_id == sticky) {
+                return Some(sticky);
+            }
+        }
+        let mut connected: Vec<WindowRecord> =
+            rows.into_iter().filter(|row| row.connected).collect();
+        connected.sort_by_key(|row| row.ordinal);
+        connected.into_iter().next().map(|row| row.window_id)
+    }
+
+    /// Remember the window an escaping open just went to, so the opens that
+    /// follow it land there too. Cleared implicitly: a window that leaves the
+    /// registry stops matching and the next open picks again.
+    fn remember_routed_standalone(&self, window_id: &str) {
+        if let Ok(mut last) = self.last_routed_standalone.lock() {
+            *last = Some(window_id.to_string());
+        }
     }
 
     /// The registered workspace whose root contains `path`, if any. Named in
@@ -5380,6 +5413,41 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_burst_of_routed_opens_fills_one_window() {
+        // The window a routed open mints has no socket for a second or two,
+        // and the next `cs open` of a loop arrives long before it connects. A
+        // liveness-only pick would mint a window per file, which is what this
+        // remembers not to do.
+        let cfg = tempfile::tempdir().expect("config dir");
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
+        host.open_terminal_session(serve_config("/api/terminal"), None)
+            .await
+            .expect("mount shared terminal tenant");
+        let store = tempfile::tempdir().expect("store dir");
+        let registry = Arc::new(WindowRegistry::open(store.path().join("windows.json")));
+        host.install_window_registry(registry.clone(), "local".into());
+
+        // Nothing open yet: the first routed open has to mint.
+        assert_eq!(host.select_standalone_window(), None);
+        let first = host
+            .mint_window(WindowKind::Terminal, None)
+            .expect("mint")
+            .window_id;
+        host.remember_routed_standalone(&first);
+
+        // The next open lands in that same window even though it never
+        // connected, and even with a second (also disconnected) window around.
+        let _second = host.mint_window(WindowKind::Terminal, None).expect("mint");
+        assert_eq!(host.select_standalone_window(), Some(first.clone()));
+
+        // A window that leaves the registry stops winning: the pick falls back
+        // rather than routing into a row that no longer exists.
+        registry.remove(&first);
+        assert_eq!(host.select_standalone_window(), None);
+    }
+
     #[tokio::test]
     async fn fdstore_skip_cleanup_reaps_only_terminal_windows() {
         let cfg = tempfile::tempdir().expect("config dir");
