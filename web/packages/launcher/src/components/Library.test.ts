@@ -193,8 +193,8 @@ describe("Library: devserver groups", () => {
 
   it("offers no files-window action: a files window is opened from a terminal", () => {
     // The launcher spawns terminals and workspace windows; a Files window is
-    // opened with `cs window new --app files` from a terminal, so no machine
-    // card advertises one.
+    // opened from inside one (`cs window new` in its own terminal), so no
+    // machine card advertises one.
     mountList();
     expect(byAria("New terminal on prod")).toBeTruthy();
     expect(ariaLabels().some((l) => l.toLowerCase().includes("files window"))).toBe(false);

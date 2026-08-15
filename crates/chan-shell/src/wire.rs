@@ -247,18 +247,22 @@ pub enum ControlRequest {
     // windows from the terminal. These reach the Tauri app through the
     // in-process bridge the embedded server installs; a standalone
     // `chan open` (standalone serve) has no desktop attached and refuses them. `new` is the
-    // only one without an id: the server derives the kind from the calling
-    // tenant (a terminal tenant spawns a terminal window; a workspace
-    // tenant spawns another window of that workspace) and returns the new
-    // window id. The id-bearing verbs act on ANY window by id (the single
-    // desktop AppHandle is global), so an id need not belong to this tenant.
-    WindowNew,
-    // Open a new standalone Files window. A DISTINCT tag rather than a field
-    // on window_new: an internally-tagged decoder ignores unknown sibling
-    // keys, so an older server receiving a field-carrying window_new would
-    // silently mint a plain Terminal; an unknown tag gets the standard
-    // unknown-request refusal instead, the clear error the caller needs.
-    WindowNewFiles,
+    // only one whose target is the CALLER: the server spawns another window
+    // of whatever the caller is running, and returns the new window id. The
+    // id-bearing verbs act on ANY window by id (the single desktop AppHandle
+    // is global), so an id need not belong to this tenant.
+    WindowNew {
+        // The window the caller's terminal runs in ($CHAN_WINDOW_ID), which
+        // is what makes `new` contextual. The tenant alone cannot say: a
+        // Files window's terminal sits on the SAME shared terminal tenant as
+        // a plain standalone terminal, so without this a Files window would
+        // spawn a bare terminal. Optional, and omitted from the wire when
+        // absent, so the request keeps its historical `{"type":"window_new"}`
+        // shape and an unresolvable/absent id degrades to the tenant-derived
+        // kind rather than failing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window_id: Option<String>,
+    },
     // Focus a live window, or un-hide a buried one; best-effort reopens a
     // closed-but-saved workspace window when its workspace is still running.
     WindowOpen {
@@ -944,20 +948,38 @@ mod survey_wire_tests {
     }
 
     #[test]
-    fn window_new_request_tag() {
-        // Bare unit variant; the server derives the kind from the tenant.
-        let v: serde_json::Value = serde_json::to_value(ControlRequest::WindowNew).unwrap();
-        assert_eq!(v, serde_json::json!({"type": "window_new"}));
-        let back: ControlRequest = serde_json::from_str(r#"{"type":"window_new"}"#).unwrap();
-        assert!(matches!(back, ControlRequest::WindowNew));
+    fn window_new_request_tag_carries_the_calling_window() {
+        // The caller's window rides the request so the server can spawn
+        // another window of the app the caller is running.
+        let req = ControlRequest::WindowNew {
+            window_id: Some("terminal-win-2".into()),
+        };
+        let v: serde_json::Value = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"type": "window_new", "window_id": "terminal-win-2"})
+        );
+        let back: ControlRequest =
+            serde_json::from_str(r#"{"type":"window_new","window_id":"terminal-win-2"}"#).unwrap();
+        assert!(
+            matches!(back, ControlRequest::WindowNew { window_id } if window_id.as_deref() == Some("terminal-win-2"))
+        );
     }
 
     #[test]
-    fn window_new_files_request_tag() {
-        let v = serde_json::to_value(ControlRequest::WindowNewFiles).unwrap();
-        assert_eq!(v, serde_json::json!({"type": "window_new_files"}));
-        let back: ControlRequest = serde_json::from_str(r#"{"type":"window_new_files"}"#).unwrap();
-        assert!(matches!(back, ControlRequest::WindowNewFiles));
+    fn window_new_without_a_window_keeps_the_bare_tag() {
+        // Absent means "no caller window to read": the request keeps the
+        // exact historical shape, and both directions still parse, so a
+        // `cs` running without $CHAN_WINDOW_ID and an older/newer peer all
+        // agree on the tenant-derived kind.
+        let v: serde_json::Value =
+            serde_json::to_value(ControlRequest::WindowNew { window_id: None }).unwrap();
+        assert_eq!(v, serde_json::json!({"type": "window_new"}));
+        let back: ControlRequest = serde_json::from_str(r#"{"type":"window_new"}"#).unwrap();
+        assert!(matches!(
+            back,
+            ControlRequest::WindowNew { window_id: None }
+        ));
     }
 
     #[test]

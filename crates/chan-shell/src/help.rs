@@ -1688,17 +1688,20 @@ live event socket is tagged with that window right now (including a
 window chan-desktop has hidden with its close button), else
 `offline`. `--json [--pretty]` emits the raw records.
 
-The lifecycle verbs drive real windows. `new` opens one whose kind
-is derived from the calling tenant: a standalone terminal spawns
-another terminal window, a workspace spawns another window of that
-workspace. `open <id>` focuses a window, un-hiding it if it was
+The lifecycle verbs drive real windows. `new` opens another window
+like the one it runs in, read from $CHAN_WINDOW_ID: a standalone
+terminal spawns another terminal window, a Files window another
+Files window, a workspace another window of that workspace. There
+is no flag to name the kind, and with no window to read (or an id
+this server owns no row for) it falls back to the tenant's default
+window. `open <id>` focuses a window, un-hiding it if it was
 hidden. `hide <id>` is the OS close-button behavior: terminals and
 layout stay warm and reopenable. `rm <id>` destroys the window and
 deletes its saved layout. Titles are library-owned and
 auto-derived; there is no rename verb.
 
-Session-scoped like `cs terminal list`: needs $CHAN_CONTROL_SOCKET
-only, no window id.
+Session-scoped like `cs terminal list`: needs $CHAN_CONTROL_SOCKET,
+plus $CHAN_WINDOW_ID for `new` to read what it should open.
 ";
 
 /// `cs window` examples, side effects, and caveats.
@@ -1708,7 +1711,9 @@ pub(crate) const CS_WINDOW_AFTER: &str = r#"EXAMPLES:
     status is connected or offline
 
   cs window new
-    -> the new window id, printed on stdout
+    -> the new window id, printed on stdout; the window is
+       another of whatever this one is (terminal, Files,
+       workspace)
 
   cs window hide win-3
     -> "hid window win-3"; bring it back with

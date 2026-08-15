@@ -22,9 +22,11 @@ use tokio::sync::{mpsc, oneshot};
 use crate::window_titles::SharedWindowTitles;
 
 /// Which kind of window `cs window new` spawns. The control socket fills
-/// this in from the calling tenant -- a terminal tenant spawns a terminal
-/// window, a workspace tenant spawns another window of that workspace  --
-/// so the CLI never has to name the kind.
+/// this in from the CALLER, so the CLI never has to name the kind: a
+/// workspace tenant spawns another window of that workspace, and a terminal
+/// tenant spawns whichever app the calling window (`$CHAN_WINDOW_ID`) runs --
+/// [`Files`](Self::Files) from a Files window, [`Terminal`](Self::Terminal)
+/// otherwise, since both ride the same shared terminal tenant.
 #[derive(Debug)]
 pub enum NewWindowKind {
     /// A standalone terminal window (the shared `/terminal` tenant).
