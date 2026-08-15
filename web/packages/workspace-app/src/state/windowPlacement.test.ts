@@ -505,6 +505,14 @@ describe("pane command semantics", () => {
     expect(pane.tabs).toHaveLength(1);
     expect(pane.tabs[0]?.kind).toBe("terminal");
     expect(freshTabs.layout.activePaneId).toBe(pane.id);
+
+    // The freshly imported module carries its own debounced session save, and
+    // the scripted split schedules one. Nothing else in this file owns that
+    // timer, so it fires after the file finishes and touches a `window` the
+    // environment has already torn down -- which vitest reports as an
+    // unhandled error and fails the run on, with every test still passing.
+    // Cancelling it is what the window-discard path does.
+    freshStore.discardWindowSessionLocal();
   });
 
   test("close preflights both sides and leaves the pane unchanged when blocked", async () => {
