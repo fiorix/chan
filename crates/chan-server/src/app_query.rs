@@ -6,9 +6,10 @@
 //! carries no application discriminator -- but a REQUEST does, on the handful
 //! of paths that serve two contracts at once:
 //!
-//!   - `POST /api/files/upload?app=files` and the other file mutations: the
-//!     standalone filesystem contract, next to the `cs upload` transfer lane
-//!     that shares the path.
+//!   - The file mutations that share a path with the `cs upload` transfer
+//!     lane. (The upload route itself reads the raw query instead: an
+//!     unrecognized `app` there has always been ignored rather than refused,
+//!     and that is kept.)
 //!   - `GET|PUT /api/session?app=files`: the layout blob of a window that can
 //!     hold browser/editor tabs, kept in its own namespace so the same window
 //!     booted against a host with no filesystem never restores tabs whose
@@ -18,7 +19,8 @@
 //!     not through a workspace.
 //!
 //! An enum rather than a bool so an unrecognized `?app=` value is a parse
-//! rejection instead of a silent fall-through to the default contract.
+//! rejection instead of a silent fall-through to the default contract, on the
+//! routes that adopted it.
 
 use serde::{Deserialize, Serialize};
 

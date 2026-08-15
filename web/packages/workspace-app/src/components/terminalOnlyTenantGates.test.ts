@@ -1,26 +1,28 @@
 import { describe, expect, test } from "vitest";
 import app from "../App.svelte?raw";
 
-// Terminal-only windows are served by the slim terminal tenant, which has no
-// workspace: it mounts neither /api/preflight (workspace onboarding) nor the
-// /api/screensaver routes (per-workspace config). The SPA must not call
-// workspace-concept endpoints there -- before these gates, every terminal
-// window logged a 404 for each at boot (local and devserver alike).
+// A workspace-less window is served by the slim terminal tenant, which mounts
+// neither /api/preflight (workspace onboarding) nor the /api/screensaver
+// routes (per-workspace config). The SPA must not call workspace-concept
+// endpoints there -- before these gates, every such window logged a 404 for
+// each at boot (local and devserver alike). The gate is the capability, not
+// the narrower terminal-only flag: a standalone window that browses files has
+// no workspace either.
 //
 // Static `?raw` source-pin (repo convention): pins both gates so an
 // unconditional mount/call can't silently creep back. Real behaviour is
 // browser-smoked.
-describe("terminal-only windows skip workspace-concept endpoints", () => {
-  test("PreflightOverlay mounts only in workspace-capable windows", () => {
+describe("workspace-less windows skip workspace-concept endpoints", () => {
+  test("PreflightOverlay mounts only in workspace windows", () => {
     expect(app).toMatch(
-      /\{#if !ui\.terminalOnly && windowCaps\.workspace\}\s*<PreflightOverlay \/>/,
+      /\{#if windowCaps\.workspace\}\s*<PreflightOverlay \/>/,
     );
     expect(app).not.toMatch(/^<PreflightOverlay \/>$/m);
   });
 
-  test("screensaver state loads only in workspace-capable windows", () => {
+  test("screensaver state loads only in workspace windows", () => {
     expect(app).toMatch(
-      /if \(!ui\.terminalOnly && windowCaps\.workspace\) \{\s*void loadScreensaverState\(\);/,
+      /if \(windowCaps\.workspace\) \{\s*void loadScreensaverState\(\);/,
     );
   });
 

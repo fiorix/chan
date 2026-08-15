@@ -53,8 +53,7 @@
     toggleCommandLauncher,
   } from "../state/commandLauncher.svelte";
   import { openNewDialog } from "../state/dialog.svelte";
-  import { hasDesktopBridge, hostOs, readOnly,
-  } from "../state/capabilities";
+  import { hasDesktopBridge, hostOs, readOnly } from "../state/capabilities";
   import { dsKey, isPending, servedKey, wsKey } from "../state/pending.svelte";
   import { screen } from "../state/screen.svelte";
   import { themeState, toggleTheme } from "../state/theme.svelte";

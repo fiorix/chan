@@ -54,8 +54,7 @@
     type WorkspaceNode,
   } from "../lib/machineTree";
   import { isMachineCollapsed, toggleMachineCollapsed } from "../state/machineCollapse.svelte";
-  import { readOnly, hasDesktopBridge, hostOs,
-  } from "../state/capabilities";
+  import { readOnly, hasDesktopBridge, hostOs } from "../state/capabilities";
   import { demoState, resetDemo } from "../state/demo.svelte";
   import type { DevserverEntry, WorkspaceEntry } from "../api/library";
 

@@ -35,8 +35,9 @@ export interface WindowRecord {
    * workspace windows expose this as inline-editable text; clients keep the
    * generated ordinal separate. */
   label?: string;
-  /** kind=workspace: full root path. null for kind=terminal. */
-  workspace_path: string | null;
+  /** kind=workspace: full root path. Omitted from the wire for a terminal
+   * window, so absent here rather than null. */
+  workspace_path?: string | null;
   /** Route prefix of the tenant serving this window's content. */
   prefix: string;
   /** Per-tenant bearer for `prefix`; empty when the owning tenant is off. */
@@ -45,9 +46,14 @@ export interface WindowRecord {
   persisted: boolean;
   /** A /ws socket tagged with window_id is live right now. */
   connected: boolean;
+  /** A file transfer (upload or download) is in flight for this window right
+   * now. Volatile per-push state, so a launcher with no socket on the serving
+   * tenant still learns a window is mid-transfer and can guard its close. */
+  active_transfer: boolean;
   /** The devserver's connect CONTROL terminal (runs the connect script). The
-   * feed renders it FIRST in its library group; the desktop mints it. */
-  control: boolean;
+   * feed renders it FIRST in its library group; the desktop mints it. Omitted
+   * from the wire for an ordinary window, so absent here rather than false. */
+  control?: boolean;
   /**
    * Server-persisted visibility. The window is buried/hidden on the
    * desktop, vs shown. Skip-if-default on the wire; OMITTED for visible windows

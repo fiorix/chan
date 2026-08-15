@@ -5,10 +5,13 @@
 // same predicate, so a hidden launcher command and a dropped dispatch
 // can never disagree.
 
-/// Commands that remain valid in a terminal-only window. Everything
-/// outside this set needs a workspace (editor / graph / file browser /
-/// dashboard / rich-prompt / drafts / search), so it is dropped before
-/// the dispatch switch when `ui.terminalOnly` is set. Terminal lifecycle,
+/// Commands that remain valid in a window holding terminals and nothing
+/// else. Everything outside this set needs a workspace or at least a
+/// filesystem (editor / graph / file browser / dashboard / rich-prompt /
+/// drafts / search), so it is dropped before the dispatch switch when
+/// `ui.terminalOnly` is set. A window that has a filesystem is gated by the
+/// catalog's requirement table instead; this set also classifies the
+/// window-level ids that have no catalog row (see `dispatchAllowsCommand`). Terminal lifecycle,
 /// the command launcher, Settings, pane/tab navigation, pane flip, broadcast,
 /// and the screensaver lock all work without a workspace and stay live.
 export const TERMINAL_ONLY_COMMANDS: ReadonlySet<string> = new Set<string>([

@@ -6,7 +6,8 @@
 //
 // The query contract mirrors what the workspace-app SPA reads on boot:
 //   ?w=<window_id>    per-window session key (panes/tabs, /ws presence)
-//   ?kind=terminal    terminal-only mode; ?kind=control adds the control
+//   ?kind=terminal    a standalone window (terminals, plus the file
+///                       browser and editor where its tenant serves them); ?kind=control adds the control
 //                     sub-mode. Absent for a workspace window (full mode).
 //   ?lib=<library_id> the owning chan-library (cross-window tab-DnD scope);
 //                     the SPA defaults a missing ?lib= to "local".

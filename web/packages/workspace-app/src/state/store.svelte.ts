@@ -281,20 +281,20 @@ export const ui = $state<{
   /// closing a tab) behind the overlay. Owned by DisconnectOverlay, which
   /// mirrors its `visible` here.
   disconnectBlocking: boolean;
-  /// True when the window loaded in terminal-only mode (`?kind=terminal`):
-  /// a workspace-less standalone terminal window backed by a slim server
-  /// tenant. There is no workspace, no file tree, no editor / graph /
-  /// file-browser / dashboard surfaces, no rich prompt, no team work.
-  /// Set once at bootstrap and never flipped. Surfaces gate their
-  /// workspace-only affordances off this flag (Hybrid staging spawns,
-  /// rich prompt, team work, and commands that open workspace-backed
-  /// surfaces). In this mode `app.terminal.toggle` (Cmd+T) adds a
-  /// terminal tab to the focused pane.
+  /// True when this window holds terminals and NOTHING else: no workspace and
+  /// no filesystem surface either, so there is no file tree, no editor,
+  /// graph, file-browser or dashboard surface, no rich prompt, no team work.
+  /// A standalone window whose tenant serves a filesystem is more than this
+  /// and reads false. Derived from the window's capabilities at boot; what a
+  /// surface may show is a capability question (`windowCaps`), and this flag
+  /// answers only the narrow one. In this mode `app.terminal.toggle` (Cmd+T)
+  /// adds a terminal tab to the focused pane.
   terminalOnly: boolean;
-  /// Terminal-only windows close when their last terminal tab is closed (they
-  /// never sit empty). Set true by `bootstrapTerminalOnly` AFTER the first
-  /// terminal exists, so the transient empty layout during boot can't trip the
-  /// close-on-last-tab watcher in App.svelte. Always false in workspace mode.
+  /// A window with no workspace closes when its last TAB is closed (it never
+  /// sits empty; a window that still shows a browser is not empty). Set true
+  /// by `bootstrapStandalone` AFTER the first tab exists, so the transient
+  /// empty layout during boot can't trip the close-when-empty watcher in
+  /// App.svelte. Always false in workspace mode.
   terminalArmed: boolean;
   /// The control-terminal sub-mode (`kind=control`): a singleton terminal-only
   /// window running a devserver's connect script. Stricter than `terminalOnly`
@@ -905,7 +905,7 @@ export function onWatchEvent(e: unknown): void {
   if (frameType === "fs_reset") {
     // A scope needs one authoritative one-level relist: its OS watch just
     // attached, failed, lost events, or the directory was replaced. Only
-    // the standalone Files watcher emits these.
+    // the standalone filesystem watcher emits these.
     const dir = (e as { dir?: string } | null)?.dir;
     if (typeof dir === "string") {
       void relistTreeDir(dir);
@@ -997,7 +997,7 @@ export function onWatchEvent(e: unknown): void {
   // ignore it, and this is the only channel that keeps fsWritable (the
   // locked lamp, the editor's readOnly) in step with OS permissions.
   const frameWritable = (e as { writable?: unknown } | null)?.writable;
-  // The standalone Files tenant attributes its own mutations: a frame whose
+  // The standalone filesystem surface attributes its own mutations: a frame whose
   // source names THIS window is the deterministic echo of a write this
   // window already accounted for, so its clean buffers are not flagged as
   // externally changed. Every other window (and every unattributed frame)
@@ -2084,10 +2084,9 @@ function onWatchReady(): void {
   // Independently of the reload decision (a tunnel can answer the socket
   // while /api/health still lags), re-resolve the extension catalog: a
   // restart re-mints every per-process entry capability, and the refresh
-  // flows fresh paths into mounted extension frames. Workspace-less
-  // tenants (terminal and Files) serve no /api/extensions (bootstrap
-  // skips the catalog the same way).
-  if (!ui.terminalOnly && windowCaps.workspace) void refreshExtensions();
+  // flows fresh paths into mounted extension frames. A workspace-less tenant
+  // serves no /api/extensions (bootstrap skips the catalog the same way).
+  if (windowCaps.workspace) void refreshExtensions();
 }
 
 /// The server instance id seen on the first watch-socket connect.
@@ -2726,7 +2725,7 @@ export function scheduleWorkspaceRefresh(): void {
   // though, and a `config_changed` frame arrives here, so refresh the same
   // preferences from the route that tenant does serve. Undebounced: this
   // path is driven by settings writes, not by a watcher-event burst.
-  if (ui.terminalOnly || !windowCaps.workspace) {
+  if (!windowCaps.workspace) {
     void refreshStandalonePreferences();
     return;
   }

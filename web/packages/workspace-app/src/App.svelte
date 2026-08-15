@@ -418,7 +418,7 @@
     // initial load still flushes any in-flight session changes.
     installSessionFlushHook();
     await bootstrap();
-    if (!ui.terminalOnly && windowCaps.workspace) await loadExtensions();
+    if (windowCaps.workspace) await loadExtensions();
     // The docked FB default lives in chan-server's
     // `BrowserSidePanes::default()`: a new preferences.toml ships with
     // both docks OFF (`left: false`), so a new workspace opens with just
@@ -432,7 +432,7 @@
     // default disarmed state). Terminal-only windows skip it: the slim
     // terminal tenant has no workspace to hold screensaver config and
     // mounts no /api/screensaver routes, so the tracker stays disarmed.
-    if (!ui.terminalOnly && windowCaps.workspace) {
+    if (windowCaps.workspace) {
       void loadScreensaverState();
     }
     // Resume hook after the tab (or the whole machine) was dormant. Browsers
@@ -834,7 +834,7 @@
       //   `>` (greater-than) -> left dock toggle
       // Same commit-then-act semantics as the other exit keys.
       case "<":
-        // Docked file browsers: workspace-only.
+        // Docked file browsers: they need a filesystem to list.
         if (!windowCaps.files) return;
         commitPaneMode();
         scheduleSessionSave();
@@ -1608,7 +1608,7 @@
 <!-- Preflight is workspace onboarding (index, model, cs link); terminal-only
      windows are served by the slim terminal tenant, which has no workspace
      and mounts no /api/preflight route. -->
-{#if !ui.terminalOnly && windowCaps.workspace}
+{#if windowCaps.workspace}
   <PreflightOverlay />
 {/if}
 <!-- Survey overlay, WINDOW-WIDE FALLBACK: renders a survey raised by

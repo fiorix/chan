@@ -577,8 +577,9 @@ pub(crate) struct TerminalUploadQuery {
 }
 
 /// `POST /api/files/upload` on the terminal tenant: write the uploaded file into
-/// the cwd / uid-scoped `dir`. No replace (`path`) flow -- the slim tenant has no
-/// file browser. Mounted only on the terminal router, so `dir` is absolute.
+/// the cwd / uid-scoped `dir`. This is the `cs upload` lane, which has no
+/// replace (`path`) flow: it targets a directory, not a file the user picked.
+/// Mounted only on the terminal router, so `dir` is absolute.
 ///
 /// `?app=files` dispatches to the standalone Files upload instead: this
 /// route owns the path, so the fork happens here rather than as a second

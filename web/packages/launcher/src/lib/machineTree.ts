@@ -17,12 +17,17 @@ import type { DevserverEntry, WindowRecord, WorkspaceEntry } from "../api/librar
 import { LOCAL_LIBRARY_ID } from "./windowLabel";
 
 /** Order windows within a machine: the connect control terminal pinned FIRST,
- * then standalone terminals before workspace windows, then by ordinal. */
+ * then standalone terminals before workspace windows, then by ordinal, and
+ * finally by window id. The last key is what makes the order TOTAL: ordinals
+ * are per-(kind, workspace), so two rows from different workspaces -- or from
+ * different libraries in the orphan bucket -- can hold the same one, and
+ * without a tiebreak their relative order would follow whatever order the feed
+ * happened to arrive in. */
 export function sortWindows(a: WindowRecord, b: WindowRecord): number {
   if (a.control !== b.control) return a.control ? -1 : 1;
-  const rank = (w: WindowRecord): number => (w.kind === "terminal" ? 0 : 1);
-  if (rank(a) !== rank(b)) return rank(a) - rank(b);
-  return a.ordinal - b.ordinal;
+  if (a.kind !== b.kind) return a.kind === "terminal" ? -1 : 1;
+  if (a.ordinal !== b.ordinal) return a.ordinal - b.ordinal;
+  return a.window_id.localeCompare(b.window_id);
 }
 
 /** Drop a duplicated window_id (defense against Svelte each_key_duplicate, which
@@ -98,7 +103,7 @@ function machineNode(
   const workspaces: WorkspaceNode[] = machineWorkspaces.map((ws) => {
     const wins: WindowRecord[] = [];
     for (const w of remaining.values()) {
-      if (samePath(w.workspace_path, ws.path)) wins.push(w);
+      if (samePath(w.workspace_path ?? null, ws.path)) wins.push(w);
     }
     for (const w of wins) remaining.delete(w.window_id);
     wins.sort(sortWindows);

@@ -437,6 +437,7 @@ describe("Library: devserver groups", () => {
         token: "",
         persisted: true,
         connected: true,
+        active_transfer: false,
         control: true,
       },
     ];

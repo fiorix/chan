@@ -814,7 +814,7 @@ export type CsLinkResult = {
 /// store dispatcher reads (it branches on `"Removed"` / `"Renamed"`).
 /// Distinct from the older, narrower `WatchEvent` type below (lowercase
 /// kinds, no rename destination); new code should use `WatchEventWire`.
-/// Response of `GET /api/fs/context`, the Files-mode boot payload: the
+/// Response of `GET /api/fs/context`, the standalone window's boot payload: the
 /// filesystem root the wire paths are relative to, the wire-relative
 /// canonical home directory the browser starts in, and the path grammar.
 /// Replaces `/api/workspace` on the standalone Files tenant.

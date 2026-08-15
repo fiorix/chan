@@ -403,10 +403,10 @@ pub async fn api_terminal_ws(
             None => None,
         }
     } else {
-        // Workspace-less terminal tenant (standalone terminal window): no
-        // workspace to resolve a relative cwd against, so new sessions open
-        // in the registry default ($HOME). The SPA gates off the
-        // From-$CWD spawn actions in this mode, so `query.cwd` is unset.
+        // Workspace-less tenant with no `?app=files` marker: no root to
+        // resolve a relative cwd against, so new sessions open in the registry
+        // default ($HOME). A spawn from the file browser or an editor carries
+        // the marker and takes the capability-rooted branch above.
         None
     };
     let opts = TerminalWsOptions {

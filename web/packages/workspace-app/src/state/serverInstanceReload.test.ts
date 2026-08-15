@@ -22,7 +22,7 @@ describe("server-restart auto-reload", () => {
 
   test("every watch (re)connect checks the server instance and refreshes the extension catalog", () => {
     expect(src).toMatch(
-      /function onWatchReady\(\): void \{.*?void checkServerInstance\(\);.*?if \(!ui\.terminalOnly && windowCaps\.workspace\) void refreshExtensions\(\);/,
+      /function onWatchReady\(\): void \{.*?void checkServerInstance\(\);.*?if \(windowCaps\.workspace\) void refreshExtensions\(\);/,
     );
   });
 

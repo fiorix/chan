@@ -1501,12 +1501,13 @@ fn workspace_window_target_url(
     // `?w=`; that is the `session_id`, NOT the Tauri label (they diverge only
     // for watcher-opened windows, where the label is the composite native key).
     parsed.query_pairs_mut().append_pair("w", session_id);
-    // `kind=terminal` / `kind=control` are the SPA's only signal to enter
-    // terminal-only mode (no workspace fetch, terminal panes only);
-    // `control` additionally selects the singleton control sub-mode, and
-    // `kind=files` boots the standalone files application on the same tenant.
-    // Workspace/outbound windows pass `None` and the SPA stays in full
-    // workspace mode.
+    // `kind=terminal` / `kind=control` are the SPA's only signal that this
+    // window has no workspace (no workspace fetch); `control` additionally
+    // selects the singleton control sub-mode. There is no third spelling: what
+    // a standalone window can reach beyond its terminals -- the file browser
+    // and the editor -- is the serving tenant's answer, declared in the shell
+    // it serves. Workspace/outbound windows pass `None` and the SPA stays in
+    // full workspace mode.
     if let Some(kind) = kind {
         parsed.query_pairs_mut().append_pair("kind", kind);
     }
