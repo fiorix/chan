@@ -5412,7 +5412,6 @@ mod tests {
         assert_eq!(*reaped.lock().unwrap(), vec![rec.window_id.clone()]);
     }
 
-    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_burst_of_routed_opens_fills_one_window() {
         // The window a routed open mints has no socket for a second or two,
@@ -5448,6 +5447,7 @@ mod tests {
         assert_eq!(host.select_standalone_window(), None);
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn fdstore_skip_cleanup_reaps_only_terminal_windows() {
         let cfg = tempfile::tempdir().expect("config dir");
