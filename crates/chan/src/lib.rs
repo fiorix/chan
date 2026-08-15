@@ -3105,10 +3105,18 @@ async fn probe_parentage(socket: &Path, timeout: Duration) -> Parentage {
 /// (only reachable if both fail, e.g. an unreadable cwd). The result must
 /// be absolute so the desktop handoff -- which runs with cwd "/" -- and the
 /// canonical-path-keyed registry both see the directory the user ran in.
+///
+/// The Windows `\\?\` verbatim prefix is stripped from whichever branch wins.
+/// `std::fs::canonicalize` emits it, and this root is user-visible: it is
+/// printed by `chan open` and handed to chan-desktop, which titles the window
+/// with it -- so leaving it in surfaces `\\?\C:\notes` in the window title.
+/// `strip_verbatim_prefix` is the same normalization the registry keys on, so
+/// this also keeps the displayed path identical to the keyed one.
 fn absolutize_serve_root(root: PathBuf) -> PathBuf {
-    std::fs::canonicalize(&root)
+    let absolute = std::fs::canonicalize(&root)
         .or_else(|_| std::path::absolute(&root))
-        .unwrap_or(root)
+        .unwrap_or(root);
+    chan_workspace::paths::strip_verbatim_prefix(&absolute)
 }
 
 /// Error for a command invoked without its required workspace path. Every
@@ -9589,6 +9597,28 @@ mod tests {
         // A relative path lands under the cwd, not the filesystem root.
         let cwd = std::env::current_dir().unwrap();
         assert!(absolutize_serve_root(PathBuf::from("sub/dir")).starts_with(&cwd));
+    }
+
+    /// This root is user-visible: `chan open` prints it and chan-desktop
+    /// titles the window with it. `std::fs::canonicalize` emits the Windows
+    /// verbatim prefix, which leaked all the way to the window title as
+    /// `\\?\C:\notes`. Windows-only in effect, but the assertion is a pure
+    /// string property so it runs on every arm.
+    #[test]
+    fn absolutize_serve_root_strips_the_windows_verbatim_prefix() {
+        let out = absolutize_serve_root(PathBuf::from("."));
+        let shown = out.to_string_lossy();
+        assert!(
+            !shown.starts_with(r"\\?\"),
+            "serve root must not carry the verbatim prefix, got {shown}",
+        );
+
+        // And the stripping itself, independent of what this host's
+        // canonicalize returns.
+        assert_eq!(
+            chan_workspace::paths::strip_verbatim_prefix(std::path::Path::new(r"\\?\C:\notes")),
+            PathBuf::from(r"C:\notes"),
+        );
     }
 
     fn ipv4(s: &str) -> IpAddr {
