@@ -46,6 +46,7 @@ The final stdout line records the container, backend, disk cap, host `cpu.max`, 
 - [`scenarios/rich-prompt.md`](scenarios/rich-prompt.md): composing a terminal prompt, sending it through the prompt queue, stopping a send, and restoring every one of those states after a reload.
 - [`scenarios/desktop-webview-rendering.md`](scenarios/desktop-webview-rendering.md): what the desktop app's own webview paints, the CSS capabilities that claim rests on, and when to re-measure them.
 - [`scenarios/terminal-grid-rendering.md`](scenarios/terminal-grid-rendering.md): what the terminal grid paints across both backends and both font preferences, and which glyphs a renderer may not defer to the font.
+- [`scenarios/tab-drag-and-drop.md`](scenarios/tab-drag-and-drop.md): moving a tab between panes and between windows, what each kind must carry with it, which moves must be refused, and why the desktop WebViews stay manual.
 
 Write a new pack when a coding session produces a set of end-to-end expectations worth keeping. Name it for its subject, never for the session that produced it, and state every expectation in the present tense: a pack describes behavior that must hold, not work that was done.
 
