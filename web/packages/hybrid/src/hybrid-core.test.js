@@ -63,6 +63,16 @@ describe("windowUrlFor", () => {
     expect(url.searchParams.get("t")).toBeNull();
   });
 
+  it("marks a frame native only under a host", () => {
+    const record = { window_id: "w-1", prefix: "/p", kind: "workspace" };
+    // Standalone in a browser there is no key bridge to install, so claiming
+    // the native chord set would advertise chords that do nothing.
+    expect(new URL(windowUrlFor(record, ORIGIN)).searchParams.get("hybrid")).toBeNull();
+    expect(
+      new URL(windowUrlFor(record, ORIGIN, { hosted: true })).searchParams.get("hybrid"),
+    ).toBe("1");
+  });
+
   it("spells the control terminal's kind", () => {
     const url = new URL(
       windowUrlFor(

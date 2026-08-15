@@ -61,6 +61,7 @@ description = "Allows the Hybrid host window to act as a window manager for chan
 permissions = [
   "allow-hybrid-frames",
   "allow-hybrid-focus",
+  "allow-hybrid-key-bridge",
   "allow-hybrid-close-requested",
   "allow-hybrid-set-destination",
 ]
@@ -351,3 +352,8 @@ commands.allow = ["hybrid_close_requested"]
 identifier = "allow-hybrid-set-destination"
 description = "Enables the hybrid_set_destination command (the destination switch: whether the next window opens inside Hybrid or on the OS window manager)."
 commands.allow = ["hybrid_set_destination"]
+
+[[permission]]
+identifier = "allow-hybrid-key-bridge"
+description = "Enables the hybrid_key_bridge command (the host reads the native key bridge so it can install it in each of its frames, which Tauri's own initialization_script cannot reach)."
+commands.allow = ["hybrid_key_bridge"]

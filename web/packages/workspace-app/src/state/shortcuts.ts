@@ -818,11 +818,34 @@ export function chordsEqual(a: Chord, b: Chord): boolean {
 /// `window.__TAURI__` (older). Either marker means we're inside the
 /// native shell and chan-desktop's init script owns the OS-reserved
 /// chords; web fallbacks are inert.
+///
+/// A window hosted inside chan-desktop's Hybrid window manager is native
+/// too, and says so with `?hybrid=1`. Tauri injects its markers into the
+/// MAIN FRAME ONLY, so a window running as a frame in that host carries
+/// neither and would otherwise read as a browser tab and take the web
+/// chords. The host injects the same key bridge into each of its frames,
+/// so the OS-reserved chords are owned there exactly as in a native
+/// window, and the keymap has to agree with that.
+///
+/// This settles the chord set, and which slot a keymap override lives in.
+/// It is deliberately NOT a claim that Tauri IPC is reachable: that is
+/// `isTauriDesktop()`, which stays false in a frame.
 export function currentPlatform(): Platform {
   if (typeof window === "undefined") return "web";
   const w = window as unknown as Record<string, unknown>;
   if (w.__TAURI_INTERNALS__ || w.__TAURI__) return "native";
-  return "web";
+  return hostedInHybridWindow() ? "native" : "web";
+}
+
+/// Whether this window runs as a frame inside chan-desktop's Hybrid window
+/// manager, which stamps `?hybrid=1` on the URL it loads.
+function hostedInHybridWindow(): boolean {
+  if (typeof location === "undefined") return false;
+  try {
+    return new URL(location.href).searchParams.get("hybrid") === "1";
+  } catch {
+    return false;
+  }
 }
 
 /// Continuation indent for a note that will not fit beside its chord.

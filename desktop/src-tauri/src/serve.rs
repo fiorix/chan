@@ -1055,11 +1055,19 @@ fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), S
         let available = crate::hybrid_surface::host_available(app);
         if state.hybrid.place(window_label, available) == crate::hybrid_surface::Destination::Hybrid
         {
+            // `hybrid=1` marks the page as a NATIVE surface for the keymap: the
+            // host injects the same key bridge into its frames, so the
+            // OS-reserved chords are owned there exactly as in a window of its
+            // own, and the SPA must take the native chord set rather than the
+            // browser fallbacks. Tauri's own markers cannot say this -- it
+            // injects them into the main frame only.
+            let mut framed = parsed.clone();
+            framed.query_pairs_mut().append_pair("hybrid", "1");
             crate::hybrid_surface::open_frame(
                 app,
                 crate::hybrid_surface::HybridOpen {
                     label: window_label.to_string(),
-                    url: parsed.to_string(),
+                    url: framed.to_string(),
                     title: compose_window_title(
                         title,
                         kind.unwrap_or("workspace"),
@@ -2242,6 +2250,17 @@ pub(crate) fn close_windows_with_prefix(app: &AppHandle, prefix: &str) {
 /// connecting screen. The launcher itself never loads this script (it
 /// gets LAUNCHER_RELOAD_BRIDGE_JS), so its native menu chords can never
 /// double-fire against the bridge.
+/// The key bridge, for a caller that must install it somewhere Tauri's own
+/// `initialization_script` cannot reach: the Hybrid host injects it into each
+/// of its frames, which are iframes rather than webviews. Handing over the one
+/// source keeps the frames' chords from drifting from a native window's.
+pub(crate) fn key_bridge_script(kind: Option<&str>) -> String {
+    format!(
+        "window.__CHAN_WINDOW_KIND__ = {};\n{KEY_BRIDGE_JS}",
+        serde_json::json!(kind.unwrap_or("workspace"))
+    )
+}
+
 const KEY_BRIDGE_JS: &str = r#"
 (() => {
   function fire(e, name, detail) {
@@ -2260,14 +2279,32 @@ const KEY_BRIDGE_JS: &str = r#"
   // bubble to the SPA's own handler (Cmd+R -> location.reload()) so the chord
   // degrades to a working fallback instead of dying. Swallowing first then
   // finding no bridge killed Cmd+R/devtools/zoom outright (no IPC, no fallback).
-  function invokeIpc(e, cmd, args) {
+  // A window running as a frame inside the Hybrid host has no Tauri bridge of
+  // its own -- Tauri injects into the main frame only -- so the host installs
+  // this hook and routes each command to where it belongs there: reload means
+  // that frame, close and new-window mean the host's own flows, and the rest
+  // forwards to the app. The hook is deliberately NOT a `window.__TAURI__`
+  // shim: that global is also what `isTauriDesktop()` reads, and claiming it
+  // would send the SPA down native window-management paths a frame cannot
+  // reach.
+  function ipcBridge() {
+    if (typeof window.__CHAN_HYBRID_IPC__ === 'function') {
+      return window.__CHAN_HYBRID_IPC__;
+    }
     const tauri = window.__TAURI__;
-    if (!(tauri && tauri.core && typeof tauri.core.invoke === 'function')) {
+    if (tauri && tauri.core && typeof tauri.core.invoke === 'function') {
+      return tauri.core.invoke.bind(tauri.core);
+    }
+    return null;
+  }
+  function invokeIpc(e, cmd, args) {
+    const invoke = ipcBridge();
+    if (!invoke) {
       return;
     }
     e.preventDefault();
     e.stopImmediatePropagation();
-    tauri.core.invoke(cmd, args).catch((err) => {
+    invoke(cmd, args).catch((err) => {
       console.error('[chan] IPC ' + cmd + ' failed:', err);
     });
   }

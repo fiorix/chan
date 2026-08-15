@@ -98,3 +98,24 @@ export function requestClose(label, { hide }) {
 export function setDestination(destination) {
   return invoke("hybrid_set_destination", { destination })?.catch(() => {});
 }
+
+/** The native key bridge, for installing into a frame.
+ *
+ * A frame is an iframe rather than a webview, so Tauri's own
+ * `initialization_script` never reaches it and the OS-reserved chords it owns
+ * would fall back to the browser set. Reading the script the native windows use
+ * rather than reimplementing it is what keeps the two from drifting. Resolves
+ * null with no host, where there is no native chord set to match. */
+export function keyBridge(kind) {
+  const call = invoke("hybrid_key_bridge", { kind: kind ?? null });
+  if (!call) return Promise.resolve(null);
+  return call.catch(() => null);
+}
+
+/** Run one of the key bridge's commands on the host's behalf.
+ *
+ * Only the handful the bridge reaches for that a frame genuinely cannot do
+ * itself; everything the shell can answer locally is answered locally. */
+export function forward(command, args) {
+  return invoke(command, args) ?? Promise.reject(new Error("no host"));
+}

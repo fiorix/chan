@@ -1398,6 +1398,32 @@ describe("Pane cross-window tab DnD (pane-id collision fix)", () => {
   });
 });
 
+describe("Pane window-bound tab kinds", () => {
+  test("a kind the target cannot reconstruct carries NO cross-window payload", () => {
+    // A graph / dashboard / browser tab used to fall through to
+    // `{ kind: "terminal" }`, so a cross-window drop opened a fresh terminal
+    // while the source's dragend removed the original: the tab was not moved,
+    // it was destroyed and replaced. Withholding CROSS_TAB_MIME refuses the
+    // drop instead, and the source keeps its tab.
+    expect(paneSource).toMatch(
+      /function crossWindowPayload\(t: Tab\): Record<string, unknown> \| null \{/,
+    );
+    expect(paneSource).not.toMatch(/return \{ kind: "terminal", title: t\.title \};/);
+    expect(paneSource).toMatch(/const crossPayload = t \? crossWindowPayload\(t\) : null;/);
+    expect(paneSource).toMatch(
+      /if \(crossPayload\) \{\s*e\.dataTransfer\.setData\(CROSS_TAB_MIME, JSON\.stringify\(crossPayload\)\);/,
+    );
+  });
+
+  test("an intra-window move still works for every kind", () => {
+    // Only the CROSS payload is withheld: TAB_DRAG_MIME is still set for any
+    // tab, so dragging a graph tab between panes of ONE window keeps working.
+    expect(paneSource).toMatch(
+      /e\.dataTransfer\.setData\(\s*TAB_DRAG_MIME,\s*JSON\.stringify\(\{ fromPaneId: pane\.id, fromSide, tabId, fromWindow: sessionWindowId\(\) \}\),\s*\);/,
+    );
+  });
+});
+
 describe("Pane cross-kind / cross-workspace tab DnD guard", () => {
   test("dragstart stamps the window's drag scope as a MIME type", () => {
     // The scope rides a MIME TYPE so the target can read it during dragover

@@ -565,7 +565,7 @@ async function openNewWindow(request) {
       acting_window_id: request.acting_window_id,
     });
     state.records.set(record.window_id, record);
-    const url = windowUrlFor(record, location.origin);
+    const url = windowUrlFor(record, location.origin, { hosted: state.hosted });
     if (destination === "os") {
       if (popup) {
         popup.location.href = url;
@@ -624,6 +624,60 @@ function chordHandler(frameId) {
 
 // -------------------------------------------------------------- frame wiring
 
+// The chords a native window gets, in a frame.
+//
+// The bridge script is the desktop's own, read from the host rather than
+// reimplemented, so a frame's chords cannot drift from a window's. It reaches
+// for a few commands over IPC, which a frame has no bridge for; most of those
+// are window operations that Hybrid answers itself, and the shell installs the
+// hook the script prefers to route them.
+//
+// The hook is deliberately not a `window.__TAURI__` shim. That global is what
+// `isTauriDesktop()` reads, and claiming it would send the SPA down native
+// window-management paths a frame cannot reach, breaking the `window.open`
+// shim this whole design rests on.
+function installKeyBridge(frameWindow, frameId) {
+  if (!state.hosted) return;
+  const frame = frameId ? wm.get(frameId) : null;
+  host.keyBridge(frame ? frame.kind : null).then((script) => {
+    if (!script) return;
+    try {
+      frameWindow.__CHAN_HYBRID_IPC__ = (command, args) =>
+        hybridIpc(frameId, command, args);
+      // eslint-disable-next-line no-new-func
+      frameWindow.eval(script);
+    } catch (err) {
+      notice(`shortcuts unavailable in this window: ${err.message}`);
+    }
+  });
+}
+
+// Where the key bridge's commands go for a frame. A window operation means
+// THIS frame, not the host that draws it, so those are answered here; the rest
+// is the app's and forwards.
+function hybridIpc(frameId, command, args) {
+  switch (command) {
+    case "reload_window": {
+      const frame = frameId ? wm.get(frameId) : null;
+      if (frame) frame.iframe.contentWindow.location.reload();
+      return Promise.resolve();
+    }
+    case "request_close_window":
+      if (frameId) onFrameCloseRequested(frameId);
+      return Promise.resolve();
+    case "open_new_window": {
+      const record = frameId ? recordFor(frameId) : null;
+      openNewWindow(newWindowRequest(frameId ? "frame" : "launcher", record, state.leaders));
+      return Promise.resolve();
+    }
+    // Zoom is per-webview on the native side; inside the host there is one
+    // webview behind every frame, so a frame cannot zoom alone and the whole
+    // host zooms instead.
+    default:
+      return host.forward(command, args);
+  }
+}
+
 function installIntoFrame(frameWindow, { frameId = null, isLauncher = false }) {
   let doc;
   try {
@@ -643,6 +697,7 @@ function installIntoFrame(frameWindow, { frameId = null, isLauncher = false }) {
     injectDestinationSwitch(doc);
     return;
   }
+  installKeyBridge(frameWindow, frameId);
   // A pointer anywhere in a window's frame raises it. The launcher is the dock,
   // not a window, so it has no frame to raise.
   {
@@ -696,7 +751,7 @@ function openFrameForRecord(record) {
   const fake = state.fakes.get(record.window_id) || makeFake(record.window_id);
   fake.closed = false;
   bindFake(fake, record.window_id);
-  fake.location.href = windowUrlFor(record, location.origin);
+  fake.location.href = windowUrlFor(record, location.origin, { hosted: state.hosted });
 }
 
 function connectFeed(attempt = 0) {

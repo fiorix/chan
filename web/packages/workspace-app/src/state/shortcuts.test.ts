@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { renderTable } from "./shortcuts";
+import { currentPlatform, renderTable } from "./shortcuts";
 
 describe("shortcut table", () => {
   test("advertises Command launcher as Ctrl+Alt+K on web and Cmd+K on native mac", () => {
@@ -173,4 +173,36 @@ describe("shortcut table", () => {
     expect(plain).toMatch(/^Search\s+Cmd\+Shift\+S\s+\(Ctrl\+Alt\+S on Linux/m);
   });
 
+});
+
+describe("currentPlatform", () => {
+  // jsdom lets the URL be rewritten in place, which is how a frame's `?hybrid=1`
+  // is simulated without a real host.
+  const withUrl = <T>(url: string, run: () => T): T => {
+    const original = window.location.href;
+    window.history.replaceState(null, "", url);
+    try {
+      return run();
+    } finally {
+      window.history.replaceState(null, "", original);
+    }
+  };
+
+  test("a plain browser tab is web", () => {
+    expect(withUrl("/ws-1/?w=w-abc", () => currentPlatform())).toBe("web");
+  });
+
+  test("a window hosted in the Hybrid window manager is native", () => {
+    // Tauri injects its markers into the MAIN FRAME ONLY, so a window running
+    // as a frame in that host carries neither and would otherwise take the web
+    // chords. The host injects the same key bridge into its frames, so the
+    // OS-reserved chords are owned there exactly as in a native window.
+    expect(withUrl("/ws-1/?w=w-abc&hybrid=1", () => currentPlatform())).toBe("native");
+  });
+
+  test("only the exact marker counts", () => {
+    expect(withUrl("/ws-1/?w=w-abc&hybrid=0", () => currentPlatform())).toBe("web");
+    expect(withUrl("/ws-1/?w=w-abc&hybrid=", () => currentPlatform())).toBe("web");
+    expect(withUrl("/ws-1/?w=w-abc&hybridish=1", () => currentPlatform())).toBe("web");
+  });
 });

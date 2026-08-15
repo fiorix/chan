@@ -817,8 +817,9 @@
       JSON.stringify({ fromPaneId: pane.id, fromSide, tabId, fromWindow: sessionWindowId() }),
     );
     const t = paneTabs(pane, fromSide).find((tab) => tab.id === tabId);
-    if (t) {
-      e.dataTransfer.setData(CROSS_TAB_MIME, JSON.stringify(crossWindowPayload(t)));
+    const crossPayload = t ? crossWindowPayload(t) : null;
+    if (crossPayload) {
+      e.dataTransfer.setData(CROSS_TAB_MIME, JSON.stringify(crossPayload));
     }
     // Stamp our drag scope as a type so the target can reject a cross-kind /
     // cross-workspace drop at dragover (no-drop cursor) and on drop. Non-empty

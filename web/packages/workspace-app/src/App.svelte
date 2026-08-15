@@ -147,7 +147,7 @@
     requestCloseWindow,
   } from "./api/desktop";
   import { activeTransferCount } from "./state/transfers.svelte";
-  import { chordFromEvent, currentOS } from "./state/shortcuts";
+  import { chordFromEvent, currentOS, currentPlatform } from "./state/shortcuts";
   import {
     allCommands,
     commandContext,
@@ -658,7 +658,7 @@
     }
     const os = currentOS();
     const commandLauncherChord =
-      isTauriDesktop() && os === "mac"
+      currentPlatform() === "native" && os === "mac"
         ? e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.code === "KeyK"
         : e.ctrlKey && !e.metaKey && e.altKey && !e.shiftKey && e.code === "KeyK";
     if (commandLauncherChord) {
@@ -918,7 +918,7 @@
     // desktop only (the registry mints no off-mac or web default; those
     // surfaces bind through user overrides, which fire in the override
     // path above). Keep in sync with osChord's BROADCAST_TOGGLE_ID branch.
-    if (e.code === "KeyI" && isTauriDesktop() && currentOS() === "mac") {
+    if (e.code === "KeyI" && currentPlatform() === "native" && currentOS() === "mac") {
       const broadcastChord =
         e.metaKey &&
         !e.ctrlKey &&

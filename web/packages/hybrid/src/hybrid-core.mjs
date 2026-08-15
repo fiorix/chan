@@ -36,7 +36,7 @@ export function toggleCollapse(current, side) {
 // Mirror of the launcher's windowUrl(record, origin): the same-origin in-app
 // URL for a window record, with ?w= always stamped so the SPA keys its
 // session on the record instead of minting a random per-tab id.
-export function windowUrlFor(record, origin) {
+export function windowUrlFor(record, origin, { hosted = false } = {}) {
   const prefix = String(record.prefix || "").replace(/^\/+|\/+$/g, "");
   const url = new URL(origin);
   url.pathname = `/${prefix}/`;
@@ -46,6 +46,13 @@ export function windowUrlFor(record, origin) {
   }
   if (record.library_id) url.searchParams.set("lib", record.library_id);
   if (record.token) url.searchParams.set("t", record.token);
+  // `hybrid=1` tells the SPA to take the NATIVE chord set, because the host
+  // installs the same key bridge into its frames that a native window gets.
+  // Only under a host: served in a plain browser there is no bridge to install,
+  // and claiming the native chords there would advertise chords that do
+  // nothing. Tauri's own markers cannot carry this either way -- it injects
+  // them into the main frame only.
+  if (hosted) url.searchParams.set("hybrid", "1");
   return url.toString();
 }
 

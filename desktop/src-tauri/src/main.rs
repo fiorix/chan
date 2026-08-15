@@ -4829,6 +4829,19 @@ fn hybrid_frames(
     Ok(state.hybrid.destination().to_wire())
 }
 
+/// The key bridge the host injects into each of its frames.
+///
+/// A frame is an iframe, not a webview, so Tauri's own `initialization_script`
+/// never reaches it and the chords it owns would fall back to the browser set.
+/// Handing over the one script the native windows use is what keeps the two
+/// from drifting; the shell installs `__CHAN_HYBRID_IPC__` alongside it so the
+/// handful of chords that need the app can still get there.
+#[tauri::command]
+fn hybrid_key_bridge(window: tauri::WebviewWindow, kind: Option<String>) -> Result<String, String> {
+    require_hybrid_host(&window)?;
+    Ok(serve::key_bridge_script(kind.as_deref()))
+}
+
 /// The Hybrid host reports which of its frames has focus, or `None` when none
 /// does. Read by [`focused_workspace_label`] so the New Window chord can answer
 /// for a window the OS window manager cannot see.
@@ -6055,6 +6068,7 @@ fn main() {
             // each handler: every one of them speaks for the window manager.
             hybrid_frames,
             hybrid_focus,
+            hybrid_key_bridge,
             hybrid_close_requested,
             hybrid_set_destination,
             // The vocabulary + build-identity advertisement a remotely-served
