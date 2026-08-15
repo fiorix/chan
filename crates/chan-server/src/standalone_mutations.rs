@@ -123,9 +123,18 @@ impl StandaloneMutationBus {
     /// match decrements that path's allowance; an unmatched event (no live
     /// ticket, an exhausted allowance, or an unexpected path) always passes
     /// through as external.
+    ///
+    /// The atomic writer also churns a same-directory temporary, which the
+    /// watcher sees as a file appearing and vanishing beside the target. That
+    /// noise is suppressed by name shape, but ONLY in a directory where a
+    /// mutation is actually in flight, so a user file that merely looks like
+    /// a temporary still reports its own changes.
     pub fn suppress_raw(&self, event: &WatchEvent) -> bool {
         let mut inner = self.lock();
         Self::sweep(&mut inner);
+        if Self::is_temp_churn(&inner, event) {
+            return true;
+        }
         let mut suppressed = false;
         for state in inner.tickets.values_mut() {
             for path in [event.path.as_deref(), event.to.as_deref()]
@@ -145,6 +154,34 @@ impl StandaloneMutationBus {
             }
         }
         suppressed
+    }
+
+    /// Whether every path this event names is an atomic-write temporary in a
+    /// directory that currently has a live ticket.
+    fn is_temp_churn(inner: &BusInner, event: &WatchEvent) -> bool {
+        let paths: Vec<&str> = [event.path.as_deref(), event.to.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect();
+        if paths.is_empty() {
+            return false;
+        }
+        paths.iter().all(|path| {
+            let (dir, name) = match path.rsplit_once('/') {
+                Some((dir, name)) => (dir, name),
+                None => ("", *path),
+            };
+            chan_workspace::fs_ops::is_atomic_write_temp_name(name)
+                && inner.tickets.values().any(|state| {
+                    state.remaining.keys().any(|expected| {
+                        let expected_dir = match expected.rsplit_once('/') {
+                            Some((expected_dir, _)) => expected_dir,
+                            None => "",
+                        };
+                        expected_dir == dir
+                    })
+                })
+        })
     }
 
     fn sweep(inner: &mut BusInner) {
@@ -205,6 +242,30 @@ mod tests {
             "a cancelled mutation must not swallow a genuine external event"
         );
         assert!(rx.try_recv().is_err(), "cancel emits nothing");
+    }
+
+    #[test]
+    fn atomic_write_temporaries_are_suppressed_only_while_a_write_is_in_flight() {
+        let (bus, _rx) = bus_with_subscriber("home/u");
+        // cap-tempfile's named temporary and the backend's unlinked-handle
+        // form, both beside the file being written.
+        let uuid_temp = modified("home/u/025cbbfa-88ee-49f1-92bc-630000cb6294");
+        let inode_temp = modified("home/u/#429785");
+        // With no write in flight they are ordinary files: a user may really
+        // have one named like this, and its changes must reach the browser.
+        assert!(!bus.suppress_raw(&uuid_temp));
+        assert!(!bus.suppress_raw(&inode_temp));
+
+        let ticket = bus.begin("w-writer", &["home/u/note.md".to_string()]);
+        assert!(bus.suppress_raw(&uuid_temp));
+        assert!(bus.suppress_raw(&inode_temp));
+        // A temporary-shaped name in a DIFFERENT directory is unrelated to
+        // this write and still reports.
+        assert!(!bus.suppress_raw(&modified("etc/025cbbfa-88ee-49f1-92bc-630000cb6294")));
+        // Ordinary neighbours keep reporting throughout.
+        assert!(!bus.suppress_raw(&modified("home/u/other.md")));
+        bus.cancel(ticket);
+        assert!(!bus.suppress_raw(&uuid_temp));
     }
 
     #[test]

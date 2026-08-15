@@ -1268,6 +1268,34 @@ pub fn resolve_safe_strict_canon(
 /// segments. cap-std performs the actual TOCTOU-free walk; this
 /// helper just gives us cleaner error variants than mapping
 /// cap-std's generic `io::Error`s.
+/// Whether `name` is the on-disk artifact of an in-progress atomic write
+/// rather than a file a user made. The streaming writer publishes through a
+/// same-directory temporary, which surfaces to a filesystem watcher under
+/// one of two shapes: a `#<inode>` entry, which is how the backend names an
+/// unlinked `O_TMPFILE` handle, or the v4 UUID `cap-tempfile` links a named
+/// temporary as. A watcher that forwards these shows the writer's own plumbing
+/// as files appearing and vanishing in the directory being edited.
+///
+/// This is a NAME shape, not proof: a user file can legitimately be named
+/// like a UUID, so callers pair it with evidence that a write is actually in
+/// flight in that directory instead of hiding such a file outright.
+pub fn is_atomic_write_temp_name(name: &str) -> bool {
+    if let Some(rest) = name.strip_prefix('#') {
+        return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit());
+    }
+    let groups = [8usize, 4, 4, 4, 12];
+    let mut parts = name.split('-');
+    for len in groups {
+        let Some(part) = parts.next() else {
+            return false;
+        };
+        if part.len() != len || !part.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    parts.next().is_none()
+}
+
 pub fn validate_rel(requested: &str) -> Result<PathBuf> {
     let trimmed = requested.trim_start_matches('/');
     if trimmed.is_empty() {
