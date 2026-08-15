@@ -155,6 +155,22 @@ export function isFilesWindow(): boolean {
   return new URL(window.location.href).searchParams.get("kind") === "files";
 }
 
+/// Query suffix a mutating call needs on the standalone Files tenant, and
+/// nothing at all anywhere else. `w` names the writing window so the server
+/// attributes the change back to it (a window must not read its own save as
+/// an external edit), and `app=files` selects the Files contract on a route
+/// whose path serves two of them.
+export function filesMutationSuffix(
+  existingQuery: boolean,
+  opts: { app?: boolean } = {},
+): string {
+  if (!isFilesWindow()) return "";
+  const params = new URLSearchParams();
+  if (opts.app) params.set("app", "files");
+  params.set("w", sessionWindowId());
+  return `${existingQuery ? "&" : "?"}${params.toString()}`;
+}
+
 export function sessionPath(): string {
   const base = `/api/session?w=${encodeURIComponent(sessionWindowId())}&client=${encodeURIComponent(clientNonceValue)}`;
   // A Files window's layout lives in its own blob namespace so a client
@@ -384,7 +400,10 @@ function uploadXhrAttempt(
 ): Promise<XhrResponse> {
   return new Promise((resolve, reject) => {
     const xhr = createXhr();
-    xhr.open("POST", apiPath("/api/files/upload"));
+    xhr.open(
+      "POST",
+      apiPath(`/api/files/upload${filesMutationSuffix(false, { app: true })}`),
+    );
     for (const [name, value] of Object.entries(directAuthHeaders())) {
       xhr.setRequestHeader(name, value);
     }
@@ -699,7 +718,11 @@ export const api = {
     form.append("file", file);
     if (dir !== null) form.append("dir", dir);
     const headers = directAuthHeaders();
-    const res = await chanFetch(apiPath("/api/attachments"), { method: "POST", headers, body: form });
+    const res = await chanFetch(apiPath(`/api/attachments${filesMutationSuffix(false)}`), {
+      method: "POST",
+      headers,
+      body: form,
+    });
     if (!res.ok) {
       await responseTextError(res);
     }
@@ -864,6 +887,7 @@ export const api = {
     if (authorityVersion !== undefined && authorityVersion !== null) {
       params.set("authority_version", String(authorityVersion));
     }
+    if (isFilesWindow()) params.set("w", sessionWindowId());
     const suffix = params.size > 0 ? `?${params.toString()}` : "";
     const headers = {
       ...directAuthHeaders(),
@@ -878,7 +902,11 @@ export const api = {
     return (await res.json()) as FileWriteResponse;
   },
   create: (path: string, isDir: boolean, content?: string) =>
-    req<void>("POST", "/api/files", { path, is_dir: isDir, content }),
+    req<void>("POST", `/api/files${filesMutationSuffix(false)}`, {
+      path,
+      is_dir: isDir,
+      content,
+    }),
   uploadFile: (
     file: File,
     dir: string,
@@ -924,16 +952,17 @@ export const api = {
     req<void>("POST", "/api/drafts/discard", { path }),
   promoteDraft: (path: string, target: string) =>
     req<DraftPromoteResponse>("POST", "/api/drafts/promote", { path, target }),
-  remove: (path: string) => req<void>("DELETE", `/api/files/${encPath(path)}`),
+  remove: (path: string) =>
+    req<void>("DELETE", `/api/files/${encPath(path)}${filesMutationSuffix(false)}`),
   downloadUrl: (path: string) => withTokenQuery(`/api/files/${encPath(path)}?download=1`),
   move: (from: string, to: string) =>
-    req<MoveResponse>("POST", "/api/move", { from, to }),
+    req<MoveResponse>("POST", `/api/move${filesMutationSuffix(false)}`, { from, to }),
   /// Multi-entry move/copy for the File Browser clipboard + multi-drag.
   /// `op` move = cut/paste + drag (rename + link rewrite per source);
   /// copy = copy/paste (duplicate). Collisions resolve to a " copy"
   /// suffix server-side; a move into a source's own parent is skipped.
   fsTransfer: (op: TransferOp, sources: string[], destDir: string) =>
-    req<TransferResponse>("POST", "/api/fs/transfer", {
+    req<TransferResponse>("POST", `/api/fs/transfer${filesMutationSuffix(false)}`, {
       op,
       sources,
       dest_dir: destDir,

@@ -5,6 +5,7 @@ import {
   api,
   clientNonce,
   dragScopeMimeToken,
+  filesMutationSuffix,
   sessionPath,
   sessionWindowId,
   windowDragScope,
@@ -15,6 +16,32 @@ afterEach(() => {
   vi.restoreAllMocks();
   window.history.replaceState(null, "", "/");
   window.sessionStorage.clear();
+});
+
+describe("files-mode request markers", () => {
+  test("mutations carry the writing window, and nothing outside a files window", () => {
+    window.history.replaceState(null, "", "/?t=token&w=w-files&kind=files");
+    expect(filesMutationSuffix(false)).toBe("?w=w-files");
+    expect(filesMutationSuffix(true)).toBe("&w=w-files");
+    // The upload path serves two contracts, so it also names the app.
+    expect(filesMutationSuffix(false, { app: true })).toBe("?app=files&w=w-files");
+
+    // A workspace window and a standalone terminal add nothing: their
+    // routes have one contract each and their own echo suppression.
+    window.history.replaceState(null, "", "/?t=token&w=w-ws");
+    expect(filesMutationSuffix(false, { app: true })).toBe("");
+    window.history.replaceState(null, "", "/?t=token&w=w-term&kind=terminal");
+    expect(filesMutationSuffix(false)).toBe("");
+  });
+
+  test("the session blob is namespaced only in a files window", () => {
+    window.history.replaceState(null, "", "/?t=token&w=w-files&kind=files");
+    expect(sessionPath()).toBe(
+      `/api/session?w=w-files&client=${clientNonce()}&app=files`,
+    );
+    window.history.replaceState(null, "", "/?t=token&w=w-term&kind=terminal");
+    expect(sessionPath()).toBe(`/api/session?w=w-term&client=${clientNonce()}`);
+  });
 });
 
 describe("sessionWindowId", () => {
