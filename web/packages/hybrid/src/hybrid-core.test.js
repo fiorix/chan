@@ -495,6 +495,33 @@ describe("collapse", () => {
   });
 });
 
+describe("frame identity", () => {
+  // The watcher keys a window it placed by its native label; a frame this shell
+  // opened itself is keyed by the bare window_id. A caller reaching for a
+  // window by id has to find it under either key, or it builds a SECOND frame
+  // onto the same session and the two mirror each other's input.
+  const windowIdOf = (id) => {
+    const at = String(id).indexOf("::");
+    return at < 0 ? id : id.slice(at + 2);
+  };
+
+  it("reads the window id out of either key", () => {
+    expect(windowIdOf("local::w-abc")).toBe("w-abc");
+    expect(windowIdOf("lib-9f2::w-abc")).toBe("w-abc");
+    expect(windowIdOf("w-abc")).toBe("w-abc");
+  });
+
+  it("matches a native label against the bare id it carries", () => {
+    // This is the comparison frameIdFor() makes; getting it wrong is the
+    // duplicate-frame bug.
+    const frames = ["local::w-one", "w-two"];
+    const find = (id) => frames.find((f) => windowIdOf(f) === id) ?? null;
+    expect(find("w-one")).toBe("local::w-one");
+    expect(find("w-two")).toBe("w-two");
+    expect(find("w-three")).toBeNull();
+  });
+});
+
 describe("geometry", () => {
   it("round-trips through a storage stub and survives junk", () => {
     const store = new Map();

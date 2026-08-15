@@ -5706,7 +5706,7 @@ fn main() {
                         let geometry_plan = serve::resolve_geometry_plan(app.handle(), "main");
                         let restored = geometry_plan.builds_hidden();
                         let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
-                            .title(LAUNCHER_WINDOW_TITLE)
+                            .title(instance_title(LAUNCHER_WINDOW_TITLE))
                             // The launcher is remote-served and skips KEY_BRIDGE_JS;
                             // inject the minimal reload-only chord so Cmd+R / Ctrl+R
                             // reloads it.
@@ -7220,7 +7220,7 @@ fn open_hybrid_window(app: &tauri::AppHandle) -> Result<(), String> {
     let geometry_plan = serve::resolve_geometry_plan(app, HYBRID_WINDOW_LABEL);
     let restored = geometry_plan.builds_hidden();
     let builder = WebviewWindowBuilder::new(app, HYBRID_WINDOW_LABEL, WebviewUrl::External(url))
-        .title(HYBRID_WINDOW_TITLE)
+        .title(instance_title(HYBRID_WINDOW_TITLE))
         // Remote-served like the launcher, so it skips KEY_BRIDGE_JS and takes
         // the same minimal reload chord. Its other chords are the shell's own:
         // the frames it hosts are same-origin, so the shell reaches their
@@ -7228,7 +7228,15 @@ fn open_hybrid_window(app: &tauri::AppHandle) -> Result<(), String> {
         .initialization_script(LAUNCHER_RELOAD_BRIDGE_JS)
         .inner_size(HYBRID_DEFAULT_WIDTH, HYBRID_DEFAULT_HEIGHT)
         .min_inner_size(HYBRID_MIN_WIDTH, HYBRID_MIN_HEIGHT)
-        .resizable(true);
+        .resizable(true)
+        // Hand HTML5 drag-and-drop to the page, for the same reason every SPA
+        // window does (serve.rs): with wry's native handler enabled, WebKit
+        // never sees ANY drag on macOS. Here that costs the tab moves the
+        // windows inside this host are for -- a tab could be picked up and
+        // never put down, in its own window as much as between two. The
+        // shell's own drop guard owns the no-takeover guarantee for a stray OS
+        // file drop on its chrome, and each frame's SPA owns its own.
+        .disable_drag_drop_handler();
     let builder = if restored {
         builder.visible(false)
     } else {
@@ -7560,6 +7568,33 @@ async fn discard_devserver_window_by_id(
 /// multiplied anymore (Cmd/Ctrl+Shift+N on the launcher opens a
 /// standalone terminal window instead), so there is no `Window N`
 /// suffix to disambiguate.
+/// Name an isolated instance in its own window titles.
+///
+/// `CHAN_HOME` means this process is running against a home that is not the
+/// user's, which in practice means an isolated smoke running BESIDE their real
+/// Chan. Two identically titled Chans on one screen is a hazard rather than an
+/// annoyance: the windows are indistinguishable, so a close or a quit can land
+/// on the wrong one. The home's directory name is the disambiguator, and an
+/// ordinary launch (no `CHAN_HOME`) is untouched.
+fn instance_title(base: &str) -> String {
+    instance_title_from(
+        std::env::var_os("CHAN_HOME").map(std::path::PathBuf::from),
+        base,
+    )
+}
+
+/// Pure core of [`instance_title`]. An empty `CHAN_HOME` is treated as unset,
+/// matching how chan-workspace resolves the same variable.
+fn instance_title_from(home: Option<std::path::PathBuf>, base: &str) -> String {
+    let Some(home) = home.filter(|h| !h.as_os_str().is_empty()) else {
+        return base.to_string();
+    };
+    match home.file_name().and_then(|n| n.to_str()) {
+        Some(name) if !name.is_empty() => format!("{base} [{name}]"),
+        _ => format!("{base} [isolated]"),
+    }
+}
+
 const LAUNCHER_WINDOW_TITLE: &str = "Chan Desktop";
 const LAUNCHER_DEFAULT_WIDTH: f64 = 420.0;
 const LAUNCHER_DEFAULT_HEIGHT: f64 = 720.0;
@@ -7861,6 +7896,61 @@ mod tests {
     /// transfer work take the ceiling; the hidden MCP proxy, the
     /// current-thread `cs` client, and Tauri's own GUI runtime must not,
     /// because capping them would throttle work this lane never admits.
+    #[test]
+    fn every_window_that_hosts_the_spa_hands_drag_and_drop_to_the_page() {
+        // With wry's native handler enabled, WebKit never sees ANY drag on
+        // macOS: a tab can be picked up and never put down, pane to pane as
+        // much as window to window. The Hybrid host is a drag surface like any
+        // SPA window (serve.rs disables it for those), and it shipped once
+        // without this.
+        const MAIN_RS: &str = include_str!("main.rs");
+        let hybrid = MAIN_RS
+            .split("fn open_hybrid_window(")
+            .nth(1)
+            .expect("the hybrid window builder exists");
+        let body = &hybrid[..hybrid.find("\n}\n").unwrap_or(hybrid.len())];
+        assert!(
+            body.contains(concat!("disable_drag", "_drop_handler()")),
+            "the Hybrid host must hand HTML5 drag-and-drop to the page",
+        );
+    }
+
+    #[test]
+    fn an_ordinary_launch_keeps_its_window_titles() {
+        // No CHAN_HOME is the user's real Chan; it must look exactly as it did.
+        assert_eq!(instance_title_from(None, "Chan Desktop"), "Chan Desktop");
+        assert_eq!(
+            instance_title_from(Some(std::path::PathBuf::new()), "Chan Desktop"),
+            "Chan Desktop",
+            "an empty CHAN_HOME is unset, matching chan-workspace",
+        );
+    }
+
+    #[test]
+    fn an_isolated_instance_names_itself_in_its_titles() {
+        // Two identically titled Chans on one screen is how a close lands on the
+        // wrong window.
+        assert_eq!(
+            instance_title_from(
+                Some(std::path::PathBuf::from("/tmp/chan-hw")),
+                "Chan Desktop"
+            ),
+            "Chan Desktop [chan-hw]",
+        );
+        assert_eq!(
+            instance_title_from(
+                Some(std::path::PathBuf::from("/tmp/chan-hw/")),
+                "Chan Hybrid"
+            ),
+            "Chan Hybrid [chan-hw]",
+        );
+        // A home with no usable final component still announces itself.
+        assert_eq!(
+            instance_title_from(Some(std::path::PathBuf::from("/")), "Chan Desktop"),
+            "Chan Desktop [isolated]",
+        );
+    }
+
     #[test]
     fn production_runtime_blocking_limit() {
         // Only the production half: this test names the same call it checks

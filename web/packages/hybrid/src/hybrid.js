@@ -77,6 +77,16 @@ function windowIdOf(id) {
   return at < 0 ? id : id.slice(at + 2);
 }
 
+// The frame showing a given window, whichever key it is under: the watcher's
+// native label for a window it placed, or the bare window_id for one this shell
+// opened itself. Callers that reach for a window by id must find it either way,
+// or they build a second frame onto the same session and the two mirror.
+function frameIdFor(windowId) {
+  if (wm.has(windowId)) return windowId;
+  const framed = wm.list().find((frame) => windowIdOf(frame.id) === windowId);
+  return framed ? framed.id : null;
+}
+
 /// Tell the host which windows it holds frames for. This IS `open_labels` for
 /// the Hybrid surface, so it goes out on every frame change; only the
 /// watcher-owned frames are reported, since the others are windows it does not
@@ -308,10 +318,12 @@ function handleFakeNavigate(fake, url) {
       hidden: false,
     }).catch((err) => notice(`show failed: ${err.message}`));
   }
-  if (wm.has(windowId)) {
-    // Re-navigation to a live frame (named reopen): focus instead of a
-    // pointless SPA reload.
-    wm.focusFrame(windowId);
+  const framed = frameIdFor(windowId);
+  if (framed) {
+    // Re-navigation to a live frame (named reopen, or the deck's focus/bury
+    // reaching for a window the watcher placed): focus instead of a pointless
+    // SPA reload, and never a second frame onto the same session.
+    wm.focusFrame(framed);
   } else {
     wm.createFrame({
       id: windowId,
@@ -561,10 +573,17 @@ async function openNewWindow(request) {
       } else {
         window.open(url, record.window_id);
       }
-    } else {
-      const fake = makeFake(record.window_id);
-      fake.location.href = url;
+      return;
     }
+    // Under a host the record is all this owes: the mint is native-origin, so
+    // the window watcher sees it, applies the destination and pushes the frame
+    // back. Opening one here too would leave the same window in two frames --
+    // two views of one session, mirroring each other's input, because both
+    // load the same `?w=`. The frames are keyed differently (the watcher by
+    // native label, this path by bare window_id), so nothing dedupes them.
+    if (state.hosted) return;
+    const fake = makeFake(record.window_id);
+    fake.location.href = url;
   } catch (err) {
     if (popup) popup.close();
     notice(`new window failed: ${err.message}`);
@@ -881,10 +900,23 @@ async function boot() {
   window.__hybrid = { wm, state, getDestination, setDestination };
 
   document.addEventListener("keydown", chordHandler(null), true);
-  // The SPA's own drop guard covers only its documents; keep a stray drop on
-  // the shell chrome from navigating the whole page.
-  window.addEventListener("dragover", (e) => e.preventDefault());
-  window.addEventListener("drop", (e) => e.preventDefault());
+  // A stray drop on the shell's own chrome must not navigate the whole page,
+  // which would take every window down with it. The SPA's own guard covers
+  // only its own documents, so the shell guards its own.
+  //
+  // Scoped to the chrome, never to a frame. WebKit surfaces a drag that is
+  // over a subframe to the parent as well, with the `<iframe>` as the target;
+  // claiming those made the shell swallow every drop bound for a window, so a
+  // tab could be picked up but never put down. Chrome does not surface them,
+  // which is why this only ever showed up in the desktop's WKWebView.
+  const overFrame = (event) =>
+    event.target instanceof Element && event.target.closest("iframe") !== null;
+  window.addEventListener("dragover", (e) => {
+    if (!overFrame(e)) e.preventDefault();
+  });
+  window.addEventListener("drop", (e) => {
+    if (!overFrame(e)) e.preventDefault();
+  });
   window.addEventListener("resize", () => wm.applyOffsets());
 
   connectFeed();
