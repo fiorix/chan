@@ -161,9 +161,23 @@ describe("no inline close affordance on first-class surfaces", () => {
   });
 
   test("FileBrowserSurface spawns a Graph tab from WorkspaceInfoBody", async () => {
-    expect(fileBrowserSurface).toContain(
-      'onSetAsScope={() => openFsGraphForDirectory("")}',
+    expect(fileBrowserSurface).toContain('openFsGraphForDirectory("")');
+  });
+
+  test("the browser's graph affordances require a workspace", async () => {
+    // The graph is built from the workspace index, so a window with no
+    // workspace has nothing to graph FROM: the row would spawn a tab that
+    // could never load. Both inspector bodies render "Graph from here" only
+    // when onSetAsScope is passed, so withholding it is the whole gate.
+    expect(fileBrowserSurface).toMatch(
+      /onSetAsScope=\{windowCaps\.workspace\s*\?\s*\(\) => openFsGraphForDirectory\(""\)\s*:\s*undefined\}/,
     );
+    expect(fileBrowserSurface).toMatch(
+      /onSetAsScope=\{windowCaps\.workspace \? graphSelection : undefined\}/,
+    );
+    // The file tree's per-entry "New Graph" row rides the same capability,
+    // through classifyFileActions' `graph` cap rather than a prop.
+    expect(fileTree).toMatch(/graph: windowCaps\.workspace/);
   });
 
   test("GraphPanel renders a tab-menu-bubble with mbtn rows + vertical filter rows", () => {
