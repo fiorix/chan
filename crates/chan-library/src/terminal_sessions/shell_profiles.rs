@@ -66,11 +66,21 @@ impl ShellKind {
     /// CI arm; `platform::classify_windows_shell` delegates here rather than
     /// keeping a second copy of the match.
     pub fn from_program_stem(program: &Path) -> ShellKind {
-        let stem = program
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
+        // Split on both separators rather than asking `Path`. A program path
+        // reaches here as portable text -- from `[[terminal.profiles]]`, or
+        // from a `CHAN_SHELL` override -- and off Windows `Path` does not treat
+        // `\` as a separator, so `C:\pwsh.exe` keeps its whole spelling as the
+        // stem and falls to `Posix`. That is the one classification that must
+        // not happen by accident: `-l` to `wsl.exe` lists distributions.
+        let raw = program.to_str().unwrap_or("");
+        let base = raw.rsplit(['/', '\\']).next().unwrap_or("");
+        // `file_stem` semantics: drop the last extension, but a leading dot is
+        // part of the name rather than an empty stem.
+        let stem = match base.rsplit_once('.') {
+            Some((name, _)) if !name.is_empty() => name,
+            _ => base,
+        }
+        .to_ascii_lowercase();
         match stem.as_str() {
             "pwsh" | "powershell" => ShellKind::PowerShell,
             "cmd" => ShellKind::Cmd,
@@ -979,6 +989,26 @@ mod tests {
         assert_eq!(
             ShellKind::from_program_stem(Path::new("")),
             ShellKind::Posix
+        );
+        // A bare name, either spelling of separator, and a dotted name whose
+        // leading dot is part of it rather than an empty stem. These pin the
+        // hand-rolled split against `Path::file_stem`, which answers
+        // differently per host for the backslash cases above.
+        assert_eq!(
+            ShellKind::from_program_stem(Path::new("pwsh.exe")),
+            ShellKind::PowerShell,
+        );
+        assert_eq!(
+            ShellKind::from_program_stem(Path::new("wsl")),
+            ShellKind::Wsl
+        );
+        assert_eq!(
+            ShellKind::from_program_stem(Path::new("/opt/tools/wsl.exe")),
+            ShellKind::Wsl,
+        );
+        assert_eq!(
+            ShellKind::from_program_stem(Path::new("/home/u/.local/bin/bash")),
+            ShellKind::Posix,
         );
     }
 
