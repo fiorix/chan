@@ -25,6 +25,7 @@ import {
   clearRecentlyClosedTabsForTest,
   closePane,
   ensureTerminalKeyboardProtocol,
+  closeFileTabAfterMove,
   closeTab,
   closeTabsInPane,
   conflictDialog,
@@ -309,6 +310,56 @@ describe("tab close confirmation", () => {
 
     expect(discard).toHaveBeenCalledWith(".Drafts/untitled-1/draft.md");
     expect(activePane().tabs).toHaveLength(0);
+  });
+
+  test("a draft moved to another window is released, not discarded", async () => {
+    // A cross-window drag is a MOVE: the target window has already opened this
+    // draft by path. Running the ordinary draft close here would delete the
+    // file out from under it (empty / pristine drafts are discarded with no
+    // prompt at all), promote it to a different path, or -- on cancel -- leave
+    // the same draft open in two windows.
+    const tab = fileTab({
+      id: "draft-move",
+      path: ".Drafts/untitled-1/draft.md",
+    });
+    const pane = resetLayout([tab]);
+    const inspect = vi.spyOn(api, "inspectDraft");
+    const discard = vi.spyOn(api, "discardDraft").mockResolvedValue(undefined);
+
+    await closeFileTabAfterMove(pane.id, tab.id);
+
+    expect(discard).not.toHaveBeenCalled();
+    expect(inspect).not.toHaveBeenCalled();
+    expect(draftCloseState.open).toBe(false);
+    expect(activePane().tabs).toHaveLength(0);
+  });
+
+  test("a dirty file moved to another window flushes to disk first", async () => {
+    // The target window reads the file from disk, so an unflushed buffer would
+    // arrive as the last-saved content: the move would silently roll back the
+    // user's edits.
+    const tab = fileTab({ id: "dirty-move", content: "edited", saved: "saved" });
+    const pane = resetLayout([tab]);
+    const write = vi
+      .spyOn(api, "write")
+      .mockResolvedValue({ mtime: 2, mtime_ns: "2000000002" });
+
+    await closeFileTabAfterMove(pane.id, tab.id);
+
+    expect(write).toHaveBeenCalled();
+    expect(activePane().tabs).toHaveLength(0);
+  });
+
+  test("a move whose save fails keeps the tab rather than losing the buffer", async () => {
+    // Two windows showing one tab is recoverable; a buffer that never reached
+    // disk and no longer has a window is not.
+    const tab = fileTab({ id: "save-fail", content: "edited", saved: "saved" });
+    const pane = resetLayout([tab]);
+    vi.spyOn(api, "write").mockRejectedValue(new Error("disk full"));
+
+    await closeFileTabAfterMove(pane.id, tab.id);
+
+    expect(activePane().tabs).toHaveLength(1);
   });
 
   test("saving a draft notifies promotion sinks with the workspace path", async () => {

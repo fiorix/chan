@@ -8,6 +8,9 @@
     bumpTabFocusPulse,
     closeTab,
     enterPaneMode,
+    adoptCrossWindowTab,
+    closeFileTabAfterMove,
+    crossWindowTabSnapshot,
     enterPaneModeTransaction,
     flipHybrid,
     focusColorForWindow,
@@ -47,6 +50,7 @@
     type FocusColor,
     type LeafNode,
     type PaneDropEdge,
+    type SerTab,
     type Tab,
   } from "../state/tabs.svelte";
 
@@ -828,41 +832,59 @@
   /// re-attach to the SAME PTY by id (a true MOVE) instead of spawning a fresh
   /// shell; the seq cursors + cwd mirror the source so the re-attach
   /// replays from where this window left off. No session (never spawned /
-  /// exited) omits those fields so the target opens fresh. Other tab kinds keep
-  /// the historical title-only shape (window-bound on native).
+  /// exited) omits those fields so the target opens fresh. The view-state kinds
+  /// (graph, file browser, dashboard) carry a `ser` snapshot from the session
+  /// serializer, which the target rebuilds through the same restore path a
+  /// reload uses.
+  ///
+  /// Every kind is enumerated deliberately. The catch-all this replaces
+  /// returned `{ kind: "terminal" }` for anything unlisted, so dragging a graph
+  /// tab to another window declared it a terminal: the target read a terminal
+  /// with no session id, opened a FRESH terminal, and the accepted drop then
+  /// closed the original in the source. A graph went in and a terminal came
+  /// out.
   function crossWindowPayload(t: Tab): Record<string, unknown> {
-    if (t.kind === "file") {
-      return {
-        kind: "file",
-        path: t.path,
-        mode: t.mode,
-        inspectorOpen: t.inspectorOpen,
-      };
+    switch (t.kind) {
+      case "file":
+        return {
+          kind: "file",
+          path: t.path,
+          mode: t.mode,
+          inspectorOpen: t.inspectorOpen,
+        };
+      case "terminal":
+        return {
+          kind: "terminal",
+          title: t.title,
+          ...(t.terminalSessionId
+            ? {
+                terminalSessionId: t.terminalSessionId,
+                // The moved shell's real CHAN_TAB_NAME, so the target can decide
+                // whether a conflict-forced rename leaves the env stale (warning).
+                terminalEnvTabName: t.terminalEnvTabName,
+                group: t.group,
+                cwd: t.cwd,
+              }
+            : {}),
+        };
+      case "extension":
+        return {
+          kind: "extension",
+          extensionId: t.extensionId,
+          title: t.title,
+        };
+      case "graph":
+      case "browser":
+      case "dashboard":
+        return { kind: t.kind, ser: crossWindowTabSnapshot(t) };
+      default: {
+        // Exhaustiveness, deliberately not a fallback: a NEW tab kind must
+        // decide HERE how it crosses a window. The old catch-all let one
+        // inherit the terminal mislabel in silence.
+        const unhandled: never = t;
+        return unhandled;
+      }
     }
-    if (t.kind === "terminal") {
-      return {
-        kind: "terminal",
-        title: t.title,
-        ...(t.terminalSessionId
-          ? {
-              terminalSessionId: t.terminalSessionId,
-              // The moved shell's real CHAN_TAB_NAME, so the target can decide
-              // whether a conflict-forced rename leaves the env stale (warning).
-              terminalEnvTabName: t.terminalEnvTabName,
-              group: t.group,
-              cwd: t.cwd,
-            }
-          : {}),
-      };
-    }
-    if (t.kind === "extension") {
-      return {
-        kind: "extension",
-        extensionId: t.extensionId,
-        title: t.title,
-      };
-    }
-    return { kind: "terminal", title: t.title };
   }
 
   /// Fired on the SOURCE element after the drop completes (anywhere).
@@ -890,6 +912,13 @@
       void closeTab(pane.id, tabId, { force: true });
       return;
     }
+    if (t?.kind === "file") {
+      // Same distinction one kind over: the target window now owns this file,
+      // so the source must let it go without running the draft promote /
+      // discard flow, which would delete or relocate the file mid-move.
+      void closeFileTabAfterMove(pane.id, tabId);
+      return;
+    }
     void closeTab(pane.id, tabId);
   }
 
@@ -908,11 +937,23 @@
       terminalEnvTabName?: string;
       group?: string;
       cwd?: string;
+      ser?: SerTab;
     };
     try {
       parsed = JSON.parse(payload);
     } catch {
       return false;
+    }
+    // The view-state kinds rebuild from their session snapshot. A snapshot this
+    // build cannot rebuild (a peer window on another version) returns false so
+    // the drop is refused and the source keeps its tab.
+    if (
+      parsed.kind === "graph" ||
+      parsed.kind === "browser" ||
+      parsed.kind === "dashboard"
+    ) {
+      if (!parsed.ser) return false;
+      return adoptCrossWindowTab(pane.id, parsed.ser) !== null;
     }
     if (parsed.kind === "terminal") {
       // A payload carrying a live `terminalSessionId` is a session-preserving
@@ -933,12 +974,16 @@
       return true;
     }
     if (parsed.kind === "extension" && parsed.extensionId) {
-      openExtensionInPane(
-        pane.id,
-        parsed.extensionId,
-        parsed.title?.trim() || parsed.extensionId,
+      // Reports its real outcome: openExtensionInPane rejects a malformed
+      // extension id, and claiming success there would let the source close a
+      // tab this window never created.
+      return (
+        openExtensionInPane(
+          pane.id,
+          parsed.extensionId,
+          parsed.title?.trim() || parsed.extensionId,
+        ) !== null
       );
-      return true;
     }
     if (!parsed.path) return false;
     void openInPane(pane.id, parsed.path);
@@ -1180,9 +1225,13 @@
       // Reject a cross-window drop from a different kind/workspace (no
       // preventDefault ⇒ dropEffect "none" ⇒ the source keeps its tab).
       if (!isTabDragScopeCompatible(e)) return;
+      // Adopt FIRST and only claim the drop if it worked: preventDefault is
+      // what makes dropEffect "move", which is what tells the source to close
+      // its tab. Accepting before knowing would destroy a tab this window
+      // failed to rebuild.
+      if (!acceptCrossWindowTab(crossRaw)) return;
       e.preventDefault();
       e.stopPropagation();
-      acceptCrossWindowTab(crossRaw);
       return;
     }
     const fileRaw = dt.getData(FILE_DRAG_MIME);
@@ -1236,8 +1285,9 @@
       // Reject a cross-window drop from a different kind/workspace (no
       // preventDefault ⇒ dropEffect "none" ⇒ the source keeps its tab).
       if (!isTabDragScopeCompatible(e)) return;
+      // Adopt before claiming the drop; see the tab-strip handler above.
+      if (!acceptCrossWindowTab(crossRaw)) return;
       e.preventDefault();
-      acceptCrossWindowTab(crossRaw);
       return;
     }
     const fileRaw = dt.getData(FILE_DRAG_MIME);

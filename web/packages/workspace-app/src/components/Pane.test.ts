@@ -13,7 +13,9 @@ import { afterEach, describe, expect, test } from "vitest";
 import Pane from "./Pane.svelte";
 import paneSource from "./Pane.svelte?raw";
 import {
+  adoptCrossWindowTab,
   cancelPaneMode,
+  crossWindowTabSnapshot,
   enterPaneMode,
   enterPaneModeTransaction,
   layout,
@@ -28,7 +30,11 @@ import {
   paneSideToggleFlash,
   requestPaneSideToggleFlash,
   splitPane,
+  type BrowserTab,
+  type DashboardTab,
+  type GraphTab,
   type LeafNode,
+  type Tab,
   type TerminalTab,
 } from "../state/tabs.svelte";
 import { ui } from "../state/store.svelte";
@@ -72,6 +78,50 @@ function terminalTab(partial: Partial<TerminalTab> = {}): TerminalTab {
     createdAt: 1,
     broadcastEnabled: false,
     broadcastTargetIds: [],
+    ...partial,
+  };
+}
+
+function graphTab(partial: Partial<GraphTab> = {}): GraphTab {
+  return {
+    kind: "graph",
+    id: "graph-1",
+    title: "Graph",
+    mode: "semantic",
+    scopeId: "workspace",
+    depth: 1,
+    expanded: { "": true },
+    filters: {
+      link: true,
+      tag: true,
+      mention: true,
+      language: true,
+      img: true,
+      folder: true,
+      markdown: true,
+      source: true,
+    },
+    inspectorOpen: false,
+    pendingSelectId: null,
+    ...partial,
+  };
+}
+
+function browserTab(partial: Partial<BrowserTab> = {}): BrowserTab {
+  return {
+    kind: "browser",
+    id: "browser-1",
+    title: "Files",
+    inspectorOpen: false,
+    ...partial,
+  };
+}
+
+function dashboardTab(partial: Partial<DashboardTab> = {}): DashboardTab {
+  return {
+    kind: "dashboard",
+    id: "dash-1",
+    title: "Dashboard",
     ...partial,
   };
 }
@@ -1404,12 +1454,158 @@ describe("Pane cross-kind / cross-workspace tab DnD guard", () => {
   });
 
   test("both drop handlers gate cross-window acceptance on scope compatibility", () => {
-    // The guard sits immediately before acceptCrossWindowTab so an incompatible
-    // drop returns without preventDefault (dropEffect "none" → source keeps it).
+    // The guard sits before acceptCrossWindowTab so an incompatible drop
+    // returns without preventDefault (dropEffect "none" → source keeps it).
+    // The acceptance itself is now the second gate: both handlers adopt first
+    // and only preventDefault on success, so a rebuild this window cannot do
+    // does not destroy the source tab.
     const dropGates = paneSource.match(
-      /if \(!isTabDragScopeCompatible\(e\)\) return;[\s\S]{1,120}acceptCrossWindowTab\(crossRaw\)/g,
+      /if \(!isTabDragScopeCompatible\(e\)\) return;[\s\S]{1,320}if \(!acceptCrossWindowTab\(crossRaw\)\) return;/g,
     );
     expect(dropGates?.length).toBe(2);
+  });
+});
+
+describe("Pane cross-window transfer of view-state tab kinds", () => {
+  // The regression: crossWindowPayload's catch-all returned
+  // `{ kind: "terminal" }` for every kind it did not list, so dragging a graph
+  // tab to another window declared it a terminal. The target read a terminal
+  // with no session id, opened a FRESH one, and the accepted drop then closed
+  // the original -- a graph went in, a terminal came out. Every kind now
+  // carries something the target can rebuild.
+  const CROSS_TAB_MIME = "application/x-chan-tab+json";
+
+  class FakeDataTransfer {
+    store = new Map<string, string>();
+    effectAllowed = "";
+    dropEffect = "";
+    setData(type: string, value: string): void {
+      this.store.set(type, value);
+    }
+    getData(type: string): string {
+      return this.store.get(type) ?? "";
+    }
+    get types(): string[] {
+      return [...this.store.keys()];
+    }
+    setDragImage(): void {}
+  }
+
+  /// Drag the pane's only tab and return what the drag put on the wire.
+  async function dragPayload(tab: Tab): Promise<Record<string, any>> {
+    const pane: LeafNode = {
+      kind: "leaf",
+      id: "pane-drag",
+      tabs: [tab],
+      activeTabId: tab.id,
+    };
+    const target = await renderPane(pane, { paneMode: false });
+    const tabEl = target.querySelector<HTMLElement>('[draggable="true"]');
+    expect(tabEl, `${tab.kind} tab renders draggable`).not.toBeNull();
+    const dt = new FakeDataTransfer();
+    const event = new Event("dragstart", { bubbles: true }) as DragEvent;
+    Object.defineProperty(event, "dataTransfer", { value: dt });
+    tabEl!.dispatchEvent(event);
+    const raw = dt.getData(CROSS_TAB_MIME);
+    expect(raw, `${tab.kind} offers a cross-window payload`).not.toBe("");
+    return JSON.parse(raw);
+  }
+
+  test("a graph tab crosses as a graph, not a terminal", async () => {
+    const payload = await dragPayload(
+      graphTab({
+        mode: "filesystem",
+        scopeId: "src",
+        depth: 3,
+        inspectorOpen: true,
+      }),
+    );
+    expect(payload.kind).toBe("graph");
+    expect(payload.kind).not.toBe("terminal");
+  });
+
+  test.each([
+    ["browser", browserTab({ inspectorOpen: true })],
+    ["dashboard", dashboardTab({ carouselSlide: 2 })],
+  ])("a %s tab crosses as itself", async (label, tab) => {
+    const payload = await dragPayload(tab as Tab);
+    expect(payload.kind).toBe(label);
+    expect(payload.ser).toBeTruthy();
+  });
+
+  test("a graph tab rebuilt in the target keeps its view state", () => {
+    // The round trip that matters: snapshot on the source, adopt in the
+    // target. Rebuilt through the same restore path a reload uses.
+    const source = graphTab({
+      mode: "filesystem",
+      scopeId: "src",
+      depth: 3,
+      inspectorOpen: true,
+    });
+    layout.nodes = {
+      "pane-target": {
+        kind: "leaf",
+        id: "pane-target",
+        tabs: [],
+        activeTabId: null,
+      },
+    };
+    layout.rootId = "pane-target";
+    // Read the tab back through `layout`: it is $state, so the stored node is
+    // a reactive proxy and the literal above is not the object adopt mutates.
+    const targetPane = layout.nodes["pane-target"] as LeafNode;
+
+    const adopted = adoptCrossWindowTab(
+      targetPane.id,
+      crossWindowTabSnapshot(source),
+    );
+
+    expect(adopted?.kind).toBe("graph");
+    const graph = adopted as GraphTab;
+    expect(graph.mode).toBe("filesystem");
+    expect(graph.scopeId).toBe("src");
+    expect(graph.depth).toBe(3);
+    expect(graph.inspectorOpen).toBe(true);
+    // A fresh id, so a move can never collide with a tab already live here.
+    expect(graph.id).not.toBe(source.id);
+    expect(targetPane.tabs).toHaveLength(1);
+    expect(targetPane.activeTabId).toBe(graph.id);
+  });
+
+  test("an unrebuildable snapshot is refused instead of swallowing the tab", () => {
+    layout.nodes = {
+      "pane-refuse": {
+        kind: "leaf",
+        id: "pane-refuse",
+        tabs: [],
+        activeTabId: null,
+      },
+    };
+    layout.rootId = "pane-refuse";
+    const targetPane = layout.nodes["pane-refuse"] as LeafNode;
+
+    // A kind this build cannot rebuild (peer window on another version).
+    expect(adoptCrossWindowTab("pane-refuse", { k: "z" } as any)).toBeNull();
+    expect(targetPane.tabs).toHaveLength(0);
+  });
+
+  test("the payload builder is exhaustive over Tab kinds", () => {
+    // The `never` binding is what turns a NEW tab kind into a compile error
+    // rather than a silent terminal mislabel. A type error cannot be asserted
+    // at runtime, so it is pinned in source.
+    expect(paneSource).toMatch(/const unhandled: never = t;/);
+    expect(paneSource).not.toMatch(
+      /return \{ kind: "terminal", title: t\.title \};/,
+    );
+  });
+
+  test("a drop is claimed only after the adopt succeeds", () => {
+    // preventDefault is what makes dropEffect "move", which is what tells the
+    // source to close its tab. Both drop handlers must adopt first.
+    const gates = paneSource.match(
+      /if \(!acceptCrossWindowTab\(crossRaw\)\) return;\s*\n\s*e\.preventDefault\(\);/g,
+    );
+    expect(gates?.length).toBe(2);
   });
 });
 

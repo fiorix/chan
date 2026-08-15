@@ -6290,6 +6290,88 @@ function restoreExtensionTabFromSer(sertab: SerTab): ExtensionTab | null {
   };
 }
 
+/// Close a file tab that MOVED to another window.
+///
+/// A move is not a destroy, and the ordinary close path cannot tell the
+/// difference. Run it on a draft and it offers promote / discard / cancel: the
+/// discard deletes the very file the target window just opened, the promote
+/// moves it out from under the target's path, and the cancel leaves the same
+/// draft open in both windows. An empty or pristine-seed draft is not even
+/// asked about - it is discarded outright.
+///
+/// So the move flushes the buffer (the target reads the file from disk) and
+/// then closes with `force`, which is what skips the draft flow. This is the
+/// file-tab counterpart of `markTerminalMovingOut`: the terminal path already
+/// distinguishes a move from a kill, and this one did not.
+///
+/// A save that fails leaves the tab open HERE, accepting a tab visible in both
+/// windows over destroying a buffer that never reached disk.
+export async function closeFileTabAfterMove(
+  paneId: string,
+  tabId: string,
+): Promise<void> {
+  const node = layout.nodes[paneId];
+  if (!node || node.kind !== "leaf") return;
+  const tab = allPaneTabs(node).find((t) => t.id === tabId);
+  if (tab?.kind === "file" && isDirty(tab)) {
+    try {
+      await performSave(tab);
+    } catch (e) {
+      tab.error = `save failed: ${(e as Error).message}`;
+      return;
+    }
+    if (isDirty(tab)) return;
+  }
+  await closeTab(paneId, tabId, { force: true });
+}
+
+/// Snapshot a tab so ANOTHER window can rebuild it. See adoptCrossWindowTab
+/// for why this rides the session serializer.
+export function crossWindowTabSnapshot(t: Tab): SerTab {
+  // `terminalSessions` is off: the terminal payload carries its PTY re-attach
+  // fields on the wire object itself (a live session id is not view state),
+  // and the kinds routed through this snapshot have no session to preserve.
+  return serializeTab(t, false, {});
+}
+
+/// Rebuild a tab from another window's snapshot and append it to `paneId`.
+///
+/// The view-state kinds (graph, file browser, dashboard) cross a window
+/// boundary through the SESSION serializer rather than a bespoke drag payload:
+/// a moved tab is reconstructed by exactly the code a reload runs, so its
+/// fidelity is whatever a reload already guarantees, and a newly persisted
+/// field has to be taught to one mapping instead of two that silently drift.
+/// The tab arrives with a freshly minted id (the restore path mints one), so a
+/// move can never collide with an id already live in the target window.
+///
+/// Returns null when the snapshot names a kind this build cannot rebuild - a
+/// peer window on a different version. The caller must treat null as a refused
+/// drop and leave the source tab alone, or the tab is lost in transit.
+export function adoptCrossWindowTab(paneId: string, sertab: SerTab): Tab | null {
+  const node = layout.nodes[paneId];
+  if (!node || node.kind !== "leaf") return null;
+  let tab: Tab;
+  switch (sertab.k) {
+    case "g":
+      tab = restoreGraphTabFromSer(sertab);
+      break;
+    case "b":
+      tab = restoreBrowserTabFromSer(sertab);
+      break;
+    case "d":
+      tab = restoreDashboardTabFromSer(sertab);
+      break;
+    default:
+      return null;
+  }
+  const side = paneSide(node);
+  mutablePaneTabs(node, side).push(tab);
+  setPaneActiveTabId(node, tab.id, side);
+  node.side = side;
+  layout.activePaneId = node.id;
+  return tab;
+}
+
 function restoreFileTabFromSer(sertab: SerTab): FileTab {
   // Recompute fileKind from the path. Cheaper than persisting
   // it (the hash already carries the path) and keeps a session

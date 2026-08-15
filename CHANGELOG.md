@@ -24,6 +24,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A tab dragged to another window arrives as itself.** Dragging a graph, file browser or dashboard tab between two windows of one workspace replaced it with an empty terminal and closed the original; it now moves, carrying its view state. Dragging a draft could discard or relocate the file mid-move, and no longer can: a move releases the tab rather than running the draft's save-or-discard flow. A window that cannot rebuild what it was handed now refuses the drop instead of accepting it and leaving the source to close.
+
 - **`chan open` no longer leaks the Windows `\\?\` verbatim prefix** from the serve root into the desktop window title.
 
 ## [v0.90.0] - 2026-08-14
