@@ -136,6 +136,19 @@ impl MiniWorkspace {
         rel.is_empty() || rel == self.start_rel
     }
 
+    /// Whether `to` sits strictly inside `from`. Both tree lanes create the
+    /// destination before they read the source, so a destination inside the
+    /// source is enumerated as one of its own entries and recurses without
+    /// bound. Refused up front in preference to relying on the rename lane's
+    /// `EINVAL`, which neither the cross-device fallback nor the copy lane
+    /// reaches. `to == from` is deliberately not this rule's business: it
+    /// terminates on its own and the existing already-exists refusal names
+    /// it more accurately.
+    fn descends_into(from: &str, to: &str) -> bool {
+        to.strip_prefix(from)
+            .is_some_and(|rest| rest.starts_with('/'))
+    }
+
     /// One-level listing: every ordinary UTF-8 entry including dotfiles
     /// and control dirs; symlinks visible, special nodes omitted,
     /// non-UTF-8 names skipped with a server-side warning.
@@ -360,6 +373,9 @@ impl MiniWorkspace {
         if self.is_protected(from) || self.is_protected(to) {
             return Err(ChanError::ProtectedPath(from.to_string()));
         }
+        if Self::descends_into(from, to) {
+            return Err(ChanError::DestinationInsideSource(to.to_string()));
+        }
         let (dir, from_path) = self.fs.resolve_io(from)?;
         let src_meta = dir
             .symlink_metadata(&from_path)
@@ -402,6 +418,9 @@ impl MiniWorkspace {
         let to = to.as_str();
         if self.is_protected(from) || self.is_protected(to) {
             return Err(ChanError::ProtectedPath(from.to_string()));
+        }
+        if Self::descends_into(from, to) {
+            return Err(ChanError::DestinationInsideSource(to.to_string()));
         }
         let (dir, to_path) = self.fs.resolve_io(to)?;
         if dir.symlink_metadata(&to_path).is_ok() {
@@ -461,6 +480,11 @@ impl MiniWorkspace {
     /// removed only after the destination tree is complete and renamed; a
     /// source-removal failure keeps BOTH trees and says so.
     fn move_across_devices(&self, from: &str, to: &str) -> Result<()> {
+        // Repeated from `move_plain` rather than assumed from it: this lane
+        // is the one that actually recurses, and it is reachable on its own.
+        if Self::descends_into(from, to) {
+            return Err(ChanError::DestinationInsideSource(to.to_string()));
+        }
         self.preflight_tree(from)?;
         let tmp = self.temp_sibling_name(to)?;
         match self.copy_tree_plain(from, &tmp) {
@@ -1009,6 +1033,47 @@ mod tests {
                 .collect();
             assert!(leftovers.is_empty(), "temp cleaned: {leftovers:?}");
         }
+    }
+
+    #[test]
+    fn a_destination_inside_the_source_is_refused_on_every_tree_lane() {
+        let fx = fixture();
+        stdfs::create_dir_all(fx.root.join("proj/sub")).unwrap();
+        stdfs::write(fx.root.join("proj/f.txt"), "f").unwrap();
+
+        // The File Browser's own paste-into-itself: copy `proj`, enter it,
+        // paste. Without the guard the destination is created first and then
+        // read back as one of the source's entries, and the walk never ends.
+        assert!(matches!(
+            fx.mini.copy_plain("proj", "proj/proj"),
+            Err(ChanError::DestinationInsideSource(path)) if path == "proj/proj"
+        ));
+        assert!(matches!(
+            fx.mini.copy_plain("proj", "proj/sub/deep"),
+            Err(ChanError::DestinationInsideSource(_))
+        ));
+        assert!(matches!(
+            fx.mini.move_plain("proj", "proj/sub/deep"),
+            Err(ChanError::DestinationInsideSource(_))
+        ));
+        // The cross-device lane carries the same recursion and never reaches
+        // the rename that would have refused it with EINVAL.
+        assert!(matches!(
+            fx.mini.move_across_devices("proj", "proj/proj"),
+            Err(ChanError::DestinationInsideSource(_))
+        ));
+        // A move onto itself is not this rule's case: it terminates on its
+        // own, and the already-exists refusal names it more accurately.
+        assert!(matches!(
+            fx.mini.move_plain("proj", "proj"),
+            Err(ChanError::PathAlreadyExists(_))
+        ));
+
+        // Nothing was mutated, and a sibling whose name merely shares the
+        // source's prefix is not a descendant.
+        assert!(fx.mini.list("proj").unwrap().len() == 2, "source intact");
+        fx.mini.copy_plain("proj", "projector").unwrap();
+        assert!(fx.root.join("projector/f.txt").exists());
     }
 
     #[test]
