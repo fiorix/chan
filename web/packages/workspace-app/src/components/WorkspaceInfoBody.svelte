@@ -16,6 +16,7 @@
   import { api } from "../api/client";
   import type { InspectorPayload, ReportPrefix } from "../api/types";
   import { formatMtime, formatSize } from "../state/format";
+  import { windowCaps } from "../state/windowCaps";
   import {
     fileOps,
     openGraphAtNode,
@@ -183,6 +184,13 @@
   let inspectorReq = 0;
   $effect(() => {
     inspectorPayload = null;
+    // `/api/report/*` and `/api/inspector` live on the workspace router only,
+    // so a window with no workspace behind it 404s on every one of them. The
+    // directory branch made that worse: a 404 from reportDir is the signal to
+    // fall back to reportPrefix, so one selection cost two doomed requests and
+    // then rendered "report unavailable" where the section should simply be
+    // absent.
+    if (!windowCaps.workspace) return;
     const req = ++inspectorReq;
     void api.inspector("")
       .then((payload) => {
@@ -215,6 +223,11 @@
     prefixReport = null;
     reportError = null;
     langExpanded = false;
+    // Workspace-only route; see the inspector effect above.
+    if (!windowCaps.workspace) {
+      reportLoading = false;
+      return;
+    }
     const req = ++reportReq;
     reportLoading = true;
     void api

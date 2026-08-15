@@ -31,6 +31,7 @@
   import { AUDIO_UNSUPPORTED_MESSAGE } from "../state/audioViewer";
   import { isAudio, isImage, isPdf, isVideo } from "../state/fileTypes";
   import { basename, formatMtime, formatSize } from "../state/format";
+  import { windowCaps } from "../state/windowCaps";
   import {
     ensureGraphLoaded,
     graphData,
@@ -216,6 +217,13 @@
   $effect(() => {
     inspectorPayload = null;
     if (path === null || path === undefined) return;
+    // `/api/report/*` and `/api/inspector` live on the workspace router only,
+    // so a window with no workspace behind it 404s on every one of them. The
+    // directory branch made that worse: a 404 from reportDir is the signal to
+    // fall back to reportPrefix, so one selection cost two doomed requests and
+    // then rendered "report unavailable" where the section should simply be
+    // absent.
+    if (!windowCaps.workspace) return;
     const req = ++inspectorReq;
     void api.inspector(path)
       .then((payload) => {
@@ -688,6 +696,14 @@
       reportLoading = false;
       return;
     }
+    // Workspace-only route; see the inspector effect above. Leaving every
+    // report field null renders no Code section at all, which is the honest
+    // answer for a window with no index behind it.
+    if (!windowCaps.workspace) {
+      reportLoading = false;
+      return;
+    }
+
     const req = ++reportReq;
     const target = entry;
     const controller = new AbortController();

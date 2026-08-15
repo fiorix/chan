@@ -26,6 +26,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A tab dragged to another window arrives as itself.** Dragging a graph, file browser or dashboard tab between two windows of one workspace replaced it with an empty terminal and closed the original; it now moves, carrying its view state. Dragging a draft could discard or relocate the file mid-move, and no longer can: a move releases the tab rather than running the draft's save-or-discard flow. A window that cannot rebuild what it was handed now refuses the drop instead of accepting it and leaving the source to close.
 
+- **A window with no workspace no longer offers, or tries to load, workspace-only things.** The file browser and the editor's details panel asked for code reports and inspector metadata that only exist on a workspace, so every selection made requests that could only 404 and then showed "report unavailable" where the section should simply be absent. "New Graph" and "Graph from here" are gone from the same surfaces for the same reason: the graph is built from the workspace index, so there was nothing to graph from.
+
 - **`chan open` no longer leaks the Windows `\\?\` verbatim prefix** from the serve root into the desktop window title.
 
 ## [v0.90.0] - 2026-08-14
