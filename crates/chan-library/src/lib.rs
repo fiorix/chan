@@ -33,8 +33,9 @@ pub mod windows;
 pub mod workspace_persist;
 
 pub use config::{
-    TerminalConfig, TerminalFontChoice, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN,
-    TERMINAL_SCROLLBACK_MB_MAX, TERMINAL_SCROLLBACK_MB_MIN, TERMINAL_SECRET_MASK_SUFFIX_MAX,
+    TerminalConfig, TerminalFontChoice, TerminalProfile, TERMINAL_FONT_SIZE_MAX,
+    TERMINAL_FONT_SIZE_MIN, TERMINAL_PROFILE_MAX, TERMINAL_SCROLLBACK_MB_MAX,
+    TERMINAL_SCROLLBACK_MB_MIN, TERMINAL_SECRET_MASK_SUFFIX_MAX,
 };
 pub use devserver_registry::{DevserverEntry, DevserverInput, DevserverRegistry, DevserverStatus};
 pub use error::Error;
@@ -50,6 +51,7 @@ pub use tenant::{
     TenantArtifacts, TenantBuilder, TenantTaskOwner, UnserveMode, UnserveScope,
     WorkspaceCellHandle,
 };
+pub use terminal_sessions::shell_profiles::{ProfileSource, ShellKind, ShellProfile};
 /// The single-sourced shell resolver (`$SHELL` → passwd → `/bin/sh`); unix-only.
 /// Re-exported at the crate root so callers say `chan_library::user_shell()`.
 #[cfg(unix)]

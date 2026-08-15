@@ -60,6 +60,11 @@ pub struct TerminalQuery {
     /// JSON-encoded spawn environment map. This is an internal SPA transport;
     /// the public control-socket request carries the map as structured JSON.
     env: Option<String>,
+    /// Id of the shell profile to spawn (`GET /api/terminal/shells`). Absent
+    /// uses the configured default profile, then the built-in resolution.
+    /// Fresh-spawn only, like `cwd` / `command` / `env`: a reattach adopts the
+    /// live session's shell and cannot change it.
+    profile: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,6 +88,9 @@ pub struct CreateTerminalBody {
     /// `sessionWindowId()` so the survey overlay lands in the right window.
     #[serde(default)]
     window_id: Option<String>,
+    /// Shell profile for the new session. Absent uses the configured default.
+    #[serde(default)]
+    profile: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -110,6 +118,11 @@ pub struct RestartTerminalBody {
     /// same key are replaced.
     #[serde(default)]
     env: Option<std::collections::BTreeMap<String, String>>,
+    /// Switch the tab to a different shell profile. Absent restarts on the
+    /// profile the session was spawned with -- restart means "same shell
+    /// again", so a change is explicit, exactly like `command` and `env`.
+    #[serde(default)]
+    profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -352,7 +365,11 @@ pub async fn api_terminal_ws(
             .map(|c| c.terminal.mcp_env)
             .unwrap_or(false),
     };
-    let (command, env) = match terminal_query_spawn_overrides(&query) {
+    let SpawnOverrides {
+        command,
+        env,
+        profile,
+    } = match terminal_query_spawn_overrides(&query) {
         Ok(overrides) => overrides,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     };
@@ -424,6 +441,7 @@ pub async fn api_terminal_ws(
         cwd,
         command,
         env,
+        profile,
     };
     ws.on_upgrade(move |socket| terminal_ws(socket, state, opts))
         .into_response()
@@ -467,6 +485,7 @@ pub async fn api_create_terminal(
             .unwrap_or(false),
         cwd: None,
         command: Some(command),
+        profile: normalize_profile_id(body.profile.as_deref()),
         env: body.env,
     };
     match state.terminal_sessions.create(opts) {
@@ -530,6 +549,7 @@ pub async fn api_restart_terminal(
             window_id,
             command: body.command,
             env: body.env,
+            profile: normalize_profile_id(body.profile.as_deref()),
         }
     } else {
         RestartOverrides::default()
@@ -634,6 +654,7 @@ struct TerminalWsOptions {
     cwd: Option<PathBuf>,
     command: Option<String>,
     env: BTreeMap<String, String>,
+    profile: Option<String>,
 }
 
 fn normalize_terminal_name(name: &str) -> Option<String> {
@@ -666,14 +687,25 @@ pub(crate) fn validate_terminal_env(env: &BTreeMap<String, String>) -> Result<()
     Ok(())
 }
 
-fn terminal_query_spawn_overrides(
-    query: &TerminalQuery,
-) -> Result<(Option<String>, BTreeMap<String, String>), String> {
+/// Spawn-only overrides carried on a fresh-terminal WebSocket query.
+#[derive(Debug)]
+struct SpawnOverrides {
+    command: Option<String>,
+    env: BTreeMap<String, String>,
+    profile: Option<String>,
+}
+
+fn terminal_query_spawn_overrides(query: &TerminalQuery) -> Result<SpawnOverrides, String> {
     // Reattach metadata never changes the live session's spawn identity. The
     // SPA omits these fields for a reattach; ignoring them here makes the
-    // server-side contract explicit, just like cwd above.
+    // server-side contract explicit, just like cwd above. `profile` joins them:
+    // reattaching to a live PTY cannot change the shell it is already running.
     if query.session.is_some() {
-        return Ok((None, BTreeMap::new()));
+        return Ok(SpawnOverrides {
+            command: None,
+            env: BTreeMap::new(),
+            profile: None,
+        });
     }
     let command = match query.command.as_deref() {
         Some(command) => Some(
@@ -688,7 +720,23 @@ fn terminal_query_spawn_overrides(
         None => BTreeMap::new(),
     };
     validate_terminal_env(&env)?;
-    Ok((command, env))
+    Ok(SpawnOverrides {
+        command,
+        env,
+        profile: normalize_profile_id(query.profile.as_deref()),
+    })
+}
+
+/// Trim a profile id, treating blank as absent. Existence is deliberately NOT
+/// checked here: the registry resolves the id at spawn against the merged
+/// profile list, and falls back to the default with a warning when it names
+/// nothing -- which is the behaviour we want if a profile is deleted between
+/// the picker listing it and the tab opening.
+fn normalize_profile_id(profile: Option<&str>) -> Option<String> {
+    profile
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
 }
 
 async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: TerminalWsOptions) {
@@ -705,6 +753,7 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
         cwd: opts.cwd,
         command: opts.command,
         env: opts.env,
+        profile: opts.profile,
     };
     let mut session = match state.terminal_sessions.get_or_create_for_ws(
         opts.session_id.as_deref(),
@@ -1271,6 +1320,71 @@ pub async fn api_terminal_next_name(State(state): State<Arc<AppState>>) -> Respo
     state.terminal_sessions.next_terminal_name().into_response()
 }
 
+/// One selectable shell, as the picker sees it.
+#[derive(Debug, Serialize)]
+struct ShellProfileView {
+    id: String,
+    name: String,
+    /// Absolute path to the executable, for a tooltip / disambiguating two
+    /// installs of the same shell. Safe to expose: this API is tokened
+    /// precisely because a PTY is already shell access.
+    program: String,
+    kind: chan_library::ShellKind,
+    source: chan_library::ProfileSource,
+}
+
+#[derive(Debug, Serialize)]
+struct TerminalShellsResponse {
+    profiles: Vec<ShellProfileView>,
+    /// The configured default, echoed back ONLY when it resolves to a listed
+    /// profile. A stale id reads as absent here for the same reason the spawn
+    /// path falls back rather than failing: the picker should show what will
+    /// actually happen, not what the file wishes for.
+    default_profile: Option<String>,
+}
+
+/// `GET /api/terminal/shells`: every shell this server can spawn -- discovery
+/// layered with the user's declared profiles, exactly as the spawn path
+/// resolves them.
+///
+/// Mounted on BOTH routers. A terminal-only window is served by the slim one
+/// and is the likeliest place to want a profile picker, so omitting it there
+/// would 404 in precisely the case that matters most.
+///
+/// Reads the warm discovery cache (primed at server build by
+/// `prime_terminal_shell`), so this never shells out on the request path.
+pub async fn api_terminal_shells(State(state): State<Arc<AppState>>) -> Response {
+    let terminal = state
+        .server_config
+        .lock()
+        .map(|config| config.terminal.clone())
+        .unwrap_or_default();
+    let effective = chan_library::terminal_sessions::shell_profiles::effective_profiles(
+        chan_library::terminal_sessions::shell_profiles::shell_profiles(),
+        &terminal.profiles,
+    );
+    let default_profile = chan_library::terminal_sessions::shell_profiles::resolve_default(
+        &effective,
+        terminal.default_profile.as_deref(),
+    )
+    .map(|profile| profile.id.clone());
+    let profiles = effective
+        .iter()
+        .map(|profile| ShellProfileView {
+            id: profile.id.clone(),
+            name: profile.name.clone(),
+            program: profile.program.display().to_string(),
+            kind: profile.kind,
+            source: profile.source,
+        })
+        .collect();
+    Json(TerminalShellsResponse {
+        profiles,
+        default_profile,
+    })
+    .into_response()
+}
+
 #[derive(Debug, Serialize)]
 struct RosterResponse {
     sessions: Vec<crate::terminal_sessions::RosterEntry>,
@@ -1443,7 +1557,7 @@ mod tests {
             env: Some(r#"{"CHAN_AGENT":"codex","TOKEN":"a=b"}"#.into()),
             ..TerminalQuery::default()
         };
-        let (command, env) = terminal_query_spawn_overrides(&query).unwrap();
+        let SpawnOverrides { command, env, .. } = terminal_query_spawn_overrides(&query).unwrap();
         assert_eq!(command.as_deref(), Some("sleep 5"));
         assert_eq!(env.get("CHAN_AGENT").map(String::as_str), Some("codex"));
         assert_eq!(env.get("TOKEN").map(String::as_str), Some("a=b"));
@@ -1461,15 +1575,41 @@ mod tests {
         .unwrap_err()
         .contains("invalid terminal env"));
 
-        let (command, env) = terminal_query_spawn_overrides(&TerminalQuery {
+        // A reattach carries no spawn identity: command, env AND profile are
+        // all ignored, so reattaching cannot change the shell a live PTY is
+        // already running. Note the deliberately invalid command/env here --
+        // they must not even be validated on this path.
+        let SpawnOverrides {
+            command,
+            env,
+            profile,
+        } = terminal_query_spawn_overrides(&TerminalQuery {
             session: Some("existing".into()),
             command: Some("   ".into()),
             env: Some("not-json".into()),
+            profile: Some("git-bash".into()),
             ..TerminalQuery::default()
         })
         .unwrap();
         assert_eq!(command, None);
         assert!(env.is_empty());
+        assert_eq!(profile, None);
+    }
+
+    #[test]
+    fn profile_id_is_trimmed_and_blank_reads_as_absent() {
+        let overrides = |profile: Option<&str>| {
+            terminal_query_spawn_overrides(&TerminalQuery {
+                profile: profile.map(str::to_string),
+                ..TerminalQuery::default()
+            })
+            .unwrap()
+            .profile
+        };
+        assert_eq!(overrides(Some("  git-bash  ")).as_deref(), Some("git-bash"));
+        assert_eq!(overrides(Some("   ")), None);
+        assert_eq!(overrides(Some("")), None);
+        assert_eq!(overrides(None), None);
     }
 
     // Pins the server -> client `pong` bytes, mirroring ws.rs's
@@ -1527,6 +1667,7 @@ mod tests {
                     cwd: None,
                     command: None,
                     env: Default::default(),
+                    profile: None,
                 })
                 .expect("spawn pty");
             Self {
@@ -1833,6 +1974,7 @@ mod tests {
                 cwd: None,
                 command: Some(command.into()),
                 env,
+                profile: None,
             })
             .expect("spawn identity session");
         (state, handle)
@@ -1872,7 +2014,7 @@ mod tests {
             env: Some(r#"{"CHAN_AGENT":"codex"}"#.into()),
             ..TerminalQuery::default()
         };
-        let (command, env) = terminal_query_spawn_overrides(&query).unwrap();
+        let SpawnOverrides { command, env, .. } = terminal_query_spawn_overrides(&query).unwrap();
         let state = crate::state::test_support::make_test_state(false);
         let forced = state
             .terminal_sessions
@@ -1885,6 +2027,7 @@ mod tests {
                 cwd: None,
                 command,
                 env,
+                profile: None,
             })
             .unwrap();
         assert_eq!(frame_submit_agent(&forced).as_deref(), Some("codex"));
@@ -1912,7 +2055,8 @@ mod tests {
             command: Some("sleep 5 # claude".into()),
             ..TerminalQuery::default()
         };
-        let (command, env) = terminal_query_spawn_overrides(&command_query).unwrap();
+        let SpawnOverrides { command, env, .. } =
+            terminal_query_spawn_overrides(&command_query).unwrap();
         let command_derived = state
             .terminal_sessions
             .create(CreateOptions {
@@ -1924,6 +2068,7 @@ mod tests {
                 cwd: None,
                 command,
                 env,
+                profile: None,
             })
             .unwrap();
         assert_eq!(
@@ -1942,6 +2087,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: BTreeMap::new(),
+                profile: None,
             })
             .unwrap();
         assert_eq!(frame_submit_agent(&plain), None);
@@ -2057,6 +2203,7 @@ mod tests {
             cwd: None,
             command: Some("sleep 5".into()),
             env: Default::default(),
+            profile: None,
         };
         let first = state.terminal_sessions.create(create("taken")).unwrap();
         let second = state.terminal_sessions.create(create("other")).unwrap();
@@ -2110,6 +2257,7 @@ mod tests {
                     cwd: None,
                     command: None,
                     env: Default::default(),
+                    profile: None,
                 },
                 TerminalPlacement::default(),
                 None,
@@ -2140,6 +2288,7 @@ mod tests {
                 cwd: None,
                 command: Some("sleep 5".into()),
                 env: Default::default(),
+                profile: None,
             })
             .expect("spawn");
         let session = handle.id().to_string();
@@ -2352,6 +2501,7 @@ mod tests {
             env: BTreeMap::new(),
             group: None,
             window_id: None,
+            profile: None,
         }
     }
 
@@ -2443,6 +2593,7 @@ mod tests {
                 env: BTreeMap::new(),
                 group: None,
                 window_id: None,
+                profile: None,
             })),
         )
         .await;
@@ -2522,6 +2673,7 @@ mod tests {
                 window_id: None,
                 command: None,
                 env: None,
+                profile: None,
             })),
         )
         .await;

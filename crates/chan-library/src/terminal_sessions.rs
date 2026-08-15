@@ -30,13 +30,14 @@ use chan_shell::{
     MAX_TERMINAL_WRITE_BYTES,
 };
 
-use crate::config::TerminalConfig;
+use crate::config::{TerminalConfig, TerminalProfile};
 use crate::time::{now_unix_millis, now_unix_secs};
 
 mod bytes;
 mod platform;
 mod redraw;
 mod ring;
+pub mod shell_profiles;
 
 use bytes::{contains_subslice, visible_activity_bytes};
 #[cfg(windows)]
@@ -183,6 +184,17 @@ pub struct Registry {
     /// absent on workspace registries, whose config-change path updates the
     /// atomic cell directly.
     terminal_backend_resolver: Mutex<Option<TerminalBackendResolver>>,
+    /// Last known `terminal.profiles` / `terminal.default_profile`, sampled
+    /// once for each PTY spawn. Refreshed by the same push and pull the
+    /// engine preference above rides, and for the same reason: the boot-time
+    /// `config` snapshot cannot answer for a file the user edits later, and
+    /// the endpoint that feeds the picker reads the LIVE config. A cell that
+    /// only one of the two consults is a picker that lists a shell clicking
+    /// it will not open.
+    terminal_profiles: Mutex<TerminalProfilePrefs>,
+    /// Optional spawn-time profile pull, installed alongside
+    /// `terminal_backend_resolver` and absent for the same registries.
+    terminal_profiles_resolver: Mutex<Option<TerminalProfilesResolver>>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     /// Names settled for a create/restart whose PTY is still spawning. A
     /// reservation prevents another caller from receiving the same name
@@ -317,6 +329,36 @@ impl std::fmt::Debug for TerminalBackendResolver {
     }
 }
 
+/// The user's declared profiles and their chosen default, as one value so a
+/// refresh cannot land half of the pair.
+#[derive(Debug, Clone, Default)]
+pub struct TerminalProfilePrefs {
+    pub profiles: Vec<TerminalProfile>,
+    pub default_profile: Option<String>,
+}
+
+/// Spawn-time profile pull, the [`TerminalBackendResolver`] analogue for
+/// `terminal.profiles`. `None` asks the registry to retain its last known
+/// value.
+#[derive(Clone)]
+pub struct TerminalProfilesResolver(Arc<dyn Fn() -> Option<TerminalProfilePrefs> + Send + Sync>);
+
+impl TerminalProfilesResolver {
+    pub fn new(f: impl Fn() -> Option<TerminalProfilePrefs> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+
+    fn resolve(&self) -> Option<TerminalProfilePrefs> {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for TerminalProfilesResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TerminalProfilesResolver(..)")
+    }
+}
+
 /// Namespace prefix for chan PTY entries in the systemd fd store.
 #[cfg(target_os = "linux")]
 pub const FDSTORE_FD_PREFIX: &str = "chan.pty.";
@@ -445,6 +487,13 @@ pub struct CreateOptions {
     pub cwd: Option<PathBuf>,
     pub command: Option<String>,
     pub env: BTreeMap<String, String>,
+    /// Id of the shell profile to spawn. `None` uses the configured default
+    /// profile, and failing that the built-in shell resolution -- so a client
+    /// that never names a profile behaves exactly as before profiles existed.
+    ///
+    /// Carried on the session (not just the request) so a restart reproduces
+    /// the shell the tab was opened with.
+    pub profile: Option<String>,
 }
 
 /// Best-effort SPA layout coordinates supplied by a terminal WebSocket
@@ -473,6 +522,11 @@ pub struct RestartOverrides {
     /// spawn command/env.
     pub command: Option<String>,
     pub env: Option<BTreeMap<String, String>>,
+    /// Switch the tab to a different shell profile. `None` restarts with the
+    /// profile the session was spawned with -- restart means "same shell
+    /// again", so changing it has to be asked for explicitly, exactly like
+    /// `command` and `env` above.
+    pub profile: Option<String>,
 }
 
 /// Read-only view of a live terminal session, for the control socket's
@@ -565,6 +619,12 @@ pub struct FdStoreSessionMeta {
     pub cwd: Option<PathBuf>,
     pub command: Option<String>,
     pub env: BTreeMap<String, String>,
+    /// Shell profile the session was spawned with. `#[serde(default)]` so a
+    /// manifest written before profiles existed imports as "no profile", i.e.
+    /// the built-in default -- which is exactly what those sessions were
+    /// spawned with.
+    #[serde(default)]
+    pub profile: Option<String>,
     pub mcp_env: bool,
     pub child_pid: Option<u32>,
     pub size: StoredPtySize,
@@ -1063,10 +1123,16 @@ impl Drop for MetadataReservation<'_> {
 impl Registry {
     pub fn new(config: RegistryConfig) -> Self {
         let terminal_ghostty = config.terminal.ghostty;
+        let terminal_profiles = TerminalProfilePrefs {
+            profiles: config.terminal.profiles.clone(),
+            default_profile: config.terminal.default_profile.clone(),
+        };
         Self {
             config,
             terminal_ghostty: AtomicBool::new(terminal_ghostty),
             terminal_backend_resolver: Mutex::new(None),
+            terminal_profiles: Mutex::new(terminal_profiles),
+            terminal_profiles_resolver: Mutex::new(None),
             sessions: Mutex::new(HashMap::new()),
             name_reservations: Mutex::new(HashSet::new()),
             last_exit: Arc::new(Mutex::new(None)),
@@ -1097,6 +1163,44 @@ impl Registry {
             .terminal_backend_resolver
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some(resolver);
+    }
+
+    /// Refresh the declared profiles sampled by subsequent PTY spawns. The
+    /// engine preference's push analogue, called from the same place.
+    pub fn set_terminal_profiles(&self, prefs: TerminalProfilePrefs) {
+        *self
+            .terminal_profiles
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = prefs;
+    }
+
+    /// Install the profile pull used by a long-lived terminal-only tenant. A
+    /// later install replaces the prior resolver.
+    pub fn install_terminal_profiles_resolver(&self, resolver: TerminalProfilesResolver) {
+        *self
+            .terminal_profiles_resolver
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(resolver);
+    }
+
+    /// Sample the declared profiles for one PTY spawn, on the same fail-open
+    /// terms as [`Self::resolve_terminal_backend`]: a successful pull refreshes
+    /// the live cell, and an unreadable store keeps the last good value rather
+    /// than dropping the user's profiles back to the boot-time snapshot.
+    fn resolve_terminal_profiles(&self) -> TerminalProfilePrefs {
+        let resolver = self
+            .terminal_profiles_resolver
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(prefs) = resolver.and_then(|resolver| resolver.resolve()) {
+            self.set_terminal_profiles(prefs.clone());
+            return prefs;
+        }
+        self.terminal_profiles
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     /// Sample the configured backend for one PTY spawn. A successful pull also
@@ -1523,6 +1627,9 @@ impl Registry {
         self.wait_at_spawn_barrier();
         let mut config = self.config.clone();
         config.terminal.ghostty = self.resolve_terminal_backend();
+        let profiles = self.resolve_terminal_profiles();
+        config.terminal.profiles = profiles.profiles;
+        config.terminal.default_profile = profiles.default_profile;
         let session = Session::spawn(
             id.clone(),
             config,
@@ -1569,6 +1676,7 @@ impl Registry {
             window_id,
             command,
             env,
+            profile,
         } = overrides;
         let old = self
             .sessions
@@ -1600,6 +1708,12 @@ impl Registry {
         if let Some(extra_env) = env {
             opts.env.extend(extra_env);
         }
+        // Switching the tab's shell. Absent, the session restarts with the
+        // profile it was spawned with, which `restart_options()` carried over --
+        // restart means "same shell again".
+        if profile.is_some() {
+            opts.profile = profile;
+        }
         let mut reservation =
             self.reserve_metadata(opts.tab_name.take(), opts.tab_group.take(), Some(id));
         opts.tab_name = reservation.metadata.name.clone();
@@ -1610,6 +1724,9 @@ impl Registry {
         // the lead's `claude`) is not a single-purpose-tenant launch.
         let mut config = self.config.clone();
         config.terminal.ghostty = self.resolve_terminal_backend();
+        let profiles = self.resolve_terminal_profiles();
+        config.terminal.profiles = profiles.profiles;
+        config.terminal.default_profile = profiles.default_profile;
         let session = Session::spawn(
             id.to_string(),
             config,
@@ -3032,7 +3149,35 @@ impl Session {
         }
         let pty_system = native_pty_system();
         let pair = openpty_absorbing_transient_refusal(&*pty_system, opts.size)?;
-        let mut cmd = command_builder(opts.command.as_deref());
+        // Resolve the shell for this spawn: the profile the caller asked for,
+        // else the configured default, else `None` -- which keeps the built-in
+        // resolution, so a client that never names a profile behaves exactly as
+        // it did before profiles existed.
+        //
+        // Both halves are already cached (discovery in a `OnceLock`, the user's
+        // declarations in the loaded config), so this is a merge of two small
+        // vectors on the spawn path, never I/O.
+        let effective = shell_profiles::effective_profiles(
+            shell_profiles::shell_profiles(),
+            &config.terminal.profiles,
+        );
+        let requested = opts.profile.as_deref().and_then(|id| {
+            let found = effective.iter().find(|profile| profile.id == id);
+            if found.is_none() {
+                // A profile can vanish between the picker listing it and the
+                // spawn (config edited, shell uninstalled). Falling back beats
+                // failing to open a terminal.
+                tracing::warn!(
+                    id,
+                    "requested terminal profile not found; using the default shell"
+                );
+            }
+            found
+        });
+        let profile = requested.or_else(|| {
+            shell_profiles::resolve_default(&effective, config.terminal.default_profile.as_deref())
+        });
+        let mut cmd = command_builder(profile, opts.command.as_deref());
         let cwd = opts.cwd.unwrap_or_else(|| config.workspace_root.clone());
         cmd.cwd(&cwd);
         // Ahead of the per-session overrides so an explicit `env` entry still
@@ -3058,6 +3203,13 @@ impl Session {
         #[cfg(windows)]
         {
             let mut prepend: Vec<PathBuf> = Vec::new();
+            // The profile's own PATH needs, ahead of the chan bin dir. Git
+            // BASH is why this exists: without `<root>\usr\bin` and
+            // `<root>\mingw64\bin` the login shell has no coreutils, so even
+            // the `cs` shim we add below would run in a shell with no `ls`.
+            if let Some(profile) = profile {
+                prepend.extend(profile.path_prepend.iter().cloned());
+            }
             if let Some(local) = dirs::data_local_dir() {
                 prepend.push(local.join("chan").join("bin"));
             }
@@ -3196,6 +3348,9 @@ impl Session {
                 cwd: Some(cwd),
                 command: opts.command,
                 env: opts.env,
+                // Retained so a restart reproduces the same shell rather than
+                // silently reverting the tab to the default profile.
+                profile: opts.profile,
             },
             child_pid,
             command_tx,
@@ -3413,6 +3568,10 @@ impl Session {
             cwd: self.cwd().or_else(|| self.spawn_opts.cwd.clone()),
             command: self.spawn_opts.command.clone(),
             env: self.spawn_opts.env.clone(),
+            // Exported so a session that survives a server restart through the
+            // fd store comes back on the shell it was opened with, rather than
+            // silently reverting to the default profile.
+            profile: self.spawn_opts.profile.clone(),
             mcp_env: self.spawn_opts.mcp_env,
             child_pid: self.child_pid,
             size: size.into(),
@@ -3477,6 +3636,10 @@ impl Session {
                 cwd: Some(cwd),
                 command: meta.command.clone(),
                 env: meta.env.clone(),
+                // Restored so a later restart of an fd-store-adopted session
+                // reproduces its original shell. Absent in manifests written
+                // before profiles existed, which is correct for them.
+                profile: meta.profile.clone(),
             },
             child_pid: meta.child_pid,
             master_fd: Some(master_fd),
@@ -4830,6 +4993,7 @@ mod tests {
                 mcp_env: true,
                 cwd: None,
                 command: command.map(str::to_string),
+                profile: None,
                 env: env
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -5258,6 +5422,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let id = first.id().to_string();
@@ -5450,6 +5615,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         // One session owns the tab name; a different name matches none. The
@@ -6227,6 +6393,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         // No drainer runs in this test, so positions are stable.
@@ -6468,6 +6635,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let id = handle.id().to_string();
@@ -6488,6 +6656,7 @@ mod tests {
             cwd: None,
             command: None,
             env: Default::default(),
+            profile: None,
         }
     }
 
@@ -6501,6 +6670,7 @@ mod tests {
             cwd: None,
             command: Some(command.to_string()),
             env: Default::default(),
+            profile: None,
         }
     }
 
@@ -6708,6 +6878,7 @@ mod tests {
             cwd: None,
             command: None,
             env: BTreeMap::new(),
+            profile: None,
             mcp_env: false,
             child_pid: None,
             size: test_size().into(),
@@ -7287,6 +7458,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let err = registry
@@ -7299,6 +7471,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap_err();
         assert!(matches!(err, CreateError::Capped));
@@ -7323,6 +7496,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let first_id = first.id().to_string();
@@ -7340,6 +7514,7 @@ mod tests {
                     cwd: None,
                     command: None,
                     env: Default::default(),
+                    profile: None,
                 },
             )
             .unwrap();
@@ -7363,6 +7538,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let second = registry
@@ -7375,6 +7551,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
 
@@ -7391,6 +7568,7 @@ mod tests {
                     cwd: None,
                     command: None,
                     env: Default::default(),
+                    profile: None,
                 },
             )
             .unwrap();
@@ -7425,6 +7603,7 @@ mod tests {
                 cwd: None,
                 command: Some("printf 'TERM=<%s>\\n' \"$TERM\"".into()),
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
 
@@ -7458,6 +7637,7 @@ mod tests {
                     cwd: None,
                     command: Some("printf 'CHAN_TERMINAL=<%s>\\n' \"$CHAN_TERMINAL\"".into()),
                     env: Default::default(),
+                    profile: None,
                 })
                 .unwrap();
 
@@ -7492,6 +7672,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let original_id = original.id().to_string();
@@ -7515,6 +7696,7 @@ mod tests {
                 cwd: None,
                 command: Some("printf 'CREATED=<%s>\\n' \"$CHAN_TERMINAL\"".into()),
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let created_out =
@@ -7544,6 +7726,63 @@ mod tests {
         registry.close(&original_id, CloseReason::Explicit);
     }
 
+    #[test]
+    fn declared_profiles_refresh_from_both_the_push_and_the_pull() {
+        // The endpoint feeding the shell picker answers from the LIVE server
+        // config. If the spawn kept reading the boot-time snapshot, the picker
+        // would list a profile that clicking it silently ignores, so both of
+        // the engine preference's refresh channels have to carry profiles too.
+        fn profile(id: &str) -> TerminalProfile {
+            TerminalProfile {
+                id: id.into(),
+                name: None,
+                program: Some("/bin/sh".into()),
+                args: None,
+                kind: None,
+                hidden: false,
+            }
+        }
+
+        let registry = Registry::new(test_config(4096, 4, 60));
+        assert!(
+            registry.resolve_terminal_profiles().profiles.is_empty(),
+            "boot snapshot declares none"
+        );
+
+        // The push a workspace server's config-change path makes.
+        registry.set_terminal_profiles(TerminalProfilePrefs {
+            profiles: vec![profile("pushed")],
+            default_profile: Some("pushed".into()),
+        });
+        let prefs = registry.resolve_terminal_profiles();
+        assert_eq!(prefs.profiles.len(), 1);
+        assert_eq!(prefs.profiles[0].id, "pushed");
+        assert_eq!(prefs.default_profile.as_deref(), Some("pushed"));
+
+        // The pull a terminal-only tenant installs, which has no push channel.
+        let pulled = Arc::new(Mutex::new(Some(TerminalProfilePrefs {
+            profiles: vec![profile("pulled")],
+            default_profile: None,
+        })));
+        registry.install_terminal_profiles_resolver(TerminalProfilesResolver::new({
+            let pulled = pulled.clone();
+            move || pulled.lock().unwrap().clone()
+        }));
+        assert_eq!(
+            registry.resolve_terminal_profiles().profiles[0].id,
+            "pulled"
+        );
+
+        // An unreadable store keeps the last good value rather than dropping
+        // the user's profiles back to the boot snapshot, matching the engine
+        // preference's fail-open posture.
+        *pulled.lock().unwrap() = None;
+        assert_eq!(
+            registry.resolve_terminal_profiles().profiles[0].id,
+            "pulled"
+        );
+    }
+
     // POSIX printf plus parameter expansion; not valid under the Windows
     // default shell (PowerShell).
     #[cfg(unix)]
@@ -7565,6 +7804,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let original_id = original.id().to_string();
@@ -7588,6 +7828,7 @@ mod tests {
                 cwd: None,
                 command: Some("printf 'CREATED=<%s>\\n' \"$CHAN_TERMINAL\"".into()),
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let created_out =
@@ -7627,6 +7868,7 @@ mod tests {
                 cwd: None,
                 command: Some("printf 'FALLBACK=<%s>\\n' \"$CHAN_TERMINAL\"".into()),
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let fallback_out =
@@ -7689,6 +7931,7 @@ mod tests {
                         .into(),
                 ),
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
 
@@ -7722,6 +7965,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let out = collect_until(&mut handle, "DEFAULT=<ran>", Duration::from_secs(5)).await;
@@ -7750,6 +7994,7 @@ mod tests {
                 cwd: None,
                 command: Some("printf 'PICK=<explicit>\\n'".into()),
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let out = collect_until(&mut handle, "PICK=<explicit>", Duration::from_secs(5)).await;
@@ -7858,6 +8103,7 @@ mod tests {
                 cwd: None,
                 command: Some("printf 'SCRAPE=<tok123>\\n'".into()),
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let _ = collect_until(&mut handle, "SCRAPE=<tok123>", Duration::from_secs(5)).await;
@@ -7882,6 +8128,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let id = handle.id().to_string();
@@ -7911,6 +8158,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let mut second = registry.attach(first.id(), Some(first.seq)).unwrap();
@@ -7947,6 +8195,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
             })
             .unwrap();
         let mut second = registry.attach(first.id(), Some(first.seq)).unwrap();
@@ -8432,6 +8681,7 @@ mod tests {
             cwd: None,
             command: None,
             env: Default::default(),
+            profile: None,
             mcp_env: false,
             child_pid: None,
             size: test_size().into(),
@@ -8556,6 +8806,7 @@ mod tests {
                 cwd: None,
                 command: command.map(str::to_string),
                 env: Default::default(),
+                profile: None,
             }
         }
 
@@ -8643,6 +8894,7 @@ mod tests {
                         window_id: None,
                         command: None,
                         env: None,
+                        profile: None,
                     },
                 )
                 .unwrap());
@@ -8864,6 +9116,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
                 mcp_env: false,
                 child_pid: Some(4242),
                 size: test_size().into(),

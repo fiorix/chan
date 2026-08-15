@@ -5641,6 +5641,7 @@ mod tests {
                 cwd: None,
                 command: None,
                 env: Default::default(),
+                profile: None,
                 mcp_env: false,
                 child_pid,
                 size: StoredPtySize {

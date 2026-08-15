@@ -144,6 +144,28 @@ mod tests {
                 ghostty: true,
                 secret_masking: false,
                 secret_mask_suffixes: vec!["TOKEN".into(), "PRIVATE_KEY".into()],
+                // Populated rather than defaulted so the round trip actually
+                // exercises the `[[terminal.profiles]]` array-of-tables: an
+                // override, and a hide.
+                profiles: vec![
+                    chan_library::TerminalProfile {
+                        id: "git-bash".into(),
+                        name: Some("Git Bash".into()),
+                        program: Some(r"C:\Program Files\Git\bin\bash.exe".into()),
+                        args: Some(vec!["-l".into()]),
+                        kind: Some(chan_library::ShellKind::Posix),
+                        hidden: false,
+                    },
+                    chan_library::TerminalProfile {
+                        id: "cmd".into(),
+                        name: None,
+                        program: None,
+                        args: None,
+                        kind: None,
+                        hidden: true,
+                    },
+                ],
+                default_profile: Some("git-bash".into()),
             },
         };
         cfg.save_to(&p).unwrap();

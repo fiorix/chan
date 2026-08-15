@@ -1339,6 +1339,10 @@
         cwd: reattaching ? undefined : tab.cwd,
         command: reattaching ? undefined : tab.spawnCommand,
         env: reattaching ? undefined : tab.spawnEnv,
+        // Fresh-spawn only, like the three above: a reattach adopts whatever
+        // shell the live PTY is already running, and the server ignores the
+        // param on that path.
+        profile: reattaching ? undefined : tab.profile,
       }),
     );
     ws = createSocket(`${proto}//${window.location.host}${path}`);

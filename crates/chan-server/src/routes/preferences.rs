@@ -458,6 +458,12 @@ pub(crate) fn broadcast_config_changed(state: &AppState) {
         state
             .terminal_sessions
             .set_terminal_backend(config.terminal.ghostty);
+        state.terminal_sessions.set_terminal_profiles(
+            crate::terminal_sessions::TerminalProfilePrefs {
+                profiles: config.terminal.profiles.clone(),
+                default_profile: config.terminal.default_profile.clone(),
+            },
+        );
     }
     let _ = state
         .events_tx
@@ -499,6 +505,18 @@ fn sanitize_terminal_config(mut cfg: TerminalConfig) -> TerminalConfig {
     } else {
         trimmed.to_string()
     };
+    // A blank default profile means "no explicit default", not a profile whose
+    // id is the empty string. `profiles` itself is normalized (drop / dedupe /
+    // cap) by its deserializer, which a PATCH body goes through too, so there
+    // is nothing further to do to the list here. The id is deliberately NOT
+    // validated against `profiles`: it may legitimately name a *discovered*
+    // profile the user never declared, and only the merge can see those.
+    cfg.default_profile = cfg
+        .default_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
     cfg
 }
 
@@ -708,6 +726,7 @@ mod tests {
                 cwd: None,
                 command: Some("printf 'CHAN_TERMINAL=<%s>\\n' \"$CHAN_TERMINAL\"".into()),
                 env: Default::default(),
+                profile: None,
             })
             .expect("spawn terminal after preference refresh");
         let deadline = Instant::now() + Duration::from_secs(5);

@@ -7,6 +7,9 @@ use std::time::Duration;
 
 use portable_pty::{CommandBuilder, PtyPair, PtySize, PtySystem};
 
+use super::shell_profiles::ShellProfile;
+#[cfg(windows)]
+use super::shell_profiles::{ProfileSource, ShellKind};
 use super::{CreateError, FdPressure};
 
 const TERMINAL_FD_HEADROOM: u64 = 32;
@@ -183,8 +186,22 @@ pub fn user_shell() -> String {
     CommandBuilder::new_default_prog().get_shell()
 }
 
-pub(super) fn command_builder(command: Option<&str>) -> CommandBuilder {
+/// Build the spawn command for a terminal.
+///
+/// `profile` names an explicit shell (a picker selection); `None` keeps the
+/// historical behaviour of spawning the machine's single default shell. The
+/// default path is unchanged on both platforms -- on Windows it still reads the
+/// warm [`windows_shell`] `OnceLock`, on unix it still defers to
+/// `portable_pty`'s own `$SHELL` resolution -- so adding the parameter does not
+/// move the default.
+pub(super) fn command_builder(
+    profile: Option<&ShellProfile>,
+    command: Option<&str>,
+) -> CommandBuilder {
     let command = command.map(str::trim).filter(|command| !command.is_empty());
+    if let Some(profile) = profile {
+        return profile.build(command);
+    }
     #[cfg(windows)]
     {
         windows_shell().build(command)
@@ -208,61 +225,16 @@ pub(super) fn command_builder(command: Option<&str>) -> CommandBuilder {
     }
 }
 
-/// The user's default Windows terminal shell, resolved once and cached.
-#[cfg(windows)]
-pub(super) struct WindowsShell {
-    program: PathBuf,
-    kind: WinShellKind,
-}
-
-/// How the resolved Windows shell takes its interactive / one-shot arguments.
-#[cfg(windows)]
-#[derive(Clone, Copy)]
-enum WinShellKind {
-    /// `powershell.exe` / `pwsh.exe`: `-NoLogo` interactive, `-NoLogo -Command`
-    /// one-shot. No `-NoProfile` -- we want the user's profile/PATH (the `-l`
-    /// analog of the unix login shell).
-    PowerShell,
-    /// `cmd.exe`: no args interactive, `/C` one-shot.
-    Cmd,
-    /// Any other shell a user points `CHAN_SHELL` at (a POSIX `sh`/`bash`,
-    /// including a Git BASH they install themselves): `-l` / `-lc`, matching the
-    /// unix login-shell convention.
-    Posix,
-}
-
-#[cfg(windows)]
-impl WindowsShell {
-    fn build(&self, command: Option<&str>) -> CommandBuilder {
-        let mut cmd = CommandBuilder::new(&self.program);
-        match (self.kind, command) {
-            (WinShellKind::PowerShell, None) => {
-                cmd.arg("-NoLogo");
-            }
-            (WinShellKind::PowerShell, Some(c)) => {
-                cmd.args(["-NoLogo", "-Command", c]);
-            }
-            (WinShellKind::Cmd, None) => {}
-            (WinShellKind::Cmd, Some(c)) => {
-                cmd.args(["/C", c]);
-            }
-            (WinShellKind::Posix, None) => {
-                cmd.arg("-l");
-            }
-            (WinShellKind::Posix, Some(c)) => {
-                cmd.args(["-lc", c]);
-            }
-        }
-        cmd
-    }
-}
-
 /// Resolve the user's default Windows shell once and cache it for the process
 /// lifetime -- resolution shells out (`where pwsh`), and a terminal spawn is on
 /// the interactive path.
+///
+/// This caches the single *default*; [`shell_profiles::shell_profiles`] caches
+/// the enumeration of every shell on the machine. Both exist: a request that
+/// names no profile must stay as cheap as it was.
 #[cfg(windows)]
-pub(super) fn windows_shell() -> &'static WindowsShell {
-    static CACHE: std::sync::OnceLock<WindowsShell> = std::sync::OnceLock::new();
+pub(super) fn windows_shell() -> &'static ShellProfile {
+    static CACHE: std::sync::OnceLock<ShellProfile> = std::sync::OnceLock::new();
     CACHE.get_or_init(resolve_windows_shell)
 }
 
@@ -283,17 +255,28 @@ pub fn prime_windows_shell() {
 /// Classify a shell program by its file stem so a `CHAN_SHELL` override gets the
 /// right argument convention. Unknown stems are treated as POSIX (`-lc`), which
 /// is the useful fallback for a user who points `CHAN_SHELL` at a `bash`/`sh`.
+///
+/// `wsl` is called out explicitly and must not fall through to POSIX: `-l` to
+/// `wsl.exe` means "list distributions", so a POSIX-classified `wsl.exe` prints
+/// a distro list and exits instead of opening a shell.
 #[cfg(windows)]
-fn classify_windows_shell(program: &Path) -> WinShellKind {
-    let stem = program
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    match stem.as_str() {
-        "pwsh" | "powershell" => WinShellKind::PowerShell,
-        "cmd" => WinShellKind::Cmd,
-        _ => WinShellKind::Posix,
+fn classify_windows_shell(program: &Path) -> ShellKind {
+    ShellKind::from_program_stem(program)
+}
+
+/// A default-resolution profile for a bare program path: interactive args come
+/// from the kind, and it is marked [`ProfileSource::Discovered`] because
+/// nothing user-authored produced it.
+#[cfg(windows)]
+fn default_profile(id: &str, name: &str, program: PathBuf, kind: ShellKind) -> ShellProfile {
+    ShellProfile {
+        id: id.to_string(),
+        name: name.to_string(),
+        program,
+        args: kind.default_interactive_args(),
+        kind,
+        path_prepend: Vec::new(),
+        source: ProfileSource::Discovered,
     }
 }
 
@@ -303,14 +286,19 @@ fn classify_windows_shell(program: &Path) -> WinShellKind {
 ///   3. `powershell.exe` (Windows PowerShell 5, in-box on every supported Windows).
 ///   4. `%ComSpec%` / `cmd.exe`.
 #[cfg(windows)]
-fn resolve_windows_shell() -> WindowsShell {
+fn resolve_windows_shell() -> ShellProfile {
     use std::process::Command;
 
     // 1. Explicit override.
     if let Some(raw) = std::env::var_os("CHAN_SHELL").filter(|v| !v.is_empty()) {
         let program = PathBuf::from(raw);
         let kind = classify_windows_shell(&program);
-        return WindowsShell { program, kind };
+        let name = program
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("CHAN_SHELL")
+            .to_string();
+        return default_profile("chan-shell", &name, program, kind);
     }
 
     // 2. PowerShell 7 (pwsh) if installed.
@@ -321,10 +309,12 @@ fn resolve_windows_shell() -> WindowsShell {
                 .map(str::trim)
                 .find(|l| !l.is_empty())
             {
-                return WindowsShell {
-                    program: PathBuf::from(path),
-                    kind: WinShellKind::PowerShell,
-                };
+                return default_profile(
+                    "pwsh",
+                    "PowerShell",
+                    PathBuf::from(path),
+                    ShellKind::PowerShell,
+                );
             }
         }
     }
@@ -336,20 +326,19 @@ fn resolve_windows_shell() -> WindowsShell {
         .map(|root| PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
         .filter(|p| p.is_file());
     if let Some(program) = powershell {
-        return WindowsShell {
+        return default_profile(
+            "windows-powershell",
+            "Windows PowerShell",
             program,
-            kind: WinShellKind::PowerShell,
-        };
+            ShellKind::PowerShell,
+        );
     }
 
     // 4. %ComSpec% / cmd.exe -- the last-resort default.
     let comspec = std::env::var_os("ComSpec")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
-    WindowsShell {
-        program: comspec,
-        kind: WinShellKind::Cmd,
-    }
+    default_profile("cmd", "Command Prompt", comspec, ShellKind::Cmd)
 }
 
 pub(crate) fn set_mcp_env(cmd: &mut CommandBuilder, socket_path: &std::path::Path) {

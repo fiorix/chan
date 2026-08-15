@@ -108,7 +108,8 @@ pub use routes::{build_fs_graph, FsGraphResponse, FsGraphScope};
 pub use routes::{build_id, set_build_id};
 
 use crate::terminal_sessions::{
-    Registry as TerminalRegistry, RegistryConfig as TerminalRegistryConfig, TerminalBackendResolver,
+    Registry as TerminalRegistry, RegistryConfig as TerminalRegistryConfig,
+    TerminalBackendResolver, TerminalProfilePrefs, TerminalProfilesResolver,
 };
 use auth::{auth_middleware, load_or_create_token, random_token};
 use bus::{make_progress_broadcast, make_watch_bridge};
@@ -129,10 +130,10 @@ use routes::{
     api_screensaver_state, api_screensaver_verify, api_search_content, api_search_files,
     api_search_workspace, api_session_handover_reply, api_set_terminal_broadcast,
     api_storage_reset, api_survey_reply, api_team_config_read, api_team_config_write,
-    api_terminal_next_name, api_terminal_ws, api_terminals_roster, api_upload_file,
-    api_window_reply, api_workspace_bootstrap, api_write_file, extension_response_policy,
-    proxy_extension, proxy_extension_root, require_local_mutation, spawn_roster_broadcaster,
-    ws_upgrade,
+    api_terminal_next_name, api_terminal_shells, api_terminal_ws, api_terminals_roster,
+    api_upload_file, api_window_reply, api_workspace_bootstrap, api_write_file,
+    extension_response_policy, proxy_extension, proxy_extension_root, require_local_mutation,
+    spawn_roster_broadcaster, ws_upgrade,
 };
 #[cfg(feature = "embeddings")]
 use routes::{
@@ -376,13 +377,20 @@ fn format_index_progress(event: &ProgressEvent, verbose: bool) -> String {
 /// server-build time -- before the router accepts any request -- so the
 /// command-builder cache read is instant. A no-op off Windows.
 fn prime_terminal_shell() {
+    // Detached on purpose: the blocking prime runs to completion on the
+    // blocking pool regardless of the dropped handle (spawn_blocking is not
+    // cancellable), and we never need its result -- the warm cache is read
+    // later through the `OnceLock`. `drop` rather than `let _` keeps clippy's
+    // `let_underscore_future` happy.
+
+    // Shell-profile discovery is primed on EVERY platform, not just Windows:
+    // it reads `/etc/shells` on unix and shells out to `where`/`reg`/`git` on
+    // Windows, so the block-the-tokio-worker hazard is the same on both.
+    drop(tokio::task::spawn_blocking(
+        crate::terminal_sessions::shell_profiles::prime_shell_profiles,
+    ));
     #[cfg(windows)]
     {
-        // Detached on purpose: the blocking prime runs to completion on the
-        // blocking pool regardless of the dropped handle (spawn_blocking is not
-        // cancellable), and we never need its result -- the warm cache is read
-        // later through the `OnceLock`. `drop` rather than `let _` keeps clippy's
-        // `let_underscore_future` happy.
         drop(tokio::task::spawn_blocking(
             crate::terminal_sessions::prime_windows_shell,
         ));
@@ -1040,6 +1048,18 @@ async fn build_terminal_app(
             .ok()
             .map(|config| config.terminal.ghostty)
     }));
+    // The same pull for the user's declared profiles. Without it this tenant
+    // spawns from the boot-time snapshot while `GET /api/terminal/shells`
+    // answers from the live config, so the picker offers a profile that
+    // clicking it does not open.
+    terminal_sessions.install_terminal_profiles_resolver(TerminalProfilesResolver::new(|| {
+        ServerConfig::load()
+            .ok()
+            .map(|config| TerminalProfilePrefs {
+                profiles: config.terminal.profiles,
+                default_profile: config.terminal.default_profile,
+            })
+    }));
     // Hand the live registry to the control socket so cs term
     // write / list can resolve sessions (mirrors build_app).
     let _ = terminal_registry_cell.set(terminal_sessions.clone());
@@ -1246,6 +1266,10 @@ fn terminal_router(state: Arc<AppState>) -> Router {
         // share this one tenant -> one global sequence. The full router
         // mounts the same route for per-workspace sequences.
         .route("/api/terminal/next-name", get(api_terminal_next_name))
+        // Selectable shells. Mounted here as well as on the full router: a
+        // terminal-only window is served by THIS one and is the likeliest
+        // place to want a profile picker.
+        .route("/api/terminal/shells", get(api_terminal_shells))
         // Cross-window roster seed; live updates ride the `/ws` bus.
         .route("/api/terminals/roster", get(api_terminals_roster))
         .route("/api/terminals", post(api_create_terminal))
@@ -1970,6 +1994,7 @@ fn router_with_extensions(
         // Same handlers as the slim terminal router; the per-tenant registry
         // gives each workspace its own name sequence and roster.
         .route("/api/terminal/next-name", get(api_terminal_next_name))
+        .route("/api/terminal/shells", get(api_terminal_shells))
         .route("/api/terminals/roster", get(api_terminals_roster))
         .route("/api/terminals", post(api_create_terminal))
         .route("/api/terminals/{session}", delete(api_delete_terminal))
@@ -2111,6 +2136,7 @@ mod terminal_router_tests {
             cwd: None,
             command: command.map(str::to_owned),
             env: Default::default(),
+            profile: None,
         }
     }
 
@@ -2306,6 +2332,44 @@ mod terminal_router_tests {
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let bytes = to_bytes(response.into_body(), 1 << 20).await.expect("body");
         assert_eq!(&bytes[..], b"wildcard capture probe");
+    }
+
+    /// The shells endpoint must be reachable from the SLIM terminal router,
+    /// not just the full workspace one. A terminal-only window is served by
+    /// this router and is the likeliest place to want a profile picker, so a
+    /// full-router-only mount would 404 in exactly the case that matters most.
+    /// This is a route-wiring assertion, not a discovery one: the profile list
+    /// is whatever the host has, and may legitimately be empty.
+    #[tokio::test]
+    async fn terminal_router_serves_the_shells_endpoint() {
+        use axum::body::to_bytes;
+        use tower::ServiceExt;
+
+        let state = crate::state::test_support::make_test_state(false);
+        let app = terminal_router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/terminal/shells")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::OK,
+            "the slim terminal router must mount /api/terminal/shells",
+        );
+        let bytes = to_bytes(response.into_body(), 1 << 20).await.expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        assert!(
+            body.get("profiles").and_then(|p| p.as_array()).is_some(),
+            "shells response must carry a profiles array, got {body}",
+        );
+        // Present as a key even when nothing is configured, so the SPA can
+        // distinguish "no default" from "field missing on an older server".
+        assert!(body.get("default_profile").is_some());
     }
 }
 

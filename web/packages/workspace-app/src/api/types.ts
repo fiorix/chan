@@ -185,7 +185,39 @@ export type TerminalPreferences = {
   /// Literal, case-insensitive assignment-name suffixes for visual masking.
   /// The server validates `[A-Za-z0-9_]+` entries and caps the list at 100.
   secret_mask_suffixes?: string[];
+  /// User-declared terminal profiles, layered over the shells the server
+  /// discovered on its own machine. An entry whose `id` matches a discovered
+  /// profile overrides its fields or hides it; a new `id` adds a shell. The
+  /// server drops malformed entries, dedupes by `id`, and caps the list at 50.
+  /// Optional on the wire so older servers (no field) deserialize cleanly;
+  /// absent means no customization, not "no profiles".
+  profiles?: TerminalProfile[];
+  /// Id of the profile new terminals spawn with. Optional; absent means the
+  /// server's built-in resolution (`CHAN_SHELL` -> pwsh -> powershell -> cmd on
+  /// Windows, `$SHELL` on unix). An id naming nothing is ignored server-side.
+  default_profile?: string;
 };
+
+/// A user-declared terminal profile. Only `id` is required: the common case is
+/// a small override of something already discovered. A wholly new profile needs
+/// `program`; one that matches no discovered id and names no program is dropped
+/// by the server, since there would be nothing to spawn.
+export type TerminalProfile = {
+  id: string;
+  name?: string;
+  program?: string;
+  /// Interactive arguments. Replaces the discovered vector wholesale rather
+  /// than appending -- appending could not express "drop `-NoLogo`".
+  args?: string[];
+  kind?: ShellKind;
+  /// Hide a discovered profile without deleting the entry, so the hiding
+  /// survives the server rediscovering that shell on its next boot.
+  hidden?: boolean;
+};
+
+/// Argument convention for a shell. `wsl` exists separately because `-l` to
+/// `wsl.exe` means "list distributions", not "login shell".
+export type ShellKind = "powershell" | "cmd" | "posix" | "wsl";
 
 export type TerminalFontChoice = "os-default" | "source-code-pro";
 
@@ -246,6 +278,9 @@ export type TerminalSpawnRequest = {
   /// None and `cs terminal survey` cannot resolve them by window. The Team
   /// Work bootstrap passes the dialog window's sessionWindowId().
   window_id?: string;
+  /// Shell profile for the new session. Absent uses the server's configured
+  /// default profile, then its built-in shell resolution.
+  profile?: string;
 };
 
 export type TerminalSpawnResponse = {
@@ -282,6 +317,30 @@ export type TerminalRestartRequest = {
   /// merged into the restart options' env so per-member env
   /// (e.g. CHAN_TAB_NAME = lead handle) lands before respawn.
   env?: Record<string, string>;
+  /// Switch the tab to a different shell profile. Absent restarts on the
+  /// profile the session was spawned with -- restart means "same shell again".
+  profile?: string;
+};
+
+/// One selectable shell from `GET /api/terminal/shells`.
+export type ShellProfileView = {
+  id: string;
+  name: string;
+  /// Absolute path to the executable, for a tooltip or to disambiguate two
+  /// installs of the same shell.
+  program: string;
+  kind: ShellKind;
+  source: "discovered" | "user";
+};
+
+/// `GET /api/terminal/shells`. Mounted on both the full and the slim
+/// terminal-only router, so a terminal-only window can populate its picker.
+export type TerminalShellsResponse = {
+  profiles: ShellProfileView[];
+  /// Echoed back only when the configured default resolves to a listed
+  /// profile, so the picker shows what will actually happen rather than what
+  /// the config file wishes for.
+  default_profile: string | null;
 };
 
 export type Preferences = {

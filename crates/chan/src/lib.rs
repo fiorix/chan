@@ -3105,10 +3105,18 @@ async fn probe_parentage(socket: &Path, timeout: Duration) -> Parentage {
 /// (only reachable if both fail, e.g. an unreadable cwd). The result must
 /// be absolute so the desktop handoff -- which runs with cwd "/" -- and the
 /// canonical-path-keyed registry both see the directory the user ran in.
+///
+/// The Windows `\\?\` verbatim prefix is stripped from whichever branch wins.
+/// `std::fs::canonicalize` emits it, and this root is user-visible: it is
+/// printed by `chan open` and handed to chan-desktop, which titles the window
+/// with it -- so leaving it in surfaces `\\?\C:\notes` in the window title.
+/// `strip_verbatim_prefix` is the same normalization the registry keys on, so
+/// this also keeps the displayed path identical to the keyed one.
 fn absolutize_serve_root(root: PathBuf) -> PathBuf {
-    std::fs::canonicalize(&root)
+    let absolute = std::fs::canonicalize(&root)
         .or_else(|_| std::path::absolute(&root))
-        .unwrap_or(root)
+        .unwrap_or(root);
+    chan_workspace::paths::strip_verbatim_prefix(&absolute)
 }
 
 /// Error for a command invoked without its required workspace path. Every
@@ -7110,6 +7118,10 @@ enum ConfigValueKind {
     Enum(&'static [&'static str]),
     OptionalU32Range(u32, u32),
     OptionalEnum(&'static [&'static str]),
+    /// A free-form string whose field skip-serializes away while unset, so
+    /// `get` reads it as null rather than failing to find a leaf, and `none`
+    /// clears it. `Enum`'s optional form, without a fixed value set.
+    OptionalString,
     StringList(usize),
     Color,
     ReadOnly(&'static str),
@@ -7364,6 +7376,20 @@ const CONFIG_KEYS: &[ConfigKeySpec] = &[
     ConfigKeySpec {
         key: "server.terminal.secret_mask_suffixes",
         kind: ConfigValueKind::StringList(100),
+    },
+    // Array-of-tables with per-entry optional fields, so it takes the same
+    // Collection escape hatch as `editor.shortcuts` rather than a scalar kind:
+    // `chan config get` renders it, and editing goes through the file or the
+    // Settings pane.
+    ConfigKeySpec {
+        key: "server.terminal.profiles",
+        kind: ConfigValueKind::Collection(
+            "edit terminal profiles in server.toml or Settings -> Terminal",
+        ),
+    },
+    ConfigKeySpec {
+        key: "server.terminal.default_profile",
+        kind: ConfigValueKind::OptionalString,
     },
 ];
 
@@ -7664,14 +7690,20 @@ fn read_config_key(
         return Ok(value.clone());
     }
     match spec.kind {
-        ConfigValueKind::OptionalU32Range(..) | ConfigValueKind::OptionalEnum(..) => {
-            Ok(serde_json::Value::Null)
-        }
+        ConfigValueKind::OptionalU32Range(..)
+        | ConfigValueKind::OptionalEnum(..)
+        | ConfigValueKind::OptionalString => Ok(serde_json::Value::Null),
         // Color leaves sit under `skip_serializing_if` parents (the graph
         // palettes, the terminal custom colors), so a config that never
         // set them serializes no leaf at all; absent means unset.
         ConfigValueKind::Color => Ok(serde_json::Value::Null),
         ConfigValueKind::Collection(_) if key == "editor.shortcuts" => Ok(serde_json::json!({})),
+        // `terminal.profiles` skip-serializes away while empty, so a config
+        // that declares none has no leaf to read. Its empty shape is a list,
+        // not the map `editor.shortcuts` reads as.
+        ConfigValueKind::Collection(_) if key == "server.terminal.profiles" => {
+            Ok(serde_json::json!([]))
+        }
         _ => {
             // `skip_serializing_if` can erase a whole subtree from the
             // dump: `GraphColorPrefs::is_empty` drops `editor.graph_colors`
@@ -7906,6 +7938,13 @@ fn parse_config_scalar(spec: ConfigKeySpec, raw: &str) -> Result<serde_json::Val
                 if !values.contains(&raw) {
                     return Err(invalid_enum(values));
                 }
+                Value::String(raw.to_owned())
+            }
+        }
+        ConfigValueKind::OptionalString => {
+            if matches!(raw, "none" | "null") {
+                Value::Null
+            } else {
                 Value::String(raw.to_owned())
             }
         }
@@ -9577,6 +9616,28 @@ mod tests {
         assert!(absolutize_serve_root(PathBuf::from("sub/dir")).starts_with(&cwd));
     }
 
+    /// This root is user-visible: `chan open` prints it and chan-desktop
+    /// titles the window with it. `std::fs::canonicalize` emits the Windows
+    /// verbatim prefix, which leaked all the way to the window title as
+    /// `\\?\C:\notes`. Windows-only in effect, but the assertion is a pure
+    /// string property so it runs on every arm.
+    #[test]
+    fn absolutize_serve_root_strips_the_windows_verbatim_prefix() {
+        let out = absolutize_serve_root(PathBuf::from("."));
+        let shown = out.to_string_lossy();
+        assert!(
+            !shown.starts_with(r"\\?\"),
+            "serve root must not carry the verbatim prefix, got {shown}",
+        );
+
+        // And the stripping itself, independent of what this host's
+        // canonicalize returns.
+        assert_eq!(
+            chan_workspace::paths::strip_verbatim_prefix(std::path::Path::new(r"\\?\C:\notes")),
+            PathBuf::from(r"C:\notes"),
+        );
+    }
+
     fn ipv4(s: &str) -> IpAddr {
         s.parse().unwrap()
     }
@@ -11231,6 +11292,26 @@ mod tests {
         let value =
             read_config_key(&editor, &server, "editor.terminal_colors.custom.contrast").unwrap();
         assert_eq!(value, serde_json::json!("auto"));
+    }
+
+    #[test]
+    fn terminal_profile_keys_read_empty_rather_than_erroring() {
+        // Both skip-serialize while unset, so on a default config neither has
+        // a leaf in the dump and both fell through to the schema sample, which
+        // does not materialize them either. `chan config get` then failed on
+        // two keys the CLI table and the config reference both advertise.
+        let editor = EditorPrefs::default();
+        let server = ServerConfig::default();
+        assert_eq!(
+            read_config_key(&editor, &server, "server.terminal.profiles").unwrap(),
+            serde_json::json!([]),
+            "an unset profile list reads as the empty list"
+        );
+        assert_eq!(
+            read_config_key(&editor, &server, "server.terminal.default_profile").unwrap(),
+            serde_json::Value::Null,
+            "an unchosen default reads as null"
+        );
     }
 
     #[test]
